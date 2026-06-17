@@ -1,13 +1,8 @@
 import React from "react";
-import { Bot, Circle, TerminalSquare, X } from "lucide-react";
+import { Circle, X } from "lucide-react";
 import { cn } from "../../lib/cn";
+import { getRegistryIcon } from "../../icons";
 import { useActiveSessionId, useAppStore, useProjectSessions } from "../../store/app";
-import type { RegistryKind } from "../../types";
-
-const KIND_ICONS: Partial<Record<RegistryKind, React.ReactNode>> = {
-  shell: <TerminalSquare size={13} />,
-  agent: <Bot size={13} />
-};
 
 /** Tabs for the current project — each is a live daemon session. */
 export const TabStrip: React.FC = () => {
@@ -37,7 +32,7 @@ export const TabStrip: React.FC = () => {
                 : "text-neutral-400 hover:bg-neutral-800/60 hover:text-neutral-200"
             )}
           >
-            <span className="text-neutral-500">{KIND_ICONS[session.kind]}</span>
+            <span className="text-neutral-500">{getRegistryIcon(session.kind, session.refId, 13)}</span>
             <span className="max-w-[140px] truncate">{session.title}</span>
             {session.status === "exited" ? (
               <Circle size={7} className="ml-0.5 fill-neutral-600 text-neutral-600" />

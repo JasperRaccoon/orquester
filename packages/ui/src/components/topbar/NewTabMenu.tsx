@@ -1,5 +1,5 @@
 import React from "react";
-import { Bot, Download, Plus, TerminalSquare } from "lucide-react";
+import { Download, Plus } from "lucide-react";
 import {
   Dropdown,
   DropdownEmpty,
@@ -8,6 +8,7 @@ import {
   DropdownSeparator,
   IconButton
 } from "../ui";
+import { getRegistryIcon } from "../../icons";
 import { useRegistry } from "../../hooks";
 import { useApi } from "../../context/orquester-context";
 import { useAppStore } from "../../store/app";
@@ -40,7 +41,7 @@ export const NewTabMenu: React.FC = () => {
       {enabledShells.map((shell) => (
         <DropdownItem
           key={shell.id}
-          icon={<TerminalSquare size={14} />}
+          icon={getRegistryIcon("shell", shell.id, 14)}
           onClick={() => void openTab("shell", shell.id, shell.name)}
         >
           {shell.name}
@@ -55,7 +56,7 @@ export const NewTabMenu: React.FC = () => {
         agent.enabled ? (
           <DropdownItem
             key={agent.id}
-            icon={<Bot size={14} />}
+            icon={getRegistryIcon("agent", agent.id, 14)}
             onClick={() => void openTab("agent", agent.id, agent.name)}
           >
             {agent.name}

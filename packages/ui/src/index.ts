@@ -55,6 +55,9 @@ export * from "./components/topbar";
 export * from "./components/main";
 export * from "./components/terminal";
 
+// Icons
+export { getRegistryIcon, RegistryIcon } from "./icons";
+
 // Types
 export type {
   Runtime,

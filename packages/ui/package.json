@@ -13,6 +13,7 @@
   "dependencies": {
     "@orquester/api": "workspace:*",
     "@orquester/config": "workspace:*",
+    "@orquester/registry": "workspace:*",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-webgl": "^0.19.0",
     "@xterm/xterm": "^6.0.0",

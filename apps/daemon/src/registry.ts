@@ -5,249 +5,93 @@ import type {
   RegistryKind,
   RegistryResponse
 } from "@orquester/api";
+import { REGISTRY, type RegistryEntryDef } from "@orquester/registry";
 import { exec, spawn } from "node:child_process";
 import { accessSync, constants } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { delimiter, isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-/** A registry definition before PATH resolution. */
+/** Runtime shape after token expansion. */
 interface RegistryDef {
   id: string;
   name: string;
   kind: RegistryKind;
   bin: string[];
-  /** Explicitly disable even when a bin is found. */
   enabled?: boolean;
   versionFlag?: string;
   installCmd?: string;
   updateCmd?: string;
 }
 
-// Common install roots used to build absolute candidate paths. Non-matching
-// platforms simply won't resolve those candidates.
-const LOCALAPPDATA = process.env.LOCALAPPDATA;
-const PROGRAM_FILES = process.env.ProgramFiles;
-
-/** Drop empty/undefined candidates. */
-function bins(...candidates: Array<string | undefined | false>): string[] {
-  return candidates.filter((c): c is string => typeof c === "string" && c.length > 0);
+function expand(tokens: readonly string[]): string[] {
+  const e = process.env;
+  const HOME = e.HOME || e.USERPROFILE || "";
+  const LOCAL = e.LOCALAPPDATA || "";
+  const PF = e.ProgramFiles || e["ProgramFiles(x86)"] || "";
+  return tokens
+    .filter(Boolean)
+    .map((t) =>
+      t
+        .replace(/\$LOCALAPPDATA/g, LOCAL)
+        .replace(/\$PROGRAMFILES/g, PF)
+        .replace(/\$HOME/g, HOME)
+    );
 }
 
-// Hardcoded defaults. Extend/override via <daemonDir>/{shells,agents,ides,file-explorers,browsers}.json.
-const DEFAULT_SHELLS: RegistryDef[] = [
-  { id: "bash", name: "Bash", kind: "shell", bin: ["bash"] },
-  { id: "zsh", name: "Zsh", kind: "shell", bin: ["zsh"] },
-  { id: "fish", name: "Fish", kind: "shell", bin: ["fish"] },
-  { id: "nu", name: "Nushell", kind: "shell", bin: ["nu"] },
-  { id: "pwsh", name: "PowerShell", kind: "shell", bin: ["pwsh", "powershell"] },
-  { id: "cmd", name: "Command Prompt", kind: "shell", bin: ["cmd"] },
-  { id: "sh", name: "sh", kind: "shell", bin: ["sh"] }
-];
-
-const DEFAULT_AGENTS: RegistryDef[] = [
-  {
-    id: "claude",
-    name: "Claude Code",
-    kind: "agent",
-    bin: ["claude"],
-    versionFlag: "--version",
-    installCmd: "npm install -g @anthropic-ai/claude-code",
-    updateCmd: "npm update -g @anthropic-ai/claude-code"
-  },
-  {
-    id: "codex",
-    name: "Codex",
-    kind: "agent",
-    bin: ["codex"],
-    versionFlag: "--version",
-    installCmd: "npm install -g @openai/codex",
-    updateCmd: "npm update -g @openai/codex"
-  },
-  {
-    id: "gemini",
-    name: "Gemini CLI",
-    kind: "agent",
-    bin: ["gemini"],
-    versionFlag: "--version",
-    installCmd: "npm install -g @google/gemini-cli",
-    updateCmd: "npm update -g @google/gemini-cli"
-  },
-  {
-    id: "opencode",
-    name: "OpenCode",
-    kind: "agent",
-    bin: ["opencode"],
-    versionFlag: "--version",
-    installCmd: "npm install -g opencode-ai",
-    updateCmd: "npm update -g opencode-ai"
-  },
-  {
-    id: "aider",
-    name: "Aider",
-    kind: "agent",
-    bin: ["aider"],
-    versionFlag: "--version",
-    installCmd: "pipx install aider-chat",
-    updateCmd: "pipx upgrade aider-chat"
-  }
-];
-
-const DEFAULT_IDES: RegistryDef[] = [
-  {
-    id: "vscode",
-    name: "VS Code",
-    kind: "ide",
-    bin: bins(
-      "code",
-      "code-insiders",
-      "/usr/bin/code",
-      "/usr/share/code/bin/code",
-      "/snap/bin/code",
-      "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
-      LOCALAPPDATA && `${LOCALAPPDATA}\\Programs\\Microsoft VS Code\\bin\\code.cmd`,
-      PROGRAM_FILES && `${PROGRAM_FILES}\\Microsoft VS Code\\bin\\code.cmd`
-    )
-  },
-  {
-    id: "cursor",
-    name: "Cursor",
-    kind: "ide",
-    bin: bins(
-      "cursor",
-      "/usr/bin/cursor",
-      "/usr/share/cursor/bin/cursor",
-      "/Applications/Cursor.app/Contents/Resources/app/bin/cursor",
-      LOCALAPPDATA && `${LOCALAPPDATA}\\Programs\\cursor\\resources\\app\\bin\\cursor.cmd`
-    )
-  },
-  {
-    id: "antigravity",
-    name: "Antigravity",
-    kind: "ide",
-    bin: bins(
-      "antigravity",
-      "/usr/bin/antigravity",
-      "/Applications/Antigravity.app/Contents/Resources/app/bin/antigravity",
-      LOCALAPPDATA && `${LOCALAPPDATA}\\Programs\\Antigravity\\bin\\antigravity.cmd`
-    )
-  },
-  {
-    id: "windsurf",
-    name: "Windsurf",
-    kind: "ide",
-    bin: bins("windsurf", "/usr/bin/windsurf", "/Applications/Windsurf.app/Contents/Resources/app/bin/windsurf")
-  },
-  {
-    id: "zed",
-    name: "Zed",
-    kind: "ide",
-    bin: bins("zed", "zeditor", "/usr/bin/zed", "/Applications/Zed.app/Contents/MacOS/cli")
-  },
-  {
-    id: "intellij",
-    name: "IntelliJ IDEA",
-    kind: "ide",
-    bin: bins("idea", "idea.sh", "/Applications/IntelliJ IDEA.app/Contents/MacOS/idea")
-  },
-  { id: "sublime", name: "Sublime Text", kind: "ide", bin: bins("subl", "/Applications/Sublime Text.app/Contents/SharedSupport/bin/subl") }
-];
-
-const DEFAULT_FILE_EXPLORERS: RegistryDef[] = [
-  { id: "nautilus", name: "Files (Nautilus)", kind: "file-explorer", bin: ["nautilus"] },
-  { id: "dolphin", name: "Dolphin", kind: "file-explorer", bin: ["dolphin"] },
-  { id: "thunar", name: "Thunar", kind: "file-explorer", bin: ["thunar"] },
-  { id: "nemo", name: "Nemo", kind: "file-explorer", bin: ["nemo"] },
-  { id: "pcmanfm", name: "PCManFM", kind: "file-explorer", bin: ["pcmanfm"] },
-  { id: "caja", name: "Caja", kind: "file-explorer", bin: ["caja"] },
-  // OS default fallback (Finder / Explorer / xdg-open).
-  { id: "system-files", name: "Open Directory", kind: "file-explorer", bin: osOpener() }
-];
-
-const DEFAULT_BROWSERS: RegistryDef[] = [
-  {
-    id: "chrome",
-    name: "Google Chrome",
-    kind: "browser",
-    bin: bins(
-      "google-chrome",
-      "google-chrome-stable",
-      "chrome",
-      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-      PROGRAM_FILES && `${PROGRAM_FILES}\\Google\\Chrome\\Application\\chrome.exe`
-    )
-  },
-  { id: "chromium", name: "Chromium", kind: "browser", bin: bins("chromium", "chromium-browser") },
-  {
-    id: "firefox",
-    name: "Firefox",
-    kind: "browser",
-    bin: bins("firefox", "/Applications/Firefox.app/Contents/MacOS/firefox", PROGRAM_FILES && `${PROGRAM_FILES}\\Mozilla Firefox\\firefox.exe`)
-  },
-  {
-    id: "brave",
-    name: "Brave",
-    kind: "browser",
-    bin: bins("brave-browser", "brave", "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser")
-  },
-  {
-    id: "edge",
-    name: "Microsoft Edge",
-    kind: "browser",
-    bin: bins("microsoft-edge", "microsoft-edge-stable", "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge")
-  },
-  { id: "vivaldi", name: "Vivaldi", kind: "browser", bin: bins("vivaldi", "vivaldi-stable") },
-  // OS default fallback.
-  { id: "system-browser", name: "Default Browser", kind: "browser", bin: osOpener() }
-];
-
-/** The platform's generic "open this" command. */
-function osOpener(): string[] {
-  if (process.platform === "win32") {
-    return ["explorer"];
-  }
-  if (process.platform === "darwin") {
-    return ["open"];
-  }
-  return ["xdg-open"];
-}
-
-/** Resolve the first candidate that exists as an executable on PATH. */
-function resolveBin(candidates: string[]): string | undefined {
-  const pathDirs = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
-  const exts =
-    process.platform === "win32"
-      ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT").split(";").filter(Boolean)
-      : [""];
-
-  for (const candidate of candidates) {
-    if (isAbsolute(candidate)) {
-      if (isExecutable(candidate)) {
-        return candidate;
-      }
-      continue;
-    }
-
-    for (const dir of pathDirs) {
-      for (const ext of exts) {
-        const full = join(dir, candidate + ext);
-        if (isExecutable(full)) {
-          return full;
-        }
-      }
-    }
-  }
-
-  return undefined;
-}
-
-function isExecutable(path: string): boolean {
+function isExecutable(p: string): boolean {
   try {
-    accessSync(path, process.platform === "win32" ? constants.F_OK : constants.X_OK);
+    accessSync(p, process.platform === "win32" ? constants.F_OK : constants.X_OK);
     return true;
   } catch {
     return false;
   }
+}
+
+function resolveBin(cands: string[]): string | undefined {
+  const dirs = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
+  const exts = process.platform === "win32" ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT").split(";").filter(Boolean) : [""];
+  for (const c of cands) {
+    if (isAbsolute(c) && isExecutable(c)) return c;
+    for (const d of dirs) {
+      for (const x of exts) {
+        const f = join(d, c + x);
+        if (isExecutable(f)) return f;
+      }
+    }
+  }
+  return undefined;
+}
+
+function osOpener(): string[] {
+  if (process.platform === "win32") return ["explorer"];
+  if (process.platform === "darwin") return ["open"];
+  return ["xdg-open"];
+}
+
+/** Materialize static defs (from @orquester/registry) into runtime defs. */
+function materialize(list: readonly RegistryEntryDef[]): RegistryDef[] {
+  return list.map((s) => {
+    const expanded = expand(s.bin);
+    const bin = s.bin.length === 0 && (s.kind === "file-explorer" || s.kind === "browser") ? osOpener() : expanded;
+    const d: RegistryDef = { id: s.id, name: s.name, kind: s.kind, bin };
+    if (s.versionFlag) d.versionFlag = s.versionFlag;
+    if (s.installCmd) d.installCmd = s.installCmd;
+    if (s.updateCmd) d.updateCmd = s.updateCmd;
+    return d;
+  });
+}
+
+const DEFAULT_SHELLS: RegistryDef[] = materialize(REGISTRY.shells as readonly RegistryEntryDef[]);
+const DEFAULT_AGENTS: RegistryDef[] = materialize(REGISTRY.agents as readonly RegistryEntryDef[]);
+const DEFAULT_IDES: RegistryDef[] = materialize(REGISTRY.ides as readonly RegistryEntryDef[]);
+const DEFAULT_FILE_EXPLORERS: RegistryDef[] = materialize(REGISTRY.fileExplorers as readonly RegistryEntryDef[]);
+const DEFAULT_BROWSERS: RegistryDef[] = materialize(REGISTRY.browsers as readonly RegistryEntryDef[]);
+
+/** The platform's generic "open this" command. */
+function osOpenerForKind(kind: RegistryKind): string[] {
+  if (kind === "file-explorer" || kind === "browser") return osOpener();
+  return [];
 }
 
 /**

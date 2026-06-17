@@ -1,6 +1,7 @@
 import React from "react";
-import { ChevronDown, Code2, ExternalLink, FolderOpen, Globe } from "lucide-react";
+import { ChevronDown, ExternalLink } from "lucide-react";
 import { Dropdown, DropdownEmpty, DropdownItem, DropdownLabel, DropdownSeparator } from "../ui";
+import { getRegistryIcon } from "../../icons";
 import { useRegistry } from "../../hooks";
 import { useApi } from "../../context/orquester-context";
 import { useAppStore } from "../../store/app";
@@ -22,7 +23,7 @@ export const OpenOnMenu: React.FC = () => {
     }
   };
 
-  const section = (label: string, icon: React.ReactNode, entries: RegistryEntry[], emptyText: string) => {
+  const section = (label: string, kind: "ide" | "file-explorer" | "browser", entries: RegistryEntry[], emptyText: string) => {
     const available = entries.filter((e) => e.enabled);
     return (
       <>
@@ -30,7 +31,7 @@ export const OpenOnMenu: React.FC = () => {
         {loading && <DropdownEmpty>Loading…</DropdownEmpty>}
         {!loading && available.length === 0 && <DropdownEmpty>{emptyText}</DropdownEmpty>}
         {available.map((entry) => (
-          <DropdownItem key={entry.id} icon={icon} onClick={() => open(entry)}>
+          <DropdownItem key={entry.id} icon={getRegistryIcon(kind, entry.id, 14)} onClick={() => open(entry)}>
             {entry.name}
           </DropdownItem>
         ))}
@@ -48,11 +49,11 @@ export const OpenOnMenu: React.FC = () => {
 
   return (
     <Dropdown trigger={trigger} align="right" width="w-56">
-      {section("Editors", <Code2 size={14} />, registry.ides, "No editors detected")}
+      {section("Editors", "ide", registry.ides, "No editors detected")}
       <DropdownSeparator />
-      {section("File explorers", <FolderOpen size={14} />, registry.fileExplorers, "Unavailable")}
+      {section("File explorers", "file-explorer", registry.fileExplorers, "Unavailable")}
       <DropdownSeparator />
-      {section("Browsers", <Globe size={14} />, registry.browsers, "No browsers detected")}
+      {section("Browsers", "browser", registry.browsers, "No browsers detected")}
     </Dropdown>
   );
 };
