@@ -15,6 +15,7 @@ import {
   createDefaultClientConfig,
   createDefaultDaemonConfig,
   dailyLogFile,
+  expandVars,
   parseDaemonConfig,
   resolveDaemonPaths
 } from "@orquester/config";
@@ -22,26 +23,49 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { createWriteStream, type WriteStream } from "node:fs";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { homedir, platform } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 
 const daemonId = randomUUID();
 const packageVersion = "0.0.0";
 
+/** Filesystem locations resolved (variables expanded) for this run. */
+interface ResolvedPaths {
+  daemonDir: string;
+  workspacesDir: string;
+  logsDir: string;
+}
+
 async function main(): Promise<void> {
-  const paths = resolveDaemonPaths({ homeDir: homedir(), platform: platform(), env: process.env });
+  const cwd = process.cwd();
+  const appdirArg = parseAppdir(process.argv.slice(2));
+  const appdir = resolveAppdir(appdirArg ?? process.env.ORQUESTER_APPDIR, cwd);
+
+  const paths = resolveDaemonPaths({
+    homeDir: homedir(),
+    platform: platform(),
+    cwd,
+    appdir,
+    env: process.env
+  });
   const config = await loadConfig(paths);
   validateTransportConfig(config);
-  await prepareDirs(config, paths);
 
-  const logStream = createWriteStream(dailyLogFile(config.logsDir), { flags: "a" });
+  const resolved: ResolvedPaths = {
+    daemonDir: paths.daemonDir,
+    workspacesDir: expandVars(config.workspacesDir, paths.vars),
+    logsDir: expandVars(config.logsDir, paths.vars)
+  };
+  await prepareDirs(resolved);
+
+  const logStream = createWriteStream(dailyLogFile(resolved.logsDir), { flags: "a" });
   const clientConfig = createDefaultClientConfig(paths.socketPath);
   const started: string[] = [];
   const servers: FastifyInstance[] = [];
 
   // The local unix socket transport is always present.
   {
-    const app = createServer(config, paths, clientConfig, logStream, {
+    const app = createServer(config, resolved, clientConfig, logStream, {
       authRequired: false,
       mode: "local"
     });
@@ -57,7 +81,7 @@ async function main(): Promise<void> {
 
   // The external HTTP transport is opt-in (daemon.json -> transports.http.enabled).
   if (config.transports.http.enabled) {
-    const app = createServer(config, paths, clientConfig, logStream, {
+    const app = createServer(config, resolved, clientConfig, logStream, {
       authRequired: true,
       mode: "remote"
     });
@@ -72,12 +96,14 @@ async function main(): Promise<void> {
   process.on("SIGINT", () => shutdown(servers));
   process.on("SIGTERM", () => shutdown(servers));
 
-  console.log(`Orquester daemon ${daemonId} listening on ${started.join(", ")}`);
+  console.log(
+    `Orquester daemon ${daemonId} listening on ${started.join(", ")} (workspaces: ${resolved.workspacesDir})`
+  );
 }
 
 function createServer(
   config: DaemonConfig,
-  paths: DaemonPaths,
+  resolved: ResolvedPaths,
   clientConfig: ClientConfig,
   logStream: WriteStream,
   options: { authRequired: boolean; mode: "local" | "remote" }
@@ -109,16 +135,13 @@ function createServer(
     daemonId,
     version: packageVersion,
     mode: options.mode,
-    transports: [
-      "unix" as const,
-      ...(config.transports.http.enabled ? (["http"] as const) : [])
-    ]
+    transports: ["unix" as const, ...(config.transports.http.enabled ? (["http"] as const) : [])]
   }));
 
   app.get("/api/info", async (): Promise<ServerInfoResponse> => ({
     name: "Orquester daemon",
-    dataDir: paths.daemonDir,
-    workspacesDir: config.workspacesDir,
+    dataDir: resolved.daemonDir,
+    workspacesDir: resolved.workspacesDir,
     capabilities: {
       terminals: false,
       sessions: false,
@@ -134,7 +157,7 @@ function createServer(
   //   (workspacesDir)/<workspace>           -> a workspace
   //   (workspacesDir)/<workspace>/<project> -> a project
   app.get("/api/workspaces", async (): Promise<WorkspaceSummary[]> =>
-    listWorkspaces(config.workspacesDir)
+    listWorkspaces(resolved.workspacesDir)
   );
 
   app.post("/api/workspaces", async (request, reply): Promise<WorkspaceSummary | void> => {
@@ -143,7 +166,7 @@ function createServer(
       return reply.code(400).send({ code: "INVALID_NAME", message: "Invalid workspace name." });
     }
 
-    const path = join(config.workspacesDir, name);
+    const path = join(resolved.workspacesDir, name);
     await mkdir(path, { recursive: true });
     return { name, path, projectCount: 0 };
   });
@@ -155,7 +178,7 @@ function createServer(
       if (!isValidName(workspace)) {
         return reply.code(400).send({ code: "INVALID_NAME", message: "Invalid workspace name." });
       }
-      return listProjects(config.workspacesDir, workspace);
+      return listProjects(resolved.workspacesDir, workspace);
     }
   );
 
@@ -168,7 +191,7 @@ function createServer(
         return reply.code(400).send({ code: "INVALID_NAME", message: "Invalid name." });
       }
 
-      const path = join(config.workspacesDir, workspace, name);
+      const path = join(resolved.workspacesDir, workspace, name);
       await mkdir(path, { recursive: true });
       return { name, workspace, path };
     }
@@ -193,6 +216,29 @@ function createServer(
   });
 
   return app;
+}
+
+/** Parse `--appdir <path>` or `--appdir=<path>` from CLI args. */
+function parseAppdir(args: string[]): string | undefined {
+  const eq = args.find((arg) => arg.startsWith("--appdir="));
+  if (eq) {
+    return eq.slice("--appdir=".length);
+  }
+
+  const index = args.indexOf("--appdir");
+  if (index !== -1 && args[index + 1]) {
+    return args[index + 1];
+  }
+
+  return undefined;
+}
+
+/** Resolve a (possibly relative) appdir to an absolute path, or undefined. */
+function resolveAppdir(raw: string | undefined, cwd: string): string | undefined {
+  if (!raw) {
+    return undefined;
+  }
+  return resolve(cwd, raw);
 }
 
 /** Reject names that would escape the workspaces directory. */
@@ -242,12 +288,7 @@ async function listProjects(workspacesDir: string, workspace: string): Promise<P
 }
 
 async function loadConfig(paths: DaemonPaths): Promise<DaemonConfig> {
-  const defaults = createDefaultDaemonConfig({
-    homeDir: paths.homeDir,
-    platform: platform(),
-    env: process.env,
-    paths
-  });
+  const defaults = createDefaultDaemonConfig({ env: process.env });
 
   try {
     const raw = await readFile(paths.configPath, "utf8");
@@ -283,10 +324,10 @@ function validateTransportConfig(config: DaemonConfig): void {
   }
 }
 
-async function prepareDirs(config: DaemonConfig, paths: DaemonPaths): Promise<void> {
-  await mkdir(paths.daemonDir, { recursive: true });
-  await mkdir(config.logsDir, { recursive: true });
-  await mkdir(config.workspacesDir, { recursive: true });
+async function prepareDirs(resolved: ResolvedPaths): Promise<void> {
+  await mkdir(resolved.daemonDir, { recursive: true });
+  await mkdir(resolved.logsDir, { recursive: true });
+  await mkdir(resolved.workspacesDir, { recursive: true });
 }
 
 function sanitizeDaemonConfig(config: DaemonConfig): DaemonConfig {

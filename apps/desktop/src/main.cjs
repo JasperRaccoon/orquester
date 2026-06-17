@@ -8,17 +8,25 @@ let daemonProcess;
 let mainWindow;
 let daemonSocketPath;
 
-// ~/.orquester/{app,daemon}; keep these in sync with @orquester/config.
-function orquesterDir() {
+const repoRoot = path.resolve(__dirname, "../../..");
+
+// Base config dir: ORQUESTER_APPDIR (relative paths resolved against the repo
+// root so `.stage` is stable regardless of Electron's cwd), else
+// ~/.orquester. Keep these in sync with @orquester/config.
+function baseDir() {
+  const appdir = process.env.ORQUESTER_APPDIR;
+  if (appdir && appdir.length > 0) {
+    return path.isAbsolute(appdir) ? appdir : path.resolve(repoRoot, appdir);
+  }
   return path.join(app.getPath("home"), ".orquester");
 }
 
 function appDir() {
-  return path.join(orquesterDir(), "app");
+  return path.join(baseDir(), "app");
 }
 
 function daemonDir() {
-  return path.join(orquesterDir(), "daemon");
+  return path.join(baseDir(), "daemon");
 }
 
 function socketPathFor() {
@@ -60,10 +68,14 @@ function ensureAppFiles() {
 
 function startDaemon() {
   const socketPath = socketPathFor();
-  const repoRoot = path.resolve(__dirname, "../../..");
   const pnpm = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
+  const args = ["--filter", "@orquester/daemon", "start"];
+  if (process.env.ORQUESTER_APPDIR) {
+    // Pass the resolved appdir so the embedded daemon shares this sandbox.
+    args.push("--", "--appdir", baseDir());
+  }
 
-  daemonProcess = spawn(pnpm, ["--filter", "@orquester/daemon", "start"], {
+  daemonProcess = spawn(pnpm, args, {
     cwd: repoRoot,
     env: {
       ...process.env,

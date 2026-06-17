@@ -22,57 +22,82 @@ export function joinPath(...segments: string[]): string {
 }
 
 // ---------------------------------------------------------------------------
+// Variable expansion
+//
+// Config string values (paths) may reference:
+//   $userhome  the OS home directory
+//   $user      the OS username
+//   $cwd       the process working directory
+//   $appdir    the resolved base config dir (~/.orquester or e.g. ./.stage)
+// ---------------------------------------------------------------------------
+
+export interface ConfigVars {
+  user: string;
+  userhome: string;
+  cwd: string;
+  appdir: string;
+}
+
+/** Replace `$userhome`/`$user`/`$cwd`/`$appdir` in a string. */
+export function expandVars(value: string, vars: ConfigVars): string {
+  // `$userhome` is expanded before `$user` so the longer token wins.
+  return value
+    .replaceAll("$userhome", vars.userhome)
+    .replaceAll("$appdir", vars.appdir)
+    .replaceAll("$cwd", vars.cwd)
+    .replaceAll("$user", vars.user);
+}
+
+// ---------------------------------------------------------------------------
 // Directory layout
 //
-//   ~/.orquester/
+//   <appdir>/                 (~/.orquester by default, or e.g. ./.stage)
 //     app/     app.json, remotes.json, logs/<yyyy-mm-dd>.log
 //     daemon/  daemon.json, daemon.sock, logs/<yyyy-mm-dd>.log
 //
-// Workspaces live OUTSIDE .orquester (default ~/workspaces).
+// Workspaces live wherever daemon.json `workspacesDir` points (default
+// `$userhome/workspaces`; the stage sandbox uses `$appdir/workspaces`).
 // ---------------------------------------------------------------------------
 
-export function orquesterDir(homeDir: string): string {
-  return joinPath(homeDir, ORQUESTER_DIR_NAME);
+/** Resolve the base config dir. `appdir` (if given) must already be absolute. */
+export function resolveBaseDir(homeDir: string, appdir?: string): string {
+  return appdir && appdir.length > 0 ? appdir : joinPath(homeDir, ORQUESTER_DIR_NAME);
 }
 
-export function appDir(homeDir: string): string {
-  return joinPath(orquesterDir(homeDir), "app");
+export function appConfigDir(baseDir: string): string {
+  return joinPath(baseDir, "app");
 }
 
-export function daemonDir(homeDir: string): string {
-  return joinPath(orquesterDir(homeDir), "daemon");
+export function daemonConfigDir(baseDir: string): string {
+  return joinPath(baseDir, "daemon");
 }
 
-export function appLogsDir(homeDir: string): string {
-  return joinPath(appDir(homeDir), "logs");
+export function appLogsDir(baseDir: string): string {
+  return joinPath(appConfigDir(baseDir), "logs");
 }
 
-export function daemonLogsDir(homeDir: string): string {
-  return joinPath(daemonDir(homeDir), "logs");
+export function daemonLogsDir(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "logs");
 }
 
-export function appConfigPath(homeDir: string): string {
-  return joinPath(appDir(homeDir), "app.json");
+export function appConfigPath(baseDir: string): string {
+  return joinPath(appConfigDir(baseDir), "app.json");
 }
 
-export function remotesConfigPath(homeDir: string): string {
-  return joinPath(appDir(homeDir), "remotes.json");
+export function remotesConfigPath(baseDir: string): string {
+  return joinPath(appConfigDir(baseDir), "remotes.json");
 }
 
-export function daemonConfigPath(homeDir: string): string {
-  return joinPath(daemonDir(homeDir), "daemon.json");
+export function daemonConfigPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "daemon.json");
 }
 
-export function defaultWorkspacesDir(homeDir: string): string {
-  return joinPath(homeDir, "workspaces");
-}
-
-export function defaultSocketPath(homeDir: string, platform: RuntimePlatform): string {
+export function defaultSocketPath(baseDir: string, platform: RuntimePlatform): string {
   if (platform === "win32") {
     return "\\\\.\\pipe\\orquester-daemon";
   }
 
-  return joinPath(daemonDir(homeDir), "daemon.sock");
+  return joinPath(daemonConfigDir(baseDir), "daemon.sock");
 }
 
 /** `yyyy-mm-dd` in local time. */
@@ -100,6 +125,7 @@ export const httpTransportSchema = z.object({
 
 export const daemonConfigSchema = z.object({
   version: z.literal(1).default(1),
+  // May contain $vars; expand with expandVars() before use.
   workspacesDir: z.string().min(1),
   logsDir: z.string().min(1),
   // Only the external HTTP transport is configurable here; the local unix
@@ -114,45 +140,47 @@ export const daemonConfigSchema = z.object({
 export type DaemonConfig = z.infer<typeof daemonConfigSchema>;
 export type HttpTransportConfig = z.infer<typeof httpTransportSchema>;
 
-/** Runtime-only daemon paths resolved from home/platform/env (not persisted). */
+/** Runtime-only daemon paths resolved from home/platform/appdir (not persisted). */
 export interface DaemonPaths {
   homeDir: string;
+  baseDir: string;
   daemonDir: string;
   configPath: string;
   socketPath: string;
-  logsDir: string;
-  workspacesDir: string;
+  vars: ConfigVars;
 }
 
 export function resolveDaemonPaths(input: {
   homeDir: string;
   platform: RuntimePlatform;
+  cwd: string;
+  /** Absolute base config dir, or undefined for the default ~/.orquester. */
+  appdir?: string;
   env?: Record<string, string | undefined>;
 }): DaemonPaths {
   const env = input.env ?? {};
+  const baseDir = resolveBaseDir(input.homeDir, input.appdir);
+  const user = env.USER ?? env.USERNAME ?? lastSegment(input.homeDir);
+
   return {
     homeDir: input.homeDir,
-    daemonDir: daemonDir(input.homeDir),
-    configPath: env.ORQUESTER_DAEMON_CONFIG ?? daemonConfigPath(input.homeDir),
-    socketPath: env.ORQUESTER_UNIX_SOCKET ?? defaultSocketPath(input.homeDir, input.platform),
-    logsDir: env.ORQUESTER_LOGS_DIR ?? daemonLogsDir(input.homeDir),
-    workspacesDir: env.ORQUESTER_WORKSPACES_DIR ?? defaultWorkspacesDir(input.homeDir)
+    baseDir,
+    daemonDir: daemonConfigDir(baseDir),
+    configPath: env.ORQUESTER_DAEMON_CONFIG ?? daemonConfigPath(baseDir),
+    socketPath: env.ORQUESTER_UNIX_SOCKET ?? defaultSocketPath(baseDir, input.platform),
+    vars: { user, userhome: input.homeDir, cwd: input.cwd, appdir: baseDir }
   };
 }
 
 export function createDefaultDaemonConfig(input: {
-  homeDir: string;
-  platform: RuntimePlatform;
   env?: Record<string, string | undefined>;
-  paths?: DaemonPaths;
 }): DaemonConfig {
   const env = input.env ?? {};
-  const paths = input.paths ?? resolveDaemonPaths(input);
 
   return parseDaemonConfig({
     version: 1,
-    workspacesDir: paths.workspacesDir,
-    logsDir: paths.logsDir,
+    workspacesDir: "$userhome/workspaces",
+    logsDir: "$appdir/daemon/logs",
     transports: {
       http: {
         enabled: env.ORQUESTER_HTTP_ENABLED === "true",
@@ -166,6 +194,11 @@ export function createDefaultDaemonConfig(input: {
 
 export function parseDaemonConfig(value: unknown): DaemonConfig {
   return daemonConfigSchema.parse(value);
+}
+
+function lastSegment(path: string): string {
+  const parts = path.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] ?? "";
 }
 
 // ---------------------------------------------------------------------------

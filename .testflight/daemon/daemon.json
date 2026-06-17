@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "workspacesDir": "$appdir/workspaces",
+  "logsDir": "$appdir/daemon/logs",
+  "transports": {
+    "http": {
+      "enabled": false,
+      "host": "127.0.0.1",
+      "port": 47831
+    }
+  }
+}

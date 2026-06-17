@@ -1,7 +1,9 @@
 import { create } from "zustand";
 import type { ApiClient } from "../lib/api-client";
 import { workspaceService } from "../services";
-import type { ProjectSummary, Tab, TabKind, WorkspaceSummary } from "../types";
+import type { ConnectionStatus, ProjectSummary, Tab, TabKind, WorkspaceSummary } from "../types";
+
+const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 let tabCounter = 0;
 const nextTabId = () => `tab-${++tabCounter}`;
@@ -18,6 +20,8 @@ const EMPTY_TABS: Tab[] = [];
 export interface AppState {
   /** Server manager bound from <OrquesterApp> at startup. */
   api: ApiClient | null;
+  /** Live status of the bound daemon connection. */
+  connectionStatus: ConnectionStatus;
 
   // --- navigation ---
   /** Workspace folder open in the sidebar (null = workspace list). */
@@ -36,6 +40,8 @@ export interface AppState {
   activeTabByProject: Record<string, string | null>;
 
   setApi: (api: ApiClient) => void;
+  /** Wait for the daemon to be reachable (handles embedded-daemon startup), then load. */
+  connect: () => Promise<void>;
 
   loadWorkspaces: () => Promise<void>;
   createWorkspace: (name: string) => Promise<void>;
@@ -53,6 +59,7 @@ export interface AppState {
 
 export const useAppStore = create<AppState>((set, get) => ({
   api: null,
+  connectionStatus: "connecting",
   currentWorkspace: null,
   currentProject: null,
   workspaces: [],
@@ -63,6 +70,34 @@ export const useAppStore = create<AppState>((set, get) => ({
   activeTabByProject: {},
 
   setApi: (api) => set({ api }),
+
+  connect: async () => {
+    const api = get().api;
+    if (!api) {
+      return;
+    }
+    set({ connectionStatus: "connecting" });
+
+    // The embedded daemon is spawned asynchronously, so poll /health until the
+    // socket answers before loading data, instead of failing on first paint.
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      if (get().api !== api) {
+        return; // connection swapped underneath us
+      }
+      try {
+        await api.health();
+        set({ connectionStatus: "connected" });
+        await get().loadWorkspaces();
+        return;
+      } catch {
+        await delay(500);
+      }
+    }
+
+    if (get().api === api) {
+      set({ connectionStatus: "error" });
+    }
+  },
 
   loadWorkspaces: async () => {
     const api = get().api;

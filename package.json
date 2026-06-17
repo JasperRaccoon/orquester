@@ -5,7 +5,10 @@
   "type": "module",
   "packageManager": "pnpm@10.12.1",
   "scripts": {
-    "dev:daemon": "pnpm --filter @orquester/daemon dev",
+    "dev": "cross-env ORQUESTER_APPDIR=./.stage pnpm --filter @orquester/desktop dev",
+    "dev:bare": "pnpm --filter @orquester/desktop dev",
+    "dev:daemon": "cross-env ORQUESTER_APPDIR=./.stage tsx watch apps/daemon/src/index.ts",
+    "dev:daemon:bare": "tsx watch apps/daemon/src/index.ts",
     "dev:web": "pnpm --filter @orquester/web dev",
     "dev:desktop": "pnpm --filter @orquester/desktop dev",
     "build": "pnpm -r build",
@@ -13,6 +16,8 @@
     "check": "pnpm -r typecheck"
   },
   "devDependencies": {
+    "cross-env": "^7.0.3",
+    "tsx": "^4.20.3",
     "typescript": "^5.8.3"
   }
 }

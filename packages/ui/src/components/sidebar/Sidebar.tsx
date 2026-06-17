@@ -20,6 +20,7 @@ const STATUS_COLOR: Record<ConnectionStatus, string> = {
  */
 export const Sidebar: React.FC = () => {
   const currentWorkspace = useAppStore((s) => s.currentWorkspace);
+  const connectionStatus = useAppStore((s) => s.connectionStatus);
   const { api } = useOrquester();
   const connection = api.connection;
 
@@ -28,7 +29,7 @@ export const Sidebar: React.FC = () => {
       {currentWorkspace ? <ProjectList /> : <WorkspaceList />}
 
       <div className="flex items-center gap-2 border-t border-neutral-800 px-3 py-2">
-        <span className={cn("h-2 w-2 rounded-full", STATUS_COLOR[connection.status])} />
+        <span className={cn("h-2 w-2 rounded-full", STATUS_COLOR[connectionStatus])} />
         <span className="flex-1 truncate text-xs text-neutral-400">{connection.name}</span>
         <span className="text-[10px] uppercase tracking-wide text-neutral-600">
           {api.transportKind}

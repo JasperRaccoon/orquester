@@ -46,11 +46,11 @@ export const OrquesterApp: React.FC<OrquesterAppProps> = ({
 
   const titlebar = useTitlebar ?? runtime === "desktop";
 
-  // Bind the server manager into the store and load the workspace tree.
+  // Bind the server manager into the store, then wait for the daemon and load.
   useEffect(() => {
     const store = useAppStore.getState();
     store.setApi(api);
-    void store.loadWorkspaces();
+    void store.connect();
   }, [api]);
 
   return (
