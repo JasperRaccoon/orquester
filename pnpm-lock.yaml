@@ -60,6 +60,9 @@ importers:
 
   apps/desktop:
     dependencies:
+      '@orquester/daemon':
+        specifier: workspace:*
+        version: link:../daemon
       '@orquester/ui':
         specifier: workspace:*
         version: link:../../packages/ui
@@ -69,6 +72,9 @@ importers:
       autoprefixer:
         specifier: ^10.4.21
         version: 10.5.0(postcss@8.5.15)
+      node-pty:
+        specifier: ^1.1.0
+        version: 1.1.0
       postcss:
         specifier: ^8.5.6
         version: 8.5.15
@@ -88,6 +94,9 @@ importers:
         specifier: ^8.21.0
         version: 8.21.0
     devDependencies:
+      '@types/node':
+        specifier: ^22.15.32
+        version: 22.19.21
       '@types/react':
         specifier: ^18.3.18
         version: 18.3.31
@@ -106,6 +115,9 @@ importers:
       electron:
         specifier: ^33.4.11
         version: 33.4.11
+      esbuild:
+        specifier: ^0.25.12
+        version: 0.25.12
       typescript:
         specifier: ^5.8.3
         version: 5.9.3

@@ -47,7 +47,7 @@ import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance } from "fastify";
 import { createWriteStream, existsSync, type WriteStream } from "node:fs";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { homedir, platform } from "node:os";
+import { homedir, platform as osPlatform } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { stat } from "node:fs/promises";
 import { randomUUID, timingSafeEqual } from "node:crypto";
@@ -68,19 +68,36 @@ interface ResolvedPaths {
   vars: ConfigVars;
 }
 
-async function main(): Promise<void> {
-  const cwd = process.cwd();
-  const appdirArg = parseAppdir(process.argv.slice(2));
-  const appdir = resolveAppdir(appdirArg ?? process.env.ORQUESTER_APPDIR, cwd);
+export interface StartDaemonOptions {
+  cwd?: string;
+  appdir?: string;
+  env?: NodeJS.ProcessEnv;
+  homeDir?: string;
+  platform?: NodeJS.Platform | string;
+  webDir?: string;
+}
+
+export interface RunningDaemon {
+  daemonId: string;
+  socketPath: string;
+  workspacesDir: string;
+  stop: () => Promise<void>;
+}
+
+export async function startDaemon(options: StartDaemonOptions = {}): Promise<RunningDaemon> {
+  const cwd = options.cwd ?? process.cwd();
+  const env = options.env ?? process.env;
+  const runtimePlatform = options.platform ?? osPlatform();
+  const appdir = resolveAppdir(options.appdir ?? env.ORQUESTER_APPDIR, cwd);
 
   const paths = resolveDaemonPaths({
-    homeDir: homedir(),
-    platform: platform(),
+    homeDir: options.homeDir ?? homedir(),
+    platform: runtimePlatform,
     cwd,
     appdir,
-    env: process.env
+    env
   });
-  const config = await loadConfig(paths);
+  const config = await loadConfig(paths, env);
   validateTransportConfig(config);
 
   const resolved: ResolvedPaths = {
@@ -118,12 +135,12 @@ async function main(): Promise<void> {
   const services: Services = { registry, sessions, broadcaster };
 
   // The static web build the HTTP transport optionally serves.
-  const webDirEnv = process.env.ORQUESTER_WEB_DIR;
+  const webDirEnv = options.webDir ?? env.ORQUESTER_WEB_DIR;
   const webDir = webDirEnv ? resolve(cwd, webDirEnv) : undefined;
   const serveWeb = webDir && existsSync(join(webDir, "index.html")) ? webDir : undefined;
 
   // The local unix socket transport is always present.
-  if (platform() !== "win32") {
+  if (runtimePlatform !== "win32") {
     await rm(paths.socketPath, { force: true });
   }
   const unixServer = createServer(config, resolved, clientConfig, logStream, services, {
@@ -170,16 +187,20 @@ async function main(): Promise<void> {
 
   await startHttp();
 
-  const shutdown = async () => {
+  const stop = async () => {
     sessions.closeAll();
     await stopHttp();
     await unixServer.close().catch(() => undefined);
-    process.exit(0);
   };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
 
   console.log(`Orquester daemon ${daemonId} on unix:${paths.socketPath} (workspaces: ${resolved.workspacesDir})`);
+
+  return {
+    daemonId,
+    socketPath: paths.socketPath,
+    workspacesDir: resolved.workspacesDir,
+    stop
+  };
 }
 
 interface Services {
@@ -646,7 +667,7 @@ function createServer(
 }
 
 /** Parse `--appdir <path>` or `--appdir=<path>` from CLI args. */
-function parseAppdir(args: string[]): string | undefined {
+export function parseAppdir(args: string[]): string | undefined {
   const eq = args.find((arg) => arg.startsWith("--appdir="));
   if (eq) {
     return eq.slice("--appdir=".length);
@@ -793,8 +814,8 @@ function migrateHttpPassword(config: DaemonConfig): boolean {
   return false;
 }
 
-async function loadConfig(paths: DaemonPaths): Promise<DaemonConfig> {
-  const defaults = createDefaultDaemonConfig({ env: process.env });
+async function loadConfig(paths: DaemonPaths, env: NodeJS.ProcessEnv): Promise<DaemonConfig> {
+  const defaults = createDefaultDaemonConfig({ env });
   let config: DaemonConfig;
   let fileExists = true;
 
@@ -859,8 +880,3 @@ function sanitizeDaemonConfig(config: DaemonConfig): DaemonConfig {
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
 }
-
-main().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});

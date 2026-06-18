@@ -1,22 +1,36 @@
-const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage } = require("electron");
-const { spawn } = require("node:child_process");
-const fs = require("node:fs");
-const http = require("node:http");
-const path = require("node:path");
-const zlib = require("node:zlib");
+import { app, BrowserWindow, ipcMain, Menu, nativeImage, Tray, type IpcMainEvent } from "electron";
+import { startDaemon as startOrquesterDaemon, type RunningDaemon } from "@orquester/daemon";
+import fs from "node:fs";
+import http from "node:http";
+import path from "node:path";
+import zlib from "node:zlib";
 
-let daemonProcess;
-let mainWindow;
-let tray;
-let daemonSocketPath;
+interface DaemonRequest {
+  method?: string;
+  path?: string;
+  headers?: http.OutgoingHttpHeaders;
+  body?: string | Buffer;
+}
+
+interface DaemonResponse {
+  status: number;
+  ok: boolean;
+  headers: http.IncomingHttpHeaders;
+  body: string;
+}
+
+let daemon: RunningDaemon | undefined;
+let mainWindow: BrowserWindow | undefined;
+let tray: Tray | undefined;
+let daemonSocketPath: string | undefined;
 let quitting = false;
-let respawnAt = 0;
 
-const repoRoot = path.resolve(__dirname, "../../..");
+const desktopRoot = path.resolve(__dirname, "..");
+const repoRoot = path.resolve(desktopRoot, "../..");
 
 // Base config dir: ORQUESTER_APPDIR (relative paths resolved against the repo
 // root so `.stage` is stable regardless of Electron's cwd), else ~/.orquester.
-function baseDir() {
+function baseDir(): string {
   const appdir = process.env.ORQUESTER_APPDIR;
   if (appdir && appdir.length > 0) {
     return path.isAbsolute(appdir) ? appdir : path.resolve(repoRoot, appdir);
@@ -27,27 +41,27 @@ function baseDir() {
 const appDir = () => path.join(baseDir(), "app");
 const daemonDir = () => path.join(baseDir(), "daemon");
 
-function socketPathFor() {
+function socketPathFor(): string {
   return process.platform === "win32" ? "\\\\.\\pipe\\orquester-daemon" : path.join(daemonDir(), "daemon.sock");
 }
 
-function dailyLogFile(logsDir) {
+function dailyLogFile(logsDir: string): string {
   const now = new Date();
   const stamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
   return path.join(logsDir, `${stamp}.log`);
 }
 
 /** Read app.json (best effort) for desktop-side flags like runInBackground. */
-function readAppConfig() {
+function readAppConfig(): Record<string, unknown> {
   try {
-    return JSON.parse(fs.readFileSync(path.join(appDir(), "app.json"), "utf8"));
+    return JSON.parse(fs.readFileSync(path.join(appDir(), "app.json"), "utf8")) as Record<string, unknown>;
   } catch {
     return {};
   }
 }
 const runInBackground = () => readAppConfig().runInBackground === true;
 
-function ensureAppFiles() {
+function ensureAppFiles(): void {
   const dir = appDir();
   const logsDir = path.join(dir, "logs");
   fs.mkdirSync(logsDir, { recursive: true });
@@ -63,52 +77,51 @@ function ensureAppFiles() {
   fs.appendFileSync(dailyLogFile(logsDir), `${new Date().toISOString()} app: started\n`);
 }
 
-function startDaemon() {
+async function startIntegratedDaemon(): Promise<void> {
   const socketPath = socketPathFor();
-  const pnpm = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
-  const args = ["--filter", "@orquester/daemon", "start"];
-  if (process.env.ORQUESTER_APPDIR) {
-    args.push("--", "--appdir", baseDir());
-  }
+  const webDir = path.join(repoRoot, "apps", "web", "dist");
+  const env = {
+    ...process.env,
+    ORQUESTER_UNIX_SOCKET: socketPath,
+    ORQUESTER_WEB_DIR: webDir,
+    ...(process.env.ORQUESTER_HTTP_ENABLED ? {} : { ORQUESTER_HTTP_ENABLED: "false" })
+  };
 
-  daemonProcess = spawn(pnpm, args, {
+  daemon = await startOrquesterDaemon({
     cwd: repoRoot,
-    env: {
-      ...process.env,
-      ORQUESTER_UNIX_SOCKET: socketPath,
-      ORQUESTER_WEB_DIR: path.join(repoRoot, "apps", "web", "dist"),
-      ...(process.env.ORQUESTER_HTTP_ENABLED ? {} : { ORQUESTER_HTTP_ENABLED: "false" })
-    },
-    stdio: "inherit"
+    env,
+    appdir: process.env.ORQUESTER_APPDIR ? baseDir() : undefined,
+    webDir
   });
 
-  // Respawn the built-in daemon if it dies unexpectedly (throttled).
-  daemonProcess.on("exit", (code) => {
-    if (quitting) {
-      return;
-    }
-    console.error(`Orquester daemon exited (code ${code}); restarting…`);
-    const wait = Date.now() - respawnAt < 3000 ? 3000 : 500;
-    respawnAt = Date.now();
-    setTimeout(() => {
-      if (!quitting) {
-        startDaemon();
-      }
-    }, wait);
-  });
+  process.env.ORQUESTER_UNIX_SOCKET = daemon.socketPath;
+  daemonSocketPath = daemon.socketPath;
+}
 
-  process.env.ORQUESTER_UNIX_SOCKET = socketPath;
-  daemonSocketPath = socketPath;
+async function stopIntegratedDaemon(): Promise<void> {
+  if (!daemon) {
+    return;
+  }
+  const current = daemon;
+  daemon = undefined;
+  await current.stop().catch((error) => {
+    console.error("Failed to stop Orquester daemon", error);
+  });
 }
 
 /** HTTP request to the daemon over its unix socket (the renderer's transport). */
-function requestOverSocket({ method, path: requestPath, headers, body }) {
+function requestOverSocket({ method, path: requestPath, headers, body }: DaemonRequest): Promise<DaemonResponse> {
   return new Promise((resolve, reject) => {
+    if (!daemonSocketPath) {
+      reject(new Error("Orquester daemon is not running."));
+      return;
+    }
+
     const req = http.request(
       { socketPath: daemonSocketPath, path: requestPath || "/", method: method || "GET", headers: headers || {} },
       (res) => {
-        const chunks = [];
-        res.on("data", (chunk) => chunks.push(chunk));
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer) => chunks.push(chunk));
         res.on("end", () => {
           const status = res.statusCode ?? 0;
           resolve({ status, ok: status >= 200 && status < 300, headers: res.headers, body: Buffer.concat(chunks).toString("utf8") });
@@ -123,12 +136,19 @@ function requestOverSocket({ method, path: requestPath, headers, body }) {
   });
 }
 
-const streams = new Map();
+const streams = new Map<string, http.ClientRequest>();
 
-function openStreamOverSocket(event, { streamId, path: streamPath }) {
+function openStreamOverSocket(event: IpcMainEvent, { streamId, path: streamPath }: { streamId: string; path: string }): void {
+  if (!daemonSocketPath) {
+    if (!event.sender.isDestroyed()) {
+      event.sender.send("orquester:stream:end", { streamId });
+    }
+    return;
+  }
+
   const req = http.request({ socketPath: daemonSocketPath, path: streamPath, method: "GET" }, (res) => {
     res.setEncoding("utf8");
-    res.on("data", (chunk) => {
+    res.on("data", (chunk: string) => {
       if (!event.sender.isDestroyed()) {
         event.sender.send("orquester:stream:data", { streamId, chunk });
       }
@@ -150,17 +170,17 @@ function openStreamOverSocket(event, { streamId, path: streamPath }) {
   streams.set(streamId, req);
 }
 
-function registerIpc() {
-  ipcMain.handle("orquester:request", (_event, request) => requestOverSocket(request));
-  ipcMain.on("orquester:stream:open", (event, payload) => openStreamOverSocket(event, payload));
-  ipcMain.on("orquester:stream:close", (_event, streamId) => {
+function registerIpc(): void {
+  ipcMain.handle("orquester:request", (_event, request: DaemonRequest) => requestOverSocket(request));
+  ipcMain.on("orquester:stream:open", (event, payload: { streamId: string; path: string }) => openStreamOverSocket(event, payload));
+  ipcMain.on("orquester:stream:close", (_event, streamId: string) => {
     const req = streams.get(streamId);
     if (req) {
       req.destroy();
       streams.delete(streamId);
     }
   });
-  ipcMain.on("orquester:window", (_event, action) => {
+  ipcMain.on("orquester:window", (_event, action: string) => {
     if (!mainWindow) {
       return;
     }
@@ -170,7 +190,7 @@ function registerIpc() {
   });
 }
 
-function showWindow() {
+function showWindow(): void {
   if (mainWindow) {
     mainWindow.show();
     mainWindow.focus();
@@ -182,7 +202,7 @@ function showWindow() {
 // --- Tray (always present; controls daemon independently of the window) ---
 
 /** A small monochrome PNG generated at runtime (no asset shipping needed). */
-function makeTrayIcon() {
+function makeTrayIcon(): Electron.NativeImage {
   const size = 16;
   const px = Buffer.alloc(size * size * 4);
   const c = (size - 1) / 2;
@@ -199,7 +219,7 @@ function makeTrayIcon() {
   for (let y = 0; y < size; y++) {
     px.copy(raw, y * (stride + 1) + 1, y * stride, (y + 1) * stride);
   }
-  const chunk = (type, data) => {
+  const chunk = (type: string, data: Buffer) => {
     const len = Buffer.alloc(4);
     len.writeUInt32BE(data.length, 0);
     const typeBuf = Buffer.from(type, "ascii");
@@ -221,7 +241,7 @@ function makeTrayIcon() {
   return nativeImage.createFromBuffer(png);
 }
 
-async function httpEnabled() {
+async function httpEnabled(): Promise<boolean> {
   try {
     const res = await requestOverSocket({ method: "GET", path: "/api/config/daemon" });
     return Boolean(JSON.parse(res.body)?.transports?.http?.enabled);
@@ -230,7 +250,7 @@ async function httpEnabled() {
   }
 }
 
-async function toggleHttp() {
+async function toggleHttp(): Promise<void> {
   const enabled = await httpEnabled();
   try {
     await requestOverSocket({
@@ -245,7 +265,7 @@ async function toggleHttp() {
   await rebuildTrayMenu();
 }
 
-async function rebuildTrayMenu() {
+async function rebuildTrayMenu(): Promise<void> {
   if (!tray) {
     return;
   }
@@ -260,24 +280,21 @@ async function rebuildTrayMenu() {
         label: "Quit daemon",
         click: () => {
           quitting = true;
-          if (daemonProcess && !daemonProcess.killed) {
-            daemonProcess.kill();
-          }
-          app.quit();
+          void stopIntegratedDaemon().finally(() => app.quit());
         }
       }
     ])
   );
 }
 
-function createTray() {
+function createTray(): void {
   tray = new Tray(makeTrayIcon());
   tray.setToolTip("Orquester");
   tray.on("click", showWindow);
   void rebuildTrayMenu();
 }
 
-function createWindow() {
+function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1320,
     height: 860,
@@ -290,7 +307,7 @@ function createWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
-      preload: path.join(__dirname, "preload.cjs")
+      preload: path.join(desktopRoot, "src", "preload.cjs")
     }
   });
 
@@ -298,7 +315,7 @@ function createWindow() {
   mainWindow.on("close", (event) => {
     if (!quitting && runInBackground()) {
       event.preventDefault();
-      mainWindow.hide();
+      mainWindow?.hide();
     }
   });
   mainWindow.on("closed", () => {
@@ -309,13 +326,13 @@ function createWindow() {
   if (devUrl) {
     void mainWindow.loadURL(devUrl);
   } else {
-    void mainWindow.loadFile(path.join(__dirname, "../dist/index.html"));
+    void mainWindow.loadFile(path.join(desktopRoot, "dist", "index.html"));
   }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   ensureAppFiles();
-  startDaemon();
+  await startIntegratedDaemon();
   registerIpc();
   createTray();
   createWindow();
@@ -325,6 +342,9 @@ app.whenReady().then(() => {
       showWindow();
     }
   });
+}).catch((error) => {
+  console.error("Failed to start Orquester desktop", error);
+  app.quit();
 });
 
 app.on("window-all-closed", () => {
@@ -334,9 +354,10 @@ app.on("window-all-closed", () => {
   }
 });
 
-app.on("before-quit", () => {
+app.on("before-quit", (event) => {
   quitting = true;
-  if (daemonProcess && !daemonProcess.killed) {
-    daemonProcess.kill();
+  if (daemon) {
+    event.preventDefault();
+    void stopIntegratedDaemon().finally(() => app.quit());
   }
 });
