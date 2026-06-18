@@ -20,14 +20,24 @@ import { RegistryService } from "./registry";
 import { SessionError, SessionManager } from "./sessions";
 import { Broadcaster } from "./broadcaster";
 import {
+  type AppConfig,
   type ClientConfig,
+  type ConfigVars,
   type DaemonConfig,
   type DaemonPaths,
+  type RemoteConnectionConfig,
+  type RemotesConfig,
+  appConfigPath,
+  createDefaultAppConfig,
   createDefaultClientConfig,
   createDefaultDaemonConfig,
+  createDefaultRemotesConfig,
   dailyLogFile,
   expandVars,
+  parseAppConfig,
   parseDaemonConfig,
+  parseRemotesConfig,
+  remotesConfigPath,
   resolveDaemonPaths
 } from "@orquester/config";
 import Fastify, { type FastifyInstance } from "fastify";
@@ -44,8 +54,13 @@ const packageVersion = "0.0.0";
 /** Filesystem locations resolved (variables expanded) for this run. */
 interface ResolvedPaths {
   daemonDir: string;
+  configPath: string;
+  /** app.json + remotes.json live under <appdir>/app and are shared by clients. */
+  appConfigFile: string;
+  remotesFile: string;
   workspacesDir: string;
   logsDir: string;
+  vars: ConfigVars;
 }
 
 async function main(): Promise<void> {
@@ -65,8 +80,12 @@ async function main(): Promise<void> {
 
   const resolved: ResolvedPaths = {
     daemonDir: paths.daemonDir,
+    configPath: paths.configPath,
+    appConfigFile: appConfigPath(paths.baseDir),
+    remotesFile: remotesConfigPath(paths.baseDir),
     workspacesDir: expandVars(config.workspacesDir, paths.vars),
-    logsDir: expandVars(config.logsDir, paths.vars)
+    logsDir: expandVars(config.logsDir, paths.vars),
+    vars: paths.vars
   };
   await prepareDirs(resolved);
 
@@ -205,6 +224,58 @@ function createServer(
   app.get("/api/config/daemon", async (): Promise<DaemonConfig> => sanitizeDaemonConfig(config));
   app.get("/api/config/client", async (): Promise<ClientConfig> => clientConfig);
 
+  // Update daemon.json. Security boundary: only over the local unix socket —
+  // an external HTTP client can read but not change the daemon config.
+  app.put("/api/config/daemon", async (request, reply): Promise<DaemonConfig | void> => {
+    if (options.mode === "remote") {
+      return reply.code(403).send({
+        code: "FORBIDDEN",
+        message: "Daemon config can only be changed locally over the unix socket."
+      });
+    }
+
+    const body = (request.body ?? {}) as Partial<DaemonConfig>;
+    const httpPatch = (body.transports?.http ?? {}) as Partial<{
+      enabled: boolean;
+      host: string;
+      port: number;
+      password: string;
+    }>;
+    const nextPassword =
+      !httpPatch.password || httpPatch.password === "********"
+        ? config.transports.http.password
+        : httpPatch.password;
+
+    let merged: DaemonConfig;
+    try {
+      merged = parseDaemonConfig({
+        version: 1,
+        workspacesDir: body.workspacesDir ?? config.workspacesDir,
+        logsDir: body.logsDir ?? config.logsDir,
+        transports: { http: { ...config.transports.http, ...httpPatch, password: nextPassword } }
+      });
+    } catch {
+      return reply.code(400).send({ code: "INVALID_CONFIG", message: "Invalid daemon config." });
+    }
+
+    if (merged.transports.http.enabled && !merged.transports.http.password) {
+      return reply.code(400).send({
+        code: "PASSWORD_REQUIRED",
+        message: "Enabling external HTTP access requires a password (min 8 chars)."
+      });
+    }
+
+    await writeFile(resolved.configPath, `${JSON.stringify(merged, null, 2)}\n`, "utf8");
+
+    // Apply what we safely can in-process; transport changes need a restart.
+    Object.assign(config, merged);
+    resolved.workspacesDir = expandVars(merged.workspacesDir, resolved.vars);
+    resolved.logsDir = expandVars(merged.logsDir, resolved.vars);
+    await mkdir(resolved.workspacesDir, { recursive: true }).catch(() => undefined);
+
+    return sanitizeDaemonConfig(config);
+  });
+
   // Filesystem-backed workspaces & projects:
   //   (workspacesDir)/<workspace>           -> a workspace
   //   (workspacesDir)/<workspace>/<project> -> a project
@@ -248,6 +319,40 @@ function createServer(
       return { name, workspace, path };
     }
   );
+
+  // App config (app.json) + remote servers (remotes.json) live on the daemon so
+  // they're shared across every client connected to it. Editable on any transport.
+  app.get("/api/config/app", async (): Promise<AppConfig> => readAppConfigFile(resolved.appConfigFile));
+
+  app.put("/api/config/app", async (request, reply): Promise<AppConfig | void> => {
+    const current = await readAppConfigFile(resolved.appConfigFile);
+    try {
+      const merged = parseAppConfig({ ...current, ...((request.body as object) ?? {}) });
+      await writeJsonFile(resolved.appConfigFile, merged);
+      return merged;
+    } catch {
+      return reply.code(400).send({ code: "INVALID_CONFIG", message: "Invalid app config." });
+    }
+  });
+
+  app.get(
+    "/api/config/remotes",
+    async (): Promise<RemoteConnectionConfig[]> =>
+      (await readRemotesFile(resolved.remotesFile)).remotes
+  );
+
+  app.put("/api/config/remotes", async (request, reply): Promise<RemoteConnectionConfig[] | void> => {
+    try {
+      const parsed = parseRemotesConfig({
+        version: 1,
+        remotes: Array.isArray(request.body) ? request.body : []
+      });
+      await writeJsonFile(resolved.remotesFile, parsed);
+      return parsed.remotes;
+    } catch {
+      return reply.code(400).send({ code: "INVALID_CONFIG", message: "Invalid remotes config." });
+    }
+  });
 
   // File browser: list a directory.
   app.get<{ Querystring: { path?: string } }>(
@@ -496,6 +601,27 @@ async function listFiles(path: string): Promise<FsListResponse> {
 
   const parent = dirname(path);
   return { path, parent: parent === path ? null : parent, entries };
+}
+
+async function readAppConfigFile(file: string): Promise<AppConfig> {
+  try {
+    return parseAppConfig(JSON.parse(await readFile(file, "utf8")));
+  } catch {
+    return createDefaultAppConfig();
+  }
+}
+
+async function readRemotesFile(file: string): Promise<RemotesConfig> {
+  try {
+    return parseRemotesConfig(JSON.parse(await readFile(file, "utf8")));
+  } catch {
+    return createDefaultRemotesConfig();
+  }
+}
+
+async function writeJsonFile(file: string, value: unknown): Promise<void> {
+  await mkdir(dirname(file), { recursive: true });
+  await writeFile(file, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
 async function loadConfig(paths: DaemonPaths): Promise<DaemonConfig> {

@@ -1,9 +1,11 @@
 import React from "react";
+import { Settings } from "lucide-react";
 import { ProjectSwitcher } from "./ProjectSwitcher";
 import { TabStrip } from "./TabStrip";
 import { NewTabMenu } from "./NewTabMenu";
 import { OpenOnMenu } from "./OpenOnMenu";
 import { WindowControls } from "../layout/WindowControls";
+import { IconButton } from "../ui";
 import { useOrquester } from "../../context/orquester-context";
 import { useAppStore } from "../../store/app";
 
@@ -16,6 +18,7 @@ import { useAppStore } from "../../store/app";
 export const TopBar: React.FC = () => {
   const { useTitlebar } = useOrquester();
   const currentProject = useAppStore((s) => s.currentProject);
+  const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
 
   return (
     <header className="app-drag flex h-11 shrink-0 items-stretch border-b border-neutral-800 bg-neutral-900/60">
@@ -40,6 +43,12 @@ export const TopBar: React.FC = () => {
             <OpenOnMenu />
           </div>
         )}
+        <div className="app-no-drag">
+          <IconButton label="Settings" onClick={() => setSettingsOpen(true)}>
+            <Settings size={15} />
+          </IconButton>
+        </div>
+        {useTitlebar && <div className="mx-1 h-4 w-px self-center bg-neutral-800" />}
         {useTitlebar && <WindowControls />}
       </div>
     </header>

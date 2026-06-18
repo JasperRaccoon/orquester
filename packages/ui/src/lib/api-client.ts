@@ -15,6 +15,7 @@ import type {
   SessionSummary,
   WorkspaceSummary
 } from "@orquester/api";
+import type { AppConfig, DaemonConfig, RemoteConnectionConfig } from "@orquester/config";
 import type { UiConnection } from "../types";
 import type {
   StreamHandle,
@@ -97,6 +98,33 @@ export class ApiClient {
 
   info(signal?: AbortSignal): Promise<ServerInfoResponse> {
     return this.send("GET", "/api/info", { signal });
+  }
+
+  getDaemonConfig(signal?: AbortSignal): Promise<DaemonConfig> {
+    return this.send("GET", "/api/config/daemon", { signal });
+  }
+
+  /** Update daemon.json. Daemon rejects this (403) over the remote HTTP transport. */
+  updateDaemonConfig(patch: Partial<DaemonConfig>): Promise<DaemonConfig> {
+    return this.send("PUT", "/api/config/daemon", { body: patch });
+  }
+
+  // --- App config + remote servers (shared, daemon-persisted) --------------
+
+  getAppConfig(signal?: AbortSignal): Promise<AppConfig> {
+    return this.send("GET", "/api/config/app", { signal });
+  }
+
+  updateAppConfig(patch: Partial<AppConfig>): Promise<AppConfig> {
+    return this.send("PUT", "/api/config/app", { body: patch });
+  }
+
+  listRemotes(signal?: AbortSignal): Promise<RemoteConnectionConfig[]> {
+    return this.send("GET", "/api/config/remotes", { signal });
+  }
+
+  saveRemotes(remotes: RemoteConnectionConfig[]): Promise<RemoteConnectionConfig[]> {
+    return this.send("PUT", "/api/config/remotes", { body: remotes });
   }
 
   // Workspaces & projects (filesystem-backed)

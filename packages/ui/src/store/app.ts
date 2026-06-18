@@ -2,11 +2,8 @@ import { useMemo } from "react";
 import { create } from "zustand";
 import { ApiClient } from "../lib/api-client";
 import { createTransporter } from "../lib/transporters";
-import {
-  toRemoteConfig,
-  toUiConnection,
-  type ConnectionsAdapter
-} from "../lib/connections";
+import { toRemoteConfig, toUiConnection } from "../lib/connections";
+import type { AppConfigAdapter } from "../lib/app-config";
 import type { HttpClient } from "../lib/http-client";
 import type { Transporter } from "../lib/transporter";
 import { workspaceService } from "../services";
@@ -32,10 +29,35 @@ interface ConnectionSetup {
   localTransporter?: Transporter;
   /** Custom HTTP client for remote transporters (rarely needed). */
   httpClient?: HttpClient;
-  adapter?: ConnectionsAdapter;
+  /**
+   * App-config persistence. Web injects a localStorage adapter; desktop omits
+   * it, so app config is read/written on the daemon (app.json), while remotes
+   * always live on the daemon (shared).
+   */
+  appConfigAdapter?: AppConfigAdapter;
+  /** Fallback for useTitlebar when app config doesn't specify it. */
+  defaultUseTitlebar: boolean;
 }
 
 let setup: ConnectionSetup | null = null;
+
+/**
+ * The "home" daemon (the initial/local connection). App config and the remote
+ * server list are persisted here so every client of this daemon shares them,
+ * independent of which connection is currently active.
+ */
+let homeApi: ApiClient | null = null;
+
+export interface UiAppConfig {
+  useTitlebar: boolean;
+}
+
+/** Persist the remote-server list to the home daemon (shared across clients). */
+async function persistRemotes(connections: UiConnection[]): Promise<void> {
+  await homeApi
+    ?.saveRemotes(connections.filter((c) => c.kind === "remote").map(toRemoteConfig))
+    .catch(() => undefined);
+}
 
 /** Build the transporter for a connection: local uses the injected one. */
 function buildTransporter(connection: UiConnection): Transporter {
@@ -75,6 +97,10 @@ export interface AppState {
   connections: UiConnection[];
   activeConnectionId: string | null;
 
+  // app config + settings modal
+  appConfig: UiAppConfig;
+  settingsOpen: boolean;
+
   // navigation
   currentWorkspace: string | null;
   currentProject: ProjectSummary | null;
@@ -100,6 +126,12 @@ export interface AppState {
   selectConnection: (id: string) => Promise<void>;
   addRemote: (input: { name: string; baseUrl: string; password?: string }) => Promise<string>;
   removeRemote: (id: string) => Promise<void>;
+  loadRemotes: () => Promise<void>;
+
+  // app config + settings
+  loadAppConfig: () => Promise<void>;
+  setSettingsOpen: (open: boolean) => void;
+  updateAppConfig: (patch: Partial<UiAppConfig>) => Promise<void>;
 
   loadWorkspaces: () => Promise<void>;
   createWorkspace: (name: string) => Promise<void>;
@@ -124,6 +156,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   connectionStatus: "connecting",
   connections: [],
   activeConnectionId: null,
+  appConfig: { useTitlebar: false },
+  settingsOpen: false,
   currentWorkspace: null,
   currentProject: null,
   workspaces: [],
@@ -171,14 +205,55 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   initConnections: async (nextSetup) => {
     setup = nextSetup;
-    const remotes = (await nextSetup.adapter?.load().catch(() => []))?.map(toUiConnection) ?? [];
-    const connections = [nextSetup.localConnection, ...remotes];
+    homeApi = new ApiClient(nextSetup.localConnection, buildTransporter(nextSetup.localConnection));
     set({
-      connections,
+      connections: [nextSetup.localConnection],
       activeConnectionId: nextSetup.localConnection.id,
-      api: new ApiClient(nextSetup.localConnection, buildTransporter(nextSetup.localConnection))
+      appConfig: { useTitlebar: nextSetup.defaultUseTitlebar },
+      api: homeApi
     });
     await get().connect();
+    // App config + remote servers are shared (persisted on the home daemon).
+    await Promise.all([get().loadAppConfig(), get().loadRemotes()]);
+  },
+
+  loadAppConfig: async () => {
+    try {
+      const adapter = setup?.appConfigAdapter;
+      const config = adapter ? await adapter.load() : await homeApi?.getAppConfig();
+      if (config && typeof config.useTitlebar === "boolean") {
+        set({ appConfig: { useTitlebar: config.useTitlebar } });
+      }
+    } catch {
+      /* keep defaults */
+    }
+  },
+
+  loadRemotes: async () => {
+    if (!homeApi || !setup) {
+      return;
+    }
+    try {
+      const remotes = (await homeApi.listRemotes()).map(toUiConnection);
+      set({ connections: [setup.localConnection, ...remotes] });
+    } catch {
+      /* keep local only */
+    }
+  },
+
+  setSettingsOpen: (open) => set({ settingsOpen: open }),
+
+  updateAppConfig: async (patch) => {
+    const appConfig = { ...get().appConfig, ...patch };
+    set({ appConfig });
+    const adapter = setup?.appConfigAdapter;
+    const full = {
+      version: 1 as const,
+      activeConnectionId: get().activeConnectionId ?? "local",
+      ...appConfig
+    };
+    const result = adapter ? adapter.save(full) : homeApi?.updateAppConfig(appConfig);
+    await result?.catch(() => undefined);
   },
 
   selectConnection: async (id) => {
@@ -212,18 +287,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     };
     const connections = [...get().connections, connection];
     set({ connections });
-    await setup?.adapter
-      ?.save(connections.filter((c) => c.kind === "remote").map(toRemoteConfig))
-      .catch(() => undefined);
+    await persistRemotes(connections);
     return connection.id;
   },
 
   removeRemote: async (id) => {
     const connections = get().connections.filter((c) => c.id !== id);
     set({ connections });
-    await setup?.adapter
-      ?.save(connections.filter((c) => c.kind === "remote").map(toRemoteConfig))
-      .catch(() => undefined);
+    await persistRemotes(connections);
     if (get().activeConnectionId === id && setup) {
       await get().selectConnection(setup.localConnection.id);
     }

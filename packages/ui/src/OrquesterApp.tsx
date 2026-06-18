@@ -3,7 +3,7 @@ import { AppWrapper, AppShell } from "./components/layout";
 import { OrquesterProvider, type WindowControls } from "./context/orquester-context";
 import { ApiClient } from "./lib/api-client";
 import { createTransporter } from "./lib/transporters";
-import type { ConnectionsAdapter } from "./lib/connections";
+import type { AppConfigAdapter } from "./lib/app-config";
 import { useAppStore } from "./store/app";
 import type { HttpClient } from "./lib/http-client";
 import type { Transporter } from "./lib/transporter";
@@ -23,8 +23,11 @@ export interface OrquesterAppProps {
   httpClient?: HttpClient;
   /** Native window controls bridge (desktop only). */
   windowControls?: WindowControls;
-  /** Persistence for user-added remote servers (desktop IPC / web localStorage). */
-  connectionsAdapter?: ConnectionsAdapter;
+  /**
+   * App-config persistence. Web passes a localStorage adapter; desktop omits it
+   * so app config lives on the daemon (app.json). Remotes always live on the daemon.
+   */
+  appConfigAdapter?: AppConfigAdapter;
 }
 
 export const OrquesterApp: React.FC<OrquesterAppProps> = ({
@@ -34,7 +37,7 @@ export const OrquesterApp: React.FC<OrquesterAppProps> = ({
   transporter,
   httpClient,
   windowControls,
-  connectionsAdapter
+  appConfigAdapter
 }) => {
   // A boot ApiClient so context always has one before the store initializes.
   const [bootApi] = useState(
@@ -47,15 +50,18 @@ export const OrquesterApp: React.FC<OrquesterAppProps> = ({
   const storeApi = useAppStore((s) => s.api);
   const api = storeApi ?? bootApi;
 
-  const titlebar = useTitlebar ?? runtime === "desktop";
+  const defaultTitlebar = useTitlebar ?? runtime === "desktop";
+  // Live value from app config (settings can toggle it).
+  const titlebar = useAppStore((s) => s.appConfig.useTitlebar);
 
-  // Set up connections (local + persisted remotes), then connect.
+  // Set up connections, then connect (app config + remotes load from the daemon).
   useEffect(() => {
     void useAppStore.getState().initConnections({
       localConnection: initialConnection,
       localTransporter: transporter,
       httpClient,
-      adapter: connectionsAdapter
+      appConfigAdapter,
+      defaultUseTitlebar: defaultTitlebar
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

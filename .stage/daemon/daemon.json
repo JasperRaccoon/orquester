@@ -4,9 +4,10 @@
   "logsDir": "$appdir/daemon/logs",
   "transports": {
     "http": {
-      "enabled": false,
+      "enabled": true,
       "host": "127.0.0.1",
-      "port": 47831
+      "port": 47831,
+      "password": "123123321"
     }
   }
 }

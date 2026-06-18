@@ -36,13 +36,12 @@ export {
   type HttpTransporterOptions,
   type CreateTransporterOptions
 } from "./lib/transporters";
+export { toUiConnection, toRemoteConfig } from "./lib/connections";
 export {
-  createLocalStorageConnectionsAdapter,
-  toUiConnection,
-  toRemoteConfig,
-  type ConnectionsAdapter
-} from "./lib/connections";
-export type { RemoteConnectionConfig } from "@orquester/config";
+  createLocalStorageAppConfigAdapter,
+  type AppConfigAdapter
+} from "./lib/app-config";
+export type { RemoteConnectionConfig, AppConfig, DaemonConfig } from "@orquester/config";
 
 // State & data
 export {
@@ -65,6 +64,7 @@ export * from "./components/main";
 export * from "./components/terminal";
 export * from "./components/servers";
 export * from "./components/files";
+export * from "./components/settings";
 
 // Icons
 export { getRegistryIcon, RegistryIcon } from "./icons";

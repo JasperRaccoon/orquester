@@ -10,3 +10,5 @@ export {
   type DropdownProps,
   type DropdownItemProps
 } from "./dropdown";
+export { Modal, ModalCloseButton, type ModalProps } from "./modal";
+export { Switch, type SwitchProps } from "./switch";
