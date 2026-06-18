@@ -100,6 +100,7 @@ export interface AppState {
   // app config + settings modal
   appConfig: UiAppConfig;
   settingsOpen: boolean;
+  sidebarCollapsed: boolean;
 
   // navigation
   currentWorkspace: string | null;
@@ -131,6 +132,7 @@ export interface AppState {
   // app config + settings
   loadAppConfig: () => Promise<void>;
   setSettingsOpen: (open: boolean) => void;
+  toggleSidebar: () => void;
   updateAppConfig: (patch: Partial<UiAppConfig>) => Promise<void>;
 
   loadWorkspaces: () => Promise<void>;
@@ -158,6 +160,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   activeConnectionId: null,
   appConfig: { useTitlebar: false },
   settingsOpen: false,
+  sidebarCollapsed: false,
   currentWorkspace: null,
   currentProject: null,
   workspaces: [],
@@ -242,6 +245,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   setSettingsOpen: (open) => set({ settingsOpen: open }),
+
+  toggleSidebar: () => set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
 
   updateAppConfig: async (patch) => {
     const appConfig = { ...get().appConfig, ...patch };

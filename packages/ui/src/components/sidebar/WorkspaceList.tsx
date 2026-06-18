@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Folder, FolderPlus } from "lucide-react";
+import { Folder, FolderPlus, PanelLeftClose } from "lucide-react";
 import { IconButton } from "../ui";
 import { NewItemInput } from "./NewItemInput";
 import { useAppStore } from "../../store/app";
@@ -10,12 +10,16 @@ export const WorkspaceList: React.FC = () => {
   const loading = useAppStore((s) => s.workspacesLoading);
   const openWorkspace = useAppStore((s) => s.openWorkspace);
   const createWorkspace = useAppStore((s) => s.createWorkspace);
+  const toggleSidebar = useAppStore((s) => s.toggleSidebar);
   const [creating, setCreating] = useState(false);
 
   return (
     <>
-      <div className="flex h-9 items-center justify-between px-3">
-        <span className="text-[10px] font-medium uppercase tracking-wider text-neutral-500">
+      <div className="flex h-9 items-center gap-1 px-2">
+        <IconButton label="Collapse sidebar" onClick={toggleSidebar}>
+          <PanelLeftClose size={15} />
+        </IconButton>
+        <span className="flex-1 text-[10px] font-medium uppercase tracking-wider text-neutral-500">
           Workspaces
         </span>
         <IconButton label="New workspace" onClick={() => setCreating(true)}>

@@ -3,8 +3,11 @@ import type {
   CreateSessionRequest,
   CreateWorkspaceRequest,
   EventMessage,
+  FsCreateRequest,
   FsEntry,
   FsListResponse,
+  FsReadResponse,
+  FsWriteRequest,
   HealthResponse,
   OpenRequest,
   OpenResult,
@@ -372,6 +375,71 @@ function createServer(
       }
     }
   );
+
+  // Read a file's text content (capped at 1 MB).
+  app.get<{ Querystring: { path?: string } }>(
+    "/api/fs/read",
+    async (request, reply): Promise<FsReadResponse | void> => {
+      const path = request.query.path;
+      if (!path) {
+        return reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
+      }
+      try {
+        const buffer = await readFile(path);
+        const cap = 1024 * 1024;
+        return {
+          path,
+          content: buffer.subarray(0, cap).toString("utf8"),
+          size: buffer.length,
+          truncated: buffer.length > cap
+        };
+      } catch (error) {
+        return reply.code(400).send({
+          code: "FS_ERROR",
+          message: error instanceof Error ? error.message : "Cannot read file."
+        });
+      }
+    }
+  );
+
+  // Write (save) a file's text content.
+  app.put("/api/fs/write", async (request, reply): Promise<{ ok: true } | void> => {
+    const body = (request.body ?? {}) as Partial<FsWriteRequest>;
+    if (!body.path || typeof body.content !== "string") {
+      return reply.code(400).send({ code: "INVALID_REQUEST", message: "path and content required." });
+    }
+    try {
+      await writeFile(body.path, body.content, "utf8");
+      return { ok: true };
+    } catch (error) {
+      return reply.code(400).send({
+        code: "FS_ERROR",
+        message: error instanceof Error ? error.message : "Cannot write file."
+      });
+    }
+  });
+
+  // Create a file or directory.
+  app.post("/api/fs/create", async (request, reply): Promise<{ ok: true } | void> => {
+    const body = (request.body ?? {}) as Partial<FsCreateRequest>;
+    if (!body.path || (body.kind !== "file" && body.kind !== "dir")) {
+      return reply.code(400).send({ code: "INVALID_REQUEST", message: "path and kind required." });
+    }
+    try {
+      if (body.kind === "dir") {
+        await mkdir(body.path, { recursive: true });
+      } else {
+        await mkdir(dirname(body.path), { recursive: true });
+        await writeFile(body.path, "", { flag: "wx" });
+      }
+      return { ok: true };
+    } catch (error) {
+      return reply.code(400).send({
+        code: "FS_ERROR",
+        message: error instanceof Error ? error.message : "Cannot create entry."
+      });
+    }
+  });
 
   // Registry (shells & agents)
   app.get("/api/registry", async (): Promise<RegistryResponse> => registry.list());

@@ -74,6 +74,24 @@ export interface FsListResponse {
   entries: FsEntry[];
 }
 
+export interface FsReadResponse {
+  path: string;
+  content: string;
+  size: number;
+  /** True when the file was larger than the read cap and content is partial. */
+  truncated: boolean;
+}
+
+export interface FsCreateRequest {
+  path: string;
+  kind: "file" | "dir";
+}
+
+export interface FsWriteRequest {
+  path: string;
+  content: string;
+}
+
 /** A pluggable coding agent the daemon detected on the host. */
 export interface AgentSummary {
   id: string;

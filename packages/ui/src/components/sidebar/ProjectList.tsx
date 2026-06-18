@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Box, ChevronLeft, FolderPlus, Plus } from "lucide-react";
+import { Box, ChevronLeft, FolderPlus, PanelLeftClose, Plus } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { Dropdown, DropdownItem, IconButton } from "../ui";
 import { NewItemInput } from "./NewItemInput";
@@ -14,11 +14,15 @@ export const ProjectList: React.FC = () => {
   const closeWorkspace = useAppStore((s) => s.closeWorkspace);
   const openProject = useAppStore((s) => s.openProject);
   const createProject = useAppStore((s) => s.createProject);
+  const toggleSidebar = useAppStore((s) => s.toggleSidebar);
   const [creating, setCreating] = useState<null | "project" | "folder">(null);
 
   return (
     <>
-      <div className="flex h-9 items-center gap-1 px-2">
+      <div className="flex h-9 items-center gap-0.5 px-2">
+        <IconButton label="Collapse sidebar" onClick={toggleSidebar}>
+          <PanelLeftClose size={15} />
+        </IconButton>
         <IconButton label="Back to workspaces" onClick={closeWorkspace}>
           <ChevronLeft size={16} />
         </IconButton>

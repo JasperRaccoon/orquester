@@ -5,6 +5,7 @@ import type {
   CreateWorkspaceRequest,
   EventMessage,
   FsListResponse,
+  FsReadResponse,
   HealthResponse,
   OpenResult,
   OpenTargetSummary,
@@ -145,6 +146,18 @@ export class ApiClient {
 
   listFiles(path: string, signal?: AbortSignal): Promise<FsListResponse> {
     return this.send("GET", "/api/fs", { query: { path }, signal });
+  }
+
+  readFile(path: string, signal?: AbortSignal): Promise<FsReadResponse> {
+    return this.send("GET", "/api/fs/read", { query: { path }, signal });
+  }
+
+  createFsEntry(path: string, kind: "file" | "dir"): Promise<{ ok: true }> {
+    return this.send("POST", "/api/fs/create", { body: { path, kind } });
+  }
+
+  saveFile(path: string, content: string): Promise<{ ok: true }> {
+    return this.send("PUT", "/api/fs/write", { body: { path, content } });
   }
 
   createProject(
