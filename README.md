@@ -22,3 +22,5 @@ pnpm check
 ```
 
 Runtime data defaults to `~/.orquester`.
+
+> Note: Stage password is 123456.

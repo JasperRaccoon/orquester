@@ -7,7 +7,7 @@
       "enabled": true,
       "host": "127.0.0.1",
       "port": 47831,
-      "password": "123123321"
+      "passwordHash": "$2b$10$d/t5uzBqvZnjBASDICtJue4H2cMlRPyFtvivvMcMhuHgfoFKxoINe"
     }
   }
 }

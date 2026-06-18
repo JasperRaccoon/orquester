@@ -27,10 +27,17 @@ export interface HttpClient {
 
 /** HttpClient backed by the platform `fetch`. Used by the web runtime. */
 export class FetchHttpClient implements HttpClient {
-  constructor(private readonly fetchImpl: typeof fetch = fetch) {}
+  private readonly fetchImpl: typeof fetch;
+
+  // Bind to the global so `fetch` keeps its required `this` (a method call like
+  // `this.fetchImpl(...)` otherwise throws "Illegal invocation" in browsers).
+  constructor(fetchImpl?: typeof fetch) {
+    this.fetchImpl = fetchImpl ?? globalThis.fetch.bind(globalThis);
+  }
 
   async send(req: HttpClientRequest): Promise<HttpClientResponse> {
-    const response = await this.fetchImpl(req.url, {
+    const doFetch = this.fetchImpl;
+    const response = await doFetch(req.url, {
       method: req.method,
       headers: req.headers,
       body: req.body,
