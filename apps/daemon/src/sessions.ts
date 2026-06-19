@@ -7,7 +7,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { spawn, type IPty } from "node-pty";
 import type { RegistryService } from "./registry";
-import { Tmux, tmuxAvailable, tmuxName } from "./tmux";
+import { Tmux, tmuxAvailable, tmuxName, tmuxVersionOk } from "./tmux";
 
 /**
  * Small live ring kept only for HOT replay between a session's creation and the
@@ -59,25 +59,30 @@ export interface ISessionManager {
 }
 
 /**
- * Pick the session backend for this host: the tmux-backed manager when a `tmux`
- * binary is on PATH (the VPS, plus any Linux/macOS dev box with tmux), else the
- * direct node-pty backend. This is what keeps the desktop built-in daemon
- * working on Windows and on a stock macOS without Homebrew tmux — there every
- * tmux invocation would ENOENT, so we never construct the tmux backend at all.
- * Persistence/reattach (Phase 2's goal) only apply to the tmux backend; the
- * local fallback restores the prior, non-persistent direct-PTY behavior.
+ * Pick the session backend for this host: the tmux-backed manager only when a
+ * `tmux` binary is on PATH AND it is >= 3.2 (the VPS, plus any Linux/macOS dev
+ * box with a recent tmux), else the direct node-pty backend. This is what keeps
+ * the desktop built-in daemon working on Windows and on a stock macOS without
+ * Homebrew tmux — there every tmux invocation would ENOENT, so we never construct
+ * the tmux backend at all. The version gate matters too: the tmux backend needs
+ * `new-session -e KEY=VAL` and `window-size latest` (both 3.2+), so on an older
+ * tmux (some Ubuntu LTS / Homebrew boxes ship 3.0/3.1) we must ALSO fall back —
+ * otherwise every create would fail on the unknown `-e` flag and all terminals
+ * would be unusable. Persistence/reattach (Phase 2's goal) only apply to the tmux
+ * backend; the local fallback restores the prior, non-persistent direct-PTY
+ * behavior.
  */
 export function createSessionManager(
   registry: RegistryService,
   tmux: Tmux,
   indexPath: string
 ): ISessionManager {
-  if (tmuxAvailable()) {
+  if (tmuxAvailable() && tmuxVersionOk()) {
     console.log("sessions: tmux-backed backend (sessions persist across daemon restarts)");
     return new SessionManager(registry, tmux, indexPath);
   }
   console.log(
-    "sessions: tmux not found on PATH — using direct node-pty backend " +
+    "sessions: usable tmux (>= 3.2) not found on PATH — using direct node-pty backend " +
       "(sessions do NOT survive a daemon restart; install tmux >= 3.2 to enable persistence)"
   );
   return new LocalSessionManager(registry);
@@ -168,6 +173,14 @@ export class SessionManager implements ISessionManager {
         this.attach(session);
       })
       .catch((error) => {
+        // Same close()/closeAll() race as the .then branch: if that window
+        // removed (or replaced) this session, it is already gone from
+        // this.sessions and the UI emitted "closed". Bail before emitting a
+        // trailing "exited" — otherwise upsertSession would resurrect a ghost
+        // tab. (A failed new-session usually left no tmux session to kill.)
+        if (this.sessions.get(id) !== session) {
+          return;
+        }
         // Failed to launch under tmux: surface as an immediate exit so the tab
         // resolves the same way a crashed PTY would.
         session.summary.status = "exited";

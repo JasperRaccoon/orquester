@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { accessSync, constants } from "node:fs";
 import { delimiter, isAbsolute, join } from "node:path";
 
@@ -37,6 +37,38 @@ export function tmuxAvailable(): boolean {
     }
   }
   return false;
+}
+
+/** Minimum tmux version the tmux backend needs (see comment below). */
+const MIN_TMUX_MAJOR = 3;
+const MIN_TMUX_MINOR = 2;
+
+/**
+ * True if `tmux -V` reports >= 3.2 — the floor the tmux backend requires:
+ * `new-session -e KEY=VAL` and `set-option -g window-size latest` are both 3.2+
+ * features (Phase 2 plan, Global Constraints). On an older tmux (e.g. the 3.0/3.1
+ * on some Ubuntu LTS / Homebrew boxes) `tmuxAvailable()` still returns true, but
+ * every create would fail on the unknown `-e` flag; createSessionManager pairs
+ * this check with the binary check so such hosts fall back to LocalSessionManager
+ * instead of producing unusable terminals. Sync (execFileSync) to keep the
+ * startup backend selection synchronous; never throws (a missing/odd binary or
+ * unparseable `-V` is treated as "not OK" → fall back). Versions like `3.2a` are
+ * handled by parsing only the leading numeric part of the minor component.
+ */
+export function tmuxVersionOk(): boolean {
+  try {
+    const out = execFileSync("tmux", ["-V"], { encoding: "utf8" });
+    // `tmux -V` prints e.g. "tmux 3.4", "tmux 3.2a", "tmux next-3.4".
+    const match = /(\d+)\.(\d+)/.exec(out);
+    if (!match) {
+      return false;
+    }
+    const major = Number(match[1]);
+    const minor = Number(match[2]);
+    return major > MIN_TMUX_MAJOR || (major === MIN_TMUX_MAJOR && minor >= MIN_TMUX_MINOR);
+  } catch {
+    return false;
+  }
 }
 
 interface ExecResult {
