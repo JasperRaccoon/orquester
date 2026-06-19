@@ -232,8 +232,20 @@ function createServer(
   const corsHeaders: Record<string, string> = cors ? { "access-control-allow-origin": "*" } : {};
 
   const app = Fastify({
-    logger: { level: "info", stream: logStream }
+    logger: {
+      level: "info",
+      stream: logStream,
+      serializers: {
+        // Strip the WS `?token=` from request logs (TLS protects it on the wire,
+        // but it must never land in plaintext logs). Other query params are kept.
+        req(request: { method: string; url: string }) {
+          return { method: request.method, url: request.url.replace(/([?&]token=)[^&]*/i, "$1[redacted]") };
+        }
+      }
+    }
   });
+
+  const throttle = new LoginThrottle();
 
   app.addHook("onRequest", async (request, reply) => {
     // The multiplexed session WebSocket authenticates itself via a query token
@@ -262,17 +274,29 @@ function createServer(
       return;
     }
 
+    const ip = clientIp(request);
+    const retryAfterMs = throttle.retryAfterMs(ip);
+    if (retryAfterMs > 0) {
+      reply.header("retry-after", String(Math.ceil(retryAfterMs / 1000)));
+      return reply.code(429).send({
+        code: "TOO_MANY_ATTEMPTS",
+        message: "Too many failed login attempts. Try again later."
+      });
+    }
+
     const authorized = authorizeCredential(
       request.headers.authorization?.replace(/^Bearer\s+/i, ""),
       config.transports.http.username,
       config.transports.http.passwordHash
     );
     if (!authorized) {
+      throttle.recordFailure(ip);
       return reply.code(401).send({
         code: "UNAUTHORIZED",
         message: "A valid bearer token is required for this daemon transport."
       });
     }
+    throttle.recordSuccess(ip);
   });
 
   // Public: tells the web client whether auth is needed and the bcrypt salt to
@@ -1060,4 +1084,58 @@ function sanitizeDaemonConfig(config: DaemonConfig): DaemonConfig {
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
+}
+
+/**
+ * Per-IP failed-login throttle with escalating lockout. Single-user, so real
+ * failures are rare: 5 fails within the window → locked out, with the lockout
+ * doubling on each subsequent breach (15 min, 30, 60 … capped). Keyed on the
+ * proxy-supplied client IP (X-Forwarded-For); this is defense-in-depth on top
+ * of fail2ban (OS-layer ban on the daemon's 401 log lines, Phase 0).
+ */
+class LoginThrottle {
+  private readonly state = new Map<string, { fails: number; lockedUntil: number; strikes: number }>();
+  private static readonly MAX_FAILS = 5;
+  private static readonly BASE_LOCKOUT_MS = 15 * 60 * 1000;
+  private static readonly MAX_LOCKOUT_MS = 24 * 60 * 60 * 1000;
+
+  /** Ms remaining on an active lockout for this IP, or 0 if not locked. */
+  retryAfterMs(ip: string): number {
+    const entry = this.state.get(ip);
+    if (!entry || entry.lockedUntil <= Date.now()) {
+      return 0;
+    }
+    return entry.lockedUntil - Date.now();
+  }
+
+  /** Record a failed attempt; locks the IP once MAX_FAILS is reached. */
+  recordFailure(ip: string): void {
+    const entry = this.state.get(ip) ?? { fails: 0, lockedUntil: 0, strikes: 0 };
+    entry.fails += 1;
+    if (entry.fails >= LoginThrottle.MAX_FAILS) {
+      const lockout = Math.min(
+        LoginThrottle.BASE_LOCKOUT_MS * 2 ** entry.strikes,
+        LoginThrottle.MAX_LOCKOUT_MS
+      );
+      entry.lockedUntil = Date.now() + lockout;
+      entry.strikes += 1;
+      entry.fails = 0;
+    }
+    this.state.set(ip, entry);
+  }
+
+  /** Clear an IP's failure count after a successful auth. */
+  recordSuccess(ip: string): void {
+    this.state.delete(ip);
+  }
+}
+
+/** Client IP from Caddy's X-Forwarded-For (first hop), falling back to the socket. */
+function clientIp(request: { headers: Record<string, unknown>; ip: string }): string {
+  const xff = request.headers["x-forwarded-for"];
+  const raw = Array.isArray(xff) ? xff[0] : xff;
+  if (typeof raw === "string" && raw.length > 0) {
+    return raw.split(",")[0]!.trim();
+  }
+  return request.ip;
 }
