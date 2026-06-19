@@ -73,7 +73,13 @@ function ensureAppFiles(): void {
   }
   const remotesPath = path.join(dir, "remotes.json");
   if (!fs.existsSync(remotesPath)) {
-    fs.writeFileSync(remotesPath, `${JSON.stringify({ version: 1, remotes: [] }, null, 2)}\n`);
+    // Seed the VPS as a selectable remote (kept alongside the bundled local
+    // daemon). The URL is build/env-provided so we never bake a placeholder in.
+    const remoteUrl = process.env.ORQUESTER_REMOTE_URL;
+    const remotes = remoteUrl
+      ? [{ id: "vps", name: "Orquester VPS", kind: "remote", baseUrl: remoteUrl }]
+      : [];
+    fs.writeFileSync(remotesPath, `${JSON.stringify({ version: 1, remotes }, null, 2)}\n`);
   }
   fs.appendFileSync(dailyLogFile(logsDir), `${new Date().toISOString()} app: started\n`);
 }
