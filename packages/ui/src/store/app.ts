@@ -207,7 +207,7 @@ export interface AppState {
   // connection management
   initConnections: (setup: ConnectionSetup) => Promise<void>;
   selectConnection: (id: string) => Promise<void>;
-  addRemote: (input: { name: string; baseUrl: string; password?: string }) => Promise<string>;
+  addRemote: (input: { name: string; baseUrl: string }) => Promise<string>;
   removeRemote: (id: string) => Promise<void>;
   loadRemotes: () => Promise<void>;
 
@@ -504,13 +504,17 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   addRemote: async (input) => {
+    // No credential is captured at add-time: `connection.password` is the wire
+    // bearer base64("<username>:<hash>"), and the raw password must never leave
+    // the client (nor be persisted to remotes.json). The AuthModal derives the
+    // hash and builds the credential on first connect, exactly like the
+    // seeded-VPS remote (apps/desktop/src/main.ts).
     const connection: UiConnection = {
       id: crypto.randomUUID(),
       name: input.name.trim() || input.baseUrl,
       kind: "remote",
       endpoint: input.baseUrl.trim().replace(/\/$/, ""),
-      status: "disconnected",
-      password: input.password?.trim() || undefined
+      status: "disconnected"
     };
     const connections = [...get().connections, connection];
     set({ connections });
