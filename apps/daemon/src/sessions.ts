@@ -1,9 +1,9 @@
 import type { CreateSessionRequest, SessionSummary } from "@orquester/api";
-import { type SessionRecord, createDefaultSessionsConfig, parseSessionsConfig } from "@orquester/config";
+import { type SessionRecord, type SessionsConfig, createDefaultSessionsConfig, parseSessionsConfig } from "@orquester/config";
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { spawn, type IPty } from "node-pty";
 import type { RegistryService } from "./registry";
@@ -187,6 +187,14 @@ export class SessionManager implements ISessionManager {
       session.emitter.emit("output", data);
     });
     pty.onExit(({ exitCode }) => {
+      // If close()/closeAll() already removed (or replaced) this session, the PTY
+      // death is the side effect of our own kill — not a real command exit. Bail
+      // so we don't emit a trailing "exited" AFTER "closed" (which would
+      // resurrect a ghost tab in the UI via upsertSession).
+      if (this.sessions.get(id) !== session) {
+        session.pty = null;
+        return;
+      }
       // The attach PTY exits when the tmux SESSION ends (command exited, default
       // remain-on-exit off) OR when the daemon dies and the master hangs up. We
       // disambiguate via tmux: if the session is still alive the daemon is just
@@ -354,10 +362,15 @@ export class SessionManager implements ISessionManager {
    *   - in index AND alive   → re-create the attach PTY (resume the tab)
    *   - in index NOT alive    → drop (its command exited while we were down)
    *   - alive NOT in index    → reap the orphan (default cleanup policy)
+   *
+   * If the index could not be read (corrupt/unreadable, not merely absent) we
+   * have no trustworthy "known" set, so we SKIP the orphan-reap pass entirely —
+   * a single bad sessions.json must never destroy every persisted session, which
+   * is the exact failure this phase exists to prevent.
    */
   async reattach(): Promise<void> {
     const live = new Set(await this.tmux.listSessions());
-    const index = await this.readIndex();
+    const { loaded: indexLoaded, config: index } = await this.readIndex();
     await this.tmux.setWindowSizeLatest();
 
     const known = new Set<string>();
@@ -384,10 +397,14 @@ export class SessionManager implements ISessionManager {
       this.attach(session);
     }
 
-    // Reap orphan tmux sessions (alive but unknown to the index).
-    for (const id of live) {
-      if (!known.has(id)) {
-        void this.tmux.killSession(id);
+    // Reap orphan tmux sessions (alive but unknown to the index) — but only when
+    // the index was read successfully. With an unreadable index every live
+    // session looks "unknown", so reaping would wipe them all; stay hands-off.
+    if (indexLoaded) {
+      for (const id of live) {
+        if (!known.has(id)) {
+          void this.tmux.killSession(id);
+        }
       }
     }
 
@@ -400,23 +417,50 @@ export class SessionManager implements ISessionManager {
     return { id, title, order, projectPath, refId, kind, cwd, createdAt };
   }
 
-  /** Read-with-fallback (mirrors readRemotesFile in index.ts). */
-  private async readIndex() {
+  /**
+   * Read the reattach index, distinguishing "file is absent/empty" (clean — the
+   * daemon has never persisted, treat as no known sessions) from "file exists
+   * but is unreadable/corrupt" (UNRELIABLE — we must not trust an empty result,
+   * or reattach() would reap every surviving session as an orphan). Returns
+   * `loaded: false` on the latter so the caller can stay conservative.
+   */
+  private async readIndex(): Promise<{ loaded: boolean; config: SessionsConfig }> {
+    let raw: string;
     try {
-      return parseSessionsConfig(JSON.parse(await readFile(this.indexPath, "utf8")));
-    } catch {
-      return createDefaultSessionsConfig();
+      raw = await readFile(this.indexPath, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        // No index yet (first run / cleared) — genuinely no known sessions.
+        return { loaded: true, config: createDefaultSessionsConfig() };
+      }
+      // Exists but unreadable (permissions, I/O error): do NOT assume empty.
+      console.error("Failed to read sessions index; skipping orphan reap", error);
+      return { loaded: false, config: createDefaultSessionsConfig() };
+    }
+    try {
+      return { loaded: true, config: parseSessionsConfig(JSON.parse(raw)) };
+    } catch (error) {
+      // Corrupt/partial JSON (e.g. an interrupted write): same caution as above.
+      console.error("Failed to parse sessions index; skipping orphan reap", error);
+      return { loaded: false, config: createDefaultSessionsConfig() };
     }
   }
 
-  /** Best-effort persist of running sessions; never throws (logs and moves on). */
+  /**
+   * Best-effort persist of running sessions; never throws (logs and moves on).
+   * Writes atomically (tmp file + rename) so an interrupted or concurrent write
+   * can never leave a half-written/corrupt sessions.json — readIndex() would
+   * otherwise see truncated JSON and reattach() would refuse to reap orphans.
+   */
   private async persistIndex(): Promise<void> {
     const sessions = [...this.sessions.values()]
       .filter((s) => s.summary.status === "running")
       .map((s) => this.recordOf(s));
+    const tmpPath = `${this.indexPath}.tmp`;
     try {
       await mkdir(dirname(this.indexPath), { recursive: true });
-      await writeFile(this.indexPath, `${JSON.stringify({ version: 1, sessions }, null, 2)}\n`, "utf8");
+      await writeFile(tmpPath, `${JSON.stringify({ version: 1, sessions }, null, 2)}\n`, "utf8");
+      await rename(tmpPath, this.indexPath);
     } catch (error) {
       console.error("Failed to persist sessions index", error);
     }
