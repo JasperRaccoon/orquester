@@ -49,7 +49,7 @@ import fastifyStatic from "@fastify/static";
 import websocketPlugin from "@fastify/websocket";
 import Fastify, { type FastifyInstance } from "fastify";
 import { createWriteStream, existsSync, type WriteStream } from "node:fs";
-import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir, platform as osPlatform } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { stat } from "node:fs/promises";
@@ -67,6 +67,8 @@ interface ResolvedPaths {
   appConfigFile: string;
   remotesFile: string;
   workspacesDir: string;
+  /** Sandbox root for the /api/fs browser API (default = workspacesDir). */
+  fsRoot: string;
   logsDir: string;
   vars: ConfigVars;
 }
@@ -109,6 +111,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     appConfigFile: appConfigPath(paths.baseDir),
     remotesFile: remotesConfigPath(paths.baseDir),
     workspacesDir: expandVars(config.workspacesDir, paths.vars),
+    fsRoot: config.transports.http.fsRoot
+      ? expandVars(config.transports.http.fsRoot, paths.vars)
+      : expandVars(config.workspacesDir, paths.vars),
     logsDir: expandVars(config.logsDir, paths.vars),
     vars: paths.vars
   };
@@ -407,6 +412,9 @@ function createServer(
     // take effect immediately. Sessions (PTYs) and the unix transport are untouched.
     Object.assign(config, merged);
     resolved.workspacesDir = expandVars(merged.workspacesDir, resolved.vars);
+    resolved.fsRoot = merged.transports.http.fsRoot
+      ? expandVars(merged.transports.http.fsRoot, resolved.vars)
+      : resolved.workspacesDir;
     resolved.logsDir = expandVars(merged.logsDir, resolved.vars);
     await mkdir(resolved.workspacesDir, { recursive: true }).catch(() => undefined);
     void services.reloadHttp?.();
@@ -501,8 +509,12 @@ function createServer(
         return reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
       }
       try {
+        await assertInsideFsRoot(resolved.fsRoot, path);
         return await listFiles(path);
       } catch (error) {
+        if (error instanceof FsSandboxError) {
+          return reply.code(403).send({ code: "FS_FORBIDDEN", message: error.message });
+        }
         return reply.code(400).send({
           code: "FS_ERROR",
           message: error instanceof Error ? error.message : "Cannot read directory."
@@ -520,6 +532,7 @@ function createServer(
         return reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
       }
       try {
+        await assertInsideFsRoot(resolved.fsRoot, path);
         const buffer = await readFile(path);
         const cap = 1024 * 1024;
         return {
@@ -529,6 +542,9 @@ function createServer(
           truncated: buffer.length > cap
         };
       } catch (error) {
+        if (error instanceof FsSandboxError) {
+          return reply.code(403).send({ code: "FS_FORBIDDEN", message: error.message });
+        }
         return reply.code(400).send({
           code: "FS_ERROR",
           message: error instanceof Error ? error.message : "Cannot read file."
@@ -544,9 +560,13 @@ function createServer(
       return reply.code(400).send({ code: "INVALID_REQUEST", message: "path and content required." });
     }
     try {
+      await assertInsideFsRoot(resolved.fsRoot, body.path);
       await writeFile(body.path, body.content, "utf8");
       return { ok: true };
     } catch (error) {
+      if (error instanceof FsSandboxError) {
+        return reply.code(403).send({ code: "FS_FORBIDDEN", message: error.message });
+      }
       return reply.code(400).send({
         code: "FS_ERROR",
         message: error instanceof Error ? error.message : "Cannot write file."
@@ -561,6 +581,7 @@ function createServer(
       return reply.code(400).send({ code: "INVALID_REQUEST", message: "path and kind required." });
     }
     try {
+      await assertInsideFsRoot(resolved.fsRoot, body.path);
       if (body.kind === "dir") {
         await mkdir(body.path, { recursive: true });
       } else {
@@ -569,6 +590,9 @@ function createServer(
       }
       return { ok: true };
     } catch (error) {
+      if (error instanceof FsSandboxError) {
+        return reply.code(403).send({ code: "FS_FORBIDDEN", message: error.message });
+      }
       return reply.code(400).send({
         code: "FS_ERROR",
         message: error instanceof Error ? error.message : "Cannot create entry."
@@ -886,6 +910,44 @@ async function listProjects(workspacesDir: string, workspace: string): Promise<P
     path: join(workspacesDir, workspace, name)
   }));
 }
+
+/**
+ * Resolve `target` to a realpath and confirm it is inside `root` (also a
+ * realpath). Rejects `..` traversal and symlink escapes. For not-yet-existing
+ * targets (create/write) the deepest existing ancestor is realpath'd instead,
+ * then the remaining segments are appended, so a brand-new file under the root
+ * still passes. Throws FsSandboxError when outside the root.
+ */
+async function assertInsideFsRoot(root: string, target: string): Promise<string> {
+  const realRoot = await realpath(root).catch(() => resolve(root));
+  let resolved = resolve(target);
+  let existing = resolved;
+  // Walk up to the nearest existing ancestor so create/write of a new path works.
+  for (;;) {
+    try {
+      existing = await realpath(existing);
+      break;
+    } catch {
+      const parent = dirname(existing);
+      if (parent === existing) {
+        existing = resolve(target);
+        break;
+      }
+      existing = parent;
+    }
+  }
+  // Re-attach the non-existing tail (if any) to the realpath'd ancestor.
+  const tail = resolved.slice(existing === resolve(target) ? resolved.length : existing.length);
+  resolved = existing + tail;
+  const withSep = realRoot.endsWith("/") ? realRoot : `${realRoot}/`;
+  if (resolved !== realRoot && !resolved.startsWith(withSep)) {
+    throw new FsSandboxError(`Path is outside the sandbox: ${target}`);
+  }
+  return resolved;
+}
+
+/** Thrown when an /api/fs path escapes fsRoot. */
+class FsSandboxError extends Error {}
 
 /** List a directory for the file browser (dirs first, dotfiles included). */
 async function listFiles(path: string): Promise<FsListResponse> {
