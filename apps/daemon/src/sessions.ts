@@ -25,7 +25,7 @@ export class SessionError extends Error {}
  */
 export class SessionManager {
   private sessions = new Map<string, Session>();
-  /** Emits "created" | "exited" (SessionSummary) and "closed" ({ id }). */
+  /** Emits "created" | "exited" | "updated" (SessionSummary) and "closed" ({ id }). */
   readonly lifecycle = new EventEmitter();
 
   constructor(private readonly registry: RegistryService) {}
@@ -40,13 +40,18 @@ export class SessionManager {
     const rows = req.rows && req.rows > 0 ? req.rows : 24;
     const cwd = req.cwd || req.projectPath || homedir();
     const id = randomUUID();
+    const projectPath = req.projectPath ?? "";
+    // Append to the end of this project's tab strip.
+    const maxOrder = [...this.sessions.values()]
+      .filter((s) => s.summary.projectPath === projectPath)
+      .reduce((max, s) => Math.max(max, s.summary.order), -1);
 
-    const pty = spawn(entry.resolvedBin, [], {
+    const pty = spawn(entry.resolvedBin, entry.args ?? [], {
       name: "xterm-256color",
       cwd,
       cols,
       rows,
-      env: { ...process.env, TERM: "xterm-256color", COLORTERM: "truecolor" }
+      env: { ...process.env, TERM: "xterm-256color", COLORTERM: "truecolor", ...entry.env }
     });
 
     const summary: SessionSummary = {
@@ -54,11 +59,12 @@ export class SessionManager {
       kind: entry.kind,
       refId: entry.id,
       title: req.title || entry.name,
-      projectPath: req.projectPath ?? "",
+      projectPath,
       cwd,
       cols,
       rows,
       status: "running",
+      order: maxOrder + 1,
       createdAt: new Date().toISOString()
     };
 
@@ -82,7 +88,9 @@ export class SessionManager {
   }
 
   list(projectPath?: string): SessionSummary[] {
-    const all = [...this.sessions.values()].map((s) => ({ ...s.summary }));
+    const all = [...this.sessions.values()]
+      .map((s) => ({ ...s.summary }))
+      .sort((a, b) => a.order - b.order || a.createdAt.localeCompare(b.createdAt));
     return projectPath === undefined ? all : all.filter((s) => s.projectPath === projectPath);
   }
 
@@ -106,6 +114,30 @@ export class SessionManager {
       session.summary.cols = cols;
       session.summary.rows = rows;
     }
+  }
+
+  /** Rename a session's tab; empty title reverts to the registry default name. */
+  rename(id: string, title: string): SessionSummary | undefined {
+    const session = this.sessions.get(id);
+    if (!session) {
+      return undefined;
+    }
+    const trimmed = title.trim();
+    const fallback = this.registry.get(session.summary.refId)?.name ?? session.summary.refId;
+    session.summary.title = trimmed || fallback;
+    this.lifecycle.emit("updated", { ...session.summary });
+    return { ...session.summary };
+  }
+
+  /** Reassign per-project tab order from an ordered id list (unknown ids ignored). */
+  reorder(projectPath: string, ids: string[]): void {
+    ids.forEach((id, index) => {
+      const session = this.sessions.get(id);
+      if (session && session.summary.projectPath === projectPath && session.summary.order !== index) {
+        session.summary.order = index;
+        this.lifecycle.emit("updated", { ...session.summary });
+      }
+    });
   }
 
   /** Kill (if running) and forget a session. Returns false if unknown. */

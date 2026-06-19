@@ -1,10 +1,10 @@
 import React, { useEffect, useRef } from "react";
 import { Terminal, type ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { useApi } from "../../context/orquester-context";
 import type { SessionSummary } from "../../types";
+import type { ViewMode } from "../../lib/view-mode";
 
 const FONT_STACK =
   '"JetBrains Mono", "Cascadia Code", "Fira Code", "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "DejaVu Sans Mono", monospace';
@@ -41,9 +41,14 @@ const THEME: ITheme = {
  * replayed (current buffer) then streamed live. The PTY lives in the daemon,
  * so unmounting this view does not kill the session.
  */
-export const TerminalView: React.FC<{ session: SessionSummary }> = ({ session }) => {
+export const TerminalView: React.FC<{
+  session: SessionSummary;
+  active?: boolean;
+  viewMode?: ViewMode;
+}> = ({ session, active, viewMode }) => {
   const api = useApi();
   const containerRef = useRef<HTMLDivElement>(null);
+  const termRef = useRef<Terminal | null>(null);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -66,18 +71,15 @@ export const TerminalView: React.FC<{ session: SessionSummary }> = ({ session })
       macOptionIsMeta: true,
       theme: THEME
     });
+    termRef.current = term;
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(container);
 
-    // Crisp GPU rendering when available; harmless fallback otherwise.
-    try {
-      const webgl = new WebglAddon();
-      webgl.onContextLoss(() => webgl.dispose());
-      term.loadAddon(webgl);
-    } catch {
-      /* keep the default canvas/DOM renderer */
-    }
+    // NB: we intentionally use xterm's default DOM renderer rather than the
+    // WebGL addon. The WebGL renderer leaves terminals blank/garbled after a
+    // resize (e.g. toggling the grid/tab layout) or when revealed from a hidden
+    // tab; the DOM renderer repaints reliably across those transitions.
 
     const applyFit = () => {
       try {
@@ -99,7 +101,10 @@ export const TerminalView: React.FC<{ session: SessionSummary }> = ({ session })
 
     const stream = api.openSessionOutput(session.id, {
       onData: (chunk) => term.write(chunk),
-      onEnd: () => term.write("\r\n\x1b[2m[session ended]\x1b[0m\r\n")
+      onEnd: () => term.write("\r\n\x1b[2m[session ended]\x1b[0m\r\n"),
+      // Multiplexed socket reconnected → clear before the buffer replay so the
+      // existing content isn't duplicated.
+      onReset: () => term.reset()
     });
 
     return () => {
@@ -107,8 +112,19 @@ export const TerminalView: React.FC<{ session: SessionSummary }> = ({ session })
       inputSub.dispose();
       resizeObserver.disconnect();
       term.dispose();
+      termRef.current = null;
     };
   }, [api, session.id]);
+
+  // Focus the active terminal when it becomes active OR when the view mode
+  // toggles (clicking the tab/grid toggle moves focus to that button; switching
+  // tabs blurs the previous terminal). Mount-time focus only runs once, so
+  // without this typing silently goes nowhere after those interactions.
+  useEffect(() => {
+    if (active) {
+      termRef.current?.focus();
+    }
+  }, [active, viewMode]);
 
   return <div ref={containerRef} className="h-full w-full overflow-hidden bg-[#0a0a0a] p-2" />;
 };

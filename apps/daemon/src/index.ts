@@ -13,6 +13,8 @@ import type {
   OpenResult,
   ProjectSummary,
   RegistryResponse,
+  RenameSessionRequest,
+  ReorderSessionsRequest,
   ServerInfoResponse,
   SessionInputRequest,
   SessionResizeRequest,
@@ -44,6 +46,7 @@ import {
   resolveDaemonPaths
 } from "@orquester/config";
 import fastifyStatic from "@fastify/static";
+import websocketPlugin from "@fastify/websocket";
 import Fastify, { type FastifyInstance } from "fastify";
 import { createWriteStream, existsSync, type WriteStream } from "node:fs";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -130,6 +133,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   );
   sessions.lifecycle.on("closed", (payload: { id: string }) =>
     broadcaster.publish("sessions", "session.closed", payload)
+  );
+  sessions.lifecycle.on("updated", (s: SessionSummary) =>
+    broadcaster.publish("sessions", "session.updated", s)
   );
 
   const services: Services = { registry, sessions, broadcaster };
@@ -230,12 +236,17 @@ function createServer(
   });
 
   app.addHook("onRequest", async (request, reply) => {
+    // The multiplexed session WebSocket authenticates itself via a query token
+    // (browsers can't set WS headers) and must skip the CORS/bearer logic below.
+    if (request.url.split("?")[0] === "/ws") {
+      return;
+    }
     if (cors) {
       // reply.header() is synchronous — do not await (awaiting the reply
       // deadlocks the request).
       reply.header("access-control-allow-origin", "*");
       reply.header("access-control-allow-headers", "authorization, content-type");
-      reply.header("access-control-allow-methods", "GET, POST, DELETE, OPTIONS");
+      reply.header("access-control-allow-methods", "GET, POST, PUT, DELETE, OPTIONS");
       if (request.method === "OPTIONS") {
         return reply.code(204).send();
       }
@@ -567,6 +578,26 @@ function createServer(
     }
   );
 
+  app.put<{ Params: { id: string }; Body: RenameSessionRequest }>(
+    "/api/sessions/:id",
+    async (request, reply): Promise<SessionSummary | void> => {
+      const summary = sessions.rename(request.params.id, request.body?.title ?? "");
+      if (!summary) {
+        return reply.code(404).send();
+      }
+      return summary;
+    }
+  );
+
+  app.post<{ Body: ReorderSessionsRequest }>(
+    "/api/sessions/reorder",
+    async (request, reply): Promise<void> => {
+      const { projectPath, ids } = request.body ?? { projectPath: "", ids: [] };
+      sessions.reorder(projectPath, ids);
+      return reply.code(204).send();
+    }
+  );
+
   app.post<{ Params: { id: string }; Body: SessionInputRequest }>(
     "/api/sessions/:id/input",
     async (request, reply): Promise<void> => {
@@ -645,6 +676,83 @@ function createServer(
     request.raw.on("close", () => {
       clearInterval(timer);
       services.broadcaster.remove(sink);
+    });
+  });
+
+  // Multiplexed session I/O over a single WebSocket. The web client opens ONE
+  // socket for ALL its terminals (output + input + resize) instead of one
+  // streaming HTTP connection each, so it no longer hits the browser's
+  // ~6-connections-per-origin cap (which otherwise froze input/resize once more
+  // than ~4 terminals were open). Registered in an encapsulated context so the
+  // plugin is loaded before the route is declared.
+  void app.register(async (instance) => {
+    await instance.register(websocketPlugin);
+    instance.get("/ws", { websocket: true }, (socket, request) => {
+      if (options.authRequired) {
+        const token = (request.query as { token?: string }).token;
+        const expected = config.transports.http.passwordHash;
+        if (!expected || !token || !safeEqual(token, expected)) {
+          socket.close(1008, "unauthorized");
+          return;
+        }
+      }
+
+      const subs = new Map<string, () => void>();
+      const send = (msg: unknown) => {
+        try {
+          socket.send(JSON.stringify(msg));
+        } catch {
+          /* socket closing */
+        }
+      };
+
+      socket.on("message", (raw) => {
+        let msg: { t?: string; id?: string; data?: string; cols?: number; rows?: number };
+        try {
+          msg = JSON.parse(raw.toString());
+        } catch {
+          return;
+        }
+        const id = msg.id;
+        if (!id) {
+          return;
+        }
+        if (msg.t === "sub") {
+          const summary = sessions.get(id);
+          if (!summary) {
+            send({ t: "end", id });
+            return;
+          }
+          send({ t: "out", id, data: sessions.buffer(id) });
+          if (summary.status === "exited") {
+            send({ t: "end", id });
+            return;
+          }
+          subs.get(id)?.();
+          subs.set(
+            id,
+            sessions.subscribe(
+              id,
+              (data) => send({ t: "out", id, data }),
+              () => send({ t: "end", id })
+            )
+          );
+        } else if (msg.t === "unsub") {
+          subs.get(id)?.();
+          subs.delete(id);
+        } else if (msg.t === "input" && typeof msg.data === "string") {
+          sessions.input(id, msg.data);
+        } else if (msg.t === "resize" && typeof msg.cols === "number" && typeof msg.rows === "number") {
+          sessions.resize(id, msg.cols, msg.rows);
+        }
+      });
+
+      socket.on("close", () => {
+        for (const unsub of subs.values()) {
+          unsub();
+        }
+        subs.clear();
+      });
     });
   });
 

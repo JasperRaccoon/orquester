@@ -5,6 +5,7 @@ import { TabStrip } from "./TabStrip";
 import { TabSwitcher } from "./TabSwitcher";
 import { NewTabMenu } from "./NewTabMenu";
 import { OpenOnMenu } from "./OpenOnMenu";
+import { ViewModeToggle } from "./ViewModeToggle";
 import { WindowControls } from "../layout/WindowControls";
 import { IconButton } from "../ui";
 import { useIsDesktop } from "../../hooks";
@@ -78,6 +79,11 @@ export const TopBar: React.FC = () => {
       </div>
 
       <div className="flex items-center gap-1 pr-1">
+        {currentProject && (
+          <div className="app-no-drag">
+            <ViewModeToggle />
+          </div>
+        )}
         {currentProject && (
           <div className="app-no-drag pr-1">
             <OpenOnMenu />

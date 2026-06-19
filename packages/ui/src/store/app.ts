@@ -4,6 +4,7 @@ import { ApiClient, ApiError } from "../lib/api-client";
 import { createTransporter } from "../lib/transporters";
 import { toRemoteConfig, toUiConnection } from "../lib/connections";
 import { clearStoredHash, deriveAuthHash, loadStoredHash, storeHash } from "../lib/auth";
+import { loadViewModes, saveViewModes, type ViewMode } from "../lib/view-mode";
 import type { AppConfigAdapter } from "../lib/app-config";
 import type { HttpClient } from "../lib/http-client";
 import type { Transporter } from "../lib/transporter";
@@ -182,6 +183,8 @@ export interface AppState {
   fileTabsByProject: Record<string, FileTab[]>;
   /** Client-local active tab id per project path (session or file tab). */
   activeTabByProject: Record<string, string | null>;
+  /** Per-project layout choice (tab view vs grid view); persisted client-side. */
+  viewModeByProject: Record<string, ViewMode>;
 
   setApi: (api: ApiClient) => void;
   connect: () => Promise<void>;
@@ -225,6 +228,9 @@ export interface AppState {
   openFileBrowser: () => void;
   closeTab: (id: string) => Promise<void>;
   activateTab: (id: string) => void;
+  setViewMode: (mode: ViewMode) => void;
+  renameTab: (id: string, title: string) => Promise<void>;
+  reorderTabs: (orderedSessionIds: string[]) => Promise<void>;
 
   applyEvent: (event: EventMessage) => void;
 }
@@ -251,6 +257,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   sessions: [],
   fileTabsByProject: {},
   activeTabByProject: {},
+  viewModeByProject: loadViewModes(),
 
   setApi: (api) => set({ api }),
 
@@ -663,6 +670,55 @@ export const useAppStore = create<AppState>((set, get) => ({
       return { activeTabByProject: { ...state.activeTabByProject, [project.path]: id } };
     }),
 
+  setViewMode: (mode) =>
+    set((state) => {
+      const project = state.currentProject;
+      if (!project) {
+        return state;
+      }
+      const viewModeByProject = { ...state.viewModeByProject, [project.path]: mode };
+      saveViewModes(viewModeByProject);
+      return { viewModeByProject };
+    }),
+
+  renameTab: async (id, title) => {
+    const trimmed = title.trim();
+    // Optimistic only when non-empty; an empty title is resolved to the default
+    // name on the daemon and arrives back via the session.updated broadcast.
+    if (trimmed) {
+      set((state) => ({
+        sessions: state.sessions.map((s) => (s.id === id ? { ...s, title: trimmed } : s))
+      }));
+    }
+    try {
+      const updated = await get().api?.renameSession(id, trimmed);
+      if (updated) {
+        set((state) => ({ sessions: upsertSession(state.sessions, updated) }));
+      }
+    } catch {
+      await get().loadSessions();
+    }
+  },
+
+  reorderTabs: async (orderedSessionIds) => {
+    const project = get().currentProject;
+    if (!project) {
+      return;
+    }
+    // Optimistic: assign order by index for this project's sessions.
+    set((state) => ({
+      sessions: state.sessions.map((s) => {
+        const index = orderedSessionIds.indexOf(s.id);
+        return s.projectPath === project.path && index !== -1 ? { ...s, order: index } : s;
+      })
+    }));
+    try {
+      await get().api?.reorderSessions(project.path, orderedSessionIds);
+    } catch {
+      await get().loadSessions();
+    }
+  },
+
   applyEvent: (event) => {
     if (event.channel === "registry" && event.type === "registry.changed") {
       const entry = event.payload as RegistryEntry;
@@ -672,7 +728,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (event.channel !== "sessions") {
       return;
     }
-    if (event.type === "session.created" || event.type === "session.exited") {
+    if (
+      event.type === "session.created" ||
+      event.type === "session.exited" ||
+      event.type === "session.updated"
+    ) {
       const summary = event.payload as SessionSummary;
       set((state) => ({ sessions: upsertSession(state.sessions, summary) }));
     } else if (event.type === "session.closed") {
@@ -738,6 +798,8 @@ export function useProjectTabs(): ProjectTab[] {
     }
     const sessionTabs: ProjectTab[] = sessions
       .filter((s) => s.projectPath === project.path)
+      .slice()
+      .sort((a, b) => a.order - b.order || a.createdAt.localeCompare(b.createdAt))
       .map((session) => ({ id: session.id, type: "session", session }));
     const fileTabs: ProjectTab[] = (fileTabsByProject[project.path] ?? []).map((tab) => ({
       id: tab.id,
@@ -751,5 +813,11 @@ export function useProjectTabs(): ProjectTab[] {
 export function useActiveTabId(): string | null {
   return useAppStore((s) =>
     s.currentProject ? (s.activeTabByProject[s.currentProject.path] ?? null) : null
+  );
+}
+
+export function useViewMode(): ViewMode {
+  return useAppStore((s) =>
+    s.currentProject ? (s.viewModeByProject[s.currentProject.path] ?? "tabs") : "tabs"
   );
 }

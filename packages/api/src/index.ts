@@ -134,6 +134,10 @@ export interface RegistryEntry {
   kind: RegistryKind;
   /** Candidate binaries (names and/or absolute install paths); first found wins (cached). */
   bin: string[];
+  /** Extra args passed to the resolved bin when a session is launched (e.g. ["--d"]). */
+  args?: string[];
+  /** Extra environment variables set on the session process when launched. */
+  env?: Record<string, string>;
   /** True only when a candidate bin resolved AND the entry is not disabled. */
   enabled: boolean;
   /** Absolute path of the resolved bin, when found. */
@@ -196,6 +200,8 @@ export interface SessionSummary {
   rows: number;
   status: SessionStatus;
   exitCode?: number;
+  /** Per-project tab sort key (ascending); assigned by the daemon. */
+  order: number;
   createdAt: string;
 }
 
@@ -207,6 +213,18 @@ export interface CreateSessionRequest {
   cols?: number;
   rows?: number;
   title?: string;
+}
+
+export interface RenameSessionRequest {
+  /** New label; empty/whitespace reverts to the registry entry's default name. */
+  title: string;
+}
+
+export interface ReorderSessionsRequest {
+  /** Project whose session tabs are being reordered. */
+  projectPath: string;
+  /** Session ids in the desired left-to-right order. */
+  ids: string[];
 }
 
 export interface SessionInputRequest {

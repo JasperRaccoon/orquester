@@ -1,5 +1,6 @@
 import {
   buildQueryString,
+  type SessionChannel,
   type StreamHandle,
   type StreamHandlers,
   type Transporter,
@@ -7,6 +8,7 @@ import {
   type TransportResponse
 } from "../transporter";
 import { FetchHttpClient, type HttpClient } from "../http-client";
+import { getSessionChannel } from "./ws-session-channel";
 
 export interface HttpTransporterOptions {
   baseUrl: string;
@@ -101,5 +103,13 @@ export class HttpTransporter implements Transporter {
       });
 
     return { close: () => controller.abort() };
+  }
+
+  /**
+   * Session output/input/resize are multiplexed over a single WebSocket (shared
+   * per origin) so many terminals don't each hold a streaming HTTP connection.
+   */
+  sessionChannel(): SessionChannel {
+    return getSessionChannel(this.baseUrl, this.password);
   }
 }

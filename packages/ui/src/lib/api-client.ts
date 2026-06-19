@@ -20,6 +20,7 @@ import type {
 import type { AppConfig, DaemonConfig, RemoteConnectionConfig } from "@orquester/config";
 import type { UiConnection } from "../types";
 import type {
+  SessionChannel,
   StreamHandle,
   StreamHandlers,
   Transporter,
@@ -41,10 +42,15 @@ export interface ApiRequestOptions {
  * NOTE: skeleton — endpoints are wired but no client-side logic/caching yet.
  */
 export class ApiClient {
+  /** Multiplexed session I/O (web/HTTP); null on transports without it (unix). */
+  private readonly channel: SessionChannel | null;
+
   constructor(
     public readonly connection: UiConnection,
     private readonly transporter: Transporter
-  ) { }
+  ) {
+    this.channel = transporter.sessionChannel?.() ?? null;
+  }
 
   get transportKind(): string {
     return this.transporter.kind;
@@ -232,18 +238,36 @@ export class ApiClient {
   }
 
   sendSessionInput(id: string, data: string): Promise<void> {
+    if (this.channel) {
+      this.channel.sendInput(id, data);
+      return Promise.resolve();
+    }
     return this.send("POST", `/api/sessions/${encodeURIComponent(id)}/input`, { body: { data } });
   }
 
   resizeSession(id: string, cols: number, rows: number): Promise<void> {
+    if (this.channel) {
+      this.channel.resize(id, cols, rows);
+      return Promise.resolve();
+    }
     return this.send("POST", `/api/sessions/${encodeURIComponent(id)}/resize`, {
       body: { cols, rows }
     });
   }
 
+  renameSession(id: string, title: string): Promise<SessionSummary> {
+    return this.send("PUT", `/api/sessions/${encodeURIComponent(id)}`, { body: { title } });
+  }
+
+  reorderSessions(projectPath: string, ids: string[]): Promise<void> {
+    return this.send("POST", "/api/sessions/reorder", { body: { projectPath, ids } });
+  }
+
   /** Open the live output stream for a session (buffer replay + live bytes). */
   openSessionOutput(id: string, handlers: StreamHandlers): StreamHandle {
-    return this.transporter.openStream(`/api/sessions/${encodeURIComponent(id)}/output`, handlers);
+    return this.channel
+      ? this.channel.openOutput(id, handlers)
+      : this.transporter.openStream(`/api/sessions/${encodeURIComponent(id)}/output`, handlers);
   }
 }
 
