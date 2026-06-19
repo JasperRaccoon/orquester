@@ -70,13 +70,24 @@ export class HttpTransporter implements Transporter {
   }
 
   openStream(path: string, handlers: StreamHandlers): StreamHandle {
-    const controller = new AbortController();
+    const url = `${this.baseUrl}${path}`;
     const headers: Record<string, string> = {};
     if (this.password) {
       headers.Authorization = `Bearer ${this.password}`;
     }
 
-    fetch(`${this.baseUrl}${path}`, { headers, signal: controller.signal })
+    // Desktop injects a Node client that streams over IPC; using it here keeps
+    // the remote event bus / output stream off the browser `fetch` so it isn't
+    // gated by CORS (the daemon is cross-origin for the desktop renderer).
+    if (this.client.stream) {
+      return this.client.stream(
+        { url, method: "GET", headers },
+        { onData: handlers.onData, onEnd: handlers.onEnd }
+      );
+    }
+
+    const controller = new AbortController();
+    fetch(url, { headers, signal: controller.signal })
       .then((response) => {
         if (!response.body) {
           handlers.onEnd();

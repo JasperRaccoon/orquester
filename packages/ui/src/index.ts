@@ -28,7 +28,9 @@ export {
   FetchHttpClient,
   type HttpClient,
   type HttpClientRequest,
-  type HttpClientResponse
+  type HttpClientResponse,
+  type HttpClientStreamHandlers,
+  type HttpClientStreamHandle
 } from "./lib/http-client";
 export {
   createTransporter,

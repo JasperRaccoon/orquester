@@ -22,6 +22,14 @@ export interface DesktopBridgeResponse {
   body: string;
 }
 
+/** Shape exchanged with the main process for a remote (TCP) unary request. */
+export interface DesktopBridgeHttpRequest {
+  url: string;
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string;
+}
+
 /** The full bridge the preload exposes for talking to the daemon over the socket. */
 export interface DesktopBridge {
   request(request: DesktopBridgeRequest): Promise<DesktopBridgeResponse>;
@@ -29,6 +37,13 @@ export interface DesktopBridge {
   streamClose(streamId: string): void;
   onStreamData(cb: (payload: { streamId: string; chunk: string }) => void): () => void;
   onStreamEnd(cb: (payload: { streamId: string }) => void): () => void;
+  // Remote HTTP transport (used by the renderer's HttpTransporter for remote
+  // servers; performed in the main process so it bypasses browser CORS).
+  httpRequest(request: DesktopBridgeHttpRequest): Promise<DesktopBridgeResponse>;
+  httpStreamOpen(streamId: string, url: string, headers?: Record<string, string>): void;
+  httpStreamClose(streamId: string): void;
+  onHttpStreamData(cb: (payload: { streamId: string; chunk: string }) => void): () => void;
+  onHttpStreamEnd(cb: (payload: { streamId: string }) => void): () => void;
 }
 
 /**

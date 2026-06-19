@@ -21,8 +21,30 @@ export interface HttpClientResponse {
   text(): Promise<string>;
 }
 
+/** Callbacks for a chunked GET stream (session output / event bus). */
+export interface HttpClientStreamHandlers {
+  /** A decoded text chunk arrived. */
+  onData(chunk: string): void;
+  /** The stream ended (server closed it, or it failed). */
+  onEnd(): void;
+}
+
+/** Handle to a chunked stream opened via {@link HttpClient.stream}. */
+export interface HttpClientStreamHandle {
+  close(): void;
+}
+
 export interface HttpClient {
   send(req: HttpClientRequest): Promise<HttpClientResponse>;
+  /**
+   * Optional chunked GET stream. When present, the HTTP transporter routes
+   * `openStream` (the NDJSON event bus, session output) through it instead of
+   * the browser `fetch`. The desktop's Node client implements this so remote
+   * streams go through Node and bypass browser CORS (the daemon is same-origin
+   * for web but cross-origin for the desktop renderer); web omits it and keeps
+   * streaming `fetch`.
+   */
+  stream?(req: HttpClientRequest, handlers: HttpClientStreamHandlers): HttpClientStreamHandle;
 }
 
 /** HttpClient backed by the platform `fetch`. Used by the web runtime. */
