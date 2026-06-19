@@ -97,6 +97,11 @@ export interface AuthInfoResponse {
   authRequired: boolean;
   /** bcrypt salt prefix the client uses to derive the bearer hash, or null. */
   salt: string | null;
+  /**
+   * Whether the credential also needs a username (UI hint; shows the username
+   * field). True when auth is required. The username itself is never returned.
+   */
+  requiresUsername: boolean;
 }
 
 /** A pluggable coding agent the daemon detected on the host. */

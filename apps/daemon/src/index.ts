@@ -276,13 +276,18 @@ function createServer(
   });
 
   // Public: tells the web client whether auth is needed and the bcrypt salt to
-  // derive the bearer (the same hash the daemon stores). Never exposes the hash.
-  app.get("/api/auth/info", async () => ({
-    authRequired: options.mode === "remote" && Boolean(config.transports.http.passwordHash),
-    salt: config.transports.http.passwordHash
-      ? config.transports.http.passwordHash.slice(0, 29)
-      : null
-  }));
+  // derive the bearer (the same hash the daemon stores). Never exposes the hash
+  // OR the username — only whether a username is required.
+  app.get("/api/auth/info", async () => {
+    const authRequired = options.mode === "remote" && Boolean(config.transports.http.passwordHash);
+    return {
+      authRequired,
+      salt: config.transports.http.passwordHash
+        ? config.transports.http.passwordHash.slice(0, 29)
+        : null,
+      requiresUsername: authRequired
+    };
+  });
 
   app.get("/health", async (): Promise<HealthResponse> => ({
     ok: true,
