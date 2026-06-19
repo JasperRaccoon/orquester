@@ -308,13 +308,15 @@ const DaemonSettings: React.FC = () => {
     try {
       await api.updateDaemonConfig({
         workspacesDir,
+        // Partial patch: the daemon merges onto its existing http config, so
+        // unmanaged fields (username, fsRoot, passwordHash) are preserved.
         transports: {
           http: {
             enabled: httpEnabled,
             host,
             port: Number(port) || 47831,
             ...(password ? { password } : {})
-          }
+          } as DaemonConfig["transports"]["http"]
         }
       });
       setPassword("");

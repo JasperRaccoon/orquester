@@ -114,10 +114,26 @@ export const httpTransportSchema = z.object({
   enabled: z.boolean().default(false),
   host: z.string().min(1).default(DEFAULT_HTTP_HOST),
   port: z.coerce.number().int().min(1).max(65535).default(DEFAULT_HTTP_PORT),
+  /**
+   * The username half of the credential. The wire bearer is
+   * base64("<username>:<passwordHash>"); the server compares this (normalized:
+   * trim + lowercase) in constant time. Defaults to "mapacho".
+   */
+  username: z
+    .string()
+    .min(1)
+    .transform((value) => value.trim().toLowerCase())
+    .default("mapacho"),
   /** Transient plaintext input (env / settings). Migrated to `passwordHash`. */
   password: z.string().min(8).optional(),
   /** bcrypt hash of the password — what's persisted at rest. */
-  passwordHash: z.string().optional()
+  passwordHash: z.string().optional(),
+  /**
+   * Filesystem-browser sandbox root: `/api/fs/*` rejects paths whose realpath
+   * is outside this dir. Optional here; the daemon defaults it to the resolved
+   * workspaces dir when unset (see resolved.fsRoot).
+   */
+  fsRoot: z.string().min(1).optional()
 });
 
 export const daemonConfigSchema = z.object({
@@ -183,6 +199,7 @@ export function createDefaultDaemonConfig(input: {
         enabled: env.ORQUESTER_HTTP_ENABLED === "true",
         host: env.ORQUESTER_HTTP_HOST ?? DEFAULT_HTTP_HOST,
         port: env.ORQUESTER_HTTP_PORT ?? String(DEFAULT_HTTP_PORT),
+        username: env.ORQUESTER_HTTP_USERNAME,
         password: env.ORQUESTER_HTTP_PASSWORD
       }
     }
