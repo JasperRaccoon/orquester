@@ -96,6 +96,20 @@ export function defaultSocketPath(baseDir: string, platform: RuntimePlatform): s
   return joinPath(daemonConfigDir(baseDir), "daemon.sock");
 }
 
+/**
+ * Unix socket of the dedicated tmux server that owns session PTYs. Lives beside
+ * the daemon socket under <appdir>/daemon so it inherits the same perms/backup
+ * and (per Phase 0's PrivateTmp=false) is reachable across daemon restarts.
+ */
+export function tmuxSocketPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "tmux.sock");
+}
+
+/** On-disk index of sessions (for reattach on boot); see SessionManager. */
+export function sessionsIndexPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "sessions.json");
+}
+
 /** `yyyy-mm-dd` in local time. */
 export function localDateStamp(date = new Date()): string {
   const year = date.getFullYear();
@@ -276,6 +290,38 @@ export function createDefaultRemotesConfig(): RemotesConfig {
 
 export function parseRemotesConfig(value: unknown): RemotesConfig {
   return remotesConfigSchema.parse(value);
+}
+
+// sessions.json — the daemon's index of live tmux-backed sessions, used to
+// reattach PTYs after a restart. The tmux server is the source of truth for
+// "is the command still running?"; this file remembers tab metadata (title /
+// order / project) that tmux doesn't track.
+
+export const sessionRecordSchema = z.object({
+  id: z.string().min(1),
+  title: z.string(),
+  order: z.number().int(),
+  projectPath: z.string(),
+  refId: z.string(),
+  kind: z.enum(["shell", "agent", "ide", "file-explorer", "browser"]),
+  cwd: z.string(),
+  createdAt: z.string()
+});
+
+export const sessionsConfigSchema = z.object({
+  version: z.literal(1).default(1),
+  sessions: z.array(sessionRecordSchema).default([])
+});
+
+export type SessionRecord = z.infer<typeof sessionRecordSchema>;
+export type SessionsConfig = z.infer<typeof sessionsConfigSchema>;
+
+export function createDefaultSessionsConfig(): SessionsConfig {
+  return sessionsConfigSchema.parse({ sessions: [] });
+}
+
+export function parseSessionsConfig(value: unknown): SessionsConfig {
+  return sessionsConfigSchema.parse(value);
 }
 
 // ClientConfig — what the daemon reports about how to reach itself.}
