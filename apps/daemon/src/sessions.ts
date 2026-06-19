@@ -80,8 +80,13 @@ export class SessionManager {
 
     // 1) Spawn the command INSIDE tmux (detached), 2) attach a streaming PTY to
     // it. tmux owns the process group, so a daemon restart leaves it running.
+    // Only per-session overrides go through `-e KEY=VAL` (which lands on the
+    // `tmux new-session` argv, visible via `ps`). The tmux SERVER already
+    // inherits the daemon's full process.env and passes it to the command, so we
+    // must NOT spread `...process.env` here: that would leak the daemon's secrets
+    // (ORQUESTER_HTTP_PASSWORD, agent API keys) onto the argv and would also
+    // reject any multiline value (e.g. BASH_FUNC_* shell functions) at launch.
     const env = {
-      ...process.env,
       TERM: "xterm-256color",
       COLORTERM: "truecolor",
       ...entry.env

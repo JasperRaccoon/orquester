@@ -52,7 +52,12 @@ export class Tmux {
     bin: string;
     args: string[];
   }): Promise<void> {
-    const envArgs = Object.entries(opts.env).flatMap(([key, value]) => ["-e", `${key}=${value}`]);
+    // A value containing a newline is rejected by `tmux new-session` and would
+    // fail the whole launch, so drop those defensively (env here is small and
+    // controlled — TERM/COLORTERM plus the registry entry's overrides).
+    const envArgs = Object.entries(opts.env)
+      .filter(([, value]) => !value.includes("\n"))
+      .flatMap(([key, value]) => ["-e", `${key}=${value}`]);
     const result = await this.run([
       "new-session",
       "-d",
