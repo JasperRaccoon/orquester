@@ -327,6 +327,7 @@ function createServer(
       enabled: boolean;
       host: string;
       port: number;
+      username: string;
       password: string;
     }>;
     // A new plaintext password (when provided) is hashed; otherwise keep the
@@ -335,6 +336,12 @@ function createServer(
       httpPatch.password && httpPatch.password !== "********"
         ? hashPassword(httpPatch.password)
         : config.transports.http.passwordHash;
+    // Username is not editable through this endpoint, but a client may echo back
+    // a GET response in which it was masked. Drop the sentinel so the real
+    // username (preserved from the existing config) is never overwritten by it.
+    if (httpPatch.username === "********") {
+      delete httpPatch.username;
+    }
 
     let merged: DaemonConfig;
     try {
@@ -1029,16 +1036,23 @@ async function prepareDirs(resolved: ResolvedPaths): Promise<void> {
 }
 
 function sanitizeDaemonConfig(config: DaemonConfig): DaemonConfig {
-  // Never expose the hash (it's a bearer-equivalent); the client derives its
-  // own via the public salt at /api/auth/info.
+  // Never expose credential material over the wire. The hash is a
+  // bearer-equivalent (the client derives its own via the public salt at
+  // /api/auth/info), and the username is deliberately withheld too — same
+  // invariant as /api/auth/info, which only reports `requiresUsername`, never
+  // the username itself. Both are masked with the same sentinel the schema
+  // accepts as a string; the fsRoot (sandbox root path) is server-internal.
+  // The client only ever needs enabled/host/port back.
   return {
     ...config,
     transports: {
       ...config.transports,
       http: {
         ...config.transports.http,
+        username: "********",
         password: undefined,
-        passwordHash: config.transports.http.passwordHash ? "********" : undefined
+        passwordHash: config.transports.http.passwordHash ? "********" : undefined,
+        fsRoot: undefined
       }
     }
   };
