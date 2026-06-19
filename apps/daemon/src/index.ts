@@ -51,7 +51,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { createWriteStream, existsSync, type WriteStream } from "node:fs";
 import { mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir, platform as osPlatform } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { stat } from "node:fs/promises";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import bcrypt from "bcryptjs";
@@ -509,8 +509,8 @@ function createServer(
         return reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
       }
       try {
-        await assertInsideFsRoot(resolved.fsRoot, path);
-        return await listFiles(path);
+        const safe = await assertInsideFsRoot(resolved.fsRoot, path);
+        return await listFiles(safe);
       } catch (error) {
         if (error instanceof FsSandboxError) {
           return reply.code(403).send({ code: "FS_FORBIDDEN", message: error.message });
@@ -532,11 +532,11 @@ function createServer(
         return reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
       }
       try {
-        await assertInsideFsRoot(resolved.fsRoot, path);
-        const buffer = await readFile(path);
+        const safe = await assertInsideFsRoot(resolved.fsRoot, path);
+        const buffer = await readFile(safe);
         const cap = 1024 * 1024;
         return {
-          path,
+          path: safe,
           content: buffer.subarray(0, cap).toString("utf8"),
           size: buffer.length,
           truncated: buffer.length > cap
@@ -560,8 +560,8 @@ function createServer(
       return reply.code(400).send({ code: "INVALID_REQUEST", message: "path and content required." });
     }
     try {
-      await assertInsideFsRoot(resolved.fsRoot, body.path);
-      await writeFile(body.path, body.content, "utf8");
+      const safe = await assertInsideFsRoot(resolved.fsRoot, body.path);
+      await writeFile(safe, body.content, "utf8");
       return { ok: true };
     } catch (error) {
       if (error instanceof FsSandboxError) {
@@ -581,12 +581,12 @@ function createServer(
       return reply.code(400).send({ code: "INVALID_REQUEST", message: "path and kind required." });
     }
     try {
-      await assertInsideFsRoot(resolved.fsRoot, body.path);
+      const safe = await assertInsideFsRoot(resolved.fsRoot, body.path);
       if (body.kind === "dir") {
-        await mkdir(body.path, { recursive: true });
+        await mkdir(safe, { recursive: true });
       } else {
-        await mkdir(dirname(body.path), { recursive: true });
-        await writeFile(body.path, "", { flag: "wx" });
+        await mkdir(dirname(safe), { recursive: true });
+        await writeFile(safe, "", { flag: "wx" });
       }
       return { ok: true };
     } catch (error) {
@@ -920,30 +920,36 @@ async function listProjects(workspacesDir: string, workspace: string): Promise<P
  */
 async function assertInsideFsRoot(root: string, target: string): Promise<string> {
   const realRoot = await realpath(root).catch(() => resolve(root));
-  let resolved = resolve(target);
-  let existing = resolved;
-  // Walk up to the nearest existing ancestor so create/write of a new path works.
+  const resolved = resolve(target);
+  // Walk up the resolved (non-realpath) path to the deepest existing ancestor so
+  // create/write of a not-yet-existing path still works.
+  let ancestor = resolved;
   for (;;) {
     try {
-      existing = await realpath(existing);
+      await realpath(ancestor);
       break;
     } catch {
-      const parent = dirname(existing);
-      if (parent === existing) {
-        existing = resolve(target);
+      const parent = dirname(ancestor);
+      if (parent === ancestor) {
         break;
       }
-      existing = parent;
+      ancestor = parent;
     }
   }
-  // Re-attach the non-existing tail (if any) to the realpath'd ancestor.
-  const tail = resolved.slice(existing === resolve(target) ? resolved.length : existing.length);
-  resolved = existing + tail;
-  const withSep = realRoot.endsWith("/") ? realRoot : `${realRoot}/`;
-  if (resolved !== realRoot && !resolved.startsWith(withSep)) {
+  // Realpath the existing ancestor, then re-attach the not-yet-existing tail by
+  // path.join (never byte-splicing two differently-resolved strings — the
+  // realpath'd ancestor may carry a prefix like macOS `/private`).
+  const realAncestor = await realpath(ancestor).catch(() => ancestor);
+  const tail = relative(ancestor, resolved);
+  const finalPath = tail ? join(realAncestor, tail) : realAncestor;
+  // Containment check on the realpath'd result: rel must stay within realRoot
+  // (empty == the root itself, otherwise no leading `..` segment and not
+  // absolute — sep-anchored so a child literally named e.g. `..foo` is allowed).
+  const rel = relative(realRoot, finalPath);
+  if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
     throw new FsSandboxError(`Path is outside the sandbox: ${target}`);
   }
-  return resolved;
+  return finalPath;
 }
 
 /** Thrown when an /api/fs path escapes fsRoot. */
