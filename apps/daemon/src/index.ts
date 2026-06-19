@@ -22,7 +22,8 @@ import type {
   WorkspaceSummary
 } from "@orquester/api";
 import { RegistryService } from "./registry";
-import { SessionError, SessionManager } from "./sessions";
+import { type ISessionManager, SessionError, createSessionManager } from "./sessions";
+import { Tmux } from "./tmux";
 import { Broadcaster } from "./broadcaster";
 import {
   type AppConfig,
@@ -43,7 +44,9 @@ import {
   parseDaemonConfig,
   parseRemotesConfig,
   remotesConfigPath,
-  resolveDaemonPaths
+  resolveDaemonPaths,
+  sessionsIndexPath,
+  tmuxSocketPath
 } from "@orquester/config";
 import fastifyStatic from "@fastify/static";
 import websocketPlugin from "@fastify/websocket";
@@ -66,6 +69,10 @@ interface ResolvedPaths {
   /** app.json + remotes.json live under <appdir>/app and are shared by clients. */
   appConfigFile: string;
   remotesFile: string;
+  /** Fixed socket of the dedicated tmux server that owns session PTYs. */
+  tmuxSocket: string;
+  /** <appdir>/daemon/sessions.json — the reattach index. */
+  sessionsIndexFile: string;
   workspacesDir: string;
   /** Sandbox root for the /api/fs browser API (default = workspacesDir). */
   fsRoot: string;
@@ -110,6 +117,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     configPath: paths.configPath,
     appConfigFile: appConfigPath(paths.baseDir),
     remotesFile: remotesConfigPath(paths.baseDir),
+    tmuxSocket: tmuxSocketPath(paths.baseDir),
+    sessionsIndexFile: sessionsIndexPath(paths.baseDir),
     workspacesDir: expandVars(config.workspacesDir, paths.vars),
     fsRoot: config.transports.http.fsRoot
       ? expandVars(config.transports.http.fsRoot, paths.vars)
@@ -123,13 +132,22 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   const clientConfig = createDefaultClientConfig(paths.socketPath);
 
   // Shared, transport-agnostic services. Sessions live here so they survive
-  // client disconnects and are visible across every transport/client.
+  // client disconnects and are visible across every transport/client. The
+  // backend is tmux-backed (persists across daemon restarts) where a tmux binary
+  // is present — the VPS and any Linux/macOS host with tmux — and falls back to
+  // a direct node-pty backend on hosts without tmux (Windows, stock macOS), so
+  // the desktop built-in daemon keeps creating sessions everywhere.
   const registry = new RegistryService(resolved.daemonDir);
-  const sessions = new SessionManager(registry);
+  const tmux = new Tmux(resolved.tmuxSocket);
+  const sessions = createSessionManager(registry, tmux, resolved.sessionsIndexFile);
   const broadcaster = new Broadcaster();
   // Stream registry changes (install/update status, detected versions) to clients.
   registry.events.on("changed", (entry) => broadcaster.publish("registry", "registry.changed", entry));
   await registry.init();
+  // Reattach to any tmux sessions that outlived a previous daemon process
+  // (KillMode=process keeps the tmux server alive across restarts). No-op on the
+  // local backend. Best-effort: a tmux/socket error must not block startup.
+  await sessions.reattach().catch((error) => console.error("Session reattach failed", error));
   sessions.lifecycle.on("created", (s: SessionSummary) =>
     broadcaster.publish("sessions", "session.created", s)
   );
@@ -199,7 +217,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   await startHttp();
 
   const stop = async () => {
-    sessions.closeAll();
+    // Detach (don't kill) sessions: the tmux backend leaves its server running so
+    // the next boot reattaches; the local backend has no server, so its shutdown()
+    // terminates the child PTYs (they'd die with the daemon regardless).
+    sessions.shutdown();
     await stopHttp();
     await unixServer.close().catch(() => undefined);
   };
@@ -216,7 +237,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
 
 interface Services {
   registry: RegistryService;
-  sessions: SessionManager;
+  sessions: ISessionManager;
   broadcaster: Broadcaster;
   /** Restart the HTTP transport (set in main once the lifecycle exists). */
   reloadHttp?: () => Promise<void>;
@@ -670,7 +691,7 @@ function createServer(
   // until the session exits or the client disconnects. Plain chunked HTTP so it
   // works identically over the unix socket and over remote HTTP. Input/resize
   // use the POST endpoints above.
-  app.get<{ Params: { id: string } }>("/api/sessions/:id/output", (request, reply) => {
+  app.get<{ Params: { id: string } }>("/api/sessions/:id/output", async (request, reply) => {
     const { id } = request.params;
     const summary = sessions.get(id);
     if (!summary) {
@@ -678,13 +699,16 @@ function createServer(
       return;
     }
 
+    // Capture scrollback BEFORE hijacking so an await can't race the raw stream.
+    const replay = await sessions.scrollback(id);
+
     reply.hijack();
     reply.raw.writeHead(200, {
       "content-type": "application/octet-stream",
       "cache-control": "no-cache",
       "x-accel-buffering": "no"
     });
-    reply.raw.write(sessions.buffer(id));
+    reply.raw.write(replay);
 
     if (summary.status === "exited") {
       reply.raw.end();
@@ -754,7 +778,7 @@ function createServer(
         }
       };
 
-      socket.on("message", (raw) => {
+      socket.on("message", async (raw) => {
         let msg: { t?: string; id?: string; data?: string; cols?: number; rows?: number };
         try {
           msg = JSON.parse(raw.toString());
@@ -771,7 +795,7 @@ function createServer(
             send({ t: "end", id });
             return;
           }
-          send({ t: "out", id, data: sessions.buffer(id) });
+          send({ t: "out", id, data: await sessions.scrollback(id) });
           if (summary.status === "exited") {
             send({ t: "end", id });
             return;

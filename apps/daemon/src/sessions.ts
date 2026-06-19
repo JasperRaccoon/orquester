@@ -7,7 +7,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { spawn, type IPty } from "node-pty";
 import type { RegistryService } from "./registry";
-import { Tmux, tmuxName } from "./tmux";
+import { Tmux, tmuxAvailable, tmuxName } from "./tmux";
 
 /**
  * Small live ring kept only for HOT replay between a session's creation and the
@@ -27,13 +27,70 @@ interface Session {
 export class SessionError extends Error {}
 
 /**
+ * The session backend contract the daemon (index.ts) talks to. Two
+ * implementations exist: {@link SessionManager} (tmux-backed, survives a daemon
+ * restart) and {@link LocalSessionManager} (direct node-pty, used where tmux is
+ * unavailable — Windows, stock macOS). They are interchangeable from the
+ * daemon's point of view; only persistence/reattach differs. `reattach` and
+ * `shutdown` are still present on the local backend (they just don't persist).
+ */
+export interface ISessionManager {
+  /** Emits "created" | "exited" | "updated" (SessionSummary) and "closed" ({ id }). */
+  readonly lifecycle: EventEmitter;
+  create(req: CreateSessionRequest): SessionSummary;
+  list(projectPath?: string): SessionSummary[];
+  get(id: string): SessionSummary | undefined;
+  /** Durable (tmux) or hot-ring (local) scrollback for a (re)connecting client. */
+  scrollback(id: string): Promise<string>;
+  /** Synchronous hot-ring snapshot (kept for callers that can't await). */
+  buffer(id: string): string;
+  input(id: string, data: string): void;
+  resize(id: string, cols: number, rows: number): void;
+  rename(id: string, title: string): SessionSummary | undefined;
+  reorder(projectPath: string, ids: string[]): void;
+  close(id: string): boolean;
+  subscribe(id: string, onOutput: (data: string) => void, onExit: (code: number) => void): () => void;
+  /** Daemon shutdown: detach (tmux) or terminate (local) without forgetting state. */
+  shutdown(): void;
+  /** Kill everything (sessions included). Test/teardown helper. */
+  closeAll(): void;
+  /** Reattach to surviving sessions on boot (no-op for the local backend). */
+  reattach(): Promise<void>;
+}
+
+/**
+ * Pick the session backend for this host: the tmux-backed manager when a `tmux`
+ * binary is on PATH (the VPS, plus any Linux/macOS dev box with tmux), else the
+ * direct node-pty backend. This is what keeps the desktop built-in daemon
+ * working on Windows and on a stock macOS without Homebrew tmux — there every
+ * tmux invocation would ENOENT, so we never construct the tmux backend at all.
+ * Persistence/reattach (Phase 2's goal) only apply to the tmux backend; the
+ * local fallback restores the prior, non-persistent direct-PTY behavior.
+ */
+export function createSessionManager(
+  registry: RegistryService,
+  tmux: Tmux,
+  indexPath: string
+): ISessionManager {
+  if (tmuxAvailable()) {
+    console.log("sessions: tmux-backed backend (sessions persist across daemon restarts)");
+    return new SessionManager(registry, tmux, indexPath);
+  }
+  console.log(
+    "sessions: tmux not found on PATH — using direct node-pty backend " +
+      "(sessions do NOT survive a daemon restart; install tmux >= 3.2 to enable persistence)"
+  );
+  return new LocalSessionManager(registry);
+}
+
+/**
  * Owns every live session. Each session's command runs inside a DEDICATED tmux
  * server (fixed socket); the daemon talks to it through a thin `tmux attach`
  * PTY. Because the command lives in tmux (not as a child of node), it survives a
  * daemon restart — on boot we reconcile live tmux sessions against sessions.json
  * and re-create the attach PTYs. Open sessions for a project are its tabs.
  */
-export class SessionManager {
+export class SessionManager implements ISessionManager {
   private sessions = new Map<string, Session>();
   /** Emits "created" | "exited" | "updated" (SessionSummary) and "closed" ({ id }). */
   readonly lifecycle = new EventEmitter();
@@ -363,5 +420,193 @@ export class SessionManager {
     } catch (error) {
       console.error("Failed to persist sessions index", error);
     }
+  }
+}
+
+/**
+ * Direct node-pty backend used where tmux is unavailable (Windows, stock macOS
+ * without Homebrew tmux). Each session's command is a CHILD of the daemon
+ * process — so, unlike {@link SessionManager}, these sessions do NOT survive a
+ * daemon restart (Phase 2 persistence requires tmux). This is the prior,
+ * pre-tmux behavior, preserved so the desktop built-in daemon keeps working on
+ * hosts with no tmux. Scrollback comes from the in-memory ring; reattach is a
+ * no-op (there is nothing to reattach to). The public surface is identical to
+ * the tmux backend so the daemon can use either interchangeably.
+ */
+export class LocalSessionManager implements ISessionManager {
+  private sessions = new Map<string, Session>();
+  /** Emits "created" | "exited" | "updated" (SessionSummary) and "closed" ({ id }). */
+  readonly lifecycle = new EventEmitter();
+
+  constructor(private readonly registry: RegistryService) {}
+
+  create(req: CreateSessionRequest): SessionSummary {
+    const entry = this.registry.get(req.refId);
+    if (!entry?.resolvedBin || !entry.enabled) {
+      throw new SessionError(`Registry entry "${req.refId}" is not available.`);
+    }
+
+    const cols = req.cols && req.cols > 0 ? req.cols : 80;
+    const rows = req.rows && req.rows > 0 ? req.rows : 24;
+    const cwd = req.cwd || req.projectPath || homedir();
+    const id = randomUUID();
+    const projectPath = req.projectPath ?? "";
+    // Append to the end of this project's tab strip.
+    const maxOrder = [...this.sessions.values()]
+      .filter((s) => s.summary.projectPath === projectPath)
+      .reduce((max, s) => Math.max(max, s.summary.order), -1);
+
+    const pty = spawn(entry.resolvedBin, entry.args ?? [], {
+      name: "xterm-256color",
+      cwd,
+      cols,
+      rows,
+      env: { ...process.env, TERM: "xterm-256color", COLORTERM: "truecolor", ...entry.env } as Record<string, string>
+    });
+
+    const summary: SessionSummary = {
+      id,
+      kind: entry.kind,
+      refId: entry.id,
+      title: req.title || entry.name,
+      projectPath,
+      cwd,
+      cols,
+      rows,
+      status: "running",
+      order: maxOrder + 1,
+      createdAt: new Date().toISOString()
+    };
+
+    const session: Session = { summary, pty, buffer: "", emitter: new EventEmitter() };
+    this.sessions.set(id, session);
+
+    pty.onData((data) => {
+      session.buffer = (session.buffer + data).slice(-MAX_BUFFER);
+      session.emitter.emit("output", data);
+    });
+    pty.onExit(({ exitCode }) => {
+      session.summary.status = "exited";
+      session.summary.exitCode = exitCode;
+      session.pty = null;
+      session.emitter.emit("exit", exitCode);
+      this.lifecycle.emit("exited", { ...session.summary });
+    });
+
+    this.lifecycle.emit("created", { ...summary });
+    return { ...summary };
+  }
+
+  list(projectPath?: string): SessionSummary[] {
+    const all = [...this.sessions.values()]
+      .map((s) => ({ ...s.summary }))
+      .sort((a, b) => a.order - b.order || a.createdAt.localeCompare(b.createdAt));
+    return projectPath === undefined ? all : all.filter((s) => s.projectPath === projectPath);
+  }
+
+  get(id: string): SessionSummary | undefined {
+    const session = this.sessions.get(id);
+    return session ? { ...session.summary } : undefined;
+  }
+
+  /** No durable store here; the hot in-memory ring is the only scrollback. */
+  async scrollback(id: string): Promise<string> {
+    return this.buffer(id);
+  }
+
+  buffer(id: string): string {
+    return this.sessions.get(id)?.buffer ?? "";
+  }
+
+  input(id: string, data: string): void {
+    this.sessions.get(id)?.pty?.write(data);
+  }
+
+  resize(id: string, cols: number, rows: number): void {
+    const session = this.sessions.get(id);
+    if (session?.pty && cols > 0 && rows > 0) {
+      session.pty.resize(cols, rows);
+      session.summary.cols = cols;
+      session.summary.rows = rows;
+    }
+  }
+
+  /** Rename a session's tab; empty title reverts to the registry default name. */
+  rename(id: string, title: string): SessionSummary | undefined {
+    const session = this.sessions.get(id);
+    if (!session) {
+      return undefined;
+    }
+    const trimmed = title.trim();
+    const fallback = this.registry.get(session.summary.refId)?.name ?? session.summary.refId;
+    session.summary.title = trimmed || fallback;
+    this.lifecycle.emit("updated", { ...session.summary });
+    return { ...session.summary };
+  }
+
+  /** Reassign per-project tab order from an ordered id list (unknown ids ignored). */
+  reorder(projectPath: string, ids: string[]): void {
+    ids.forEach((id, index) => {
+      const session = this.sessions.get(id);
+      if (session && session.summary.projectPath === projectPath && session.summary.order !== index) {
+        session.summary.order = index;
+        this.lifecycle.emit("updated", { ...session.summary });
+      }
+    });
+  }
+
+  /** Kill (if running) and forget a session. Returns false if unknown. */
+  close(id: string): boolean {
+    const session = this.sessions.get(id);
+    if (!session) {
+      return false;
+    }
+    try {
+      session.pty?.kill();
+    } catch {
+      /* already gone */
+    }
+    this.sessions.delete(id);
+    this.lifecycle.emit("closed", { id });
+    return true;
+  }
+
+  /** Stream a session's output/exit to one client. Returns an unsubscribe fn. */
+  subscribe(
+    id: string,
+    onOutput: (data: string) => void,
+    onExit: (code: number) => void
+  ): () => void {
+    const session = this.sessions.get(id);
+    if (!session) {
+      return () => undefined;
+    }
+    session.emitter.on("output", onOutput);
+    session.emitter.on("exit", onExit);
+    return () => {
+      session.emitter.off("output", onOutput);
+      session.emitter.off("exit", onExit);
+    };
+  }
+
+  /**
+   * Daemon shutdown. These PTYs are children of the daemon, so they die with it
+   * regardless; kill them explicitly and forget so we leave nothing headless.
+   * (There is no tmux server to detach from and reattach to here.)
+   */
+  shutdown(): void {
+    this.closeAll();
+  }
+
+  /** Kill everything (daemon shutdown / teardown). */
+  closeAll(): void {
+    for (const id of [...this.sessions.keys()]) {
+      this.close(id);
+    }
+  }
+
+  /** Nothing persists across a restart in this backend → nothing to reattach. */
+  async reattach(): Promise<void> {
+    /* no-op: direct PTYs do not outlive the daemon */
   }
 }

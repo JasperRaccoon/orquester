@@ -1,4 +1,6 @@
 import { execFile } from "node:child_process";
+import { accessSync, constants } from "node:fs";
+import { delimiter, isAbsolute, join } from "node:path";
 
 /** Prefix for every orquester-owned tmux session (`orq-<uuid>`). */
 export const TMUX_SESSION_PREFIX = "orq-";
@@ -6,6 +8,35 @@ export const TMUX_SESSION_PREFIX = "orq-";
 /** Derive the tmux session name from a session id. */
 export function tmuxName(id: string): string {
   return `${TMUX_SESSION_PREFIX}${id}`;
+}
+
+/**
+ * True if a `tmux` binary is resolvable on PATH. The tmux-backed SessionManager
+ * is the persistence backend on the VPS (and any Linux/macOS host with tmux),
+ * but the desktop built-in daemon also runs on Windows (no tmux) and on a stock
+ * macOS where tmux isn't preinstalled — there we fall back to a direct node-pty
+ * backend (see createSessionManager). Mirrors registry.ts's resolveBin: sync
+ * PATH scan, F_OK on win32 (+ PATHEXT) and X_OK elsewhere.
+ */
+export function tmuxAvailable(): boolean {
+  const dirs = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
+  const exts =
+    process.platform === "win32" ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT").split(";").filter(Boolean) : [""];
+  const mode = process.platform === "win32" ? constants.F_OK : constants.X_OK;
+  for (const dir of dirs) {
+    for (const ext of exts) {
+      const candidate = join(dir, `tmux${ext}`);
+      if (isAbsolute(candidate)) {
+        try {
+          accessSync(candidate, mode);
+          return true;
+        } catch {
+          /* not here; keep scanning */
+        }
+      }
+    }
+  }
+  return false;
 }
 
 interface ExecResult {
