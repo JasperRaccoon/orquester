@@ -53,7 +53,7 @@ import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { homedir, platform as osPlatform } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { stat } from "node:fs/promises";
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import bcrypt from "bcryptjs";
 
 const daemonId = randomUUID();
@@ -262,10 +262,12 @@ function createServer(
       return;
     }
 
-    const expected = config.transports.http.passwordHash;
-    const actual = request.headers.authorization?.replace(/^Bearer\s+/i, "");
-
-    if (!expected || !actual || !safeEqual(actual, expected)) {
+    const authorized = authorizeCredential(
+      request.headers.authorization?.replace(/^Bearer\s+/i, ""),
+      config.transports.http.username,
+      config.transports.http.passwordHash
+    );
+    if (!authorized) {
       return reply.code(401).send({
         code: "UNAUTHORIZED",
         message: "A valid bearer token is required for this daemon transport."
@@ -690,8 +692,7 @@ function createServer(
     instance.get("/ws", { websocket: true }, (socket, request) => {
       if (options.authRequired) {
         const token = (request.query as { token?: string }).token;
-        const expected = config.transports.http.passwordHash;
-        if (!expected || !token || !safeEqual(token, expected)) {
+        if (!authorizeCredential(token, config.transports.http.username, config.transports.http.passwordHash)) {
           socket.close(1008, "unauthorized");
           return;
         }
@@ -904,6 +905,59 @@ function safeEqual(a: string, b: string): boolean {
   const ba = Buffer.from(a);
   const bb = Buffer.from(b);
   return ba.length === bb.length && timingSafeEqual(ba, bb);
+}
+
+/**
+ * Decode a credential bearer/token of the form base64("<username>:<hash>").
+ * Splits on the FIRST ":" (a bcrypt hash contains no ":", but be defensive).
+ * Returns empty strings when the input is missing or not valid base64 — the
+ * caller still runs the full constant-time check so a malformed credential is
+ * indistinguishable from a wrong one.
+ */
+function decodeCredential(token: string | undefined): { user: string; hash: string } {
+  if (!token) {
+    return { user: "", hash: "" };
+  }
+  let decoded: string;
+  try {
+    decoded = Buffer.from(token, "base64").toString("utf8");
+  } catch {
+    return { user: "", hash: "" };
+  }
+  const sep = decoded.indexOf(":");
+  if (sep === -1) {
+    return { user: "", hash: "" };
+  }
+  return { user: decoded.slice(0, sep), hash: decoded.slice(sep + 1) };
+}
+
+/** Normalize a username for comparison (matches the config-side transform). */
+function normalizeUsername(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+/** Fixed-length sha256 digest so timingSafeEqual gets equal-length buffers. */
+function sha256(value: string): Buffer {
+  return createHash("sha256").update(value).digest();
+}
+
+/**
+ * Constant-time credential check with NO early return: both the username and
+ * the password-hash comparisons are always computed, so wrong-username,
+ * wrong-length and wrong-password are indistinguishable (no enumeration).
+ */
+function authorizeCredential(
+  token: string | undefined,
+  expectedUsername: string,
+  expectedHash: string | undefined
+): boolean {
+  if (!expectedHash) {
+    return false;
+  }
+  const { user, hash } = decodeCredential(token);
+  const userOk = timingSafeEqual(sha256(normalizeUsername(user)), sha256(expectedUsername));
+  const passOk = timingSafeEqual(sha256(hash), sha256(expectedHash));
+  return userOk && passOk;
 }
 
 /**
