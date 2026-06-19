@@ -12,8 +12,9 @@ import { getSessionChannel } from "./ws-session-channel";
 
 export interface HttpTransporterOptions {
   baseUrl: string;
-  /** Bearer token sent as `Authorization: Bearer <password>` when present. */
-  password?: string;
+  /** Bearer sent as `Authorization: Bearer <credential>` when present. The
+   *  credential is base64("<username>:<hash>"). */
+  credential?: string;
   /** Defaults to a {@link FetchHttpClient}. */
   httpClient?: HttpClient;
 }
@@ -27,12 +28,12 @@ export class HttpTransporter implements Transporter {
   readonly kind = "http";
 
   private readonly baseUrl: string;
-  private readonly password?: string;
+  private readonly credential?: string;
   private readonly client: HttpClient;
 
   constructor(options: HttpTransporterOptions) {
     this.baseUrl = options.baseUrl.replace(/\/$/, "");
-    this.password = options.password;
+    this.credential = options.credential;
     this.client = options.httpClient ?? new FetchHttpClient();
   }
 
@@ -40,8 +41,8 @@ export class HttpTransporter implements Transporter {
     const url = `${this.baseUrl}${req.path}${buildQueryString(req.query)}`;
     const headers: Record<string, string> = { ...req.headers };
 
-    if (this.password) {
-      headers.Authorization = `Bearer ${this.password}`;
+    if (this.credential) {
+      headers.Authorization = `Bearer ${this.credential}`;
     }
 
     let body: string | undefined;
@@ -72,8 +73,8 @@ export class HttpTransporter implements Transporter {
   openStream(path: string, handlers: StreamHandlers): StreamHandle {
     const url = `${this.baseUrl}${path}`;
     const headers: Record<string, string> = {};
-    if (this.password) {
-      headers.Authorization = `Bearer ${this.password}`;
+    if (this.credential) {
+      headers.Authorization = `Bearer ${this.credential}`;
     }
 
     // Desktop injects a Node client that streams over IPC; using it here keeps
@@ -121,6 +122,6 @@ export class HttpTransporter implements Transporter {
    * per origin) so many terminals don't each hold a streaming HTTP connection.
    */
   sessionChannel(): SessionChannel {
-    return getSessionChannel(this.baseUrl, this.password);
+    return getSessionChannel(this.baseUrl, this.credential);
   }
 }

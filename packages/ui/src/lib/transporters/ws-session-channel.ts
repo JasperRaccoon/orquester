@@ -20,17 +20,17 @@ export class WsSessionChannel implements SessionChannel {
 
   constructor(
     private readonly wsUrl: string,
-    private password?: string
+    private credential?: string
   ) {
     this.connect();
   }
 
-  /** Update the bearer token (e.g. after auth) and reconnect if it changed. */
-  setPassword(password?: string): void {
-    if (password === this.password) {
+  /** Update the credential (e.g. after auth) and reconnect if it changed. */
+  setCredential(credential?: string): void {
+    if (credential === this.credential) {
       return;
     }
-    this.password = password;
+    this.credential = credential;
     this.reconnect();
   }
 
@@ -55,7 +55,9 @@ export class WsSessionChannel implements SessionChannel {
   }
 
   private url(): string {
-    return this.password ? `${this.wsUrl}?token=${encodeURIComponent(this.password)}` : this.wsUrl;
+    return this.credential
+      ? `${this.wsUrl}?token=${encodeURIComponent(this.credential)}`
+      : this.wsUrl;
   }
 
   private connect(): void {
@@ -157,14 +159,14 @@ export class WsSessionChannel implements SessionChannel {
 /** One shared channel per daemon origin, reused across ApiClient rebuilds. */
 const channels = new Map<string, WsSessionChannel>();
 
-export function getSessionChannel(httpBaseUrl: string, password?: string): WsSessionChannel {
+export function getSessionChannel(httpBaseUrl: string, credential?: string): WsSessionChannel {
   const wsUrl = `${httpBaseUrl.replace(/^http/, "ws").replace(/\/$/, "")}/ws`;
   const existing = channels.get(wsUrl);
   if (existing) {
-    existing.setPassword(password);
+    existing.setCredential(credential);
     return existing;
   }
-  const channel = new WsSessionChannel(wsUrl, password);
+  const channel = new WsSessionChannel(wsUrl, credential);
   channels.set(wsUrl, channel);
   return channel;
 }

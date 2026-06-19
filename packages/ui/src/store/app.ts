@@ -3,7 +3,16 @@ import { create } from "zustand";
 import { ApiClient, ApiError } from "../lib/api-client";
 import { createTransporter } from "../lib/transporters";
 import { toRemoteConfig, toUiConnection } from "../lib/connections";
-import { clearStoredHash, deriveAuthHash, loadStoredHash, storeHash } from "../lib/auth";
+import {
+  buildCredential,
+  clearStoredHash,
+  clearStoredUsername,
+  deriveAuthHash,
+  loadStoredHash,
+  loadStoredUsername,
+  storeHash,
+  storeUsername
+} from "../lib/auth";
 import { loadViewModes, saveViewModes, type ViewMode } from "../lib/view-mode";
 import type { AppConfigAdapter } from "../lib/app-config";
 import type { HttpClient } from "../lib/http-client";
@@ -110,8 +119,8 @@ async function persistRemotes(connections: UiConnection[]): Promise<void> {
 }
 
 /** Rebuild an ApiClient for the same connection but with a bearer credential. */
-function apiWithPassword(api: ApiClient, password: string): ApiClient {
-  const connection: UiConnection = { ...api.connection, password };
+function apiWithCredential(api: ApiClient, credential: string): ApiClient {
+  const connection: UiConnection = { ...api.connection, password: credential };
   return new ApiClient(connection, buildTransporter(connection));
 }
 
@@ -165,6 +174,8 @@ export interface AppState {
   // auth (web → password-protected HTTP daemon)
   authPrompt: { connectionId: string } | null;
   authSalt: string | null;
+  /** Whether the active connection's auth needs a username (UI hint). */
+  authRequiresUsername: boolean;
 
   // navigation
   currentWorkspace: string | null;
@@ -208,7 +219,7 @@ export interface AppState {
   updateAppConfig: (patch: Partial<UiAppConfig>) => Promise<void>;
 
   // auth
-  submitPassword: (password: string) => Promise<void>;
+  submitCredentials: (username: string, password: string) => Promise<void>;
   signOut: () => void;
 
   loadWorkspaces: () => Promise<void>;
@@ -247,6 +258,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   sidebarDrawerOpen: false,
   authPrompt: null,
   authSalt: null,
+  authRequiresUsername: false,
   currentWorkspace: null,
   currentProject: null,
   registry: EMPTY_REGISTRY,
@@ -292,19 +304,26 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   establish: async (api) => {
-    // Auth gate: derive/restore the bcrypt-hash bearer (web) or prompt.
+    // Auth gate: derive/restore the bearer credential (web) or prompt.
     let active = api;
     const info = await active.authInfo().catch(() => null);
-    set({ authSalt: info?.salt ?? null });
+    set({ authSalt: info?.salt ?? null, authRequiresUsername: info?.requiresUsername ?? false });
     if (info?.authRequired) {
-      const hash = active.connection.password ?? loadStoredHash(active.connection.endpoint);
-      if (!hash) {
+      // The bearer is base64("<username>:<hash>"). Prefer one already on the
+      // connection; else rebuild it from the per-endpoint stored username+hash.
+      const endpoint = active.connection.endpoint;
+      const storedHash = loadStoredHash(endpoint);
+      const storedUser = loadStoredUsername(endpoint);
+      const credential =
+        active.connection.password ??
+        (storedHash ? buildCredential(storedUser ?? "", storedHash) : undefined);
+      if (!credential) {
         stopHealthProbe();
         set({ connectionStatus: "error", reconnectAttempt: 0, authPrompt: { connectionId: active.connection.id } });
         return;
       }
-      if (active.connection.password !== hash) {
-        active = apiWithPassword(active, hash);
+      if (active.connection.password !== credential) {
+        active = apiWithCredential(active, credential);
         set({ api: active });
       }
     }
@@ -353,7 +372,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           await current.health();
           // Daemon is back: rebuild the client so terminals + event streams
           // re-subscribe to the (intact) sessions, then re-establish.
-          const fresh = apiWithPassword(current, current.connection.password ?? "");
+          const fresh = apiWithCredential(current, current.connection.password ?? "");
           set({ api: fresh });
           await get().establish(fresh);
           break;
@@ -428,17 +447,21 @@ export const useAppStore = create<AppState>((set, get) => ({
     await result?.catch(() => undefined);
   },
 
-  submitPassword: async (password) => {
+  submitCredentials: async (username, password) => {
     const api = get().api;
     const salt = get().authSalt;
     if (!api || !salt) {
       return;
     }
-    // Derive the same bcrypt hash the daemon stores; persist it (never the
-    // plaintext) and use it as the bearer.
+    // Derive the same bcrypt hash the daemon stores; persist the hash + the
+    // plain username (never the plaintext password). The wire bearer is
+    // base64("<username>:<hash>").
+    const normalizedUser = username.trim().toLowerCase();
     const hash = deriveAuthHash(password, salt);
+    const credential = buildCredential(normalizedUser, hash);
     storeHash(api.connection.endpoint, hash);
-    set({ api: apiWithPassword(api, hash), authPrompt: null });
+    storeUsername(api.connection.endpoint, normalizedUser);
+    set({ api: apiWithCredential(api, credential), authPrompt: null });
     await get().connect();
   },
 
@@ -449,8 +472,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       reconnecting = false;
       closeEvents();
       clearStoredHash(api.connection.endpoint);
+      clearStoredUsername(api.connection.endpoint);
       set({
-        api: apiWithPassword(api, ""),
+        api: apiWithCredential(api, ""),
         connectionStatus: "error",
         reconnectAttempt: 0,
         authPrompt: { connectionId: api.connection.id }
@@ -515,6 +539,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       // A wrong/stale token surfaces here — clear it and re-prompt.
       if (error instanceof ApiError && error.status === 401) {
         clearStoredHash(api.connection.endpoint);
+        clearStoredUsername(api.connection.endpoint);
         set({ connectionStatus: "error", authPrompt: { connectionId: api.connection.id } });
       } else {
         console.error("[orquester] failed to load workspaces", error);
