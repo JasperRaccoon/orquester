@@ -13,10 +13,6 @@ export interface ApiErrorPayload {
 
 export interface HealthResponse {
   ok: true;
-  daemonId: string;
-  version: string;
-  mode: "local" | "remote";
-  transports: Array<"unix" | "http">;
 }
 
 export interface ServerInfoResponse {

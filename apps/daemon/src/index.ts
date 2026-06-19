@@ -231,10 +231,6 @@ function createServer(
   options: { authRequired: boolean; mode: "local" | "remote"; serveWeb?: string }
 ): FastifyInstance {
   const { registry, sessions } = services;
-  // Remote (HTTP) clients are cross-origin (web app / desktop renderer), so the
-  // remote transport is permissive on CORS; it is still bearer-token protected.
-  const cors = options.mode === "remote";
-  const corsHeaders: Record<string, string> = cors ? { "access-control-allow-origin": "*" } : {};
 
   const app = Fastify({
     // Remote requests arrive via Caddy on loopback (reverse_proxy 127.0.0.1:47831),
@@ -261,24 +257,14 @@ function createServer(
 
   app.addHook("onRequest", async (request, reply) => {
     // The multiplexed session WebSocket authenticates itself via a query token
-    // (browsers can't set WS headers) and must skip the CORS/bearer logic below.
+    // (browsers can't set WS headers) and must skip the bearer logic below.
     if (request.url.split("?")[0] === "/ws") {
       return;
-    }
-    if (cors) {
-      // reply.header() is synchronous — do not await (awaiting the reply
-      // deadlocks the request).
-      reply.header("access-control-allow-origin", "*");
-      reply.header("access-control-allow-headers", "authorization, content-type");
-      reply.header("access-control-allow-methods", "GET, POST, PUT, DELETE, OPTIONS");
-      if (request.method === "OPTIONS") {
-        return reply.code(204).send();
-      }
     }
 
     // Only the API + event stream are token-gated; the static web client, its
     // assets and the public auth-info endpoint load freely (the web app then
-    // authenticates its API calls with the bcrypt-hash bearer).
+    // authenticates its API calls with the credential bearer).
     const url = request.url.split("?")[0];
     const needsAuth =
       (url.startsWith("/api") || url.startsWith("/events")) && url !== "/api/auth/info";
@@ -325,13 +311,9 @@ function createServer(
     };
   });
 
-  app.get("/health", async (): Promise<HealthResponse> => ({
-    ok: true,
-    daemonId,
-    version: packageVersion,
-    mode: options.mode,
-    transports: ["unix" as const, ...(config.transports.http.enabled ? (["http"] as const) : [])]
-  }));
+  // Public liveness only. Daemon id / version / mode / transports are not
+  // disclosed to unauthenticated callers (moved behind /api/info, which is gated).
+  app.get("/health", async (): Promise<HealthResponse> => ({ ok: true }));
 
   app.get("/api/info", async (): Promise<ServerInfoResponse> => ({
     name: "Orquester daemon",
@@ -700,8 +682,7 @@ function createServer(
     reply.raw.writeHead(200, {
       "content-type": "application/octet-stream",
       "cache-control": "no-cache",
-      "x-accel-buffering": "no",
-      ...corsHeaders
+      "x-accel-buffering": "no"
     });
     reply.raw.write(sessions.buffer(id));
 
@@ -724,8 +705,7 @@ function createServer(
     reply.raw.writeHead(200, {
       "content-type": "application/x-ndjson",
       "cache-control": "no-cache",
-      "x-accel-buffering": "no",
-      ...corsHeaders
+      "x-accel-buffering": "no"
     });
 
     const sink = { send: (data: string) => reply.raw.write(`${data}\n`) };
@@ -1006,9 +986,12 @@ async function writeJsonFile(file: string, value: unknown): Promise<void> {
   await writeFile(file, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
-/** bcrypt-hash a plaintext password (stable hash persisted at rest). */
+/** bcrypt-hash a plaintext password (stable hash persisted at rest). Cost 12
+ *  slows offline cracking / per-guess derivation if a hash ever leaks; the
+ *  expensive hash runs only at password-set and client-side login, so
+ *  per-request auth stays cheap. */
 function hashPassword(plaintext: string): string {
-  return bcrypt.hashSync(plaintext, bcrypt.genSaltSync(10));
+  return bcrypt.hashSync(plaintext, bcrypt.genSaltSync(12));
 }
 
 /** Constant-time string comparison. */
