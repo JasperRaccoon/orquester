@@ -530,6 +530,14 @@ export class LocalSessionManager implements ISessionManager {
       session.emitter.emit("output", data);
     });
     pty.onExit(({ exitCode }) => {
+      // If close()/closeAll() already removed (or replaced) this session, the PTY
+      // death is the side effect of our own kill — not a real command exit. Bail
+      // so we don't emit a trailing "exited" AFTER "closed" (which would
+      // resurrect a ghost tab in the UI via upsertSession).
+      if (this.sessions.get(id) !== session) {
+        session.pty = null;
+        return;
+      }
       session.summary.status = "exited";
       session.summary.exitCode = exitCode;
       session.pty = null;
