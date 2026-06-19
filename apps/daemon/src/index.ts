@@ -795,12 +795,29 @@ function createServer(
             send({ t: "end", id });
             return;
           }
+          // Cancel any prior subscription and reserve this id's slot SYNCHRONOUSLY
+          // with a unique placeholder before the await below. `ws` drains queued
+          // frames into this async handler at each await point, so a back-to-back
+          // `unsub` (fast tab close, or a strict-mode dev double-mount — see
+          // WsSessionChannel.openOutput/close) runs DURING this await. Reserving the
+          // slot lets that unsub remove it, and the identity check after the await
+          // lets the unsub — or a newer sub — win instead of installing an emitter
+          // listener the client already cancelled (which would leak and keep
+          // streaming output for a closed stream).
+          subs.get(id)?.();
+          const pending = () => {};
+          subs.set(id, pending);
           send({ t: "out", id, data: await sessions.scrollback(id) });
+          // A racing unsub (or a newer sub) replaced our placeholder while we
+          // awaited — honor it and do not install the subscription.
+          if (subs.get(id) !== pending) {
+            return;
+          }
           if (summary.status === "exited") {
+            subs.delete(id);
             send({ t: "end", id });
             return;
           }
-          subs.get(id)?.();
           subs.set(
             id,
             sessions.subscribe(
