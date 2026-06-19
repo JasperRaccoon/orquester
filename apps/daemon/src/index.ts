@@ -232,6 +232,13 @@ function createServer(
   const corsHeaders: Record<string, string> = cors ? { "access-control-allow-origin": "*" } : {};
 
   const app = Fastify({
+    // Remote requests arrive via Caddy on loopback (reverse_proxy 127.0.0.1:47831),
+    // so trust ONLY the loopback hop. proxy-addr then resolves request.ip to the
+    // closest UNtrusted address — the real client IP that Caddy appended to
+    // X-Forwarded-For — instead of the literal 127.0.0.1 socket peer. This is what
+    // makes the per-IP login throttle key on the actual client (see clientIp).
+    // The unix-socket transport has no proxy, so leave it off there.
+    trustProxy: options.mode === "remote" ? "127.0.0.1" : false,
     logger: {
       level: "info",
       stream: logStream,
@@ -1130,12 +1137,32 @@ class LoginThrottle {
   }
 }
 
-/** Client IP from Caddy's X-Forwarded-For (first hop), falling back to the socket. */
+/**
+ * Client IP used to key the login throttle.
+ *
+ * TRUSTED-HOP ASSUMPTION: exactly ONE trusted proxy (Caddy) fronts the daemon on
+ * loopback. Caddy's default `reverse_proxy` APPENDS the real client IP to whatever
+ * the client sent, so `X-Forwarded-For` is `<client-supplied…>, <real-client-ip>`
+ * — the entry we trust is the RIGHTMOST one (the hop Caddy added), never the
+ * leftmost (which is fully attacker-controlled and would let an attacker rotate it
+ * per request to evade the per-IP throttle).
+ *
+ * With `trustProxy: "127.0.0.1"` set on the remote Fastify instance, proxy-addr
+ * already computes exactly this (request.ip = closest untrusted address = the
+ * rightmost XFF hop), so request.ip is authoritative; the manual rightmost parse
+ * below is a belt-and-suspenders fallback that still refuses the client-controlled
+ * leftmost value. If the deployment ever inserts more than one proxy hop, both
+ * trustProxy and this helper must be updated together.
+ */
 function clientIp(request: { headers: Record<string, unknown>; ip: string }): string {
+  if (request.ip) {
+    return request.ip;
+  }
   const xff = request.headers["x-forwarded-for"];
-  const raw = Array.isArray(xff) ? xff[0] : xff;
+  const raw = Array.isArray(xff) ? xff[xff.length - 1] : xff;
   if (typeof raw === "string" && raw.length > 0) {
-    return raw.split(",")[0]!.trim();
+    const parts = raw.split(",");
+    return parts[parts.length - 1]!.trim();
   }
   return request.ip;
 }
