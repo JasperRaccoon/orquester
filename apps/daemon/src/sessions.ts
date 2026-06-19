@@ -151,7 +151,22 @@ export class SessionManager implements ISessionManager {
 
     this.tmux
       .newSession({ id, cols, rows, cwd, env, bin: entry.resolvedBin, args: entry.args ?? [] })
-      .then(() => this.attach(session))
+      .then(() => {
+        // newSession is async (an execFile of `tmux new-session` takes several
+        // ms) but create() has already returned. If close()/closeAll() ran in
+        // that window it killed a tmux session that did NOT exist yet (silent
+        // no-op) and dropped us from `this.sessions`. Now that the LIVE
+        // orq-<id> session finally exists, kill it instead of attaching —
+        // otherwise its command (possibly a `claude`/agent) keeps running
+        // headless, invisible to the UI and sessions.json, until the next
+        // daemon restart reaps it as an orphan. (LocalSessionManager spawns its
+        // PTY synchronously in create(), so it never opens this window.)
+        if (this.sessions.get(id) !== session) {
+          void this.tmux.killSession(id);
+          return;
+        }
+        this.attach(session);
+      })
       .catch((error) => {
         // Failed to launch under tmux: surface as an immediate exit so the tab
         // resolves the same way a crashed PTY would.
