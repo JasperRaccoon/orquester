@@ -578,7 +578,17 @@ export const useAppStore = create<AppState>((set, get) => ({
       get().closeWorkspace();
     }
     if (prefix) {
-      set((state) => clearProjectLocalState(state, (path) => path === prefix || path.startsWith(`${prefix}/`)));
+      const match = (path: string) => path === prefix || path.startsWith(`${prefix}/`);
+      set((state) => {
+        const next = clearProjectLocalState(state, match);
+        // If the open project lived under the deleted workspace, drop it from
+        // the main view (closeWorkspace keeps currentProject sticky, and the
+        // delete can fire while currentWorkspace is already null).
+        if (state.currentProject && match(state.currentProject.path)) {
+          next.currentProject = null;
+        }
+        return next;
+      });
     }
     await get().loadWorkspaces();
   },
