@@ -13,6 +13,7 @@ export const ConnectionStatusToast: React.FC = () => {
   const status = useAppStore((s) => s.connectionStatus);
   const attempt = useAppStore((s) => s.reconnectAttempt);
   const authPrompt = useAppStore((s) => s.authPrompt);
+  const connectionError = useAppStore((s) => s.connectionError);
   const connect = useAppStore((s) => s.connect);
 
   if (authPrompt) {
@@ -38,7 +39,7 @@ export const ConnectionStatusToast: React.FC = () => {
         ) : (
           <>
             <WifiOff size={15} className="text-red-400" />
-            <span className="text-neutral-200">Disconnected</span>
+            <span className="text-neutral-200">{connectionError ?? "Disconnected"}</span>
             <button
               type="button"
               onClick={() => void connect()}

@@ -70,7 +70,7 @@ export class ApiClient {
     });
 
     if (!response.ok) {
-      throw new ApiError(response.status, method, path);
+      throw new ApiError(response.status, method, path, response.headers);
     }
 
     return response.data;
@@ -307,9 +307,21 @@ export class ApiError extends Error {
   constructor(
     public readonly status: number,
     method: string,
-    path: string
+    path: string,
+    /** Response headers (lowercased keys), e.g. `retry-after` on a 429. */
+    public readonly headers?: Record<string, string>
   ) {
     super(`Orquester API ${method} ${path} failed with status ${status}`);
     this.name = "ApiError";
+  }
+
+  /** Parsed `Retry-After` (seconds) when present, else null. Set on 429s. */
+  get retryAfterSeconds(): number | null {
+    const raw = this.headers?.["retry-after"];
+    if (!raw) {
+      return null;
+    }
+    const seconds = Number(raw);
+    return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
   }
 }

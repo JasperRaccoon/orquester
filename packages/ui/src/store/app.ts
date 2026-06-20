@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { create } from "zustand";
+import { create, type StoreApi } from "zustand";
 import { ApiClient, ApiError } from "../lib/api-client";
 import { createTransporter } from "../lib/transporters";
 import { toRemoteConfig, toUiConnection } from "../lib/connections";
@@ -65,14 +65,65 @@ let eventsUnsubscribe: (() => void) | null = null;
 let eventsGen = 0;
 /** Periodic health probe that detects a dropped/restarted transport. */
 let healthTimer: ReturnType<typeof setInterval> | null = null;
+/** Pending delayed reconnect (e.g. after a 429 lockout); cleared before re-arming. */
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 /** Guards against overlapping reconnect loops. */
 let reconnecting = false;
+
+/** Capped exponential backoff (ms) for reconnect attempt N (1-based). */
+function backoffMs(attempt: number): number {
+  return Math.min(attempt * 1000, 8000);
+}
 
 function stopHealthProbe(): void {
   if (healthTimer) {
     clearInterval(healthTimer);
     healthTimer = null;
   }
+}
+
+/** Clear any pending delayed reconnect so timers never stack. */
+function clearReconnectTimer(): void {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+}
+
+/** Tear down every reconnect mechanism (probe, loop, pending timer). */
+function stopReconnect(): void {
+  stopHealthProbe();
+  clearReconnectTimer();
+  reconnecting = false;
+}
+
+/**
+ * Enter the rate-limited (429) state: surface a clear locked message + the
+ * lockout deadline, then schedule a SINGLE delayed reconnect after Retry-After
+ * (or a capped fallback). Tears down probes/timers first so backoffs never
+ * stack and we never tight-loop on the 429.
+ */
+function scheduleLockedReconnect(
+  get: StoreApi<AppState>["getState"],
+  set: StoreApi<AppState>["setState"],
+  retryAfterSeconds: number | null
+): void {
+  stopHealthProbe();
+  clearReconnectTimer();
+  reconnecting = false;
+  const seconds = retryAfterSeconds ?? 8;
+  set({
+    connectionStatus: "error",
+    reconnectAttempt: 0,
+    connectionError: `Too many attempts — locked out, retry in ${seconds}s.`,
+    lockedUntil: Date.now() + seconds * 1000
+  });
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    if (get().api) {
+      get().handleDisconnect();
+    }
+  }, seconds * 1000);
 }
 
 /** Intentionally drop the events subscription (bumps gen so its onEnd is ignored). */
@@ -161,6 +212,10 @@ export interface AppState {
   connectionStatus: ConnectionStatus;
   /** >0 while auto-reconnecting (drives the "Reconnecting… attempt N" toast). */
   reconnectAttempt: number;
+  /** Human-readable reason for an errored/locked connection (UI message). */
+  connectionError: string | null;
+  /** Epoch ms until which we're rate-limited (429); reconnect waits past this. */
+  lockedUntil: number | null;
 
   // connections (local daemon + user-added remotes)
   connections: UiConnection[];
@@ -261,6 +316,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   api: null,
   connectionStatus: "connecting",
   reconnectAttempt: 0,
+  connectionError: null,
+  lockedUntil: null,
   connections: [],
   activeConnectionId: null,
   appConfig: { useTitlebar: false, runInBackground: false },
@@ -290,9 +347,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (!initial) {
       return;
     }
-    stopHealthProbe();
-    reconnecting = false;
-    set({ connectionStatus: "connecting", reconnectAttempt: 0 });
+    // A manual connect (or fresh credentials) clears any lockout/backoff state.
+    stopReconnect();
+    set({ connectionStatus: "connecting", reconnectAttempt: 0, connectionError: null, lockedUntil: null });
 
     // The embedded daemon is spawned asynchronously: poll /health first.
     for (let attempt = 0; attempt < 60; attempt += 1) {
@@ -312,7 +369,14 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
     }
 
-    await get().establish(initial);
+    try {
+      await get().establish(initial);
+    } catch {
+      // A network error during establish (after /health came back) is a
+      // transient disconnect: hand off to the exponential-backoff reconnect.
+      // 401/429 are handled inside establish() and never reach here.
+      get().handleDisconnect();
+    }
   },
 
   establish: async (api) => {
@@ -330,8 +394,14 @@ export const useAppStore = create<AppState>((set, get) => ({
         active.connection.password ??
         (storedHash ? buildCredential(storedUser ?? "", storedHash) : undefined);
       if (!credential) {
-        stopHealthProbe();
-        set({ connectionStatus: "error", reconnectAttempt: 0, authPrompt: { connectionId: active.connection.id } });
+        stopReconnect();
+        set({
+          connectionStatus: "error",
+          reconnectAttempt: 0,
+          connectionError: null,
+          lockedUntil: null,
+          authPrompt: { connectionId: active.connection.id }
+        });
         return;
       }
       if (active.connection.password !== credential) {
@@ -340,7 +410,42 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
     }
 
-    set({ connectionStatus: "connected", reconnectAttempt: 0, authPrompt: null });
+    // CREDENTIAL PRE-CHECK: one lightweight authenticated request (GET /api/info)
+    // *before* the parallel fan-out. A bad/stale credential then yields a single
+    // 401 (not five), and a locked-out client a single 429 — and we never enter
+    // the reconnect loop on either. Only network errors fall through to retry.
+    try {
+      await active.info();
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        // Wrong credentials: drop the stored hash/username and re-prompt. Do NOT
+        // fan out and do NOT reconnect.
+        stopReconnect();
+        clearStoredHash(active.connection.endpoint);
+        clearStoredUsername(active.connection.endpoint);
+        set({
+          connectionStatus: "error",
+          reconnectAttempt: 0,
+          connectionError: "Incorrect username or password.",
+          lockedUntil: null,
+          authPrompt: { connectionId: active.connection.id }
+        });
+        return;
+      }
+      if (error instanceof ApiError && error.status === 429) {
+        // Rate-limited (too many failed attempts): back off until Retry-After
+        // (or a capped exponential fallback) — never tight-loop.
+        scheduleLockedReconnect(get, set, error.retryAfterSeconds);
+        return;
+      }
+      // Transient/network error: rethrow so the caller routes it to the
+      // exponential-backoff reconnect (handleDisconnect's loop, or connect()).
+      // Rethrowing — rather than calling handleDisconnect() here — keeps this
+      // safe when establish() is itself invoked from inside that loop.
+      throw error;
+    }
+
+    set({ connectionStatus: "connected", reconnectAttempt: 0, connectionError: null, lockedUntil: null, authPrompt: null });
     await Promise.all([get().loadWorkspaces(), get().loadSessions(), get().loadRegistry()]);
 
     // Live event sync. The stream ending unexpectedly (e.g. the transport was
@@ -367,7 +472,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   handleDisconnect: () => {
+    // Tear down the probe + any pending delayed reconnect so a stream `onEnd`
+    // can't stack a second loop/timer; a single backoff loop owns reconnection.
     stopHealthProbe();
+    clearReconnectTimer();
     if (reconnecting || get().api === null) {
       return;
     }
@@ -379,17 +487,32 @@ export const useAppStore = create<AppState>((set, get) => ({
         if (!current) {
           break;
         }
-        set({ connectionStatus: "connecting", reconnectAttempt: attempt });
+        // Respect an active lockout (429): wait past it before probing again so
+        // we don't hammer the rate-limited daemon.
+        const lockedUntil = get().lockedUntil;
+        if (lockedUntil && lockedUntil > Date.now()) {
+          await delay(Math.min(lockedUntil - Date.now(), 8000));
+          continue;
+        }
+        set({ connectionStatus: "connecting", reconnectAttempt: attempt, connectionError: null });
         try {
           await current.health();
           // Daemon is back: rebuild the client so terminals + event streams
-          // re-subscribe to the (intact) sessions, then re-establish.
+          // re-subscribe to the (intact) sessions, then re-establish. establish()
+          // runs its own auth pre-check — a 401 re-prompts and a 429 reschedules
+          // its own backoff, so either way we stop looping here.
           const fresh = apiWithCredential(current, current.connection.password ?? "");
           set({ api: fresh });
           await get().establish(fresh);
           break;
-        } catch {
-          await delay(Math.min(attempt * 1000, 8000));
+        } catch (error) {
+          // Even /health can 429 if the limiter is broadened: honor Retry-After.
+          if (error instanceof ApiError && error.status === 429) {
+            reconnecting = false;
+            scheduleLockedReconnect(get, set, error.retryAfterSeconds);
+            return;
+          }
+          await delay(backoffMs(attempt));
         }
       }
       reconnecting = false;
@@ -480,8 +603,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   signOut: () => {
     const api = get().api;
     if (api) {
-      stopHealthProbe();
-      reconnecting = false;
+      stopReconnect();
       closeEvents();
       clearStoredHash(api.connection.endpoint);
       clearStoredUsername(api.connection.endpoint);
@@ -489,6 +611,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         api: apiWithCredential(api, ""),
         connectionStatus: "error",
         reconnectAttempt: 0,
+        connectionError: null,
+        lockedUntil: null,
         authPrompt: { connectionId: api.connection.id }
       });
     }
@@ -499,8 +623,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (!connection || id === get().activeConnectionId) {
       return;
     }
-    stopHealthProbe();
-    reconnecting = false;
+    stopReconnect();
     closeEvents();
     // Reset all daemon-scoped state: a different server has its own data.
     set({
@@ -588,11 +711,19 @@ export const useAppStore = create<AppState>((set, get) => ({
     try {
       set({ workspaces: await workspaceService.list(api) });
     } catch (error) {
-      // A wrong/stale token surfaces here — clear it and re-prompt.
+      // A wrong/stale token surfaces here — clear it and re-prompt. (Normally the
+      // establish() pre-check catches this first; this is the defensive fallback
+      // for a credential revoked mid-fan-out.)
       if (error instanceof ApiError && error.status === 401) {
+        stopReconnect();
         clearStoredHash(api.connection.endpoint);
         clearStoredUsername(api.connection.endpoint);
-        set({ connectionStatus: "error", authPrompt: { connectionId: api.connection.id } });
+        set({
+          connectionStatus: "error",
+          connectionError: "Incorrect username or password.",
+          lockedUntil: null,
+          authPrompt: { connectionId: api.connection.id }
+        });
       } else {
         console.error("[orquester] failed to load workspaces", error);
       }
