@@ -8,6 +8,10 @@ User=orquester
 Group=orquester
 WorkingDirectory=/opt/orquester
 EnvironmentFile=/etc/orquester/daemon.env
+# tsx writes its transpile cache to TMPDIR; ProtectSystem=strict makes /tmp
+# unavailable, so point it at a writable, persistent dir under the appdir.
+Environment=TMPDIR=/var/lib/orquester/tmp
+ExecStartPre=/usr/bin/mkdir -p /var/lib/orquester/tmp
 # This monorepo is noEmit (TS is run via tsx, same as `pnpm dev:daemon`); there is
 # no standalone dist build, so run the daemon through tsx as a single node process.
 ExecStart=/usr/bin/node --import tsx /opt/orquester/apps/daemon/src/cli.ts --appdir /var/lib/orquester
