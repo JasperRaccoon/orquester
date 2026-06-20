@@ -35,6 +35,14 @@ export interface WorkspaceSummary {
   name: string;
   path: string;
   projectCount: number;
+  /**
+   * Git account this workspace is bound to, from workspaces.json (Phase 4).
+   * `null`/absent = no binding (default git identity). The UI resolves the id
+   * to a label from its accounts store; this contract carries only the id.
+   */
+  gitAccountId?: string | null;
+  /** ISO creation timestamp from workspaces.json, when present. */
+  createdAt?: string;
 }
 
 /**
@@ -49,6 +57,8 @@ export interface ProjectSummary {
 
 export interface CreateWorkspaceRequest {
   name: string;
+  /** Optional git account to bind (Phase 4 wires the picker; undefined here). */
+  gitAccountId?: string;
 }
 
 export interface CreateProjectRequest {
