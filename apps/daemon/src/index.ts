@@ -33,20 +33,24 @@ import {
   type DaemonPaths,
   type RemoteConnectionConfig,
   type RemotesConfig,
+  type WorkspacesConfig,
   appConfigPath,
   createDefaultAppConfig,
   createDefaultClientConfig,
   createDefaultDaemonConfig,
   createDefaultRemotesConfig,
+  createDefaultWorkspacesConfig,
   dailyLogFile,
   expandVars,
   parseAppConfig,
   parseDaemonConfig,
   parseRemotesConfig,
+  parseWorkspacesConfig,
   remotesConfigPath,
   resolveDaemonPaths,
   sessionsIndexPath,
-  tmuxSocketPath
+  tmuxSocketPath,
+  workspacesMetaPath
 } from "@orquester/config";
 import fastifyStatic from "@fastify/static";
 import websocketPlugin from "@fastify/websocket";
@@ -69,6 +73,8 @@ interface ResolvedPaths {
   /** app.json + remotes.json live under <appdir>/app and are shared by clients. */
   appConfigFile: string;
   remotesFile: string;
+  /** Per-workspace metadata side-table (daemon-side, keyed by workspace name). */
+  workspacesMetaFile: string;
   /** Fixed socket of the dedicated tmux server that owns session PTYs. */
   tmuxSocket: string;
   /** <appdir>/daemon/sessions.json — the reattach index. */
@@ -117,6 +123,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     configPath: paths.configPath,
     appConfigFile: appConfigPath(paths.baseDir),
     remotesFile: remotesConfigPath(paths.baseDir),
+    workspacesMetaFile: workspacesMetaPath(paths.baseDir),
     tmuxSocket: tmuxSocketPath(paths.baseDir),
     sessionsIndexFile: sessionsIndexPath(paths.baseDir),
     workspacesDir: expandVars(config.workspacesDir, paths.vars),
@@ -429,18 +436,27 @@ function createServer(
   //   (workspacesDir)/<workspace>           -> a workspace
   //   (workspacesDir)/<workspace>/<project> -> a project
   app.get("/api/workspaces", async (): Promise<WorkspaceSummary[]> =>
-    listWorkspaces(resolved.workspacesDir)
+    listWorkspaces(resolved.workspacesDir, resolved.workspacesMetaFile)
   );
 
   app.post("/api/workspaces", async (request, reply): Promise<WorkspaceSummary | void> => {
-    const name = (request.body as CreateWorkspaceRequest | undefined)?.name;
+    const body = request.body as CreateWorkspaceRequest | undefined;
+    const name = body?.name;
     if (!isValidName(name)) {
       return reply.code(400).send({ code: "INVALID_NAME", message: "Invalid workspace name." });
     }
 
     const path = join(resolved.workspacesDir, name);
     await mkdir(path, { recursive: true });
-    return { name, path, projectCount: 0 };
+
+    // Upsert the metadata side-table entry (keyed by name).
+    const createdAt = new Date().toISOString();
+    const meta = await readWorkspacesMeta(resolved.workspacesMetaFile);
+    const entry = { name, gitAccountId: body?.gitAccountId, createdAt };
+    meta.workspaces = [...meta.workspaces.filter((w) => w.name !== name), entry];
+    await writeWorkspacesMeta(resolved.workspacesMetaFile, meta);
+
+    return { name, path, projectCount: 0, gitAccountId: entry.gitAccountId ?? null, createdAt };
   });
 
   app.get<{ Params: { workspace: string } }>(
@@ -926,13 +942,25 @@ async function listDirectories(path: string): Promise<string[]> {
   }
 }
 
-async function listWorkspaces(workspacesDir: string): Promise<WorkspaceSummary[]> {
+async function listWorkspaces(
+  workspacesDir: string,
+  metaFile: string
+): Promise<WorkspaceSummary[]> {
   const names = await listDirectories(workspacesDir);
+  const meta = await readWorkspacesMeta(metaFile);
+  const byName = new Map(meta.workspaces.map((w) => [w.name, w]));
   return Promise.all(
     names.map(async (name) => {
       const path = join(workspacesDir, name);
       const projects = await listDirectories(path);
-      return { name, path, projectCount: projects.length };
+      const entry = byName.get(name);
+      return {
+        name,
+        path,
+        projectCount: projects.length,
+        gitAccountId: entry?.gitAccountId ?? null,
+        createdAt: entry?.createdAt
+      };
     })
   );
 }
@@ -1034,6 +1062,18 @@ async function readRemotesFile(file: string): Promise<RemotesConfig> {
   } catch {
     return createDefaultRemotesConfig();
   }
+}
+
+async function readWorkspacesMeta(file: string): Promise<WorkspacesConfig> {
+  try {
+    return parseWorkspacesConfig(JSON.parse(await readFile(file, "utf8")));
+  } catch {
+    return createDefaultWorkspacesConfig();
+  }
+}
+
+async function writeWorkspacesMeta(file: string, value: WorkspacesConfig): Promise<void> {
+  await writeJsonFile(file, value);
 }
 
 async function writeJsonFile(file: string, value: unknown): Promise<void> {
