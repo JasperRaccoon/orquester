@@ -87,11 +87,18 @@ export class Tmux {
 
   /** Run `tmux -S <socket> <args...>`; never rejects (returns the exit code). */
   private run(args: string[]): Promise<ExecResult> {
+    // Strip the multiplexer vars: control commands here (has-session /
+    // list-sessions / new-session -d / capture-pane / kill-session) are NOT
+    // subject to tmux's nesting guard today, but if the daemon was launched
+    // from inside a tmux pane ($TMUX/$TMUX_PANE present) we keep them immune to
+    // any future tightening — the attach PTY in SessionManager.attach() does the
+    // same for the same reason.
+    const { TMUX, TMUX_PANE, ...cleanEnv } = process.env;
     return new Promise((resolve) => {
       execFile(
         "tmux",
         ["-S", this.socket, ...args],
-        { maxBuffer: 16 * 1024 * 1024 },
+        { maxBuffer: 16 * 1024 * 1024, env: cleanEnv },
         (error, stdout, stderr) => {
           const err = error as (NodeJS.ErrnoException & { code?: number }) | null;
           const code = err && typeof err.code === "number" ? err.code : err ? 1 : 0;

@@ -201,12 +201,23 @@ export class SessionManager implements ISessionManager {
    */
   private attach(session: Session): void {
     const { id } = session.summary;
+    // Strip the multiplexer vars before spawning: when the daemon itself was
+    // launched from inside a tmux pane (the common dev case — `pnpm dev:daemon`
+    // / `dev:daemon:bare` / `tsx cli.ts` run in tmux, exactly the Task 5
+    // restart-survival path), `$TMUX`/`$TMUX_PANE` are in process.env and
+    // node-pty passes them straight through to the child. tmux applies its
+    // nesting guard to `attach` REGARDLESS of the `-S` socket and refuses
+    // ("sessions should be nested with care, unset $TMUX to force"), so the
+    // attach client would exit immediately and the tab would stay silently
+    // blank/frozen. (`new-session -d` is not subject to the check, so the
+    // headless session is created fine — making the failure invisible.)
+    const { TMUX, TMUX_PANE, ...cleanEnv } = process.env;
     const pty = spawn("tmux", this.tmux.attachArgs(id), {
       name: "xterm-256color",
       cwd: session.summary.cwd,
       cols: session.summary.cols,
       rows: session.summary.rows,
-      env: { ...process.env, TERM: "xterm-256color", COLORTERM: "truecolor" } as Record<string, string>
+      env: { ...cleanEnv, TERM: "xterm-256color", COLORTERM: "truecolor" } as Record<string, string>
     });
     session.pty = pty;
 
