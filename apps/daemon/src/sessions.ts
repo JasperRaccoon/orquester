@@ -4,7 +4,7 @@ import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, sep } from "node:path";
 import { spawn, type IPty } from "node-pty";
 import type { RegistryService } from "./registry";
 import { Tmux, tmuxAvailable, tmuxName, tmuxVersionOk } from "./tmux";
@@ -49,6 +49,8 @@ export interface ISessionManager {
   rename(id: string, title: string): SessionSummary | undefined;
   reorder(projectPath: string, ids: string[]): void;
   close(id: string): boolean;
+  /** Close every session whose project is `prefix` (exact) or under it (`prefix + sep`). */
+  closeByProjectPrefix(prefix: string): void;
   subscribe(id: string, onOutput: (data: string) => void, onExit: (code: number) => void): () => void;
   /** Daemon shutdown: detach (tmux) or terminate (local) without forgetting state. */
   shutdown(): void;
@@ -352,6 +354,20 @@ export class SessionManager implements ISessionManager {
     this.lifecycle.emit("closed", { id });
     void this.persistIndex();
     return true;
+  }
+
+  /**
+   * Close every session whose project is `prefix` (exact, e.g. delete-project)
+   * or lives under it (`prefix + sep`, e.g. delete-workspace). Reuses close(),
+   * so each emits "closed" (clients drop the tab).
+   */
+  closeByProjectPrefix(prefix: string): void {
+    for (const [id, session] of [...this.sessions]) {
+      const project = session.summary.projectPath;
+      if (project === prefix || project.startsWith(prefix + sep)) {
+        this.close(id);
+      }
+    }
   }
 
   /** Stream a session's output/exit to one client. Returns an unsubscribe fn. */
@@ -660,6 +676,20 @@ export class LocalSessionManager implements ISessionManager {
     this.sessions.delete(id);
     this.lifecycle.emit("closed", { id });
     return true;
+  }
+
+  /**
+   * Close every session whose project is `prefix` (exact, e.g. delete-project)
+   * or lives under it (`prefix + sep`, e.g. delete-workspace). Reuses close(),
+   * so each emits "closed" (clients drop the tab).
+   */
+  closeByProjectPrefix(prefix: string): void {
+    for (const [id, session] of [...this.sessions]) {
+      const project = session.summary.projectPath;
+      if (project === prefix || project.startsWith(prefix + sep)) {
+        this.close(id);
+      }
+    }
   }
 
   /** Stream a session's output/exit to one client. Returns an unsubscribe fn. */

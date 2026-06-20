@@ -485,6 +485,53 @@ function createServer(
     }
   );
 
+  app.delete<{ Params: { workspace: string; project: string } }>(
+    "/api/workspaces/:workspace/projects/:project",
+    async (request, reply): Promise<void> => {
+      const { workspace, project } = request.params;
+      if (!isValidName(workspace) || !isValidName(project)) {
+        return reply.code(400).send({ code: "INVALID_NAME", message: "Invalid name." });
+      }
+
+      const target = join(resolved.workspacesDir, workspace, project);
+      const safe = await resolveWithinWorkspaces(target, resolved.workspacesDir);
+      if (!safe) {
+        // Either gone or outside the workspaces root — 404 (don't leak which).
+        return reply.code(404).send();
+      }
+
+      sessions.closeByProjectPrefix(safe);
+      await rm(safe, { recursive: true, force: true });
+      return reply.code(204).send();
+    }
+  );
+
+  app.delete<{ Params: { workspace: string } }>(
+    "/api/workspaces/:workspace",
+    async (request, reply): Promise<void> => {
+      const { workspace } = request.params;
+      if (!isValidName(workspace)) {
+        return reply.code(400).send({ code: "INVALID_NAME", message: "Invalid workspace name." });
+      }
+
+      const target = join(resolved.workspacesDir, workspace);
+      const safe = await resolveWithinWorkspaces(target, resolved.workspacesDir);
+      if (!safe) {
+        return reply.code(404).send();
+      }
+
+      // Kill every session under the workspace, remove the tree, then prune the
+      // metadata entry (keyed by name).
+      sessions.closeByProjectPrefix(safe);
+      await rm(safe, { recursive: true, force: true });
+      const meta = await readWorkspacesMeta(resolved.workspacesMetaFile);
+      meta.workspaces = meta.workspaces.filter((w) => w.name !== workspace);
+      await writeWorkspacesMeta(resolved.workspacesMetaFile, meta);
+
+      return reply.code(204).send();
+    }
+  );
+
   // App config (app.json) + remote servers (remotes.json) live on the daemon so
   // they're shared across every client connected to it. Editable on any transport.
   app.get("/api/config/app", async (): Promise<AppConfig> => readAppConfigFile(resolved.appConfigFile));
@@ -925,6 +972,26 @@ function isValidName(name: string | undefined): name is string {
     !name.includes("/") &&
     !name.includes("\\")
   );
+}
+
+/**
+ * Resolve `target` and verify it is `root` itself or strictly inside it (after
+ * following symlinks). Returns the realpath when safe, else null. Used to make
+ * the destructive delete endpoints reject path traversal / symlink escapes.
+ */
+async function resolveWithinWorkspaces(target: string, root: string): Promise<string | null> {
+  let realTarget: string;
+  let realRoot: string;
+  try {
+    realTarget = await realpath(target);
+    realRoot = await realpath(root);
+  } catch {
+    return null; // target (or root) doesn't exist
+  }
+  if (realTarget === realRoot || realTarget.startsWith(realRoot + sep)) {
+    return realTarget;
+  }
+  return null;
 }
 
 async function listDirectories(path: string): Promise<string[]> {
