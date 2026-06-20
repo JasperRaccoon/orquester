@@ -500,7 +500,12 @@ function createServer(
         return reply.code(404).send();
       }
 
-      sessions.closeByProjectPrefix(safe);
+      // Cascade against `target` (the non-realpath join), not `safe`: sessions
+      // store projectPath as the raw client-sent join path (sessions.ts:122/552
+      // ← listProjects index.ts), so closeByProjectPrefix must match that form,
+      // not the realpath, or symlinked workspace roots (e.g. /tmp → /private/tmp)
+      // never match and the dir is removed while sessions keep running.
+      sessions.closeByProjectPrefix(target);
       await rm(safe, { recursive: true, force: true });
       return reply.code(204).send();
     }
@@ -521,8 +526,10 @@ function createServer(
       }
 
       // Kill every session under the workspace, remove the tree, then prune the
-      // metadata entry (keyed by name).
-      sessions.closeByProjectPrefix(safe);
+      // metadata entry (keyed by name). Cascade against `target` (non-realpath
+      // join), not `safe`: stored projectPaths use the raw join form, so matching
+      // the realpath would miss every session under a symlinked workspace root.
+      sessions.closeByProjectPrefix(target);
       await rm(safe, { recursive: true, force: true });
       const meta = await readWorkspacesMeta(resolved.workspacesMetaFile);
       meta.workspaces = meta.workspaces.filter((w) => w.name !== workspace);
