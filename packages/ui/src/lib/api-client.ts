@@ -1,6 +1,9 @@
 import type {
+  AccountSummary,
+  AccountTestResult,
   AgentSummary,
   AuthInfoResponse,
+  CreateAccountRequest,
   CreateProjectRequest,
   CreateSessionRequest,
   CreateWorkspaceRequest,
@@ -142,6 +145,24 @@ export class ApiClient {
 
   saveRemotes(remotes: RemoteConnectionConfig[]): Promise<RemoteConnectionConfig[]> {
     return this.send("PUT", "/api/config/remotes", { body: remotes });
+  }
+
+  // --- Git accounts (daemon-persisted; allowed over remote HTTP) -----------
+
+  listAccounts(signal?: AbortSignal): Promise<AccountSummary[]> {
+    return this.send("GET", "/api/accounts", { signal });
+  }
+
+  createAccount(req: CreateAccountRequest): Promise<AccountSummary> {
+    return this.send("POST", "/api/accounts", { body: req });
+  }
+
+  removeAccount(id: string): Promise<void> {
+    return this.send("DELETE", `/api/accounts/${encodeURIComponent(id)}`);
+  }
+
+  testAccount(id: string): Promise<AccountTestResult> {
+    return this.send("POST", `/api/accounts/${encodeURIComponent(id)}/test`);
   }
 
   // Workspaces & projects (filesystem-backed)
