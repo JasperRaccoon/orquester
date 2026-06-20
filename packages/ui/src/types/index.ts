@@ -1,4 +1,6 @@
 import type {
+  AccountSummary,
+  AccountTestResult,
   AgentSummary,
   EventMessage,
   OpenTargetSummary,
@@ -33,6 +35,8 @@ export interface UiConnection {
 }
 
 export type {
+  AccountSummary,
+  AccountTestResult,
   AgentSummary,
   EventMessage,
   OpenTargetSummary,

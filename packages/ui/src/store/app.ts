@@ -19,6 +19,8 @@ import type { HttpClient } from "../lib/http-client";
 import type { Transporter } from "../lib/transporter";
 import { workspaceService } from "../services";
 import type {
+  AccountSummary,
+  AccountTestResult,
   ConnectionStatus,
   EventMessage,
   ProjectSummary,
@@ -184,6 +186,7 @@ export interface AppState {
   // data
   registry: RegistryResponse;
   workspaces: WorkspaceSummary[];
+  accounts: AccountSummary[];
   workspacesLoading: boolean;
   projects: ProjectSummary[];
   projectsLoading: boolean;
@@ -210,6 +213,12 @@ export interface AppState {
   addRemote: (input: { name: string; baseUrl: string }) => Promise<string>;
   removeRemote: (id: string) => Promise<void>;
   loadRemotes: () => Promise<void>;
+
+  // git accounts (daemon-persisted; shared across clients of this daemon)
+  loadAccounts: () => Promise<void>;
+  addAccount: (input: { label: string; token: string }) => Promise<AccountSummary>;
+  removeAccount: (id: string) => Promise<void>;
+  testAccount: (id: string) => Promise<AccountTestResult>;
 
   // app config + settings
   loadAppConfig: () => Promise<void>;
@@ -265,6 +274,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   currentProject: null,
   registry: EMPTY_REGISTRY,
   workspaces: [],
+  accounts: [],
   workspacesLoading: false,
   projects: [],
   projectsLoading: false,
@@ -398,7 +408,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     });
     await get().connect();
     // App config + remote servers are shared (persisted on the home daemon).
-    await Promise.all([get().loadAppConfig(), get().loadRemotes()]);
+    await Promise.all([get().loadAppConfig(), get().loadRemotes(), get().loadAccounts()]);
   },
 
   loadAppConfig: async () => {
@@ -500,7 +510,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       currentProject: null,
       workspaces: [],
       projects: [],
-      sessions: []
+      sessions: [],
+      accounts: []
     });
     await get().connect();
   },
@@ -531,6 +542,41 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (get().activeConnectionId === id && setup) {
       await get().selectConnection(setup.localConnection.id);
     }
+  },
+
+  loadAccounts: async () => {
+    const api = get().api;
+    if (!api) {
+      return;
+    }
+    try {
+      set({ accounts: await api.listAccounts() });
+    } catch {
+      /* keep current (e.g. transport without the endpoint) */
+    }
+  },
+
+  addAccount: async (input) => {
+    const api = get().api;
+    if (!api) {
+      throw new Error("Not connected.");
+    }
+    const account = await api.createAccount({ label: input.label.trim(), token: input.token.trim() });
+    await get().loadAccounts();
+    return account;
+  },
+
+  removeAccount: async (id) => {
+    await get().api?.removeAccount(id);
+    await get().loadAccounts();
+  },
+
+  testAccount: async (id) => {
+    const api = get().api;
+    if (!api) {
+      return { ok: false, message: "Not connected." };
+    }
+    return api.testAccount(id);
   },
 
   loadWorkspaces: async () => {
