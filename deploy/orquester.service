@@ -1,0 +1,27 @@
+[Unit]
+Description=Orquester daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=orquester
+Group=orquester
+WorkingDirectory=/opt/orquester
+EnvironmentFile=/etc/orquester/daemon.env
+# This monorepo is noEmit (TS is run via tsx, same as `pnpm dev:daemon`); there is
+# no standalone dist build, so run the daemon through tsx as a single node process.
+ExecStart=/usr/bin/node --import tsx /opt/orquester/apps/daemon/src/cli.ts --appdir /var/lib/orquester
+Restart=always
+RestartSec=2
+# CRITICAL (Phase 2): only signal the main node process on stop/restart, so the
+# daemonized tmux server (and its panes) survive a daemon restart.
+KillMode=process
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/orquester
+ProtectHome=true
+# tmux socket lives under /var/lib/orquester, not /tmp:
+PrivateTmp=false
+
+[Install]
+WantedBy=multi-user.target
