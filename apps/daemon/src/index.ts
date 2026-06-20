@@ -1396,10 +1396,18 @@ function isNodeError(error: unknown): error is NodeJS.ErrnoException {
  * of fail2ban (OS-layer ban on the daemon's 401 log lines, Phase 0).
  */
 class LoginThrottle {
-  private readonly state = new Map<string, { fails: number; lockedUntil: number; strikes: number }>();
+  private readonly state = new Map<
+    string,
+    { fails: number; lockedUntil: number; strikes: number; lastFailAt: number }
+  >();
   private static readonly MAX_FAILS = 5;
   private static readonly BASE_LOCKOUT_MS = 15 * 60 * 1000;
   private static readonly MAX_LOCKOUT_MS = 24 * 60 * 60 * 1000;
+  // One login attempt fans out into several authenticated requests (workspaces,
+  // sessions, registry, events, …), so a single wrong password yields a burst of
+  // near-simultaneous 401s. Collapse failures within this window into ONE counted
+  // attempt so a lone typo can't trip the lockout instantly.
+  private static readonly BURST_WINDOW_MS = 2000;
 
   /** Ms remaining on an active lockout for this IP, or 0 if not locked. */
   retryAfterMs(ip: string): number {
@@ -1412,7 +1420,18 @@ class LoginThrottle {
 
   /** Record a failed attempt; locks the IP once MAX_FAILS is reached. */
   recordFailure(ip: string): void {
-    const entry = this.state.get(ip) ?? { fails: 0, lockedUntil: 0, strikes: 0 };
+    const entry = this.state.get(ip) ?? { fails: 0, lockedUntil: 0, strikes: 0, lastFailAt: 0 };
+    const now = Date.now();
+    // Burst collapse: failures arriving within BURST_WINDOW_MS of the previous one
+    // belong to the same login attempt's fan-out (or a rapid auto-reconnect) — keep
+    // the window alive but don't count them, so only genuinely-separate bad attempts
+    // advance the strike counter.
+    if (entry.fails > 0 && now - entry.lastFailAt < LoginThrottle.BURST_WINDOW_MS) {
+      entry.lastFailAt = now;
+      this.state.set(ip, entry);
+      return;
+    }
+    entry.lastFailAt = now;
     entry.fails += 1;
     if (entry.fails >= LoginThrottle.MAX_FAILS) {
       const lockout = Math.min(
