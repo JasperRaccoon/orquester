@@ -12,6 +12,14 @@ EnvironmentFile=/etc/orquester/daemon.env
 # unavailable, so point it at a writable, persistent dir under the appdir.
 Environment=TMPDIR=/var/lib/orquester/tmp
 ExecStartPre=/usr/bin/mkdir -p /var/lib/orquester/tmp
+# Agent installs ("npm install -g ...") must land somewhere writable. The default
+# global prefix is /usr, which is read-only under ProtectSystem=strict and not
+# writable by the non-root service user, so installs fail with "npm error code
+# ENOENT". Point npm at a prefix inside ReadWritePaths and put its bin/ on PATH
+# so the daemon can also resolve and launch the agents it installs.
+Environment=NPM_CONFIG_PREFIX=/var/lib/orquester/.npm-global
+Environment=PATH=/var/lib/orquester/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStartPre=/usr/bin/mkdir -p /var/lib/orquester/.npm-global/bin
 # This monorepo is noEmit (TS is run via tsx, same as `pnpm dev:daemon`); there is
 # no standalone dist build, so run the daemon through tsx as a single node process.
 ExecStart=/usr/bin/node --import tsx /opt/orquester/apps/daemon/src/cli.ts --appdir /var/lib/orquester
