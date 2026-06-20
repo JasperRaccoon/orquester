@@ -187,6 +187,17 @@ export class ApiClient {
     });
   }
 
+  deleteWorkspace(name: string): Promise<void> {
+    return this.send("DELETE", `/api/workspaces/${encodeURIComponent(name)}`);
+  }
+
+  deleteProject(workspace: string, name: string): Promise<void> {
+    return this.send(
+      "DELETE",
+      `/api/workspaces/${encodeURIComponent(workspace)}/projects/${encodeURIComponent(name)}`
+    );
+  }
+
   // Catalog (agents / open targets)
 
   listAgents(signal?: AbortSignal): Promise<AgentSummary[]> {

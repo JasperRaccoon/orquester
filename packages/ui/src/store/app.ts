@@ -223,12 +223,14 @@ export interface AppState {
   signOut: () => void;
 
   loadWorkspaces: () => Promise<void>;
-  createWorkspace: (name: string) => Promise<void>;
+  createWorkspace: (name: string, gitAccountId?: string) => Promise<void>;
+  deleteWorkspace: (name: string) => Promise<void>;
   openWorkspace: (name: string) => Promise<void>;
   closeWorkspace: () => void;
 
   loadProjects: () => Promise<void>;
   createProject: (name: string) => Promise<void>;
+  deleteProject: (project: ProjectSummary) => Promise<void>;
   openProject: (project: ProjectSummary) => void;
 
   loadSessions: () => Promise<void>;
@@ -553,12 +555,31 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  createWorkspace: async (name) => {
+  createWorkspace: async (name, gitAccountId) => {
     const api = get().api;
     if (!api) {
       return;
     }
-    await workspaceService.create(api, name);
+    await workspaceService.create(api, name, gitAccountId);
+    await get().loadWorkspaces();
+  },
+
+  deleteWorkspace: async (name) => {
+    const api = get().api;
+    if (!api) {
+      return;
+    }
+    // The deleted workspace's directory prefix; every project path under it is
+    // `<wsPath>/<project>`. Used to purge path-keyed client-local tab state.
+    const ws = get().workspaces.find((w) => w.name === name);
+    const prefix = ws?.path;
+    await workspaceService.delete(api, name);
+    if (get().currentWorkspace === name) {
+      get().closeWorkspace();
+    }
+    if (prefix) {
+      set((state) => clearProjectLocalState(state, (path) => path === prefix || path.startsWith(`${prefix}/`)));
+    }
     await get().loadWorkspaces();
   },
 
@@ -593,6 +614,23 @@ export const useAppStore = create<AppState>((set, get) => ({
       return;
     }
     await workspaceService.createProject(api, workspace, name);
+    await get().loadProjects();
+  },
+
+  deleteProject: async (project) => {
+    const api = get().api;
+    if (!api) {
+      return;
+    }
+    await workspaceService.deleteProject(api, project.workspace, project.name);
+    set((state) => {
+      const next = clearProjectLocalState(state, (path) => path === project.path);
+      // If the open project was deleted, drop it from the main view.
+      if (state.currentProject?.path === project.path) {
+        next.currentProject = null;
+      }
+      return next;
+    });
     await get().loadProjects();
   },
 
@@ -814,6 +852,37 @@ function removeFileTab(state: AppState, id: string): Partial<AppState> {
     fileTabsByProject,
     activeTabByProject: reassignActive(state.activeTabByProject, id, state.sessions, fileTabsByProject)
   };
+}
+
+/**
+ * Purge the client-local, path-keyed tab maps for project paths matching
+ * `match` (used after a workspace/project is deleted — the daemon's
+ * session.closed events drop sessions, but these maps are client-only).
+ */
+function clearProjectLocalState(
+  state: AppState,
+  match: (path: string) => boolean
+): Partial<AppState> {
+  const fileTabsByProject: Record<string, FileTab[]> = {};
+  for (const [path, tabs] of Object.entries(state.fileTabsByProject)) {
+    if (!match(path)) {
+      fileTabsByProject[path] = tabs;
+    }
+  }
+  const activeTabByProject: Record<string, string | null> = {};
+  for (const [path, id] of Object.entries(state.activeTabByProject)) {
+    if (!match(path)) {
+      activeTabByProject[path] = id;
+    }
+  }
+  const viewModeByProject: Record<string, ViewMode> = {};
+  for (const [path, mode] of Object.entries(state.viewModeByProject)) {
+    if (!match(path)) {
+      viewModeByProject[path] = mode;
+    }
+  }
+  saveViewModes(viewModeByProject);
+  return { fileTabsByProject, activeTabByProject, viewModeByProject };
 }
 
 /** Combined tabs (sessions + file tabs) of the currently open project. */
