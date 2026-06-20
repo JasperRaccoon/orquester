@@ -69,10 +69,37 @@ let healthTimer: ReturnType<typeof setInterval> | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 /** Guards against overlapping reconnect loops. */
 let reconnecting = false;
+/**
+ * Generation guard for the reconnect flow, mirroring {@link eventsGen}. Every
+ * reconnect path (the backoff loop, the locked-reconnect path, and the
+ * reconnect-driven branch of establish) captures the current value and bails
+ * after each `await` if it changed. Bumped by stopReconnect/connect/
+ * scheduleLockedReconnect so a new flow preempts any old loop suspended on an
+ * untracked `delay()` timer (whose setTimeout we cannot clear directly).
+ */
+let reconnectGen = 0;
+/** Consecutive 429 lockout cycles; resets on any successful connect. */
+let lockedCycles = 0;
+
+/** After this many back-to-back lockouts, stop auto-polling and let the user act. */
+const MAX_LOCKED_CYCLES = 4;
+/** Base delay (ms) for the locked-cycle exponential fallback (no Retry-After). */
+const LOCKED_FALLBACK_BASE_MS = 8000;
+/** Cap (ms) for the locked-cycle exponential fallback. */
+const LOCKED_FALLBACK_CAP_MS = 120000;
 
 /** Capped exponential backoff (ms) for reconnect attempt N (1-based). */
 function backoffMs(attempt: number): number {
   return Math.min(attempt * 1000, 8000);
+}
+
+/**
+ * Capped exponential fallback (ms) for the Nth consecutive locked cycle
+ * (0-based) when a 429 carries no Retry-After. Avoids an unbounded fixed 8s
+ * poll: `min(base * 2 ** n, cap)`.
+ */
+function lockedFallbackMs(cycle: number): number {
+  return Math.min(LOCKED_FALLBACK_BASE_MS * 2 ** cycle, LOCKED_FALLBACK_CAP_MS);
 }
 
 function stopHealthProbe(): void {
@@ -90,18 +117,32 @@ function clearReconnectTimer(): void {
   }
 }
 
-/** Tear down every reconnect mechanism (probe, loop, pending timer). */
+/**
+ * Tear down every reconnect mechanism (probe, loop, pending timer). Bumping
+ * reconnectGen preempts any loop/establish suspended on an untracked delay() so
+ * it returns instead of resuming a now-stale flow.
+ */
 function stopReconnect(): void {
   stopHealthProbe();
   clearReconnectTimer();
   reconnecting = false;
+  reconnectGen += 1;
 }
 
 /**
  * Enter the rate-limited (429) state: surface a clear locked message + the
  * lockout deadline, then schedule a SINGLE delayed reconnect after Retry-After
- * (or a capped fallback). Tears down probes/timers first so backoffs never
- * stack and we never tight-loop on the 429.
+ * (or a capped exponential fallback). Tears down probes/timers first so backoffs
+ * never stack and we never tight-loop on the 429.
+ *
+ * Guards against an unbounded locked cycle (scheduleLockedReconnect →
+ * handleDisconnect → establish → 429 → …): consecutive cycles grow the fallback
+ * exponentially, and after {@link MAX_LOCKED_CYCLES} we STOP auto-polling and
+ * drop to a terminal state (re-prompt credentials + a Retry affordance) so a
+ * client with a wrong stored credential isn't stuck cycling forever.
+ *
+ * Bumps reconnectGen (mirroring stopReconnect) so any loop/establish suspended
+ * on an untracked delay() is preempted rather than resuming into a stale flow.
  */
 function scheduleLockedReconnect(
   get: StoreApi<AppState>["getState"],
@@ -111,16 +152,45 @@ function scheduleLockedReconnect(
   stopHealthProbe();
   clearReconnectTimer();
   reconnecting = false;
-  const seconds = retryAfterSeconds ?? 8;
+  reconnectGen += 1;
+
+  const cycle = lockedCycles;
+  lockedCycles += 1;
+
+  // Too many back-to-back lockouts: stop polling and drop to a terminal state so
+  // a client with a wrong stored credential isn't stuck cycling forever. When
+  // auth is in play, re-prompt (AuthModal); otherwise leave authPrompt cleared so
+  // the ConnectionStatusToast's Retry button is the escape hatch. Both paths run
+  // connect() (resetting lockedCycles) on the user's next action. lockedUntil is
+  // cleared because nothing is scheduled to fire.
+  if (cycle >= MAX_LOCKED_CYCLES) {
+    const api = get().api;
+    const authInPlay = get().authSalt != null && api != null;
+    set({
+      connectionStatus: "error",
+      reconnectAttempt: 0,
+      connectionError: authInPlay
+        ? "Too many attempts — locked out. Re-enter your credentials to retry."
+        : "Too many attempts — locked out. Press Retry to try again.",
+      lockedUntil: null,
+      authPrompt: authInPlay ? { connectionId: api.connection.id } : get().authPrompt
+    });
+    return;
+  }
+
+  // Honor Retry-After; otherwise grow the fallback exponentially (capped) so a
+  // 429 without a header doesn't degenerate into a flat fixed-interval poll.
+  const seconds = retryAfterSeconds ?? Math.round(lockedFallbackMs(cycle) / 1000);
   set({
     connectionStatus: "error",
     reconnectAttempt: 0,
     connectionError: `Too many attempts — locked out, retry in ${seconds}s.`,
     lockedUntil: Date.now() + seconds * 1000
   });
+  const gen = reconnectGen;
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
-    if (get().api) {
+    if (gen === reconnectGen && get().api) {
       get().handleDisconnect();
     }
   }, seconds * 1000);
@@ -348,7 +418,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       return;
     }
     // A manual connect (or fresh credentials) clears any lockout/backoff state.
+    // stopReconnect() bumps reconnectGen, preempting any loop suspended on an
+    // untracked delay(); reset the locked-cycle counter so a fresh attempt
+    // starts from a clean exponential fallback.
     stopReconnect();
+    lockedCycles = 0;
     set({ connectionStatus: "connecting", reconnectAttempt: 0, connectionError: null, lockedUntil: null });
 
     // The embedded daemon is spawned asynchronously: poll /health first.
@@ -380,9 +454,19 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   establish: async (api) => {
+    // Reconnect-generation guard (mirrors eventsGen): capture the current gen and
+    // bail after every await if a newer flow (Retry/credentials/teardown) bumped
+    // it. This is what lets connect()/stopReconnect()/scheduleLockedReconnect()
+    // preempt an establish that was kicked off by a reconnect loop suspended on an
+    // untracked delay() — without it, the resumed loop would run a SECOND
+    // establish (duplicate fan-out + double events subscription).
+    const reconnectGenAtStart = reconnectGen;
     // Auth gate: derive/restore the bearer credential (web) or prompt.
     let active = api;
     const info = await active.authInfo().catch(() => null);
+    if (reconnectGenAtStart !== reconnectGen) {
+      return;
+    }
     set({ authSalt: info?.salt ?? null, authRequiresUsername: info?.requiresUsername ?? false });
     if (info?.authRequired) {
       // The bearer is base64("<username>:<hash>"). Prefer one already on the
@@ -417,6 +501,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     try {
       await active.info();
     } catch (error) {
+      // A newer flow preempted us while the pre-check was in flight: don't act on
+      // this stale response (no creds-clear, no reschedule, no rethrow-to-retry).
+      if (reconnectGenAtStart !== reconnectGen) {
+        return;
+      }
       if (error instanceof ApiError && error.status === 401) {
         // Wrong credentials: drop the stored hash/username and re-prompt. Do NOT
         // fan out and do NOT reconnect.
@@ -445,8 +534,20 @@ export const useAppStore = create<AppState>((set, get) => ({
       throw error;
     }
 
+    // Pre-check passed: still our flow? If a newer one preempted us, bail before
+    // claiming "connected" / fanning out.
+    if (reconnectGenAtStart !== reconnectGen) {
+      return;
+    }
+    // Successful connect resets the consecutive-lockout counter.
+    lockedCycles = 0;
     set({ connectionStatus: "connected", reconnectAttempt: 0, connectionError: null, lockedUntil: null, authPrompt: null });
     await Promise.all([get().loadWorkspaces(), get().loadSessions(), get().loadRegistry()]);
+    // A newer flow may have preempted us during the fan-out: don't open a
+    // duplicate events stream or arm a second health probe.
+    if (reconnectGenAtStart !== reconnectGen) {
+      return;
+    }
 
     // Live event sync. The stream ending unexpectedly (e.g. the transport was
     // restarted) is the primary disconnect signal.
@@ -482,6 +583,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     reconnecting = true;
 
     const loop = async () => {
+      // Own this reconnect generation (mirrors eventsGen). Any newer flow
+      // (Retry/credentials/teardown/locked) bumps reconnectGen; after each await
+      // we bail so a loop resumed from an untracked delay() can't run a SECOND
+      // establish concurrently with the new flow.
+      const gen = ++reconnectGen;
       for (let attempt = 1; ; attempt += 1) {
         const current = get().api;
         if (!current) {
@@ -492,11 +598,17 @@ export const useAppStore = create<AppState>((set, get) => ({
         const lockedUntil = get().lockedUntil;
         if (lockedUntil && lockedUntil > Date.now()) {
           await delay(Math.min(lockedUntil - Date.now(), 8000));
+          if (gen !== reconnectGen) {
+            return;
+          }
           continue;
         }
         set({ connectionStatus: "connecting", reconnectAttempt: attempt, connectionError: null });
         try {
           await current.health();
+          if (gen !== reconnectGen) {
+            return;
+          }
           // Daemon is back: rebuild the client so terminals + event streams
           // re-subscribe to the (intact) sessions, then re-establish. establish()
           // runs its own auth pre-check — a 401 re-prompts and a 429 reschedules
@@ -506,6 +618,9 @@ export const useAppStore = create<AppState>((set, get) => ({
           await get().establish(fresh);
           break;
         } catch (error) {
+          if (gen !== reconnectGen) {
+            return;
+          }
           // Even /health can 429 if the limiter is broadened: honor Retry-After.
           if (error instanceof ApiError && error.status === 429) {
             reconnecting = false;
@@ -513,6 +628,9 @@ export const useAppStore = create<AppState>((set, get) => ({
             return;
           }
           await delay(backoffMs(attempt));
+          if (gen !== reconnectGen) {
+            return;
+          }
         }
       }
       reconnecting = false;

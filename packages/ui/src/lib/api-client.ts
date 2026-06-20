@@ -317,7 +317,18 @@ export class ApiError extends Error {
 
   /** Parsed `Retry-After` (seconds) when present, else null. Set on 429s. */
   get retryAfterSeconds(): number | null {
-    const raw = this.headers?.["retry-after"];
+    // Case-insensitive lookup: most transports lowercase header keys, but the
+    // desktop NodeHttpClient path can surface a capitalized `Retry-After`.
+    const headers = this.headers;
+    let raw = headers?.["retry-after"];
+    if (raw === undefined && headers) {
+      for (const [key, value] of Object.entries(headers)) {
+        if (key.toLowerCase() === "retry-after") {
+          raw = value;
+          break;
+        }
+      }
+    }
     if (!raw) {
       return null;
     }

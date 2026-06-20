@@ -1398,7 +1398,7 @@ function isNodeError(error: unknown): error is NodeJS.ErrnoException {
 class LoginThrottle {
   private readonly state = new Map<
     string,
-    { fails: number; lockedUntil: number; strikes: number; lastFailAt: number }
+    { fails: number; lockedUntil: number; strikes: number; burstStartAt: number }
   >();
   private static readonly MAX_FAILS = 5;
   private static readonly BASE_LOCKOUT_MS = 15 * 60 * 1000;
@@ -1408,6 +1408,10 @@ class LoginThrottle {
   // near-simultaneous 401s. Collapse failures within this window into ONE counted
   // attempt so a lone typo can't trip the lockout instantly.
   private static readonly BURST_WINDOW_MS = 2000;
+  // Bound the per-IP map: only sweep once it grows past this, then drop entries
+  // that are neither locked nor part of a recent burst.
+  private static readonly PRUNE_THRESHOLD = 1024;
+  private static readonly STALE_AFTER_MS = 10 * 60 * 1000;
 
   /** Ms remaining on an active lockout for this IP, or 0 if not locked. */
   retryAfterMs(ip: string): number {
@@ -1420,18 +1424,21 @@ class LoginThrottle {
 
   /** Record a failed attempt; locks the IP once MAX_FAILS is reached. */
   recordFailure(ip: string): void {
-    const entry = this.state.get(ip) ?? { fails: 0, lockedUntil: 0, strikes: 0, lastFailAt: 0 };
+    const entry = this.state.get(ip) ?? { fails: 0, lockedUntil: 0, strikes: 0, burstStartAt: 0 };
     const now = Date.now();
-    // Burst collapse: failures arriving within BURST_WINDOW_MS of the previous one
-    // belong to the same login attempt's fan-out (or a rapid auto-reconnect) — keep
-    // the window alive but don't count them, so only genuinely-separate bad attempts
-    // advance the strike counter.
-    if (entry.fails > 0 && now - entry.lastFailAt < LoginThrottle.BURST_WINDOW_MS) {
-      entry.lastFailAt = now;
+    this.prune(now);
+    // Burst collapse: failures arriving within BURST_WINDOW_MS of the FIRST failure
+    // of the current burst belong to one login attempt's fan-out (or a rapid
+    // auto-reconnect), so they don't count. The window is anchored to that first
+    // failure and is NEVER refreshed — otherwise a sustained stream of guesses
+    // (even 1/sec) would keep the window alive forever and pin `fails` at 1, so the
+    // IP would never lock. Anchoring lets a real fan-out collapse to one strike
+    // while a continuous attack advances ~one strike per BURST_WINDOW_MS.
+    if (entry.fails > 0 && now - entry.burstStartAt < LoginThrottle.BURST_WINDOW_MS) {
       this.state.set(ip, entry);
       return;
     }
-    entry.lastFailAt = now;
+    entry.burstStartAt = now;
     entry.fails += 1;
     if (entry.fails >= LoginThrottle.MAX_FAILS) {
       const lockout = Math.min(
@@ -1443,6 +1450,20 @@ class LoginThrottle {
       entry.fails = 0;
     }
     this.state.set(ip, entry);
+  }
+
+  // Opportunistic eviction so a distinct-IP spray can't grow `state` without
+  // bound: entries that are neither locked nor mid-burst carry no useful state.
+  // Cheap by default; sweeps the whole map only once it gets large.
+  private prune(now: number): void {
+    if (this.state.size <= LoginThrottle.PRUNE_THRESHOLD) {
+      return;
+    }
+    for (const [ip, entry] of this.state) {
+      if (entry.lockedUntil <= now && now - entry.burstStartAt > LoginThrottle.STALE_AFTER_MS) {
+        this.state.delete(ip);
+      }
+    }
   }
 
   /** Clear an IP's failure count after a successful auth. */
