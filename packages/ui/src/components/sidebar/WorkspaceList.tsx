@@ -1,8 +1,9 @@
 import React, { useState } from "react";
-import { Folder, FolderPlus, PanelLeftClose } from "lucide-react";
-import { IconButton } from "../ui";
+import { Folder, FolderPlus, PanelLeftClose, Trash2 } from "lucide-react";
+import { ConfirmDialog, ContextMenu, IconButton, type ContextMenuItem } from "../ui";
 import { NewItemInput } from "./NewItemInput";
 import { useAppStore } from "../../store/app";
+import type { WorkspaceSummary } from "../../types";
 
 /** Root sidebar view: the list of workspace folders. */
 export const WorkspaceList: React.FC = () => {
@@ -10,8 +11,20 @@ export const WorkspaceList: React.FC = () => {
   const loading = useAppStore((s) => s.workspacesLoading);
   const openWorkspace = useAppStore((s) => s.openWorkspace);
   const createWorkspace = useAppStore((s) => s.createWorkspace);
+  const deleteWorkspace = useAppStore((s) => s.deleteWorkspace);
   const toggleSidebar = useAppStore((s) => s.toggleSidebar);
   const [creating, setCreating] = useState(false);
+  const [menu, setMenu] = useState<{ x: number; y: number; workspace: WorkspaceSummary } | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<WorkspaceSummary | null>(null);
+
+  const menuItems = (workspace: WorkspaceSummary): ContextMenuItem[] => [
+    {
+      label: "Delete",
+      icon: <Trash2 size={13} />,
+      danger: true,
+      onClick: () => setPendingDelete(workspace)
+    }
+  ];
 
   return (
     <>
@@ -50,6 +63,10 @@ export const WorkspaceList: React.FC = () => {
             key={workspace.path}
             type="button"
             onClick={() => void openWorkspace(workspace.name)}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              setMenu({ x: event.clientX, y: event.clientY, workspace });
+            }}
             className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-neutral-300 transition-colors hover:bg-neutral-800 hover:text-neutral-100"
           >
             <Folder size={15} className="text-neutral-500" />
@@ -58,6 +75,35 @@ export const WorkspaceList: React.FC = () => {
           </button>
         ))}
       </nav>
+
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={menuItems(menu.workspace)}
+          onClose={() => setMenu(null)}
+        />
+      )}
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title="Delete workspace"
+        confirmText={pendingDelete?.name}
+        message={
+          <>
+            This permanently deletes <span className="font-medium text-neutral-200">{pendingDelete?.name}</span>{" "}
+            and all of its projects from disk. This cannot be undone. Type the workspace name to confirm.
+          </>
+        }
+        onCancel={() => setPendingDelete(null)}
+        onConfirm={() => {
+          const name = pendingDelete?.name;
+          setPendingDelete(null);
+          if (name) {
+            void deleteWorkspace(name);
+          }
+        }}
+      />
     </>
   );
 };
