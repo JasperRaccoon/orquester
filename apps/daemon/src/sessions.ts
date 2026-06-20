@@ -156,8 +156,22 @@ export class SessionManager implements ISessionManager {
       ...entry.env
     } as Record<string, string>;
 
+    // A bare shell launched via `tmux new-session -- bash` runs non-interactively
+    // and exits immediately (status 1) — unlike LocalSessionManager's node-pty,
+    // which gives the shell an interactive controlling terminal so bare `bash`
+    // works. Launch shell-kind entries as LOGIN shells (`-l`, what a terminal
+    // emulator does), so they behave as a real interactive terminal shell and
+    // persist. Agents/IDEs and shells that already specify a login flag are left
+    // as-is. (POSIX shells used on tmux-backend hosts — bash/zsh/sh/fish/nu — all
+    // accept `-l`.)
+    const baseArgs = entry.args ?? [];
+    const args =
+      entry.kind === "shell" && !baseArgs.includes("-l") && !baseArgs.includes("--login")
+        ? [...baseArgs, "-l"]
+        : baseArgs;
+
     this.tmux
-      .newSession({ id, cols, rows, cwd, env, bin: entry.resolvedBin, args: entry.args ?? [] })
+      .newSession({ id, cols, rows, cwd, env, bin: entry.resolvedBin, args })
       .then(() => {
         // newSession is async (an execFile of `tmux new-session` takes several
         // ms) but create() has already returned. If close()/closeAll() ran in
