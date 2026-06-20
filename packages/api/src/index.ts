@@ -61,6 +61,37 @@ export interface CreateWorkspaceRequest {
   gitAccountId?: string;
 }
 
+/**
+ * Public view of a connected git account. Deliberately omits `keyPath` and any
+ * private-key material — the daemon never returns where/what the private key is.
+ */
+export interface AccountSummary {
+  id: string;
+  label: string;
+  githubLogin: string;
+  gitName: string;
+  gitEmail: string;
+  /** OpenSSH public key (safe to display/copy). */
+  publicKey: string;
+  createdAt: string;
+}
+
+export interface CreateAccountRequest {
+  /** User-facing label; also used in the SSH key comment + GitHub key title. */
+  label: string;
+  /** GitHub PAT — used transiently to upload the key + read identity, then discarded. */
+  token: string;
+}
+
+/** Result of `POST /api/accounts/:id/test` (an `ssh -T git@github.com` probe). */
+export interface AccountTestResult {
+  ok: boolean;
+  /** GitHub login parsed from the "Hi <login>!" greeting, when ok. */
+  login?: string;
+  /** Human-readable detail (success greeting or failure reason). */
+  message?: string;
+}
+
 export interface CreateProjectRequest {
   name: string;
 }
