@@ -710,7 +710,14 @@ function createServer(
     });
     reply.raw.write(replay);
 
-    if (summary.status === "exited") {
+    // Re-read the LIVE status after the await: the pre-await `summary` is a clone
+    // and can't reflect a transition that happened during scrollback(). If the
+    // session exited while capture-pane was in flight (a real several-ms window on
+    // the tmux backend), the attach PTY's onExit already emitted "exit" with no
+    // subscriber yet — installing one below would never see an end and the client
+    // pane would hang. End immediately instead.
+    const current = sessions.get(id);
+    if (!current || current.status === "exited") {
       reply.raw.end();
       return;
     }
@@ -813,7 +820,14 @@ function createServer(
           if (subs.get(id) !== pending) {
             return;
           }
-          if (summary.status === "exited") {
+          // Re-read the LIVE status after the await — the pre-await `summary` is a
+          // clone and can't reflect a transition during scrollback(). If the
+          // command exited (or the session was closed) while capture-pane was in
+          // flight, the attach PTY's onExit already emitted "exit" with no
+          // subscriber, so subscribing now would never deliver an end and the
+          // client's terminal pane would hang open. Send end + drop the slot.
+          const current = sessions.get(id);
+          if (!current || current.status === "exited") {
             subs.delete(id);
             send({ t: "end", id });
             return;
