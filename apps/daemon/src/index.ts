@@ -1,4 +1,7 @@
 import type {
+  AccountSummary,
+  AccountTestResult,
+  CreateAccountRequest,
   CreateProjectRequest,
   CreateSessionRequest,
   CreateWorkspaceRequest,
@@ -25,6 +28,7 @@ import { RegistryService } from "./registry";
 import { type ISessionManager, SessionError, createSessionManager } from "./sessions";
 import { Tmux } from "./tmux";
 import { Broadcaster } from "./broadcaster";
+import { AccountError, AccountsService } from "./accounts";
 import {
   type AppConfig,
   type ClientConfig,
@@ -34,6 +38,7 @@ import {
   type RemoteConnectionConfig,
   type RemotesConfig,
   type WorkspacesConfig,
+  accountsConfigPath,
   appConfigPath,
   createDefaultAppConfig,
   createDefaultClientConfig,
@@ -42,6 +47,7 @@ import {
   createDefaultWorkspacesConfig,
   dailyLogFile,
   expandVars,
+  keysDir,
   parseAppConfig,
   parseDaemonConfig,
   parseRemotesConfig,
@@ -80,6 +86,10 @@ interface ResolvedPaths {
   /** <appdir>/daemon/sessions.json — the reattach index. */
   sessionsIndexFile: string;
   workspacesDir: string;
+  /** <appdir>/daemon/keys — per-account SSH keys (created mode 0700). */
+  keysDir: string;
+  /** <appdir>/daemon/accounts.json — connected git accounts (daemon-side). */
+  accountsFile: string;
   /** Sandbox root for the /api/fs browser API (default = workspacesDir). */
   fsRoot: string;
   logsDir: string;
@@ -127,6 +137,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     tmuxSocket: tmuxSocketPath(paths.baseDir),
     sessionsIndexFile: sessionsIndexPath(paths.baseDir),
     workspacesDir: expandVars(config.workspacesDir, paths.vars),
+    keysDir: keysDir(paths.baseDir),
+    accountsFile: accountsConfigPath(paths.baseDir),
     fsRoot: config.transports.http.fsRoot
       ? expandVars(config.transports.http.fsRoot, paths.vars)
       : expandVars(config.workspacesDir, paths.vars),
@@ -147,6 +159,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   const registry = new RegistryService(resolved.daemonDir);
   const tmux = new Tmux(resolved.tmuxSocket);
   const sessions = createSessionManager(registry, tmux, resolved.sessionsIndexFile);
+  const accounts = new AccountsService(resolved.accountsFile, resolved.keysDir);
   const broadcaster = new Broadcaster();
   // Stream registry changes (install/update status, detected versions) to clients.
   registry.events.on("changed", (entry) => broadcaster.publish("registry", "registry.changed", entry));
@@ -168,7 +181,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     broadcaster.publish("sessions", "session.updated", s)
   );
 
-  const services: Services = { registry, sessions, broadcaster };
+  const services: Services = { registry, sessions, accounts, broadcaster };
 
   // The static web build the HTTP transport optionally serves.
   const webDirEnv = options.webDir ?? env.ORQUESTER_WEB_DIR;
@@ -245,6 +258,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
 interface Services {
   registry: RegistryService;
   sessions: ISessionManager;
+  accounts: AccountsService;
   broadcaster: Broadcaster;
   /** Restart the HTTP transport (set in main once the lifecycle exists). */
   reloadHttp?: () => Promise<void>;
@@ -258,7 +272,7 @@ function createServer(
   services: Services,
   options: { authRequired: boolean; mode: "local" | "remote"; serveWeb?: string }
 ): FastifyInstance {
-  const { registry, sessions } = services;
+  const { registry, sessions, accounts } = services;
 
   const app = Fastify({
     // Remote requests arrive via Caddy on loopback (reverse_proxy 127.0.0.1:47831),
@@ -456,6 +470,15 @@ function createServer(
     meta.workspaces = [...meta.workspaces.filter((w) => w.name !== name), entry];
     await writeWorkspacesMeta(resolved.workspacesMetaFile, meta);
 
+    // Bind the git account (immutable): write the include file + register the
+    // global includeIf rule for this workspace's realpath. Best-effort — a
+    // binding failure must not orphan the just-created dir/metadata.
+    if (entry.gitAccountId) {
+      await services.accounts.bindWorkspace(entry.gitAccountId, path).catch((error) => {
+        app.log.error({ err: error }, "git account binding failed");
+      });
+    }
+
     return { name, path, projectCount: 0, gitAccountId: entry.gitAccountId ?? null, createdAt };
   });
 
@@ -530,6 +553,11 @@ function createServer(
       // join), not `safe`: stored projectPaths use the raw join form, so matching
       // the realpath would miss every session under a symlinked workspace root.
       sessions.closeByProjectPrefix(target);
+      // Drop the git includeIf binding BEFORE removing the tree: unbindWorkspace
+      // realpaths the dir to rebuild the same matcher bindWorkspace used, so it
+      // must run while the dir still exists (on macOS the literal /tmp path and
+      // its /private/tmp realpath differ — a post-rm fallback wouldn't match).
+      await services.accounts.unbindWorkspace(target).catch(() => undefined);
       await rm(safe, { recursive: true, force: true });
       const meta = await readWorkspacesMeta(resolved.workspacesMetaFile);
       meta.workspaces = meta.workspaces.filter((w) => w.name !== workspace);
@@ -572,6 +600,52 @@ function createServer(
       return reply.code(400).send({ code: "INVALID_CONFIG", message: "Invalid remotes config." });
     }
   });
+
+  // Connected git accounts. Unlike PUT /api/config/daemon (unix-socket-only),
+  // these ARE allowed over remote HTTP: the transport is TLS + password gated,
+  // and no response ever returns the private key or the PAT — an authenticated
+  // client can create/bind accounts but cannot exfiltrate key material.
+  app.get("/api/accounts", async (): Promise<AccountSummary[]> => accounts.list());
+
+  app.post("/api/accounts", async (request, reply): Promise<AccountSummary | void> => {
+    try {
+      return await accounts.add((request.body ?? {}) as CreateAccountRequest);
+    } catch (error) {
+      const status = error instanceof AccountError ? error.status : 500;
+      const message = error instanceof Error ? error.message : "Could not connect the account.";
+      return reply.code(status).send({ code: "ACCOUNT_ERROR", message });
+    }
+  });
+
+  app.delete<{ Params: { id: string } }>(
+    "/api/accounts/:id",
+    async (request, reply): Promise<void> => {
+      try {
+        const bound = (await readWorkspacesMeta(resolved.workspacesMetaFile)).workspaces
+          .filter((w) => w.gitAccountId === request.params.id)
+          .map((w) => w.name);
+        await accounts.remove(request.params.id, bound);
+        return reply.code(204).send();
+      } catch (error) {
+        const status = error instanceof AccountError ? error.status : 500;
+        const message = error instanceof Error ? error.message : "Could not remove the account.";
+        return reply.code(status).send({ code: "ACCOUNT_ERROR", message });
+      }
+    }
+  );
+
+  app.post<{ Params: { id: string } }>(
+    "/api/accounts/:id/test",
+    async (request, reply): Promise<AccountTestResult | void> => {
+      try {
+        return await accounts.test(request.params.id);
+      } catch (error) {
+        const status = error instanceof AccountError ? error.status : 500;
+        const message = error instanceof Error ? error.message : "Could not test the account.";
+        return reply.code(status).send({ code: "ACCOUNT_ERROR", message });
+      }
+    }
+  );
 
   // File browser: list a directory.
   app.get<{ Querystring: { path?: string } }>(
@@ -1284,6 +1358,7 @@ async function prepareDirs(resolved: ResolvedPaths): Promise<void> {
   await mkdir(resolved.daemonDir, { recursive: true });
   await mkdir(resolved.logsDir, { recursive: true });
   await mkdir(resolved.workspacesDir, { recursive: true });
+  await mkdir(resolved.keysDir, { recursive: true, mode: 0o700 });
 }
 
 function sanitizeDaemonConfig(config: DaemonConfig): DaemonConfig {
