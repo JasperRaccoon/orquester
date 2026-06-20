@@ -143,7 +143,9 @@ export const Dropdown: React.FC<DropdownProps> = ({
               maxHeight: position.maxHeight
             }}
             className={cn(
-              "z-50 overflow-y-auto rounded-md border border-neutral-800",
+              // z-[120] so the panel sits above Modal (z-[100]) / BottomSheet
+              // (z-[110]) when composed inside one — matches ContextMenu/Tooltip.
+              "z-[120] overflow-y-auto rounded-md border border-neutral-800",
               "bg-neutral-900 p-1 shadow-xl shadow-black/40 app-no-drag",
               width,
               className
