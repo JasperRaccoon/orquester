@@ -88,6 +88,15 @@ export function daemonConfigPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "daemon.json");
 }
 
+export function accountsConfigPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "accounts.json");
+}
+
+/** Per-account SSH keys live here (created mode 0700 by the daemon). */
+export function keysDir(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "keys");
+}
+
 export function workspacesMetaPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "workspaces.json");
 }
@@ -294,6 +303,47 @@ export function createDefaultRemotesConfig(): RemotesConfig {
 
 export function parseRemotesConfig(value: unknown): RemotesConfig {
   return remotesConfigSchema.parse(value);
+}
+
+// accounts.json (connected GitHub/git accounts; daemon-side).
+//
+// Each account owns a server-side ed25519 key (private key at `keyPath`, never
+// returned by any API) and a git identity. The GitHub PAT used to connect is
+// transient and is NEVER persisted here.
+
+export const accountSchema = z.object({
+  id: z.string(),
+  /** User-facing label (e.g. "work", "personal"). */
+  label: z.string().min(1),
+  /** GitHub login the PAT authenticated as. */
+  githubLogin: z.string(),
+  /** `git config user.name` for this account (editable in the UI). */
+  gitName: z.string(),
+  /** `git config user.email` for this account (editable in the UI). */
+  gitEmail: z.string(),
+  /** OpenSSH public key (safe to expose). */
+  publicKey: z.string(),
+  /** Absolute path to the private key on the daemon host. NEVER exposed by any API. */
+  keyPath: z.string(),
+  /** Id of the key on GitHub (for later removal); absent if the upload id was unknown. */
+  githubKeyId: z.number().optional(),
+  createdAt: z.string()
+});
+
+export const accountsConfigSchema = z.object({
+  version: z.literal(1).default(1),
+  accounts: z.array(accountSchema).default([])
+});
+
+export type Account = z.infer<typeof accountSchema>;
+export type AccountsConfig = z.infer<typeof accountsConfigSchema>;
+
+export function createDefaultAccountsConfig(): AccountsConfig {
+  return accountsConfigSchema.parse({ accounts: [] });
+}
+
+export function parseAccountsConfig(value: unknown): AccountsConfig {
+  return accountsConfigSchema.parse(value);
 }
 
 // workspaces.json (daemon-side per-workspace metadata; keyed by workspace NAME)
