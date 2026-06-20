@@ -88,6 +88,10 @@ export function daemonConfigPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "daemon.json");
 }
 
+export function workspacesMetaPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "workspaces.json");
+}
+
 export function defaultSocketPath(baseDir: string, platform: RuntimePlatform): string {
   if (platform === "win32") {
     return "\\\\.\\pipe\\orquester-daemon";
@@ -290,6 +294,38 @@ export function createDefaultRemotesConfig(): RemotesConfig {
 
 export function parseRemotesConfig(value: unknown): RemotesConfig {
   return remotesConfigSchema.parse(value);
+}
+
+// workspaces.json (daemon-side per-workspace metadata; keyed by workspace NAME)
+//
+// A lightweight side-table layered onto the filesystem listing of
+// `workspacesDir`. The filesystem stays the source of truth for which
+// workspaces exist; this only carries extra metadata (the bound git account id
+// + creation time) for names that have it. Lives at <appdir>/daemon/workspaces.json.
+
+export const workspaceMetaSchema = z.object({
+  /** Workspace directory name — the stable identifier (paths contain $vars). */
+  name: z.string().min(1),
+  /** Git account this workspace is bound to (Phase 4); undefined = default identity. */
+  gitAccountId: z.string().optional(),
+  /** ISO timestamp the workspace was created through orquester. */
+  createdAt: z.string()
+});
+
+export const workspacesConfigSchema = z.object({
+  version: z.literal(1).default(1),
+  workspaces: z.array(workspaceMetaSchema).default([])
+});
+
+export type WorkspaceMeta = z.infer<typeof workspaceMetaSchema>;
+export type WorkspacesConfig = z.infer<typeof workspacesConfigSchema>;
+
+export function createDefaultWorkspacesConfig(): WorkspacesConfig {
+  return workspacesConfigSchema.parse({ workspaces: [] });
+}
+
+export function parseWorkspacesConfig(value: unknown): WorkspacesConfig {
+  return workspacesConfigSchema.parse(value);
 }
 
 // sessions.json — the daemon's index of live tmux-backed sessions, used to
