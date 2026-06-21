@@ -2,6 +2,7 @@ import { app, BrowserWindow, ipcMain, Menu, nativeImage, Tray, type IpcMainEvent
 import { startDaemon as startOrquesterDaemon, type RunningDaemon } from "@orquester/daemon";
 import fs from "node:fs";
 import http from "node:http";
+import https from "node:https";
 import path from "node:path";
 import zlib from "node:zlib";
 
@@ -110,7 +111,13 @@ function ensureAppFiles(): void {
   }
   const remotesPath = path.join(dir, "remotes.json");
   if (!fs.existsSync(remotesPath)) {
-    fs.writeFileSync(remotesPath, `${JSON.stringify({ version: 1, remotes: [] }, null, 2)}\n`);
+    // Seed the VPS as a selectable remote (kept alongside the bundled local
+    // daemon). The URL is build/env-provided so we never bake a placeholder in.
+    const remoteUrl = process.env.ORQUESTER_REMOTE_URL;
+    const remotes = remoteUrl
+      ? [{ id: "vps", name: "Orquester VPS", kind: "remote", baseUrl: remoteUrl }]
+      : [];
+    fs.writeFileSync(remotesPath, `${JSON.stringify({ version: 1, remotes }, null, 2)}\n`);
   }
   fs.appendFileSync(dailyLogFile(logsDir), `${new Date().toISOString()} app: started\n`);
 }
@@ -208,16 +215,116 @@ function openStreamOverSocket(event: IpcMainEvent, { streamId, path: streamPath 
   streams.set(streamId, req);
 }
 
+// --- Remote HTTP transport (desktop → VPS over TCP, in the main process) ---
+//
+// The renderer is loaded from file:// (or the dev-server origin), so a browser
+// `fetch` to a remote daemon (https://…) is cross-origin. The daemon serves no
+// CORS headers (it is same-origin only for the web SPA behind Caddy), so those
+// browser requests would be blocked. Running the request/stream here in Node
+// has no CORS gate, so the desktop's remote REST calls and event stream work.
+// The bearer token still authenticates each call (sent as Authorization).
+
+interface RemoteHttpRequest {
+  url: string;
+  method?: string;
+  headers?: http.OutgoingHttpHeaders;
+  body?: string;
+}
+
+function httpModuleFor(target: URL): typeof http | typeof https {
+  return target.protocol === "https:" ? https : http;
+}
+
+/** One unary request/response round trip to a remote daemon over TCP. */
+function requestOverHttp({ url, method, headers, body }: RemoteHttpRequest): Promise<DaemonResponse> {
+  return new Promise((resolve, reject) => {
+    let target: URL;
+    try {
+      target = new URL(url);
+    } catch (error) {
+      reject(error instanceof Error ? error : new Error(String(error)));
+      return;
+    }
+
+    const req = httpModuleFor(target).request(
+      target,
+      { method: method || "GET", headers: headers || {} },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer) => chunks.push(chunk));
+        res.on("end", () => {
+          const status = res.statusCode ?? 0;
+          resolve({ status, ok: status >= 200 && status < 300, headers: res.headers, body: Buffer.concat(chunks).toString("utf8") });
+        });
+      }
+    );
+    req.on("error", reject);
+    if (body) {
+      req.write(body);
+    }
+    req.end();
+  });
+}
+
+/** Open a chunked GET stream (event bus / session output) to a remote daemon. */
+function openHttpStream(
+  event: IpcMainEvent,
+  { streamId, url, headers }: { streamId: string; url: string; headers?: http.OutgoingHttpHeaders }
+): void {
+  let target: URL;
+  try {
+    target = new URL(url);
+  } catch {
+    if (!event.sender.isDestroyed()) {
+      event.sender.send("orquester:http-stream:end", { streamId });
+    }
+    return;
+  }
+
+  const req = httpModuleFor(target).request(target, { method: "GET", headers: headers || {} }, (res) => {
+    res.setEncoding("utf8");
+    res.on("data", (chunk: string) => {
+      if (!event.sender.isDestroyed()) {
+        event.sender.send("orquester:http-stream:data", { streamId, chunk });
+      }
+    });
+    res.on("end", () => {
+      streams.delete(streamId);
+      if (!event.sender.isDestroyed()) {
+        event.sender.send("orquester:http-stream:end", { streamId });
+      }
+    });
+  });
+  req.on("error", () => {
+    streams.delete(streamId);
+    if (!event.sender.isDestroyed()) {
+      event.sender.send("orquester:http-stream:end", { streamId });
+    }
+  });
+  req.end();
+  streams.set(streamId, req);
+}
+
+function closeStream(streamId: string): void {
+  const req = streams.get(streamId);
+  if (req) {
+    req.destroy();
+    streams.delete(streamId);
+  }
+}
+
 function registerIpc(): void {
   ipcMain.handle("orquester:request", (_event, request: DaemonRequest) => requestOverSocket(request));
   ipcMain.on("orquester:stream:open", (event, payload: { streamId: string; path: string }) => openStreamOverSocket(event, payload));
-  ipcMain.on("orquester:stream:close", (_event, streamId: string) => {
-    const req = streams.get(streamId);
-    if (req) {
-      req.destroy();
-      streams.delete(streamId);
-    }
-  });
+  ipcMain.on("orquester:stream:close", (_event, streamId: string) => closeStream(streamId));
+
+  // Remote HTTP transport (the renderer's HttpTransporter for remote servers).
+  ipcMain.handle("orquester:http:request", (_event, request: RemoteHttpRequest) => requestOverHttp(request));
+  ipcMain.on(
+    "orquester:http-stream:open",
+    (event, payload: { streamId: string; url: string; headers?: http.OutgoingHttpHeaders }) => openHttpStream(event, payload)
+  );
+  ipcMain.on("orquester:http-stream:close", (_event, streamId: string) => closeStream(streamId));
   ipcMain.on("orquester:window", (_event, action: string) => {
     if (!mainWindow) {
       return;

@@ -88,12 +88,39 @@ export function daemonConfigPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "daemon.json");
 }
 
+export function accountsConfigPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "accounts.json");
+}
+
+/** Per-account SSH keys live here (created mode 0700 by the daemon). */
+export function keysDir(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "keys");
+}
+
+export function workspacesMetaPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "workspaces.json");
+}
+
 export function defaultSocketPath(baseDir: string, platform: RuntimePlatform): string {
   if (platform === "win32") {
     return "\\\\.\\pipe\\orquester-daemon";
   }
 
   return joinPath(daemonConfigDir(baseDir), "daemon.sock");
+}
+
+/**
+ * Unix socket of the dedicated tmux server that owns session PTYs. Lives beside
+ * the daemon socket under <appdir>/daemon so it inherits the same perms/backup
+ * and (per Phase 0's PrivateTmp=false) is reachable across daemon restarts.
+ */
+export function tmuxSocketPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "tmux.sock");
+}
+
+/** On-disk index of sessions (for reattach on boot); see SessionManager. */
+export function sessionsIndexPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "sessions.json");
 }
 
 /** `yyyy-mm-dd` in local time. */
@@ -114,10 +141,26 @@ export const httpTransportSchema = z.object({
   enabled: z.boolean().default(false),
   host: z.string().min(1).default(DEFAULT_HTTP_HOST),
   port: z.coerce.number().int().min(1).max(65535).default(DEFAULT_HTTP_PORT),
+  /**
+   * The username half of the credential. The wire bearer is
+   * base64("<username>:<passwordHash>"); the server compares this (normalized:
+   * trim + lowercase) in constant time. Defaults to "mapacho".
+   */
+  username: z
+    .string()
+    .min(1)
+    .transform((value) => value.trim().toLowerCase())
+    .default("mapacho"),
   /** Transient plaintext input (env / settings). Migrated to `passwordHash`. */
   password: z.string().min(8).optional(),
   /** bcrypt hash of the password — what's persisted at rest. */
-  passwordHash: z.string().optional()
+  passwordHash: z.string().optional(),
+  /**
+   * Filesystem-browser sandbox root: `/api/fs/*` rejects paths whose realpath
+   * is outside this dir. Optional here; the daemon defaults it to the resolved
+   * workspaces dir when unset (see resolved.fsRoot).
+   */
+  fsRoot: z.string().min(1).optional()
 });
 
 export const daemonConfigSchema = z.object({
@@ -183,6 +226,7 @@ export function createDefaultDaemonConfig(input: {
         enabled: env.ORQUESTER_HTTP_ENABLED === "true",
         host: env.ORQUESTER_HTTP_HOST ?? DEFAULT_HTTP_HOST,
         port: env.ORQUESTER_HTTP_PORT ?? String(DEFAULT_HTTP_PORT),
+        username: env.ORQUESTER_HTTP_USERNAME,
         password: env.ORQUESTER_HTTP_PASSWORD
       }
     }
@@ -259,6 +303,111 @@ export function createDefaultRemotesConfig(): RemotesConfig {
 
 export function parseRemotesConfig(value: unknown): RemotesConfig {
   return remotesConfigSchema.parse(value);
+}
+
+// accounts.json (connected GitHub/git accounts; daemon-side).
+//
+// Each account owns a server-side ed25519 key (private key at `keyPath`, never
+// returned by any API) and a git identity. The GitHub PAT used to connect is
+// transient and is NEVER persisted here.
+
+export const accountSchema = z.object({
+  id: z.string(),
+  /** User-facing label (e.g. "work", "personal"). */
+  label: z.string().min(1),
+  /** GitHub login the PAT authenticated as. */
+  githubLogin: z.string(),
+  /** `git config user.name` for this account (editable in the UI). */
+  gitName: z.string(),
+  /** `git config user.email` for this account (editable in the UI). */
+  gitEmail: z.string(),
+  /** OpenSSH public key (safe to expose). */
+  publicKey: z.string(),
+  /** Absolute path to the private key on the daemon host. NEVER exposed by any API. */
+  keyPath: z.string(),
+  /** Id of the key on GitHub (for later removal); absent if the upload id was unknown. */
+  githubKeyId: z.number().optional(),
+  createdAt: z.string()
+});
+
+export const accountsConfigSchema = z.object({
+  version: z.literal(1).default(1),
+  accounts: z.array(accountSchema).default([])
+});
+
+export type Account = z.infer<typeof accountSchema>;
+export type AccountsConfig = z.infer<typeof accountsConfigSchema>;
+
+export function createDefaultAccountsConfig(): AccountsConfig {
+  return accountsConfigSchema.parse({ accounts: [] });
+}
+
+export function parseAccountsConfig(value: unknown): AccountsConfig {
+  return accountsConfigSchema.parse(value);
+}
+
+// workspaces.json (daemon-side per-workspace metadata; keyed by workspace NAME)
+//
+// A lightweight side-table layered onto the filesystem listing of
+// `workspacesDir`. The filesystem stays the source of truth for which
+// workspaces exist; this only carries extra metadata (the bound git account id
+// + creation time) for names that have it. Lives at <appdir>/daemon/workspaces.json.
+
+export const workspaceMetaSchema = z.object({
+  /** Workspace directory name — the stable identifier (paths contain $vars). */
+  name: z.string().min(1),
+  /** Git account this workspace is bound to (Phase 4); undefined = default identity. */
+  gitAccountId: z.string().optional(),
+  /** ISO timestamp the workspace was created through orquester. */
+  createdAt: z.string()
+});
+
+export const workspacesConfigSchema = z.object({
+  version: z.literal(1).default(1),
+  workspaces: z.array(workspaceMetaSchema).default([])
+});
+
+export type WorkspaceMeta = z.infer<typeof workspaceMetaSchema>;
+export type WorkspacesConfig = z.infer<typeof workspacesConfigSchema>;
+
+export function createDefaultWorkspacesConfig(): WorkspacesConfig {
+  return workspacesConfigSchema.parse({ workspaces: [] });
+}
+
+export function parseWorkspacesConfig(value: unknown): WorkspacesConfig {
+  return workspacesConfigSchema.parse(value);
+}
+
+// sessions.json — the daemon's index of live tmux-backed sessions, used to
+// reattach PTYs after a restart. The tmux server is the source of truth for
+// "is the command still running?"; this file remembers tab metadata (title /
+// order / project) that tmux doesn't track.
+
+export const sessionRecordSchema = z.object({
+  id: z.string().min(1),
+  title: z.string(),
+  order: z.number().int(),
+  projectPath: z.string(),
+  refId: z.string(),
+  kind: z.enum(["shell", "agent", "ide", "file-explorer", "browser"]),
+  cwd: z.string(),
+  createdAt: z.string()
+});
+
+export const sessionsConfigSchema = z.object({
+  version: z.literal(1).default(1),
+  sessions: z.array(sessionRecordSchema).default([])
+});
+
+export type SessionRecord = z.infer<typeof sessionRecordSchema>;
+export type SessionsConfig = z.infer<typeof sessionsConfigSchema>;
+
+export function createDefaultSessionsConfig(): SessionsConfig {
+  return sessionsConfigSchema.parse({ sessions: [] });
+}
+
+export function parseSessionsConfig(value: unknown): SessionsConfig {
+  return sessionsConfigSchema.parse(value);
 }
 
 // ClientConfig — what the daemon reports about how to reach itself.}

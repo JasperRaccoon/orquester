@@ -1,14 +1,26 @@
 import { useMemo } from "react";
-import { create } from "zustand";
+import { create, type StoreApi } from "zustand";
 import { ApiClient, ApiError } from "../lib/api-client";
 import { createTransporter } from "../lib/transporters";
 import { toRemoteConfig, toUiConnection } from "../lib/connections";
-import { clearStoredHash, deriveAuthHash, loadStoredHash, storeHash } from "../lib/auth";
+import {
+  buildCredential,
+  clearStoredHash,
+  clearStoredUsername,
+  deriveAuthHash,
+  loadStoredHash,
+  loadStoredUsername,
+  storeHash,
+  storeUsername
+} from "../lib/auth";
+import { loadViewModes, saveViewModes, type ViewMode } from "../lib/view-mode";
 import type { AppConfigAdapter } from "../lib/app-config";
 import type { HttpClient } from "../lib/http-client";
 import type { Transporter } from "../lib/transporter";
 import { workspaceService } from "../services";
 import type {
+  AccountSummary,
+  AccountTestResult,
   ConnectionStatus,
   EventMessage,
   ProjectSummary,
@@ -53,14 +65,135 @@ let eventsUnsubscribe: (() => void) | null = null;
 let eventsGen = 0;
 /** Periodic health probe that detects a dropped/restarted transport. */
 let healthTimer: ReturnType<typeof setInterval> | null = null;
+/** Pending delayed reconnect (e.g. after a 429 lockout); cleared before re-arming. */
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 /** Guards against overlapping reconnect loops. */
 let reconnecting = false;
+/**
+ * Generation guard for the reconnect flow, mirroring {@link eventsGen}. Every
+ * reconnect path (the backoff loop, the locked-reconnect path, and the
+ * reconnect-driven branch of establish) captures the current value and bails
+ * after each `await` if it changed. Bumped by stopReconnect/connect/
+ * scheduleLockedReconnect so a new flow preempts any old loop suspended on an
+ * untracked `delay()` timer (whose setTimeout we cannot clear directly).
+ */
+let reconnectGen = 0;
+/** Consecutive 429 lockout cycles; resets on any successful connect. */
+let lockedCycles = 0;
+
+/** After this many back-to-back lockouts, stop auto-polling and let the user act. */
+const MAX_LOCKED_CYCLES = 4;
+/** Base delay (ms) for the locked-cycle exponential fallback (no Retry-After). */
+const LOCKED_FALLBACK_BASE_MS = 8000;
+/** Cap (ms) for the locked-cycle exponential fallback. */
+const LOCKED_FALLBACK_CAP_MS = 120000;
+
+/** Capped exponential backoff (ms) for reconnect attempt N (1-based). */
+function backoffMs(attempt: number): number {
+  return Math.min(attempt * 1000, 8000);
+}
+
+/**
+ * Capped exponential fallback (ms) for the Nth consecutive locked cycle
+ * (0-based) when a 429 carries no Retry-After. Avoids an unbounded fixed 8s
+ * poll: `min(base * 2 ** n, cap)`.
+ */
+function lockedFallbackMs(cycle: number): number {
+  return Math.min(LOCKED_FALLBACK_BASE_MS * 2 ** cycle, LOCKED_FALLBACK_CAP_MS);
+}
 
 function stopHealthProbe(): void {
   if (healthTimer) {
     clearInterval(healthTimer);
     healthTimer = null;
   }
+}
+
+/** Clear any pending delayed reconnect so timers never stack. */
+function clearReconnectTimer(): void {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+}
+
+/**
+ * Tear down every reconnect mechanism (probe, loop, pending timer). Bumping
+ * reconnectGen preempts any loop/establish suspended on an untracked delay() so
+ * it returns instead of resuming a now-stale flow.
+ */
+function stopReconnect(): void {
+  stopHealthProbe();
+  clearReconnectTimer();
+  reconnecting = false;
+  reconnectGen += 1;
+}
+
+/**
+ * Enter the rate-limited (429) state: surface a clear locked message + the
+ * lockout deadline, then schedule a SINGLE delayed reconnect after Retry-After
+ * (or a capped exponential fallback). Tears down probes/timers first so backoffs
+ * never stack and we never tight-loop on the 429.
+ *
+ * Guards against an unbounded locked cycle (scheduleLockedReconnect →
+ * handleDisconnect → establish → 429 → …): consecutive cycles grow the fallback
+ * exponentially, and after {@link MAX_LOCKED_CYCLES} we STOP auto-polling and
+ * drop to a terminal state (re-prompt credentials + a Retry affordance) so a
+ * client with a wrong stored credential isn't stuck cycling forever.
+ *
+ * Bumps reconnectGen (mirroring stopReconnect) so any loop/establish suspended
+ * on an untracked delay() is preempted rather than resuming into a stale flow.
+ */
+function scheduleLockedReconnect(
+  get: StoreApi<AppState>["getState"],
+  set: StoreApi<AppState>["setState"],
+  retryAfterSeconds: number | null
+): void {
+  stopHealthProbe();
+  clearReconnectTimer();
+  reconnecting = false;
+  reconnectGen += 1;
+
+  const cycle = lockedCycles;
+  lockedCycles += 1;
+
+  // Too many back-to-back lockouts: stop polling and drop to a terminal state so
+  // a client with a wrong stored credential isn't stuck cycling forever. When
+  // auth is in play, re-prompt (AuthModal); otherwise leave authPrompt cleared so
+  // the ConnectionStatusToast's Retry button is the escape hatch. Both paths run
+  // connect() (resetting lockedCycles) on the user's next action. lockedUntil is
+  // cleared because nothing is scheduled to fire.
+  if (cycle >= MAX_LOCKED_CYCLES) {
+    const api = get().api;
+    const authInPlay = get().authSalt != null && api != null;
+    set({
+      connectionStatus: "error",
+      reconnectAttempt: 0,
+      connectionError: authInPlay
+        ? "Too many attempts — locked out. Re-enter your credentials to retry."
+        : "Too many attempts — locked out. Press Retry to try again.",
+      lockedUntil: null,
+      authPrompt: authInPlay ? { connectionId: api.connection.id } : get().authPrompt
+    });
+    return;
+  }
+
+  // Honor Retry-After; otherwise grow the fallback exponentially (capped) so a
+  // 429 without a header doesn't degenerate into a flat fixed-interval poll.
+  const seconds = retryAfterSeconds ?? Math.round(lockedFallbackMs(cycle) / 1000);
+  set({
+    connectionStatus: "error",
+    reconnectAttempt: 0,
+    connectionError: `Too many attempts — locked out, retry in ${seconds}s.`,
+    lockedUntil: Date.now() + seconds * 1000
+  });
+  const gen = reconnectGen;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    if (gen === reconnectGen && get().api) {
+      get().handleDisconnect();
+    }
+  }, seconds * 1000);
 }
 
 /** Intentionally drop the events subscription (bumps gen so its onEnd is ignored). */
@@ -109,8 +242,8 @@ async function persistRemotes(connections: UiConnection[]): Promise<void> {
 }
 
 /** Rebuild an ApiClient for the same connection but with a bearer credential. */
-function apiWithPassword(api: ApiClient, password: string): ApiClient {
-  const connection: UiConnection = { ...api.connection, password };
+function apiWithCredential(api: ApiClient, credential: string): ApiClient {
+  const connection: UiConnection = { ...api.connection, password: credential };
   return new ApiClient(connection, buildTransporter(connection));
 }
 
@@ -149,6 +282,10 @@ export interface AppState {
   connectionStatus: ConnectionStatus;
   /** >0 while auto-reconnecting (drives the "Reconnecting… attempt N" toast). */
   reconnectAttempt: number;
+  /** Human-readable reason for an errored/locked connection (UI message). */
+  connectionError: string | null;
+  /** Epoch ms until which we're rate-limited (429); reconnect waits past this. */
+  lockedUntil: number | null;
 
   // connections (local daemon + user-added remotes)
   connections: UiConnection[];
@@ -164,6 +301,8 @@ export interface AppState {
   // auth (web → password-protected HTTP daemon)
   authPrompt: { connectionId: string } | null;
   authSalt: string | null;
+  /** Whether the active connection's auth needs a username (UI hint). */
+  authRequiresUsername: boolean;
 
   // navigation
   currentWorkspace: string | null;
@@ -172,6 +311,7 @@ export interface AppState {
   // data
   registry: RegistryResponse;
   workspaces: WorkspaceSummary[];
+  accounts: AccountSummary[];
   workspacesLoading: boolean;
   projects: ProjectSummary[];
   projectsLoading: boolean;
@@ -182,6 +322,8 @@ export interface AppState {
   fileTabsByProject: Record<string, FileTab[]>;
   /** Client-local active tab id per project path (session or file tab). */
   activeTabByProject: Record<string, string | null>;
+  /** Per-project layout choice (tab view vs grid view); persisted client-side. */
+  viewModeByProject: Record<string, ViewMode>;
 
   setApi: (api: ApiClient) => void;
   connect: () => Promise<void>;
@@ -193,9 +335,15 @@ export interface AppState {
   // connection management
   initConnections: (setup: ConnectionSetup) => Promise<void>;
   selectConnection: (id: string) => Promise<void>;
-  addRemote: (input: { name: string; baseUrl: string; password?: string }) => Promise<string>;
+  addRemote: (input: { name: string; baseUrl: string }) => Promise<string>;
   removeRemote: (id: string) => Promise<void>;
   loadRemotes: () => Promise<void>;
+
+  // git accounts (daemon-persisted; shared across clients of this daemon)
+  loadAccounts: () => Promise<void>;
+  addAccount: (input: { label: string; token: string }) => Promise<AccountSummary>;
+  removeAccount: (id: string) => Promise<void>;
+  testAccount: (id: string) => Promise<AccountTestResult>;
 
   // app config + settings
   loadAppConfig: () => Promise<void>;
@@ -205,16 +353,18 @@ export interface AppState {
   updateAppConfig: (patch: Partial<UiAppConfig>) => Promise<void>;
 
   // auth
-  submitPassword: (password: string) => Promise<void>;
+  submitCredentials: (username: string, password: string) => Promise<void>;
   signOut: () => void;
 
   loadWorkspaces: () => Promise<void>;
-  createWorkspace: (name: string) => Promise<void>;
+  createWorkspace: (name: string, gitAccountId?: string) => Promise<void>;
+  deleteWorkspace: (name: string) => Promise<void>;
   openWorkspace: (name: string) => Promise<void>;
   closeWorkspace: () => void;
 
   loadProjects: () => Promise<void>;
   createProject: (name: string) => Promise<void>;
+  deleteProject: (project: ProjectSummary) => Promise<void>;
   openProject: (project: ProjectSummary) => void;
 
   loadSessions: () => Promise<void>;
@@ -225,6 +375,9 @@ export interface AppState {
   openFileBrowser: () => void;
   closeTab: (id: string) => Promise<void>;
   activateTab: (id: string) => void;
+  setViewMode: (mode: ViewMode) => void;
+  renameTab: (id: string, title: string) => Promise<void>;
+  reorderTabs: (orderedSessionIds: string[]) => Promise<void>;
 
   applyEvent: (event: EventMessage) => void;
 }
@@ -233,6 +386,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   api: null,
   connectionStatus: "connecting",
   reconnectAttempt: 0,
+  connectionError: null,
+  lockedUntil: null,
   connections: [],
   activeConnectionId: null,
   appConfig: { useTitlebar: false, runInBackground: false },
@@ -241,16 +396,19 @@ export const useAppStore = create<AppState>((set, get) => ({
   sidebarDrawerOpen: false,
   authPrompt: null,
   authSalt: null,
+  authRequiresUsername: false,
   currentWorkspace: null,
   currentProject: null,
   registry: EMPTY_REGISTRY,
   workspaces: [],
+  accounts: [],
   workspacesLoading: false,
   projects: [],
   projectsLoading: false,
   sessions: [],
   fileTabsByProject: {},
   activeTabByProject: {},
+  viewModeByProject: loadViewModes(),
 
   setApi: (api) => set({ api }),
 
@@ -259,9 +417,13 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (!initial) {
       return;
     }
-    stopHealthProbe();
-    reconnecting = false;
-    set({ connectionStatus: "connecting", reconnectAttempt: 0 });
+    // A manual connect (or fresh credentials) clears any lockout/backoff state.
+    // stopReconnect() bumps reconnectGen, preempting any loop suspended on an
+    // untracked delay(); reset the locked-cycle counter so a fresh attempt
+    // starts from a clean exponential fallback.
+    stopReconnect();
+    lockedCycles = 0;
+    set({ connectionStatus: "connecting", reconnectAttempt: 0, connectionError: null, lockedUntil: null });
 
     // The embedded daemon is spawned asynchronously: poll /health first.
     for (let attempt = 0; attempt < 60; attempt += 1) {
@@ -281,29 +443,111 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
     }
 
-    await get().establish(initial);
+    try {
+      await get().establish(initial);
+    } catch {
+      // A network error during establish (after /health came back) is a
+      // transient disconnect: hand off to the exponential-backoff reconnect.
+      // 401/429 are handled inside establish() and never reach here.
+      get().handleDisconnect();
+    }
   },
 
   establish: async (api) => {
-    // Auth gate: derive/restore the bcrypt-hash bearer (web) or prompt.
+    // Reconnect-generation guard (mirrors eventsGen): capture the current gen and
+    // bail after every await if a newer flow (Retry/credentials/teardown) bumped
+    // it. This is what lets connect()/stopReconnect()/scheduleLockedReconnect()
+    // preempt an establish that was kicked off by a reconnect loop suspended on an
+    // untracked delay() — without it, the resumed loop would run a SECOND
+    // establish (duplicate fan-out + double events subscription).
+    const reconnectGenAtStart = reconnectGen;
+    // Auth gate: derive/restore the bearer credential (web) or prompt.
     let active = api;
     const info = await active.authInfo().catch(() => null);
-    set({ authSalt: info?.salt ?? null });
+    if (reconnectGenAtStart !== reconnectGen) {
+      return;
+    }
+    set({ authSalt: info?.salt ?? null, authRequiresUsername: info?.requiresUsername ?? false });
     if (info?.authRequired) {
-      const hash = active.connection.password ?? loadStoredHash(active.connection.endpoint);
-      if (!hash) {
-        stopHealthProbe();
-        set({ connectionStatus: "error", reconnectAttempt: 0, authPrompt: { connectionId: active.connection.id } });
+      // The bearer is base64("<username>:<hash>"). Prefer one already on the
+      // connection; else rebuild it from the per-endpoint stored username+hash.
+      const endpoint = active.connection.endpoint;
+      const storedHash = loadStoredHash(endpoint);
+      const storedUser = loadStoredUsername(endpoint);
+      const credential =
+        active.connection.password ??
+        (storedHash ? buildCredential(storedUser ?? "", storedHash) : undefined);
+      if (!credential) {
+        stopReconnect();
+        set({
+          connectionStatus: "error",
+          reconnectAttempt: 0,
+          connectionError: null,
+          lockedUntil: null,
+          authPrompt: { connectionId: active.connection.id }
+        });
         return;
       }
-      if (active.connection.password !== hash) {
-        active = apiWithPassword(active, hash);
+      if (active.connection.password !== credential) {
+        active = apiWithCredential(active, credential);
         set({ api: active });
       }
     }
 
-    set({ connectionStatus: "connected", reconnectAttempt: 0, authPrompt: null });
+    // CREDENTIAL PRE-CHECK: one lightweight authenticated request (GET /api/info)
+    // *before* the parallel fan-out. A bad/stale credential then yields a single
+    // 401 (not five), and a locked-out client a single 429 — and we never enter
+    // the reconnect loop on either. Only network errors fall through to retry.
+    try {
+      await active.info();
+    } catch (error) {
+      // A newer flow preempted us while the pre-check was in flight: don't act on
+      // this stale response (no creds-clear, no reschedule, no rethrow-to-retry).
+      if (reconnectGenAtStart !== reconnectGen) {
+        return;
+      }
+      if (error instanceof ApiError && error.status === 401) {
+        // Wrong credentials: drop the stored hash/username and re-prompt. Do NOT
+        // fan out and do NOT reconnect.
+        stopReconnect();
+        clearStoredHash(active.connection.endpoint);
+        clearStoredUsername(active.connection.endpoint);
+        set({
+          connectionStatus: "error",
+          reconnectAttempt: 0,
+          connectionError: "Incorrect username or password.",
+          lockedUntil: null,
+          authPrompt: { connectionId: active.connection.id }
+        });
+        return;
+      }
+      if (error instanceof ApiError && error.status === 429) {
+        // Rate-limited (too many failed attempts): back off until Retry-After
+        // (or a capped exponential fallback) — never tight-loop.
+        scheduleLockedReconnect(get, set, error.retryAfterSeconds);
+        return;
+      }
+      // Transient/network error: rethrow so the caller routes it to the
+      // exponential-backoff reconnect (handleDisconnect's loop, or connect()).
+      // Rethrowing — rather than calling handleDisconnect() here — keeps this
+      // safe when establish() is itself invoked from inside that loop.
+      throw error;
+    }
+
+    // Pre-check passed: still our flow? If a newer one preempted us, bail before
+    // claiming "connected" / fanning out.
+    if (reconnectGenAtStart !== reconnectGen) {
+      return;
+    }
+    // Successful connect resets the consecutive-lockout counter.
+    lockedCycles = 0;
+    set({ connectionStatus: "connected", reconnectAttempt: 0, connectionError: null, lockedUntil: null, authPrompt: null });
     await Promise.all([get().loadWorkspaces(), get().loadSessions(), get().loadRegistry()]);
+    // A newer flow may have preempted us during the fan-out: don't open a
+    // duplicate events stream or arm a second health probe.
+    if (reconnectGenAtStart !== reconnectGen) {
+      return;
+    }
 
     // Live event sync. The stream ending unexpectedly (e.g. the transport was
     // restarted) is the primary disconnect signal.
@@ -329,29 +573,64 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   handleDisconnect: () => {
+    // Tear down the probe + any pending delayed reconnect so a stream `onEnd`
+    // can't stack a second loop/timer; a single backoff loop owns reconnection.
     stopHealthProbe();
+    clearReconnectTimer();
     if (reconnecting || get().api === null) {
       return;
     }
     reconnecting = true;
 
     const loop = async () => {
+      // Own this reconnect generation (mirrors eventsGen). Any newer flow
+      // (Retry/credentials/teardown/locked) bumps reconnectGen; after each await
+      // we bail so a loop resumed from an untracked delay() can't run a SECOND
+      // establish concurrently with the new flow.
+      const gen = ++reconnectGen;
       for (let attempt = 1; ; attempt += 1) {
         const current = get().api;
         if (!current) {
           break;
         }
-        set({ connectionStatus: "connecting", reconnectAttempt: attempt });
+        // Respect an active lockout (429): wait past it before probing again so
+        // we don't hammer the rate-limited daemon.
+        const lockedUntil = get().lockedUntil;
+        if (lockedUntil && lockedUntil > Date.now()) {
+          await delay(Math.min(lockedUntil - Date.now(), 8000));
+          if (gen !== reconnectGen) {
+            return;
+          }
+          continue;
+        }
+        set({ connectionStatus: "connecting", reconnectAttempt: attempt, connectionError: null });
         try {
           await current.health();
+          if (gen !== reconnectGen) {
+            return;
+          }
           // Daemon is back: rebuild the client so terminals + event streams
-          // re-subscribe to the (intact) sessions, then re-establish.
-          const fresh = apiWithPassword(current, current.connection.password ?? "");
+          // re-subscribe to the (intact) sessions, then re-establish. establish()
+          // runs its own auth pre-check — a 401 re-prompts and a 429 reschedules
+          // its own backoff, so either way we stop looping here.
+          const fresh = apiWithCredential(current, current.connection.password ?? "");
           set({ api: fresh });
           await get().establish(fresh);
           break;
-        } catch {
-          await delay(Math.min(attempt * 1000, 8000));
+        } catch (error) {
+          if (gen !== reconnectGen) {
+            return;
+          }
+          // Even /health can 429 if the limiter is broadened: honor Retry-After.
+          if (error instanceof ApiError && error.status === 429) {
+            reconnecting = false;
+            scheduleLockedReconnect(get, set, error.retryAfterSeconds);
+            return;
+          }
+          await delay(backoffMs(attempt));
+          if (gen !== reconnectGen) {
+            return;
+          }
         }
       }
       reconnecting = false;
@@ -370,7 +649,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     });
     await get().connect();
     // App config + remote servers are shared (persisted on the home daemon).
-    await Promise.all([get().loadAppConfig(), get().loadRemotes()]);
+    await Promise.all([get().loadAppConfig(), get().loadRemotes(), get().loadAccounts()]);
   },
 
   loadAppConfig: async () => {
@@ -421,31 +700,37 @@ export const useAppStore = create<AppState>((set, get) => ({
     await result?.catch(() => undefined);
   },
 
-  submitPassword: async (password) => {
+  submitCredentials: async (username, password) => {
     const api = get().api;
     const salt = get().authSalt;
     if (!api || !salt) {
       return;
     }
-    // Derive the same bcrypt hash the daemon stores; persist it (never the
-    // plaintext) and use it as the bearer.
+    // Derive the same bcrypt hash the daemon stores; persist the hash + the
+    // plain username (never the plaintext password). The wire bearer is
+    // base64("<username>:<hash>").
+    const normalizedUser = username.trim().toLowerCase();
     const hash = deriveAuthHash(password, salt);
+    const credential = buildCredential(normalizedUser, hash);
     storeHash(api.connection.endpoint, hash);
-    set({ api: apiWithPassword(api, hash), authPrompt: null });
+    storeUsername(api.connection.endpoint, normalizedUser);
+    set({ api: apiWithCredential(api, credential), authPrompt: null });
     await get().connect();
   },
 
   signOut: () => {
     const api = get().api;
     if (api) {
-      stopHealthProbe();
-      reconnecting = false;
+      stopReconnect();
       closeEvents();
       clearStoredHash(api.connection.endpoint);
+      clearStoredUsername(api.connection.endpoint);
       set({
-        api: apiWithPassword(api, ""),
+        api: apiWithCredential(api, ""),
         connectionStatus: "error",
         reconnectAttempt: 0,
+        connectionError: null,
+        lockedUntil: null,
         authPrompt: { connectionId: api.connection.id }
       });
     }
@@ -456,8 +741,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (!connection || id === get().activeConnectionId) {
       return;
     }
-    stopHealthProbe();
-    reconnecting = false;
+    stopReconnect();
     closeEvents();
     // Reset all daemon-scoped state: a different server has its own data.
     set({
@@ -467,19 +751,24 @@ export const useAppStore = create<AppState>((set, get) => ({
       currentProject: null,
       workspaces: [],
       projects: [],
-      sessions: []
+      sessions: [],
+      accounts: []
     });
     await get().connect();
   },
 
   addRemote: async (input) => {
+    // No credential is captured at add-time: `connection.password` is the wire
+    // bearer base64("<username>:<hash>"), and the raw password must never leave
+    // the client (nor be persisted to remotes.json). The AuthModal derives the
+    // hash and builds the credential on first connect, exactly like the
+    // seeded-VPS remote (apps/desktop/src/main.ts).
     const connection: UiConnection = {
       id: crypto.randomUUID(),
       name: input.name.trim() || input.baseUrl,
       kind: "remote",
       endpoint: input.baseUrl.trim().replace(/\/$/, ""),
-      status: "disconnected",
-      password: input.password?.trim() || undefined
+      status: "disconnected"
     };
     const connections = [...get().connections, connection];
     set({ connections });
@@ -496,6 +785,41 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
+  loadAccounts: async () => {
+    const api = get().api;
+    if (!api) {
+      return;
+    }
+    try {
+      set({ accounts: await api.listAccounts() });
+    } catch {
+      /* keep current (e.g. transport without the endpoint) */
+    }
+  },
+
+  addAccount: async (input) => {
+    const api = get().api;
+    if (!api) {
+      throw new Error("Not connected.");
+    }
+    const account = await api.createAccount({ label: input.label.trim(), token: input.token.trim() });
+    await get().loadAccounts();
+    return account;
+  },
+
+  removeAccount: async (id) => {
+    await get().api?.removeAccount(id);
+    await get().loadAccounts();
+  },
+
+  testAccount: async (id) => {
+    const api = get().api;
+    if (!api) {
+      return { ok: false, message: "Not connected." };
+    }
+    return api.testAccount(id);
+  },
+
   loadWorkspaces: async () => {
     const api = get().api;
     if (!api) {
@@ -505,10 +829,19 @@ export const useAppStore = create<AppState>((set, get) => ({
     try {
       set({ workspaces: await workspaceService.list(api) });
     } catch (error) {
-      // A wrong/stale token surfaces here — clear it and re-prompt.
+      // A wrong/stale token surfaces here — clear it and re-prompt. (Normally the
+      // establish() pre-check catches this first; this is the defensive fallback
+      // for a credential revoked mid-fan-out.)
       if (error instanceof ApiError && error.status === 401) {
+        stopReconnect();
         clearStoredHash(api.connection.endpoint);
-        set({ connectionStatus: "error", authPrompt: { connectionId: api.connection.id } });
+        clearStoredUsername(api.connection.endpoint);
+        set({
+          connectionStatus: "error",
+          connectionError: "Incorrect username or password.",
+          lockedUntil: null,
+          authPrompt: { connectionId: api.connection.id }
+        });
       } else {
         console.error("[orquester] failed to load workspaces", error);
       }
@@ -517,12 +850,41 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  createWorkspace: async (name) => {
+  createWorkspace: async (name, gitAccountId) => {
     const api = get().api;
     if (!api) {
       return;
     }
-    await workspaceService.create(api, name);
+    await workspaceService.create(api, name, gitAccountId);
+    await get().loadWorkspaces();
+  },
+
+  deleteWorkspace: async (name) => {
+    const api = get().api;
+    if (!api) {
+      return;
+    }
+    // The deleted workspace's directory prefix; every project path under it is
+    // `<wsPath>/<project>`. Used to purge path-keyed client-local tab state.
+    const ws = get().workspaces.find((w) => w.name === name);
+    const prefix = ws?.path;
+    await workspaceService.delete(api, name);
+    if (get().currentWorkspace === name) {
+      get().closeWorkspace();
+    }
+    if (prefix) {
+      const match = (path: string) => path === prefix || path.startsWith(`${prefix}/`);
+      set((state) => {
+        const next = clearProjectLocalState(state, match);
+        // If the open project lived under the deleted workspace, drop it from
+        // the main view (closeWorkspace keeps currentProject sticky, and the
+        // delete can fire while currentWorkspace is already null).
+        if (state.currentProject && match(state.currentProject.path)) {
+          next.currentProject = null;
+        }
+        return next;
+      });
+    }
     await get().loadWorkspaces();
   },
 
@@ -557,6 +919,23 @@ export const useAppStore = create<AppState>((set, get) => ({
       return;
     }
     await workspaceService.createProject(api, workspace, name);
+    await get().loadProjects();
+  },
+
+  deleteProject: async (project) => {
+    const api = get().api;
+    if (!api) {
+      return;
+    }
+    await workspaceService.deleteProject(api, project.workspace, project.name);
+    set((state) => {
+      const next = clearProjectLocalState(state, (path) => path === project.path);
+      // If the open project was deleted, drop it from the main view.
+      if (state.currentProject?.path === project.path) {
+        next.currentProject = null;
+      }
+      return next;
+    });
     await get().loadProjects();
   },
 
@@ -663,6 +1042,55 @@ export const useAppStore = create<AppState>((set, get) => ({
       return { activeTabByProject: { ...state.activeTabByProject, [project.path]: id } };
     }),
 
+  setViewMode: (mode) =>
+    set((state) => {
+      const project = state.currentProject;
+      if (!project) {
+        return state;
+      }
+      const viewModeByProject = { ...state.viewModeByProject, [project.path]: mode };
+      saveViewModes(viewModeByProject);
+      return { viewModeByProject };
+    }),
+
+  renameTab: async (id, title) => {
+    const trimmed = title.trim();
+    // Optimistic only when non-empty; an empty title is resolved to the default
+    // name on the daemon and arrives back via the session.updated broadcast.
+    if (trimmed) {
+      set((state) => ({
+        sessions: state.sessions.map((s) => (s.id === id ? { ...s, title: trimmed } : s))
+      }));
+    }
+    try {
+      const updated = await get().api?.renameSession(id, trimmed);
+      if (updated) {
+        set((state) => ({ sessions: upsertSession(state.sessions, updated) }));
+      }
+    } catch {
+      await get().loadSessions();
+    }
+  },
+
+  reorderTabs: async (orderedSessionIds) => {
+    const project = get().currentProject;
+    if (!project) {
+      return;
+    }
+    // Optimistic: assign order by index for this project's sessions.
+    set((state) => ({
+      sessions: state.sessions.map((s) => {
+        const index = orderedSessionIds.indexOf(s.id);
+        return s.projectPath === project.path && index !== -1 ? { ...s, order: index } : s;
+      })
+    }));
+    try {
+      await get().api?.reorderSessions(project.path, orderedSessionIds);
+    } catch {
+      await get().loadSessions();
+    }
+  },
+
   applyEvent: (event) => {
     if (event.channel === "registry" && event.type === "registry.changed") {
       const entry = event.payload as RegistryEntry;
@@ -672,7 +1100,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (event.channel !== "sessions") {
       return;
     }
-    if (event.type === "session.created" || event.type === "session.exited") {
+    if (
+      event.type === "session.created" ||
+      event.type === "session.exited" ||
+      event.type === "session.updated"
+    ) {
       const summary = event.payload as SessionSummary;
       set((state) => ({ sessions: upsertSession(state.sessions, summary) }));
     } else if (event.type === "session.closed") {
@@ -727,6 +1159,37 @@ function removeFileTab(state: AppState, id: string): Partial<AppState> {
   };
 }
 
+/**
+ * Purge the client-local, path-keyed tab maps for project paths matching
+ * `match` (used after a workspace/project is deleted — the daemon's
+ * session.closed events drop sessions, but these maps are client-only).
+ */
+function clearProjectLocalState(
+  state: AppState,
+  match: (path: string) => boolean
+): Partial<AppState> {
+  const fileTabsByProject: Record<string, FileTab[]> = {};
+  for (const [path, tabs] of Object.entries(state.fileTabsByProject)) {
+    if (!match(path)) {
+      fileTabsByProject[path] = tabs;
+    }
+  }
+  const activeTabByProject: Record<string, string | null> = {};
+  for (const [path, id] of Object.entries(state.activeTabByProject)) {
+    if (!match(path)) {
+      activeTabByProject[path] = id;
+    }
+  }
+  const viewModeByProject: Record<string, ViewMode> = {};
+  for (const [path, mode] of Object.entries(state.viewModeByProject)) {
+    if (!match(path)) {
+      viewModeByProject[path] = mode;
+    }
+  }
+  saveViewModes(viewModeByProject);
+  return { fileTabsByProject, activeTabByProject, viewModeByProject };
+}
+
 /** Combined tabs (sessions + file tabs) of the currently open project. */
 export function useProjectTabs(): ProjectTab[] {
   const sessions = useAppStore((s) => s.sessions);
@@ -738,6 +1201,8 @@ export function useProjectTabs(): ProjectTab[] {
     }
     const sessionTabs: ProjectTab[] = sessions
       .filter((s) => s.projectPath === project.path)
+      .slice()
+      .sort((a, b) => a.order - b.order || a.createdAt.localeCompare(b.createdAt))
       .map((session) => ({ id: session.id, type: "session", session }));
     const fileTabs: ProjectTab[] = (fileTabsByProject[project.path] ?? []).map((tab) => ({
       id: tab.id,
@@ -751,5 +1216,11 @@ export function useProjectTabs(): ProjectTab[] {
 export function useActiveTabId(): string | null {
   return useAppStore((s) =>
     s.currentProject ? (s.activeTabByProject[s.currentProject.path] ?? null) : null
+  );
+}
+
+export function useViewMode(): ViewMode {
+  return useAppStore((s) =>
+    s.currentProject ? (s.viewModeByProject[s.currentProject.path] ?? "tabs") : "tabs"
   );
 }

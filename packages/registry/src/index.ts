@@ -8,6 +8,10 @@ export interface RegistryEntryDef {
   kind: RegistryKind;
   /** bin candidates. May use tokens: $LOCALAPPDATA, $PROGRAMFILES, $HOME */
   bin: readonly string[];
+  /** Extra args passed to the resolved bin when a session is launched (not used for resolution/version/install). */
+  args?: readonly string[];
+  /** Extra environment variables set on the process when a session is launched. */
+  env?: Readonly<Record<string, string>>;
   versionFlag?: string;
   installCmd?: string;
   updateCmd?: string;
@@ -34,6 +38,12 @@ export const REGISTRY = {
       name: "Claude Code",
       kind: "agent",
       bin: ["claude"] as const,
+      // Equivalent of the user's `claude --d` shell shortcut, expanded so it works
+      // when the daemon execs the binary directly (shell functions aren't consulted).
+      args: ["--dangerously-skip-permissions", "--effort", "max", "--verbose"] as const,
+      // Claude Code repaints its whole TUI each frame, which flickers over a
+      // streamed PTY; this switches it to flicker-free diff rendering.
+      env: { CLAUDE_CODE_NO_FLICKER: "1" },
       versionFlag: "--version",
       installCmd: "npm install -g @anthropic-ai/claude-code",
       updateCmd: "npm update -g @anthropic-ai/claude-code"
@@ -43,6 +53,7 @@ export const REGISTRY = {
       name: "Codex",
       kind: "agent",
       bin: ["codex"] as const,
+      args: ["--yolo"] as const,
       versionFlag: "--version",
       installCmd: "npm install -g @openai/codex",
       updateCmd: "npm update -g @openai/codex"

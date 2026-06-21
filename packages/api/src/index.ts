@@ -13,10 +13,6 @@ export interface ApiErrorPayload {
 
 export interface HealthResponse {
   ok: true;
-  daemonId: string;
-  version: string;
-  mode: "local" | "remote";
-  transports: Array<"unix" | "http">;
 }
 
 export interface ServerInfoResponse {
@@ -39,6 +35,14 @@ export interface WorkspaceSummary {
   name: string;
   path: string;
   projectCount: number;
+  /**
+   * Git account this workspace is bound to, from workspaces.json (Phase 4).
+   * `null`/absent = no binding (default git identity). The UI resolves the id
+   * to a label from its accounts store; this contract carries only the id.
+   */
+  gitAccountId?: string | null;
+  /** ISO creation timestamp from workspaces.json, when present. */
+  createdAt?: string;
 }
 
 /**
@@ -53,6 +57,39 @@ export interface ProjectSummary {
 
 export interface CreateWorkspaceRequest {
   name: string;
+  /** Optional git account to bind (Phase 4 wires the picker; undefined here). */
+  gitAccountId?: string;
+}
+
+/**
+ * Public view of a connected git account. Deliberately omits `keyPath` and any
+ * private-key material — the daemon never returns where/what the private key is.
+ */
+export interface AccountSummary {
+  id: string;
+  label: string;
+  githubLogin: string;
+  gitName: string;
+  gitEmail: string;
+  /** OpenSSH public key (safe to display/copy). */
+  publicKey: string;
+  createdAt: string;
+}
+
+export interface CreateAccountRequest {
+  /** User-facing label; also used in the SSH key comment + GitHub key title. */
+  label: string;
+  /** GitHub PAT — used transiently to upload the key + read identity, then discarded. */
+  token: string;
+}
+
+/** Result of `POST /api/accounts/:id/test` (an `ssh -T git@github.com` probe). */
+export interface AccountTestResult {
+  ok: boolean;
+  /** GitHub login parsed from the "Hi <login>!" greeting, when ok. */
+  login?: string;
+  /** Human-readable detail (success greeting or failure reason). */
+  message?: string;
 }
 
 export interface CreateProjectRequest {
@@ -97,6 +134,11 @@ export interface AuthInfoResponse {
   authRequired: boolean;
   /** bcrypt salt prefix the client uses to derive the bearer hash, or null. */
   salt: string | null;
+  /**
+   * Whether the credential also needs a username (UI hint; shows the username
+   * field). True when auth is required. The username itself is never returned.
+   */
+  requiresUsername: boolean;
 }
 
 /** A pluggable coding agent the daemon detected on the host. */
@@ -134,6 +176,10 @@ export interface RegistryEntry {
   kind: RegistryKind;
   /** Candidate binaries (names and/or absolute install paths); first found wins (cached). */
   bin: string[];
+  /** Extra args passed to the resolved bin when a session is launched (e.g. ["--d"]). */
+  args?: string[];
+  /** Extra environment variables set on the session process when launched. */
+  env?: Record<string, string>;
   /** True only when a candidate bin resolved AND the entry is not disabled. */
   enabled: boolean;
   /** Absolute path of the resolved bin, when found. */
@@ -196,6 +242,8 @@ export interface SessionSummary {
   rows: number;
   status: SessionStatus;
   exitCode?: number;
+  /** Per-project tab sort key (ascending); assigned by the daemon. */
+  order: number;
   createdAt: string;
 }
 
@@ -207,6 +255,18 @@ export interface CreateSessionRequest {
   cols?: number;
   rows?: number;
   title?: string;
+}
+
+export interface RenameSessionRequest {
+  /** New label; empty/whitespace reverts to the registry entry's default name. */
+  title: string;
+}
+
+export interface ReorderSessionsRequest {
+  /** Project whose session tabs are being reordered. */
+  projectPath: string;
+  /** Session ids in the desired left-to-right order. */
+  ids: string[];
 }
 
 export interface SessionInputRequest {

@@ -1,9 +1,17 @@
 import React, { useState } from "react";
-import { Box, ChevronLeft, FolderPlus, PanelLeftClose, Plus } from "lucide-react";
+import { Box, ChevronLeft, FolderPlus, PanelLeftClose, Plus, Trash2 } from "lucide-react";
 import { cn } from "../../lib/cn";
-import { Dropdown, DropdownItem, IconButton } from "../ui";
+import {
+  ConfirmDialog,
+  ContextMenu,
+  Dropdown,
+  DropdownItem,
+  IconButton,
+  type ContextMenuItem
+} from "../ui";
 import { NewItemInput } from "./NewItemInput";
 import { useAppStore } from "../../store/app";
+import type { ProjectSummary } from "../../types";
 
 /** Sidebar view shown after entering a workspace: its projects. */
 export const ProjectList: React.FC = () => {
@@ -14,8 +22,20 @@ export const ProjectList: React.FC = () => {
   const closeWorkspace = useAppStore((s) => s.closeWorkspace);
   const openProject = useAppStore((s) => s.openProject);
   const createProject = useAppStore((s) => s.createProject);
+  const deleteProject = useAppStore((s) => s.deleteProject);
   const toggleSidebar = useAppStore((s) => s.toggleSidebar);
   const [creating, setCreating] = useState<null | "project" | "folder">(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; project: ProjectSummary } | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<ProjectSummary | null>(null);
+
+  const menuItems = (project: ProjectSummary): ContextMenuItem[] => [
+    {
+      label: "Delete",
+      icon: <Trash2 size={13} />,
+      danger: true,
+      onClick: () => setPendingDelete(project)
+    }
+  ];
 
   return (
     <>
@@ -70,6 +90,10 @@ export const ProjectList: React.FC = () => {
             key={project.path}
             type="button"
             onClick={() => openProject(project)}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              setMenu({ x: event.clientX, y: event.clientY, project });
+            }}
             className={cn(
               "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
               project.path === currentProject?.path
@@ -82,6 +106,34 @@ export const ProjectList: React.FC = () => {
           </button>
         ))}
       </nav>
+
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={menuItems(menu.project)}
+          onClose={() => setMenu(null)}
+        />
+      )}
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title="Delete project"
+        message={
+          <>
+            This permanently deletes <span className="font-medium text-neutral-200">{pendingDelete?.name}</span>{" "}
+            and its contents from disk. This cannot be undone.
+          </>
+        }
+        onCancel={() => setPendingDelete(null)}
+        onConfirm={() => {
+          const project = pendingDelete;
+          setPendingDelete(null);
+          if (project) {
+            void deleteProject(project);
+          }
+        }}
+      />
     </>
   );
 };

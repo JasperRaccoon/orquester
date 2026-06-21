@@ -11,8 +11,12 @@ export const workspaceService = {
     return api.listWorkspaces(signal);
   },
 
-  create(api: ApiClient, name: string): Promise<WorkspaceSummary> {
-    return api.createWorkspace({ name });
+  create(api: ApiClient, name: string, gitAccountId?: string): Promise<WorkspaceSummary> {
+    return api.createWorkspace({ name, gitAccountId });
+  },
+
+  delete(api: ApiClient, name: string): Promise<void> {
+    return api.deleteWorkspace(name);
   },
 
   listProjects(api: ApiClient, workspace: string, signal?: AbortSignal): Promise<ProjectSummary[]> {
@@ -21,5 +25,9 @@ export const workspaceService = {
 
   createProject(api: ApiClient, workspace: string, name: string): Promise<ProjectSummary> {
     return api.createProject(workspace, { name });
+  },
+
+  deleteProject(api: ApiClient, workspace: string, name: string): Promise<void> {
+    return api.deleteProject(workspace, name);
   }
 };

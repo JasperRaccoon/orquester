@@ -1,4 +1,7 @@
 import type {
+  AccountSummary,
+  AccountTestResult,
+  CreateAccountRequest,
   CreateProjectRequest,
   CreateSessionRequest,
   CreateWorkspaceRequest,
@@ -13,6 +16,8 @@ import type {
   OpenResult,
   ProjectSummary,
   RegistryResponse,
+  RenameSessionRequest,
+  ReorderSessionsRequest,
   ServerInfoResponse,
   SessionInputRequest,
   SessionResizeRequest,
@@ -20,8 +25,10 @@ import type {
   WorkspaceSummary
 } from "@orquester/api";
 import { RegistryService } from "./registry";
-import { SessionError, SessionManager } from "./sessions";
+import { type ISessionManager, SessionError, createSessionManager } from "./sessions";
+import { Tmux } from "./tmux";
 import { Broadcaster } from "./broadcaster";
+import { AccountError, AccountsService } from "./accounts";
 import {
   type AppConfig,
   type ClientConfig,
@@ -30,27 +37,36 @@ import {
   type DaemonPaths,
   type RemoteConnectionConfig,
   type RemotesConfig,
+  type WorkspacesConfig,
+  accountsConfigPath,
   appConfigPath,
   createDefaultAppConfig,
   createDefaultClientConfig,
   createDefaultDaemonConfig,
   createDefaultRemotesConfig,
+  createDefaultWorkspacesConfig,
   dailyLogFile,
   expandVars,
+  keysDir,
   parseAppConfig,
   parseDaemonConfig,
   parseRemotesConfig,
+  parseWorkspacesConfig,
   remotesConfigPath,
-  resolveDaemonPaths
+  resolveDaemonPaths,
+  sessionsIndexPath,
+  tmuxSocketPath,
+  workspacesMetaPath
 } from "@orquester/config";
 import fastifyStatic from "@fastify/static";
+import websocketPlugin from "@fastify/websocket";
 import Fastify, { type FastifyInstance } from "fastify";
 import { createWriteStream, existsSync, type WriteStream } from "node:fs";
-import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir, platform as osPlatform } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { stat } from "node:fs/promises";
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import bcrypt from "bcryptjs";
 
 const daemonId = randomUUID();
@@ -63,7 +79,19 @@ interface ResolvedPaths {
   /** app.json + remotes.json live under <appdir>/app and are shared by clients. */
   appConfigFile: string;
   remotesFile: string;
+  /** Per-workspace metadata side-table (daemon-side, keyed by workspace name). */
+  workspacesMetaFile: string;
+  /** Fixed socket of the dedicated tmux server that owns session PTYs. */
+  tmuxSocket: string;
+  /** <appdir>/daemon/sessions.json — the reattach index. */
+  sessionsIndexFile: string;
   workspacesDir: string;
+  /** <appdir>/daemon/keys — per-account SSH keys (created mode 0700). */
+  keysDir: string;
+  /** <appdir>/daemon/accounts.json — connected git accounts (daemon-side). */
+  accountsFile: string;
+  /** Sandbox root for the /api/fs browser API (default = workspacesDir). */
+  fsRoot: string;
   logsDir: string;
   vars: ConfigVars;
 }
@@ -105,7 +133,15 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     configPath: paths.configPath,
     appConfigFile: appConfigPath(paths.baseDir),
     remotesFile: remotesConfigPath(paths.baseDir),
+    workspacesMetaFile: workspacesMetaPath(paths.baseDir),
+    tmuxSocket: tmuxSocketPath(paths.baseDir),
+    sessionsIndexFile: sessionsIndexPath(paths.baseDir),
     workspacesDir: expandVars(config.workspacesDir, paths.vars),
+    keysDir: keysDir(paths.baseDir),
+    accountsFile: accountsConfigPath(paths.baseDir),
+    fsRoot: config.transports.http.fsRoot
+      ? expandVars(config.transports.http.fsRoot, paths.vars)
+      : expandVars(config.workspacesDir, paths.vars),
     logsDir: expandVars(config.logsDir, paths.vars),
     vars: paths.vars
   };
@@ -115,13 +151,23 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   const clientConfig = createDefaultClientConfig(paths.socketPath);
 
   // Shared, transport-agnostic services. Sessions live here so they survive
-  // client disconnects and are visible across every transport/client.
+  // client disconnects and are visible across every transport/client. The
+  // backend is tmux-backed (persists across daemon restarts) where a tmux binary
+  // is present — the VPS and any Linux/macOS host with tmux — and falls back to
+  // a direct node-pty backend on hosts without tmux (Windows, stock macOS), so
+  // the desktop built-in daemon keeps creating sessions everywhere.
   const registry = new RegistryService(resolved.daemonDir);
-  const sessions = new SessionManager(registry);
+  const tmux = new Tmux(resolved.tmuxSocket);
+  const sessions = createSessionManager(registry, tmux, resolved.sessionsIndexFile);
+  const accounts = new AccountsService(resolved.accountsFile, resolved.keysDir);
   const broadcaster = new Broadcaster();
   // Stream registry changes (install/update status, detected versions) to clients.
   registry.events.on("changed", (entry) => broadcaster.publish("registry", "registry.changed", entry));
   await registry.init();
+  // Reattach to any tmux sessions that outlived a previous daemon process
+  // (KillMode=process keeps the tmux server alive across restarts). No-op on the
+  // local backend. Best-effort: a tmux/socket error must not block startup.
+  await sessions.reattach().catch((error) => console.error("Session reattach failed", error));
   sessions.lifecycle.on("created", (s: SessionSummary) =>
     broadcaster.publish("sessions", "session.created", s)
   );
@@ -131,8 +177,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   sessions.lifecycle.on("closed", (payload: { id: string }) =>
     broadcaster.publish("sessions", "session.closed", payload)
   );
+  sessions.lifecycle.on("updated", (s: SessionSummary) =>
+    broadcaster.publish("sessions", "session.updated", s)
+  );
 
-  const services: Services = { registry, sessions, broadcaster };
+  const services: Services = { registry, sessions, accounts, broadcaster };
 
   // The static web build the HTTP transport optionally serves.
   const webDirEnv = options.webDir ?? env.ORQUESTER_WEB_DIR;
@@ -188,7 +237,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   await startHttp();
 
   const stop = async () => {
-    sessions.closeAll();
+    // Detach (don't kill) sessions: the tmux backend leaves its server running so
+    // the next boot reattaches; the local backend has no server, so its shutdown()
+    // terminates the child PTYs (they'd die with the daemon regardless).
+    sessions.shutdown();
     await stopHttp();
     await unixServer.close().catch(() => undefined);
   };
@@ -205,7 +257,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
 
 interface Services {
   registry: RegistryService;
-  sessions: SessionManager;
+  sessions: ISessionManager;
+  accounts: AccountsService;
   broadcaster: Broadcaster;
   /** Restart the HTTP transport (set in main once the lifecycle exists). */
   reloadHttp?: () => Promise<void>;
@@ -219,31 +272,41 @@ function createServer(
   services: Services,
   options: { authRequired: boolean; mode: "local" | "remote"; serveWeb?: string }
 ): FastifyInstance {
-  const { registry, sessions } = services;
-  // Remote (HTTP) clients are cross-origin (web app / desktop renderer), so the
-  // remote transport is permissive on CORS; it is still bearer-token protected.
-  const cors = options.mode === "remote";
-  const corsHeaders: Record<string, string> = cors ? { "access-control-allow-origin": "*" } : {};
+  const { registry, sessions, accounts } = services;
 
   const app = Fastify({
-    logger: { level: "info", stream: logStream }
+    // Remote requests arrive via Caddy on loopback (reverse_proxy 127.0.0.1:47831),
+    // so trust ONLY the loopback hop. proxy-addr then resolves request.ip to the
+    // closest UNtrusted address — the real client IP that Caddy appended to
+    // X-Forwarded-For — instead of the literal 127.0.0.1 socket peer. This is what
+    // makes the per-IP login throttle key on the actual client (see clientIp).
+    // The unix-socket transport has no proxy, so leave it off there.
+    trustProxy: options.mode === "remote" ? "127.0.0.1" : false,
+    logger: {
+      level: "info",
+      stream: logStream,
+      serializers: {
+        // Strip the WS `?token=` from request logs (TLS protects it on the wire,
+        // but it must never land in plaintext logs). Other query params are kept.
+        req(request: { method: string; url: string }) {
+          return { method: request.method, url: request.url.replace(/([?&]token=)[^&]*/i, "$1[redacted]") };
+        }
+      }
+    }
   });
 
+  const throttle = new LoginThrottle();
+
   app.addHook("onRequest", async (request, reply) => {
-    if (cors) {
-      // reply.header() is synchronous — do not await (awaiting the reply
-      // deadlocks the request).
-      reply.header("access-control-allow-origin", "*");
-      reply.header("access-control-allow-headers", "authorization, content-type");
-      reply.header("access-control-allow-methods", "GET, POST, DELETE, OPTIONS");
-      if (request.method === "OPTIONS") {
-        return reply.code(204).send();
-      }
+    // The multiplexed session WebSocket authenticates itself via a query token
+    // (browsers can't set WS headers) and must skip the bearer logic below.
+    if (request.url.split("?")[0] === "/ws") {
+      return;
     }
 
     // Only the API + event stream are token-gated; the static web client, its
     // assets and the public auth-info endpoint load freely (the web app then
-    // authenticates its API calls with the bcrypt-hash bearer).
+    // authenticates its API calls with the credential bearer).
     const url = request.url.split("?")[0];
     const needsAuth =
       (url.startsWith("/api") || url.startsWith("/events")) && url !== "/api/auth/info";
@@ -251,33 +314,48 @@ function createServer(
       return;
     }
 
-    const expected = config.transports.http.passwordHash;
-    const actual = request.headers.authorization?.replace(/^Bearer\s+/i, "");
+    const ip = clientIp(request);
+    const retryAfterMs = throttle.retryAfterMs(ip);
+    if (retryAfterMs > 0) {
+      reply.header("retry-after", String(Math.ceil(retryAfterMs / 1000)));
+      return reply.code(429).send({
+        code: "TOO_MANY_ATTEMPTS",
+        message: "Too many failed login attempts. Try again later."
+      });
+    }
 
-    if (!expected || !actual || !safeEqual(actual, expected)) {
+    const authorized = authorizeCredential(
+      request.headers.authorization?.replace(/^Bearer\s+/i, ""),
+      config.transports.http.username,
+      config.transports.http.passwordHash
+    );
+    if (!authorized) {
+      throttle.recordFailure(ip);
       return reply.code(401).send({
         code: "UNAUTHORIZED",
         message: "A valid bearer token is required for this daemon transport."
       });
     }
+    throttle.recordSuccess(ip);
   });
 
   // Public: tells the web client whether auth is needed and the bcrypt salt to
-  // derive the bearer (the same hash the daemon stores). Never exposes the hash.
-  app.get("/api/auth/info", async () => ({
-    authRequired: options.mode === "remote" && Boolean(config.transports.http.passwordHash),
-    salt: config.transports.http.passwordHash
-      ? config.transports.http.passwordHash.slice(0, 29)
-      : null
-  }));
+  // derive the bearer (the same hash the daemon stores). Never exposes the hash
+  // OR the username — only whether a username is required.
+  app.get("/api/auth/info", async () => {
+    const authRequired = options.mode === "remote" && Boolean(config.transports.http.passwordHash);
+    return {
+      authRequired,
+      salt: config.transports.http.passwordHash
+        ? config.transports.http.passwordHash.slice(0, 29)
+        : null,
+      requiresUsername: authRequired
+    };
+  });
 
-  app.get("/health", async (): Promise<HealthResponse> => ({
-    ok: true,
-    daemonId,
-    version: packageVersion,
-    mode: options.mode,
-    transports: ["unix" as const, ...(config.transports.http.enabled ? (["http"] as const) : [])]
-  }));
+  // Public liveness only. Daemon id / version / mode / transports are not
+  // disclosed to unauthenticated callers (moved behind /api/info, which is gated).
+  app.get("/health", async (): Promise<HealthResponse> => ({ ok: true }));
 
   app.get("/api/info", async (): Promise<ServerInfoResponse> => ({
     name: "Orquester daemon",
@@ -309,6 +387,7 @@ function createServer(
       enabled: boolean;
       host: string;
       port: number;
+      username: string;
       password: string;
     }>;
     // A new plaintext password (when provided) is hashed; otherwise keep the
@@ -317,6 +396,12 @@ function createServer(
       httpPatch.password && httpPatch.password !== "********"
         ? hashPassword(httpPatch.password)
         : config.transports.http.passwordHash;
+    // Username is not editable through this endpoint, but a client may echo back
+    // a GET response in which it was masked. Drop the sentinel so the real
+    // username (preserved from the existing config) is never overwritten by it.
+    if (httpPatch.username === "********") {
+      delete httpPatch.username;
+    }
 
     let merged: DaemonConfig;
     try {
@@ -351,6 +436,9 @@ function createServer(
     // take effect immediately. Sessions (PTYs) and the unix transport are untouched.
     Object.assign(config, merged);
     resolved.workspacesDir = expandVars(merged.workspacesDir, resolved.vars);
+    resolved.fsRoot = merged.transports.http.fsRoot
+      ? expandVars(merged.transports.http.fsRoot, resolved.vars)
+      : resolved.workspacesDir;
     resolved.logsDir = expandVars(merged.logsDir, resolved.vars);
     await mkdir(resolved.workspacesDir, { recursive: true }).catch(() => undefined);
     void services.reloadHttp?.();
@@ -369,18 +457,36 @@ function createServer(
   //   (workspacesDir)/<workspace>           -> a workspace
   //   (workspacesDir)/<workspace>/<project> -> a project
   app.get("/api/workspaces", async (): Promise<WorkspaceSummary[]> =>
-    listWorkspaces(resolved.workspacesDir)
+    listWorkspaces(resolved.workspacesDir, resolved.workspacesMetaFile)
   );
 
   app.post("/api/workspaces", async (request, reply): Promise<WorkspaceSummary | void> => {
-    const name = (request.body as CreateWorkspaceRequest | undefined)?.name;
+    const body = request.body as CreateWorkspaceRequest | undefined;
+    const name = body?.name;
     if (!isValidName(name)) {
       return reply.code(400).send({ code: "INVALID_NAME", message: "Invalid workspace name." });
     }
 
     const path = join(resolved.workspacesDir, name);
     await mkdir(path, { recursive: true });
-    return { name, path, projectCount: 0 };
+
+    // Upsert the metadata side-table entry (keyed by name).
+    const createdAt = new Date().toISOString();
+    const meta = await readWorkspacesMeta(resolved.workspacesMetaFile);
+    const entry = { name, gitAccountId: body?.gitAccountId, createdAt };
+    meta.workspaces = [...meta.workspaces.filter((w) => w.name !== name), entry];
+    await writeWorkspacesMeta(resolved.workspacesMetaFile, meta);
+
+    // Bind the git account (immutable): write the include file + register the
+    // global includeIf rule for this workspace's realpath. Best-effort — a
+    // binding failure must not orphan the just-created dir/metadata.
+    if (entry.gitAccountId) {
+      await services.accounts.bindWorkspace(entry.gitAccountId, path).catch((error) => {
+        app.log.error({ err: error }, "git account binding failed");
+      });
+    }
+
+    return { name, path, projectCount: 0, gitAccountId: entry.gitAccountId ?? null, createdAt };
   });
 
   app.get<{ Params: { workspace: string } }>(
@@ -406,6 +512,65 @@ function createServer(
       const path = join(resolved.workspacesDir, workspace, name);
       await mkdir(path, { recursive: true });
       return { name, workspace, path };
+    }
+  );
+
+  app.delete<{ Params: { workspace: string; project: string } }>(
+    "/api/workspaces/:workspace/projects/:project",
+    async (request, reply): Promise<void> => {
+      const { workspace, project } = request.params;
+      if (!isValidName(workspace) || !isValidName(project)) {
+        return reply.code(400).send({ code: "INVALID_NAME", message: "Invalid name." });
+      }
+
+      const target = join(resolved.workspacesDir, workspace, project);
+      const safe = await resolveWithinWorkspaces(target, resolved.workspacesDir);
+      if (!safe) {
+        // Either gone or outside the workspaces root — 404 (don't leak which).
+        return reply.code(404).send();
+      }
+
+      // Cascade against `target` (the non-realpath join), not `safe`: sessions
+      // store projectPath as the raw client-sent join path (sessions.ts:122/552
+      // ← listProjects index.ts), so closeByProjectPrefix must match that form,
+      // not the realpath, or symlinked workspace roots (e.g. /tmp → /private/tmp)
+      // never match and the dir is removed while sessions keep running.
+      sessions.closeByProjectPrefix(target);
+      await rm(safe, { recursive: true, force: true });
+      return reply.code(204).send();
+    }
+  );
+
+  app.delete<{ Params: { workspace: string } }>(
+    "/api/workspaces/:workspace",
+    async (request, reply): Promise<void> => {
+      const { workspace } = request.params;
+      if (!isValidName(workspace)) {
+        return reply.code(400).send({ code: "INVALID_NAME", message: "Invalid workspace name." });
+      }
+
+      const target = join(resolved.workspacesDir, workspace);
+      const safe = await resolveWithinWorkspaces(target, resolved.workspacesDir);
+      if (!safe) {
+        return reply.code(404).send();
+      }
+
+      // Kill every session under the workspace, remove the tree, then prune the
+      // metadata entry (keyed by name). Cascade against `target` (non-realpath
+      // join), not `safe`: stored projectPaths use the raw join form, so matching
+      // the realpath would miss every session under a symlinked workspace root.
+      sessions.closeByProjectPrefix(target);
+      // Drop the git includeIf binding BEFORE removing the tree: unbindWorkspace
+      // realpaths the dir to rebuild the same matcher bindWorkspace used, so it
+      // must run while the dir still exists (on macOS the literal /tmp path and
+      // its /private/tmp realpath differ — a post-rm fallback wouldn't match).
+      await services.accounts.unbindWorkspace(target).catch(() => undefined);
+      await rm(safe, { recursive: true, force: true });
+      const meta = await readWorkspacesMeta(resolved.workspacesMetaFile);
+      meta.workspaces = meta.workspaces.filter((w) => w.name !== workspace);
+      await writeWorkspacesMeta(resolved.workspacesMetaFile, meta);
+
+      return reply.code(204).send();
     }
   );
 
@@ -443,6 +608,52 @@ function createServer(
     }
   });
 
+  // Connected git accounts. Unlike PUT /api/config/daemon (unix-socket-only),
+  // these ARE allowed over remote HTTP: the transport is TLS + password gated,
+  // and no response ever returns the private key or the PAT — an authenticated
+  // client can create/bind accounts but cannot exfiltrate key material.
+  app.get("/api/accounts", async (): Promise<AccountSummary[]> => accounts.list());
+
+  app.post("/api/accounts", async (request, reply): Promise<AccountSummary | void> => {
+    try {
+      return await accounts.add((request.body ?? {}) as CreateAccountRequest);
+    } catch (error) {
+      const status = error instanceof AccountError ? error.status : 500;
+      const message = error instanceof Error ? error.message : "Could not connect the account.";
+      return reply.code(status).send({ code: "ACCOUNT_ERROR", message });
+    }
+  });
+
+  app.delete<{ Params: { id: string } }>(
+    "/api/accounts/:id",
+    async (request, reply): Promise<void> => {
+      try {
+        const bound = (await readWorkspacesMeta(resolved.workspacesMetaFile)).workspaces
+          .filter((w) => w.gitAccountId === request.params.id)
+          .map((w) => w.name);
+        await accounts.remove(request.params.id, bound);
+        return reply.code(204).send();
+      } catch (error) {
+        const status = error instanceof AccountError ? error.status : 500;
+        const message = error instanceof Error ? error.message : "Could not remove the account.";
+        return reply.code(status).send({ code: "ACCOUNT_ERROR", message });
+      }
+    }
+  );
+
+  app.post<{ Params: { id: string } }>(
+    "/api/accounts/:id/test",
+    async (request, reply): Promise<AccountTestResult | void> => {
+      try {
+        return await accounts.test(request.params.id);
+      } catch (error) {
+        const status = error instanceof AccountError ? error.status : 500;
+        const message = error instanceof Error ? error.message : "Could not test the account.";
+        return reply.code(status).send({ code: "ACCOUNT_ERROR", message });
+      }
+    }
+  );
+
   // File browser: list a directory.
   app.get<{ Querystring: { path?: string } }>(
     "/api/fs",
@@ -452,8 +663,12 @@ function createServer(
         return reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
       }
       try {
-        return await listFiles(path);
+        const safe = await assertInsideFsRoot(resolved.fsRoot, path);
+        return await listFiles(safe);
       } catch (error) {
+        if (error instanceof FsSandboxError) {
+          return reply.code(403).send({ code: "FS_FORBIDDEN", message: error.message });
+        }
         return reply.code(400).send({
           code: "FS_ERROR",
           message: error instanceof Error ? error.message : "Cannot read directory."
@@ -471,15 +686,19 @@ function createServer(
         return reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
       }
       try {
-        const buffer = await readFile(path);
+        const safe = await assertInsideFsRoot(resolved.fsRoot, path);
+        const buffer = await readFile(safe);
         const cap = 1024 * 1024;
         return {
-          path,
+          path: safe,
           content: buffer.subarray(0, cap).toString("utf8"),
           size: buffer.length,
           truncated: buffer.length > cap
         };
       } catch (error) {
+        if (error instanceof FsSandboxError) {
+          return reply.code(403).send({ code: "FS_FORBIDDEN", message: error.message });
+        }
         return reply.code(400).send({
           code: "FS_ERROR",
           message: error instanceof Error ? error.message : "Cannot read file."
@@ -495,9 +714,13 @@ function createServer(
       return reply.code(400).send({ code: "INVALID_REQUEST", message: "path and content required." });
     }
     try {
-      await writeFile(body.path, body.content, "utf8");
+      const safe = await assertInsideFsRoot(resolved.fsRoot, body.path);
+      await writeFile(safe, body.content, "utf8");
       return { ok: true };
     } catch (error) {
+      if (error instanceof FsSandboxError) {
+        return reply.code(403).send({ code: "FS_FORBIDDEN", message: error.message });
+      }
       return reply.code(400).send({
         code: "FS_ERROR",
         message: error instanceof Error ? error.message : "Cannot write file."
@@ -512,14 +735,18 @@ function createServer(
       return reply.code(400).send({ code: "INVALID_REQUEST", message: "path and kind required." });
     }
     try {
+      const safe = await assertInsideFsRoot(resolved.fsRoot, body.path);
       if (body.kind === "dir") {
-        await mkdir(body.path, { recursive: true });
+        await mkdir(safe, { recursive: true });
       } else {
-        await mkdir(dirname(body.path), { recursive: true });
-        await writeFile(body.path, "", { flag: "wx" });
+        await mkdir(dirname(safe), { recursive: true });
+        await writeFile(safe, "", { flag: "wx" });
       }
       return { ok: true };
     } catch (error) {
+      if (error instanceof FsSandboxError) {
+        return reply.code(403).send({ code: "FS_FORBIDDEN", message: error.message });
+      }
       return reply.code(400).send({
         code: "FS_ERROR",
         message: error instanceof Error ? error.message : "Cannot create entry."
@@ -574,6 +801,26 @@ function createServer(
     }
   );
 
+  app.put<{ Params: { id: string }; Body: RenameSessionRequest }>(
+    "/api/sessions/:id",
+    async (request, reply): Promise<SessionSummary | void> => {
+      const summary = sessions.rename(request.params.id, request.body?.title ?? "");
+      if (!summary) {
+        return reply.code(404).send();
+      }
+      return summary;
+    }
+  );
+
+  app.post<{ Body: ReorderSessionsRequest }>(
+    "/api/sessions/reorder",
+    async (request, reply): Promise<void> => {
+      const { projectPath, ids } = request.body ?? { projectPath: "", ids: [] };
+      sessions.reorder(projectPath, ids);
+      return reply.code(204).send();
+    }
+  );
+
   app.post<{ Params: { id: string }; Body: SessionInputRequest }>(
     "/api/sessions/:id/input",
     async (request, reply): Promise<void> => {
@@ -595,7 +842,7 @@ function createServer(
   // until the session exits or the client disconnects. Plain chunked HTTP so it
   // works identically over the unix socket and over remote HTTP. Input/resize
   // use the POST endpoints above.
-  app.get<{ Params: { id: string } }>("/api/sessions/:id/output", (request, reply) => {
+  app.get<{ Params: { id: string } }>("/api/sessions/:id/output", async (request, reply) => {
     const { id } = request.params;
     const summary = sessions.get(id);
     if (!summary) {
@@ -603,16 +850,25 @@ function createServer(
       return;
     }
 
+    // Capture scrollback BEFORE hijacking so an await can't race the raw stream.
+    const replay = await sessions.scrollback(id);
+
     reply.hijack();
     reply.raw.writeHead(200, {
       "content-type": "application/octet-stream",
       "cache-control": "no-cache",
-      "x-accel-buffering": "no",
-      ...corsHeaders
+      "x-accel-buffering": "no"
     });
-    reply.raw.write(sessions.buffer(id));
+    reply.raw.write(replay);
 
-    if (summary.status === "exited") {
+    // Re-read the LIVE status after the await: the pre-await `summary` is a clone
+    // and can't reflect a transition that happened during scrollback(). If the
+    // session exited while capture-pane was in flight (a real several-ms window on
+    // the tmux backend), the attach PTY's onExit already emitted "exit" with no
+    // subscriber yet — installing one below would never see an end and the client
+    // pane would hang. End immediately instead.
+    const current = sessions.get(id);
+    if (!current || current.status === "exited") {
       reply.raw.end();
       return;
     }
@@ -631,8 +887,7 @@ function createServer(
     reply.raw.writeHead(200, {
       "content-type": "application/x-ndjson",
       "cache-control": "no-cache",
-      "x-accel-buffering": "no",
-      ...corsHeaders
+      "x-accel-buffering": "no"
     });
 
     const sink = { send: (data: string) => reply.raw.write(`${data}\n`) };
@@ -652,6 +907,106 @@ function createServer(
     request.raw.on("close", () => {
       clearInterval(timer);
       services.broadcaster.remove(sink);
+    });
+  });
+
+  // Multiplexed session I/O over a single WebSocket. The web client opens ONE
+  // socket for ALL its terminals (output + input + resize) instead of one
+  // streaming HTTP connection each, so it no longer hits the browser's
+  // ~6-connections-per-origin cap (which otherwise froze input/resize once more
+  // than ~4 terminals were open). Registered in an encapsulated context so the
+  // plugin is loaded before the route is declared.
+  void app.register(async (instance) => {
+    await instance.register(websocketPlugin);
+    instance.get("/ws", { websocket: true }, (socket, request) => {
+      if (options.authRequired) {
+        const token = (request.query as { token?: string }).token;
+        if (!authorizeCredential(token, config.transports.http.username, config.transports.http.passwordHash)) {
+          socket.close(1008, "unauthorized");
+          return;
+        }
+      }
+
+      const subs = new Map<string, () => void>();
+      const send = (msg: unknown) => {
+        try {
+          socket.send(JSON.stringify(msg));
+        } catch {
+          /* socket closing */
+        }
+      };
+
+      socket.on("message", async (raw) => {
+        let msg: { t?: string; id?: string; data?: string; cols?: number; rows?: number };
+        try {
+          msg = JSON.parse(raw.toString());
+        } catch {
+          return;
+        }
+        const id = msg.id;
+        if (!id) {
+          return;
+        }
+        if (msg.t === "sub") {
+          const summary = sessions.get(id);
+          if (!summary) {
+            send({ t: "end", id });
+            return;
+          }
+          // Cancel any prior subscription and reserve this id's slot SYNCHRONOUSLY
+          // with a unique placeholder before the await below. `ws` drains queued
+          // frames into this async handler at each await point, so a back-to-back
+          // `unsub` (fast tab close, or a strict-mode dev double-mount — see
+          // WsSessionChannel.openOutput/close) runs DURING this await. Reserving the
+          // slot lets that unsub remove it, and the identity check after the await
+          // lets the unsub — or a newer sub — win instead of installing an emitter
+          // listener the client already cancelled (which would leak and keep
+          // streaming output for a closed stream).
+          subs.get(id)?.();
+          const pending = () => {};
+          subs.set(id, pending);
+          send({ t: "out", id, data: await sessions.scrollback(id) });
+          // A racing unsub (or a newer sub) replaced our placeholder while we
+          // awaited — honor it and do not install the subscription.
+          if (subs.get(id) !== pending) {
+            return;
+          }
+          // Re-read the LIVE status after the await — the pre-await `summary` is a
+          // clone and can't reflect a transition during scrollback(). If the
+          // command exited (or the session was closed) while capture-pane was in
+          // flight, the attach PTY's onExit already emitted "exit" with no
+          // subscriber, so subscribing now would never deliver an end and the
+          // client's terminal pane would hang open. Send end + drop the slot.
+          const current = sessions.get(id);
+          if (!current || current.status === "exited") {
+            subs.delete(id);
+            send({ t: "end", id });
+            return;
+          }
+          subs.set(
+            id,
+            sessions.subscribe(
+              id,
+              (data) => send({ t: "out", id, data }),
+              () => send({ t: "end", id })
+            )
+          );
+        } else if (msg.t === "unsub") {
+          subs.get(id)?.();
+          subs.delete(id);
+        } else if (msg.t === "input" && typeof msg.data === "string") {
+          sessions.input(id, msg.data);
+        } else if (msg.t === "resize" && typeof msg.cols === "number" && typeof msg.rows === "number") {
+          sessions.resize(id, msg.cols, msg.rows);
+        }
+      });
+
+      socket.on("close", () => {
+        for (const unsub of subs.values()) {
+          unsub();
+        }
+        subs.clear();
+      });
     });
   });
 
@@ -707,6 +1062,26 @@ function isValidName(name: string | undefined): name is string {
   );
 }
 
+/**
+ * Resolve `target` and verify it is `root` itself or strictly inside it (after
+ * following symlinks). Returns the realpath when safe, else null. Used to make
+ * the destructive delete endpoints reject path traversal / symlink escapes.
+ */
+async function resolveWithinWorkspaces(target: string, root: string): Promise<string | null> {
+  let realTarget: string;
+  let realRoot: string;
+  try {
+    realTarget = await realpath(target);
+    realRoot = await realpath(root);
+  } catch {
+    return null; // target (or root) doesn't exist
+  }
+  if (realTarget === realRoot || realTarget.startsWith(realRoot + sep)) {
+    return realTarget;
+  }
+  return null;
+}
+
 async function listDirectories(path: string): Promise<string[]> {
   try {
     const entries = await readdir(path, { withFileTypes: true });
@@ -722,13 +1097,25 @@ async function listDirectories(path: string): Promise<string[]> {
   }
 }
 
-async function listWorkspaces(workspacesDir: string): Promise<WorkspaceSummary[]> {
+async function listWorkspaces(
+  workspacesDir: string,
+  metaFile: string
+): Promise<WorkspaceSummary[]> {
   const names = await listDirectories(workspacesDir);
+  const meta = await readWorkspacesMeta(metaFile);
+  const byName = new Map(meta.workspaces.map((w) => [w.name, w]));
   return Promise.all(
     names.map(async (name) => {
       const path = join(workspacesDir, name);
       const projects = await listDirectories(path);
-      return { name, path, projectCount: projects.length };
+      const entry = byName.get(name);
+      return {
+        name,
+        path,
+        projectCount: projects.length,
+        gitAccountId: entry?.gitAccountId ?? null,
+        createdAt: entry?.createdAt
+      };
     })
   );
 }
@@ -741,6 +1128,50 @@ async function listProjects(workspacesDir: string, workspace: string): Promise<P
     path: join(workspacesDir, workspace, name)
   }));
 }
+
+/**
+ * Resolve `target` to a realpath and confirm it is inside `root` (also a
+ * realpath). Rejects `..` traversal and symlink escapes. For not-yet-existing
+ * targets (create/write) the deepest existing ancestor is realpath'd instead,
+ * then the remaining segments are appended, so a brand-new file under the root
+ * still passes. Throws FsSandboxError when outside the root.
+ */
+async function assertInsideFsRoot(root: string, target: string): Promise<string> {
+  const realRoot = await realpath(root).catch(() => resolve(root));
+  const resolved = resolve(target);
+  // Walk up the resolved (non-realpath) path to the deepest existing ancestor so
+  // create/write of a not-yet-existing path still works.
+  let ancestor = resolved;
+  for (;;) {
+    try {
+      await realpath(ancestor);
+      break;
+    } catch {
+      const parent = dirname(ancestor);
+      if (parent === ancestor) {
+        break;
+      }
+      ancestor = parent;
+    }
+  }
+  // Realpath the existing ancestor, then re-attach the not-yet-existing tail by
+  // path.join (never byte-splicing two differently-resolved strings — the
+  // realpath'd ancestor may carry a prefix like macOS `/private`).
+  const realAncestor = await realpath(ancestor).catch(() => ancestor);
+  const tail = relative(ancestor, resolved);
+  const finalPath = tail ? join(realAncestor, tail) : realAncestor;
+  // Containment check on the realpath'd result: rel must stay within realRoot
+  // (empty == the root itself, otherwise no leading `..` segment and not
+  // absolute — sep-anchored so a child literally named e.g. `..foo` is allowed).
+  const rel = relative(realRoot, finalPath);
+  if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    throw new FsSandboxError(`Path is outside the sandbox: ${target}`);
+  }
+  return finalPath;
+}
+
+/** Thrown when an /api/fs path escapes fsRoot. */
+class FsSandboxError extends Error {}
 
 /** List a directory for the file browser (dirs first, dotfiles included). */
 async function listFiles(path: string): Promise<FsListResponse> {
@@ -788,14 +1219,29 @@ async function readRemotesFile(file: string): Promise<RemotesConfig> {
   }
 }
 
+async function readWorkspacesMeta(file: string): Promise<WorkspacesConfig> {
+  try {
+    return parseWorkspacesConfig(JSON.parse(await readFile(file, "utf8")));
+  } catch {
+    return createDefaultWorkspacesConfig();
+  }
+}
+
+async function writeWorkspacesMeta(file: string, value: WorkspacesConfig): Promise<void> {
+  await writeJsonFile(file, value);
+}
+
 async function writeJsonFile(file: string, value: unknown): Promise<void> {
   await mkdir(dirname(file), { recursive: true });
   await writeFile(file, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
-/** bcrypt-hash a plaintext password (stable hash persisted at rest). */
+/** bcrypt-hash a plaintext password (stable hash persisted at rest). Cost 12
+ *  slows offline cracking / per-guess derivation if a hash ever leaks; the
+ *  expensive hash runs only at password-set and client-side login, so
+ *  per-request auth stays cheap. */
 function hashPassword(plaintext: string): string {
-  return bcrypt.hashSync(plaintext, bcrypt.genSaltSync(10));
+  return bcrypt.hashSync(plaintext, bcrypt.genSaltSync(12));
 }
 
 /** Constant-time string comparison. */
@@ -803,6 +1249,59 @@ function safeEqual(a: string, b: string): boolean {
   const ba = Buffer.from(a);
   const bb = Buffer.from(b);
   return ba.length === bb.length && timingSafeEqual(ba, bb);
+}
+
+/**
+ * Decode a credential bearer/token of the form base64("<username>:<hash>").
+ * Splits on the FIRST ":" (a bcrypt hash contains no ":", but be defensive).
+ * Returns empty strings when the input is missing or not valid base64 — the
+ * caller still runs the full constant-time check so a malformed credential is
+ * indistinguishable from a wrong one.
+ */
+function decodeCredential(token: string | undefined): { user: string; hash: string } {
+  if (!token) {
+    return { user: "", hash: "" };
+  }
+  let decoded: string;
+  try {
+    decoded = Buffer.from(token, "base64").toString("utf8");
+  } catch {
+    return { user: "", hash: "" };
+  }
+  const sep = decoded.indexOf(":");
+  if (sep === -1) {
+    return { user: "", hash: "" };
+  }
+  return { user: decoded.slice(0, sep), hash: decoded.slice(sep + 1) };
+}
+
+/** Normalize a username for comparison (matches the config-side transform). */
+function normalizeUsername(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+/** Fixed-length sha256 digest so timingSafeEqual gets equal-length buffers. */
+function sha256(value: string): Buffer {
+  return createHash("sha256").update(value).digest();
+}
+
+/**
+ * Constant-time credential check with NO early return: both the username and
+ * the password-hash comparisons are always computed, so wrong-username,
+ * wrong-length and wrong-password are indistinguishable (no enumeration).
+ */
+function authorizeCredential(
+  token: string | undefined,
+  expectedUsername: string,
+  expectedHash: string | undefined
+): boolean {
+  if (!expectedHash) {
+    return false;
+  }
+  const { user, hash } = decodeCredential(token);
+  const userOk = timingSafeEqual(sha256(normalizeUsername(user)), sha256(expectedUsername));
+  const passOk = timingSafeEqual(sha256(hash), sha256(expectedHash));
+  return userOk && passOk;
 }
 
 /**
@@ -866,19 +1365,27 @@ async function prepareDirs(resolved: ResolvedPaths): Promise<void> {
   await mkdir(resolved.daemonDir, { recursive: true });
   await mkdir(resolved.logsDir, { recursive: true });
   await mkdir(resolved.workspacesDir, { recursive: true });
+  await mkdir(resolved.keysDir, { recursive: true, mode: 0o700 });
 }
 
 function sanitizeDaemonConfig(config: DaemonConfig): DaemonConfig {
-  // Never expose the hash (it's a bearer-equivalent); the client derives its
-  // own via the public salt at /api/auth/info.
+  // Never expose credential material over the wire. The hash is a
+  // bearer-equivalent (the client derives its own via the public salt at
+  // /api/auth/info), and the username is deliberately withheld too — same
+  // invariant as /api/auth/info, which only reports `requiresUsername`, never
+  // the username itself. Both are masked with the same sentinel the schema
+  // accepts as a string; the fsRoot (sandbox root path) is server-internal.
+  // The client only ever needs enabled/host/port back.
   return {
     ...config,
     transports: {
       ...config.transports,
       http: {
         ...config.transports.http,
+        username: "********",
         password: undefined,
-        passwordHash: config.transports.http.passwordHash ? "********" : undefined
+        passwordHash: config.transports.http.passwordHash ? "********" : undefined,
+        fsRoot: undefined
       }
     }
   };
@@ -886,4 +1393,118 @@ function sanitizeDaemonConfig(config: DaemonConfig): DaemonConfig {
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
+}
+
+/**
+ * Per-IP failed-login throttle with escalating lockout. Single-user, so real
+ * failures are rare: 5 fails within the window → locked out, with the lockout
+ * doubling on each subsequent breach (15 min, 30, 60 … capped). Keyed on the
+ * proxy-supplied client IP (X-Forwarded-For); this is defense-in-depth on top
+ * of fail2ban (OS-layer ban on the daemon's 401 log lines, Phase 0).
+ */
+class LoginThrottle {
+  private readonly state = new Map<
+    string,
+    { fails: number; lockedUntil: number; strikes: number; burstStartAt: number }
+  >();
+  private static readonly MAX_FAILS = 5;
+  private static readonly BASE_LOCKOUT_MS = 15 * 60 * 1000;
+  private static readonly MAX_LOCKOUT_MS = 24 * 60 * 60 * 1000;
+  // One login attempt fans out into several authenticated requests (workspaces,
+  // sessions, registry, events, …), so a single wrong password yields a burst of
+  // near-simultaneous 401s. Collapse failures within this window into ONE counted
+  // attempt so a lone typo can't trip the lockout instantly.
+  private static readonly BURST_WINDOW_MS = 2000;
+  // Bound the per-IP map: only sweep once it grows past this, then drop entries
+  // that are neither locked nor part of a recent burst.
+  private static readonly PRUNE_THRESHOLD = 1024;
+  private static readonly STALE_AFTER_MS = 10 * 60 * 1000;
+
+  /** Ms remaining on an active lockout for this IP, or 0 if not locked. */
+  retryAfterMs(ip: string): number {
+    const entry = this.state.get(ip);
+    if (!entry || entry.lockedUntil <= Date.now()) {
+      return 0;
+    }
+    return entry.lockedUntil - Date.now();
+  }
+
+  /** Record a failed attempt; locks the IP once MAX_FAILS is reached. */
+  recordFailure(ip: string): void {
+    const entry = this.state.get(ip) ?? { fails: 0, lockedUntil: 0, strikes: 0, burstStartAt: 0 };
+    const now = Date.now();
+    this.prune(now);
+    // Burst collapse: failures arriving within BURST_WINDOW_MS of the FIRST failure
+    // of the current burst belong to one login attempt's fan-out (or a rapid
+    // auto-reconnect), so they don't count. The window is anchored to that first
+    // failure and is NEVER refreshed — otherwise a sustained stream of guesses
+    // (even 1/sec) would keep the window alive forever and pin `fails` at 1, so the
+    // IP would never lock. Anchoring lets a real fan-out collapse to one strike
+    // while a continuous attack advances ~one strike per BURST_WINDOW_MS.
+    if (entry.fails > 0 && now - entry.burstStartAt < LoginThrottle.BURST_WINDOW_MS) {
+      this.state.set(ip, entry);
+      return;
+    }
+    entry.burstStartAt = now;
+    entry.fails += 1;
+    if (entry.fails >= LoginThrottle.MAX_FAILS) {
+      const lockout = Math.min(
+        LoginThrottle.BASE_LOCKOUT_MS * 2 ** entry.strikes,
+        LoginThrottle.MAX_LOCKOUT_MS
+      );
+      entry.lockedUntil = Date.now() + lockout;
+      entry.strikes += 1;
+      entry.fails = 0;
+    }
+    this.state.set(ip, entry);
+  }
+
+  // Opportunistic eviction so a distinct-IP spray can't grow `state` without
+  // bound: entries that are neither locked nor mid-burst carry no useful state.
+  // Cheap by default; sweeps the whole map only once it gets large.
+  private prune(now: number): void {
+    if (this.state.size <= LoginThrottle.PRUNE_THRESHOLD) {
+      return;
+    }
+    for (const [ip, entry] of this.state) {
+      if (entry.lockedUntil <= now && now - entry.burstStartAt > LoginThrottle.STALE_AFTER_MS) {
+        this.state.delete(ip);
+      }
+    }
+  }
+
+  /** Clear an IP's failure count after a successful auth. */
+  recordSuccess(ip: string): void {
+    this.state.delete(ip);
+  }
+}
+
+/**
+ * Client IP used to key the login throttle.
+ *
+ * TRUSTED-HOP ASSUMPTION: exactly ONE trusted proxy (Caddy) fronts the daemon on
+ * loopback. Caddy's default `reverse_proxy` APPENDS the real client IP to whatever
+ * the client sent, so `X-Forwarded-For` is `<client-supplied…>, <real-client-ip>`
+ * — the entry we trust is the RIGHTMOST one (the hop Caddy added), never the
+ * leftmost (which is fully attacker-controlled and would let an attacker rotate it
+ * per request to evade the per-IP throttle).
+ *
+ * With `trustProxy: "127.0.0.1"` set on the remote Fastify instance, proxy-addr
+ * already computes exactly this (request.ip = closest untrusted address = the
+ * rightmost XFF hop), so request.ip is authoritative; the manual rightmost parse
+ * below is a belt-and-suspenders fallback that still refuses the client-controlled
+ * leftmost value. If the deployment ever inserts more than one proxy hop, both
+ * trustProxy and this helper must be updated together.
+ */
+function clientIp(request: { headers: Record<string, unknown>; ip: string }): string {
+  if (request.ip) {
+    return request.ip;
+  }
+  const xff = request.headers["x-forwarded-for"];
+  const raw = Array.isArray(xff) ? xff[xff.length - 1] : xff;
+  if (typeof raw === "string" && raw.length > 0) {
+    const parts = raw.split(",");
+    return parts[parts.length - 1]!.trim();
+  }
+  return request.ip;
 }

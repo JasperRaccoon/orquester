@@ -19,6 +19,8 @@ interface RegistryDef {
   name: string;
   kind: RegistryKind;
   bin: string[];
+  args?: string[];
+  env?: Record<string, string>;
   enabled?: boolean;
   versionFlag?: string;
   installCmd?: string;
@@ -76,6 +78,8 @@ function materialize(list: readonly RegistryEntryDef[]): RegistryDef[] {
     const expanded = expand(s.bin);
     const bin = s.bin.length === 0 && (s.kind === "file-explorer" || s.kind === "browser") ? osOpener() : expanded;
     const d: RegistryDef = { id: s.id, name: s.name, kind: s.kind, bin };
+    if (s.args && s.args.length > 0) d.args = [...s.args];
+    if (s.env && Object.keys(s.env).length > 0) d.env = { ...s.env };
     if (s.versionFlag) d.versionFlag = s.versionFlag;
     if (s.installCmd) d.installCmd = s.installCmd;
     if (s.updateCmd) d.updateCmd = s.updateCmd;
@@ -250,6 +254,8 @@ export class RegistryService {
       name: def.name,
       kind: def.kind,
       bin: def.bin,
+      args: def.args,
+      env: def.env,
       resolvedBin,
       enabled: Boolean(resolvedBin) && def.enabled !== false,
       versionFlag: def.versionFlag,
@@ -291,6 +297,20 @@ function normalizeDef(item: unknown, defaultKind: RegistryKind): RegistryDef | n
       : Array.isArray(obj.bin)
         ? obj.bin.filter((b): b is string => typeof b === "string")
         : [];
+  const args =
+    typeof obj.args === "string"
+      ? [obj.args]
+      : Array.isArray(obj.args)
+        ? obj.args.filter((a): a is string => typeof a === "string")
+        : undefined;
+  const env =
+    typeof obj.env === "object" && obj.env !== null && !Array.isArray(obj.env)
+      ? Object.fromEntries(
+          Object.entries(obj.env as Record<string, unknown>).filter(
+            (e): e is [string, string] => typeof e[1] === "string"
+          )
+        )
+      : undefined;
 
   if (!id || !name || bin.length === 0) {
     return null;
@@ -301,6 +321,8 @@ function normalizeDef(item: unknown, defaultKind: RegistryKind): RegistryDef | n
     name,
     kind: KINDS.includes(obj.kind as RegistryKind) ? (obj.kind as RegistryKind) : defaultKind,
     bin,
+    args: args && args.length > 0 ? args : undefined,
+    env: env && Object.keys(env).length > 0 ? env : undefined,
     enabled: typeof obj.enabled === "boolean" ? obj.enabled : undefined,
     versionFlag: typeof obj.versionFlag === "string" ? obj.versionFlag : undefined,
     installCmd: typeof obj.installCmd === "string" ? obj.installCmd : undefined,

@@ -4,14 +4,17 @@ import { Button, Input, Modal } from "../ui";
 import { useAppStore } from "../../store/app";
 
 /**
- * Password prompt for a token-protected daemon (web). The password is turned
- * into a bcrypt hash (using the daemon's salt) and only that hash is stored;
- * the plaintext never leaves the form.
+ * Credential prompt for a token-protected daemon (web). The password is turned
+ * into a bcrypt hash (using the daemon's salt) and combined with the username
+ * into a base64 bearer; only the hash + plain username are stored, never the
+ * plaintext password.
  */
 export const AuthModal: React.FC = () => {
   const authPrompt = useAppStore((s) => s.authPrompt);
   const connections = useAppStore((s) => s.connections);
-  const submitPassword = useAppStore((s) => s.submitPassword);
+  const requiresUsername = useAppStore((s) => s.authRequiresUsername);
+  const submitCredentials = useAppStore((s) => s.submitCredentials);
+  const [username, setUsername] = useState("mapacho");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -26,7 +29,7 @@ export const AuthModal: React.FC = () => {
       return;
     }
     setBusy(true);
-    await submitPassword(password);
+    await submitCredentials(username, password);
     setBusy(false);
     setPassword("");
   };
@@ -48,8 +51,23 @@ export const AuthModal: React.FC = () => {
           </div>
         </div>
 
+        {requiresUsername ? (
+          <Input
+            autoFocus
+            placeholder="Username"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                void submit();
+              }
+            }}
+            className="mb-2"
+          />
+        ) : null}
+
         <Input
-          autoFocus
+          autoFocus={!requiresUsername}
           type="password"
           placeholder="Password"
           value={password}

@@ -1,5 +1,6 @@
 import {
   buildQueryString,
+  type SessionChannel,
   type StreamHandle,
   type StreamHandlers,
   type Transporter,
@@ -7,11 +8,13 @@ import {
   type TransportResponse
 } from "../transporter";
 import { FetchHttpClient, type HttpClient } from "../http-client";
+import { getSessionChannel } from "./ws-session-channel";
 
 export interface HttpTransporterOptions {
   baseUrl: string;
-  /** Bearer token sent as `Authorization: Bearer <password>` when present. */
-  password?: string;
+  /** Bearer sent as `Authorization: Bearer <credential>` when present. The
+   *  credential is base64("<username>:<hash>"). */
+  credential?: string;
   /** Defaults to a {@link FetchHttpClient}. */
   httpClient?: HttpClient;
 }
@@ -25,12 +28,12 @@ export class HttpTransporter implements Transporter {
   readonly kind = "http";
 
   private readonly baseUrl: string;
-  private readonly password?: string;
+  private readonly credential?: string;
   private readonly client: HttpClient;
 
   constructor(options: HttpTransporterOptions) {
     this.baseUrl = options.baseUrl.replace(/\/$/, "");
-    this.password = options.password;
+    this.credential = options.credential;
     this.client = options.httpClient ?? new FetchHttpClient();
   }
 
@@ -38,8 +41,8 @@ export class HttpTransporter implements Transporter {
     const url = `${this.baseUrl}${req.path}${buildQueryString(req.query)}`;
     const headers: Record<string, string> = { ...req.headers };
 
-    if (this.password) {
-      headers.Authorization = `Bearer ${this.password}`;
+    if (this.credential) {
+      headers.Authorization = `Bearer ${this.credential}`;
     }
 
     let body: string | undefined;
@@ -68,13 +71,24 @@ export class HttpTransporter implements Transporter {
   }
 
   openStream(path: string, handlers: StreamHandlers): StreamHandle {
-    const controller = new AbortController();
+    const url = `${this.baseUrl}${path}`;
     const headers: Record<string, string> = {};
-    if (this.password) {
-      headers.Authorization = `Bearer ${this.password}`;
+    if (this.credential) {
+      headers.Authorization = `Bearer ${this.credential}`;
     }
 
-    fetch(`${this.baseUrl}${path}`, { headers, signal: controller.signal })
+    // Desktop injects a Node client that streams over IPC; using it here keeps
+    // the remote event bus / output stream off the browser `fetch` so it isn't
+    // gated by CORS (the daemon is cross-origin for the desktop renderer).
+    if (this.client.stream) {
+      return this.client.stream(
+        { url, method: "GET", headers },
+        { onData: handlers.onData, onEnd: handlers.onEnd }
+      );
+    }
+
+    const controller = new AbortController();
+    fetch(url, { headers, signal: controller.signal })
       .then((response) => {
         if (!response.body) {
           handlers.onEnd();
@@ -101,5 +115,13 @@ export class HttpTransporter implements Transporter {
       });
 
     return { close: () => controller.abort() };
+  }
+
+  /**
+   * Session output/input/resize are multiplexed over a single WebSocket (shared
+   * per origin) so many terminals don't each hold a streaming HTTP connection.
+   */
+  sessionChannel(): SessionChannel {
+    return getSessionChannel(this.baseUrl, this.credential);
   }
 }

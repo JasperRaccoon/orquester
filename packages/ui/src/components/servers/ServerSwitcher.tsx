@@ -24,19 +24,20 @@ export const ServerSwitcher: React.FC = () => {
   const [adding, setAdding] = useState(false);
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
-  const [password, setPassword] = useState("");
 
   const active = connections.find((c) => c.id === activeId);
 
+  // No credential is collected here: a protected server prompts via AuthModal on
+  // first connect, which derives the hash + builds the bearer client-side (the
+  // raw password never leaves the client nor lands in remotes.json).
   const submit = async () => {
     if (!url.trim()) {
       return;
     }
-    const id = await addRemote({ name, baseUrl: url, password });
+    const id = await addRemote({ name, baseUrl: url });
     setAdding(false);
     setName("");
     setUrl("");
-    setPassword("");
     void select(id);
   };
 
@@ -89,12 +90,6 @@ export const ServerSwitcher: React.FC = () => {
               placeholder="https://host:47831"
               value={url}
               onChange={(e) => setUrl(e.target.value)}
-            />
-            <Input
-              type="password"
-              placeholder="Token (optional)"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
             />
             <div className="flex gap-1.5">
               <Button size="sm" className="flex-1" onClick={() => void submit()}>

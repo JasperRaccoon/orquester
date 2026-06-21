@@ -1,5 +1,19 @@
 import React, { useEffect, useState } from "react";
-import { AppWindow, Boxes, ChevronLeft, ChevronRight, Download, Loader2, RefreshCw, Server } from "lucide-react";
+import {
+  AppWindow,
+  Boxes,
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  Download,
+  Github,
+  Loader2,
+  Plus,
+  RefreshCw,
+  Server,
+  Trash2,
+  X
+} from "lucide-react";
 import type { DaemonConfig } from "@orquester/config";
 import { cn } from "../../lib/cn";
 import { Button, Input, Modal, ModalCloseButton, Switch } from "../ui";
@@ -8,16 +22,25 @@ import { useIsDesktop, useRegistry } from "../../hooks";
 import { useApi, useOrquester } from "../../context/orquester-context";
 import { useAppStore } from "../../store/app";
 
-type Section = "app" | "agents" | "daemon";
+type Section = "app" | "agents" | "github" | "daemon";
 
 const SECTIONS: { id: Section; label: string; icon: React.ReactNode; desc: string }[] = [
   { id: "app", label: "App", icon: <AppWindow size={16} />, desc: "Titlebar, runtime, active server" },
   { id: "agents", label: "Agents", icon: <Boxes size={16} />, desc: "Install, update and view harness versions" },
+  { id: "github", label: "GitHub", icon: <Github size={16} />, desc: "Connect accounts and per-workspace git identities" },
   { id: "daemon", label: "Daemon", icon: <Server size={16} />, desc: "Workspaces dir, external HTTP access" }
 ];
 
 const renderSection = (id: Section) =>
-  id === "app" ? <AppSettings /> : id === "agents" ? <AgentsSettings /> : <DaemonSettings />;
+  id === "app" ? (
+    <AppSettings />
+  ) : id === "agents" ? (
+    <AgentsSettings />
+  ) : id === "github" ? (
+    <GitHubSettings />
+  ) : (
+    <DaemonSettings />
+  );
 const labelOf = (id: Section) => SECTIONS.find((s) => s.id === id)?.label ?? "";
 
 export const SettingsModal: React.FC = () => {
@@ -234,6 +257,136 @@ const AgentsSettings: React.FC = () => {
 
 const firstLine = (text: string) => text.split("\n").find((l) => l.trim())?.trim().slice(0, 80) ?? "";
 
+const GitHubSettings: React.FC = () => {
+  const accounts = useAppStore((s) => s.accounts);
+  const loadAccounts = useAppStore((s) => s.loadAccounts);
+  const addAccount = useAppStore((s) => s.addAccount);
+  const removeAccount = useAppStore((s) => s.removeAccount);
+  const testAccount = useAppStore((s) => s.testAccount);
+
+  const [adding, setAdding] = useState(false);
+  const [label, setLabel] = useState("");
+  const [token, setToken] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // Per-account test state, keyed by id.
+  const [tests, setTests] = useState<Record<string, { ok: boolean; text: string } | "busy">>({});
+
+  // Accounts load on connect; refresh on open in case another client changed them.
+  useEffect(() => {
+    void loadAccounts();
+  }, [loadAccounts]);
+
+  const connect = async () => {
+    if (!label.trim() || !token.trim()) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await addAccount({ label, token });
+      setAdding(false);
+      setLabel("");
+      setToken("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not connect the account.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const runTest = async (id: string) => {
+    setTests((t) => ({ ...t, [id]: "busy" }));
+    const result = await testAccount(id);
+    setTests((t) => ({
+      ...t,
+      [id]: { ok: result.ok, text: result.ok ? `Connected as ${result.login}` : result.message ?? "Failed" }
+    }));
+  };
+
+  const disconnect = async (id: string) => {
+    setError(null);
+    try {
+      await removeAccount(id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not disconnect.");
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="divide-y divide-neutral-800 rounded-lg border border-neutral-800">
+        {accounts.length === 0 && (
+          <p className="px-3 py-4 text-sm text-neutral-600">No accounts connected.</p>
+        )}
+        {accounts.map((account) => {
+          const test = tests[account.id];
+          return (
+            <div key={account.id} className="group flex items-center gap-3 px-3 py-2.5">
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center text-neutral-400">
+                <Github size={18} />
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm text-neutral-100">
+                  {account.label}
+                  <span className="ml-1.5 text-neutral-500">@{account.githubLogin}</span>
+                </p>
+                <p className="truncate text-xs text-neutral-500">{account.gitEmail}</p>
+                {test && test !== "busy" && (
+                  <p className={cn("truncate text-xs", test.ok ? "text-emerald-400" : "text-red-400")}>
+                    {test.ok ? <Check size={11} className="mr-1 inline" /> : <X size={11} className="mr-1 inline" />}
+                    {test.text}
+                  </p>
+                )}
+              </div>
+              <Button size="sm" variant="outline" disabled={test === "busy"} onClick={() => void runTest(account.id)}>
+                {test === "busy" ? <Loader2 size={13} className="animate-spin" /> : null} Test
+              </Button>
+              <button
+                type="button"
+                aria-label="Disconnect account"
+                className="flex h-7 w-7 items-center justify-center rounded text-neutral-500 hover:bg-neutral-800 hover:text-red-400"
+                onClick={() => void disconnect(account.id)}
+              >
+                <Trash2 size={13} />
+              </button>
+            </div>
+          );
+        })}
+      </div>
+
+      {error && <p className="text-xs text-red-400">{error}</p>}
+
+      {adding ? (
+        <div className="space-y-2 rounded-lg border border-neutral-800 p-3">
+          <Input placeholder="Label (e.g. work)" value={label} onChange={(e) => setLabel(e.target.value)} />
+          <Input
+            type="password"
+            placeholder="GitHub PAT (write:public_key, user:email, read:user)"
+            value={token}
+            onChange={(e) => setToken(e.target.value)}
+          />
+          <p className="text-xs text-neutral-500">
+            The token is used once to upload an SSH key and read your identity, then discarded. It is never stored.
+          </p>
+          <div className="flex gap-2">
+            <Button size="sm" disabled={busy} onClick={() => void connect()}>
+              {busy ? <Loader2 size={13} className="animate-spin" /> : null} Connect
+            </Button>
+            <Button size="sm" variant="outline" disabled={busy} onClick={() => setAdding(false)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <Button size="sm" variant="outline" onClick={() => setAdding(true)}>
+          <Plus size={13} /> Add account…
+        </Button>
+      )}
+    </div>
+  );
+};
+
 const AppSettings: React.FC = () => {
   const { runtime } = useOrquester();
   const appConfig = useAppStore((s) => s.appConfig);
@@ -308,13 +461,15 @@ const DaemonSettings: React.FC = () => {
     try {
       await api.updateDaemonConfig({
         workspacesDir,
+        // Partial patch: the daemon merges onto its existing http config, so
+        // unmanaged fields (username, fsRoot, passwordHash) are preserved.
         transports: {
           http: {
             enabled: httpEnabled,
             host,
             port: Number(port) || 47831,
             ...(password ? { password } : {})
-          }
+          } as DaemonConfig["transports"]["http"]
         }
       });
       setPassword("");

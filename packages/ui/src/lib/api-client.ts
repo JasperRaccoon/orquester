@@ -1,6 +1,9 @@
 import type {
+  AccountSummary,
+  AccountTestResult,
   AgentSummary,
   AuthInfoResponse,
+  CreateAccountRequest,
   CreateProjectRequest,
   CreateSessionRequest,
   CreateWorkspaceRequest,
@@ -20,6 +23,7 @@ import type {
 import type { AppConfig, DaemonConfig, RemoteConnectionConfig } from "@orquester/config";
 import type { UiConnection } from "../types";
 import type {
+  SessionChannel,
   StreamHandle,
   StreamHandlers,
   Transporter,
@@ -41,10 +45,15 @@ export interface ApiRequestOptions {
  * NOTE: skeleton — endpoints are wired but no client-side logic/caching yet.
  */
 export class ApiClient {
+  /** Multiplexed session I/O (web/HTTP); null on transports without it (unix). */
+  private readonly channel: SessionChannel | null;
+
   constructor(
     public readonly connection: UiConnection,
     private readonly transporter: Transporter
-  ) { }
+  ) {
+    this.channel = transporter.sessionChannel?.() ?? null;
+  }
 
   get transportKind(): string {
     return this.transporter.kind;
@@ -61,7 +70,7 @@ export class ApiClient {
     });
 
     if (!response.ok) {
-      throw new ApiError(response.status, method, path);
+      throw new ApiError(response.status, method, path, response.headers);
     }
 
     return response.data;
@@ -138,6 +147,24 @@ export class ApiClient {
     return this.send("PUT", "/api/config/remotes", { body: remotes });
   }
 
+  // --- Git accounts (daemon-persisted; allowed over remote HTTP) -----------
+
+  listAccounts(signal?: AbortSignal): Promise<AccountSummary[]> {
+    return this.send("GET", "/api/accounts", { signal });
+  }
+
+  createAccount(req: CreateAccountRequest): Promise<AccountSummary> {
+    return this.send("POST", "/api/accounts", { body: req });
+  }
+
+  removeAccount(id: string): Promise<void> {
+    return this.send("DELETE", `/api/accounts/${encodeURIComponent(id)}`);
+  }
+
+  testAccount(id: string): Promise<AccountTestResult> {
+    return this.send("POST", `/api/accounts/${encodeURIComponent(id)}/test`);
+  }
+
   // Workspaces & projects (filesystem-backed)
 
   listWorkspaces(signal?: AbortSignal): Promise<WorkspaceSummary[]> {
@@ -179,6 +206,17 @@ export class ApiClient {
       body: req,
       signal
     });
+  }
+
+  deleteWorkspace(name: string): Promise<void> {
+    return this.send("DELETE", `/api/workspaces/${encodeURIComponent(name)}`);
+  }
+
+  deleteProject(workspace: string, name: string): Promise<void> {
+    return this.send(
+      "DELETE",
+      `/api/workspaces/${encodeURIComponent(workspace)}/projects/${encodeURIComponent(name)}`
+    );
   }
 
   // Catalog (agents / open targets)
@@ -232,18 +270,36 @@ export class ApiClient {
   }
 
   sendSessionInput(id: string, data: string): Promise<void> {
+    if (this.channel) {
+      this.channel.sendInput(id, data);
+      return Promise.resolve();
+    }
     return this.send("POST", `/api/sessions/${encodeURIComponent(id)}/input`, { body: { data } });
   }
 
   resizeSession(id: string, cols: number, rows: number): Promise<void> {
+    if (this.channel) {
+      this.channel.resize(id, cols, rows);
+      return Promise.resolve();
+    }
     return this.send("POST", `/api/sessions/${encodeURIComponent(id)}/resize`, {
       body: { cols, rows }
     });
   }
 
+  renameSession(id: string, title: string): Promise<SessionSummary> {
+    return this.send("PUT", `/api/sessions/${encodeURIComponent(id)}`, { body: { title } });
+  }
+
+  reorderSessions(projectPath: string, ids: string[]): Promise<void> {
+    return this.send("POST", "/api/sessions/reorder", { body: { projectPath, ids } });
+  }
+
   /** Open the live output stream for a session (buffer replay + live bytes). */
   openSessionOutput(id: string, handlers: StreamHandlers): StreamHandle {
-    return this.transporter.openStream(`/api/sessions/${encodeURIComponent(id)}/output`, handlers);
+    return this.channel
+      ? this.channel.openOutput(id, handlers)
+      : this.transporter.openStream(`/api/sessions/${encodeURIComponent(id)}/output`, handlers);
   }
 }
 
@@ -251,9 +307,32 @@ export class ApiError extends Error {
   constructor(
     public readonly status: number,
     method: string,
-    path: string
+    path: string,
+    /** Response headers (lowercased keys), e.g. `retry-after` on a 429. */
+    public readonly headers?: Record<string, string>
   ) {
     super(`Orquester API ${method} ${path} failed with status ${status}`);
     this.name = "ApiError";
+  }
+
+  /** Parsed `Retry-After` (seconds) when present, else null. Set on 429s. */
+  get retryAfterSeconds(): number | null {
+    // Case-insensitive lookup: most transports lowercase header keys, but the
+    // desktop NodeHttpClient path can surface a capitalized `Retry-After`.
+    const headers = this.headers;
+    let raw = headers?.["retry-after"];
+    if (raw === undefined && headers) {
+      for (const [key, value] of Object.entries(headers)) {
+        if (key.toLowerCase() === "retry-after") {
+          raw = value;
+          break;
+        }
+      }
+    }
+    if (!raw) {
+      return null;
+    }
+    const seconds = Number(raw);
+    return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
   }
 }

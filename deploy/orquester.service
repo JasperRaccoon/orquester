@@ -1,0 +1,39 @@
+[Unit]
+Description=Orquester daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=orquester
+Group=orquester
+WorkingDirectory=/opt/orquester
+EnvironmentFile=/etc/orquester/daemon.env
+# tsx writes its transpile cache to TMPDIR; ProtectSystem=strict makes /tmp
+# unavailable, so point it at a writable, persistent dir under the appdir.
+Environment=TMPDIR=/var/lib/orquester/tmp
+ExecStartPre=/usr/bin/mkdir -p /var/lib/orquester/tmp
+# Agent installs ("npm install -g ...") must land somewhere writable. The default
+# global prefix is /usr, which is read-only under ProtectSystem=strict and not
+# writable by the non-root service user, so installs fail with "npm error code
+# ENOENT". Point npm at a prefix inside ReadWritePaths and put its bin/ on PATH
+# so the daemon can also resolve and launch the agents it installs.
+Environment=NPM_CONFIG_PREFIX=/var/lib/orquester/.npm-global
+Environment=PATH=/var/lib/orquester/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStartPre=/usr/bin/mkdir -p /var/lib/orquester/.npm-global/bin
+# This monorepo is noEmit (TS is run via tsx, same as `pnpm dev:daemon`); there is
+# no standalone dist build, so run the daemon through tsx as a single node process.
+ExecStart=/usr/bin/node --import tsx /opt/orquester/apps/daemon/src/cli.ts --appdir /var/lib/orquester
+Restart=always
+RestartSec=2
+# CRITICAL (Phase 2): only signal the main node process on stop/restart, so the
+# daemonized tmux server (and its panes) survive a daemon restart.
+KillMode=process
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/orquester
+ProtectHome=true
+# tmux socket lives under /var/lib/orquester, not /tmp:
+PrivateTmp=false
+
+[Install]
+WantedBy=multi-user.target

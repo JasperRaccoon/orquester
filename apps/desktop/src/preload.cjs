@@ -26,6 +26,22 @@ contextBridge.exposeInMainWorld("orquesterDesktop", {
     ipcRenderer.on("orquester:stream:end", listener);
     return () => ipcRenderer.removeListener("orquester:stream:end", listener);
   },
+  // Remote HTTP transport (the renderer's HttpTransporter for remote servers).
+  // Runs in the main process (Node) so cross-origin calls to the VPS aren't
+  // gated by the browser's CORS — the daemon serves no CORS headers.
+  httpRequest: (request) => ipcRenderer.invoke("orquester:http:request", request),
+  httpStreamOpen: (streamId, url, headers) => ipcRenderer.send("orquester:http-stream:open", { streamId, url, headers }),
+  httpStreamClose: (streamId) => ipcRenderer.send("orquester:http-stream:close", streamId),
+  onHttpStreamData: (cb) => {
+    const listener = (_event, payload) => cb(payload);
+    ipcRenderer.on("orquester:http-stream:data", listener);
+    return () => ipcRenderer.removeListener("orquester:http-stream:data", listener);
+  },
+  onHttpStreamEnd: (cb) => {
+    const listener = (_event, payload) => cb(payload);
+    ipcRenderer.on("orquester:http-stream:end", listener);
+    return () => ipcRenderer.removeListener("orquester:http-stream:end", listener);
+  },
   // Frameless window caption controls.
   windowControls: {
     minimize: () => ipcRenderer.send("orquester:window", "minimize"),

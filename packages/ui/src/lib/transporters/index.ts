@@ -24,7 +24,7 @@ export function createTransporter(
   if (connection.endpoint.startsWith("http://") || connection.endpoint.startsWith("https://")) {
     return new HttpTransporter({
       baseUrl: connection.endpoint,
-      password: connection.password,
+      credential: connection.password,
       httpClient: options.httpClient
     });
   }

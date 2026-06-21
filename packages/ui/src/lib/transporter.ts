@@ -38,10 +38,30 @@ export interface StreamHandlers {
   /** The stream ended (server closed it). */
   onEnd: () => void;
   onError?: (error: unknown) => void;
+  /**
+   * The multiplexed session socket reconnected and is about to replay the
+   * session's buffer; clear the terminal first so the replay doesn't duplicate.
+   */
+  onReset?: () => void;
 }
 
 export interface StreamHandle {
   close(): void;
+}
+
+/**
+ * Multiplexed session I/O over a single connection (a WebSocket on the web).
+ * Used instead of one streaming HTTP connection per terminal so the web app
+ * doesn't exhaust the browser's per-origin connection cap (~6) once several
+ * terminals are open.
+ */
+export interface SessionChannel {
+  /** Subscribe to a session's output (buffer replay, then live). */
+  openOutput(id: string, handlers: StreamHandlers): StreamHandle;
+  /** Forward keystrokes/data to the session's PTY. */
+  sendInput(id: string, data: string): void;
+  /** Resize the session's PTY. */
+  resize(id: string, cols: number, rows: number): void;
 }
 
 export interface Transporter {
@@ -54,6 +74,13 @@ export interface Transporter {
    * specific: web uses streaming fetch, desktop bridges over IPC.
    */
   openStream(path: string, handlers: StreamHandlers): StreamHandle;
+  /**
+   * Optional multiplexed channel for session output/input/resize. When present
+   * (web/HTTP), the ApiClient routes terminal I/O through it instead of opening
+   * a stream plus POSTs per session. Transports with no connection limit (the
+   * desktop unix socket) omit it and fall back to {@link openStream}/request.
+   */
+  sessionChannel?(): SessionChannel;
 }
 
 /** Build a querystring (with leading `?`) from a query object, or "" if empty. */
