@@ -77,6 +77,9 @@ export const TerminalView: React.FC<{
       allowProposedApi: true,
       drawBoldTextInBrightColors: true,
       macOptionIsMeta: true,
+      // Default is true on macOS, where right-clicking reselects the word under
+      // the cursor and wipes an existing selection before we can copy it.
+      rightClickSelectsWord: false,
       theme: THEME
     });
     termRef.current = term;
@@ -122,16 +125,18 @@ export const TerminalView: React.FC<{
       return true;
     });
 
-    // Right-click copies the current selection (keeping it highlighted); with
-    // no selection the browser's native context menu is left untouched.
+    // Right-click copies the current selection. Registered in the CAPTURE phase
+    // so it runs before xterm's own bubble-phase contextmenu handler (which would
+    // otherwise reselect/clear the selection); stopPropagation keeps that handler
+    // from firing. With no selection we leave the native menu alone.
     const onContextMenu = (event: MouseEvent) => {
-      const selection = term.getSelection();
-      if (selection) {
+      if (term.hasSelection()) {
         event.preventDefault();
-        void writeClipboard(selection);
+        event.stopPropagation();
+        void writeClipboard(term.getSelection());
       }
     };
-    container.addEventListener("contextmenu", onContextMenu);
+    container.addEventListener("contextmenu", onContextMenu, true);
 
     const inputSub = term.onData((data) => {
       void api.sendSessionInput(session.id, data);
@@ -149,7 +154,7 @@ export const TerminalView: React.FC<{
     });
 
     return () => {
-      container.removeEventListener("contextmenu", onContextMenu);
+      container.removeEventListener("contextmenu", onContextMenu, true);
       stream.close();
       inputSub.dispose();
       resizeObserver.disconnect();
