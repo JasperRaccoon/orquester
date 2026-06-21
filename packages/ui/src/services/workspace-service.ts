@@ -1,4 +1,4 @@
-import type { ProjectSummary, WorkspaceSummary } from "@orquester/api";
+import type { CreateProjectRequest, ProjectSummary, WorkspaceSummary } from "@orquester/api";
 import type { ApiClient } from "../lib/api-client";
 
 /**
@@ -23,8 +23,12 @@ export const workspaceService = {
     return api.listProjects(workspace, signal);
   },
 
-  createProject(api: ApiClient, workspace: string, name: string): Promise<ProjectSummary> {
-    return api.createProject(workspace, { name });
+  createProject(
+    api: ApiClient,
+    workspace: string,
+    req: CreateProjectRequest
+  ): Promise<ProjectSummary> {
+    return api.createProject(workspace, req);
   },
 
   deleteProject(api: ApiClient, workspace: string, name: string): Promise<void> {

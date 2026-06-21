@@ -17,6 +17,7 @@ import type {
   ProjectSummary,
   RegistryResponse,
   RenameSessionRequest,
+  RepoSummary,
   ReorderSessionsRequest,
   ServerInfoResponse,
   SessionInputRequest,
@@ -507,18 +508,86 @@ function createServer(
     }
   );
 
-  app.post<{ Params: { workspace: string } }>(
+  app.post<{ Params: { workspace: string }; Body: CreateProjectRequest }>(
     "/api/workspaces/:workspace/projects",
     async (request, reply): Promise<ProjectSummary | void> => {
       const { workspace } = request.params;
-      const name = (request.body as CreateProjectRequest | undefined)?.name;
-      if (!isValidName(workspace) || !isValidName(name)) {
-        return reply.code(400).send({ code: "INVALID_NAME", message: "Invalid name." });
+      if (!isValidName(workspace)) {
+        return reply.code(400).send({ code: "INVALID_NAME", message: "Invalid workspace name." });
+      }
+      const body = request.body ?? ({ name: "" } as CreateProjectRequest);
+      const workspaceDir = join(resolved.workspacesDir, workspace);
+
+      // Empty (or absent source): today's behavior — mkdir the validated name.
+      if (body.source === undefined || body.source === "empty") {
+        const name = body.name;
+        if (!isValidName(name)) {
+          return reply.code(400).send({ code: "INVALID_NAME", message: "Invalid name." });
+        }
+        const path = join(workspaceDir, name);
+        await mkdir(path, { recursive: true });
+        return { name, workspace, path };
       }
 
-      const path = join(resolved.workspacesDir, workspace, name);
-      await mkdir(path, { recursive: true });
-      return { name, workspace, path };
+      // Repo modes (clone/create) resolve the GitHub account from the WORKSPACE's
+      // gitAccountId. 400 if the workspace has no linked account (the no-token case
+      // is enforced by the accounts methods, which throw AccountError(400)).
+      const accountId = (await readWorkspacesMeta(resolved.workspacesMetaFile)).workspaces.find(
+        (w) => w.name === workspace
+      )?.gitAccountId;
+      if (!accountId) {
+        return reply.code(400).send({
+          code: "NO_GIT_ACCOUNT",
+          message: "This workspace has no linked GitHub account."
+        });
+      }
+
+      try {
+        if (body.source === "clone") {
+          const sshUrl = normalizeRepoUrl(body.url);
+          if (!sshUrl) {
+            return reply.code(400).send({ code: "INVALID_URL", message: "Unrecognized repository URL." });
+          }
+          const name = body.name ?? repoNameFromSshUrl(sshUrl);
+          if (!isValidName(name)) {
+            return reply.code(400).send({ code: "INVALID_NAME", message: "Invalid name." });
+          }
+          const path = join(workspaceDir, name);
+          if (existsSync(path)) {
+            return reply.code(409).send({ code: "ALREADY_EXISTS", message: `"${name}" already exists.` });
+          }
+          await mkdir(workspaceDir, { recursive: true });
+          await accounts.cloneRepo(accountId, sshUrl, name, workspaceDir);
+          return { name, workspace, path };
+        }
+
+        if (body.source === "create") {
+          // Make the repo (REST), then clone the returned SSH URL.
+          const name = body.name;
+          if (!isValidName(name)) {
+            return reply.code(400).send({ code: "INVALID_NAME", message: "Invalid name." });
+          }
+          const path = join(workspaceDir, name);
+          if (existsSync(path)) {
+            return reply.code(409).send({ code: "ALREADY_EXISTS", message: `"${name}" already exists.` });
+          }
+          const repo = await accounts.createRepo(accountId, {
+            owner: body.owner,
+            name,
+            visibility: body.visibility,
+            ...(body.description ? { description: body.description } : {})
+          });
+          await mkdir(workspaceDir, { recursive: true });
+          await accounts.cloneRepo(accountId, repo.sshUrl, name, workspaceDir);
+          return { name, workspace, path };
+        }
+
+        return reply.code(400).send({ code: "INVALID_REQUEST", message: "Unknown project source." });
+      } catch (error) {
+        const status = error instanceof AccountError ? error.status : 500;
+        const message = error instanceof Error ? error.message : "Could not create the project.";
+        return reply.code(status).send({ code: "ACCOUNT_ERROR", message });
+      }
     }
   );
 
@@ -656,6 +725,51 @@ function createServer(
       } catch (error) {
         const status = error instanceof AccountError ? error.status : 500;
         const message = error instanceof Error ? error.message : "Could not test the account.";
+        return reply.code(status).send({ code: "ACCOUNT_ERROR", message });
+      }
+    }
+  );
+
+  // Set/replace an account's GitHub PAT (for REST list/create repos). Validated
+  // against the account's githubLogin; stored at rest (0600), never returned.
+  app.post<{ Params: { id: string }; Body: { token?: string } }>(
+    "/api/accounts/:id/token",
+    async (request, reply): Promise<void> => {
+      try {
+        await accounts.setToken(request.params.id, request.body?.token ?? "");
+        return reply.code(204).send();
+      } catch (error) {
+        const status = error instanceof AccountError ? error.status : 500;
+        const message = error instanceof Error ? error.message : "Could not save the token.";
+        return reply.code(status).send({ code: "ACCOUNT_ERROR", message });
+      }
+    }
+  );
+
+  // List repos the account can reach (owner/collaborator/org member). 400 if the
+  // account has no token (repoAccess:false).
+  app.get<{ Params: { id: string } }>(
+    "/api/accounts/:id/repos",
+    async (request, reply): Promise<RepoSummary[] | void> => {
+      try {
+        return await accounts.listRepos(request.params.id);
+      } catch (error) {
+        const status = error instanceof AccountError ? error.status : 500;
+        const message = error instanceof Error ? error.message : "Could not list repositories.";
+        return reply.code(status).send({ code: "ACCOUNT_ERROR", message });
+      }
+    }
+  );
+
+  // List the org logins the account belongs to (create-owner picker). 400 if no token.
+  app.get<{ Params: { id: string } }>(
+    "/api/accounts/:id/orgs",
+    async (request, reply): Promise<string[] | void> => {
+      try {
+        return await accounts.listOrgs(request.params.id);
+      } catch (error) {
+        const status = error instanceof AccountError ? error.status : 500;
+        const message = error instanceof Error ? error.message : "Could not list organizations.";
         return reply.code(status).send({ code: "ACCOUNT_ERROR", message });
       }
     }
@@ -1067,6 +1181,40 @@ function isValidName(name: string | undefined): name is string {
     !name.includes("/") &&
     !name.includes("\\")
   );
+}
+
+/**
+ * Normalize a GitHub repo reference to its SSH clone URL
+ * (`git@github.com:owner/repo.git`). Accepts `https://github.com/owner/repo`
+ * (optional `.git`), the SSH form itself, and the `owner/repo` shorthand.
+ * Returns undefined if it can't be parsed (the route maps that to 400). The
+ * clone uses SSH only — no token ever enters the URL.
+ */
+function normalizeRepoUrl(url: string | undefined): string | undefined {
+  if (typeof url !== "string") {
+    return undefined;
+  }
+  const trimmed = url.trim();
+  const part = "[A-Za-z0-9._-]+";
+  const repoRe = new RegExp(`^(${part})/(${part}?)$`);
+  const httpsRe = new RegExp(`^https?://github\\.com/(${part})/(${part}?)(?:\\.git)?/?$`, "i");
+  const sshRe = new RegExp(`^git@github\\.com:(${part})/(${part}?)(?:\\.git)?$`, "i");
+  const match = trimmed.match(httpsRe) ?? trimmed.match(sshRe) ?? trimmed.match(repoRe);
+  if (!match) {
+    return undefined;
+  }
+  const owner = match[1];
+  const repo = match[2].replace(/\.git$/i, "");
+  if (!owner || !repo) {
+    return undefined;
+  }
+  return `git@github.com:${owner}/${repo}.git`;
+}
+
+/** Derive the repo name (the dir `git clone` would create) from an SSH clone URL. */
+function repoNameFromSshUrl(sshUrl: string): string {
+  const tail = sshUrl.split("/").pop() ?? "";
+  return tail.replace(/\.git$/i, "");
 }
 
 /**

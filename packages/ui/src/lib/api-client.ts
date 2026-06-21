@@ -16,6 +16,7 @@ import type {
   ProjectSummary,
   RegistryActionResult,
   RegistryResponse,
+  RepoSummary,
   ServerInfoResponse,
   SessionSummary,
   WorkspaceSummary
@@ -163,6 +164,23 @@ export class ApiClient {
 
   testAccount(id: string): Promise<AccountTestResult> {
     return this.send("POST", `/api/accounts/${encodeURIComponent(id)}/test`);
+  }
+
+  /** Repos the account can reach (needs a persisted token; 400 otherwise). */
+  listRepos(accountId: string, signal?: AbortSignal): Promise<RepoSummary[]> {
+    return this.send("GET", `/api/accounts/${encodeURIComponent(accountId)}/repos`, { signal });
+  }
+
+  /** Org logins the account belongs to (needs a persisted token; 400 otherwise). */
+  listOrgs(accountId: string, signal?: AbortSignal): Promise<string[]> {
+    return this.send("GET", `/api/accounts/${encodeURIComponent(accountId)}/orgs`, { signal });
+  }
+
+  /** Persist a GitHub token for repo access. The token is only sent, never read back. */
+  setAccountToken(accountId: string, token: string): Promise<void> {
+    return this.send("POST", `/api/accounts/${encodeURIComponent(accountId)}/token`, {
+      body: { token }
+    });
   }
 
   // Workspaces & projects (filesystem-backed)

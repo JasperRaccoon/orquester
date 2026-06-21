@@ -7,6 +7,7 @@ import {
   ChevronRight,
   Download,
   Github,
+  KeyRound,
   Loader2,
   Plus,
   RefreshCw,
@@ -263,6 +264,7 @@ const GitHubSettings: React.FC = () => {
   const addAccount = useAppStore((s) => s.addAccount);
   const removeAccount = useAppStore((s) => s.removeAccount);
   const testAccount = useAppStore((s) => s.testAccount);
+  const setAccountToken = useAppStore((s) => s.setAccountToken);
 
   const [adding, setAdding] = useState(false);
   const [label, setLabel] = useState("");
@@ -271,6 +273,11 @@ const GitHubSettings: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   // Per-account test state, keyed by id.
   const [tests, setTests] = useState<Record<string, { ok: boolean; text: string } | "busy">>({});
+  // Per-account "enable repo access" token entry: which row is open + its value.
+  const [repoTokenFor, setRepoTokenFor] = useState<string | null>(null);
+  const [repoToken, setRepoToken] = useState("");
+  const [repoBusy, setRepoBusy] = useState(false);
+  const [repoError, setRepoError] = useState<string | null>(null);
 
   // Accounts load on connect; refresh on open in case another client changed them.
   useEffect(() => {
@@ -304,6 +311,36 @@ const GitHubSettings: React.FC = () => {
     }));
   };
 
+  const openRepoToken = (id: string) => {
+    setRepoTokenFor(id);
+    setRepoToken("");
+    setRepoError(null);
+  };
+
+  const cancelRepoToken = () => {
+    setRepoTokenFor(null);
+    setRepoToken("");
+    setRepoError(null);
+  };
+
+  const saveRepoToken = async (id: string) => {
+    if (!repoToken.trim()) {
+      return;
+    }
+    setRepoBusy(true);
+    setRepoError(null);
+    try {
+      // The token is only sent — never read back. setAccountToken refetches
+      // accounts so `repoAccess` flips on success.
+      await setAccountToken(id, repoToken);
+      cancelRepoToken();
+    } catch (err) {
+      setRepoError(err instanceof Error ? err.message : "Could not enable repo access.");
+    } finally {
+      setRepoBusy(false);
+    }
+  };
+
   const disconnect = async (id: string) => {
     setError(null);
     try {
@@ -321,35 +358,79 @@ const GitHubSettings: React.FC = () => {
         )}
         {accounts.map((account) => {
           const test = tests[account.id];
+          const editingToken = repoTokenFor === account.id;
           return (
-            <div key={account.id} className="group flex items-center gap-3 px-3 py-2.5">
-              <span className="flex h-8 w-8 shrink-0 items-center justify-center text-neutral-400">
-                <Github size={18} />
-              </span>
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-sm text-neutral-100">
-                  {account.label}
-                  <span className="ml-1.5 text-neutral-500">@{account.githubLogin}</span>
-                </p>
-                <p className="truncate text-xs text-neutral-500">{account.gitEmail}</p>
-                {test && test !== "busy" && (
-                  <p className={cn("truncate text-xs", test.ok ? "text-emerald-400" : "text-red-400")}>
-                    {test.ok ? <Check size={11} className="mr-1 inline" /> : <X size={11} className="mr-1 inline" />}
-                    {test.text}
+            <div key={account.id} className="group px-3 py-2.5">
+              <div className="flex items-center gap-3">
+                <span className="flex h-8 w-8 shrink-0 items-center justify-center text-neutral-400">
+                  <Github size={18} />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm text-neutral-100">
+                    {account.label}
+                    <span className="ml-1.5 text-neutral-500">@{account.githubLogin}</span>
                   </p>
+                  <p className="truncate text-xs text-neutral-500">{account.gitEmail}</p>
+                  <p className="truncate text-xs">
+                    {account.repoAccess ? (
+                      <span className="text-emerald-400">
+                        <Check size={11} className="mr-1 inline" />
+                        Repo access enabled
+                      </span>
+                    ) : (
+                      <span className="text-neutral-500">Repo access off</span>
+                    )}
+                  </p>
+                  {test && test !== "busy" && (
+                    <p className={cn("truncate text-xs", test.ok ? "text-emerald-400" : "text-red-400")}>
+                      {test.ok ? <Check size={11} className="mr-1 inline" /> : <X size={11} className="mr-1 inline" />}
+                      {test.text}
+                    </p>
+                  )}
+                </div>
+                {!account.repoAccess && !editingToken && (
+                  <Button size="sm" variant="outline" onClick={() => openRepoToken(account.id)}>
+                    <KeyRound size={13} /> Enable repo access
+                  </Button>
                 )}
+                <Button size="sm" variant="outline" disabled={test === "busy"} onClick={() => void runTest(account.id)}>
+                  {test === "busy" ? <Loader2 size={13} className="animate-spin" /> : null} Test
+                </Button>
+                <button
+                  type="button"
+                  aria-label="Disconnect account"
+                  className="flex h-7 w-7 items-center justify-center rounded text-neutral-500 hover:bg-neutral-800 hover:text-red-400"
+                  onClick={() => void disconnect(account.id)}
+                >
+                  <Trash2 size={13} />
+                </button>
               </div>
-              <Button size="sm" variant="outline" disabled={test === "busy"} onClick={() => void runTest(account.id)}>
-                {test === "busy" ? <Loader2 size={13} className="animate-spin" /> : null} Test
-              </Button>
-              <button
-                type="button"
-                aria-label="Disconnect account"
-                className="flex h-7 w-7 items-center justify-center rounded text-neutral-500 hover:bg-neutral-800 hover:text-red-400"
-                onClick={() => void disconnect(account.id)}
-              >
-                <Trash2 size={13} />
-              </button>
+
+              {editingToken && (
+                <div className="ml-11 mt-2 space-y-2 rounded-md border border-neutral-800 bg-neutral-950 p-3">
+                  <Input
+                    autoFocus
+                    type="password"
+                    placeholder="GitHub PAT (repo, read:org)"
+                    value={repoToken}
+                    onChange={(e) => setRepoToken(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && void saveRepoToken(account.id)}
+                  />
+                  <p className="text-xs text-neutral-500">
+                    Stored securely on the daemon to list and create repositories. It is never
+                    displayed again and never used on a clone command line.
+                  </p>
+                  {repoError && <p className="text-xs text-red-400">{repoError}</p>}
+                  <div className="flex gap-2">
+                    <Button size="sm" disabled={repoBusy || !repoToken.trim()} onClick={() => void saveRepoToken(account.id)}>
+                      {repoBusy ? <Loader2 size={13} className="animate-spin" /> : null} Save token
+                    </Button>
+                    <Button size="sm" variant="outline" disabled={repoBusy} onClick={cancelRepoToken}>
+                      Cancel
+                    </Button>
+                  </div>
+                </div>
+              )}
             </div>
           );
         })}
@@ -362,12 +443,14 @@ const GitHubSettings: React.FC = () => {
           <Input placeholder="Label (e.g. work)" value={label} onChange={(e) => setLabel(e.target.value)} />
           <Input
             type="password"
-            placeholder="GitHub PAT (write:public_key, user:email, read:user)"
+            placeholder="GitHub PAT (write:public_key, user:email, read:user, repo, read:org)"
             value={token}
             onChange={(e) => setToken(e.target.value)}
           />
           <p className="text-xs text-neutral-500">
-            The token is used once to upload an SSH key and read your identity, then discarded. It is never stored.
+            The token uploads an SSH key and reads your identity. With the <code>repo</code> and{" "}
+            <code>read:org</code> scopes it is also stored securely on the daemon to list and create
+            repositories. It is never displayed again.
           </p>
           <div className="flex gap-2">
             <Button size="sm" disabled={busy} onClick={() => void connect()}>

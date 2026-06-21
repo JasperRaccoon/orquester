@@ -10,6 +10,7 @@ import {
   type ContextMenuItem
 } from "../ui";
 import { NewItemInput } from "./NewItemInput";
+import { NewProjectModal } from "./NewProjectModal";
 import { useAppStore } from "../../store/app";
 import type { ProjectSummary } from "../../types";
 
@@ -24,7 +25,8 @@ export const ProjectList: React.FC = () => {
   const createProject = useAppStore((s) => s.createProject);
   const deleteProject = useAppStore((s) => s.deleteProject);
   const toggleSidebar = useAppStore((s) => s.toggleSidebar);
-  const [creating, setCreating] = useState<null | "project" | "folder">(null);
+  const [creatingFolder, setCreatingFolder] = useState(false);
+  const [modalOpen, setModalOpen] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number; project: ProjectSummary } | null>(null);
   const [pendingDelete, setPendingDelete] = useState<ProjectSummary | null>(null);
 
@@ -58,23 +60,23 @@ export const ProjectList: React.FC = () => {
           align="right"
           width="w-44"
         >
-          <DropdownItem icon={<Box size={14} />} onClick={() => setCreating("project")}>
+          <DropdownItem icon={<Box size={14} />} onClick={() => setModalOpen(true)}>
             New Project
           </DropdownItem>
-          <DropdownItem icon={<FolderPlus size={14} />} onClick={() => setCreating("folder")}>
+          <DropdownItem icon={<FolderPlus size={14} />} onClick={() => setCreatingFolder(true)}>
             New Folder
           </DropdownItem>
         </Dropdown>
       </div>
 
       <nav className="flex-1 space-y-px overflow-y-auto px-2 pb-2">
-        {creating && (
+        {creatingFolder && (
           <NewItemInput
-            placeholder={creating === "folder" ? "folder-name" : "project-name"}
-            onCancel={() => setCreating(null)}
+            placeholder="folder-name"
+            onCancel={() => setCreatingFolder(false)}
             onSubmit={(name) => {
-              setCreating(null);
-              void createProject(name);
+              setCreatingFolder(false);
+              void createProject({ source: "empty", name });
             }}
           />
         )}
@@ -82,7 +84,7 @@ export const ProjectList: React.FC = () => {
         {loading && projects.length === 0 && (
           <p className="px-2 py-2 text-xs text-neutral-600">Loading…</p>
         )}
-        {!loading && projects.length === 0 && !creating && (
+        {!loading && projects.length === 0 && !creatingFolder && (
           <p className="px-2 py-2 text-xs text-neutral-600">No projects yet</p>
         )}
         {projects.map((project) => (
@@ -134,6 +136,8 @@ export const ProjectList: React.FC = () => {
           }
         }}
       />
+
+      <NewProjectModal open={modalOpen} onClose={() => setModalOpen(false)} />
     </>
   );
 };

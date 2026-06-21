@@ -62,8 +62,9 @@ export interface CreateWorkspaceRequest {
 }
 
 /**
- * Public view of a connected git account. Deliberately omits `keyPath` and any
- * private-key material — the daemon never returns where/what the private key is.
+ * Public view of a connected git account. Deliberately omits `keyPath`, the
+ * GitHub `token`, and any private-key material — the daemon never returns
+ * where/what the private key is, nor the token (only `repoAccess` reflects it).
  */
 export interface AccountSummary {
   id: string;
@@ -73,6 +74,11 @@ export interface AccountSummary {
   gitEmail: string;
   /** OpenSSH public key (safe to display/copy). */
   publicKey: string;
+  /**
+   * True when a GitHub token is persisted for this account (`!!account.token`),
+   * enabling repo list/create. The token itself is never returned.
+   */
+  repoAccess: boolean;
   createdAt: string;
 }
 
@@ -92,9 +98,40 @@ export interface AccountTestResult {
   message?: string;
 }
 
-export interface CreateProjectRequest {
+/**
+ * A GitHub repository the account can reach, as projected by
+ * `GET /api/accounts/:id/repos`. Carries only what the create-project picker
+ * needs; the clone uses `sshUrl` (token never enters a clone URL/argv).
+ */
+export interface RepoSummary {
+  /** "owner/name". */
+  fullName: string;
+  owner: string;
   name: string;
+  private: boolean;
+  /** git@github.com:owner/name.git — the SSH clone URL. */
+  sshUrl: string;
+  defaultBranch: string;
+  description: string | null;
 }
+
+/**
+ * Body for `POST /api/workspaces/:workspace/projects`. Discriminated on
+ * `source`, which is OPTIONAL and defaults to "empty" so existing callers (the
+ * "New Folder"/name-only path) keep working unchanged. Repo modes resolve the
+ * GitHub account from the workspace's `gitAccountId`.
+ */
+export type CreateProjectRequest =
+  | { source?: "empty"; name: string }
+  /** `url`: full URL, `git@…`, or `owner/repo`; `name` overrides the dest dir. */
+  | { source: "clone"; url: string; name?: string }
+  | {
+      source: "create";
+      owner: string;
+      name: string;
+      visibility: "private" | "public";
+      description?: string;
+    };
 
 /** A filesystem entry returned by the file browser. */
 export interface FsEntry {
@@ -351,6 +388,22 @@ export class HttpOrquesterApiClient implements OrquesterApi {
     return this.get(`/api/workspaces/${encodeURIComponent(workspace)}/projects`);
   }
 
+  createProject(workspace: string, req: CreateProjectRequest): Promise<ProjectSummary> {
+    return this.post(`/api/workspaces/${encodeURIComponent(workspace)}/projects`, req);
+  }
+
+  listRepos(accountId: string): Promise<RepoSummary[]> {
+    return this.get(`/api/accounts/${encodeURIComponent(accountId)}/repos`);
+  }
+
+  listOrgs(accountId: string): Promise<string[]> {
+    return this.get(`/api/accounts/${encodeURIComponent(accountId)}/orgs`);
+  }
+
+  setAccountToken(accountId: string, token: string): Promise<void> {
+    return this.post(`/api/accounts/${encodeURIComponent(accountId)}/token`, { token });
+  }
+
   eventsUrl(): string {
     const url = new URL(this.baseUrl);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
@@ -370,7 +423,30 @@ export class HttpOrquesterApiClient implements OrquesterApi {
     return response.json() as Promise<T>;
   }
 
-  private authHeaders(): HeadersInit {
+  private async post<T>(path: string, body?: unknown): Promise<T> {
+    const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+      method: "POST",
+      headers: {
+        ...this.authHeaders(),
+        ...(body === undefined ? {} : { "Content-Type": "application/json" })
+      },
+      body: body === undefined ? undefined : JSON.stringify(body)
+    });
+
+    if (!response.ok) {
+      throw new Error(`Orquester API request failed: ${response.status} ${response.statusText}`);
+    }
+
+    // 204 No Content (e.g. POST /api/accounts/:id/token) has an empty body —
+    // response.json() would throw. Void-returning callers get undefined.
+    if (response.status === 204) {
+      return undefined as T;
+    }
+
+    return response.json() as Promise<T>;
+  }
+
+  private authHeaders(): Record<string, string> {
     if (!this.password) {
       return {};
     }

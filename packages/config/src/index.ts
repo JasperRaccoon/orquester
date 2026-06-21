@@ -308,8 +308,9 @@ export function parseRemotesConfig(value: unknown): RemotesConfig {
 // accounts.json (connected GitHub/git accounts; daemon-side).
 //
 // Each account owns a server-side ed25519 key (private key at `keyPath`, never
-// returned by any API) and a git identity. The GitHub PAT used to connect is
-// transient and is NEVER persisted here.
+// returned by any API) and a git identity. A scoped GitHub PAT may also be
+// persisted (for REST: list/create repos); like the private key it is stored at
+// rest (`0600`) and NEVER returned by any API — clients only see `repoAccess`.
 
 export const accountSchema = z.object({
   id: z.string(),
@@ -327,6 +328,12 @@ export const accountSchema = z.object({
   keyPath: z.string(),
   /** Id of the key on GitHub (for later removal); absent if the upload id was unknown. */
   githubKeyId: z.number().optional(),
+  /**
+   * Scoped GitHub PAT for REST (list/create repos). Persisted at rest (`0600`);
+   * NEVER exposed by any API — only `AccountSummary.repoAccess` reflects its
+   * presence. Absent until captured at connect-time or set via the token route.
+   */
+  token: z.string().optional(),
   createdAt: z.string()
 });
 

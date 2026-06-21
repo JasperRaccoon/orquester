@@ -22,11 +22,13 @@ import type {
   AccountSummary,
   AccountTestResult,
   ConnectionStatus,
+  CreateProjectRequest,
   EventMessage,
   ProjectSummary,
   RegistryEntry,
   RegistryKind,
   RegistryResponse,
+  RepoSummary,
   SessionSummary,
   UiConnection,
   WorkspaceSummary
@@ -344,6 +346,12 @@ export interface AppState {
   addAccount: (input: { label: string; token: string }) => Promise<AccountSummary>;
   removeAccount: (id: string) => Promise<void>;
   testAccount: (id: string) => Promise<AccountTestResult>;
+  /** Repos the account can reach (for the clone picker). */
+  listRepos: (accountId: string) => Promise<RepoSummary[]>;
+  /** Org logins the account belongs to (for the create-owner picker). */
+  listOrgs: (accountId: string) => Promise<string[]>;
+  /** Persist a token (enables repo access); refetches accounts so repoAccess flips. */
+  setAccountToken: (accountId: string, token: string) => Promise<void>;
 
   // app config + settings
   loadAppConfig: () => Promise<void>;
@@ -363,7 +371,7 @@ export interface AppState {
   closeWorkspace: () => void;
 
   loadProjects: () => Promise<void>;
-  createProject: (name: string) => Promise<void>;
+  createProject: (req: CreateProjectRequest) => Promise<void>;
   deleteProject: (project: ProjectSummary) => Promise<void>;
   openProject: (project: ProjectSummary) => void;
 
@@ -542,7 +550,16 @@ export const useAppStore = create<AppState>((set, get) => ({
     // Successful connect resets the consecutive-lockout counter.
     lockedCycles = 0;
     set({ connectionStatus: "connected", reconnectAttempt: 0, connectionError: null, lockedUntil: null, authPrompt: null });
-    await Promise.all([get().loadWorkspaces(), get().loadSessions(), get().loadRegistry()]);
+    await Promise.all([
+      get().loadWorkspaces(),
+      get().loadSessions(),
+      get().loadRegistry(),
+      // Reload git accounts on every (re)connect too — otherwise a daemon
+      // restart leaves `accounts` stale (it was only filled by the one-time
+      // initConnections path), so the workspace/project pickers go empty until
+      // Settings → GitHub refills it. (project-repo-linking bug fix.)
+      get().loadAccounts()
+    ]);
     // A newer flow may have preempted us during the fan-out: don't open a
     // duplicate events stream or arm a second health probe.
     if (reconnectGenAtStart !== reconnectGen) {
@@ -820,6 +837,32 @@ export const useAppStore = create<AppState>((set, get) => ({
     return api.testAccount(id);
   },
 
+  listRepos: async (accountId) => {
+    const api = get().api;
+    if (!api) {
+      throw new Error("Not connected.");
+    }
+    return api.listRepos(accountId);
+  },
+
+  listOrgs: async (accountId) => {
+    const api = get().api;
+    if (!api) {
+      throw new Error("Not connected.");
+    }
+    return api.listOrgs(accountId);
+  },
+
+  setAccountToken: async (accountId, token) => {
+    const api = get().api;
+    if (!api) {
+      throw new Error("Not connected.");
+    }
+    await api.setAccountToken(accountId, token.trim());
+    // Refetch so repoAccess flips in the UI (no broadcast; single-user).
+    await get().loadAccounts();
+  },
+
   loadWorkspaces: async () => {
     const api = get().api;
     if (!api) {
@@ -912,13 +955,13 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  createProject: async (name) => {
+  createProject: async (req) => {
     const api = get().api;
     const workspace = get().currentWorkspace;
     if (!api || !workspace) {
       return;
     }
-    await workspaceService.createProject(api, workspace, name);
+    await workspaceService.createProject(api, workspace, req);
     await get().loadProjects();
   },
 

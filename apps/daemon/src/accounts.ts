@@ -1,4 +1,4 @@
-import type { AccountSummary, AccountTestResult, CreateAccountRequest } from "@orquester/api";
+import type { AccountSummary, AccountTestResult, CreateAccountRequest, RepoSummary } from "@orquester/api";
 import {
   type Account,
   type AccountsConfig,
@@ -12,6 +12,8 @@ import { realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
+
+import { type CreateRepoOptions, createRepo, listOrgs, listRepos } from "./repos";
 
 const run = promisify(execFile);
 
@@ -34,7 +36,10 @@ export class AccountError extends Error {
  *
  * Security invariants:
  *   - The private key never leaves the host; no method returns `keyPath`.
- *   - The GitHub PAT is used for the connect request only, then discarded.
+ *   - The GitHub PAT is persisted at rest (accounts.json, 0600) for REST
+ *     (list/create repos) but NEVER returned by any API — clients only see
+ *     `repoAccess`. It is read solely by the `listRepos`/`listOrgs`/`createRepo`
+ *     wrappers, and never enters a clone URL/argv (clones use the SSH key).
  *   - Every git/ssh/ssh-keygen call uses execFile (arg array, no shell) because
  *     labels/identity/paths are user- or network-controlled.
  *   - All global git edits go through `git config --global`; HOME is pinned so
@@ -63,10 +68,16 @@ export class AccountsService {
 
   private async write(config: AccountsConfig): Promise<void> {
     await mkdir(dirname(this.configPath), { recursive: true });
-    await writeFile(this.configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+    // 0600: accounts.json holds the GitHub PAT at rest (same care as keys/, 0700).
+    // `mode` only applies on create, so chmod afterwards to also fix existing files.
+    await writeFile(this.configPath, `${JSON.stringify(config, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    await chmod(this.configPath, 0o600).catch(() => undefined);
   }
 
-  /** Strip `keyPath`/`githubKeyId` — the public projection the API returns. */
+  /**
+   * Strip `keyPath`/`githubKeyId`/`token` — the public projection the API
+   * returns. `repoAccess` reflects whether a PAT is persisted, never the PAT.
+   */
   private toSummary(account: Account): AccountSummary {
     return {
       id: account.id,
@@ -75,6 +86,7 @@ export class AccountsService {
       gitName: account.gitName,
       gitEmail: account.gitEmail,
       publicKey: account.publicKey,
+      repoAccess: !!account.token,
       createdAt: account.createdAt
     };
   }
@@ -92,9 +104,9 @@ export class AccountsService {
 
   /**
    * Connect a GitHub account: generate an ed25519 key, upload it to GitHub with
-   * the PAT, read the identity, persist (no token, no private key beyond
-   * keyPath), discard the PAT. On any failure after keygen, the key files are
-   * cleaned up so a retry is idempotent.
+   * the PAT, read the identity, then persist (the PAT is kept at rest, 0600, for
+   * REST list/create repos; the private key never leaves `keyPath`). On any
+   * failure after keygen, the key files are cleaned up so a retry is idempotent.
    */
   async add(req: CreateAccountRequest): Promise<AccountSummary> {
     const label = req.label?.trim();
@@ -159,7 +171,8 @@ export class AccountsService {
         gitEmail = `${githubId}+${githubLogin}@users.noreply.github.com`;
       }
 
-      // 4) Persist (no token).
+      // 4) Persist (the PAT is kept at rest, 0600, for REST list/create repos;
+      //    toSummary strips it — only `repoAccess` is ever returned).
       const account: Account = {
         id,
         label,
@@ -169,13 +182,13 @@ export class AccountsService {
         publicKey,
         keyPath,
         ...(githubKeyId !== undefined ? { githubKeyId } : {}),
+        token,
         createdAt: new Date().toISOString()
       };
       const config = await this.read();
       config.accounts.push(account);
       await this.write(config);
 
-      // 5) Discard the PAT: nothing else references `token` past this point.
       return this.toSummary(account);
     } catch (error) {
       // Clean up the orphaned key on any post-keygen failure.
@@ -248,6 +261,111 @@ export class AccountsService {
       return { ok: false, message: text.trim().slice(0, 200) || "No greeting from GitHub." };
     } catch (error) {
       return { ok: false, message: errText(error) };
+    }
+  }
+
+  // --- GitHub token & repos (REST) ----------------------------------------
+
+  /**
+   * Persist a GitHub PAT for an existing account (e.g. one connected before the
+   * token was kept). Validates the token via `GET /user` and REJECTS it if the
+   * returned login differs from the account's `githubLogin` — guarding against
+   * wiring a typo'd token or a different identity. The PAT is stored at rest
+   * (0600); it is never returned (only `repoAccess` flips).
+   */
+  async setToken(id: string, token: string): Promise<void> {
+    const trimmed = token?.trim();
+    if (!trimmed) {
+      throw new AccountError(400, "A GitHub token is required.");
+    }
+    const account = await this.find(id);
+    if (!account) {
+      throw new AccountError(404, "Account not found.");
+    }
+    const user = await this.github(trimmed, "GET", "/user");
+    const login = typeof user?.login === "string" ? user.login : "";
+    if (!login) {
+      throw new AccountError(502, "GitHub did not return a login for this token.");
+    }
+    if (login !== account.githubLogin) {
+      throw new AccountError(
+        400,
+        `This token authenticates as "${login}", but this account is "${account.githubLogin}". Use a token for the right account.`
+      );
+    }
+    const config = await this.read();
+    const stored = config.accounts.find((a) => a.id === id);
+    if (!stored) {
+      throw new AccountError(404, "Account not found.");
+    }
+    stored.token = trimmed;
+    await this.write(config);
+  }
+
+  /** Read an account's persisted token, or throw the route-friendly 400 precondition. */
+  private async requireToken(id: string): Promise<string> {
+    const account = await this.find(id);
+    if (!account) {
+      throw new AccountError(404, "Account not found.");
+    }
+    if (!account.token) {
+      throw new AccountError(400, "This account has no GitHub token. Enable repo access first.");
+    }
+    return account.token;
+  }
+
+  /**
+   * List repos the account can reach. Thin wrapper that reads the token (the
+   * only place it is read for REST) and delegates to `repos.ts`.
+   */
+  async listRepos(id: string): Promise<RepoSummary[]> {
+    return listRepos(await this.requireToken(id));
+  }
+
+  /** List the org logins the account belongs to (for the create-owner picker). */
+  async listOrgs(id: string): Promise<string[]> {
+    return listOrgs(await this.requireToken(id));
+  }
+
+  /**
+   * Create a repo for the account. `owner` may be the account's own login or an
+   * org it can create in; `repos.ts` chooses the user vs. org endpoint by
+   * comparing `owner` to the account's `githubLogin`.
+   */
+  async createRepo(
+    id: string,
+    opts: Omit<CreateRepoOptions, "login">
+  ): Promise<RepoSummary> {
+    const account = await this.find(id);
+    if (!account) {
+      throw new AccountError(404, "Account not found.");
+    }
+    if (!account.token) {
+      throw new AccountError(400, "This account has no GitHub token. Enable repo access first.");
+    }
+    return createRepo(account.token, { ...opts, login: account.githubLogin });
+  }
+
+  /**
+   * Clone a repo into a project dir using the account's SSH key (no token in the
+   * URL/argv). `GIT_SSH_COMMAND` pins the key explicitly so the clone uses the
+   * right identity deterministically rather than relying on `includeIf` timing.
+   * `cwd` is the workspace dir; `destName` the new project subdir. Errors surface
+   * stderr so the route can map them (e.g. destination exists, auth) to 4xx.
+   */
+  async cloneRepo(id: string, sshUrl: string, destName: string, cwd: string): Promise<void> {
+    const account = await this.find(id);
+    if (!account) {
+      throw new AccountError(404, "Account not found.");
+    }
+    const sshCommand = `ssh -i "${account.keyPath}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new`;
+    try {
+      await run("git", ["clone", sshUrl, destName], {
+        cwd,
+        env: { ...process.env, HOME: this.home, GIT_SSH_COMMAND: sshCommand }
+      });
+    } catch (error) {
+      throw new AccountError(502, `Could not clone the repository: ${errText(error)}`);
     }
   }
 
@@ -363,7 +481,7 @@ export class AccountsService {
       const detail = await response.text().catch(() => "");
       const hint =
         response.status === 401 || response.status === 403
-          ? " (check the token's scopes: write:public_key, user:email, read:user)"
+          ? " (check the token's scopes: write:public_key, user:email, read:user, repo, read:org)"
           : "";
       throw new AccountError(
         response.status === 401 || response.status === 403 ? 400 : 502,
