@@ -35,6 +35,14 @@ const THEME: ITheme = {
   brightWhite: "#fafafa"
 };
 
+async function writeClipboard(text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    /* clipboard API unavailable (insecure context or permission denied) */
+  }
+}
+
 /**
  * xterm.js view bound to a daemon session. Keystrokes (including control codes
  * like Ctrl-C `\x03`) are forwarded as input; the session's output stream is
@@ -92,6 +100,39 @@ export const TerminalView: React.FC<{
     applyFit();
     term.focus();
 
+    // Clipboard: xterm forwards Ctrl-C to the PTY as SIGINT and has no built-in
+    // copy, so selecting text then pressing Ctrl-C / right-clicking would just
+    // clear the selection instead of copying. Wire copy from xterm's own
+    // selection model (works regardless of the app-wide `select-none`).
+    term.attachCustomKeyEventHandler((event) => {
+      if (event.type !== "keydown") {
+        return true;
+      }
+      const mod = event.ctrlKey || event.metaKey;
+      // Copy on Ctrl/Cmd+Shift+C, or Ctrl/Cmd+C when text is selected. With no
+      // selection, Ctrl+C falls through to the PTY so it still interrupts.
+      if (mod && event.code === "KeyC" && (event.shiftKey || term.hasSelection())) {
+        const selection = term.getSelection();
+        if (selection) {
+          event.preventDefault();
+          void writeClipboard(selection);
+          return false;
+        }
+      }
+      return true;
+    });
+
+    // Right-click copies the current selection (keeping it highlighted); with
+    // no selection the browser's native context menu is left untouched.
+    const onContextMenu = (event: MouseEvent) => {
+      const selection = term.getSelection();
+      if (selection) {
+        event.preventDefault();
+        void writeClipboard(selection);
+      }
+    };
+    container.addEventListener("contextmenu", onContextMenu);
+
     const inputSub = term.onData((data) => {
       void api.sendSessionInput(session.id, data);
     });
@@ -108,6 +149,7 @@ export const TerminalView: React.FC<{
     });
 
     return () => {
+      container.removeEventListener("contextmenu", onContextMenu);
       stream.close();
       inputSub.dispose();
       resizeObserver.disconnect();
