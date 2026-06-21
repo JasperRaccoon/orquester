@@ -222,7 +222,12 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     if (httpServer) {
       const server = httpServer;
       httpServer = null;
-      await server.close().catch(() => undefined);
+      // close() waits for open connections to end first; long-lived WebSocket
+      // clients would otherwise hold it open until the stop timeout. Force-drop
+      // lingering sockets so close() resolves promptly (clients reconnect).
+      const closed = server.close();
+      server.server.closeAllConnections?.();
+      await closed.catch(() => undefined);
     }
   };
   services.reloadHttp = async () => {
@@ -242,7 +247,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // terminates the child PTYs (they'd die with the daemon regardless).
     sessions.shutdown();
     await stopHttp();
-    await unixServer.close().catch(() => undefined);
+    const unixClosed = unixServer.close();
+    unixServer.server.closeAllConnections?.();
+    await unixClosed.catch(() => undefined);
   };
 
   console.log(`Orquester daemon ${daemonId} on unix:${paths.socketPath} (workspaces: ${resolved.workspacesDir})`);
