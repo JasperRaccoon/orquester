@@ -37,9 +37,11 @@ export class AccountError extends Error {
  * Security invariants:
  *   - The private key never leaves the host; no method returns `keyPath`.
  *   - The GitHub PAT is persisted at rest (accounts.json, 0600) for REST
- *     (list/create repos) but NEVER returned by any API — clients only see
- *     `repoAccess`. It is read solely by the `listRepos`/`listOrgs`/`createRepo`
- *     wrappers, and never enters a clone URL/argv (clones use the SSH key).
+ *     (list/create repos) and is NEVER returned by any API / never crosses the
+ *     wire — clients only see `repoAccess`. On a bound workspace it is ALSO
+ *     written to local 0600 files (a git-credentials store + gh hosts.yml) so
+ *     that workspace's terminals/agents can authenticate HTTPS git + `gh` as
+ *     the account — same-host, same-user trust boundary, off any command line.
  *   - Every git/ssh/ssh-keygen call uses execFile (arg array, no shell) because
  *     labels/identity/paths are user- or network-controlled.
  *   - All global git edits go through `git config --global`; HOME is pinned so
@@ -188,6 +190,9 @@ export class AccountsService {
       const config = await this.read();
       config.accounts.push(account);
       await this.write(config);
+      // gh auth is global (not workspace-scoped), so wire it as soon as the
+      // account is connected; the include file's HTTPS creds follow on bind.
+      await this.syncGitHubCliAuth(account);
 
       return this.toSummary(account);
     } catch (error) {
@@ -220,6 +225,8 @@ export class AccountsService {
     }
     await rm(account.keyPath, { force: true }).catch(() => undefined);
     await rm(`${account.keyPath}.pub`, { force: true }).catch(() => undefined);
+    await rm(this.credentialsPath(account), { force: true }).catch(() => undefined);
+    await rm(this.includePath(account), { force: true }).catch(() => undefined);
     const config = await this.read();
     config.accounts = config.accounts.filter((a) => a.id !== id);
     await this.write(config);
@@ -300,6 +307,10 @@ export class AccountsService {
     }
     stored.token = trimmed;
     await this.write(config);
+    // Newly-authorized: refresh the per-account include file (adds the HTTPS
+    // credential helper for all its bound workspaces at once) and gh auth.
+    await this.writeIncludeFile(stored);
+    await this.syncGitHubCliAuth(stored);
   }
 
   /** Read an account's persisted token, or throw the route-friendly 400 precondition. */
@@ -376,7 +387,17 @@ export class AccountsService {
     return join(this.keysDirPath, `${account.id}.gitconfig`);
   }
 
-  /** Write/refresh the per-account include file (identity + sshCommand). */
+  /** Path of the per-account HTTPS credential store (token at rest, 0600). */
+  private credentialsPath(account: Account): string {
+    return join(this.keysDirPath, `${account.id}.git-credentials`);
+  }
+
+  /**
+   * Write/refresh the per-account include file: identity + sshCommand, and —
+   * when a PAT is present — HTTPS credentials. This file is pulled into every
+   * repo under a bound workspace via the `includeIf` rule, so everything set
+   * here applies to that workspace's terminals/agents and ONLY them.
+   */
   async writeIncludeFile(account: Account): Promise<string> {
     const includePath = this.includePath(account);
     // Quote the key path: core.sshCommand is parsed shell-like, and the path may
@@ -385,7 +406,50 @@ export class AccountsService {
     await this.git(["config", "--file", includePath, "user.name", account.gitName]);
     await this.git(["config", "--file", includePath, "user.email", account.gitEmail]);
     await this.git(["config", "--file", includePath, "core.sshCommand", sshCommand]);
+
+    // HTTPS auth for this account's workspaces: when a PAT exists, stash it in a
+    // 0600 credential-store file and point a github.com-scoped `credential.helper`
+    // at it (here, inside the includeIf'd file — so HTTPS git push/pull/clone
+    // works for repos under a bound workspace, and only there). The token rides
+    // a file git reads, never a command line/argv. Tokenless → strip both.
+    const credsPath = this.credentialsPath(account);
+    const credentialKey = "credential.https://github.com.helper";
+    if (account.token) {
+      await writeFile(credsPath, `https://${account.githubLogin}:${account.token}@github.com\n`, {
+        encoding: "utf8",
+        mode: 0o600
+      });
+      await chmod(credsPath, 0o600).catch(() => undefined);
+      await this.git(["config", "--file", includePath, credentialKey, `store --file=${credsPath}`]);
+    } else {
+      await rm(credsPath, { force: true }).catch(() => undefined);
+      await this.git(["config", "--file", includePath, "--unset", credentialKey]).catch(() => undefined);
+    }
     return includePath;
+  }
+
+  /**
+   * Write `<HOME>/.config/gh/hosts.yml` (0600, under the pinned HOME) so the
+   * `gh` CLI in terminals/agents is authenticated as this account — enabling
+   * repo creation, PRs and other GitHub API calls from inside a session. No-op
+   * without a token. `gh` itself must be installed on the host (it is not an npm
+   * package); when absent this file simply sits unused. hosts.yml is keyed by
+   * host, so with multiple accounts the most-recently-synced one wins.
+   */
+  private async syncGitHubCliAuth(account: Account): Promise<void> {
+    if (!account.token) {
+      return;
+    }
+    const ghDir = join(this.home, ".config", "gh");
+    await mkdir(ghDir, { recursive: true });
+    const hostsPath = join(ghDir, "hosts.yml");
+    const hosts =
+      "github.com:\n" +
+      `    oauth_token: ${account.token}\n` +
+      `    user: ${account.githubLogin}\n` +
+      "    git_protocol: ssh\n";
+    await writeFile(hostsPath, hosts, { encoding: "utf8", mode: 0o600 });
+    await chmod(hostsPath, 0o600).catch(() => undefined);
   }
 
   /**
@@ -410,6 +474,7 @@ export class AccountsService {
       throw new AccountError(404, "Account not found.");
     }
     const includePath = await this.writeIncludeFile(account);
+    await this.syncGitHubCliAuth(account);
     const real = await realpath(workspaceDir);
     await this.git(["config", "--global", `includeIf.${this.gitdirCondition(real)}.path`, includePath]);
   }

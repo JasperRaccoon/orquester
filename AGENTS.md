@@ -8,6 +8,10 @@ deploys to a VPS. `CLAUDE.md` is a thin pointer to this file.
 > Follow your process skills (TDD, systematic-debugging, verification) unless the user says
 > otherwise.
 
+## Git & Commits
+
+- **When asked to commit, commit to the _current_ branch as-is. Do NOT create a new branch first** — even when on `main` — unless I explicitly ask for one. (This overrides the default "branch first when on the default branch" behavior.)
+
 ---
 
 ## What Orquester is
@@ -252,7 +256,11 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
   macOS.
 - **Secrets never cross the wire.** Plaintext passwords are migrated to bcrypt at rest;
   `sanitizeDaemonConfig` masks username/passwordHash/fsRoot; SSH private keys and GitHub PATs are
-  never returned by any API; the `?token=` is redacted from logs.
+  never returned by any API; the `?token=` is redacted from logs. *(A bound workspace's PAT **is**
+  written to local 0600 files — a git-credentials store inside the per-account `includeIf` file +
+  `~/.config/gh/hosts.yml` — so that workspace's terminals/agents can use HTTPS git + `gh` as the
+  account. It stays on-host (same user), off any command line, and is still never returned by the
+  API. `gh` must be installed on the host separately; it is not an npm package.)*
 - **Security boundary asymmetry.** `PUT /api/config/daemon` is **Unix-socket-only** (403 over
   remote HTTP); `/api/accounts` *is* allowed remotely (safe — no key material is ever returned).
 - **Default endpoint is `127.0.0.1:47831`.** On the VPS it stays on loopback; Caddy (443) is the

@@ -330,8 +330,11 @@ export const accountSchema = z.object({
   githubKeyId: z.number().optional(),
   /**
    * Scoped GitHub PAT for REST (list/create repos). Persisted at rest (`0600`);
-   * NEVER exposed by any API — only `AccountSummary.repoAccess` reflects its
-   * presence. Absent until captured at connect-time or set via the token route.
+   * NEVER exposed by any API / never crosses the wire — only
+   * `AccountSummary.repoAccess` reflects its presence. On a bound workspace it
+   * is additionally written to local 0600 files (a git-credentials store + gh
+   * hosts.yml) so that workspace's terminals/agents can use HTTPS git + `gh`.
+   * Absent until captured at connect-time or set via the token route.
    */
   token: z.string().optional(),
   createdAt: z.string()
