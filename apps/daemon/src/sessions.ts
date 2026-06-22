@@ -442,6 +442,11 @@ export class SessionManager implements ISessionManager {
     const live = new Set(await this.tmux.listSessions());
     const { loaded: indexLoaded, config: index } = await this.readIndex();
     await this.tmux.setWindowSizeLatest();
+    // The server's global env is captured from whoever first started it; a
+    // pre-sessionEnvBase() daemon seeded it with ORQUESTER_* secrets, and a new
+    // session copies the global env — so scrub it when reattaching to a
+    // surviving server (new panes then never inherit the leaked credentials).
+    await this.tmux.scrubGlobalSecrets();
 
     const known = new Set<string>();
     for (const record of index.sessions) {

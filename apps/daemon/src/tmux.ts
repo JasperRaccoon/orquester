@@ -242,6 +242,31 @@ export class Tmux {
     await this.run(["set-option", "-g", "window-size", "latest"]);
   }
 
+  /**
+   * Unset any leftover secret vars from the tmux SERVER's global environment.
+   * The global env is captured from whichever client first started the server;
+   * a daemon from before sessionEnvBase() existed seeded it with ORQUESTER_*
+   * (incl. the HTTP password). A new session COPIES the server's global env, so
+   * scrubbing the new-session client's env alone is not enough — on reattach to
+   * a surviving server we strip the matching keys here, after which new panes
+   * never inherit the leaked credentials even though the server outlived the
+   * daemon that leaked them. Idempotent: a server already started clean has none.
+   */
+  async scrubGlobalSecrets(prefix = "ORQUESTER_"): Promise<void> {
+    const result = await this.run(["show-environment", "-g"]);
+    if (result.code !== 0) {
+      return;
+    }
+    const keys = result.stdout
+      .split("\n")
+      // show-environment prints `VAR=value`, or `-VAR` for an already-unset var.
+      .map((line) => line.split("=", 1)[0].replace(/^-/, ""))
+      .filter((key) => key.startsWith(prefix));
+    for (const key of keys) {
+      await this.run(["set-environment", "-g", "-u", key]);
+    }
+  }
+
   /** Kill a session (used to reap orphans / forget on close). */
   async killSession(id: string): Promise<void> {
     await this.run(["kill-session", "-t", tmuxName(id)]);
