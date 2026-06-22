@@ -13,6 +13,12 @@ const FONT_STACK =
 // (see the upload route's MAX_UPLOAD_BYTES) so we fail fast before encoding.
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 
+// Delay (ms) between the two halves of the post-replay "repaint nudge" (see the
+// terminal effect). Long enough that a running agent processes the first SIGWINCH
+// (and caches the off-by-one size) before the restore, so the two size changes
+// can't coalesce into a single no-op — short enough to stay barely perceptible.
+const REPAINT_NUDGE_MS = 50;
+
 // Standard 16-colour ANSI palette tuned for a dark, neutral background so
 // CLIs/TUIs render with the colours they expect (not washed-out grays).
 const THEME: ITheme = {
@@ -344,12 +350,51 @@ export const TerminalView: React.FC<{
     const resizeObserver = new ResizeObserver(() => applyFit());
     resizeObserver.observe(container);
 
+    // After the daemon replays a session's scrollback, force a running agent TUI
+    // (claude/codex) to repaint itself. The replay is a `tmux capture-pane`
+    // snapshot — a static, imperfect reproduction of a live full-screen TUI. On a
+    // fresh mount (e.g. switching projects in the sidebar) the new terminal re-fits
+    // to the size the daemon pane ALREADY has, so the follow-up resize is a no-op:
+    // no SIGWINCH reaches the agent, it never redraws over the snapshot, and the
+    // terminal looks mangled until the next genuine resize (which is why toggling
+    // grid/tab view "fixes" it). The replay's arrival (first output chunk — the
+    // daemon installs the live subscriber immediately after sending it) is our cue
+    // to nudge the pane size by one row and back: two real size changes →
+    // SIGWINCHes → a clean self-repaint. Only the daemon pane is resized, never
+    // xterm, so xterm's own grid never reflows. Re-armed on every replay (onReset)
+    // so a socket reconnect heals the same way.
+    let repaintArmed = true;
+    let nudgeTimer: ReturnType<typeof setTimeout> | undefined;
+    const forceAgentRepaint = () => {
+      if (!repaintArmed) {
+        return;
+      }
+      repaintArmed = false;
+      if (term.rows <= 1) {
+        return;
+      }
+      // Shrink the daemon pane by a row (a genuine change → SIGWINCH)…
+      void api.resizeSession(session.id, term.cols, term.rows - 1);
+      // …then restore to xterm's CURRENT size (re-read, in case a real resize
+      // landed meanwhile) so the agent ends matched to xterm. The gap keeps the
+      // two changes from coalescing into one no-op SIGWINCH.
+      nudgeTimer = setTimeout(() => {
+        void api.resizeSession(session.id, term.cols, term.rows);
+      }, REPAINT_NUDGE_MS);
+    };
+
     const stream = api.openSessionOutput(session.id, {
-      onData: (chunk) => term.write(chunk),
+      onData: (chunk) => {
+        term.write(chunk);
+        forceAgentRepaint();
+      },
       onEnd: () => term.write("\r\n\x1b[2m[session ended]\x1b[0m\r\n"),
       // Multiplexed socket reconnected → clear before the buffer replay so the
       // existing content isn't duplicated.
-      onReset: () => term.reset()
+      onReset: () => {
+        term.reset();
+        repaintArmed = true;
+      }
     });
 
     return () => {
@@ -361,6 +406,9 @@ export const TerminalView: React.FC<{
       container.removeEventListener("drop", onDrop);
       container.removeEventListener("paste", onPaste);
       stream.close();
+      if (nudgeTimer) {
+        clearTimeout(nudgeTimer);
+      }
       inputSub.dispose();
       resizeObserver.disconnect();
       term.dispose();
