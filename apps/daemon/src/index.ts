@@ -11,6 +11,12 @@ import type {
   FsListResponse,
   FsReadResponse,
   FsWriteRequest,
+  GitBranchesResponse,
+  GitCommitDetail,
+  GitDiffResponse,
+  GitLogEntry,
+  GitOpResult,
+  GitStatusResponse,
   HealthResponse,
   OpenRequest,
   OpenResult,
@@ -32,6 +38,7 @@ import { type ISessionManager, SessionError, createSessionManager } from "./sess
 import { Tmux } from "./tmux";
 import { Broadcaster } from "./broadcaster";
 import { AccountError, AccountsService } from "./accounts";
+import { GitError, GitService } from "./git";
 import {
   type AppConfig,
   type ClientConfig,
@@ -63,7 +70,7 @@ import {
 } from "@orquester/config";
 import fastifyStatic from "@fastify/static";
 import websocketPlugin from "@fastify/websocket";
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import { createWriteStream, existsSync, type WriteStream } from "node:fs";
 import { mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir, platform as osPlatform } from "node:os";
@@ -171,6 +178,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   const tmux = new Tmux(resolved.tmuxSocket);
   const sessions = createSessionManager(registry, tmux, resolved.sessionsIndexFile);
   const accounts = new AccountsService(resolved.accountsFile, resolved.keysDir);
+  const git = new GitService();
   const broadcaster = new Broadcaster();
   // Stream registry changes (install/update status, detected versions) to clients.
   registry.events.on("changed", (entry) => broadcaster.publish("registry", "registry.changed", entry));
@@ -204,7 +212,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     broadcaster.publish("sessions", "session.updated", s)
   );
 
-  const services: Services = { registry, sessions, accounts, broadcaster };
+  const services: Services = { registry, sessions, accounts, git, broadcaster };
 
   // The static web build the HTTP transport optionally serves.
   const webDirEnv = options.webDir ?? env.ORQUESTER_WEB_DIR;
@@ -289,6 +297,7 @@ interface Services {
   registry: RegistryService;
   sessions: ISessionManager;
   accounts: AccountsService;
+  git: GitService;
   broadcaster: Broadcaster;
   /** Restart the HTTP transport (set in main once the lifecycle exists). */
   reloadHttp?: () => Promise<void>;
@@ -302,7 +311,7 @@ function createServer(
   services: Services,
   options: { authRequired: boolean; mode: "local" | "remote"; serveWeb?: string }
 ): FastifyInstance {
-  const { registry, sessions, accounts } = services;
+  const { registry, sessions, accounts, git } = services;
 
   const app = Fastify({
     // Remote requests arrive via Caddy on loopback (reverse_proxy 127.0.0.1:47831),
@@ -897,6 +906,236 @@ function createServer(
     }
   });
 
+  // Git — a project's repo as a GitHub-Desktop-style tab. Stateless: every route
+  // resolves + sandboxes `path` (the project dir) to fsRoot the same way the
+  // /api/fs/* routes do, then shells out via GitService. Errors map FsSandboxError
+  // → 403 and GitError.status (else 500) → { code:"GIT_ERROR", message } via the
+  // shared `gitError` helper. Allowed on both transports (no secret returned),
+  // exactly like /api/accounts.
+
+  // Status of the project's repo (isRepo:false — never an error — for non-repos).
+  app.get<{ Querystring: { path?: string } }>(
+    "/api/git/status",
+    async (request, reply): Promise<GitStatusResponse | void> => {
+      const path = request.query.path;
+      if (!path) {
+        return reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
+      }
+      try {
+        const safe = await assertInsideFsRoot(resolved.fsRoot, path);
+        return await git.status(safe);
+      } catch (error) {
+        return gitError(reply, error);
+      }
+    }
+  );
+
+  // Unified diff for one file (working tree, index, or a commit).
+  app.get<{ Querystring: { path?: string; file?: string; staged?: string; commit?: string } }>(
+    "/api/git/diff",
+    async (request, reply): Promise<GitDiffResponse | void> => {
+      const { path, file, staged, commit } = request.query;
+      if (!path || !file) {
+        return reply.code(400).send({ code: "INVALID_REQUEST", message: "path and file required." });
+      }
+      try {
+        const safe = await assertInsideFsRoot(resolved.fsRoot, path);
+        return await git.diff(safe, file, { staged: staged === "true", commit });
+      } catch (error) {
+        return gitError(reply, error);
+      }
+    }
+  );
+
+  // Commit log (newest first), paged by skip/limit.
+  app.get<{ Querystring: { path?: string; skip?: string; limit?: string } }>(
+    "/api/git/log",
+    async (request, reply): Promise<GitLogEntry[] | void> => {
+      const path = request.query.path;
+      if (!path) {
+        return reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
+      }
+      try {
+        const safe = await assertInsideFsRoot(resolved.fsRoot, path);
+        const skip = request.query.skip ? Number.parseInt(request.query.skip, 10) : undefined;
+        const limit = request.query.limit ? Number.parseInt(request.query.limit, 10) : undefined;
+        return await git.log(safe, { skip, limit });
+      } catch (error) {
+        return gitError(reply, error);
+      }
+    }
+  );
+
+  // Full detail (metadata + per-file stats) for a single commit.
+  app.get<{ Querystring: { path?: string; sha?: string } }>(
+    "/api/git/commit",
+    async (request, reply): Promise<GitCommitDetail | void> => {
+      const { path, sha } = request.query;
+      if (!path || !sha) {
+        return reply.code(400).send({ code: "INVALID_REQUEST", message: "path and sha required." });
+      }
+      try {
+        const safe = await assertInsideFsRoot(resolved.fsRoot, path);
+        return await git.commitDetail(safe, sha);
+      } catch (error) {
+        return gitError(reply, error);
+      }
+    }
+  );
+
+  // Local + remote-tracking branches.
+  app.get<{ Querystring: { path?: string } }>(
+    "/api/git/branches",
+    async (request, reply): Promise<GitBranchesResponse | void> => {
+      const path = request.query.path;
+      if (!path) {
+        return reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
+      }
+      try {
+        const safe = await assertInsideFsRoot(resolved.fsRoot, path);
+        return await git.branches(safe);
+      } catch (error) {
+        return gitError(reply, error);
+      }
+    }
+  );
+
+  // Stage files (or everything when `files` is empty).
+  app.post<{ Body: { path?: string; files?: string[] } }>(
+    "/api/git/stage",
+    async (request, reply): Promise<GitOpResult | void> => {
+      const { path, files } = request.body ?? {};
+      if (!path) {
+        return reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
+      }
+      try {
+        const safe = await assertInsideFsRoot(resolved.fsRoot, path);
+        return await git.stage(safe, files ?? []);
+      } catch (error) {
+        return gitError(reply, error);
+      }
+    }
+  );
+
+  // Unstage files (or the whole index when `files` is empty).
+  app.post<{ Body: { path?: string; files?: string[] } }>(
+    "/api/git/unstage",
+    async (request, reply): Promise<GitOpResult | void> => {
+      const { path, files } = request.body ?? {};
+      if (!path) {
+        return reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
+      }
+      try {
+        const safe = await assertInsideFsRoot(resolved.fsRoot, path);
+        return await git.unstage(safe, files ?? []);
+      } catch (error) {
+        return gitError(reply, error);
+      }
+    }
+  );
+
+  // Commit the staged changes (identity comes from ambient/includeIf config).
+  app.post<{ Body: { path?: string; summary?: string; description?: string } }>(
+    "/api/git/commit",
+    async (request, reply): Promise<GitOpResult | void> => {
+      const { path, summary, description } = request.body ?? {};
+      if (!path) {
+        return reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
+      }
+      try {
+        const safe = await assertInsideFsRoot(resolved.fsRoot, path);
+        return await git.commit(safe, summary ?? "", description);
+      } catch (error) {
+        return gitError(reply, error);
+      }
+    }
+  );
+
+  // Discard working-tree changes for the given files (destructive; client-gated).
+  app.post<{ Body: { path?: string; files?: string[] } }>(
+    "/api/git/discard",
+    async (request, reply): Promise<GitOpResult | void> => {
+      const { path, files } = request.body ?? {};
+      if (!path) {
+        return reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
+      }
+      try {
+        const safe = await assertInsideFsRoot(resolved.fsRoot, path);
+        return await git.discard(safe, files ?? []);
+      } catch (error) {
+        return gitError(reply, error);
+      }
+    }
+  );
+
+  // Fetch all remotes (prune stale tracking refs).
+  app.post<{ Body: { path?: string } }>(
+    "/api/git/fetch",
+    async (request, reply): Promise<GitOpResult | void> => {
+      const path = request.body?.path;
+      if (!path) {
+        return reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
+      }
+      try {
+        const safe = await assertInsideFsRoot(resolved.fsRoot, path);
+        return await git.fetch(safe);
+      } catch (error) {
+        return gitError(reply, error);
+      }
+    }
+  );
+
+  // Pull (fast-forward/merge, no editor).
+  app.post<{ Body: { path?: string } }>(
+    "/api/git/pull",
+    async (request, reply): Promise<GitOpResult | void> => {
+      const path = request.body?.path;
+      if (!path) {
+        return reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
+      }
+      try {
+        const safe = await assertInsideFsRoot(resolved.fsRoot, path);
+        return await git.pull(safe);
+      } catch (error) {
+        return gitError(reply, error);
+      }
+    }
+  );
+
+  // Push the current branch.
+  app.post<{ Body: { path?: string } }>(
+    "/api/git/push",
+    async (request, reply): Promise<GitOpResult | void> => {
+      const path = request.body?.path;
+      if (!path) {
+        return reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
+      }
+      try {
+        const safe = await assertInsideFsRoot(resolved.fsRoot, path);
+        return await git.push(safe);
+      } catch (error) {
+        return gitError(reply, error);
+      }
+    }
+  );
+
+  // Switch branches.
+  app.post<{ Body: { path?: string; branch?: string } }>(
+    "/api/git/checkout",
+    async (request, reply): Promise<GitOpResult | void> => {
+      const { path, branch } = request.body ?? {};
+      if (!path) {
+        return reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
+      }
+      try {
+        const safe = await assertInsideFsRoot(resolved.fsRoot, path);
+        return await git.checkout(safe, branch ?? "");
+      } catch (error) {
+        return gitError(reply, error);
+      }
+    }
+  );
+
   // Registry (shells & agents)
   app.get("/api/registry", async (): Promise<RegistryResponse> => registry.list());
 
@@ -1487,6 +1726,21 @@ async function assertInsideFsRoot(root: string, target: string): Promise<string>
 
 /** Thrown when an /api/fs path escapes fsRoot. */
 class FsSandboxError extends Error {}
+
+/**
+ * Map a thrown error from a /api/git/* handler to a reply: a sandbox escape →
+ * 403 FS_FORBIDDEN (as the fs routes do), a GitError → its `status`, anything
+ * else → 500, both as { code:"GIT_ERROR", message }.
+ */
+function gitError(reply: FastifyReply, error: unknown): void {
+  if (error instanceof FsSandboxError) {
+    void reply.code(403).send({ code: "FS_FORBIDDEN", message: error.message });
+    return;
+  }
+  const status = error instanceof GitError ? error.status : 500;
+  const message = error instanceof Error ? error.message : "Git operation failed.";
+  void reply.code(status).send({ code: "GIT_ERROR", message });
+}
 
 /** List a directory for the file browser (dirs first, dotfiles included). */
 async function listFiles(path: string): Promise<FsListResponse> {

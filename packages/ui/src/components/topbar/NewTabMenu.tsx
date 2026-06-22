@@ -1,5 +1,5 @@
 import React from "react";
-import { FolderTree, Plus } from "lucide-react";
+import { FolderTree, GitBranch, Plus } from "lucide-react";
 import {
   AdaptiveMenu,
   DropdownEmpty,
@@ -20,6 +20,7 @@ import { useAppStore } from "../../store/app";
 export const NewTabMenu: React.FC = () => {
   const openTab = useAppStore((s) => s.openTab);
   const openFileBrowser = useAppStore((s) => s.openFileBrowser);
+  const openGit = useAppStore((s) => s.openGit);
   const registry = useRegistry();
 
   const shells = registry.shells.filter((s) => s.enabled);
@@ -52,6 +53,9 @@ export const NewTabMenu: React.FC = () => {
       <DropdownLabel>Tools</DropdownLabel>
       <DropdownItem icon={<FolderTree size={14} />} onClick={() => openFileBrowser()}>
         File Browser
+      </DropdownItem>
+      <DropdownItem icon={<GitBranch size={14} />} onClick={() => openGit()}>
+        Git
       </DropdownItem>
 
       <DropdownSeparator />

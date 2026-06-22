@@ -10,6 +10,13 @@ import type {
   EventMessage,
   FsListResponse,
   FsReadResponse,
+  GitBranchesResponse,
+  GitCommitDetail,
+  GitCommitRequest,
+  GitDiffResponse,
+  GitLogEntry,
+  GitOpResult,
+  GitStatusResponse,
   HealthResponse,
   OpenResult,
   OpenTargetSummary,
@@ -215,6 +222,75 @@ export class ApiClient {
 
   saveFile(path: string, content: string): Promise<{ ok: true }> {
     return this.send("PUT", "/api/fs/write", { body: { path, content } });
+  }
+
+  // --- Git -----------------------------------------------------------------
+
+  gitStatus(path: string, signal?: AbortSignal): Promise<GitStatusResponse> {
+    return this.send("GET", "/api/git/status", { query: { path }, signal });
+  }
+
+  gitDiff(
+    path: string,
+    file: string,
+    opts?: { staged?: boolean; commit?: string },
+    signal?: AbortSignal
+  ): Promise<GitDiffResponse> {
+    return this.send("GET", "/api/git/diff", {
+      query: { path, file, staged: opts?.staged ? "true" : undefined, commit: opts?.commit },
+      signal
+    });
+  }
+
+  gitLog(
+    path: string,
+    opts?: { skip?: number; limit?: number },
+    signal?: AbortSignal
+  ): Promise<GitLogEntry[]> {
+    return this.send("GET", "/api/git/log", {
+      query: { path, skip: opts?.skip?.toString(), limit: opts?.limit?.toString() },
+      signal
+    });
+  }
+
+  gitCommitDetail(path: string, sha: string, signal?: AbortSignal): Promise<GitCommitDetail> {
+    return this.send("GET", "/api/git/commit", { query: { path, sha }, signal });
+  }
+
+  gitBranches(path: string, signal?: AbortSignal): Promise<GitBranchesResponse> {
+    return this.send("GET", "/api/git/branches", { query: { path }, signal });
+  }
+
+  gitStage(path: string, files: string[]): Promise<GitOpResult> {
+    return this.send("POST", "/api/git/stage", { body: { path, files } });
+  }
+
+  gitUnstage(path: string, files: string[]): Promise<GitOpResult> {
+    return this.send("POST", "/api/git/unstage", { body: { path, files } });
+  }
+
+  gitCommit(req: GitCommitRequest): Promise<GitOpResult> {
+    return this.send("POST", "/api/git/commit", { body: req });
+  }
+
+  gitDiscard(path: string, files: string[]): Promise<GitOpResult> {
+    return this.send("POST", "/api/git/discard", { body: { path, files } });
+  }
+
+  gitFetch(path: string): Promise<GitOpResult> {
+    return this.send("POST", "/api/git/fetch", { body: { path } });
+  }
+
+  gitPull(path: string): Promise<GitOpResult> {
+    return this.send("POST", "/api/git/pull", { body: { path } });
+  }
+
+  gitPush(path: string): Promise<GitOpResult> {
+    return this.send("POST", "/api/git/push", { body: { path } });
+  }
+
+  gitCheckout(path: string, branch: string): Promise<GitOpResult> {
+    return this.send("POST", "/api/git/checkout", { body: { path, branch } });
   }
 
   createProject(

@@ -1,5 +1,5 @@
 import React from "react";
-import { ChevronDown, Circle, FolderTree } from "lucide-react";
+import { ChevronDown, Circle, FolderTree, GitBranch } from "lucide-react";
 import { AdaptiveMenu, DropdownEmpty, DropdownItem } from "../ui";
 import { getRegistryIcon } from "../../icons";
 import { useActiveTabId, useAppStore, useProjectTabs } from "../../store/app";
@@ -7,7 +7,13 @@ import type { ProjectTab } from "../../store/app";
 
 const tabLabel = (tab: ProjectTab) => (tab.type === "session" ? tab.session.title : tab.title);
 const tabIcon = (tab: ProjectTab, size = 14) =>
-  tab.type === "session" ? getRegistryIcon(tab.session.kind, tab.session.refId, size) : <FolderTree size={size} />;
+  tab.type === "session" ? (
+    getRegistryIcon(tab.session.kind, tab.session.refId, size)
+  ) : tab.type === "git" ? (
+    <GitBranch size={size} />
+  ) : (
+    <FolderTree size={size} />
+  );
 
 /** Mobile: shows the active tab and opens a sheet to switch between tabs. */
 export const TabSwitcher: React.FC = () => {

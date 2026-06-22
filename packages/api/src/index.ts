@@ -166,6 +166,110 @@ export interface FsWriteRequest {
   content: string;
 }
 
+// Git — a project's git repo surfaced as a GitHub-Desktop-style tab. Stateless;
+// the daemon shells out to `git` in the project dir (no PTY/session).
+
+export type GitFileStatus =
+  | "modified"
+  | "added"
+  | "deleted"
+  | "renamed"
+  | "copied"
+  | "typechange"
+  | "untracked"
+  | "conflicted";
+
+/** A changed file in the working tree / index. A file may be both staged and unstaged. */
+export interface GitFileChange {
+  path: string;
+  status: GitFileStatus;
+  /** Present in the index (will be committed). */
+  staged: boolean;
+  /** Has working-tree changes not yet staged. */
+  unstaged: boolean;
+  /** Original path for renames/copies. */
+  oldPath?: string;
+}
+
+export interface GitStatusResponse {
+  isRepo: boolean;
+  /** Current branch name; null when detached or no commits yet. */
+  branch: string | null;
+  detached: boolean;
+  /** Upstream ref, e.g. "origin/main"; null when none. */
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  /** ISO timestamp from .git/FETCH_HEAD mtime, or null if never fetched. */
+  lastFetched: string | null;
+  files: GitFileChange[];
+}
+
+export interface GitDiffResponse {
+  /** Raw unified diff text (git diff / git show output, --no-color). Empty when no diff. */
+  diff: string;
+  binary: boolean;
+}
+
+export interface GitLogEntry {
+  sha: string;
+  shortSha: string;
+  subject: string;
+  body: string;
+  authorName: string;
+  authorEmail: string;
+  /** ISO author date. */
+  date: string;
+  /** Decorations: branch/tag names on this commit, e.g. ["main", "origin/main", "v1.2"]. */
+  refs: string[];
+}
+
+export interface GitCommitFile {
+  path: string;
+  oldPath?: string;
+  status: GitFileStatus;
+  additions: number;
+  deletions: number;
+  binary: boolean;
+}
+
+export interface GitCommitDetail {
+  sha: string;
+  shortSha: string;
+  subject: string;
+  body: string;
+  authorName: string;
+  authorEmail: string;
+  date: string;
+  files: GitCommitFile[];
+}
+
+export interface GitBranch {
+  name: string;
+  current: boolean;
+  upstream?: string;
+}
+
+export interface GitBranchesResponse {
+  current: string | null;
+  local: GitBranch[];
+  /** Remote-tracking branch names, e.g. ["origin/main", "origin/dev"]. */
+  remote: string[];
+}
+
+export interface GitCommitRequest {
+  path: string;
+  summary: string;
+  description?: string;
+}
+
+/** Generic result for git mutations (stage/unstage/commit/discard/fetch/pull/push/checkout). */
+export interface GitOpResult {
+  ok: true;
+  /** Combined stdout/stderr of the op (shown for fetch/pull/push), trimmed. */
+  output?: string;
+}
+
 /** Public auth metadata for the HTTP transport (no secrets). */
 export interface AuthInfoResponse {
   authRequired: boolean;

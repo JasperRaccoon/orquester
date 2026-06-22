@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Circle, FolderTree, Pencil, X } from "lucide-react";
+import { Circle, FolderTree, GitBranch, Pencil, X } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { getRegistryIcon } from "../../icons";
 import { ContextMenu, type ContextMenuItem } from "../ui/context-menu";
@@ -90,6 +90,8 @@ export const TabStrip: React.FC = () => {
         const title = isSession ? tab.session.title : tab.title;
         const icon = isSession ? (
           getRegistryIcon(tab.session.kind, tab.session.refId, 13)
+        ) : tab.type === "git" ? (
+          <GitBranch size={13} />
         ) : (
           <FolderTree size={13} />
         );

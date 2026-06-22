@@ -1,9 +1,10 @@
 import React from "react";
-import { FolderTree, LayoutGrid, MousePointerClick, X } from "lucide-react";
+import { FolderTree, GitBranch, LayoutGrid, MousePointerClick, X } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { EmptyState } from "./EmptyState";
 import { TerminalView } from "../terminal";
 import { FileBrowser } from "../files";
+import { GitView } from "../git";
 import { getRegistryIcon } from "../../icons";
 import { useIsDesktop } from "../../hooks";
 import {
@@ -18,6 +19,8 @@ import {
 function cellIcon(tab: ProjectTab): React.ReactNode {
   return tab.type === "session" ? (
     getRegistryIcon(tab.session.kind, tab.session.refId, 13)
+  ) : tab.type === "git" ? (
+    <GitBranch size={13} />
   ) : (
     <FolderTree size={13} />
   );
@@ -122,6 +125,8 @@ export const MainView: React.FC = () => {
               <div className="min-h-0 flex-1">
                 {tab.type === "session" ? (
                   <TerminalView session={tab.session} active={active} viewMode={viewMode} />
+                ) : tab.type === "git" ? (
+                  <GitView projectPath={currentProject.path} />
                 ) : (
                   <FileBrowser rootPath={currentProject.path} />
                 )}

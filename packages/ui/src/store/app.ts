@@ -264,10 +264,18 @@ export interface FileTab {
   title: string;
 }
 
+/** A client-local Git tab (GitHub-Desktop-style), one per project. */
+export interface GitTab {
+  id: string;
+  projectPath: string;
+  title: string;
+}
+
 /** A tab in the current project: a daemon session or a local tool tab. */
 export type ProjectTab =
   | { id: string; type: "session"; session: SessionSummary }
-  | { id: string; type: "files"; title: string };
+  | { id: string; type: "files"; title: string }
+  | { id: string; type: "git"; title: string };
 
 function upsertSession(sessions: SessionSummary[], next: SessionSummary): SessionSummary[] {
   const index = sessions.findIndex((s) => s.id === next.id);
@@ -322,6 +330,8 @@ export interface AppState {
   sessions: SessionSummary[];
   /** Client-local tool tabs (file browser) per project path. */
   fileTabsByProject: Record<string, FileTab[]>;
+  /** Client-local Git tabs (GitHub-Desktop-style) per project path. */
+  gitTabsByProject: Record<string, GitTab[]>;
   /** Client-local active tab id per project path (session or file tab). */
   activeTabByProject: Record<string, string | null>;
   /** Per-project layout choice (tab view vs grid view); persisted client-side. */
@@ -381,6 +391,7 @@ export interface AppState {
   updateAgent: (id: string) => Promise<void>;
   openTab: (kind: RegistryKind, refId: string, title?: string) => Promise<void>;
   openFileBrowser: () => void;
+  openGit: () => void;
   closeTab: (id: string) => Promise<void>;
   activateTab: (id: string) => void;
   setViewMode: (mode: ViewMode) => void;
@@ -415,6 +426,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   projectsLoading: false,
   sessions: [],
   fileTabsByProject: {},
+  gitTabsByProject: {},
   activeTabByProject: {},
   viewModeByProject: loadViewModes(),
 
@@ -985,7 +997,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   openProject: (project) =>
     set((state) => {
       const active = state.activeTabByProject[project.path];
-      const fallback = firstTabId(state.sessions, state.fileTabsByProject, project.path);
+      const fallback = firstTabId(
+        state.sessions,
+        state.fileTabsByProject,
+        state.gitTabsByProject,
+        project.path
+      );
       return {
         currentProject: project,
         // Opening a project reveals the main view — close the mobile drawer.
@@ -1067,10 +1084,32 @@ export const useAppStore = create<AppState>((set, get) => ({
       };
     }),
 
+  // A Git tab is a singleton per project: reuse the existing one if present,
+  // otherwise create it (unlike the file browser, which allows multiple).
+  openGit: () =>
+    set((state) => {
+      const project = state.currentProject;
+      if (!project) {
+        return state;
+      }
+      const existing = state.gitTabsByProject[project.path]?.[0];
+      if (existing) {
+        return { activeTabByProject: { ...state.activeTabByProject, [project.path]: existing.id } };
+      }
+      const tab: GitTab = { id: crypto.randomUUID(), projectPath: project.path, title: "Git" };
+      return {
+        gitTabsByProject: {
+          ...state.gitTabsByProject,
+          [project.path]: [tab]
+        },
+        activeTabByProject: { ...state.activeTabByProject, [project.path]: tab.id }
+      };
+    }),
+
   closeTab: async (id) => {
     const api = get().api;
     const isSession = get().sessions.some((s) => s.id === id);
-    set((state) => (isSession ? removeSession(state, id) : removeFileTab(state, id)));
+    set((state) => (isSession ? removeSession(state, id) : removeLocalTab(state, id)));
     if (isSession) {
       await api?.closeSession(id).catch(() => undefined);
     }
@@ -1157,14 +1196,18 @@ export const useAppStore = create<AppState>((set, get) => ({
   }
 }));
 
-/** First remaining tab id for a project (session preferred, then file tab). */
+/** First remaining tab id for a project (session preferred, then file, then git). */
 function firstTabId(
   sessions: SessionSummary[],
   fileTabs: Record<string, FileTab[]>,
+  gitTabs: Record<string, GitTab[]>,
   path: string
 ): string | null {
   return (
-    sessions.find((s) => s.projectPath === path)?.id ?? fileTabs[path]?.[0]?.id ?? null
+    sessions.find((s) => s.projectPath === path)?.id ??
+    fileTabs[path]?.[0]?.id ??
+    gitTabs[path]?.[0]?.id ??
+    null
   );
 }
 
@@ -1172,12 +1215,13 @@ function reassignActive(
   activeTabByProject: Record<string, string | null>,
   removedId: string,
   sessions: SessionSummary[],
-  fileTabs: Record<string, FileTab[]>
+  fileTabs: Record<string, FileTab[]>,
+  gitTabs: Record<string, GitTab[]>
 ): Record<string, string | null> {
   const next = { ...activeTabByProject };
   for (const [path, activeId] of Object.entries(next)) {
     if (activeId === removedId) {
-      next[path] = firstTabId(sessions, fileTabs, path);
+      next[path] = firstTabId(sessions, fileTabs, gitTabs, path);
     }
   }
   return next;
@@ -1187,18 +1231,36 @@ function removeSession(state: AppState, id: string): Partial<AppState> {
   const sessions = state.sessions.filter((s) => s.id !== id);
   return {
     sessions,
-    activeTabByProject: reassignActive(state.activeTabByProject, id, sessions, state.fileTabsByProject)
+    activeTabByProject: reassignActive(
+      state.activeTabByProject,
+      id,
+      sessions,
+      state.fileTabsByProject,
+      state.gitTabsByProject
+    )
   };
 }
 
-function removeFileTab(state: AppState, id: string): Partial<AppState> {
+/** Drop a client-local (non-session) tab — a file browser OR a git tab — by id. */
+function removeLocalTab(state: AppState, id: string): Partial<AppState> {
   const fileTabsByProject: Record<string, FileTab[]> = {};
   for (const [path, tabs] of Object.entries(state.fileTabsByProject)) {
     fileTabsByProject[path] = tabs.filter((t) => t.id !== id);
   }
+  const gitTabsByProject: Record<string, GitTab[]> = {};
+  for (const [path, tabs] of Object.entries(state.gitTabsByProject)) {
+    gitTabsByProject[path] = tabs.filter((t) => t.id !== id);
+  }
   return {
     fileTabsByProject,
-    activeTabByProject: reassignActive(state.activeTabByProject, id, state.sessions, fileTabsByProject)
+    gitTabsByProject,
+    activeTabByProject: reassignActive(
+      state.activeTabByProject,
+      id,
+      state.sessions,
+      fileTabsByProject,
+      gitTabsByProject
+    )
   };
 }
 
@@ -1217,6 +1279,12 @@ function clearProjectLocalState(
       fileTabsByProject[path] = tabs;
     }
   }
+  const gitTabsByProject: Record<string, GitTab[]> = {};
+  for (const [path, tabs] of Object.entries(state.gitTabsByProject)) {
+    if (!match(path)) {
+      gitTabsByProject[path] = tabs;
+    }
+  }
   const activeTabByProject: Record<string, string | null> = {};
   for (const [path, id] of Object.entries(state.activeTabByProject)) {
     if (!match(path)) {
@@ -1230,13 +1298,14 @@ function clearProjectLocalState(
     }
   }
   saveViewModes(viewModeByProject);
-  return { fileTabsByProject, activeTabByProject, viewModeByProject };
+  return { fileTabsByProject, gitTabsByProject, activeTabByProject, viewModeByProject };
 }
 
-/** Combined tabs (sessions + file tabs) of the currently open project. */
+/** Combined tabs (sessions + file tabs + git tabs) of the currently open project. */
 export function useProjectTabs(): ProjectTab[] {
   const sessions = useAppStore((s) => s.sessions);
   const fileTabsByProject = useAppStore((s) => s.fileTabsByProject);
+  const gitTabsByProject = useAppStore((s) => s.gitTabsByProject);
   const project = useAppStore((s) => s.currentProject);
   return useMemo(() => {
     if (!project) {
@@ -1252,8 +1321,13 @@ export function useProjectTabs(): ProjectTab[] {
       type: "files",
       title: tab.title
     }));
-    return [...sessionTabs, ...fileTabs];
-  }, [sessions, fileTabsByProject, project]);
+    const gitTabs: ProjectTab[] = (gitTabsByProject[project.path] ?? []).map((tab) => ({
+      id: tab.id,
+      type: "git",
+      title: tab.title
+    }));
+    return [...sessionTabs, ...fileTabs, ...gitTabs];
+  }, [sessions, fileTabsByProject, gitTabsByProject, project]);
 }
 
 export function useActiveTabId(): string | null {
