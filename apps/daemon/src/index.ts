@@ -23,6 +23,8 @@ import type {
   SessionInputRequest,
   SessionResizeRequest,
   SessionSummary,
+  SessionUploadRequest,
+  SessionUploadResponse,
   WorkspaceSummary
 } from "@orquester/api";
 import { RegistryService } from "./registry";
@@ -72,6 +74,14 @@ import bcrypt from "bcryptjs";
 
 const daemonId = randomUUID();
 const packageVersion = "0.0.0";
+
+/**
+ * Hard cap on a single terminal file upload (decoded bytes). The upload route's
+ * Fastify `bodyLimit` is set higher (~40 MB) to leave room for base64 inflation
+ * (+~33%) and JSON overhead; this is the post-decode ceiling enforced in the
+ * handler. See docs/superpowers/specs/2026-06-22-terminal-file-drop-design.md.
+ */
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 
 /** Filesystem locations resolved (variables expanded) for this run. */
 interface ResolvedPaths {
@@ -169,15 +179,27 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // (KillMode=process keeps the tmux server alive across restarts). No-op on the
   // local backend. Best-effort: a tmux/socket error must not block startup.
   await sessions.reattach().catch((error) => console.error("Session reattach failed", error));
+  // Sweep terminal-upload dirs for sessions that didn't survive (orphans from a
+  // crash): keep only dirs whose id matches a now-live session. Best-effort.
+  await sweepOrphanUploads(
+    resolved.daemonDir,
+    new Set(sessions.list().map((s) => s.id))
+  ).catch(() => undefined);
   sessions.lifecycle.on("created", (s: SessionSummary) =>
     broadcaster.publish("sessions", "session.created", s)
   );
-  sessions.lifecycle.on("exited", (s: SessionSummary) =>
-    broadcaster.publish("sessions", "session.exited", s)
-  );
-  sessions.lifecycle.on("closed", (payload: { id: string }) =>
-    broadcaster.publish("sessions", "session.closed", payload)
-  );
+  // When a session goes away — whether it exited on its own ("exited", carries a
+  // SessionSummary) or was closed/cascaded ("closed", carries just { id }) —
+  // broadcast the event AND drop its uploaded files (best-effort;
+  // removeSessionUploads swallows errors).
+  sessions.lifecycle.on("exited", (s: SessionSummary) => {
+    broadcaster.publish("sessions", "session.exited", s);
+    void removeSessionUploads(resolved.daemonDir, s.id);
+  });
+  sessions.lifecycle.on("closed", (payload: { id: string }) => {
+    broadcaster.publish("sessions", "session.closed", payload);
+    void removeSessionUploads(resolved.daemonDir, payload.id);
+  });
   sessions.lifecycle.on("updated", (s: SessionSummary) =>
     broadcaster.publish("sessions", "session.updated", s)
   );
@@ -950,6 +972,61 @@ function createServer(
     }
   );
 
+  // Accept a file dropped/pasted onto a terminal, persist it to a daemon-private
+  // dir, and return the absolute on-disk path (the client injects that path into
+  // the session so the running agent can read it — see the file-drop design doc).
+  // The client supplies only bytes + a name hint; the daemon fully controls the
+  // directory and final name (random-prefixed, sanitized), so there is no
+  // path-traversal surface. Inherits the bearer-auth hook (it lives under /api).
+  // The route-level bodyLimit overrides the 256 KB global default so a base64
+  // 25 MB file fits; MAX_UPLOAD_BYTES is the post-decode ceiling.
+  app.post<{ Params: { id: string }; Body: SessionUploadRequest }>(
+    "/api/sessions/:id/upload",
+    { bodyLimit: 40 * 1024 * 1024 },
+    async (request, reply): Promise<SessionUploadResponse | void> => {
+      const { id } = request.params;
+      if (!sessions.get(id)) {
+        return reply.code(404).send({ code: "SESSION_NOT_FOUND", message: "Session does not exist." });
+      }
+      const body = (request.body ?? {}) as Partial<SessionUploadRequest>;
+      if (typeof body.dataBase64 !== "string" || body.dataBase64.length === 0) {
+        return reply.code(400).send({ code: "INVALID_REQUEST", message: "dataBase64 required." });
+      }
+      const buffer = Buffer.from(body.dataBase64, "base64");
+      if (buffer.length > MAX_UPLOAD_BYTES) {
+        return reply.code(413).send({
+          code: "UPLOAD_TOO_LARGE",
+          message: `File exceeds the ${Math.floor(MAX_UPLOAD_BYTES / (1024 * 1024))} MB upload limit.`
+        });
+      }
+      // Buffer.from(…, "base64") silently drops invalid chars, so garbage input
+      // decodes to an empty buffer. A non-empty payload that yields zero bytes is
+      // malformed — reject it rather than writing an empty file.
+      if (buffer.length === 0) {
+        return reply.code(400).send({ code: "INVALID_REQUEST", message: "dataBase64 is not valid base64." });
+      }
+
+      const name = uploadFileName(body.name ?? "", body.type);
+      const dir = sessionUploadsDir(resolved.daemonDir, id);
+      const path = join(dir, name);
+      // Mirror the accounts.json / keys conventions: 0700 dir, 0600 file. A
+      // filesystem failure (disk full, permission denied, …) must surface as a
+      // clean error, not an unhandled rejection: map ENOSPC to 507, else 500.
+      try {
+        await mkdir(dir, { recursive: true, mode: 0o700 });
+        await writeFile(path, buffer, { mode: 0o600 });
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException)?.code === "ENOSPC" ? 507 : 500;
+        return reply.code(code).send({
+          code: "UPLOAD_FAILED",
+          message: error instanceof Error ? error.message : "Cannot store the uploaded file."
+        });
+      }
+
+      return { path, name, size: buffer.length };
+    }
+  );
+
   app.post<{ Params: { id: string }; Body: SessionResizeRequest }>(
     "/api/sessions/:id/resize",
     async (request, reply): Promise<void> => {
@@ -1215,6 +1292,89 @@ function normalizeRepoUrl(url: string | undefined): string | undefined {
 function repoNameFromSshUrl(sshUrl: string): string {
   const tail = sshUrl.split("/").pop() ?? "";
   return tail.replace(/\.git$/i, "");
+}
+
+/** Root of the daemon-private terminal-upload store: <appdir>/daemon/uploads. */
+function uploadsRootDir(daemonDir: string): string {
+  return join(daemonDir, "uploads");
+}
+
+/** Per-session upload dir: <appdir>/daemon/uploads/<sessionId>. */
+function sessionUploadsDir(daemonDir: string, sessionId: string): string {
+  return join(uploadsRootDir(daemonDir), sessionId);
+}
+
+/** Minimal MIME → extension map for naming clipboard images that carry no filename. */
+const MIME_EXTENSIONS: Record<string, string> = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/gif": "gif",
+  "image/webp": "webp",
+  "image/svg+xml": "svg",
+  "image/bmp": "bmp",
+  "image/tiff": "tiff",
+  "application/pdf": "pdf",
+  "text/plain": "txt"
+};
+
+/**
+ * Build the final on-disk basename for an uploaded file. The client only sends a
+ * name HINT (and a MIME type); the daemon owns the real name. We strip any
+ * directory components, keep `[A-Za-z0-9._-]` (dropping spaces and anything
+ * else), and — if nothing usable remains — synthesize one from the MIME type
+ * (`pasted.<ext>`). A short random id is ALWAYS prefixed so names never collide,
+ * never contain spaces (no shell quoting needed) and cannot be path traversal.
+ */
+function uploadFileName(rawName: string, mime: string | undefined): string {
+  // Drop directory components first (defense in depth — the result is also
+  // sanitized below), then keep only safe characters.
+  const base = rawName.replace(/[\\/]+/g, "/").split("/").pop() ?? "";
+  let safe = base.replace(/[^A-Za-z0-9._-]/g, "");
+  if (!safe || safe === "." || safe === "..") {
+    const ext = mimeExtension(mime);
+    safe = ext ? `pasted.${ext}` : "pasted";
+  }
+  return `${randomUUID().slice(0, 8)}-${safe}`;
+}
+
+/** Map a MIME type to a file extension, or undefined when unknown. */
+function mimeExtension(mime: string | undefined): string | undefined {
+  if (!mime) {
+    return undefined;
+  }
+  return MIME_EXTENSIONS[mime.split(";")[0].trim().toLowerCase()];
+}
+
+/**
+ * Remove uploaded files for sessions that are no longer live (best-effort).
+ * Called on the session lifecycle ("exited"/"closed") to drop a single session's
+ * dir, and on boot (sweep) to clear orphan dirs left by a crash. Errors are
+ * swallowed — stale upload files are harmless, and cleanup must never break a
+ * lifecycle handler or startup.
+ */
+async function removeSessionUploads(daemonDir: string, sessionId: string): Promise<void> {
+  await rm(sessionUploadsDir(daemonDir, sessionId), { recursive: true, force: true }).catch(
+    () => undefined
+  );
+}
+
+/**
+ * On boot, remove any uploads/<id> dir whose <id> is not a currently-live
+ * session — orphans from a previous daemon process that crashed before its
+ * lifecycle cleanup ran. Best-effort; a missing/empty uploads root is a no-op.
+ */
+async function sweepOrphanUploads(daemonDir: string, liveIds: Set<string>): Promise<void> {
+  let entries: string[];
+  try {
+    entries = await readdir(uploadsRootDir(daemonDir));
+  } catch {
+    return; // no uploads dir yet (or unreadable) — nothing to sweep.
+  }
+  await Promise.all(
+    entries
+      .filter((id) => !liveIds.has(id))
+      .map((id) => removeSessionUploads(daemonDir, id))
+  );
 }
 
 /**

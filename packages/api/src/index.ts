@@ -315,6 +315,25 @@ export interface SessionResizeRequest {
   rows: number;
 }
 
+/** Body for `POST /api/sessions/:id/upload` — a file dropped/pasted onto a terminal. */
+export interface SessionUploadRequest {
+  /** Original filename (may be empty for clipboard images). */
+  name: string;
+  /** MIME type if known (e.g. "image/png"). */
+  type?: string;
+  /** Base64-encoded file bytes. */
+  dataBase64: string;
+}
+
+export interface SessionUploadResponse {
+  /** Absolute daemon-side path the agent can read. */
+  path: string;
+  /** Final on-disk basename (sanitized). */
+  name: string;
+  /** Bytes written. */
+  size: number;
+}
+
 /** Frames pushed from daemon to client over the session stream. */
 export type SessionStreamMessage =
   | { type: "buffer"; data: string }
@@ -402,6 +421,10 @@ export class HttpOrquesterApiClient implements OrquesterApi {
 
   setAccountToken(accountId: string, token: string): Promise<void> {
     return this.post(`/api/accounts/${encodeURIComponent(accountId)}/token`, { token });
+  }
+
+  uploadSessionFile(id: string, body: SessionUploadRequest): Promise<SessionUploadResponse> {
+    return this.post(`/api/sessions/${encodeURIComponent(id)}/upload`, body);
   }
 
   eventsUrl(): string {

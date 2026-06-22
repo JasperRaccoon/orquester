@@ -19,6 +19,8 @@ import type {
   RepoSummary,
   ServerInfoResponse,
   SessionSummary,
+  SessionUploadRequest,
+  SessionUploadResponse,
   WorkspaceSummary
 } from "@orquester/api";
 import type { AppConfig, DaemonConfig, RemoteConnectionConfig } from "@orquester/config";
@@ -293,6 +295,16 @@ export class ApiClient {
       return Promise.resolve();
     }
     return this.send("POST", `/api/sessions/${encodeURIComponent(id)}/input`, { body: { data } });
+  }
+
+  /**
+   * Upload a dropped/pasted file to the session's daemon and get back the
+   * absolute daemon-side path. Rides the normal request path (HTTP/socket
+   * bridge) with a JSON body — NOT the multiplexed `/ws` channel, which only
+   * carries sub/unsub/input/resize.
+   */
+  uploadSessionFile(id: string, body: SessionUploadRequest): Promise<SessionUploadResponse> {
+    return this.send("POST", `/api/sessions/${encodeURIComponent(id)}/upload`, { body });
   }
 
   resizeSession(id: string, cols: number, rows: number): Promise<void> {

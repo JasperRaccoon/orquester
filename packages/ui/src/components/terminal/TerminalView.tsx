@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Terminal, type ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -8,6 +8,10 @@ import type { ViewMode } from "../../lib/view-mode";
 
 const FONT_STACK =
   '"JetBrains Mono", "Cascadia Code", "Fira Code", "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "DejaVu Sans Mono", monospace';
+
+// Largest file we'll upload from the client. Mirrors the daemon's decoded cap
+// (see the upload route's MAX_UPLOAD_BYTES) so we fail fast before encoding.
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 
 // Standard 16-colour ANSI palette tuned for a dark, neutral background so
 // CLIs/TUIs render with the colours they expect (not washed-out grays).
@@ -44,6 +48,44 @@ async function writeClipboard(text: string): Promise<void> {
 }
 
 /**
+ * Build the terminal input that places dropped/pasted file paths into the
+ * agent's prompt. We do NOT append a newline/Enter — the path is only inserted,
+ * never submitted; the user types their prompt and hits Enter themselves.
+ *
+ * Default is BRACKETED PASTE (format A): the space-joined paths wrapped in the
+ * bracketed-paste escapes (`\x1b[200~`…`\x1b[201~`), with NO trailing space —
+ * agents' TUIs enable bracketed-paste mode and run their attach/path detection
+ * on pasted text, mimicking a native drag. To switch to RAW (format B) — paths
+ * + a trailing space, no escape wrapper — replace the single returned expression
+ * with `return joined + " ";` (the format is locked in via runtime verification
+ * against real agents).
+ */
+function injectionForPaths(paths: string[]): string {
+  const joined = paths.join(" ");
+  // Format A (bracketed paste). Switch to format B by returning `joined + " "`.
+  return `\x1b[200~${joined}\x1b[201~`;
+}
+
+/** Strip the `data:<mime>;base64,` prefix from a FileReader data URL. */
+function stripDataUrlPrefix(dataUrl: string): string {
+  const comma = dataUrl.indexOf(",");
+  return comma === -1 ? dataUrl : dataUrl.slice(comma + 1);
+}
+
+/**
+ * Base64-encode a file via FileReader. readAsDataURL is safe for large files;
+ * btoa(String.fromCharCode(...)) overflows the call stack on big buffers.
+ */
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(stripDataUrlPrefix(reader.result as string));
+    reader.onerror = () => reject(reader.error ?? new Error("read failed"));
+    reader.readAsDataURL(file);
+  });
+}
+
+/**
  * xterm.js view bound to a daemon session. Keystrokes (including control codes
  * like Ctrl-C `\x03`) are forwarded as input; the session's output stream is
  * replayed (current buffer) then streamed live. The PTY lives in the daemon,
@@ -57,6 +99,49 @@ export const TerminalView: React.FC<{
   const api = useApi();
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
+  // Drag-over highlight + a short-lived inline status line (uploading / errors).
+  const [dragging, setDragging] = useState(false);
+  const [status, setStatus] = useState<{ text: string; error?: boolean } | null>(null);
+
+  // Upload dropped/pasted files, then inject all returned paths in one input.
+  // Stored in a ref so the (effect-mounted) DOM listeners always see the latest
+  // closure without re-running the terminal effect.
+  const handleFilesRef = useRef<(files: File[]) => Promise<void>>(async () => {});
+  handleFilesRef.current = async (files: File[]) => {
+    const usable = files.filter((file) => file.size > 0);
+    if (usable.length === 0) {
+      return;
+    }
+    const oversized = usable.filter((file) => file.size > MAX_UPLOAD_BYTES);
+    const toUpload = usable.filter((file) => file.size <= MAX_UPLOAD_BYTES);
+    if (oversized.length > 0) {
+      const cap = Math.round(MAX_UPLOAD_BYTES / (1024 * 1024));
+      setStatus({ text: `Skipped ${oversized.length} file(s) over ${cap} MB`, error: true });
+    }
+    if (toUpload.length === 0) {
+      return;
+    }
+
+    setStatus({ text: `Uploading ${toUpload.length} file(s)…` });
+    try {
+      const paths: string[] = [];
+      // Preserve drop order: upload sequentially so paths line up with files.
+      for (const file of toUpload) {
+        const dataBase64 = await fileToBase64(file);
+        const result = await api.uploadSessionFile(session.id, {
+          name: file.name,
+          type: file.type || undefined,
+          dataBase64
+        });
+        paths.push(result.path);
+      }
+      // Inject every path in a single input write (no Enter — see helper).
+      await api.sendSessionInput(session.id, injectionForPaths(paths));
+      setStatus(null);
+    } catch {
+      setStatus({ text: "Upload failed", error: true });
+    }
+  };
 
   useEffect(() => {
     const container = containerRef.current;
@@ -172,6 +257,86 @@ export const TerminalView: React.FC<{
     container.addEventListener("mousedown", onRightMouseDown, true);
     container.addEventListener("contextmenu", onContextMenu, true);
 
+    // --- File drop & paste → upload + path injection -----------------------
+    // dragenter/dragover must preventDefault so the browser allows a drop here;
+    // we also track a `dragging` state for the highlight. A dragleave that
+    // crosses into a child still bubbles, so only clear when actually leaving
+    // the container (relatedTarget outside it).
+    const onDragEnter = (event: DragEvent) => {
+      event.preventDefault();
+      setDragging(true);
+    };
+    const onDragOver = (event: DragEvent) => {
+      event.preventDefault();
+    };
+    const onDragLeave = (event: DragEvent) => {
+      const next = event.relatedTarget as Node | null;
+      if (!next || !container.contains(next)) {
+        setDragging(false);
+      }
+    };
+    const onDrop = (event: DragEvent) => {
+      event.preventDefault();
+      setDragging(false);
+      const files = event.dataTransfer ? Array.from(event.dataTransfer.files) : [];
+      if (files.length > 0) {
+        void handleFilesRef.current(files);
+      }
+    };
+    // Paste: only intercept when the clipboard carries files/images. A plain
+    // text paste must fall through (no preventDefault) so xterm delivers it to
+    // the PTY as usual. Raw clipboard images arrive as `items` of kind "file"
+    // with no filename → synthesize pasted-<id>.<ext> from the MIME subtype.
+    const onPaste = (event: ClipboardEvent) => {
+      const clip = event.clipboardData;
+      if (!clip) {
+        return;
+      }
+      const files: File[] = Array.from(clip.files);
+      // The same file can appear in both `clip.files` and `clip.items` as
+      // distinct File instances, so dedup by identity (name+size+type+mtime)
+      // rather than reference — otherwise it would upload twice.
+      const fileKey = (file: File) => `${file.name}\0${file.size}\0${file.type}\0${file.lastModified}`;
+      const seen = new Set(files.map(fileKey));
+      for (const item of Array.from(clip.items)) {
+        if (item.kind !== "file") {
+          continue;
+        }
+        const file = item.getAsFile();
+        if (!file) {
+          continue;
+        }
+        if (seen.has(fileKey(file))) {
+          continue;
+        }
+        seen.add(fileKey(file));
+        // Clipboard images often have no usable name (e.g. "image.png" or "").
+        if (file.name) {
+          files.push(file);
+        } else {
+          // Strip any MIME parameters (e.g. "text/plain; charset=utf-8") before
+          // taking the subtype, mirroring the daemon's split(";") handling.
+          const subtype = (item.type.split(";")[0] || "").split("/")[1] || "bin";
+          const ext = subtype.replace(/[^a-z0-9]/gi, "") || "bin";
+          // Crypto-based id (mirrors the daemon's randomUUID().slice(0, 8)) so
+          // the synthesized name isn't predictable. This is only a hint — the
+          // daemon re-sanitizes and re-prefixes the final on-disk name.
+          const id = crypto.randomUUID().slice(0, 8);
+          files.push(new File([file], `pasted-${id}.${ext}`, { type: item.type }));
+        }
+      }
+      if (files.length === 0) {
+        return; // plain text → let xterm paste it to the PTY
+      }
+      event.preventDefault();
+      void handleFilesRef.current(files);
+    };
+    container.addEventListener("dragenter", onDragEnter);
+    container.addEventListener("dragover", onDragOver);
+    container.addEventListener("dragleave", onDragLeave);
+    container.addEventListener("drop", onDrop);
+    container.addEventListener("paste", onPaste);
+
     const inputSub = term.onData((data) => {
       void api.sendSessionInput(session.id, data);
     });
@@ -190,6 +355,11 @@ export const TerminalView: React.FC<{
     return () => {
       container.removeEventListener("mousedown", onRightMouseDown, true);
       container.removeEventListener("contextmenu", onContextMenu, true);
+      container.removeEventListener("dragenter", onDragEnter);
+      container.removeEventListener("dragover", onDragOver);
+      container.removeEventListener("dragleave", onDragLeave);
+      container.removeEventListener("drop", onDrop);
+      container.removeEventListener("paste", onPaste);
       stream.close();
       inputSub.dispose();
       resizeObserver.disconnect();
@@ -197,6 +367,15 @@ export const TerminalView: React.FC<{
       termRef.current = null;
     };
   }, [api, session.id]);
+
+  // Auto-clear a transient status line so it doesn't linger.
+  useEffect(() => {
+    if (!status) {
+      return;
+    }
+    const timer = window.setTimeout(() => setStatus(null), status.error ? 4000 : 2000);
+    return () => window.clearTimeout(timer);
+  }, [status]);
 
   // Focus the active terminal when it becomes active OR when the view mode
   // toggles (clicking the tab/grid toggle moves focus to that button; switching
@@ -208,5 +387,28 @@ export const TerminalView: React.FC<{
     }
   }, [active, viewMode]);
 
-  return <div ref={containerRef} className="h-full w-full overflow-hidden bg-[#0a0a0a] p-2" />;
+  // Outer wrapper is the positioning context for the drag overlay + status
+  // line; the inner div is the dedicated xterm host the ResizeObserver watches,
+  // so the overlays never perturb xterm's fit/layout.
+  return (
+    <div className="relative h-full w-full">
+      <div ref={containerRef} className="h-full w-full overflow-hidden bg-[#0a0a0a] p-2" />
+      {dragging && (
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded ring-2 ring-inset ring-blue-400/70 bg-blue-400/10">
+          <span className="rounded bg-zinc-900/80 px-3 py-1 text-xs text-zinc-100">
+            Drop to attach to this session
+          </span>
+        </div>
+      )}
+      {status && (
+        <div
+          className={`pointer-events-none absolute bottom-2 left-2 rounded px-2 py-1 text-xs ${
+            status.error ? "bg-red-500/90 text-white" : "bg-zinc-800/90 text-zinc-100"
+          }`}
+        >
+          {status.text}
+        </div>
+      )}
+    </div>
+  );
 };
