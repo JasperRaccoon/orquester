@@ -93,6 +93,23 @@ export const TerminalView: React.FC<{
     term.loadAddon(fit);
     term.open(container);
 
+    // Normalize the "force a local selection over an app's mouse reporting"
+    // modifier. xterm hardcodes Shift on Windows/Linux but Option/Alt on macOS
+    // (shouldForceSelection: isMac ? altKey : shiftKey) with no public option,
+    // so on macOS there's no Shift way to select inside a mouse-reporting agent.
+    // Override the internal predicate so Shift (or Alt) works on every platform.
+    // Guarded: if a future xterm changes this internal, it falls back to the
+    // native modifier (Alt on macOS via macOptionClickForcesSelection, Shift
+    // elsewhere).
+    const selectionService = (
+      term as unknown as {
+        _core?: { _selectionService?: { shouldForceSelection?: (e: MouseEvent) => boolean } };
+      }
+    )._core?._selectionService;
+    if (selectionService && typeof selectionService.shouldForceSelection === "function") {
+      selectionService.shouldForceSelection = (e: MouseEvent) => e.shiftKey || e.altKey;
+    }
+
     // NB: we intentionally use xterm's default DOM renderer rather than the
     // WebGL addon. The WebGL renderer leaves terminals blank/garbled after a
     // resize (e.g. toggling the grid/tab layout) or when revealed from a hidden
