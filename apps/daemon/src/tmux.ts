@@ -1,5 +1,6 @@
 import { execFile, execFileSync } from "node:child_process";
 import { accessSync, constants } from "node:fs";
+import { homedir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 
 /** Prefix for every orquester-owned tmux session (`orq-<uuid>`). */
@@ -71,6 +72,37 @@ export function tmuxVersionOk(): boolean {
   }
 }
 
+/**
+ * The PATH a session's command should run with. The daemon's own PATH is
+ * intentionally narrow — under systemd on the VPS it is pinned to a minimal set
+ * (deploy/orquester.service) that excludes the per-user bin dirs modern dev
+ * tools install into: bun → ~/.bun/bin, uv/pipx → ~/.local/bin, rust →
+ * ~/.cargo/bin, deno → ~/.deno/bin, `go install` → ~/go/bin.
+ *
+ * IMPORTANT (the bite): a tmux pane inherits the environment of the CLIENT
+ * process that ran `tmux new-session` (here, the daemon) — NOT the per-session
+ * `-e KEY=VAL` vars. `-e` only populates tmux's own environment *table* (visible
+ * via `show-environment`); the spawned pane process never reads it for PATH. So
+ * the only place that actually changes the command's PATH is the new-session
+ * client's process env (run()/newSession below) — or, for the direct node-pty
+ * backend, the child's env. We prepend the user-local dirs (deduped; they win)
+ * and keep the inherited PATH as the tail. PATH is not a secret, so this is safe
+ * to set explicitly.
+ */
+export function sessionPath(): string {
+  const home = homedir();
+  const extras = [
+    join(home, ".local", "bin"),
+    join(home, ".bun", "bin"),
+    join(home, ".cargo", "bin"),
+    join(home, ".deno", "bin"),
+    join(home, "go", "bin")
+  ];
+  const inherited = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
+  const seen = new Set(inherited);
+  return [...extras.filter((dir) => !seen.has(dir)), ...inherited].join(delimiter);
+}
+
 interface ExecResult {
   code: number;
   stdout: string;
@@ -86,7 +118,7 @@ export class Tmux {
   constructor(private readonly socket: string) {}
 
   /** Run `tmux -S <socket> <args...>`; never rejects (returns the exit code). */
-  private run(args: string[]): Promise<ExecResult> {
+  private run(args: string[], envOverride?: Record<string, string>): Promise<ExecResult> {
     // Strip the multiplexer vars: control commands here (has-session /
     // list-sessions / new-session -d / capture-pane / kill-session) are NOT
     // subject to tmux's nesting guard today, but if the daemon was launched
@@ -98,7 +130,7 @@ export class Tmux {
       execFile(
         "tmux",
         ["-S", this.socket, ...args],
-        { maxBuffer: 16 * 1024 * 1024, env: cleanEnv },
+        { maxBuffer: 16 * 1024 * 1024, env: { ...cleanEnv, ...envOverride } as NodeJS.ProcessEnv },
         (error, stdout, stderr) => {
           const err = error as (NodeJS.ErrnoException & { code?: number }) | null;
           const code = err && typeof err.code === "number" ? err.code : err ? 1 : 0;
@@ -143,7 +175,9 @@ export class Tmux {
       "--",
       opts.bin,
       ...opts.args
-    ]);
+      // The pane inherits THIS new-session client's env (not the `-e` vars
+      // above), so the session PATH must be set here to expose user-local tools.
+    ], { PATH: sessionPath() });
     if (result.code !== 0) {
       throw new Error(`tmux new-session failed (${result.code}): ${result.stderr.trim()}`);
     }
