@@ -77,6 +77,12 @@ export const TerminalView: React.FC<{
       allowProposedApi: true,
       drawBoldTextInBrightColors: true,
       macOptionIsMeta: true,
+      // When an app (e.g. an agent TUI) enables mouse reporting, a normal drag is
+      // sent to the app instead of selecting text. Allowing Option/Alt+drag to
+      // force a local selection on macOS gives a way to select+copy regardless
+      // (Windows/Linux already allow Shift+drag). Without this, macOS users have
+      // NO way to select inside a mouse-reporting agent.
+      macOptionClickForcesSelection: true,
       // Default is true on macOS, where right-clicking reselects the word under
       // the cursor and wipes an existing selection before we can copy it.
       rightClickSelectsWord: false,
@@ -125,10 +131,20 @@ export const TerminalView: React.FC<{
       return true;
     });
 
-    // Right-click copies the current selection. Registered in the CAPTURE phase
-    // so it runs before xterm's own bubble-phase contextmenu handler (which would
-    // otherwise reselect/clear the selection); stopPropagation keeps that handler
-    // from firing. With no selection we leave the native menu alone.
+    // Right-click copies the current selection. Both handlers are CAPTURE-phase
+    // + stopPropagation so they run before xterm sees the event. The mousedown
+    // handler is the important one: when an app has mouse reporting enabled, the
+    // right-press is otherwise consumed by xterm (clearing the selection or
+    // forwarding it to the app) before the contextmenu fires — so we copy on the
+    // press itself. The contextmenu handler then suppresses the native menu.
+    // With no selection we leave the event alone (native menu / app gets it).
+    const onRightMouseDown = (event: MouseEvent) => {
+      if (event.button === 2 && term.hasSelection()) {
+        event.preventDefault();
+        event.stopPropagation();
+        void writeClipboard(term.getSelection());
+      }
+    };
     const onContextMenu = (event: MouseEvent) => {
       if (term.hasSelection()) {
         event.preventDefault();
@@ -136,6 +152,7 @@ export const TerminalView: React.FC<{
         void writeClipboard(term.getSelection());
       }
     };
+    container.addEventListener("mousedown", onRightMouseDown, true);
     container.addEventListener("contextmenu", onContextMenu, true);
 
     const inputSub = term.onData((data) => {
@@ -154,6 +171,7 @@ export const TerminalView: React.FC<{
     });
 
     return () => {
+      container.removeEventListener("mousedown", onRightMouseDown, true);
       container.removeEventListener("contextmenu", onContextMenu, true);
       stream.close();
       inputSub.dispose();
