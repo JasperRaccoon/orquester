@@ -4,7 +4,7 @@ import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname, sep } from "node:path";
+import { delimiter, dirname, join, sep } from "node:path";
 import { spawn, type IPty } from "node-pty";
 import type { RegistryService } from "./registry";
 import { Tmux, tmuxAvailable, tmuxName, tmuxVersionOk } from "./tmux";
@@ -15,6 +15,36 @@ import { Tmux, tmuxAvailable, tmuxName, tmuxVersionOk } from "./tmux";
  * capture-pane (survives daemon restarts); this ring does not.
  */
 const MAX_BUFFER = 256 * 1024;
+
+/**
+ * The PATH a freshly launched session should see. The daemon's own PATH is
+ * intentionally narrow — under systemd on the VPS it is pinned to a minimal set
+ * (deploy/orquester.service) and it excludes the per-user bin dirs that modern
+ * dev tools install into: bun → ~/.bun/bin, uv/pipx → ~/.local/bin, rust →
+ * ~/.cargo/bin, deno → ~/.deno/bin, `go install` → ~/go/bin. Sessions inherit
+ * the daemon's PATH (the tmux server's global env, or process.env in the local
+ * backend), so without this an agent launched in a terminal can't find any tool
+ * that installed itself under $HOME. Prepend those dirs (deduped; user-local
+ * wins) and keep the inherited PATH as the tail. PATH is not a secret, so —
+ * unlike the rest of the daemon's env (passwords, API keys) — it is safe to set
+ * explicitly, including on the visible `tmux new-session -e` argv. Passing it
+ * per-session also overrides the tmux SERVER's frozen global env, so a new PATH
+ * takes effect for new sessions without restarting the (restart-surviving) tmux
+ * server.
+ */
+function sessionPath(): string {
+  const home = homedir();
+  const extras = [
+    join(home, ".local", "bin"),
+    join(home, ".bun", "bin"),
+    join(home, ".cargo", "bin"),
+    join(home, ".deno", "bin"),
+    join(home, "go", "bin")
+  ];
+  const inherited = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
+  const seen = new Set(inherited);
+  return [...extras.filter((dir) => !seen.has(dir)), ...inherited].join(delimiter);
+}
 
 interface Session {
   summary: SessionSummary;
@@ -153,6 +183,7 @@ export class SessionManager implements ISessionManager {
     const env = {
       TERM: "xterm-256color",
       COLORTERM: "truecolor",
+      PATH: sessionPath(),
       ...entry.env
     } as Record<string, string>;
 
@@ -574,7 +605,7 @@ export class LocalSessionManager implements ISessionManager {
       cwd,
       cols,
       rows,
-      env: { ...process.env, TERM: "xterm-256color", COLORTERM: "truecolor", ...entry.env } as Record<string, string>
+      env: { ...process.env, TERM: "xterm-256color", COLORTERM: "truecolor", PATH: sessionPath(), ...entry.env } as Record<string, string>
     });
 
     const summary: SessionSummary = {
