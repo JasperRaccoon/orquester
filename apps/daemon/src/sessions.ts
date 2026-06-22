@@ -7,7 +7,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, sep } from "node:path";
 import { spawn, type IPty } from "node-pty";
 import type { RegistryService } from "./registry";
-import { Tmux, sessionPath, tmuxAvailable, tmuxName, tmuxVersionOk } from "./tmux";
+import { Tmux, sessionEnvBase, sessionPath, tmuxAvailable, tmuxName, tmuxVersionOk } from "./tmux";
 
 /**
  * Small live ring kept only for HOT replay between a session's creation and the
@@ -144,12 +144,13 @@ export class SessionManager implements ISessionManager {
 
     // 1) Spawn the command INSIDE tmux (detached), 2) attach a streaming PTY to
     // it. tmux owns the process group, so a daemon restart leaves it running.
-    // Only per-session overrides go through `-e KEY=VAL` (which lands on the
-    // `tmux new-session` argv, visible via `ps`). The tmux SERVER already
-    // inherits the daemon's full process.env and passes it to the command, so we
-    // must NOT spread `...process.env` here: that would leak the daemon's secrets
-    // (ORQUESTER_HTTP_PASSWORD, agent API keys) onto the argv and would also
-    // reject any multiline value (e.g. BASH_FUNC_* shell functions) at launch.
+    // The pane inherits the new-session CLIENT's environment (Tmux.run uses
+    // sessionEnvBase() — the daemon's env minus ORQUESTER_* secrets — and sets
+    // the session PATH there); these `-e KEY=VAL` entries are only small
+    // per-session overrides. We deliberately do NOT spread `...process.env` onto
+    // `-e`: it lands on the `tmux new-session` argv (visible via `ps`), would
+    // leak secrets there, and would reject any multiline value (e.g. BASH_FUNC_*
+    // shell functions) at launch.
     const env = {
       TERM: "xterm-256color",
       COLORTERM: "truecolor",
@@ -227,7 +228,7 @@ export class SessionManager implements ISessionManager {
     // attach client would exit immediately and the tab would stay silently
     // blank/frozen. (`new-session -d` is not subject to the check, so the
     // headless session is created fine — making the failure invisible.)
-    const { TMUX, TMUX_PANE, ...cleanEnv } = process.env;
+    const cleanEnv = sessionEnvBase();
     const pty = spawn("tmux", this.tmux.attachArgs(id), {
       name: "xterm-256color",
       cwd: session.summary.cwd,
@@ -574,7 +575,7 @@ export class LocalSessionManager implements ISessionManager {
       cwd,
       cols,
       rows,
-      env: { ...process.env, TERM: "xterm-256color", COLORTERM: "truecolor", PATH: sessionPath(), ...entry.env } as Record<string, string>
+      env: { ...sessionEnvBase(), TERM: "xterm-256color", COLORTERM: "truecolor", PATH: sessionPath(), ...entry.env } as Record<string, string>
     });
 
     const summary: SessionSummary = {

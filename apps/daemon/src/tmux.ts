@@ -103,6 +103,28 @@ export function sessionPath(): string {
   return [...extras.filter((dir) => !seen.has(dir)), ...inherited].join(delimiter);
 }
 
+/**
+ * The daemon's environment with everything a user session must NOT inherit
+ * removed: tmux's own $TMUX/$TMUX_PANE (which would trip tmux's nesting guard
+ * when the daemon itself runs inside a tmux pane) and the daemon's ORQUESTER_*
+ * configuration — notably ORQUESTER_HTTP_PASSWORD/ORQUESTER_HTTP_USERNAME loaded
+ * from the systemd EnvironmentFile. A tmux pane inherits the new-session
+ * client's environment, and the node-pty backend spawns the command straight
+ * from the daemon's env, so without this scrub every terminal/agent could read
+ * the web credentials out of its own environment. The daemon's own process.env
+ * is untouched (it still reads its config); this only shapes what children get.
+ */
+export function sessionEnvBase(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value === undefined) continue;
+    if (key === "TMUX" || key === "TMUX_PANE") continue;
+    if (key.startsWith("ORQUESTER_")) continue;
+    env[key] = value;
+  }
+  return env;
+}
+
 interface ExecResult {
   code: number;
   stdout: string;
@@ -119,13 +141,12 @@ export class Tmux {
 
   /** Run `tmux -S <socket> <args...>`; never rejects (returns the exit code). */
   private run(args: string[], envOverride?: Record<string, string>): Promise<ExecResult> {
-    // Strip the multiplexer vars: control commands here (has-session /
-    // list-sessions / new-session -d / capture-pane / kill-session) are NOT
-    // subject to tmux's nesting guard today, but if the daemon was launched
-    // from inside a tmux pane ($TMUX/$TMUX_PANE present) we keep them immune to
-    // any future tightening — the attach PTY in SessionManager.attach() does the
-    // same for the same reason.
-    const { TMUX, TMUX_PANE, ...cleanEnv } = process.env;
+    // sessionEnvBase() strips $TMUX/$TMUX_PANE (so control commands and the
+    // new-session client are immune to tmux's nesting guard when the daemon was
+    // itself launched inside a tmux pane — the attach PTY does the same) AND the
+    // daemon's ORQUESTER_* secrets, since the new-session client's env is what a
+    // pane inherits.
+    const cleanEnv = sessionEnvBase();
     return new Promise((resolve) => {
       execFile(
         "tmux",
