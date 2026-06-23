@@ -126,7 +126,7 @@ export const MainView: React.FC = () => {
                 {tab.type === "session" ? (
                   <TerminalView session={tab.session} active={active} viewMode={viewMode} />
                 ) : tab.type === "git" ? (
-                  <GitView projectPath={currentProject.path} />
+                  <GitView projectPath={currentProject.path} active={active} />
                 ) : (
                   <FileBrowser rootPath={currentProject.path} />
                 )}

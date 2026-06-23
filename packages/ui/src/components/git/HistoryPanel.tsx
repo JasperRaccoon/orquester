@@ -64,6 +64,14 @@ const relativeDate = (iso: string): string => {
 
 interface HistoryPanelProps {
   projectPath: string;
+  /**
+   * Bumped by GitView after anything that can change the commit graph (pull,
+   * commit, checkout, fetch) and on tab activation / window focus. A change
+   * reloads the commit list in place. Without it the log only ever loaded once
+   * on mount, so freshly pulled commits stayed hidden until the Git tab was
+   * closed and reopened (which remounts this panel).
+   */
+  reloadToken?: number;
 }
 
 /**
@@ -72,7 +80,7 @@ interface HistoryPanelProps {
  * file's diff on the right. Responsive: on narrow screens it's a three-stage
  * master/detail (commits → files → diff, each with a back button).
  */
-export const HistoryPanel: React.FC<HistoryPanelProps> = ({ projectPath }) => {
+export const HistoryPanel: React.FC<HistoryPanelProps> = ({ projectPath, reloadToken = 0 }) => {
   const api = useApi();
   const [commits, setCommits] = useState<GitLogEntry[]>([]);
   const [loadingLog, setLoadingLog] = useState(true);
@@ -88,13 +96,21 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({ projectPath }) => {
   const [diffBinary, setDiffBinary] = useState(false);
   const [loadingDiff, setLoadingDiff] = useState(false);
 
-  // Reset everything when the repo changes.
+  // Clear the selection when the repo (project) changes — but NOT on a plain
+  // reload, so a pull/commit/refresh keeps whatever commit the user was viewing.
   useEffect(() => {
     setSelectedSha(null);
     setDetail(null);
     setSelectedFile(null);
     setDiff("");
     setDiffBinary(false);
+  }, [projectPath]);
+
+  // (Re)load the first page of commits: on mount, on repo change, and whenever
+  // GitView bumps `reloadToken` (after a pull/commit/fetch/checkout, or on tab
+  // activation / window focus). The list is refreshed in place — existing rows
+  // stay visible while reloading, so there's no flash on a routine refresh.
+  useEffect(() => {
     setDone(false);
     setLoadingLog(true);
     let active = true;
@@ -110,7 +126,7 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({ projectPath }) => {
     return () => {
       active = false;
     };
-  }, [api, projectPath]);
+  }, [api, projectPath, reloadToken]);
 
   const loadMore = useCallback(async () => {
     if (loadingMore || done) {
@@ -196,7 +212,7 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({ projectPath }) => {
           <span className="text-xs text-neutral-500">History</span>
         </div>
         <div className="min-h-0 flex-1 overflow-auto py-1">
-          {loadingLog ? (
+          {loadingLog && commits.length === 0 ? (
             <p className="px-3 py-2 text-xs text-neutral-600">Loading…</p>
           ) : commits.length === 0 ? (
             <p className="px-3 py-2 text-xs text-neutral-600">No commits yet.</p>

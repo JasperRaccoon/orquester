@@ -80,7 +80,7 @@ export class ApiClient {
     });
 
     if (!response.ok) {
-      throw new ApiError(response.status, method, path, response.headers);
+      throw new ApiError(response.status, method, path, response.headers, response.data);
     }
 
     return response.data;
@@ -415,10 +415,28 @@ export class ApiError extends Error {
     method: string,
     path: string,
     /** Response headers (lowercased keys), e.g. `retry-after` on a 429. */
-    public readonly headers?: Record<string, string>
+    public readonly headers?: Record<string, string>,
+    /** Parsed error body the daemon sent (e.g. `{ code, message }`), if any. */
+    public readonly body?: unknown
   ) {
     super(`Orquester API ${method} ${path} failed with status ${status}`);
     this.name = "ApiError";
+  }
+
+  /**
+   * The daemon's human-readable error message (`body.message`) when present —
+   * e.g. git's stderr for a failed fetch/pull/push. Null when the body carried
+   * no usable message, so callers can fall back to the generic `.message`.
+   */
+  get serverMessage(): string | null {
+    const body = this.body;
+    if (body && typeof body === "object" && "message" in body) {
+      const message = (body as { message?: unknown }).message;
+      if (typeof message === "string" && message.trim()) {
+        return message.trim();
+      }
+    }
+    return null;
   }
 
   /** Parsed `Retry-After` (seconds) when present, else null. Set on 429s. */
