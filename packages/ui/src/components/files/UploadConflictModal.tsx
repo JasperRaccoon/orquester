@@ -23,8 +23,11 @@ export const UploadConflictModal: React.FC<{ prompt: ConflictPrompt | null }> = 
   const isDir = prompt.kind === "dir";
   const choose = (choice: ConflictChoice) => prompt.resolve(choice, all);
 
+  // Dismiss (Esc / backdrop) skips ONLY the current conflict — never the whole
+  // batch — by ignoring the "apply to all" checkbox, so an incidental dismiss
+  // gesture can't silently skip every remaining conflict.
   return (
-    <Modal open onClose={() => choose("skip")} className="max-w-md">
+    <Modal open onClose={() => prompt.resolve("skip", false)} className="max-w-md">
       <div className="w-full p-5">
         <div className="mb-3 flex items-center gap-2">
           <span className="flex h-8 w-8 items-center justify-center rounded-md bg-amber-500/10 text-amber-400">

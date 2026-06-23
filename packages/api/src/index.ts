@@ -184,7 +184,13 @@ export interface FsUploadResponse {
   name: string;
   /** Bytes written (0 when conflict is true). */
   size: number;
-  /** True when onConflict was "error" and the target already existed. */
+  /**
+   * True when the write did NOT happen because the target — or an intermediate
+   * path segment — already existed: either onConflict was "error" and the
+   * target existed, OR a file occupies an intermediate directory in
+   * relativePath (reported for ANY onConflict, since mkdir then fails). In this
+   * case path is "" and size is 0; see conflictKind.
+   */
   conflict?: boolean;
   /** What already occupied the path (drives the type-clash message). */
   conflictKind?: "file" | "dir";

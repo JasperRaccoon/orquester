@@ -66,6 +66,29 @@ export const OrquesterApp: React.FC<OrquesterAppProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Global stray-drop guard. A file dropped OUTSIDE a registered drop zone (the
+  // file browser, a terminal) would otherwise hit the browser default and, in
+  // the web client, navigate the whole SPA to the file:// URL — destroying the
+  // app. The real zones preventDefault on their own handlers and do the upload;
+  // this is a backstop that neutralizes any FILE drag/drop bubbling to the
+  // window. Scoped to drags carrying Files, so text drag-drop into inputs /
+  // editors is unaffected; preventDefault here doesn't undo a zone's handling.
+  useEffect(() => {
+    const hasFiles = (e: DragEvent) =>
+      !!e.dataTransfer && Array.from(e.dataTransfer.types).includes("Files");
+    const neutralize = (e: DragEvent) => {
+      if (hasFiles(e)) {
+        e.preventDefault();
+      }
+    };
+    window.addEventListener("dragover", neutralize);
+    window.addEventListener("drop", neutralize);
+    return () => {
+      window.removeEventListener("dragover", neutralize);
+      window.removeEventListener("drop", neutralize);
+    };
+  }, []);
+
   return (
     <OrquesterProvider
       runtime={runtime}

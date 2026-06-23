@@ -30,8 +30,21 @@ export interface UseFileUpload {
   bigFolder: { count: number; bytes: number } | null;
   confirmBigFolder: () => void;
   cancelBigFolder: () => void;
-  /** Upload items into destDir; refreshes destDir as files land. */
+  /** Upload items into destDir; refreshes the dirs that received files. */
   start: (destDir: string, items: UploadItem[]) => Promise<void>;
+}
+
+/** destDir plus each intermediate directory along relativePath (filename dropped). */
+function touchedDirs(destDir: string, relativePath: string): string[] {
+  const segs = relativePath.split("/");
+  segs.pop(); // drop the filename — we want the directories that hold files
+  const dirs: string[] = [];
+  let cur = destDir;
+  for (const seg of segs) {
+    cur = `${cur}/${seg}`;
+    dirs.push(cur);
+  }
+  return dirs;
 }
 
 /**
@@ -60,8 +73,12 @@ export function useFileUpload(api: ApiClient, onUploaded: (destDir: string) => v
     async (destDir: string, items: UploadItem[]) => {
       // Drop overlapping runs — the shared modal-await slots (bigFolderResolve /
       // the conflict prompt) can't serve two at once; a second run would orphan
-      // the first's awaited promise. Serialize on a single in-flight upload.
-      if (isRunning.current) return;
+      // the first's awaited promise. Serialize on a single in-flight upload, and
+      // tell the user rather than silently discarding the second batch.
+      if (isRunning.current) {
+        setStatus({ text: "An upload is already in progress…" });
+        return;
+      }
       isRunning.current = true;
       try {
         const usable = items.filter((it) => it.file.size > 0);
@@ -89,6 +106,19 @@ export function useFileUpload(api: ApiClient, onUploaded: (destDir: string) => v
           }
         }
 
+        // Dirs that received files — refreshed/expanded on completion so a
+        // dropped nested subtree shows its contents, not just the top folder.
+        const touched = new Set<string>([destDir]);
+        const refresh = () => {
+          // Cap the fan-out: a giant drop would otherwise fire one listFiles per
+          // subdir. Above the cap just refresh destDir (deep dirs load on expand).
+          if (touched.size > 50) {
+            onUploaded(destDir);
+          } else {
+            touched.forEach((dir) => onUploaded(dir));
+          }
+        };
+
         // Pass 1 — exclusive write; collect conflicts and failures.
         const conflicts: { item: UploadItem; kind: "file" | "dir" }[] = [];
         let failed = 0;
@@ -100,12 +130,14 @@ export function useFileUpload(api: ApiClient, onUploaded: (destDir: string) => v
             const res = await api.uploadFsEntry({ destDir, relativePath: item.relativePath, dataBase64, onConflict: "error" });
             if (res.conflict) {
               conflicts.push({ item, kind: res.conflictKind ?? "file" });
+            } else {
+              touchedDirs(destDir, item.relativePath).forEach((dir) => touched.add(dir));
             }
           } catch {
             failed++;
           }
         }
-        onUploaded(destDir);
+        refresh();
 
         // Resolve conflicts — one prompt at a time, with apply-to-all.
         let replaced = 0;
@@ -148,17 +180,20 @@ export function useFileUpload(api: ApiClient, onUploaded: (destDir: string) => v
             // it — count it as failed, never as a phantom Replaced/Kept-both.
             if (res.conflict) {
               failed++;
-            } else if (policy === "overwrite") {
-              replaced++;
             } else {
-              kept++;
+              touchedDirs(destDir, c.item.relativePath).forEach((dir) => touched.add(dir));
+              if (policy === "overwrite") {
+                replaced++;
+              } else {
+                kept++;
+              }
             }
           } catch {
             failed++;
           }
         }
         if (conflicts.length > 0) {
-          onUploaded(destDir);
+          refresh();
         }
 
         const parts: string[] = [];

@@ -65,17 +65,30 @@ export async function gatherFromDataTransfer(dt: DataTransfer): Promise<UploadIt
   return items;
 }
 
-/** Depth-first walk of a FileSystemEntry, appending files to `out`. */
+/**
+ * Depth-first walk of a FileSystemEntry, appending files to `out`. Per-entry
+ * errors are swallowed (skip that file/dir) so one unreadable item can't abort
+ * gathering — and reject the whole dropped batch — the way a single throw would.
+ */
 async function walkEntry(entry: FileSystemEntry, prefix: string, out: UploadItem[]): Promise<void> {
   const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
   if (entry.isFile) {
-    out.push({ relativePath, file: await fileFromEntry(entry as FileSystemFileEntry) });
+    try {
+      out.push({ relativePath, file: await fileFromEntry(entry as FileSystemFileEntry) });
+    } catch {
+      /* skip a single unreadable file rather than failing the whole drop */
+    }
     return;
   }
   const reader = (entry as FileSystemDirectoryEntry).createReader();
   // readEntries yields at most ~100 per call — loop until it returns empty.
   for (;;) {
-    const batch = await readEntries(reader);
+    let batch: FileSystemEntry[];
+    try {
+      batch = await readEntries(reader);
+    } catch {
+      break; // unreadable directory — keep what we have, skip the rest of it
+    }
     if (batch.length === 0) {
       break;
     }

@@ -99,8 +99,31 @@ export const FileBrowser: React.FC<{ rootPath: string }> = ({ rootPath }) => {
 
   useEffect(() => {
     setActiveDir(rootPath);
+    // Keep the toolbar-upload destination pinned to the current root (defends
+    // against a reused instance whose rootPath prop changes without remount).
+    uploadDestRef.current = rootPath;
     void loadDir(rootPath);
   }, [rootPath, loadDir]);
+
+  // Clear a stranded drop-target highlight when a drag is abandoned — dropped
+  // outside any zone, ended, or the cursor left the window. None of the row /
+  // container dragleave handlers fire in those cases, so the ring would stick.
+  useEffect(() => {
+    const clear = () => setDropTarget(null);
+    const onWindowDragLeave = (e: DragEvent) => {
+      if (!e.relatedTarget) {
+        setDropTarget(null); // relatedTarget null == pointer left the window
+      }
+    };
+    window.addEventListener("drop", clear);
+    window.addEventListener("dragend", clear);
+    window.addEventListener("dragleave", onWindowDragLeave);
+    return () => {
+      window.removeEventListener("drop", clear);
+      window.removeEventListener("dragend", clear);
+      window.removeEventListener("dragleave", onWindowDragLeave);
+    };
+  }, []);
 
   const toggleDir = (path: string) => {
     setActiveDir(path);
@@ -196,9 +219,17 @@ export const FileBrowser: React.FC<{ rootPath: string }> = ({ rootPath }) => {
             align="right"
             width="w-44"
             trigger={
-              <IconButton label="Upload">
+              // A non-button element: AdaptiveMenu/Dropdown wraps the trigger in
+              // its OWN <button>, so an IconButton here would nest <button> in
+              // <button> (invalid HTML + a React warning). Mirror IconButton's
+              // styling on a span instead.
+              <span
+                aria-label="Upload"
+                title="Upload"
+                className="inline-flex h-7 w-7 items-center justify-center rounded-md text-neutral-400 transition-colors hover:bg-neutral-800 hover:text-neutral-100"
+              >
                 <Upload size={14} />
-              </IconButton>
+              </span>
             }
           >
             <DropdownItem icon={<FilePlus size={14} />} onClick={() => pickUpload(rootPath, "files")}>
