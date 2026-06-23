@@ -229,6 +229,21 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ 
         });
         return next;
       });
+      // Drop the deleted subtree from the loaded-dir cache too, so the live poll
+      // (which re-fetches every key of childrenByPath) stops issuing failing list
+      // requests for paths that no longer exist.
+      setChildrenByPath((prev) => {
+        const next: Record<string, FsEntry[]> = {};
+        for (const [d, entries] of Object.entries(prev)) {
+          if (d !== path && !d.startsWith(path + "/")) next[d] = entries;
+        }
+        return next;
+      });
+      // If the active dir was inside the deleted tree, fall back to its parent so
+      // New File/Folder/Refresh don't act on a now-deleted directory.
+      if (activeDir === path || activeDir.startsWith(path + "/")) {
+        setActiveDir(parentOf(path));
+      }
       await loadDir(parentOf(path));
     } catch {
       setError("Could not delete.");

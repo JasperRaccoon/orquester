@@ -31,7 +31,8 @@ const opErrorMessage = (error: unknown): string => {
  * Root of the Git tab (GitHub-Desktop style). Owns the repo's status + branches
  * and a `historyVersion` ticket that drives the History panel's reloads. It
  * reconciles on mount, on window focus, on tab (re)activation, and after any
- * mutation (no polling). Non-git directories render a plain "not a repository"
+ * mutation, plus a 3s status/branches poll while active (history stays event-
+ * driven). Non-git directories render a plain "not a repository"
  * message; repos get the sync header, a Changes|History segmented control, an
  * error banner for failed ops, and the active panel.
  */
@@ -49,11 +50,15 @@ export const GitView: React.FC<{ projectPath: string; active?: boolean }> = ({
   // `status`, so a pull/commit would otherwise leave History stale (see reconcile).
   const [historyVersion, setHistoryVersion] = useState(0);
 
+  // Monotonic generation so overlapping polls apply in issue order: a slow tick's
+  // response is ignored once a newer refresh has started (last-issued-wins).
+  const pollGen = useRef(0);
   const refresh = useCallback(() => {
+    const gen = ++pollGen.current;
     let cancelled = false;
     Promise.all([api.gitStatus(projectPath), api.gitBranches(projectPath)])
       .then(([s, b]) => {
-        if (cancelled) return;
+        if (cancelled || gen !== pollGen.current) return;
         setStatus(s);
         setBranches(b);
       })

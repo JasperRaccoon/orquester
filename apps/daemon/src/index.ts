@@ -1026,6 +1026,12 @@ function createServer(
         if (safe === realRoot) {
           return reply.code(400).send({ code: "FS_ERROR", message: "Cannot delete the workspaces root." });
         }
+        // Close any sessions rooted at the deleted tree first (like the project/
+        // workspace delete routes) so a terminal can't keep running in a now-
+        // deleted cwd and leave an orphan tab. Match both the realpath (`safe`)
+        // and the raw resolved form — sessions store the raw client-join path.
+        sessions.closeByProjectPrefix(safe);
+        sessions.closeByProjectPrefix(resolve(path));
         await rm(safe, { recursive: true, force: false });
         return { ok: true };
       } catch (error) {

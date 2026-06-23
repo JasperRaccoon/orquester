@@ -126,9 +126,11 @@ export const MainView: React.FC = () => {
                 {tab.type === "session" ? (
                   <TerminalView session={tab.session} active={active} viewMode={viewMode} />
                 ) : tab.type === "git" ? (
-                  <GitView projectPath={currentProject.path} active={active} />
+                  // active={show}: in grid view every VISIBLE cell stays live, not
+                  // only the focused one (TerminalView keeps focus-only semantics).
+                  <GitView projectPath={currentProject.path} active={show} />
                 ) : (
-                  <FileBrowser rootPath={currentProject.path} active={active} />
+                  <FileBrowser rootPath={currentProject.path} active={show} />
                 )}
               </div>
             </div>

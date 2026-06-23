@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, GitCommitHorizontal } from "lucide-react";
 import type { GitFileChange, GitStatusResponse } from "@orquester/api";
 import { cn } from "../../lib/cn";
@@ -42,7 +42,12 @@ export const ChangesPanel: React.FC<ChangesPanelProps> = ({ projectPath, status,
   // The staged selection mirrors the index: files git reports as staged. Kept in
   // sync with the latest status so a refresh reconciles optimistic toggles.
   const [checked, setChecked] = useState<Set<string>>(new Set());
+  // Count of stage/unstage ops in flight. While > 0 we don't reconcile `checked`
+  // from status, so a background 3s poll landing mid-toggle can't flicker the
+  // just-clicked checkbox back off before the op commits to the index.
+  const inFlight = useRef(0);
   useEffect(() => {
+    if (inFlight.current > 0) return;
     setChecked(new Set(files.filter((f) => f.staged).map((f) => f.path)));
   }, [files]);
 
@@ -110,10 +115,12 @@ export const ChangesPanel: React.FC<ChangesPanelProps> = ({ projectPath, status,
         }
         return next;
       });
+      inFlight.current += 1;
       try {
         if (stageIt) await api.gitStage(projectPath, paths);
         else await api.gitUnstage(projectPath, paths);
       } finally {
+        inFlight.current -= 1;
         onChanged();
       }
     },
