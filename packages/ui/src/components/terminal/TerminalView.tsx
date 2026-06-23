@@ -72,6 +72,21 @@ function injectionForPaths(paths: string[]): string {
   return `\x1b[200~${joined}\x1b[201~`;
 }
 
+/**
+ * Wrap pasted text in the bracketed-paste escapes (`\x1b[200~`…`\x1b[201~`) a
+ * native terminal sends, normalizing every newline to CR exactly as xterm's own
+ * `prepareTextForTerminal` does. We send this explicitly for agent sessions
+ * because xterm only brackets a paste once it has SEEN the app enable
+ * bracketed-paste mode (`\x1b[?2004h`) — but the daemon replays scrollback via
+ * `tmux capture-pane`, which omits DEC private modes, so a reattached / reloaded
+ * / reconnected client never learns the agent turned it on. Without the wrapper
+ * xterm sends a bare CR between lines and the agent submits at the first one.
+ */
+function bracketPaste(text: string): string {
+  const normalized = text.replace(/\r\n/g, "\r").replace(/\n/g, "\r");
+  return `\x1b[200~${normalized}\x1b[201~`;
+}
+
 /** Strip the `data:<mime>;base64,` prefix from a FileReader data URL. */
 function stripDataUrlPrefix(dataUrl: string): string {
   const comma = dataUrl.indexOf(",");
@@ -236,6 +251,25 @@ export const TerminalView: React.FC<{
           return false;
         }
       }
+      // Shift+Enter inserts a newline in an agent's prompt instead of submitting.
+      // xterm has no distinct encoding for Shift+Enter — it sends a bare CR,
+      // identical to Enter — so the agent can't tell them apart and submits.
+      // Send the sequence agents recognize as "insert newline": ESC + CR
+      // (`\x1b\r`, i.e. Meta+Enter) — exactly what Claude Code's `/terminal-setup`
+      // binds Shift+Enter to. Scoped to agents so a shell's Shift+Enter still
+      // behaves as a normal Enter. (Plain Shift only — Ctrl/Cmd/Alt fall through.)
+      if (
+        session.kind === "agent" &&
+        event.key === "Enter" &&
+        event.shiftKey &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.altKey
+      ) {
+        event.preventDefault();
+        void api.sendSessionInput(session.id, "\x1b\r");
+        return false;
+      }
       return true;
     });
 
@@ -289,10 +323,17 @@ export const TerminalView: React.FC<{
         void handleFilesRef.current(files);
       }
     };
-    // Paste: only intercept when the clipboard carries files/images. A plain
-    // text paste must fall through (no preventDefault) so xterm delivers it to
-    // the PTY as usual. Raw clipboard images arrive as `items` of kind "file"
-    // with no filename → synthesize pasted-<id>.<ext> from the MIME subtype.
+    // Paste handling, registered in the CAPTURE phase so it runs before xterm's
+    // own textarea paste handler (a descendant) and can take over cleanly:
+    //   • files/images  → upload + inject paths, and stop the event so xterm
+    //                      doesn't also paste.
+    //   • agent text     → bracket it ourselves (see bracketPaste) and stop the
+    //                      event; xterm's bracketed-paste mode is unreliable
+    //                      after a capture-pane replay, so a multi-line paste
+    //                      would otherwise submit at the first line.
+    //   • other text     → fall through untouched so xterm pastes natively.
+    // Raw clipboard images arrive as `items` of kind "file" with no filename →
+    // synthesize pasted-<id>.<ext> from the MIME subtype.
     const onPaste = (event: ClipboardEvent) => {
       const clip = event.clipboardData;
       if (!clip) {
@@ -331,17 +372,31 @@ export const TerminalView: React.FC<{
           files.push(new File([file], `pasted-${id}.${ext}`, { type: item.type }));
         }
       }
-      if (files.length === 0) {
-        return; // plain text → let xterm paste it to the PTY
+      if (files.length > 0) {
+        // Capture phase: stop here so xterm's own paste handler doesn't fire too.
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        void handleFilesRef.current(files);
+        return;
       }
-      event.preventDefault();
-      void handleFilesRef.current(files);
+      // Plain text. Agents get an explicitly-bracketed paste (robust against the
+      // mode desync above); every other session kind falls through to xterm.
+      if (session.kind === "agent") {
+        const text = clip.getData("text/plain");
+        if (!text) {
+          return;
+        }
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        void api.sendSessionInput(session.id, bracketPaste(text));
+      }
     };
     container.addEventListener("dragenter", onDragEnter);
     container.addEventListener("dragover", onDragOver);
     container.addEventListener("dragleave", onDragLeave);
     container.addEventListener("drop", onDrop);
-    container.addEventListener("paste", onPaste);
+    // Capture phase (true): see onPaste — must run before xterm's textarea handler.
+    container.addEventListener("paste", onPaste, true);
 
     const inputSub = term.onData((data) => {
       void api.sendSessionInput(session.id, data);
@@ -404,7 +459,7 @@ export const TerminalView: React.FC<{
       container.removeEventListener("dragover", onDragOver);
       container.removeEventListener("dragleave", onDragLeave);
       container.removeEventListener("drop", onDrop);
-      container.removeEventListener("paste", onPaste);
+      container.removeEventListener("paste", onPaste, true);
       stream.close();
       if (nudgeTimer) {
         clearTimeout(nudgeTimer);
