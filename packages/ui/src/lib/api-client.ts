@@ -10,6 +10,8 @@ import type {
   EventMessage,
   FsListResponse,
   FsReadResponse,
+  FsUploadRequest,
+  FsUploadResponse,
   GitBranchesResponse,
   GitCommitDetail,
   GitCommitRequest,
@@ -222,6 +224,10 @@ export class ApiClient {
 
   saveFile(path: string, content: string): Promise<{ ok: true }> {
     return this.send("PUT", "/api/fs/write", { body: { path, content } });
+  }
+
+  uploadFsEntry(body: FsUploadRequest): Promise<FsUploadResponse> {
+    return this.send("POST", "/api/fs/upload", { body });
   }
 
   // --- Git -----------------------------------------------------------------

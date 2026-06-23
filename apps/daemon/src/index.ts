@@ -10,6 +10,8 @@ import type {
   FsEntry,
   FsListResponse,
   FsReadResponse,
+  FsUploadRequest,
+  FsUploadResponse,
   FsWriteRequest,
   GitBranchesResponse,
   GitCommitDetail,
@@ -74,7 +76,7 @@ import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import { createWriteStream, existsSync, type WriteStream } from "node:fs";
 import { mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir, platform as osPlatform } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { stat } from "node:fs/promises";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import bcrypt from "bcryptjs";
@@ -905,6 +907,106 @@ function createServer(
       });
     }
   });
+
+  // Upload one file into the project tree (a folder is many requests from the
+  // client). Sibling of /api/fs/create: same fsRoot sandbox + error mapping,
+  // plus the session-upload route's base64/bodyLimit/ENOSPC handling. Writes
+  // with `wx` by default so an upload never silently clobbers — a pre-existing
+  // target comes back as { conflict:true } (200, NOT an error) so the client
+  // can prompt; "overwrite"/"rename" act only on an explicit user choice. The
+  // client supplies destDir + relativePath, but the joined final path is
+  // re-sanitized and assertInsideFsRoot'd, so nothing escapes fsRoot.
+  app.post<{ Body: FsUploadRequest }>(
+    "/api/fs/upload",
+    { bodyLimit: 40 * 1024 * 1024 },
+    async (request, reply): Promise<FsUploadResponse | void> => {
+      const body = (request.body ?? {}) as Partial<FsUploadRequest>;
+      if (!body.destDir || !body.relativePath || typeof body.dataBase64 !== "string") {
+        return reply
+          .code(400)
+          .send({ code: "INVALID_REQUEST", message: "destDir, relativePath and dataBase64 required." });
+      }
+      // Sanitize the relative path: split on either separator, drop empties,
+      // reject any "."/".." segment. assertInsideFsRoot below is authoritative;
+      // this is defense in depth + a clean 400 for obvious garbage.
+      const segments = body.relativePath.split(/[\\/]+/).filter((s) => s.length > 0);
+      if (segments.length === 0 || segments.some((s) => s === "." || s === "..")) {
+        return reply.code(400).send({ code: "INVALID_REQUEST", message: "relativePath is invalid." });
+      }
+      const onConflict = body.onConflict ?? "error";
+
+      const buffer = Buffer.from(body.dataBase64, "base64");
+      if (buffer.length > MAX_UPLOAD_BYTES) {
+        return reply.code(413).send({
+          code: "UPLOAD_TOO_LARGE",
+          message: `File exceeds the ${Math.floor(MAX_UPLOAD_BYTES / (1024 * 1024))} MB upload limit.`
+        });
+      }
+      // Buffer.from(…, "base64") silently drops invalid chars → empty buffer.
+      if (buffer.length === 0) {
+        return reply.code(400).send({ code: "INVALID_REQUEST", message: "dataBase64 is not valid base64." });
+      }
+
+      const leaf = segments[segments.length - 1];
+      try {
+        const safeDir = await assertInsideFsRoot(resolved.fsRoot, body.destDir);
+        const target = await assertInsideFsRoot(resolved.fsRoot, join(safeDir, ...segments));
+
+        // Create the parent chain. If a path segment is already a FILE, mkdir
+        // fails ENOTDIR/EEXIST — a file/dir type clash, surfaced as a conflict
+        // the client resolves (Skip / Keep both), not a 500. Other mkdir errors
+        // (ENOSPC, EACCES) rethrow to the outer catch.
+        try {
+          await mkdir(dirname(target), { recursive: true });
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException)?.code;
+          if (code === "ENOTDIR" || code === "EEXIST") {
+            return { path: "", name: leaf, size: 0, conflict: true, conflictKind: "file" };
+          }
+          throw error;
+        }
+
+        if (onConflict === "error") {
+          try {
+            await writeFile(target, buffer, { flag: "wx" });
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException)?.code === "EEXIST") {
+              const existing = await stat(target).catch(() => null);
+              return {
+                path: "",
+                name: leaf,
+                size: 0,
+                conflict: true,
+                conflictKind: existing?.isDirectory() ? "dir" : "file"
+              };
+            }
+            throw error;
+          }
+          return { path: target, name: leaf, size: buffer.length };
+        }
+
+        if (onConflict === "rename") {
+          const renamed = await nextAvailableName(target);
+          await writeFile(renamed, buffer, { flag: "wx" });
+          return { path: renamed, name: basename(renamed), size: buffer.length };
+        }
+
+        // "overwrite" — replace. EISDIR if a directory is there (the client
+        // never offers Replace for a dir clash) → mapped to FS_ERROR below.
+        await writeFile(target, buffer);
+        return { path: target, name: leaf, size: buffer.length };
+      } catch (error) {
+        if (error instanceof FsSandboxError) {
+          return reply.code(403).send({ code: "FS_FORBIDDEN", message: error.message });
+        }
+        const code = (error as NodeJS.ErrnoException)?.code === "ENOSPC" ? 507 : 400;
+        return reply.code(code).send({
+          code: "FS_ERROR",
+          message: error instanceof Error ? error.message : "Cannot store the uploaded file."
+        });
+      }
+    }
+  );
 
   // Git — a project's repo as a GitHub-Desktop-style tab. Stateless: every route
   // resolves + sandboxes `path` (the project dir) to fsRoot the same way the
@@ -1740,6 +1842,28 @@ function gitError(reply: FastifyReply, error: unknown): void {
   const status = error instanceof GitError ? error.status : 500;
   const message = error instanceof Error ? error.message : "Git operation failed.";
   void reply.code(status).send({ code: "GIT_ERROR", message });
+}
+
+/**
+ * Given a desired absolute file path, return it if free, else the next free
+ * `name (n).ext` in the same directory (n = 1, 2, …). Backs the upload route's
+ * "rename" (keep-both) conflict resolution. A leading-dot name (".env") is kept
+ * whole — its dot is not an extension.
+ */
+async function nextAvailableName(desired: string): Promise<string> {
+  const dir = dirname(desired);
+  const base = basename(desired);
+  const dot = base.lastIndexOf(".");
+  const stem = dot > 0 ? base.slice(0, dot) : base;
+  const ext = dot > 0 ? base.slice(dot) : "";
+  for (let n = 1; ; n++) {
+    const candidate = join(dir, `${stem} (${n})${ext}`);
+    try {
+      await stat(candidate);
+    } catch {
+      return candidate; // stat threw → does not exist → free
+    }
+  }
 }
 
 /** List a directory for the file browser (dirs first, dotfiles included). */

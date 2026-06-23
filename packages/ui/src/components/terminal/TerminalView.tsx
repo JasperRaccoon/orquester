@@ -3,6 +3,7 @@ import { Terminal, type ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { useApi } from "../../context/orquester-context";
+import { fileToBase64 } from "../../lib/files";
 import type { SessionSummary } from "../../types";
 import type { ViewMode } from "../../lib/view-mode";
 
@@ -85,25 +86,6 @@ function injectionForPaths(paths: string[]): string {
 function bracketPaste(text: string): string {
   const normalized = text.replace(/\r\n/g, "\r").replace(/\n/g, "\r");
   return `\x1b[200~${normalized}\x1b[201~`;
-}
-
-/** Strip the `data:<mime>;base64,` prefix from a FileReader data URL. */
-function stripDataUrlPrefix(dataUrl: string): string {
-  const comma = dataUrl.indexOf(",");
-  return comma === -1 ? dataUrl : dataUrl.slice(comma + 1);
-}
-
-/**
- * Base64-encode a file via FileReader. readAsDataURL is safe for large files;
- * btoa(String.fromCharCode(...)) overflows the call stack on big buffers.
- */
-function fileToBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(stripDataUrlPrefix(reader.result as string));
-    reader.onerror = () => reject(reader.error ?? new Error("read failed"));
-    reader.readAsDataURL(file);
-  });
 }
 
 /**

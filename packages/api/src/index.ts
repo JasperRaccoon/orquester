@@ -166,6 +166,30 @@ export interface FsWriteRequest {
   content: string;
 }
 
+export interface FsUploadRequest {
+  /** Absolute directory under fsRoot the upload lands in. */
+  destDir: string;
+  /** Path within the upload, POSIX-separated, e.g. "folder 1/folder 2/file_c.txt". */
+  relativePath: string;
+  /** base64-encoded file bytes. */
+  dataBase64: string;
+  /** Conflict policy when the target already exists. Default "error". */
+  onConflict?: "error" | "overwrite" | "rename";
+}
+
+export interface FsUploadResponse {
+  /** Absolute final path written (after any rename); "" when conflict is true. */
+  path: string;
+  /** Final basename actually written (differs from the source under "rename"). */
+  name: string;
+  /** Bytes written (0 when conflict is true). */
+  size: number;
+  /** True when onConflict was "error" and the target already existed. */
+  conflict?: boolean;
+  /** What already occupied the path (drives the type-clash message). */
+  conflictKind?: "file" | "dir";
+}
+
 // Git — a project's git repo surfaced as a GitHub-Desktop-style tab. Stateless;
 // the daemon shells out to `git` in the project dir (no PTY/session).
 
@@ -529,6 +553,10 @@ export class HttpOrquesterApiClient implements OrquesterApi {
 
   uploadSessionFile(id: string, body: SessionUploadRequest): Promise<SessionUploadResponse> {
     return this.post(`/api/sessions/${encodeURIComponent(id)}/upload`, body);
+  }
+
+  uploadFsEntry(body: FsUploadRequest): Promise<FsUploadResponse> {
+    return this.post("/api/fs/upload", body);
   }
 
   eventsUrl(): string {
