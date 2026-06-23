@@ -55,6 +55,16 @@ export const ChangesPanel: React.FC<ChangesPanelProps> = ({ projectPath, status,
     }
   }, [files, selectedPath]);
 
+  // A stable signature for the selected file's change state. `status` is re-fetched
+  // on GitView's 3s poll, so `files` gets a fresh reference each tick; keying the
+  // diff effect on this signature instead of the whole `files` array keeps a
+  // background refresh from re-running the fetch (and flashing DiffView's
+  // "Loading diff…" placeholder, resetting scroll) when nothing actually changed.
+  const selectedSignature = useMemo(() => {
+    const file = files.find((f) => f.path === selectedPath);
+    return file ? `${file.path}|${file.staged}|${file.unstaged}` : "";
+  }, [files, selectedPath]);
+
   // Fetch the selected file's diff: prefer unstaged changes, fall back to staged.
   useEffect(() => {
     if (!selectedPath) {
@@ -83,7 +93,11 @@ export const ChangesPanel: React.FC<ChangesPanelProps> = ({ projectPath, status,
     return () => {
       active = false;
     };
-  }, [api, projectPath, selectedPath, files]);
+    // Deps use `selectedSignature` (path + staged/unstaged flags) rather than the
+    // whole `files` array: a 3s poll returns a fresh `files` reference every tick,
+    // but the signature only changes when the selected file's state actually does,
+    // so a no-op refresh no longer re-runs this fetch and flashes the placeholder.
+  }, [api, projectPath, selectedPath, selectedSignature]);
 
   const stage = useCallback(
     async (paths: string[], stageIt: boolean) => {
