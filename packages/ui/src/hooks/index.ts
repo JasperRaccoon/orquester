@@ -3,3 +3,4 @@ export { useAgents, useOpenTargets } from "./use-catalog";
 export { useRegistry } from "./use-registry";
 export { useMediaQuery, useIsDesktop } from "./use-media-query";
 export { useViewportHeight } from "./use-viewport-height";
+export { usePollWhileActive } from "./use-poll-while-active";

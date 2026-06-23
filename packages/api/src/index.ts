@@ -565,6 +565,10 @@ export class HttpOrquesterApiClient implements OrquesterApi {
     return this.post("/api/fs/upload", body);
   }
 
+  deleteFsEntry(path: string): Promise<{ ok: true }> {
+    return this.delete(`/api/fs?path=${encodeURIComponent(path)}`);
+  }
+
   eventsUrl(): string {
     const url = new URL(this.baseUrl);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
@@ -574,6 +578,19 @@ export class HttpOrquesterApiClient implements OrquesterApi {
 
   private async get<T>(path: string): Promise<T> {
     const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+      headers: this.authHeaders()
+    });
+
+    if (!response.ok) {
+      throw new Error(`Orquester API request failed: ${response.status} ${response.statusText}`);
+    }
+
+    return response.json() as Promise<T>;
+  }
+
+  private async delete<T>(path: string): Promise<T> {
+    const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+      method: "DELETE",
       headers: this.authHeaders()
     });
 

@@ -128,7 +128,7 @@ export const MainView: React.FC = () => {
                 ) : tab.type === "git" ? (
                   <GitView projectPath={currentProject.path} active={active} />
                 ) : (
-                  <FileBrowser rootPath={currentProject.path} />
+                  <FileBrowser rootPath={currentProject.path} active={active} />
                 )}
               </div>
             </div>

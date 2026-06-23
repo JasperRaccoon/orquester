@@ -8,6 +8,7 @@ import { ChangesPanel } from "./ChangesPanel";
 import { GitHeader } from "./GitHeader";
 import { HistoryPanel } from "./HistoryPanel";
 import { useApi } from "../../context/orquester-context";
+import { usePollWhileActive } from "../../hooks";
 
 type SubTab = "changes" | "history";
 
@@ -98,6 +99,12 @@ export const GitView: React.FC<{ projectPath: string; active?: boolean }> = ({
   useEffect(() => {
     setError(null);
   }, [projectPath]);
+
+  // Live-poll status + branches while the tab is open so the Changes list and
+  // ahead/behind stay fresh without a manual refresh. Polls `refresh` (not
+  // `reconcile`) on purpose: history stays event-driven via the focus/activate/
+  // mutation reconcile calls, so we don't re-run git log every 3s.
+  usePollWhileActive(active, refresh, 3000);
 
   // Run a remote/branch op behind a busy flag, then reconcile. A failure is
   // shown in a dismissible banner rather than swallowed (a failed fetch/push

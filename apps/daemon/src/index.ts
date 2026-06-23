@@ -1008,6 +1008,38 @@ function createServer(
     }
   );
 
+  // Delete a file or directory from the project tree. Sibling of /api/fs/create:
+  // same fsRoot sandbox + error mapping. `recursive` removes a non-empty dir;
+  // `force:false` so a missing path is a real error, not a silent no-op. Refuses
+  // to delete the sandbox root itself (resolve the realpath both sides first so a
+  // symlinked root can't be matched away).
+  app.delete<{ Querystring: { path?: string } }>(
+    "/api/fs",
+    async (request, reply): Promise<{ ok: true } | void> => {
+      const path = request.query.path;
+      if (!path) {
+        return reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
+      }
+      try {
+        const safe = await assertInsideFsRoot(resolved.fsRoot, path);
+        const realRoot = await realpath(resolved.fsRoot).catch(() => resolve(resolved.fsRoot));
+        if (safe === realRoot) {
+          return reply.code(400).send({ code: "FS_ERROR", message: "Cannot delete the workspaces root." });
+        }
+        await rm(safe, { recursive: true, force: false });
+        return { ok: true };
+      } catch (error) {
+        if (error instanceof FsSandboxError) {
+          return reply.code(403).send({ code: "FS_FORBIDDEN", message: error.message });
+        }
+        return reply.code(400).send({
+          code: "FS_ERROR",
+          message: error instanceof Error ? error.message : "Cannot delete entry."
+        });
+      }
+    }
+  );
+
   // Git — a project's repo as a GitHub-Desktop-style tab. Stateless: every route
   // resolves + sandboxes `path` (the project dir) to fsRoot the same way the
   // /api/fs/* routes do, then shells out via GitService. Errors map FsSandboxError

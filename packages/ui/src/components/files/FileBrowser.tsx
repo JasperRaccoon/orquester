@@ -9,6 +9,7 @@ import {
   FolderPlus,
   RefreshCw,
   Save,
+  Trash2,
   Upload
 } from "lucide-react";
 import type { FsEntry } from "@orquester/api";
@@ -25,6 +26,7 @@ import {
 } from "../ui";
 import { Editor } from "./Editor";
 import { useApi } from "../../context/orquester-context";
+import { usePollWhileActive } from "../../hooks";
 import { gatherFromDataTransfer, gatherFromInput } from "../../lib/files";
 import { useFileUpload } from "./use-file-upload";
 import { UploadConflictModal } from "./UploadConflictModal";
@@ -37,6 +39,7 @@ interface MenuState {
   x: number;
   y: number;
   dir: string;
+  target?: { path: string; name: string; kind: "dir" | "file" };
 }
 
 /**
@@ -44,7 +47,7 @@ interface MenuState {
  * the right. Create via the toolbar or right-click context menu. Responsive:
  * on narrow screens it's a master/detail (tree, then file with a back button).
  */
-export const FileBrowser: React.FC<{ rootPath: string }> = ({ rootPath }) => {
+export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ rootPath, active = true }) => {
   const api = useApi();
   const [childrenByPath, setChildrenByPath] = useState<Record<string, FsEntry[]>>({});
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -54,6 +57,7 @@ export const FileBrowser: React.FC<{ rootPath: string }> = ({ rootPath }) => {
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<{ path: string; name: string; kind: "dir" | "file" } | null>(null);
 
   const loadDir = useCallback(
     async (dir: string) => {
@@ -66,6 +70,17 @@ export const FileBrowser: React.FC<{ rootPath: string }> = ({ rootPath }) => {
     },
     [api]
   );
+
+  // Mirror the set of loaded dirs into a ref so refreshTree can re-fetch them
+  // all without re-creating its callback on every children change.
+  const loadedDirsRef = useRef<string[]>([rootPath]);
+  useEffect(() => {
+    loadedDirsRef.current = Object.keys(childrenByPath);
+  }, [childrenByPath]);
+  const refreshTree = useCallback(() => {
+    const dirs = loadedDirsRef.current.length > 0 ? loadedDirsRef.current : [rootPath];
+    for (const dir of dirs) void loadDir(dir);
+  }, [loadDir, rootPath]);
 
   const upload = useFileUpload(api, (dir) => {
     void loadDir(dir);
@@ -104,6 +119,26 @@ export const FileBrowser: React.FC<{ rootPath: string }> = ({ rootPath }) => {
     uploadDestRef.current = rootPath;
     void loadDir(rootPath);
   }, [rootPath, loadDir]);
+
+  // Refresh the whole tree when the tab goes inactive -> active again, so a
+  // file created/deleted in another tab shows up the moment you return.
+  const wasActive = useRef(active);
+  useEffect(() => {
+    if (active && !wasActive.current) refreshTree();
+    wasActive.current = active;
+  }, [active, refreshTree]);
+
+  // Same idea when the window regains focus (e.g. after editing on the host).
+  useEffect(() => {
+    const onFocus = () => {
+      if (active) refreshTree();
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [active, refreshTree]);
+
+  // Live polling while the tab is active+visible (auto-paused otherwise).
+  usePollWhileActive(active, refreshTree);
 
   // Clear a stranded drop-target highlight when a drag is abandoned — dropped
   // outside any zone, ended, or the cursor left the window. None of the row /
@@ -164,11 +199,40 @@ export const FileBrowser: React.FC<{ rootPath: string }> = ({ rootPath }) => {
     }
   };
 
-  const openMenu = (event: React.MouseEvent, dir: string) => {
+  const openMenu = (
+    event: React.MouseEvent,
+    dir: string,
+    target?: { path: string; name: string; kind: "dir" | "file" }
+  ) => {
     event.preventDefault();
     event.stopPropagation();
     setActiveDir(dir);
-    setMenu({ x: event.clientX, y: event.clientY, dir });
+    setMenu({ x: event.clientX, y: event.clientY, dir, target });
+  };
+
+  const confirmDelete = async () => {
+    if (!deleting) {
+      return;
+    }
+    const { path } = deleting;
+    setDeleting(null);
+    setError(null);
+    try {
+      await api.deleteFsEntry(path);
+      if (selectedFile && (selectedFile === path || selectedFile.startsWith(path + "/"))) {
+        setSelectedFile(null);
+      }
+      setExpanded((prev) => {
+        const next = new Set<string>();
+        prev.forEach((d) => {
+          if (d !== path && !d.startsWith(path + "/")) next.add(d);
+        });
+        return next;
+      });
+      await loadDir(parentOf(path));
+    } catch {
+      setError("Could not delete.");
+    }
   };
 
   const menuItems: ContextMenuItem[] = menu
@@ -177,7 +241,10 @@ export const FileBrowser: React.FC<{ rootPath: string }> = ({ rootPath }) => {
         { label: "New Folder", icon: <FolderPlus size={14} />, onClick: () => startCreate(menu.dir, "dir") },
         { label: "Upload Files…", icon: <Upload size={14} />, onClick: () => pickUpload(menu.dir, "files") },
         { label: "Upload Folder…", icon: <Upload size={14} />, onClick: () => pickUpload(menu.dir, "folder") },
-        { label: "Refresh", icon: <RefreshCw size={13} />, onClick: () => void loadDir(menu.dir) }
+        { label: "Refresh", icon: <RefreshCw size={13} />, onClick: () => void loadDir(menu.dir) },
+        ...(menu.target
+          ? [{ label: "Delete", icon: <Trash2 size={14} />, onClick: () => setDeleting(menu.target!) }]
+          : [])
       ]
     : [];
 
@@ -340,6 +407,29 @@ export const FileBrowser: React.FC<{ rootPath: string }> = ({ rootPath }) => {
         onConfirm={upload.confirmBigFolder}
         onCancel={upload.cancelBigFolder}
       />
+      <ConfirmDialog
+        open={deleting !== null}
+        title={deleting?.kind === "dir" ? "Delete folder?" : "Delete file?"}
+        confirmLabel="Delete"
+        message={
+          deleting ? (
+            deleting.kind === "dir" ? (
+              <>
+                Delete folder <code>{deleting.name}</code> and everything inside it? This can&apos;t be
+                undone.
+              </>
+            ) : (
+              <>
+                Delete <code>{deleting.name}</code>? This can&apos;t be undone.
+              </>
+            )
+          ) : (
+            ""
+          )
+        }
+        onConfirm={() => void confirmDelete()}
+        onCancel={() => setDeleting(null)}
+      />
     </div>
   );
 };
@@ -354,7 +444,11 @@ interface TreeLevelProps {
   dropTarget: string | null;
   onToggleDir: (path: string) => void;
   onSelectFile: (path: string) => void;
-  onContextMenu: (event: React.MouseEvent, dir: string) => void;
+  onContextMenu: (
+    event: React.MouseEvent,
+    dir: string,
+    target?: { path: string; name: string; kind: "dir" | "file" }
+  ) => void;
   onDragTo: (dir: string | null) => void;
   onDropTo: (dir: string, dt: DataTransfer) => void;
 }
@@ -382,7 +476,13 @@ const TreeLevel: React.FC<TreeLevelProps> = (props) => {
             <button
               type="button"
               onClick={() => (isDir ? props.onToggleDir(entry.path) : props.onSelectFile(entry.path))}
-              onContextMenu={(e) => props.onContextMenu(e, isDir ? entry.path : parentOf(entry.path))}
+              onContextMenu={(e) =>
+                props.onContextMenu(e, isDir ? entry.path : parentOf(entry.path), {
+                  path: entry.path,
+                  name: entry.name,
+                  kind: entry.kind
+                })
+              }
               onDragOver={(e) => {
                 if (Array.from(e.dataTransfer.types).includes("Files")) {
                   e.preventDefault();

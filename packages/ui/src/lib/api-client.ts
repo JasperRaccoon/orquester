@@ -230,6 +230,10 @@ export class ApiClient {
     return this.send("POST", "/api/fs/upload", { body });
   }
 
+  deleteFsEntry(path: string): Promise<{ ok: true }> {
+    return this.send("DELETE", "/api/fs", { query: { path } });
+  }
+
   // --- Git -----------------------------------------------------------------
 
   gitStatus(path: string, signal?: AbortSignal): Promise<GitStatusResponse> {
