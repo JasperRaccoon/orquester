@@ -10,7 +10,7 @@ import { WindowControls } from "../layout/WindowControls";
 import { IconButton } from "../ui";
 import { useIsDesktop } from "../../hooks";
 import { useOrquester } from "../../context/orquester-context";
-import { useAppStore } from "../../store/app";
+import { currentContext, useAppStore } from "../../store/app";
 
 const SettingsButton: React.FC = () => {
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
@@ -31,7 +31,7 @@ const SettingsButton: React.FC = () => {
 export const TopBar: React.FC = () => {
   const { useTitlebar } = useOrquester();
   const isDesktop = useIsDesktop();
-  const currentProject = useAppStore((s) => s.currentProject);
+  const ctx = useAppStore(currentContext);
   const setSidebarDrawer = useAppStore((s) => s.setSidebarDrawer);
 
   if (!isDesktop) {
@@ -41,16 +41,16 @@ export const TopBar: React.FC = () => {
           <IconButton label="Open menu" onClick={() => setSidebarDrawer(true)}>
             <Menu size={18} />
           </IconButton>
-          {currentProject ? (
+          {ctx?.kind === "project" ? (
             <ProjectSwitcher />
           ) : (
             <span className="px-1 text-sm text-neutral-500">Select a project</span>
           )}
           <div className="flex-1" />
-          {currentProject && <OpenOnMenu />}
+          {ctx?.kind === "project" && <OpenOnMenu />}
           <SettingsButton />
         </div>
-        {currentProject && (
+        {ctx && (
           <div className="flex h-11 items-center gap-1 border-t border-neutral-800 px-2">
             <TabSwitcher />
             <div className="flex-1" />
@@ -64,10 +64,14 @@ export const TopBar: React.FC = () => {
   return (
     <header className="app-drag flex h-11 shrink-0 items-stretch border-b border-neutral-800 bg-neutral-900/60">
       <div className="flex flex-1 items-center gap-2 overflow-hidden pl-2">
-        {currentProject ? (
+        {ctx ? (
           <>
-            <ProjectSwitcher />
-            <div className="h-4 w-px bg-neutral-800" />
+            {ctx.kind === "project" && (
+              <>
+                <ProjectSwitcher />
+                <div className="h-4 w-px bg-neutral-800" />
+              </>
+            )}
             <div className="flex items-center gap-1 overflow-x-auto">
               <TabStrip />
               <NewTabMenu />
@@ -79,12 +83,12 @@ export const TopBar: React.FC = () => {
       </div>
 
       <div className="flex items-center gap-1 pr-1">
-        {currentProject && (
+        {ctx?.kind === "project" && (
           <div className="app-no-drag">
             <ViewModeToggle />
           </div>
         )}
-        {currentProject && (
+        {ctx?.kind === "project" && (
           <div className="app-no-drag pr-1">
             <OpenOnMenu />
           </div>
