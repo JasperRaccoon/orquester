@@ -263,6 +263,9 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
   API. `gh` must be installed on the host separately; it is not an npm package.)*
 - **Security boundary asymmetry.** `PUT /api/config/daemon` is **Unix-socket-only** (403 over
   remote HTTP); `/api/accounts` *is* allowed remotely (safe — no key material is ever returned).
+- **Archive preview is host-tool-gated.** `GET /api/fs/archive` lists archive contents by
+  shelling out to `7z` (p7zip-full) or `bsdtar` (libarchive-tools). Without either on PATH,
+  archives degrade gracefully to a download card (`supported:false`). Not an npm package.
 - **Default endpoint is `127.0.0.1:47831`.** On the VPS it stays on loopback; Caddy (443) is the
   only public face. CORS is intentionally absent (single-origin server; desktop dodges CORS via
   Node HTTP).
@@ -315,7 +318,7 @@ Caddy as the TLS reverse proxy. Templates live in `deploy/`. Use placeholders
 sudo useradd --system --create-home --home-dir /var/lib/orquester --shell /usr/sbin/nologin orquester
 
 # 2. Runtime + build tools (node-pty needs python3/make/g++), plus tmux, ufw, Caddy
-sudo apt-get update && sudo apt-get install -y git openssh-client tmux ufw python3 make g++ curl ca-certificates
+sudo apt-get update && sudo apt-get install -y git openssh-client tmux ufw python3 make g++ curl ca-certificates p7zip-full
 curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - && sudo apt-get install -y nodejs
 sudo npm install -g pnpm
 # (install Caddy from its official apt repo)

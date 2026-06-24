@@ -41,6 +41,7 @@ import { Tmux } from "./tmux";
 import { Broadcaster } from "./broadcaster";
 import { AccountError, AccountsService } from "./accounts";
 import { GitError, GitService } from "./git";
+import { listArchiveEntries } from "./archive";
 import {
   type AppConfig,
   type ClientConfig,
@@ -91,6 +92,12 @@ const packageVersion = "0.0.0";
  * handler. See docs/superpowers/specs/2026-06-22-terminal-file-drop-design.md.
  */
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+
+/**
+ * Hard ceiling on a single /api/fs/raw read: the in-memory + in-app download
+ * limit for binary preview. See docs/superpowers/specs/2026-06-24-file-preview-design.md.
+ */
+const RAW_MAX_BYTES = 50 * 1024 * 1024;
 
 /** Filesystem locations resolved (variables expanded) for this run. */
 interface ResolvedPaths {
@@ -860,6 +867,65 @@ function createServer(
       }
     }
   );
+
+  // Read a file's RAW bytes (binary-safe, no decode) for the preview viewers.
+  // Capped at RAW_MAX_BYTES; the client picks the real MIME and rewraps the
+  // bytes in a typed Blob, so octet-stream here is both safe and sufficient.
+  app.get<{ Querystring: { path?: string } }>("/api/fs/raw", async (request, reply) => {
+    const path = request.query.path;
+    if (!path) {
+      void reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
+      return;
+    }
+    try {
+      const safe = await assertInsideFsRoot(resolved.fsRoot, path);
+      const info = await stat(safe);
+      if (!info.isFile()) {
+        void reply.code(400).send({ code: "FS_ERROR", message: "Not a file." });
+        return;
+      }
+      if (info.size > RAW_MAX_BYTES) {
+        void reply.code(413).send({
+          code: "FS_TOO_LARGE",
+          message: `File exceeds the ${Math.floor(RAW_MAX_BYTES / (1024 * 1024))} MB preview limit.`
+        });
+        return;
+      }
+      const buffer = await readFile(safe);
+      void reply.header("X-Content-Type-Options", "nosniff").type("application/octet-stream").send(buffer);
+    } catch (error) {
+      if (error instanceof FsSandboxError) {
+        void reply.code(403).send({ code: "FS_FORBIDDEN", message: error.message });
+        return;
+      }
+      void reply.code(400).send({
+        code: "FS_ERROR",
+        message: error instanceof Error ? error.message : "Cannot read file."
+      });
+    }
+  });
+
+  // List an archive's contents (no extraction) for the preview viewer.
+  app.get<{ Querystring: { path?: string } }>("/api/fs/archive", async (request, reply) => {
+    const path = request.query.path;
+    if (!path) {
+      void reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
+      return;
+    }
+    try {
+      const safe = await assertInsideFsRoot(resolved.fsRoot, path);
+      void reply.send(await listArchiveEntries(safe));
+    } catch (error) {
+      if (error instanceof FsSandboxError) {
+        void reply.code(403).send({ code: "FS_FORBIDDEN", message: error.message });
+        return;
+      }
+      void reply.code(400).send({
+        code: "FS_ERROR",
+        message: error instanceof Error ? error.message : "Cannot read archive."
+      });
+    }
+  });
 
   // Write (save) a file's text content.
   app.put("/api/fs/write", async (request, reply): Promise<{ ok: true } | void> => {

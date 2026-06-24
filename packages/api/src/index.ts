@@ -156,6 +156,26 @@ export interface FsReadResponse {
   truncated: boolean;
 }
 
+/** One entry inside an archive (from GET /api/fs/archive). */
+export interface ArchiveEntry {
+  /** POSIX-separated path within the archive, e.g. "src/index.ts". */
+  name: string;
+  size: number;
+  dir: boolean;
+}
+
+export interface FsArchiveResponse {
+  /** False when no host tool can read this archive format. */
+  supported: boolean;
+  entries: ArchiveEntry[];
+  /** True when the listing was capped (more entries exist than returned). */
+  truncated: boolean;
+  /** Tool used (diagnostics), e.g. "7z" | "bsdtar". */
+  tool?: string;
+  /** Why unsupported, when supported is false. */
+  reason?: string;
+}
+
 export interface FsCreateRequest {
   path: string;
   kind: "file" | "dir";
