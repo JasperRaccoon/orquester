@@ -1,14 +1,16 @@
 import React from "react";
-import { FolderTree, GitBranch, LayoutGrid, MousePointerClick, X } from "lucide-react";
+import { FolderTree, GitBranch, LayoutGrid, ListTodo, MousePointerClick, X } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { EmptyState } from "./EmptyState";
 import { TerminalView } from "../terminal";
 import { FileBrowser } from "../files";
 import { GitView } from "../git";
+import { TodoView } from "../todo";
 import { getRegistryIcon } from "../../icons";
 import { SessionStatusDot } from "../ui/session-status-dot";
 import { useIsDesktop } from "../../hooks";
 import {
+  currentContext,
   useActiveTabId,
   useAppStore,
   useProjectTabs,
@@ -22,6 +24,8 @@ function cellIcon(tab: ProjectTab): React.ReactNode {
     getRegistryIcon(tab.session.kind, tab.session.refId, 13)
   ) : tab.type === "git" ? (
     <GitBranch size={13} />
+  ) : tab.type === "todo" ? (
+    <ListTodo size={13} />
   ) : (
     <FolderTree size={13} />
   );
@@ -43,7 +47,7 @@ function gridColumns(count: number): number {
  * change — so toggling never tears a terminal (xterm + output stream) down.
  */
 export const MainView: React.FC = () => {
-  const currentProject = useAppStore((s) => s.currentProject);
+  const ctx = useAppStore(currentContext);
   const tabs = useProjectTabs();
   const activeId = useActiveTabId();
   const viewMode = useViewMode();
@@ -52,16 +56,17 @@ export const MainView: React.FC = () => {
   const closeTab = useAppStore((s) => s.closeTab);
 
   // Grid is a desktop-only layout; a persisted "grid" falls back to tab view on
-  // narrow viewports (the toggle isn't shown there either).
+  // narrow viewports (the toggle isn't shown there either). A workspace context
+  // never has a project, so useViewMode() returns "tabs" there — grid stays off.
   const grid = isDesktop && viewMode === "grid";
 
-  if (!currentProject) {
+  if (!ctx) {
     return (
       <main className="min-h-0 flex-1 overflow-hidden bg-neutral-950">
         <EmptyState
           icon={<LayoutGrid size={40} strokeWidth={1.25} />}
-          title="No project selected"
-          description="Pick a workspace and open a project from the sidebar to get started."
+          title="No workspace selected"
+          description="Pick a workspace from the sidebar."
         />
       </main>
     );
@@ -70,11 +75,19 @@ export const MainView: React.FC = () => {
   if (tabs.length === 0) {
     return (
       <main className="min-h-0 flex-1 overflow-hidden bg-neutral-950">
-        <EmptyState
-          icon={<MousePointerClick size={40} strokeWidth={1.25} />}
-          title="No tabs open"
-          description='Use the "+" button in the top bar to open a terminal, agent or file browser.'
-        />
+        {ctx.kind === "project" ? (
+          <EmptyState
+            icon={<MousePointerClick size={40} strokeWidth={1.25} />}
+            title="No tabs open"
+            description='Use the "+" button in the top bar to open a terminal, agent or file browser.'
+          />
+        ) : (
+          <EmptyState
+            icon={<ListTodo size={40} strokeWidth={1.25} />}
+            title="No to-do lists open"
+            description='Use "+" or the sidebar to open a to-do list.'
+          />
+        )}
       </main>
     );
   }
@@ -132,9 +145,13 @@ export const MainView: React.FC = () => {
                 ) : tab.type === "git" ? (
                   // active={show}: in grid view every VISIBLE cell stays live, not
                   // only the focused one (TerminalView keeps focus-only semantics).
-                  <GitView projectPath={currentProject.path} active={show} />
+                  // Git/Files tabs only ever exist in project context, so the
+                  // ternary just satisfies the type — ctx.project.path is defined.
+                  <GitView projectPath={ctx.kind === "project" ? ctx.project.path : ""} active={show} />
+                ) : tab.type === "files" ? (
+                  <FileBrowser rootPath={ctx.kind === "project" ? ctx.project.path : ""} active={show} />
                 ) : (
-                  <FileBrowser rootPath={currentProject.path} active={show} />
+                  <TodoView todoId={tab.todoId} active={show} />
                 )}
               </div>
             </div>
