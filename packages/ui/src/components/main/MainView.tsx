@@ -151,7 +151,7 @@ export const MainView: React.FC = () => {
                 ) : tab.type === "files" ? (
                   <FileBrowser rootPath={ctx.kind === "project" ? ctx.project.path : ""} active={show} />
                 ) : (
-                  <TodoView todoId={tab.todoId} active={show} />
+                  <TodoView todoId={tab.todoId} active={active} />
                 )}
               </div>
             </div>

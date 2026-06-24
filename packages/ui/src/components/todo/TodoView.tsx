@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Eye, EyeOff, GripVertical, ListTodo, X } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { ConfirmDialog } from "../ui";
@@ -11,8 +11,8 @@ interface TodoViewProps {
   active: boolean;
 }
 
-export const TodoView: React.FC<TodoViewProps> = ({ todoId }) => {
-  const { record, items, setItems, saving } = useTodoDoc(todoId);
+export const TodoView: React.FC<TodoViewProps> = ({ todoId, active }) => {
+  const { record, items, setItems, saving } = useTodoDoc(todoId, active);
   const [hideDone, setHideDone] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
@@ -132,7 +132,7 @@ export const TodoView: React.FC<TodoViewProps> = ({ todoId }) => {
         )}
       </div>
 
-      <AddItemInput onAdd={addItem} />
+      <AddItemInput onAdd={addItem} active={active} />
 
       <ConfirmDialog
         open={confirmClear}
@@ -149,11 +149,17 @@ export const TodoView: React.FC<TodoViewProps> = ({ todoId }) => {
   );
 };
 
-const AddItemInput: React.FC<{ onAdd: (text: string) => void }> = ({ onAdd }) => {
+const AddItemInput: React.FC<{ onAdd: (text: string) => void; active: boolean }> = ({ onAdd, active }) => {
   const [value, setValue] = useState("");
+  const ref = useRef<HTMLInputElement>(null);
+  // Put the cursor in the add field when this tab becomes the focused one.
+  useEffect(() => {
+    if (active) ref.current?.focus();
+  }, [active]);
   return (
     <div className="shrink-0 border-t border-neutral-800 px-3 py-2">
       <input
+        ref={ref}
         value={value}
         placeholder="Add a to-do…"
         onChange={(e) => setValue(e.target.value)}

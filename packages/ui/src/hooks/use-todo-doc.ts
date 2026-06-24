@@ -5,7 +5,10 @@ import { parseTodoMarkdown, serializeTodoMarkdown, type TodoItem } from "../comp
 
 const DEBOUNCE_MS = 400;
 
-export function useTodoDoc(todoId: string): {
+export function useTodoDoc(
+  todoId: string,
+  active: boolean
+): {
   record: TodoListRecord | undefined;
   items: TodoItem[];
   setItems: (next: TodoItem[]) => void;
@@ -62,6 +65,16 @@ export function useTodoDoc(todoId: string): {
       setItemsState(parseTodoMarkdown(body));
     }
   }, [record?.body]);
+
+  // Flush the pending save when this tab goes inactive (not just on unmount), so a debounced
+  // edit isn't left hanging when you switch away. Tracks the previous `active` value.
+  const wasActive = useRef(active);
+  useEffect(() => {
+    if (wasActive.current && !active) {
+      void flush();
+    }
+    wasActive.current = active;
+  }, [active, flush]);
 
   // Flush any pending save on unmount.
   useEffect(() => () => void flush(), [flush]);

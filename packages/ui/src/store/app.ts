@@ -404,11 +404,16 @@ function renameTodoTabs(
   todoId: string,
   title: string
 ): Record<string, TodoTab[]> {
+  let changed = false;
   const next: Record<string, TodoTab[]> = {};
   for (const [key, tabs] of Object.entries(todoTabsByContext)) {
-    next[key] = tabs.map((t) => (t.todoId === todoId ? { ...t, title } : t));
+    const hit = tabs.some((t) => t.todoId === todoId && t.title !== title);
+    next[key] = hit ? tabs.map((t) => (t.todoId === todoId ? { ...t, title } : t)) : tabs;
+    if (hit) changed = true;
   }
-  return next;
+  // Preserve object/array identity when nothing actually changed, so useProjectTabs' memo
+  // doesn't recompute on todo events for lists with no matching open tab (the common case).
+  return changed ? next : todoTabsByContext;
 }
 
 export interface AppState {
@@ -1408,13 +1413,22 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (!api) {
       return;
     }
+    const record = get().todos.find((t) => t.id === id);
     // Optimistic: the component already shows the new items; mirror into the cache.
     set((state) => ({
       todos: state.todos.map((t) =>
         t.id === id ? { ...t, body, updatedAt: new Date().toISOString() } : t
       )
     }));
-    await api.updateTodo(id, { body });
+    try {
+      await api.updateTodo(id, { body });
+    } catch {
+      // A failed save shouldn't leave a stale optimistic body in the cache: reload the
+      // server's truth (the editor reconciles to it, since no save is pending).
+      if (record) {
+        await get().loadTodos(record.scope, record.refKey);
+      }
+    }
   },
 
   deleteTodo: async (id) => {
