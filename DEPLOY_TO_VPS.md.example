@@ -36,6 +36,7 @@ ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new root@203.0.113.10 '
   cd /opt/orquester
   git fetch origin -q && git reset --hard origin/main
   echo "HEAD=$(git rev-parse --short HEAD)"
+  CI=1 ELECTRON_SKIP_BINARY_DOWNLOAD=1 pnpm install --frozen-lockfile
   ELECTRON_SKIP_BINARY_DOWNLOAD=1 pnpm --filter @orquester/web build
   chown -R root:root /opt/orquester
   systemctl restart orquester
@@ -50,6 +51,7 @@ ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new -o IdentitiesOnly=y
   cd /opt/orquester
   sudo git fetch origin -q && sudo git reset --hard origin/main
   echo "HEAD=$(sudo git rev-parse --short HEAD)"
+  sudo CI=1 ELECTRON_SKIP_BINARY_DOWNLOAD=1 pnpm install --frozen-lockfile
   sudo ELECTRON_SKIP_BINARY_DOWNLOAD=1 pnpm --filter @orquester/web build
   sudo chown -R root:root /opt/orquester
   sudo systemctl restart orquester
@@ -62,6 +64,7 @@ ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new -o IdentitiesOnly=y
 | Step | Why |
 |------|-----|
 | `git fetch + reset --hard origin/main` | Tree is root-owned (immutable code); reset to the pushed commit. |
+| `CI=1 pnpm install --frozen-lockfile` | Reconciles deps to the lockfile. **`CI=1` is non-negotiable**: it makes pnpm non-interactive, so a *"reinstall modules from scratch? (Y/n)"* prompt (fired when `node_modules` was built by a different pnpm version) **auto-proceeds** instead of wedging the non-TTY deploy. `--frozen-lockfile` installs exactly what's locked and **fails loudly** on lockfile drift; it's a fast no-op when deps are unchanged. |
 | `pnpm --filter @orquester/web build` | Rebuilds the **served SPA** (`apps/web/dist`). Only needed when `web`/`ui`/`api` changed — harmless to always run. The **daemon** needs no build (tsx runs the new `.ts` after restart). |
 | `chown -R root:root /opt/orquester` | Keep code root-owned (avoids git "dubious ownership"; the daemon runs as a different user). |
 | `systemctl restart orquester` | Near-instant graceful restart. `KillMode=process` ⇒ the tmux server + all terminal/agent sessions **survive** and the daemon reattaches. |
@@ -70,7 +73,8 @@ ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new -o IdentitiesOnly=y
 ## Gotchas
 
 - **Push before deploying** — the VPSes only see what's on `origin/main`.
-- **`pnpm install` only if `pnpm-lock.yaml` changed.** Source-only changes don't need it; run it (with `sudo` where applicable) before the build when the lockfile moved.
+- **Always run the install with `CI=1`.** Without it, pnpm's interactive *"reinstall modules from scratch? (Y/n)"* prompt blocks on the non-TTY SSH and silently breaks the deploy (it skips installing new deps, then the build fails to resolve them). `CI=1 … pnpm install --frozen-lockfile` is safe to run every time — a fast no-op when nothing changed.
+- **Never pipe the build through `| tail`/`| grep`.** A pipeline's exit status is the *last* command's, so `set -e` won't catch a failed `vite build` — the script would march past it and `systemctl restart` into a stale/broken `dist`. Run the build bare (let `set -e` abort), or redirect to a file and check `$?`.
 - **Daemon-only changes need no build** — just `systemctl restart`. Only the SPA needs `pnpm build`.
 - **Caddy** only needs a reload if `deploy/Caddyfile` changed (`systemctl reload caddy`).
 - **Browser cache:** after a web change, hard-reload the open app (Cmd/Ctrl+Shift+R).

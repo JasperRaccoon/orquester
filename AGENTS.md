@@ -356,7 +356,7 @@ sudo ufw allow 22/tcp && sudo ufw allow 443/tcp && sudo ufw --force enable
 ```bash
 cd /opt/orquester
 sudo git fetch origin && sudo git reset --hard origin/main   # tree is root-owned → run git as root
-sudo -u orquester pnpm install   # only if the lockfile changed
+sudo -u orquester CI=1 pnpm install --frozen-lockfile   # CI=1 = non-interactive (see below); fast no-op if unchanged
 sudo -u orquester pnpm build     # only if web/ui changed (rebuilds the served SPA)
 sudo chown -R root:root /opt/orquester
 sudo systemctl restart orquester # near-instant (graceful SIGTERM); tmux sessions survive
@@ -370,6 +370,13 @@ curl -fsS http://127.0.0.1:47831/health
 - **Daemon code changes need no rebuild** — tsx runs the new source after `systemctl restart`.
   Only the web SPA (`apps/web/dist`) needs `pnpm build`. Caddy needs a reload only if the
   Caddyfile changes.
+- **Deploy installs must be non-interactive (`CI=1`).** pnpm prints an interactive *"reinstall
+  modules from scratch? (Y/n)"* prompt when `node_modules` was built by a different pnpm version
+  (it pins `pnpm@10.12.1` via `packageManager`, but a host's global pnpm may differ). Over a
+  non-TTY SSH that prompt wedges the deploy and silently skips installing new deps, so the build
+  then fails to resolve them. Always `CI=1 pnpm install --frozen-lockfile`. And **never pipe the
+  build through `| tail`/`| grep`** — a pipeline's exit status is the last command's, so `set -e`
+  won't catch a failed `vite build` and the script will restart into a stale/broken `dist`.
 
 ### Security posture
 
