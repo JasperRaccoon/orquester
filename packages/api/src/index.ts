@@ -328,6 +328,38 @@ export interface GitOpResult {
   output?: string;
 }
 
+// To-do lists — daemon-owned, synced checklists. One record per list; the checklist
+// is GitHub task-list markdown in `body`. Scoped to a workspace (refKey = workspace
+// name) or a project (refKey = project path). No PTY/session.
+
+export type TodoScope = "workspace" | "project";
+
+export interface TodoListRecord {
+  id: string;
+  name: string;            // free-form, renamable (NOT a filename)
+  scope: TodoScope;
+  refKey: string;          // workspace name (scope "workspace") | project path (scope "project")
+  body: string;            // "- [ ] a\n- [x] b" ; "" when empty
+  createdAt: string;       // ISO
+  updatedAt: string;       // ISO
+}
+
+export interface CreateTodoRequest {
+  scope: TodoScope;
+  refKey: string;
+  name?: string;           // default "Untitled"
+}
+
+/** Patch: send only the fields you change. */
+export interface UpdateTodoRequest {
+  name?: string;
+  body?: string;
+}
+
+/** `/events` channel "todos"; type one of these. Payload is always a full TodoListRecord
+ *  (for "todo.deleted" it is the record as it was at deletion — clients remove by id). */
+export type TodoEventType = "todo.created" | "todo.updated" | "todo.deleted";
+
 /** Public auth metadata for the HTTP transport (no secrets). */
 export interface AuthInfoResponse {
   authRequired: boolean;
