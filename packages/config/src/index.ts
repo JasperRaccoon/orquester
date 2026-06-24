@@ -50,7 +50,7 @@ export function expandVars(value: string, vars: ConfigVars): string {
 //
 //   <appdir>/                 (~/.orquester by default, or e.g. ./.stage)
 //     app/     app.json, remotes.json, logs/<yyyy-mm-dd>.log
-//     daemon/  daemon.json, daemon.sock, logs/<yyyy-mm-dd>.log
+//     daemon/  daemon.json, daemon.sock, sessions.json, todos.json, logs/<yyyy-mm-dd>.log
 //
 // Workspaces live wherever daemon.json `workspacesDir` points (default
 // `$userhome/workspaces`; the stage sandbox uses `$appdir/workspaces`).
@@ -121,6 +121,10 @@ export function tmuxSocketPath(baseDir: string): string {
 /** On-disk index of sessions (for reattach on boot); see SessionManager. */
 export function sessionsIndexPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "sessions.json");
+}
+
+export function todosIndexPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "todos.json");
 }
 
 /** `yyyy-mm-dd` in local time. */
@@ -418,6 +422,37 @@ export function createDefaultSessionsConfig(): SessionsConfig {
 
 export function parseSessionsConfig(value: unknown): SessionsConfig {
   return sessionsConfigSchema.parse(value);
+}
+
+// todos.json — the daemon's index of synced to-do lists. One record per list;
+// the checklist body is GitHub task-list markdown. Scoped to a workspace
+// (refKey = workspace name) or a project (refKey = project path).
+
+export const todoScopeSchema = z.enum(["workspace", "project"]);
+
+export const todoRecordSchema = z.object({
+  id: z.string().min(1),
+  name: z.string(),
+  scope: todoScopeSchema,
+  refKey: z.string().min(1),
+  body: z.string().default(""),
+  createdAt: z.string(),
+  updatedAt: z.string()
+});
+export type TodoRecord = z.infer<typeof todoRecordSchema>;
+
+export const todosConfigSchema = z.object({
+  version: z.literal(1).default(1),
+  todos: z.array(todoRecordSchema).default([])
+});
+export type TodosConfig = z.infer<typeof todosConfigSchema>;
+
+export function createDefaultTodosConfig(): TodosConfig {
+  return { version: 1, todos: [] };
+}
+
+export function parseTodosConfig(raw: unknown): TodosConfig {
+  return todosConfigSchema.parse(raw);
 }
 
 // ClientConfig — what the daemon reports about how to reach itself.}
