@@ -1,8 +1,9 @@
 import React, { useState } from "react";
-import { Circle, FolderTree, GitBranch, Pencil, X } from "lucide-react";
+import { FolderTree, GitBranch, Pencil, X } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { getRegistryIcon } from "../../icons";
 import { ContextMenu, type ContextMenuItem } from "../ui/context-menu";
+import { SessionStatusDot } from "../ui/session-status-dot";
 import {
   useActiveTabId,
   useAppStore,
@@ -147,8 +148,8 @@ export const TabStrip: React.FC = () => {
             ) : (
               <span className="max-w-[140px] truncate">{title}</span>
             )}
-            {isSession && tab.session.status === "exited" ? (
-              <Circle size={7} className="ml-0.5 fill-neutral-600 text-neutral-600" />
+            {isSession ? (
+              <SessionStatusDot sessionId={tab.id} status={tab.session.status} className="ml-0.5" />
             ) : null}
             <button
               type="button"

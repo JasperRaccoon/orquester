@@ -1,6 +1,7 @@
 import React from "react";
 import { ChevronDown, Circle, FolderTree, GitBranch } from "lucide-react";
 import { AdaptiveMenu, DropdownEmpty, DropdownItem } from "../ui";
+import { SessionStatusDot } from "../ui/session-status-dot";
 import { getRegistryIcon } from "../../icons";
 import { useActiveTabId, useAppStore, useProjectTabs } from "../../store/app";
 import type { ProjectTab } from "../../store/app";
@@ -36,6 +37,9 @@ export const TabSwitcher: React.FC = () => {
       {tabs.map((tab) => (
         <DropdownItem key={tab.id} icon={tabIcon(tab)} onClick={() => activateTab(tab.id)}>
           <span className="flex items-center gap-2">
+            {tab.type === "session" ? (
+              <SessionStatusDot sessionId={tab.id} status={tab.session.status} />
+            ) : null}
             {tabLabel(tab)}
             {tab.id === activeId && <Circle size={7} className="fill-neutral-300 text-neutral-300" />}
           </span>

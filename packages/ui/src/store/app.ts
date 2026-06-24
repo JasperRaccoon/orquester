@@ -277,6 +277,70 @@ export type ProjectTab =
   | { id: string; type: "files"; title: string }
   | { id: string; type: "git"; title: string };
 
+/**
+ * Client-derived per-session activity that drives the status dot. `state`
+ * reflects output flow (working = PTY output within the last
+ * {@link IDLE_THRESHOLD_MS}; idle = quiet, i.e. waiting for the user).
+ * `attention` is raised when an agent rings the terminal bell and is cleared
+ * once the user looks at / types into the session.
+ */
+export interface SessionActivity {
+  state: "working" | "idle";
+  attention: boolean;
+}
+
+/** Silence (ms) after the last PTY output before a session is deemed idle/waiting. */
+const IDLE_THRESHOLD_MS = 3000;
+/** Per-session quiescence timers (module-level: timers aren't store state). */
+const idleTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+/** Cancel a session's pending quiescence timer, if any. */
+function clearIdleTimer(id: string): void {
+  const existing = idleTimers.get(id);
+  if (existing) {
+    clearTimeout(existing);
+    idleTimers.delete(id);
+  }
+}
+
+/**
+ * (Re)arm a session's quiescence timer. Each output chunk pushes the deadline
+ * out; after {@link IDLE_THRESHOLD_MS} with no further output the session flips
+ * working → idle (its bell-driven `attention` flag is preserved).
+ */
+function rearmIdleTimer(
+  id: string,
+  get: StoreApi<AppState>["getState"],
+  set: StoreApi<AppState>["setState"]
+): void {
+  clearIdleTimer(id);
+  idleTimers.set(
+    id,
+    setTimeout(() => {
+      idleTimers.delete(id);
+      const current = get().activityById[id];
+      if (current?.state === "working") {
+        set((state) => ({
+          activityById: { ...state.activityById, [id]: { state: "idle", attention: current.attention } }
+        }));
+      }
+    }, IDLE_THRESHOLD_MS)
+  );
+}
+
+/** Drop a session's activity entry (returns the same ref when absent → no-op set). */
+function dropActivity(
+  activityById: Record<string, SessionActivity>,
+  id: string
+): Record<string, SessionActivity> {
+  if (!(id in activityById)) {
+    return activityById;
+  }
+  const next = { ...activityById };
+  delete next[id];
+  return next;
+}
+
 function upsertSession(sessions: SessionSummary[], next: SessionSummary): SessionSummary[] {
   const index = sessions.findIndex((s) => s.id === next.id);
   if (index === -1) {
@@ -328,6 +392,8 @@ export interface AppState {
 
   /** All daemon sessions; a project's sessions are its tabs. */
   sessions: SessionSummary[];
+  /** Client-derived working/idle + attention per session id (drives the status dot). */
+  activityById: Record<string, SessionActivity>;
   /** Client-local tool tabs (file browser) per project path. */
   fileTabsByProject: Record<string, FileTab[]>;
   /** Client-local Git tabs (GitHub-Desktop-style) per project path. */
@@ -398,6 +464,13 @@ export interface AppState {
   renameTab: (id: string, title: string) => Promise<void>;
   reorderTabs: (orderedSessionIds: string[]) => Promise<void>;
 
+  /** Record output activity for a session (→ working; re-arms its idle timer). */
+  noteSessionActivity: (id: string) => void;
+  /** Record a terminal bell for a session (→ idle + attention; awaiting the user). */
+  noteSessionBell: (id: string) => void;
+  /** Clear a session's attention flag (the user looked at / typed into it). */
+  clearSessionAttention: (id: string) => void;
+
   applyEvent: (event: EventMessage) => void;
 }
 
@@ -425,6 +498,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   projects: [],
   projectsLoading: false,
   sessions: [],
+  activityById: {},
   fileTabsByProject: {},
   gitTabsByProject: {},
   activeTabByProject: {},
@@ -1173,6 +1247,38 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
+  noteSessionActivity: (id) => {
+    rearmIdleTimer(id, get, set);
+    const current = get().activityById[id];
+    // Already shown as working with nothing to clear → the timer re-arm above is
+    // all that's needed; skip the set() so a streaming burst doesn't churn renders.
+    if (current && current.state === "working" && !current.attention) {
+      return;
+    }
+    set((state) => ({
+      activityById: { ...state.activityById, [id]: { state: "working", attention: false } }
+    }));
+  },
+
+  noteSessionBell: (id) => {
+    // The bell is an explicit "done — your turn": go idle immediately (skip the
+    // quiescence wait) and raise attention so the dot pulses until acknowledged.
+    clearIdleTimer(id);
+    set((state) => ({
+      activityById: { ...state.activityById, [id]: { state: "idle", attention: true } }
+    }));
+  },
+
+  clearSessionAttention: (id) => {
+    const current = get().activityById[id];
+    if (!current || !current.attention) {
+      return;
+    }
+    set((state) => ({
+      activityById: { ...state.activityById, [id]: { ...current, attention: false } }
+    }));
+  },
+
   applyEvent: (event) => {
     if (event.channel === "registry" && event.type === "registry.changed") {
       const entry = event.payload as RegistryEntry;
@@ -1188,6 +1294,17 @@ export const useAppStore = create<AppState>((set, get) => ({
       event.type === "session.updated"
     ) {
       const summary = event.payload as SessionSummary;
+      // A real process exit makes activity meaningless (the gray "exited" dot
+      // wins): drop tracking + the pending timer so a late quiescence fire can't
+      // resurrect a working/idle dot on a dead session.
+      if (event.type === "session.exited") {
+        clearIdleTimer(summary.id);
+        set((state) => ({
+          sessions: upsertSession(state.sessions, summary),
+          activityById: dropActivity(state.activityById, summary.id)
+        }));
+        return;
+      }
       set((state) => ({ sessions: upsertSession(state.sessions, summary) }));
     } else if (event.type === "session.closed") {
       const { id } = event.payload as { id: string };
@@ -1228,9 +1345,11 @@ function reassignActive(
 }
 
 function removeSession(state: AppState, id: string): Partial<AppState> {
+  clearIdleTimer(id);
   const sessions = state.sessions.filter((s) => s.id !== id);
   return {
     sessions,
+    activityById: dropActivity(state.activityById, id),
     activeTabByProject: reassignActive(
       state.activeTabByProject,
       id,
@@ -1340,4 +1459,13 @@ export function useViewMode(): ViewMode {
   return useAppStore((s) =>
     s.currentProject ? (s.viewModeByProject[s.currentProject.path] ?? "tabs") : "tabs"
   );
+}
+
+/**
+ * Subscribe to a single session's activity slice. Only the dot for the session
+ * that transitioned re-renders (other entries keep their object identity across
+ * an `activityById` update), so this stays cheap on a chatty output stream.
+ */
+export function useSessionActivity(id: string): SessionActivity | undefined {
+  return useAppStore((s) => s.activityById[id]);
 }

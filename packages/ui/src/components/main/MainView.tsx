@@ -6,6 +6,7 @@ import { TerminalView } from "../terminal";
 import { FileBrowser } from "../files";
 import { GitView } from "../git";
 import { getRegistryIcon } from "../../icons";
+import { SessionStatusDot } from "../ui/session-status-dot";
 import { useIsDesktop } from "../../hooks";
 import {
   useActiveTabId,
@@ -110,6 +111,9 @@ export const MainView: React.FC = () => {
               >
                 <span className="text-neutral-500">{cellIcon(tab)}</span>
                 <span className="flex-1 truncate text-xs text-neutral-300">{cellTitle(tab)}</span>
+                {tab.type === "session" ? (
+                  <SessionStatusDot sessionId={tab.id} status={tab.session.status} />
+                ) : null}
                 <button
                   type="button"
                   aria-label="Close tab"

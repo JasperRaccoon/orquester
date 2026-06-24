@@ -3,6 +3,7 @@ import { Terminal, type ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { useApi } from "../../context/orquester-context";
+import { useAppStore } from "../../store/app";
 import { fileToBase64 } from "../../lib/files";
 import type { SessionSummary } from "../../types";
 import type { ViewMode } from "../../lib/view-mode";
@@ -381,8 +382,19 @@ export const TerminalView: React.FC<{
     container.addEventListener("paste", onPaste, true);
 
     const inputSub = term.onData((data) => {
+      // The user is responding → clear any bell-driven attention pulse.
+      useAppStore.getState().clearSessionAttention(session.id);
       void api.sendSessionInput(session.id, data);
     });
+
+    // Agents ring the terminal bell (BEL) when they finish / want attention.
+    // Treat it as an explicit "your turn": go idle now (skip the quiescence wait)
+    // and pulse the status dot. Scoped to agents so a shell's completion beep
+    // doesn't masquerade as "waiting for you".
+    const bellSub =
+      session.kind === "agent"
+        ? term.onBell(() => useAppStore.getState().noteSessionBell(session.id))
+        : null;
 
     const resizeObserver = new ResizeObserver(() => applyFit());
     resizeObserver.observe(container);
@@ -424,6 +436,9 @@ export const TerminalView: React.FC<{
       onData: (chunk) => {
         term.write(chunk);
         forceAgentRepaint();
+        // Output flowing → working; re-arms the quiescence timer (guarded so a
+        // streaming burst doesn't churn the store).
+        useAppStore.getState().noteSessionActivity(session.id);
       },
       onEnd: () => term.write("\r\n\x1b[2m[session ended]\x1b[0m\r\n"),
       // Multiplexed socket reconnected → clear before the buffer replay so the
@@ -447,6 +462,7 @@ export const TerminalView: React.FC<{
         clearTimeout(nudgeTimer);
       }
       inputSub.dispose();
+      bellSub?.dispose();
       resizeObserver.disconnect();
       term.dispose();
       termRef.current = null;
@@ -469,8 +485,10 @@ export const TerminalView: React.FC<{
   useEffect(() => {
     if (active) {
       termRef.current?.focus();
+      // Looking at the session acknowledges any bell-driven attention pulse.
+      useAppStore.getState().clearSessionAttention(session.id);
     }
-  }, [active, viewMode]);
+  }, [active, viewMode, session.id]);
 
   // Outer wrapper is the positioning context for the drag overlay + status
   // line; the inner div is the dedicated xterm host the ResizeObserver watches,
