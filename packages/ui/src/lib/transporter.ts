@@ -70,6 +70,11 @@ export interface Transporter {
   /** Perform a single request/response round trip. */
   request<T = unknown>(req: TransportRequest): Promise<TransportResponse<T>>;
   /**
+   * Optional binary GET (file preview: image/pdf/audio/video bytes). Returns the
+   * raw bytes; absent on transports that cannot carry binary.
+   */
+  requestBytes?(req: TransportRequest): Promise<TransportResponse<ArrayBuffer>>;
+  /**
    * Open a long-lived chunked GET stream (session output, event bus). Runtime
    * specific: web uses streaming fetch, desktop bridges over IPC.
    */

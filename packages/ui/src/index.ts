@@ -29,6 +29,7 @@ export {
   type HttpClient,
   type HttpClientRequest,
   type HttpClientResponse,
+  type HttpClientBytesResponse,
   type HttpClientStreamHandlers,
   type HttpClientStreamHandle
 } from "./lib/http-client";

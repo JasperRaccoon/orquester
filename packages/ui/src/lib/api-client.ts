@@ -8,6 +8,7 @@ import type {
   CreateSessionRequest,
   CreateWorkspaceRequest,
   EventMessage,
+  FsArchiveResponse,
   FsListResponse,
   FsReadResponse,
   FsUploadRequest,
@@ -216,6 +217,27 @@ export class ApiClient {
 
   readFile(path: string, signal?: AbortSignal): Promise<FsReadResponse> {
     return this.send("GET", "/api/fs/read", { query: { path }, signal });
+  }
+
+  /** Raw bytes of a file (binary-safe) for the preview viewers. */
+  async readFileBytes(path: string, signal?: AbortSignal): Promise<ArrayBuffer> {
+    if (!this.transporter.requestBytes) {
+      throw new Error("Binary preview is not supported on this connection.");
+    }
+    const response = await this.transporter.requestBytes({
+      method: "GET",
+      path: "/api/fs/raw",
+      query: { path },
+      signal
+    });
+    if (!response.ok) {
+      throw new ApiError(response.status, "GET", "/api/fs/raw", response.headers, undefined);
+    }
+    return response.data;
+  }
+
+  listArchive(path: string, signal?: AbortSignal): Promise<FsArchiveResponse> {
+    return this.send("GET", "/api/fs/archive", { query: { path }, signal });
   }
 
   createFsEntry(path: string, kind: "file" | "dir"): Promise<{ ok: true }> {

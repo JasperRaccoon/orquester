@@ -21,6 +21,13 @@ export interface HttpClientResponse {
   text(): Promise<string>;
 }
 
+export interface HttpClientBytesResponse {
+  status: number;
+  ok: boolean;
+  headers: Record<string, string>;
+  bytes(): Promise<ArrayBuffer>;
+}
+
 /** Callbacks for a chunked GET stream (session output / event bus). */
 export interface HttpClientStreamHandlers {
   /** A decoded text chunk arrived. */
@@ -36,6 +43,12 @@ export interface HttpClientStreamHandle {
 
 export interface HttpClient {
   send(req: HttpClientRequest): Promise<HttpClientResponse>;
+  /**
+   * Optional binary GET (file preview). Web uses fetch -> arrayBuffer; desktop
+   * injects a Node client that returns bytes over IPC. Absent => binary preview
+   * is unavailable on that connection.
+   */
+  sendBytes?(req: HttpClientRequest): Promise<HttpClientBytesResponse>;
   /**
    * Optional chunked GET stream. When present, the HTTP transporter routes
    * `openStream` (the NDJSON event bus, session output) through it instead of
@@ -76,6 +89,25 @@ export class FetchHttpClient implements HttpClient {
       ok: response.ok,
       headers,
       text: () => response.text()
+    };
+  }
+
+  async sendBytes(req: HttpClientRequest): Promise<HttpClientBytesResponse> {
+    const doFetch = this.fetchImpl;
+    const response = await doFetch(req.url, {
+      method: req.method,
+      headers: req.headers,
+      signal: req.signal
+    });
+    const headers: Record<string, string> = {};
+    response.headers.forEach((value, key) => {
+      headers[key] = value;
+    });
+    return {
+      status: response.status,
+      ok: response.ok,
+      headers,
+      bytes: () => response.arrayBuffer()
     };
   }
 }

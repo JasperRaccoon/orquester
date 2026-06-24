@@ -70,6 +70,20 @@ export class HttpTransporter implements Transporter {
     };
   }
 
+  async requestBytes(req: TransportRequest): Promise<TransportResponse<ArrayBuffer>> {
+    if (!this.client.sendBytes) {
+      throw new Error("This transport cannot fetch binary content.");
+    }
+    const url = `${this.baseUrl}${req.path}${buildQueryString(req.query)}`;
+    const headers: Record<string, string> = { ...req.headers };
+    if (this.credential) {
+      headers.Authorization = `Bearer ${this.credential}`;
+    }
+    const response = await this.client.sendBytes({ url, method: req.method, headers, signal: req.signal });
+    const data = response.ok ? await response.bytes() : new ArrayBuffer(0);
+    return { status: response.status, ok: response.ok, data, headers: response.headers };
+  }
+
   openStream(path: string, handlers: StreamHandlers): StreamHandle {
     const url = `${this.baseUrl}${path}`;
     const headers: Record<string, string> = {};
