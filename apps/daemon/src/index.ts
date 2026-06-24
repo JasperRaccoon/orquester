@@ -6,6 +6,7 @@ import type {
   CreateSessionRequest,
   CreateWorkspaceRequest,
   EventMessage,
+  FsCapabilitiesResponse,
   FsCreateRequest,
   FsEntry,
   FsListResponse,
@@ -42,6 +43,7 @@ import { Broadcaster } from "./broadcaster";
 import { AccountError, AccountsService } from "./accounts";
 import { GitError, GitService } from "./git";
 import { listArchiveEntries } from "./archive";
+import { resolveZipTool, spawnDirZip } from "./zip";
 import {
   type AppConfig,
   type ClientConfig,
@@ -74,7 +76,7 @@ import {
 import fastifyStatic from "@fastify/static";
 import websocketPlugin from "@fastify/websocket";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
-import { createWriteStream, existsSync, type WriteStream } from "node:fs";
+import { createReadStream, createWriteStream, existsSync, type WriteStream } from "node:fs";
 import { mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir, platform as osPlatform } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -372,8 +374,14 @@ function createServer(
       });
     }
 
+    // A browser download navigation (<a download>) can't set an Authorization
+    // header, so /api/fs/download also accepts the credential as ?token= — the
+    // same trick /ws uses. Scoped to this one route; the token is redacted from
+    // logs by the request serializer above.
+    const headerToken = request.headers.authorization?.replace(/^Bearer\s+/i, "");
+    const queryToken = url === "/api/fs/download" ? (request.query as { token?: string }).token : undefined;
     const authorized = authorizeCredential(
-      request.headers.authorization?.replace(/^Bearer\s+/i, ""),
+      headerToken ?? queryToken,
       config.transports.http.username,
       config.transports.http.passwordHash
     );
@@ -925,6 +933,98 @@ function createServer(
         message: error instanceof Error ? error.message : "Cannot read archive."
       });
     }
+  });
+
+  // File-browser capabilities probe: whether the server can zip a folder for
+  // download (a zip tool is on PATH). Single-file download never needs a tool.
+  app.get("/api/fs/capabilities", async (): Promise<FsCapabilitiesResponse> => {
+    const tool = resolveZipTool();
+    return { folderZip: tool !== null, zipTool: tool?.bin ?? null };
+  });
+
+  // Download a file (streamed, uncapped) or a folder (zipped on the fly via a
+  // host tool, streamed). Distinct from /api/fs/raw, which is the 50 MB-capped,
+  // in-memory inline-preview route. Auth: this route also accepts ?token= (see
+  // the onRequest hook) so a native <a download> works without a header.
+  app.get<{ Querystring: { path?: string } }>("/api/fs/download", async (request, reply) => {
+    const path = request.query.path;
+    if (!path) {
+      void reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
+      return;
+    }
+    let safe: string;
+    try {
+      safe = await assertInsideFsRoot(resolved.fsRoot, path);
+    } catch (error) {
+      if (error instanceof FsSandboxError) {
+        void reply.code(403).send({ code: "FS_FORBIDDEN", message: error.message });
+        return;
+      }
+      void reply.code(400).send({
+        code: "FS_ERROR",
+        message: error instanceof Error ? error.message : "Cannot resolve path."
+      });
+      return;
+    }
+
+    let info;
+    try {
+      info = await stat(safe);
+    } catch {
+      void reply.code(404).send({ code: "FS_ERROR", message: "Not found." });
+      return;
+    }
+    const name = basename(safe);
+
+    // File: stream the bytes as-is. createReadStream (not readFile) means no
+    // memory cap; Content-Length from the stat gives the browser a progress bar.
+    if (info.isFile()) {
+      void reply
+        .header("Content-Disposition", contentDisposition(name))
+        .header("Content-Length", String(info.size))
+        .header("X-Content-Type-Options", "nosniff")
+        .type("application/octet-stream")
+        .send(createReadStream(safe));
+      return;
+    }
+
+    // Directory: spawn a zip tool and stream its stdout (hijack pattern, as the
+    // session-output route does). Zip size is unknown up front, so it's chunked.
+    if (info.isDirectory()) {
+      const child = spawnDirZip(safe);
+      if (!child) {
+        void reply.code(501).send({
+          code: "FS_UNSUPPORTED",
+          message: "No zip tool (bsdtar/zip/7z) on the server PATH."
+        });
+        return;
+      }
+      reply.hijack();
+      reply.raw.writeHead(200, {
+        "content-type": "application/zip",
+        "content-disposition": contentDisposition(`${name}.zip`),
+        "x-content-type-options": "nosniff",
+        "cache-control": "no-cache"
+      });
+      // pipe() ends reply.raw when stdout ends. Drain stderr so a chatty tool
+      // (zip warns on e.g. empty dirs) can't block on a full pipe. Kill the
+      // child if the client disconnects; destroy the socket on a spawn error.
+      child.stdout.pipe(reply.raw);
+      child.stderr.resume();
+      child.on("error", () => reply.raw.destroy());
+      // A non-zero exit (e.g. an unreadable subdir) means the zip is incomplete.
+      // stdout closing would otherwise end the chunked response cleanly, so the
+      // client would see a truncated body as a successful 200. Destroy the socket
+      // instead so the aborted transfer fails visibly. Harmless on a clean exit
+      // (code 0 → no-op; destroy() on an already-finished socket is idempotent).
+      child.on("close", (code) => {
+        if (code) reply.raw.destroy();
+      });
+      request.raw.on("close", () => child.kill());
+      return;
+    }
+
+    void reply.code(400).send({ code: "FS_ERROR", message: "Not a file or folder." });
   });
 
   // Write (save) a file's text content.
@@ -1932,6 +2032,17 @@ async function assertInsideFsRoot(root: string, target: string): Promise<string>
 
 /** Thrown when an /api/fs path escapes fsRoot. */
 class FsSandboxError extends Error {}
+
+/**
+ * Build a `Content-Disposition: attachment` value. The ASCII filename="" form is
+ * a fallback with control/quote/backslash and non-ASCII bytes replaced by "_";
+ * the RFC 5987 filename*=UTF-8'' form carries the real (possibly non-ASCII) name
+ * for browsers that honor it.
+ */
+function contentDisposition(name: string): string {
+  const ascii = name.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`;
+}
 
 /**
  * Map a thrown error from a /api/git/* handler to a reply: a sandbox escape →
