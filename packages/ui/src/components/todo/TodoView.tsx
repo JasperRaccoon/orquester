@@ -82,15 +82,19 @@ export const TodoView: React.FC<TodoViewProps> = ({ todoId, active }) => {
   const remove = (id: string) => setItems(items.filter((i) => i.id !== id));
   const updateText = (id: string, text: string) =>
     setItems(items.map((i) => (i.id === id ? { ...i, text } : i)));
-  const reorder = (targetId: string) => {
-    if (!dragId || dragId === targetId) return;
+  // Move `sourceId` into `targetId`'s slot. Shared by drag-drop and Alt+↑/↓.
+  const moveItemToSlot = (sourceId: string, targetId: string) => {
+    if (sourceId === targetId) return;
     const next = [...items];
-    const from = next.findIndex((i) => i.id === dragId);
+    const from = next.findIndex((i) => i.id === sourceId);
     const to = next.findIndex((i) => i.id === targetId);
     if (from < 0 || to < 0) return;
     const [moved] = next.splice(from, 1);
     next.splice(to, 0, moved);
     setItems(next);
+  };
+  const reorder = (targetId: string) => {
+    if (dragId) moveItemToSlot(dragId, targetId);
   };
 
   const onItemKeyDown = (e: React.KeyboardEvent<HTMLInputElement>, item: TodoItem) => {
@@ -98,6 +102,12 @@ export const TodoView: React.FC<TodoViewProps> = ({ todoId, active }) => {
     const start = el.selectionStart ?? 0;
     const end = el.selectionEnd ?? start;
     const visIdx = visible.findIndex((v) => v.id === item.id);
+
+    // Esc → drop out of editing.
+    if (e.key === "Escape") {
+      el.blur();
+      return;
+    }
 
     // Cmd/Ctrl+Enter → toggle done (Notion's shortcut), keep the caret where it is.
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
@@ -141,6 +151,25 @@ export const TodoView: React.FC<TodoViewProps> = ({ todoId, active }) => {
       return;
     }
 
+    // Alt+↑/↓ → move the focused item up/down among the visible items; caret rides with it.
+    if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+      e.preventDefault();
+      const neighbor = visible[visIdx + (e.key === "ArrowUp" ? -1 : 1)];
+      if (neighbor) {
+        moveItemToSlot(item.id, neighbor.id);
+        focusLater(item.id, start);
+      }
+      return;
+    }
+
+    // Cmd/Ctrl+↑/↓ → jump the caret to the first/last item.
+    if ((e.metaKey || e.ctrlKey) && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+      e.preventDefault();
+      const target = e.key === "ArrowUp" ? visible[0] : visible[visible.length - 1];
+      if (target) focusNow(target.id, e.key === "ArrowUp" ? 0 : "end");
+      return;
+    }
+
     if (e.key === "ArrowUp" && visIdx > 0) {
       e.preventDefault();
       focusNow(visible[visIdx - 1].id, start);
@@ -154,6 +183,10 @@ export const TodoView: React.FC<TodoViewProps> = ({ todoId, active }) => {
   };
 
   const onAddKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Escape") {
+      e.currentTarget.blur();
+      return;
+    }
     if (e.key === "Enter" && adding.trim()) {
       e.preventDefault();
       const item: TodoItem = { id: crypto.randomUUID(), checked: false, text: adding.trim() };
