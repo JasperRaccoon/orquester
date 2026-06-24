@@ -6,6 +6,7 @@ import type {
   CreateAccountRequest,
   CreateProjectRequest,
   CreateSessionRequest,
+  CreateTodoRequest,
   CreateWorkspaceRequest,
   EventMessage,
   FsArchiveResponse,
@@ -32,6 +33,9 @@ import type {
   SessionSummary,
   SessionUploadRequest,
   SessionUploadResponse,
+  TodoListRecord,
+  TodoScope,
+  UpdateTodoRequest,
   WorkspaceSummary
 } from "@orquester/api";
 import type { AppConfig, DaemonConfig, RemoteConnectionConfig } from "@orquester/config";
@@ -299,6 +303,24 @@ export class ApiClient {
 
   deleteFsEntry(path: string): Promise<{ ok: true }> {
     return this.send("DELETE", "/api/fs", { query: { path } });
+  }
+
+  // --- To-do lists (daemon-persisted, synced) ------------------------------
+
+  listTodos(scope: TodoScope, refKey: string, signal?: AbortSignal): Promise<TodoListRecord[]> {
+    return this.send("GET", "/api/todos", { query: { scope, refKey }, signal });
+  }
+
+  createTodo(req: CreateTodoRequest): Promise<TodoListRecord> {
+    return this.send("POST", "/api/todos", { body: req });
+  }
+
+  updateTodo(id: string, patch: UpdateTodoRequest): Promise<TodoListRecord> {
+    return this.send("PUT", `/api/todos/${encodeURIComponent(id)}`, { body: patch });
+  }
+
+  deleteTodo(id: string): Promise<void> {
+    return this.send("DELETE", `/api/todos/${encodeURIComponent(id)}`);
   }
 
   // --- Git -----------------------------------------------------------------
