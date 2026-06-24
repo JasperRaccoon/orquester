@@ -13,6 +13,8 @@ contextBridge.exposeInMainWorld("orquesterDesktop", {
   },
   // Byte transport for the renderer's UnixSocketTransporter.
   request: (request) => ipcRenderer.invoke("orquester:request", request),
+  // Raw-bytes request (file preview) over the unix socket.
+  requestBytes: (request) => ipcRenderer.invoke("orquester:request-bytes", request),
   // Chunked streaming (session output, event bus). The renderer supplies the id.
   streamOpen: (streamId, path) => ipcRenderer.send("orquester:stream:open", { streamId, path }),
   streamClose: (streamId) => ipcRenderer.send("orquester:stream:close", streamId),
@@ -30,6 +32,8 @@ contextBridge.exposeInMainWorld("orquesterDesktop", {
   // Runs in the main process (Node) so cross-origin calls to the VPS aren't
   // gated by the browser's CORS — the daemon serves no CORS headers.
   httpRequest: (request) => ipcRenderer.invoke("orquester:http:request", request),
+  // Raw-bytes request (file preview) over the remote HTTP transport.
+  httpRequestBytes: (request) => ipcRenderer.invoke("orquester:http:request-bytes", request),
   httpStreamOpen: (streamId, url, headers) => ipcRenderer.send("orquester:http-stream:open", { streamId, url, headers }),
   httpStreamClose: (streamId) => ipcRenderer.send("orquester:http-stream:close", streamId),
   onHttpStreamData: (cb) => {

@@ -1,5 +1,6 @@
 import type {
   HttpClient,
+  HttpClientBytesResponse,
   HttpClientRequest,
   HttpClientResponse,
   HttpClientStreamHandle,
@@ -32,6 +33,20 @@ export class NodeHttpClient implements HttpClient {
       ok: response.ok,
       headers: response.headers,
       text: () => Promise.resolve(response.body)
+    };
+  }
+
+  async sendBytes(req: HttpClientRequest): Promise<HttpClientBytesResponse> {
+    const response = await this.bridge.httpRequestBytes({
+      url: req.url,
+      method: req.method,
+      headers: req.headers
+    });
+    return {
+      status: response.status,
+      ok: response.ok,
+      headers: response.headers,
+      bytes: () => Promise.resolve(response.body)
     };
   }
 

@@ -181,6 +181,41 @@ function requestOverSocket({ method, path: requestPath, headers, body }: DaemonR
   });
 }
 
+interface DaemonBytesResponse {
+  status: number;
+  ok: boolean;
+  headers: http.IncomingHttpHeaders;
+  body: ArrayBuffer;
+}
+
+function toArrayBuffer(buf: Buffer): ArrayBuffer {
+  return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer;
+}
+
+/** Like requestOverSocket but preserves raw bytes (file preview). */
+function requestBytesOverSocket({ method, path: requestPath, headers, body }: DaemonRequest): Promise<DaemonBytesResponse> {
+  return new Promise((resolve, reject) => {
+    if (!daemonSocketPath) {
+      reject(new Error("Orquester daemon is not running."));
+      return;
+    }
+    const req = http.request(
+      { socketPath: daemonSocketPath, path: requestPath || "/", method: method || "GET", headers: headers || {} },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer) => chunks.push(chunk));
+        res.on("end", () => {
+          const status = res.statusCode ?? 0;
+          resolve({ status, ok: status >= 200 && status < 300, headers: res.headers, body: toArrayBuffer(Buffer.concat(chunks)) });
+        });
+      }
+    );
+    req.on("error", reject);
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
 const streams = new Map<string, http.ClientRequest>();
 
 function openStreamOverSocket(event: IpcMainEvent, { streamId, path: streamPath }: { streamId: string; path: string }): void {
@@ -266,6 +301,30 @@ function requestOverHttp({ url, method, headers, body }: RemoteHttpRequest): Pro
   });
 }
 
+/** Like requestOverHttp but preserves raw bytes (file preview over TCP). */
+function requestBytesOverHttp({ url, method, headers, body }: RemoteHttpRequest): Promise<DaemonBytesResponse> {
+  return new Promise((resolve, reject) => {
+    let target: URL;
+    try {
+      target = new URL(url);
+    } catch (error) {
+      reject(error instanceof Error ? error : new Error(String(error)));
+      return;
+    }
+    const req = httpModuleFor(target).request(target, { method: method || "GET", headers: headers || {} }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk: Buffer) => chunks.push(chunk));
+      res.on("end", () => {
+        const status = res.statusCode ?? 0;
+        resolve({ status, ok: status >= 200 && status < 300, headers: res.headers, body: toArrayBuffer(Buffer.concat(chunks)) });
+      });
+    });
+    req.on("error", reject);
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
 /** Open a chunked GET stream (event bus / session output) to a remote daemon. */
 function openHttpStream(
   event: IpcMainEvent,
@@ -315,11 +374,13 @@ function closeStream(streamId: string): void {
 
 function registerIpc(): void {
   ipcMain.handle("orquester:request", (_event, request: DaemonRequest) => requestOverSocket(request));
+  ipcMain.handle("orquester:request-bytes", (_event, request: DaemonRequest) => requestBytesOverSocket(request));
   ipcMain.on("orquester:stream:open", (event, payload: { streamId: string; path: string }) => openStreamOverSocket(event, payload));
   ipcMain.on("orquester:stream:close", (_event, streamId: string) => closeStream(streamId));
 
   // Remote HTTP transport (the renderer's HttpTransporter for remote servers).
   ipcMain.handle("orquester:http:request", (_event, request: RemoteHttpRequest) => requestOverHttp(request));
+  ipcMain.handle("orquester:http:request-bytes", (_event, request: RemoteHttpRequest) => requestBytesOverHttp(request));
   ipcMain.on(
     "orquester:http-stream:open",
     (event, payload: { streamId: string; url: string; headers?: http.OutgoingHttpHeaders }) => openHttpStream(event, payload)

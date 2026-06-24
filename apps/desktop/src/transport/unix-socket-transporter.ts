@@ -22,6 +22,14 @@ export interface DesktopBridgeResponse {
   body: string;
 }
 
+/** Binary response shape (file preview) — raw bytes instead of a decoded body. */
+export interface DesktopBridgeBytesResponse {
+  status: number;
+  ok: boolean;
+  headers: Record<string, string>;
+  body: ArrayBuffer;
+}
+
 /** Shape exchanged with the main process for a remote (TCP) unary request. */
 export interface DesktopBridgeHttpRequest {
   url: string;
@@ -33,6 +41,7 @@ export interface DesktopBridgeHttpRequest {
 /** The full bridge the preload exposes for talking to the daemon over the socket. */
 export interface DesktopBridge {
   request(request: DesktopBridgeRequest): Promise<DesktopBridgeResponse>;
+  requestBytes(request: DesktopBridgeRequest): Promise<DesktopBridgeBytesResponse>;
   streamOpen(streamId: string, path: string): void;
   streamClose(streamId: string): void;
   onStreamData(cb: (payload: { streamId: string; chunk: string }) => void): () => void;
@@ -40,6 +49,7 @@ export interface DesktopBridge {
   // Remote HTTP transport (used by the renderer's HttpTransporter for remote
   // servers; performed in the main process so it bypasses browser CORS).
   httpRequest(request: DesktopBridgeHttpRequest): Promise<DesktopBridgeResponse>;
+  httpRequestBytes(request: DesktopBridgeHttpRequest): Promise<DesktopBridgeBytesResponse>;
   httpStreamOpen(streamId: string, url: string, headers?: Record<string, string>): void;
   httpStreamClose(streamId: string): void;
   onHttpStreamData(cb: (payload: { streamId: string; chunk: string }) => void): () => void;
@@ -81,6 +91,15 @@ export class UnixSocketTransporter implements Transporter {
       data,
       headers: response.headers
     };
+  }
+
+  async requestBytes(req: TransportRequest): Promise<TransportResponse<ArrayBuffer>> {
+    const response = await this.bridge.requestBytes({
+      method: req.method,
+      path: `${req.path}${buildQueryString(req.query)}`,
+      headers: { ...req.headers }
+    });
+    return { status: response.status, ok: response.ok, data: response.body, headers: response.headers };
   }
 
   openStream(path: string, handlers: StreamHandlers): StreamHandle {

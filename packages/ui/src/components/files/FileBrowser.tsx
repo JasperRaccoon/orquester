@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
-  ArrowLeft,
   ChevronDown,
   ChevronRight,
   File,
@@ -8,7 +7,6 @@ import {
   Folder,
   FolderPlus,
   RefreshCw,
-  Save,
   Trash2,
   Upload
 } from "lucide-react";
@@ -24,7 +22,7 @@ import {
   Input,
   type ContextMenuItem
 } from "../ui";
-import { Editor } from "./Editor";
+import { FilePreview } from "./FilePreview";
 import { useApi } from "../../context/orquester-context";
 import { usePollWhileActive } from "../../hooks";
 import { gatherFromDataTransfer, gatherFromInput } from "../../lib/files";
@@ -52,6 +50,7 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ 
   const [childrenByPath, setChildrenByPath] = useState<Record<string, FsEntry[]>>({});
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  const [selectedSize, setSelectedSize] = useState(0);
   const [activeDir, setActiveDir] = useState(rootPath);
   const [creating, setCreating] = useState<null | "file" | "dir">(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
@@ -176,8 +175,9 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ 
     });
   };
 
-  const selectFile = (path: string) => {
+  const selectFile = (path: string, size: number) => {
     setSelectedFile(path);
+    setSelectedSize(size);
     setActiveDir(parentOf(path));
   };
 
@@ -402,7 +402,7 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ 
           selectedFile ? "flex" : "hidden md:flex"
         )}
       >
-        <FileContent path={selectedFile} onBack={() => setSelectedFile(null)} />
+        <FilePreview path={selectedFile} size={selectedSize} onBack={() => setSelectedFile(null)} />
       </div>
 
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menuItems} onClose={() => setMenu(null)} />}
@@ -458,7 +458,7 @@ interface TreeLevelProps {
   activeDir: string;
   dropTarget: string | null;
   onToggleDir: (path: string) => void;
-  onSelectFile: (path: string) => void;
+  onSelectFile: (path: string, size: number) => void;
   onContextMenu: (
     event: React.MouseEvent,
     dir: string,
@@ -490,7 +490,7 @@ const TreeLevel: React.FC<TreeLevelProps> = (props) => {
           <React.Fragment key={entry.path}>
             <button
               type="button"
-              onClick={() => (isDir ? props.onToggleDir(entry.path) : props.onSelectFile(entry.path))}
+              onClick={() => (isDir ? props.onToggleDir(entry.path) : props.onSelectFile(entry.path, entry.size))}
               onContextMenu={(e) =>
                 props.onContextMenu(e, isDir ? entry.path : parentOf(entry.path), {
                   path: entry.path,
@@ -535,102 +535,6 @@ const TreeLevel: React.FC<TreeLevelProps> = (props) => {
           </React.Fragment>
         );
       })}
-    </>
-  );
-};
-
-const FileContent: React.FC<{ path: string | null; onBack: () => void }> = ({ path, onBack }) => {
-  const api = useApi();
-  const [content, setContent] = useState("");
-  const [original, setOriginal] = useState("");
-  const [state, setState] = useState<"idle" | "loading" | "error">("idle");
-  const [truncated, setTruncated] = useState(false);
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    if (!path) {
-      return;
-    }
-    let active = true;
-    setState("loading");
-    api
-      .readFile(path)
-      .then((res) => {
-        if (!active) return;
-        setContent(res.content);
-        setOriginal(res.content);
-        setTruncated(res.truncated);
-        setState("idle");
-      })
-      .catch(() => active && setState("error"));
-    return () => {
-      active = false;
-    };
-  }, [api, path]);
-
-  if (!path) {
-    return (
-      <div className="flex flex-1 items-center justify-center text-sm text-neutral-600">
-        Select a file to view its contents
-      </div>
-    );
-  }
-
-  // Don't allow editing partial reads or binary blobs (would corrupt on save).
-  const readOnly = truncated || content.includes("\u0000");
-  const dirty = !readOnly && content !== original;
-
-  const save = async () => {
-    if (!dirty || saving) {
-      return;
-    }
-    setSaving(true);
-    try {
-      await api.saveFile(path, content);
-      setOriginal(content);
-    } catch {
-      /* surfaced as still-dirty */
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <>
-      <div className="flex h-9 items-center gap-2 border-b border-neutral-800 px-2">
-        <button
-          type="button"
-          aria-label="Back to files"
-          onClick={onBack}
-          className="flex h-7 w-7 items-center justify-center rounded-md text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100 md:hidden"
-        >
-          <ArrowLeft size={15} />
-        </button>
-        <File size={13} className="text-neutral-500" />
-        <span className="truncate text-xs text-neutral-300">{baseName(path)}</span>
-        {dirty && <span className="h-1.5 w-1.5 rounded-full bg-neutral-300" title="Unsaved changes" />}
-        {truncated && <span className="text-[10px] text-neutral-600">(truncated · read-only)</span>}
-        <div className="flex-1" />
-        {!readOnly && state === "idle" && (
-          <Button size="sm" variant="outline" disabled={!dirty || saving} onClick={() => void save()}>
-            <Save size={13} />
-            {saving ? "Saving…" : "Save"}
-          </Button>
-        )}
-      </div>
-      <div className="min-h-0 flex-1 overflow-hidden">
-        {state === "loading" && <p className="p-3 text-xs text-neutral-600">Loading…</p>}
-        {state === "error" && <p className="p-3 text-xs text-red-400">Could not read file.</p>}
-        {state === "idle" && (
-          <Editor
-            filename={baseName(path)}
-            value={content}
-            readOnly={readOnly}
-            onChange={setContent}
-            onSave={() => void save()}
-          />
-        )}
-      </div>
     </>
   );
 };
