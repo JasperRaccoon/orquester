@@ -589,7 +589,12 @@ Behavior:
   you switch/close tabs).
 - **Reconcile**: when `record.body` changes from outside (another client) **and** there is no
   pending debounce/dirty edit, re-seed `items` from the new body. While a save is pending, keep
-  local items (last-write-wins).
+  local items (last-write-wins). Track the last-synced body in a ref and set it **before**
+  awaiting the save (not after): `saveTodoBody` does a synchronous optimistic store write that
+  re-runs the reconcile effect mid-flight, and the guard must treat that write as
+  self-originated — otherwise a successful autosave re-parses the body and regenerates the
+  render-only item ids, remounting rows and dropping an in-progress inline edit. On save
+  failure the next external `todo.updated` event still reconciles.
 
 ### 9c. `TodoView.tsx`
 

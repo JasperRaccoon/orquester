@@ -760,10 +760,15 @@ export function useTodoDoc(todoId: string): {
     if (pending.current === null) return;
     const body = pending.current;
     pending.current = null;
+    // Mark as synced BEFORE awaiting: saveTodoBody does a synchronous optimistic store
+    // write (new record.body) that re-runs the reconcile effect mid-flight. Setting
+    // lastSynced now makes the reconcile guard treat that write as self-originated, so it
+    // won't re-parse the body and churn the render-only item ids. On save failure the next
+    // external todo.updated event still reconciles.
+    lastSynced.current = body;
     setSaving(true);
     try {
       await saveTodoBody(todoId, body);
-      lastSynced.current = body;
     } finally {
       setSaving(false);
     }
