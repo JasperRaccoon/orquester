@@ -8,6 +8,16 @@ deploys to a VPS. `CLAUDE.md` is a thin pointer to this file.
 > Follow your process skills (TDD, systematic-debugging, verification) unless the user says
 > otherwise.
 
+> **⛔ Never launch, restart, or stop the daemon unless I explicitly tell you to.** This repo
+> is frequently checked out **inside a running Orquester instance** — a live daemon is already
+> serving the very workspace you're editing. Do **not** run `pnpm dev`, `pnpm dev:daemon`,
+> `pnpm dev:web`, start `apps/daemon/src/cli.ts`, bind the daemon port/socket
+> (`127.0.0.1:47831` / `daemon.sock`), or `systemctl restart orquester` on your own initiative:
+> a second daemon collides with the live one (the port/socket is already held) and can disrupt
+> the user's running session. Verify daemon/server-side changes with `pnpm check` (typecheck)
+> and code review instead. Drive a real daemon **only** when explicitly asked — and then against
+> a separate checkout, never this one.
+
 ## Git & Commits
 
 - **When asked to commit, commit to the _current_ branch as-is. Do NOT create a new branch first** — even when on `main` — unless I explicitly ask for one. (This overrides the default "branch first when on the default branch" behavior.)
