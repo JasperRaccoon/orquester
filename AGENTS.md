@@ -276,6 +276,16 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
 - **Archive preview is host-tool-gated.** `GET /api/fs/archive` lists archive contents by
   shelling out to `7z` (p7zip-full) or `bsdtar` (libarchive-tools). Without either on PATH,
   archives degrade gracefully to a download card (`supported:false`). Not an npm package.
+- **Folder download is host-tool-gated; file download is not.** `GET /api/fs/download`
+  streams a file as-is (`createReadStream`, uncapped, `Content-Disposition: attachment`)
+  or zips a folder on the fly by shelling out to `bsdtar`/`zip`/`7z` (`apps/daemon/src/zip.ts`,
+  reusing `archive.ts`'s PATH probe) and streaming stdout. No tool → `GET /api/fs/capabilities`
+  reports `folderZip:false` and the UI disables "Download as Zip" (the VPS's `p7zip-full`
+  gives `7z`; add `libarchive-tools`/`zip` if needed). Zip tools are invoked with
+  store-symlinks-not-follow flags so a link inside a folder can't read outside `fsRoot`.
+  This is the **only** route that accepts the credential as `?token=` (besides `/ws`), so a
+  native browser `<a download>` can authenticate; it's redacted from logs. Distinct from
+  `/api/fs/raw`, the 50 MB-capped in-memory inline-preview route.
 - **Default endpoint is `127.0.0.1:47831`.** On the VPS it stays on loopback; Caddy (443) is the
   only public face. CORS is intentionally absent (single-origin server; desktop dodges CORS via
   Node HTTP).
