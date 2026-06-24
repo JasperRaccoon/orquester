@@ -216,6 +216,14 @@ export interface FsUploadResponse {
   conflictKind?: "file" | "dir";
 }
 
+/** Server-side file-browser capabilities (GET /api/fs/capabilities). */
+export interface FsCapabilitiesResponse {
+  /** True when the server can produce a folder zip (a zip tool is on PATH). */
+  folderZip: boolean;
+  /** Resolved zip tool basename for diagnostics ("bsdtar"|"zip"|"7z"|…), or null. */
+  zipTool: string | null;
+}
+
 // Git — a project's git repo surfaced as a GitHub-Desktop-style tab. Stateless;
 // the daemon shells out to `git` in the project dir (no PTY/session).
 
@@ -583,6 +591,10 @@ export class HttpOrquesterApiClient implements OrquesterApi {
 
   uploadFsEntry(body: FsUploadRequest): Promise<FsUploadResponse> {
     return this.post("/api/fs/upload", body);
+  }
+
+  getFsCapabilities(): Promise<FsCapabilitiesResponse> {
+    return this.get("/api/fs/capabilities");
   }
 
   deleteFsEntry(path: string): Promise<{ ok: true }> {
