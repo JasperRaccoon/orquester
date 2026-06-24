@@ -1367,9 +1367,13 @@ export const useAppStore = create<AppState>((set, get) => ({
   openTodo: (rec) =>
     set((state) => {
       const key = rec.refKey;
+      // Workspace-scoped lists live in the workspace context. If a project is open, the
+      // workspace main view is hidden behind it, so deselect the project (its tabs are
+      // preserved — reopening the project restores them) to bring the list into view.
+      const nav = rec.scope === "workspace" && state.currentProject ? { currentProject: null } : {};
       const existing = state.todoTabsByContext[key]?.find((t) => t.todoId === rec.id);
       if (existing) {
-        return { activeTabByProject: { ...state.activeTabByProject, [key]: existing.id } };
+        return { ...nav, activeTabByProject: { ...state.activeTabByProject, [key]: existing.id } };
       }
       const tab: TodoTab = {
         id: crypto.randomUUID(),
@@ -1378,6 +1382,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         title: rec.name
       };
       return {
+        ...nav,
         todoTabsByContext: {
           ...state.todoTabsByContext,
           [key]: [...(state.todoTabsByContext[key] ?? []), tab]

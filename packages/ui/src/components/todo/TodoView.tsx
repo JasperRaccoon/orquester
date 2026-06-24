@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Eye, EyeOff, GripVertical, ListTodo, X } from "lucide-react";
+import { Eye, EyeOff, GripVertical, ListTodo, Plus, X } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { ConfirmDialog } from "../ui";
 import { EmptyState } from "../main/EmptyState";
@@ -18,6 +18,13 @@ export const TodoView: React.FC<TodoViewProps> = ({ todoId, active }) => {
   const [draft, setDraft] = useState("");
   const [confirmClear, setConfirmClear] = useState(false);
   const [dragId, setDragId] = useState<string | null>(null);
+  const [adding, setAdding] = useState("");
+  const addRef = useRef<HTMLInputElement>(null);
+
+  // Focus the inline "add a to-do" line when this tab becomes the focused one.
+  useEffect(() => {
+    if (active) addRef.current?.focus();
+  }, [active]);
 
   const completedCount = useMemo(() => items.filter((i) => i.checked).length, [items]);
   const visible = hideDone ? items.filter((i) => !i.checked) : items;
@@ -75,11 +82,8 @@ export const TodoView: React.FC<TodoViewProps> = ({ todoId, active }) => {
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
-        {items.length === 0 ? (
-          <p className="px-1 py-6 text-center text-sm text-neutral-600">No items yet — add one below.</p>
-        ) : (
-          <ul className="flex flex-col">
-            {visible.map((item: TodoItem) => (
+        <ul className="flex flex-col">
+          {visible.map((item: TodoItem) => (
               <li
                 key={item.id}
                 draggable={editingId !== item.id}
@@ -128,11 +132,25 @@ export const TodoView: React.FC<TodoViewProps> = ({ todoId, active }) => {
                 </button>
               </li>
             ))}
+            <li className="flex items-center gap-2 rounded px-1 py-1">
+              <span className="w-3.5 shrink-0" aria-hidden />
+              <Plus size={14} className="shrink-0 text-neutral-600" />
+              <input
+                ref={addRef}
+                value={adding}
+                placeholder="Add a to-do…"
+                onChange={(e) => setAdding(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && adding.trim()) {
+                    addItem(adding);
+                    setAdding("");
+                  }
+                }}
+                className="flex-1 bg-transparent text-sm text-neutral-200 outline-none placeholder:text-neutral-600"
+              />
+            </li>
           </ul>
-        )}
       </div>
-
-      <AddItemInput onAdd={addItem} active={active} />
 
       <ConfirmDialog
         open={confirmClear}
@@ -144,32 +162,6 @@ export const TodoView: React.FC<TodoViewProps> = ({ todoId, active }) => {
           setItems(items.filter((i) => !i.checked));
           setConfirmClear(false);
         }}
-      />
-    </div>
-  );
-};
-
-const AddItemInput: React.FC<{ onAdd: (text: string) => void; active: boolean }> = ({ onAdd, active }) => {
-  const [value, setValue] = useState("");
-  const ref = useRef<HTMLInputElement>(null);
-  // Put the cursor in the add field when this tab becomes the focused one.
-  useEffect(() => {
-    if (active) ref.current?.focus();
-  }, [active]);
-  return (
-    <div className="shrink-0 border-t border-neutral-800 px-3 py-2">
-      <input
-        ref={ref}
-        value={value}
-        placeholder="Add a to-do…"
-        onChange={(e) => setValue(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && value.trim()) {
-            onAdd(value);
-            setValue("");
-          }
-        }}
-        className="w-full rounded border border-neutral-800 bg-neutral-900 px-2 py-1 text-sm text-neutral-100 outline-none placeholder:text-neutral-600 focus:border-neutral-600"
       />
     </div>
   );
