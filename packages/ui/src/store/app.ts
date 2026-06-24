@@ -1274,11 +1274,12 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   activateTab: (id) =>
     set((state) => {
-      const project = state.currentProject;
-      if (!project) {
+      // Context key: project path, else workspace name (workspace-context to-do tabs).
+      const key = state.currentProject?.path ?? state.currentWorkspace ?? null;
+      if (!key) {
         return state;
       }
-      return { activeTabByProject: { ...state.activeTabByProject, [project.path]: id } };
+      return { activeTabByProject: { ...state.activeTabByProject, [key]: id } };
     }),
 
   setViewMode: (mode) =>
