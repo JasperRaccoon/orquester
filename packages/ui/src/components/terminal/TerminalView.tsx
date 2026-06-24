@@ -4,16 +4,12 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { useApi } from "../../context/orquester-context";
 import { useAppStore } from "../../store/app";
-import { fileToBase64 } from "../../lib/files";
+import { uploadFilesToSession, type UploadStatus } from "../../lib/session-upload";
 import type { SessionSummary } from "../../types";
 import type { ViewMode } from "../../lib/view-mode";
 
 const FONT_STACK =
   '"JetBrains Mono", "Cascadia Code", "Fira Code", "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "DejaVu Sans Mono", monospace';
-
-// Largest file we'll upload from the client. Mirrors the daemon's decoded cap
-// (see the upload route's MAX_UPLOAD_BYTES) so we fail fast before encoding.
-const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 
 // Delay (ms) between the two halves of the post-replay "repaint nudge" (see the
 // terminal effect). Long enough that a running agent processes the first SIGWINCH
@@ -56,25 +52,6 @@ async function writeClipboard(text: string): Promise<void> {
 }
 
 /**
- * Build the terminal input that places dropped/pasted file paths into the
- * agent's prompt. We do NOT append a newline/Enter — the path is only inserted,
- * never submitted; the user types their prompt and hits Enter themselves.
- *
- * Default is BRACKETED PASTE (format A): the space-joined paths wrapped in the
- * bracketed-paste escapes (`\x1b[200~`…`\x1b[201~`), with NO trailing space —
- * agents' TUIs enable bracketed-paste mode and run their attach/path detection
- * on pasted text, mimicking a native drag. To switch to RAW (format B) — paths
- * + a trailing space, no escape wrapper — replace the single returned expression
- * with `return joined + " ";` (the format is locked in via runtime verification
- * against real agents).
- */
-function injectionForPaths(paths: string[]): string {
-  const joined = paths.join(" ");
-  // Format A (bracketed paste). Switch to format B by returning `joined + " "`.
-  return `\x1b[200~${joined}\x1b[201~`;
-}
-
-/**
  * Wrap pasted text in the bracketed-paste escapes (`\x1b[200~`…`\x1b[201~`) a
  * native terminal sends, normalizing every newline to CR exactly as xterm's own
  * `prepareTextForTerminal` does. We send this explicitly for agent sessions
@@ -105,47 +82,15 @@ export const TerminalView: React.FC<{
   const termRef = useRef<Terminal | null>(null);
   // Drag-over highlight + a short-lived inline status line (uploading / errors).
   const [dragging, setDragging] = useState(false);
-  const [status, setStatus] = useState<{ text: string; error?: boolean } | null>(null);
+  const [status, setStatus] = useState<UploadStatus | null>(null);
 
   // Upload dropped/pasted files, then inject all returned paths in one input.
   // Stored in a ref so the (effect-mounted) DOM listeners always see the latest
-  // closure without re-running the terminal effect.
+  // closure without re-running the terminal effect. The upload + path injection
+  // lives in a shared helper so the mobile attach button runs the exact same flow.
   const handleFilesRef = useRef<(files: File[]) => Promise<void>>(async () => {});
-  handleFilesRef.current = async (files: File[]) => {
-    const usable = files.filter((file) => file.size > 0);
-    if (usable.length === 0) {
-      return;
-    }
-    const oversized = usable.filter((file) => file.size > MAX_UPLOAD_BYTES);
-    const toUpload = usable.filter((file) => file.size <= MAX_UPLOAD_BYTES);
-    if (oversized.length > 0) {
-      const cap = Math.round(MAX_UPLOAD_BYTES / (1024 * 1024));
-      setStatus({ text: `Skipped ${oversized.length} file(s) over ${cap} MB`, error: true });
-    }
-    if (toUpload.length === 0) {
-      return;
-    }
-
-    setStatus({ text: `Uploading ${toUpload.length} file(s)…` });
-    try {
-      const paths: string[] = [];
-      // Preserve drop order: upload sequentially so paths line up with files.
-      for (const file of toUpload) {
-        const dataBase64 = await fileToBase64(file);
-        const result = await api.uploadSessionFile(session.id, {
-          name: file.name,
-          type: file.type || undefined,
-          dataBase64
-        });
-        paths.push(result.path);
-      }
-      // Inject every path in a single input write (no Enter — see helper).
-      await api.sendSessionInput(session.id, injectionForPaths(paths));
-      setStatus(null);
-    } catch {
-      setStatus({ text: "Upload failed", error: true });
-    }
-  };
+  handleFilesRef.current = (files: File[]) =>
+    uploadFilesToSession(api, session.id, files, { onStatus: setStatus });
 
   useEffect(() => {
     const container = containerRef.current;
@@ -474,7 +419,7 @@ export const TerminalView: React.FC<{
     if (!status) {
       return;
     }
-    const timer = window.setTimeout(() => setStatus(null), status.error ? 4000 : 2000);
+    const timer = window.setTimeout(() => setStatus(null), status.kind === "uploading" ? 2000 : 4000);
     return () => window.clearTimeout(timer);
   }, [status]);
 
@@ -506,7 +451,7 @@ export const TerminalView: React.FC<{
       {status && (
         <div
           className={`pointer-events-none absolute bottom-2 left-2 rounded px-2 py-1 text-xs ${
-            status.error ? "bg-red-500/90 text-white" : "bg-zinc-800/90 text-zinc-100"
+            status.kind === "uploading" ? "bg-zinc-800/90 text-zinc-100" : "bg-red-500/90 text-white"
           }`}
         >
           {status.text}
