@@ -4,6 +4,7 @@ import type {
   CreateAccountRequest,
   CreateProjectRequest,
   CreateSessionRequest,
+  CreateTodoRequest,
   CreateWorkspaceRequest,
   EventMessage,
   FsCapabilitiesResponse,
@@ -34,10 +35,12 @@ import type {
   SessionSummary,
   SessionUploadRequest,
   SessionUploadResponse,
+  UpdateTodoRequest,
   WorkspaceSummary
 } from "@orquester/api";
 import { RegistryService } from "./registry";
 import { type ISessionManager, SessionError, createSessionManager } from "./sessions";
+import { TodoError, TodoListManager } from "./todos";
 import { Tmux } from "./tmux";
 import { Broadcaster } from "./broadcaster";
 import { AccountError, AccountsService } from "./accounts";
@@ -71,6 +74,7 @@ import {
   resolveDaemonPaths,
   sessionsIndexPath,
   tmuxSocketPath,
+  todosIndexPath,
   workspacesMetaPath
 } from "@orquester/config";
 import fastifyStatic from "@fastify/static";
@@ -114,6 +118,8 @@ interface ResolvedPaths {
   tmuxSocket: string;
   /** <appdir>/daemon/sessions.json — the reattach index. */
   sessionsIndexFile: string;
+  /** <appdir>/daemon/todos.json — the managed to-do list index. */
+  todosIndexFile: string;
   workspacesDir: string;
   /** <appdir>/daemon/keys — per-account SSH keys (created mode 0700). */
   keysDir: string;
@@ -165,6 +171,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     workspacesMetaFile: workspacesMetaPath(paths.baseDir),
     tmuxSocket: tmuxSocketPath(paths.baseDir),
     sessionsIndexFile: sessionsIndexPath(paths.baseDir),
+    todosIndexFile: todosIndexPath(paths.baseDir),
     workspacesDir: expandVars(config.workspacesDir, paths.vars),
     keysDir: keysDir(paths.baseDir),
     accountsFile: accountsConfigPath(paths.baseDir),
@@ -190,6 +197,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   const sessions = createSessionManager(registry, tmux, resolved.sessionsIndexFile);
   const accounts = new AccountsService(resolved.accountsFile, resolved.keysDir);
   const git = new GitService();
+  const todos = new TodoListManager(resolved.todosIndexFile, console);
+  await todos.load();
   const broadcaster = new Broadcaster();
   // Stream registry changes (install/update status, detected versions) to clients.
   registry.events.on("changed", (entry) => broadcaster.publish("registry", "registry.changed", entry));
@@ -223,7 +232,13 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     broadcaster.publish("sessions", "session.updated", s)
   );
 
-  const services: Services = { registry, sessions, accounts, git, broadcaster };
+  // To-do list lifecycle → event bus (channel "todos"). Each payload is a full
+  // TodoListRecord; clients reconcile their cache/tabs by id (§6).
+  todos.lifecycle.on("created", (r) => broadcaster.publish("todos", "todo.created", r));
+  todos.lifecycle.on("updated", (r) => broadcaster.publish("todos", "todo.updated", r));
+  todos.lifecycle.on("deleted", (r) => broadcaster.publish("todos", "todo.deleted", r));
+
+  const services: Services = { registry, sessions, accounts, git, todos, broadcaster };
 
   // The static web build the HTTP transport optionally serves.
   const webDirEnv = options.webDir ?? env.ORQUESTER_WEB_DIR;
@@ -309,6 +324,7 @@ interface Services {
   sessions: ISessionManager;
   accounts: AccountsService;
   git: GitService;
+  todos: TodoListManager;
   broadcaster: Broadcaster;
   /** Restart the HTTP transport (set in main once the lifecycle exists). */
   reloadHttp?: () => Promise<void>;
@@ -322,7 +338,7 @@ function createServer(
   services: Services,
   options: { authRequired: boolean; mode: "local" | "remote"; serveWeb?: string }
 ): FastifyInstance {
-  const { registry, sessions, accounts, git } = services;
+  const { registry, sessions, accounts, git, todos } = services;
 
   const app = Fastify({
     // Remote requests arrive via Caddy on loopback (reverse_proxy 127.0.0.1:47831),
@@ -660,6 +676,9 @@ function createServer(
       // not the realpath, or symlinked workspace roots (e.g. /tmp → /private/tmp)
       // never match and the dir is removed while sessions keep running.
       sessions.closeByProjectPrefix(target);
+      // Cascade-delete this project's to-do lists (match `target`, the raw-join
+      // path used as the list refKey — not the realpath `safe`).
+      await todos.deleteByProjectPath(target);
       await rm(safe, { recursive: true, force: true });
       return reply.code(204).send();
     }
@@ -684,6 +703,9 @@ function createServer(
       // join), not `safe`: stored projectPaths use the raw join form, so matching
       // the realpath would miss every session under a symlinked workspace root.
       sessions.closeByProjectPrefix(target);
+      // Cascade-delete the workspace's own to-do lists AND every list under a
+      // project inside it (`workspace` = name refKey; `target` = raw-join path).
+      await todos.deleteByWorkspace(workspace, target);
       // Drop the git includeIf binding BEFORE removing the tree: unbindWorkspace
       // realpaths the dir to rebuild the same matcher bindWorkspace used, so it
       // must run while the dir still exists (on macOS the literal /tmp path and
@@ -1622,6 +1644,49 @@ function createServer(
       () => reply.raw.end()
     );
     request.raw.on("close", unsubscribe);
+  });
+
+  // To-do lists — daemon-owned, synced checklists (channel "todos"). Allowed on
+  // both transports like /api/sessions and /api/accounts (no secret returned).
+  // Errors map TodoError.status (else 500) to { code:"TODO_ERROR", message }.
+  app.get<{ Querystring: { scope?: string; refKey?: string } }>("/api/todos", async (request, reply) => {
+    const { scope, refKey } = request.query;
+    if ((scope !== "workspace" && scope !== "project") || !refKey) {
+      return reply.code(400).send({ code: "BAD_REQUEST", message: "scope and refKey required" });
+    }
+    return reply.send(todos.list(scope, refKey));
+  });
+
+  app.post<{ Body: CreateTodoRequest }>("/api/todos", async (request, reply) => {
+    const body = (request.body ?? {}) as CreateTodoRequest;
+    try {
+      const rec = await todos.create(body.scope, body.refKey, body.name);
+      return reply.code(201).send(rec);
+    } catch (error) {
+      const status = error instanceof TodoError ? error.status : 500;
+      return reply.code(status).send({ code: "TODO_ERROR", message: (error as Error).message });
+    }
+  });
+
+  app.put<{ Params: { id: string }; Body: UpdateTodoRequest }>("/api/todos/:id", async (request, reply) => {
+    const body = (request.body ?? {}) as UpdateTodoRequest;
+    try {
+      const rec = await todos.update(request.params.id, { name: body.name, body: body.body });
+      return reply.send(rec);
+    } catch (error) {
+      const status = error instanceof TodoError ? error.status : 500;
+      return reply.code(status).send({ code: "TODO_ERROR", message: (error as Error).message });
+    }
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/todos/:id", async (request, reply) => {
+    try {
+      await todos.delete(request.params.id);
+      return reply.code(204).send();
+    } catch (error) {
+      const status = error instanceof TodoError ? error.status : 500;
+      return reply.code(status).send({ code: "TODO_ERROR", message: (error as Error).message });
+    }
   });
 
   // Daemon event bus (newline-delimited JSON): lifecycle broadcasts + heartbeat.
