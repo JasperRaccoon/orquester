@@ -2,9 +2,11 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
+  Download,
   File,
   FilePlus,
   Folder,
+  FolderDown,
   FolderPlus,
   RefreshCw,
   Trash2,
@@ -26,6 +28,7 @@ import { FilePreview } from "./FilePreview";
 import { useApi } from "../../context/orquester-context";
 import { usePollWhileActive } from "../../hooks";
 import { gatherFromDataTransfer, gatherFromInput } from "../../lib/files";
+import { downloadPath } from "../../lib/download";
 import { useFileUpload } from "./use-file-upload";
 import { UploadConflictModal } from "./UploadConflictModal";
 
@@ -57,6 +60,10 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ 
   const [error, setError] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<{ path: string; name: string; kind: "dir" | "file" } | null>(null);
+  // Whether the server can zip a folder. Optimistic (true) until the probe
+  // answers, so a fast right-click before it resolves still works on a capable
+  // server; if the server has no tool the folder item disables itself.
+  const [folderZip, setFolderZip] = useState(true);
 
   const loadDir = useCallback(
     async (dir: string) => {
@@ -118,6 +125,21 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ 
     uploadDestRef.current = rootPath;
     void loadDir(rootPath);
   }, [rootPath, loadDir]);
+
+  useEffect(() => {
+    let alive = true;
+    api
+      .getFsCapabilities()
+      .then((caps) => {
+        if (alive) setFolderZip(caps.folderZip);
+      })
+      .catch(() => {
+        /* leave optimistic; a failed download surfaces its own error */
+      });
+    return () => {
+      alive = false;
+    };
+  }, [api]);
 
   // Refresh the whole tree when the tab goes inactive -> active again, so a
   // file created/deleted in another tab shows up the moment you return.
@@ -258,7 +280,15 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ 
         { label: "Upload Folder…", icon: <Upload size={14} />, onClick: () => pickUpload(menu.dir, "folder") },
         { label: "Refresh", icon: <RefreshCw size={13} />, onClick: () => void loadDir(menu.dir) },
         ...(menu.target
-          ? [{ label: "Delete", icon: <Trash2 size={14} />, onClick: () => setDeleting(menu.target!) }]
+          ? [
+              {
+                label: menu.target.kind === "dir" ? "Download as Zip" : "Download",
+                icon: menu.target.kind === "dir" ? <FolderDown size={14} /> : <Download size={14} />,
+                disabled: menu.target.kind === "dir" && !folderZip,
+                onClick: () => void downloadPath(api, menu.target!)
+              },
+              { label: "Delete", icon: <Trash2 size={14} />, onClick: () => setDeleting(menu.target!) }
+            ]
           : [])
       ]
     : [];
