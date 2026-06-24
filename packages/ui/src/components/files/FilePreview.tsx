@@ -1,6 +1,6 @@
 import React, { useCallback } from "react";
-import { ArrowLeft, File, Save } from "lucide-react";
-import { Button } from "../ui";
+import { ArrowLeft, Download, File, Save } from "lucide-react";
+import { Button, IconButton } from "../ui";
 import { Editor } from "./Editor";
 import { ImageViewer } from "./viewers/ImageViewer";
 import { BinaryCard } from "./viewers/BinaryCard";
@@ -11,6 +11,7 @@ import { HtmlViewer } from "./viewers/HtmlViewer";
 import { useApi } from "../../context/orquester-context";
 import { useFileText } from "../../hooks";
 import { detectFileKind, PREVIEW_CAP_BY_KIND, DOWNLOAD_MAX_BYTES } from "../../lib/file-kind";
+import { downloadPath } from "../../lib/download";
 
 const baseName = (p: string) => p.slice(p.lastIndexOf("/") + 1);
 
@@ -76,27 +77,34 @@ export const FilePreview: React.FC<{ path: string | null; size: number; onBack: 
 
   return (
     <>
-      <PreviewHeader name={name} onBack={onBack} />
+      <PreviewHeader path={path} name={name} onBack={onBack} />
       <div className="min-h-0 flex-1 overflow-hidden">{body}</div>
     </>
   );
 };
 
-/** Shared header for non-text viewers (filename + mobile back button). */
-const PreviewHeader: React.FC<{ name: string; onBack: () => void }> = ({ name, onBack }) => (
-  <div className="flex h-9 items-center gap-2 border-b border-neutral-800 px-2">
-    <button
-      type="button"
-      aria-label="Back to files"
-      onClick={onBack}
-      className="flex h-7 w-7 items-center justify-center rounded-md text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100 md:hidden"
-    >
-      <ArrowLeft size={15} />
-    </button>
-    <File size={13} className="text-neutral-500" />
-    <span className="truncate text-xs text-neutral-300">{name}</span>
-  </div>
-);
+/** Shared header for non-text viewers (filename + mobile back + download). */
+const PreviewHeader: React.FC<{ path: string; name: string; onBack: () => void }> = ({ path, name, onBack }) => {
+  const api = useApi();
+  return (
+    <div className="flex h-9 items-center gap-2 border-b border-neutral-800 px-2">
+      <button
+        type="button"
+        aria-label="Back to files"
+        onClick={onBack}
+        className="flex h-7 w-7 items-center justify-center rounded-md text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100 md:hidden"
+      >
+        <ArrowLeft size={15} />
+      </button>
+      <File size={13} className="text-neutral-500" />
+      <span className="truncate text-xs text-neutral-300">{name}</span>
+      <div className="flex-1" />
+      <IconButton label="Download" onClick={() => void downloadPath(api, { path, name, kind: "file" })}>
+        <Download size={14} />
+      </IconButton>
+    </div>
+  );
+};
 
 /** Text files: CodeMirror editor with save — plus a null-byte -> binary card
  *  guard so an unknown-extension binary never renders as mojibake. */
@@ -128,6 +136,9 @@ const TextPreview: React.FC<{ path: string; mime: string; size: number; onBack: 
         {dirty && <span className="h-1.5 w-1.5 rounded-full bg-neutral-300" title="Unsaved changes" />}
         {truncated && <span className="text-[10px] text-neutral-600">(truncated · read-only)</span>}
         <div className="flex-1" />
+        <IconButton label="Download" onClick={() => void downloadPath(api, { path, name, kind: "file" })}>
+          <Download size={14} />
+        </IconButton>
         {!readOnly && state === "idle" && (
           <Button size="sm" variant="outline" disabled={!dirty || saving} onClick={() => void save()}>
             <Save size={13} />
