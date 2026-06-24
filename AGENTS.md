@@ -356,8 +356,8 @@ sudo ufw allow 22/tcp && sudo ufw allow 443/tcp && sudo ufw --force enable
 ```bash
 cd /opt/orquester
 sudo git fetch origin && sudo git reset --hard origin/main   # tree is root-owned → run git as root
-sudo -u orquester CI=1 pnpm install --frozen-lockfile   # CI=1 = non-interactive (see below); fast no-op if unchanged
-sudo -u orquester pnpm build     # only if web/ui changed (rebuilds the served SPA)
+sudo -u orquester CI=1 pnpm install --frozen-lockfile </dev/null   # CI=1 = non-interactive; </dev/null so pnpm can't steal stdin (see below)
+sudo -u orquester pnpm build </dev/null   # only if web/ui changed (rebuilds the served SPA)
 sudo chown -R root:root /opt/orquester
 sudo systemctl restart orquester # near-instant (graceful SIGTERM); tmux sessions survive
 curl -fsS http://127.0.0.1:47831/health
@@ -377,6 +377,13 @@ curl -fsS http://127.0.0.1:47831/health
   then fails to resolve them. Always `CI=1 pnpm install --frozen-lockfile`. And **never pipe the
   build through `| tail`/`| grep`** — a pipeline's exit status is the last command's, so `set -e`
   won't catch a failed `vite build` and the script will restart into a stale/broken `dist`.
+- **Detach pnpm's stdin (`</dev/null`) inside a piped `bash -s`.** If you wrap a deploy as
+  `ssh host 'bash -s' <<'EOF' … EOF` (or `sudo bash -s`), a `pnpm install`/`build` in the script
+  **reads the rest of the script from stdin** (pnpm reads stdin, e.g. on its *"ignored build
+  scripts"* notice), so every step after pnpm silently never runs — the deploy looks done while
+  the bundle/Caddy were never rebuilt. Append `</dev/null` to each pnpm command, or write the
+  script to a file and `bash file` instead of piping. **Confirm a deploy by the live bundle hash**
+  (`curl -s http://127.0.0.1:47831/ | grep -o 'index-[^.]*\.js'`), not the SSH output.
 
 ### Security posture
 

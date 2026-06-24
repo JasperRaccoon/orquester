@@ -36,8 +36,8 @@ ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new root@203.0.113.10 '
   cd /opt/orquester
   git fetch origin -q && git reset --hard origin/main
   echo "HEAD=$(git rev-parse --short HEAD)"
-  CI=1 ELECTRON_SKIP_BINARY_DOWNLOAD=1 pnpm install --frozen-lockfile
-  ELECTRON_SKIP_BINARY_DOWNLOAD=1 pnpm --filter @orquester/web build
+  CI=1 ELECTRON_SKIP_BINARY_DOWNLOAD=1 pnpm install --frozen-lockfile </dev/null
+  ELECTRON_SKIP_BINARY_DOWNLOAD=1 pnpm --filter @orquester/web build </dev/null
   chown -R root:root /opt/orquester
   systemctl restart orquester
   curl -fsS --retry 25 --retry-delay 1 --retry-connrefused http://127.0.0.1:47831/health; echo
@@ -51,8 +51,8 @@ ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new -o IdentitiesOnly=y
   cd /opt/orquester
   sudo git fetch origin -q && sudo git reset --hard origin/main
   echo "HEAD=$(sudo git rev-parse --short HEAD)"
-  sudo CI=1 ELECTRON_SKIP_BINARY_DOWNLOAD=1 pnpm install --frozen-lockfile
-  sudo ELECTRON_SKIP_BINARY_DOWNLOAD=1 pnpm --filter @orquester/web build
+  sudo CI=1 ELECTRON_SKIP_BINARY_DOWNLOAD=1 pnpm install --frozen-lockfile </dev/null
+  sudo ELECTRON_SKIP_BINARY_DOWNLOAD=1 pnpm --filter @orquester/web build </dev/null
   sudo chown -R root:root /opt/orquester
   sudo systemctl restart orquester
   curl -fsS --retry 25 --retry-delay 1 --retry-connrefused http://127.0.0.1:47831/health; echo
@@ -75,6 +75,7 @@ ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new -o IdentitiesOnly=y
 - **Push before deploying** — the VPSes only see what's on `origin/main`.
 - **Always run the install with `CI=1`.** Without it, pnpm's interactive *"reinstall modules from scratch? (Y/n)"* prompt blocks on the non-TTY SSH and silently breaks the deploy (it skips installing new deps, then the build fails to resolve them). `CI=1 … pnpm install --frozen-lockfile` is safe to run every time — a fast no-op when nothing changed.
 - **Never pipe the build through `| tail`/`| grep`.** A pipeline's exit status is the *last* command's, so `set -e` won't catch a failed `vite build` — the script would march past it and `systemctl restart` into a stale/broken `dist`. Run the build bare (let `set -e` abort), or redirect to a file and check `$?`.
+- **Detach pnpm's stdin (`</dev/null`) — critical inside a piped `bash -s`.** If you wrap a multi-step deploy as `ssh host 'bash -s' <<'EOF' … EOF` (or `sudo bash -s`), a `pnpm install`/`build` in that script **reads the remaining script lines from stdin** (pnpm reads stdin — e.g. on its *"ignored build scripts → run pnpm approve-builds"* notice), so every step **after** pnpm silently never runs and the deploy looks done while the bundle/Caddy were never touched. The one-liners above already append `</dev/null` to each pnpm command. If you must run a longer combined script, **write it to a file and `bash file`** rather than piping it to `bash -s`. Always confirm a deploy by the **live bundle hash** (`curl -s http://127.0.0.1:47831/ | grep -o 'index-[^.]*\.js'`), not by the SSH output.
 - **Daemon-only changes need no build** — just `systemctl restart`. Only the SPA needs `pnpm build`.
 - **Caddy** only needs a reload if `deploy/Caddyfile` changed (`systemctl reload caddy`).
 - **Browser cache:** after a web change, hard-reload the open app (Cmd/Ctrl+Shift+R).
