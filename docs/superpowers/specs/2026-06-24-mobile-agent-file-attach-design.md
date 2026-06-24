@@ -74,26 +74,36 @@ Exports:
 - `MAX_UPLOAD_BYTES` — moved from `TerminalView`.
 - `injectionForPaths(paths: string[]): string` — moved verbatim from `TerminalView`, comment
   block intact (it documents the locked-in bracketed-paste format).
+- `UploadStatus` — a discriminated union so consumers can treat the three cases differently
+  (e.g. distinct auto-clear timing on mobile) without parsing text:
+  ```ts
+  export type UploadStatus =
+    | { kind: "uploading"; text: string }
+    | { kind: "skipped"; text: string }   // benign: some files over the cap
+    | { kind: "error"; text: string };    // hard failure: upload threw
+  ```
 - `uploadFilesToSession(api, sessionId, files, { onStatus }): Promise<void>` — the body of the
   current `handleFilesRef.current`, lifted unchanged:
   - filter `size > 0`; split into oversized (`> MAX_UPLOAD_BYTES`) and uploadable;
-  - if any oversized → `onStatus({ text: "Skipped N file(s) over 25 MB", error: true })`;
+  - if any oversized → `onStatus({ kind: "skipped", text: "Skipped N file(s) over 25 MB" })`;
   - if nothing uploadable → return;
-  - `onStatus({ text: "Uploading N file(s)…" })`; sequentially `fileToBase64` →
+  - `onStatus({ kind: "uploading", text: "Uploading N file(s)…" })`; sequentially `fileToBase64` →
     `api.uploadSessionFile` collecting paths; then
     `api.sendSessionInput(sessionId, injectionForPaths(paths))`; `onStatus(null)` on success;
-  - on throw → `onStatus({ text: "Upload failed", error: true })`.
+  - on throw → `onStatus({ kind: "error", text: "Upload failed" })`.
 
-`onStatus(status | null)` is the only UX seam — each caller renders feedback its own way.
-`api` is typed as the existing `ApiClient` (it only needs `uploadSessionFile` + `sendSessionInput`).
-The status object shape is `{ text: string; error?: boolean }`, matching `TerminalView`'s
-existing `status` state.
+`onStatus(status: UploadStatus | null)` is the only UX seam — each caller renders feedback its own
+way and decides its own dismiss timing. `api` is typed as the existing `ApiClient` (it only needs
+`uploadSessionFile` + `sendSessionInput`).
 
 ### 2. `TerminalView.tsx` — refactor, zero behavior change
 
 - Remove the inline `MAX_UPLOAD_BYTES`, `injectionForPaths`, and the `handleFilesRef` body.
 - `handleFilesRef.current = (files) => uploadFilesToSession(api, session.id, files, { onStatus: setStatus })`.
-- Drag overlay, the `status` state, and the status line render unchanged.
+- The local `status` state adopts `UploadStatus | null`; the status line colors red for
+  `status.kind !== "uploading"` (i.e. `skipped` or `error`) — visually identical to today's
+  `status.error` check (skip and failure were both red). Drag overlay unchanged. Desktop keeps
+  **no** auto-clear (the status clears on the next drop / success), so its behavior is unchanged.
 - Parity is proven by `pnpm check` plus a manual desktop drop after the change.
 
 ### 3. `MobileKeyBar.tsx` — the attach button (agent-only)
@@ -110,13 +120,20 @@ existing `status` state.
     keyboard up), the attach button uses a normal `onClick` — opening the native picker inherently
     moves focus, which is expected here.
   - While uploading, the button shows a spinning `Loader2` and is `disabled`.
-- Local state: `status: { text; error? } | null` (passed as `onStatus`) and an explicit `busy`
-  flag set `true` immediately around the `uploadFilesToSession` call and cleared in a `finally`
-  (not parsed from the status text). Error/skip statuses auto-clear after ~4 s via a `setTimeout`
-  so a transient message doesn't linger in the horizontally-scrolling bar.
+- Local state: `status: UploadStatus | null` (passed as `onStatus`) and an explicit `busy` flag
+  set `true` immediately around the `uploadFilesToSession` call and cleared in a `finally` (not
+  parsed from the status text).
+- **Auto-clear timing**, keyed off `status.kind` so a transient message doesn't linger in the
+  horizontally-scrolling bar:
+  - `error` → clear after **10 s** (a hard failure warrants a longer read).
+  - `skipped` → clear after **4 s** (benign — some files were over the cap).
+  - `uploading` → no timer (it's superseded by the success `null` or by an `error`).
+  Implemented with a single timer ref reset on every `onStatus` call (and cleared on unmount), so
+  a newer status always cancels the previous pending clear.
 - Layout: the component root becomes a `flex flex-col shrink-0` wrapper holding (a) an optional
   thin status line above and (b) the existing button row (unchanged `overflow-x-auto` scroller).
-  The status line mirrors `TerminalView`'s treatment: small text, red when `error`.
+  The status line mirrors `TerminalView`'s treatment: small text, red when `kind` is `skipped` or
+  `error`.
 
 ### Component tree (unchanged placement)
 
@@ -169,7 +186,8 @@ AppShell
 - **Scope: agent sessions only.** The control-key bar still shows for all sessions, but the
   attach button renders only when `active.session.kind === "agent"`. (Chosen over all-sessions:
   attaching a file path is an agent-prompt affordance; a shell user gains nothing from it.)
-- **Status placement:** a thin line above the key row, mirroring `TerminalView`'s status
-  treatment (over a floating toast).
+- **Status placement & timing:** a thin line above the key row, mirroring `TerminalView`'s status
+  treatment (over a floating toast). Auto-clear is per-kind — **error 10 s, skip 4 s** — carried by
+  the `UploadStatus` discriminated union so the timing is chosen from `kind`, not parsed from text.
 - **Logic sharing:** extract a shared orchestrator (`uploadFilesToSession`) rather than a hook or
   a copy — one source of truth for the 25 MB cap and the locked-in injection format.
