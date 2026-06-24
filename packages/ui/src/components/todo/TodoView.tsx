@@ -35,24 +35,34 @@ export const TodoView: React.FC<TodoViewProps> = ({ todoId, active }) => {
 
   // Live DOM inputs keyed by item id, plus a queued focus request applied after render.
   const inputs = useRef(new Map<string, HTMLInputElement>());
-  const pendingFocus = useRef<{ id: string; caret: number | "end" } | null>(null);
-  const focusLater = (id: string, caret: number | "end") => {
-    pendingFocus.current = { id, caret };
-  };
 
-  useLayoutEffect(() => {
-    const req = pendingFocus.current;
-    if (!req) return;
-    pendingFocus.current = null;
-    const el = req.id === ADD ? addRef.current : inputs.current.get(req.id);
+  // Move the caret to a row that already exists in the DOM, right now. Used for pure
+  // navigation (arrows, add-line backspace) that doesn't mutate the list — there's no
+  // re-render to hang a deferred focus on, so anything queued would silently never fire.
+  const focusNow = (id: string, caret: number | "end") => {
+    const el = id === ADD ? addRef.current : inputs.current.get(id);
     if (!el) return;
     el.focus();
-    const pos = req.caret === "end" ? el.value.length : req.caret;
+    const pos = caret === "end" ? el.value.length : caret;
     try {
       el.setSelectionRange(pos, pos);
     } catch {
       /* setSelectionRange throws on some input types; harmless here */
     }
+  };
+
+  // Focus that must wait for a setItems-driven re-render: the target row is created or
+  // removed by the same edit, so it may not exist (or hold its final value) until after
+  // the commit. Queue it; the layout effect applies it once the row is in the DOM.
+  const pendingFocus = useRef<{ id: string; caret: number | "end" } | null>(null);
+  const focusLater = (id: string, caret: number | "end") => {
+    pendingFocus.current = { id, caret };
+  };
+  useLayoutEffect(() => {
+    const req = pendingFocus.current;
+    if (!req) return;
+    pendingFocus.current = null;
+    focusNow(req.id, req.caret);
   });
 
   // Focus the inline "add a to-do" line when this tab becomes the focused one.
@@ -72,11 +82,6 @@ export const TodoView: React.FC<TodoViewProps> = ({ todoId, active }) => {
   const remove = (id: string) => setItems(items.filter((i) => i.id !== id));
   const updateText = (id: string, text: string) =>
     setItems(items.map((i) => (i.id === id ? { ...i, text } : i)));
-  const addItem = (text: string) => {
-    const t = text.trim();
-    if (!t) return;
-    setItems([...items, { id: crypto.randomUUID(), checked: false, text: t }]);
-  };
   const reorder = (targetId: string) => {
     if (!dragId || dragId === targetId) return;
     const next = [...items];
@@ -138,27 +143,30 @@ export const TodoView: React.FC<TodoViewProps> = ({ todoId, active }) => {
 
     if (e.key === "ArrowUp" && visIdx > 0) {
       e.preventDefault();
-      focusLater(visible[visIdx - 1].id, start);
+      focusNow(visible[visIdx - 1].id, start);
       return;
     }
     if (e.key === "ArrowDown") {
       e.preventDefault();
       const nextVisible = visible[visIdx + 1];
-      focusLater(nextVisible ? nextVisible.id : ADD, nextVisible ? start : "end");
+      focusNow(nextVisible ? nextVisible.id : ADD, nextVisible ? start : "end");
     }
   };
 
   const onAddKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter" && adding.trim()) {
       e.preventDefault();
-      addItem(adding);
-      setAdding(""); // stay on the add line for rapid entry
+      const item: TodoItem = { id: crypto.randomUUID(), checked: false, text: adding.trim() };
+      setItems([...items, item]);
+      setAdding("");
+      focusLater(item.id, "end"); // caret rides into the new to-do (Enter again splits from there)
       return;
     }
+    // Empty add line: Backspace or ArrowUp steps back up into the last item.
     if ((e.key === "Backspace" && adding === "") || e.key === "ArrowUp") {
       if (visible.length > 0) {
         e.preventDefault();
-        focusLater(visible[visible.length - 1].id, "end");
+        focusNow(visible[visible.length - 1].id, "end");
       }
     }
   };
