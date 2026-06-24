@@ -1,5 +1,5 @@
 import React from "react";
-import { ChevronDown, Circle, FolderTree, GitBranch } from "lucide-react";
+import { ChevronDown, Circle, FolderTree, GitBranch, ListTodo } from "lucide-react";
 import { AdaptiveMenu, DropdownEmpty, DropdownItem } from "../ui";
 import { SessionStatusDot } from "../ui/session-status-dot";
 import { getRegistryIcon } from "../../icons";
@@ -12,6 +12,8 @@ const tabIcon = (tab: ProjectTab, size = 14) =>
     getRegistryIcon(tab.session.kind, tab.session.refId, size)
   ) : tab.type === "git" ? (
     <GitBranch size={size} />
+  ) : tab.type === "todo" ? (
+    <ListTodo size={size} />
   ) : (
     <FolderTree size={size} />
   );

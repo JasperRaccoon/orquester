@@ -1,7 +1,8 @@
 import React, { useState } from "react";
-import { FolderTree, GitBranch, Pencil, X } from "lucide-react";
+import { FolderTree, GitBranch, ListTodo, Pencil, Trash2, X } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { getRegistryIcon } from "../../icons";
+import { ConfirmDialog } from "../ui";
 import { ContextMenu, type ContextMenuItem } from "../ui/context-menu";
 import { SessionStatusDot } from "../ui/session-status-dot";
 import {
@@ -47,12 +48,15 @@ export const TabStrip: React.FC = () => {
   const activateTab = useAppStore((s) => s.activateTab);
   const closeTab = useAppStore((s) => s.closeTab);
   const renameTab = useAppStore((s) => s.renameTab);
+  const renameTodo = useAppStore((s) => s.renameTodo);
+  const deleteTodo = useAppStore((s) => s.deleteTodo);
   const reorderTabs = useAppStore((s) => s.reorderTabs);
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
   const [overId, setOverId] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; tab: ProjectTab } | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<{ todoId: string; name: string } | null>(null);
 
   if (tabs.length === 0) {
     return null;
@@ -74,25 +78,42 @@ export const TabStrip: React.FC = () => {
     void reorderTabs(next);
   };
 
-  const menuItems = (tab: ProjectTab): ContextMenuItem[] =>
-    tab.type === "session"
-      ? [
-          { label: "Rename", icon: <Pencil size={13} />, onClick: () => setEditingId(tab.id) },
-          { label: "Close", icon: <X size={13} />, danger: true, onClick: () => void closeTab(tab.id) }
-        ]
-      : [{ label: "Close", icon: <X size={13} />, danger: true, onClick: () => void closeTab(tab.id) }];
+  const menuItems = (tab: ProjectTab): ContextMenuItem[] => {
+    if (tab.type === "session") {
+      return [
+        { label: "Rename", icon: <Pencil size={13} />, onClick: () => setEditingId(tab.id) },
+        { label: "Close", icon: <X size={13} />, danger: true, onClick: () => void closeTab(tab.id) }
+      ];
+    }
+    if (tab.type === "todo") {
+      return [
+        { label: "Rename", icon: <Pencil size={13} />, onClick: () => setEditingId(tab.id) },
+        {
+          label: "Delete list",
+          icon: <Trash2 size={13} />,
+          danger: true,
+          onClick: () => setConfirmDelete({ todoId: tab.todoId, name: tab.title })
+        },
+        { label: "Close", icon: <X size={13} />, onClick: () => void closeTab(tab.id) }
+      ];
+    }
+    return [{ label: "Close", icon: <X size={13} />, danger: true, onClick: () => void closeTab(tab.id) }];
+  };
 
   return (
     <div className="app-no-drag flex items-center gap-1">
       {tabs.map((tab) => {
         const active = tab.id === activeTabId;
         const isSession = tab.type === "session";
+        const canRename = isSession || tab.type === "todo";
         const editing = editingId === tab.id;
         const title = isSession ? tab.session.title : tab.title;
         const icon = isSession ? (
           getRegistryIcon(tab.session.kind, tab.session.refId, 13)
         ) : tab.type === "git" ? (
           <GitBranch size={13} />
+        ) : tab.type === "todo" ? (
+          <ListTodo size={13} />
         ) : (
           <FolderTree size={13} />
         );
@@ -103,7 +124,7 @@ export const TabStrip: React.FC = () => {
             aria-selected={active}
             draggable={isSession && !editing}
             onClick={() => activateTab(tab.id)}
-            onDoubleClick={() => isSession && setEditingId(tab.id)}
+            onDoubleClick={() => canRename && setEditingId(tab.id)}
             onContextMenu={(event) => {
               event.preventDefault();
               setMenu({ x: event.clientX, y: event.clientY, tab });
@@ -141,7 +162,13 @@ export const TabStrip: React.FC = () => {
                 initial={title}
                 onSubmit={(value) => {
                   setEditingId(null);
-                  if (value.trim() !== title) void renameTab(tab.id, value);
+                  if (value.trim() !== title) {
+                    if (tab.type === "todo") {
+                      void renameTodo(tab.todoId, value);
+                    } else if (isSession) {
+                      void renameTab(tab.id, value);
+                    }
+                  }
                 }}
                 onCancel={() => setEditingId(null)}
               />
@@ -168,6 +195,18 @@ export const TabStrip: React.FC = () => {
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} items={menuItems(menu.tab)} onClose={() => setMenu(null)} />
       )}
+      <ConfirmDialog
+        open={confirmDelete !== null}
+        title="Delete to-do list"
+        message={`Delete '${confirmDelete?.name ?? ""}'? This removes it on every machine.`}
+        confirmLabel="Delete"
+        danger
+        onCancel={() => setConfirmDelete(null)}
+        onConfirm={() => {
+          if (confirmDelete) void deleteTodo(confirmDelete.todoId);
+          setConfirmDelete(null);
+        }}
+      />
     </div>
   );
 };
