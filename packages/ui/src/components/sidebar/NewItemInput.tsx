@@ -5,11 +5,18 @@ export interface NewItemInputProps {
   placeholder: string;
   onSubmit: (name: string) => void;
   onCancel: () => void;
+  /** Pre-fill the field (e.g. to rename an existing item). Default "". */
+  initialValue?: string;
 }
 
 /** Inline row for naming a new workspace/project; Enter submits, Escape cancels. */
-export const NewItemInput: React.FC<NewItemInputProps> = ({ placeholder, onSubmit, onCancel }) => {
-  const [value, setValue] = useState("");
+export const NewItemInput: React.FC<NewItemInputProps> = ({
+  placeholder,
+  onSubmit,
+  onCancel,
+  initialValue
+}) => {
+  const [value, setValue] = useState(initialValue ?? "");
 
   const submit = () => {
     const name = value.trim();

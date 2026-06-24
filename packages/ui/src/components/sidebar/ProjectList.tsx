@@ -1,5 +1,14 @@
 import React, { useState } from "react";
-import { Box, ChevronLeft, FolderPlus, PanelLeftClose, Plus, Trash2 } from "lucide-react";
+import {
+  Box,
+  ChevronLeft,
+  FolderPlus,
+  ListTodo,
+  PanelLeftClose,
+  Pencil,
+  Plus,
+  Trash2
+} from "lucide-react";
 import { cn } from "../../lib/cn";
 import {
   ConfirmDialog,
@@ -13,6 +22,7 @@ import { NewItemInput } from "./NewItemInput";
 import { NewProjectModal } from "./NewProjectModal";
 import { useAppStore } from "../../store/app";
 import type { ProjectSummary } from "../../types";
+import type { TodoListRecord } from "@orquester/api";
 
 /** Sidebar view shown after entering a workspace: its projects. */
 export const ProjectList: React.FC = () => {
@@ -25,10 +35,24 @@ export const ProjectList: React.FC = () => {
   const createProject = useAppStore((s) => s.createProject);
   const deleteProject = useAppStore((s) => s.deleteProject);
   const toggleSidebar = useAppStore((s) => s.toggleSidebar);
+  const todos = useAppStore((s) => s.todos);
+  const createTodo = useAppStore((s) => s.createTodo);
+  const openTodo = useAppStore((s) => s.openTodo);
+  const renameTodo = useAppStore((s) => s.renameTodo);
+  const deleteTodo = useAppStore((s) => s.deleteTodo);
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number; project: ProjectSummary } | null>(null);
   const [pendingDelete, setPendingDelete] = useState<ProjectSummary | null>(null);
+  const [todoMenu, setTodoMenu] = useState<{ x: number; y: number; todo: TodoListRecord } | null>(
+    null
+  );
+  const [renamingTodo, setRenamingTodo] = useState<TodoListRecord | null>(null);
+  const [pendingTodoDelete, setPendingTodoDelete] = useState<TodoListRecord | null>(null);
+
+  const todoLists = todos
+    .filter((t) => t.scope === "workspace" && t.refKey === currentWorkspace)
+    .sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
 
   const menuItems = (project: ProjectSummary): ContextMenuItem[] => [
     {
@@ -36,6 +60,20 @@ export const ProjectList: React.FC = () => {
       icon: <Trash2 size={13} />,
       danger: true,
       onClick: () => setPendingDelete(project)
+    }
+  ];
+
+  const todoMenuItems = (todo: TodoListRecord): ContextMenuItem[] => [
+    {
+      label: "Rename",
+      icon: <Pencil size={13} />,
+      onClick: () => setRenamingTodo(todo)
+    },
+    {
+      label: "Delete",
+      icon: <Trash2 size={13} />,
+      danger: true,
+      onClick: () => setPendingTodoDelete(todo)
     }
   ];
 
@@ -65,6 +103,16 @@ export const ProjectList: React.FC = () => {
           </DropdownItem>
           <DropdownItem icon={<FolderPlus size={14} />} onClick={() => setCreatingFolder(true)}>
             New Folder
+          </DropdownItem>
+          <DropdownItem
+            icon={<ListTodo size={14} />}
+            onClick={() => {
+              if (currentWorkspace) {
+                void createTodo("workspace", currentWorkspace);
+              }
+            }}
+          >
+            New to-do list
           </DropdownItem>
         </Dropdown>
       </div>
@@ -107,6 +155,42 @@ export const ProjectList: React.FC = () => {
             <span className="flex-1 truncate">{project.name}</span>
           </button>
         ))}
+
+        {todoLists.length > 0 && (
+          <div className="pt-3">
+            <p className="px-2 pb-1 text-xs font-medium uppercase tracking-wide text-neutral-600">
+              To-do lists
+            </p>
+            {todoLists.map((todo) =>
+              renamingTodo?.id === todo.id ? (
+                <NewItemInput
+                  key={todo.id}
+                  placeholder="list-name"
+                  initialValue={todo.name}
+                  onCancel={() => setRenamingTodo(null)}
+                  onSubmit={(name) => {
+                    setRenamingTodo(null);
+                    void renameTodo(todo.id, name);
+                  }}
+                />
+              ) : (
+                <button
+                  key={todo.id}
+                  type="button"
+                  onClick={() => openTodo(todo)}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    setTodoMenu({ x: event.clientX, y: event.clientY, todo });
+                  }}
+                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-neutral-300 transition-colors hover:bg-neutral-800 hover:text-neutral-100"
+                >
+                  <ListTodo size={15} className="text-neutral-500" />
+                  <span className="flex-1 truncate">{todo.name}</span>
+                </button>
+              )
+            )}
+          </div>
+        )}
       </nav>
 
       {menu && (
@@ -115,6 +199,15 @@ export const ProjectList: React.FC = () => {
           y={menu.y}
           items={menuItems(menu.project)}
           onClose={() => setMenu(null)}
+        />
+      )}
+
+      {todoMenu && (
+        <ContextMenu
+          x={todoMenu.x}
+          y={todoMenu.y}
+          items={todoMenuItems(todoMenu.todo)}
+          onClose={() => setTodoMenu(null)}
         />
       )}
 
@@ -133,6 +226,25 @@ export const ProjectList: React.FC = () => {
           setPendingDelete(null);
           if (project) {
             void deleteProject(project);
+          }
+        }}
+      />
+
+      <ConfirmDialog
+        open={pendingTodoDelete !== null}
+        title="Delete to-do list"
+        message={
+          <>
+            Delete{" "}
+            <span className="font-medium text-neutral-200">{pendingTodoDelete?.name}</span>?
+          </>
+        }
+        onCancel={() => setPendingTodoDelete(null)}
+        onConfirm={() => {
+          const todo = pendingTodoDelete;
+          setPendingTodoDelete(null);
+          if (todo) {
+            void deleteTodo(todo.id);
           }
         }}
       />
