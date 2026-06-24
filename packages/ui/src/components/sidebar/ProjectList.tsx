@@ -49,6 +49,7 @@ export const ProjectList: React.FC = () => {
   );
   const [renamingTodo, setRenamingTodo] = useState<TodoListRecord | null>(null);
   const [pendingTodoDelete, setPendingTodoDelete] = useState<TodoListRecord | null>(null);
+  const [creatingTodo, setCreatingTodo] = useState(false);
 
   const todoLists = todos
     .filter((t) => t.scope === "workspace" && t.refKey === currentWorkspace)
@@ -104,14 +105,7 @@ export const ProjectList: React.FC = () => {
           <DropdownItem icon={<FolderPlus size={14} />} onClick={() => setCreatingFolder(true)}>
             New Folder
           </DropdownItem>
-          <DropdownItem
-            icon={<ListTodo size={14} />}
-            onClick={() => {
-              if (currentWorkspace) {
-                void createTodo("workspace", currentWorkspace);
-              }
-            }}
-          >
+          <DropdownItem icon={<ListTodo size={14} />} onClick={() => setCreatingTodo(true)}>
             New to-do list
           </DropdownItem>
         </Dropdown>
@@ -156,11 +150,23 @@ export const ProjectList: React.FC = () => {
           </button>
         ))}
 
-        {todoLists.length > 0 && (
+        {(creatingTodo || todoLists.length > 0) && (
           <div className="pt-3">
             <p className="px-2 pb-1 text-xs font-medium uppercase tracking-wide text-neutral-600">
               To-do lists
             </p>
+            {creatingTodo && (
+              <NewItemInput
+                placeholder="list-name"
+                onCancel={() => setCreatingTodo(false)}
+                onSubmit={(name) => {
+                  setCreatingTodo(false);
+                  if (currentWorkspace) {
+                    void createTodo("workspace", currentWorkspace, name);
+                  }
+                }}
+              />
+            )}
             {todoLists.map((todo) =>
               renamingTodo?.id === todo.id ? (
                 <NewItemInput

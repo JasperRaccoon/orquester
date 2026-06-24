@@ -81,7 +81,7 @@ export const NewTabMenu: React.FC = () => {
       </DropdownItem>
       <DropdownItem
         icon={<ListTodo size={14} />}
-        onClick={() => ctx && void createTodo("project", ctx.key)}
+        onClick={() => ctx && void createTodo("project", ctx.key, "to-dos")}
       >
         New to-do list
       </DropdownItem>
