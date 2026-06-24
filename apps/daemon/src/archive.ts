@@ -23,7 +23,7 @@ const TOOL_TIMEOUT_MS = 15_000;
 type Tool = { bin: string; kind: "7z" | "bsdtar" };
 let resolvedTool: Tool | null | undefined;
 
-function onPath(bin: string): boolean {
+export function onPath(bin: string): boolean {
   const dirs = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
   const exts = process.platform === "win32" ? [".EXE", ".CMD", ".BAT", ""] : [""];
   for (const dir of dirs) {
