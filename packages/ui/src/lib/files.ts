@@ -117,3 +117,19 @@ export function downloadBlob(filename: string, blob: Blob): void {
   anchor.remove();
   URL.revokeObjectURL(url);
 }
+
+/**
+ * Trigger a browser download from a URL (the server sets the real filename via
+ * Content-Disposition; `filename` is only a fallback hint). Unlike downloadBlob
+ * there's no object URL to revoke — this is a real URL the browser streams to
+ * disk via its own download manager.
+ */
+export function downloadUrl(url: string, filename: string): void {
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.rel = "noopener";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+}
