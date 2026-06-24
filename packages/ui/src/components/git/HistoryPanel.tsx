@@ -5,6 +5,7 @@ import { cn } from "../../lib/cn";
 import { Button } from "../ui";
 import { DiffView } from "./DiffView";
 import { useApi } from "../../context/orquester-context";
+import { useIsDesktop } from "../../hooks";
 
 const PAGE = 50;
 
@@ -82,6 +83,7 @@ interface HistoryPanelProps {
  */
 export const HistoryPanel: React.FC<HistoryPanelProps> = ({ projectPath, reloadToken = 0 }) => {
   const api = useApi();
+  const isDesktop = useIsDesktop();
   const [commits, setCommits] = useState<GitLogEntry[]>([]);
   const [loadingLog, setLoadingLog] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -185,8 +187,10 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({ projectPath, reloadT
         .then((d) => {
           if (!active) return;
           setDetail(d);
-          // Auto-select the first file so the diff pane isn't empty.
-          if (d.files[0]) {
+          // Desktop's 3-pane auto-opens the first file so the diff pane isn't
+          // empty. On mobile that would skip the commit's file list (a master
+          // stage), so we stop here and let the user tap a file to see its diff.
+          if (isDesktop && d.files[0]) {
             selectFile(sha, d.files[0]);
           }
         })
@@ -196,7 +200,7 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({ projectPath, reloadT
         active = false;
       };
     },
-    [api, projectPath, selectFile]
+    [api, projectPath, selectFile, isDesktop]
   );
 
   return (
@@ -335,7 +339,7 @@ const CommitRow: React.FC<{ commit: GitLogEntry; active: boolean; onSelect: () =
       }
     }}
     className={cn(
-      "flex w-full cursor-pointer flex-col gap-0.5 px-3 py-1.5 text-left",
+      "flex w-full cursor-pointer flex-col gap-0.5 px-3 py-2 text-left md:py-1.5",
       active ? "bg-neutral-800" : "hover:bg-neutral-900"
     )}
   >
@@ -381,7 +385,7 @@ const CommitFileRow: React.FC<{ file: GitCommitFile; active: boolean; onSelect: 
         }
       }}
       className={cn(
-        "flex w-full cursor-pointer items-center gap-2 py-1 pl-2.5 pr-2 text-left text-sm",
+        "flex w-full cursor-pointer items-center gap-2 py-2 pl-2.5 pr-2 text-left text-sm md:py-1",
         active ? "bg-neutral-800 text-neutral-100" : "text-neutral-300 hover:bg-neutral-900"
       )}
     >

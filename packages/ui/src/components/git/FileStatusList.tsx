@@ -39,6 +39,8 @@ interface FileStatusListProps {
   checked: Set<string>; // staged-for-commit selection
   onToggle: (path: string) => void;
   onToggleAll: () => void;
+  /** Optional trailing per-row affordance (e.g. a ⋯ actions menu). */
+  rowAction?: (file: GitFileChange) => React.ReactNode;
 }
 
 /**
@@ -52,7 +54,8 @@ export const FileStatusList: React.FC<FileStatusListProps> = ({
   onSelect,
   checked,
   onToggle,
-  onToggleAll
+  onToggleAll,
+  rowAction
 }) => {
   const allChecked = files.length > 0 && files.every((f) => checked.has(f.path));
   const someChecked = files.some((f) => checked.has(f.path));
@@ -91,7 +94,7 @@ export const FileStatusList: React.FC<FileStatusListProps> = ({
                 }
               }}
               className={cn(
-                "flex w-full cursor-pointer items-center gap-2 py-1 pl-2.5 pr-2 text-left text-sm",
+                "group flex w-full cursor-pointer items-center gap-2 py-2 pl-2.5 pr-2 text-left text-sm md:py-1",
                 isActive ? "bg-neutral-800 text-neutral-100" : "text-neutral-300 hover:bg-neutral-900"
               )}
             >
@@ -100,7 +103,7 @@ export const FileStatusList: React.FC<FileStatusListProps> = ({
                 checked={checked.has(file.path)}
                 onClick={(e) => e.stopPropagation()}
                 onChange={() => onToggle(file.path)}
-                className="h-3.5 w-3.5 shrink-0 accent-neutral-300"
+                className="h-4 w-4 shrink-0 accent-neutral-300 md:h-3.5 md:w-3.5"
               />
               <span className="min-w-0 flex-1 truncate" title={file.path}>
                 {dir && <span className="text-neutral-500">{dir}</span>}
@@ -109,6 +112,7 @@ export const FileStatusList: React.FC<FileStatusListProps> = ({
               <span className={cn("w-3 shrink-0 text-center font-mono text-xs", STATUS_COLOR[file.status])}>
                 {STATUS_LETTER[file.status]}
               </span>
+              {rowAction?.(file)}
             </div>
           );
         })}

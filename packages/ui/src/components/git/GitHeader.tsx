@@ -148,10 +148,11 @@ export const GitHeader: React.FC<GitHeaderProps> = ({
           disabled={isBusy}
           onClick={onFetch}
           className="rounded-r-none"
+          aria-label="Fetch"
           title={lastFetchedLabel(status?.lastFetched ?? null)}
         >
           <Download size={13} />
-          {busy === "fetch" ? "Fetching…" : "Fetch"}
+          <span className="hidden sm:inline">{busy === "fetch" ? "Fetching…" : "Fetch"}</span>
         </Button>
         <Button
           size="sm"
@@ -159,9 +160,10 @@ export const GitHeader: React.FC<GitHeaderProps> = ({
           disabled={isBusy}
           onClick={onPull}
           className="rounded-none border-x border-neutral-800"
+          aria-label="Pull"
         >
           <ArrowDown size={13} />
-          {busy === "pull" ? "Pulling…" : "Pull"}
+          <span className="hidden sm:inline">{busy === "pull" ? "Pulling…" : "Pull"}</span>
           {behind > 0 && <span className="text-neutral-500">{behind}</span>}
         </Button>
         <Button
@@ -170,9 +172,10 @@ export const GitHeader: React.FC<GitHeaderProps> = ({
           disabled={isBusy}
           onClick={onPush}
           className="rounded-l-none"
+          aria-label="Push"
         >
           <Upload size={13} />
-          {busy === "push" ? "Pushing…" : "Push"}
+          <span className="hidden sm:inline">{busy === "push" ? "Pushing…" : "Push"}</span>
           {ahead > 0 && <span className="text-neutral-500">{ahead}</span>}
         </Button>
       </div>

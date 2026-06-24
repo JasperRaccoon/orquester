@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, GitCommitHorizontal } from "lucide-react";
+import { ArrowLeft, GitCommitHorizontal, MoreVertical } from "lucide-react";
 import type { GitFileChange, GitStatusResponse } from "@orquester/api";
 import { cn } from "../../lib/cn";
 import { Button, ContextMenu, Input, type ContextMenuItem } from "../ui";
 import { DiffView } from "./DiffView";
 import { FileStatusList } from "./FileStatusList";
 import { useApi } from "../../context/orquester-context";
+import { useIsDesktop } from "../../hooks";
 
 interface MenuState {
   x: number;
@@ -27,6 +28,7 @@ interface ChangesPanelProps {
  */
 export const ChangesPanel: React.FC<ChangesPanelProps> = ({ projectPath, status, onChanged }) => {
   const api = useApi();
+  const isDesktop = useIsDesktop();
   const files = useMemo(() => status?.files ?? [], [status]);
   const branch = status?.branch;
 
@@ -52,13 +54,17 @@ export const ChangesPanel: React.FC<ChangesPanelProps> = ({ projectPath, status,
   }, [files]);
 
   // Keep a valid selection as the file list changes (commits, discards, …).
+  // Auto-opening the first file is a desktop-only convenience: the side-by-side
+  // layout wants the diff pane populated. On mobile this panel is a master/detail
+  // stack, so it must land on the file list — auto-selecting would skip straight
+  // to a diff, and a vanished selection returns to the list (not another diff).
   useEffect(() => {
     if (selectedPath && !files.some((f) => f.path === selectedPath)) {
-      setSelectedPath(files[0]?.path ?? null);
-    } else if (!selectedPath && files.length > 0) {
+      setSelectedPath(isDesktop ? files[0]?.path ?? null : null);
+    } else if (!selectedPath && files.length > 0 && isDesktop) {
       setSelectedPath(files[0].path);
     }
-  }, [files, selectedPath]);
+  }, [files, selectedPath, isDesktop]);
 
   // A stable signature for the selected file's change state. `status` is re-fetched
   // on GitView's 3s poll, so `files` gets a fresh reference each tick; keying the
@@ -202,6 +208,29 @@ export const ChangesPanel: React.FC<ChangesPanelProps> = ({ projectPath, status,
               e.stopPropagation();
               setMenu({ x: e.clientX, y: e.clientY, file });
             }}
+            rowAction={(file) => (
+              <button
+                type="button"
+                aria-label={`Show actions for ${file.path}`}
+                onClick={(e) => {
+                  // Touch has no right-click: this opens the same actions menu,
+                  // anchored under the button. Stop the row's select handler.
+                  e.stopPropagation();
+                  const r = e.currentTarget.getBoundingClientRect();
+                  setMenu({ x: r.right, y: r.bottom + 4, file });
+                }}
+                className={cn(
+                  "flex h-6 w-6 shrink-0 items-center justify-center rounded text-neutral-500",
+                  "transition-colors hover:bg-neutral-800 hover:text-neutral-200",
+                  "focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500",
+                  // Always reachable on touch; on desktop it stays hidden until the
+                  // row is hovered/focused, keeping the list uncluttered.
+                  "opacity-100 md:opacity-0 md:group-hover:opacity-100 md:focus-visible:opacity-100"
+                )}
+              >
+                <MoreVertical size={14} />
+              </button>
+            )}
           />
         </div>
 
