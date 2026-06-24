@@ -1,5 +1,5 @@
 import React from "react";
-import { FolderTree, GitBranch, Plus } from "lucide-react";
+import { FolderTree, GitBranch, ListTodo, Plus } from "lucide-react";
 import {
   AdaptiveMenu,
   DropdownEmpty,
@@ -10,32 +10,54 @@ import {
 } from "../ui";
 import { getRegistryIcon } from "../../icons";
 import { useRegistry } from "../../hooks";
-import { useAppStore } from "../../store/app";
+import { currentContext, useAppStore } from "../../store/app";
 
 /**
- * The "+" new-tab button. Lists detected shells and INSTALLED agents (manage
- * installs in Settings → Agents / Harnesses) plus built-in tools; choosing one
- * opens a tab in the current project.
+ * The "+" new-tab button. In a project it lists detected shells and INSTALLED
+ * agents (manage installs in Settings → Agents / Harnesses) plus built-in tools
+ * and to-do lists; in a workspace context it offers only to-do lists. Choosing
+ * an entry opens a tab in the current context.
  */
 export const NewTabMenu: React.FC = () => {
   const openTab = useAppStore((s) => s.openTab);
   const openFileBrowser = useAppStore((s) => s.openFileBrowser);
   const openGit = useAppStore((s) => s.openGit);
+  const ctx = useAppStore(currentContext);
+  const todos = useAppStore((s) => s.todos);
+  const createTodo = useAppStore((s) => s.createTodo);
+  const openTodo = useAppStore((s) => s.openTodo);
   const registry = useRegistry();
 
   const shells = registry.shells.filter((s) => s.enabled);
   const agents = registry.agents.filter((a) => a.enabled);
 
+  const trigger = (
+    <IconButton label="New tab" className="app-no-drag">
+      <Plus size={16} />
+    </IconButton>
+  );
+
+  if (ctx?.kind === "workspace") {
+    const workspaceTodos = todos.filter((t) => t.scope === "workspace" && t.refKey === ctx.key);
+    return (
+      <AdaptiveMenu title="New tab" trigger={trigger} width="w-60">
+        <DropdownLabel>To-do lists</DropdownLabel>
+        <DropdownItem icon={<ListTodo size={14} />} onClick={() => void createTodo("workspace", ctx.key)}>
+          New to-do list
+        </DropdownItem>
+        {workspaceTodos.map((rec) => (
+          <DropdownItem key={rec.id} icon={<ListTodo size={14} />} onClick={() => openTodo(rec)}>
+            {rec.name}
+          </DropdownItem>
+        ))}
+      </AdaptiveMenu>
+    );
+  }
+
+  const projectTodos = ctx ? todos.filter((t) => t.scope === "project" && t.refKey === ctx.key) : [];
+
   return (
-    <AdaptiveMenu
-      title="New tab"
-      trigger={
-        <IconButton label="New tab" className="app-no-drag">
-          <Plus size={16} />
-        </IconButton>
-      }
-      width="w-60"
-    >
+    <AdaptiveMenu title="New tab" trigger={trigger} width="w-60">
       <DropdownLabel>Shells</DropdownLabel>
       {shells.length === 0 && <DropdownEmpty>No shells detected</DropdownEmpty>}
       {shells.map((shell) => (
@@ -57,6 +79,17 @@ export const NewTabMenu: React.FC = () => {
       <DropdownItem icon={<GitBranch size={14} />} onClick={() => openGit()}>
         Git
       </DropdownItem>
+      <DropdownItem
+        icon={<ListTodo size={14} />}
+        onClick={() => ctx && void createTodo("project", ctx.key)}
+      >
+        New to-do list
+      </DropdownItem>
+      {projectTodos.map((rec) => (
+        <DropdownItem key={rec.id} icon={<ListTodo size={14} />} onClick={() => openTodo(rec)}>
+          {rec.name}
+        </DropdownItem>
+      ))}
 
       <DropdownSeparator />
 
