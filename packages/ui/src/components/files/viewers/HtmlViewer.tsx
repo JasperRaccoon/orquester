@@ -1,8 +1,9 @@
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import { ArrowLeft, Code2, Eye, File, Save } from "lucide-react";
 import { Button } from "../../ui";
 import { Editor } from "../Editor";
 import { useFileText } from "../../../hooks";
+import { buildHtmlSrcdoc } from "../../../lib/html-preview";
 
 const baseName = (p: string) => p.slice(p.lastIndexOf("/") + 1);
 
@@ -19,6 +20,9 @@ export const HtmlViewer: React.FC<{ path: string; onBack: () => void }> = ({ pat
   const { content, setContent, original, truncated, state, saving, save } = useFileText(path);
   const readOnly = truncated;
   const dirty = !readOnly && content !== original;
+  // Rewrite self-anchors + inject <base> so in-page links scroll instead of
+  // navigating the iframe to the app origin (which frame-ancestors blocks).
+  const previewHtml = useMemo(() => buildHtmlSrcdoc(content, name), [content, name]);
 
   return (
     <>
@@ -61,7 +65,7 @@ export const HtmlViewer: React.FC<{ path: string; onBack: () => void }> = ({ pat
             // Empty sandbox: no scripts, forms, popups, plugins, or same-origin
             // access — the HTML renders as static markup/CSS only.
             sandbox=""
-            srcDoc={content}
+            srcDoc={previewHtml}
             title={`Preview of ${name}`}
             referrerPolicy="no-referrer"
             className="h-full w-full border-0 bg-white"
