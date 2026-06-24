@@ -9,8 +9,11 @@ orquester.example.com {
         X-Frame-Options "DENY"
         Referrer-Policy "no-referrer"
         Permissions-Policy "camera=(), microphone=(), geolocation=(), interest-cohort=()"
-        # Tune CSP to the SPA (xterm/codemirror use inline styles; WS needs wss:).
-        Content-Security-Policy "default-src 'self'; connect-src 'self' wss:; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+        # Tune CSP to the SPA: xterm/codemirror use inline styles; WS needs wss:;
+        # the file-preview viewers load images/audio/video as blob: object URLs and
+        # pdf.js spins up a worker (which can be a blob:), so img/media/worker-src
+        # must allow blob:.
+        Content-Security-Policy "default-src 'self'; connect-src 'self' wss:; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
         -Server
     }
 }
