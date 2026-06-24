@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback } from "react";
 import { ArrowLeft, File, Save } from "lucide-react";
 import { Button } from "../ui";
 import { Editor } from "./Editor";
@@ -7,7 +7,9 @@ import { BinaryCard } from "./viewers/BinaryCard";
 import { MediaViewer } from "./viewers/MediaViewer";
 import { ArchiveViewer } from "./viewers/ArchiveViewer";
 import { PdfViewer } from "./viewers/PdfViewer";
+import { HtmlViewer } from "./viewers/HtmlViewer";
 import { useApi } from "../../context/orquester-context";
+import { useFileText } from "../../hooks";
 import { detectFileKind, PREVIEW_CAP_BY_KIND, DOWNLOAD_MAX_BYTES } from "../../lib/file-kind";
 
 const baseName = (p: string) => p.slice(p.lastIndexOf("/") + 1);
@@ -39,6 +41,11 @@ export const FilePreview: React.FC<{ path: string | null; size: number; onBack: 
   // Text keeps its own header (Save button + dirty dot) — delegate wholesale.
   if (kind === "text") {
     return <TextPreview path={path} mime={mime} size={size} onBack={onBack} />;
+  }
+
+  // HTML renders in a sandboxed iframe with a Preview | Source toggle (text route).
+  if (kind === "html") {
+    return <HtmlViewer path={path} onBack={onBack} />;
   }
 
   const overCeiling = size > DOWNLOAD_MAX_BYTES;
@@ -95,30 +102,8 @@ const PreviewHeader: React.FC<{ name: string; onBack: () => void }> = ({ name, o
  *  guard so an unknown-extension binary never renders as mojibake. */
 const TextPreview: React.FC<{ path: string; mime: string; size: number; onBack: () => void }> = ({ path, mime, size, onBack }) => {
   const api = useApi();
-  const [content, setContent] = useState("");
-  const [original, setOriginal] = useState("");
-  const [state, setState] = useState<"idle" | "loading" | "error">("idle");
-  const [truncated, setTruncated] = useState(false);
-  const [saving, setSaving] = useState(false);
   const fetchBytes = useCallback((p: string, signal?: AbortSignal) => api.readFileBytes(p, signal), [api]);
-
-  useEffect(() => {
-    let active = true;
-    setState("loading");
-    api
-      .readFile(path)
-      .then((res) => {
-        if (!active) return;
-        setContent(res.content);
-        setOriginal(res.content);
-        setTruncated(res.truncated);
-        setState("idle");
-      })
-      .catch(() => active && setState("error"));
-    return () => {
-      active = false;
-    };
-  }, [api, path]);
+  const { content, setContent, original, truncated, state, saving, save } = useFileText(path);
 
   const name = baseName(path);
   // Same NUL-byte guard the original viewer used to force read-only;
@@ -126,19 +111,6 @@ const TextPreview: React.FC<{ path: string; mime: string; size: number; onBack: 
   const isBinary = content.includes(String.fromCharCode(0));
   const readOnly = truncated || isBinary;
   const dirty = !readOnly && content !== original;
-
-  const save = async () => {
-    if (!dirty || saving) return;
-    setSaving(true);
-    try {
-      await api.saveFile(path, content);
-      setOriginal(content);
-    } catch {
-      /* surfaced as still-dirty */
-    } finally {
-      setSaving(false);
-    }
-  };
 
   return (
     <>

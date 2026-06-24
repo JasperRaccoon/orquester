@@ -5,3 +5,4 @@ export { useMediaQuery, useIsDesktop } from "./use-media-query";
 export { useViewportHeight } from "./use-viewport-height";
 export { usePollWhileActive } from "./use-poll-while-active";
 export { useObjectUrl, type ObjectUrlState } from "./use-object-url";
+export { useFileText, type FileTextState } from "./use-file-text";

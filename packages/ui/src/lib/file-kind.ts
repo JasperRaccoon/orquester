@@ -4,7 +4,7 @@
  * magic-byte sniffing; predictable and synchronous.
  */
 
-export type FileKind = "text" | "image" | "pdf" | "audio" | "video" | "archive" | "binary";
+export type FileKind = "text" | "html" | "image" | "pdf" | "audio" | "video" | "archive" | "binary";
 
 export interface FileKindInfo {
   kind: FileKind;
@@ -26,7 +26,8 @@ export const PREVIEW_CAP_BY_KIND: Record<FileKind, number> = {
   audio: 25 * 1024 * 1024,
   binary: 25 * 1024 * 1024,
   archive: DOWNLOAD_MAX_BYTES, // listed server-side, not byte-fetched
-  text: DOWNLOAD_MAX_BYTES // text uses the separate 1 MB /api/fs/read route
+  text: DOWNLOAD_MAX_BYTES, // text uses the separate 1 MB /api/fs/read route
+  html: DOWNLOAD_MAX_BYTES // html also uses the text route (rendered in a sandboxed iframe)
 };
 
 // extension (no dot, lowercased) -> [kind, mime]
@@ -41,6 +42,8 @@ const BY_EXT: Record<string, [FileKind, string]> = {
   ico: ["image", "image/x-icon"],
   avif: ["image", "image/avif"],
   pdf: ["pdf", "application/pdf"],
+  html: ["html", "text/html"],
+  htm: ["html", "text/html"],
   mp3: ["audio", "audio/mpeg"],
   wav: ["audio", "audio/wav"],
   ogg: ["audio", "audio/ogg"],
