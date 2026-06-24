@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import CodeMirror from "@uiw/react-codemirror";
+import CodeMirror, { EditorView } from "@uiw/react-codemirror";
 import { oneDark } from "@codemirror/theme-one-dark";
 import { languages } from "@codemirror/language-data";
 import { LanguageDescription } from "@codemirror/language";
@@ -54,7 +54,9 @@ export const Editor: React.FC<EditorProps> = ({ filename, value, readOnly, onCha
         theme={oneDark}
         readOnly={readOnly}
         editable={!readOnly}
-        extensions={langExtension}
+        // Soft-wrap long lines so text never runs off-screen (mobile or desktop);
+        // the editor then only scrolls vertically. Matches the Git diff view.
+        extensions={[EditorView.lineWrapping, ...langExtension]}
         onChange={onChange}
         basicSetup={{ highlightActiveLine: !readOnly, foldGutter: true }}
       />
