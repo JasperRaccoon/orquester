@@ -41,13 +41,14 @@ classifies the file by extension, then mounts the matching viewer:
 | `audio` | mp3, wav, ogg, m4a, flac, aac | `<audio controls>` on a blob URL | bytes via Transporter |
 | `video` | mp4, webm, mov, mkv, m4v | `<video controls>` on a blob URL | bytes via Transporter |
 | `archive` | zip, rar, 7z, tar, tar.gz/tgz, gz, bz2, xz | listing view (read-only entry tree) | `GET /api/fs/archive` → small JSON |
-| `binary` | unknown, or **any file over the size cap** | download + metadata card | bytes via Transporter (on demand) |
+| `binary` | unknown, or **any file over its preview cap** | download + metadata card | bytes via Transporter (on demand) |
 
 **Detection is extension-based**, in a new `packages/ui/src/lib/file-kind.ts`
-(`detectFileKind(filename) → { kind, mime }`). This mirrors how the existing `Editor` already uses
-CodeMirror's `LanguageDescription.matchFilename` to pick a language — predictable, synchronous,
-zero-cost, and easy to extend. Magic-byte sniffing is intentionally **not** done (YAGNI; extensions
-are reliable enough for a single-user tool browsing its own project files).
+(`detectFileKind(filename) → { kind, mime }`, plus the `PREVIEW_CAP_BY_KIND` table used by the
+dispatcher — see "Size caps"). This mirrors how the existing `Editor` already uses CodeMirror's
+`LanguageDescription.matchFilename` to pick a language — predictable, synchronous, zero-cost, and
+easy to extend. Magic-byte sniffing is intentionally **not** done (YAGNI; extensions are reliable
+enough for a single-user tool browsing its own project files).
 
 ### Why two different content paths
 
@@ -75,9 +76,12 @@ Returns the file's **raw bytes**, no decode:
   so serving a generic `application/octet-stream` is both **safe** (an `.svg`/`.html` is never
   served as `text/html`, so no stored-XSS via the raw route) and sufficient.
 
-`RAW_MAX_BYTES = 50 * 1024 * 1024` (50 MB) — a named constant. Because the blob/bytes approach
-loads the whole file into renderer memory, this bounds any single preview. Files above it are not
-previewed or downloaded in-app; the card states the size and suggests a terminal.
+`RAW_MAX_BYTES = 50 * 1024 * 1024` (50 MB) — a named constant. It is the **absolute ceiling** on any
+single read (memory backstop) and the **in-app download ceiling**: above it, a file is neither
+previewed nor downloaded in-app, and the card states the size and suggests a terminal. Whether a
+file under this ceiling is *previewed inline* vs shown as a download card is a finer, **per-kind
+client policy** (see "Size caps" below) — the route itself only enforces the single 50 MB backstop
+and stays agnostic to file kind.
 
 ### `GET /api/fs/archive?path=…`
 
@@ -155,8 +159,9 @@ than grown further (a focused-boundary improvement on code this change already t
 - `viewers/MediaViewer.tsx` — `<audio>` / `<video controls>`.
 - `viewers/ArchiveViewer.tsx` — read-only listing from `listArchive`; shows `truncated` notice and
   falls back to `BinaryCard` when `supported: false`.
-- `viewers/BinaryCard.tsx` — metadata (name, size, type) + **Download**; also the "too large to
-  preview (N MB)" state.
+- `viewers/BinaryCard.tsx` — metadata (name, size, type); renders in two states — **downloadable**
+  (≤ 50 MB: unknown binary, or a non-video over its 25 MB preview cap) with a **Download** button,
+  and **over-ceiling** (> 50 MB: download disabled, suggests a terminal). See "Size caps" below.
 - `hooks/use-object-url.ts`, `lib/file-kind.ts`, and a `downloadBlob(name, blob)` helper beside the
   existing `lib/files.ts`.
 
@@ -173,12 +178,36 @@ than grown further (a focused-boundary improvement on code this change already t
   Electron's `webPreferences.plugins` PDF plugin. Cost to note: `pdfjs-dist` adds a few hundred KB
   to the renderer bundle.
 
+## Size caps & download tiers
+
+Two cap layers, deciding *render inline* vs *download card* vs *neither*:
+
+- **`RAW_MAX_BYTES = 50 MB`** (daemon) — absolute read ceiling + in-app download ceiling. Enforced
+  on `/api/fs/raw`; kind-agnostic.
+- **Per-kind preview cap** (client, in `lib/file-kind.ts` as `PREVIEW_CAP_BY_KIND`) — `video: 50 MB`,
+  everything else (image, audio, pdf, binary) `25 MB`. The client already has `size` (from the
+  directory listing's `FsEntry.size`) and `kind`, so it decides inline-vs-card *before* fetching
+  bytes — no wasted fetch for a file it won't render.
+
+Resulting tiers:
+
+| File size | image / pdf / audio | video |
+|---|---|---|
+| ≤ 25 MB | preview inline | preview inline |
+| 25 MB – 50 MB | download card (download **works**) | preview inline |
+| > 50 MB | card, **no** in-app download (suggest a terminal) | card, no download |
+
+So `BinaryCard` has two visual states: **downloadable** (file ≤ `RAW_MAX_BYTES`, over its preview
+cap or just an unknown binary) and **over-ceiling** (file > `RAW_MAX_BYTES`, download disabled).
+`useObjectUrl` only fetches when the file is within the download ceiling.
+
 ## Error handling & edge cases
 
 | Situation | Behavior |
 |---|---|
 | Bytes fetch fails | error card ("Could not load file.") |
-| File over `RAW_MAX_BYTES` (50 MB) | "Too large to preview (N MB)" card; in-app download disabled past the hard cap |
+| Over per-kind preview cap but ≤ 50 MB | "Too large to preview (N MB)" card, **download still works** |
+| Over `RAW_MAX_BYTES` (50 MB) | "Too large to preview (N MB)" card, in-app download disabled (suggest a terminal) |
 | Archive format unsupported / no host tool | `{ supported: false }` → download card with a short note |
 | Archive with >5,000 entries | listing shown + "truncated" notice |
 | SVG | rendered via `<img>` on a blob (script-less `<img>` context — safe) |
@@ -210,7 +239,8 @@ in `AGENTS.md` (provisioning) and `deploy/README.md`.
 1. Drop a png, an svg, a pdf (multi-page), an mp3, an mp4, a zip, and a rar into a `.stage`
    workspace; open each and confirm the correct viewer renders / plays.
 2. Open a text/code file → confirm CodeMirror still edits **and saves**.
-3. Open a file just over 50 MB → confirm the "too large" card (not a hung fetch).
+3. Size tiers: a ~30 MB image → "too large to preview" card with a **working** download; a ~40 MB
+   mp4 → **plays** inline (under the 50 MB video cap); a >50 MB file → card with download **disabled**.
 4. Open an archive on a host **with** `7z`/`bsdtar` (listing) and simulate one **without**
    (download card).
 5. Repeat the image/pdf/archive checks on the **desktop** app specifically — that exercises the new
