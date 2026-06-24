@@ -10,6 +10,9 @@ dist-electron/
 project.md
 release/
 
+# Local deploy runbook (real hosts/logins/keys). The .example template IS committed.
+/DEPLOY_TO_VPS.md
+
 # Stage Sandbox: keep committed config + seed workspaces, ignore runtime artifacts
 .stage/**/logs/
 .stage/daemon/*.sock

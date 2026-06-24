@@ -275,6 +275,13 @@ Stack: Ubuntu LTS, Node 20, pnpm, tmux, Caddy 2, ufw — daemon as a hardened sy
 Caddy as the TLS reverse proxy. Templates live in `deploy/`. Use placeholders
 `orquester.example.com` / `203.0.113.10` (never commit a real domain/IP/secret).
 
+> **Before deploying, check for a local `DEPLOY_TO_VPS.md` at the repo root.** It's a
+> **gitignored**, per-machine runbook that records the actual VPS targets (host, SSH login,
+> key, sudo) and copy-paste deploy commands for this checkout — the fastest way to know
+> *where* and *how* to deploy. If it's missing, copy `DEPLOY_TO_VPS.md.example` to
+> `DEPLOY_TO_VPS.md` and fill in real values (which stay off git). The generic procedure is in
+> **Routine updates** below.
+
 ### Model
 
 - **systemd (`deploy/orquester.service`)** runs the daemon as the unprivileged `orquester` user

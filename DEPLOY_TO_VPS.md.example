@@ -1,0 +1,84 @@
+# Deploy to VPS — runbook (TEMPLATE)
+
+> **Copy this to `DEPLOY_TO_VPS.md` and fill in real values.** The real file is
+> **gitignored** (it holds your hosts/logins/keys) — never commit it. Private SSH
+> keys live in `~/.ssh/`, not here. Placeholders below use the repo convention
+> (`203.0.113.x`); replace every `<…>` and example value with yours.
+
+How to ship the current `main` to your production VPS(es). Each runs the daemon
+as a hardened systemd service from `/opt/orquester` (appdir `/var/lib/orquester`),
+behind Caddy on 443; the daemon listens on loopback `127.0.0.1:47831`.
+
+## TL;DR
+
+1. **Push first** — the VPSes pull from `origin/main`:
+   ```sh
+   git push origin main
+   ```
+2. **Deploy each VPS** (run the one-liners below). They're independent.
+
+## Targets
+
+| Name | Host (IP) | SSH login | Key | Privilege | Domain |
+|------|-----------|-----------|-----|-----------|--------|
+| **vps-a** | `203.0.113.10` | `root` | `~/.ssh/<key_a>` | runs as root, **no sudo** | `example.com` |
+| **vps-b** | `203.0.113.20` | `<user>` | `~/.ssh/<key_b>` | **`sudo` for git/pnpm/chown/systemctl** | `example.net` |
+
+Notes / per-host quirks to record here:
+- Whether the host has a `~/.ssh/config` entry (and whether it sets `User`), so you know if you must connect as `<user>@host` explicitly.
+- Whether you need `-i ~/.ssh/<key>`, `-o IdentitiesOnly=yes`, and/or `-o StrictHostKeyChecking=accept-new` (e.g. a host key that rotates).
+- Whether `/opt/orquester` is root-owned (⇒ a non-root login needs `sudo` for git/pnpm/chown/systemctl, ideally NOPASSWD).
+
+## Deploy — a root-login VPS
+
+```sh
+ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new root@203.0.113.10 'set -e
+  cd /opt/orquester
+  git fetch origin -q && git reset --hard origin/main
+  echo "HEAD=$(git rev-parse --short HEAD)"
+  ELECTRON_SKIP_BINARY_DOWNLOAD=1 pnpm --filter @orquester/web build
+  chown -R root:root /opt/orquester
+  systemctl restart orquester
+  curl -fsS --retry 25 --retry-delay 1 --retry-connrefused http://127.0.0.1:47831/health; echo
+  echo "service=$(systemctl is-active orquester)"'
+```
+
+## Deploy — a sudo-login VPS (non-root user)
+
+```sh
+ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new -o IdentitiesOnly=yes -i ~/.ssh/<key_b> <user>@203.0.113.20 'set -e
+  cd /opt/orquester
+  sudo git fetch origin -q && sudo git reset --hard origin/main
+  echo "HEAD=$(sudo git rev-parse --short HEAD)"
+  sudo ELECTRON_SKIP_BINARY_DOWNLOAD=1 pnpm --filter @orquester/web build
+  sudo chown -R root:root /opt/orquester
+  sudo systemctl restart orquester
+  curl -fsS --retry 25 --retry-delay 1 --retry-connrefused http://127.0.0.1:47831/health; echo
+  echo "service=$(systemctl is-active orquester)"'
+```
+
+## What each step does
+
+| Step | Why |
+|------|-----|
+| `git fetch + reset --hard origin/main` | Tree is root-owned (immutable code); reset to the pushed commit. |
+| `pnpm --filter @orquester/web build` | Rebuilds the **served SPA** (`apps/web/dist`). Only needed when `web`/`ui`/`api` changed — harmless to always run. The **daemon** needs no build (tsx runs the new `.ts` after restart). |
+| `chown -R root:root /opt/orquester` | Keep code root-owned (avoids git "dubious ownership"; the daemon runs as a different user). |
+| `systemctl restart orquester` | Near-instant graceful restart. `KillMode=process` ⇒ the tmux server + all terminal/agent sessions **survive** and the daemon reattaches. |
+| health `curl` | Expect `{"ok":true}`. `--retry-connrefused` rides out the ~1–2 s restart window (a few `connection refused` lines are normal). |
+
+## Gotchas
+
+- **Push before deploying** — the VPSes only see what's on `origin/main`.
+- **`pnpm install` only if `pnpm-lock.yaml` changed.** Source-only changes don't need it; run it (with `sudo` where applicable) before the build when the lockfile moved.
+- **Daemon-only changes need no build** — just `systemctl restart`. Only the SPA needs `pnpm build`.
+- **Caddy** only needs a reload if `deploy/Caddyfile` changed (`systemctl reload caddy`).
+- **Browser cache:** after a web change, hard-reload the open app (Cmd/Ctrl+Shift+R).
+- `47831` is loopback-only; never exposed. Caddy (443) is the public face.
+
+## Troubleshooting
+
+- Logs: `journalctl -u orquester -n 50 --no-pager` (prefix `sudo` for a non-root login).
+- Service state: `systemctl status orquester`.
+- Rolled back? `git reset --hard <good-sha>` then rebuild + restart.
+- Rotate the password: edit `/etc/orquester/daemon.env` (`ORQUESTER_HTTP_PASSWORD`), `systemctl restart orquester` (re-hashes into `daemon.json`).
