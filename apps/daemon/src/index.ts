@@ -1001,13 +1001,18 @@ function createServer(
     // File: stream the bytes as-is. createReadStream (not readFile) means no
     // memory cap; Content-Length from the stat gives the browser a progress bar.
     if (info.isFile()) {
-      void reply
+      // MUST be `return reply.send(stream)`, NOT `void reply.send(stream); return;`.
+      // In an async handler a stream send is still piping when the function
+      // resolves to `undefined`, so Fastify sends that `undefined` and clobbers
+      // the stream — content-length:0, empty body. (A buffer send like
+      // /api/fs/raw is immune because it completes inline.) Returning the reply
+      // tells Fastify the response is taken.
+      return reply
         .header("Content-Disposition", contentDisposition(name))
         .header("Content-Length", String(info.size))
         .header("X-Content-Type-Options", "nosniff")
         .type("application/octet-stream")
         .send(createReadStream(safe));
-      return;
     }
 
     // Directory: spawn a zip tool and stream its stdout (hijack pattern, as the
