@@ -33,6 +33,7 @@ import type {
   UiConnection,
   WorkspaceSummary
 } from "../types";
+import type { TodoListRecord, TodoScope } from "@orquester/api";
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -271,11 +272,46 @@ export interface GitTab {
   title: string;
 }
 
+/** A client-local to-do tab. Bound to a TodoListRecord by `todoId`; `title` mirrors
+ *  the record's name (kept in sync by the todo.* event handler + rename). */
+export interface TodoTab {
+  id: string;         // tab id
+  contextKey: string; // project path or workspace name (the map key)
+  todoId: string;
+  title: string;
+}
+
 /** A tab in the current project: a daemon session or a local tool tab. */
 export type ProjectTab =
   | { id: string; type: "session"; session: SessionSummary }
   | { id: string; type: "files"; title: string }
-  | { id: string; type: "git"; title: string };
+  | { id: string; type: "git"; title: string }
+  | { id: string; type: "todo"; todoId: string; title: string };
+
+/** What the tab strip + MainView are showing. A project (full tab set) or a
+ *  workspace (to-do tabs only). The `key` is the map key for all per-context tab state:
+ *  project path (never collides with) workspace name (names have no "/"; paths are absolute). */
+export type TabContext =
+  | { kind: "project"; key: string; project: ProjectSummary }
+  | { kind: "workspace"; key: string; workspace: string };
+
+/** Resolve the active context from navigation. Project wins when both are set. */
+export function currentContext(state: Pick<AppState, "currentProject" | "currentWorkspace">): TabContext | null {
+  if (state.currentProject) {
+    return { kind: "project", key: state.currentProject.path, project: state.currentProject };
+  }
+  if (state.currentWorkspace) {
+    return { kind: "workspace", key: state.currentWorkspace, workspace: state.currentWorkspace };
+  }
+  return null;
+}
+
+/** The (scope, refKey) a to-do list gets in a given context. */
+export function todoRefOf(ctx: TabContext): { scope: TodoScope; refKey: string } {
+  return ctx.kind === "project"
+    ? { scope: "project", refKey: ctx.key }
+    : { scope: "workspace", refKey: ctx.key };
+}
 
 /**
  * Client-derived per-session activity that drives the status dot. `state`
@@ -351,6 +387,30 @@ function upsertSession(sessions: SessionSummary[], next: SessionSummary): Sessio
   return copy;
 }
 
+/** Replace a to-do record by id (or append if new). */
+function upsertTodo(todos: TodoListRecord[], next: TodoListRecord): TodoListRecord[] {
+  const index = todos.findIndex((t) => t.id === next.id);
+  if (index === -1) {
+    return [...todos, next];
+  }
+  const copy = [...todos];
+  copy[index] = next;
+  return copy;
+}
+
+/** Retitle any open to-do tab bound to `todoId` (across every context). */
+function renameTodoTabs(
+  todoTabsByContext: Record<string, TodoTab[]>,
+  todoId: string,
+  title: string
+): Record<string, TodoTab[]> {
+  const next: Record<string, TodoTab[]> = {};
+  for (const [key, tabs] of Object.entries(todoTabsByContext)) {
+    next[key] = tabs.map((t) => (t.todoId === todoId ? { ...t, title } : t));
+  }
+  return next;
+}
+
 export interface AppState {
   api: ApiClient | null;
   connectionStatus: ConnectionStatus;
@@ -398,7 +458,14 @@ export interface AppState {
   fileTabsByProject: Record<string, FileTab[]>;
   /** Client-local Git tabs (GitHub-Desktop-style) per project path. */
   gitTabsByProject: Record<string, GitTab[]>;
-  /** Client-local active tab id per project path (session or file tab). */
+  /** Client-local to-do tabs per context key (project path *or* workspace name). */
+  todoTabsByContext: Record<string, TodoTab[]>;
+  /** Server cache of to-do records (all loaded scopes/refs). */
+  todos: TodoListRecord[];
+  /**
+   * Client-local active tab id per **context key** — a project path *or* a
+   * workspace name (they can't collide: paths are absolute, names have no "/").
+   */
   activeTabByProject: Record<string, string | null>;
   /** Per-project layout choice (tab view vs grid view); persisted client-side. */
   viewModeByProject: Record<string, ViewMode>;
@@ -464,6 +531,14 @@ export interface AppState {
   renameTab: (id: string, title: string) => Promise<void>;
   reorderTabs: (orderedSessionIds: string[]) => Promise<void>;
 
+  // to-do lists (daemon-owned, synced; scoped to a workspace name or project path)
+  loadTodos: (scope: TodoScope, refKey: string) => Promise<void>;
+  createTodo: (scope: TodoScope, refKey: string, name?: string) => Promise<void>;
+  openTodo: (rec: TodoListRecord) => void;
+  renameTodo: (id: string, name: string) => Promise<void>;
+  saveTodoBody: (id: string, body: string) => Promise<void>;
+  deleteTodo: (id: string) => Promise<void>;
+
   /** Record output activity for a session (→ working; re-arms its idle timer). */
   noteSessionActivity: (id: string) => void;
   /** Record a terminal bell for a session (→ idle + attention; awaiting the user). */
@@ -501,6 +576,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   activityById: {},
   fileTabsByProject: {},
   gitTabsByProject: {},
+  todoTabsByContext: {},
+  todos: [],
   activeTabByProject: {},
   viewModeByProject: loadViewModes(),
 
@@ -1019,6 +1096,8 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   openWorkspace: async (name) => {
     set({ currentWorkspace: name, projects: [] });
+    // Fire-and-forget: workspace-scoped to-do lists for the sidebar + "+" menu.
+    void get().loadTodos("workspace", name);
     await get().loadProjects();
   },
 
@@ -1068,13 +1147,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     await get().loadProjects();
   },
 
-  openProject: (project) =>
+  openProject: (project) => {
     set((state) => {
       const active = state.activeTabByProject[project.path];
       const fallback = firstTabId(
         state.sessions,
         state.fileTabsByProject,
         state.gitTabsByProject,
+        state.todoTabsByContext,
         project.path
       );
       return {
@@ -1086,7 +1166,10 @@ export const useAppStore = create<AppState>((set, get) => ({
           [project.path]: active ?? fallback
         }
       };
-    }),
+    });
+    // Fire-and-forget (keeps openProject synchronous): project-scoped to-do lists.
+    void get().loadTodos("project", project.path);
+  },
 
   loadSessions: async () => {
     const api = get().api;
@@ -1247,6 +1330,101 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
+  loadTodos: async (scope, refKey) => {
+    const api = get().api;
+    if (!api) {
+      return;
+    }
+    try {
+      const fetched = await api.listTodos(scope, refKey);
+      // Replace any cached records for this (scope, refKey); keep all others.
+      set((state) => ({
+        todos: [...state.todos.filter((t) => !(t.scope === scope && t.refKey === refKey)), ...fetched]
+      }));
+    } catch {
+      /* keep current cache (never throw into navigation) */
+    }
+  },
+
+  createTodo: async (scope, refKey, name) => {
+    const api = get().api;
+    if (!api) {
+      return;
+    }
+    const rec = await api.createTodo({ scope, refKey, name });
+    set((state) => ({ todos: upsertTodo(state.todos, rec) }));
+    get().openTodo(rec);
+  },
+
+  // A to-do tab is a singleton per record: reuse the existing tab for this
+  // todoId if present, otherwise create it (modeled on openGit).
+  openTodo: (rec) =>
+    set((state) => {
+      const key = rec.refKey;
+      const existing = state.todoTabsByContext[key]?.find((t) => t.todoId === rec.id);
+      if (existing) {
+        return { activeTabByProject: { ...state.activeTabByProject, [key]: existing.id } };
+      }
+      const tab: TodoTab = {
+        id: crypto.randomUUID(),
+        contextKey: key,
+        todoId: rec.id,
+        title: rec.name
+      };
+      return {
+        todoTabsByContext: {
+          ...state.todoTabsByContext,
+          [key]: [...(state.todoTabsByContext[key] ?? []), tab]
+        },
+        activeTabByProject: { ...state.activeTabByProject, [key]: tab.id }
+      };
+    }),
+
+  renameTodo: async (id, name) => {
+    const api = get().api;
+    if (!api) {
+      return;
+    }
+    const trimmed = name.trim();
+    const record = get().todos.find((t) => t.id === id);
+    // Optimistic: update the cached record's name + any open tab's title.
+    set((state) => ({
+      todos: state.todos.map((t) => (t.id === id ? { ...t, name: trimmed || "Untitled" } : t)),
+      todoTabsByContext: renameTodoTabs(state.todoTabsByContext, id, trimmed || "Untitled")
+    }));
+    try {
+      await api.updateTodo(id, { name });
+    } catch {
+      // Roll back to the server's truth for this record's scope/ref.
+      if (record) {
+        await get().loadTodos(record.scope, record.refKey);
+      }
+    }
+  },
+
+  saveTodoBody: async (id, body) => {
+    const api = get().api;
+    if (!api) {
+      return;
+    }
+    // Optimistic: the component already shows the new items; mirror into the cache.
+    set((state) => ({
+      todos: state.todos.map((t) =>
+        t.id === id ? { ...t, body, updatedAt: new Date().toISOString() } : t
+      )
+    }));
+    await api.updateTodo(id, { body });
+  },
+
+  deleteTodo: async (id) => {
+    const api = get().api;
+    if (!api) {
+      return;
+    }
+    await api.deleteTodo(id);
+    set((state) => removeTodoEverywhere(state, id));
+  },
+
   noteSessionActivity: (id) => {
     rearmIdleTimer(id, get, set);
     const current = get().activityById[id];
@@ -1285,6 +1463,15 @@ export const useAppStore = create<AppState>((set, get) => ({
       set((state) => ({ registry: applyRegistryEntry(state.registry, entry) }));
       return;
     }
+    if (event.channel === "todos") {
+      const rec = event.payload as TodoListRecord;
+      if (event.type === "todo.created" || event.type === "todo.updated") {
+        set((state) => applyTodoUpsert(state, rec)); // upsert cache + sync any open tab's title
+      } else if (event.type === "todo.deleted") {
+        set((state) => removeTodoEverywhere(state, rec.id)); // drop from cache + close the tab
+      }
+      return;
+    }
     if (event.channel !== "sessions") {
       return;
     }
@@ -1313,17 +1500,19 @@ export const useAppStore = create<AppState>((set, get) => ({
   }
 }));
 
-/** First remaining tab id for a project (session preferred, then file, then git). */
+/** First remaining tab id for a context (session, then file, then git, then to-do). */
 function firstTabId(
   sessions: SessionSummary[],
   fileTabs: Record<string, FileTab[]>,
   gitTabs: Record<string, GitTab[]>,
+  todoTabs: Record<string, TodoTab[]>,
   path: string
 ): string | null {
   return (
     sessions.find((s) => s.projectPath === path)?.id ??
     fileTabs[path]?.[0]?.id ??
     gitTabs[path]?.[0]?.id ??
+    todoTabs[path]?.[0]?.id ??
     null
   );
 }
@@ -1333,12 +1522,13 @@ function reassignActive(
   removedId: string,
   sessions: SessionSummary[],
   fileTabs: Record<string, FileTab[]>,
-  gitTabs: Record<string, GitTab[]>
+  gitTabs: Record<string, GitTab[]>,
+  todoTabs: Record<string, TodoTab[]>
 ): Record<string, string | null> {
   const next = { ...activeTabByProject };
   for (const [path, activeId] of Object.entries(next)) {
     if (activeId === removedId) {
-      next[path] = firstTabId(sessions, fileTabs, gitTabs, path);
+      next[path] = firstTabId(sessions, fileTabs, gitTabs, todoTabs, path);
     }
   }
   return next;
@@ -1355,12 +1545,13 @@ function removeSession(state: AppState, id: string): Partial<AppState> {
       id,
       sessions,
       state.fileTabsByProject,
-      state.gitTabsByProject
+      state.gitTabsByProject,
+      state.todoTabsByContext
     )
   };
 }
 
-/** Drop a client-local (non-session) tab — a file browser OR a git tab — by id. */
+/** Drop a client-local (non-session) tab — file browser, git, OR to-do — by id. */
 function removeLocalTab(state: AppState, id: string): Partial<AppState> {
   const fileTabsByProject: Record<string, FileTab[]> = {};
   for (const [path, tabs] of Object.entries(state.fileTabsByProject)) {
@@ -1370,17 +1561,56 @@ function removeLocalTab(state: AppState, id: string): Partial<AppState> {
   for (const [path, tabs] of Object.entries(state.gitTabsByProject)) {
     gitTabsByProject[path] = tabs.filter((t) => t.id !== id);
   }
+  const todoTabsByContext: Record<string, TodoTab[]> = {};
+  for (const [key, tabs] of Object.entries(state.todoTabsByContext)) {
+    todoTabsByContext[key] = tabs.filter((t) => t.id !== id);
+  }
   return {
     fileTabsByProject,
     gitTabsByProject,
+    todoTabsByContext,
     activeTabByProject: reassignActive(
       state.activeTabByProject,
       id,
       state.sessions,
       fileTabsByProject,
-      gitTabsByProject
+      gitTabsByProject,
+      todoTabsByContext
     )
   };
+}
+
+/**
+ * Upsert a to-do record into the cache and keep any open tab's title in sync
+ * (a `todo.created`/`todo.updated` event — possibly a rename on another client).
+ */
+function applyTodoUpsert(state: AppState, rec: TodoListRecord): Partial<AppState> {
+  return {
+    todos: upsertTodo(state.todos, rec),
+    todoTabsByContext: renameTodoTabs(state.todoTabsByContext, rec.id, rec.name)
+  };
+}
+
+/**
+ * Drop a to-do record from the cache and close any open tab bound to it (a
+ * `todo.deleted` event, or a local delete/cascade). Non-destructive close path:
+ * removeLocalTab also reassigns the active tab.
+ */
+function removeTodoEverywhere(state: AppState, todoId: string): Partial<AppState> {
+  const todos = state.todos.filter((t) => t.id !== todoId);
+  // Find any open tab bound to this record and remove it (reassigning active).
+  let tabId: string | null = null;
+  for (const tabs of Object.values(state.todoTabsByContext)) {
+    const hit = tabs.find((t) => t.todoId === todoId);
+    if (hit) {
+      tabId = hit.id;
+      break;
+    }
+  }
+  if (tabId === null) {
+    return { todos };
+  }
+  return { ...removeLocalTab({ ...state, todos }, tabId), todos };
 }
 
 /**
@@ -1416,43 +1646,77 @@ function clearProjectLocalState(
       viewModeByProject[path] = mode;
     }
   }
+  // To-do tabs are keyed by context key (project path here); drop matching keys.
+  const todoTabsByContext: Record<string, TodoTab[]> = {};
+  for (const [key, tabs] of Object.entries(state.todoTabsByContext)) {
+    if (!match(key)) {
+      todoTabsByContext[key] = tabs;
+    }
+  }
+  // Drop cached records belonging to the removed scope(s) (project refKey = path).
+  const todos = state.todos.filter((t) => !match(t.refKey));
   saveViewModes(viewModeByProject);
-  return { fileTabsByProject, gitTabsByProject, activeTabByProject, viewModeByProject };
+  return {
+    fileTabsByProject,
+    gitTabsByProject,
+    activeTabByProject,
+    viewModeByProject,
+    todoTabsByContext,
+    todos
+  };
 }
 
-/** Combined tabs (sessions + file tabs + git tabs) of the currently open project. */
+/**
+ * Combined tabs of the currently open **context** (a project → sessions + file +
+ * git + to-do tabs; a workspace → to-do tabs only). Four single-slice selectors +
+ * a `useMemo` (per-slice `Object.is` — no custom equality), mirroring the other
+ * tab selectors.
+ */
 export function useProjectTabs(): ProjectTab[] {
   const sessions = useAppStore((s) => s.sessions);
   const fileTabsByProject = useAppStore((s) => s.fileTabsByProject);
   const gitTabsByProject = useAppStore((s) => s.gitTabsByProject);
+  const todoTabsByContext = useAppStore((s) => s.todoTabsByContext);
   const project = useAppStore((s) => s.currentProject);
+  const workspace = useAppStore((s) => s.currentWorkspace);
   return useMemo(() => {
-    if (!project) {
+    const key = project?.path ?? workspace ?? null; // context key
+    if (!key) {
       return [];
     }
-    const sessionTabs: ProjectTab[] = sessions
-      .filter((s) => s.projectPath === project.path)
+    const todoTabs = (todoTabsByContext[key] ?? []).map<ProjectTab>((t) => ({
+      id: t.id,
+      type: "todo",
+      todoId: t.todoId,
+      title: t.title
+    }));
+    if (!project) {
+      return todoTabs; // workspace context: to-do only
+    }
+    const sessionTabs = sessions
+      .filter((s) => s.projectPath === key)
       .slice()
       .sort((a, b) => a.order - b.order || a.createdAt.localeCompare(b.createdAt))
-      .map((session) => ({ id: session.id, type: "session", session }));
-    const fileTabs: ProjectTab[] = (fileTabsByProject[project.path] ?? []).map((tab) => ({
-      id: tab.id,
+      .map<ProjectTab>((session) => ({ id: session.id, type: "session", session }));
+    const fileTabs = (fileTabsByProject[key] ?? []).map<ProjectTab>((t) => ({
+      id: t.id,
       type: "files",
-      title: tab.title
+      title: t.title
     }));
-    const gitTabs: ProjectTab[] = (gitTabsByProject[project.path] ?? []).map((tab) => ({
-      id: tab.id,
+    const gitTabs = (gitTabsByProject[key] ?? []).map<ProjectTab>((t) => ({
+      id: t.id,
       type: "git",
-      title: tab.title
+      title: t.title
     }));
-    return [...sessionTabs, ...fileTabs, ...gitTabs];
-  }, [sessions, fileTabsByProject, gitTabsByProject, project]);
+    return [...sessionTabs, ...fileTabs, ...gitTabs, ...todoTabs];
+  }, [sessions, fileTabsByProject, gitTabsByProject, todoTabsByContext, project, workspace]);
 }
 
 export function useActiveTabId(): string | null {
-  return useAppStore((s) =>
-    s.currentProject ? (s.activeTabByProject[s.currentProject.path] ?? null) : null
-  );
+  return useAppStore((s) => {
+    const key = s.currentProject?.path ?? s.currentWorkspace ?? null;
+    return key ? (s.activeTabByProject[key] ?? null) : null;
+  });
 }
 
 export function useViewMode(): ViewMode {
