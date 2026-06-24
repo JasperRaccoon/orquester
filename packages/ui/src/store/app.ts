@@ -1668,6 +1668,26 @@ function clearProjectLocalState(
 }
 
 /**
+ * The active {@link TabContext}, referentially stable across renders.
+ *
+ * Must NOT be written as `useAppStore(currentContext)`: zustand v5 reads the
+ * selector through a bare `useSyncExternalStore` with no memoization, and
+ * `currentContext` builds a fresh object on every call, so React sees the
+ * snapshot change on each render and bails with "Maximum update depth exceeded"
+ * (#185) the moment a project/workspace is selected. Selecting the two stable
+ * slices and deriving via `useMemo` keeps the result stable until navigation
+ * actually changes — same single-slice + `useMemo` pattern as {@link useProjectTabs}.
+ */
+export function useCurrentContext(): TabContext | null {
+  const currentProject = useAppStore((s) => s.currentProject);
+  const currentWorkspace = useAppStore((s) => s.currentWorkspace);
+  return useMemo(
+    () => currentContext({ currentProject, currentWorkspace }),
+    [currentProject, currentWorkspace]
+  );
+}
+
+/**
  * Combined tabs of the currently open **context** (a project → sessions + file +
  * git + to-do tabs; a workspace → to-do tabs only). Four single-slice selectors +
  * a `useMemo` (per-slice `Object.is` — no custom equality), mirroring the other

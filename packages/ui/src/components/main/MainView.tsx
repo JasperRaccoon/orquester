@@ -10,9 +10,9 @@ import { getRegistryIcon } from "../../icons";
 import { SessionStatusDot } from "../ui/session-status-dot";
 import { useIsDesktop } from "../../hooks";
 import {
-  currentContext,
   useActiveTabId,
   useAppStore,
+  useCurrentContext,
   useProjectTabs,
   useViewMode,
   type ProjectTab
@@ -47,7 +47,7 @@ function gridColumns(count: number): number {
  * change — so toggling never tears a terminal (xterm + output stream) down.
  */
 export const MainView: React.FC = () => {
-  const ctx = useAppStore(currentContext);
+  const ctx = useCurrentContext();
   const tabs = useProjectTabs();
   const activeId = useActiveTabId();
   const viewMode = useViewMode();

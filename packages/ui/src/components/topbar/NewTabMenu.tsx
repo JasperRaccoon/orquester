@@ -10,7 +10,7 @@ import {
 } from "../ui";
 import { getRegistryIcon } from "../../icons";
 import { useRegistry } from "../../hooks";
-import { currentContext, useAppStore } from "../../store/app";
+import { useAppStore, useCurrentContext } from "../../store/app";
 
 /**
  * The "+" new-tab button. In a project it lists detected shells and INSTALLED
@@ -22,7 +22,7 @@ export const NewTabMenu: React.FC = () => {
   const openTab = useAppStore((s) => s.openTab);
   const openFileBrowser = useAppStore((s) => s.openFileBrowser);
   const openGit = useAppStore((s) => s.openGit);
-  const ctx = useAppStore(currentContext);
+  const ctx = useCurrentContext();
   const todos = useAppStore((s) => s.todos);
   const createTodo = useAppStore((s) => s.createTodo);
   const openTodo = useAppStore((s) => s.openTodo);

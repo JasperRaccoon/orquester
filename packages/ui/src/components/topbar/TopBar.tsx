@@ -10,7 +10,7 @@ import { WindowControls } from "../layout/WindowControls";
 import { IconButton } from "../ui";
 import { useIsDesktop } from "../../hooks";
 import { useOrquester } from "../../context/orquester-context";
-import { currentContext, useAppStore } from "../../store/app";
+import { useAppStore, useCurrentContext } from "../../store/app";
 
 const SettingsButton: React.FC = () => {
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
@@ -31,7 +31,7 @@ const SettingsButton: React.FC = () => {
 export const TopBar: React.FC = () => {
   const { useTitlebar } = useOrquester();
   const isDesktop = useIsDesktop();
-  const ctx = useAppStore(currentContext);
+  const ctx = useCurrentContext();
   const setSidebarDrawer = useAppStore((s) => s.setSidebarDrawer);
 
   if (!isDesktop) {
