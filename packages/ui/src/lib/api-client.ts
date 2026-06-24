@@ -9,6 +9,7 @@ import type {
   CreateWorkspaceRequest,
   EventMessage,
   FsArchiveResponse,
+  FsCapabilitiesResponse,
   FsListResponse,
   FsReadResponse,
   FsUploadRequest,
@@ -238,6 +239,50 @@ export class ApiClient {
 
   listArchive(path: string, signal?: AbortSignal): Promise<FsArchiveResponse> {
     return this.send("GET", "/api/fs/archive", { query: { path }, signal });
+  }
+
+  getFsCapabilities(signal?: AbortSignal): Promise<FsCapabilitiesResponse> {
+    return this.send("GET", "/api/fs/capabilities", { signal });
+  }
+
+  /**
+   * Build an authenticated URL for a native browser download (<a download>) of a
+   * file or folder zip — or null when the transport can't be reached that way
+   * (the desktop unix socket). The bearer rides as ?token= because a download
+   * navigation can't set an Authorization header; the daemon accepts it only on
+   * this route.
+   */
+  buildDownloadUrl(path: string): string | null {
+    if (this.transportKind !== "http") {
+      return null;
+    }
+    const base = this.connection.endpoint.replace(/\/$/, "");
+    const params = new URLSearchParams({ path });
+    if (this.connection.password) {
+      params.set("token", this.connection.password);
+    }
+    return `${base}/api/fs/download?${params.toString()}`;
+  }
+
+  /**
+   * Buffered download (file bytes or a folder zip) for transports without a
+   * native download URL (the desktop unix socket). Rides requestBytes, the same
+   * channel readFileBytes uses.
+   */
+  async downloadBytes(path: string, signal?: AbortSignal): Promise<ArrayBuffer> {
+    if (!this.transporter.requestBytes) {
+      throw new Error("Download is not supported on this connection.");
+    }
+    const response = await this.transporter.requestBytes({
+      method: "GET",
+      path: "/api/fs/download",
+      query: { path },
+      signal
+    });
+    if (!response.ok) {
+      throw new ApiError(response.status, "GET", "/api/fs/download", response.headers, undefined);
+    }
+    return response.data;
   }
 
   createFsEntry(path: string, kind: "file" | "dir"): Promise<{ ok: true }> {
