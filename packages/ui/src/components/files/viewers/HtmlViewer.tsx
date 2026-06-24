@@ -1,9 +1,9 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { ArrowLeft, Code2, Eye, File, Save } from "lucide-react";
 import { Button } from "../../ui";
 import { Editor } from "../Editor";
 import { useFileText } from "../../../hooks";
-import { buildHtmlSrcdoc } from "../../../lib/html-preview";
+import { rewriteSelfAnchors } from "../../../lib/html-preview";
 
 const baseName = (p: string) => p.slice(p.lastIndexOf("/") + 1);
 
@@ -20,9 +20,21 @@ export const HtmlViewer: React.FC<{ path: string; onBack: () => void }> = ({ pat
   const { content, setContent, original, truncated, state, saving, save } = useFileText(path);
   const readOnly = truncated;
   const dirty = !readOnly && content !== original;
-  // Rewrite self-anchors + inject <base> so in-page links scroll instead of
-  // navigating the iframe to the app origin (which frame-ancestors blocks).
-  const previewHtml = useMemo(() => buildHtmlSrcdoc(content, name), [content, name]);
+  // Render the preview from a blob: URL so the document has a real URL: in-page
+  // #anchors scroll, and relative links resolve within the blob: scheme rather
+  // than the app origin (which frame-ancestors 'none' blocks). Self-referential
+  // TOC links (href="<thisfile>#x") are rewritten to bare fragments first.
+  const previewHtml = useMemo(() => rewriteSelfAnchors(content, name), [content, name]);
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (state !== "idle") {
+      setBlobUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(new Blob([previewHtml], { type: "text/html" }));
+    setBlobUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [previewHtml, state]);
 
   return (
     <>
@@ -60,12 +72,13 @@ export const HtmlViewer: React.FC<{ path: string; onBack: () => void }> = ({ pat
       <div className="min-h-0 flex-1 overflow-hidden">
         {state === "loading" && <p className="p-3 text-xs text-neutral-600">Loading…</p>}
         {state === "error" && <p className="p-3 text-xs text-red-400">Could not read file.</p>}
-        {state === "idle" && view === "preview" && (
+        {state === "idle" && view === "preview" && blobUrl && (
           <iframe
             // Empty sandbox: no scripts, forms, popups, plugins, or same-origin
-            // access — the HTML renders as static markup/CSS only.
+            // access — static markup/CSS only. src is a blob: URL (frame-src
+            // 'self' blob: in the CSP) so links can't navigate to the app origin.
             sandbox=""
-            srcDoc={previewHtml}
+            src={blobUrl}
             title={`Preview of ${name}`}
             referrerPolicy="no-referrer"
             className="h-full w-full border-0 bg-white"

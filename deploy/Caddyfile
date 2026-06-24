@@ -12,8 +12,10 @@ orquester.example.com {
         # Tune CSP to the SPA: xterm/codemirror use inline styles; WS needs wss:;
         # the file-preview viewers load images/audio/video as blob: object URLs and
         # pdf.js spins up a worker (which can be a blob:), so img/media/worker-src
-        # must allow blob:.
-        Content-Security-Policy "default-src 'self'; connect-src 'self' wss:; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+        # must allow blob:. The HTML preview renders from a blob: iframe, so
+        # frame-src must allow blob: too (frame-ancestors 'none' still forbids the
+        # app itself from being framed by anyone).
+        Content-Security-Policy "default-src 'self'; connect-src 'self' wss:; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self' blob:; frame-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
         -Server
     }
 }
