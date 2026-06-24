@@ -42,9 +42,7 @@ const DiffLine: React.FC<{ row: DiffRow }> = ({ row }) => {
     return (
       <div className="flex bg-neutral-900 text-neutral-500">
         <span className="w-20 shrink-0 select-none border-r border-neutral-800" />
-        <span className="min-w-0 whitespace-pre-wrap break-words px-2 md:min-w-min md:whitespace-pre md:break-normal">
-          {row.text}
-        </span>
+        <span className="min-w-0 whitespace-pre-wrap break-words px-2">{row.text}</span>
       </div>
     );
   }
@@ -65,9 +63,7 @@ const DiffLine: React.FC<{ row: DiffRow }> = ({ row }) => {
       <span className="w-4 shrink-0 select-none text-center">
         {row.type === "add" ? "+" : row.type === "del" ? "-" : ""}
       </span>
-      <span className="min-w-0 whitespace-pre-wrap break-words pr-2 md:min-w-min md:whitespace-pre md:break-normal">
-        {row.text}
-      </span>
+      <span className="min-w-0 whitespace-pre-wrap break-words pr-2">{row.text}</span>
     </div>
   );
 };
