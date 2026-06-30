@@ -7,7 +7,7 @@
 
 const STORAGE_KEY = "orquester:terminal-font-size";
 
-export const TERMINAL_FONT_MIN = 8;
+export const TERMINAL_FONT_MIN = 5;
 export const TERMINAL_FONT_MAX = 22;
 export const TERMINAL_FONT_STEP = 1;
 
