@@ -82,6 +82,8 @@ existing HTTP server.
   timeout), getting the finished output back in one call — the ergonomic path for "ask the Claude
   in tab X something and read its answer."
 - An agent can **create** a new tab (launch a shell/agent in a project) and **close** one.
+- An agent can **answer the inner agent's interactive prompts** (single-select, multiselect,
+  free-text) by reading the rendered menu and sending keys/shortcuts like a human — see §8.
 - It all rides the daemon's existing auth/TLS and works against a local daemon or the VPS.
 
 ## Non-goals
@@ -95,6 +97,9 @@ existing HTTP server.
 - **No streaming MCP output / progress.** Reads are snapshots; "wait" blocks then returns once.
   (MCP progress notifications are a possible future add.)
 - **No multi-daemon / remotes fan-out.** One MCP server drives the daemon it lives in.
+- **No daemon-side TUI menu parser.** Answering the inner agent's interactive prompts is a documented
+  workflow over the read/keys/input primitives (§8), not a parser that auto-selects — brittle across
+  Claude/Codex/Gemini TUIs and could pick the wrong option.
 
 ## Design
 
@@ -421,6 +426,50 @@ McpServer tool handler ──► TerminalControl.<fn>(sel,…)
    └─ create / close       → ISessionManager.create/close
 ```
 
+### 8. Answering the inner agent's interactive prompts (workflow — no new tools)
+
+Coding agents (Claude Code, Codex, Gemini) and many CLIs ask **interactive questions** — a
+single-select menu, a multiselect, or a free-text field — rendered as a TUI driven by
+arrows/`Space`/`Enter`/typing. They expose **no structured channel**: the only way in is a human's —
+read the rendered screen, send keystrokes. The existing primitives cover this, so v1 ships it as a
+**documented workflow**, not a daemon-side menu parser (brittle across each TUI's format/keybindings,
+and a mis-parse could silently pick the *wrong* option — see Decisions).
+
+**A prompt is a *settled* state.** When the inner agent asks, it stops emitting and waits, so
+`send_and_wait`/`wait_for_idle` returns `settled:true` with the question on screen. The tab is
+**running** (not exited), so `read_terminal` returns the *clean tmux-rendered* menu — the good read
+path, exactly when it's needed (the degraded fallback never applies to a live prompt). The driving
+agent recognizes a prompt from the rendered text (a question + option list; a `❯`/highlight cursor;
+checkbox markers `◉/◯` or `[x]/[ ]`; hint text like "space to select, enter to confirm"), answers,
+then `send_and_wait` again for the result (or the next prompt).
+
+- **Single-select.** (1) **Prefer a direct shortcut when the menu offers one** — most of these TUIs
+  accept a number or letter (Claude Code permission prompts take `1`/`2`/`3`, `y`/`n`).
+  `write_input(sel, "2")` (literal keys ride `write_input`, not `send_keys`) is far more reliable
+  than counting arrows; add `Enter` only if the TUI needs a separate confirm. (2) **Else
+  arrow-navigate with verify:** read the cursor; send **one** `Down`/`Up` via `send_keys`; **read
+  again to confirm `❯` moved**; repeat; then `send_keys(["Enter"])`.
+- **Multiselect.** Read the current markers first; for each option whose marker differs from the
+  desired state, navigate to it (arrows, verify), `send_keys(["Space"])` to toggle, read to confirm
+  the marker flipped — toggle only the deltas — then `send_keys(["Enter"])` to confirm the set.
+- **Custom / free-text.** A "write your own" menu entry: navigate to it (or `Tab` to the field),
+  `write_input(sel, text)`, `send_keys(["Enter"])`. A plain inline text prompt (no menu): just
+  `write_input(sel, text, { submit:true })`.
+
+**Reliability rules (embedded in the tool descriptions):**
+- **One key at a time, read between.** Don't batch `["Down","Down","Enter"]` into one `send_keys` —
+  concatenated to a single PTY write it can submit before the TUI consumes the arrows; keep the
+  confirming `Enter` in its own call.
+- **Verify each step** against a fresh `read_terminal` (the cursor/marker moved as expected) — this
+  absorbs cursor wrap, list repaint, and miscount.
+- **Prefer shortcuts over navigation** whenever the menu shows them; **then `send_and_wait`** to
+  capture the result or surface the next question.
+
+No code beyond wording: literal shortcut/vim keys (`1`, `y`, `j`, `k`) ride `write_input`; named/
+control keys (`Down`, `Space`, `Enter`, `Tab`, `Escape`) ride `send_keys` — both already exist. The
+MCP **tool descriptions** for `read_terminal`/`send_keys`/`write_input` carry a short version of this
+workflow so the driving agent discovers it.
+
 ## Security
 
 - `/mcp` requires the bearer credential exactly like `/api` (added to the same `onRequest` gate)
@@ -468,6 +517,11 @@ McpServer tool handler ──► TerminalControl.<fn>(sel,…)
 - **`read_terminal` dims may be stale:** a reattached session reports `cols/rows` of `80/24` until
   the next resize (`sessions.ts:464`), so the reported dimensions can lag the real pane. Cosmetic —
   the captured text is unaffected.
+- **Inner-agent interactive prompt:** handled as the §8 workflow — recognized as a `settled` state
+  with a menu on screen (a clean *running* read), answered via a number/letter shortcut or verified
+  arrow-nav (+ `Space` for multiselect / `write_input` for custom), then `send_and_wait` for the
+  result. Sending nav keys batched in one `send_keys` can submit before the TUI consumes them — the
+  §8 pattern sends one key at a time with a read between.
 
 ## Testing / verification
 
@@ -485,6 +539,9 @@ McpServer tool handler ──► TerminalControl.<fn>(sel,…)
   - `send_and_wait("what is 2+2", submit:true)` returns the agent's settled reply, `settled:true`;
   - `send_keys(["C-c"])` interrupts a running command; `write_input` + `submit` runs one;
   - `create_tab(refId:"bash")` appears as a new tab in the UI; `close_tab` removes it;
+  - **interactive prompts (§8):** drive a real `claude`/`codex` tab into a permission prompt and a
+    multiselect; answer via (a) a number/letter shortcut and (b) verified arrow-nav + `Space` +
+    `Enter`, and a free-text prompt via `write_input` — each selection takes and the agent proceeds;
   - ambiguity: two "bash" tabs → `read_terminal` errors with both ids; retry with `tabId` works;
   - auth: a request without/with a wrong bearer → 401 (same as `/api`);
   - `GET /mcp` returns a clean 404/405, **not** the SPA `index.html` (confirms the not-found-handler
@@ -506,7 +563,8 @@ McpServer tool handler ──► TerminalControl.<fn>(sel,…)
 - `apps/daemon/src/mcp/server.ts` — **new**: per-request `McpServer` with the 11 tools;
   `registerMcp(app, control)` Fastify mount (Streamable-HTTP, hijack, stateless, **per-request
   teardown**, route `bodyLimit`); error→`isError` mapping (`TabNotFound`/`AmbiguousTab`/
-  `SessionError`/`encodeKey` + catch-all).
+  `SessionError`/`encodeKey` + catch-all). The `read_terminal`/`send_keys`/`write_input` tool
+  **descriptions embed the §8 prompt-answering workflow** so the driving agent discovers it.
 - `apps/daemon/src/sessions.ts` — add `captureText(id, {lines?})` to `ISessionManager` and both
   backends, mirroring `scrollback()`'s `captured || buffer` fallback (C1: exited/empty → ANSI-stripped
   ring) via the `mcp/text.ts` leaf helpers; trims trailing blank lines.
@@ -546,6 +604,10 @@ McpServer tool handler ──► TerminalControl.<fn>(sel,…)
 - **No `busy` flag on `read_terminal`.** A one-shot snapshot can't reliably tell "at a prompt" from
   "mid-command"; faking it would mislead. Liveness is the job of `wait_for_idle`/`send_and_wait`
   (which actively observe and return `settled`).
+- **Document prompt-answering, don't parse menus (§8).** The driving agent reads the rendered prompt
+  and sends keys/shortcuts like a human; a daemon-side menu parser would be brittle across
+  Claude/Codex/Gemini TUIs and risks auto-selecting the wrong option. Number/letter shortcuts + a
+  read-verify loop make the manual pattern reliable, and it adds zero new tools or brittle surface.
 - **Stateless MCP transport (v1).** Every tool is independent; no per-connection state to manage
   (fresh server+transport per request, torn down on response close).
 - **Inject `listWorkspaces`/`listProjects`, don't extract a module.** `createServer` already has
