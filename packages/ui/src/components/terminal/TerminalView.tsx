@@ -3,6 +3,7 @@ import { Terminal, type ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { useApi } from "../../context/orquester-context";
+import { useIsDesktop } from "../../hooks";
 import { useAppStore, useTerminalFontSize } from "../../store/app";
 import { uploadFilesToSession, type UploadStatus } from "../../lib/session-upload";
 import type { SessionSummary } from "../../types";
@@ -110,6 +111,11 @@ export const TerminalView: React.FC<{
   // down the session stream. Live changes are handled by a separate effect below.
   const fontSizeRef = useRef(fontSize);
   fontSizeRef.current = fontSize;
+  // Same ref trick (avoid re-running the terminal effect): on mobile a bare Enter
+  // from the soft keyboard inserts a newline instead of submitting — see onData.
+  const isDesktop = useIsDesktop();
+  const isDesktopRef = useRef(isDesktop);
+  isDesktopRef.current = isDesktop;
   const fitRef = useRef<FitAddon | null>(null);
   // Drag-over highlight + a short-lived inline status line (uploading / errors).
   const [dragging, setDragging] = useState(false);
@@ -465,6 +471,21 @@ export const TerminalView: React.FC<{
     const inputSub = term.onData((data) => {
       // The user is responding → clear any bell-driven attention pulse.
       useAppStore.getState().clearSessionAttention(session.id);
+      // On mobile there's no Shift modifier to distinguish "newline" from
+      // "submit", so a bare Enter from the soft keyboard would submit an agent's
+      // prompt mid-compose. Treat the soft-keyboard Enter as "insert newline"
+      // (ESC+CR, the same sequence as Shift+Enter above); to submit, the user
+      // taps the on-screen ↵ button in MobileKeyBar — that calls
+      // sendSessionInput directly, bypassing this handler, so it sends a real CR.
+      // Shells keep Enter = run, and desktop is unaffected.
+      if (
+        !isDesktopRef.current &&
+        session.kind === "agent" &&
+        (data === "\r" || data === "\n")
+      ) {
+        void api.sendSessionInput(session.id, "\x1b\r");
+        return;
+      }
       void api.sendSessionInput(session.id, data);
     });
 

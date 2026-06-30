@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from "react";
-import { Check, Folder, FolderPlus, PanelLeftClose, Plus, Trash2 } from "lucide-react";
+import { Check, Folder, FolderPlus, MoreVertical, PanelLeftClose, Plus, Trash2 } from "lucide-react";
+import { cn } from "../../lib/cn";
 import {
   Button,
   ConfirmDialog,
@@ -95,25 +96,49 @@ export const WorkspaceList: React.FC = () => {
         {workspaces.map((workspace) => {
           const label = accountLabel(workspace.gitAccountId);
           return (
-            <button
+            <div
               key={workspace.path}
-              type="button"
-              onClick={() => void openWorkspace(workspace.name)}
               onContextMenu={(event) => {
                 event.preventDefault();
                 setMenu({ x: event.clientX, y: event.clientY, workspace });
               }}
-              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-neutral-300 transition-colors hover:bg-neutral-800 hover:text-neutral-100"
+              className="group flex items-center rounded-md text-neutral-300 transition-colors hover:bg-neutral-800 hover:text-neutral-100"
             >
-              <Folder size={15} className="text-neutral-500" />
-              <span className="flex-1 truncate">{workspace.name}</span>
-              {label && (
-                <span className="truncate text-[10px] text-neutral-600" title={`git account: ${label}`}>
-                  {label}
-                </span>
-              )}
-              <span className="text-xs text-neutral-600">{workspace.projectCount}</span>
-            </button>
+              <button
+                type="button"
+                onClick={() => void openWorkspace(workspace.name)}
+                className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm"
+              >
+                <Folder size={15} className="shrink-0 text-neutral-500" />
+                <span className="flex-1 truncate">{workspace.name}</span>
+                {label && (
+                  <span className="truncate text-[10px] text-neutral-600" title={`git account: ${label}`}>
+                    {label}
+                  </span>
+                )}
+                <span className="text-xs text-neutral-600">{workspace.projectCount}</span>
+              </button>
+              <button
+                type="button"
+                aria-label={`Actions for ${workspace.name}`}
+                onClick={(event) => {
+                  // Touch has no right-click: open the same menu, anchored under
+                  // the button. Stop the row's open handler.
+                  event.stopPropagation();
+                  const r = event.currentTarget.getBoundingClientRect();
+                  setMenu({ x: r.right, y: r.bottom + 4, workspace });
+                }}
+                className={cn(
+                  "mr-1 flex h-6 w-6 shrink-0 items-center justify-center rounded text-neutral-500",
+                  "transition-colors hover:bg-neutral-700 hover:text-neutral-200",
+                  "focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500",
+                  // Always reachable on touch; hover/focus-revealed on desktop.
+                  "opacity-100 md:opacity-0 md:group-hover:opacity-100 md:focus-visible:opacity-100"
+                )}
+              >
+                <MoreVertical size={15} />
+              </button>
+            </div>
           );
         })}
       </nav>

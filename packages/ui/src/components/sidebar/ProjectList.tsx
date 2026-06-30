@@ -4,6 +4,7 @@ import {
   ChevronLeft,
   FolderPlus,
   ListTodo,
+  MoreVertical,
   PanelLeftClose,
   Pencil,
   Plus,
@@ -130,24 +131,48 @@ export const ProjectList: React.FC = () => {
           <p className="px-2 py-2 text-xs text-neutral-600">No projects yet</p>
         )}
         {projects.map((project) => (
-          <button
+          <div
             key={project.path}
-            type="button"
-            onClick={() => openProject(project)}
             onContextMenu={(event) => {
               event.preventDefault();
               setMenu({ x: event.clientX, y: event.clientY, project });
             }}
             className={cn(
-              "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
+              "group flex items-center rounded-md transition-colors",
               project.path === currentProject?.path
                 ? "bg-neutral-800 text-neutral-100"
                 : "text-neutral-300 hover:bg-neutral-800 hover:text-neutral-100"
             )}
           >
-            <Box size={15} className="text-neutral-500" />
-            <span className="flex-1 truncate">{project.name}</span>
-          </button>
+            <button
+              type="button"
+              onClick={() => openProject(project)}
+              className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm"
+            >
+              <Box size={15} className="shrink-0 text-neutral-500" />
+              <span className="flex-1 truncate">{project.name}</span>
+            </button>
+            <button
+              type="button"
+              aria-label={`Actions for ${project.name}`}
+              onClick={(event) => {
+                // Touch has no right-click: open the same menu, anchored under
+                // the button. Stop the row's open handler.
+                event.stopPropagation();
+                const r = event.currentTarget.getBoundingClientRect();
+                setMenu({ x: r.right, y: r.bottom + 4, project });
+              }}
+              className={cn(
+                "mr-1 flex h-6 w-6 shrink-0 items-center justify-center rounded text-neutral-500",
+                "transition-colors hover:bg-neutral-700 hover:text-neutral-200",
+                "focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500",
+                // Always reachable on touch; hover/focus-revealed on desktop.
+                "opacity-100 md:opacity-0 md:group-hover:opacity-100 md:focus-visible:opacity-100"
+              )}
+            >
+              <MoreVertical size={15} />
+            </button>
+          </div>
         ))}
 
         {(creatingTodo || todoLists.length > 0) && (
@@ -180,19 +205,43 @@ export const ProjectList: React.FC = () => {
                   }}
                 />
               ) : (
-                <button
+                <div
                   key={todo.id}
-                  type="button"
-                  onClick={() => openTodo(todo)}
                   onContextMenu={(event) => {
                     event.preventDefault();
                     setTodoMenu({ x: event.clientX, y: event.clientY, todo });
                   }}
-                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-neutral-300 transition-colors hover:bg-neutral-800 hover:text-neutral-100"
+                  className="group flex items-center rounded-md text-neutral-300 transition-colors hover:bg-neutral-800 hover:text-neutral-100"
                 >
-                  <ListTodo size={15} className="text-neutral-500" />
-                  <span className="flex-1 truncate">{todo.name}</span>
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => openTodo(todo)}
+                    className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm"
+                  >
+                    <ListTodo size={15} className="shrink-0 text-neutral-500" />
+                    <span className="flex-1 truncate">{todo.name}</span>
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={`Actions for ${todo.name}`}
+                    onClick={(event) => {
+                      // Touch has no right-click: open the same menu, anchored
+                      // under the button. Stop the row's open handler.
+                      event.stopPropagation();
+                      const r = event.currentTarget.getBoundingClientRect();
+                      setTodoMenu({ x: r.right, y: r.bottom + 4, todo });
+                    }}
+                    className={cn(
+                      "mr-1 flex h-6 w-6 shrink-0 items-center justify-center rounded text-neutral-500",
+                      "transition-colors hover:bg-neutral-700 hover:text-neutral-200",
+                      "focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500",
+                      // Always reachable on touch; hover/focus-revealed on desktop.
+                      "opacity-100 md:opacity-0 md:group-hover:opacity-100 md:focus-visible:opacity-100"
+                    )}
+                  >
+                    <MoreVertical size={15} />
+                  </button>
+                </div>
               )
             )}
           </div>
