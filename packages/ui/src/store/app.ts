@@ -14,6 +14,11 @@ import {
   storeUsername
 } from "../lib/auth";
 import { loadViewModes, saveViewModes, type ViewMode } from "../lib/view-mode";
+import {
+  clampTerminalFontSize,
+  loadTerminalFontSize,
+  saveTerminalFontSize
+} from "../lib/terminal-font";
 import type { AppConfigAdapter } from "../lib/app-config";
 import type { HttpClient } from "../lib/http-client";
 import type { Transporter } from "../lib/transporter";
@@ -474,6 +479,8 @@ export interface AppState {
   activeTabByProject: Record<string, string | null>;
   /** Per-project layout choice (tab view vs grid view); persisted client-side. */
   viewModeByProject: Record<string, ViewMode>;
+  /** Global terminal font size (px); persisted client-side, per device. */
+  terminalFontSize: number;
 
   setApi: (api: ApiClient) => void;
   connect: () => Promise<void>;
@@ -533,6 +540,8 @@ export interface AppState {
   closeTab: (id: string) => Promise<void>;
   activateTab: (id: string) => void;
   setViewMode: (mode: ViewMode) => void;
+  setTerminalFontSize: (size: number) => void;
+  nudgeTerminalFontSize: (delta: number) => void;
   renameTab: (id: string, title: string) => Promise<void>;
   reorderTabs: (orderedSessionIds: string[]) => Promise<void>;
 
@@ -585,6 +594,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   todos: [],
   activeTabByProject: {},
   viewModeByProject: loadViewModes(),
+  terminalFontSize: loadTerminalFontSize(),
 
   setApi: (api) => set({ api }),
 
@@ -1298,6 +1308,20 @@ export const useAppStore = create<AppState>((set, get) => ({
       return { viewModeByProject };
     }),
 
+  setTerminalFontSize: (size) =>
+    set(() => {
+      const next = clampTerminalFontSize(size);
+      saveTerminalFontSize(next);
+      return { terminalFontSize: next };
+    }),
+
+  nudgeTerminalFontSize: (delta) =>
+    set((state) => {
+      const next = clampTerminalFontSize(state.terminalFontSize + delta);
+      saveTerminalFontSize(next);
+      return { terminalFontSize: next };
+    }),
+
   renameTab: async (id, title) => {
     const trimmed = title.trim();
     // Optimistic only when non-empty; an empty title is resolved to the default
@@ -1763,6 +1787,10 @@ export function useViewMode(): ViewMode {
   return useAppStore((s) =>
     s.currentProject ? (s.viewModeByProject[s.currentProject.path] ?? "tabs") : "tabs"
   );
+}
+
+export function useTerminalFontSize(): number {
+  return useAppStore((s) => s.terminalFontSize);
 }
 
 /**
