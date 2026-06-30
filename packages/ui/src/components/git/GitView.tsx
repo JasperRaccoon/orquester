@@ -17,6 +17,17 @@ const SUB_TABS: { tab: SubTab; label: string }[] = [
   { tab: "history", label: "History" }
 ];
 
+/**
+ * How often to run a background `git fetch` while the Git tab is open. The 3s
+ * status poll only re-reads LOCAL state; the "behind" count is measured against
+ * the remote-tracking ref, which ONLY `git fetch` advances — so this interval is
+ * what keeps ahead/behind from silently going stale until a manual Fetch. Kept
+ * well above the status poll because it's a real network op, not a local read;
+ * the focus/activate triggers cover the "just opened the tab" case, so this is
+ * mostly the backstop for sitting on the tab watching.
+ */
+const AUTO_FETCH_INTERVAL_MS = 60_000;
+
 const repoNameOf = (path: string) => path.replace(/\/+$/, "").split("/").pop() || path;
 
 /** Best human-readable message for a failed git op: daemon's message, else generic. */
@@ -31,8 +42,9 @@ const opErrorMessage = (error: unknown): string => {
  * Root of the Git tab (GitHub-Desktop style). Owns the repo's status + branches
  * and a `historyVersion` ticket that drives the History panel's reloads. It
  * reconciles on mount, on window focus, on tab (re)activation, and after any
- * mutation, plus a 3s status/branches poll while active (history stays event-
- * driven). Non-git directories render a plain "not a repository"
+ * mutation, plus a 3s status/branches poll AND a slower background `git fetch`
+ * while active so ahead/behind never goes stale without a manual Fetch (history
+ * stays event-driven). Non-git directories render a plain "not a repository"
  * message; repos get the sync header, a Changes|History segmented control, an
  * error banner for failed ops, and the active panel.
  */
@@ -77,10 +89,52 @@ export const GitView: React.FC<{ projectPath: string; active?: boolean }> = ({
     setHistoryVersion((v) => v + 1);
   }, [refresh]);
 
+  // Background `git fetch` that advances the remote-tracking ref so ahead/behind
+  // stays current without a manual Fetch. Deliberately NOT routed through runOp:
+  // a periodic background fetch must stay silent (offline / no-auth is normal, so
+  // no error banner) and must not flip the `busy` flag — that would flash the
+  // Fetch button to "Fetching…" and disable the whole cluster every interval.
+  // Guarded: skip when there's no upstream (nothing to be behind), while a manual
+  // remote op (fetch/pull/push/checkout) is in flight (don't run a second git
+  // remote process behind the user's back), when a background fetch is already
+  // running, or — unless `force`d — when we fetched within the last interval,
+  // which paces the periodic tick + focus trigger and throttles retries while
+  // offline. Entering the tab passes `force` so it always refetches.
+  const autoFetching = useRef(false);
+  const lastAutoFetchAt = useRef(0);
+  const autoFetch = useCallback(
+    async (opts?: { force?: boolean }) => {
+      if (autoFetching.current || busy !== null || !status?.upstream) return;
+      // `force` skips only the interval throttle (entering the tab should always
+      // fetch); the in-flight / busy / no-upstream guards above still apply.
+      if (!opts?.force && Date.now() - lastAutoFetchAt.current < AUTO_FETCH_INTERVAL_MS) return;
+      autoFetching.current = true;
+      lastAutoFetchAt.current = Date.now();
+      try {
+        await api.gitFetch(projectPath);
+        refresh(); // surface the new ahead/behind + last-fetched right away
+      } catch {
+        /* offline / no remote / auth prompt — keep the last good snapshot, stay quiet */
+      } finally {
+        autoFetching.current = false;
+      }
+    },
+    [api, projectPath, busy, status?.upstream, refresh]
+  );
+  // Stable handle to the latest autoFetch so the entry/focus triggers below can
+  // call it without listing it as a dep — otherwise its identity churn (it closes
+  // over `busy`, which flips on every manual op) would re-fire those effects and,
+  // for the forced entry fetch, fetch spuriously after each fetch/pull/push.
+  const autoFetchRef = useRef(autoFetch);
+  autoFetchRef.current = autoFetch;
+
   // Refresh on mount/project change and whenever the OS window regains focus.
   useEffect(() => {
     const cancel = refresh();
-    const onFocus = () => reconcile();
+    const onFocus = () => {
+      reconcile();
+      void autoFetchRef.current();
+    };
     window.addEventListener("focus", onFocus);
     return () => {
       cancel();
@@ -105,11 +159,29 @@ export const GitView: React.FC<{ projectPath: string; active?: boolean }> = ({
     setError(null);
   }, [projectPath]);
 
+  // Fetch whenever the user ENTERS the Git tab: on first load once we know the
+  // branch has an upstream, and on every re-activation — the tab stays mounted
+  // and just toggles `active`, so active going true IS the "opened the tab"
+  // signal. Forced past the interval throttle so entering always pulls the latest
+  // remote state, even if you were just here a moment ago. Called via the ref so
+  // `busy` churn during a manual op can't trigger a spurious forced fetch.
+  useEffect(() => {
+    if (active && status?.upstream) void autoFetchRef.current({ force: true });
+  }, [active, status?.upstream]);
+
   // Live-poll status + branches while the tab is open so the Changes list and
-  // ahead/behind stay fresh without a manual refresh. Polls `refresh` (not
-  // `reconcile`) on purpose: history stays event-driven via the focus/activate/
-  // mutation reconcile calls, so we don't re-run git log every 3s.
+  // LOCAL ahead/behind (e.g. a commit made in a terminal) stay fresh without a
+  // manual refresh. Polls `refresh` (not `reconcile`) on purpose: history stays
+  // event-driven via the focus/activate/mutation reconcile calls, so we don't
+  // re-run git log every 3s.
   usePollWhileActive(active, refresh, 3000);
+
+  // …and a slower background `git fetch` on its own cadence so the REMOTE side of
+  // ahead/behind stays current too. This is the actual fix for "the Git tab goes
+  // stale until I click Fetch": the status poll above only reads local state, so
+  // without this nothing ever advances the remote-tracking ref while you sit on
+  // the tab.
+  usePollWhileActive(active, autoFetch, AUTO_FETCH_INTERVAL_MS);
 
   // Run a remote/branch op behind a busy flag, then reconcile. A failure is
   // shown in a dismissible banner rather than swallowed (a failed fetch/push
@@ -124,6 +196,12 @@ export const GitView: React.FC<{ projectPath: string; active?: boolean }> = ({
         setError(opErrorMessage(err));
       } finally {
         setBusy(null);
+        // A manual fetch/pull just hit the remote, so reset the auto-fetch clock
+        // (simply true — we just fetched) to keep the periodic poll from
+        // re-fetching seconds later. Push/checkout don't fetch, so they leave it.
+        if (name === "fetch" || name === "pull") {
+          lastAutoFetchAt.current = Date.now();
+        }
         reconcile();
       }
     },
