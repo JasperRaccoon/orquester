@@ -135,6 +135,17 @@ export class TerminalControl {
       .map((e) => ({ id: e.id, name: e.name, kind: e.kind, version: e.version }));
   }
 
+  async listWorkspacesProjected() {
+    return this.deps.listWorkspaces();
+  }
+
+  async listProjectsProjected(workspace: string) {
+    if (!isValidName(workspace)) {
+      throw new TabNotFound("Invalid workspace name.");
+    }
+    return this.deps.listProjects(workspace);
+  }
+
   /** Subscribe → debounce on output → resolve on idle/exit/cap/abort. Shared by both waits. */
   private async runWait(id: string, opts: { idleMs?: number; timeoutMs?: number; signal?: AbortSignal }) {
     const { sessions } = this.deps;
