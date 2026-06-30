@@ -11,6 +11,20 @@ export function tmuxName(id: string): string {
   return `${TMUX_SESSION_PREFIX}${id}`;
 }
 
+/** Build the `capture-pane` argv. Pure (testable without tmux). `name` is the full orq-<id>. */
+export function captureArgs(
+  name: string,
+  opts: { escapes?: boolean; lines?: number | "all" } = {}
+): string[] {
+  const { escapes = true, lines = "all" } = opts;
+  const start = lines === "all" ? "-" : String(-Math.max(0, lines)); // "-" | "0" | "-N"
+  const args = ["capture-pane", "-p", "-J", "-S", start, "-t", name];
+  if (escapes) {
+    args.splice(2, 0, "-e"); // colors only when asked
+  }
+  return args;
+}
+
 /**
  * True if a `tmux` binary is resolvable on PATH. The tmux-backed SessionManager
  * is the persistence backend on the VPS (and any Linux/macOS host with tmux),
@@ -209,8 +223,17 @@ export class Tmux {
     return ["-S", this.socket, "attach", "-t", tmuxName(id)];
   }
 
-  /** Full visible + scrollback history of a session's pane (empty if gone). */
-  async capturePane(id: string): Promise<string> {
+  /**
+   * Visible + scrollback text of a session's pane (empty if gone). Defaults
+   * preserve the xterm replay path: colors (-e) + full history (-S -), with
+   * alt-screen-aware framing for full-screen TUIs. For agent reads pass
+   * { escapes:false } (plain text) and { lines } to bound the range: lines:0 ⇒
+   * current screen (-S 0), lines:N ⇒ last N rows (-S -N).
+   */
+  async capturePane(
+    id: string,
+    opts: { escapes?: boolean; lines?: number | "all" } = {}
+  ): Promise<string> {
     // A full-screen TUI (e.g. an agent like Claude Code) runs in the terminal's
     // ALTERNATE screen. capture-pane records the cells but NOT the DEC private mode
     // that put the pane there — so replaying it verbatim drops the captured TUI into
@@ -221,18 +244,23 @@ export class Tmux {
     // For an alt-screen pane, prefix the enter-alt-screen sequence so the browser is
     // in the SAME buffer, and capture the visible grid faithfully: no -J (it would
     // merge full-width TUI rows) and no -S (the alt screen has no scrollback).
-    const alt =
-      (await this.run(["display-message", "-p", "-t", tmuxName(id), "#{alternate_on}"])).stdout.trim() === "1";
-    if (alt) {
-      const result = await this.run(["capture-pane", "-p", "-e", "-t", tmuxName(id)]);
-      // \x1b[?1049h enters the alt screen (and clears it); \x1b[H homes the cursor
-      // so the captured grid lands top-aligned. Always emit the mode switch (even if
-      // the capture is empty) so the live redraws that follow land in the right buffer.
-      return `\x1b[?1049h\x1b[H${result.code === 0 ? result.stdout : ""}`;
+    // This replay framing emits escape sequences, so it applies only to the colored
+    // default path; agent reads ({ escapes:false }) want plain, alt-mode-agnostic
+    // text and fall through to the bounded capture below.
+    if (opts.escapes !== false) {
+      const alt =
+        (await this.run(["display-message", "-p", "-t", tmuxName(id), "#{alternate_on}"])).stdout.trim() === "1";
+      if (alt) {
+        const result = await this.run(["capture-pane", "-p", "-e", "-t", tmuxName(id)]);
+        // \x1b[?1049h enters the alt screen (and clears it); \x1b[H homes the cursor
+        // so the captured grid lands top-aligned. Always emit the mode switch (even if
+        // the capture is empty) so the live redraws that follow land in the right buffer.
+        return `\x1b[?1049h\x1b[H${result.code === 0 ? result.stdout : ""}`;
+      }
     }
-    // Normal buffer (shell scrollback): -p print, -e keep colors, -S - from the very
-    // start of history, -J join wrapped lines back into logical lines.
-    const result = await this.run(["capture-pane", "-p", "-e", "-J", "-S", "-", "-t", tmuxName(id)]);
+    // Normal buffer / bounded read: argv from captureArgs (default = -p -e -J -S -,
+    // the exact back-compatible replay capture; agent reads drop -e and bound -S).
+    const result = await this.run(captureArgs(tmuxName(id), opts));
     return result.code === 0 ? result.stdout : "";
   }
 
