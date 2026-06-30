@@ -17,12 +17,13 @@ PTY input path, the per-session output emitter).
 The work is two thin layers over existing code:
 
 1. A **`TerminalControl` module** (`apps/daemon/src/mcp/terminal-control.ts`) — plain, testable
-   functions (`resolveTab`, `readTerminal`, `writeInput`, `sendKeys`, `waitForIdle`,
-   `sendAndWait`, `createTab`, `closeTab`) that take the existing `ISessionManager` + `RegistryService`
-   + the workspaces dir as dependencies.
-2. A **thin MCP server** (`apps/daemon/src/mcp/server.ts`) that maps **11 MCP tools** 1:1 onto
-   those functions and mounts on Fastify at `/mcp` (Streamable-HTTP), gated by the daemon's
-   existing bearer auth.
+   functions (`resolveTab`, `readTerminal`, `writeInput`, `sendKeys`, `waitForIdle`, `sendAndWait`,
+   `createTab`, `closeTab`, `listTabs`, `listLaunchers`) that take the existing `ISessionManager` +
+   `RegistryService` + the workspaces dir as dependencies.
+2. A **thin MCP server** (`apps/daemon/src/mcp/server.ts`) that maps the **11 MCP tools** onto those
+   functions (with `list_workspaces`/`list_projects` delegating to the injected `listWorkspaces`/
+   `listProjects`, and `resolveTab` a shared internal helper) and mounts on Fastify at `/mcp`
+   (Streamable-HTTP), gated by the daemon's existing bearer auth.
 
 Plus one small backend addition (`captureText` on `ISessionManager`, for *clean* rendered text).
 No file is extracted: `createServer` (the composition root) already has `listWorkspaces`/
@@ -62,7 +63,7 @@ existing HTTP server.
   and the opt-in HTTP transport (`authRequired:true`, `mode:"remote"`, `index.ts:267`). A single
   `onRequest` hook (`index.ts:366`) gates auth: it lets `/ws` self-authenticate, and requires the
   bearer for any URL where `url.startsWith("/api") || url.startsWith("/events")` (except
-  `/api/auth/info`) — `index.ts:377`. The credential is `base64("<user>:<bcryptHash>")` as
+  `/api/auth/info`) — `index.ts:378`. The credential is `base64("<user>:<bcryptHash>")` as
   `Authorization: Bearer …`, verified in constant time.
 
 - **The daemon never touches tmux directly.** `index.ts` only ever calls the `ISessionManager`
@@ -110,7 +111,7 @@ apps/daemon/src/
   sessions.ts          ← + captureText() on ISessionManager and both backends
   tmux.ts              ← capturePane() gains options (clean text, line range)
   mcp/
-    terminal-control.ts ← NEW: the resolve/read/write/wait/create/close functions
+    terminal-control.ts ← NEW: the resolve/read/write/wait/create/close/list functions
     keys.ts             ← NEW: key-name → bytes table + encoder
     text.ts             ← NEW: leaf stripAnsi/trimTrailingBlankLines (no imports — breaks the cycle)
     server.ts           ← NEW: McpServer with 11 tools; mounts on Fastify at /mcp
@@ -308,9 +309,13 @@ async sendAndWait(sel, data, opts?) {    // subscribe BEFORE writing so no outpu
 }
 ```
 
-- **`settled: false`** means the hard cap fired while output was still flowing — the command is
-  still running. The agent re-invokes `wait_for_idle`/`send_and_wait` to keep waiting. The 2-min
-  default just means fewer re-invokes for slow agents.
+- **`settled: false`** means the hard cap fired while output was still flowing — usually the command
+  is still running, so the agent re-invokes `wait_for_idle`/`send_and_wait` to keep waiting (the
+  2-min default just means fewer re-invokes for slow agents). **But always inspect the returned
+  `text` first:** an *interactive prompt whose UI animates* (spinner, countdown, live token/elapsed
+  counter) also emits continuously, so it returns `settled:false` while actually **waiting for
+  input** — its `text` shows the question (see §8). Don't treat `settled:false` as "still working"
+  without reading the screen.
 - Works on **both** backends — `subscribe()` exists on each; only the final `captureText` is
   degraded on non-tmux hosts.
 - `sendAndWait` subscribes *before* writing, so the response to its own input is never missed.
@@ -327,7 +332,7 @@ A name→bytes table so the agent stays out of the ANSI business:
 
 ```ts
 const NAMED: Record<string, string> = {
-  Enter: "\r", Tab: "\t", Escape: "\x1b", Backspace: "\x7f", Space: " ", Delete: "\x1b[3~",
+  Enter: "\r", Tab: "\t", BackTab: "\x1b[Z", Escape: "\x1b", Backspace: "\x7f", Space: " ", Delete: "\x1b[3~",
   Up: "\x1b[A", Down: "\x1b[B", Right: "\x1b[C", Left: "\x1b[D",
   Home: "\x1b[H", End: "\x1b[F", PageUp: "\x1b[5~", PageDown: "\x1b[6~",
 };
@@ -382,7 +387,7 @@ throw, and a generic catch-all — each with an actionable message.
 - **Methods + the SPA catch-all (subtle).** Stateless mode only needs `POST /mcp`. But on the
   HTTP/remote transport `createServer` installs a `setNotFoundHandler` that serves the SPA's
   `index.html` for any non-matching **GET** whose path isn't reserved (`index.ts:1828-1838`), and its
-  reserved set is only `/api`/`/health`/`/events` (`index.ts:1832`). So an unhandled `GET /mcp` would
+  reserved set is only `/api`/`/health`/`/events` (`index.ts:1833`). So an unhandled `GET /mcp` would
   return the SPA **HTML (200)**, not a 404 — confusing a Streamable-HTTP client that probes the
   optional GET SSE channel. **Reserve `/mcp` there too:** add `url.startsWith("/mcp")` to that
   handler's reserved set. (`DELETE /mcp` already 404s.) Note this is a *second* reserved list,
@@ -392,7 +397,7 @@ throw, and a generic catch-all — each with an actionable message.
   413 at the parser. Give `/mcp` a route-level override (e.g. `{ bodyLimit: 8 * 1024 * 1024 }`,
   following the upload route at `index.ts:1557`). *(Aside: the "256 KB" in the upload comment at
   `index.ts:1553` is itself inaccurate — the real default is ~1 MiB; not fixed by this work.)*
-- **Auth:** add `/mcp` to the gated set in the `onRequest` hook (`index.ts:377`):
+- **Auth:** add `/mcp` to the gated set in the `onRequest` hook (`index.ts:378`):
   `url.startsWith("/api") || url.startsWith("/events") || url.startsWith("/mcp")`. On the HTTP
   transport this requires the bearer exactly like `/api`; on the unix socket it's open (local).
 - **Transport mode:** v1 runs **stateless** (`sessionIdGenerator: undefined`, fresh server+transport
@@ -435,35 +440,54 @@ read the rendered screen, send keystrokes. The existing primitives cover this, s
 **documented workflow**, not a daemon-side menu parser (brittle across each TUI's format/keybindings,
 and a mis-parse could silently pick the *wrong* option — see Decisions).
 
-**A prompt is a *settled* state.** When the inner agent asks, it stops emitting and waits, so
-`send_and_wait`/`wait_for_idle` returns `settled:true` with the question on screen. The tab is
-**running** (not exited), so `read_terminal` returns the *clean tmux-rendered* menu — the good read
-path, exactly when it's needed (the degraded fallback never applies to a live prompt). The driving
-agent recognizes a prompt from the rendered text (a question + option list; a `❯`/highlight cursor;
-checkbox markers `◉/◯` or `[x]/[ ]`; hint text like "space to select, enter to confirm"), answers,
-then `send_and_wait` again for the result (or the next prompt).
+**Detect a prompt from the rendered text, not from `settled`.** A *static* prompt settles (the inner
+agent stops emitting while it waits), so `send_and_wait`/`wait_for_idle` returns `settled:true` with
+the question on screen. But a prompt whose UI **animates** — a spinner, a "default in 9…8…"
+countdown, a live token/elapsed counter beside the question — keeps emitting, so §4's
+output-debounce **never settles** and the call returns `settled:false` *even though it is waiting for
+input*. Both paths return `text`, so the rule is: **after any wait, inspect `text` for a prompt
+regardless of `settled`** — a question + option list; a `❯`/highlight cursor; checkbox markers
+`◉/◯` or `[x]/[ ]`; hint text like "space to select, enter to confirm". (A blinking cursor is *not* a
+prompt signal — cursor blink is terminal-local and emits no PTY bytes.) A tab at a prompt is
+**running**, so `read_terminal` takes the clean tmux-rendered path (the degraded ring fallback
+applies only rarely here — a transient empty capture, or a non-tmux host; see §1). Answer, then
+`send_and_wait` again for the result (or the next prompt).
 
 - **Single-select.** (1) **Prefer a direct shortcut when the menu offers one** — most of these TUIs
   accept a number or letter (Claude Code permission prompts take `1`/`2`/`3`, `y`/`n`).
   `write_input(sel, "2")` (literal keys ride `write_input`, not `send_keys`) is far more reliable
   than counting arrows; add `Enter` only if the TUI needs a separate confirm. (2) **Else
-  arrow-navigate with verify:** read the cursor; send **one** `Down`/`Up` via `send_keys`; **read
-  again to confirm `❯` moved**; repeat; then `send_keys(["Enter"])`.
+  arrow-navigate with verify:** if the highlighted option is already the target (a default may be
+  pre-selected), just confirm. Otherwise send **one** `Down`/`Up` via `send_keys`, then **read again
+  and check the *highlighted option's label*** — not the `❯` row position: a long list scrolls under
+  a fixed cursor, so the glyph may not move while the selected label does — and repeat until the
+  target label is highlighted; then `send_keys(["Enter"])` and `send_and_wait`.
 - **Multiselect.** Read the current markers first; for each option whose marker differs from the
-  desired state, navigate to it (arrows, verify), `send_keys(["Space"])` to toggle, read to confirm
-  the marker flipped — toggle only the deltas — then `send_keys(["Enter"])` to confirm the set.
+  desired state, navigate to it (arrows; verify by the highlighted *label*), `send_keys(["Space"])`
+  to toggle, read to confirm that option's marker flipped — toggle only the deltas — then
+  `send_keys(["Enter"])` to confirm the set, and `send_and_wait`.
 - **Custom / free-text.** A "write your own" menu entry: navigate to it (or `Tab` to the field),
-  `write_input(sel, text)`, `send_keys(["Enter"])`. A plain inline text prompt (no menu): just
-  `write_input(sel, text, { submit:true })`.
+  `write_input(sel, text)`, `send_keys(["Enter"])`, `send_and_wait`. A plain inline text prompt (no
+  menu): `write_input(sel, text, { submit:true })`. **Multi-line answers are best-effort /
+  TUI-dependent in v1:** `write_input` sends `data` verbatim, and on most single-line widgets an
+  embedded `\n` (or the `\r` from `submit`) submits at the *first* line break, truncating the rest.
+  Some TUIs insert a literal newline with `Ctrl-J` (`send_keys(["C-j"])` → `\n`) or `Alt-Enter`, but
+  this is not universal — for a multi-paragraph answer prefer a field that accepts it, or keep it to
+  one line.
 
 **Reliability rules (embedded in the tool descriptions):**
 - **One key at a time, read between.** Don't batch `["Down","Down","Enter"]` into one `send_keys` —
   concatenated to a single PTY write it can submit before the TUI consumes the arrows; keep the
   confirming `Enter` in its own call.
-- **Verify each step** against a fresh `read_terminal` (the cursor/marker moved as expected) — this
-  absorbs cursor wrap, list repaint, and miscount.
+- **Verify each step** against a fresh `read_terminal` by the **highlighted label / changed marker**
+  (not the cursor's screen row — scrolling menus keep the `❯` fixed) — this absorbs scroll, wrap,
+  list repaint, and miscount. A **non-echoing** field (password) can't be verified this way: send it
+  and check the *result* of the next `send_and_wait`.
 - **Prefer shortcuts over navigation** whenever the menu shows them; **then `send_and_wait`** to
   capture the result or surface the next question.
+- **Some prompts self-timeout** (auto-select a default after a few seconds — often the source of the
+  animated `settled:false` above). Answer promptly; prefer a one-shot shortcut over a multi-round nav
+  that could miss the window.
 
 No code beyond wording: literal shortcut/vim keys (`1`, `y`, `j`, `k`) ride `write_input`; named/
 control keys (`Down`, `Space`, `Enter`, `Tab`, `Escape`) ride `send_keys` — both already exist. The
@@ -530,8 +554,8 @@ workflow so the driving agent discovers it.
   timers): `resolveTab` name-hit / not-found (lists titles) / ambiguous (lists ids) / `tabId`
   bypass; `createTab` bad-dir + unknown-`refId` → clean errors (no `TypeError`); `writeInput` submit
   appends `\r`; `encodeKey` table + `C-x` rule + unknown throws; `waitForIdle` resolves on debounce,
-  on exit, and `settled:false` on cap; `captureText` **exited→buffer fallback** (the C1 path) and
-  trailing-blank trim; the early-settle behavior (§4/I3) is asserted as documented behavior.
+  on exit, and `settled:false` on cap; `captureText` **exited→buffer fallback** and trailing-blank
+  trim; the early-settle behavior (§4) is asserted as documented behavior.
 - **Manual, against a real daemon with tmux** (a *separate* checkout — never this one, per AGENTS.md):
   drive `/mcp` with an MCP client (or `mcp` inspector / curl JSON-RPC):
   - `list_workspaces`→`list_projects`→`list_tabs` reflect the live UI;
@@ -545,7 +569,7 @@ workflow so the driving agent discovers it.
   - ambiguity: two "bash" tabs → `read_terminal` errors with both ids; retry with `tabId` works;
   - auth: a request without/with a wrong bearer → 401 (same as `/api`);
   - `GET /mcp` returns a clean 404/405, **not** the SPA `index.html` (confirms the not-found-handler
-    reservation at `index.ts:1832`).
+    reservation at `index.ts:1833`).
 - **Regression:** existing terminals (UI scrollback via the unchanged `scrollback()`/`capturePane()`
   default), and `pnpm check` clean.
 
@@ -566,12 +590,12 @@ workflow so the driving agent discovers it.
   `SessionError`/`encodeKey` + catch-all). The `read_terminal`/`send_keys`/`write_input` tool
   **descriptions embed the §8 prompt-answering workflow** so the driving agent discovers it.
 - `apps/daemon/src/sessions.ts` — add `captureText(id, {lines?})` to `ISessionManager` and both
-  backends, mirroring `scrollback()`'s `captured || buffer` fallback (C1: exited/empty → ANSI-stripped
+  backends, mirroring `scrollback()`'s `captured || buffer` fallback (exited/empty → ANSI-stripped
   ring) via the `mcp/text.ts` leaf helpers; trims trailing blank lines.
 - `apps/daemon/src/tmux.ts` — `capturePane(id, { escapes?, lines? })` options (back-compatible).
 - `apps/daemon/src/index.ts` — build `TerminalControl` (injecting the in-scope `listWorkspaces`/
   `listProjects`) + `registerMcp(app, …)` in `createServer`; reserve `/mcp` in **both** the
-  `onRequest` auth gate (`:377`) **and** the SPA `setNotFoundHandler` reserved set (`:1832`, else
+  `onRequest` auth gate (`:378`) **and** the SPA `setNotFoundHandler` reserved set (`:1833`, else
   `GET /mcp` returns the SPA HTML); re-import `isValidName` from `@orquester/config` (moved out of
   this file). **No `workspaces.ts` extraction** — `listWorkspaces`/`listProjects` depend on
   `readWorkspacesMeta`/`writeWorkspacesMeta`, which ~6 other routes use, so extracting would force a
