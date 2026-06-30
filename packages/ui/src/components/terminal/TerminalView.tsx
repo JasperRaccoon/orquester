@@ -67,6 +67,25 @@ function bracketPaste(text: string): string {
 }
 
 /**
+ * True when the element currently has a layout box — i.e. it and all its
+ * ancestors are rendered, not `display:none`. A hidden element reports
+ * `offsetWidth`/`offsetHeight` of 0.
+ *
+ * Every fit/resize is gated on this. An inactive tab is kept mounted but
+ * `display:none` (see MainView), and xterm's FitAddon sizes from
+ * `getComputedStyle(container).height/width`. For a hidden element those resolve
+ * to the *computed* value — the literal "100%" from Tailwind's `h-full`/`w-full`
+ * (`parseInt("100%")` → 100px) — so FitAddon proposes a tiny ~11×6 grid and we'd
+ * shrink the daemon PTY to it. That stray SIGWINCH reflows a running agent into a
+ * "tiny square" and emits redraw output that churns its working/idle light. So we
+ * fit only when shown; the ResizeObserver fires again on reveal (the box goes
+ * 0→real) and fits to the correct size then.
+ */
+function hasLayoutBox(el: HTMLElement): boolean {
+  return el.offsetWidth > 0 && el.offsetHeight > 0;
+}
+
+/**
  * xterm.js view bound to a daemon session. Keystrokes (including control codes
  * like Ctrl-C `\x03`) are forwarded as input; the session's output stream is
  * replayed (current buffer) then streamed live. The PTY lives in the daemon,
@@ -150,6 +169,12 @@ export const TerminalView: React.FC<{
     // tab; the DOM renderer repaints reliably across those transitions.
 
     const applyFit = () => {
+      // Skip while hidden (display:none) — see hasLayoutBox. The PTY keeps its
+      // real size until the tab is shown again, when the ResizeObserver re-fires
+      // with a measurable box and we fit for real.
+      if (!hasLayoutBox(container)) {
+        return;
+      }
       try {
         fit.fit();
       } catch {
