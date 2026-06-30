@@ -47,6 +47,8 @@ import { AccountError, AccountsService } from "./accounts";
 import { GitError, GitService } from "./git";
 import { listArchiveEntries } from "./archive";
 import { resolveZipTool, spawnDirZip } from "./zip";
+import { TerminalControl } from "./mcp/terminal-control.ts";
+import { registerMcp } from "./mcp/server.ts";
 import {
   type AppConfig,
   type ClientConfig,
@@ -377,7 +379,8 @@ function createServer(
     // authenticates its API calls with the credential bearer).
     const url = request.url.split("?")[0];
     const needsAuth =
-      (url.startsWith("/api") || url.startsWith("/events")) && url !== "/api/auth/info";
+      (url.startsWith("/api") || url.startsWith("/events") || url.startsWith("/mcp")) &&
+      url !== "/api/auth/info";
     if (!options.authRequired || !needsAuth) {
       return;
     }
@@ -1845,6 +1848,20 @@ function createServer(
     });
   });
 
+  // Terminal-control MCP — HTTP-only. The unix socket is unauthenticated, so full
+  // terminal drive must never be reachable there; register /mcp only on remote.
+  if (options.mode === "remote") {
+    const control = new TerminalControl({
+      sessions: services.sessions,
+      registry: services.registry,
+      workspacesDir: resolved.workspacesDir,
+      fsRoot: resolved.fsRoot,
+      listWorkspaces: () => listWorkspaces(resolved.workspacesDir, resolved.workspacesMetaFile),
+      listProjects: (workspace) => listProjects(resolved.workspacesDir, workspace),
+    });
+    registerMcp(app, control);
+  }
+
   // Serve the static web client build for everything outside the API, with an
   // SPA fallback to index.html. Reserved prefixes stay JSON 404s.
   //
@@ -1862,7 +1879,10 @@ function createServer(
     app.setNotFoundHandler((request, reply) => {
       const url = request.url;
       const isApi =
-        url.startsWith("/api") || url.startsWith("/health") || url.startsWith("/events");
+        url.startsWith("/api") ||
+        url.startsWith("/health") ||
+        url.startsWith("/events") ||
+        url.startsWith("/mcp");
       if (request.method !== "GET" || isApi) {
         return reply.code(404).send({ code: "NOT_FOUND", message: "Route not found." });
       }
