@@ -211,7 +211,26 @@ export class Tmux {
 
   /** Full visible + scrollback history of a session's pane (empty if gone). */
   async capturePane(id: string): Promise<string> {
-    // -p print to stdout, -e keep escape sequences (colors), -S - from the very
+    // A full-screen TUI (e.g. an agent like Claude Code) runs in the terminal's
+    // ALTERNATE screen. capture-pane records the cells but NOT the DEC private mode
+    // that put the pane there — so replaying it verbatim drops the captured TUI into
+    // a (re)connecting client's NORMAL buffer, the wrong one. Every later agent
+    // redraw (including our resize-nudge) then paints into a buffer that doesn't
+    // match the snapshot and can't cleanly overwrite it → garbled until the agent
+    // does a full clear (a working agent's animation does; an idle one never does).
+    // For an alt-screen pane, prefix the enter-alt-screen sequence so the browser is
+    // in the SAME buffer, and capture the visible grid faithfully: no -J (it would
+    // merge full-width TUI rows) and no -S (the alt screen has no scrollback).
+    const alt =
+      (await this.run(["display-message", "-p", "-t", tmuxName(id), "#{alternate_on}"])).stdout.trim() === "1";
+    if (alt) {
+      const result = await this.run(["capture-pane", "-p", "-e", "-t", tmuxName(id)]);
+      // \x1b[?1049h enters the alt screen (and clears it); \x1b[H homes the cursor
+      // so the captured grid lands top-aligned. Always emit the mode switch (even if
+      // the capture is empty) so the live redraws that follow land in the right buffer.
+      return `\x1b[?1049h\x1b[H${result.code === 0 ? result.stdout : ""}`;
+    }
+    // Normal buffer (shell scrollback): -p print, -e keep colors, -S - from the very
     // start of history, -J join wrapped lines back into logical lines.
     const result = await this.run(["capture-pane", "-p", "-e", "-J", "-S", "-", "-t", tmuxName(id)]);
     return result.code === 0 ? result.stdout : "";
