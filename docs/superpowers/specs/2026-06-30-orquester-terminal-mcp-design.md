@@ -788,10 +788,12 @@ rather than inflating every request.
   per-request `McpServer`**, `initialize`, `tools/list`, and `tools/call` each return a `200` JSON-RPC
   result, and a request missing `Accept: text/event-stream` returns the documented `406` — so the
   "fresh server per POST" design does **not** break the MCP lifecycle, and the SDK does not require an
-  `initialize` first on each request. Residual (smaller) risk: a *specific* client (Claude
-  Desktop/Code) insisting on an `Mcp-Session-Id` handshake — a real-client check is the only remaining
-  confirmation. If one does require sessions, v1 needs the stateful session-map mount (§7), a real
-  rework, not a toggle.
+  `initialize` first on each request. A **real-client** check then passed too: `@modelcontextprotocol/
+  inspector --cli` (the official MCP SDK *client* — the same transport Claude clients use) completed
+  `initialize` + `tools/list` + `tools/call` against the stateless server with **no `Mcp-Session-Id`**.
+  The stateless assumption is therefore validated end-to-end; the only thing left unexercised is the
+  literal Claude Desktop/Code app (same client lib → very low risk). If some client ever does require
+  sessions, v1 needs the stateful session-map mount (§7) — a real rework, not a toggle.
 - **Inject `listWorkspaces`/`listProjects`, don't extract a module.** `createServer` already has
   them in scope; injecting keeps the change small and avoids a `workspaces.ts` ↔ `index.ts` import
   cycle (those helpers' `readWorkspacesMeta`/`writeWorkspacesMeta` deps are used by ~6 other routes).
