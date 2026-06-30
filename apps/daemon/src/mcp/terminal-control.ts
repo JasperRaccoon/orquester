@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { statSync } from "node:fs";
 import type { ProjectSummary, SessionSummary, WorkspaceSummary } from "@orquester/api";
 import { isValidName } from "@orquester/config";
-import { assertInsideFsRoot, FsSandboxError } from "@orquester/config/fs";
+import { assertInsideFsRoot } from "@orquester/config/fs";
 import type { ISessionManager } from "../sessions.ts";
 import type { RegistryService } from "../registry.ts";
 import { encodeKey } from "./keys.ts";
