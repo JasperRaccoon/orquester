@@ -132,3 +132,93 @@ test("listLaunchers returns only enabled shells+agents", () => {
   const out = make(f, { registry }).listLaunchers();
   assert.deepEqual(out.map((l) => l.id), ["bash", "claude"]);
 });
+
+import { mock } from "node:test";
+
+test("waitForIdle settles after idleMs of quiet, returns captured text", async () => {
+  const f = new FakeManager();
+  f.add({ id: "a", title: "Claude", projectPath: "/ws/w/p" });
+  f.texts.set("a", "done");
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const p = make(f).waitForIdle({ tabId: "a" }, { idleMs: 1000, timeoutMs: 5000 });
+    f.emitOutput("a", "working...");
+    mock.timers.tick(500);
+    f.emitOutput("a", "more");      // re-arms the idle timer
+    mock.timers.tick(1000);          // 1000ms quiet → settle
+    const r = await p;
+    assert.equal(r.settled, true);
+    assert.equal(r.text, "done");
+    assert.equal(r.status, "running");
+    assert.equal(f.subscriberCount("a"), 0); // unsubscribed
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("waitForIdle: exit settles immediately with status exited", async () => {
+  const f = new FakeManager();
+  f.add({ id: "a", title: "bash", projectPath: "/ws/w/p" });
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const p = make(f).waitForIdle({ tabId: "a" }, { idleMs: 1000 });
+    f.tabs[0].status = "exited";
+    f.tabs[0].exitCode = 0;
+    f.emitExit("a", 0);
+    const r = await p;
+    assert.equal(r.settled, true);
+    assert.equal(r.status, "exited");
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("waitForIdle: hard cap → settled:false", async () => {
+  const f = new FakeManager();
+  f.add({ id: "a", title: "Claude", projectPath: "/ws/w/p" });
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const p = make(f).waitForIdle({ tabId: "a" }, { idleMs: 10_000, timeoutMs: 2000 });
+    f.emitOutput("a", "still going");
+    mock.timers.tick(2000);          // cap fires before idle
+    const r = await p;
+    assert.equal(r.settled, false);
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("waitForIdle: abort returns aborted, skips capture, cleans up", async () => {
+  const f = new FakeManager();
+  f.add({ id: "a", title: "Claude", projectPath: "/ws/w/p" });
+  const ac = new AbortController();
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const p = make(f).waitForIdle({ tabId: "a" }, { idleMs: 10_000, signal: ac.signal });
+    ac.abort();
+    const r = await p;
+    assert.equal(r.aborted, true);
+    assert.equal(r.settled, false);
+    assert.equal(r.text, "");
+    assert.equal(f.subscriberCount("a"), 0);
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("sendAndWait writes input (with CR on submit) before waiting", async () => {
+  const f = new FakeManager();
+  f.add({ id: "a", title: "Claude", projectPath: "/ws/w/p" });
+  f.texts.set("a", "4");
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const p = make(f).sendAndWait({ tabId: "a" }, "2+2", { submit: true, idleMs: 500 });
+    assert.deepEqual(f.inputs.at(-1), { id: "a", data: "2+2\r" }); // wrote before waiting
+    mock.timers.tick(500);
+    const r = await p;
+    assert.equal(r.text, "4");
+    assert.equal(r.settled, true);
+  } finally {
+    mock.timers.reset();
+  }
+});

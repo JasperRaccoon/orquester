@@ -7,6 +7,18 @@ import type { ISessionManager } from "../sessions.ts";
 import type { RegistryService } from "../registry.ts";
 import { encodeKey } from "./keys.ts";
 
+const DEFAULT_IDLE_MS = 1000;
+const DEFAULT_TIMEOUT_MS = 120_000; // 2 min
+const MAX_TIMEOUT_MS = 600_000;     // 10 min ceiling
+
+export type WaitResult = {
+  text: string;
+  settled: boolean;
+  status: SessionSummary["status"];
+  exitCode?: number;
+  aborted?: boolean;
+};
+
 /** A tab is addressed by (workspace,project,tab) name, or by opaque tabId. */
 export type TabSelector = { workspace?: string; project?: string; tab?: string; tabId?: string };
 
@@ -121,5 +133,102 @@ export class TerminalControl {
     return [...r.shells, ...r.agents]
       .filter((e) => e.enabled)
       .map((e) => ({ id: e.id, name: e.name, kind: e.kind, version: e.version }));
+  }
+
+  /** Subscribe → debounce on output → resolve on idle/exit/cap/abort. Shared by both waits. */
+  private async runWait(id: string, opts: { idleMs?: number; timeoutMs?: number; signal?: AbortSignal }) {
+    const { sessions } = this.deps;
+    const idleMs = opts.idleMs ?? DEFAULT_IDLE_MS;
+    const timeoutMs = Math.min(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS);
+    const sig = opts.signal;
+    return new Promise<boolean>((resolve) => {
+      let idleTimer: ReturnType<typeof setTimeout>;
+      let resolved = false;
+      const done = (ok: boolean) => {
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(idleTimer);
+        clearTimeout(hardTimer);
+        unsub();
+        sig?.removeEventListener("abort", onAbort);
+        resolve(ok);
+      };
+      const arm = () => {
+        clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => done(true), idleMs);
+      };
+      const onAbort = () => done(false);
+      const hardTimer = setTimeout(() => done(false), timeoutMs);
+      const unsub = sessions.subscribe(id, () => arm(), () => done(true)); // output re-arms; exit settles
+      sig?.addEventListener("abort", onAbort, { once: true });
+      if (sig?.aborted) {
+        done(false);
+        return;
+      }
+      arm(); // start the idle countdown immediately
+    });
+  }
+
+  /** Pure wait (no write) — the re-invoke path. Inspect `text` for a prompt regardless of `settled`. */
+  async waitForIdle(
+    sel: TabSelector,
+    opts?: { idleMs?: number; timeoutMs?: number; lines?: number; signal?: AbortSignal }
+  ): Promise<WaitResult> {
+    const t = this.resolveTab(sel);
+    const settled = await this.runWait(t.id, opts ?? {});
+    if (opts?.signal?.aborted) {
+      // Don't fabricate "exited"; don't touch a dead transport.
+      return { text: "", settled: false, aborted: true, status: this.deps.sessions.get(t.id)?.status ?? "exited" };
+    }
+    const after = this.deps.sessions.get(t.id);
+    const text = await this.deps.sessions.captureText(t.id, { lines: opts?.lines ?? 0 });
+    return { text, settled, status: after?.status ?? "exited", exitCode: after?.exitCode };
+  }
+
+  /** Write input, then wait. Subscribes BEFORE writing so the response is never missed. */
+  async sendAndWait(
+    sel: TabSelector,
+    data: string,
+    opts?: { submit?: boolean; idleMs?: number; timeoutMs?: number; lines?: number; signal?: AbortSignal }
+  ): Promise<WaitResult> {
+    const t = this.resolveTab(sel);
+    const { sessions } = this.deps;
+    const idleMs = opts?.idleMs ?? DEFAULT_IDLE_MS;
+    const timeoutMs = Math.min(opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS);
+    const sig = opts?.signal;
+    const settled = await new Promise<boolean>((resolve) => {
+      let idleTimer: ReturnType<typeof setTimeout>;
+      let resolved = false;
+      const done = (ok: boolean) => {
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(idleTimer);
+        clearTimeout(hardTimer);
+        unsub();
+        sig?.removeEventListener("abort", onAbort);
+        resolve(ok);
+      };
+      const arm = () => {
+        clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => done(true), idleMs);
+      };
+      const onAbort = () => done(false);
+      const hardTimer = setTimeout(() => done(false), timeoutMs);
+      const unsub = sessions.subscribe(t.id, () => arm(), () => done(true));
+      sig?.addEventListener("abort", onAbort, { once: true });
+      if (sig?.aborted) {
+        done(false);
+        return;
+      }
+      // Subscribe is in place — now write, then start the idle countdown.
+      sessions.input(t.id, opts?.submit ? `${data}\r` : data);
+      arm();
+    });
+    if (sig?.aborted) {
+      return { text: "", settled: false, aborted: true, status: sessions.get(t.id)?.status ?? "exited" };
+    }
+    const after = sessions.get(t.id);
+    const text = await sessions.captureText(t.id, { lines: opts?.lines ?? 0 });
+    return { text, settled, status: after?.status ?? "exited", exitCode: after?.exitCode };
   }
 }
