@@ -24,9 +24,10 @@ The work is two thin layers over existing code:
    those functions and mounts on Fastify at `/mcp` (Streamable-HTTP), gated by the daemon's
    existing bearer auth.
 
-Plus one small backend addition (`captureText` on `ISessionManager`, for *clean* rendered text)
-and one targeted refactor (export `listWorkspaces`/`listProjects` so both `index.ts` and the new
-module share them).
+Plus one small backend addition (`captureText` on `ISessionManager`, for *clean* rendered text).
+No file is extracted: `createServer` (the composition root) already has `listWorkspaces`/
+`listProjects` in scope and **injects** them into the MCP layer (see §7 / Decisions — this avoids
+an `index.ts` import cycle).
 
 No change to the wire contracts in `@orquester/api` (MCP carries its own JSON-RPC schema), no
 change to the desktop/web UI, no new transport — `/mcp` is just another route on the daemon's
@@ -44,7 +45,7 @@ existing HTTP server.
   project's `path` as `join(workspacesDir, workspace, name)`, and sessions are created with exactly
   that string as `projectPath`. So `(workspace, project)` → `projectPath` is a pure `join`, and
   matching `session.projectPath === join(workspacesDir, workspace, project)` is exact (the same
-  identity `closeByProjectPrefix` already relies on — see `index.ts:675`).
+  identity `closeByProjectPrefix` already relies on — see `index.ts:678`).
 
 - **The plumbing for read/write already exists**, addressed by session id:
   - **Input:** `sessions.input(id, data)` (`sessions.ts:309`) writes raw bytes to the session's
@@ -101,19 +102,21 @@ existing HTTP server.
 
 ```
 apps/daemon/src/
-  workspaces.ts        ← NEW (extracted): listWorkspaces / listProjects (shared)
   sessions.ts          ← + captureText() on ISessionManager and both backends
   tmux.ts              ← capturePane() gains options (clean text, line range)
   mcp/
     terminal-control.ts ← NEW: the resolve/read/write/wait/create/close functions
     keys.ts             ← NEW: key-name → bytes table + encoder
     server.ts           ← NEW: McpServer with 11 tools; mounts on Fastify at /mcp
-  index.ts             ← instantiate TerminalControl, mount /mcp, gate /mcp in the auth hook
+  index.ts             ← build TerminalControl (injecting listWorkspaces/listProjects),
+                          mount /mcp, gate /mcp in the auth hook
 ```
 
-`TerminalControl`'s only dependencies are `ISessionManager`, `RegistryService`, and
-`workspacesDir: string` — so it is unit-testable against a fake session manager, and the same
-functions could later back REST routes if ever wanted.
+`TerminalControl`'s dependencies are injected at construction — `ISessionManager`,
+`RegistryService`, `workspacesDir: string`, and the existing `listWorkspaces`/`listProjects`
+helpers (passed in from `createServer`, which already has them in module scope — see §7). So it
+imports nothing from the 2000-line `index.ts`, is unit-testable against fakes, and avoids any
+import cycle. The same functions could later back REST routes if ever wanted.
 
 ### 1. Clean-text reads — `captureText` on the session backend
 
@@ -148,12 +151,22 @@ Add a clean-text method to the backend contract so the MCP layer never imports t
 captureText(id: string, opts?: { lines?: number }): Promise<string>;
 ```
 
-- **tmux backend:** `this.tmux.capturePane(id, { escapes: false, lines: opts?.lines ?? 0 })`.
-  Default `lines: 0` = just the visible screen (what a human sees); the tool exposes `lines` to
-  pull more history.
-- **local backend (no tmux):** degraded fallback — return the hot ring (`this.buffer(id)`) with a
-  best-effort ANSI strip (a `\x1b\[[0-9;]*[A-Za-z]` / OSC regex). Documented as approximate (no
-  cursor/reflow emulation). The VPS has tmux, so this only affects desktop-on-Windows/stock-macOS.
+- **tmux backend:** mirror `scrollback()`'s own guard (`sessions.ts:295-301`). tmux's default
+  `remain-on-exit off` destroys the pane when the command exits, so `capture-pane` on an exited
+  session returns `""`. Therefore: while `status === "running"`, return
+  `this.tmux.capturePane(id, { escapes:false, lines:opts?.lines ?? 0 })`; **else fall back to the
+  hot ring** (`session.buffer`, ANSI-stripped). Without this fallback an exited tab reads as empty —
+  silently dropping the *final* output of any command that prints then exits, i.e. the common
+  `send_and_wait` case (the headline flow). Then **trim trailing blank lines** (a visible-screen
+  capture pads to the full row count). Default `lines: 0` = the visible screen.
+- **local backend (no tmux):** the hot ring (`this.buffer(id)`), ANSI-stripped — it survives exit,
+  so no special-casing needed. The strip must cover private/intermediate CSI params
+  (`\x1b\[[0-9;?>=]*[ -/]*[@-~]`) and OSC (`\x1b\][^\x07]*(?:\x07|\x1b\\)`), else sequences like
+  `\x1b[?25l` leak. Documented as approximate (no cursor/reflow emulation); only affects
+  desktop-on-Windows/stock-macOS — the VPS has tmux.
+
+A shared `stripAnsi()` + `trimTrailingBlankLines()` helper (in `mcp/terminal-control.ts`, imported
+by `sessions.ts`) serves both the exited-tmux fallback and the local backend.
 
 ### 2. Tab resolution — `resolveTab`
 
@@ -213,8 +226,16 @@ sendKeys(sel, keys: string[]) {                              // ["Enter"], ["C-c
 }
 
 createTab(sel: { workspace, project }, opts: { refId, title?, cwd? }) {
-  const projectPath = join(workspacesDir, sel.workspace, sel.project); // validated
-  return sessions.create({ kind: registry.get(opts.refId)!.kind, refId: opts.refId,
+  if (!isValidName(sel.workspace) || !isValidName(sel.project))
+    throw new TabNotFound("Invalid workspace/project name.");
+  const projectPath = join(workspacesDir, sel.workspace, sel.project);
+  if (!existsSync(projectPath))                          // else tmux `new-session -c` fails ASYNC,
+    throw new TabNotFound(`No project "${sel.project}" in "${sel.workspace}".`);  // after we returned
+  const entry = registry.get(opts.refId);               // undefined → clean error, not `!.kind` TypeError
+  if (!entry) throw new SessionError(`Registry entry "${opts.refId}" is not available.`);
+  // create() derives kind from the entry (sessions.ts:130) and re-validates enabled/bin (throwing
+  // SessionError); we pass entry.kind only to satisfy CreateSessionRequest's runtime-ignored type.
+  return sessions.create({ kind: entry.kind, refId: opts.refId,
                            projectPath, cwd: opts.cwd ?? projectPath, title: opts.title });
 }
 
@@ -267,6 +288,12 @@ async sendAndWait(sel, data, opts?) {    // subscribe BEFORE writing so no outpu
 - Works on **both** backends — `subscribe()` exists on each; only the final `captureText` is
   degraded on non-tmux hosts.
 - `sendAndWait` subscribes *before* writing, so the response to its own input is never missed.
+- **What `settled:true` means:** the pane was *quiet for `idleMs`* — **not** "the command
+  completed." A command that emits nothing for `> idleMs` before it starts (`sleep 5; echo done`)
+  can settle early, before its output exists. For the primary case (a coding-agent TUI streaming a
+  spinner/tokens) this is rarely hit; for shells the agent should read the result and
+  re-`wait_for_idle` if it expected more. A larger `idleMs` is sensible for `agent`-kind tabs.
+  (This is also why `read_terminal` exposes no `busy` flag — see Decisions.)
 
 ### 5. Key encoding — `keys.ts`
 
@@ -307,25 +334,50 @@ one `TerminalControl` function and return its result as JSON text content (typed
 | `close_tab` | `sel` | `{closed:true}` |
 
 `sel` = `{ workspace?, project?, tab?, tabId? }` (provide `tabId`, or all of `workspace+project+tab`).
+`list_launchers` filters `registry.list()` to `enabled` entries (it returns disabled ones too,
+`registry.ts:138`). Errors map to MCP `isError` results: `TabNotFound`/`AmbiguousTab` (with the
+candidate ids), `SessionError` (bad/disabled `refId` on `create_tab`), `encodeKey`'s unknown-key
+throw, and a generic catch-all — each with an actionable message.
 
 ### 7. Fastify mount + auth (`index.ts`)
 
-- **Mount** in `createServer` after services are in scope: build a `TerminalControl` from
-  `services.sessions`, `services.registry`, `resolved.workspacesDir`, hand it to
-  `registerMcp(app, control)`, which registers a `POST /mcp` handler (in stateless mode the SDK
-  uses POST; GET/DELETE return 405). The handler **hijacks the reply** and passes
-  `request.raw`/`reply.raw` (and the parsed
-  body) to a `StreamableHTTPServerTransport` bound to the `McpServer` — the same `reply.hijack()`
-  pattern `GET /api/sessions/:id/output` already uses (`index.ts:1626`).
+- **Mount** in `createServer`: build `TerminalControl` from `services.sessions`,
+  `services.registry`, `resolved.workspacesDir`, and the in-scope `listWorkspaces`/`listProjects`;
+  hand it to `registerMcp(app, control)`. It registers `app.post("/mcp", { bodyLimit }, …)` (see
+  body-limit note). The handler **hijacks the reply** and passes `request.raw`/`reply.raw` **and the
+  already-parsed `request.body`** (Fastify has consumed the raw stream, so the parsed body must be
+  handed in) to a per-request `StreamableHTTPServerTransport` bound to a per-request `McpServer` —
+  the same `reply.hijack()` pattern `GET /api/sessions/:id/output` uses (`index.ts:1626`).
+- **Teardown (no leaks).** Server+transport are created per request, so close them when the response
+  ends: `reply.raw.on("close", () => { transport.close(); server.close(); })`. Wrap
+  `transport.handleRequest(...)` in try/catch and, on a throw *after* hijack, write a 500 to
+  `reply.raw` and `end()` it — otherwise a post-hijack throw hangs the socket (the existing hijack
+  route is a GET that can't throw mid-stream the same way).
+- **Methods.** Stateless mode only needs `POST /mcp`; Fastify returns **404** for an unregistered
+  `GET`/`DELETE /mcp` by default — fine (stateless Streamable-HTTP clients only POST); add explicit
+  405 handlers only if a client complains.
+- **Body limit.** `createServer` sets no global `bodyLimit`, so Fastify's ~1 MiB default applies to
+  `/mcp`. A large paste in `write_input`/`send_and_wait` `data` (inside the JSON-RPC envelope) could
+  413 at the parser. Give `/mcp` a route-level override (e.g. `{ bodyLimit: 8 * 1024 * 1024 }`,
+  following the upload route at `index.ts:1557`). *(Aside: the "256 KB" in the upload comment at
+  `index.ts:1553` is itself inaccurate — the real default is ~1 MiB; not fixed by this work.)*
 - **Auth:** add `/mcp` to the gated set in the `onRequest` hook (`index.ts:377`):
   `url.startsWith("/api") || url.startsWith("/events") || url.startsWith("/mcp")`. On the HTTP
   transport this requires the bearer exactly like `/api`; on the unix socket it's open (local).
-- **Transport mode:** v1 runs the transport **stateless** (`sessionIdGenerator: undefined`, a fresh
-  `McpServer`+transport per request) — every tool is an independent read/write, so there is no
-  per-connection state to keep, and it sidesteps MCP session-id lifecycle management. (A stateful
-  map can be added later if a client needs the long-lived session handshake.)
-- **Caddy:** no change — `reverse_proxy 127.0.0.1:47831` already forwards every path (including the
-  long-lived `/events` and `/ws`), so a blocking `send_and_wait` POST is covered the same way.
+- **Transport mode:** v1 runs **stateless** (`sessionIdGenerator: undefined`, fresh server+transport
+  per request) — every tool is independent, so there is no per-connection state, and it sidesteps
+  MCP session-id lifecycle. (A stateful map can be added later if a client needs the handshake.)
+- **Reachability + credential (client setup).** `/mcp` needs the **HTTP transport enabled** — a
+  normal Streamable-HTTP client cannot reach the unix socket. The desktop app embeds the daemon with
+  HTTP **off** by default (`apps/desktop/src/main.ts` forces `ORQUESTER_HTTP_ENABLED:"false"`), so
+  `/mcp` targets the **VPS** (or a daemon with HTTP explicitly enabled), not a stock desktop install
+  — Goals' "local or VPS" is true only with HTTP on. The client's `Authorization: Bearer` is
+  `base64("<user>:<bcryptHash>")` — **not** the plaintext password and never the raw hash: the
+  client fetches the bcrypt salt from `/api/auth/info`, bcrypts the password client-side (cost 12),
+  and base64s `user:hash` (exactly what the web/desktop clients do). Document this derivation for
+  whoever wires the MCP client config.
+- **Caddy:** no change — `reverse_proxy 127.0.0.1:47831` already forwards every path (incl. the
+  long-lived `/events`/`/ws`), so a blocking `send_and_wait` POST is covered the same way.
 
 ### Component / call flow
 
@@ -349,9 +401,12 @@ McpServer tool handler ──► TerminalControl.<fn>(sel,…)
   and rides Caddy's TLS. It does **not** widen the trust boundary: anyone holding the password can
   already inject input via `POST /api/sessions/:id/input` and read via `GET /api/sessions/:id/output`.
   `/mcp` is an ergonomic re-packaging of capabilities the credential already grants.
-- **No path surface.** Tabs are resolved through `sessions.list(projectPath)` against existing
-  sessions; `workspace`/`project` are `isValidName`-checked before the `join`. `create_tab`'s
-  `cwd` defaults to the (validated) project path. No raw filesystem path is taken from the client.
+- **Path surface is parity with the existing session API.** Tab resolution uses
+  `sessions.list(projectPath)` against existing sessions, with `workspace`/`project`
+  `isValidName`-checked before the `join`; `create_tab` also `isValidName`-checks them and verifies
+  the project dir exists. Its optional `cwd` *is* a client-supplied path used verbatim — but that is
+  exactly what `POST /api/sessions` already accepts, so `/mcp` adds **no new** path surface beyond
+  what the credential already grants (the daemon does not sandbox session `cwd` today).
 - **Transparency.** Writes go through the *shared* attach PTY, so a human watching the tab in the
   UI sees the agent's keystrokes — intentional (no hidden side-channel).
 - Future opt-in guardrails (read-only mode, command confirmation) are noted as out of scope.
@@ -360,14 +415,21 @@ McpServer tool handler ──► TerminalControl.<fn>(sel,…)
 
 - **Ambiguous tab name** (two "bash"): reads/writes return an error listing `title=id` pairs;
   `close_tab` likewise refuses — the agent must pass `tabId`.
-- **Tab exited:** `read_terminal` still returns the last captured screen with `status:"exited"`;
-  `write_input`/`send_keys` are no-ops at the PTY (`input()` already guards a null pty) — surfaced
-  with the tab's `status` so the agent can tell.
-- **`create_tab` not-yet-booted:** returns immediately (tmux `new-session` is async, `sessions.ts:174`);
-  the PTY may not have drawn its prompt yet. Documented: follow with `read_terminal` or
-  `send_and_wait`. An unknown/`disabled` `refId` → tool error (mirrors `SessionError`).
-- **`send_and_wait` on a silent command:** no output after the write → idle timer fires after
-  `idleMs` → `settled:true` with the current screen. Correct (nothing was happening).
+- **Tab exited:** `read_terminal` returns the last screen from the hot-ring fallback (§1 C1 handling
+  — tmux's pane is gone once the command exits) with `status:"exited"`; `write_input`/`send_keys`
+  are no-ops at the PTY (`input()` already guards a null pty) — surfaced with the tab's `status` so
+  the agent can tell. (A `projectPath:""` session — not bound to a project — is unaddressable via
+  `(workspace, project, tab)`; reach it by `tabId`.)
+- **`create_tab` is provisional:** it returns immediately with `status:"running"` (tmux
+  `new-session` is async, `sessions.ts:174`); the prompt may not be drawn yet, and a launch failure
+  flips the tab to `exited` *after* the tool already returned (the `.catch` at `sessions.ts:192`).
+  The agent should follow with `read_terminal`/`send_and_wait` to confirm. `createTab` pre-checks
+  the project dir exists and that `refId` resolves, so the common failures surface as clean tool
+  errors *before* spawning rather than as a ghost tab that dies a moment later.
+- **`send_and_wait` on a slow/silent command:** no output for `idleMs` → idle timer fires →
+  `settled:true`. This correctly means "the pane went quiet," but also fires for a command that
+  hasn't started emitting yet (`sleep 5; echo x`) — see §4's "what `settled:true` means": the agent
+  treats it as "quiesced," reads, and re-`wait_for_idle`s if it expected more.
 - **`send_and_wait` exceeds the cap:** `settled:false` + partial text; the agent re-invokes
   `wait_for_idle` to continue. `timeoutMs` is clamped to `MAX_TIMEOUT_MS` (10 min).
 - **Session exits mid-wait:** the `onExit` path resolves `settled:true` with `status:"exited"`.
@@ -376,14 +438,19 @@ McpServer tool handler ──► TerminalControl.<fn>(sel,…)
   unchanged (they don't depend on tmux).
 - **Concurrent writers** (human in the UI + MCP agent): both write to the same PTY; interleaving is
   possible, same as two humans sharing a terminal. Accepted.
+- **`read_terminal` dims may be stale:** a reattached session reports `cols/rows` of `80/24` until
+  the next resize (`sessions.ts:464`), so the reported dimensions can lag the real pane. Cosmetic —
+  the captured text is unaffected.
 
 ## Testing / verification
 
 - `pnpm check` (typecheck — the repo's only pre-commit gate). Includes the new SDK/zod types.
-- **Unit** (`TerminalControl` against a fake `ISessionManager`): `resolveTab` name-hit / not-found
-  (lists titles) / ambiguous (lists ids) / `tabId` bypass; `writeInput` submit appends `\r`;
-  `encodeKey` table + `C-x` rule + unknown throws; `waitForIdle` resolves on debounce, on exit, and
-  `settled:false` on cap (fake emitter + fake timers).
+- **Unit** (`TerminalControl` against a fake `ISessionManager` exposing a drivable emitter + fake
+  timers): `resolveTab` name-hit / not-found (lists titles) / ambiguous (lists ids) / `tabId`
+  bypass; `createTab` bad-dir + unknown-`refId` → clean errors (no `TypeError`); `writeInput` submit
+  appends `\r`; `encodeKey` table + `C-x` rule + unknown throws; `waitForIdle` resolves on debounce,
+  on exit, and `settled:false` on cap; `captureText` **exited→buffer fallback** (the C1 path) and
+  trailing-blank trim; the early-settle behavior (§4/I3) is asserted as documented behavior.
 - **Manual, against a real daemon with tmux** (a *separate* checkout — never this one, per AGENTS.md):
   drive `/mcp` with an MCP client (or `mcp` inspector / curl JSON-RPC):
   - `list_workspaces`→`list_projects`→`list_tabs` reflect the live UI;
@@ -399,18 +466,26 @@ McpServer tool handler ──► TerminalControl.<fn>(sel,…)
 ## Files touched
 
 - `apps/daemon/src/mcp/terminal-control.ts` — **new**: `resolveTab`, `readTerminal`, `writeInput`,
-  `sendKeys`, `waitForIdle`, `sendAndWait`, `createTab`, `closeTab`, `listTabs` + typed errors.
+  `sendKeys`, `waitForIdle`, `sendAndWait`, `createTab`, `closeTab`, `listTabs`, `listLaunchers`
+  (filters `enabled`) + typed errors (`TabNotFound`/`AmbiguousTab`); shared `stripAnsi` /
+  `trimTrailingBlankLines` helpers (also imported by `sessions.ts`).
 - `apps/daemon/src/mcp/keys.ts` — **new**: named-key table + `encodeKey`.
-- `apps/daemon/src/mcp/server.ts` — **new**: `McpServer` with the 11 tools; `registerMcp(app, control)`
-  Fastify mount (Streamable-HTTP, hijack pattern, stateless).
-- `apps/daemon/src/workspaces.ts` — **new (extracted)**: `listWorkspaces` / `listProjects` moved
-  from `index.ts` so both it and `terminal-control.ts` import them.
+- `apps/daemon/src/mcp/server.ts` — **new**: per-request `McpServer` with the 11 tools;
+  `registerMcp(app, control)` Fastify mount (Streamable-HTTP, hijack, stateless, **per-request
+  teardown**, route `bodyLimit`); error→`isError` mapping (`TabNotFound`/`AmbiguousTab`/
+  `SessionError`/`encodeKey` + catch-all).
 - `apps/daemon/src/sessions.ts` — add `captureText(id, {lines?})` to `ISessionManager` and both
-  backends (tmux: clean capture-pane; local: ANSI-stripped ring).
+  backends; tmux backend gates on `running` and falls back to the ANSI-stripped buffer when exited
+  (C1); trims trailing blank lines.
 - `apps/daemon/src/tmux.ts` — `capturePane(id, { escapes?, lines? })` options (back-compatible).
-- `apps/daemon/src/index.ts` — instantiate `TerminalControl` + `registerMcp(app, …)` in
-  `createServer`; add `/mcp` to the `onRequest` auth gate; import the extracted workspace helpers.
-- `apps/daemon/package.json` — add `@modelcontextprotocol/sdk` (+ `zod` for tool schemas).
+- `apps/daemon/src/index.ts` — build `TerminalControl` (injecting the in-scope `listWorkspaces`/
+  `listProjects`) + `registerMcp(app, …)` in `createServer`; add `/mcp` to the `onRequest` auth
+  gate. **No `workspaces.ts` extraction** — `listWorkspaces`/`listProjects` depend on
+  `readWorkspacesMeta`/`writeWorkspacesMeta`, which ~6 other routes use, so extracting would force a
+  `workspaces.ts` ↔ `index.ts` cycle; injecting from the composition root avoids it.
+- `apps/daemon/package.json` — add `@modelcontextprotocol/sdk` and `zod` (pin `zod` to the SDK's
+  expected major to avoid a duplicate-`zod` `instanceof` footgun; `@orquester/config` already uses
+  `zod ^3.25`).
 
 ## Decisions
 
@@ -431,7 +506,14 @@ McpServer tool handler ──► TerminalControl.<fn>(sel,…)
 - **No `busy` flag on `read_terminal`.** A one-shot snapshot can't reliably tell "at a prompt" from
   "mid-command"; faking it would mislead. Liveness is the job of `wait_for_idle`/`send_and_wait`
   (which actively observe and return `settled`).
-- **Stateless MCP transport (v1).** Every tool is independent; no per-connection state to manage.
+- **Stateless MCP transport (v1).** Every tool is independent; no per-connection state to manage
+  (fresh server+transport per request, torn down on response close).
+- **Inject `listWorkspaces`/`listProjects`, don't extract a module.** `createServer` already has
+  them in scope; injecting keeps the change small and avoids a `workspaces.ts` ↔ `index.ts` import
+  cycle (those helpers' `readWorkspacesMeta`/`writeWorkspacesMeta` deps are used by ~6 other routes).
+- **`settled` means "quiesced", not "completed".** The idle engine reports pane-quiet, which the
+  agent re-checks; honest semantics beat a fragile "is it done?" guess (same reason `read_terminal`
+  has no `busy` flag).
 - **Stays out of `@orquester/api`.** MCP carries its own JSON-RPC schema; the REST/WS contracts are
   unaffected, keeping the surface contained to the daemon.
 
