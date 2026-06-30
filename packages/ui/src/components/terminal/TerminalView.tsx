@@ -478,23 +478,29 @@ export const TerminalView: React.FC<{
     // so a socket reconnect heals the same way.
     let repaintArmed = true;
     let nudgeTimer: ReturnType<typeof setTimeout> | undefined;
-    const forceAgentRepaint = () => {
+    let repaintRaf: number | undefined;
+    const forceAgentRepaint = (tries = 0) => {
       if (!repaintArmed) {
         return;
       }
-      // Fit to the real size FIRST. Our trigger is the scrollback replay, and on a
-      // fresh mount (e.g. a project switch, which remounts every tab) that replay
-      // can arrive BEFORE xterm has measured its character cell — so term.{cols,rows}
-      // is still xterm's 80×24 default. Nudging around that resizes the PTY down to
-      // 80×24, shrinking a running agent into a small corner until the real fit
-      // lands (the "half-size on project switch" bug: the pane oscillated 80×24 ↔
-      // full on every switch). applyFit() fits to the real size once measurable.
+      // The nudge MUST use the real on-screen size. Our trigger is the scrollback
+      // replay, and on a fresh mount (a project switch remounts every tab) that
+      // replay can arrive BEFORE xterm has measured its character cell, so
+      // term.{cols,rows} is still xterm's 80×24 default — nudging it would resize
+      // the PTY down to 80×24 (the "shrinks on project switch" bug). applyFit()
+      // fits to the real size once measurable.
       applyFit();
       if (!hasLayoutBox(container) || !fit.proposeDimensions()) {
-        // Hidden tab, or the cell is still unmeasured (applyFit bailed) → do NOT
-        // nudge: term.{cols,rows} isn't a real on-screen size and resizing the PTY
-        // to it would shrink the pane. Stay armed and retry on the next chunk (by
-        // when an inactive tab is shown / the cell is measured).
+        // Not a real on-screen size yet. If we're VISIBLE but the cell just isn't
+        // measured (the replay paints on the next frame), retry on a frame instead
+        // of waiting for the next output chunk — an idle agent paused at a prompt
+        // sends nothing else, so the mangled capture-pane snapshot would stay
+        // garbled until the user types. If hidden, stay armed; the next chunk (or
+        // showing the tab) re-triggers us.
+        if (hasLayoutBox(container) && tries < 120) {
+          cancelAnimationFrame(repaintRaf ?? 0);
+          repaintRaf = requestAnimationFrame(() => forceAgentRepaint(tries + 1));
+        }
         return;
       }
       repaintArmed = false;
@@ -543,6 +549,9 @@ export const TerminalView: React.FC<{
       stream.close();
       if (nudgeTimer) {
         clearTimeout(nudgeTimer);
+      }
+      if (repaintRaf) {
+        cancelAnimationFrame(repaintRaf);
       }
       inputSub.dispose();
       bellSub?.dispose();
