@@ -494,9 +494,21 @@ export class GitService {
     return { ok: true, output: combine(stdout, stderr) };
   }
 
-  /** Pull (fast-forward/merge, never opening an editor). */
+  /**
+   * Pull the current branch. `--no-rebase` pins the reconciliation strategy to
+   * merge so a *divergent* branch (local commits the remote lacks AND remote
+   * commits we lack) fast-forwards when it can and otherwise records a merge
+   * commit — deterministically, never opening an editor (`--no-edit`). Without
+   * it, git ≥ 2.27 aborts a divergent pull with "Need to specify how to
+   * reconcile divergent branches" unless `pull.rebase` happens to be configured;
+   * forcing merge here is the GitHub-Desktop default and the one behavior the
+   * Pull button can promise every time. A merge that hits a conflict exits
+   * non-zero (→ GitError → the UI's error banner) and leaves the conflicted
+   * files in the working tree, where the Changes panel lists them to resolve +
+   * commit — which completes the merge.
+   */
   async pull(cwd: string): Promise<GitOpResult> {
-    const { stdout, stderr } = await this.exec(cwd, ["pull", "--no-edit"], {
+    const { stdout, stderr } = await this.exec(cwd, ["pull", "--no-edit", "--no-rebase"], {
       remote: true,
       timeout: 60_000
     });
