@@ -188,6 +188,16 @@ export const TerminalView: React.FC<{
       if (!hasLayoutBox(container)) {
         return;
       }
+      // Bail until xterm has measured its character cell — it does so lazily on
+      // the first render, and fitting before then leaves xterm at its default
+      // 80×24, which we'd push to the PTY as a ≈half-size SIGWINCH (the "half size
+      // on a fresh mount / project switch" bug). proposeDimensions() returns
+      // undefined while the cell width is still 0; the first-render handler and the
+      // ResizeObserver both re-fit once it's measured.
+      const dims = fit.proposeDimensions();
+      if (!dims || Number.isNaN(dims.cols) || Number.isNaN(dims.rows)) {
+        return;
+      }
       try {
         fit.fit();
       } catch {
@@ -196,6 +206,17 @@ export const TerminalView: React.FC<{
       void api.resizeSession(session.id, term.cols, term.rows);
     };
     applyFit();
+    // xterm measures its character cell lazily on its first render, so the fit()
+    // above can bail (0-width cell → FitAddon proposes nothing) and leave the
+    // terminal at xterm's default 80×24. On a full-size container that's ≈ half
+    // the real cols/rows, so a freshly-mounted terminal — e.g. after a project
+    // switch, which remounts every tab — shows up at ~half size until something
+    // resizes it. Re-fit on the first render, by which point the cell IS measured,
+    // so the correct size lands within a frame instead of on a later stray resize.
+    const firstRenderFit = term.onRender(() => {
+      firstRenderFit.dispose();
+      applyFit();
+    });
     term.focus();
 
     // Clipboard: xterm forwards Ctrl-C to the PTY as SIGINT and has no built-in
@@ -510,6 +531,7 @@ export const TerminalView: React.FC<{
       }
       inputSub.dispose();
       bellSub?.dispose();
+      firstRenderFit.dispose();
       resizeObserver.disconnect();
       term.dispose();
       termRef.current = null;
