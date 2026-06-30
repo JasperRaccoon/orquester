@@ -231,4 +231,45 @@ export class TerminalControl {
     const text = await sessions.captureText(t.id, { lines: opts?.lines ?? 0 });
     return { text, settled, status: after?.status ?? "exited", exitCode: after?.exitCode };
   }
+
+  /**
+   * Launch a new tab (shell/agent) in a project. Async because assertInsideFsRoot
+   * realpaths — it MUST be awaited (un-awaited + swapped args would bypass the
+   * sandbox AND crash-loop the daemon via an unhandled rejection).
+   */
+  async createTab(
+    sel: { workspace: string; project: string },
+    opts: { refId: string; title?: string; cwd?: string }
+  ): Promise<SessionSummary> {
+    const { sessions, registry, workspacesDir, fsRoot } = this.deps;
+    if (!isValidName(sel.workspace) || !isValidName(sel.project)) {
+      throw new TabNotFound("Invalid workspace/project name.");
+    }
+    const projectPath = join(workspacesDir, sel.workspace, sel.project);
+    if (!statSafe(projectPath)?.isDirectory()) {
+      // A FILE would pass existsSync then fail async in tmux — reject cleanly first.
+      throw new TabNotFound(`No project "${sel.project}" in "${sel.workspace}".`);
+    }
+    // SECURITY: assertInsideFsRoot(ROOT, target), async, awaited, root = fsRoot.
+    const cwd = await assertInsideFsRoot(fsRoot, opts.cwd ?? projectPath); // throws FsSandboxError
+    // Only launch SESSION kinds: create() checks resolvedBin+enabled but NOT kind,
+    // so a bare create() would launch an ide/browser, and claude/codex carry
+    // --dangerously-skip-permissions/--yolo. Restrict to what list_launchers shows.
+    const entry = registry.get(opts.refId);
+    if (!entry?.enabled || (entry.kind !== "shell" && entry.kind !== "agent")) {
+      throw new ToolError(`"${opts.refId}" is not a launchable shell or agent.`);
+    }
+    // Count cap — sessions persist across restart and reattach() re-spawns them all.
+    const running = sessions.list(projectPath).filter((s) => s.status === "running").length;
+    if (running >= MAX_TABS_PER_PROJECT) {
+      throw new ToolError(`Tab limit reached for "${sel.project}" (${MAX_TABS_PER_PROJECT}).`);
+    }
+    return sessions.create({ kind: entry.kind, refId: opts.refId, projectPath, cwd, title: opts.title });
+  }
+
+  closeTab(sel: TabSelector) {
+    const t = this.resolveTab(sel); // errors on ambiguity → never kills the wrong tab
+    this.deps.sessions.close(t.id);
+    return { closed: true as const };
+  }
 }

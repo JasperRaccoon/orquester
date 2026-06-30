@@ -10,6 +10,7 @@ export class FakeManager implements Partial<ISessionManager> {
   inputs: { id: string; data: string }[] = [];
   closed: string[] = [];
   created: CreateSessionRequest[] = [];
+  create?: ISessionManager["create"];
   texts = new Map<string, string>();
   private subs = new Map<string, { out: (d: string) => void; exit: (c: number) => void }[]>();
 
@@ -221,4 +222,69 @@ test("sendAndWait writes input (with CR on submit) before waiting", async () => 
   } finally {
     mock.timers.reset();
   }
+});
+
+import { tmpdir } from "node:os";
+import { mkdtemp, mkdir } from "node:fs/promises";
+import { join } from "node:path";
+import { FsSandboxError } from "@orquester/config/fs";
+
+function registryWith(entries: Record<string, { kind: string; enabled: boolean }>) {
+  return {
+    get: (id: string) => (entries[id] ? { id, name: id, ...entries[id] } : undefined),
+    list: () => ({ shells: [], agents: [], ides: [], fileExplorers: [], browsers: [] }),
+  } as any;
+}
+
+test("createTab: launches a shell/agent in the project dir", async () => {
+  const root = await mkdtemp(join(tmpdir(), "tc-"));
+  await mkdir(join(root, "w", "p"), { recursive: true });
+  const f = new FakeManager();
+  f.create = (req) => { f.created.push(req); return f.add({ id: "new", title: req.title ?? "bash", projectPath: req.projectPath ?? "" }); };
+  const tc = make(f, { workspacesDir: root, fsRoot: root, registry: registryWith({ bash: { kind: "shell", enabled: true } }) });
+  const s = await tc.createTab({ workspace: "w", project: "p" }, { refId: "bash" });
+  assert.equal(s.id, "new");
+  assert.equal(f.created[0].projectPath, join(root, "w", "p"));
+  assert.equal(f.created[0].cwd, join(root, "w", "p"));
+});
+
+test("createTab: rejects a non-existent project (no ghost tab)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "tc-"));
+  const f = new FakeManager();
+  f.create = () => { throw new Error("should not be called"); };
+  const tc = make(f, { workspacesDir: root, fsRoot: root, registry: registryWith({ bash: { kind: "shell", enabled: true } }) });
+  await assert.rejects(() => tc.createTab({ workspace: "w", project: "missing" }, { refId: "bash" }), TabNotFound);
+});
+
+test("createTab: rejects a cwd outside fsRoot", async () => {
+  const root = await mkdtemp(join(tmpdir(), "tc-"));
+  await mkdir(join(root, "w", "p"), { recursive: true });
+  const f = new FakeManager();
+  f.create = () => { throw new Error("should not be called"); };
+  const tc = make(f, { workspacesDir: root, fsRoot: root, registry: registryWith({ bash: { kind: "shell", enabled: true } }) });
+  await assert.rejects(() => tc.createTab({ workspace: "w", project: "p" }, { refId: "bash", cwd: "/etc" }), FsSandboxError);
+});
+
+test("createTab: rejects a non-shell/agent refId", async () => {
+  const root = await mkdtemp(join(tmpdir(), "tc-"));
+  await mkdir(join(root, "w", "p"), { recursive: true });
+  const f = new FakeManager();
+  const tc = make(f, { workspacesDir: root, fsRoot: root, registry: registryWith({ code: { kind: "ide", enabled: true } }) });
+  await assert.rejects(() => tc.createTab({ workspace: "w", project: "p" }, { refId: "code" }), ToolError);
+});
+
+test("createTab: rejects past the per-project cap", async () => {
+  const root = await mkdtemp(join(tmpdir(), "tc-"));
+  await mkdir(join(root, "w", "p"), { recursive: true });
+  const f = new FakeManager();
+  for (let i = 0; i < 24; i++) f.add({ id: `t${i}`, title: "bash", projectPath: join(root, "w", "p"), status: "running" });
+  const tc = make(f, { workspacesDir: root, fsRoot: root, registry: registryWith({ bash: { kind: "shell", enabled: true } }) });
+  await assert.rejects(() => tc.createTab({ workspace: "w", project: "p" }, { refId: "bash" }), ToolError);
+});
+
+test("closeTab: closes the resolved tab", () => {
+  const f = new FakeManager();
+  f.add({ id: "a", title: "Claude", projectPath: "/ws/w/p" });
+  make(f).closeTab({ tabId: "a" });
+  assert.deepEqual(f.closed, ["a"]);
 });
