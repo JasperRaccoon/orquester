@@ -75,8 +75,10 @@ import {
   sessionsIndexPath,
   tmuxSocketPath,
   todosIndexPath,
-  workspacesMetaPath
+  workspacesMetaPath,
+  isValidName
 } from "@orquester/config";
+import { assertInsideFsRoot, FsSandboxError } from "@orquester/config/fs";
 import fastifyStatic from "@fastify/static";
 import websocketPlugin from "@fastify/websocket";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
@@ -1894,17 +1896,6 @@ function resolveAppdir(raw: string | undefined, cwd: string): string | undefined
   return resolve(cwd, raw);
 }
 
-/** Reject names that would escape the workspaces directory. */
-function isValidName(name: string | undefined): name is string {
-  return (
-    typeof name === "string" &&
-    name.length > 0 &&
-    !name.startsWith(".") &&
-    !name.includes("/") &&
-    !name.includes("\\")
-  );
-}
-
 /**
  * Normalize a GitHub repo reference to its SSH clone URL
  * (`git@github.com:owner/repo.git`). Accepts `https://github.com/owner/repo`
@@ -2088,50 +2079,6 @@ async function listProjects(workspacesDir: string, workspace: string): Promise<P
     path: join(workspacesDir, workspace, name)
   }));
 }
-
-/**
- * Resolve `target` to a realpath and confirm it is inside `root` (also a
- * realpath). Rejects `..` traversal and symlink escapes. For not-yet-existing
- * targets (create/write) the deepest existing ancestor is realpath'd instead,
- * then the remaining segments are appended, so a brand-new file under the root
- * still passes. Throws FsSandboxError when outside the root.
- */
-async function assertInsideFsRoot(root: string, target: string): Promise<string> {
-  const realRoot = await realpath(root).catch(() => resolve(root));
-  const resolved = resolve(target);
-  // Walk up the resolved (non-realpath) path to the deepest existing ancestor so
-  // create/write of a not-yet-existing path still works.
-  let ancestor = resolved;
-  for (;;) {
-    try {
-      await realpath(ancestor);
-      break;
-    } catch {
-      const parent = dirname(ancestor);
-      if (parent === ancestor) {
-        break;
-      }
-      ancestor = parent;
-    }
-  }
-  // Realpath the existing ancestor, then re-attach the not-yet-existing tail by
-  // path.join (never byte-splicing two differently-resolved strings — the
-  // realpath'd ancestor may carry a prefix like macOS `/private`).
-  const realAncestor = await realpath(ancestor).catch(() => ancestor);
-  const tail = relative(ancestor, resolved);
-  const finalPath = tail ? join(realAncestor, tail) : realAncestor;
-  // Containment check on the realpath'd result: rel must stay within realRoot
-  // (empty == the root itself, otherwise no leading `..` segment and not
-  // absolute — sep-anchored so a child literally named e.g. `..foo` is allowed).
-  const rel = relative(realRoot, finalPath);
-  if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
-    throw new FsSandboxError(`Path is outside the sandbox: ${target}`);
-  }
-  return finalPath;
-}
-
-/** Thrown when an /api/fs path escapes fsRoot. */
-class FsSandboxError extends Error {}
 
 /**
  * Build a `Content-Disposition: attachment` value. The ASCII filename="" form is

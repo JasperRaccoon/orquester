@@ -485,3 +485,16 @@ export function createDefaultClientConfig(socketPath: string): ClientConfig {
 export function parseClientConfig(value: unknown): ClientConfig {
   return clientConfigSchema.parse(value);
 }
+
+/** Reject names that would escape the workspaces directory. */
+export function isValidName(name: string | undefined): name is string {
+  return (
+    typeof name === "string" &&
+    name.length > 0 &&
+    !name.startsWith(".") &&
+    !name.includes("/") &&
+    !name.includes("\\")
+  );
+}
+
+// assertInsideFsRoot / FsSandboxError moved to ./fs.ts (node-only; see that file).
