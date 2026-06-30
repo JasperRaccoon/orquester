@@ -482,6 +482,21 @@ export const TerminalView: React.FC<{
       if (!repaintArmed) {
         return;
       }
+      // Fit to the real size FIRST. Our trigger is the scrollback replay, and on a
+      // fresh mount (e.g. a project switch, which remounts every tab) that replay
+      // can arrive BEFORE xterm has measured its character cell — so term.{cols,rows}
+      // is still xterm's 80×24 default. Nudging around that resizes the PTY down to
+      // 80×24, shrinking a running agent into a small corner until the real fit
+      // lands (the "half-size on project switch" bug: the pane oscillated 80×24 ↔
+      // full on every switch). applyFit() fits to the real size once measurable.
+      applyFit();
+      if (!hasLayoutBox(container) || !fit.proposeDimensions()) {
+        // Hidden tab, or the cell is still unmeasured (applyFit bailed) → do NOT
+        // nudge: term.{cols,rows} isn't a real on-screen size and resizing the PTY
+        // to it would shrink the pane. Stay armed and retry on the next chunk (by
+        // when an inactive tab is shown / the cell is measured).
+        return;
+      }
       repaintArmed = false;
       if (term.rows <= 1) {
         return;
