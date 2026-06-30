@@ -165,6 +165,30 @@ export const TerminalView: React.FC<{
     fitRef.current = fit;
     term.open(container);
 
+    // Disable IME autocorrect on the input. Android Gboard garbles terminal
+    // input: when autocorrect rewrites a word it edits its own composition
+    // buffer, but the implied backspaces never reach the PTY, so the shell/agent
+    // receives the original AND the correction interleaved. xterm already sets
+    // autocorrect/autocapitalize/spellcheck off on its textarea at creation, but
+    // some Android keyboards only honour those on the NEXT focus (a long-standing
+    // Chromium quirk) or override them — so re-assert them (attribute AND property
+    // form, plus `autocomplete` which xterm omits) now and again on every focus.
+    const inputEl = term.textarea;
+    const hardenInput = () => {
+      const ta = term.textarea;
+      if (!ta) {
+        return;
+      }
+      ta.setAttribute("autocomplete", "off");
+      ta.setAttribute("autocorrect", "off");
+      ta.setAttribute("autocapitalize", "off");
+      ta.setAttribute("spellcheck", "false");
+      ta.autocapitalize = "off";
+      ta.spellcheck = false;
+    };
+    hardenInput();
+    inputEl?.addEventListener("focus", hardenInput);
+
     // Normalize the "force a local selection over an app's mouse reporting"
     // modifier. xterm hardcodes Shift on Windows/Linux but Option/Alt on macOS
     // (shouldForceSelection: isMac ? altKey : shiftKey) with no public option,
@@ -584,6 +608,7 @@ export const TerminalView: React.FC<{
       container.removeEventListener("dragleave", onDragLeave);
       container.removeEventListener("drop", onDrop);
       container.removeEventListener("paste", onPaste, true);
+      inputEl?.removeEventListener("focus", hardenInput);
       stream.close();
       if (nudgeTimer) {
         clearTimeout(nudgeTimer);
