@@ -176,6 +176,23 @@ export const TerminalView: React.FC<{
       selectionService.shouldForceSelection = (e: MouseEvent) => e.shiftKey || e.altKey;
     }
 
+    // Force xterm to measure its character cell NOW. It normally defers this to the
+    // first render, but the daemon's scrollback replay — an alt-screen agent's grid
+    // captured at the pane's REAL width — can arrive before that first render. Writing
+    // that wide content into the still-80-col default terminal wraps it (and the alt
+    // screen doesn't reflow on the later resize), so it lands garbled and only a
+    // redraw heals it — unreliably for an idle agent. Measuring now lets applyFit()
+    // below size to the real width immediately, so our resize reaches the daemon
+    // BEFORE it captures + replays and the grid arrives un-wrapped. Same `_core`
+    // internal as the selection override above; a no-op (lazy fallback) if it moves.
+    try {
+      (
+        term as unknown as { _core?: { _charSizeService?: { measure?: () => void } } }
+      )._core?._charSizeService?.measure?.();
+    } catch {
+      /* internal moved — fall back to lazy render-time measurement */
+    }
+
     // NB: we intentionally use xterm's default DOM renderer rather than the
     // WebGL addon. The WebGL renderer leaves terminals blank/garbled after a
     // resize (e.g. toggling the grid/tab layout) or when revealed from a hidden
