@@ -8,6 +8,7 @@ import { dirname, sep } from "node:path";
 import { spawn, type IPty } from "node-pty";
 import type { RegistryService } from "./registry";
 import { Tmux, sessionEnvBase, sessionPath, tmuxAvailable, tmuxName, tmuxVersionOk } from "./tmux";
+import { renderText } from "./mcp/text.ts";
 
 /**
  * Small live ring kept only for HOT replay between a session's creation and the
@@ -42,6 +43,8 @@ export interface ISessionManager {
   get(id: string): SessionSummary | undefined;
   /** Durable (tmux) or hot-ring (local) scrollback for a (re)connecting client. */
   scrollback(id: string): Promise<string>;
+  /** Clean (no-ANSI) rendered text: current screen + last `lines` of scrollback. */
+  captureText(id: string, opts?: { lines?: number }): Promise<string>;
   /** Synchronous hot-ring snapshot (kept for callers that can't await). */
   buffer(id: string): string;
   input(id: string, data: string): void;
@@ -301,6 +304,25 @@ export class SessionManager implements ISessionManager {
       }
     }
     return session.buffer;
+  }
+
+  /**
+   * Clean rendered text for an agent read. A running tmux pane renders cleanly via
+   * capture-pane (escapes:false); an exited pane is destroyed (remain-on-exit off)
+   * and a running capture can transiently return "" — both fall back to the
+   * ANSI-stripped hot ring, bounded by `lines`. Mirrors scrollback()'s !session
+   * guard so a close() mid-call returns "" instead of throwing.
+   */
+  async captureText(id: string, opts?: { lines?: number }): Promise<string> {
+    const session = this.sessions.get(id);
+    if (!session) {
+      return "";
+    }
+    const captured =
+      session.summary.status === "running"
+        ? await this.tmux.capturePane(id, { escapes: false, lines: opts?.lines ?? 0 })
+        : "";
+    return renderText(captured, session.buffer, opts);
   }
 
   /** Synchronous hot-ring snapshot (kept for callers that can't await). */
@@ -666,6 +688,15 @@ export class LocalSessionManager implements ISessionManager {
   /** No durable store here; the hot in-memory ring is the only scrollback. */
   async scrollback(id: string): Promise<string> {
     return this.buffer(id);
+  }
+
+  /** No tmux here — always the ANSI-stripped hot ring (bounded by `lines`). */
+  async captureText(id: string, opts?: { lines?: number }): Promise<string> {
+    const session = this.sessions.get(id);
+    if (!session) {
+      return "";
+    }
+    return renderText("", session.buffer, opts);
   }
 
   buffer(id: string): string {
