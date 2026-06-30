@@ -3,7 +3,7 @@ import { Terminal, type ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { useApi } from "../../context/orquester-context";
-import { useAppStore } from "../../store/app";
+import { useAppStore, useTerminalFontSize } from "../../store/app";
 import { uploadFilesToSession, type UploadStatus } from "../../lib/session-upload";
 import type { SessionSummary } from "../../types";
 import type { ViewMode } from "../../lib/view-mode";
@@ -16,6 +16,11 @@ const FONT_STACK =
 // (and caches the off-by-one size) before the restore, so the two size changes
 // can't coalesce into a single no-op — short enough to stay barely perceptible.
 const REPAINT_NUDGE_MS = 50;
+
+// Pixels a touch must travel before we claim it as a scroll gesture. Below this,
+// touches pass through to xterm so tap-to-focus, mouse-report clicks, and
+// long-press selection still work.
+const SCROLL_SLOP_PX = 6;
 
 // Standard 16-colour ANSI palette tuned for a dark, neutral background so
 // CLIs/TUIs render with the colours they expect (not washed-out grays).
@@ -99,6 +104,13 @@ export const TerminalView: React.FC<{
   const api = useApi();
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
+  const fontSize = useTerminalFontSize();
+  // Initial size is read through a ref so the terminal-creation effect (keyed on
+  // [api, session.id]) does NOT re-run when the size changes — that would tear
+  // down the session stream. Live changes are handled by a separate effect below.
+  const fontSizeRef = useRef(fontSize);
+  fontSizeRef.current = fontSize;
+  const fitRef = useRef<FitAddon | null>(null);
   // Drag-over highlight + a short-lived inline status line (uploading / errors).
   const [dragging, setDragging] = useState(false);
   const [status, setStatus] = useState<UploadStatus | null>(null);
@@ -121,7 +133,7 @@ export const TerminalView: React.FC<{
       cursorBlink: true,
       cursorStyle: "block",
       fontFamily: FONT_STACK,
-      fontSize: 13,
+      fontSize: fontSizeRef.current,
       fontWeight: 400,
       fontWeightBold: 600,
       lineHeight: 1.2,
@@ -144,6 +156,7 @@ export const TerminalView: React.FC<{
     termRef.current = term;
     const fit = new FitAddon();
     term.loadAddon(fit);
+    fitRef.current = fit;
     term.open(container);
 
     // Normalize the "force a local selection over an app's mouse reporting"
@@ -249,6 +262,66 @@ export const TerminalView: React.FC<{
     };
     container.addEventListener("mousedown", onRightMouseDown, true);
     container.addEventListener("contextmenu", onContextMenu, true);
+
+    // --- Touch drag-to-scroll (mobile) -------------------------------------
+    // The scrollable .xterm-viewport sits UNDER .xterm-screen, and xterm's
+    // touch→mouse shim turns a drag into a selection/mouse-report event — so a
+    // drag never scrolls natively. Translate a one-finger vertical drag into
+    // term.scrollLines(). Direction is content-follows-finger (finger down →
+    // older history). Touch events only fire on touch input, so desktop
+    // mouse/trackpad (xterm's own wheel handler) is unaffected.
+    let touchY: number | null = null; // last clientY of the active 1-finger drag
+    let touchAccum = 0; // unconsumed vertical px delta
+    let touchRowHeight = 0; // px per row, measured at touchstart
+    let touchDragging = false; // crossed the slop threshold → we own the gesture
+    const onTouchStart = (event: TouchEvent) => {
+      // Ignore multi-touch (pinch) and full-screen TUIs (alt-screen has no
+      // scrollback — leave those touches to xterm).
+      if (event.touches.length !== 1 || term.buffer.active.type === "alternate") {
+        touchY = null;
+        return;
+      }
+      const screen = container.querySelector<HTMLElement>(".xterm-screen");
+      touchRowHeight =
+        screen && term.rows > 0
+          ? screen.clientHeight / term.rows
+          : (term.options.fontSize ?? 13) * 1.2;
+      touchY = event.touches[0].clientY;
+      touchAccum = 0;
+      touchDragging = false;
+    };
+    const onTouchMove = (event: TouchEvent) => {
+      if (touchY === null || event.touches.length !== 1) {
+        return;
+      }
+      const y = event.touches[0].clientY;
+      touchAccum += touchY - y; // finger up → positive → scroll toward newer
+      touchY = y;
+      if (!touchDragging && Math.abs(touchAccum) < SCROLL_SLOP_PX) {
+        return; // small move: let xterm have tap / long-press
+      }
+      touchDragging = true;
+      event.preventDefault(); // stop native scroll + xterm's touch→mouse select
+      event.stopPropagation(); // stop the document-level shim (bubble phase)
+      if (touchRowHeight > 0 && Math.abs(touchAccum) >= touchRowHeight) {
+        const lines = Math.trunc(touchAccum / touchRowHeight);
+        term.scrollLines(lines);
+        touchAccum -= lines * touchRowHeight;
+      }
+    };
+    const onTouchEnd = (event: TouchEvent) => {
+      if (touchDragging) {
+        event.preventDefault(); // swallow the synthetic tap/click after a drag
+        event.stopPropagation();
+      }
+      touchY = null;
+      touchDragging = false;
+    };
+    // passive:false so preventDefault() works inside the move handler.
+    container.addEventListener("touchstart", onTouchStart, { passive: false });
+    container.addEventListener("touchmove", onTouchMove, { passive: false });
+    container.addEventListener("touchend", onTouchEnd);
+    container.addEventListener("touchcancel", onTouchEnd);
 
     // --- File drop & paste → upload + path injection -----------------------
     // dragenter/dragover must preventDefault so the browser allows a drop here;
@@ -422,6 +495,10 @@ export const TerminalView: React.FC<{
     return () => {
       container.removeEventListener("mousedown", onRightMouseDown, true);
       container.removeEventListener("contextmenu", onContextMenu, true);
+      container.removeEventListener("touchstart", onTouchStart);
+      container.removeEventListener("touchmove", onTouchMove);
+      container.removeEventListener("touchend", onTouchEnd);
+      container.removeEventListener("touchcancel", onTouchEnd);
       container.removeEventListener("dragenter", onDragEnter);
       container.removeEventListener("dragover", onDragOver);
       container.removeEventListener("dragleave", onDragLeave);
@@ -438,6 +515,29 @@ export const TerminalView: React.FC<{
       termRef.current = null;
     };
   }, [api, session.id]);
+
+  // Apply a live font-size change (from the mobile A−/A+ buttons) without
+  // recreating the terminal: mutate the option, refit (recomputes cols/rows),
+  // and push the new size to the daemon PTY — the same path applyFit() uses.
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) {
+      return;
+    }
+    term.options.fontSize = fontSize;
+    // Skip the fit+resize while hidden (same trap as applyFit); setting the
+    // option is enough — the reveal-time ResizeObserver fits to the new metrics.
+    const container = containerRef.current;
+    if (!container || !hasLayoutBox(container)) {
+      return;
+    }
+    try {
+      fitRef.current?.fit();
+    } catch {
+      /* container not measurable yet */
+    }
+    void api.resizeSession(session.id, term.cols, term.rows);
+  }, [fontSize, api, session.id]);
 
   // Auto-clear a transient status line so it doesn't linger.
   useEffect(() => {
