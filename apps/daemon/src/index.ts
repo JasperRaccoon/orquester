@@ -1825,8 +1825,18 @@ function createServer(
 
   // Serve the static web client build for everything outside the API, with an
   // SPA fallback to index.html. Reserved prefixes stay JSON 404s.
+  //
+  // wildcard:true registers a single GET /* that resolves files from disk
+  // per-request, so a rebuilt dist (new content-hash filenames) is served
+  // immediately — no daemon restart needed. wildcard:false enumerates files
+  // once at registration, so after a deploy that rebuilds the SPA the running
+  // daemon 404s every new asset hash; the SPA fallback then returns index.html
+  // for *.js requests → the browser's "Expected a module but got text/html".
+  // On a miss @fastify/static calls reply.callNotFound(), routing to the SPA
+  // fallback below; more-specific /api,/health,/events,/ws routes are never
+  // shadowed by /*.
   if (options.serveWeb) {
-    void app.register(fastifyStatic, { root: options.serveWeb, wildcard: false });
+    void app.register(fastifyStatic, { root: options.serveWeb, wildcard: true });
     app.setNotFoundHandler((request, reply) => {
       const url = request.url;
       const isApi =
