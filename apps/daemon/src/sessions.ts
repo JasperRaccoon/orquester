@@ -99,6 +99,8 @@ export function createSessionManager(
  */
 export class SessionManager implements ISessionManager {
   private sessions = new Map<string, Session>();
+  /** Coalesces resize-driven index writes (≤ one per second) so the latest size persists. */
+  private persistTimer: ReturnType<typeof setTimeout> | null = null;
   /** Emits "created" | "exited" | "updated" (SessionSummary) and "closed" ({ id }). */
   readonly lifecycle = new EventEmitter();
 
@@ -316,9 +318,25 @@ export class SessionManager implements ISessionManager {
       // Resizing the attach PTY drives tmux (window-size latest); tmux then
       // resizes the pane the command sees.
       session.pty.resize(cols, rows);
-      session.summary.cols = cols;
-      session.summary.rows = rows;
+      if (session.summary.cols !== cols || session.summary.rows !== rows) {
+        session.summary.cols = cols;
+        session.summary.rows = rows;
+        // Persist the new size (coalesced) so a daemon restart reattaches at it
+        // rather than the 80×24 default — see reattach().
+        this.schedulePersist();
+      }
     }
+  }
+
+  /** Persist the index ≤ once/second; coalesces a burst of resizes into one write. */
+  private schedulePersist(): void {
+    if (this.persistTimer) {
+      return;
+    }
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      void this.persistIndex();
+    }, 1000);
   }
 
   /** Rename a session's tab; empty title reverts to the registry default name. */
@@ -441,6 +459,9 @@ export class SessionManager implements ISessionManager {
   async reattach(): Promise<void> {
     const live = new Set(await this.tmux.listSessions());
     const { loaded: indexLoaded, config: index } = await this.readIndex();
+    // Fallback sizes for records that predate persisted cols/rows (read before
+    // we attach any client, so the windows still hold their pre-restart size).
+    const liveSizes = await this.tmux.windowSizes();
     await this.tmux.setWindowSizeLatest();
     // The server's global env is captured from whoever first started it; a
     // pre-sessionEnvBase() daemon seeded it with ORQUESTER_* secrets, and a new
@@ -461,8 +482,14 @@ export class SessionManager implements ISessionManager {
         title: record.title,
         projectPath: record.projectPath,
         cwd: record.cwd,
-        cols: 80,
-        rows: 24,
+        // Restore the persisted size so the reattached PTY (and tmux window via
+        // window-size latest) match what the agent last drew at. Records from
+        // before cols/rows were persisted fall back to the live tmux window size
+        // (the window survived the restart), and only to 80×24 if even that is
+        // gone. Any imprecision self-heals the first time the tab is viewed (the
+        // client re-sends a resize, which schedulePersist() then saves).
+        cols: record.cols ?? liveSizes.get(record.id)?.cols ?? 80,
+        rows: record.rows ?? liveSizes.get(record.id)?.rows ?? 24,
         status: "running",
         order: record.order,
         createdAt: record.createdAt
@@ -488,8 +515,8 @@ export class SessionManager implements ISessionManager {
 
   /** Map a live session to its persisted record shape. */
   private recordOf(session: Session): SessionRecord {
-    const { id, title, order, projectPath, refId, kind, cwd, createdAt } = session.summary;
-    return { id, title, order, projectPath, refId, kind, cwd, createdAt };
+    const { id, title, order, projectPath, refId, kind, cwd, createdAt, cols, rows } = session.summary;
+    return { id, title, order, projectPath, refId, kind, cwd, createdAt, cols, rows };
   }
 
   /**

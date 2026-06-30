@@ -405,7 +405,13 @@ export const sessionRecordSchema = z.object({
   refId: z.string(),
   kind: z.enum(["shell", "agent", "ide", "file-explorer", "browser"]),
   cwd: z.string(),
-  createdAt: z.string()
+  createdAt: z.string(),
+  // Last known PTY size, persisted so a daemon restart reattaches each session at
+  // its real size instead of the 80×24 default — otherwise a running full-screen
+  // TUI (agent) repaints into a small corner until the client re-sends a resize.
+  // Optional: records written before this field existed simply fall back.
+  cols: z.number().int().positive().optional(),
+  rows: z.number().int().positive().optional()
 });
 
 export const sessionsConfigSchema = z.object({

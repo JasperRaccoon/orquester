@@ -237,6 +237,36 @@ export class Tmux {
       .map((name) => name.slice(TMUX_SESSION_PREFIX.length));
   }
 
+  /**
+   * Current window size (cols×rows) of every live orquester session, by id. Used
+   * by reattach() to restore a session's size after a restart when its on-disk
+   * record predates persisted cols/rows: the tmux window kept its real size while
+   * the daemon was gone, so it's a faithful fallback. (window_height is the pane
+   * area — already minus the status line — so reattaching at it leaves the pane at
+   * most a row shorter; imperceptible, and the next client resize corrects it.)
+   */
+  async windowSizes(): Promise<Map<string, { cols: number; rows: number }>> {
+    const sizes = new Map<string, { cols: number; rows: number }>();
+    const result = await this.run([
+      "list-windows",
+      "-a",
+      "-F",
+      "#{session_name} #{window_width} #{window_height}"
+    ]);
+    if (result.code !== 0) {
+      return sizes;
+    }
+    for (const line of result.stdout.split("\n")) {
+      const [name, w, h] = line.trim().split(" ");
+      const cols = Number(w);
+      const rows = Number(h);
+      if (name?.startsWith(TMUX_SESSION_PREFIX) && cols > 0 && rows > 0) {
+        sizes.set(name.slice(TMUX_SESSION_PREFIX.length), { cols, rows });
+      }
+    }
+    return sizes;
+  }
+
   /** Make every session follow the most-recent attached client's size. */
   async setWindowSizeLatest(): Promise<void> {
     await this.run(["set-option", "-g", "window-size", "latest"]);
