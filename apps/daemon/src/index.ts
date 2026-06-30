@@ -1741,6 +1741,10 @@ function createServer(
       }
 
       const subs = new Map<string, () => void>();
+      // Ids whose sub-time scrollback was captured before the client reported its
+      // real terminal size; re-sent once on the first resize after the sub so an
+      // alt-screen grid that was captured at the wrong width arrives un-wrapped.
+      const resyncPending = new Set<string>();
       const send = (msg: unknown) => {
         try {
           socket.send(JSON.stringify(msg));
@@ -1804,13 +1808,28 @@ function createServer(
               () => send({ t: "end", id })
             )
           );
+          resyncPending.add(id);
         } else if (msg.t === "unsub") {
           subs.get(id)?.();
           subs.delete(id);
+          resyncPending.delete(id);
         } else if (msg.t === "input" && typeof msg.data === "string") {
           sessions.input(id, msg.data);
         } else if (msg.t === "resize" && typeof msg.cols === "number" && typeof msg.rows === "number") {
           sessions.resize(id, msg.cols, msg.rows);
+          // The first resize after a sub is the client's REAL terminal size. The
+          // sub-time scrollback was captured before the client fit (often at the
+          // 80-col default), so an alt-screen TUI grid landed wrapped/garbled. Now
+          // the pane matches the client: re-capture at the correct width and re-send,
+          // once. The brief wait lets tmux apply the resize (SIGWINCH → window
+          // resize) before we snapshot. Reliable regardless of whether the agent
+          // emits more output — an idle agent would otherwise stay garbled.
+          if (resyncPending.delete(id)) {
+            await new Promise((resolve) => setTimeout(resolve, 80));
+            if (subs.has(id)) {
+              send({ t: "out", id, data: await sessions.scrollback(id) });
+            }
+          }
         }
       });
 
@@ -1819,6 +1838,7 @@ function createServer(
           unsub();
         }
         subs.clear();
+        resyncPending.clear();
       });
     });
   });
