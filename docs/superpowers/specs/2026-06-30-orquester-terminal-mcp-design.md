@@ -123,10 +123,11 @@ apps/daemon/src/
 ```
 
 `TerminalControl`'s stateful dependencies are injected at construction — `ISessionManager`,
-`RegistryService`, `workspacesDir: string`, and the existing `listWorkspaces`/`listProjects`
-helpers (passed in from `createServer`, which already has them in module scope — see §7). Its only
-*static* imports are leaf/pure: `isValidName` (moved to `@orquester/config`), the `text.ts` leaf
-helpers, `keys.ts`, and **type-only** imports of `ISessionManager`/`RegistryService`/`SessionSummary`.
+`RegistryService`, `workspacesDir: string`, `fsRoot: string` (the `cwd` sandbox root), and the
+existing `listWorkspaces`/`listProjects` helpers (passed in from `createServer`, which already has them
+in module scope — see §7). Its only *static* imports are leaf/pure: `isValidName` +
+`assertInsideFsRoot`/`FsSandboxError` (moved to `@orquester/config`), the `text.ts` leaf helpers,
+`keys.ts`, and **type-only** imports of `ISessionManager`/`RegistryService`/`SessionSummary`.
 Crucially it has **no runtime import from `sessions.ts`** — `createTab` lets `sessions.create()`
 throw `SessionError` rather than importing it (§3) — so importing it for a unit test does not
 transitively load `node-pty`. It imports nothing from the 2000-line `index.ts`, and there is no
@@ -212,6 +213,7 @@ error (never a guess):
 // terminal-control.ts
 class TabNotFound extends Error {}        // includes the available titles
 class AmbiguousTab extends Error {}       // includes the matching {id,title} list
+class ToolError extends Error {}          // generic tool-level reject (bad launcher kind, tab limit) — safe message
 
 resolveTab(sel: { workspace?: string; project?: string; tab?: string; tabId?: string }): SessionSummary {
   if (sel.tabId) {
@@ -225,12 +227,17 @@ resolveTab(sel: { workspace?: string; project?: string; tab?: string; tabId?: st
     throw new TabNotFound("Invalid workspace/project name.");
   const projectPath = join(workspacesDir, sel.workspace, sel.project);
   const tabs = sessions.list(projectPath);
-  const matches = tabs.filter((t) => t.title.toLowerCase() === sel.tab!.toLowerCase());
+  let matches = tabs.filter((t) => t.title.toLowerCase() === sel.tab!.toLowerCase());
   if (matches.length === 0)
     throw new TabNotFound(`No tab "${sel.tab}". Open tabs: ${tabs.map((t) => t.title).join(", ") || "(none)"}.`);
+  // Exited tabs linger in the map until close(), so a few finished "bash" tabs would otherwise make
+  // "bash" permanently ambiguous. Prefer running; stay ambiguous only among RUNNING matches.
+  const running = matches.filter((m) => m.status === "running");
+  if (running.length === 1) return running[0];
+  matches = running.length ? running : matches;
   if (matches.length > 1)
     throw new AmbiguousTab(`"${sel.tab}" is ambiguous (${matches.length}). Retry with tabId: ` +
-      matches.map((m) => `${m.title}=${m.id}`).join(", "));
+      matches.map((m) => `${m.title}=${m.id} (${m.status})`).join(", "));
   return matches[0];
 }
 ```
@@ -262,23 +269,36 @@ sendKeys(sel, keys: string[]) {                              // ["Enter"], ["C-c
   sessions.input(t.id, keys.map(encodeKey).join(""));        // encodeKey from keys.ts
 }
 
-createTab(sel: { workspace, project }, opts: { refId, title?, cwd? }) {
+// createTab is async: assertInsideFsRoot realpaths (it's async) and MUST be awaited.
+async createTab(sel: { workspace, project }, opts: { refId, title?, cwd? }) {
   if (!isValidName(sel.workspace) || !isValidName(sel.project))
     throw new TabNotFound("Invalid workspace/project name.");
   const projectPath = join(workspacesDir, sel.workspace, sel.project);
-  if (!statSafe(projectPath)?.isDirectory())            // a FILE passes existsSync, then tmux
-    throw new TabNotFound(`No project "${sel.project}" in "${sel.workspace}".`);  // `new-session -c` fails ASYNC
-  const cwd = opts.cwd ?? projectPath;
-  assertInsideFsRoot(cwd, workspacesDir);               // SECURITY: never let an injected agent cwd to ~/.ssh, /etc, …
-  // No `registry.get(refId)!.kind`: it TypeErrors on a bad id, AND create() ignores req.kind (it
-  // derives kind from the entry, sessions.ts:130) and already throws a clean SessionError for an
-  // unknown/disabled refId (sessions.ts:114). Pass a placeholder kind to satisfy the (ignored)
-  // type and let create() validate — so terminal-control.ts needs NO runtime SessionError import.
-  return sessions.create({ kind: "shell", refId: opts.refId, projectPath, cwd, title: opts.title });
+  if (!statSafe(projectPath)?.isDirectory())            // a FILE passes existsSync, then tmux fails ASYNC
+    throw new TabNotFound(`No project "${sel.project}" in "${sel.workspace}".`);
+  // SECURITY — signature is assertInsideFsRoot(ROOT, target), async, MUST be awaited, root = fsRoot.
+  // (Getting this wrong was a real regression: un-awaited + swapped args bypassed the sandbox, inverted
+  // the happy path, AND crash-looped the daemon via unhandled rejection.)
+  const cwd = await assertInsideFsRoot(fsRoot, opts.cwd ?? projectPath);  // throws FsSandboxError if outside
+  // Restrict to launchable SESSION kinds. create() checks resolvedBin+enabled but NOT kind, so a bare
+  // create() would launch an `ide`/`browser`/`file-explorer` entry (vscode, xdg-open…) as a "session" —
+  // and `claude`/`codex` registry args carry `--dangerously-skip-permissions`/`--yolo`. Only allow what
+  // list_launchers advertises:
+  const entry = registry.get(opts.refId);
+  if (!entry?.enabled || (entry.kind !== "shell" && entry.kind !== "agent"))
+    throw new ToolError(`"${opts.refId}" is not a launchable shell or agent.`);
+  // Count cap — an injected/buggy agent must not fork-bomb tmux (sessions persist across restart and
+  // reattach() re-spawns them all on boot). Refuse beyond a ceiling.
+  if (sessions.list(projectPath).filter((s) => s.status === "running").length >= MAX_TABS_PER_PROJECT)
+    throw new ToolError(`Tab limit reached for "${sel.project}" (${MAX_TABS_PER_PROJECT}).`);
+  return sessions.create({ kind: entry.kind, refId: opts.refId, projectPath, cwd, title: opts.title });
 }
-// statSafe(p) = a tiny try/catch around node:fs statSync returning undefined on ENOENT.
-// assertInsideFsRoot = the file-browser's fsRoot containment guard, moved to @orquester/config
-// (alongside isValidName) so terminal-control.ts reuses it without importing index.ts.
+// statSafe(p) = a tiny try/catch around node:fs statSync → undefined on ENOENT.
+// assertInsideFsRoot(root, target): the file browser's ASYNC realpath containment guard (index.ts:2069),
+// moved to @orquester/config (with isValidName) — terminal-control reuses it (+ its FsSandboxError)
+// without importing index.ts. `fsRoot` is injected (resolved.fsRoot — may differ from workspacesDir,
+// index.ts:178). ToolError (not SessionError) keeps terminal-control free of a runtime sessions import;
+// create() still throws SessionError for a vanished bin (it propagates). MAX_TABS_PER_PROJECT — a const.
 
 closeTab(sel) {                          // resolveTab errors on ambiguity → never kill the wrong tab
   const t = resolveTab(sel);
@@ -316,7 +336,7 @@ async waitForIdle(sel, opts?: { idleMs?: number; timeoutMs?: number; lines?: num
     arm();                                   // start the idle countdown immediately
   });
 
-  if (sig?.aborted) return { text: "", settled: false, status: "exited" }; // don't touch a dead transport
+  if (sig?.aborted) return { text: "", settled: false, aborted: true, status: sessions.get(t.id)?.status ?? "exited" }; // don't fabricate "exited" (matters under a stateful/SSE mount); don't touch a dead transport
   const after = sessions.get(t.id);
   const text = await sessions.captureText(t.id, { lines: opts?.lines ?? 0 });
   return { text, settled, status: after?.status ?? "exited", exitCode: after?.exitCode };
@@ -394,9 +414,9 @@ one `TerminalControl` function and return its result as JSON text content (typed
 | `read_terminal` | `sel, lines?` | `{text, status, exitCode?, cols, rows}` |
 | `write_input` | `sel, data, submit?` | `{ok:true}` |
 | `send_keys` | `sel, keys[]` | `{ok:true}` |
-| `send_and_wait` | `sel, data, submit?, idleMs?, timeoutMs?, lines?` | `{text, settled, status, exitCode?}` |
-| `wait_for_idle` | `sel, idleMs?, timeoutMs?, lines?` | `{text, settled, status, exitCode?}` (pure wait — no write; the re-invoke path) |
-| `create_tab` | `workspace, project, refId, title?, cwd?` | the new tab summary |
+| `send_and_wait` | `sel, data, submit?, idleMs?, timeoutMs?, lines?` | `{text, settled, status, exitCode?, aborted?}` |
+| `wait_for_idle` | `sel, idleMs?, timeoutMs?, lines?` | `{text, settled, status, exitCode?, aborted?}` (pure wait — no write; the re-invoke path) |
+| `create_tab` | `workspace, project, refId, title?, cwd?` | new tab summary — `refId` must be a **shell/agent** (per `list_launchers`); `cwd` sandboxed to `fsRoot`; per-project count cap |
 | `close_tab` | `sel` | `{closed:true}` |
 
 `sel` = `{ workspace?, project?, tab?, tabId? }` (provide `tabId`, or all of `workspace+project+tab`).
@@ -404,15 +424,19 @@ one `TerminalControl` function and return its result as JSON text content (typed
 `registry.ts:138`); `list_workspaces`/`list_projects` **project** the injected helpers' richer
 records (`listWorkspaces` → `{name,path,projectCount,gitAccountId,createdAt}`, `listProjects` →
 `{name,workspace,path}`) down to the documented shapes (workspace `gitAccountId`/`createdAt` are
-intentionally omitted). Errors map to MCP `isError` results: `TabNotFound`/`AmbiguousTab` (with the
-candidate ids), `SessionError` (matched via `instanceof`, imported into `server.ts` — it sets no
-`.name`; bad/disabled `refId` on `create_tab`), `encodeKey`'s unknown-key throw, and a generic
-catch-all — each with an actionable message.
+intentionally omitted). Errors map to MCP `isError` results (matched via `instanceof` in `server.ts`):
+`TabNotFound`/`AmbiguousTab`/`ToolError` (terminal-control's own — bad launcher kind, tab-limit,
+candidate ids; safe messages), `SessionError` (from `create()` — vanished/disabled bin),
+`FsSandboxError` (out-of-`fsRoot` `cwd`) → a **generic** "path not allowed" message, **not** the raw
+path, `encodeKey`'s unknown-key throw, and a **catch-all that returns a fixed string and logs detail
+server-side only** (never echo `error.message`/stack — it can leak absolute paths/usernames the daemon
+otherwise masks).
 
 ### 7. Fastify mount + auth (`index.ts`)
 
-- **Mount** in `createServer`: build `TerminalControl` from `services.sessions`,
-  `services.registry`, `resolved.workspacesDir`, and the in-scope `listWorkspaces`/`listProjects`;
+- **Mount** in `createServer`: build `TerminalControl` from `services.sessions`, `services.registry`,
+  `resolved.workspacesDir` (for `(workspace,project)→path`) **and `resolved.fsRoot`** (the `cwd`
+  sandbox root — they can differ, `index.ts:178`), and the in-scope `listWorkspaces`/`listProjects`;
   hand it to `registerMcp(app, control)`. It registers `app.post("/mcp", { bodyLimit }, …)` (see
   body-limit note). The handler **hijacks the reply** and passes `request.raw`/`reply.raw` **and the
   already-parsed `request.body`** (Fastify has consumed the raw stream, so the parsed body must be
@@ -439,9 +463,15 @@ catch-all — each with an actionable message.
   413 at the parser. Give `/mcp` a route-level override (e.g. `{ bodyLimit: 8 * 1024 * 1024 }`,
   following the upload route at `index.ts:1557`). *(Aside: the "256 KB" in the upload comment at
   `index.ts:1553` is itself inaccurate — the real default is ~1 MiB; not fixed by this work.)*
-- **Auth:** add `/mcp` to the gated set in the `onRequest` hook (`index.ts:378`):
-  `url.startsWith("/api") || url.startsWith("/events") || url.startsWith("/mcp")`. On the HTTP
-  transport this requires the bearer exactly like `/api`; on the unix socket it's open (local).
+- **Auth + socket asymmetry (important).** Add `/mcp` to the `onRequest` gate (`index.ts:378`):
+  `url.startsWith("/api") || url.startsWith("/events") || url.startsWith("/mcp")`. **But the gate only
+  fires on the HTTP transport** (`authRequired:false` on the socket, `index.ts:253`), so `/mcp` over
+  the unix socket would be **unauthenticated full terminal drive** — any local process (incl. a command
+  running *inside* a managed session, same uid) could enumerate and drive every workspace's tabs with
+  no credential. So **register `/mcp` only on the remote/HTTP transport** (skip it when `mode:"local"`
+  → 404 on the socket). Unlike the REST plane this is full drive, and the desktop (HTTP off) can't
+  reach `/mcp` anyway, so nothing is lost. (The inverse of the `PUT /api/config/daemon` socket-*only*
+  asymmetry: `/mcp` is HTTP-*only*.)
 - **Transport mode (validate before building).** v1 intends **stateless** (`sessionIdGenerator:
   undefined`, fresh server+transport per request) with **`enableJsonResponse: true`** so each tool
   returns a single JSON body (no held-open SSE socket — simpler, and it shrinks the cancellation-leak
@@ -562,19 +592,28 @@ rather than inflating every request.
   steer a credentialed actor with full host privileges. Treat the driving agent as an
   untrusted-input-influenced operator; don't point `/mcp` at a daemon whose sessions can reach secrets
   you wouldn't hand an injected LLM.
-- **Sandbox `create_tab`'s `cwd` to `fsRoot`** (reuse the file-browser guard `assertInsideFsRoot`,
-  `index.ts:2069`) — the cheap, high-value mitigation the threat above demands. Session `cwd` is
-  otherwise **unsandboxed**: `sessions.create` uses it verbatim (`sessions.ts:122` → `tmux
-  new-session -c`) and `POST /api/sessions` validates nothing (`index.ts:1504`), so without this an
-  injected agent could `create_tab(cwd:"~/.ssh")` and exfiltrate — walking straight past the
-  `/api/fs/*` sandbox. The human UI only ever uses an in-workspace `cwd`, so restricting it costs
-  nothing and makes `/mcp` *stricter* than `POST /api/sessions` (tightening that REST route is a
-  separate follow-up).
+- **`create_tab` is constrained three ways** (§3): (1) `cwd` is sandboxed to `fsRoot` via the
+  awaited, correctly-ordered `assertInsideFsRoot(fsRoot, cwd)` — session `cwd` is otherwise
+  unsandboxed (`sessions.create` uses it verbatim, `sessions.ts:122` → `tmux new-session -c`;
+  `POST /api/sessions` validates nothing, `index.ts:1504`), so an injected agent could otherwise
+  `create_tab(cwd:"~/.ssh")` past the `/api/fs/*` sandbox; (2) `refId` is restricted to **shell/agent**
+  kinds (else it could launch an IDE/browser, or spawn `claude`/`codex` with their baked-in
+  `--dangerously-skip-permissions`/`--yolo` args); (3) a **per-project count cap** stops a fork-bomb of
+  restart-persistent tmux sessions. This makes `/mcp` *stricter* than `POST /api/sessions` (tightening
+  that REST route is a follow-up).
+- **Read-side disclosure (the other direction).** `read_terminal`/`send_and_wait` return raw rendered
+  screen text — which can contain secrets a command or the inner agent printed (`.env`, tokens, even a
+  bound-workspace PAT if echoed) — and that text flows to the **driving LLM, which may be a hosted
+  third party**. Error messages flow there too (hence the generic `FsSandboxError`/catch-all mapping,
+  §6). Document that `/mcp` exposes session output to the driving model; don't drive sessions printing
+  secrets you wouldn't share with it.
 - **Transparency.** Writes go through the *shared* attach PTY, so a human watching the tab in the UI
   sees the agent's keystrokes — intentional (no hidden side-channel).
-- **Guardrails are a fast-follow, not "never."** Full drive is the chosen v1 posture, but given the
-  injection surface, a read-only-by-default mode (write/`create_tab` behind an explicit opt-in) and/or
-  a destructive-command confirmation are the first things to add after v1 — see Future.
+- **v1 *does* ship guardrails** (the `cwd` sandbox + kind allowlist + count cap above, plus HTTP-only
+  `/mcp`); the *heavier* ones — read-only-by-default mode (write/`create_tab` behind an explicit
+  opt-in), per-workspace scoping, destructive-command confirmation — are the first fast-follow (see
+  Future). A standalone policy-enforcing proxy was weighed as the alternative home for default-deny and
+  deferred (Decisions).
 
 ## Edge cases
 
@@ -585,13 +624,16 @@ rather than inflating every request.
   `status:"exited"`; `write_input`/`send_keys` are no-ops at the PTY (`input()` already guards a null
   pty) — surfaced with the tab's `status` so the agent can tell. (A `projectPath:""` session — not
   bound to a project — is unaddressable via `(workspace, project, tab)`; reach it by `tabId`.)
-- **`create_tab` is provisional:** it returns immediately with `status:"running"` (tmux
+- **Lingering exited tabs vs name resolution:** exited sessions stay in the map until `close()`, so
+  several finished `bash` tabs would otherwise make `"bash"` permanently ambiguous. `resolveTab`
+  prefers a **running** match (§2) — a unique running tab resolves; ambiguity is reported only among
+  running tabs, each annotated with its `status`.
+- **`create_tab` is provisional + constrained:** it returns immediately with `status:"running"` (tmux
   `new-session` is async, `sessions.ts:174`); the prompt may not be drawn yet, and a launch failure
-  flips the tab to `exited` *after* the tool already returned (the `.catch` at `sessions.ts:192`).
-  The agent should follow with `read_terminal`/`send_and_wait` to confirm. `createTab` pre-checks the
-  project path is a **directory** (`statSafe(...).isDirectory()` — a file would pass `existsSync` then
-  fail `new-session -c` async) and lets `create()` reject an unknown/disabled `refId` with a clean
-  `SessionError` before spawning — so common failures surface as tool errors, not a ghost tab.
+  flips the tab to `exited` *after* the tool returned (the `.catch` at `sessions.ts:192`) — so follow
+  with `read_terminal`/`send_and_wait` to confirm. Before spawning, `createTab` rejects with a clean
+  tool error (no ghost tab): a non-directory project path, an out-of-`fsRoot` `cwd` (`FsSandboxError`),
+  a `refId` that isn't a shell/agent (`ToolError`), and creation past the per-project count cap.
 - **`send_and_wait` on a slow/silent command:** no output for `idleMs` → idle timer fires →
   `settled:true`. This correctly means "the pane went quiet," but also fires for a command that
   hasn't started emitting yet (`sleep 5; echo x`) — see §4's "what `settled:true` means": the agent
@@ -642,6 +684,10 @@ rather than inflating every request.
   - `send_and_wait("what is 2+2", submit:true)` returns the agent's settled reply, `settled:true`;
   - `send_keys(["C-c"])` interrupts a running command; `write_input` + `submit` runs one;
   - `create_tab(refId:"bash")` appears as a new tab in the UI; `close_tab` removes it;
+  - `create_tab(refId:"vscode"/"chrome")` is **rejected** (not a shell/agent); `create_tab(cwd:"/etc")`
+    is **rejected** (out of `fsRoot`); creating past the per-project cap is rejected;
+  - over the unix socket `/mcp` is **404** (HTTP-only); a disconnect mid-`send_and_wait` leaves no
+    orphaned listener/timer (no `MaxListenersExceededWarning` in logs);
   - **interactive prompts (§8):** drive a real `claude`/`codex` tab into a permission prompt and a
     multiselect; answer via (a) a number/letter shortcut and (b) verified arrow-nav + `Space` +
     `Enter`, and a free-text prompt via `write_input` — each selection takes and the agent proceeds;
@@ -654,38 +700,44 @@ rather than inflating every request.
 
 ## Files touched
 
-- `apps/daemon/src/mcp/terminal-control.ts` — **new**: `resolveTab`, `readTerminal`, `writeInput`,
-  `sendKeys`, `waitForIdle`/`sendAndWait` (accept an `AbortSignal`; clean up on cancel — Finding 2),
-  `createTab` (sandboxes `cwd` to `fsRoot`), `closeTab`, `listTabs`, `listLaunchers` (filters
-  `enabled`) + typed errors (`TabNotFound`/`AmbiguousTab`). **No runtime import from `sessions.ts`**
-  (type-only `ISessionManager`; `createTab` lets `create()` throw `SessionError`) — so it loads
-  without `node-pty` and there is no import cycle.
+- `apps/daemon/src/mcp/terminal-control.ts` — **new**: `resolveTab` (prefers *running* tabs on a name
+  tie), `readTerminal`, `writeInput`, `sendKeys`, `waitForIdle`/`sendAndWait` (accept an `AbortSignal`;
+  clean up + skip `captureText` on cancel), **`async` `createTab`** (awaited `assertInsideFsRoot(fsRoot,
+  cwd)`; `refId` restricted to shell/agent; per-project count cap `MAX_TABS_PER_PROJECT`), `closeTab`,
+  `listTabs`, `listLaunchers` (filters `enabled`) + typed errors `TabNotFound`/`AmbiguousTab`/`ToolError`.
+  Injected `fsRoot` (not `workspacesDir`) for the sandbox. **No runtime import from `sessions.ts`**
+  (type-only `ISessionManager`; throws its own `ToolError`, not `SessionError`; `create()`'s
+  `SessionError` propagates) — so it loads without `node-pty`, no import cycle.
 - `apps/daemon/src/mcp/keys.ts` — **new**: named-key table + `encodeKey`.
 - `apps/daemon/src/mcp/text.ts` — **new (leaf, imports nothing)**: `stripAnsi` /
   `trimTrailingBlankLines`, used by **both** `terminal-control.ts` and `sessions.ts` — this is what
   removes the would-be `sessions.ts ⇄ terminal-control.ts` cycle.
 - `apps/daemon/src/mcp/server.ts` — **new**: per-request `McpServer` with the 11 tools;
-  `registerMcp(app, control)` Fastify mount (Streamable-HTTP, hijack, stateless + `enableJsonResponse`,
-  **per-request teardown that aborts in-flight waits**, route `bodyLimit`); threads
-  `RequestHandlerExtra.signal` + the `reply.raw` `"close"` controller into `waitForIdle`/`sendAndWait`;
-  error→`isError` mapping (`TabNotFound`/`AmbiguousTab`/`SessionError` via `instanceof` / `encodeKey` +
-  catch-all). Tool descriptions carry a **terse** §8 pointer (not the full section — token cost).
+  `registerMcp(app, control)` mounted **only on the HTTP/remote transport** (never the unauthenticated
+  socket) — Streamable-HTTP, hijack, stateless + `enableJsonResponse`, **per-request teardown that
+  aborts in-flight waits**, route `bodyLimit`; threads `RequestHandlerExtra.signal` + the `reply.raw`
+  `"close"` controller into `waitForIdle`/`sendAndWait`; error→`isError` via `instanceof`
+  (`TabNotFound`/`AmbiguousTab`/`ToolError`/`SessionError`; `FsSandboxError`→generic; **catch-all → fixed
+  string, detail logged server-side only**). Tool descriptions carry a **terse** §8 pointer (token cost).
+  Consider hoisting tool registration / a shared `McpServer` and bumping the driven emitter's
+  `maxListeners`, since the §4 read-loop makes many POSTs + concurrent waits.
 - `apps/daemon/src/sessions.ts` — add `captureText(id, {lines?})` to `ISessionManager` and both
   backends, mirroring `scrollback()`'s `!session` guard + `captured || buffer` fallback
   (closed/exited/empty → ANSI-stripped ring) via the `mcp/text.ts` leaf helpers; `tailLines`-bounds +
   `cap`s the result.
 - `apps/daemon/src/tmux.ts` — `capturePane(id, { escapes?, lines? })` options (back-compatible).
 - `apps/daemon/src/index.ts` — build `TerminalControl` (injecting the in-scope `listWorkspaces`/
-  `listProjects`) + `registerMcp(app, …)` in `createServer`; reserve `/mcp` in **both** the
-  `onRequest` auth gate (`:378`) **and** the SPA `setNotFoundHandler` reserved set (`:1833`, else
-  `GET /mcp` returns the SPA HTML); re-import `isValidName` from `@orquester/config` (moved out of
-  this file). **No `workspaces.ts` extraction** — `listWorkspaces`/`listProjects` depend on
+  `listProjects` + `resolved.fsRoot`) and call `registerMcp(app, …)` **only when `mode:"remote"`** (so
+  `/mcp` is never on the unauthenticated socket); reserve `/mcp` in **both** the `onRequest` auth gate
+  (`:378`) **and** the SPA `setNotFoundHandler` reserved set (`:1833`, else `GET /mcp` returns the SPA
+  HTML); re-import `isValidName`/`assertInsideFsRoot` from `@orquester/config` (moved out of this
+  file). **No `workspaces.ts` extraction** — `listWorkspaces`/`listProjects` depend on
   `readWorkspacesMeta`/`writeWorkspacesMeta`, which ~6 other routes use, so extracting would force a
   `workspaces.ts` ↔ `index.ts` cycle; injecting from the composition root avoids it.
-- `packages/config/src/index.ts` — **move `isValidName` (`index.ts:1868`) and the `fsRoot`
-  containment guard (`assertInsideFsRoot`, `index.ts:2069`) here** (both currently `index.ts`-private)
-  and export them, so `terminal-control.ts` validates names and sandboxes `create_tab`'s `cwd` without
-  importing `index.ts`; update `index.ts`'s call sites accordingly.
+- `packages/config/src/index.ts` — **move `isValidName` (`index.ts:1868`), the async `fsRoot`
+  containment guard `assertInsideFsRoot` (`index.ts:2069`), and its `FsSandboxError` here** (currently
+  `index.ts`-private) and export them, so `terminal-control.ts` validates names and sandboxes
+  `create_tab`'s `cwd` without importing `index.ts`; update `index.ts`'s ~26 call sites accordingly.
 - `apps/daemon/package.json` — add `@modelcontextprotocol/sdk` and `zod`. **Verify the SDK's actual
   zod major before pinning** — if the SDK moved to zod 4 while `@orquester/config` uses zod 3, the two
   copies re-create the `instanceof` footgun this warns about; pin `zod` to match the SDK and ideally
@@ -696,11 +748,19 @@ rather than inflating every request.
 
 - **In-daemon `/mcp`, not a standalone process.** Direct access to the live `ISessionManager`
   (no HTTP hop, no second credential), reuses the existing auth/TLS/Caddy, one thing to deploy.
-- **Full-drive, hardened — not read-only/guardrailed (v1), but `cwd`-sandboxed.** An MCP that lets an
-  LLM drive terminals is inherently a prompt-injectable, confused-deputy surface; that risk is
-  intrinsic to the feature, so v1 accepts it *with* the cheap mitigations (sandbox `create_tab` `cwd`
-  to `fsRoot`; document the threat honestly). Read-only/allowlist/confirmation are the first
-  fast-follow, deliberately not in v1.
+- **Full-drive, hardened — v1 ships real guardrails, not just a posture.** An MCP that lets an LLM
+  drive terminals is inherently a prompt-injectable, confused-deputy surface; the risk is intrinsic, so
+  v1 accepts it *with* concrete mitigations: `create_tab` `cwd` sandboxed to `fsRoot` (awaited,
+  correctly-ordered guard), `refId` restricted to shell/agent, a per-project count cap, `/mcp`
+  HTTP-only, and generic error messages. Read-only-by-default, per-workspace scoping, and command
+  confirmation are the next fast-follow.
+- **`/mcp` is HTTP-only (refused on the unix socket).** The socket transport is unauthenticated; full
+  terminal drive must not be reachable without the bearer (a command inside a session could otherwise
+  drive its siblings). Inverts the socket-only `PUT /api/config/daemon` asymmetry.
+- **Stayed in-daemon despite the proxy argument.** A standalone policy-enforcing proxy (own
+  reduced-capability credential, default-deny) is a cleaner home for heavy policy and the likely shape
+  if guardrails grow; for v1 the in-daemon wins (no second credential, direct `ISessionManager`, reuse
+  of auth/TLS) hold *given* the v1 guardrails above land. Revisit if read-only/scoping is needed.
 - **Name-first addressing, id fallback, ambiguity is fatal.** Matches how a human refers to a tab;
   `list_tabs` makes ids discoverable; `read` tolerates ambiguity by erroring (harmless), `close`
   refuses to guess (killing the wrong agent isn't harmless).
@@ -739,9 +799,10 @@ rather than inflating every request.
 ## Future (out of scope)
 
 - Headless VT rendering for clean reads on non-tmux hosts.
-- **Guardrails (likely the first fast-follow):** read-only-by-default mode, destructive-command
-  confirmation, per-tab allowlist; and sandbox `POST /api/sessions`' `cwd` to `fsRoot` too (v1 only
-  hardens the MCP path).
+- **Guardrails (likely the first fast-follow):** read-only-by-default mode, **per-workspace scoping**
+  (a credential/agent limited to one workspace instead of enumerating all), destructive-command
+  confirmation, per-tab allowlist; sandbox `POST /api/sessions`' `cwd` to `fsRoot` too (v1 only hardens
+  the MCP path); possibly relocate policy into a **standalone policy-enforcing MCP proxy**.
 - Content-based "stable screen" idle settle (poll `capture-pane`, settle when the *rendered* text
   stops changing) — more robust than output-debounce for animated agent TUIs (see §4 latency caveat).
 - MCP progress notifications / streaming output during a long `send_and_wait`.
