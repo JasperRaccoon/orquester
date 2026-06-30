@@ -2,8 +2,9 @@ import React, { useEffect, useState, useRef } from "react";
 import { Loader2, Paperclip } from "lucide-react";
 import { useApi } from "../../context/orquester-context";
 import { useIsDesktop } from "../../hooks";
-import { useActiveTabId, useProjectTabs } from "../../store/app";
+import { useActiveTabId, useAppStore, useProjectTabs, useTerminalFontSize } from "../../store/app";
 import { uploadFilesToSession, type UploadStatus } from "../../lib/session-upload";
+import { TERMINAL_FONT_MIN, TERMINAL_FONT_MAX, TERMINAL_FONT_STEP } from "../../lib/terminal-font";
 
 // Control keys Android/iOS soft keyboards usually lack. Values are the bytes a
 // PTY expects.
@@ -45,6 +46,8 @@ export const MobileKeyBar: React.FC = () => {
   const isDesktop = useIsDesktop();
   const tabs = useProjectTabs();
   const activeId = useActiveTabId();
+  const fontSize = useTerminalFontSize();
+  const nudgeTerminalFontSize = useAppStore((s) => s.nudgeTerminalFontSize);
 
   const [status, setStatus] = useState<UploadStatus | null>(null);
   const [busy, setBusy] = useState(false);
@@ -122,6 +125,36 @@ export const MobileKeyBar: React.FC = () => {
             </button>
           </>
         )}
+        <div className="flex shrink-0 items-stretch gap-1">
+          <button
+            type="button"
+            aria-label="Decrease terminal text size"
+            disabled={fontSize <= TERMINAL_FONT_MIN}
+            // onPointerDown + preventDefault keeps the soft keyboard up (no focus steal).
+            onPointerDown={(e) => {
+              e.preventDefault();
+              nudgeTerminalFontSize(-TERMINAL_FONT_STEP);
+            }}
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-neutral-800 font-mono text-sm text-neutral-200 active:bg-neutral-700 disabled:opacity-40"
+          >
+            A−
+          </button>
+          <span className="flex h-9 w-7 shrink-0 items-center justify-center font-mono text-xs text-neutral-400">
+            {fontSize}
+          </span>
+          <button
+            type="button"
+            aria-label="Increase terminal text size"
+            disabled={fontSize >= TERMINAL_FONT_MAX}
+            onPointerDown={(e) => {
+              e.preventDefault();
+              nudgeTerminalFontSize(TERMINAL_FONT_STEP);
+            }}
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-neutral-800 font-mono text-sm text-neutral-200 active:bg-neutral-700 disabled:opacity-40"
+          >
+            A+
+          </button>
+        </div>
         {KEYS.map((key) => (
           <button
             key={key.label}
