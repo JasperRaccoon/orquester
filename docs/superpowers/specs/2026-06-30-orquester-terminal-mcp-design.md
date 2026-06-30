@@ -281,7 +281,7 @@ const DEFAULT_IDLE_MS = 1000;
 const DEFAULT_TIMEOUT_MS = 120_000;   // 2 min
 const MAX_TIMEOUT_MS = 600_000;       // 10 min ceiling
 
-async waitForIdle(sel, opts?: { idleMs?: number; timeoutMs?: number }) {
+async waitForIdle(sel, opts?: { idleMs?: number; timeoutMs?: number; lines?: number }) {
   const t = resolveTab(sel);
   const idleMs = opts?.idleMs ?? DEFAULT_IDLE_MS;
   const timeoutMs = Math.min(opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS);
@@ -298,7 +298,7 @@ async waitForIdle(sel, opts?: { idleMs?: number; timeoutMs?: number }) {
   });
 
   const after = sessions.get(t.id);
-  const text = await sessions.captureText(t.id, { lines: 0 });
+  const text = await sessions.captureText(t.id, { lines: opts?.lines ?? 0 });
   return { text, settled, status: after?.status ?? "exited", exitCode: after?.exitCode };
 }
 
@@ -319,6 +319,8 @@ async sendAndWait(sel, data, opts?) {    // subscribe BEFORE writing so no outpu
 - Works on **both** backends — `subscribe()` exists on each; only the final `captureText` is
   degraded on non-tmux hosts.
 - `sendAndWait` subscribes *before* writing, so the response to its own input is never missed.
+- **The returned `text` defaults to the visible screen** (`lines:0`). For a long reply that scrolled
+  off, pass `lines:N` (the result then includes that much scrollback) or follow with `read_terminal`.
 - **What `settled:true` means:** the pane was *quiet for `idleMs`* — **not** "the command
   completed." A command that emits nothing for `> idleMs` before it starts (`sleep 5; echo done`)
   can settle early, before its output exists. For the primary case (a coding-agent TUI streaming a
@@ -359,16 +361,20 @@ one `TerminalControl` function and return its result as JSON text content (typed
 | `read_terminal` | `sel, lines?` | `{text, status, exitCode?, cols, rows}` |
 | `write_input` | `sel, data, submit?` | `{ok:true}` |
 | `send_keys` | `sel, keys[]` | `{ok:true}` |
-| `send_and_wait` | `sel, data, submit?, idleMs?, timeoutMs?` | `{text, settled, status, exitCode?}` |
-| `wait_for_idle` | `sel, idleMs?, timeoutMs?` | `{text, settled, status, exitCode?}` (pure wait — no write; the re-invoke path) |
+| `send_and_wait` | `sel, data, submit?, idleMs?, timeoutMs?, lines?` | `{text, settled, status, exitCode?}` |
+| `wait_for_idle` | `sel, idleMs?, timeoutMs?, lines?` | `{text, settled, status, exitCode?}` (pure wait — no write; the re-invoke path) |
 | `create_tab` | `workspace, project, refId, title?, cwd?` | the new tab summary |
 | `close_tab` | `sel` | `{closed:true}` |
 
 `sel` = `{ workspace?, project?, tab?, tabId? }` (provide `tabId`, or all of `workspace+project+tab`).
 `list_launchers` filters `registry.list()` to `enabled` entries (it returns disabled ones too,
-`registry.ts:138`). Errors map to MCP `isError` results: `TabNotFound`/`AmbiguousTab` (with the
-candidate ids), `SessionError` (bad/disabled `refId` on `create_tab`), `encodeKey`'s unknown-key
-throw, and a generic catch-all — each with an actionable message.
+`registry.ts:138`); `list_workspaces`/`list_projects` **project** the injected helpers' richer
+records (`listWorkspaces` → `{name,path,projectCount,gitAccountId,createdAt}`, `listProjects` →
+`{name,workspace,path}`) down to the documented shapes (workspace `gitAccountId`/`createdAt` are
+intentionally omitted). Errors map to MCP `isError` results: `TabNotFound`/`AmbiguousTab` (with the
+candidate ids), `SessionError` (matched via `instanceof`, imported into `server.ts` — it sets no
+`.name`; bad/disabled `refId` on `create_tab`), `encodeKey`'s unknown-key throw, and a generic
+catch-all — each with an actionable message.
 
 ### 7. Fastify mount + auth (`index.ts`)
 
@@ -413,7 +419,8 @@ throw, and a generic catch-all — each with an actionable message.
   and base64s `user:hash` (exactly what the web/desktop clients do). Document this derivation for
   whoever wires the MCP client config.
 - **Caddy:** no change — `reverse_proxy 127.0.0.1:47831` already forwards every path (incl. the
-  long-lived `/events`/`/ws`), so a blocking `send_and_wait` POST is covered the same way.
+  long-lived `/events`/`/ws`), so a blocking `send_and_wait` POST is covered the same way (verify no
+  default upstream response-read timeout trips at the `MAX_TIMEOUT_MS` 600s ceiling).
 
 ### Component / call flow
 
@@ -541,11 +548,12 @@ workflow so the driving agent discovers it.
 - **`read_terminal` dims may be stale:** a reattached session reports `cols/rows` of `80/24` until
   the next resize (`sessions.ts:464`), so the reported dimensions can lag the real pane. Cosmetic —
   the captured text is unaffected.
-- **Inner-agent interactive prompt:** handled as the §8 workflow — recognized as a `settled` state
-  with a menu on screen (a clean *running* read), answered via a number/letter shortcut or verified
-  arrow-nav (+ `Space` for multiselect / `write_input` for custom), then `send_and_wait` for the
-  result. Sending nav keys batched in one `send_keys` can submit before the TUI consumes them — the
-  §8 pattern sends one key at a time with a read between.
+- **Inner-agent interactive prompt:** handled as the §8 workflow — recognized from the rendered
+  `text` (a menu on screen) **regardless of `settled`** (an *animated* prompt returns `settled:false`
+  while it waits; a clean *running* read either way), answered via a number/letter shortcut or
+  verified arrow-nav (+ `Space` for multiselect / `write_input` for custom), then `send_and_wait` for
+  the result. Sending nav keys batched in one `send_keys` can submit before the TUI consumes them —
+  the §8 pattern sends one key at a time with a read between.
 
 ## Testing / verification
 
