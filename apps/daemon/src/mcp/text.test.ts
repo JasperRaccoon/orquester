@@ -36,4 +36,7 @@ test("renderText prefers the capture; falls back to stripped, bounded ring", () 
   assert.ok(!out.includes("\x1b"));
   assert.equal(out.split("\n").length, SCREEN_ROWS);            // default bound
   assert.equal(renderText("", "1\n2\n3\n4", { lines: 2 }), "3\n4");
+  // Regression: callers pass `lines: opts?.lines ?? 0`, so a default read arrives
+  // as lines:0 — it must still bound the fallback to SCREEN_ROWS, NOT the whole ring.
+  assert.equal(renderText("", `\x1b[32m${ring}\x1b[0m`, { lines: 0 }).split("\n").length, SCREEN_ROWS);
 });

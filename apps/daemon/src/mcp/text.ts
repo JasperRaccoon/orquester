@@ -41,9 +41,13 @@ export function cap(s: string, max = MAX_TEXT): string {
  * Clean rendered text for an agent read. `captured` is a tmux capture-pane result
  * (already clean when taken with escapes:false) — used as-is when non-empty. When
  * empty (exited/destroyed pane, transient empty capture, or non-tmux host) fall
- * back to the ANSI-stripped hot ring, bounded to `opts.lines` (default SCREEN_ROWS).
+ * back to the ANSI-stripped hot ring, bounded to a POSITIVE `opts.lines`, else
+ * SCREEN_ROWS. `lines:0` ("current screen") is meaningful only for the tmux capture
+ * path — there is no rendered frame in the ring — so 0/unset both bound to
+ * SCREEN_ROWS here rather than returning the whole ring (callers pass `?? 0`).
  */
 export function renderText(captured: string, buffer: string, opts?: { lines?: number }): string {
-  const body = captured || tailLines(stripAnsi(buffer), opts?.lines ?? SCREEN_ROWS);
+  const want = opts?.lines && opts.lines > 0 ? opts.lines : SCREEN_ROWS;
+  const body = captured || tailLines(stripAnsi(buffer), want);
   return cap(trimTrailingBlankLines(body));
 }
