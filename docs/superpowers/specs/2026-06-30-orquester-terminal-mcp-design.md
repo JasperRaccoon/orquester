@@ -782,11 +782,16 @@ rather than inflating every request.
   and sends keys/shortcuts like a human; a daemon-side menu parser would be brittle across
   Claude/Codex/Gemini TUIs and risks auto-selecting the wrong option. Number/letter shortcuts + a
   read-verify loop make the manual pattern reliable, and it adds zero new tools or brittle surface.
-- **Stateless MCP transport (v1), pending client validation.** Intended stateless +
+- **Stateless MCP transport (v1) — server side validated.** Stateless +
   `enableJsonResponse:true` (every tool independent; one JSON body per call; torn down on response
-  close) — but this is an *assumption to verify* against the target client. If Claude Desktop/Code
-  require an `Mcp-Session-Id` handshake, v1 needs the stateful session-map mount instead (§7), which
-  is a real rework, not a toggle.
+  close). The `scripts/mcp-spike.ts` spike confirmed the server side (2026-06-30): against a **fresh
+  per-request `McpServer`**, `initialize`, `tools/list`, and `tools/call` each return a `200` JSON-RPC
+  result, and a request missing `Accept: text/event-stream` returns the documented `406` — so the
+  "fresh server per POST" design does **not** break the MCP lifecycle, and the SDK does not require an
+  `initialize` first on each request. Residual (smaller) risk: a *specific* client (Claude
+  Desktop/Code) insisting on an `Mcp-Session-Id` handshake — a real-client check is the only remaining
+  confirmation. If one does require sessions, v1 needs the stateful session-map mount (§7), a real
+  rework, not a toggle.
 - **Inject `listWorkspaces`/`listProjects`, don't extract a module.** `createServer` already has
   them in scope; injecting keeps the change small and avoids a `workspaces.ts` ↔ `index.ts` import
   cycle (those helpers' `readWorkspacesMeta`/`writeWorkspacesMeta` deps are used by ~6 other routes).
