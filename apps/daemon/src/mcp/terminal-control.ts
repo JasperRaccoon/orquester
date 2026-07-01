@@ -10,6 +10,12 @@ import { encodeKey } from "./keys.ts";
 const DEFAULT_IDLE_MS = 1000;
 const DEFAULT_TIMEOUT_MS = 120_000; // 2 min
 const MAX_TIMEOUT_MS = 600_000;     // 10 min ceiling
+// On submit, send Enter as its OWN write this long after the text. A coding-agent TUI
+// (Claude Code) treats a bulk single-chunk write ending in CR as a *paste* and keeps
+// the trailing newline literal — so `${data}\r` in one write types the message but never
+// submits. Decoupling the CR into a discrete, later keystroke makes it a real Enter that
+// submits. Harmless for shells (they submit on CR regardless of pacing).
+const SUBMIT_ENTER_DELAY_MS = 150;
 
 export type WaitResult = {
   text: string;
@@ -99,9 +105,15 @@ export class TerminalControl {
     return { text, status: t.status, exitCode: t.exitCode, cols: t.cols, rows: t.rows };
   }
 
-  writeInput(sel: TabSelector, data: string, opts?: { submit?: boolean }) {
+  async writeInput(sel: TabSelector, data: string, opts?: { submit?: boolean }) {
     const t = this.resolveTab(sel);
-    this.deps.sessions.input(t.id, opts?.submit ? `${data}\r` : data); // Enter == CR in a PTY
+    this.deps.sessions.input(t.id, data);
+    if (opts?.submit) {
+      // Enter as a SEPARATE, delayed keystroke — NOT `${data}\r` in one write — so a
+      // coding-agent TUI doesn't paste-eat the newline (see SUBMIT_ENTER_DELAY_MS).
+      await new Promise((r) => setTimeout(r, SUBMIT_ENTER_DELAY_MS));
+      this.deps.sessions.input(t.id, "\r");
+    }
     return { ok: true as const };
   }
 
@@ -209,11 +221,13 @@ export class TerminalControl {
     const sig = opts?.signal;
     const settled = await new Promise<boolean>((resolve) => {
       let idleTimer: ReturnType<typeof setTimeout>;
+      let submitTimer: ReturnType<typeof setTimeout> | undefined;
       let resolved = false;
       const done = (ok: boolean) => {
         if (resolved) return;
         resolved = true;
         clearTimeout(idleTimer);
+        clearTimeout(submitTimer);
         clearTimeout(hardTimer);
         unsub();
         sig?.removeEventListener("abort", onAbort);
@@ -231,9 +245,19 @@ export class TerminalControl {
         done(false);
         return;
       }
-      // Subscribe is in place — now write, then start the idle countdown.
-      sessions.input(t.id, opts?.submit ? `${data}\r` : data);
-      arm();
+      // Subscribe is in place — type the text, then on submit send Enter as a SEPARATE
+      // delayed keystroke (so a TUI doesn't paste-eat the newline; see
+      // SUBMIT_ENTER_DELAY_MS) before starting the idle countdown.
+      sessions.input(t.id, data);
+      if (opts?.submit) {
+        submitTimer = setTimeout(() => {
+          if (resolved) return; // wait already ended (abort/cap) — don't write into a dead flow
+          sessions.input(t.id, "\r");
+          arm();
+        }, SUBMIT_ENTER_DELAY_MS);
+      } else {
+        arm();
+      }
     });
     if (sig?.aborted) {
       return { text: "", settled: false, aborted: true, status: sessions.get(t.id)?.status ?? "exited" };

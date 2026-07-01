@@ -103,13 +103,29 @@ test("readTerminal returns clean text + status", async () => {
   assert.equal(r.status, "running");
 });
 
-test("writeInput appends CR only when submit", () => {
+test("writeInput: no submit writes just the text (no CR)", async () => {
+  const f = new FakeManager();
+  f.add({ id: "a", title: "Claude", projectPath: "/ws/w/p" });
+  await make(f).writeInput({ tabId: "a" }, "ls");
+  assert.deepEqual(f.inputs, [{ id: "a", data: "ls" }]);
+});
+
+// #1 fix: submit must NOT be `${data}\r` in one write (a TUI paste-eats the trailing
+// newline and never submits). Text first, then Enter as a SEPARATE, later keystroke.
+test("writeInput: submit sends the text, then a separate Enter", async () => {
   const f = new FakeManager();
   f.add({ id: "a", title: "Claude", projectPath: "/ws/w/p" });
   const tc = make(f);
-  tc.writeInput({ tabId: "a" }, "ls");
-  tc.writeInput({ tabId: "a" }, "ls", { submit: true });
-  assert.deepEqual(f.inputs, [{ id: "a", data: "ls" }, { id: "a", data: "ls\r" }]);
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const p = tc.writeInput({ tabId: "a" }, "a long message", { submit: true });
+    assert.deepEqual(f.inputs.at(-1), { id: "a", data: "a long message" }); // text only, no CR yet
+    mock.timers.tick(1000);
+    await p;
+    assert.deepEqual(f.inputs.at(-1), { id: "a", data: "\r" }); // Enter arrives on its own
+  } finally {
+    mock.timers.reset();
+  }
 });
 
 test("sendKeys encodes; unknown key → ToolError", () => {
@@ -207,15 +223,17 @@ test("waitForIdle: abort returns aborted, skips capture, cleans up", async () =>
   }
 });
 
-test("sendAndWait writes input (with CR on submit) before waiting", async () => {
+test("sendAndWait writes the text before waiting, then a separate Enter on submit", async () => {
   const f = new FakeManager();
   f.add({ id: "a", title: "Claude", projectPath: "/ws/w/p" });
   f.texts.set("a", "4");
   mock.timers.enable({ apis: ["setTimeout"] });
   try {
     const p = make(f).sendAndWait({ tabId: "a" }, "2+2", { submit: true, idleMs: 500 });
-    assert.deepEqual(f.inputs.at(-1), { id: "a", data: "2+2\r" }); // wrote before waiting
-    mock.timers.tick(500);
+    assert.deepEqual(f.inputs.at(-1), { id: "a", data: "2+2" }); // text written before waiting, no CR yet
+    mock.timers.tick(200);                                        // past the submit delay → CR on its own
+    assert.deepEqual(f.inputs.at(-1), { id: "a", data: "\r" });
+    mock.timers.tick(500);                                        // 500ms quiet → settle
     const r = await p;
     assert.equal(r.text, "4");
     assert.equal(r.settled, true);

@@ -180,8 +180,10 @@ single text content block** — parse `content[0].text` as JSON. Errors come bac
   Output is capped (~64 KB). **Greyed placeholder/ghost text** (e.g. a coding-agent's empty-composer
   hint — often a dimmed copy of the previous prompt) is **filtered out** (it's rendered faint), so a
   lone `❯` reads as an empty box and can't be mistaken for something the user typed.
-- **`write_input`** — types `data` verbatim. `submit: true` appends Enter (CR). Use this for
-  literal keystrokes too — menu shortcuts like `"1"`, `"y"`.
+- **`write_input`** — types `data` verbatim. `submit: true` then presses Enter as a **separate
+  keystroke a beat later** (not `data`+CR in one write) so a coding-agent TUI doesn't treat the
+  text as a paste and swallow the newline — i.e. long messages submit reliably. Use `write_input`
+  for literal keystrokes too — menu shortcuts like `"1"`, `"y"`.
 - **`send_keys`** — named/control keys, **one logical action per call**. Recognized names:
   `Enter, Tab, BackTab, Escape, Backspace, Space, Delete, Up, Down, Left, Right, Home, End,
   PageUp, PageDown`, plus `C-<letter>` (e.g. `C-c` = Ctrl-C, `C-d`, `C-j` = newline).
@@ -290,8 +292,15 @@ enter to confirm". (An animated prompt returns `settled:false`; a static one `se
   `4. Type something.`): `write_input { data:"4" }` to open the field, then
   `write_input { data:"your answer" }`, then `send_keys ["Enter"]`. (Or arrow to it, `Enter`, type,
   `Enter`.) A plain inline prompt with no menu: `write_input { data:"your answer", submit:true }`.
-- **Multi-question widgets** show a tab bar (`← … ✔ Submit →`): answer the current question, then
-  `send_keys ["Right"]` to reach the next, and select **Submit** at the end.
+- **Multi-question widgets** — AskUserQuestion often bundles several questions. You'll see
+  `Question N of M` and a top tab bar (one box per question — `☐` unanswered, `☒` answered — ending
+  in `✔ Submit`). **Answer all M before submitting.** A **single-select** question *auto-advances*
+  to the next the moment you pick its number. A **multi-select** question (`[ ]` checkboxes) does
+  **not**: a number / `Space` / `Enter` only *toggles* the highlighted option, so toggle each one you
+  want, then arrow **Down** to the **`Next`** row and `send_keys ["Enter"]` to advance. After the
+  last question a **`Review your answers → 1. Submit answers / 2. Cancel`** screen appears — submit
+  with `write_input { data:"1" }` **only when no `☐` remain**. If you reach Submit with questions
+  still `☐`, `send_keys ["Left"]` back to them and answer first.
 
 **Rules that make it reliable**
 

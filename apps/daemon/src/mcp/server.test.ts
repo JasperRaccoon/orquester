@@ -37,3 +37,12 @@ test("prompt guidance warns Escape cancels a menu and teaches the number shortcu
   }
   assert.match(SERVER_INSTRUCTIONS, /Type something|write-your-own/i, "must cover the write-your-own option");
 });
+
+// #2: multi-question AskUserQuestion — the driver answered one of three and submitted.
+// Lock in the guidance that answers all questions and never submits early.
+test("instructions cover multi-question widgets (answer all, multi-select Next, no early submit)", () => {
+  assert.match(SERVER_INSTRUCTIONS, /Question N of M/i, "must explain the N-of-M progress");
+  assert.match(SERVER_INSTRUCTIONS, /multi-select/i, "must distinguish multi-select");
+  assert.match(SERVER_INSTRUCTIONS, /"Next"/, "must tell multi-select to advance via Next");
+  assert.match(SERVER_INSTRUCTIONS, /Answer ALL|Never submit/i, "must forbid submitting with questions unanswered");
+});
