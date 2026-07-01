@@ -28,9 +28,16 @@ RestartSec=2
 # CRITICAL (Phase 2): only signal the main node process on stop/restart, so the
 # daemonized tmux server (and its panes) survive a daemon restart.
 KillMode=process
-NoNewPrivileges=true
+# Sessions run package managers via scoped sudo (/etc/sudoers.d/orquester-pkg, installed by
+# deploy/provision-devtools.sh). NoNewPrivileges would block setuid elevation for the daemon's
+# whole process subtree, so sudo cannot run at all while it is on — it must be off.
+NoNewPrivileges=false
+# Loosened from bare `strict` so scoped `sudo apt` can write /usr,/etc,/var. Kept as `strict` WITH
+# explicit carve-outs (not `off`) so /opt (daemon code), /boot, /root, /home stay read-only even to
+# a root session. DAC still gates writes: the unprivileged daemon user can't touch these paths; only
+# root-via-sudo-apt can. If a maintainer script ever hits a read-only path, switch this to `off`.
 ProtectSystem=strict
-ReadWritePaths=/var/lib/orquester
+ReadWritePaths=/var/lib/orquester /usr /etc /var /run /tmp
 ProtectHome=true
 # tmux socket lives under /var/lib/orquester, not /tmp:
 PrivateTmp=false

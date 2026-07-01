@@ -8,8 +8,16 @@ and `docs/superpowers/plans/2026-06-19-remote-phase0-vps-provisioning.md`.
   - Runs the daemon via `node --import tsx` (the repo is `noEmit`; no dist build).
 - `daemon.env.example` → copy to `/etc/orquester/daemon.env` (chmod 600), fill the password.
 - `Caddyfile` → `/etc/caddy/Caddyfile` (set your real domain or a sslip.io host).
+- `provision-devtools.sh` → run once per VPS as root: installs system build deps, the scoped-sudo
+  drop-in (`sudoers.d/orquester-pkg`), and user-space tools (`devtools-user.sh`: `uv`, `cargo-audit`).
+  First-time provisioning runs it, so any **new** VPS gets session dev tooling + scoped sudo out of
+  the box. Idempotent — re-run to catch up an **existing** VPS, then `systemctl daemon-reload && systemctl restart orquester`.
+- `devtools-user.sh` → user-space tool installer (no root); also runnable from a session to refresh
+  `uv`/`cargo-audit` in the appdir.
+- `sudoers.d/orquester-pkg` → scoped passwordless sudo (`apt`/`apt-get`/`dpkg`) for the service user.
+  ≈root — see `docs/superpowers/specs/2026-07-01-vps-session-devtools-scoped-sudo-design.md`.
 
-Install `p7zip-full` (or `libarchive-tools` for `bsdtar`) for archive previews — optional; without
-either on PATH, archives degrade to a download card.
+Archive previews want `p7zip-full` or `libarchive-tools` (`bsdtar`) on PATH; `provision-devtools.sh`
+installs `libarchive-tools`. Without either, archives degrade to a download card.
 
 Never commit the real `daemon.env`.

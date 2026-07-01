@@ -1,0 +1,10 @@
+# Scoped passwordless sudo for the orquester service user: package management only.
+#
+# SECURITY NOTE: this is a convenience/intent boundary, NOT a hard security boundary.
+# apt-get/apt/dpkg run package maintainer scripts as root and accept hooks/local .deb
+# files, so anything that can run them as root is ~equivalent to full root. It protects
+# against accidental root fat-fingering and documents intent; it does not change the
+# threat model. See docs/superpowers/specs/2026-07-01-vps-session-devtools-scoped-sudo-design.md
+#
+# Installed to /etc/sudoers.d/orquester-pkg (root:root, mode 0440) by deploy/provision-devtools.sh.
+orquester ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt, /usr/bin/dpkg

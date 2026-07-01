@@ -356,8 +356,9 @@ sudo cp deploy/daemon.env.example /etc/orquester/daemon.env
 sudo sed -i "s|replace-with-a-32+char-random-secret|$(openssl rand -base64 32)|" /etc/orquester/daemon.env
 sudo chown orquester:orquester /etc/orquester/daemon.env && sudo chmod 600 /etc/orquester/daemon.env
 
-# 5. systemd unit
+# 5. systemd unit + session dev tooling & scoped sudo (out-of-the-box for any new VPS)
 sudo cp deploy/orquester.service /etc/systemd/system/orquester.service
+sudo bash deploy/provision-devtools.sh       # build deps + scoped-sudo drop-in + user tools (uv; cargo-audit best-effort)
 sudo systemctl daemon-reload && sudo systemctl enable --now orquester
 curl -fsS http://127.0.0.1:47831/health      # expect {"ok":true}
 
@@ -390,6 +391,11 @@ curl -fsS http://127.0.0.1:47831/health
 - **Daemon code changes need no rebuild** — tsx runs the new source after `systemctl restart`.
   Only the web SPA (`apps/web/dist`) needs `pnpm build`. Caddy needs a reload only if the
   Caddyfile changes.
+- **Unit changes need `daemon-reload`.** `deploy/orquester.service` carries the loosened sandbox
+  that makes scoped sudo work; a routine `systemctl restart` does **not** re-read the unit. On an
+  existing VPS run `provision-devtools.sh` once (build deps + sudoers drop-in + user tools;
+  idempotent) then `systemctl daemon-reload && systemctl restart orquester`. New VPSes get it
+  automatically via provisioning step 5.
 - **Deploy installs must be non-interactive (`CI=1`).** pnpm prints an interactive *"reinstall
   modules from scratch? (Y/n)"* prompt when `node_modules` was built by a different pnpm version
   (it pins `pnpm@10.12.1` via `packageManager`, but a host's global pnpm may differ). Over a
@@ -414,7 +420,12 @@ loopback with Caddy as the only public face, `ufw` allowing 22+443 only, key-onl
 strict CSP/HSTS/headers, `/api/fs/*` sandboxed to the workspaces dir, and no key/PAT material ever
 returned by the API. **The #1 ongoing mitigation is keeping the stack patched** (enable
 `unattended-upgrades`). A leaked password grants full access — rotate `ORQUESTER_HTTP_PASSWORD`
-(edit `daemon.env`, restart) if ever exposed.
+(edit `daemon.env`, restart) if ever exposed. Sessions also have **scoped passwordless sudo** for
+package managers (`deploy/sudoers.d/orquester-pkg` → `/etc/sudoers.d/orquester-pkg`); treat it as
+≈root (apt/dpkg run maintainer scripts as root), so it does **not** change the threat model —
+password secrecy + patching remain the real mitigations. It costs two loosened unit directives
+(`NoNewPrivileges=false`, `ProtectSystem=strict` with carve-outs), keeping `/opt` code + `/boot` +
+`/home` read-only even to a root session.
 
 ---
 
