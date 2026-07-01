@@ -357,6 +357,8 @@ enter to confirm". (An animated prompt returns `settled:false`; a static one `se
 | `Tab limit reached …` | 24 running tabs/project — `close_tab` some first. |
 | Read looks stale / wrong size | A reattached session may report `80×24` until its next resize — the captured `text` is still correct. |
 | Empty/approximate read of an exited tab | Expected: tmux destroys the pane on exit, so reads fall back to ANSI-stripped scrollback. |
+| Driver acts on **old tool guidance** after the server was redeployed | Claude Code caches tool descriptions/instructions **per session** and only re-fetches on a fresh connect. `/mcp` "reconnect" does **not** refresh a healthy header-auth HTTP server (Claude Code issue #54710). **Fully quit and start a new `claude` session** (not `--resume`/`--continue`), then `/mcp` → confirm connected + tool count. `claude mcp remove <name>` + re-add if still stale. |
+| Guidance in the server `instructions` block seems ignored | Claude Code only surfaces server `instructions` when **tool search is on** (default; disabled by a custom `ANTHROPIC_BASE_URL`, Vertex, `ENABLE_TOOL_SEARCH=false`, or Haiku) and truncates them at ~2 KB. The load-bearing rules are duplicated into each tool's `description`, which always reaches the model — so this is a convenience, not the source of truth. |
 
 ---
 

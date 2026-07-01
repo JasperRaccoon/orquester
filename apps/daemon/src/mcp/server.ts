@@ -36,25 +36,20 @@ const sel = {
   tabId: z.string().optional(),
 };
 /**
- * Global playbook surfaced to the driving client in the `initialize` result (the
- * one place it's guaranteed to read — it never sees the .md doc). Teaches the three
- * on-screen states because the #1 failure is treating a real select-menu like the
- * normal input box: the agent sends Escape to "clear" it, but the menu's own hint
- * says "Esc to cancel" — so it dismisses the question and the next write lands in
- * the composer as a stray message.
+ * Concise "skill hint" surfaced in the `initialize` result. Kept SHORT on purpose:
+ * Claude Code only surfaces server instructions when tool-search is on, and truncates
+ * them at ~2 KB — so this is a high-level pointer, and the load-bearing how-to lives in
+ * each tool's `description` (PROMPT_HINT), the channel that reaches the model in every
+ * config. Keep the most critical rules first and the whole thing under 2 KB.
  */
-export const SERVER_INSTRUCTIONS = `Orquester terminal-control — observe and drive Orquester's terminal & coding-agent tabs, addressed as (workspace, project, tab) or by tabId. Always read_terminal (or the returned \`text\`) before AND after acting; a live spinner keeps settled:false even while the tab waits for you, so judge from \`text\`, not \`settled\` — and after a submit, settled:true only means the pane went quiet, so glance at \`text\` to confirm your message actually left the input box. Send ONE key per send_keys and read between.
-
-Three on-screen states, each answered differently:
-
-1. INTERACTIVE MENU — numbered options with a \`❯\` cursor on the selected row and a hint line like "Enter to select · Tab/Arrow keys to navigate · Esc to cancel". Answer it by the option NUMBER: write_input the number (e.g. "2"), no submit — that selects it. For a "Type something"/write-your-own option, send its number, then write_input your text, then send_keys ["Enter"]. Or navigate: send_keys ONE ["Down"]/["Up"], re-read, confirm by the \`❯\`/label (not the row), then send_keys ["Enter"]. NEVER send ["Escape"] to a menu you intend to answer — the hint literally says "Esc to cancel"; Escape dismisses the whole widget and drops the agent to its normal input box, so your next write becomes a stray chat message — and in a multi-question batch Escape declines EVERY question at once, so never Escape to "reset" or retry; if you're unsure, re-read and continue. A fresh menu has nothing to "clear" first. MULTI-QUESTION widgets show "Question N of M" and a top tab bar (one box per question: ☐ = unanswered, ☒ = answered, ending in "✔ Submit"). Answer ALL M before submitting. A single-select question auto-advances to the next the moment you pick its number. A MULTI-SELECT question (options show "[ ]" checkboxes) works differently: a number (or Space, or Enter on the row) only TOGGLES that checkbox and STAYS — so toggle each option you want, RE-READING after each to confirm its "[ ]"↔"[✔]" flip. To FINISH the question, send_keys ["Tab"] — Tab jumps straight to the finish action — then re-read to see where you landed. Do NOT type a number to finish: the finish action is an UNNUMBERED "Submit"/"Next" row BELOW the numbered options, and the numbered "Type something" just above it is a free-text option, NOT the finish button — confusing those two is the classic multi-select failure. After the last question a "Review your answers → 1. Submit answers / 2. Cancel" screen appears; submit with write_input "1" only when NO ☐ remain. Never submit while a question is still ☐ — if you reach Submit early, send_keys ["Left"] back to the unanswered question and answer it first.
-
-2. NORMAL INPUT BOX — a \`❯\` prompt with NO numbered options. Just write_input your text with submit:true. Do not press Escape or try to clear it first. Greyed placeholder/ghost hints are filtered out of your read, so a lone \`❯\` means the box is EMPTY — the user has not typed anything; do not treat a leftover hint as "the user's prompt".
-
-3. PROSE SUGGESTIONS — a numbered list written inside the agent's reply (no \`❯\` cursor, no "Enter to select" hint) is NOT a menu. Answer by typing a normal message (write_input, submit:true).`;
+export const SERVER_INSTRUCTIONS = `Orquester terminal-control drives Orquester's terminal & coding-agent tabs, addressed by (workspace,project,tab) or tabId. Each tool's description carries the detailed how-to; the load-bearing rules:
+• Read the tab (read_terminal, or send_and_wait's \`text\`) before AND after acting. settled:true means the pane went quiet, NOT that your input was accepted — judge from the text. One key per send_keys, read between.
+• Answer an interactive MENU (numbered options under a \`❯\` cursor) by option NUMBER; a MULTI-select ("[ ]" checkboxes) only TOGGLES on a number, so toggle the ones you want then press ["Tab"] to reach the UNNUMBERED "Submit"/"Next" row (never a number, and NOT the "Type something" option). In a multi-question batch (Question N of M) answer EVERY question before the final "Submit answers"; never submit early.
+• NEVER send ["Escape"] to a menu/question you mean to answer — it cancels it (declining the whole batch at once) and drops you to the input box, so your next write becomes a stray message.
+• A plain \`❯\` box with no numbered options is a text prompt: write_input with submit:true (a lone \`❯\` is empty — ghost/placeholder hints are filtered from your read). Numbered lists inside the agent's prose are NOT menus — reply with a normal message.`;
 
 export const PROMPT_HINT =
-  " Interactive MENU (numbered options + `❯` + an 'Esc to cancel' hint)? SINGLE-select: write_input the option NUMBER (or one send_keys arrow, then Enter). MULTI-select ('[ ]' checkboxes): a NUMBER only TOGGLES that option — toggle the ones you want (read between), then send_keys ['Tab'] to reach Submit/Next; the finish row is UNNUMBERED, so never a number and NOT the 'Type something' option. NEVER send Escape to a question you mean to answer: it cancels the whole batch and your next write becomes a stray message. Plain `❯` box (no numbered options): write_input with submit:true. Judge from the screen text, not `settled`.";
+  " Interactive MENU (numbered options + `❯` + an 'Esc to cancel' hint)? SINGLE-select: write_input the option NUMBER (or one send_keys arrow, then Enter). MULTI-select ('[ ]' checkboxes): a NUMBER only TOGGLES that option — toggle the ones you want (read between), then send_keys ['Tab'] to reach Submit/Next; the finish row is UNNUMBERED, so never a number and NOT the 'Type something' option. In a multi-question batch (Question N of M) answer EVERY question; at the final Review pick 'Submit answers' only when none remain unanswered. NEVER send Escape to a question you mean to answer: it cancels the whole batch and your next write becomes a stray message. Plain `❯` box (no numbered options): write_input with submit:true. Judge from the screen text, not `settled`.";
 
 /** Build a per-request McpServer with all 11 tools bound to `control`. */
 function buildServer(control: TerminalControl, signal: AbortSignal): McpServer {
