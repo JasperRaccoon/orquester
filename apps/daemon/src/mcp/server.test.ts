@@ -43,6 +43,17 @@ test("prompt guidance warns Escape cancels a menu and teaches the number shortcu
 test("instructions cover multi-question widgets (answer all, multi-select Next, no early submit)", () => {
   assert.match(SERVER_INSTRUCTIONS, /Question N of M/i, "must explain the N-of-M progress");
   assert.match(SERVER_INSTRUCTIONS, /multi-select/i, "must distinguish multi-select");
-  assert.match(SERVER_INSTRUCTIONS, /"Next"/, "must tell multi-select to advance via Next");
+  assert.match(SERVER_INSTRUCTIONS, /"Next"/, "must name the Next/Submit finish row");
   assert.match(SERVER_INSTRUCTIONS, /Answer ALL|Never submit/i, "must forbid submitting with questions unanswered");
+});
+
+// The multi-select failure: the driver typed "5" (a numbered "Type something") thinking
+// it was the unnumbered "Submit" row, lost track of toggles, then Escaped (declining all).
+// Lock in the robust mechanics that prevent it.
+test("instructions teach the robust multi-select advance (Tab, unnumbered finish, batch Escape)", () => {
+  assert.match(SERVER_INSTRUCTIONS, /\bTab\b/, "must offer Tab as the finish shortcut");
+  assert.match(SERVER_INSTRUCTIONS, /UNNUMBERED/, "must warn the finish row is unnumbered (not a number)");
+  assert.match(SERVER_INSTRUCTIONS, /Type something/, "must call out the Type-something-vs-finish trap");
+  assert.match(SERVER_INSTRUCTIONS, /every question|EVERY question|whole batch/i, "must warn Escape declines the whole batch");
+  assert.match(PROMPT_HINT, /\bTab\b/, "per-tool hint must also point multi-select at Tab");
 });

@@ -263,7 +263,9 @@ it to the driving model automatically — but read this for the full picture.)
 select-menu's own hint reads *"Esc to cancel"* — `send_keys ["Escape"]` dismisses the whole widget
 and drops the agent back to its **normal input box**, so your *next* `write_input` becomes a stray
 chat message (the classic "it just sent esc then typed a normal prompt" symptom). A fresh menu has
-nothing to "clear" first — just select an option. Reserve `Escape` for genuinely backing out of a
+nothing to "clear" first — just select an option. In a **multi-question** batch, `Escape` declines
+*every* question at once (it logs "User declined to answer questions"), so never `Escape` to "reset"
+or retry a step — re-read and continue instead. Reserve `Escape` for genuinely backing out of a
 prompt you do **not** want to answer.
 
 **Tell the three states apart** (they're answered differently):
@@ -285,9 +287,13 @@ enter to confirm". (An animated prompt returns `settled:false`; a static one `se
   `send_keys`, **re-read**, and check the **highlighted option's *label*** (not the cursor's row —
   long lists scroll under a fixed `❯`); repeat until the target label is highlighted, then
   `send_keys ["Enter"]`.
-- **Multiselect** — read the current markers; for each option whose marker differs from desired,
-  navigate to it (verify by label), `send_keys ["Space"]` to toggle, re-read to confirm the marker
-  flipped; toggle only the deltas; then `send_keys ["Enter"]` to confirm the set.
+- **Multiselect (`[ ]` checkboxes)** — a **number** (or `Space`) *toggles* that option and **stays**
+  put (`Enter` on a row toggles it too). Type each option's number, **re-reading after each** to
+  confirm its `[ ]`↔`[✔]` flip (toggle only the deltas). To **finish**, `send_keys ["Tab"]` — Tab
+  jumps straight to the finish action — then re-read. **Don't type a number to finish:** the finish
+  action is an **unnumbered `Submit`/`Next` row below the options**, and the numbered `Type something`
+  just above it is a free-text option, *not* the finish button — confusing those two is the classic
+  multi-select mistake.
 - **Free-text ("Type something")** — these menus expose a numbered write-your-own entry (e.g.
   `4. Type something.`): `write_input { data:"4" }` to open the field, then
   `write_input { data:"your answer" }`, then `send_keys ["Enter"]`. (Or arrow to it, `Enter`, type,
@@ -296,8 +302,10 @@ enter to confirm". (An animated prompt returns `settled:false`; a static one `se
   `Question N of M` and a top tab bar (one box per question — `☐` unanswered, `☒` answered — ending
   in `✔ Submit`). **Answer all M before submitting.** A **single-select** question *auto-advances*
   to the next the moment you pick its number. A **multi-select** question (`[ ]` checkboxes) does
-  **not**: a number / `Space` / `Enter` only *toggles* the highlighted option, so toggle each one you
-  want, then arrow **Down** to the **`Next`** row and `send_keys ["Enter"]` to advance. After the
+  **not**: a number / `Space` / `Enter` only *toggles* an option, so toggle each one you want (read
+  after each), then `send_keys ["Tab"]` to reach the **`Next`** action and re-read — don't type a
+  number for it (`Next` is an *unnumbered* row, and `Type something` is a free-text option, not
+  `Next`). After the
   last question a **`Review your answers → 1. Submit answers / 2. Cancel`** screen appears — submit
   with `write_input { data:"1" }` **only when no `☐` remain**. If you reach Submit with questions
   still `☐`, `send_keys ["Left"]` back to them and answer first.
