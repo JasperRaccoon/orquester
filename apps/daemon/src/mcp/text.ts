@@ -38,16 +38,45 @@ export function cap(s: string, max = MAX_TEXT): string {
 }
 
 /**
- * Clean rendered text for an agent read. `captured` is a tmux capture-pane result
- * (already clean when taken with escapes:false) — used as-is when non-empty. When
- * empty (exited/destroyed pane, transient empty capture, or non-tmux host) fall
- * back to the ANSI-stripped hot ring, bounded to a POSITIVE `opts.lines`, else
- * SCREEN_ROWS. `lines:0` ("current screen") is meaningful only for the tmux capture
- * path — there is no rendered frame in the ring — so 0/unset both bound to
- * SCREEN_ROWS here rather than returning the whole ring (callers pass `?? 0`).
+ * Drop text rendered FAINT (SGR 2) — de-emphasized ghost/placeholder text such as a
+ * coding-agent's empty-composer hint (e.g. a greyed previous prompt), never primary
+ * content. Without this, a color-stripped read turns that ghost into what looks like
+ * real typed input ("the user prompt says …"). Every escape token is kept in place
+ * (stripAnsi removes them next); only the faint-styled TEXT is dropped. Faint turns on
+ * with SGR 2 and off with SGR 0 (reset) or 22 (normal intensity).
+ */
+export function stripFaint(input: string): string {
+  const sgr = /\x1b\[([0-9;]*)m/g;
+  let out = "";
+  let last = 0;
+  let faint = false;
+  let m: RegExpExecArray | null;
+  while ((m = sgr.exec(input)) !== null) {
+    if (!faint) out += input.slice(last, m.index); // keep non-faint text
+    out += m[0]; // keep the SGR token itself (stripAnsi drops it next)
+    for (const p of (m[1] === "" ? "0" : m[1]).split(";").map(Number)) {
+      if (p === 2) faint = true;
+      else if (p === 0 || p === 22) faint = false;
+    }
+    last = sgr.lastIndex;
+  }
+  if (!faint) out += input.slice(last);
+  return out;
+}
+
+/**
+ * Clean rendered text for an agent read. `captured` is a COLORED tmux capture
+ * (capture-pane -e): drop faint ghost/placeholder text, then strip the remaining ANSI.
+ * When the cleaned capture has no visible text (exited/destroyed pane, transient empty
+ * capture, or non-tmux host) fall back to the same-cleaned hot ring, bounded to a
+ * POSITIVE `opts.lines`, else SCREEN_ROWS. `lines:0` ("current screen") is meaningful
+ * only for the capture path — there is no rendered frame in the ring — so 0/unset both
+ * bound to SCREEN_ROWS here rather than returning the whole ring (callers pass `?? 0`).
  */
 export function renderText(captured: string, buffer: string, opts?: { lines?: number }): string {
   const want = opts?.lines && opts.lines > 0 ? opts.lines : SCREEN_ROWS;
-  const body = captured || tailLines(stripAnsi(buffer), want);
+  const clean = (s: string) => stripAnsi(stripFaint(s));
+  const screen = clean(captured);
+  const body = screen.trim() ? screen : tailLines(clean(buffer), want);
   return cap(trimTrailingBlankLines(body));
 }

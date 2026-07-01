@@ -307,11 +307,11 @@ export class SessionManager implements ISessionManager {
   }
 
   /**
-   * Clean rendered text for an agent read. A running tmux pane renders cleanly via
-   * capture-pane (escapes:false); an exited pane is destroyed (remain-on-exit off)
-   * and a running capture can transiently return "" — both fall back to the
-   * ANSI-stripped hot ring, bounded by `lines`. Mirrors scrollback()'s !session
-   * guard so a close() mid-call returns "" instead of throwing.
+   * Clean rendered text for an agent read. A running tmux pane is captured WITH color
+   * (captureAnsi) so renderText can drop faint ghost/placeholder text before stripping
+   * ANSI; an exited pane is destroyed (remain-on-exit off) and a running capture can
+   * transiently return "" — both fall back to the cleaned hot ring, bounded by `lines`.
+   * Mirrors scrollback()'s !session guard so a close() mid-call returns "" not throws.
    */
   async captureText(id: string, opts?: { lines?: number }): Promise<string> {
     const session = this.sessions.get(id);
@@ -320,7 +320,7 @@ export class SessionManager implements ISessionManager {
     }
     const captured =
       session.summary.status === "running"
-        ? await this.tmux.capturePane(id, { escapes: false, lines: opts?.lines ?? 0 })
+        ? await this.tmux.captureAnsi(id, opts?.lines ?? 0)
         : "";
     return renderText(captured, session.buffer, opts);
   }

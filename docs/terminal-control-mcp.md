@@ -177,7 +177,9 @@ single text content block** — parse `content[0].text` as JSON. Errors come bac
 
 - **`read_terminal`** — clean, ANSI-free rendered text. `lines` omitted/`0` = the current screen
   (≈ last 50 lines on the fallback path); `lines: N` includes the last `N` rows of scrollback.
-  Output is capped (~64 KB).
+  Output is capped (~64 KB). **Greyed placeholder/ghost text** (e.g. a coding-agent's empty-composer
+  hint — often a dimmed copy of the previous prompt) is **filtered out** (it's rendered faint), so a
+  lone `❯` reads as an empty box and can't be mistaken for something the user typed.
 - **`write_input`** — types `data` verbatim. `submit: true` appends Enter (CR). Use this for
   literal keystrokes too — menu shortcuts like `"1"`, `"y"`.
 - **`send_keys`** — named/control keys, **one logical action per call**. Recognized names:

@@ -264,6 +264,19 @@ export class Tmux {
     return result.code === 0 ? result.stdout : "";
   }
 
+  /**
+   * Colored + bounded capture for AGENT reads: capture-pane -e via captureArgs,
+   * deliberately WITHOUT the alt-screen replay framing capturePane() adds (that framing
+   * exists only to replay scrollback into a reconnecting client's buffer). text.ts then
+   * drops faint (ghost/placeholder) text and strips the remaining ANSI — keeping color is
+   * what lets a read tell a greyed placeholder from real typed input. lines:0 ⇒ current
+   * screen (-S 0), lines:N ⇒ last N rows (-S -N).
+   */
+  async captureAnsi(id: string, lines: number | "all" = 0): Promise<string> {
+    const result = await this.run(captureArgs(tmuxName(id), { escapes: true, lines }));
+    return result.code === 0 ? result.stdout : "";
+  }
+
   /** True if a live session named orq-<id> exists on this server. */
   async hasSession(id: string): Promise<boolean> {
     const result = await this.run(["has-session", "-t", tmuxName(id)]);

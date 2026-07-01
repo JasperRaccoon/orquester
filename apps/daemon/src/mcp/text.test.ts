@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { stripAnsi, trimTrailingBlankLines, tailLines, cap, renderText, SCREEN_ROWS, MAX_TEXT } from "./text.ts";
+import { stripAnsi, stripFaint, trimTrailingBlankLines, tailLines, cap, renderText, SCREEN_ROWS, MAX_TEXT } from "./text.ts";
 
 test("stripAnsi removes CSI, private CSI, and OSC", () => {
   assert.equal(stripAnsi("a\x1b[31mb\x1b[0mc"), "abc");
@@ -26,6 +26,21 @@ test("cap keeps the tail and prefixes a marker when over the limit", () => {
   assert.ok(out.startsWith("…[truncated]"));
   assert.ok(out.length < big.length);
   assert.equal(cap("short"), "short");
+});
+
+test("stripFaint drops faint (SGR 2) text but keeps normal-intensity text", () => {
+  // Exact bytes of a Claude Code empty composer: default-fg marker + NBSP, faint ghost.
+  assert.equal(stripAnsi(stripFaint("\x1b[39m❯\xa0\x1b[2mwatch the workflow progress\x1b[0m")).trim(), "❯");
+  assert.equal(stripFaint("\x1b[2mghost\x1b[22mreal"), "\x1b[2m\x1b[22mreal"); // 22 ends faint
+  assert.equal(stripFaint("\x1b[31mred\x1b[0m"), "\x1b[31mred\x1b[0m");         // no faint → unchanged
+});
+
+test("renderText drops a faint placeholder so an empty composer reads empty", () => {
+  const colored = "some output\n\x1b[39m❯\xa0\x1b[2mwatch the workflow progress\x1b[0m";
+  const out = renderText(colored, "ignored", {});
+  assert.ok(!out.includes("watch the workflow progress"), "ghost placeholder must be gone");
+  assert.ok(out.includes("some output"));
+  assert.ok(out.trimEnd().endsWith("❯"), "empty composer shows just the prompt marker");
 });
 
 test("renderText prefers the capture; falls back to stripped, bounded ring", () => {

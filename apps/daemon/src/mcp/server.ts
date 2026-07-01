@@ -49,7 +49,7 @@ Three on-screen states, each answered differently:
 
 1. INTERACTIVE MENU — numbered options with a \`❯\` cursor on the selected row and a hint line like "Enter to select · Tab/Arrow keys to navigate · Esc to cancel". Answer it by the option NUMBER: write_input the number (e.g. "2"), no submit — that selects it. For a "Type something"/write-your-own option, send its number, then write_input your text, then send_keys ["Enter"]. Or navigate: send_keys ONE ["Down"]/["Up"], re-read, confirm by the \`❯\`/label (not the row), then send_keys ["Enter"]. NEVER send ["Escape"] to a menu you intend to answer — the hint literally says "Esc to cancel"; Escape dismisses the whole widget and drops the agent to its normal input box, so your next write becomes a stray chat message. A fresh menu has nothing to "clear" first. Multi-question widgets show a tab bar ("← … ✔ Submit →"): answer the current question, send_keys ["Right"] to reach the next, and select Submit at the end.
 
-2. NORMAL INPUT BOX — a \`❯\` prompt with NO numbered options. Just write_input your text with submit:true. Do not press Escape or try to clear it first.
+2. NORMAL INPUT BOX — a \`❯\` prompt with NO numbered options. Just write_input your text with submit:true. Do not press Escape or try to clear it first. Greyed placeholder/ghost hints are filtered out of your read, so a lone \`❯\` means the box is EMPTY — the user has not typed anything; do not treat a leftover hint as "the user's prompt".
 
 3. PROSE SUGGESTIONS — a numbered list written inside the agent's reply (no \`❯\` cursor, no "Enter to select" hint) is NOT a menu. Answer by typing a normal message (write_input, submit:true).`;
 
