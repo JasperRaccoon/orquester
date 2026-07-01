@@ -251,7 +251,25 @@ regardless of `settled`:**
 
 Coding agents (Claude Code, Codex, Gemini) and many CLIs ask **interactive questions** —
 single-select menus, multiselects, free-text — as a TUI. There is no structured channel; you
-answer them the way a human does: **read the screen, send keystrokes.**
+answer them the way a human does: **read the screen, send keystrokes.** (The daemon also ships a
+condensed version of this section as the MCP `instructions` block, so an MCP-aware client surfaces
+it to the driving model automatically — but read this for the full picture.)
+
+**⚠️ The one mistake that breaks everything: don't `Escape` a menu you mean to answer.** A real
+select-menu's own hint reads *"Esc to cancel"* — `send_keys ["Escape"]` dismisses the whole widget
+and drops the agent back to its **normal input box**, so your *next* `write_input` becomes a stray
+chat message (the classic "it just sent esc then typed a normal prompt" symptom). A fresh menu has
+nothing to "clear" first — just select an option. Reserve `Escape` for genuinely backing out of a
+prompt you do **not** want to answer.
+
+**Tell the three states apart** (they're answered differently):
+
+1. **Interactive menu** — numbered options with a `❯` cursor and a hint like *"Enter to select ·
+   Tab/Arrow keys to navigate · Esc to cancel"*. Answer by the **option number** (see below).
+2. **Normal input box** — a `❯` prompt with **no** numbered options. Just
+   `write_input { data:"…", submit:true }`. Don't Escape or clear it first.
+3. **Prose suggestions** — a numbered list *inside the agent's written reply* (no `❯` cursor, no
+   "Enter to select" hint) is **not** a menu. Answer by typing a normal message.
 
 **Detect a prompt from the rendered `text`, regardless of `settled`** — a question + option list,
 a `❯`/highlight cursor, checkbox markers (`◉/◯`, `[x]/[ ]`), hint text like "space to select,
@@ -266,12 +284,16 @@ enter to confirm". (An animated prompt returns `settled:false`; a static one `se
 - **Multiselect** — read the current markers; for each option whose marker differs from desired,
   navigate to it (verify by label), `send_keys ["Space"]` to toggle, re-read to confirm the marker
   flipped; toggle only the deltas; then `send_keys ["Enter"]` to confirm the set.
-- **Free-text** — navigate to the "write your own" entry (or `Tab` to the field),
-  `write_input { data:"your answer" }`, `send_keys ["Enter"]`. A plain inline prompt:
-  `write_input { data:"your answer", submit:true }`.
+- **Free-text ("Type something")** — these menus expose a numbered write-your-own entry (e.g.
+  `4. Type something.`): `write_input { data:"4" }` to open the field, then
+  `write_input { data:"your answer" }`, then `send_keys ["Enter"]`. (Or arrow to it, `Enter`, type,
+  `Enter`.) A plain inline prompt with no menu: `write_input { data:"your answer", submit:true }`.
+- **Multi-question widgets** show a tab bar (`← … ✔ Submit →`): answer the current question, then
+  `send_keys ["Right"]` to reach the next, and select **Submit** at the end.
 
 **Rules that make it reliable**
 
+- **Never `Escape` a menu you mean to answer** (see the warning above) — it cancels the question.
 - **One key at a time, read between.** Don't batch `["Down","Down","Enter"]` in one `send_keys` —
   concatenated to a single PTY write it can submit before the TUI consumes the arrows. Keep the
   confirming `Enter` in its own call.

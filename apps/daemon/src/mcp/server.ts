@@ -35,12 +35,33 @@ const sel = {
   tab: z.string().optional(),
   tabId: z.string().optional(),
 };
-const PROMPT_HINT =
-  " For interactive prompts (menus): read the screen regardless of `settled`, prefer a number/letter shortcut via write_input, else send ONE arrow via send_keys and re-read; confirm with Enter.";
+/**
+ * Global playbook surfaced to the driving client in the `initialize` result (the
+ * one place it's guaranteed to read — it never sees the .md doc). Teaches the three
+ * on-screen states because the #1 failure is treating a real select-menu like the
+ * normal input box: the agent sends Escape to "clear" it, but the menu's own hint
+ * says "Esc to cancel" — so it dismisses the question and the next write lands in
+ * the composer as a stray message.
+ */
+export const SERVER_INSTRUCTIONS = `Orquester terminal-control — observe and drive Orquester's terminal & coding-agent tabs, addressed as (workspace, project, tab) or by tabId. Always read_terminal (or the returned \`text\`) before AND after acting; a live spinner keeps settled:false even while the tab waits for you, so judge from \`text\`, not \`settled\`. Send ONE key per send_keys and read between.
+
+Three on-screen states, each answered differently:
+
+1. INTERACTIVE MENU — numbered options with a \`❯\` cursor on the selected row and a hint line like "Enter to select · Tab/Arrow keys to navigate · Esc to cancel". Answer it by the option NUMBER: write_input the number (e.g. "2"), no submit — that selects it. For a "Type something"/write-your-own option, send its number, then write_input your text, then send_keys ["Enter"]. Or navigate: send_keys ONE ["Down"]/["Up"], re-read, confirm by the \`❯\`/label (not the row), then send_keys ["Enter"]. NEVER send ["Escape"] to a menu you intend to answer — the hint literally says "Esc to cancel"; Escape dismisses the whole widget and drops the agent to its normal input box, so your next write becomes a stray chat message. A fresh menu has nothing to "clear" first. Multi-question widgets show a tab bar ("← … ✔ Submit →"): answer the current question, send_keys ["Right"] to reach the next, and select Submit at the end.
+
+2. NORMAL INPUT BOX — a \`❯\` prompt with NO numbered options. Just write_input your text with submit:true. Do not press Escape or try to clear it first.
+
+3. PROSE SUGGESTIONS — a numbered list written inside the agent's reply (no \`❯\` cursor, no "Enter to select" hint) is NOT a menu. Answer by typing a normal message (write_input, submit:true).`;
+
+export const PROMPT_HINT =
+  " If the tab shows an interactive MENU (numbered options + `❯` cursor + an 'Esc to cancel' hint), answer by write_input-ing the option NUMBER (for a 'Type something' option, send its number, then your text, then Enter) — or send ONE send_keys arrow then Enter. NEVER send Escape to a menu you mean to answer: it cancels the question and your next write becomes a stray message. A plain `❯` input box (no numbered options): just write_input with submit:true. Read the screen regardless of `settled`.";
 
 /** Build a per-request McpServer with all 11 tools bound to `control`. */
 function buildServer(control: TerminalControl, signal: AbortSignal): McpServer {
-  const server = new McpServer({ name: "orquester", version: "1.0.0" });
+  const server = new McpServer(
+    { name: "orquester", version: "1.0.0" },
+    { instructions: SERVER_INSTRUCTIONS }
+  );
   const tool = (
     name: string,
     description: string,
