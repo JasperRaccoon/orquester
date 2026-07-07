@@ -54,11 +54,13 @@ async function claudeTests() {
   assert.ok(good);
   assert.equal(good.stale, false);
   assert.equal(good.session?.percent, 45);
+  assert.ok(good.asOf, "fresh reading stamps asOf");
   mode = "429";
   const stale = await src();
   assert.ok(stale);
   assert.equal(stale.stale, true);
   assert.equal(stale.session?.percent, 45, "stale shows last-known 45%");
+  assert.equal(stale.asOf, good.asOf, "stale reuses the last good reading's asOf");
 
   // No creds file → genuinely not logged in (null → widget shows "not logged in").
   const empty = await mkdtemp(join(tmpdir(), "usage-empty-"));
@@ -101,6 +103,7 @@ async function codexTests() {
   assert.equal(a.session?.percent, 3);
   assert.equal(a.weekly?.percent, 37);
   assert.equal(a.plan, "Pro");
+  assert.ok(a.asOf, "codex reading stamps asOf");
 
   // API-key mode → null (no subscription quota to read).
   await writeFile(join(codex, "auth.json"), JSON.stringify({ OPENAI_API_KEY: "sk-x" }));

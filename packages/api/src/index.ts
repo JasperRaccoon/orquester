@@ -377,6 +377,8 @@ export interface AgentUsage {
   /** rolling 5-hour window. */
   session: UsageWindow | null;
   weekly: UsageWindow | null;
+  /** ISO time the reading was actually obtained (for an honest "as of"). */
+  asOf?: string;
 }
 
 export interface UsageResponse {

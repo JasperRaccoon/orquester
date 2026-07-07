@@ -77,8 +77,8 @@ export function createClaudeSource(opts: {
       }
       const agent = parseClaudeUsage(await res.json(), creds, now);
       if (agent.available) {
-        lastGood = agent;
-        return agent;
+        lastGood = { ...agent, asOf: new Date(now).toISOString() };
+        return lastGood;
       }
       return signedIn(); // 200 but unparseable → still signed in, no number yet
     } catch (err) {
@@ -139,7 +139,7 @@ export function createCodexSource(opts: {
       const rateLimits = findLastCodexTokenCount(text.split("\n"));
       if (!rateLimits) continue;
       const agent = parseCodexUsage(rateLimits, opts.now());
-      if (agent.available) return agent;
+      if (agent.available) return { ...agent, asOf: new Date(opts.now()).toISOString() };
     }
     // Signed in but no usable reading yet → present + updating (not "not logged in").
     return signedIn ? { id: "codex", available: true, stale: true, session: null, weekly: null } : null;

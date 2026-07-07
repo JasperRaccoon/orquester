@@ -65,6 +65,22 @@ export function gaugeClass(pct: number): string {
   }
 }
 
+/** Minutes since an ISO timestamp (Infinity when absent/unparseable). */
+export function minutesSince(asOf: string | undefined, now: number): number {
+  if (!asOf) return Infinity;
+  const t = Date.parse(asOf);
+  return Number.isNaN(t) ? Infinity : Math.max(0, (now - t) / 60_000);
+}
+
+/** Human "as of" age: "just now" / "Xm ago" / "Xh ago" ("" when absent). */
+export function formatAgo(asOf: string | undefined, now: number): string {
+  const m = minutesSince(asOf, now);
+  if (!Number.isFinite(m)) return "";
+  if (m < 1) return "just now";
+  if (m < 60) return `${Math.floor(m)}m ago`;
+  return `${Math.floor(m / 60)}h ago`;
+}
+
 export function formatClock(iso: string): string {
   const d = new Date(iso);
   return Number.isNaN(d.getTime())

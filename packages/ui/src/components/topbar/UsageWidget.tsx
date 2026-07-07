@@ -4,7 +4,7 @@ import type { AgentUsage } from "@orquester/api";
 import { AdaptiveMenu } from "../ui";
 import { getRegistryIcon } from "../../icons";
 import { useAppStore } from "../../store/app";
-import { barClass, formatClock, formatCountdown, gaugeClass, pickDriver, windowMax } from "./usage-format";
+import { barClass, formatAgo, formatClock, formatCountdown, gaugeClass, minutesSince, pickDriver, windowMax } from "./usage-format";
 
 const AGENT_LABEL: Record<AgentUsage["id"], string> = { claude: "Claude Code", codex: "Codex" };
 
@@ -27,21 +27,29 @@ const Bar: React.FC<{ label: string; window: AgentUsage["session"]; muted: boole
   );
 };
 
-const AgentSection: React.FC<{ agent: AgentUsage }> = ({ agent }) => (
-  <div className="px-3 py-2">
-    <div className="flex items-center justify-between">
-      <p className="text-sm text-neutral-200">{AGENT_LABEL[agent.id]} Usage</p>
-      {agent.plan && <span className="text-xs text-neutral-500">{agent.plan}</span>}
+/** A reading older than this reads as stale in the panel. */
+const STALE_MIN = 10;
+
+const AgentSection: React.FC<{ agent: AgentUsage }> = ({ agent }) => {
+  const hasData = agent.session || agent.weekly;
+  const isOld = minutesSince(agent.asOf, Date.now()) > STALE_MIN;
+  const muted = !hasData || isOld;
+  return (
+    <div className="px-3 py-2">
+      <div className="flex items-center justify-between">
+        <p className="text-sm text-neutral-200">{AGENT_LABEL[agent.id]} Usage</p>
+        {agent.plan && <span className="text-xs text-neutral-500">{agent.plan}</span>}
+      </div>
+      {!hasData ? (
+        <p className="text-[11px] text-amber-400">Signed in — usage updating…</p>
+      ) : isOld ? (
+        <p className="text-[11px] text-amber-400">Updated {formatAgo(agent.asOf, Date.now())}</p>
+      ) : null}
+      <Bar label="Current session (5 hours)" window={agent.session} muted={muted} />
+      <Bar label="Current week" window={agent.weekly} muted={muted} />
     </div>
-    {agent.stale && (
-      <p className="text-[11px] text-amber-400">
-        {agent.session || agent.weekly ? "Last known — updating…" : "Signed in — usage updating…"}
-      </p>
-    )}
-    <Bar label="Current session (5 hours)" window={agent.session} muted={agent.stale} />
-    <Bar label="Current week" window={agent.weekly} muted={agent.stale} />
-  </div>
-);
+  );
+};
 
 export const UsageWidget: React.FC = () => {
   const usage = useAppStore((s) => s.usage);
@@ -59,10 +67,18 @@ export const UsageWidget: React.FC = () => {
   // in the live snapshot) get a muted, actionable row in the panel.
   const present = new Set(agents.map((a) => a.id));
   const missing = (["claude", "codex"] as const).filter((id) => prefs[id] && !present.has(id));
+  // Honest "as of": the most recent successful reading among the shown agents.
+  const freshestAsOf = agents
+    .map((a) => a.asOf)
+    .filter((x): x is string => !!x)
+    .sort()
+    .at(-1);
 
   const cell = (w: AgentUsage["session"]) => (w ? `${Math.round(w.percent)}%` : "—");
   const chipText = `${cell(driver.session)} • ${cell(driver.weekly)}`;
-  const gauge = driver.stale ? "text-neutral-600" : gaugeClass(windowMax(driver));
+  // Color by usage level whenever we have a number (even if stale — the value is
+  // still real); grey only when there's no reading yet.
+  const gauge = driver.session || driver.weekly ? gaugeClass(windowMax(driver)) : "text-neutral-600";
   const trigger = (
     <span className="flex h-7 items-center gap-1.5 rounded-md px-2 text-xs font-medium text-neutral-300 hover:bg-neutral-800">
       {getRegistryIcon("agent", driver.id, 13)}
@@ -75,7 +91,7 @@ export const UsageWidget: React.FC = () => {
   return (
     <AdaptiveMenu title="Usage" trigger={trigger} align="right" width="w-72">
       <div className="flex items-center justify-between px-3 pt-2 text-[11px] text-neutral-500">
-        <span>Updated {formatClock(usage.updatedAt)}</span>
+        <span>{freshestAsOf ? `Updated ${formatClock(freshestAsOf)}` : "Updating…"}</span>
         <button
           type="button"
           className="rounded p-1 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200"

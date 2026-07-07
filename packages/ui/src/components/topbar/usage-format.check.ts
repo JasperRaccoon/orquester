@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import type { AgentUsage } from "@orquester/api";
-import { barClass, formatCountdown, gaugeClass, pickDriver, usageLevel, windowMax } from "./usage-format";
+import { barClass, formatAgo, formatCountdown, gaugeClass, minutesSince, pickDriver, usageLevel, windowMax } from "./usage-format";
 
 const claude: AgentUsage = { id: "claude", available: true, stale: false, session: { percent: 10 }, weekly: { percent: 20 } };
 const codex: AgentUsage = { id: "codex", available: true, stale: false, session: { percent: 80 }, weekly: { percent: 5 } };
@@ -32,5 +32,14 @@ assert.match(gaugeClass(10), /emerald/);
 assert.match(gaugeClass(95), /red/);
 // windowMax = the worse of session/weekly (codex: max(80, 5)).
 assert.equal(windowMax(codex), 80);
+
+// "as of" age helpers.
+const t0 = Date.parse("2026-07-07T08:00:00Z");
+assert.equal(minutesSince(undefined, t0), Infinity);
+assert.equal(minutesSince("2026-07-07T07:50:00Z", t0), 10);
+assert.equal(formatAgo("2026-07-07T07:59:40Z", t0), "just now");
+assert.equal(formatAgo("2026-07-07T07:46:00Z", t0), "14m ago");
+assert.equal(formatAgo("2026-07-07T06:00:00Z", t0), "2h ago");
+assert.equal(formatAgo(undefined, t0), "");
 
 console.log("usage-format.check OK");
