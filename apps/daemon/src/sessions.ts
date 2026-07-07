@@ -9,6 +9,7 @@ import { spawn, type IPty } from "node-pty";
 import type { RegistryService } from "./registry";
 import { Tmux, sessionEnvBase, sessionPath, tmuxAvailable, tmuxName, tmuxVersionOk } from "./tmux";
 import { renderText } from "./mcp/text.ts";
+import { ActivityTracker, type ActivitySnapshot } from "./ansi-activity.ts";
 
 /**
  * Small live ring kept only for HOT replay between a session's creation and the
@@ -22,6 +23,7 @@ interface Session {
   /** Streaming PTY: `tmux attach -t orq-<id>`. Null once exited. */
   pty: IPty | null;
   buffer: string;
+  tracker: ActivityTracker;
   emitter: EventEmitter;
 }
 
@@ -36,7 +38,7 @@ export class SessionError extends Error {}
  * `shutdown` are still present on the local backend (they just don't persist).
  */
 export interface ISessionManager {
-  /** Emits "created" | "exited" | "updated" (SessionSummary) and "closed" ({ id }). */
+  /** Emits "created" | "exited" | "updated" (SessionSummary), "closed" ({ id }), and "activity" ({ id, type: "bell" }). */
   readonly lifecycle: EventEmitter;
   create(req: CreateSessionRequest): SessionSummary;
   list(projectPath?: string): SessionSummary[];
@@ -47,6 +49,7 @@ export interface ISessionManager {
   captureText(id: string, opts?: { lines?: number }): Promise<string>;
   /** Synchronous hot-ring snapshot (kept for callers that can't await). */
   buffer(id: string): string;
+  activity(id: string): ActivitySnapshot | undefined;
   input(id: string, data: string): void;
   resize(id: string, cols: number, rows: number): void;
   rename(id: string, title: string): SessionSummary | undefined;
@@ -104,7 +107,7 @@ export class SessionManager implements ISessionManager {
   private sessions = new Map<string, Session>();
   /** Coalesces resize-driven index writes (≤ one per second) so the latest size persists. */
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Emits "created" | "exited" | "updated" (SessionSummary) and "closed" ({ id }). */
+  /** Emits "created" | "exited" | "updated" (SessionSummary), "closed" ({ id }), and "activity" ({ id, type: "bell" }). */
   readonly lifecycle = new EventEmitter();
 
   constructor(
@@ -144,7 +147,7 @@ export class SessionManager implements ISessionManager {
       createdAt: new Date().toISOString()
     };
 
-    const session: Session = { summary, pty: null, buffer: "", emitter: new EventEmitter() };
+    const session: Session = { summary, pty: null, buffer: "", tracker: new ActivityTracker(), emitter: new EventEmitter() };
     this.sessions.set(id, session);
 
     // 1) Spawn the command INSIDE tmux (detached), 2) attach a streaming PTY to
@@ -244,7 +247,13 @@ export class SessionManager implements ISessionManager {
     session.pty = pty;
 
     pty.onData((data) => {
+      if (this.sessions.get(id) !== session) {
+        return;
+      }
       session.buffer = (session.buffer + data).slice(-MAX_BUFFER);
+      if (session.tracker.onOutput(data, Date.now())) {
+        this.lifecycle.emit("activity", { id, type: "bell" });
+      }
       session.emitter.emit("output", data);
     });
     pty.onExit(({ exitCode }) => {
@@ -330,8 +339,14 @@ export class SessionManager implements ISessionManager {
     return this.sessions.get(id)?.buffer ?? "";
   }
 
+  activity(id: string): ActivitySnapshot | undefined {
+    return this.sessions.get(id)?.tracker.snapshot();
+  }
+
   input(id: string, data: string): void {
-    this.sessions.get(id)?.pty?.write(data);
+    const session = this.sessions.get(id);
+    session?.tracker.onInput();
+    session?.pty?.write(data);
   }
 
   resize(id: string, cols: number, rows: number): void {
@@ -516,7 +531,7 @@ export class SessionManager implements ISessionManager {
         order: record.order,
         createdAt: record.createdAt
       };
-      const session: Session = { summary, pty: null, buffer: "", emitter: new EventEmitter() };
+      const session: Session = { summary, pty: null, buffer: "", tracker: new ActivityTracker(), emitter: new EventEmitter() };
       this.sessions.set(record.id, session);
       this.attach(session);
     }
@@ -603,7 +618,7 @@ export class SessionManager implements ISessionManager {
  */
 export class LocalSessionManager implements ISessionManager {
   private sessions = new Map<string, Session>();
-  /** Emits "created" | "exited" | "updated" (SessionSummary) and "closed" ({ id }). */
+  /** Emits "created" | "exited" | "updated" (SessionSummary), "closed" ({ id }), and "activity" ({ id, type: "bell" }). */
   readonly lifecycle = new EventEmitter();
 
   constructor(private readonly registry: RegistryService) {}
@@ -646,11 +661,17 @@ export class LocalSessionManager implements ISessionManager {
       createdAt: new Date().toISOString()
     };
 
-    const session: Session = { summary, pty, buffer: "", emitter: new EventEmitter() };
+    const session: Session = { summary, pty, buffer: "", tracker: new ActivityTracker(), emitter: new EventEmitter() };
     this.sessions.set(id, session);
 
     pty.onData((data) => {
+      if (this.sessions.get(id) !== session) {
+        return;
+      }
       session.buffer = (session.buffer + data).slice(-MAX_BUFFER);
+      if (session.tracker.onOutput(data, Date.now())) {
+        this.lifecycle.emit("activity", { id, type: "bell" });
+      }
       session.emitter.emit("output", data);
     });
     pty.onExit(({ exitCode }) => {
@@ -703,8 +724,14 @@ export class LocalSessionManager implements ISessionManager {
     return this.sessions.get(id)?.buffer ?? "";
   }
 
+  activity(id: string): ActivitySnapshot | undefined {
+    return this.sessions.get(id)?.tracker.snapshot();
+  }
+
   input(id: string, data: string): void {
-    this.sessions.get(id)?.pty?.write(data);
+    const session = this.sessions.get(id);
+    session?.tracker.onInput();
+    session?.pty?.write(data);
   }
 
   resize(id: string, cols: number, rows: number): void {
