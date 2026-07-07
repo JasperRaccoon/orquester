@@ -1,12 +1,14 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, Check, Copy } from "lucide-react";
 import type { GitCommitDetail, GitCommitFile, GitFileStatus, GitLogEntry } from "@orquester/api";
 import { cn } from "../../lib/cn";
 import { copyText } from "../../lib/clipboard";
-import { Button } from "../ui";
+import { Button, ResizeHandle } from "../ui";
 import { DiffView } from "./DiffView";
 import { useApi } from "../../context/orquester-context";
 import { useIsDesktop } from "../../hooks";
+import { useAppStore, usePaneSizes } from "../../store/app";
+import { PANE_DEFAULTS, PANE_FLEX_RESERVE, clampPaneWidth } from "../../lib/panel-sizes";
 
 const PAGE = 50;
 
@@ -85,6 +87,16 @@ interface HistoryPanelProps {
 export const HistoryPanel: React.FC<HistoryPanelProps> = ({ projectPath, reloadToken = 0 }) => {
   const api = useApi();
   const isDesktop = useIsDesktop();
+  const setPaneSize = useAppStore((s) => s.setPaneSize);
+  const resetPaneSize = useAppStore((s) => s.resetPaneSize);
+  const paneSizes = usePaneSizes();
+  const commitsWidth = paneSizes.gitHistoryCommits ?? PANE_DEFAULTS.gitHistoryCommits;
+  const filesWidth = paneSizes.gitHistoryFiles ?? PANE_DEFAULTS.gitHistoryFiles;
+  // The outer flex row (commit list + right area) and the nested row (files list
+  // + diff). Each seam clamps against its own container's live width so both the
+  // right area and the diff keep a usable floor.
+  const outerRowRef = useRef<HTMLDivElement>(null);
+  const filesRowRef = useRef<HTMLDivElement>(null);
   const [commits, setCommits] = useState<GitLogEntry[]>([]);
   const [loadingLog, setLoadingLog] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -217,13 +229,22 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({ projectPath, reloadT
   );
 
   return (
-    <div className="flex h-full min-h-0 bg-neutral-950">
-      {/* Commit list (full width on mobile until a commit is picked) */}
+    <div ref={outerRowRef} className="flex h-full min-h-0 bg-neutral-950">
+      {/* Commit list (full width on mobile until a commit is picked). Keeps its
+          border-box border-r; the zero-footprint ResizeHandle seam below paints
+          only on hover/drag. */}
       <div
         className={cn(
-          "min-h-0 flex-col border-r border-neutral-800 md:flex md:w-72 md:shrink-0",
+          "min-h-0 flex-col border-r border-neutral-800 md:flex md:shrink-0",
           selectedSha ? "hidden md:flex" : "flex w-full"
         )}
+        // Inline style beats the mobile w-full class, so gate it to desktop. The
+        // maxWidth guard keeps the right area (and divider) reachable on a narrow row.
+        style={
+          isDesktop
+            ? { width: commitsWidth, maxWidth: `calc(100% - ${PANE_FLEX_RESERVE}px)` }
+            : undefined
+        }
       >
         <div className="flex h-9 shrink-0 items-center border-b border-neutral-800 px-2.5">
           <span className="text-xs text-neutral-500">History</span>
@@ -260,6 +281,22 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({ projectPath, reloadT
           )}
         </div>
       </div>
+
+      {/* Draggable seam between the commit list and the right area (desktop only). */}
+      <ResizeHandle
+        orientation="vertical"
+        className="hidden md:block"
+        aria-label="Resize commit list"
+        disabled={!isDesktop}
+        getCurrent={() =>
+          useAppStore.getState().paneSizesByProject[projectPath]?.gitHistoryCommits ??
+          PANE_DEFAULTS.gitHistoryCommits
+        }
+        clamp={(px) => clampPaneWidth(px, outerRowRef.current)}
+        onResize={(px) => setPaneSize(projectPath, "gitHistoryCommits", px, false)}
+        onCommit={(px) => setPaneSize(projectPath, "gitHistoryCommits", px)}
+        onReset={() => resetPaneSize(projectPath, "gitHistoryCommits")}
+      />
 
       {/* Right area: commit-detail band above the files + diff row */}
       <div
@@ -300,13 +337,22 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({ projectPath, reloadT
         )}
 
         {/* Files list + diff */}
-        <div className="flex min-h-0 flex-1">
-          {/* Commit's changed files (mobile: shown once a commit is picked, until a file is) */}
+        <div ref={filesRowRef} className="flex min-h-0 flex-1">
+          {/* Commit's changed files (mobile: shown once a commit is picked, until
+              a file is). Keeps its border-box border-r; the zero-footprint
+              ResizeHandle seam below paints only on hover/drag. */}
           <div
             className={cn(
-              "min-h-0 flex-col border-r border-neutral-800 md:flex md:w-72 md:shrink-0",
+              "min-h-0 flex-col border-r border-neutral-800 md:flex md:shrink-0",
               selectedSha && !selectedFile ? "flex w-full" : "hidden md:flex"
             )}
+            // Inline style beats the mobile w-full class, so gate it to desktop. The
+            // maxWidth guard keeps the diff pane (and divider) reachable on a narrow row.
+            style={
+              isDesktop
+                ? { width: filesWidth, maxWidth: `calc(100% - ${PANE_FLEX_RESERVE}px)` }
+                : undefined
+            }
           >
             <div className="flex h-9 shrink-0 items-center gap-2 border-b border-neutral-800 px-2">
               <button
@@ -338,6 +384,22 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({ projectPath, reloadT
               )}
             </div>
           </div>
+
+          {/* Draggable seam between the files list and the diff (desktop only). */}
+          <ResizeHandle
+            orientation="vertical"
+            className="hidden md:block"
+            aria-label="Resize changed-files list"
+            disabled={!isDesktop}
+            getCurrent={() =>
+              useAppStore.getState().paneSizesByProject[projectPath]?.gitHistoryFiles ??
+              PANE_DEFAULTS.gitHistoryFiles
+            }
+            clamp={(px) => clampPaneWidth(px, filesRowRef.current)}
+            onResize={(px) => setPaneSize(projectPath, "gitHistoryFiles", px, false)}
+            onCommit={(px) => setPaneSize(projectPath, "gitHistoryFiles", px)}
+            onReset={() => resetPaneSize(projectPath, "gitHistoryFiles")}
+          />
 
           {/* Diff pane (full width on mobile when a file is selected) */}
           <div className={cn("min-w-0 flex-1 flex-col", selectedFile ? "flex" : "hidden md:flex")}>

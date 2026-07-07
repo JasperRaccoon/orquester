@@ -19,6 +19,25 @@ import {
   loadTerminalFontSize,
   saveTerminalFontSize
 } from "../lib/terminal-font";
+import {
+  clampPaneSize,
+  clampSidebarWidth,
+  loadGridTracks,
+  loadPaneSizes,
+  loadSidebarWidth,
+  normalizeGridTracks,
+  persistGridTracks,
+  persistGridTracksReset,
+  persistPaneSize,
+  persistPaneSizeReset,
+  saveGridTracks,
+  savePaneSizes,
+  saveSidebarWidth,
+  SIDEBAR_DEFAULT,
+  type GridTracks,
+  type PaneSizeKey,
+  type PaneSizes
+} from "../lib/panel-sizes";
 import type { AppConfigAdapter } from "../lib/app-config";
 import type { HttpClient } from "../lib/http-client";
 import type { Transporter } from "../lib/transporter";
@@ -52,6 +71,15 @@ const EMPTY_REGISTRY: RegistryResponse = {
 };
 
 const DEFAULT_USAGE_PREFS: UsagePrefs = { enabled: true, claude: true, codex: true, chip: "busiest" };
+
+/**
+ * Stable empty pane-sizes object for the {@link usePaneSizes} fallback. A fresh
+ * `{}` per render would change the zustand snapshot identity every time and loop
+ * React (the #185 trap documented on {@link useCurrentContext}); this shared
+ * frozen ref keeps the selector referentially stable when a project has no
+ * stored sizes.
+ */
+const EMPTY_PANE_SIZES: PaneSizes = Object.freeze({});
 
 /** Replace a registry entry (matched by id within its kind) with a fresh copy. */
 function applyRegistryEntry(registry: RegistryResponse, entry: RegistryEntry): RegistryResponse {
@@ -485,6 +513,12 @@ export interface AppState {
   viewModeByProject: Record<string, ViewMode>;
   /** Global terminal font size (px); persisted client-side, per device. */
   terminalFontSize: number;
+  /** Global sidebar width (px); persisted client-side, per device. */
+  sidebarWidth: number;
+  /** Per-project pane-split widths (px); persisted client-side, per device. */
+  paneSizesByProject: Record<string, PaneSizes>;
+  /** Per-project grid-view track fraction weights; persisted client-side, per device. */
+  gridTracksByProject: Record<string, GridTracks>;
 
   setApi: (api: ApiClient) => void;
   connect: () => Promise<void>;
@@ -546,6 +580,27 @@ export interface AppState {
   setViewMode: (mode: ViewMode) => void;
   setTerminalFontSize: (size: number) => void;
   nudgeTerminalFontSize: (delta: number) => void;
+  /**
+   * Set the sidebar width (clamped). Pass `persist=false` for live drag frames
+   * (store-only, no localStorage write); the default `true` commits + persists.
+   */
+  setSidebarWidth: (px: number, persist?: boolean) => void;
+  /** Reset the sidebar to its default width and persist. */
+  resetSidebarWidth: () => void;
+  /**
+   * Set one pane split for a project (clamped). Pass `persist=false` for live
+   * drag frames; the default `true` commits + persists.
+   */
+  setPaneSize: (projectPath: string, key: PaneSizeKey, px: number, persist?: boolean) => void;
+  /** Clear one pane split for a project (falls back to its default) and persist. */
+  resetPaneSize: (projectPath: string, key: PaneSizeKey) => void;
+  /**
+   * Set a project's grid-view track weights. Pass `persist=false` for live drag
+   * frames; the default `true` commits + persists.
+   */
+  setGridTracks: (projectPath: string, tracks: GridTracks, persist?: boolean) => void;
+  /** Clear a project's grid tracks (falls back to uniform) and persist. */
+  resetGridTracks: (projectPath: string) => void;
   renameTab: (id: string, title: string) => Promise<void>;
   reorderTabs: (orderedSessionIds: string[]) => Promise<void>;
 
@@ -599,6 +654,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   activeTabByProject: {},
   viewModeByProject: loadViewModes(),
   terminalFontSize: loadTerminalFontSize(),
+  sidebarWidth: loadSidebarWidth(),
+  paneSizesByProject: loadPaneSizes(),
+  gridTracksByProject: loadGridTracks(),
 
   setApi: (api) => set({ api }),
 
@@ -1339,6 +1397,78 @@ export const useAppStore = create<AppState>((set, get) => ({
       return { terminalFontSize: next };
     }),
 
+  setSidebarWidth: (px, persist = true) =>
+    set(() => {
+      const sidebarWidth = clampSidebarWidth(px);
+      if (persist) {
+        saveSidebarWidth(sidebarWidth);
+      }
+      return { sidebarWidth };
+    }),
+
+  resetSidebarWidth: () =>
+    set(() => {
+      saveSidebarWidth(SIDEBAR_DEFAULT);
+      return { sidebarWidth: SIDEBAR_DEFAULT };
+    }),
+
+  setPaneSize: (projectPath, key, px, persist = true) =>
+    set((state) => {
+      const current = state.paneSizesByProject[projectPath];
+      const paneSizesByProject = {
+        ...state.paneSizesByProject,
+        [projectPath]: { ...current, [key]: clampPaneSize(px) }
+      };
+      // Persist via a read-merge-write so a commit here can't clobber another
+      // tab's freshly-persisted field for the same project.
+      if (persist) {
+        persistPaneSize(projectPath, key, px);
+      }
+      return { paneSizesByProject };
+    }),
+
+  resetPaneSize: (projectPath, key) =>
+    set((state) => {
+      const current = state.paneSizesByProject[projectPath];
+      if (!current || current[key] === undefined) {
+        return state;
+      }
+      const entry = { ...current };
+      delete entry[key];
+      const paneSizesByProject = { ...state.paneSizesByProject };
+      if (Object.keys(entry).length === 0) {
+        delete paneSizesByProject[projectPath];
+      } else {
+        paneSizesByProject[projectPath] = entry;
+      }
+      persistPaneSizeReset(projectPath, key);
+      return { paneSizesByProject };
+    }),
+
+  setGridTracks: (projectPath, tracks, persist = true) =>
+    set((state) => {
+      // On commit, normalize so stored magnitudes stay bounded (mean 1) no matter
+      // how many drags accumulate; the preview (persist=false) keeps raw weights
+      // and renders identically (weights are normalized at render either way).
+      const entry = persist ? normalizeGridTracks(tracks) : tracks;
+      const gridTracksByProject = { ...state.gridTracksByProject, [projectPath]: entry };
+      if (persist) {
+        persistGridTracks(projectPath, tracks);
+      }
+      return { gridTracksByProject };
+    }),
+
+  resetGridTracks: (projectPath) =>
+    set((state) => {
+      if (!state.gridTracksByProject[projectPath]) {
+        return state;
+      }
+      const gridTracksByProject = { ...state.gridTracksByProject };
+      delete gridTracksByProject[projectPath];
+      persistGridTracksReset(projectPath);
+      return { gridTracksByProject };
+    }),
+
   renameTab: async (id, title) => {
     const trimmed = title.trim();
     // Optimistic only when non-empty; an empty title is resolved to the default
@@ -1711,6 +1841,18 @@ function clearProjectLocalState(
       viewModeByProject[path] = mode;
     }
   }
+  const paneSizesByProject: Record<string, PaneSizes> = {};
+  for (const [path, sizes] of Object.entries(state.paneSizesByProject)) {
+    if (!match(path)) {
+      paneSizesByProject[path] = sizes;
+    }
+  }
+  const gridTracksByProject: Record<string, GridTracks> = {};
+  for (const [path, tracks] of Object.entries(state.gridTracksByProject)) {
+    if (!match(path)) {
+      gridTracksByProject[path] = tracks;
+    }
+  }
   // To-do tabs are keyed by context key (project path here); drop matching keys.
   const todoTabsByContext: Record<string, TodoTab[]> = {};
   for (const [key, tabs] of Object.entries(state.todoTabsByContext)) {
@@ -1721,11 +1863,15 @@ function clearProjectLocalState(
   // Drop cached records belonging to the removed scope(s) (project refKey = path).
   const todos = state.todos.filter((t) => !match(t.refKey));
   saveViewModes(viewModeByProject);
+  savePaneSizes(paneSizesByProject);
+  saveGridTracks(gridTracksByProject);
   return {
     fileTabsByProject,
     gitTabsByProject,
     activeTabByProject,
     viewModeByProject,
+    paneSizesByProject,
+    gridTracksByProject,
     todoTabsByContext,
     todos
   };
@@ -1812,6 +1958,28 @@ export function useViewMode(): ViewMode {
 
 export function useTerminalFontSize(): number {
   return useAppStore((s) => s.terminalFontSize);
+}
+
+/** The global sidebar width (px). */
+export function useSidebarWidth(): number {
+  return useAppStore((s) => s.sidebarWidth);
+}
+
+/**
+ * The active project's pane-split widths (a stable frozen empty object when the
+ * project has none stored, or no project is open — safe to select directly).
+ */
+export function usePaneSizes(): PaneSizes {
+  return useAppStore((s) =>
+    s.currentProject ? (s.paneSizesByProject[s.currentProject.path] ?? EMPTY_PANE_SIZES) : EMPTY_PANE_SIZES
+  );
+}
+
+/** The active project's grid tracks, or `null` when absent/no project open. */
+export function useGridTracks(): GridTracks | null {
+  return useAppStore((s) =>
+    s.currentProject ? (s.gridTracksByProject[s.currentProject.path] ?? null) : null
+  );
 }
 
 /**

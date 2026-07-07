@@ -24,11 +24,14 @@ import {
   DropdownItem,
   IconButton,
   Input,
+  ResizeHandle,
   type ContextMenuItem
 } from "../ui";
 import { FilePreview } from "./FilePreview";
 import { useApi } from "../../context/orquester-context";
-import { usePollWhileActive } from "../../hooks";
+import { usePollWhileActive, useIsDesktop } from "../../hooks";
+import { useAppStore } from "../../store/app";
+import { PANE_DEFAULTS, PANE_FLEX_RESERVE, clampPaneWidth } from "../../lib/panel-sizes";
 import { gatherFromDataTransfer, gatherFromInput } from "../../lib/files";
 import { downloadPath } from "../../lib/download";
 import { copyText } from "../../lib/clipboard";
@@ -69,6 +72,15 @@ interface MenuState {
  */
 export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ rootPath, active = true }) => {
   const api = useApi();
+  // Persisted tree-pane width, keyed by project path (rootPath). Applied inline
+  // only at md+ so the mobile w-full/hidden master-detail classes still win.
+  const isDesktop = useIsDesktop();
+  // The flex row containing the tree pane + seam + content, measured live at drag
+  // time so the seam clamp bounds against the real available width.
+  const rowRef = useRef<HTMLDivElement>(null);
+  const treeWidth = useAppStore((s) => s.paneSizesByProject[rootPath]?.fileTree) ?? PANE_DEFAULTS.fileTree;
+  const setPaneSize = useAppStore((s) => s.setPaneSize);
+  const resetPaneSize = useAppStore((s) => s.resetPaneSize);
   const [childrenByPath, setChildrenByPath] = useState<Record<string, FsEntry[]>>({});
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
@@ -317,7 +329,7 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ 
     : [];
 
   return (
-    <div className="flex h-full min-h-0 bg-neutral-950">
+    <div ref={rowRef} className="flex h-full min-h-0 bg-neutral-950">
       <input ref={filesInputRef} type="file" multiple hidden onChange={onInputChange} />
       <input
         type="file"
@@ -332,12 +344,22 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ 
           }
         }}
       />
-      {/* Tree sub-sidebar (full width on mobile; hidden when a file is open) */}
+      {/* Tree sub-sidebar (full width on mobile; hidden when a file is open).
+          At md+ the width is controlled inline (the ResizeHandle seam below
+          replaces the desktop border-r); mobile keeps its w-full border-r. */}
       <div
         className={cn(
-          "min-h-0 flex-col border-r border-neutral-800 md:flex md:w-64 md:shrink-0",
+          "min-h-0 flex-col border-r border-neutral-800 md:flex md:shrink-0",
           selectedFile ? "hidden md:flex" : "flex w-full"
         )}
+        // Inline style beats the mobile w-full class, so gate it to desktop. The
+        // maxWidth guard keeps the content pane (and its divider) from collapsing
+        // out of view on a narrow desktop row.
+        style={
+          isDesktop
+            ? { width: treeWidth, maxWidth: `calc(100% - ${PANE_FLEX_RESERVE}px)` }
+            : undefined
+        }
       >
         <div className="flex h-9 items-center gap-0.5 border-b border-neutral-800 px-2">
           <span className="flex-1 truncate text-xs text-neutral-500" title={rootPath}>
@@ -451,6 +473,21 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ 
           />
         </div>
       </div>
+
+      {/* Draggable seam between tree and content (desktop only). */}
+      <ResizeHandle
+        orientation="vertical"
+        className="hidden md:block"
+        aria-label="Resize file tree"
+        // Disabled below md (the handle is display:none there but stays mounted)
+        // and when there is no project to key the size by.
+        disabled={!isDesktop || !rootPath}
+        getCurrent={() => useAppStore.getState().paneSizesByProject[rootPath]?.fileTree ?? PANE_DEFAULTS.fileTree}
+        clamp={(px) => clampPaneWidth(px, rowRef.current)}
+        onResize={(px) => setPaneSize(rootPath, "fileTree", px, false)}
+        onCommit={(px) => setPaneSize(rootPath, "fileTree", px)}
+        onReset={() => resetPaneSize(rootPath, "fileTree")}
+      />
 
       {/* Content pane (full width on mobile when a file is selected) */}
       <div

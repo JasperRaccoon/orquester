@@ -3,8 +3,10 @@ import { cn } from "../../lib/cn";
 import { WorkspaceList } from "./WorkspaceList";
 import { ProjectList } from "./ProjectList";
 import { ServerSwitcher } from "../servers";
+import { ResizeHandle } from "../ui";
 import { useIsDesktop } from "../../hooks";
-import { useAppStore } from "../../store/app";
+import { useAppStore, useSidebarWidth } from "../../store/app";
+import { SIDEBAR_MIN, SIDEBAR_MAX, PANE_FLEX_RESERVE } from "../../lib/panel-sizes";
 
 /**
  * Left navigation. Desktop: inline. Mobile: an off-canvas drawer (with
@@ -15,14 +17,36 @@ export const Sidebar: React.FC = () => {
   const currentWorkspace = useAppStore((s) => s.currentWorkspace);
   const drawerOpen = useAppStore((s) => s.sidebarDrawerOpen);
   const setDrawer = useAppStore((s) => s.setSidebarDrawer);
+  const sidebarWidth = useSidebarWidth();
+  const setSidebarWidth = useAppStore((s) => s.setSidebarWidth);
+  const resetSidebarWidth = useAppStore((s) => s.resetSidebarWidth);
 
   // --- Desktop ---
   if (isDesktop) {
+    // The aside keeps its own border-box `border-r` (so its rendered width incl.
+    // the 1px border matches pre-feature exactly); the ResizeHandle is a
+    // zero-footprint overlay seam that paints only on hover/drag. The `maxWidth`
+    // guard keeps the main area from collapsing on a narrow window.
     return (
-      <aside className="flex w-64 shrink-0 flex-col border-r border-neutral-800 bg-neutral-900/40">
-        {currentWorkspace ? <ProjectList /> : <WorkspaceList />}
-        <ServerSwitcher />
-      </aside>
+      <>
+        <aside
+          className="flex shrink-0 flex-col border-r border-neutral-800 bg-neutral-900/40"
+          style={{ width: sidebarWidth, maxWidth: `calc(100% - ${PANE_FLEX_RESERVE}px)` }}
+        >
+          {currentWorkspace ? <ProjectList /> : <WorkspaceList />}
+          <ServerSwitcher />
+        </aside>
+        <ResizeHandle
+          orientation="vertical"
+          aria-label="Resize sidebar"
+          getCurrent={() => useAppStore.getState().sidebarWidth}
+          min={SIDEBAR_MIN}
+          max={SIDEBAR_MAX}
+          onResize={(px) => setSidebarWidth(px, false)}
+          onCommit={(px) => setSidebarWidth(px, true)}
+          onReset={resetSidebarWidth}
+        />
+      </>
     );
   }
 

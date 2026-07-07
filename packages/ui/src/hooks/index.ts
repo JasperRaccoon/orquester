@@ -6,3 +6,10 @@ export { useViewportHeight } from "./use-viewport-height";
 export { usePollWhileActive } from "./use-poll-while-active";
 export { useObjectUrl, type ObjectUrlState } from "./use-object-url";
 export { useFileText, type FileTextState } from "./use-file-text";
+export {
+  useResizeDrag,
+  type ResizeOrientation,
+  type UseResizeDragOptions,
+  type UseResizeDragResult,
+  type ResizeDragHandlers
+} from "./use-resize-drag";

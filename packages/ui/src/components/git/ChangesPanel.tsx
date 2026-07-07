@@ -2,11 +2,13 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { ArrowLeft, GitCommitHorizontal, MoreVertical } from "lucide-react";
 import type { GitFileChange, GitStatusResponse } from "@orquester/api";
 import { cn } from "../../lib/cn";
-import { Button, ContextMenu, Input, type ContextMenuItem } from "../ui";
+import { Button, ContextMenu, Input, ResizeHandle, type ContextMenuItem } from "../ui";
 import { DiffView } from "./DiffView";
 import { FileStatusList } from "./FileStatusList";
 import { useApi } from "../../context/orquester-context";
 import { useIsDesktop } from "../../hooks";
+import { useAppStore, usePaneSizes } from "../../store/app";
+import { PANE_DEFAULTS, PANE_FLEX_RESERVE, clampPaneWidth } from "../../lib/panel-sizes";
 
 interface MenuState {
   x: number;
@@ -46,6 +48,11 @@ function suggestedCommitSummary(file: GitFileChange): string {
 export const ChangesPanel: React.FC<ChangesPanelProps> = ({ projectPath, status, onChanged }) => {
   const api = useApi();
   const isDesktop = useIsDesktop();
+  const setPaneSize = useAppStore((s) => s.setPaneSize);
+  const resetPaneSize = useAppStore((s) => s.resetPaneSize);
+  // The flex row (list pane + seam + diff), measured live for the seam clamp.
+  const rowRef = useRef<HTMLDivElement>(null);
+  const listWidth = usePaneSizes().gitChanges ?? PANE_DEFAULTS.gitChanges;
   const files = useMemo(() => status?.files ?? [], [status]);
   const branch = status?.branch;
 
@@ -208,13 +215,22 @@ export const ChangesPanel: React.FC<ChangesPanelProps> = ({ projectPath, status,
   }
 
   return (
-    <div className="flex min-h-0 flex-1 bg-neutral-950">
-      {/* Left column: changed-files list + commit box (full width on mobile). */}
+    <div ref={rowRef} className="flex min-h-0 flex-1 bg-neutral-950">
+      {/* Left column: changed-files list + commit box (full width on mobile).
+          Keeps its border-box border-r; the zero-footprint ResizeHandle seam
+          below paints only on hover/drag. */}
       <div
         className={cn(
-          "min-h-0 flex-col border-r border-neutral-800 md:flex md:w-72 md:shrink-0",
+          "min-h-0 flex-col border-r border-neutral-800 md:flex md:shrink-0",
           selectedPath ? "hidden md:flex" : "flex w-full"
         )}
+        // Inline style beats the mobile w-full class, so gate it to desktop. The
+        // maxWidth guard keeps the diff pane (and divider) reachable on a narrow row.
+        style={
+          isDesktop
+            ? { width: listWidth, maxWidth: `calc(100% - ${PANE_FLEX_RESERVE}px)` }
+            : undefined
+        }
       >
         <div className="min-h-0 flex-1" onContextMenu={(e) => e.preventDefault()}>
           <FileStatusListWithMenu
@@ -281,6 +297,22 @@ export const ChangesPanel: React.FC<ChangesPanelProps> = ({ projectPath, status,
           </Button>
         </div>
       </div>
+
+      {/* Draggable seam between the list and the diff (desktop only). */}
+      <ResizeHandle
+        orientation="vertical"
+        className="hidden md:block"
+        aria-label="Resize changed-files list"
+        // Disabled below md (display:none but still mounted).
+        disabled={!isDesktop}
+        getCurrent={() =>
+          useAppStore.getState().paneSizesByProject[projectPath]?.gitChanges ?? PANE_DEFAULTS.gitChanges
+        }
+        clamp={(px) => clampPaneWidth(px, rowRef.current)}
+        onResize={(px) => setPaneSize(projectPath, "gitChanges", px, false)}
+        onCommit={(px) => setPaneSize(projectPath, "gitChanges", px)}
+        onReset={() => resetPaneSize(projectPath, "gitChanges")}
+      />
 
       {/* Diff of the selected file (full width on mobile when a file is open). */}
       <div className={cn("min-w-0 flex-1 flex-col", selectedPath ? "flex" : "hidden md:flex")}>
