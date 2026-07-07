@@ -487,7 +487,7 @@ const UsageSettings: React.FC = () => {
     if (!installed) return "Not installed";
     const found = usage?.agents.find((a) => a.id === id);
     if (!found) return "Not logged in";
-    if (found.stale) return "Stale — token expired";
+    if (found.stale) return found.plan ? `Logged in · ${found.plan} — updating…` : "Logged in — updating…";
     return found.plan ? `Logged in · ${found.plan}` : "Logged in";
   };
 
