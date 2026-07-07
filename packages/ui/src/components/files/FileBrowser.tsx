@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
+  ClipboardCopy,
+  Copy,
   Download,
   File,
   FilePlus,
@@ -29,6 +31,7 @@ import { useApi } from "../../context/orquester-context";
 import { usePollWhileActive } from "../../hooks";
 import { gatherFromDataTransfer, gatherFromInput } from "../../lib/files";
 import { downloadPath } from "../../lib/download";
+import { copyText } from "../../lib/clipboard";
 import { useFileUpload } from "./use-file-upload";
 import { UploadConflictModal } from "./UploadConflictModal";
 
@@ -36,11 +39,27 @@ const parentOf = (p: string) => p.slice(0, Math.max(0, p.lastIndexOf("/"))) || p
 const joinPath = (dir: string, name: string) => `${dir.replace(/\/$/, "")}/${name}`;
 const baseName = (p: string) => p.slice(p.lastIndexOf("/") + 1);
 
+// Path of `path` relative to the explorer's project root `root` (e.g. "apps/daemon/src/index.ts").
+// Falls back to the absolute path when there is no root or `path` sits outside it. The trailing
+// "/" boundary check stops "/a/proj" from being treated as a child of root "/a/pro".
+const relativeTo = (root: string, path: string) => {
+  const r = root.replace(/\/$/, "");
+  if (r && (path === r || path.startsWith(r + "/"))) {
+    return path.slice(r.length).replace(/^\//, "") || baseName(path);
+  }
+  return path;
+};
+
+const LONG_PRESS_MS = 500;
+const MOVE_SLOP_PX = 10;
+
+type MenuTarget = { path: string; name: string; kind: "dir" | "file" };
+
 interface MenuState {
   x: number;
   y: number;
   dir: string;
-  target?: { path: string; name: string; kind: "dir" | "file" };
+  target?: MenuTarget;
 }
 
 /**
@@ -221,15 +240,9 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ 
     }
   };
 
-  const openMenu = (
-    event: React.MouseEvent,
-    dir: string,
-    target?: { path: string; name: string; kind: "dir" | "file" }
-  ) => {
-    event.preventDefault();
-    event.stopPropagation();
+  const openMenu = (x: number, y: number, dir: string, target?: MenuTarget) => {
     setActiveDir(dir);
-    setMenu({ x: event.clientX, y: event.clientY, dir, target });
+    setMenu({ x, y, dir, target });
   };
 
   const confirmDelete = async () => {
@@ -286,6 +299,16 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ 
                 icon: menu.target.kind === "dir" ? <FolderDown size={14} /> : <Download size={14} />,
                 disabled: menu.target.kind === "dir" && !folderZip,
                 onClick: () => void downloadPath(api, menu.target!)
+              },
+              {
+                label: "Copy Relative Path",
+                icon: <Copy size={14} />,
+                onClick: () => void copyText(relativeTo(rootPath, menu.target!.path))
+              },
+              {
+                label: "Copy Full Path",
+                icon: <ClipboardCopy size={14} />,
+                onClick: () => void copyText(menu.target!.path)
               },
               { label: "Delete", icon: <Trash2 size={14} />, onClick: () => setDeleting(menu.target!) }
             ]
@@ -372,7 +395,11 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ 
             "min-h-0 flex-1 overflow-auto py-1",
             dropTarget === rootPath && "ring-1 ring-inset ring-neutral-600"
           )}
-          onContextMenu={(e) => openMenu(e, rootPath)}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            openMenu(e.clientX, e.clientY, rootPath);
+          }}
           onDragOver={(e) => {
             if (Array.from(e.dataTransfer.types).includes("Files")) {
               e.preventDefault();
@@ -418,7 +445,7 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ 
             dropTarget={dropTarget}
             onToggleDir={toggleDir}
             onSelectFile={selectFile}
-            onContextMenu={openMenu}
+            onOpenMenu={openMenu}
             onDragTo={setDropTarget}
             onDropTo={(dir, dt) => void onDropTo(dir, dt)}
           />
@@ -489,17 +516,22 @@ interface TreeLevelProps {
   dropTarget: string | null;
   onToggleDir: (path: string) => void;
   onSelectFile: (path: string, size: number) => void;
-  onContextMenu: (
-    event: React.MouseEvent,
-    dir: string,
-    target?: { path: string; name: string; kind: "dir" | "file" }
-  ) => void;
+  onOpenMenu: (x: number, y: number, dir: string, target?: MenuTarget) => void;
   onDragTo: (dir: string | null) => void;
   onDropTo: (dir: string, dt: DataTransfer) => void;
 }
 
 const TreeLevel: React.FC<TreeLevelProps> = (props) => {
   const entries = props.childrenByPath[props.dir];
+  const pressTimer = useRef<number | null>(null);
+  const pressStart = useRef<{ x: number; y: number } | null>(null);
+  const didLongPress = useRef(false);
+  const clearPress = () => {
+    if (pressTimer.current !== null) {
+      window.clearTimeout(pressTimer.current);
+      pressTimer.current = null;
+    }
+  };
   if (!entries) {
     return props.depth === 0 ? (
       <p className="px-3 py-2 text-xs text-neutral-600">Loading…</p>
@@ -520,14 +552,50 @@ const TreeLevel: React.FC<TreeLevelProps> = (props) => {
           <React.Fragment key={entry.path}>
             <button
               type="button"
-              onClick={() => (isDir ? props.onToggleDir(entry.path) : props.onSelectFile(entry.path, entry.size))}
-              onContextMenu={(e) =>
-                props.onContextMenu(e, isDir ? entry.path : parentOf(entry.path), {
+              onClick={() => {
+                if (didLongPress.current) {
+                  didLongPress.current = false;
+                  return;
+                }
+                if (isDir) props.onToggleDir(entry.path);
+                else props.onSelectFile(entry.path, entry.size);
+              }}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                props.onOpenMenu(e.clientX, e.clientY, isDir ? entry.path : parentOf(entry.path), {
                   path: entry.path,
                   name: entry.name,
                   kind: entry.kind
-                })
-              }
+                });
+              }}
+              onTouchStart={(e) => {
+                const { clientX, clientY } = e.touches[0];
+                pressStart.current = { x: clientX, y: clientY };
+                didLongPress.current = false;
+                clearPress();
+                pressTimer.current = window.setTimeout(() => {
+                  didLongPress.current = true;
+                  props.onOpenMenu(clientX, clientY, isDir ? entry.path : parentOf(entry.path), {
+                    path: entry.path,
+                    name: entry.name,
+                    kind: entry.kind
+                  });
+                }, LONG_PRESS_MS);
+              }}
+              onTouchMove={(e) => {
+                const s = pressStart.current;
+                if (!s) return;
+                const t = e.touches[0];
+                if (Math.abs(t.clientX - s.x) > MOVE_SLOP_PX || Math.abs(t.clientY - s.y) > MOVE_SLOP_PX) {
+                  clearPress();
+                }
+              }}
+              onTouchEnd={(e) => {
+                clearPress();
+                if (didLongPress.current) e.preventDefault();
+              }}
+              onTouchCancel={clearPress}
               onDragOver={(e) => {
                 if (Array.from(e.dataTransfer.types).includes("Files")) {
                   e.preventDefault();
@@ -542,7 +610,7 @@ const TreeLevel: React.FC<TreeLevelProps> = (props) => {
               }}
               style={{ paddingLeft: 8 + props.depth * 12 }}
               className={cn(
-                "flex w-full items-center gap-1.5 py-1 pr-2 text-left text-sm",
+                "flex w-full select-none items-center gap-1.5 py-1 pr-2 text-left text-sm [-webkit-touch-callout:none]",
                 isActive ? "bg-neutral-800 text-neutral-100" : "text-neutral-300 hover:bg-neutral-900",
                 isDir && props.dropTarget === entry.path && "bg-neutral-800 ring-1 ring-inset ring-neutral-600"
               )}
