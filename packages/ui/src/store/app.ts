@@ -38,7 +38,8 @@ import type {
   UiConnection,
   WorkspaceSummary
 } from "../types";
-import type { TodoListRecord, TodoScope } from "@orquester/api";
+import type { TodoListRecord, TodoScope, UsageResponse } from "@orquester/api";
+import type { UsagePrefs } from "@orquester/config";
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -49,6 +50,8 @@ const EMPTY_REGISTRY: RegistryResponse = {
   fileExplorers: [],
   browsers: []
 };
+
+const DEFAULT_USAGE_PREFS: UsagePrefs = { enabled: true, claude: true, codex: true, chip: "busiest" };
 
 /** Replace a registry entry (matched by id within its kind) with a fresh copy. */
 function applyRegistryEntry(registry: RegistryResponse, entry: RegistryEntry): RegistryResponse {
@@ -240,6 +243,7 @@ let homeApi: ApiClient | null = null;
 export interface UiAppConfig {
   useTitlebar: boolean;
   runInBackground: boolean;
+  usage: UsagePrefs;
 }
 
 /** Persist the remote-server list to the home daemon (shared across clients). */
@@ -454,6 +458,7 @@ export interface AppState {
 
   // data
   registry: RegistryResponse;
+  usage: UsageResponse | null;
   workspaces: WorkspaceSummary[];
   accounts: AccountSummary[];
   workspacesLoading: boolean;
@@ -532,6 +537,7 @@ export interface AppState {
 
   loadSessions: () => Promise<void>;
   loadRegistry: () => Promise<void>;
+  loadUsage: (force?: boolean) => Promise<void>;
   installAgent: (id: string) => Promise<void>;
   updateAgent: (id: string) => Promise<void>;
   openTab: (kind: RegistryKind, refId: string, title?: string) => Promise<void>;
@@ -571,7 +577,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   lockedUntil: null,
   connections: [],
   activeConnectionId: null,
-  appConfig: { useTitlebar: false, runInBackground: false },
+  appConfig: { useTitlebar: false, runInBackground: false, usage: DEFAULT_USAGE_PREFS },
   settingsOpen: false,
   sidebarCollapsed: false,
   sidebarDrawerOpen: false,
@@ -581,6 +587,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   currentWorkspace: null,
   currentProject: null,
   registry: EMPTY_REGISTRY,
+  usage: null,
   workspaces: [],
   accounts: [],
   workspacesLoading: false,
@@ -732,6 +739,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       get().loadWorkspaces(),
       get().loadSessions(),
       get().loadRegistry(),
+      get().loadUsage(),
       // Reload git accounts on every (re)connect too — otherwise a daemon
       // restart leaves `accounts` stale (it was only filled by the one-time
       // initConnections path), so the workspace/project pickers go empty until
@@ -839,7 +847,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({
       connections: [nextSetup.localConnection],
       activeConnectionId: nextSetup.localConnection.id,
-      appConfig: { useTitlebar: nextSetup.defaultUseTitlebar, runInBackground: false },
+      appConfig: { useTitlebar: nextSetup.defaultUseTitlebar, runInBackground: false, usage: DEFAULT_USAGE_PREFS },
       api: homeApi
     });
     await get().connect();
@@ -855,7 +863,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         set((state) => ({
           appConfig: {
             useTitlebar: config.useTitlebar ?? state.appConfig.useTitlebar,
-            runInBackground: config.runInBackground ?? state.appConfig.runInBackground
+            runInBackground: config.runInBackground ?? state.appConfig.runInBackground,
+            usage: config.usage ?? state.appConfig.usage
           }
         }));
       }
@@ -1210,6 +1219,18 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
+  loadUsage: async (force) => {
+    const api = get().api;
+    if (!api) {
+      return;
+    }
+    try {
+      set({ usage: await api.getUsage(force) });
+    } catch {
+      /* keep current */
+    }
+  },
+
   installAgent: async (id) => {
     // Status (installing/installed/error) arrives via the "registry" event bus.
     await get().api?.installRegistryEntry(id).catch(() => undefined);
@@ -1502,6 +1523,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   applyEvent: (event) => {
+    if (event.channel === "usage") {
+      set({ usage: event.payload as UsageResponse });
+      return;
+    }
     if (event.channel === "registry" && event.type === "registry.changed") {
       const entry = event.payload as RegistryEntry;
       set((state) => ({ registry: applyRegistryEntry(state.registry, entry) }));

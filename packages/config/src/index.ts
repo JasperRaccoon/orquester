@@ -272,6 +272,17 @@ export function createLocalConnection(socketPath: string): LocalConnectionConfig
 
 // app.json (desktop app config)
 
+export const usagePrefsSchema = z.object({
+  /** Master switch for the top-bar usage widget (also gates daemon polling). */
+  enabled: z.boolean().default(true),
+  claude: z.boolean().default(true),
+  codex: z.boolean().default(true),
+  /** Which agent drives the collapsed chip. */
+  chip: z.enum(["busiest", "claude", "codex"]).default("busiest")
+});
+
+export type UsagePrefs = z.infer<typeof usagePrefsSchema>;
+
 export const appConfigSchema = z.object({
   version: z.literal(1).default(1),
   /** Connection opened on launch. "local" is always available. */
@@ -279,7 +290,9 @@ export const appConfigSchema = z.object({
   /** Render the custom frameless titlebar with window controls. */
   useTitlebar: z.boolean().default(true),
   /** Desktop: keep the daemon running in a tray when the window is closed. */
-  runInBackground: z.boolean().default(false)
+  runInBackground: z.boolean().default(false),
+  /** Top-bar agent-usage widget preferences. */
+  usage: usagePrefsSchema.default({})
 });
 
 export type AppConfig = z.infer<typeof appConfigSchema>;

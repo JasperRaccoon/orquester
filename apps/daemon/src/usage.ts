@@ -1,0 +1,71 @@
+import { EventEmitter } from "node:events";
+import type { AgentUsage, UsageResponse } from "@orquester/api";
+import type { UsagePrefs } from "@orquester/config";
+
+export interface UsageServiceDeps {
+  /** Returns the Claude agent (possibly stale) or null when not logged in. */
+  fetchClaude: () => Promise<AgentUsage | null>;
+  /** Returns the Codex agent or null when not logged in / API-key mode. */
+  readCodex: () => Promise<AgentUsage | null>;
+  getPrefs: () => Promise<UsagePrefs>;
+  now: () => number;
+  /** Poll cadence while a window is fresh (default 60s) / stale-idle (default 5m). */
+  activeMs?: number;
+  idleMs?: number;
+}
+
+const DEFAULT_PREFS: UsagePrefs = { enabled: true, claude: true, codex: true, chip: "busiest" };
+
+export class UsageService {
+  readonly events = new EventEmitter();
+  private cache: UsageResponse = { updatedAt: new Date(0).toISOString(), agents: [] };
+  private hash = "";
+  private timer?: ReturnType<typeof setTimeout>;
+  private stopped = false;
+
+  constructor(private readonly deps: UsageServiceDeps) {}
+
+  async recompute(): Promise<void> {
+    const prefs = await this.deps.getPrefs().catch(() => DEFAULT_PREFS);
+    const agents: AgentUsage[] = [];
+    if (prefs.enabled && prefs.claude) {
+      const c = await this.deps.fetchClaude().catch(() => null);
+      if (c) agents.push(c);
+    }
+    if (prefs.enabled && prefs.codex) {
+      const x = await this.deps.readCodex().catch(() => null);
+      if (x) agents.push(x);
+    }
+    this.cache = { updatedAt: new Date(this.deps.now()).toISOString(), agents };
+    const h = JSON.stringify(agents); // dedupe on the agents payload, ignoring updatedAt
+    if (h !== this.hash) {
+      this.hash = h;
+      this.events.emit("changed", this.cache);
+    }
+  }
+
+  async snapshot(force = false): Promise<UsageResponse> {
+    if (force) await this.recompute();
+    return this.cache;
+  }
+
+  start(): void {
+    this.stopped = false;
+    void this.tick();
+  }
+
+  private async tick(): Promise<void> {
+    if (this.stopped) return;
+    await this.recompute().catch(() => undefined);
+    if (this.stopped) return;
+    const claude = this.cache.agents.find((a) => a.id === "claude");
+    const delay = claude?.stale ? this.deps.idleMs ?? 300_000 : this.deps.activeMs ?? 60_000;
+    this.timer = setTimeout(() => void this.tick(), delay);
+  }
+
+  stop(): void {
+    this.stopped = true;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = undefined;
+  }
+}

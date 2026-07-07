@@ -360,6 +360,33 @@ export interface UpdateTodoRequest {
  *  (for "todo.deleted" it is the record as it was at deletion — clients remove by id). */
 export type TodoEventType = "todo.created" | "todo.updated" | "todo.deleted";
 
+/** One quota window (0–100 % used) with its reset time (ISO 8601). */
+export interface UsageWindow {
+  percent: number;
+  resetsAt?: string;
+}
+
+export interface AgentUsage {
+  id: "claude" | "codex";
+  /** installed + logged in + at least one window present. */
+  available: boolean;
+  /** data known but the token/log is expired/old (last-known shown greyed). */
+  stale: boolean;
+  /** e.g. "Max 20x", "Pro". */
+  plan?: string;
+  /** rolling 5-hour window. */
+  session: UsageWindow | null;
+  weekly: UsageWindow | null;
+}
+
+export interface UsageResponse {
+  updatedAt: string;
+  /** only logged-in agents; empty ⇒ the widget hides. */
+  agents: AgentUsage[];
+}
+
+export type UsageEventType = "usage.changed";
+
 /** Public auth metadata for the HTTP transport (no secrets). */
 export interface AuthInfoResponse {
   authRequired: boolean;
@@ -558,6 +585,7 @@ export interface OrquesterApi {
   clientConfig(): Promise<ClientConfig>;
   listWorkspaces(): Promise<WorkspaceSummary[]>;
   listProjects(workspace: string): Promise<ProjectSummary[]>;
+  usage(force?: boolean): Promise<UsageResponse>;
 }
 
 export interface HttpApiClientOptions {
@@ -627,6 +655,10 @@ export class HttpOrquesterApiClient implements OrquesterApi {
 
   getFsCapabilities(): Promise<FsCapabilitiesResponse> {
     return this.get("/api/fs/capabilities");
+  }
+
+  usage(force?: boolean): Promise<UsageResponse> {
+    return this.get(`/api/usage${force ? "?refresh=1" : ""}`);
   }
 
   deleteFsEntry(path: string): Promise<{ ok: true }> {

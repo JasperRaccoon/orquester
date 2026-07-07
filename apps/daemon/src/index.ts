@@ -36,6 +36,7 @@ import type {
   SessionUploadRequest,
   SessionUploadResponse,
   UpdateTodoRequest,
+  UsageResponse,
   WorkspaceSummary
 } from "@orquester/api";
 import { RegistryService } from "./registry";
@@ -45,6 +46,8 @@ import { Tmux } from "./tmux";
 import { Broadcaster } from "./broadcaster";
 import { AccountError, AccountsService } from "./accounts";
 import { GitError, GitService } from "./git";
+import { UsageService } from "./usage";
+import { createClaudeSource, createCodexSource, readUsagePrefs } from "./usage-sources";
 import { listArchiveEntries } from "./archive";
 import { resolveZipTool, spawnDirZip } from "./zip";
 import { TerminalControl } from "./mcp/terminal-control.ts";
@@ -206,6 +209,32 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   const broadcaster = new Broadcaster();
   // Stream registry changes (install/update status, detected versions) to clients.
   registry.events.on("changed", (entry) => broadcaster.publish("registry", "registry.changed", entry));
+  const usage = new UsageService({
+    fetchClaude: createClaudeSource({ userhome: resolved.vars.userhome, now: () => Date.now(), logger: console }),
+    readCodex: createCodexSource({ userhome: resolved.vars.userhome, now: () => Date.now() }),
+    getPrefs: () => readUsagePrefs(resolved.appConfigFile),
+    now: () => Date.now()
+  });
+  usage.events.on("changed", (u) => broadcaster.publish("usage", "usage.changed", u));
+  usage.start();
+  {
+    const { watch } = await import("node:fs");
+    let debounce: ReturnType<typeof setTimeout> | undefined;
+    const nudge = () => {
+      clearTimeout(debounce);
+      debounce = setTimeout(() => void usage.recompute(), 500);
+    };
+    for (const dir of [
+      join(process.env.CODEX_HOME || join(resolved.vars.userhome, ".codex"), "sessions"),
+      process.env.CLAUDE_CONFIG_DIR || join(resolved.vars.userhome, ".claude")
+    ]) {
+      try {
+        watch(dir, { recursive: true }, nudge);
+      } catch {
+        /* dir may not exist yet; the poll still covers it */
+      }
+    }
+  }
   await registry.init();
   // Reattach to any tmux sessions that outlived a previous daemon process
   // (KillMode=process keeps the tmux server alive across restarts). No-op on the
@@ -242,7 +271,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   todos.lifecycle.on("updated", (r) => broadcaster.publish("todos", "todo.updated", r));
   todos.lifecycle.on("deleted", (r) => broadcaster.publish("todos", "todo.deleted", r));
 
-  const services: Services = { registry, sessions, accounts, git, todos, broadcaster };
+  const services: Services = { registry, sessions, accounts, git, todos, usage, broadcaster };
 
   // The static web build the HTTP transport optionally serves.
   const webDirEnv = options.webDir ?? env.ORQUESTER_WEB_DIR;
@@ -303,6 +332,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   await startHttp();
 
   const stop = async () => {
+    usage.stop();
     // Detach (don't kill) sessions: the tmux backend leaves its server running so
     // the next boot reattaches; the local backend has no server, so its shutdown()
     // terminates the child PTYs (they'd die with the daemon regardless).
@@ -329,6 +359,7 @@ interface Services {
   accounts: AccountsService;
   git: GitService;
   todos: TodoListManager;
+  usage: UsageService;
   broadcaster: Broadcaster;
   /** Restart the HTTP transport (set in main once the lifecycle exists). */
   reloadHttp?: () => Promise<void>;
@@ -342,7 +373,7 @@ function createServer(
   services: Services,
   options: { authRequired: boolean; mode: "local" | "remote"; serveWeb?: string }
 ): FastifyInstance {
-  const { registry, sessions, accounts, git, todos } = services;
+  const { registry, sessions, accounts, git, todos, usage } = services;
 
   const app = Fastify({
     // Remote requests arrive via Caddy on loopback (reverse_proxy 127.0.0.1:47831),
@@ -1476,6 +1507,10 @@ function createServer(
 
   // Registry (shells & agents)
   app.get("/api/registry", async (): Promise<RegistryResponse> => registry.list());
+
+  app.get<{ Querystring: { refresh?: string } }>("/api/usage", async (request): Promise<UsageResponse> =>
+    usage.snapshot(request.query.refresh === "1")
+  );
 
   app.get<{ Params: { id: string } }>("/api/registry/:id/version", async (request) =>
     registry.version(request.params.id)

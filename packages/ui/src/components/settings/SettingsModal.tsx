@@ -6,6 +6,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Download,
+  Gauge,
   Github,
   KeyRound,
   Loader2,
@@ -23,10 +24,11 @@ import { useIsDesktop, useRegistry } from "../../hooks";
 import { useApi, useOrquester } from "../../context/orquester-context";
 import { useAppStore } from "../../store/app";
 
-type Section = "app" | "agents" | "github" | "daemon";
+type Section = "app" | "agents" | "usage" | "github" | "daemon";
 
 const SECTIONS: { id: Section; label: string; icon: React.ReactNode; desc: string }[] = [
   { id: "app", label: "App", icon: <AppWindow size={16} />, desc: "Titlebar, runtime, active server" },
+  { id: "usage", label: "Usage", icon: <Gauge size={16} />, desc: "Top-bar usage widget for Claude Code & Codex" },
   { id: "agents", label: "Agents", icon: <Boxes size={16} />, desc: "Install, update and view harness versions" },
   { id: "github", label: "GitHub", icon: <Github size={16} />, desc: "Connect accounts and per-workspace git identities" },
   { id: "daemon", label: "Daemon", icon: <Server size={16} />, desc: "Workspaces dir, external HTTP access" }
@@ -37,6 +39,8 @@ const renderSection = (id: Section) =>
     <AppSettings />
   ) : id === "agents" ? (
     <AgentsSettings />
+  ) : id === "usage" ? (
+    <UsageSettings />
   ) : id === "github" ? (
     <GitHubSettings />
   ) : (
@@ -466,6 +470,63 @@ const GitHubSettings: React.FC = () => {
           <Plus size={13} /> Add account…
         </Button>
       )}
+    </div>
+  );
+};
+
+const UsageSettings: React.FC = () => {
+  const prefs = useAppStore((s) => s.appConfig.usage);
+  const usage = useAppStore((s) => s.usage);
+  const updateAppConfig = useAppStore((s) => s.updateAppConfig);
+  const registry = useRegistry();
+
+  const setUsage = (patch: Partial<typeof prefs>) => void updateAppConfig({ usage: { ...prefs, ...patch } });
+
+  const agentHint = (id: "claude" | "codex") => {
+    const installed = registry.agents.some((a) => a.id === id && a.enabled);
+    if (!installed) return "Not installed";
+    const found = usage?.agents.find((a) => a.id === id);
+    if (!found) return "Not logged in";
+    if (found.stale) return "Stale — token expired";
+    return found.plan ? `Logged in · ${found.plan}` : "Logged in";
+  };
+
+  const CHIP_OPTIONS: { value: typeof prefs.chip; label: string }[] = [
+    { value: "busiest", label: "Busiest" },
+    { value: "claude", label: "Claude" },
+    { value: "codex", label: "Codex" }
+  ];
+
+  return (
+    <div className="divide-y divide-neutral-800">
+      <Field label="Show usage in the top bar" hint="A compact quota chip that opens a details panel.">
+        <Switch checked={prefs.enabled} onChange={(v) => setUsage({ enabled: v })} />
+      </Field>
+      <Field label="Claude Code" hint={agentHint("claude")}>
+        <Switch checked={prefs.claude} onChange={(v) => setUsage({ claude: v })} />
+      </Field>
+      <Field label="Codex" hint={agentHint("codex")}>
+        <Switch checked={prefs.codex} onChange={(v) => setUsage({ codex: v })} />
+      </Field>
+      <Field label="Chip shows" hint="Which agent drives the collapsed chip.">
+        <div className="flex gap-1">
+          {CHIP_OPTIONS.map((o) => (
+            <button
+              key={o.value}
+              type="button"
+              onClick={() => setUsage({ chip: o.value })}
+              className={cn(
+                "rounded-md px-2 py-1 text-xs",
+                prefs.chip === o.value
+                  ? "bg-neutral-700 text-neutral-100"
+                  : "text-neutral-400 hover:bg-neutral-800"
+              )}
+            >
+              {o.label}
+            </button>
+          ))}
+        </div>
+      </Field>
     </div>
   );
 };

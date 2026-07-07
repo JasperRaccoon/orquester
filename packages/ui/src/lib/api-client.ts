@@ -36,6 +36,7 @@ import type {
   TodoListRecord,
   TodoScope,
   UpdateTodoRequest,
+  UsageResponse,
   WorkspaceSummary
 } from "@orquester/api";
 import type { AppConfig, DaemonConfig, RemoteConnectionConfig } from "@orquester/config";
@@ -428,6 +429,10 @@ export class ApiClient {
 
   listRegistry(signal?: AbortSignal): Promise<RegistryResponse> {
     return this.send("GET", "/api/registry", { signal });
+  }
+
+  getUsage(force?: boolean, signal?: AbortSignal): Promise<UsageResponse> {
+    return this.send("GET", `/api/usage${force ? "?refresh=1" : ""}`, { signal });
   }
 
   installRegistryEntry(id: string): Promise<RegistryActionResult> {
