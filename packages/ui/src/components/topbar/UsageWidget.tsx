@@ -37,7 +37,10 @@ const AgentSection: React.FC<{ agent: AgentUsage }> = ({ agent }) => {
   return (
     <div className="px-3 py-2">
       <div className="flex items-center justify-between">
-        <p className="text-sm text-neutral-200">{AGENT_LABEL[agent.id]} Usage</p>
+        <p className="flex items-center gap-1.5 text-sm text-neutral-200">
+          {getRegistryIcon("agent", agent.id, 14)}
+          <span>{AGENT_LABEL[agent.id]} Usage</span>
+        </p>
         {agent.plan && <span className="text-xs text-neutral-500">{agent.plan}</span>}
       </div>
       {!hasData ? (
