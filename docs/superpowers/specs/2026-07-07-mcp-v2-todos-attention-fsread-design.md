@@ -148,9 +148,10 @@ attention: boolean}`.
 `ISessionManager` (both backends — tmux `SessionManager` and `LocalSessionManager`) gains:
 
 - `activity(id): {lastOutputAt: number | null, attention: boolean} | undefined`
-- `onActivity(listener: (ev: {id: string, type: "bell" | "exit"}) => void): () => void` —
-  one manager-wide stream (not per-session subscriptions), so a multi-tab wait needs no
-  N-subscription fan-out. `exit` fires alongside the existing per-session exit path.
+- a new `"activity"` event (`{id, type: "bell"}`) on the **existing manager-wide
+  `lifecycle` emitter** — one stream (not per-session subscriptions), so a multi-tab
+  wait needs no N-subscription fan-out; exits ride the existing `lifecycle "exited"`
+  event.
 
 Both backends feed the scanner at the same point they feed the ring buffer / subscriber
 fan-out (tmux attach-PTY `onData`; local pty `onData`). The bell reaches the daemon on the
@@ -170,8 +171,8 @@ idempotent teardown).
   `ToolError` ("nothing to wait for" — never a silent empty wait).
 - **Immediate return:** if any watched tab already has `attention = true`, return without
   blocking.
-- **Blocking:** subscribe via `onActivity`, filter to the watched id set; the first `bell`
-  or `exit` resolves. Timeout resolves `settled: false`; abort resolves
+- **Blocking:** listen on `lifecycle` (`"activity"` bells + `"exited"`), filtered to the
+  watched id set; the first bell or exit resolves. Timeout resolves `settled: false`; abort resolves
   `{settled: false, aborted: true}` without touching the transport further.
 - **Result:** `tabs` contains only the tabs needing attention (bell-flagged or
   just-exited), each `{id, title, status, activity, attention}`; empty on timeout.
@@ -188,9 +189,10 @@ New module `apps/daemon/src/mcp/fs-tools.ts`, deps `{fsRoot: string}`, reusing
 everything is sandbox-asserted after resolution. `FsSandboxError` keeps its existing
 generic, path-free mapping.
 
-- **`list_files {path}`** → the existing `listFiles` helper, projected to
-  `{name, kind: "file" | "dir" | "symlink" | "other", size}`, capped at
-  `MAX_FS_ENTRIES = 500` entries with `truncated: true` beyond (a stray `node_modules`
+- **`list_files {path}`** → a small module-local `readdir` (the HTTP route's `listFiles`
+  helper is private to `index.ts`, and importing it from `mcp/` would create an import
+  cycle), projected to `{name, kind: "file" | "dir" | "symlink" | "other", size}`, capped
+  at `MAX_FS_ENTRIES = 500` entries with `truncated: true` beyond (a stray `node_modules`
   must not flood the model's context).
 - **`read_file {path, offset?, maxBytes?}`** → `readFile`, then:
   - Binary sniff: NUL byte in the first 8 KB → `ToolError` `"Binary file (N bytes); read_file only serves text."`
@@ -265,7 +267,7 @@ existing `tool()` helper; its deps gain the todo-tools and fs-tools instances pl
 `resolved.workspacesDir`, `resolved.fsRoot`, and the `UsageService`). `registerMcp`'s call
 site in `index.ts` passes the already-constructed `TodoListManager` and `UsageService`.
 Transport, auth, body limit, statelessness: unchanged. `SERVER_INSTRUCTIONS` gets one
-sentence per new family and must stay under 2 KB (existing test enforces the budget).
+sentence per new family and must stay under 2 KB (a new test enforces the budget).
 
 ## Security posture
 
