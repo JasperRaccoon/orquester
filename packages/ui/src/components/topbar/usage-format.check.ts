@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import type { AgentUsage } from "@orquester/api";
-import { barClass, formatCountdown, pickDriver } from "./usage-format";
+import { barClass, formatCountdown, gaugeClass, pickDriver, usageLevel, windowMax } from "./usage-format";
 
 const claude: AgentUsage = { id: "claude", available: true, stale: false, session: { percent: 10 }, weekly: { percent: 20 } };
 const codex: AgentUsage = { id: "codex", available: true, stale: false, session: { percent: 80 }, weekly: { percent: 5 } };
@@ -19,9 +19,18 @@ assert.equal(formatCountdown("2026-07-07T10:29:00Z", now), "Resets in 2h 29m");
 assert.equal(formatCountdown("2026-07-07T07:59:00Z", now), "Resets now.");
 assert.equal(formatCountdown(undefined, now), "");
 
-// Color ramp thresholds.
+// Color ramp: green → yellow → orange → red by nearness to the limit.
+assert.equal(usageLevel(10), "ok");
+assert.equal(usageLevel(60), "moderate");
+assert.equal(usageLevel(80), "high");
+assert.equal(usageLevel(95), "critical");
 assert.match(barClass(10), /emerald/);
-assert.match(barClass(80), /amber/);
+assert.match(barClass(60), /yellow/);
+assert.match(barClass(80), /orange/);
 assert.match(barClass(95), /red/);
+assert.match(gaugeClass(10), /emerald/);
+assert.match(gaugeClass(95), /red/);
+// windowMax = the worse of session/weekly (codex: max(80, 5)).
+assert.equal(windowMax(codex), 80);
 
 console.log("usage-format.check OK");

@@ -3,7 +3,7 @@ import type { UsagePrefs as _Prefs } from "@orquester/config";
 
 type Chip = _Prefs["chip"];
 
-function windowMax(a: AgentUsage): number {
+export function windowMax(a: AgentUsage): number {
   return Math.max(a.session?.percent ?? 0, a.weekly?.percent ?? 0);
 }
 
@@ -27,11 +27,42 @@ export function formatCountdown(resetsAt: string | undefined, now: number): stri
   return h > 0 ? `Resets in ${h}h ${m}m` : `Resets in ${m}m`;
 }
 
-/** Fill color for a percentage: emerald < 75, amber < 90, red otherwise. */
+export type UsageLevel = "ok" | "moderate" | "high" | "critical";
+
+/** How close a percentage is to its limit: <50 ok, <75 moderate, <90 high, else critical. */
+export function usageLevel(pct: number): UsageLevel {
+  if (pct >= 90) return "critical";
+  if (pct >= 75) return "high";
+  if (pct >= 50) return "moderate";
+  return "ok";
+}
+
+/** Progress-bar fill color, green → yellow → orange → red by usage level. */
 export function barClass(pct: number): string {
-  if (pct >= 90) return "bg-red-500";
-  if (pct >= 75) return "bg-amber-400";
-  return "bg-emerald-400";
+  switch (usageLevel(pct)) {
+    case "critical":
+      return "bg-red-500";
+    case "high":
+      return "bg-orange-400";
+    case "moderate":
+      return "bg-yellow-400";
+    default:
+      return "bg-emerald-400";
+  }
+}
+
+/** Chip gauge icon color, same green → yellow → orange → red ramp (text-*). */
+export function gaugeClass(pct: number): string {
+  switch (usageLevel(pct)) {
+    case "critical":
+      return "text-red-500";
+    case "high":
+      return "text-orange-400";
+    case "moderate":
+      return "text-yellow-400";
+    default:
+      return "text-emerald-400";
+  }
 }
 
 export function formatClock(iso: string): string {

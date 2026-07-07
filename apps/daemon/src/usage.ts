@@ -9,7 +9,7 @@ export interface UsageServiceDeps {
   readCodex: () => Promise<AgentUsage | null>;
   getPrefs: () => Promise<UsagePrefs>;
   now: () => number;
-  /** Poll cadence while a window is fresh (default 60s) / stale-idle (default 5m). */
+  /** Poll cadence while a window is fresh (default 2m) / stale-idle (default 5m). */
   activeMs?: number;
   idleMs?: number;
 }
@@ -59,7 +59,7 @@ export class UsageService {
     await this.recompute().catch(() => undefined);
     if (this.stopped) return;
     const claude = this.cache.agents.find((a) => a.id === "claude");
-    const delay = claude?.stale ? this.deps.idleMs ?? 300_000 : this.deps.activeMs ?? 60_000;
+    const delay = claude?.stale ? this.deps.idleMs ?? 300_000 : this.deps.activeMs ?? 120_000;
     this.timer = setTimeout(() => void this.tick(), delay);
   }
 

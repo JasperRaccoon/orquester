@@ -2,8 +2,9 @@ import React from "react";
 import { ChevronDown, Gauge, RefreshCw } from "lucide-react";
 import type { AgentUsage } from "@orquester/api";
 import { AdaptiveMenu } from "../ui";
+import { getRegistryIcon } from "../../icons";
 import { useAppStore } from "../../store/app";
-import { barClass, formatClock, formatCountdown, pickDriver } from "./usage-format";
+import { barClass, formatClock, formatCountdown, gaugeClass, pickDriver, windowMax } from "./usage-format";
 
 const AGENT_LABEL: Record<AgentUsage["id"], string> = { claude: "Claude Code", codex: "Codex" };
 
@@ -32,7 +33,11 @@ const AgentSection: React.FC<{ agent: AgentUsage }> = ({ agent }) => (
       <p className="text-sm text-neutral-200">{AGENT_LABEL[agent.id]} Usage</p>
       {agent.plan && <span className="text-xs text-neutral-500">{agent.plan}</span>}
     </div>
-    {agent.stale && <p className="text-[11px] text-amber-400">Stale — open {AGENT_LABEL[agent.id]} to refresh</p>}
+    {agent.stale && (
+      <p className="text-[11px] text-amber-400">
+        {agent.session || agent.weekly ? "Last known — updating…" : "Signed in — usage updating…"}
+      </p>
+    )}
     <Bar label="Current session (5 hours)" window={agent.session} muted={agent.stale} />
     <Bar label="Current week" window={agent.weekly} muted={agent.stale} />
   </div>
@@ -55,10 +60,13 @@ export const UsageWidget: React.FC = () => {
   const present = new Set(agents.map((a) => a.id));
   const missing = (["claude", "codex"] as const).filter((id) => prefs[id] && !present.has(id));
 
-  const chipText = `${Math.round(driver.session?.percent ?? 0)}% • ${Math.round(driver.weekly?.percent ?? 0)}%`;
+  const cell = (w: AgentUsage["session"]) => (w ? `${Math.round(w.percent)}%` : "—");
+  const chipText = `${cell(driver.session)} • ${cell(driver.weekly)}`;
+  const gauge = driver.stale ? "text-neutral-600" : gaugeClass(windowMax(driver));
   const trigger = (
     <span className="flex h-7 items-center gap-1.5 rounded-md px-2 text-xs font-medium text-neutral-300 hover:bg-neutral-800">
-      <Gauge size={13} className={driver.stale ? "text-neutral-600" : "text-emerald-400"} />
+      {getRegistryIcon("agent", driver.id, 13)}
+      <Gauge size={13} className={gauge} />
       <span>{chipText}</span>
       <ChevronDown size={13} className="text-neutral-500" />
     </span>

@@ -20,7 +20,7 @@ function epochSecondsToIso(v: unknown): string | undefined {
   return new Date(v * 1000).toISOString();
 }
 
-function claudePlanLabel(creds: ClaudeCreds): string | undefined {
+export function claudePlanLabel(creds: ClaudeCreds): string | undefined {
   if (!creds.subscriptionType) return undefined;
   const base = creds.subscriptionType.charAt(0).toUpperCase() + creds.subscriptionType.slice(1);
   const m = /(\d+)\s*x/i.exec(creds.rateLimitTier ?? "");
