@@ -10,6 +10,7 @@ import { encodeKey } from "./keys.ts";
 const DEFAULT_IDLE_MS = 1000;
 const DEFAULT_TIMEOUT_MS = 120_000; // 2 min
 const MAX_TIMEOUT_MS = 600_000;     // 10 min ceiling
+export const ACTIVITY_WORKING_MS = 3000;
 // On submit, send Enter as its OWN write this long after the text. A coding-agent TUI
 // (Claude Code) treats a bulk single-chunk write ending in CR as a *paste* and keeps
 // the trailing newline literal — so `${data}\r` in one write types the message but never
@@ -24,6 +25,21 @@ export type WaitResult = {
   exitCode?: number;
   aborted?: boolean;
 };
+
+export type AttentionResult = {
+  tabs: {
+    id: string;
+    title: string;
+    status: SessionSummary["status"];
+    activity?: "working" | "idle";
+    attention?: boolean;
+    lastOutputAt?: string;
+  }[];
+  settled: boolean;
+  aborted?: boolean;
+};
+
+type ActivityFields = Partial<Pick<AttentionResult["tabs"][number], "activity" | "attention" | "lastOutputAt">>;
 
 /** A tab is addressed by (workspace,project,tab) name, or by opaque tabId. */
 export type TabSelector = { workspace?: string; project?: string; tab?: string; tabId?: string };
@@ -59,6 +75,31 @@ function statSafe(p: string) {
 
 export class TerminalControl {
   constructor(private readonly deps: TerminalControlDeps) {}
+
+  private activityFields(t: SessionSummary): ActivityFields {
+    if (t.status !== "running") {
+      return {};
+    }
+    const activity = this.deps.sessions.activity(t.id);
+    if (!activity) {
+      return {};
+    }
+    const fields: { activity: "working" | "idle"; attention: boolean; lastOutputAt?: string } = {
+      activity:
+        activity.lastOutputAt !== null && Date.now() - activity.lastOutputAt < ACTIVITY_WORKING_MS
+          ? "working"
+          : "idle",
+      attention: activity.attention,
+    };
+    if (activity.lastOutputAt !== null) {
+      fields.lastOutputAt = new Date(activity.lastOutputAt).toISOString();
+    }
+    return fields;
+  }
+
+  private attentionTab(t: SessionSummary): AttentionResult["tabs"][number] {
+    return { id: t.id, title: t.title, status: t.status, ...this.activityFields(t) };
+  }
 
   /** Name-first, id fallback. Prefers a running match; ambiguity is fatal (never guesses). */
   resolveTab(sel: TabSelector): SessionSummary {
@@ -102,7 +143,7 @@ export class TerminalControl {
   async readTerminal(sel: TabSelector, opts?: { lines?: number }) {
     const t = this.resolveTab(sel);
     const text = await this.deps.sessions.captureText(t.id, { lines: opts?.lines ?? 0 });
-    return { text, status: t.status, exitCode: t.exitCode, cols: t.cols, rows: t.rows };
+    return { text, status: t.status, exitCode: t.exitCode, cols: t.cols, rows: t.rows, ...this.activityFields(t) };
   }
 
   async writeInput(sel: TabSelector, data: string, opts?: { submit?: boolean }) {
@@ -137,6 +178,7 @@ export class TerminalControl {
     return this.deps.sessions.list(projectPath).map((t) => ({
       id: t.id, title: t.title, kind: t.kind, refId: t.refId,
       status: t.status, exitCode: t.exitCode, order: t.order,
+      ...this.activityFields(t),
     }));
   }
 
@@ -206,6 +248,73 @@ export class TerminalControl {
     const after = this.deps.sessions.get(t.id);
     const text = await this.deps.sessions.captureText(t.id, { lines: opts?.lines ?? 0 });
     return { text, settled, status: after?.status ?? "exited", exitCode: after?.exitCode };
+  }
+
+  async waitForAttention(
+    sel: TabSelector,
+    opts?: { timeoutMs?: number; signal?: AbortSignal }
+  ): Promise<AttentionResult> {
+    const { sessions, workspacesDir } = this.deps;
+    let watched: SessionSummary[];
+    if (sel.tabId || sel.tab) {
+      watched = [this.resolveTab(sel)];
+    } else if (sel.workspace && sel.project) {
+      if (!isValidName(sel.workspace) || !isValidName(sel.project)) {
+        throw new TabNotFound("Invalid workspace/project name.");
+      }
+      const projectPath = join(workspacesDir, sel.workspace, sel.project);
+      watched = sessions.list(projectPath).filter((t) => t.status === "running");
+      if (watched.length === 0) {
+        throw new ToolError(`No running tabs in "${sel.workspace}/${sel.project}".`);
+      }
+    } else {
+      throw new ToolError("Provide tabId, workspace+project, or all of workspace+project+tab.");
+    }
+
+    const immediate = watched.filter((t) => t.status === "exited" || sessions.activity(t.id)?.attention);
+    if (immediate.length > 0) {
+      return { tabs: immediate.map((t) => this.attentionTab(t)), settled: true };
+    }
+
+    const watchedIds = new Set(watched.map((t) => t.id));
+    const timeoutMs = Math.min(opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS);
+    const sig = opts?.signal;
+    return new Promise<AttentionResult>((resolve) => {
+      let resolved = false;
+      const done = (result: AttentionResult) => {
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(hardTimer);
+        sessions.lifecycle.off("activity", onActivity);
+        sessions.lifecycle.off("exited", onExited);
+        sig?.removeEventListener("abort", onAbort);
+        resolve(result);
+      };
+      const onActivity = (event: { id: string; type: string }) => {
+        if (event.type !== "bell" || !watchedIds.has(event.id)) {
+          return;
+        }
+        const tab = sessions.get(event.id) ?? watched.find((t) => t.id === event.id);
+        if (tab) {
+          done({ tabs: [this.attentionTab(tab)], settled: true });
+        }
+      };
+      const onExited = (tab: SessionSummary) => {
+        if (!watchedIds.has(tab.id)) {
+          return;
+        }
+        done({ tabs: [this.attentionTab(tab)], settled: true });
+      };
+      const onAbort = () => done({ tabs: [], settled: false, aborted: true });
+      const hardTimer = setTimeout(() => done({ tabs: [], settled: false }), timeoutMs);
+
+      sessions.lifecycle.on("activity", onActivity);
+      sessions.lifecycle.on("exited", onExited);
+      sig?.addEventListener("abort", onAbort, { once: true });
+      if (sig?.aborted) {
+        done({ tabs: [], settled: false, aborted: true });
+      }
+    });
   }
 
   /** Write input, then wait. Subscribes BEFORE writing so the response is never missed. */
