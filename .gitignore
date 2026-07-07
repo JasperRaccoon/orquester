@@ -2,6 +2,7 @@ node_modules/
 dist/
 dist-electron/
 .turbo/
+.serena/
 .DS_Store
 *.log
 .env
