@@ -4,7 +4,6 @@ import { ProjectSwitcher } from "./ProjectSwitcher";
 import { TabStrip } from "./TabStrip";
 import { TabSwitcher } from "./TabSwitcher";
 import { NewTabMenu } from "./NewTabMenu";
-import { OpenOnMenu } from "./OpenOnMenu";
 import { ViewModeToggle } from "./ViewModeToggle";
 import { UsageWidget } from "./UsageWidget";
 import { WindowControls } from "../layout/WindowControls";
@@ -25,9 +24,9 @@ const SettingsButton: React.FC = () => {
 };
 
 /**
- * Desktop: a single titlebar row (project switcher · tabs · new tab | open-in ·
- * settings · window controls). Mobile: a two-row header (menu · project ·
- * open-in · settings) then a tab row (current tab switcher · new tab).
+ * Desktop: a single titlebar row (project switcher · tabs · new tab | usage ·
+ * settings · window controls). Mobile: a two-row header (menu · project · usage
+ * · settings) then a tab row (current tab switcher · new tab).
  */
 export const TopBar: React.FC = () => {
   const { useTitlebar } = useOrquester();
@@ -48,7 +47,6 @@ export const TopBar: React.FC = () => {
             <span className="px-1 text-sm text-neutral-500">Select a project</span>
           )}
           <div className="flex-1" />
-          {ctx?.kind === "project" && <OpenOnMenu />}
           <div className="app-no-drag">
             <UsageWidget />
           </div>
@@ -90,11 +88,6 @@ export const TopBar: React.FC = () => {
         {ctx?.kind === "project" && (
           <div className="app-no-drag">
             <ViewModeToggle />
-          </div>
-        )}
-        {ctx?.kind === "project" && (
-          <div className="app-no-drag pr-1">
-            <OpenOnMenu />
           </div>
         )}
         <div className="app-no-drag">
