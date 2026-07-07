@@ -21,6 +21,23 @@ interface ChangesPanelProps {
 }
 
 /**
+ * GitHub-Desktop-style default commit summary for a single-file changeset:
+ * "<verb> <basename>" with Create/Update/Delete chosen by the file's status.
+ */
+function suggestedCommitSummary(file: GitFileChange): string {
+  const name = file.path.slice(file.path.lastIndexOf("/") + 1);
+  switch (file.status) {
+    case "added":
+    case "untracked":
+      return `Create ${name}`;
+    case "deleted":
+      return `Delete ${name}`;
+    default:
+      return `Update ${name}`;
+  }
+}
+
+/**
  * The Changes tab (GitHub-Desktop style): the working-tree file list plus a
  * commit box on the left, the selected file's diff on the right. Checkboxes are
  * the staged-for-commit selection — toggling stages/unstages via the daemon and
@@ -153,7 +170,11 @@ export const ChangesPanel: React.FC<ChangesPanelProps> = ({ projectPath, status,
     }
   };
 
-  const canCommit = summary.trim().length > 0 && checked.size > 0 && !committing;
+  // Only one changed file → offer a GitHub-Desktop-style default summary shown as
+  // the input's placeholder; committing with the box empty uses it.
+  const suggestion = files.length === 1 ? suggestedCommitSummary(files[0]) : "";
+  const effectiveSummary = summary.trim() || suggestion;
+  const canCommit = effectiveSummary.length > 0 && checked.size > 0 && !committing;
   const commit = async () => {
     if (!canCommit) {
       return;
@@ -162,7 +183,7 @@ export const ChangesPanel: React.FC<ChangesPanelProps> = ({ projectPath, status,
     try {
       await api.gitCommit({
         path: projectPath,
-        summary: summary.trim(),
+        summary: effectiveSummary,
         description: description.trim() || undefined
       });
       setSummary("");
@@ -236,7 +257,7 @@ export const ChangesPanel: React.FC<ChangesPanelProps> = ({ projectPath, status,
 
         <div className="shrink-0 space-y-2 border-t border-neutral-800 p-2.5">
           <Input
-            placeholder="Summary (required)"
+            placeholder={suggestion || "Summary (required)"}
             value={summary}
             onChange={(e) => setSummary(e.target.value)}
             onKeyDown={(e) => {
