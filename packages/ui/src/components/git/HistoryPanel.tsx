@@ -1,7 +1,8 @@
-import React, { useCallback, useEffect, useState } from "react";
-import { ArrowLeft } from "lucide-react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { ArrowLeft, Check, Copy } from "lucide-react";
 import type { GitCommitDetail, GitCommitFile, GitFileStatus, GitLogEntry } from "@orquester/api";
 import { cn } from "../../lib/cn";
+import { copyText } from "../../lib/clipboard";
 import { Button } from "../ui";
 import { DiffView } from "./DiffView";
 import { useApi } from "../../context/orquester-context";
@@ -97,6 +98,18 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({ projectPath, reloadT
   const [diff, setDiff] = useState("");
   const [diffBinary, setDiffBinary] = useState(false);
   const [loadingDiff, setLoadingDiff] = useState(false);
+
+  // Commit-wide +/- totals, summed from the per-file numstat the daemon already
+  // returns. Binary files report 0/0, so this equals git's own shortstat.
+  const totals = useMemo(() => {
+    let additions = 0;
+    let deletions = 0;
+    for (const f of detail?.files ?? []) {
+      additions += f.additions;
+      deletions += f.deletions;
+    }
+    return { additions, deletions };
+  }, [detail]);
 
   // Clear the selection when the repo (project) changes — but NOT on a plain
   // reload, so a pull/commit/refresh keeps whatever commit the user was viewing.
@@ -248,78 +261,132 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({ projectPath, reloadT
         </div>
       </div>
 
-      {/* Commit's changed files (mobile: shown once a commit is picked, until a file is) */}
+      {/* Right area: commit-detail band above the files + diff row */}
       <div
         className={cn(
-          "min-h-0 flex-col border-r border-neutral-800 md:flex md:w-72 md:shrink-0",
-          selectedSha && !selectedFile ? "flex w-full" : "hidden md:flex"
+          "min-h-0 min-w-0 flex-1 flex-col md:flex",
+          selectedSha ? "flex" : "hidden md:flex"
         )}
       >
-        <div className="flex h-9 shrink-0 items-center gap-2 border-b border-neutral-800 px-2">
-          <button
-            type="button"
-            aria-label="Back to history"
-            onClick={() => setSelectedSha(null)}
-            className="flex h-7 w-7 items-center justify-center rounded-md text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100 md:hidden"
+        {/* Commit-detail band: full title, scrollable description, meta + totals.
+            Hidden on the mobile diff stage so the diff gets the full screen. */}
+        {detail && (
+          <div
+            className={cn(
+              "shrink-0 space-y-2 border-b border-neutral-800 px-4 py-3",
+              selectedFile ? "hidden md:block" : "block"
+            )}
           >
-            <ArrowLeft size={15} />
-          </button>
-          <span className="truncate text-xs text-neutral-500">
-            {detail ? `${detail.files.length} changed ${detail.files.length === 1 ? "file" : "files"}` : "Files"}
-          </span>
-        </div>
-        <div className="min-h-0 flex-1 overflow-auto">
-          {detail && (
-            <div className="border-b border-neutral-800 px-3 py-2">
-              <p className="truncate text-sm text-neutral-200" title={detail.subject}>
-                {detail.subject}
-              </p>
-              <p className="mt-0.5 text-xs text-neutral-500">
-                {detail.authorName} · {detail.shortSha}
-              </p>
+            <p className="whitespace-pre-wrap break-words text-sm font-semibold text-neutral-100">
+              {detail.subject}
+            </p>
+            {detail.body.trim() && (
+              <div className="max-h-32 overflow-auto whitespace-pre-wrap break-words rounded bg-neutral-900/40 p-2 text-xs leading-relaxed text-neutral-400">
+                {detail.body.trim()}
+              </div>
+            )}
+            <div className="flex items-center gap-1.5 text-xs text-neutral-500">
+              <span className="min-w-0 truncate">{detail.authorName}</span>
+              <span className="shrink-0">·</span>
+              <span className="shrink-0">{relativeDate(detail.date)}</span>
+              <span className="shrink-0 font-mono text-neutral-600">{detail.shortSha}</span>
+              <CopyHashButton key={detail.sha} sha={detail.sha} />
+              <span className="shrink-0 font-mono tabular-nums">
+                <span className="text-green-500">+{totals.additions}</span>{" "}
+                <span className="text-red-500">-{totals.deletions}</span>
+              </span>
             </div>
-          )}
-          <div className="py-1">
-            {loadingDetail ? (
-              <p className="px-3 py-2 text-xs text-neutral-600">Loading…</p>
-            ) : !selectedSha ? (
-              <p className="px-3 py-2 text-xs text-neutral-600">Select a commit.</p>
+          </div>
+        )}
+
+        {/* Files list + diff */}
+        <div className="flex min-h-0 flex-1">
+          {/* Commit's changed files (mobile: shown once a commit is picked, until a file is) */}
+          <div
+            className={cn(
+              "min-h-0 flex-col border-r border-neutral-800 md:flex md:w-72 md:shrink-0",
+              selectedSha && !selectedFile ? "flex w-full" : "hidden md:flex"
+            )}
+          >
+            <div className="flex h-9 shrink-0 items-center gap-2 border-b border-neutral-800 px-2">
+              <button
+                type="button"
+                aria-label="Back to history"
+                onClick={() => setSelectedSha(null)}
+                className="flex h-7 w-7 items-center justify-center rounded-md text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100 md:hidden"
+              >
+                <ArrowLeft size={15} />
+              </button>
+              <span className="truncate text-xs text-neutral-500">
+                {detail ? `${detail.files.length} changed ${detail.files.length === 1 ? "file" : "files"}` : "Files"}
+              </span>
+            </div>
+            <div className="min-h-0 flex-1 overflow-auto py-1">
+              {loadingDetail ? (
+                <p className="px-3 py-2 text-xs text-neutral-600">Loading…</p>
+              ) : !selectedSha ? (
+                <p className="px-3 py-2 text-xs text-neutral-600">Select a commit.</p>
+              ) : (
+                detail?.files.map((file) => (
+                  <CommitFileRow
+                    key={file.path}
+                    file={file}
+                    active={file.path === selectedFile}
+                    onSelect={() => selectedSha && selectFile(selectedSha, file)}
+                  />
+                ))
+              )}
+            </div>
+          </div>
+
+          {/* Diff pane (full width on mobile when a file is selected) */}
+          <div className={cn("min-w-0 flex-1 flex-col", selectedFile ? "flex" : "hidden md:flex")}>
+            <div className="flex h-9 shrink-0 items-center gap-2 border-b border-neutral-800 px-2">
+              <button
+                type="button"
+                aria-label="Back to files"
+                onClick={() => setSelectedFile(null)}
+                className="flex h-7 w-7 items-center justify-center rounded-md text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100 md:hidden"
+              >
+                <ArrowLeft size={15} />
+              </button>
+              <span className="truncate text-xs text-neutral-300">{selectedFile ? baseName(selectedFile) : ""}</span>
+            </div>
+            {selectedFile ? (
+              <DiffView diff={diff} binary={diffBinary} loading={loadingDiff} />
             ) : (
-              detail?.files.map((file) => (
-                <CommitFileRow
-                  key={file.path}
-                  file={file}
-                  active={file.path === selectedFile}
-                  onSelect={() => selectedSha && selectFile(selectedSha, file)}
-                />
-              ))
+              <div className="flex flex-1 items-center justify-center text-sm text-neutral-600">
+                Select a commit to view its changes
+              </div>
             )}
           </div>
         </div>
       </div>
-
-      {/* Diff pane (full width on mobile when a file is selected) */}
-      <div className={cn("min-w-0 flex-1 flex-col", selectedFile ? "flex" : "hidden md:flex")}>
-        <div className="flex h-9 shrink-0 items-center gap-2 border-b border-neutral-800 px-2">
-          <button
-            type="button"
-            aria-label="Back to files"
-            onClick={() => setSelectedFile(null)}
-            className="flex h-7 w-7 items-center justify-center rounded-md text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100 md:hidden"
-          >
-            <ArrowLeft size={15} />
-          </button>
-          <span className="truncate text-xs text-neutral-300">{selectedFile ? baseName(selectedFile) : ""}</span>
-        </div>
-        {selectedFile ? (
-          <DiffView diff={diff} binary={diffBinary} loading={loadingDiff} />
-        ) : (
-          <div className="flex flex-1 items-center justify-center text-sm text-neutral-600">
-            Select a commit to view its changes
-          </div>
-        )}
-      </div>
     </div>
+  );
+};
+
+/** Small icon button that copies a commit's full SHA to the clipboard. */
+const CopyHashButton: React.FC<{ sha: string }> = ({ sha }) => {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      aria-label="Copy commit hash"
+      title="Copy commit hash"
+      onClick={() => {
+        void copyText(sha);
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1200);
+      }}
+      className={cn(
+        "flex h-5 w-5 shrink-0 items-center justify-center rounded text-neutral-500 transition-colors",
+        "hover:bg-neutral-800 hover:text-neutral-200",
+        "focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
+      )}
+    >
+      {copied ? <Check size={12} className="text-green-500" /> : <Copy size={12} />}
+    </button>
   );
 };
 
