@@ -1,4 +1,4 @@
-# Orquester MCP v2 — Todos, Attention Signal, File Reads (Design)
+# Orquester MCP v2 — Todos, Attention Signal, File Reads, Usage (Design)
 
 **Date:** 2026-07-07 · **Status:** approved design, pre-plan
 
@@ -11,7 +11,7 @@ driving (`read_terminal`, `write_input`, `send_keys`, `send_and_wait`, `wait_for
 tab lifecycle (`create_tab`, `close_tab`). Its philosophy is "drive terminals like a human
 user"; usage docs live in `docs/terminal-control-mcp.md`.
 
-Three daemon capabilities are invisible to MCP clients today:
+Four daemon capabilities are invisible to MCP clients today:
 
 1. **Todo lists** are a first-class daemon feature (`TodoListManager` in
    `apps/daemon/src/todos.ts`, CRUD at `/api/todos*`, `todo.*` events, `TodoView` UI tab)
@@ -23,12 +23,16 @@ Three daemon capabilities are invisible to MCP clients today:
    distinguish "spinner still animating" from "done, awaiting input".
 3. **Files**: no way to inspect a file or directory without burning a terminal tab on
    `cat`/`ls`.
+4. **Usage**: the daemon's `UsageService` (`apps/daemon/src/usage.ts`) tracks Claude Code
+   and Codex subscription quota (5-hour + weekly windows) behind `GET /api/usage` and
+   `usage.changed` events — an orchestrator cannot check quota before launching or
+   continuing expensive work.
 
-This design adds 8 tools (19 total) plus a small daemon-core activity engine. Chosen scope
-(user decision 2026-07-07): todos + attention + read-only fs. Explicitly parked: git tools
-(structured `/api/git/*` routes already exist server-side and can be wrapped later),
-fs write/delete/upload, workspace/project provisioning, registry mutation, event-bus
-subscription, usage. The UI is untouched: the daemon-side activity engine is for MCP
+This design adds 9 tools (20 total) plus a small daemon-core activity engine. Chosen scope
+(user decisions 2026-07-07): todos + attention + read-only fs + usage. Explicitly parked:
+git tools (structured `/api/git/*` routes already exist server-side and can be wrapped
+later), fs write/delete/upload, workspace/project provisioning, registry mutation,
+event-bus subscription. The UI is untouched: the daemon-side activity engine is for MCP
 consumers only; the UI keeps its client-side detection (accepted duplication).
 
 ## Goals
@@ -36,8 +40,9 @@ consumers only; the UI keeps its client-side detection (accepted duplication).
 - Agents (outer orchestrators over HTTPS, or inner agents via loopback
   `http://127.0.0.1:47831/mcp` + bearer) can maintain the same todo lists humans see live
   in the UI, tick items atomically, supervise many agent tabs on a real
-  "needs attention" signal instead of silence-polling, and read files/directories inside
-  the existing `fsRoot` sandbox.
+  "needs attention" signal instead of silence-polling, read files/directories inside
+  the existing `fsRoot` sandbox, and check Claude/Codex quota windows before scheduling
+  expensive work.
 - Zero changes to transport, auth, UI, or wire contracts consumed by the UI.
 
 ## Non-goals
@@ -59,6 +64,7 @@ consumers only; the UI keeps its client-side detection (accepted duplication).
 | `wait_for_attention` | `workspace?: string`, `project?: string`, `tab?: string`, `tabId?: string`, `timeoutMs?: int` | `{tabs: [{id, title, status, activity, attention}], settled, aborted?}` |
 | `list_files` | `path: string` | `{path, entries: [{name, kind, size}], truncated}` |
 | `read_file` | `path: string`, `offset?: int`, `maxBytes?: int` | `{path, text, size, offset, truncated}` |
+| `get_usage` | `refresh?: boolean` | `{agents: [{id, available, stale, plan?, session, weekly, asOf?, ageMinutes?}]}` |
 
 Existing-tool additions: `list_tabs` rows and `read_terminal` results gain
 `activity: "working" | "idle"`, `attention: boolean`, and (list_tabs only)
@@ -192,12 +198,44 @@ generic, path-free mapping.
 
 Read-only by design: no write/create/delete/upload tools in this iteration.
 
+## Component 5: Usage tool
+
+`get_usage {refresh?}` exposes the existing `UsageService` (Claude Code + Codex
+subscription quota; investigated 2026-07-07). No new module — it registers in `server.ts`
+via a `getUsage(force)` dep closure over the `UsageService` instance `index.ts` already
+constructs.
+
+- **Default `refresh: false`** returns the in-memory cache (`usage.snapshot(false)`) —
+  zero upstream I/O. The daemon already keeps the cache fresh: a 5-minute poll loop plus
+  500 ms-debounced fs-watchers on `~/.claude` and `~/.codex/sessions`.
+- **`refresh: true`** maps to `snapshot(true)` (forced recompute). Rate-limit safety is
+  server-side and stays there: the Claude source's `backoffUntil` (429 → `Retry-After`
+  with a 5-minute floor; other errors → 60 s) is respected even on forced refresh, so the
+  tool cannot bust Anthropic's per-account limit; a Codex refresh is local disk reads
+  only. The tool description still forbids retry loops, and states a forced refresh may
+  return last-known data anyway (backoff window).
+- **Projection** per agent: `{id, available, stale, plan?, session: {percent, resetsAt?}
+  | null, weekly: {percent, resetsAt?} | null, asOf?, ageMinutes?}`. `ageMinutes` is
+  derived from `asOf` at call time (models do poor ISO date arithmetic; the UI treats
+  > 10 minutes as stale). The top-level `updatedAt` is deliberately **dropped**: it
+  advances on every poll attempt even when the fetch failed or was skipped, and the
+  feature's own history (commit `1ea739f`, "honest 'as of'") shows presenting it as
+  freshness is a lie. `asOf` + `ageMinutes` + `stale` are the honest signals.
+- **Load-bearing description semantics** (asserted by tests): `percent` is % *used*,
+  clamped 0–100 (over-limit reads as exactly 100); `session` = rolling 5-hour window,
+  `weekly` = 7-day window; either window can be individually `null`. An agent **absent**
+  from `agents` is not logged in on the daemon host (or disabled in usage prefs); a
+  **present** agent with null windows and `stale: true` is logged in with no reading yet —
+  never report "0% used" for "unknown". Never call `refresh: true` in a loop.
+- Response contains no secrets: percentages, ISO reset times, and plan labels only.
+
 ## Wiring
 
-`buildServer` (`apps/daemon/src/mcp/server.ts`) grows the 8 registrations through the
-existing `tool()` helper; its deps gain the todo-tools and fs-tools instances (constructed
-in `registerMcp` from `todos`, `resolved.workspacesDir`, `resolved.fsRoot`).
-`registerMcp`'s call site in `index.ts` passes the already-constructed `TodoListManager`.
+`buildServer` (`apps/daemon/src/mcp/server.ts`) grows the 9 registrations through the
+existing `tool()` helper; its deps gain the todo-tools and fs-tools instances plus a
+`getUsage(force)` closure (constructed in `registerMcp` from `todos`,
+`resolved.workspacesDir`, `resolved.fsRoot`, and the `UsageService`). `registerMcp`'s call
+site in `index.ts` passes the already-constructed `TodoListManager` and `UsageService`.
 Transport, auth, body limit, statelessness: unchanged. `SERVER_INSTRUCTIONS` gets one
 sentence per new family and must stay under 2 KB (existing test enforces the budget).
 
@@ -211,6 +249,9 @@ sentence per new family and must stay under 2 KB (existing test enforces the bud
   naming it.
 - `wait_for_attention` holds a request open like `wait_for_idle` (bounded by the 10-min
   clamp, aborted on disconnect) — no new DoS surface.
+- `get_usage` is read-only and secret-free; upstream rate-limit protection lives
+  server-side in the usage sources (`backoffUntil` floor) and is not bypassable via
+  `refresh: true`, so a misbehaving client can at worst re-read local disk.
 - All name inputs pass `isValidName`; all paths pass `assertInsideFsRoot`; all errors pass
   `toSafeToolError` (no paths/stacks leak).
 
@@ -228,8 +269,12 @@ Co-located `node:test` files, `pnpm check` clean, no daemon launched from a live
   + `truncated`; window offset/cap math; binary sniff.
 - `terminal-control.test.ts` additions: `wait_for_attention` immediate-return, resolve on
   bell, resolve on exit, timeout, abort; snapshot semantics (mid-wait tab not watched).
+- `get_usage` tests (with a fake `getUsage`): default call passes `force: false` (cache
+  only), `refresh: true` passes `force: true`; projection drops `updatedAt` and derives
+  `ageMinutes` from `asOf`; agents with null windows pass through un-invented.
 - `server.test.ts` additions: new tools registered; load-bearing description guidance
-  (bell caveat, byte-offset note) survives future trims; `SERVER_INSTRUCTIONS` ≤ 2 KB.
+  (bell caveat, byte-offset note, never-loop-refresh + absent-vs-placeholder usage
+  semantics) survives future trims; `SERVER_INSTRUCTIONS` ≤ 2 KB.
 
 Live verification happens post-deploy against the VPS (fresh `claude` session required —
 tool descriptions are cached per session).
@@ -239,11 +284,12 @@ tool descriptions are cached per session).
 `docs/terminal-control-mcp.md` is extended in place (filename kept; title notes the scope
 is now "Orquester control", not just terminals): new tool reference entries, a
 "Supervising agent tabs" pattern (wait_for_attention loop replacing short-timeout
-`wait_for_idle` polling for bell-capable TUIs), and a "Shared todo lists" pattern
-(orchestrator plans → inner agents tick → human watches TodoView).
+`wait_for_idle` polling for bell-capable TUIs), a "Shared todo lists" pattern
+(orchestrator plans → inner agents tick → human watches TodoView), and a quota-awareness
+note (check `get_usage` before spawning long agent runs; respect its staleness fields).
 
 ## Future candidates (explicitly out of scope now)
 
 Read-only git tools over the existing `/api/git/*` routes; fs write; event-bus
 subscription (poll tool or MCP notifications); workspace/project provisioning incl.
-clone/create-as-identity; registry install/version; usage quota tool.
+clone/create-as-identity; registry install/version.
