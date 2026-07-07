@@ -31,7 +31,16 @@ test("BellScanner swallows BELs inside DCS, SOS, PM, and APC strings", () => {
   for (const introducer of ["P", "X", "^", "_"]) {
     const scanner = new BellScanner();
 
-    assert.equal(scanner.feed(`\x1b${introducer}hidden\x07still-hidden\x07\x1b\\shown\x07`), 1, introducer);
+    assert.equal(scanner.feed(`\x1b${introducer}hidden\x07`), 0, introducer);
+  }
+});
+
+test("BellScanner recovers after BEL terminates DCS, SOS, PM, and APC strings", () => {
+  for (const introducer of ["P", "X", "^", "_"]) {
+    const scanner = new BellScanner();
+
+    assert.equal(scanner.feed(`\x1b${introducer}hidden\x07`), 0, introducer);
+    assert.equal(scanner.feed("\x07"), 1, introducer);
   }
 });
 

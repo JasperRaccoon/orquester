@@ -1,4 +1,4 @@
-import { open, readdir, stat } from "node:fs/promises";
+import { open, opendir, stat } from "node:fs/promises";
 import type { Dirent } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { assertInsideFsRoot, FsSandboxError } from "@orquester/config/fs";
@@ -54,8 +54,21 @@ export class FsTools {
   async listFiles(path: string): Promise<ListFilesResult> {
     const safe = await this.resolvePath(path);
     let dirents: Dirent[];
+    let truncated = false;
     try {
-      dirents = await readdir(safe, { withFileTypes: true });
+      dirents = [];
+      const dir = await opendir(safe);
+      try {
+        for await (const entry of dir) {
+          if (dirents.length >= MAX_FS_ENTRIES) {
+            truncated = true;
+            break;
+          }
+          dirents.push(entry);
+        }
+      } finally {
+        await dir.close().catch(() => undefined);
+      }
     } catch (error) {
       const code = codeOf(error);
       if (code === "ENOENT") {
@@ -68,9 +81,8 @@ export class FsTools {
     }
 
     dirents.sort((a, b) => a.name.localeCompare(b.name));
-    const truncated = dirents.length > MAX_FS_ENTRIES;
     const entries = await Promise.all(
-      dirents.slice(0, MAX_FS_ENTRIES).map(async (entry) => {
+      dirents.map(async (entry) => {
         const kind = entryKind(entry);
         const size = kind === "file" ? await fileSize(join(safe, entry.name)) : 0;
         return { name: entry.name, kind, size };

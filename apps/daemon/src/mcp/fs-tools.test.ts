@@ -93,8 +93,10 @@ test("listFiles caps entries and marks truncated after MAX_FS_ENTRIES", async (t
 
   assert.equal(result.entries.length, MAX_FS_ENTRIES);
   assert.equal(result.truncated, true);
-  assert.equal(result.entries[0].name, "f0000.txt");
-  assert.equal(result.entries.at(-1)?.name, `f${String(MAX_FS_ENTRIES - 1).padStart(4, "0")}.txt`);
+  assert.deepEqual(
+    result.entries.map((entry) => entry.name),
+    [...result.entries].map((entry) => entry.name).sort((a, b) => a.localeCompare(b))
+  );
 });
 
 test("readFileWindow reads the default window and supports byte-offset paging", async (t) => {

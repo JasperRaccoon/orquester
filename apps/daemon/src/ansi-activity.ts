@@ -76,7 +76,7 @@ export class BellScanner {
             this.state = "string-esc";
           } else if (code === ST) {
             this.state = "ground";
-          } else if (code === BEL && this.stringBelTerminates) {
+          } else if (code === BEL) {
             this.state = "ground";
           }
           break;

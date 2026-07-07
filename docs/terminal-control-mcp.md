@@ -207,7 +207,7 @@ single text content block** — parse `content[0].text` as JSON. Errors come bac
 | `list_todos` / `create_todo` / `update_todo` / `delete_todo` | Shared todo lists on a workspace (`{workspace}`) or project (`{workspace, project}`). `body` is GitHub task-list markdown (`- [ ] item`). The human sees every change live in the UI's Todo tab. |
 | `toggle_todo_item` | Atomically check/uncheck ONE item by 1-based index or exact text (omit `checked` to flip). Prefer this over `update_todo` for ticks — no read-modify-write clobber. |
 | `wait_for_attention` | Block until a watched tab needs you: a real terminal BELL or an exit. `{workspace, project}` watches every running tab; add `tab`/`tabId` for one. Already-flagged tabs return instantly; `tabs: []` on timeout. `list_tabs`/`read_terminal` now also report `activity` ("working"/"idle"), `attention`, and `lastOutputAt` for running tabs. |
-| `list_files` | List a sandboxed directory (absolute, or relative to the workspaces root). Capped at 500 entries (`truncated: true` beyond). |
+| `list_files` | List a sandboxed directory (absolute, or relative to the sandbox root). Capped at 500 entries (`truncated: true` beyond). |
 | `read_file` | Read a text file with byte-offset paging (`offset`/`maxBytes`, 64 KB default, 256 KB max). Binary files are refused; `truncated: true` means advance `offset`. |
 | `get_usage` | Claude Code / Codex subscription quota from the daemon's cache (≈5 min fresh). Percent is % USED. An ABSENT agent is not logged in; present with null windows + `stale: true` is "logged in, no reading yet". Freshness = per-agent `asOf`/`ageMinutes`. `refresh: true` may still return last-known data (upstream backoff) — never call it in a loop. |
 
@@ -414,4 +414,5 @@ npx @modelcontextprotocol/inspector --cli http://127.0.0.1:47999/mcp --method to
 ---
 
 *Design reference: `docs/superpowers/specs/2026-06-30-orquester-terminal-mcp-design.md`.
-Implementation: `apps/daemon/src/mcp/` (`server.ts`, `terminal-control.ts`, `keys.ts`, `text.ts`).*
+Implementation: `apps/daemon/src/mcp/` (`server.ts`, `terminal-control.ts`, `todo-tools.ts`,
+`fs-tools.ts`, `keys.ts`, `text.ts`) plus `apps/daemon/src/ansi-activity.ts`.*
