@@ -19,14 +19,17 @@ const options: BuildOptions = {
   logLevel: "info",
   plugins: [
     {
-      name: "copy-preload",
+      name: "copy-assets",
       setup(build) {
         build.onEnd(async () => {
           const { copyFile } = await import("node:fs/promises");
-          await copyFile(
-            path.join(root, "src", "preload.cjs"),
-            path.join(root, "dist-electron", "preload.cjs")
-          );
+          const outDir = path.join(root, "dist-electron");
+          await copyFile(path.join(root, "src", "preload.cjs"), path.join(outDir, "preload.cjs"));
+          // App logo assets loaded by the main process at runtime (tray + window icon).
+          // dist-electron is included in electron-builder `files`, so these ship packaged too.
+          for (const name of ["logo-32.png", "logo-512.png"]) {
+            await copyFile(path.join(root, "assets", name), path.join(outDir, name));
+          }
         });
       }
     }

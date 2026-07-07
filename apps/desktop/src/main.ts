@@ -4,7 +4,6 @@ import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import path from "node:path";
-import zlib from "node:zlib";
 
 interface DaemonRequest {
   method?: string;
@@ -407,44 +406,16 @@ function showWindow(): void {
 
 // --- Tray (always present; controls daemon independently of the window) ---
 
-/** A small monochrome PNG generated at runtime (no asset shipping needed). */
+// Resolves an app-logo asset copied into dist-electron by the build step (see
+// scripts/build-main.ts). Works in dev and inside the packaged app.asar alike.
+function logoPath(name: string): string {
+  return path.join(desktopRoot, "dist-electron", name);
+}
+
 function makeTrayIcon(): Electron.NativeImage {
-  const size = 16;
-  const px = Buffer.alloc(size * size * 4);
-  const c = (size - 1) / 2;
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      const i = (y * size + x) * 4;
-      const inside = Math.hypot(x - c, y - c) <= size / 2 - 0.5;
-      px[i] = px[i + 1] = px[i + 2] = 0xe5;
-      px[i + 3] = inside ? 0xff : 0;
-    }
-  }
-  const stride = size * 4;
-  const raw = Buffer.alloc(size * (stride + 1));
-  for (let y = 0; y < size; y++) {
-    px.copy(raw, y * (stride + 1) + 1, y * stride, (y + 1) * stride);
-  }
-  const chunk = (type: string, data: Buffer) => {
-    const len = Buffer.alloc(4);
-    len.writeUInt32BE(data.length, 0);
-    const typeBuf = Buffer.from(type, "ascii");
-    const crc = Buffer.alloc(4);
-    crc.writeUInt32BE(zlib.crc32(Buffer.concat([typeBuf, data])) >>> 0, 0);
-    return Buffer.concat([len, typeBuf, data, crc]);
-  };
-  const ihdr = Buffer.alloc(13);
-  ihdr.writeUInt32BE(size, 0);
-  ihdr.writeUInt32BE(size, 4);
-  ihdr[8] = 8; // bit depth
-  ihdr[9] = 6; // colour type RGBA
-  const png = Buffer.concat([
-    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
-    chunk("IHDR", ihdr),
-    chunk("IDAT", zlib.deflateSync(raw)),
-    chunk("IEND", Buffer.alloc(0))
-  ]);
-  return nativeImage.createFromBuffer(png);
+  const icon = nativeImage.createFromPath(logoPath("logo-32.png"));
+  // Fit the menu-bar / system-tray footprint; keep the source's alpha.
+  return icon.isEmpty() ? icon : icon.resize({ width: 16, height: 16, quality: "best" });
 }
 
 async function httpEnabled(): Promise<boolean> {
@@ -508,6 +479,7 @@ function createWindow(): void {
     minWidth: 1040,
     minHeight: 680,
     title: "Orquester",
+    icon: nativeImage.createFromPath(logoPath("logo-512.png")),
     frame: false,
     titleBarStyle: "hidden",
     trafficLightPosition: { x: 12, y: 12 },
