@@ -28,12 +28,14 @@ Four daemon capabilities are invisible to MCP clients today:
    `usage.changed` events — an orchestrator cannot check quota before launching or
    continuing expensive work.
 
-This design adds 9 tools (20 total) plus a small daemon-core activity engine. Chosen scope
+This design adds 9 tools (20 total), a small daemon-core activity engine, and two
+usage-honesty root fixes (Component 6). Chosen scope
 (user decisions 2026-07-07): todos + attention + read-only fs + usage. Explicitly parked:
 git tools (structured `/api/git/*` routes already exist server-side and can be wrapped
 later), fs write/delete/upload, workspace/project provisioning, registry mutation,
-event-bus subscription. The UI is untouched: the daemon-side activity engine is for MCP
-consumers only; the UI keeps its client-side detection (accepted duplication).
+event-bus subscription. The UI is untouched by the activity engine: it is for MCP
+consumers only; the UI keeps its client-side detection (accepted duplication). The one
+deliberate UI edit is Component 6's Settings copy fix.
 
 ## Goals
 
@@ -43,7 +45,9 @@ consumers only; the UI keeps its client-side detection (accepted duplication).
   "needs attention" signal instead of silence-polling, read files/directories inside
   the existing `fsRoot` sandbox, and check Claude/Codex quota windows before scheduling
   expensive work.
-- Zero changes to transport, auth, UI, or wire contracts consumed by the UI.
+- Zero changes to transport or auth. The UI and its wire contracts change only in
+  Component 6: removing a dead, misleading field (`UsageResponse.updatedAt`) and
+  correcting misleading Settings copy.
 
 ## Non-goals
 
@@ -217,10 +221,9 @@ constructs.
 - **Projection** per agent: `{id, available, stale, plan?, session: {percent, resetsAt?}
   | null, weekly: {percent, resetsAt?} | null, asOf?, ageMinutes?}`. `ageMinutes` is
   derived from `asOf` at call time (models do poor ISO date arithmetic; the UI treats
-  > 10 minutes as stale). The top-level `updatedAt` is deliberately **dropped**: it
-  advances on every poll attempt even when the fetch failed or was skipped, and the
-  feature's own history (commit `1ea739f`, "honest 'as of'") shows presenting it as
-  freshness is a lie. `asOf` + `ageMinutes` + `stale` are the honest signals.
+  > 10 minutes as stale). The result carries no top-level `updatedAt` — Component 6
+  removes that field from the wire model entirely. `asOf` + `ageMinutes` + `stale` are
+  the honest signals.
 - **Load-bearing description semantics** (asserted by tests): `percent` is % *used*,
   clamped 0–100 (over-limit reads as exactly 100); `session` = rolling 5-hour window,
   `weekly` = 7-day window; either window can be individually `null`. An agent **absent**
@@ -228,6 +231,31 @@ constructs.
   **present** agent with null windows and `stale: true` is logged in with no reading yet —
   never report "0% used" for "unknown". Never call `refresh: true` in a loop.
 - Response contains no secrets: percentages, ISO reset times, and plan labels only.
+
+## Component 6: Usage honesty root fixes
+
+The MCP projection defends against two usage data-model traps (Component 5); this
+component removes them at the source so no future consumer can fall into them.
+
+1. **Remove `UsageResponse.updatedAt`** (`packages/api/src/index.ts:385`; written at
+   `apps/daemon/src/usage.ts:25,43`). The field advances on every poll attempt —
+   including fetches that were skipped (backoff, expired token) or failed — so it is a
+   freshness lie by construction; presenting it as freshness was a shipped bug (commit
+   `1ea739f`). Verified 2026-07-07: nothing reads it — not the UI, not the desktop, not
+   the check tests — and the daemon's own change-dedupe explicitly excludes it. The wire
+   type shrinks to `{agents}` and the two construction sites go with it; `pnpm check`
+   proves the removal is complete. Per-agent `asOf` remains the only freshness timestamp.
+2. **Fix the Settings usage hint**
+   (`packages/ui/src/components/settings/SettingsModal.tsx:485-492`). `agentHint` renders
+   every `stale` agent as `"Stale — token expired"`, but `stale: true` also covers 429
+   backoff, network errors, an unparseable 200, and logged-in-with-no-reading-yet — the
+   exact "transient failure misread as a login problem" confusion commit `05be873` fixed
+   elsewhere. Replace with truthful logged-in phrasing consistent with the widget
+   (plan-aware, e.g. `"Logged in · Max 20x — updating…"`). The `!found → "Not logged in"`
+   branch is already correct (absence means not logged in) and stays. This is the
+   design's one deliberate UI edit.
+
+Both fixes are small, self-contained, and ship with Component 5.
 
 ## Wiring
 
@@ -270,8 +298,11 @@ Co-located `node:test` files, `pnpm check` clean, no daemon launched from a live
 - `terminal-control.test.ts` additions: `wait_for_attention` immediate-return, resolve on
   bell, resolve on exit, timeout, abort; snapshot semantics (mid-wait tab not watched).
 - `get_usage` tests (with a fake `getUsage`): default call passes `force: false` (cache
-  only), `refresh: true` passes `force: true`; projection drops `updatedAt` and derives
-  `ageMinutes` from `asOf`; agents with null windows pass through un-invented.
+  only), `refresh: true` passes `force: true`; projection derives `ageMinutes` from
+  `asOf`; agents with null windows pass through un-invented.
+- Component 6: `pnpm check` proves the `updatedAt` removal left no readers behind; the
+  Settings hint change is copy-only (no UI test runner — verified by typecheck and
+  post-deploy inspection).
 - `server.test.ts` additions: new tools registered; load-bearing description guidance
   (bell caveat, byte-offset note, never-loop-refresh + absent-vs-placeholder usage
   semantics) survives future trims; `SERVER_INSTRUCTIONS` ≤ 2 KB.
