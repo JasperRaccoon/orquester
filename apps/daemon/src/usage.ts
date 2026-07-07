@@ -22,7 +22,7 @@ const DEFAULT_PREFS: UsagePrefs = { enabled: true, claude: true, codex: true, ch
 
 export class UsageService {
   readonly events = new EventEmitter();
-  private cache: UsageResponse = { updatedAt: new Date(0).toISOString(), agents: [] };
+  private cache: UsageResponse = { agents: [] };
   private hash = "";
   private timer?: ReturnType<typeof setTimeout>;
   private stopped = false;
@@ -40,8 +40,8 @@ export class UsageService {
       const x = await this.deps.readCodex().catch(() => null);
       if (x) agents.push(x);
     }
-    this.cache = { updatedAt: new Date(this.deps.now()).toISOString(), agents };
-    const h = JSON.stringify(agents); // dedupe on the agents payload, ignoring updatedAt
+    this.cache = { agents };
+    const h = JSON.stringify(agents); // dedupe on the agents payload
     if (h !== this.hash) {
       this.hash = h;
       this.events.emit("changed", this.cache);

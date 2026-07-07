@@ -341,7 +341,7 @@ export interface TodoListRecord {
   refKey: string;          // workspace name (scope "workspace") | project path (scope "project")
   body: string;            // "- [ ] a\n- [x] b" ; "" when empty
   createdAt: string;       // ISO
-  updatedAt: string;       // ISO
+  updatedAt: string;       // ISO (TodoListRecord timestamp)
 }
 
 export interface CreateTodoRequest {
@@ -382,8 +382,8 @@ export interface AgentUsage {
 }
 
 export interface UsageResponse {
-  updatedAt: string;
-  /** only logged-in agents; empty ⇒ the widget hides. */
+  /** Only logged-in agents; empty ⇒ the widget hides. Freshness lives on each
+   *  agent's `asOf`; there is deliberately no top-level poll timestamp. */
   agents: AgentUsage[];
 }
 
