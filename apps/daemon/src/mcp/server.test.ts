@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { FsSandboxError } from "@orquester/config/fs";
 import { TabNotFound, AmbiguousTab, ToolError } from "./terminal-control.ts";
 import { SessionError } from "../sessions.ts";
+import { TodoError } from "../todos.ts";
 import { toSafeToolError, SERVER_INSTRUCTIONS, PROMPT_HINT } from "./server.ts";
 
 test("typed tool errors surface their (safe) message", () => {
@@ -11,6 +12,12 @@ test("typed tool errors surface their (safe) message", () => {
     assert.equal(r.isError, true);
     assert.equal(r.content[0].text, e.message);
   }
+});
+
+test("todo errors surface their safe message", () => {
+  const r = toSafeToolError(new TodoError(404, "todo not found"));
+  assert.equal(r.isError, true);
+  assert.equal(r.content[0].text, "todo not found");
 });
 
 test("FsSandboxError is generic (never echoes the path)", () => {

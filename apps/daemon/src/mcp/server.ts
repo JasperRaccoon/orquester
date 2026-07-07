@@ -4,9 +4,16 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import { FsSandboxError } from "@orquester/config/fs";
 import { SessionError } from "../sessions.ts";
+import { TodoError } from "../todos.ts";
 import { AmbiguousTab, TabNotFound, TerminalControl, ToolError } from "./terminal-control.ts";
+import type { TodoTools } from "./todo-tools.ts";
 
 const MCP_BODY_LIMIT = 8 * 1024 * 1024;
+
+export interface McpDeps {
+  control: TerminalControl;
+  todos: TodoTools;
+}
 
 /** Map any thrown error to an MCP isError result with a SAFE message (no path/stack leak). */
 export function toSafeToolError(err: unknown): { content: { type: "text"; text: string }[]; isError: true } {
@@ -15,6 +22,8 @@ export function toSafeToolError(err: unknown): { content: { type: "text"; text: 
     message = err.message; // terminal-control's own — crafted safe (titles/ids, limits)
   } else if (err instanceof SessionError) {
     message = err.message; // e.g. 'Registry entry "claude" is not available.' — safe
+  } else if (err instanceof TodoError) {
+    message = err.message;
   } else if (err instanceof FsSandboxError) {
     message = "Path is not allowed (outside the sandbox)."; // NEVER the raw path
   } else {
@@ -51,10 +60,11 @@ export const SERVER_INSTRUCTIONS = `Orquester terminal-control drives Orquester'
 export const PROMPT_HINT =
   " Interactive MENU (numbered options + `❯` + an 'Esc to cancel' hint)? SINGLE-select: write_input the option NUMBER (or one send_keys arrow, then Enter). MULTI-select ('[ ]' checkboxes): a NUMBER only TOGGLES that option — toggle the ones you want (read between), then send_keys ['Tab'] to reach Submit/Next; the finish row is UNNUMBERED, so never a number and NOT the 'Type something' option. In a multi-question batch (Question N of M) answer EVERY question; at the final Review pick 'Submit answers' only when none remain unanswered. NEVER send Escape to a question you mean to answer: it cancels the whole batch and your next write becomes a stray message. Plain `❯` box (no numbered options): write_input with submit:true. Judge from the screen text, not `settled`.";
 
-/** Build a per-request McpServer with all 11 tools bound to `control`. */
-function buildServer(control: TerminalControl, signal: AbortSignal): McpServer {
+/** Build a per-request McpServer with all tools bound to injected deps. */
+function buildServer(deps: McpDeps, signal: AbortSignal): McpServer {
+  const { control, todos } = deps;
   const server = new McpServer(
-    { name: "orquester", version: "1.0.0" },
+    { name: "orquester", version: "1.1.0" },
     { instructions: SERVER_INSTRUCTIONS }
   );
   const tool = (
@@ -108,15 +118,40 @@ function buildServer(control: TerminalControl, signal: AbortSignal): McpServer {
     (a) => control.createTab({ workspace: a.workspace, project: a.project }, { refId: a.refId, title: a.title, cwd: a.cwd })
   );
   tool("close_tab", "Close a tab.", sel, (a) => control.closeTab(a));
+  tool("list_todos",
+    "List a workspace's (project's, if given) shared todo lists — the human sees them live in the UI.",
+    { workspace: z.string(), project: z.string().optional() },
+    (a) =>
+    todos.list({ workspace: a.workspace, project: a.project })
+  );
+  tool("create_todo",
+    "Create a shared todo list in a workspace (or project). Body starts empty — fill it with update_todo.",
+    { workspace: z.string(), project: z.string().optional(), name: z.string() },
+    (a) =>
+    todos.create({ workspace: a.workspace, project: a.project }, a.name)
+  );
+  tool("update_todo",
+    "Rename a todo list and/or replace its whole markdown body ('- [ ] item' lines). To tick ONE item use toggle_todo_item (atomic — no clobber).",
+    { id: z.string(), name: z.string().optional(), body: z.string().optional() },
+    (a) =>
+    todos.update(a.id, { name: a.name, body: a.body })
+  );
+  tool("delete_todo", "Delete a todo.", { id: z.string() }, (a) => todos.remove(a.id));
+  tool("toggle_todo_item",
+    "Atomically check/uncheck one task item by 1-based index or exact text; omit checked to flip. Prefer this over update_todo for ticks.",
+    { id: z.string(), item: z.union([z.string(), z.number().int()]), checked: z.boolean().optional() },
+    (a) =>
+    todos.toggleItem(a.id, a.item, a.checked)
+  );
 
   return server;
 }
 
 /** Mount POST /mcp (Streamable-HTTP, stateless). Caller registers this ONLY on the HTTP transport. */
-export function registerMcp(app: FastifyInstance, control: TerminalControl): void {
+export function registerMcp(app: FastifyInstance, deps: McpDeps): void {
   app.post("/mcp", { bodyLimit: MCP_BODY_LIMIT }, async (request, reply) => {
     const ctrl = new AbortController(); // cancels in-flight waits on disconnect
-    const server = buildServer(control, ctrl.signal);
+    const server = buildServer(deps, ctrl.signal);
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined, // stateless
       enableJsonResponse: true,

@@ -51,6 +51,7 @@ import { createClaudeSource, createCodexSource, readUsagePrefs } from "./usage-s
 import { listArchiveEntries } from "./archive";
 import { resolveZipTool, spawnDirZip } from "./zip";
 import { TerminalControl } from "./mcp/terminal-control.ts";
+import { TodoTools } from "./mcp/todo-tools.ts";
 import { registerMcp } from "./mcp/server.ts";
 import {
   type AppConfig,
@@ -1894,7 +1895,10 @@ function createServer(
       listWorkspaces: () => listWorkspaces(resolved.workspacesDir, resolved.workspacesMetaFile),
       listProjects: (workspace) => listProjects(resolved.workspacesDir, workspace),
     });
-    registerMcp(app, control);
+    registerMcp(app, {
+      control,
+      todos: new TodoTools({ todos, workspacesDir: resolved.workspacesDir }),
+    });
   }
 
   // Serve the static web client build for everything outside the API, with an
