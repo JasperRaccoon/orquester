@@ -2,10 +2,12 @@ import type { FastifyInstance } from "fastify";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
+import type { UsageResponse } from "@orquester/api";
 import { FsSandboxError } from "@orquester/config/fs";
 import { SessionError } from "../sessions.ts";
 import { TodoError } from "../todos.ts";
 import { AmbiguousTab, TabNotFound, TerminalControl, ToolError } from "./terminal-control.ts";
+import type { FsTools } from "./fs-tools.ts";
 import type { TodoTools } from "./todo-tools.ts";
 
 const MCP_BODY_LIMIT = 8 * 1024 * 1024;
@@ -13,6 +15,8 @@ const MCP_BODY_LIMIT = 8 * 1024 * 1024;
 export interface McpDeps {
   control: TerminalControl;
   todos: TodoTools;
+  files: FsTools;
+  getUsage: (force: boolean) => Promise<UsageResponse>;
 }
 
 /** Map any thrown error to an MCP isError result with a SAFE message (no path/stack leak). */
@@ -55,14 +59,44 @@ export const SERVER_INSTRUCTIONS = `Orquester terminal-control drives Orquester'
 • Read the tab (read_terminal, or send_and_wait's \`text\`) before AND after acting. settled:true means the pane went quiet, NOT that your input was accepted — judge from the text. One key per send_keys, read between.
 • Answer an interactive MENU (numbered options under a \`❯\` cursor) by option NUMBER; a MULTI-select ("[ ]" checkboxes) only TOGGLES on a number, so toggle the ones you want then press ["Tab"] to reach the UNNUMBERED "Submit"/"Next" row (never a number, and NOT the "Type something" option). In a multi-question batch (Question N of M) answer EVERY question before the final "Submit answers"; never submit early.
 • NEVER send ["Escape"] to a menu/question you mean to answer — it cancels it (declining the whole batch at once) and drops you to the input box, so your next write becomes a stray message.
-• A plain \`❯\` box with no numbered options is a text prompt: write_input with submit:true (a lone \`❯\` is empty — ghost/placeholder hints are filtered from your read). Numbered lists inside the agent's prose are NOT menus — reply with a normal message.`;
+• A plain \`❯\` box with no numbered options is a text prompt: write_input with submit:true (a lone \`❯\` is empty — ghost/placeholder hints are filtered from your read). Numbered lists inside the agent's prose are NOT menus — reply with a normal message.
+• Beyond terminals: TODO lists are live in the UI (toggle_todo_item is atomic); list_files/read_file are sandboxed with byte paging; wait_for_attention catches bell/exit attention; get_usage reports quota — never loop refresh:true.`;
 
 export const PROMPT_HINT =
   " Interactive MENU (numbered options + `❯` + an 'Esc to cancel' hint)? SINGLE-select: write_input the option NUMBER (or one send_keys arrow, then Enter). MULTI-select ('[ ]' checkboxes): a NUMBER only TOGGLES that option — toggle the ones you want (read between), then send_keys ['Tab'] to reach Submit/Next; the finish row is UNNUMBERED, so never a number and NOT the 'Type something' option. In a multi-question batch (Question N of M) answer EVERY question; at the final Review pick 'Submit answers' only when none remain unanswered. NEVER send Escape to a question you mean to answer: it cancels the whole batch and your next write becomes a stray message. Plain `❯` box (no numbered options): write_input with submit:true. Judge from the screen text, not `settled`.";
 
+export const ATTENTION_HINT =
+  " attention:true = the tab rang the terminal BELL (Claude Code rings when it finishes or needs input) — read_terminal next and answer. Only bell-ringing TUIs raise it; for plain shells and non-bell TUIs use wait_for_idle.";
+
+export const READ_FILE_DESC =
+  "Read a text file inside the workspace sandbox. Path may be absolute or relative to the sandbox root. Supports byte-offset paging with offset/maxBytes; default window is 64KB (65536 bytes), max 256KB. truncated:true means advance offset and read again. Binary files are refused.";
+
+export const GET_USAGE_DESC =
+  "Report Claude/Codex subscription quota. Percent values are USED from 0-100; session is rolling 5h and weekly is 7d, and either window may be null. Cache is fresh for about 5min. An absent agent means not logged in. A present agent with null windows and stale:true means logged in but no reading yet. Freshness is per-agent asOf/ageMinutes. refresh:true may still return last-known data due to backoff. NEVER call in a loop with refresh:true.";
+
+export function projectUsage(res: UsageResponse, now: number) {
+  return {
+    agents: res.agents.map((agent) => {
+      const asOfMs = agent.asOf ? Date.parse(agent.asOf) : Number.NaN;
+      return {
+        id: agent.id,
+        available: agent.available,
+        stale: agent.stale,
+        plan: agent.plan,
+        session: agent.session,
+        weekly: agent.weekly,
+        asOf: agent.asOf,
+        ageMinutes: Number.isNaN(asOfMs)
+          ? undefined
+          : Math.max(0, Math.round((now - asOfMs) / 60000)),
+      };
+    }),
+  };
+}
+
 /** Build a per-request McpServer with all tools bound to injected deps. */
 function buildServer(deps: McpDeps, signal: AbortSignal): McpServer {
-  const { control, todos } = deps;
+  const { control, todos, files, getUsage } = deps;
   const server = new McpServer(
     { name: "orquester", version: "1.1.0" },
     { instructions: SERVER_INSTRUCTIONS }
@@ -142,6 +176,30 @@ function buildServer(deps: McpDeps, signal: AbortSignal): McpServer {
     { id: z.string(), item: z.union([z.string(), z.number().int()]), checked: z.boolean().optional() },
     (a) =>
     todos.toggleItem(a.id, a.item, a.checked)
+  );
+  tool("wait_for_attention",
+    "Block until a watched tab needs you (bell or exit). workspace+project watches every running tab; add tab/tabId for one. Already-flagged tabs return instantly; tabs:[] on timeout." + ATTENTION_HINT + PROMPT_HINT,
+    { ...sel, timeoutMs: z.number().int().optional() },
+    (a) =>
+      control.waitForAttention(
+        { workspace: a.workspace, project: a.project, tab: a.tab, tabId: a.tabId },
+        { timeoutMs: a.timeoutMs, signal }
+      )
+  );
+  tool("list_files",
+    "List files/directories inside the workspace sandbox. Results are capped at 500 entries.",
+    { path: z.string() },
+    (a) => files.listFiles(a.path)
+  );
+  tool("read_file",
+    READ_FILE_DESC,
+    { path: z.string(), offset: z.number().int().optional(), maxBytes: z.number().int().optional() },
+    (a) => files.readFileWindow(a.path, { offset: a.offset, maxBytes: a.maxBytes })
+  );
+  tool("get_usage",
+    GET_USAGE_DESC,
+    { refresh: z.boolean().optional() },
+    async (a) => projectUsage(await getUsage(a.refresh === true), Date.now())
   );
 
   return server;

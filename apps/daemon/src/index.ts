@@ -52,6 +52,7 @@ import { listArchiveEntries } from "./archive";
 import { resolveZipTool, spawnDirZip } from "./zip";
 import { TerminalControl } from "./mcp/terminal-control.ts";
 import { TodoTools } from "./mcp/todo-tools.ts";
+import { FsTools } from "./mcp/fs-tools.ts";
 import { registerMcp } from "./mcp/server.ts";
 import {
   type AppConfig,
@@ -1898,6 +1899,8 @@ function createServer(
     registerMcp(app, {
       control,
       todos: new TodoTools({ todos, workspacesDir: resolved.workspacesDir }),
+      files: new FsTools({ fsRoot: resolved.fsRoot }),
+      getUsage: (force) => usage.snapshot(force),
     });
   }
 
