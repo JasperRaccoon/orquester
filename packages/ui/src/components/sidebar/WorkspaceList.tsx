@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from "react";
-import { Check, Folder, FolderPlus, MoreVertical, PanelLeftClose, Plus, Trash2 } from "lucide-react";
+import { Check, Folder, FolderPlus, MoreVertical, Plus, Trash2 } from "lucide-react";
 import { cn } from "../../lib/cn";
 import {
   Button,
@@ -26,7 +26,6 @@ export const WorkspaceList: React.FC = () => {
   const openWorkspace = useAppStore((s) => s.openWorkspace);
   const createWorkspace = useAppStore((s) => s.createWorkspace);
   const deleteWorkspace = useAppStore((s) => s.deleteWorkspace);
-  const toggleSidebar = useAppStore((s) => s.toggleSidebar);
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
 
   const [creating, setCreating] = useState(false);
@@ -75,9 +74,6 @@ export const WorkspaceList: React.FC = () => {
   return (
     <>
       <div className="flex h-9 items-center gap-1 px-2">
-        <IconButton label="Collapse sidebar" className="hidden md:flex" onClick={toggleSidebar}>
-          <PanelLeftClose size={15} />
-        </IconButton>
         <span className="flex-1 text-[10px] font-medium uppercase tracking-wider text-neutral-500">
           Workspaces
         </span>

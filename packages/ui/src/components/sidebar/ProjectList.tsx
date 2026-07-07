@@ -5,7 +5,6 @@ import {
   FolderPlus,
   ListTodo,
   MoreVertical,
-  PanelLeftClose,
   Pencil,
   Plus,
   Trash2
@@ -35,7 +34,6 @@ export const ProjectList: React.FC = () => {
   const openProject = useAppStore((s) => s.openProject);
   const createProject = useAppStore((s) => s.createProject);
   const deleteProject = useAppStore((s) => s.deleteProject);
-  const toggleSidebar = useAppStore((s) => s.toggleSidebar);
   const todos = useAppStore((s) => s.todos);
   const createTodo = useAppStore((s) => s.createTodo);
   const openTodo = useAppStore((s) => s.openTodo);
@@ -82,9 +80,6 @@ export const ProjectList: React.FC = () => {
   return (
     <>
       <div className="flex h-9 items-center gap-0.5 px-2">
-        <IconButton label="Collapse sidebar" className="hidden md:flex" onClick={toggleSidebar}>
-          <PanelLeftClose size={15} />
-        </IconButton>
         <IconButton label="Back to workspaces" onClick={closeWorkspace}>
           <ChevronLeft size={16} />
         </IconButton>

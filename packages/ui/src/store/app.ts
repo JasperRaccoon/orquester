@@ -442,7 +442,6 @@ export interface AppState {
   // app config + settings modal
   appConfig: UiAppConfig;
   settingsOpen: boolean;
-  sidebarCollapsed: boolean;
   /** Mobile off-canvas sidebar drawer. */
   sidebarDrawerOpen: boolean;
 
@@ -516,7 +515,6 @@ export interface AppState {
   // app config + settings
   loadAppConfig: () => Promise<void>;
   setSettingsOpen: (open: boolean) => void;
-  toggleSidebar: () => void;
   setSidebarDrawer: (open: boolean) => void;
   updateAppConfig: (patch: Partial<UiAppConfig>) => Promise<void>;
 
@@ -579,7 +577,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   activeConnectionId: null,
   appConfig: { useTitlebar: false, runInBackground: false, usage: DEFAULT_USAGE_PREFS },
   settingsOpen: false,
-  sidebarCollapsed: false,
   sidebarDrawerOpen: false,
   authPrompt: null,
   authSalt: null,
@@ -887,7 +884,6 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setSettingsOpen: (open) => set({ settingsOpen: open }),
 
-  toggleSidebar: () => set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
 
   setSidebarDrawer: (open) => set({ sidebarDrawerOpen: open }),
 

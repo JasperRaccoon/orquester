@@ -2,27 +2,22 @@ import React from "react";
 import { cn } from "../../lib/cn";
 import { WorkspaceList } from "./WorkspaceList";
 import { ProjectList } from "./ProjectList";
-import { SidebarRail } from "./SidebarRail";
 import { ServerSwitcher } from "../servers";
 import { useIsDesktop } from "../../hooks";
 import { useAppStore } from "../../store/app";
 
 /**
- * Left navigation. Desktop: inline, collapsible to an icon rail. Mobile: an
- * off-canvas drawer (with backdrop) toggled from the top bar.
+ * Left navigation. Desktop: inline. Mobile: an off-canvas drawer (with
+ * backdrop) toggled from the top bar.
  */
 export const Sidebar: React.FC = () => {
   const isDesktop = useIsDesktop();
   const currentWorkspace = useAppStore((s) => s.currentWorkspace);
-  const collapsed = useAppStore((s) => s.sidebarCollapsed);
   const drawerOpen = useAppStore((s) => s.sidebarDrawerOpen);
   const setDrawer = useAppStore((s) => s.setSidebarDrawer);
 
   // --- Desktop ---
   if (isDesktop) {
-    if (collapsed) {
-      return <SidebarRail />;
-    }
     return (
       <aside className="flex w-64 shrink-0 flex-col border-r border-neutral-800 bg-neutral-900/40">
         {currentWorkspace ? <ProjectList /> : <WorkspaceList />}
