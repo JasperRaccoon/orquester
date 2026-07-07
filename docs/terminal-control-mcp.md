@@ -1,4 +1,8 @@
-# Orquester Terminal-Control MCP — install & use
+# Orquester Control MCP — install & use
+
+> Scope note: this MCP started as terminal control and now also covers shared todo
+> lists, sandboxed file reads, a bell-based attention signal, and usage quota.
+> The filename keeps its historical name.
 
 A guide for an AI agent (or whoever configures one) to connect an MCP client to
 Orquester's **terminal-control MCP** and drive its terminal/coding-agent sessions.
@@ -127,7 +131,7 @@ curl -sS -X POST <URL> \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
 ```
 
-Expect a `200` with the 11 tools. `401` = bad bearer · `406` = missing the `Accept` header ·
+Expect a `200` with the tool list. `401` = bad bearer · `406` = missing the `Accept` header ·
 `404` = HTTP transport off / wrong path / you hit the socket.
 
 ---
@@ -196,6 +200,17 @@ single text content block** — parse `content[0].text` as JSON. Errors come bac
   rejected. Max **24 running tabs per project**. The tab returns immediately as `running` before
   its prompt is drawn — follow with `read_terminal`/`send_and_wait` to confirm it started.
 
+### Beyond terminals (v1.1.0)
+
+| Tool | What it does |
+|---|---|
+| `list_todos` / `create_todo` / `update_todo` / `delete_todo` | Shared todo lists on a workspace (`{workspace}`) or project (`{workspace, project}`). `body` is GitHub task-list markdown (`- [ ] item`). The human sees every change live in the UI's Todo tab. |
+| `toggle_todo_item` | Atomically check/uncheck ONE item by 1-based index or exact text (omit `checked` to flip). Prefer this over `update_todo` for ticks — no read-modify-write clobber. |
+| `wait_for_attention` | Block until a watched tab needs you: a real terminal BELL or an exit. `{workspace, project}` watches every running tab; add `tab`/`tabId` for one. Already-flagged tabs return instantly; `tabs: []` on timeout. `list_tabs`/`read_terminal` now also report `activity` ("working"/"idle"), `attention`, and `lastOutputAt` for running tabs. |
+| `list_files` | List a sandboxed directory (absolute, or relative to the workspaces root). Capped at 500 entries (`truncated: true` beyond). |
+| `read_file` | Read a text file with byte-offset paging (`offset`/`maxBytes`, 64 KB default, 256 KB max). Binary files are refused; `truncated: true` means advance `offset`. |
+| `get_usage` | Claude Code / Codex subscription quota from the daemon's cache (≈5 min fresh). Percent is % USED. An ABSENT agent is not logged in; present with null windows + `stale: true` is "logged in, no reading yet". Freshness = per-agent `asOf`/`ageMinutes`. `refresh: true` may still return last-known data (upstream backoff) — never call it in a loop. |
+
 ---
 
 ## 6. Usage patterns
@@ -248,6 +263,21 @@ regardless of `settled`:**
   answer/question is in `text`.
 - For animated agent tabs, prefer a **short-`timeoutMs` read-loop** (wait briefly → read → decide
   from screen content → repeat) over one long blocking wait.
+
+### Supervise several agent tabs
+
+`wait_for_attention {workspace, project, timeoutMs: 300000}` → it returns the tabs that
+rang the bell or exited → `read_terminal` each → answer (menus per §7) → loop. This
+replaces short-timeout `wait_for_idle` polling for bell-capable TUIs (Claude Code rings
+on finish/needs-input). Non-bell TUIs and plain shells still need `wait_for_idle`.
+
+### Shared todo lists (agent ↔ human)
+
+Plan work as a checklist the human watches live: `create_todo {workspace, project, name}`
+→ `update_todo {id, body: "- [ ] step 1\n- [ ] step 2"}` → after finishing a step,
+`toggle_todo_item {id, item: "step 1"}`. Check quota first when the work is long:
+`get_usage {}` — treat `ageMinutes > 10` as stale, and don't start a big run against a
+window that is nearly exhausted.
 
 ---
 
@@ -339,6 +369,13 @@ enter to confirm". (An animated prompt returns `settled:false`; a static one `se
   Orquester UI sees them — intentional, no hidden side-channel.
 - **`create_tab` is constrained:** shell/agent `refId`s only, `cwd` sandboxed, 24 running
   tabs/project.
+
+`read_file`/`list_files` widen the read surface: file contents inside the sandbox
+(including `.env`s or tokens developers keep in workspaces) flow to the driving model,
+exactly like terminal reads. The todo tools are the only new mutating surface — benign,
+human-visible, event-audited. `get_usage` returns percentages/reset times only; its
+`refresh: true` cannot bust Anthropic's rate limit (the daemon's backoff floor applies)
+but is still not for polling loops.
 
 ---
 
