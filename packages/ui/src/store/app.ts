@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { create, type StoreApi } from "zustand";
 import { ApiClient, ApiError } from "../lib/api-client";
 import { createTransporter } from "../lib/transporters";
+import { wakeSessionChannels } from "../lib/transporters/ws-session-channel";
 import { toRemoteConfig, toUiConnection } from "../lib/connections";
 import {
   buildCredential,
@@ -61,6 +62,49 @@ import type { TodoListRecord, TodoScope, UsageResponse } from "@orquester/api";
 import type { UsagePrefs } from "@orquester/config";
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** Pending reconnect-backoff waits that a wake (tab visible/online) short-circuits. */
+let wakeWaiters: Array<() => void> = [];
+
+/**
+ * Like {@link delay}, but resolves early when {@link wakeReconnectWaiters} fires.
+ * Used for reconnect backoff only: a hidden tab's setTimeout is throttled/frozen,
+ * so on tab return the wake path must be able to retry NOW instead of waiting
+ * out a thawed backoff timer.
+ */
+const wakeableDelay = (ms: number) =>
+  new Promise<void>((resolve) => {
+    const wake = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      wakeWaiters = wakeWaiters.filter((w) => w !== wake);
+      resolve();
+    }, ms);
+    wakeWaiters.push(wake);
+  });
+
+/** Short-circuit every pending {@link wakeableDelay}. */
+function wakeReconnectWaiters(): void {
+  const waiters = wakeWaiters;
+  wakeWaiters = [];
+  for (const wake of waiters) {
+    wake();
+  }
+}
+
+/**
+ * When the last /events line (any event or the daemon's 15s heartbeat) arrived.
+ * A frozen tab's dead stream may never error (silent stall), so staleness — not
+ * just onEnd — must count as a disconnect signal.
+ */
+let lastEventAt = 0;
+/** /events heartbeats every 15s; three misses ⇒ the stream is dead. */
+const EVENTS_STALE_MS = 45_000;
+
+/** Last wakeConnections run — visibilitychange/pageshow/focus/online fire together. */
+let lastWakeAt = 0;
 
 const EMPTY_REGISTRY: RegistryResponse = {
   shells: [],
@@ -526,6 +570,13 @@ export interface AppState {
   establish: (api: ApiClient) => Promise<void>;
   /** Called when the transport drops; runs the reconnect loop. */
   handleDisconnect: () => void;
+  /**
+   * The page regained visibility/focus/network (tab return, PWA resume, radio
+   * back). Mobile browsers freeze hidden tabs and kill their connections, so
+   * every timer-driven recovery path stalls until now — probe/short-circuit
+   * everything immediately instead of waiting for thawed backoff timers.
+   */
+  wakeConnections: () => void;
 
   // connection management
   initConnections: (setup: ConnectionSetup) => Promise<void>;
@@ -811,8 +862,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     // restarted) is the primary disconnect signal.
     closeEvents();
     const gen = eventsGen;
+    lastEventAt = Date.now();
     eventsUnsubscribe = active.openEvents(
-      (event) => get().applyEvent(event),
+      (event) => {
+        lastEventAt = Date.now();
+        get().applyEvent(event);
+      },
       () => {
         if (gen === eventsGen) {
           get().handleDisconnect();
@@ -821,12 +876,20 @@ export const useAppStore = create<AppState>((set, get) => ({
     );
 
     // Health probe: detect a dropped/restarted transport and auto-reconnect.
+    // A silently stalled /events stream (killed while the tab was frozen, no
+    // error ever delivered) counts as dropped too: /health can succeed while
+    // the stream is dead, so heartbeat staleness is checked first.
     stopHealthProbe();
     healthTimer = setInterval(() => {
       const current = get().api;
-      if (current) {
-        void current.health().catch(() => get().handleDisconnect());
+      if (!current) {
+        return;
       }
+      if (Date.now() - lastEventAt > EVENTS_STALE_MS) {
+        get().handleDisconnect();
+        return;
+      }
+      void current.health().catch(() => get().handleDisconnect());
     }, 4000);
   },
 
@@ -885,7 +948,9 @@ export const useAppStore = create<AppState>((set, get) => ({
             scheduleLockedReconnect(get, set, error.retryAfterSeconds);
             return;
           }
-          await delay(backoffMs(attempt));
+          // Wakeable: a tab-return/online event short-circuits the backoff so
+          // the next probe runs immediately instead of when the timer thaws.
+          await wakeableDelay(backoffMs(attempt));
           if (gen !== reconnectGen) {
             return;
           }
@@ -894,6 +959,52 @@ export const useAppStore = create<AppState>((set, get) => ({
       reconnecting = false;
     };
     void loop();
+  },
+
+  wakeConnections: () => {
+    // visibilitychange + pageshow + focus (+ online) typically fire together on
+    // tab return — run the probe once, not four times.
+    const now = Date.now();
+    if (now - lastWakeAt < 1000) {
+      return;
+    }
+    lastWakeAt = now;
+
+    // Terminal WS: redial a dead socket now, ping-probe a half-dead one (mobile
+    // kills sockets without a close event; readyState lies).
+    wakeSessionChannels();
+
+    const api = get().api;
+    if (!api) {
+      return;
+    }
+    if (reconnecting) {
+      // A backoff loop is mid-wait: retry NOW instead of when its timer thaws.
+      wakeReconnectWaiters();
+      return;
+    }
+    const status = get().connectionStatus;
+    if (status === "connected") {
+      // The tab may have been frozen: the /events stream can be dead without its
+      // onEnd having been delivered yet. Probe immediately rather than waiting
+      // for the 4s interval (throttled to ≥60s while hidden) to notice.
+      if (now - lastEventAt > EVENTS_STALE_MS) {
+        get().handleDisconnect();
+      } else {
+        void api.health().catch(() => get().handleDisconnect());
+      }
+      return;
+    }
+    if (status === "error") {
+      // Auto-retry the transient give-up state, but never past an auth prompt
+      // (needs the user) or an active 429 lockout (would hammer the limiter).
+      const lockedUntil = get().lockedUntil;
+      if (get().authPrompt || (lockedUntil && lockedUntil > Date.now())) {
+        return;
+      }
+      void get().connect();
+    }
+    // "connecting": connect()'s own poll loop resumed with the page — let it run.
   },
 
   initConnections: async (nextSetup) => {

@@ -1860,6 +1860,13 @@ function createServer(
         } catch {
           return;
         }
+        // Liveness probe: mobile browsers kill a backgrounded tab's socket
+        // without a close frame, so the client pings on wake and treats a
+        // missing pong as a dead socket (see WsSessionChannel.wake).
+        if (msg.t === "ping") {
+          send({ t: "pong" });
+          return;
+        }
         const id = msg.id;
         if (!id) {
           return;

@@ -9,14 +9,16 @@ import type { SessionChannel, StreamHandle, StreamHandlers } from "../transporte
  * is duplicated.
  *
  * Wire protocol (JSON text frames):
- *   client → { t:"sub"|"unsub", id } | { t:"input", id, data } | { t:"resize", id, cols, rows }
- *   server → { t:"out", id, data } | { t:"end", id }
+ *   client → { t:"sub"|"unsub", id } | { t:"input", id, data } | { t:"resize", id, cols, rows } | { t:"ping" }
+ *   server → { t:"out", id, data } | { t:"end", id } | { t:"pong" }
  */
 export class WsSessionChannel implements SessionChannel {
   private ws: WebSocket | null = null;
   private readonly subs = new Map<string, StreamHandlers>();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private attempts = 0;
+  /** Pending ping deadline from {@link wake}; a pong (or reconnect) clears it. */
+  private pongTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly wsUrl: string,
@@ -52,6 +54,48 @@ export class WsSessionChannel implements SessionChannel {
 
   resize(id: string, cols: number, rows: number): void {
     this.raw({ t: "resize", id, cols, rows });
+  }
+
+  /**
+   * The page regained visibility/focus/network. Mobile browsers freeze hidden
+   * tabs and kill their sockets — often WITHOUT delivering `close` (the
+   * half-dead state: readyState still reads OPEN while frames go nowhere). So:
+   * a pending backoff timer is short-circuited to redial NOW, a dead socket is
+   * torn down and redialed, and an apparently-open socket must answer a ping
+   * within the deadline or it is force-reconnected. Safe to call aggressively —
+   * the daemon replays the tmux buffer on re-subscribe, so a redial is lossless.
+   */
+  wake(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+      this.attempts = 0;
+      this.connect();
+      return;
+    }
+    const ws = this.ws;
+    if (!ws || ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) {
+      this.attempts = 0;
+      this.reconnect();
+      return;
+    }
+    if (ws.readyState === WebSocket.CONNECTING || this.pongTimer) {
+      // Handshake or a previous wake's probe already in flight — let it resolve.
+      return;
+    }
+    this.raw({ t: "ping" });
+    this.pongTimer = setTimeout(() => {
+      this.pongTimer = null;
+      this.attempts = 0;
+      this.reconnect();
+    }, 2500);
+  }
+
+  private clearPongDeadline(): void {
+    if (this.pongTimer) {
+      clearTimeout(this.pongTimer);
+      this.pongTimer = null;
+    }
   }
 
   private url(): string {
@@ -90,6 +134,10 @@ export class WsSessionChannel implements SessionChannel {
       } catch {
         return;
       }
+      if (msg.t === "pong") {
+        this.clearPongDeadline();
+        return;
+      }
       if (!msg.id) {
         return;
       }
@@ -105,9 +153,14 @@ export class WsSessionChannel implements SessionChannel {
     };
 
     ws.onclose = () => {
-      if (this.ws === ws) {
-        this.ws = null;
+      // Superseded by an explicit reconnect (wake/credential change): this close
+      // is expected — scheduling another dial here would double-connect.
+      if (this.ws !== ws) {
+        return;
       }
+      this.ws = null;
+      // A wake-probe deadline racing this close would tear down the redial.
+      this.clearPongDeadline();
       this.scheduleReconnect();
     };
 
@@ -121,6 +174,7 @@ export class WsSessionChannel implements SessionChannel {
   }
 
   private reconnect(): void {
+    this.clearPongDeadline();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -158,6 +212,14 @@ export class WsSessionChannel implements SessionChannel {
 
 /** One shared channel per daemon origin, reused across ApiClient rebuilds. */
 const channels = new Map<string, WsSessionChannel>();
+
+/** Wake every live channel (see {@link WsSessionChannel.wake}) — called on
+ *  visibility/focus/online regain by the store's wakeConnections. */
+export function wakeSessionChannels(): void {
+  for (const channel of channels.values()) {
+    channel.wake();
+  }
+}
 
 export function getSessionChannel(httpBaseUrl: string, credential?: string): WsSessionChannel {
   const wsUrl = `${httpBaseUrl.replace(/^http/, "ws").replace(/\/$/, "")}/ws`;
