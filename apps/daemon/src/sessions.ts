@@ -1,13 +1,13 @@
-import type { CreateSessionRequest, SessionSummary } from "@orquester/api";
+import type { CreateSessionRequest, RegistryEntry, SessionSummary } from "@orquester/api";
 import { type SessionRecord, type SessionsConfig, createDefaultSessionsConfig, parseSessionsConfig } from "@orquester/config";
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname, sep } from "node:path";
+import { basename, dirname, sep } from "node:path";
 import { spawn, type IPty } from "node-pty";
 import type { RegistryService } from "./registry";
-import { Tmux, sessionEnvBase, sessionPath, tmuxAvailable, tmuxName, tmuxVersionOk } from "./tmux";
+import { Tmux, sessionCommandShell, sessionEnvBase, sessionPath, tmuxAvailable, tmuxName, tmuxVersionOk } from "./tmux";
 import { renderText } from "./mcp/text.ts";
 import { ActivityTracker, type ActivitySnapshot } from "./ansi-activity.ts";
 
@@ -96,6 +96,31 @@ export function createSessionManager(
   return new LocalSessionManager(registry);
 }
 
+export function buildLaunchCommand(entry: RegistryEntry, opts: { tmux: boolean }): { bin: string; args: string[] } {
+  const bin = entry.resolvedBin ?? "";
+  const baseArgs = entry.args ?? [];
+
+  if (entry.kind === "shell") {
+    return {
+      bin,
+      args: opts.tmux && !baseArgs.includes("-l") && !baseArgs.includes("--login") ? [...baseArgs, "-l"] : baseArgs
+    };
+  }
+
+  if (entry.launchViaShell) {
+    const shell = sessionCommandShell();
+    if (shell) {
+      const commandFlag = basename(shell) === "bash" ? "-lc" : "-c";
+      return {
+        bin: shell,
+        args: [commandFlag, '"$@"', "orquester-launch", bin, ...baseArgs]
+      };
+    }
+  }
+
+  return { bin, args: baseArgs };
+}
+
 /**
  * Owns every live session. Each session's command runs inside a DEDICATED tmux
  * server (fixed socket); the daemon talks to it through a thin `tmux attach`
@@ -170,17 +195,13 @@ export class SessionManager implements ISessionManager {
     // which gives the shell an interactive controlling terminal so bare `bash`
     // works. Launch shell-kind entries as LOGIN shells (`-l`, what a terminal
     // emulator does), so they behave as a real interactive terminal shell and
-    // persist. Agents/IDEs and shells that already specify a login flag are left
-    // as-is. (POSIX shells used on tmux-backend hosts — bash/zsh/sh/fish/nu — all
-    // accept `-l`.)
-    const baseArgs = entry.args ?? [];
-    const args =
-      entry.kind === "shell" && !baseArgs.includes("-l") && !baseArgs.includes("--login")
-        ? [...baseArgs, "-l"]
-        : baseArgs;
+    // persist. Some agents (OpenCode on locked service users) also need to be
+    // spawned as a child of a real shell, matching the path that works from a
+    // Bash tab while preserving direct binary resolution/version checks.
+    const launch = buildLaunchCommand(entry, { tmux: true });
 
     this.tmux
-      .newSession({ id, cols, rows, cwd, env, bin: entry.resolvedBin, args })
+      .newSession({ id, cols, rows, cwd, env, bin: launch.bin, args: launch.args })
       .then(() => {
         // newSession is async (an execFile of `tmux new-session` takes several
         // ms) but create() has already returned. If close()/closeAll() ran in
@@ -639,7 +660,8 @@ export class LocalSessionManager implements ISessionManager {
       .filter((s) => s.summary.projectPath === projectPath)
       .reduce((max, s) => Math.max(max, s.summary.order), -1);
 
-    const pty = spawn(entry.resolvedBin, entry.args ?? [], {
+    const launch = buildLaunchCommand(entry, { tmux: false });
+    const pty = spawn(launch.bin, launch.args, {
       name: "xterm-256color",
       cwd,
       cols,

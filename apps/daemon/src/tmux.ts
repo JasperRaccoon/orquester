@@ -160,6 +160,19 @@ export function sessionShell(): string | undefined {
   return undefined;
 }
 
+/** POSIX-compatible shell used to run shell-wrapped launch commands. */
+export function sessionCommandShell(): string | undefined {
+  if (process.platform === "win32") {
+    return undefined;
+  }
+  for (const candidate of ["/bin/bash", "/usr/bin/bash", "/bin/sh", "/usr/bin/sh"]) {
+    if (usableShell(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
 /**
  * The daemon's environment with everything a user session must NOT inherit
  * removed: tmux's own $TMUX/$TMUX_PANE (which would trip tmux's nesting guard

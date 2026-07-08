@@ -10,6 +10,8 @@ export interface RegistryEntryDef {
   bin: readonly string[];
   /** Extra args passed to the resolved bin when a session is launched (not used for resolution/version/install). */
   args?: readonly string[];
+  /** Launch the resolved bin as a child of a real shell instead of execing it directly. */
+  launchViaShell?: boolean;
   /** Extra environment variables set on the process when a session is launched. */
   env?: Readonly<Record<string, string>>;
   versionFlag?: string;
@@ -81,6 +83,7 @@ export const REGISTRY = {
       name: "OpenCode",
       kind: "agent",
       bin: ["opencode"] as const,
+      launchViaShell: true,
       versionFlag: "--version",
       installCmd: "npm install -g opencode-ai",
       updateCmd: "npm update -g opencode-ai"

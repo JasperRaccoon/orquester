@@ -512,6 +512,8 @@ export interface RegistryEntry {
   bin: string[];
   /** Extra args passed to the resolved bin when a session is launched (e.g. ["--d"]). */
   args?: string[];
+  /** Launch the resolved bin as a child of a real shell instead of execing it directly. */
+  launchViaShell?: boolean;
   /** Extra environment variables set on the session process when launched. */
   env?: Record<string, string>;
   /** True only when a candidate bin resolved AND the entry is not disabled. */

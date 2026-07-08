@@ -20,6 +20,7 @@ interface RegistryDef {
   kind: RegistryKind;
   bin: string[];
   args?: string[];
+  launchViaShell?: boolean;
   env?: Record<string, string>;
   enabled?: boolean;
   versionFlag?: string;
@@ -79,6 +80,7 @@ function materialize(list: readonly RegistryEntryDef[]): RegistryDef[] {
     const bin = s.bin.length === 0 && (s.kind === "file-explorer" || s.kind === "browser") ? osOpener() : expanded;
     const d: RegistryDef = { id: s.id, name: s.name, kind: s.kind, bin };
     if (s.args && s.args.length > 0) d.args = [...s.args];
+    if (s.launchViaShell) d.launchViaShell = true;
     if (s.env && Object.keys(s.env).length > 0) d.env = { ...s.env };
     if (s.versionFlag) d.versionFlag = s.versionFlag;
     if (s.installCmd) d.installCmd = s.installCmd;
@@ -255,6 +257,7 @@ export class RegistryService {
       kind: def.kind,
       bin: def.bin,
       args: def.args,
+      launchViaShell: def.launchViaShell,
       env: def.env,
       resolvedBin,
       enabled: Boolean(resolvedBin) && def.enabled !== false,
@@ -322,6 +325,7 @@ function normalizeDef(item: unknown, defaultKind: RegistryKind): RegistryDef | n
     kind: KINDS.includes(obj.kind as RegistryKind) ? (obj.kind as RegistryKind) : defaultKind,
     bin,
     args: args && args.length > 0 ? args : undefined,
+    launchViaShell: obj.launchViaShell === true ? true : undefined,
     env: env && Object.keys(env).length > 0 ? env : undefined,
     enabled: typeof obj.enabled === "boolean" ? obj.enabled : undefined,
     versionFlag: typeof obj.versionFlag === "string" ? obj.versionFlag : undefined,
