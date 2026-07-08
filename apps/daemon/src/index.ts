@@ -25,6 +25,10 @@ import type {
   OpenRequest,
   OpenResult,
   ProjectSummary,
+  PushInfoResponse,
+  PushSubscribeRequest,
+  PushTestResponse,
+  PushUnsubscribeRequest,
   RegistryResponse,
   RenameSessionRequest,
   RepoSummary,
@@ -45,6 +49,7 @@ import { TodoError, TodoListManager } from "./todos";
 import { Tmux } from "./tmux";
 import { Broadcaster } from "./broadcaster";
 import { AccountError, AccountsService } from "./accounts";
+import { PushService, isValidPushEndpoint } from "./push";
 import { GitError, GitService } from "./git";
 import { UsageService } from "./usage";
 import { createClaudeSource, createCodexSource, readUsagePrefs } from "./usage-sources";
@@ -77,6 +82,7 @@ import {
   parseDaemonConfig,
   parseRemotesConfig,
   parseWorkspacesConfig,
+  pushConfigPath,
   remotesConfigPath,
   resolveDaemonPaths,
   sessionsIndexPath,
@@ -129,6 +135,8 @@ interface ResolvedPaths {
   sessionsIndexFile: string;
   /** <appdir>/daemon/todos.json — the managed to-do list index. */
   todosIndexFile: string;
+  /** <appdir>/daemon/push.json — Web Push VAPID keypair + subscriptions (0600). */
+  pushConfigFile: string;
   workspacesDir: string;
   /** <appdir>/daemon/keys — per-account SSH keys (created mode 0700). */
   keysDir: string;
@@ -181,6 +189,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     tmuxSocket: tmuxSocketPath(paths.baseDir),
     sessionsIndexFile: sessionsIndexPath(paths.baseDir),
     todosIndexFile: todosIndexPath(paths.baseDir),
+    pushConfigFile: pushConfigPath(paths.baseDir),
     workspacesDir: expandVars(config.workspacesDir, paths.vars),
     keysDir: keysDir(paths.baseDir),
     accountsFile: accountsConfigPath(paths.baseDir),
@@ -208,6 +217,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   const git = new GitService();
   const todos = new TodoListManager(resolved.todosIndexFile, console);
   await todos.load();
+  const push = new PushService(resolved.pushConfigFile, console);
   const broadcaster = new Broadcaster();
   // Stream registry changes (install/update status, detected versions) to clients.
   registry.events.on("changed", (entry) => broadcaster.publish("registry", "registry.changed", entry));
@@ -266,6 +276,19 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   sessions.lifecycle.on("updated", (s: SessionSummary) =>
     broadcaster.publish("sessions", "session.updated", s)
   );
+  // Terminal-bell attention → Web Push. This lifecycle signal is deliberately
+  // NOT on the /events Broadcaster (see the PWA design doc); the push service
+  // hooks the session manager's emitter directly. Only AGENT bells push — shell
+  // beeps must not. notifyAttention is debounced + log-never-throw.
+  sessions.lifecycle.on("activity", (event: { id: string; type: string }) => {
+    if (event.type !== "bell") {
+      return;
+    }
+    const summary = sessions.get(event.id);
+    if (summary?.kind === "agent") {
+      void push.notifyAttention(summary);
+    }
+  });
 
   // To-do list lifecycle → event bus (channel "todos"). Each payload is a full
   // TodoListRecord; clients reconcile their cache/tabs by id (§6).
@@ -273,7 +296,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   todos.lifecycle.on("updated", (r) => broadcaster.publish("todos", "todo.updated", r));
   todos.lifecycle.on("deleted", (r) => broadcaster.publish("todos", "todo.deleted", r));
 
-  const services: Services = { registry, sessions, accounts, git, todos, usage, broadcaster };
+  const services: Services = { registry, sessions, accounts, git, todos, usage, push, broadcaster };
 
   // The static web build the HTTP transport optionally serves.
   const webDirEnv = options.webDir ?? env.ORQUESTER_WEB_DIR;
@@ -362,6 +385,7 @@ interface Services {
   git: GitService;
   todos: TodoListManager;
   usage: UsageService;
+  push: PushService;
   broadcaster: Broadcaster;
   /** Restart the HTTP transport (set in main once the lifecycle exists). */
   reloadHttp?: () => Promise<void>;
@@ -375,7 +399,7 @@ function createServer(
   services: Services,
   options: { authRequired: boolean; mode: "local" | "remote"; serveWeb?: string }
 ): FastifyInstance {
-  const { registry, sessions, accounts, git, todos, usage } = services;
+  const { registry, sessions, accounts, git, todos, usage, push } = services;
 
   const app = Fastify({
     // Remote requests arrive via Caddy on loopback (reverse_proxy 127.0.0.1:47831),
@@ -1735,6 +1759,40 @@ function createServer(
       return reply.code(status).send({ code: "TODO_ERROR", message: (error as Error).message });
     }
   });
+
+  // Web Push (PWA attention notifications). Allowed on both transports like
+  // /api/sessions and /api/accounts — the response never carries the VAPID
+  // private key (only the public key + a count). The bearer-auth hook gates
+  // these on remote HTTP automatically.
+
+  // Public VAPID key + subscription count. Triggers lazy VAPID generation.
+  app.get("/api/push/info", async (): Promise<PushInfoResponse> => push.info());
+
+  // Register (upsert) a browser subscription.
+  app.post<{ Body: PushSubscribeRequest }>("/api/push/subscriptions", async (request, reply): Promise<void> => {
+    const body = (request.body ?? {}) as Partial<PushSubscribeRequest>;
+    if (!body.endpoint || !body.keys?.p256dh || !body.keys?.auth) {
+      return reply.code(400).send({ code: "INVALID_REQUEST", message: "endpoint and keys required." });
+    }
+    if (!isValidPushEndpoint(body.endpoint)) {
+      return reply.code(400).send({ code: "INVALID_REQUEST", message: "endpoint must be a public https URL." });
+    }
+    await push.subscribe({ endpoint: body.endpoint, keys: body.keys, userAgent: body.userAgent });
+    return reply.code(204).send();
+  });
+
+  // Remove a subscription by endpoint.
+  app.delete<{ Body: PushUnsubscribeRequest }>("/api/push/subscriptions", async (request, reply): Promise<void> => {
+    const body = (request.body ?? {}) as Partial<PushUnsubscribeRequest>;
+    if (!body.endpoint) {
+      return reply.code(400).send({ code: "INVALID_REQUEST", message: "endpoint required." });
+    }
+    await push.unsubscribe(body.endpoint);
+    return reply.code(204).send();
+  });
+
+  // Send a test push to every subscription; returns how many were delivered.
+  app.post("/api/push/test", async (): Promise<PushTestResponse> => ({ sent: await push.sendTest() }));
 
   // Daemon event bus (newline-delimited JSON): lifecycle broadcasts + heartbeat.
   app.get("/events", (request, reply) => {

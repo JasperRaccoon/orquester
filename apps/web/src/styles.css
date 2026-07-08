@@ -8,6 +8,17 @@ body,
   height: 100%;
 }
 
+/* Standalone (installed PWA) safe-area padding so the iOS status bar / home
+   indicator don't overlap the app chrome. env() insets are 0 in a normal
+   browser tab, so this is inert outside standalone mode. */
+#root {
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+  box-sizing: border-box;
+}
+
 body {
   margin: 0;
   font-family:

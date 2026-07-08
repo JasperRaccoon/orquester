@@ -26,6 +26,10 @@ import type {
   OpenResult,
   OpenTargetSummary,
   ProjectSummary,
+  PushInfoResponse,
+  PushSubscribeRequest,
+  PushTestResponse,
+  PushUnsubscribeRequest,
   RegistryActionResult,
   RegistryResponse,
   RepoSummary,
@@ -450,6 +454,26 @@ export class ApiClient {
   /** Launch an ide/file-explorer/browser target on a path. */
   open(targetId: string, path: string): Promise<OpenResult> {
     return this.send("POST", "/api/open", { body: { targetId, path } });
+  }
+
+  // --- Web Push (web runtime only; bearer-gated on remote HTTP) -------------
+
+  /** VAPID public key + subscription count; triggers lazy key generation. */
+  pushInfo(signal?: AbortSignal): Promise<PushInfoResponse> {
+    return this.send("GET", "/api/push/info", { signal });
+  }
+
+  pushSubscribe(req: PushSubscribeRequest): Promise<void> {
+    return this.send("POST", "/api/push/subscriptions", { body: req });
+  }
+
+  pushUnsubscribe(req: PushUnsubscribeRequest): Promise<void> {
+    return this.send("DELETE", "/api/push/subscriptions", { body: req });
+  }
+
+  /** Send a fixed test notification to every subscription. */
+  pushTest(): Promise<PushTestResponse> {
+    return this.send("POST", "/api/push/test");
   }
 
   // Sessions (PTYs)

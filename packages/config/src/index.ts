@@ -127,6 +127,11 @@ export function todosIndexPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "todos.json");
 }
 
+/** Web Push state (VAPID keypair + browser subscriptions); 0600 — holds the private key. */
+export function pushConfigPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "push.json");
+}
+
 /** `yyyy-mm-dd` in local time. */
 export function localDateStamp(date = new Date()): string {
   const year = date.getFullYear();
@@ -472,6 +477,37 @@ export function createDefaultTodosConfig(): TodosConfig {
 
 export function parseTodosConfig(raw: unknown): TodosConfig {
   return todosConfigSchema.parse(raw);
+}
+
+// push.json — Web Push state for the PWA: the daemon's VAPID keypair (lazily
+// generated on first need) and the browsers subscribed to attention pushes.
+// Lives at <appdir>/daemon/push.json, written 0600 — `vapid.privateKey` is
+// secret material and is NEVER returned by any API.
+
+export const pushConfigSchema = z.object({
+  version: z.literal(1),
+  vapid: z
+    .object({ publicKey: z.string(), privateKey: z.string(), subject: z.string() })
+    .nullable(),
+  subscriptions: z.array(
+    z.object({
+      endpoint: z.string(),
+      keys: z.object({ p256dh: z.string(), auth: z.string() }),
+      createdAt: z.string(),
+      userAgent: z.string().optional()
+    })
+  )
+});
+
+export type PushConfig = z.infer<typeof pushConfigSchema>;
+export type PushSubscriptionRecord = PushConfig["subscriptions"][number];
+
+export function createDefaultPushConfig(): PushConfig {
+  return { version: 1, vapid: null, subscriptions: [] };
+}
+
+export function parsePushConfig(raw: unknown): PushConfig {
+  return pushConfigSchema.parse(raw);
 }
 
 // ClientConfig — what the daemon reports about how to reach itself.}

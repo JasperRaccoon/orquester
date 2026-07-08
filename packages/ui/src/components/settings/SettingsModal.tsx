@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import {
   AppWindow,
+  Bell,
   Boxes,
   Check,
   ChevronLeft,
@@ -18,6 +19,7 @@ import {
 } from "lucide-react";
 import type { DaemonConfig } from "@orquester/config";
 import { cn } from "../../lib/cn";
+import { disablePush, enablePush, getSubscription, pushSupported } from "../../lib/push";
 import { Button, Input, Modal, ModalCloseButton, Switch } from "../ui";
 import { getRegistryIcon } from "../../icons";
 import { useIsDesktop, useRegistry } from "../../hooks";
@@ -558,6 +560,7 @@ const AppSettings: React.FC = () => {
           />
         </Field>
       )}
+      {runtime === "web" && pushSupported() && <PushNotificationsField />}
       <Field label="Runtime">
         <span className="text-sm text-neutral-400">{runtime}</span>
       </Field>
@@ -565,6 +568,101 @@ const AppSettings: React.FC = () => {
         <span className="text-sm text-neutral-400">{active?.name ?? "—"}</span>
       </Field>
     </div>
+  );
+};
+
+/**
+ * Web-push opt-in. Rendered by {@link AppSettings} only when
+ * `runtime === "web" && pushSupported()`, so the desktop never mounts it. The
+ * switch reflects the live `PushSubscription` presence (the single global
+ * notification preference), loaded async on mount.
+ */
+const PushNotificationsField: React.FC = () => {
+  const api = useApi();
+  const [enabled, setEnabled] = useState(false);
+  const [denied, setDenied] = useState(
+    typeof Notification !== "undefined" && Notification.permission === "denied"
+  );
+  const [busy, setBusy] = useState(false);
+  const [hint, setHint] = useState<string | null>(null);
+  const [testing, setTesting] = useState(false);
+
+  // Load the live subscription state on mount.
+  useEffect(() => {
+    let active = true;
+    getSubscription()
+      .then((sub) => {
+        if (active) setEnabled(!!sub);
+      })
+      .catch(() => {
+        /* leave disabled */
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const toggle = async (next: boolean) => {
+    setBusy(true);
+    setHint(null);
+    // Optimistic; revert on failure.
+    setEnabled(next);
+    try {
+      if (next) {
+        await enablePush(api);
+        setDenied(false);
+      } else {
+        await disablePush(api);
+      }
+    } catch (err) {
+      setEnabled(!next);
+      if (typeof Notification !== "undefined" && Notification.permission === "denied") {
+        setDenied(true);
+      }
+      setHint(err instanceof Error ? err.message : "Could not update notifications.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const sendTest = async () => {
+    setTesting(true);
+    setHint(null);
+    try {
+      const res = await api.pushTest();
+      setHint(
+        res.sent > 0
+          ? `Test sent to ${res.sent} device${res.sent === 1 ? "" : "s"}.`
+          : "No devices subscribed."
+      );
+    } catch (err) {
+      setHint(err instanceof Error ? err.message : "Could not send a test notification.");
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const hintText = denied
+    ? "Notifications are blocked. Allow them in your browser's site settings to enable."
+    : hint ?? "Get a push when an agent session needs your attention.";
+
+  return (
+    <>
+      <Field label="Push notifications" hint={hintText}>
+        <Switch
+          checked={enabled && !denied}
+          disabled={busy || denied}
+          onChange={(v) => void toggle(v)}
+        />
+      </Field>
+      {enabled && !denied && (
+        <div className="flex justify-end py-2">
+          <Button size="sm" variant="outline" disabled={testing} onClick={() => void sendTest()}>
+            {testing ? <Loader2 size={13} className="animate-spin" /> : <Bell size={13} />} Send test
+          </Button>
+        </div>
+      )}
+    </>
   );
 };
 
