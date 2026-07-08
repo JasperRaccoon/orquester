@@ -22,8 +22,10 @@ export function formatCountdown(resetsAt: string | undefined, now: number): stri
   const ms = Date.parse(resetsAt) - now;
   if (Number.isNaN(ms) || ms <= 60_000) return "Resets now.";
   const mins = Math.floor(ms / 60_000);
-  const h = Math.floor(mins / 60);
+  const d = Math.floor(mins / 1_440);
+  const h = Math.floor((mins % 1_440) / 60);
   const m = mins % 60;
+  if (d > 0) return `Resets in ${d}d ${h}h ${m}m`;
   return h > 0 ? `Resets in ${h}h ${m}m` : `Resets in ${m}m`;
 }
 

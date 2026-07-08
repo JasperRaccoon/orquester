@@ -15,7 +15,9 @@ assert.equal(pickDriver([], "busiest"), null);
 
 // Countdown formatting.
 const now = Date.parse("2026-07-07T08:00:00Z");
+assert.equal(formatCountdown("2026-07-07T08:29:00Z", now), "Resets in 29m");
 assert.equal(formatCountdown("2026-07-07T10:29:00Z", now), "Resets in 2h 29m");
+assert.equal(formatCountdown("2026-07-13T01:20:00Z", now), "Resets in 5d 17h 20m");
 assert.equal(formatCountdown("2026-07-07T07:59:00Z", now), "Resets now.");
 assert.equal(formatCountdown(undefined, now), "");
 
