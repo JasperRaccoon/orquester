@@ -1,7 +1,7 @@
 import { execFile, execFileSync } from "node:child_process";
 import { accessSync, constants } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, isAbsolute, join } from "node:path";
+import { basename, delimiter, isAbsolute, join } from "node:path";
 
 /** Prefix for every orquester-owned tmux session (`orq-<uuid>`). */
 export const TMUX_SESSION_PREFIX = "orq-";
@@ -117,6 +117,49 @@ export function sessionPath(): string {
   return [...extras.filter((dir) => !seen.has(dir)), ...inherited].join(delimiter);
 }
 
+const NON_INTERACTIVE_SHELLS = new Set(["false", "nologin"]);
+
+function executable(path: string): boolean {
+  try {
+    accessSync(path, process.platform === "win32" ? constants.F_OK : constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function usableShell(path: string | undefined): path is string {
+  if (!path || !isAbsolute(path)) {
+    return false;
+  }
+  if (NON_INTERACTIVE_SHELLS.has(basename(path))) {
+    return false;
+  }
+  return executable(path);
+}
+
+/**
+ * The daemon often runs as a locked-down service user whose account shell is
+ * `/usr/sbin/nologin`. That is correct for SSH/login security, but child TUIs
+ * such as opencode consult `$SHELL` when spawning subprocesses; pointing them at
+ * nologin makes the session exit immediately. Keep the account locked down while
+ * advertising a real shell inside Orquester-managed PTYs.
+ */
+export function sessionShell(): string | undefined {
+  if (usableShell(process.env.SHELL)) {
+    return process.env.SHELL;
+  }
+  if (process.platform === "win32") {
+    return process.env.ComSpec || process.env.COMSPEC || process.env.SHELL;
+  }
+  for (const candidate of ["/bin/bash", "/usr/bin/bash", "/bin/zsh", "/usr/bin/zsh", "/bin/sh", "/usr/bin/sh"]) {
+    if (usableShell(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
 /**
  * The daemon's environment with everything a user session must NOT inherit
  * removed: tmux's own $TMUX/$TMUX_PANE (which would trip tmux's nesting guard
@@ -135,6 +178,10 @@ export function sessionEnvBase(): Record<string, string> {
     if (key === "TMUX" || key === "TMUX_PANE") continue;
     if (key.startsWith("ORQUESTER_")) continue;
     env[key] = value;
+  }
+  const shell = sessionShell();
+  if (shell) {
+    env.SHELL = shell;
   }
   return env;
 }
