@@ -9,13 +9,35 @@ export interface EditorProps {
   filename: string;
   value: string;
   readOnly?: boolean;
+  /** 1-based line to scroll to + place the cursor on (e.g. a search-result jump). */
+  jumpToLine?: number;
+  /** Changes on every search-result open so re-clicking the same line re-jumps. */
+  jumpNonce?: number;
   onChange: (value: string) => void;
   onSave?: () => void;
 }
 
 /** CodeMirror 6 editor with syntax highlighting (language inferred from name). */
-export const Editor: React.FC<EditorProps> = ({ filename, value, readOnly, onChange, onSave }) => {
+export const Editor: React.FC<EditorProps> = ({ filename, value, readOnly, jumpToLine, jumpNonce, onChange, onSave }) => {
   const [langExtension, setLangExtension] = useState<Extension[]>([]);
+  const [view, setView] = useState<EditorView | null>(null);
+
+  // Scroll to + select the requested line once the view exists and the document
+  // has content. Keyed on (view, jumpToLine, jumpNonce, content-ready) so it fires
+  // for the initial jump, for later jumps to a different line, AND for a repeat
+  // click on the same line (jumpNonce changes), but not on every edit.
+  const hasContent = value.length > 0;
+  useEffect(() => {
+    if (!view || jumpToLine == null || !hasContent) return;
+    const doc = view.state.doc;
+    if (doc.lines === 0) return;
+    const clamped = Math.min(Math.max(1, Math.floor(jumpToLine)), doc.lines);
+    const pos = doc.line(clamped).from;
+    view.dispatch({
+      selection: { anchor: pos },
+      effects: EditorView.scrollIntoView(pos, { y: "center" })
+    });
+  }, [view, jumpToLine, jumpNonce, hasContent]);
 
   useEffect(() => {
     let active = true;
@@ -58,6 +80,7 @@ export const Editor: React.FC<EditorProps> = ({ filename, value, readOnly, onCha
         // the editor then only scrolls vertically. Matches the Git diff view.
         extensions={[EditorView.lineWrapping, ...langExtension]}
         onChange={onChange}
+        onCreateEditor={(v) => setView(v)}
         basicSetup={{ highlightActiveLine: !readOnly, foldGutter: true }}
       />
     </div>

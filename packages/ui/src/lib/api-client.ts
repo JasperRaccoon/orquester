@@ -11,8 +11,10 @@ import type {
   EventMessage,
   FsArchiveResponse,
   FsCapabilitiesResponse,
+  FsFilesResponse,
   FsListResponse,
   FsReadResponse,
+  FsSearchResponse,
   FsUploadRequest,
   FsUploadResponse,
   GitBranchesResponse,
@@ -244,6 +246,26 @@ export class ApiClient {
 
   listArchive(path: string, signal?: AbortSignal): Promise<FsArchiveResponse> {
     return this.send("GET", "/api/fs/archive", { query: { path }, signal });
+  }
+
+  listProjectFiles(path: string, signal?: AbortSignal): Promise<FsFilesResponse> {
+    return this.send("GET", "/api/fs/files", { query: { path }, signal });
+  }
+
+  searchFs(
+    params: { path: string; q: string; caseSensitive?: boolean; regex?: boolean; maxResults?: number },
+    signal?: AbortSignal
+  ): Promise<FsSearchResponse> {
+    return this.send("GET", "/api/fs/search", {
+      query: {
+        path: params.path,
+        q: params.q,
+        caseSensitive: params.caseSensitive ? "1" : undefined,
+        regex: params.regex ? "1" : undefined,
+        maxResults: params.maxResults
+      },
+      signal
+    });
   }
 
   getFsCapabilities(signal?: AbortSignal): Promise<FsCapabilitiesResponse> {

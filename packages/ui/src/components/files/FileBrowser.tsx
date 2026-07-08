@@ -28,6 +28,7 @@ import {
   type ContextMenuItem
 } from "../ui";
 import { FilePreview } from "./FilePreview";
+import { SearchPanel } from "./SearchPanel";
 import { useApi } from "../../context/orquester-context";
 import { usePollWhileActive, useIsDesktop } from "../../hooks";
 import { useAppStore } from "../../store/app";
@@ -85,6 +86,13 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ 
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [selectedSize, setSelectedSize] = useState(0);
+  // Line to jump to in the editor, set when a search result is opened and cleared
+  // when the file is picked from the tree instead.
+  const [pendingLine, setPendingLine] = useState<number | null>(null);
+  // Bumped on every search-result open so re-clicking the SAME result (same file +
+  // line) still re-triggers the editor's jump, which is otherwise keyed on the line.
+  const [jumpNonce, setJumpNonce] = useState(0);
+  const [searchActive, setSearchActive] = useState(false);
   const [activeDir, setActiveDir] = useState(rootPath);
   const [creating, setCreating] = useState<null | "file" | "dir">(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
@@ -234,6 +242,22 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ 
     setActiveDir(parentOf(path));
   };
 
+  // Tree clicks open a file with no line jump; a search hit carries the line.
+  const selectFromTree = (path: string, size: number) => {
+    setPendingLine(null);
+    selectFile(path, size);
+  };
+
+  const openFromSearch = useCallback((path: string, size: number, line?: number) => {
+    setSelectedFile(path);
+    setSelectedSize(size);
+    setActiveDir(parentOf(path));
+    setPendingLine(line ?? null);
+    setJumpNonce((n) => n + 1);
+  }, []);
+
+  const onSearchActiveChange = useCallback((value: boolean) => setSearchActive(value), []);
+
   const startCreate = (dir: string, kind: "file" | "dir") => {
     setActiveDir(dir);
     setCreating(kind);
@@ -365,10 +389,23 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ 
           <span className="flex-1 truncate text-xs text-neutral-500" title={rootPath}>
             {baseName(rootPath) || rootPath}
           </span>
-          <IconButton label="New file" onClick={() => startCreate(rootPath, "file")}>
+          {/* Disabled while a search query is active: the create input + inline
+              errors render inside the tree pane, which is hidden during search, so
+              triggering them there would be an invisible dead-end. */}
+          <IconButton
+            label="New file"
+            disabled={searchActive}
+            className="disabled:pointer-events-none disabled:opacity-40"
+            onClick={() => startCreate(rootPath, "file")}
+          >
             <FilePlus size={14} />
           </IconButton>
-          <IconButton label="New folder" onClick={() => startCreate(rootPath, "dir")}>
+          <IconButton
+            label="New folder"
+            disabled={searchActive}
+            className="disabled:pointer-events-none disabled:opacity-40"
+            onClick={() => startCreate(rootPath, "dir")}
+          >
             <FolderPlus size={14} />
           </IconButton>
           <AdaptiveMenu
@@ -412,9 +449,21 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ 
           </p>
         )}
 
+        {/* Search / quick-open above the tree. When a query is active it grows to
+            fill the pane (its results scroll) and the tree below is hidden. */}
+        <div
+          className={cn(
+            "flex min-h-0 flex-col border-b border-neutral-800",
+            searchActive ? "flex-1" : "shrink-0"
+          )}
+        >
+          <SearchPanel root={rootPath} onOpenFile={openFromSearch} onActiveChange={onSearchActiveChange} />
+        </div>
+
         <div
           className={cn(
             "min-h-0 flex-1 overflow-auto py-1",
+            searchActive && "hidden",
             dropTarget === rootPath && "ring-1 ring-inset ring-neutral-600"
           )}
           onContextMenu={(e) => {
@@ -442,6 +491,8 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ 
             <div className="px-2 py-1">
               <Input
                 autoFocus
+                // 16px on mobile (text-base) prevents iOS from zooming on focus.
+                className="text-base md:text-sm"
                 placeholder={creating === "dir" ? "folder name" : "file name"}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") {
@@ -466,7 +517,7 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ 
             activeDir={activeDir}
             dropTarget={dropTarget}
             onToggleDir={toggleDir}
-            onSelectFile={selectFile}
+            onSelectFile={selectFromTree}
             onOpenMenu={openMenu}
             onDragTo={setDropTarget}
             onDropTo={(dir, dt) => void onDropTo(dir, dt)}
@@ -496,7 +547,13 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ 
           selectedFile ? "flex" : "hidden md:flex"
         )}
       >
-        <FilePreview path={selectedFile} size={selectedSize} onBack={() => setSelectedFile(null)} />
+        <FilePreview
+          path={selectedFile}
+          size={selectedSize}
+          jumpToLine={pendingLine ?? undefined}
+          jumpNonce={jumpNonce}
+          onBack={() => setSelectedFile(null)}
+        />
       </div>
 
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menuItems} onClose={() => setMenu(null)} />}

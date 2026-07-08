@@ -10,8 +10,10 @@ import type {
   FsCapabilitiesResponse,
   FsCreateRequest,
   FsEntry,
+  FsFilesResponse,
   FsListResponse,
   FsReadResponse,
+  FsSearchResponse,
   FsUploadRequest,
   FsUploadResponse,
   FsWriteRequest,
@@ -50,6 +52,7 @@ import { UsageService } from "./usage";
 import { createClaudeSource, createCodexSource, readUsagePrefs } from "./usage-sources";
 import { listArchiveEntries } from "./archive";
 import { resolveZipTool, spawnDirZip } from "./zip";
+import { FsSearchError, listProjectFiles, searchProjectFiles } from "./search";
 import { TerminalControl } from "./mcp/terminal-control.ts";
 import { TodoTools } from "./mcp/todo-tools.ts";
 import { FsTools } from "./mcp/fs-tools.ts";
@@ -902,6 +905,78 @@ function createServer(
           code: "FS_ERROR",
           message: error instanceof Error ? error.message : "Cannot read directory."
         });
+      }
+    }
+  );
+
+  // File browser: recursive file listing for search / quick-open.
+  app.get<{ Querystring: { path?: string } }>(
+    "/api/fs/files",
+    async (request, reply): Promise<FsFilesResponse | void> => {
+      const path = request.query.path;
+      if (!path) {
+        return reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
+      }
+      const abort = new AbortController();
+      const onClose = () => abort.abort();
+      reply.raw.on("close", onClose);
+      try {
+        const safe = await assertInsideFsRoot(resolved.fsRoot, path);
+        return await listProjectFiles(resolved.fsRoot, safe, { signal: abort.signal });
+      } catch (error) {
+        if (abort.signal.aborted) return;
+        if (error instanceof FsSandboxError) {
+          return reply.code(403).send({ code: "FS_FORBIDDEN", message: error.message });
+        }
+        if (error instanceof FsSearchError) {
+          return reply.code(error.status).send({ code: error.code, message: error.message });
+        }
+        return reply.code(400).send({
+          code: "FS_ERROR",
+          message: error instanceof Error ? error.message : "Cannot list project files."
+        });
+      } finally {
+        reply.raw.off("close", onClose);
+      }
+    }
+  );
+
+  // File browser: content search across a project subtree.
+  app.get<{
+    Querystring: { path?: string; q?: string; caseSensitive?: string; regex?: string; maxResults?: string };
+  }>(
+    "/api/fs/search",
+    async (request, reply): Promise<FsSearchResponse | void> => {
+      const { path, q } = request.query;
+      if (!path || !q) {
+        return reply.code(400).send({ code: "INVALID_REQUEST", message: "path and q required." });
+      }
+      const abort = new AbortController();
+      const onClose = () => abort.abort();
+      reply.raw.on("close", onClose);
+      try {
+        const safe = await assertInsideFsRoot(resolved.fsRoot, path);
+        return await searchProjectFiles(resolved.fsRoot, safe, {
+          query: q,
+          caseSensitive: request.query.caseSensitive === "1",
+          regex: request.query.regex === "1",
+          maxResults: request.query.maxResults,
+          signal: abort.signal
+        });
+      } catch (error) {
+        if (abort.signal.aborted) return;
+        if (error instanceof FsSandboxError) {
+          return reply.code(403).send({ code: "FS_FORBIDDEN", message: error.message });
+        }
+        if (error instanceof FsSearchError) {
+          return reply.code(error.status).send({ code: error.code, message: error.message });
+        }
+        return reply.code(400).send({
+          code: "FS_ERROR",
+          message: error instanceof Error ? error.message : "Cannot search files."
+        });
+      } finally {
+        reply.raw.off("close", onClose);
       }
     }
   );

@@ -156,6 +156,51 @@ export interface FsReadResponse {
   truncated: boolean;
 }
 
+/** One project file returned by GET /api/fs/files (recursive listing for search/quick-open). */
+export interface FsProjectFile {
+  /** Path relative to the searched root, using forward slashes. */
+  path: string;
+  size: number;
+}
+
+export interface FsFilesResponse {
+  /** Absolute path of the searched root. */
+  root: string;
+  files: FsProjectFile[];
+  /** True when the listing was capped (more files exist than returned). */
+  truncated: boolean;
+}
+
+/** One match within a file (from GET /api/fs/search). */
+export interface FsSearchMatch {
+  /** 1-based line number. */
+  line: number;
+  /** The matched line, trimmed and capped to ~300 chars. */
+  text: string;
+  /** Match start char offset within `text`. */
+  start: number;
+  /** Match end char offset within `text`. */
+  end: number;
+}
+
+export interface FsSearchFileResult {
+  /** Path relative to the searched root, using forward slashes. */
+  path: string;
+  size: number;
+  matches: FsSearchMatch[];
+  /** True when this file had more matches than returned. */
+  truncated: boolean;
+}
+
+export interface FsSearchResponse {
+  files: FsSearchFileResult[];
+  totalMatches: number;
+  /** True when the overall result limit was reached. */
+  limitHit: boolean;
+  /** Tool used to search (diagnostics). */
+  tool: "rg" | "node";
+}
+
 /** One entry inside an archive (from GET /api/fs/archive). */
 export interface ArchiveEntry {
   /** POSIX-separated path within the archive, e.g. "src/index.ts". */

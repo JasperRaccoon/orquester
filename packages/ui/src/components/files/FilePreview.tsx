@@ -20,11 +20,15 @@ const baseName = (p: string) => p.slice(p.lastIndexOf("/") + 1);
  * viewer. Text stays in CodeMirror (editable + saveable); binary kinds render
  * from raw bytes (or a download card when over their size cap).
  */
-export const FilePreview: React.FC<{ path: string | null; size: number; onBack: () => void }> = ({
-  path,
-  size,
-  onBack
-}) => {
+export const FilePreview: React.FC<{
+  path: string | null;
+  size: number;
+  onBack: () => void;
+  /** 1-based line to jump to (text files only), e.g. from a search-result click. */
+  jumpToLine?: number;
+  /** Bumped on every search-result open so re-clicking the same line re-jumps. */
+  jumpNonce?: number;
+}> = ({ path, size, onBack, jumpToLine, jumpNonce }) => {
   const api = useApi();
   const fetchBytes = useCallback((p: string, signal?: AbortSignal) => api.readFileBytes(p, signal), [api]);
 
@@ -41,7 +45,7 @@ export const FilePreview: React.FC<{ path: string | null; size: number; onBack: 
 
   // Text keeps its own header (Save button + dirty dot) — delegate wholesale.
   if (kind === "text") {
-    return <TextPreview path={path} mime={mime} size={size} onBack={onBack} />;
+    return <TextPreview path={path} mime={mime} size={size} onBack={onBack} jumpToLine={jumpToLine} jumpNonce={jumpNonce} />;
   }
 
   // HTML renders in a sandboxed iframe with a Preview | Source toggle (text route).
@@ -108,7 +112,7 @@ const PreviewHeader: React.FC<{ path: string; name: string; onBack: () => void }
 
 /** Text files: CodeMirror editor with save — plus a null-byte -> binary card
  *  guard so an unknown-extension binary never renders as mojibake. */
-const TextPreview: React.FC<{ path: string; mime: string; size: number; onBack: () => void }> = ({ path, mime, size, onBack }) => {
+const TextPreview: React.FC<{ path: string; mime: string; size: number; onBack: () => void; jumpToLine?: number; jumpNonce?: number }> = ({ path, mime, size, onBack, jumpToLine, jumpNonce }) => {
   const api = useApi();
   const fetchBytes = useCallback((p: string, signal?: AbortSignal) => api.readFileBytes(p, signal), [api]);
   const { content, setContent, original, truncated, state, saving, save } = useFileText(path);
@@ -153,7 +157,7 @@ const TextPreview: React.FC<{ path: string; mime: string; size: number; onBack: 
           <BinaryCard path={path} name={name} size={size} mime={mime} downloadable title="Binary file" fetchBytes={fetchBytes} />
         )}
         {state === "idle" && !isBinary && (
-          <Editor filename={name} value={content} readOnly={readOnly} onChange={setContent} onSave={() => void save()} />
+          <Editor filename={name} value={content} readOnly={readOnly} jumpToLine={jumpToLine} jumpNonce={jumpNonce} onChange={setContent} onSave={() => void save()} />
         )}
       </div>
     </>
