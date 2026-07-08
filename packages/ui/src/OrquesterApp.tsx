@@ -66,6 +66,32 @@ export const OrquesterApp: React.FC<OrquesterAppProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Instant reconnect on tab/app return. Mobile browsers freeze hidden tabs and
+  // kill their sockets/streams, so every timer-driven recovery path stalls until
+  // the page thaws. All regain signals route to one debounced wake: iOS fires
+  // pageshow/focus more reliably than visibilitychange (WebKit 202399), Chrome
+  // adds "resume" after a freeze, and "online" covers radio/NAT changes.
+  useEffect(() => {
+    const wake = () => useAppStore.getState().wakeConnections();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") {
+        wake();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    document.addEventListener("resume", wake);
+    window.addEventListener("pageshow", wake);
+    window.addEventListener("focus", wake);
+    window.addEventListener("online", wake);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      document.removeEventListener("resume", wake);
+      window.removeEventListener("pageshow", wake);
+      window.removeEventListener("focus", wake);
+      window.removeEventListener("online", wake);
+    };
+  }, []);
+
   // Global stray-drop guard. A file dropped OUTSIDE a registered drop zone (the
   // file browser, a terminal) would otherwise hit the browser default and, in
   // the web client, navigate the whole SPA to the file:// URL — destroying the

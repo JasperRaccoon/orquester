@@ -434,6 +434,35 @@ export interface UsageResponse {
 
 export type UsageEventType = "usage.changed";
 
+// Web Push — the PWA subscribes browsers to attention pushes that fire when an
+// agent session rings the terminal bell. The daemon owns a VAPID keypair; only
+// the public key ever crosses the wire (the private key stays in push.json).
+
+export interface PushInfoResponse {
+  supported: boolean;
+  vapidPublicKey: string;
+  subscriptionCount: number;
+}
+
+export interface PushSubscriptionKeys {
+  p256dh: string;
+  auth: string;
+}
+
+export interface PushSubscribeRequest {
+  endpoint: string;
+  keys: PushSubscriptionKeys;
+  userAgent?: string;
+}
+
+export interface PushUnsubscribeRequest {
+  endpoint: string;
+}
+
+export interface PushTestResponse {
+  sent: number;
+}
+
 /** Public auth metadata for the HTTP transport (no secrets). */
 export interface AuthInfoResponse {
   authRequired: boolean;

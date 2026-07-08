@@ -46,7 +46,8 @@ detection; detection + "Open on…" for shells/IDEs/explorers/browsers; xterm.js
 WebSocket-multiplexed PTY streaming, scrollback replay and resize; a CodeMirror file editor;
 tab drag-reorder + inline rename (server-authoritative); a per-project grid view; remote access
 with TLS, username+password auth, per-IP login throttling, and tmux persistence; per-workspace
-git/GitHub SSH identities.
+git/GitHub SSH identities; and an installable **PWA** web client (service worker + Web Push
+notifications on agent-session bells).
 
 ---
 
@@ -289,6 +290,15 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
 - **Default endpoint is `127.0.0.1:47831`.** On the VPS it stays on loopback; Caddy (443) is the
   only public face. CORS is intentionally absent (single-origin server; desktop dodges CORS via
   Node HTTP).
+- **PWA is `apps/web`-only and needs `dist`.** `/sw.js` + `site.webmanifest` must genuinely
+  exist in `apps/web/dist` (Vite copies `public/`); the daemon's SPA fallback returns
+  `index.html` for any missing GET, so a missing `sw.js` silently serves HTML and breaks the
+  service worker. Run `pnpm build` after touching either. Web Push state lives in
+  `<appdir>/daemon/push.json` (chmod 0600 — it holds the VAPID **private** key, never returned by
+  any API); pushes fire only from **agent**-session bells (shell beeps never push), debounced
+  per session. The SW never intercepts `/api`, `/events`, `/ws`, `/health`, `/mcp` or non-GET
+  requests. Registration is web-host-only (`apps/web/src/pwa.ts`, PROD-gated) — Electron never
+  touches it.
 
 ---
 
