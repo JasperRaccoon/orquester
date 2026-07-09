@@ -12,7 +12,7 @@ import {
   type TeamClaudeConfig
 } from "@orquester/config";
 import { TEAMCLAUDE_README } from "@orquester/registry";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { exec, spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import {
@@ -189,6 +189,59 @@ function writeTcConfig(next: TcConfigRaw): void {
   writeJson0600(teamclaudeUserConfigPath(), next);
 }
 
+function createProxyApiKey(): string {
+  return `tc-${randomBytes(24).toString("base64url")}`;
+}
+
+function normalizeTcConfigForOrquester(cfg: TcConfigRaw, port: number): boolean {
+  let changed = false;
+  if (!cfg.proxy) {
+    cfg.proxy = {};
+    changed = true;
+  }
+  if (cfg.proxy.port !== port) {
+    cfg.proxy.port = port;
+    changed = true;
+  }
+  if (cfg.proxy.host !== "127.0.0.1") {
+    cfg.proxy.host = "127.0.0.1";
+    changed = true;
+  }
+  if (typeof cfg.proxy.apiKey !== "string" || !cfg.proxy.apiKey.trim()) {
+    cfg.proxy.apiKey = createProxyApiKey();
+    changed = true;
+  }
+  for (const account of cfg.accounts ?? []) {
+    if ((account.type === "api" || account.type === "apikey") && !account.apiKey && account.accessToken) {
+      account.type = "apikey";
+      account.apiKey = account.accessToken;
+      delete account.accessToken;
+      delete account.refreshToken;
+      changed = true;
+    } else if (account.type === "api") {
+      account.type = "apikey";
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function readOrCreateTcConfig(port: number): TcConfigRaw {
+  const cfg = readTcConfig() ?? { proxy: {}, accounts: [] };
+  if (normalizeTcConfigForOrquester(cfg, port)) {
+    writeTcConfig(cfg);
+  }
+  return cfg;
+}
+
+function hasUsableAccount(cfg: TcConfigRaw | null): boolean {
+  return Boolean(
+    cfg?.accounts?.some(
+      (account) => account.disabled !== true && Boolean(account.accessToken || account.refreshToken || account.apiKey)
+    )
+  );
+}
+
 function accountSummaries(cfg: TcConfigRaw | null): TeamClaudeAccountSummary[] {
   const list = cfg?.accounts ?? [];
   return list
@@ -351,7 +404,7 @@ export class TeamClaudeService {
     this.state = parseTeamClaudeConfig(next);
     this.persistState();
 
-    const cfg = readTcConfig() ?? { proxy: {}, accounts: [] };
+    const cfg = readOrCreateTcConfig(this.state.port);
     cfg.proxy = { ...(cfg.proxy ?? {}), port: this.state.port, host: "127.0.0.1" };
     cfg.switchThreshold = this.state.switchThreshold;
     cfg.quotaProbeSeconds = this.state.quotaProbeSeconds;
@@ -413,13 +466,16 @@ export class TeamClaudeService {
     if (!this.isRunning()) {
       await this.ensureRunning();
     }
-    const cfg = readTcConfig();
+    const cfg = readOrCreateTcConfig(this.state.port);
     const port = this.state.port || cfg?.proxy?.port || 3456;
     const apiKey = cfg?.proxy?.apiKey;
     if (!apiKey) {
       throw new TeamClaudeError(
-        "TeamClaude is enabled but has no proxy API key yet. Run the proxy once (re-enable) or add an account."
+        "TeamClaude is enabled but has no proxy API key yet. Re-enable TeamClaude or add an account."
       );
+    }
+    if (!hasUsableAccount(cfg)) {
+      throw new TeamClaudeError("TeamClaude is enabled but has no usable accounts. Add or enable a TeamClaude account.");
     }
     return {
       env: {
@@ -479,19 +535,19 @@ export class TeamClaudeService {
   async addApiKey(apiKey: string, name?: string): Promise<TeamClaudeStatus> {
     const trimmed = apiKey.trim();
     if (!trimmed) throw new TeamClaudeError("API key is required.");
-    const cfg = readTcConfig() ?? { proxy: { port: this.state.port }, accounts: [] };
+    const cfg = readOrCreateTcConfig(this.state.port);
     if (!cfg.accounts) cfg.accounts = [];
     const accountName = name?.trim() || `api-${cfg.accounts.length + 1}`;
     // Remove existing same-name first.
     cfg.accounts = cfg.accounts.filter((a) => a.name !== accountName);
     cfg.accounts.push({
       name: accountName,
-      type: "api",
-      accessToken: trimmed,
+      type: "apikey",
+      apiKey: trimmed,
       priority: 100,
       disabled: false
     });
-    if (!cfg.proxy) cfg.proxy = { port: this.state.port };
+    normalizeTcConfigForOrquester(cfg, this.state.port);
     writeTcConfig(cfg);
     await this.syncProxyAfterConfigChange();
     this.emitChanged();
@@ -576,7 +632,7 @@ export class TeamClaudeService {
     const bin = this.requireBin();
     await this.stopRecordedProxy();
     // Ensure a config exists with our preferred port before spawning.
-    const cfg = readTcConfig() ?? { proxy: {}, accounts: [] };
+    const cfg = readOrCreateTcConfig(this.state.port);
     cfg.proxy = { ...(cfg.proxy ?? {}), port: this.state.port, host: "127.0.0.1" };
     cfg.switchThreshold = this.state.switchThreshold;
     cfg.quotaProbeSeconds = this.state.quotaProbeSeconds;
