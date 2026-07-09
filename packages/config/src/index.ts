@@ -565,6 +565,27 @@ export function parseTeamClaudeConfig(raw: unknown): TeamClaudeConfig {
   return teamclaudeConfigSchema.parse(raw);
 }
 
+export const teamclaudeSettingsUpdateSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    port: z.coerce.number().int().min(1).max(65535).optional(),
+    switchThreshold: z.coerce.number().min(0).max(1).optional(),
+    quotaProbeSeconds: z.coerce.number().int().min(0).optional(),
+    warmupSeconds: z.coerce.number().int().min(0).optional(),
+    autoUpdate: z.boolean().optional(),
+    upstream: z.string().trim().min(1).optional(),
+    stormRamp: teamclaudeStormRampSchema.partial().strict().optional(),
+    sxMode: z.enum(["always", "429", "off"]).optional(),
+    sxApiKey: z.string().optional()
+  })
+  .strict();
+
+export type ParsedTeamClaudeSettingsUpdate = z.infer<typeof teamclaudeSettingsUpdateSchema>;
+
+export function parseTeamClaudeSettingsUpdate(raw: unknown): ParsedTeamClaudeSettingsUpdate {
+  return teamclaudeSettingsUpdateSchema.parse(raw);
+}
+
 // ClientConfig — what the daemon reports about how to reach itself.}
 
 export const clientConfigSchema = z.object({

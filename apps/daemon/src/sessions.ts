@@ -2,9 +2,9 @@ import type { CreateSessionRequest, RegistryEntry, SessionSummary } from "@orque
 import { type SessionRecord, type SessionsConfig, createDefaultSessionsConfig, parseSessionsConfig } from "@orquester/config";
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
-import { homedir } from "node:os";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { basename, dirname, sep } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { basename, dirname, join, sep } from "node:path";
 import { spawn, type IPty } from "node-pty";
 import type { RegistryService } from "./registry";
 import {
@@ -150,6 +150,51 @@ export function buildLaunchCommand(entry: RegistryEntry, opts: { tmux: boolean }
   return { bin, args: baseArgs };
 }
 
+function shellQuote(s: string): string {
+  if (/^[a-zA-Z0-9_./:@%+=-]+$/.test(s)) return s;
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+async function writeAddonEnvLaunchScript(
+  launch: { bin: string; args: string[] },
+  env: Record<string, string>
+): Promise<{ bin: string; args: string[]; cleanup: () => Promise<void> }> {
+  const entries = Object.entries(env).filter(
+    ([key, value]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key) && !value.includes("\0")
+  );
+  if (entries.length === 0) {
+    return { ...launch, cleanup: async () => undefined };
+  }
+
+  const shell = sessionCommandShell();
+  if (!shell) {
+    throw new SessionError("No usable shell found to prepare addon launch environment.");
+  }
+
+  const dir = await mkdtemp(join(tmpdir(), "orquester-launch-"));
+  const script = join(dir, "launch.sh");
+  const exports = entries.map(([key, value]) => `export ${key}=${shellQuote(value)}`);
+  const command = [shellQuote(launch.bin), ...launch.args.map(shellQuote)].join(" ");
+  await writeFile(
+    script,
+    [
+      "#!/bin/sh",
+      'script_dir=${0%/*}',
+      'rm -f -- "$0"',
+      'rmdir "$script_dir" 2>/dev/null || true',
+      ...exports,
+      `exec ${command}`,
+      ""
+    ].join("\n"),
+    { encoding: "utf8", mode: 0o600 }
+  );
+  return {
+    bin: shell,
+    args: [script],
+    cleanup: () => rm(dir, { recursive: true, force: true })
+  };
+}
+
 /**
  * Owns every live session. Each session's command runs inside a DEDICATED tmux
  * server (fixed socket); the daemon talks to it through a thin `tmux attach`
@@ -218,16 +263,13 @@ export class SessionManager implements ISessionManager {
     // it. tmux owns the process group, so a daemon restart leaves it running.
     // The pane inherits the new-session CLIENT's environment (Tmux.run uses
     // sessionEnvBase() — the daemon's env minus ORQUESTER_* secrets — and sets
-    // the session PATH there); these `-e KEY=VAL` entries are only small
-    // per-session overrides. We deliberately do NOT spread `...process.env` onto
-    // `-e`: it lands on the `tmux new-session` argv (visible via `ps`), would
-    // leak secrets there, and would reject any multiline value (e.g. BASH_FUNC_*
-    // shell functions) at launch.
+    // the session PATH there). Registry env is non-secret and can use tmux -e;
+    // addon env may contain launch credentials, so the tmux backend injects it
+    // through a private one-shot wrapper script instead of argv-visible -e.
     const env = {
       TERM: "xterm-256color",
       COLORTERM: "truecolor",
-      ...entry.env,
-      ...addonEnv
+      ...entry.env
     } as Record<string, string>;
 
     // A bare shell launched via `tmux new-session -- bash` runs non-interactively
@@ -238,43 +280,25 @@ export class SessionManager implements ISessionManager {
     // persist. Some agents (OpenCode on locked service users) also need to be
     // spawned as a child of a real shell, matching the path that works from a
     // Bash tab while preserving direct binary resolution/version checks.
-    const launch = buildLaunchCommand(entry, { tmux: true });
+    const baseLaunch = buildLaunchCommand(entry, { tmux: true });
+    const wrapped = await writeAddonEnvLaunchScript(baseLaunch, addonEnv);
+    try {
+      await this.tmux.newSession({ id, cols, rows, cwd, env, bin: wrapped.bin, args: wrapped.args });
+    } catch (error) {
+      this.sessions.delete(id);
+      await wrapped.cleanup();
+      throw new SessionError(error instanceof Error ? error.message : String(error));
+    }
+    const cleanupTimer = setTimeout(() => {
+      void wrapped.cleanup();
+    }, 30_000);
+    cleanupTimer.unref?.();
 
-    this.tmux
-      .newSession({ id, cols, rows, cwd, env, bin: launch.bin, args: launch.args })
-      .then(() => {
-        // newSession is async (an execFile of `tmux new-session` takes several
-        // ms) but create() has already returned. If close()/closeAll() ran in
-        // that window it killed a tmux session that did NOT exist yet (silent
-        // no-op) and dropped us from `this.sessions`. Now that the LIVE
-        // orq-<id> session finally exists, kill it instead of attaching —
-        // otherwise its command (possibly a `claude`/agent) keeps running
-        // headless, invisible to the UI and sessions.json, until the next
-        // daemon restart reaps it as an orphan. (LocalSessionManager spawns its
-        // PTY synchronously in create(), so it never opens this window.)
-        if (this.sessions.get(id) !== session) {
-          void this.tmux.killSession(id);
-          return;
-        }
-        this.attach(session);
-      })
-      .catch((error) => {
-        // Same close()/closeAll() race as the .then branch: if that window
-        // removed (or replaced) this session, it is already gone from
-        // this.sessions and the UI emitted "closed". Bail before emitting a
-        // trailing "exited" — otherwise upsertSession would resurrect a ghost
-        // tab. (A failed new-session usually left no tmux session to kill.)
-        if (this.sessions.get(id) !== session) {
-          return;
-        }
-        // Failed to launch under tmux: surface as an immediate exit so the tab
-        // resolves the same way a crashed PTY would.
-        session.summary.status = "exited";
-        session.summary.exitCode = 1;
-        session.emitter.emit("output", `\r\n[orquester] failed to start session: ${String(error)}\r\n`);
-        session.emitter.emit("exit", 1);
-        this.lifecycle.emit("exited", { ...session.summary });
-      });
+    if (this.sessions.get(id) !== session) {
+      void this.tmux.killSession(id);
+      throw new SessionError("Session was closed before launch completed.");
+    }
+    this.attach(session);
 
     this.lifecycle.emit("created", { ...summary });
     void this.persistIndex();

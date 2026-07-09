@@ -42,8 +42,9 @@ const AccountRow: React.FC<{ account: UsageAccount }> = ({ account }) => {
 };
 
 const AgentSection: React.FC<{ agent: AgentUsage; view: "aggregate" | "accounts" }> = ({ agent, view }) => {
-  const hasData = agent.session || agent.weekly || (agent.accounts && agent.accounts.length > 0);
-  const isOld = minutesSince(agent.asOf, Date.now()) > STALE_MIN;
+  const hasTimestamp = Boolean(agent.asOf);
+  const hasData = hasTimestamp && (agent.session || agent.weekly || (agent.accounts && agent.accounts.length > 0));
+  const isOld = hasTimestamp && minutesSince(agent.asOf, Date.now()) > STALE_MIN;
   const muted = !hasData || isOld;
   const multi = (agent.accounts?.length ?? 0) > 0;
   const showAccounts = multi && view === "accounts";

@@ -12,21 +12,25 @@ import {
   type TeamClaudeConfig
 } from "@orquester/config";
 import { TEAMCLAUDE_README } from "@orquester/registry";
+import { randomUUID } from "node:crypto";
 import { exec, spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import {
   accessSync,
   chmodSync,
   constants,
+  mkdtempSync,
   mkdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   unlinkSync,
   writeFileSync
 } from "node:fs";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
+import { sessionEnvBase, sessionPath } from "./tmux";
 
 const execAsync = promisify(exec);
 
@@ -51,6 +55,36 @@ const DEF = {
   readmeMarkdown: TEAMCLAUDE_README,
   logoUrl: LOGO_URL
 } as const;
+
+const SAFE_CHILD_ENV_KEYS = new Set([
+  "CI",
+  "HOME",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "LOGNAME",
+  "NODE_EXTRA_CA_CERTS",
+  "NO_PROXY",
+  "NPM_CONFIG_PREFIX",
+  "PATH",
+  "SHELL",
+  "SSL_CERT_DIR",
+  "SSL_CERT_FILE",
+  "TEMP",
+  "TMP",
+  "TMPDIR",
+  "USER",
+  "USERNAME",
+  "XDG_CACHE_HOME",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "http_proxy",
+  "https_proxy",
+  "no_proxy",
+  "npm_config_prefix",
+  "HTTP_PROXY",
+  "HTTPS_PROXY"
+]);
 
 function isExecutable(p: string): boolean {
   try {
@@ -187,10 +221,12 @@ export class TeamClaudeService {
   private child: ChildProcess | null = null;
   private lastError?: string;
   private starting: Promise<void> | null = null;
+  private readonly pidPath: string;
 
   constructor(private readonly statePath: string) {
     this.state = loadOrquesterState(statePath);
     this.resolvedBin = resolveBin([...DEF.bin]);
+    this.pidPath = join(dirname(statePath), "teamclaude.pid");
   }
 
   async init(): Promise<void> {
@@ -200,7 +236,7 @@ export class TeamClaudeService {
     }
     if (this.state.enabled && this.resolvedBin) {
       await this.ensureRunning().catch((err) => {
-        this.lastError = err instanceof Error ? err.message : String(err);
+        this.lastError = sanitizeErrorText(err instanceof Error ? err.message : String(err));
         console.error("teamclaude: failed to start proxy on boot", err);
       });
     }
@@ -297,25 +333,13 @@ export class TeamClaudeService {
   }
 
   async setEnabled(enabled: boolean): Promise<TeamClaudeStatus> {
-    this.state = { ...this.state, enabled };
-    this.persistState();
-    if (enabled) {
-      if (!this.resolvedBin) {
-        this.lastError = "TeamClaude is not installed.";
-        this.emitChanged();
-        return this.status();
-      }
-      await this.syncProxyAfterConfigChange();
-    } else {
-      await this.stopProxy();
-      this.lastError = undefined;
-    }
-    this.emitChanged();
-    return this.status();
+    return this.updateSettings({ enabled });
   }
 
   async updateSettings(patch: TeamClaudeSettingsUpdate): Promise<TeamClaudeStatus> {
+    const wasEnabled = this.state.enabled;
     const next: TeamClaudeConfig = { ...this.state };
+    if (typeof patch.enabled === "boolean") next.enabled = patch.enabled;
     if (typeof patch.port === "number") next.port = patch.port;
     if (typeof patch.switchThreshold === "number") next.switchThreshold = patch.switchThreshold;
     if (typeof patch.quotaProbeSeconds === "number") next.quotaProbeSeconds = patch.quotaProbeSeconds;
@@ -363,7 +387,16 @@ export class TeamClaudeService {
       }
     }
 
-    await this.syncProxyAfterConfigChange({ restart: this.state.enabled });
+    if (!this.state.enabled) {
+      if (wasEnabled) {
+        await this.stopProxy();
+      }
+      this.lastError = undefined;
+    } else if (!this.resolvedBin) {
+      this.lastError = "TeamClaude is not installed.";
+    } else {
+      await this.syncProxyAfterConfigChange({ restart: wasEnabled });
+    }
     this.emitChanged();
     return this.status();
   }
@@ -400,13 +433,20 @@ export class TeamClaudeService {
 
   async importCredentials(from?: string, content?: string): Promise<TeamClaudeStatus> {
     const bin = this.requireBin();
-    if (content && content.trim()) {
+    if (content !== undefined) {
+      if (from?.trim()) {
+        throw new TeamClaudeError("Choose either an uploaded credentials file or a daemon-host path, not both.");
+      }
+      if (!content.trim()) {
+        throw new TeamClaudeError("Uploaded credentials file is empty.");
+      }
       try {
         JSON.parse(content);
       } catch {
         throw new TeamClaudeError("Uploaded file is not valid JSON.");
       }
-      const tmpPath = join(tmpdir(), `orquester-tc-creds-${Date.now()}.json`);
+      const tmpDir = mkdtempSync(join(tmpdir(), "orquester-tc-creds-"));
+      const tmpPath = join(tmpDir, `${randomUUID()}.json`);
       try {
         writeFileSync(tmpPath, content, { encoding: "utf8", mode: 0o600 });
         try {
@@ -418,6 +458,11 @@ export class TeamClaudeService {
       } finally {
         try {
           unlinkSync(tmpPath);
+        } catch {
+          /* ignore */
+        }
+        try {
+          rmSync(tmpDir, { recursive: true, force: true });
         } catch {
           /* ignore */
         }
@@ -529,6 +574,7 @@ export class TeamClaudeService {
 
   private async startProxy(): Promise<void> {
     const bin = this.requireBin();
+    await this.stopRecordedProxy();
     // Ensure a config exists with our preferred port before spawning.
     const cfg = readTcConfig() ?? { proxy: {}, accounts: [] };
     cfg.proxy = { ...(cfg.proxy ?? {}), port: this.state.port, host: "127.0.0.1" };
@@ -543,56 +589,69 @@ export class TeamClaudeService {
     }
     writeTcConfig(cfg);
 
-    const env = {
-      ...process.env,
-      TEAMCLAUDE_CONFIG: teamclaudeUserConfigPath(),
-      TEAMCLAUDE_DISABLE_AUTOUPDATE: this.state.autoUpdate ? "0" : "1"
-    };
+    const env = teamclaudeProcessEnv(this.state.autoUpdate ? "0" : "1");
 
     const child = spawn(bin, ["server", "--headless"], {
       env,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["ignore", "ignore", "pipe"],
       detached: false
     });
     this.child = child;
+    this.writePid(child.pid);
     let stderr = "";
     child.stderr?.on("data", (buf: Buffer) => {
       stderr = (stderr + buf.toString("utf8")).slice(-4000);
     });
     child.on("exit", (code) => {
+      this.unlinkPid(child.pid);
       if (this.child === child) {
         this.child = null;
         if (this.state.enabled) {
-          this.lastError = `TeamClaude proxy exited (code ${code ?? "?"})${stderr ? `: ${stderr.slice(-200)}` : ""}`;
+          this.lastError = sanitizeErrorText(
+            `TeamClaude proxy exited (code ${code ?? "?"})${stderr ? `: ${stderr.slice(-200)}` : ""}`
+          );
           this.emitChanged();
         }
       }
     });
 
-    // Wait until the proxy accepts HTTP or we time out.
+    // Wait until TeamClaude's own control surface answers or we time out.
     const port = this.state.port;
     const deadline = Date.now() + 15_000;
-    while (Date.now() < deadline) {
-      if (!this.isRunning()) {
-        throw new TeamClaudeError(
-          `TeamClaude proxy failed to start${stderr ? `: ${stderr.slice(-300)}` : "."}`
-        );
+    try {
+      while (Date.now() < deadline) {
+        if (!this.isRunning()) {
+          throw new TeamClaudeError(
+            sanitizeErrorText(`TeamClaude proxy failed to start${stderr ? `: ${stderr.slice(-300)}` : "."}`)
+          );
+        }
+        if (await probeLocal(port)) {
+          this.lastError = undefined;
+          // First boot generates proxy.apiKey into the config — re-read so launch env has it.
+          this.emitChanged();
+          return;
+        }
+        await sleep(250);
       }
-      if (await probeLocal(port)) {
-        this.lastError = undefined;
-        // First boot generates proxy.apiKey into the config — re-read so launch env has it.
-        this.emitChanged();
-        return;
-      }
-      await sleep(250);
+      throw new TeamClaudeError(`TeamClaude proxy did not become ready on 127.0.0.1:${port} within 15s.`);
+    } catch (error) {
+      await this.stopProxy();
+      throw error;
     }
-    throw new TeamClaudeError(`TeamClaude proxy did not become ready on 127.0.0.1:${port} within 15s.`);
   }
 
   private async stopProxy(): Promise<void> {
     const child = this.child;
     this.child = null;
-    if (!child || child.killed) return;
+    if (!child) return;
+    if (child.killed) {
+      this.unlinkPid(child.pid);
+      return;
+    }
+    if (child.exitCode !== null) {
+      this.unlinkPid(child.pid);
+      return;
+    }
     await new Promise<void>((resolve) => {
       const t = setTimeout(() => {
         try {
@@ -613,6 +672,7 @@ export class TeamClaudeService {
         resolve();
       }
     });
+    this.unlinkPid(child.pid);
   }
 
   private async tellReload(): Promise<void> {
@@ -641,8 +701,65 @@ export class TeamClaudeService {
       }
       this.lastError = undefined;
     } catch (err) {
-      this.lastError = err instanceof Error ? err.message : String(err);
+      this.lastError = sanitizeErrorText(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  private writePid(pid: number | undefined): void {
+    if (!pid) return;
+    try {
+      writeFileSync(this.pidPath, `${pid}\n`, { encoding: "utf8", mode: 0o600 });
+      chmodSync(this.pidPath, 0o600);
+    } catch {
+      /* pid tracking is best-effort */
+    }
+  }
+
+  private unlinkPid(pid: number | undefined): void {
+    try {
+      const recorded = Number(readFileSync(this.pidPath, "utf8").trim());
+      if (pid && recorded !== pid) return;
+      unlinkSync(this.pidPath);
+    } catch {
+      /* already absent */
+    }
+  }
+
+  private async stopRecordedProxy(): Promise<void> {
+    let pid = 0;
+    try {
+      pid = Number(readFileSync(this.pidPath, "utf8").trim());
+    } catch {
+      return;
+    }
+    if (!Number.isInteger(pid) || pid <= 0) {
+      this.unlinkPid(undefined);
+      return;
+    }
+    if (!isLikelyTeamClaudePid(pid)) {
+      this.unlinkPid(pid);
+      return;
+    }
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {
+      this.unlinkPid(pid);
+      return;
+    }
+    const deadline = Date.now() + 3_000;
+    while (Date.now() < deadline) {
+      if (!pidAlive(pid)) {
+        this.unlinkPid(pid);
+        return;
+      }
+      await sleep(100);
+    }
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      /* already gone */
+    }
+    this.unlinkPid(pid);
   }
 
   private runManaged(command: string): void {
@@ -661,7 +778,7 @@ export class TeamClaudeService {
         })().finally(() => this.emitChanged());
       } else {
         this.installState = "error";
-        this.installError = result.output.slice(-4000);
+        this.installError = sanitizeErrorText(result.output).slice(-4000);
         this.emitChanged();
       }
     });
@@ -684,16 +801,16 @@ export class TeamClaudeService {
     opts: { timeoutMs?: number } = {}
   ): Promise<string> {
     const timeout = opts.timeoutMs ?? 60_000;
-    const { stdout, stderr } = await execAsync(`"${bin}" ${args.map(shellQuote).join(" ")}`, {
-      timeout,
-      maxBuffer: 4 * 1024 * 1024,
-      env: {
-        ...process.env,
-        TEAMCLAUDE_CONFIG: teamclaudeUserConfigPath(),
-        TEAMCLAUDE_DISABLE_AUTOUPDATE: "1"
-      }
-    });
-    return `${stdout ?? ""}${stderr ?? ""}`;
+    try {
+      const { stdout, stderr } = await execAsync(`"${bin}" ${args.map(shellQuote).join(" ")}`, {
+        timeout,
+        maxBuffer: 4 * 1024 * 1024,
+        env: teamclaudeProcessEnv("1")
+      });
+      return `${stdout ?? ""}${stderr ?? ""}`;
+    } catch (error) {
+      throw new TeamClaudeError(commandErrorMessage(error));
+    }
   }
 
   private persistState(): void {
@@ -720,11 +837,95 @@ function shellQuote(s: string): string {
 
 function runShell(command: string): Promise<{ ok: boolean; output: string }> {
   return new Promise((resolve) => {
-    exec(command, { timeout: 10 * 60_000, maxBuffer: 8 * 1024 * 1024 }, (error, stdout, stderr) => {
-      const output = `${stdout ?? ""}${stderr ?? ""}`.slice(0, 64_000);
-      resolve({ ok: !error, output });
-    });
+    exec(
+      command,
+      { timeout: 10 * 60_000, maxBuffer: 8 * 1024 * 1024, env: teamclaudeProcessEnv("1") },
+      (error, stdout, stderr) => {
+        const output = sanitizeErrorText(`${stdout ?? ""}${stderr ?? ""}`).slice(0, 64_000);
+        resolve({ ok: !error, output });
+      }
+    );
   });
+}
+
+function teamclaudeProcessEnv(disableAutoUpdate: "0" | "1"): NodeJS.ProcessEnv {
+  const base = sessionEnvBase();
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(base)) {
+    if (SAFE_CHILD_ENV_KEYS.has(key)) {
+      env[key] = value;
+    }
+  }
+  env.CI = "1";
+  env.PATH = sessionPath();
+  env.TEAMCLAUDE_CONFIG = teamclaudeUserConfigPath();
+  env.TEAMCLAUDE_DISABLE_AUTOUPDATE = disableAutoUpdate;
+  return env;
+}
+
+function commandErrorMessage(error: unknown): string {
+  const err = error as { stdout?: unknown; stderr?: unknown; message?: unknown } | null;
+  const parts = [
+    typeof err?.stdout === "string" ? err.stdout : "",
+    typeof err?.stderr === "string" ? err.stderr : "",
+    typeof err?.message === "string" ? err.message : ""
+  ].filter(Boolean);
+  return sanitizeErrorText(parts.join("\n") || "TeamClaude command failed.").slice(-4000);
+}
+
+function secretValues(): string[] {
+  const cfg = readTcConfig();
+  const values: string[] = [];
+  const push = (value: unknown) => {
+    if (typeof value === "string" && value.length >= 8) values.push(value);
+  };
+  push(cfg?.proxy?.apiKey);
+  push(cfg?.sx?.apiKey);
+  for (const account of cfg?.accounts ?? []) {
+    push(account.accessToken);
+    push(account.refreshToken);
+    push(account.apiKey);
+  }
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!value || value.length < 8) continue;
+    if (key.startsWith("ORQUESTER_") || /TOKEN|PASSWORD|SECRET|API[_-]?KEY|AUTH/i.test(key)) {
+      values.push(value);
+    }
+  }
+  return values;
+}
+
+function sanitizeErrorText(input: string): string {
+  let output = input;
+  for (const value of secretValues()) {
+    output = output.split(value).join("[redacted]");
+  }
+  return output
+    .replace(/sk-ant-[A-Za-z0-9_-]+/g, "[redacted]")
+    .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]{16,}/gi, "$1[redacted]")
+    .replace(
+      /((?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)\s*[:=]\s*)["']?[^"'\s,}]{8,}/gi,
+      "$1[redacted]"
+    );
+}
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isLikelyTeamClaudePid(pid: number): boolean {
+  if (!pidAlive(pid)) return false;
+  if (process.platform === "win32") return true;
+  try {
+    return readFileSync(`/proc/${pid}/cmdline`, "utf8").toLowerCase().includes("teamclaude");
+  } catch {
+    return false;
+  }
 }
 
 function sleep(ms: number): Promise<void> {
@@ -733,12 +934,17 @@ function sleep(ms: number): Promise<void> {
 
 async function probeLocal(port: number): Promise<boolean> {
   try {
-    // Prefer the control/status surface; fall back to any TCP accept.
-    const res = await fetch(`http://127.0.0.1:${port}/`, {
+    const res = await fetch(`http://127.0.0.1:${port}/teamclaude/status`, {
       signal: AbortSignal.timeout(1500)
     });
-    // Any HTTP response means the proxy is up (401/404 still count).
-    return res.status > 0;
+    if (!res.ok) return false;
+    const parsed = (await res.json().catch(() => null)) as unknown;
+    if (!parsed || typeof parsed !== "object") return false;
+    const root = parsed as Record<string, unknown>;
+    const server = root.server;
+    if (!server || typeof server !== "object") return false;
+    const portValue = (server as Record<string, unknown>).port;
+    return portValue === port;
   } catch {
     return false;
   }

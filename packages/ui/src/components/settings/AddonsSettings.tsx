@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useId, useRef, useState } from "react";
 import { ChevronDown, Download, Loader2, RefreshCw, Trash2, Upload } from "lucide-react";
 import type { TeamClaudeStatus } from "@orquester/api";
 import { cn } from "../../lib/cn";
@@ -90,50 +90,56 @@ const Section: React.FC<{
   onToggle: () => void;
   badge?: React.ReactNode;
   children: React.ReactNode;
-}> = ({ title, open, onToggle, badge, children }) => (
-  <div className="border-t border-neutral-800">
-    <button
-      type="button"
-      onClick={onToggle}
-      className="flex w-full items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-neutral-900/50"
-      aria-expanded={open}
-    >
-      <ChevronDown
-        size={14}
-        className={cn(
-          "shrink-0 text-neutral-500 transition-transform duration-200 ease-out",
-          open ? "rotate-0" : "-rotate-90"
-        )}
-      />
-      <span className="text-[11px] font-medium uppercase tracking-wide text-neutral-500">{title}</span>
-      {badge}
-    </button>
-    <div
-      className={cn(
-        "grid transition-[grid-template-rows] duration-200 ease-out",
-        open ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
-      )}
-    >
-      <div className="min-h-0 overflow-hidden">
-        <div
+}> = ({ title, open, onToggle, badge, children }) => {
+  const contentId = useId();
+  return (
+    <div className="border-t border-neutral-800">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex w-full items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-neutral-900/50"
+        aria-expanded={open}
+        aria-controls={contentId}
+      >
+        <ChevronDown
+          size={14}
           className={cn(
-            "px-3 pb-3 transition-opacity duration-200 ease-out",
-            open ? "opacity-100" : "opacity-0"
+            "shrink-0 text-neutral-500 transition-transform duration-200 ease-out",
+            open ? "rotate-0" : "-rotate-90"
           )}
-        >
-          {children}
-        </div>
+        />
+        <span className="text-[11px] font-medium uppercase tracking-wide text-neutral-500">{title}</span>
+        {badge}
+      </button>
+      <div
+        id={contentId}
+        hidden={!open}
+        aria-hidden={!open}
+        className={cn("grid", open ? "grid-rows-[1fr]" : "grid-rows-[0fr]")}
+      >
+        {open && (
+          <div className="min-h-0 overflow-hidden">
+            <div className="px-3 pb-3">{children}</div>
+          </div>
+        )}
       </div>
     </div>
-  </div>
-);
+  );
+};
+
+const finiteNumber = (value: string, fallback: number): number => {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+};
+
+const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
 
 export const TeamClaudeSettings: React.FC = () => {
   const api = useApi();
   const fileRef = useRef<HTMLInputElement>(null);
   const [status, setStatus] = useState<TeamClaudeStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [busyCount, setBusyCount] = useState(0);
   const [apiKey, setApiKey] = useState("");
   const [apiName, setApiName] = useState("");
   const [importFrom, setImportFrom] = useState("");
@@ -154,6 +160,7 @@ export const TeamClaudeSettings: React.FC = () => {
   const [stepConc, setStepConc] = useState("1");
   const [stepMs, setStepMs] = useState("250");
   const [windowMs, setWindowMs] = useState("30000");
+  const busy = busyCount > 0;
 
   const applyStatus = (s: TeamClaudeStatus) => {
     setStatus(s);
@@ -192,7 +199,7 @@ export const TeamClaudeSettings: React.FC = () => {
   }, [status?.installState, refresh]);
 
   const run = async (fn: () => Promise<TeamClaudeStatus>) => {
-    setBusy(true);
+    setBusyCount((n) => n + 1);
     setError(null);
     try {
       applyStatus(await fn());
@@ -200,7 +207,7 @@ export const TeamClaudeSettings: React.FC = () => {
       setError(e instanceof Error ? e.message : "Operation failed");
       await refresh();
     } finally {
-      setBusy(false);
+      setBusyCount((n) => Math.max(0, n - 1));
     }
   };
 
@@ -289,6 +296,7 @@ export const TeamClaudeSettings: React.FC = () => {
                   <span>Active</span>
                   <Switch
                     checked={status.enabled}
+                    disabled={installing || busy}
                     onChange={(v) => void run(() => api!.updateTeamClaude({ enabled: v }))}
                   />
                 </div>
@@ -605,18 +613,18 @@ export const TeamClaudeSettings: React.FC = () => {
                     onClick={() =>
                       void run(() =>
                         api!.updateTeamClaude({
-                          port: Number(port) || 3456,
-                          switchThreshold: Math.min(1, Math.max(0, Number(threshold) || 0.98)),
-                          quotaProbeSeconds: Math.max(0, Number(quotaProbe) || 0),
-                          warmupSeconds: Math.max(0, Number(warmup) || 0),
+                          port: Math.round(clamp(finiteNumber(port, 3456), 1, 65535)),
+                          switchThreshold: clamp(finiteNumber(threshold, 0.98), 0, 1),
+                          quotaProbeSeconds: Math.round(Math.max(0, finiteNumber(quotaProbe, 0))),
+                          warmupSeconds: Math.round(Math.max(0, finiteNumber(warmup, 0))),
                           autoUpdate,
                           upstream: upstream.trim() || "https://api.anthropic.com",
                           stormRamp: {
                             enabled: stormEnabled,
-                            startConc: Math.max(1, Number(startConc) || 1),
-                            stepConc: Math.max(1, Number(stepConc) || 1),
-                            stepMs: Math.max(1, Number(stepMs) || 250),
-                            windowMs: Math.max(0, Number(windowMs) || 30000)
+                            startConc: Math.round(Math.max(1, finiteNumber(startConc, 1))),
+                            stepConc: Math.round(Math.max(1, finiteNumber(stepConc, 1))),
+                            stepMs: Math.round(Math.max(1, finiteNumber(stepMs, 250))),
+                            windowMs: Math.round(Math.max(0, finiteNumber(windowMs, 30000)))
                           }
                         })
                       )

@@ -45,7 +45,6 @@ import type {
   TeamClaudeApiKeyRequest,
   TeamClaudeImportRequest,
   TeamClaudePriorityRequest,
-  TeamClaudeSettingsUpdate,
   TeamClaudeStatus,
   UpdateTodoRequest,
   UsageAccount,
@@ -93,6 +92,7 @@ import {
   parseAppConfig,
   parseDaemonConfig,
   parseRemotesConfig,
+  parseTeamClaudeSettingsUpdate,
   parseWorkspacesConfig,
   pushConfigPath,
   remotesConfigPath,
@@ -1674,26 +1674,12 @@ function createServer(
 
   app.get("/api/addons/teamclaude", async (): Promise<TeamClaudeStatus> => teamclaude.status());
 
-  app.put<{ Body: TeamClaudeSettingsUpdate }>(
+  app.put(
     "/api/addons/teamclaude",
     async (request, reply): Promise<TeamClaudeStatus | void> => {
       try {
-        const body = request.body ?? {};
-        if (typeof body.enabled === "boolean") {
-          await teamclaude.setEnabled(body.enabled);
-        }
-        const {
-          enabled: _enabled,
-          ...settings
-        } = body;
-        const hasSettings = Object.keys(settings).some((k) => {
-          const v = (settings as Record<string, unknown>)[k];
-          return v !== undefined;
-        });
-        if (hasSettings) {
-          await teamclaude.updateSettings(settings);
-        }
-        return teamclaude.status();
+        const body = parseTeamClaudeSettingsUpdate(request.body ?? {});
+        return await teamclaude.updateSettings(body);
       } catch (error) {
         return teamclaudeError(reply, error);
       }
@@ -2455,8 +2441,17 @@ function gitError(reply: FastifyReply, error: unknown): void {
 }
 
 function teamclaudeError(reply: FastifyReply, error: unknown): void {
-  const status = error instanceof TeamClaudeError ? 400 : 500;
-  const message = error instanceof Error ? error.message : "TeamClaude operation failed.";
+  const validationError =
+    error &&
+    typeof error === "object" &&
+    "issues" in error &&
+    Array.isArray((error as { issues?: unknown }).issues);
+  const status = error instanceof TeamClaudeError || validationError ? 400 : 500;
+  const message = validationError
+    ? "Invalid TeamClaude settings."
+    : error instanceof Error
+      ? error.message
+      : "TeamClaude operation failed.";
   void reply.code(status).send({ code: "TEAMCLAUDE_ERROR", message });
 }
 
@@ -2466,7 +2461,7 @@ async function enrichClaudeWithTeamClaude(
   tc: TeamClaudeService
 ): Promise<AgentUsage | null> {
   const status = tc.status();
-  if (!status.enabled || !status.installed) return base;
+  if (!status.enabled || !status.installed || !status.running) return base;
 
   const snap = await tc.fetchUsageSnapshot();
   if (!snap || snap.accounts.length === 0) {
@@ -2488,12 +2483,14 @@ async function enrichClaudeWithTeamClaude(
         stale: true,
         plan: `TeamClaude · ${accounts.length} acct`,
         session: null,
-        weekly: null
+        weekly: null,
+        asOf: new Date().toISOString()
       } as AgentUsage);
     return {
       ...seed,
       available: true,
       plan: seed.plan ?? `TeamClaude · ${accounts.length} acct`,
+      asOf: seed.asOf ?? new Date().toISOString(),
       accounts,
       aggregate: { strategy: "equal-weight", accountCount: accounts.length, staleAccountCount: accounts.length }
     };

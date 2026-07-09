@@ -28,6 +28,8 @@ Browser OAuth (`teamclaude login`) is not available from this UI. Use one of:
 
 Re-importing the same account refreshes credentials.
 
+Custom daemon-host paths are read by the daemon user and are intended for trusted local credential files only.
+
 ### Anthropic API key
 
 Use **Add API key** for Console-billed API accounts.
@@ -57,6 +59,7 @@ When TeamClaude is active and accounts are present, the top-bar Usage widget can
 - Only install from the official package: `@karpeleslab/teamclaude`.
 - OAuth/API tokens live in TeamClaude's own config (`~/.config/teamclaude.json` / `$XDG_CONFIG_HOME`), never returned by the Orquester API.
 - The proxy API key is local-loopback only; Orquester never exposes raw tokens to the browser.
+- Daemon-host path imports are post-auth local file reads by the daemon user; prefer upload unless you know the exact host path.
 
 ## Upstream
 
