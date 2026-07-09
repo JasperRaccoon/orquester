@@ -21,33 +21,58 @@ export class NodeHttpClient implements HttpClient {
   constructor(private readonly bridge: DesktopBridge) {}
 
   async send(req: HttpClientRequest): Promise<HttpClientResponse> {
-    const response = await this.bridge.httpRequest({
-      url: req.url,
-      method: req.method,
-      headers: req.headers,
-      body: req.body
-    });
+    // Reject an already-aborted request the way the web `fetch` path does
+    // (throws signal.reason, a DOMException "AbortError" by default) before
+    // minting a requestId or hitting IPC.
+    req.signal?.throwIfAborted();
 
-    return {
-      status: response.status,
-      ok: response.ok,
-      headers: response.headers,
-      text: () => Promise.resolve(response.body)
-    };
+    const requestId = req.signal ? crypto.randomUUID() : undefined;
+    const onAbort = requestId ? () => this.bridge.httpRequestAbort(requestId) : undefined;
+    if (req.signal && onAbort) req.signal.addEventListener("abort", onAbort, { once: true });
+
+    try {
+      const response = await this.bridge.httpRequest({
+        url: req.url,
+        method: req.method,
+        headers: req.headers,
+        body: req.body,
+        requestId
+      });
+
+      return {
+        status: response.status,
+        ok: response.ok,
+        headers: response.headers,
+        text: () => Promise.resolve(response.body)
+      };
+    } finally {
+      if (req.signal && onAbort) req.signal.removeEventListener("abort", onAbort);
+    }
   }
 
   async sendBytes(req: HttpClientRequest): Promise<HttpClientBytesResponse> {
-    const response = await this.bridge.httpRequestBytes({
-      url: req.url,
-      method: req.method,
-      headers: req.headers
-    });
-    return {
-      status: response.status,
-      ok: response.ok,
-      headers: response.headers,
-      bytes: () => Promise.resolve(response.body)
-    };
+    req.signal?.throwIfAborted();
+
+    const requestId = req.signal ? crypto.randomUUID() : undefined;
+    const onAbort = requestId ? () => this.bridge.httpRequestAbort(requestId) : undefined;
+    if (req.signal && onAbort) req.signal.addEventListener("abort", onAbort, { once: true });
+
+    try {
+      const response = await this.bridge.httpRequestBytes({
+        url: req.url,
+        method: req.method,
+        headers: req.headers,
+        requestId
+      });
+      return {
+        status: response.status,
+        ok: response.ok,
+        headers: response.headers,
+        bytes: () => Promise.resolve(response.body)
+      };
+    } finally {
+      if (req.signal && onAbort) req.signal.removeEventListener("abort", onAbort);
+    }
   }
 
   stream(req: HttpClientRequest, handlers: HttpClientStreamHandlers): HttpClientStreamHandle {

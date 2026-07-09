@@ -14,6 +14,7 @@ import type {
   FsFilesResponse,
   FsListResponse,
   FsReadResponse,
+  FsSearchRequest,
   FsSearchResponse,
   FsUploadRequest,
   FsUploadResponse,
@@ -73,6 +74,16 @@ function serverMessageFromBody(body: unknown): string | null {
     const message = (body as { message?: unknown }).message;
     if (typeof message === "string" && message.trim()) {
       return message.trim();
+    }
+  }
+  return null;
+}
+
+function serverFieldFromBody(body: unknown): string | null {
+  if (body && typeof body === "object" && "field" in body) {
+    const field = (body as { field?: unknown }).field;
+    if (typeof field === "string" && field.trim()) {
+      return field.trim();
     }
   }
   return null;
@@ -272,16 +283,18 @@ export class ApiClient {
     return this.send("GET", "/api/fs/files", { query: { path }, signal });
   }
 
-  searchFs(
-    params: { path: string; q: string; caseSensitive?: boolean; regex?: boolean; maxResults?: number },
-    signal?: AbortSignal
-  ): Promise<FsSearchResponse> {
+  searchFs(params: FsSearchRequest, signal?: AbortSignal): Promise<FsSearchResponse> {
     return this.send("GET", "/api/fs/search", {
       query: {
         path: params.path,
         q: params.q,
         caseSensitive: params.caseSensitive ? "1" : undefined,
+        wholeWord: params.wholeWord ? "1" : undefined,
         regex: params.regex ? "1" : undefined,
+        // Pass glob fields verbatim (only when non-empty) so the daemon reproduces
+        // today's unfiltered behavior when they're absent.
+        include: params.include && params.include.trim() ? params.include : undefined,
+        exclude: params.exclude && params.exclude.trim() ? params.exclude : undefined,
         maxResults: params.maxResults
       },
       signal
@@ -639,6 +652,15 @@ export class ApiError extends Error {
    */
   get serverMessage(): string | null {
     return serverMessageFromBody(this.body);
+  }
+
+  /**
+   * The offending field the daemon flagged (`body.field`, e.g. "include" /
+   * "exclude" / "query" on an INVALID_GLOB), so the UI can attach the error to
+   * the right input. Null when the body carried no field.
+   */
+  get serverField(): string | null {
+    return serverFieldFromBody(this.body);
   }
 
   /** Parsed `Retry-After` (seconds) when present, else null. Set on 429s. */

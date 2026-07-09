@@ -11,6 +11,10 @@ export interface EditorProps {
   readOnly?: boolean;
   /** 1-based line to scroll to + place the cursor on (e.g. a search-result jump). */
   jumpToLine?: number;
+  /** 0-based char offset within the jump line to select the match from. */
+  jumpToColumn?: number;
+  /** Length (chars) of the match to select; 0/undefined places a bare cursor. */
+  jumpLength?: number;
   /** Changes on every search-result open so re-clicking the same line re-jumps. */
   jumpNonce?: number;
   onChange: (value: string) => void;
@@ -18,7 +22,7 @@ export interface EditorProps {
 }
 
 /** CodeMirror 6 editor with syntax highlighting (language inferred from name). */
-export const Editor: React.FC<EditorProps> = ({ filename, value, readOnly, jumpToLine, jumpNonce, onChange, onSave }) => {
+export const Editor: React.FC<EditorProps> = ({ filename, value, readOnly, jumpToLine, jumpToColumn, jumpLength, jumpNonce, onChange, onSave }) => {
   const [langExtension, setLangExtension] = useState<Extension[]>([]);
   const [view, setView] = useState<EditorView | null>(null);
 
@@ -32,12 +36,17 @@ export const Editor: React.FC<EditorProps> = ({ filename, value, readOnly, jumpT
     const doc = view.state.doc;
     if (doc.lines === 0) return;
     const clamped = Math.min(Math.max(1, Math.floor(jumpToLine)), doc.lines);
-    const pos = doc.line(clamped).from;
+    const line = doc.line(clamped);
+    // Column present (from a text-search hit): select the match and scroll it into
+    // the center. Absent: fall back to a bare cursor at the line start.
+    const col = jumpToColumn != null ? Math.min(Math.max(0, Math.floor(jumpToColumn)), line.length) : 0;
+    const pos = line.from + col;
+    const head = jumpLength != null ? Math.min(pos + Math.max(0, Math.floor(jumpLength)), line.to) : pos;
     view.dispatch({
-      selection: { anchor: pos },
+      selection: { anchor: pos, head },
       effects: EditorView.scrollIntoView(pos, { y: "center" })
     });
-  }, [view, jumpToLine, jumpNonce, hasContent]);
+  }, [view, jumpToLine, jumpToColumn, jumpLength, jumpNonce, hasContent]);
 
   useEffect(() => {
     let active = true;

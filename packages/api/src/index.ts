@@ -181,6 +181,33 @@ export interface FsSearchMatch {
   start: number;
   /** Match end char offset within `text`. */
   end: number;
+  /** 0-based char offset of the match start within the FULL original line (for editor jumps). */
+  column: number;
+  /** Length of the match in chars. */
+  matchLength: number;
+}
+
+/**
+ * Parameters for GET /api/fs/search. Omitting every optional field reproduces the
+ * pre-existing literal, case-insensitive, unfiltered search behavior.
+ */
+export interface FsSearchRequest {
+  /** Absolute path of the root to search under. */
+  path: string;
+  /** The query text (literal, unless `regex` is set). */
+  q: string;
+  /** Match case exactly. Defaults to case-insensitive. */
+  caseSensitive?: boolean;
+  /** Require word boundaries around each match. */
+  wholeWord?: boolean;
+  /** Treat `q` as a regular expression (rg-backed only; rejected without ripgrep). */
+  regex?: boolean;
+  /** Comma-separated glob field limiting which files are searched. */
+  include?: string;
+  /** Comma-separated glob field excluding files from the search. */
+  exclude?: string;
+  /** Cap on total matches returned. */
+  maxResults?: number;
 }
 
 export interface FsSearchFileResult {

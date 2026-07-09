@@ -10,6 +10,8 @@ interface DaemonRequest {
   path?: string;
   headers?: http.OutgoingHttpHeaders;
   body?: string | Buffer;
+  // Present when the renderer wants the request to be cancellable (see unaryRequests).
+  requestId?: string;
 }
 
 interface DaemonResponse {
@@ -153,8 +155,32 @@ async function stopIntegratedDaemon(): Promise<void> {
   });
 }
 
+// In-flight cancellable unary requests, keyed by the renderer-supplied requestId.
+// Mirrors `streams` for the stream-close channel: abortUnaryRequest destroys the
+// ClientRequest (which drops the daemon connection so its reply.raw "close" abort
+// fires). senderId gates aborts to the window that owns the request.
+const unaryRequests = new Map<string, { req: http.ClientRequest; senderId: number }>();
+
+/** Register a cancellable request; no-op unless the renderer supplied a requestId. */
+function trackUnaryRequest(req: http.ClientRequest, requestId: string | undefined, senderId: number | undefined): void {
+  if (requestId === undefined || senderId === undefined) return;
+  unaryRequests.set(requestId, { req, senderId });
+  const cleanup = () => unaryRequests.delete(requestId);
+  req.on("close", cleanup);
+  req.on("error", cleanup);
+}
+
+/** Destroy an in-flight request on renderer abort, but only for its owning window. */
+function abortUnaryRequest(event: IpcMainEvent, requestId: string): void {
+  const entry = unaryRequests.get(requestId);
+  if (entry && entry.senderId === event.sender.id) {
+    entry.req.destroy();
+    unaryRequests.delete(requestId);
+  }
+}
+
 /** HTTP request to the daemon over its unix socket (the renderer's transport). */
-function requestOverSocket({ method, path: requestPath, headers, body }: DaemonRequest): Promise<DaemonResponse> {
+function requestOverSocket({ method, path: requestPath, headers, body, requestId }: DaemonRequest, senderId?: number): Promise<DaemonResponse> {
   return new Promise((resolve, reject) => {
     if (!daemonSocketPath) {
       reject(new Error("Orquester daemon is not running."));
@@ -172,6 +198,7 @@ function requestOverSocket({ method, path: requestPath, headers, body }: DaemonR
         });
       }
     );
+    trackUnaryRequest(req, requestId, senderId);
     req.on("error", reject);
     if (body) {
       req.write(body);
@@ -192,7 +219,7 @@ function toArrayBuffer(buf: Buffer): ArrayBuffer {
 }
 
 /** Like requestOverSocket but preserves raw bytes (file preview). */
-function requestBytesOverSocket({ method, path: requestPath, headers, body }: DaemonRequest): Promise<DaemonBytesResponse> {
+function requestBytesOverSocket({ method, path: requestPath, headers, body, requestId }: DaemonRequest, senderId?: number): Promise<DaemonBytesResponse> {
   return new Promise((resolve, reject) => {
     if (!daemonSocketPath) {
       reject(new Error("Orquester daemon is not running."));
@@ -209,6 +236,7 @@ function requestBytesOverSocket({ method, path: requestPath, headers, body }: Da
         });
       }
     );
+    trackUnaryRequest(req, requestId, senderId);
     req.on("error", reject);
     if (body) req.write(body);
     req.end();
@@ -263,6 +291,8 @@ interface RemoteHttpRequest {
   method?: string;
   headers?: http.OutgoingHttpHeaders;
   body?: string;
+  // See DaemonRequest.requestId.
+  requestId?: string;
 }
 
 function httpModuleFor(target: URL): typeof http | typeof https {
@@ -270,7 +300,7 @@ function httpModuleFor(target: URL): typeof http | typeof https {
 }
 
 /** One unary request/response round trip to a remote daemon over TCP. */
-function requestOverHttp({ url, method, headers, body }: RemoteHttpRequest): Promise<DaemonResponse> {
+function requestOverHttp({ url, method, headers, body, requestId }: RemoteHttpRequest, senderId?: number): Promise<DaemonResponse> {
   return new Promise((resolve, reject) => {
     let target: URL;
     try {
@@ -292,6 +322,7 @@ function requestOverHttp({ url, method, headers, body }: RemoteHttpRequest): Pro
         });
       }
     );
+    trackUnaryRequest(req, requestId, senderId);
     req.on("error", reject);
     if (body) {
       req.write(body);
@@ -301,7 +332,7 @@ function requestOverHttp({ url, method, headers, body }: RemoteHttpRequest): Pro
 }
 
 /** Like requestOverHttp but preserves raw bytes (file preview over TCP). */
-function requestBytesOverHttp({ url, method, headers, body }: RemoteHttpRequest): Promise<DaemonBytesResponse> {
+function requestBytesOverHttp({ url, method, headers, body, requestId }: RemoteHttpRequest, senderId?: number): Promise<DaemonBytesResponse> {
   return new Promise((resolve, reject) => {
     let target: URL;
     try {
@@ -318,6 +349,7 @@ function requestBytesOverHttp({ url, method, headers, body }: RemoteHttpRequest)
         resolve({ status, ok: status >= 200 && status < 300, headers: res.headers, body: toArrayBuffer(Buffer.concat(chunks)) });
       });
     });
+    trackUnaryRequest(req, requestId, senderId);
     req.on("error", reject);
     if (body) req.write(body);
     req.end();
@@ -372,14 +404,16 @@ function closeStream(streamId: string): void {
 }
 
 function registerIpc(): void {
-  ipcMain.handle("orquester:request", (_event, request: DaemonRequest) => requestOverSocket(request));
-  ipcMain.handle("orquester:request-bytes", (_event, request: DaemonRequest) => requestBytesOverSocket(request));
+  ipcMain.handle("orquester:request", (event, request: DaemonRequest) => requestOverSocket(request, event.sender.id));
+  ipcMain.handle("orquester:request-bytes", (event, request: DaemonRequest) => requestBytesOverSocket(request, event.sender.id));
+  ipcMain.on("orquester:request:abort", (event, requestId: string) => abortUnaryRequest(event, requestId));
   ipcMain.on("orquester:stream:open", (event, payload: { streamId: string; path: string }) => openStreamOverSocket(event, payload));
   ipcMain.on("orquester:stream:close", (_event, streamId: string) => closeStream(streamId));
 
   // Remote HTTP transport (the renderer's HttpTransporter for remote servers).
-  ipcMain.handle("orquester:http:request", (_event, request: RemoteHttpRequest) => requestOverHttp(request));
-  ipcMain.handle("orquester:http:request-bytes", (_event, request: RemoteHttpRequest) => requestBytesOverHttp(request));
+  ipcMain.handle("orquester:http:request", (event, request: RemoteHttpRequest) => requestOverHttp(request, event.sender.id));
+  ipcMain.handle("orquester:http:request-bytes", (event, request: RemoteHttpRequest) => requestBytesOverHttp(request, event.sender.id));
+  ipcMain.on("orquester:http:request:abort", (event, requestId: string) => abortUnaryRequest(event, requestId));
   ipcMain.on(
     "orquester:http-stream:open",
     (event, payload: { streamId: string; url: string; headers?: http.OutgoingHttpHeaders }) => openHttpStream(event, payload)

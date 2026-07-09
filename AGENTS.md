@@ -351,7 +351,7 @@ Caddy as the TLS reverse proxy. Templates live in `deploy/`. Use placeholders
 sudo useradd --system --create-home --home-dir /var/lib/orquester --shell /usr/sbin/nologin orquester
 
 # 2. Runtime + build tools (node-pty needs python3/make/g++), plus tmux, ufw, Caddy
-sudo apt-get update && sudo apt-get install -y git openssh-client tmux ufw python3 make g++ curl ca-certificates p7zip-full
+sudo apt-get update && sudo apt-get install -y git openssh-client tmux ufw python3 make g++ curl ca-certificates p7zip-full ripgrep
 curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - && sudo apt-get install -y nodejs
 sudo npm install -g pnpm
 # (install Caddy from its official apt repo)

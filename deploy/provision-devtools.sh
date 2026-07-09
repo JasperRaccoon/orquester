@@ -24,7 +24,7 @@ apt-get install -y --no-install-recommends \
   build-essential cmake pkg-config \
   libssl-dev zlib1g-dev libffi-dev \
   python3-venv python3-pip python3-dev \
-  libarchive-tools
+  libarchive-tools ripgrep
 
 # 2. Scoped sudo drop-in — validate with visudo before installing so a typo can't lock out sudo.
 log "install /etc/sudoers.d/orquester-pkg (validated, 0440 root:root)"

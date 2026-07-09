@@ -1001,7 +1001,16 @@ function createServer(
 
   // File browser: content search across a project subtree.
   app.get<{
-    Querystring: { path?: string; q?: string; caseSensitive?: string; regex?: string; maxResults?: string };
+    Querystring: {
+      path?: string;
+      q?: string;
+      caseSensitive?: string;
+      wholeWord?: string;
+      regex?: string;
+      include?: string;
+      exclude?: string;
+      maxResults?: string;
+    };
   }>(
     "/api/fs/search",
     async (request, reply): Promise<FsSearchResponse | void> => {
@@ -1014,10 +1023,15 @@ function createServer(
       reply.raw.on("close", onClose);
       try {
         const safe = await assertInsideFsRoot(resolved.fsRoot, path);
+        // `engine` is deliberately NOT read from the query: backend selection is an
+        // internal/test seam, never client-controlled.
         return await searchProjectFiles(resolved.fsRoot, safe, {
           query: q,
           caseSensitive: request.query.caseSensitive === "1",
+          wholeWord: request.query.wholeWord === "1",
           regex: request.query.regex === "1",
+          include: request.query.include,
+          exclude: request.query.exclude,
           maxResults: request.query.maxResults,
           signal: abort.signal
         });
@@ -1027,7 +1041,9 @@ function createServer(
           return reply.code(403).send({ code: "FS_FORBIDDEN", message: error.message });
         }
         if (error instanceof FsSearchError) {
-          return reply.code(error.status).send({ code: error.code, message: error.message });
+          return reply
+            .code(error.status)
+            .send({ code: error.code, message: error.message, ...(error.field ? { field: error.field } : {}) });
         }
         return reply.code(400).send({
           code: "FS_ERROR",

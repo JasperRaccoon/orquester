@@ -13,6 +13,9 @@ export interface DesktopBridgeRequest {
   path: string;
   headers?: Record<string, string>;
   body?: string;
+  // Present only when the request is cancellable; the main process keys the
+  // in-flight ClientRequest by this id so requestAbort can destroy it.
+  requestId?: string;
 }
 
 export interface DesktopBridgeResponse {
@@ -36,12 +39,15 @@ export interface DesktopBridgeHttpRequest {
   method?: string;
   headers?: Record<string, string>;
   body?: string;
+  // See DesktopBridgeRequest.requestId.
+  requestId?: string;
 }
 
 /** The full bridge the preload exposes for talking to the daemon over the socket. */
 export interface DesktopBridge {
   request(request: DesktopBridgeRequest): Promise<DesktopBridgeResponse>;
   requestBytes(request: DesktopBridgeRequest): Promise<DesktopBridgeBytesResponse>;
+  requestAbort(requestId: string): void;
   streamOpen(streamId: string, path: string): void;
   streamClose(streamId: string): void;
   onStreamData(cb: (payload: { streamId: string; chunk: string }) => void): () => void;
@@ -50,6 +56,7 @@ export interface DesktopBridge {
   // servers; performed in the main process so it bypasses browser CORS).
   httpRequest(request: DesktopBridgeHttpRequest): Promise<DesktopBridgeResponse>;
   httpRequestBytes(request: DesktopBridgeHttpRequest): Promise<DesktopBridgeBytesResponse>;
+  httpRequestAbort(requestId: string): void;
   httpStreamOpen(streamId: string, url: string, headers?: Record<string, string>): void;
   httpStreamClose(streamId: string): void;
   onHttpStreamData(cb: (payload: { streamId: string; chunk: string }) => void): () => void;
@@ -68,6 +75,11 @@ export class UnixSocketTransporter implements Transporter {
   constructor(private readonly bridge: DesktopBridge) {}
 
   async request<T = unknown>(req: TransportRequest): Promise<TransportResponse<T>> {
+    // Reject an already-aborted request the way the web `fetch` path does
+    // (throws signal.reason, a DOMException "AbortError" by default) before
+    // minting a requestId or hitting IPC.
+    req.signal?.throwIfAborted();
+
     const headers: Record<string, string> = { ...req.headers };
     let body: string | undefined;
 
@@ -76,30 +88,50 @@ export class UnixSocketTransporter implements Transporter {
       body = JSON.stringify(req.body);
     }
 
-    const response = await this.bridge.request({
-      method: req.method,
-      path: `${req.path}${buildQueryString(req.query)}`,
-      headers,
-      body
-    });
+    const requestId = req.signal ? crypto.randomUUID() : undefined;
+    const onAbort = requestId ? () => this.bridge.requestAbort(requestId) : undefined;
+    if (req.signal && onAbort) req.signal.addEventListener("abort", onAbort, { once: true });
 
-    const data = response.body ? (JSON.parse(response.body) as T) : (undefined as T);
+    try {
+      const response = await this.bridge.request({
+        method: req.method,
+        path: `${req.path}${buildQueryString(req.query)}`,
+        headers,
+        body,
+        requestId
+      });
 
-    return {
-      status: response.status,
-      ok: response.ok,
-      data,
-      headers: response.headers
-    };
+      const data = response.body ? (JSON.parse(response.body) as T) : (undefined as T);
+
+      return {
+        status: response.status,
+        ok: response.ok,
+        data,
+        headers: response.headers
+      };
+    } finally {
+      if (req.signal && onAbort) req.signal.removeEventListener("abort", onAbort);
+    }
   }
 
   async requestBytes(req: TransportRequest): Promise<TransportResponse<ArrayBuffer>> {
-    const response = await this.bridge.requestBytes({
-      method: req.method,
-      path: `${req.path}${buildQueryString(req.query)}`,
-      headers: { ...req.headers }
-    });
-    return { status: response.status, ok: response.ok, data: response.body, headers: response.headers };
+    req.signal?.throwIfAborted();
+
+    const requestId = req.signal ? crypto.randomUUID() : undefined;
+    const onAbort = requestId ? () => this.bridge.requestAbort(requestId) : undefined;
+    if (req.signal && onAbort) req.signal.addEventListener("abort", onAbort, { once: true });
+
+    try {
+      const response = await this.bridge.requestBytes({
+        method: req.method,
+        path: `${req.path}${buildQueryString(req.query)}`,
+        headers: { ...req.headers },
+        requestId
+      });
+      return { status: response.status, ok: response.ok, data: response.body, headers: response.headers };
+    } finally {
+      if (req.signal && onAbort) req.signal.removeEventListener("abort", onAbort);
+    }
   }
 
   openStream(path: string, handlers: StreamHandlers): StreamHandle {

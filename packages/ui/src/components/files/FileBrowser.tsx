@@ -87,8 +87,11 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ 
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [selectedSize, setSelectedSize] = useState(0);
   // Line to jump to in the editor, set when a search result is opened and cleared
-  // when the file is picked from the tree instead.
+  // when the file is picked from the tree instead. Column/length carry a text-match
+  // hit's exact offset so the editor selects it (absent for fuzzy file opens).
   const [pendingLine, setPendingLine] = useState<number | null>(null);
+  const [pendingColumn, setPendingColumn] = useState<number | null>(null);
+  const [pendingLength, setPendingLength] = useState<number | null>(null);
   // Bumped on every search-result open so re-clicking the SAME result (same file +
   // line) still re-triggers the editor's jump, which is otherwise keyed on the line.
   const [jumpNonce, setJumpNonce] = useState(0);
@@ -245,16 +248,23 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ 
   // Tree clicks open a file with no line jump; a search hit carries the line.
   const selectFromTree = (path: string, size: number) => {
     setPendingLine(null);
+    setPendingColumn(null);
+    setPendingLength(null);
     selectFile(path, size);
   };
 
-  const openFromSearch = useCallback((path: string, size: number, line?: number) => {
-    setSelectedFile(path);
-    setSelectedSize(size);
-    setActiveDir(parentOf(path));
-    setPendingLine(line ?? null);
-    setJumpNonce((n) => n + 1);
-  }, []);
+  const openFromSearch = useCallback(
+    (path: string, size: number, line?: number, column?: number, matchLength?: number) => {
+      setSelectedFile(path);
+      setSelectedSize(size);
+      setActiveDir(parentOf(path));
+      setPendingLine(line ?? null);
+      setPendingColumn(column ?? null);
+      setPendingLength(matchLength ?? null);
+      setJumpNonce((n) => n + 1);
+    },
+    []
+  );
 
   const onSearchActiveChange = useCallback((value: boolean) => setSearchActive(value), []);
 
@@ -551,6 +561,8 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ 
           path={selectedFile}
           size={selectedSize}
           jumpToLine={pendingLine ?? undefined}
+          jumpToColumn={pendingColumn ?? undefined}
+          jumpLength={pendingLength ?? undefined}
           jumpNonce={jumpNonce}
           onBack={() => setSelectedFile(null)}
         />

@@ -11,10 +11,14 @@ contextBridge.exposeInMainWorld("orquesterDesktop", {
     endpoint: `unix://${process.env.ORQUESTER_UNIX_SOCKET}`,
     status: "connected"
   },
-  // Byte transport for the renderer's UnixSocketTransporter.
+  // Byte transport for the renderer's UnixSocketTransporter. The envelope may
+  // carry an optional requestId; the main process keys in-flight requests by it
+  // so requestAbort can cancel a specific one (mirrors the stream close channel).
   request: (request) => ipcRenderer.invoke("orquester:request", request),
   // Raw-bytes request (file preview) over the unix socket.
   requestBytes: (request) => ipcRenderer.invoke("orquester:request-bytes", request),
+  // Abort a socket request previously issued with a matching requestId.
+  requestAbort: (requestId) => ipcRenderer.send("orquester:request:abort", requestId),
   // Chunked streaming (session output, event bus). The renderer supplies the id.
   streamOpen: (streamId, path) => ipcRenderer.send("orquester:stream:open", { streamId, path }),
   streamClose: (streamId) => ipcRenderer.send("orquester:stream:close", streamId),
@@ -34,6 +38,8 @@ contextBridge.exposeInMainWorld("orquesterDesktop", {
   httpRequest: (request) => ipcRenderer.invoke("orquester:http:request", request),
   // Raw-bytes request (file preview) over the remote HTTP transport.
   httpRequestBytes: (request) => ipcRenderer.invoke("orquester:http:request-bytes", request),
+  // Abort a remote HTTP request previously issued with a matching requestId.
+  httpRequestAbort: (requestId) => ipcRenderer.send("orquester:http:request:abort", requestId),
   httpStreamOpen: (streamId, url, headers) => ipcRenderer.send("orquester:http-stream:open", { streamId, url, headers }),
   httpStreamClose: (streamId) => ipcRenderer.send("orquester:http-stream:close", streamId),
   onHttpStreamData: (cb) => {
