@@ -149,6 +149,7 @@ in production (`--appdir`). The daemon persists **JSON, not a database**:
   daemon/   daemon.json (incl. bcrypt passwordHash)   daemon.sock (control socket)
             tmux.sock (dedicated tmux server)         sessions.json (reattach index)
             workspaces.json  accounts.json  keys/ (0700 per-account SSH keys)  logs/
+            env/ (optional per-launcher env files, e.g. opencode.env)
   workspaces/   <workspace>/<project> dirs (the file-browser sandbox root, fsRoot)
 ```
 
@@ -170,9 +171,11 @@ tmux `attach` so the daemon can run inside a tmux pane (the common `pnpm dev:dae
 
 **The agent registry.** `@orquester/registry`'s `REGISTRY` is static data; `registry.ts`'s
 `RegistryService` materializes it at runtime: expands path tokens, resolves each `bin` against
-PATH, marks entries `enabled` only when a binary is found, and detects agent versions in the
-background. `install()`/`update()` run the agent's `npm install -g …`, re-resolve the bin,
-re-detect the version, and broadcast `registry.changed`.
+PATH, marks entries `enabled` only when a binary is found, loads optional per-launcher env files
+from `<appdir>/daemon/env/<id>.env` (for example `opencode.env` for an OpenCode-only proxy), and
+detects agent versions in the background. `install()`/`update()` run the agent's
+`npm install -g …`, re-resolve the bin, re-detect the version, and broadcast `registry.changed`.
+Launcher env values are applied only to spawned sessions and are redacted from registry responses.
 
 **Graceful shutdown.** On SIGTERM/SIGINT the daemon calls `daemon.stop()` with a **3 s hard-exit
 backstop** so a connection that refuses to drain can't stall the stop. `stop()` detaches sessions

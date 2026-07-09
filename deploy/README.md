@@ -7,6 +7,8 @@ and `docs/superpowers/plans/2026-06-19-remote-phase0-vps-provisioning.md`.
 - `orquester.service` → `/etc/systemd/system/orquester.service`
   - Runs the daemon via `node --import tsx` (the repo is `noEmit`; no dist build).
 - `daemon.env.example` → copy to `/etc/orquester/daemon.env` (chmod 600), fill the password.
+- `opencode.env.example` → optional per-launcher proxy env; copy to
+  `/var/lib/orquester/daemon/env/opencode.env` (chmod 600) to affect only OpenCode sessions.
 - `Caddyfile` → `/etc/caddy/Caddyfile` (set your real domain or a sslip.io host).
 - `provision-devtools.sh` → run once per VPS as root: installs system build deps, the scoped-sudo
   drop-in (`sudoers.d/orquester-pkg`), and user-space tools (`devtools-user.sh`: `uv`, `cargo-audit`).

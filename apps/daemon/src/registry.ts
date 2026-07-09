@@ -22,6 +22,7 @@ interface RegistryDef {
   args?: string[];
   launchViaShell?: boolean;
   env?: Record<string, string>;
+  envFile?: string;
   enabled?: boolean;
   versionFlag?: string;
   installCmd?: string;
@@ -130,7 +131,7 @@ export class RegistryService {
 
     this.entries.clear();
     for (const def of defs) {
-      this.entries.set(def.id, this.resolveDef(def));
+      this.entries.set(def.id, await this.resolveDef(def));
     }
     // Detect installed agent versions in the background (cached); each result
     // patches the entry and emits "changed".
@@ -139,7 +140,7 @@ export class RegistryService {
 
   list(): RegistryResponse {
     const byKind = (kind: RegistryKind) =>
-      [...this.entries.values()].filter((entry) => entry.kind === kind);
+      [...this.entries.values()].filter((entry) => entry.kind === kind).map(publicEntry);
     return {
       shells: byKind("shell"),
       agents: byKind("agent"),
@@ -226,7 +227,7 @@ export class RegistryService {
       return;
     }
     Object.assign(entry, partial);
-    this.events.emit("changed", { ...entry });
+    this.events.emit("changed", publicEntry(entry));
   }
 
   private async detectVersions(): Promise<void> {
@@ -249,8 +250,10 @@ export class RegistryService {
     }
   }
 
-  private resolveDef(def: RegistryDef): RegistryEntry {
+  private async resolveDef(def: RegistryDef): Promise<RegistryEntry> {
     const resolvedBin = resolveBin(def.bin);
+    const envFromFile = await this.loadEnvFile(def.id, def.envFile);
+    const env = mergeEnv(def.env, envFromFile);
     return {
       id: def.id,
       name: def.name,
@@ -258,7 +261,7 @@ export class RegistryService {
       bin: def.bin,
       args: def.args,
       launchViaShell: def.launchViaShell,
-      env: def.env,
+      env,
       resolvedBin,
       enabled: Boolean(resolvedBin) && def.enabled !== false,
       versionFlag: def.versionFlag,
@@ -266,6 +269,18 @@ export class RegistryService {
       updateCmd: def.updateCmd,
       installState: "idle"
     };
+  }
+
+  private async loadEnvFile(id: string, explicitPath?: string): Promise<Record<string, string> | undefined> {
+    const path = explicitPath ? envFilePath(this.daemonDir, explicitPath) : defaultEnvFilePath(this.daemonDir, id);
+    if (!path) {
+      return undefined;
+    }
+    try {
+      return parseEnvFile(await readFile(path, "utf8"));
+    } catch {
+      return undefined;
+    }
   }
 
   /** Load and normalize <daemonDir>/<file> (array of partial defs), if present. */
@@ -314,6 +329,7 @@ function normalizeDef(item: unknown, defaultKind: RegistryKind): RegistryDef | n
           )
         )
       : undefined;
+  const envFile = typeof obj.envFile === "string" ? obj.envFile : undefined;
 
   if (!id || !name || bin.length === 0) {
     return null;
@@ -327,11 +343,80 @@ function normalizeDef(item: unknown, defaultKind: RegistryKind): RegistryDef | n
     args: args && args.length > 0 ? args : undefined,
     launchViaShell: obj.launchViaShell === true ? true : undefined,
     env: env && Object.keys(env).length > 0 ? env : undefined,
+    envFile,
     enabled: typeof obj.enabled === "boolean" ? obj.enabled : undefined,
     versionFlag: typeof obj.versionFlag === "string" ? obj.versionFlag : undefined,
     installCmd: typeof obj.installCmd === "string" ? obj.installCmd : undefined,
     updateCmd: typeof obj.updateCmd === "string" ? obj.updateCmd : undefined
   };
+}
+
+function defaultEnvFilePath(daemonDir: string, id: string): string | undefined {
+  if (!/^[A-Za-z0-9._-]+$/.test(id)) {
+    return undefined;
+  }
+  return join(daemonDir, "env", `${id}.env`);
+}
+
+function envFilePath(daemonDir: string, path: string): string {
+  return isAbsolute(path) ? path : join(daemonDir, path);
+}
+
+function mergeEnv(...parts: Array<Record<string, string> | undefined>): Record<string, string> | undefined {
+  const merged = Object.assign({}, ...parts.filter(Boolean));
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
+function publicEntry(entry: RegistryEntry): RegistryEntry {
+  const { env: _env, ...rest } = entry;
+  return { ...rest };
+}
+
+export function parseEnvFile(raw: string): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const line of raw.split(/\r?\n/)) {
+    const parsed = parseEnvLine(line);
+    if (parsed) {
+      env[parsed.key] = parsed.value;
+    }
+  }
+  return env;
+}
+
+function parseEnvLine(line: string): { key: string; value: string } | undefined {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.startsWith("#")) {
+    return undefined;
+  }
+
+  const assignment = trimmed.startsWith("export ") ? trimmed.slice("export ".length).trimStart() : trimmed;
+  const eq = assignment.indexOf("=");
+  if (eq <= 0) {
+    return undefined;
+  }
+
+  const key = assignment.slice(0, eq).trim();
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+    return undefined;
+  }
+
+  return { key, value: parseEnvValue(assignment.slice(eq + 1).trim()) };
+}
+
+function parseEnvValue(value: string): string {
+  if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
+    return value
+      .slice(1, -1)
+      .replace(/\\n/g, "\n")
+      .replace(/\\r/g, "\r")
+      .replace(/\\t/g, "\t")
+      .replace(/\\"/g, '"')
+      .replace(/\\\\/g, "\\");
+  }
+  if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) {
+    return value.slice(1, -1);
+  }
+  return value;
 }
 
 /** Run a shell command to completion, capturing combined output (capped). */
