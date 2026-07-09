@@ -7,7 +7,16 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { basename, dirname, sep } from "node:path";
 import { spawn, type IPty } from "node-pty";
 import type { RegistryService } from "./registry";
-import { Tmux, sessionCommandShell, sessionEnvBase, sessionPath, tmuxAvailable, tmuxName, tmuxVersionOk } from "./tmux";
+import {
+  Tmux,
+  sessionCommandShell,
+  sessionEnvBase,
+  sessionEnvCommand,
+  sessionPath,
+  tmuxAvailable,
+  tmuxName,
+  tmuxVersionOk
+} from "./tmux";
 import { renderText } from "./mcp/text.ts";
 import { ActivityTracker, type ActivitySnapshot } from "./ansi-activity.ts";
 
@@ -111,6 +120,13 @@ export function buildLaunchCommand(entry: RegistryEntry, opts: { tmux: boolean }
     const shell = sessionCommandShell();
     if (shell) {
       const commandFlag = basename(shell) === "bash" ? "-lc" : "-c";
+      const envCommand = sessionEnvCommand();
+      if (envCommand) {
+        return {
+          bin: envCommand,
+          args: [`SHELL=${shell}`, shell, commandFlag, '"$@"', "orquester-launch", bin, ...baseArgs]
+        };
+      }
       return {
         bin: shell,
         args: [commandFlag, '"$@"', "orquester-launch", bin, ...baseArgs]

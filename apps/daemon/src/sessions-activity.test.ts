@@ -96,6 +96,13 @@ test("buildLaunchCommand can launch an agent as a child of a real shell", () => 
     return;
   }
 
+  if (launch.bin.endsWith("/env")) {
+    assert.match(launch.args[0], /^SHELL=\/.*(?:ba)?sh$/);
+    assert.match(launch.args[1], /\/(?:ba)?sh$/);
+    assert.deepEqual(launch.args.slice(3), ['"$@"', "orquester-launch", "/opt/bin/opencode", "--flag"]);
+    return;
+  }
+
   assert.match(launch.bin, /\/(?:ba)?sh$/);
   assert.deepEqual(launch.args.slice(1), ['"$@"', "orquester-launch", "/opt/bin/opencode", "--flag"]);
 });

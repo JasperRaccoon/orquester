@@ -173,6 +173,19 @@ export function sessionCommandShell(): string | undefined {
   return undefined;
 }
 
+/** POSIX `env` binary used to force child env vars through persistent tmux servers. */
+export function sessionEnvCommand(): string | undefined {
+  if (process.platform === "win32") {
+    return undefined;
+  }
+  for (const candidate of ["/usr/bin/env", "/bin/env"]) {
+    if (executable(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
 /**
  * The daemon's environment with everything a user session must NOT inherit
  * removed: tmux's own $TMUX/$TMUX_PANE (which would trip tmux's nesting guard
