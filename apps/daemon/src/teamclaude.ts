@@ -468,21 +468,14 @@ export class TeamClaudeService {
     }
     const cfg = readOrCreateTcConfig(this.state.port);
     const port = this.state.port || cfg?.proxy?.port || 3456;
-    const apiKey = cfg?.proxy?.apiKey;
-    if (!apiKey) {
-      throw new TeamClaudeError(
-        "TeamClaude is enabled but has no proxy API key yet. Re-enable TeamClaude or add an account."
-      );
-    }
     if (!hasUsableAccount(cfg)) {
       throw new TeamClaudeError("TeamClaude is enabled but has no usable accounts. Add or enable a TeamClaude account.");
     }
     return {
       env: {
-        ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`,
-        ANTHROPIC_API_KEY: apiKey,
-        // Prefer base-URL routing for daemon-spawned sessions (no MITM CA).
-        ANTHROPIC_AUTH_TOKEN: apiKey
+        // Match TeamClaude's own base-URL mode: leave Claude Code's OAuth
+        // credentials in control so it stays in subscription/plan mode.
+        ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`
       }
     };
   }

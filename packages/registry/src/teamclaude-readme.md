@@ -46,9 +46,8 @@ Account enable/disable, priority, and removal are managed in the **Accounts** li
 With the addon **Active**, launching Claude Code sets:
 
 - `ANTHROPIC_BASE_URL=http://127.0.0.1:<port>`
-- `ANTHROPIC_API_KEY=<local proxy key>`
 
-TeamClaude injects the real account token upstream. If the proxy is not healthy when you open a tab, creation fails closed (no silent bypass).
+Claude Code keeps using its normal OAuth/subscription credentials locally; TeamClaude accepts loopback traffic and injects the selected account token upstream. If the proxy is not healthy when you open a tab, creation fails closed (no silent bypass).
 
 ## Usage widget
 
