@@ -605,13 +605,33 @@ export interface TeamClaudeAccountSummary {
   orgName?: string;
 }
 
+export interface TeamClaudeStormRamp {
+  enabled: boolean;
+  startConc: number;
+  stepConc: number;
+  stepMs: number;
+  windowMs: number;
+}
+
 export interface TeamClaudeStatus {
   installed: boolean;
   enabled: boolean;
   running: boolean;
   version?: string;
+  /** Org avatar (GitHub) for the addon card. */
+  logoUrl: string;
   port: number;
   switchThreshold: number;
+  /** Background quota-probe interval seconds (0 = off). */
+  quotaProbeSeconds: number;
+  /** Keep-warm interval seconds (0 = off). */
+  warmupSeconds: number;
+  autoUpdate: boolean;
+  upstream: string;
+  stormRamp: TeamClaudeStormRamp;
+  /** sx.org residential proxy mode; key never returned. */
+  sxMode: "always" | "429" | "off";
+  sxKeyConfigured: boolean;
   accounts: TeamClaudeAccountSummary[];
   installState: RegistryInstallState;
   installError?: string;
@@ -623,11 +643,21 @@ export interface TeamClaudeSettingsUpdate {
   enabled?: boolean;
   switchThreshold?: number;
   port?: number;
+  quotaProbeSeconds?: number;
+  warmupSeconds?: number;
+  autoUpdate?: boolean;
+  upstream?: string;
+  stormRamp?: Partial<TeamClaudeStormRamp>;
+  sxMode?: "always" | "429" | "off";
+  /** Write-only; set empty string to clear. Never returned. */
+  sxApiKey?: string;
 }
 
 export interface TeamClaudeImportRequest {
-  /** Optional path to Claude Code credentials.json; omit for the default. */
+  /** Optional path to Claude Code credentials.json on the daemon host; omit for default. */
   from?: string;
+  /** Raw credentials.json contents (client upload / drag-drop). Mutually exclusive with `from`. */
+  content?: string;
 }
 
 export interface TeamClaudeApiKeyRequest {

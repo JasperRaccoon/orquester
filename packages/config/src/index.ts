@@ -529,6 +529,14 @@ export function parsePushConfig(raw: unknown): PushConfig {
 // Orquester should route Claude Code sessions through the local proxy and a few
 // non-secret knobs mirrored into TeamClaude's config when changed.
 
+export const teamclaudeStormRampSchema = z.object({
+  enabled: z.boolean().default(true),
+  startConc: z.coerce.number().int().min(1).default(1),
+  stepConc: z.coerce.number().int().min(1).default(1),
+  stepMs: z.coerce.number().int().min(1).default(250),
+  windowMs: z.coerce.number().int().min(0).default(30000)
+});
+
 export const teamclaudeConfigSchema = z.object({
   version: z.literal(1).default(1),
   /** Master switch: when true, new Claude Code sessions launch via the proxy. */
@@ -536,7 +544,15 @@ export const teamclaudeConfigSchema = z.object({
   /** Local TeamClaude proxy port (default matches TeamClaude's 3456). */
   port: z.coerce.number().int().min(1).max(65535).default(3456),
   /** Quota utilization (0–1) at which TeamClaude rotates accounts. */
-  switchThreshold: z.coerce.number().min(0).max(1).default(0.98)
+  switchThreshold: z.coerce.number().min(0).max(1).default(0.98),
+  /** Background quotaprobe interval seconds (`0` = off). */
+  quotaProbeSeconds: z.coerce.number().int().min(0).default(0),
+  /** Keep-warm interval seconds (`0` = off). */
+  warmupSeconds: z.coerce.number().int().min(0).default(0),
+  autoUpdate: z.boolean().default(true),
+  upstream: z.string().min(1).default("https://api.anthropic.com"),
+  stormRamp: teamclaudeStormRampSchema.default({}),
+  sxMode: z.enum(["always", "429", "off"]).default("off")
 });
 
 export type TeamClaudeConfig = z.infer<typeof teamclaudeConfigSchema>;

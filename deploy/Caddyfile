@@ -15,7 +15,7 @@ orquester.example.com {
         # must allow blob:. The HTML preview renders from a blob: iframe, so
         # frame-src must allow blob: too (frame-ancestors 'none' still forbids the
         # app itself from being framed by anyone).
-        Content-Security-Policy "default-src 'self'; connect-src 'self' wss:; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self' blob:; manifest-src 'self'; frame-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+        Content-Security-Policy "default-src 'self'; connect-src 'self' wss:; img-src 'self' data: blob: https://avatars.githubusercontent.com; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self' blob:; manifest-src 'self'; frame-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
         -Server
     }
 }

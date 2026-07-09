@@ -1681,11 +1681,16 @@ function createServer(
         if (typeof body.enabled === "boolean") {
           await teamclaude.setEnabled(body.enabled);
         }
-        if (typeof body.port === "number" || typeof body.switchThreshold === "number") {
-          await teamclaude.updateSettings({
-            port: body.port,
-            switchThreshold: body.switchThreshold
-          });
+        const {
+          enabled: _enabled,
+          ...settings
+        } = body;
+        const hasSettings = Object.keys(settings).some((k) => {
+          const v = (settings as Record<string, unknown>)[k];
+          return v !== undefined;
+        });
+        if (hasSettings) {
+          await teamclaude.updateSettings(settings);
         }
         return teamclaude.status();
       } catch (error) {
@@ -1698,7 +1703,7 @@ function createServer(
     "/api/addons/teamclaude/import",
     async (request, reply): Promise<TeamClaudeStatus | void> => {
       try {
-        return await teamclaude.importCredentials(request.body?.from);
+        return await teamclaude.importCredentials(request.body?.from, request.body?.content);
       } catch (error) {
         return teamclaudeError(reply, error);
       }

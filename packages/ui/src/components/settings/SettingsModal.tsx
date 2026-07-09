@@ -74,7 +74,7 @@ export const SettingsModal: React.FC = () => {
   if (isDesktop) {
     const current = section ?? "app";
     return (
-      <Modal open={open} onClose={close} className="h-[85vh] max-w-4xl">
+      <Modal open={open} onClose={close} className="h-[90vh] max-w-6xl">
         <nav className="flex w-48 shrink-0 flex-col gap-0.5 border-r border-neutral-800 bg-neutral-950/40 p-2">
           <p className="px-2 pb-2 pt-1 text-[10px] font-medium uppercase tracking-wider text-neutral-500">
             Settings

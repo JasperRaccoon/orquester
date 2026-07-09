@@ -2,7 +2,9 @@ import type {
   AddonEntry,
   RegistryInstallState,
   TeamClaudeAccountSummary,
-  TeamClaudeStatus
+  TeamClaudeSettingsUpdate,
+  TeamClaudeStatus,
+  TeamClaudeStormRamp
 } from "@orquester/api";
 import {
   createDefaultTeamClaudeConfig,
@@ -19,12 +21,24 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
+  unlinkSync,
   writeFileSync
 } from "node:fs";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
+import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 
 const execAsync = promisify(exec);
+
+const LOGO_URL = "https://avatars.githubusercontent.com/u/58999683?v=4";
+
+const DEFAULT_STORM: TeamClaudeStormRamp = {
+  enabled: true,
+  startConc: 1,
+  stepConc: 1,
+  stepMs: 250,
+  windowMs: 30000
+};
 
 const DEF = {
   id: "teamclaude",
@@ -34,7 +48,8 @@ const DEF = {
   versionFlag: "version",
   installCmd: "npm install -g @karpeleslab/teamclaude",
   updateCmd: "npm update -g @karpeleslab/teamclaude",
-  readmeMarkdown: TEAMCLAUDE_README
+  readmeMarkdown: TEAMCLAUDE_README,
+  logoUrl: LOGO_URL
 } as const;
 
 function isExecutable(p: string): boolean {
@@ -107,7 +122,25 @@ interface TcAccountRaw {
 interface TcConfigRaw {
   proxy?: { port?: number; apiKey?: string; host?: string };
   switchThreshold?: number;
+  quotaProbeSeconds?: number;
+  warmupSeconds?: number;
+  autoUpdate?: boolean;
+  upstream?: string;
+  stormRamp?: Partial<TeamClaudeStormRamp>;
+  sx?: { apiKey?: string; mode?: "always" | "429" | "off" };
   accounts?: TcAccountRaw[];
+  routes?: unknown[];
+}
+
+function mergeStorm(raw?: Partial<TeamClaudeStormRamp> | null, fallback?: TeamClaudeStormRamp): TeamClaudeStormRamp {
+  const base = fallback ?? DEFAULT_STORM;
+  return {
+    enabled: typeof raw?.enabled === "boolean" ? raw.enabled : base.enabled,
+    startConc: typeof raw?.startConc === "number" ? raw.startConc : base.startConc,
+    stepConc: typeof raw?.stepConc === "number" ? raw.stepConc : base.stepConc,
+    stepMs: typeof raw?.stepMs === "number" ? raw.stepMs : base.stepMs,
+    windowMs: typeof raw?.windowMs === "number" ? raw.windowMs : base.windowMs
+  };
 }
 
 function readTcConfig(): TcConfigRaw | null {
@@ -203,13 +236,46 @@ export class TeamClaudeService {
         : typeof cfg?.switchThreshold === "number"
           ? cfg.switchThreshold
           : 0.98;
+    const quotaProbeSeconds =
+      typeof this.state.quotaProbeSeconds === "number"
+        ? this.state.quotaProbeSeconds
+        : typeof cfg?.quotaProbeSeconds === "number"
+          ? cfg.quotaProbeSeconds
+          : 0;
+    const warmupSeconds =
+      typeof this.state.warmupSeconds === "number"
+        ? this.state.warmupSeconds
+        : typeof cfg?.warmupSeconds === "number"
+          ? cfg.warmupSeconds
+          : 0;
+    const autoUpdate =
+      typeof this.state.autoUpdate === "boolean"
+        ? this.state.autoUpdate
+        : typeof cfg?.autoUpdate === "boolean"
+          ? cfg.autoUpdate
+          : true;
+    const upstream =
+      this.state.upstream ||
+      (typeof cfg?.upstream === "string" ? cfg.upstream : "https://api.anthropic.com");
+    const stormRamp = mergeStorm(cfg?.stormRamp, this.state.stormRamp);
+    const sxMode = this.state.sxMode ?? cfg?.sx?.mode ?? "off";
+    const sxKeyConfigured = Boolean(cfg?.sx?.apiKey && cfg.sx.apiKey.length > 0);
+
     return {
       installed: Boolean(this.resolvedBin),
       enabled: this.state.enabled,
       running: this.isRunning(),
       version: this.version,
+      logoUrl: DEF.logoUrl,
       port,
       switchThreshold: threshold,
+      quotaProbeSeconds,
+      warmupSeconds,
+      autoUpdate,
+      upstream,
+      stormRamp,
+      sxMode,
+      sxKeyConfigured,
       accounts: accountSummaries(cfg),
       installState: this.installState,
       installError: this.installError,
@@ -253,21 +319,54 @@ export class TeamClaudeService {
     return this.status();
   }
 
-  async updateSettings(patch: {
-    switchThreshold?: number;
-    port?: number;
-  }): Promise<TeamClaudeStatus> {
-    const next = { ...this.state };
+  async updateSettings(patch: TeamClaudeSettingsUpdate): Promise<TeamClaudeStatus> {
+    const next: TeamClaudeConfig = { ...this.state };
     if (typeof patch.port === "number") next.port = patch.port;
     if (typeof patch.switchThreshold === "number") next.switchThreshold = patch.switchThreshold;
+    if (typeof patch.quotaProbeSeconds === "number") next.quotaProbeSeconds = patch.quotaProbeSeconds;
+    if (typeof patch.warmupSeconds === "number") next.warmupSeconds = patch.warmupSeconds;
+    if (typeof patch.autoUpdate === "boolean") next.autoUpdate = patch.autoUpdate;
+    if (typeof patch.upstream === "string" && patch.upstream.trim()) next.upstream = patch.upstream.trim();
+    if (patch.stormRamp) next.stormRamp = mergeStorm(patch.stormRamp, next.stormRamp);
+    if (patch.sxMode) next.sxMode = patch.sxMode;
     this.state = parseTeamClaudeConfig(next);
     this.persistState();
 
-    // Mirror into TeamClaude's own config so the proxy process sees them.
     const cfg = readTcConfig() ?? { proxy: {}, accounts: [] };
-    cfg.proxy = { ...(cfg.proxy ?? {}), port: this.state.port };
+    cfg.proxy = { ...(cfg.proxy ?? {}), port: this.state.port, host: "127.0.0.1" };
     cfg.switchThreshold = this.state.switchThreshold;
+    cfg.quotaProbeSeconds = this.state.quotaProbeSeconds;
+    cfg.warmupSeconds = this.state.warmupSeconds;
+    cfg.autoUpdate = this.state.autoUpdate;
+    cfg.upstream = this.state.upstream;
+    cfg.stormRamp = this.state.stormRamp;
+    if (typeof patch.sxApiKey === "string") {
+      const key = patch.sxApiKey.trim();
+      if (key) {
+        cfg.sx = { apiKey: key, mode: this.state.sxMode };
+      } else if (cfg.sx) {
+        delete cfg.sx.apiKey;
+        cfg.sx.mode = "off";
+      }
+    } else if (cfg.sx || this.state.sxMode !== "off") {
+      cfg.sx = { ...(cfg.sx ?? {}), mode: this.state.sxMode };
+    }
     writeTcConfig(cfg);
+
+    if (this.resolvedBin) {
+      try {
+        if (typeof patch.quotaProbeSeconds === "number") {
+          const arg = patch.quotaProbeSeconds <= 0 ? "off" : String(Math.max(30, patch.quotaProbeSeconds));
+          await this.runCli(this.resolvedBin, ["probe", arg]).catch(() => undefined);
+        }
+        if (typeof patch.warmupSeconds === "number") {
+          const arg = patch.warmupSeconds <= 0 ? "off" : String(Math.max(60, patch.warmupSeconds));
+          await this.runCli(this.resolvedBin, ["warmup", arg]).catch(() => undefined);
+        }
+      } catch {
+        /* best-effort */
+      }
+    }
 
     if (this.state.enabled) {
       await this.stopProxy();
@@ -314,10 +413,34 @@ export class TeamClaudeService {
     };
   }
 
-  async importCredentials(from?: string): Promise<TeamClaudeStatus> {
+  async importCredentials(from?: string, content?: string): Promise<TeamClaudeStatus> {
     const bin = this.requireBin();
-    const args = from ? ["import", "--from", from] : ["import"];
-    await this.runCli(bin, args);
+    if (content && content.trim()) {
+      try {
+        JSON.parse(content);
+      } catch {
+        throw new TeamClaudeError("Uploaded file is not valid JSON.");
+      }
+      const tmpPath = join(tmpdir(), `orquester-tc-creds-${Date.now()}.json`);
+      try {
+        writeFileSync(tmpPath, content, { encoding: "utf8", mode: 0o600 });
+        try {
+          chmodSync(tmpPath, 0o600);
+        } catch {
+          /* ignore */
+        }
+        await this.runCli(bin, ["import", "--from", tmpPath]);
+      } finally {
+        try {
+          unlinkSync(tmpPath);
+        } catch {
+          /* ignore */
+        }
+      }
+    } else {
+      const args = from ? ["import", "--from", from] : ["import"];
+      await this.runCli(bin, args);
+    }
     await this.tellReload().catch(() => undefined);
     this.emitChanged();
     return this.status();
@@ -425,12 +548,20 @@ export class TeamClaudeService {
     const cfg = readTcConfig() ?? { proxy: {}, accounts: [] };
     cfg.proxy = { ...(cfg.proxy ?? {}), port: this.state.port, host: "127.0.0.1" };
     cfg.switchThreshold = this.state.switchThreshold;
+    cfg.quotaProbeSeconds = this.state.quotaProbeSeconds;
+    cfg.warmupSeconds = this.state.warmupSeconds;
+    cfg.autoUpdate = this.state.autoUpdate;
+    cfg.upstream = this.state.upstream;
+    cfg.stormRamp = this.state.stormRamp;
+    if (cfg.sx || this.state.sxMode !== "off") {
+      cfg.sx = { ...(cfg.sx ?? {}), mode: this.state.sxMode };
+    }
     writeTcConfig(cfg);
 
     const env = {
       ...process.env,
       TEAMCLAUDE_CONFIG: teamclaudeUserConfigPath(),
-      TEAMCLAUDE_DISABLE_AUTOUPDATE: "1"
+      TEAMCLAUDE_DISABLE_AUTOUPDATE: this.state.autoUpdate ? "0" : "1"
     };
 
     const child = spawn(bin, ["server", "--headless"], {
