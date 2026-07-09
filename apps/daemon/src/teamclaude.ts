@@ -305,12 +305,7 @@ export class TeamClaudeService {
         this.emitChanged();
         return this.status();
       }
-      try {
-        await this.ensureRunning();
-        this.lastError = undefined;
-      } catch (err) {
-        this.lastError = err instanceof Error ? err.message : String(err);
-      }
+      await this.syncProxyAfterConfigChange();
     } else {
       await this.stopProxy();
       this.lastError = undefined;
@@ -368,15 +363,7 @@ export class TeamClaudeService {
       }
     }
 
-    if (this.state.enabled) {
-      await this.stopProxy();
-      try {
-        await this.ensureRunning();
-        this.lastError = undefined;
-      } catch (err) {
-        this.lastError = err instanceof Error ? err.message : String(err);
-      }
-    }
+    await this.syncProxyAfterConfigChange({ restart: this.state.enabled });
     this.emitChanged();
     return this.status();
   }
@@ -385,15 +372,13 @@ export class TeamClaudeService {
    * Env injected into new Claude Code sessions when the addon is enabled.
    * Throws SessionError-style message if enabled but unhealthy.
    */
-  resolveClaudeLaunchEnv(): ClaudeLaunchEnv | null {
+  async resolveClaudeLaunchEnv(): Promise<ClaudeLaunchEnv | null> {
     if (!this.state.enabled) return null;
     if (!this.resolvedBin) {
       throw new TeamClaudeError("TeamClaude is enabled but not installed. Install it from Settings → Addons.");
     }
     if (!this.isRunning()) {
-      throw new TeamClaudeError(
-        "TeamClaude is enabled but the proxy is not running. Check Settings → Addons or try re-enabling."
-      );
+      await this.ensureRunning();
     }
     const cfg = readTcConfig();
     const port = this.state.port || cfg?.proxy?.port || 3456;
@@ -441,7 +426,7 @@ export class TeamClaudeService {
       const args = from ? ["import", "--from", from] : ["import"];
       await this.runCli(bin, args);
     }
-    await this.tellReload().catch(() => undefined);
+    await this.syncProxyAfterConfigChange();
     this.emitChanged();
     return this.status();
   }
@@ -463,7 +448,7 @@ export class TeamClaudeService {
     });
     if (!cfg.proxy) cfg.proxy = { port: this.state.port };
     writeTcConfig(cfg);
-    await this.tellReload().catch(() => undefined);
+    await this.syncProxyAfterConfigChange();
     this.emitChanged();
     return this.status();
   }
@@ -471,7 +456,7 @@ export class TeamClaudeService {
   async removeAccount(name: string): Promise<TeamClaudeStatus> {
     const bin = this.requireBin();
     await this.runCli(bin, ["remove", name]);
-    await this.tellReload().catch(() => undefined);
+    await this.syncProxyAfterConfigChange();
     this.emitChanged();
     return this.status();
   }
@@ -479,7 +464,7 @@ export class TeamClaudeService {
   async setAccountDisabled(name: string, disabled: boolean): Promise<TeamClaudeStatus> {
     const bin = this.requireBin();
     await this.runCli(bin, [disabled ? "disable" : "enable", name]);
-    await this.tellReload().catch(() => undefined);
+    await this.syncProxyAfterConfigChange();
     this.emitChanged();
     return this.status();
   }
@@ -487,7 +472,7 @@ export class TeamClaudeService {
   async setPriority(name: string, priority: number): Promise<TeamClaudeStatus> {
     const bin = this.requireBin();
     await this.runCli(bin, ["priority", name, String(priority)]);
-    await this.tellReload().catch(() => undefined);
+    await this.syncProxyAfterConfigChange();
     this.emitChanged();
     return this.status();
   }
@@ -584,7 +569,7 @@ export class TeamClaudeService {
       }
     });
 
-    // Wait until the health endpoint answers or we time out.
+    // Wait until the proxy accepts HTTP or we time out.
     const port = this.state.port;
     const deadline = Date.now() + 15_000;
     while (Date.now() < deadline) {
@@ -640,6 +625,26 @@ export class TeamClaudeService {
     }
   }
 
+  private async syncProxyAfterConfigChange(opts: { restart?: boolean } = {}): Promise<void> {
+    if (!this.state.enabled) {
+      await this.tellReload().catch(() => undefined);
+      return;
+    }
+    try {
+      if (opts.restart) {
+        await this.stopProxy();
+      }
+      if (this.isRunning()) {
+        await this.tellReload().catch(() => undefined);
+      } else {
+        await this.ensureRunning();
+      }
+      this.lastError = undefined;
+    } catch (err) {
+      this.lastError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
   private runManaged(command: string): void {
     this.installState = "installing";
     this.installError = undefined;
@@ -650,7 +655,10 @@ export class TeamClaudeService {
         this.installState = "idle";
         this.installError = undefined;
         this.version = undefined;
-        void this.detectVersion().then(() => this.emitChanged());
+        void (async () => {
+          await this.detectVersion();
+          await this.syncProxyAfterConfigChange({ restart: this.state.enabled });
+        })().finally(() => this.emitChanged());
       } else {
         this.installState = "error";
         this.installError = result.output.slice(-4000);
@@ -833,4 +841,3 @@ function pickIso(
   }
   return undefined;
 }
-

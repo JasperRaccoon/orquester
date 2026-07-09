@@ -49,7 +49,7 @@ export class SessionError extends Error {}
 export interface ISessionManager {
   /** Emits "created" | "exited" | "updated" (SessionSummary), "closed" ({ id }), and "activity" ({ id, type: "bell" }). */
   readonly lifecycle: EventEmitter;
-  create(req: CreateSessionRequest): SessionSummary;
+  create(req: CreateSessionRequest): Promise<SessionSummary>;
   list(projectPath?: string): SessionSummary[];
   get(id: string): SessionSummary | undefined;
   /** Durable (tmux) or hot-ring (local) scrollback for a (re)connecting client. */
@@ -79,7 +79,9 @@ export interface ISessionManager {
  * Optional hook consulted at session-create time for extra env vars (and force-fail).
  * Return null/undefined to leave the launch alone. Throw SessionError to reject create.
  */
-export type ResolveSessionExtraEnv = (entry: RegistryEntry) => Record<string, string> | null | undefined;
+export type ResolveSessionExtraEnv = (
+  entry: RegistryEntry
+) => Promise<Record<string, string> | null | undefined> | Record<string, string> | null | undefined;
 
 export interface SessionManagerOptions {
   resolveExtraEnv?: ResolveSessionExtraEnv;
@@ -170,10 +172,19 @@ export class SessionManager implements ISessionManager {
     private readonly options: SessionManagerOptions = {}
   ) {}
 
-  create(req: CreateSessionRequest): SessionSummary {
+  async create(req: CreateSessionRequest): Promise<SessionSummary> {
     const entry = this.registry.get(req.refId);
     if (!entry?.resolvedBin || !entry.enabled) {
       throw new SessionError(`Registry entry "${req.refId}" is not available.`);
+    }
+
+    let addonEnv: Record<string, string> = {};
+    try {
+      addonEnv = (await this.options.resolveExtraEnv?.(entry)) ?? {};
+    } catch (error) {
+      throw error instanceof SessionError
+        ? error
+        : new SessionError(error instanceof Error ? error.message : String(error));
     }
 
     const cols = req.cols && req.cols > 0 ? req.cols : 80;
@@ -212,15 +223,6 @@ export class SessionManager implements ISessionManager {
     // `-e`: it lands on the `tmux new-session` argv (visible via `ps`), would
     // leak secrets there, and would reject any multiline value (e.g. BASH_FUNC_*
     // shell functions) at launch.
-    let addonEnv: Record<string, string> = {};
-    try {
-      addonEnv = this.options.resolveExtraEnv?.(entry) ?? {};
-    } catch (error) {
-      this.sessions.delete(id);
-      throw error instanceof SessionError
-        ? error
-        : new SessionError(error instanceof Error ? error.message : String(error));
-    }
     const env = {
       TERM: "xterm-256color",
       COLORTERM: "truecolor",
@@ -685,10 +687,19 @@ export class LocalSessionManager implements ISessionManager {
     private readonly options: SessionManagerOptions = {}
   ) {}
 
-  create(req: CreateSessionRequest): SessionSummary {
+  async create(req: CreateSessionRequest): Promise<SessionSummary> {
     const entry = this.registry.get(req.refId);
     if (!entry?.resolvedBin || !entry.enabled) {
       throw new SessionError(`Registry entry "${req.refId}" is not available.`);
+    }
+
+    let addonEnv: Record<string, string> = {};
+    try {
+      addonEnv = (await this.options.resolveExtraEnv?.(entry)) ?? {};
+    } catch (error) {
+      throw error instanceof SessionError
+        ? error
+        : new SessionError(error instanceof Error ? error.message : String(error));
     }
 
     const cols = req.cols && req.cols > 0 ? req.cols : 80;
@@ -700,15 +711,6 @@ export class LocalSessionManager implements ISessionManager {
     const maxOrder = [...this.sessions.values()]
       .filter((s) => s.summary.projectPath === projectPath)
       .reduce((max, s) => Math.max(max, s.summary.order), -1);
-
-    let addonEnv: Record<string, string> = {};
-    try {
-      addonEnv = this.options.resolveExtraEnv?.(entry) ?? {};
-    } catch (error) {
-      throw error instanceof SessionError
-        ? error
-        : new SessionError(error instanceof Error ? error.message : String(error));
-    }
 
     const launch = buildLaunchCommand(entry, { tmux: false });
     const pty = spawn(launch.bin, launch.args, {

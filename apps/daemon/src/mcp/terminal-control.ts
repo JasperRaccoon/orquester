@@ -408,7 +408,7 @@ export class TerminalControl {
     if (running >= MAX_TABS_PER_PROJECT) {
       throw new ToolError(`Tab limit reached for "${sel.project}" (${MAX_TABS_PER_PROJECT}).`);
     }
-    return sessions.create({ kind: entry.kind, refId: opts.refId, projectPath, cwd, title: opts.title });
+    return await sessions.create({ kind: entry.kind, refId: opts.refId, projectPath, cwd, title: opts.title });
   }
 
   closeTab(sel: TabSelector) {

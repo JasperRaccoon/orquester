@@ -227,10 +227,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   const tmux = new Tmux(resolved.tmuxSocket);
   const teamclaude = new TeamClaudeService(teamclaudeConfigPath(paths.baseDir));
   const sessions = createSessionManager(registry, tmux, resolved.sessionsIndexFile, {
-    resolveExtraEnv: (entry) => {
+    resolveExtraEnv: async (entry) => {
       if (entry.id !== "claude" || entry.kind !== "agent") return null;
       try {
-        return teamclaude.resolveClaudeLaunchEnv()?.env ?? null;
+        const launch = await teamclaude.resolveClaudeLaunchEnv();
+        return launch?.env ?? null;
       } catch (error) {
         throw new SessionError(error instanceof Error ? error.message : String(error));
       }
@@ -1787,7 +1788,7 @@ function createServer(
 
   app.post("/api/sessions", async (request, reply): Promise<SessionSummary | void> => {
     try {
-      return sessions.create((request.body ?? {}) as CreateSessionRequest);
+      return await sessions.create((request.body ?? {}) as CreateSessionRequest);
     } catch (error) {
       const message = error instanceof SessionError ? error.message : "Failed to create session.";
       return reply.code(400).send({ code: "SESSION_UNAVAILABLE", message });

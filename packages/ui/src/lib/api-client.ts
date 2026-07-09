@@ -68,6 +68,16 @@ export interface ApiRequestOptions {
   signal?: AbortSignal;
 }
 
+function serverMessageFromBody(body: unknown): string | null {
+  if (body && typeof body === "object" && "message" in body) {
+    const message = (body as { message?: unknown }).message;
+    if (typeof message === "string" && message.trim()) {
+      return message.trim();
+    }
+  }
+  return null;
+}
+
 /**
  * ApiClient is the "server manager": it owns the active {@link UiConnection}
  * and its {@link Transporter}, and exposes typed daemon endpoints to the
@@ -617,7 +627,8 @@ export class ApiError extends Error {
     /** Parsed error body the daemon sent (e.g. `{ code, message }`), if any. */
     public readonly body?: unknown
   ) {
-    super(`Orquester API ${method} ${path} failed with status ${status}`);
+    const serverMessage = serverMessageFromBody(body);
+    super(`Orquester API ${method} ${path} failed with status ${status}${serverMessage ? `: ${serverMessage}` : ""}`);
     this.name = "ApiError";
   }
 
@@ -627,14 +638,7 @@ export class ApiError extends Error {
    * no usable message, so callers can fall back to the generic `.message`.
    */
   get serverMessage(): string | null {
-    const body = this.body;
-    if (body && typeof body === "object" && "message" in body) {
-      const message = (body as { message?: unknown }).message;
-      if (typeof message === "string" && message.trim()) {
-        return message.trim();
-      }
-    }
-    return null;
+    return serverMessageFromBody(this.body);
   }
 
   /** Parsed `Retry-After` (seconds) when present, else null. Set on 429s. */

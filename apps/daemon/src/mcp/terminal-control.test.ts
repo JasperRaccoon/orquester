@@ -420,7 +420,10 @@ test("createTab: launches a shell/agent in the project dir", async () => {
   const root = await mkdtemp(join(tmpdir(), "tc-"));
   await mkdir(join(root, "w", "p"), { recursive: true });
   const f = new FakeManager();
-  f.create = (req) => { f.created.push(req); return f.add({ id: "new", title: req.title ?? "bash", projectPath: req.projectPath ?? "" }); };
+  f.create = async (req) => {
+    f.created.push(req);
+    return f.add({ id: "new", title: req.title ?? "bash", projectPath: req.projectPath ?? "" });
+  };
   const tc = make(f, { workspacesDir: root, fsRoot: root, registry: registryWith({ bash: { kind: "shell", enabled: true } }) });
   const s = await tc.createTab({ workspace: "w", project: "p" }, { refId: "bash" });
   assert.equal(s.id, "new");

@@ -42,7 +42,7 @@ test("LocalSessionManager tracks bell activity and clears attention on input", a
   mgr.lifecycle.on("activity", (event) => activityEvents.push(event));
 
   try {
-    const session = mgr.create({ kind: "shell", refId: "sh", projectPath: root, cwd: root });
+    const session = await mgr.create({ kind: "shell", refId: "sh", projectPath: root, cwd: root });
 
     const activity = await waitFor(() => {
       const snapshot = mgr.activity(session.id);
