@@ -271,7 +271,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
       process.env.CLAUDE_CONFIG_DIR || join(resolved.vars.userhome, ".claude")
     ]) {
       try {
-        watch(dir, { recursive: true }, nudge);
+        const watcher = watch(dir, { recursive: true }, nudge);
+        watcher.on("error", (error) => {
+          console.warn(`Usage watcher disabled for ${dir}:`, error);
+          watcher.close();
+        });
       } catch {
         /* dir may not exist yet; the poll still covers it */
       }

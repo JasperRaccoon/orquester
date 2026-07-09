@@ -47,7 +47,7 @@ With the addon **Active**, launching Claude Code sets:
 
 - `ANTHROPIC_BASE_URL=http://127.0.0.1:<port>`
 
-Claude Code keeps using its normal OAuth/subscription credentials locally; TeamClaude accepts loopback traffic and injects the selected account token upstream. If the proxy is not healthy when you open a tab, creation fails closed (no silent bypass).
+For OAuth accounts, Orquester also syncs Claude Code's local OAuth identity to an enabled TeamClaude account before launch. TeamClaude accepts loopback traffic and injects the selected account token upstream. If the proxy is not healthy when you open a tab, creation fails closed (no silent bypass).
 
 ## Usage widget
 

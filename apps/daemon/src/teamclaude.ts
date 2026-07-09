@@ -145,11 +145,14 @@ function loadOrquesterState(path: string): TeamClaudeConfig {
 interface TcAccountRaw {
   name?: string;
   type?: string;
+  accountUuid?: string | null;
+  orgUuid?: string | null;
   priority?: number;
   disabled?: boolean;
   orgName?: string;
   accessToken?: string;
   refreshToken?: string;
+  expiresAt?: number;
   apiKey?: string;
 }
 
@@ -240,6 +243,79 @@ function hasUsableAccount(cfg: TcConfigRaw | null): boolean {
       (account) => account.disabled !== true && Boolean(account.accessToken || account.refreshToken || account.apiKey)
     )
   );
+}
+
+function enabledOauthAccount(cfg: TcConfigRaw): TcAccountRaw | undefined {
+  return [...(cfg.accounts ?? [])]
+    .filter(
+      (account) =>
+        account.disabled !== true &&
+        account.type === "oauth" &&
+        typeof account.accessToken === "string" &&
+        account.accessToken.length > 0 &&
+        typeof account.refreshToken === "string" &&
+        account.refreshToken.length > 0
+    )
+    .sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0))[0];
+}
+
+function claudeConfigDir(): string {
+  if (process.env.CLAUDE_CONFIG_DIR) return process.env.CLAUDE_CONFIG_DIR;
+  const home = process.env.HOME || process.env.USERPROFILE || "";
+  return join(home, ".claude");
+}
+
+function claudeStatePath(): string {
+  const home = process.env.HOME || process.env.USERPROFILE || "";
+  return join(home, ".claude.json");
+}
+
+function readObjectJson(path: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function removeProxyKeyApproval(state: Record<string, unknown>, proxyKey: string | undefined): void {
+  if (!proxyKey) return;
+  const responses = isRecord(state.customApiKeyResponses) ? state.customApiKeyResponses : {};
+  const approved = Array.isArray(responses.approved) ? responses.approved : [];
+  responses.approved = approved.filter((value) => typeof value !== "string" || (value !== proxyKey && !proxyKey.endsWith(value)));
+  if (!Array.isArray(responses.rejected)) responses.rejected = [];
+  state.customApiKeyResponses = responses;
+}
+
+function syncClaudeCodeOauth(account: TcAccountRaw, proxyKey: string | undefined): void {
+  const credentialsPath = join(claudeConfigDir(), ".credentials.json");
+  const credentials = readObjectJson(credentialsPath);
+  const previousOauth = isRecord(credentials.claudeAiOauth) ? credentials.claudeAiOauth : {};
+  credentials.claudeAiOauth = {
+    ...previousOauth,
+    accessToken: account.accessToken,
+    refreshToken: account.refreshToken,
+    expiresAt: account.expiresAt ?? previousOauth.expiresAt ?? 0
+  };
+  writeJson0600(credentialsPath, credentials);
+
+  const statePath = claudeStatePath();
+  const state = readObjectJson(statePath);
+  const previousAccount = isRecord(state.oauthAccount) ? state.oauthAccount : {};
+  state.oauthAccount = {
+    ...previousAccount,
+    ...(account.accountUuid ? { accountUuid: account.accountUuid } : {}),
+    ...(account.orgUuid ? { organizationUuid: account.orgUuid } : {}),
+    ...(account.orgName ? { organizationName: account.orgName } : {}),
+    ...(account.name ? { emailAddress: account.name, displayName: account.name.split("@")[0] || account.name } : {})
+  };
+  removeProxyKeyApproval(state, proxyKey);
+  writeJson0600(statePath, state);
 }
 
 function accountSummaries(cfg: TcConfigRaw | null): TeamClaudeAccountSummary[] {
@@ -471,12 +547,18 @@ export class TeamClaudeService {
     if (!hasUsableAccount(cfg)) {
       throw new TeamClaudeError("TeamClaude is enabled but has no usable accounts. Add or enable a TeamClaude account.");
     }
+    const oauthAccount = enabledOauthAccount(cfg);
+    if (oauthAccount) {
+      syncClaudeCodeOauth(oauthAccount, cfg.proxy?.apiKey);
+    }
+    const env: Record<string, string> = {
+      ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`
+    };
+    if (!oauthAccount && cfg.proxy?.apiKey) {
+      env.ANTHROPIC_API_KEY = cfg.proxy.apiKey;
+    }
     return {
-      env: {
-        // Match TeamClaude's own base-URL mode: leave Claude Code's OAuth
-        // credentials in control so it stays in subscription/plan mode.
-        ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`
-      }
+      env
     };
   }
 
