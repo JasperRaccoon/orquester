@@ -12,6 +12,7 @@ import {
   KeyRound,
   Loader2,
   Plus,
+  Puzzle,
   RefreshCw,
   Server,
   Trash2,
@@ -25,13 +26,15 @@ import { getRegistryIcon } from "../../icons";
 import { useIsDesktop, useRegistry } from "../../hooks";
 import { useApi, useOrquester } from "../../context/orquester-context";
 import { useAppStore } from "../../store/app";
+import { AddonsSettings } from "./AddonsSettings";
 
-type Section = "app" | "agents" | "usage" | "github" | "daemon";
+type Section = "app" | "agents" | "addons" | "usage" | "github" | "daemon";
 
 const SECTIONS: { id: Section; label: string; icon: React.ReactNode; desc: string }[] = [
   { id: "app", label: "App", icon: <AppWindow size={16} />, desc: "Titlebar, runtime, active server" },
   { id: "usage", label: "Usage", icon: <Gauge size={16} />, desc: "Top-bar usage widget for Claude Code & Codex" },
   { id: "agents", label: "Agents", icon: <Boxes size={16} />, desc: "Install, update and view harness versions" },
+  { id: "addons", label: "Addons", icon: <Puzzle size={16} />, desc: "Companion tools (TeamClaude multi-account proxy)" },
   { id: "github", label: "GitHub", icon: <Github size={16} />, desc: "Connect accounts and per-workspace git identities" },
   { id: "daemon", label: "Daemon", icon: <Server size={16} />, desc: "Workspaces dir, external HTTP access" }
 ];
@@ -41,6 +44,8 @@ const renderSection = (id: Section) =>
     <AppSettings />
   ) : id === "agents" ? (
     <AgentsSettings />
+  ) : id === "addons" ? (
+    <AddonsSettings />
   ) : id === "usage" ? (
     <UsageSettings />
   ) : id === "github" ? (
@@ -499,6 +504,11 @@ const UsageSettings: React.FC = () => {
     { value: "codex", label: "Codex" }
   ];
 
+  const VIEW_OPTIONS: { value: NonNullable<typeof prefs.view>; label: string }[] = [
+    { value: "aggregate", label: "Aggregated" },
+    { value: "accounts", label: "Per account" }
+  ];
+
   return (
     <div className="divide-y divide-neutral-800">
       <Field label="Show usage in the top bar" hint="A compact quota chip that opens a details panel.">
@@ -520,6 +530,28 @@ const UsageSettings: React.FC = () => {
               className={cn(
                 "rounded-md px-2 py-1 text-xs",
                 prefs.chip === o.value
+                  ? "bg-neutral-700 text-neutral-100"
+                  : "text-neutral-400 hover:bg-neutral-800"
+              )}
+            >
+              {o.label}
+            </button>
+          ))}
+        </div>
+      </Field>
+      <Field
+        label="Claude multi-account view"
+        hint="When TeamClaude is active, show pooled quota or each account’s bars."
+      >
+        <div className="flex gap-1">
+          {VIEW_OPTIONS.map((o) => (
+            <button
+              key={o.value}
+              type="button"
+              onClick={() => setUsage({ view: o.value })}
+              className={cn(
+                "rounded-md px-2 py-1 text-xs",
+                (prefs.view ?? "aggregate") === o.value
                   ? "bg-neutral-700 text-neutral-100"
                   : "text-neutral-400 hover:bg-neutral-800"
               )}

@@ -1,6 +1,7 @@
 import type {
   AccountSummary,
   AccountTestResult,
+  AgentUsage,
   CreateAccountRequest,
   CreateProjectRequest,
   CreateSessionRequest,
@@ -41,8 +42,15 @@ import type {
   SessionSummary,
   SessionUploadRequest,
   SessionUploadResponse,
+  TeamClaudeApiKeyRequest,
+  TeamClaudeImportRequest,
+  TeamClaudePriorityRequest,
+  TeamClaudeSettingsUpdate,
+  TeamClaudeStatus,
   UpdateTodoRequest,
+  UsageAccount,
   UsageResponse,
+  UsageWindow,
   WorkspaceSummary
 } from "@orquester/api";
 import { RegistryService } from "./registry";
@@ -55,6 +63,7 @@ import { PushService, isValidPushEndpoint } from "./push";
 import { GitError, GitService } from "./git";
 import { UsageService } from "./usage";
 import { createClaudeSource, createCodexSource, readUsagePrefs } from "./usage-sources";
+import { TeamClaudeError, TeamClaudeService } from "./teamclaude";
 import { listArchiveEntries } from "./archive";
 import { resolveZipTool, spawnDirZip } from "./zip";
 import { FsSearchError, listProjectFiles, searchProjectFiles } from "./search";
@@ -89,6 +98,7 @@ import {
   remotesConfigPath,
   resolveDaemonPaths,
   sessionsIndexPath,
+  teamclaudeConfigPath,
   tmuxSocketPath,
   todosIndexPath,
   workspacesMetaPath,
@@ -215,7 +225,17 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // the desktop built-in daemon keeps creating sessions everywhere.
   const registry = new RegistryService(resolved.daemonDir);
   const tmux = new Tmux(resolved.tmuxSocket);
-  const sessions = createSessionManager(registry, tmux, resolved.sessionsIndexFile);
+  const teamclaude = new TeamClaudeService(teamclaudeConfigPath(paths.baseDir));
+  const sessions = createSessionManager(registry, tmux, resolved.sessionsIndexFile, {
+    resolveExtraEnv: (entry) => {
+      if (entry.id !== "claude" || entry.kind !== "agent") return null;
+      try {
+        return teamclaude.resolveClaudeLaunchEnv()?.env ?? null;
+      } catch (error) {
+        throw new SessionError(error instanceof Error ? error.message : String(error));
+      }
+    }
+  });
   const accounts = new AccountsService(resolved.accountsFile, resolved.keysDir);
   const git = new GitService();
   const todos = new TodoListManager(resolved.todosIndexFile, console);
@@ -224,8 +244,14 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   const broadcaster = new Broadcaster();
   // Stream registry changes (install/update status, detected versions) to clients.
   registry.events.on("changed", (entry) => broadcaster.publish("registry", "registry.changed", entry));
+  teamclaude.events.on("changed", (entry) => broadcaster.publish("addons", "addon.changed", entry));
+  teamclaude.events.on("status", (status) => broadcaster.publish("addons", "teamclaude.status", status));
+  const baseClaude = createClaudeSource({ userhome: resolved.vars.userhome, now: () => Date.now(), logger: console });
   const usage = new UsageService({
-    fetchClaude: createClaudeSource({ userhome: resolved.vars.userhome, now: () => Date.now(), logger: console }),
+    fetchClaude: async () => {
+      const single = await baseClaude();
+      return enrichClaudeWithTeamClaude(single, teamclaude);
+    },
     readCodex: createCodexSource({ userhome: resolved.vars.userhome, now: () => Date.now() }),
     getPrefs: () => readUsagePrefs(resolved.appConfigFile),
     now: () => Date.now()
@@ -251,6 +277,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     }
   }
   await registry.init();
+  await teamclaude.init().catch((error) => console.error("TeamClaude init failed", error));
   // Reattach to any tmux sessions that outlived a previous daemon process
   // (KillMode=process keeps the tmux server alive across restarts). No-op on the
   // local backend. Best-effort: a tmux/socket error must not block startup.
@@ -299,7 +326,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   todos.lifecycle.on("updated", (r) => broadcaster.publish("todos", "todo.updated", r));
   todos.lifecycle.on("deleted", (r) => broadcaster.publish("todos", "todo.deleted", r));
 
-  const services: Services = { registry, sessions, accounts, git, todos, usage, push, broadcaster };
+  const services: Services = { registry, sessions, accounts, git, todos, usage, push, broadcaster, teamclaude };
 
   // The static web build the HTTP transport optionally serves.
   const webDirEnv = options.webDir ?? env.ORQUESTER_WEB_DIR;
@@ -361,6 +388,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
 
   const stop = async () => {
     usage.stop();
+    await teamclaude.stop().catch(() => undefined);
     // Detach (don't kill) sessions: the tmux backend leaves its server running so
     // the next boot reattaches; the local backend has no server, so its shutdown()
     // terminates the child PTYs (they'd die with the daemon regardless).
@@ -390,6 +418,7 @@ interface Services {
   usage: UsageService;
   push: PushService;
   broadcaster: Broadcaster;
+  teamclaude: TeamClaudeService;
   /** Restart the HTTP transport (set in main once the lifecycle exists). */
   reloadHttp?: () => Promise<void>;
 }
@@ -402,7 +431,7 @@ function createServer(
   services: Services,
   options: { authRequired: boolean; mode: "local" | "remote"; serveWeb?: string }
 ): FastifyInstance {
-  const { registry, sessions, accounts, git, todos, usage, push } = services;
+  const { registry, sessions, accounts, git, todos, usage, push, teamclaude } = services;
 
   const app = Fastify({
     // Remote requests arrive via Caddy on loopback (reverse_proxy 127.0.0.1:47831),
@@ -1625,6 +1654,117 @@ function createServer(
     registry.update(request.params.id)
   );
 
+  // Addons (TeamClaude, …) — installable companions, not launchable sessions.
+  app.get("/api/addons", async () => ({ addons: teamclaude.listAddons() }));
+
+  app.post<{ Params: { id: string } }>("/api/addons/:id/install", async (request, reply) => {
+    if (request.params.id !== "teamclaude") {
+      return reply.code(404).send({ code: "NOT_FOUND", message: "Unknown addon." });
+    }
+    return teamclaude.install();
+  });
+
+  app.post<{ Params: { id: string } }>("/api/addons/:id/update", async (request, reply) => {
+    if (request.params.id !== "teamclaude") {
+      return reply.code(404).send({ code: "NOT_FOUND", message: "Unknown addon." });
+    }
+    return teamclaude.update();
+  });
+
+  app.get("/api/addons/teamclaude", async (): Promise<TeamClaudeStatus> => teamclaude.status());
+
+  app.put<{ Body: TeamClaudeSettingsUpdate }>(
+    "/api/addons/teamclaude",
+    async (request, reply): Promise<TeamClaudeStatus | void> => {
+      try {
+        const body = request.body ?? {};
+        if (typeof body.enabled === "boolean") {
+          await teamclaude.setEnabled(body.enabled);
+        }
+        if (typeof body.port === "number" || typeof body.switchThreshold === "number") {
+          await teamclaude.updateSettings({
+            port: body.port,
+            switchThreshold: body.switchThreshold
+          });
+        }
+        return teamclaude.status();
+      } catch (error) {
+        return teamclaudeError(reply, error);
+      }
+    }
+  );
+
+  app.post<{ Body: TeamClaudeImportRequest }>(
+    "/api/addons/teamclaude/import",
+    async (request, reply): Promise<TeamClaudeStatus | void> => {
+      try {
+        return await teamclaude.importCredentials(request.body?.from);
+      } catch (error) {
+        return teamclaudeError(reply, error);
+      }
+    }
+  );
+
+  app.post<{ Body: TeamClaudeApiKeyRequest }>(
+    "/api/addons/teamclaude/api-key",
+    async (request, reply): Promise<TeamClaudeStatus | void> => {
+      try {
+        const { apiKey, name } = request.body ?? {};
+        if (!apiKey) {
+          return reply.code(400).send({ code: "INVALID_REQUEST", message: "apiKey required." });
+        }
+        return await teamclaude.addApiKey(apiKey, name);
+      } catch (error) {
+        return teamclaudeError(reply, error);
+      }
+    }
+  );
+
+  app.delete<{ Body: { name?: string } }>(
+    "/api/addons/teamclaude/accounts",
+    async (request, reply): Promise<TeamClaudeStatus | void> => {
+      try {
+        const name = request.body?.name;
+        if (!name) {
+          return reply.code(400).send({ code: "INVALID_REQUEST", message: "name required." });
+        }
+        return await teamclaude.removeAccount(name);
+      } catch (error) {
+        return teamclaudeError(reply, error);
+      }
+    }
+  );
+
+  app.post<{ Body: { name?: string; disabled?: boolean } }>(
+    "/api/addons/teamclaude/accounts/toggle",
+    async (request, reply): Promise<TeamClaudeStatus | void> => {
+      try {
+        const name = request.body?.name;
+        if (!name || typeof request.body?.disabled !== "boolean") {
+          return reply.code(400).send({ code: "INVALID_REQUEST", message: "name and disabled required." });
+        }
+        return await teamclaude.setAccountDisabled(name, request.body.disabled);
+      } catch (error) {
+        return teamclaudeError(reply, error);
+      }
+    }
+  );
+
+  app.post<{ Body: TeamClaudePriorityRequest }>(
+    "/api/addons/teamclaude/accounts/priority",
+    async (request, reply): Promise<TeamClaudeStatus | void> => {
+      try {
+        const { name, priority } = request.body ?? {};
+        if (!name || typeof priority !== "number") {
+          return reply.code(400).send({ code: "INVALID_REQUEST", message: "name and priority required." });
+        }
+        return await teamclaude.setPriority(name, priority);
+      } catch (error) {
+        return teamclaudeError(reply, error);
+      }
+    }
+  );
+
   // Launch an ide/file-explorer/browser on a path (fire-and-forget).
   app.post("/api/open", async (request, reply): Promise<OpenResult | void> => {
     const body = (request.body ?? {}) as OpenRequest;
@@ -2306,6 +2446,104 @@ function gitError(reply: FastifyReply, error: unknown): void {
   const status = error instanceof GitError ? error.status : 500;
   const message = error instanceof Error ? error.message : "Git operation failed.";
   void reply.code(status).send({ code: "GIT_ERROR", message });
+}
+
+function teamclaudeError(reply: FastifyReply, error: unknown): void {
+  const status = error instanceof TeamClaudeError ? 400 : 500;
+  const message = error instanceof Error ? error.message : "TeamClaude operation failed.";
+  void reply.code(status).send({ code: "TEAMCLAUDE_ERROR", message });
+}
+
+/** When TeamClaude is active, overlay multi-account quota onto the Claude usage agent. */
+async function enrichClaudeWithTeamClaude(
+  base: AgentUsage | null,
+  tc: TeamClaudeService
+): Promise<AgentUsage | null> {
+  const status = tc.status();
+  if (!status.enabled || !status.installed) return base;
+
+  const snap = await tc.fetchUsageSnapshot();
+  if (!snap || snap.accounts.length === 0) {
+    // Still mark as multi-account if we know accounts exist in config.
+    if (status.accounts.length === 0) return base;
+    const accounts: UsageAccount[] = status.accounts.map((a) => ({
+      id: a.name,
+      label: a.name,
+      available: !a.disabled && a.hasCredentials,
+      stale: true,
+      session: null,
+      weekly: null
+    }));
+    const seed: AgentUsage =
+      base ??
+      ({
+        id: "claude",
+        available: true,
+        stale: true,
+        plan: `TeamClaude · ${accounts.length} acct`,
+        session: null,
+        weekly: null
+      } as AgentUsage);
+    return {
+      ...seed,
+      available: true,
+      plan: seed.plan ?? `TeamClaude · ${accounts.length} acct`,
+      accounts,
+      aggregate: { strategy: "equal-weight", accountCount: accounts.length, staleAccountCount: accounts.length }
+    };
+  }
+
+  const now = Date.now();
+  const accounts: UsageAccount[] = snap.accounts.map((a) => ({
+    id: a.name,
+    label: a.name,
+    available: true,
+    stale: a.sessionPercent === undefined && a.weeklyPercent === undefined,
+    session:
+      a.sessionPercent === undefined
+        ? null
+        : ({ percent: clampPct(a.sessionPercent), resetsAt: a.sessionResetsAt } as UsageWindow),
+    weekly:
+      a.weeklyPercent === undefined
+        ? null
+        : ({ percent: clampPct(a.weeklyPercent), resetsAt: a.weeklyResetsAt } as UsageWindow),
+    asOf: new Date(now).toISOString()
+  }));
+
+  const session = averageWindow(accounts.map((a) => a.session));
+  const weekly = averageWindow(accounts.map((a) => a.weekly));
+  const staleCount = accounts.filter((a) => a.stale).length;
+
+  return {
+    id: "claude",
+    available: true,
+    stale: staleCount === accounts.length,
+    plan: `TeamClaude · ${accounts.length} acct`,
+    session,
+    weekly,
+    asOf: new Date(now).toISOString(),
+    accounts,
+    aggregate: {
+      strategy: "equal-weight",
+      accountCount: accounts.length,
+      staleAccountCount: staleCount
+    }
+  };
+}
+
+function clampPct(n: number): number {
+  return Math.max(0, Math.min(100, n));
+}
+
+function averageWindow(windows: Array<UsageWindow | null>): UsageWindow | null {
+  const present = windows.filter((w): w is UsageWindow => !!w);
+  if (present.length === 0) return null;
+  const percent = present.reduce((s, w) => s + w.percent, 0) / present.length;
+  const resets = present
+    .map((w) => w.resetsAt)
+    .filter((x): x is string => !!x)
+    .sort();
+  return { percent: clampPct(percent), resetsAt: resets[0] };
 }
 
 /**

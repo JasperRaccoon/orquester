@@ -5,7 +5,7 @@ import { UsageService } from "./usage";
 
 const claude: AgentUsage = { id: "claude", available: true, stale: false, session: { percent: 45 }, weekly: { percent: 69 } };
 const codex: AgentUsage = { id: "codex", available: true, stale: false, session: { percent: 3 }, weekly: { percent: 37 } };
-const allOn: UsagePrefs = { enabled: true, claude: true, codex: true, chip: "busiest" };
+const allOn: UsagePrefs = { enabled: true, claude: true, codex: true, chip: "busiest", view: "aggregate" };
 
 function make(over: Partial<UsagePrefs> = {}, c: AgentUsage | null = claude) {
   const changed: unknown[] = [];

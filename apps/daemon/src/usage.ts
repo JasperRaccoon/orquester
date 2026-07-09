@@ -18,7 +18,13 @@ export interface UsageServiceDeps {
   idleMs?: number;
 }
 
-const DEFAULT_PREFS: UsagePrefs = { enabled: true, claude: true, codex: true, chip: "busiest" };
+const DEFAULT_PREFS: UsagePrefs = {
+  enabled: true,
+  claude: true,
+  codex: true,
+  chip: "busiest",
+  view: "aggregate"
+};
 
 export class UsageService {
   readonly events = new EventEmitter();

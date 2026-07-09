@@ -132,6 +132,15 @@ export function pushConfigPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "push.json");
 }
 
+/**
+ * Orquester-owned TeamClaude toggle/settings mirror. Account OAuth material stays
+ * in TeamClaude's own config (`~/.config/teamclaude.json`) — never duplicated here.
+ * Written 0600 by the daemon.
+ */
+export function teamclaudeConfigPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "teamclaude.json");
+}
+
 /** `yyyy-mm-dd` in local time. */
 export function localDateStamp(date = new Date()): string {
   const year = date.getFullYear();
@@ -283,7 +292,12 @@ export const usagePrefsSchema = z.object({
   claude: z.boolean().default(true),
   codex: z.boolean().default(true),
   /** Which agent drives the collapsed chip. */
-  chip: z.enum(["busiest", "claude", "codex"]).default("busiest")
+  chip: z.enum(["busiest", "claude", "codex"]).default("busiest"),
+  /**
+   * How to render multi-account Claude usage (TeamClaude): pooled aggregate bars
+   * or a per-account breakdown.
+   */
+  view: z.enum(["aggregate", "accounts"]).default("aggregate")
 });
 
 export type UsagePrefs = z.infer<typeof usagePrefsSchema>;
@@ -508,6 +522,31 @@ export function createDefaultPushConfig(): PushConfig {
 
 export function parsePushConfig(raw: unknown): PushConfig {
   return pushConfigSchema.parse(raw);
+}
+
+// teamclaude.json — Orquester-side enablement of the TeamClaude multi-account
+// proxy addon. Tokens live in TeamClaude's own config; this only stores whether
+// Orquester should route Claude Code sessions through the local proxy and a few
+// non-secret knobs mirrored into TeamClaude's config when changed.
+
+export const teamclaudeConfigSchema = z.object({
+  version: z.literal(1).default(1),
+  /** Master switch: when true, new Claude Code sessions launch via the proxy. */
+  enabled: z.boolean().default(false),
+  /** Local TeamClaude proxy port (default matches TeamClaude's 3456). */
+  port: z.coerce.number().int().min(1).max(65535).default(3456),
+  /** Quota utilization (0–1) at which TeamClaude rotates accounts. */
+  switchThreshold: z.coerce.number().min(0).max(1).default(0.98)
+});
+
+export type TeamClaudeConfig = z.infer<typeof teamclaudeConfigSchema>;
+
+export function createDefaultTeamClaudeConfig(): TeamClaudeConfig {
+  return teamclaudeConfigSchema.parse({});
+}
+
+export function parseTeamClaudeConfig(raw: unknown): TeamClaudeConfig {
+  return teamclaudeConfigSchema.parse(raw);
 }
 
 // ClientConfig — what the daemon reports about how to reach itself.}

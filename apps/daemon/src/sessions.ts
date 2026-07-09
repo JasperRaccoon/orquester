@@ -76,6 +76,16 @@ export interface ISessionManager {
 }
 
 /**
+ * Optional hook consulted at session-create time for extra env vars (and force-fail).
+ * Return null/undefined to leave the launch alone. Throw SessionError to reject create.
+ */
+export type ResolveSessionExtraEnv = (entry: RegistryEntry) => Record<string, string> | null | undefined;
+
+export interface SessionManagerOptions {
+  resolveExtraEnv?: ResolveSessionExtraEnv;
+}
+
+/**
  * Pick the session backend for this host: the tmux-backed manager only when a
  * `tmux` binary is on PATH AND it is >= 3.2 (the VPS, plus any Linux/macOS dev
  * box with a recent tmux), else the direct node-pty backend. This is what keeps
@@ -92,17 +102,18 @@ export interface ISessionManager {
 export function createSessionManager(
   registry: RegistryService,
   tmux: Tmux,
-  indexPath: string
+  indexPath: string,
+  options: SessionManagerOptions = {}
 ): ISessionManager {
   if (tmuxAvailable() && tmuxVersionOk()) {
     console.log("sessions: tmux-backed backend (sessions persist across daemon restarts)");
-    return new SessionManager(registry, tmux, indexPath);
+    return new SessionManager(registry, tmux, indexPath, options);
   }
   console.log(
     "sessions: usable tmux (>= 3.2) not found on PATH — using direct node-pty backend " +
       "(sessions do NOT survive a daemon restart; install tmux >= 3.2 to enable persistence)"
   );
-  return new LocalSessionManager(registry);
+  return new LocalSessionManager(registry, options);
 }
 
 export function buildLaunchCommand(entry: RegistryEntry, opts: { tmux: boolean }): { bin: string; args: string[] } {
@@ -155,7 +166,8 @@ export class SessionManager implements ISessionManager {
     private readonly registry: RegistryService,
     private readonly tmux: Tmux,
     /** <appdir>/daemon/sessions.json — the reattach index. */
-    private readonly indexPath: string
+    private readonly indexPath: string,
+    private readonly options: SessionManagerOptions = {}
   ) {}
 
   create(req: CreateSessionRequest): SessionSummary {
@@ -200,10 +212,20 @@ export class SessionManager implements ISessionManager {
     // `-e`: it lands on the `tmux new-session` argv (visible via `ps`), would
     // leak secrets there, and would reject any multiline value (e.g. BASH_FUNC_*
     // shell functions) at launch.
+    let addonEnv: Record<string, string> = {};
+    try {
+      addonEnv = this.options.resolveExtraEnv?.(entry) ?? {};
+    } catch (error) {
+      this.sessions.delete(id);
+      throw error instanceof SessionError
+        ? error
+        : new SessionError(error instanceof Error ? error.message : String(error));
+    }
     const env = {
       TERM: "xterm-256color",
       COLORTERM: "truecolor",
-      ...entry.env
+      ...entry.env,
+      ...addonEnv
     } as Record<string, string>;
 
     // A bare shell launched via `tmux new-session -- bash` runs non-interactively
@@ -658,7 +680,10 @@ export class LocalSessionManager implements ISessionManager {
   /** Emits "created" | "exited" | "updated" (SessionSummary), "closed" ({ id }), and "activity" ({ id, type: "bell" }). */
   readonly lifecycle = new EventEmitter();
 
-  constructor(private readonly registry: RegistryService) {}
+  constructor(
+    private readonly registry: RegistryService,
+    private readonly options: SessionManagerOptions = {}
+  ) {}
 
   create(req: CreateSessionRequest): SessionSummary {
     const entry = this.registry.get(req.refId);
@@ -676,13 +701,29 @@ export class LocalSessionManager implements ISessionManager {
       .filter((s) => s.summary.projectPath === projectPath)
       .reduce((max, s) => Math.max(max, s.summary.order), -1);
 
+    let addonEnv: Record<string, string> = {};
+    try {
+      addonEnv = this.options.resolveExtraEnv?.(entry) ?? {};
+    } catch (error) {
+      throw error instanceof SessionError
+        ? error
+        : new SessionError(error instanceof Error ? error.message : String(error));
+    }
+
     const launch = buildLaunchCommand(entry, { tmux: false });
     const pty = spawn(launch.bin, launch.args, {
       name: "xterm-256color",
       cwd,
       cols,
       rows,
-      env: { ...sessionEnvBase(), TERM: "xterm-256color", COLORTERM: "truecolor", PATH: sessionPath(), ...entry.env } as Record<string, string>
+      env: {
+        ...sessionEnvBase(),
+        TERM: "xterm-256color",
+        COLORTERM: "truecolor",
+        PATH: sessionPath(),
+        ...entry.env,
+        ...addonEnv
+      } as Record<string, string>
     });
 
     const summary: SessionSummary = {

@@ -409,6 +409,22 @@ export type TodoEventType = "todo.created" | "todo.updated" | "todo.deleted";
 export interface UsageWindow {
   percent: number;
   resetsAt?: string;
+  /** Optional capacity fields when a multi-account source provides them. */
+  used?: number;
+  limit?: number;
+  remaining?: number;
+}
+
+/** Per sub-account quota for agents that pool multiple logins (e.g. TeamClaude). */
+export interface UsageAccount {
+  id: string;
+  label?: string;
+  available: boolean;
+  stale: boolean;
+  plan?: string;
+  session: UsageWindow | null;
+  weekly: UsageWindow | null;
+  asOf?: string;
 }
 
 export interface AgentUsage {
@@ -419,11 +435,19 @@ export interface AgentUsage {
   stale: boolean;
   /** e.g. "Max 20x", "Pro". */
   plan?: string;
-  /** rolling 5-hour window. */
+  /** rolling 5-hour window (aggregate when multi-account). */
   session: UsageWindow | null;
   weekly: UsageWindow | null;
   /** ISO time the reading was actually obtained (for an honest "as of"). */
   asOf?: string;
+  /** Per-account breakdown when the agent pools multiple accounts. */
+  accounts?: UsageAccount[];
+  /** How the top-level session/weekly windows were aggregated. */
+  aggregate?: {
+    strategy: "equal-weight" | "capacity-weighted" | "source-provided" | "worst-account";
+    accountCount: number;
+    staleAccountCount?: number;
+  };
 }
 
 export interface UsageResponse {
@@ -546,6 +570,78 @@ export interface RegistryActionResult {
   ok: boolean;
   exitCode: number;
   output: string;
+}
+
+// Addons — installable companion tools (e.g. TeamClaude). Not launchable as sessions.
+
+export interface AddonEntry {
+  id: string;
+  name: string;
+  description?: string;
+  /** Local, reviewed markdown shown in the Settings → Addons card. */
+  readmeMarkdown: string;
+  installed: boolean;
+  /** Master activate toggle (only meaningful when installed). */
+  enabled: boolean;
+  resolvedBin?: string;
+  version?: string;
+  installCmd?: string;
+  updateCmd?: string;
+  installState: RegistryInstallState;
+  installError?: string;
+}
+
+export interface AddonsResponse {
+  addons: AddonEntry[];
+}
+
+/** Safe TeamClaude account summary — never includes tokens. */
+export interface TeamClaudeAccountSummary {
+  name: string;
+  type?: string;
+  priority?: number;
+  disabled?: boolean;
+  hasCredentials: boolean;
+  orgName?: string;
+}
+
+export interface TeamClaudeStatus {
+  installed: boolean;
+  enabled: boolean;
+  running: boolean;
+  version?: string;
+  port: number;
+  switchThreshold: number;
+  accounts: TeamClaudeAccountSummary[];
+  installState: RegistryInstallState;
+  installError?: string;
+  lastError?: string;
+  readmeMarkdown: string;
+}
+
+export interface TeamClaudeSettingsUpdate {
+  enabled?: boolean;
+  switchThreshold?: number;
+  port?: number;
+}
+
+export interface TeamClaudeImportRequest {
+  /** Optional path to Claude Code credentials.json; omit for the default. */
+  from?: string;
+}
+
+export interface TeamClaudeApiKeyRequest {
+  apiKey: string;
+  name?: string;
+}
+
+export interface TeamClaudeAccountActionRequest {
+  name: string;
+}
+
+export interface TeamClaudePriorityRequest {
+  name: string;
+  priority: number;
 }
 
 export interface OpenRequest {

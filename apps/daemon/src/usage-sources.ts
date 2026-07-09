@@ -11,7 +11,7 @@ export async function readUsagePrefs(appConfigFile: string): Promise<UsagePrefs>
     return parseAppConfig(JSON.parse(await readFile(appConfigFile, "utf8"))).usage;
   } catch {
     // ENOENT / corrupt → defaults (enabled).
-    return { enabled: true, claude: true, codex: true, chip: "busiest" };
+    return { enabled: true, claude: true, codex: true, chip: "busiest", view: "aggregate" };
   }
 }
 

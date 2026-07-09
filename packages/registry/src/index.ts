@@ -1,6 +1,8 @@
 import type { RegistryKind } from "@orquester/api";
 
 export type { RegistryKind };
+export { ADDONS_CATALOG as ADDONS, type AddonDef } from "./addons";
+export { TEAMCLAUDE_README } from "./teamclaude-readme";
 
 export interface RegistryEntryDef {
   id: string;

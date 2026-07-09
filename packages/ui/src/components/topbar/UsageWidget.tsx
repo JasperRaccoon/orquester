@@ -1,6 +1,6 @@
-import React from "react";
+import React, { useState } from "react";
 import { ChevronDown, Gauge, RefreshCw } from "lucide-react";
-import type { AgentUsage } from "@orquester/api";
+import type { AgentUsage, UsageAccount, UsageWindow } from "@orquester/api";
 import { AdaptiveMenu } from "../ui";
 import { getRegistryIcon } from "../../icons";
 import { useAppStore } from "../../store/app";
@@ -8,7 +8,7 @@ import { barClass, formatAgo, formatClock, formatCountdown, gaugeClass, minutesS
 
 const AGENT_LABEL: Record<AgentUsage["id"], string> = { claude: "Claude Code", codex: "Codex" };
 
-const Bar: React.FC<{ label: string; window: AgentUsage["session"]; muted: boolean }> = ({ label, window, muted }) => {
+const Bar: React.FC<{ label: string; window: UsageWindow | null; muted: boolean }> = ({ label, window, muted }) => {
   const pct = window?.percent ?? 0;
   return (
     <div className="py-1.5">
@@ -30,10 +30,24 @@ const Bar: React.FC<{ label: string; window: AgentUsage["session"]; muted: boole
 /** A reading older than this reads as stale in the panel. */
 const STALE_MIN = 10;
 
-const AgentSection: React.FC<{ agent: AgentUsage }> = ({ agent }) => {
-  const hasData = agent.session || agent.weekly;
+const AccountRow: React.FC<{ account: UsageAccount }> = ({ account }) => {
+  const muted = account.stale || !(account.session || account.weekly);
+  return (
+    <div className="border-t border-neutral-800/80 py-1.5 pl-2">
+      <p className="truncate text-[11px] text-neutral-400">{account.label ?? account.id}</p>
+      <Bar label="5h" window={account.session} muted={muted} />
+      <Bar label="Week" window={account.weekly} muted={muted} />
+    </div>
+  );
+};
+
+const AgentSection: React.FC<{ agent: AgentUsage; view: "aggregate" | "accounts" }> = ({ agent, view }) => {
+  const hasData = agent.session || agent.weekly || (agent.accounts && agent.accounts.length > 0);
   const isOld = minutesSince(agent.asOf, Date.now()) > STALE_MIN;
   const muted = !hasData || isOld;
+  const multi = (agent.accounts?.length ?? 0) > 0;
+  const showAccounts = multi && view === "accounts";
+
   return (
     <div className="px-3 py-2">
       <div className="flex items-center justify-between">
@@ -48,8 +62,19 @@ const AgentSection: React.FC<{ agent: AgentUsage }> = ({ agent }) => {
       ) : isOld ? (
         <p className="text-[11px] text-amber-400">Updated {formatAgo(agent.asOf, Date.now())}</p>
       ) : null}
-      <Bar label="Current session (5 hours)" window={agent.session} muted={muted} />
-      <Bar label="Current week" window={agent.weekly} muted={muted} />
+      {multi && (
+        <p className="mt-1 text-[11px] text-neutral-500">
+          {agent.aggregate?.accountCount ?? agent.accounts!.length} accounts ·{" "}
+          {view === "aggregate" ? "pooled" : "per account"}
+        </p>
+      )}
+      {!showAccounts && (
+        <>
+          <Bar label="Current session (5 hours)" window={agent.session} muted={muted} />
+          <Bar label="Current week" window={agent.weekly} muted={muted} />
+        </>
+      )}
+      {showAccounts && agent.accounts!.map((a) => <AccountRow key={a.id} account={a} />)}
     </div>
   );
 };
@@ -58,6 +83,8 @@ export const UsageWidget: React.FC = () => {
   const usage = useAppStore((s) => s.usage);
   const prefs = useAppStore((s) => s.appConfig.usage);
   const loadUsage = useAppStore((s) => s.loadUsage);
+  const updateAppConfig = useAppStore((s) => s.updateAppConfig);
+  const [localView, setLocalView] = useState<"aggregate" | "accounts" | null>(null);
 
   if (!prefs.enabled || !usage) return null;
   const agents = usage.agents.filter((a) => a.available && (a.id === "claude" ? prefs.claude : prefs.codex));
@@ -65,6 +92,9 @@ export const UsageWidget: React.FC = () => {
 
   const driver = pickDriver(agents, prefs.chip);
   if (!driver) return null;
+
+  const view = localView ?? prefs.view ?? "aggregate";
+  const hasMulti = agents.some((a) => (a.accounts?.length ?? 0) > 0);
 
   // Included agents that are enabled in prefs but aren't logged in (so not present
   // in the live snapshot) get a muted, actionable row in the panel.
@@ -107,8 +137,33 @@ export const UsageWidget: React.FC = () => {
           <RefreshCw size={13} />
         </button>
       </div>
+      {hasMulti && (
+        <div className="flex gap-1 px-3 pt-1">
+          {(
+            [
+              ["aggregate", "Aggregated"],
+              ["accounts", "Per account"]
+            ] as const
+          ).map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              className={`rounded px-2 py-0.5 text-[11px] ${
+                view === id ? "bg-neutral-700 text-neutral-100" : "text-neutral-500 hover:text-neutral-300"
+              }`}
+              onClick={(e) => {
+                e.stopPropagation();
+                setLocalView(id);
+                void updateAppConfig({ usage: { ...prefs, view: id } });
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
       {agents.map((a) => (
-        <AgentSection key={a.id} agent={a} />
+        <AgentSection key={a.id} agent={a} view={view} />
       ))}
       {missing.map((id) => (
         <div key={id} className="px-3 py-2 text-xs text-neutral-500">

@@ -114,7 +114,13 @@ const EMPTY_REGISTRY: RegistryResponse = {
   browsers: []
 };
 
-const DEFAULT_USAGE_PREFS: UsagePrefs = { enabled: true, claude: true, codex: true, chip: "busiest" };
+const DEFAULT_USAGE_PREFS: UsagePrefs = {
+  enabled: true,
+  claude: true,
+  codex: true,
+  chip: "busiest",
+  view: "aggregate"
+};
 
 /**
  * Stable empty pane-sizes object for the {@link usePaneSizes} fallback. A fresh
