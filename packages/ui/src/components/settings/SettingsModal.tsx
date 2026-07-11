@@ -572,6 +572,23 @@ const AppSettings: React.FC = () => {
   const connections = useAppStore((s) => s.connections);
   const activeId = useAppStore((s) => s.activeConnectionId);
   const active = connections.find((c) => c.id === activeId);
+  const [reloading, setReloading] = useState(false);
+
+  // Force the web client to pull the freshly deployed bundle. Pull-to-refresh is
+  // disabled app-wide (it was reloading the SPA on terminal scroll), so an
+  // installed PWA left open has no gesture to refresh itself. Nudge the service
+  // worker to re-check for a new version, then reload — navigations are
+  // network-first and assets are content-hashed, so this lands on the latest.
+  const reloadApp = async () => {
+    setReloading(true);
+    try {
+      const reg = await navigator.serviceWorker?.getRegistration();
+      await reg?.update();
+    } catch {
+      /* SW unsupported/blocked — the reload below still refreshes the shell */
+    }
+    window.location.reload();
+  };
 
   return (
     <div className="divide-y divide-neutral-800">
@@ -593,6 +610,16 @@ const AppSettings: React.FC = () => {
         </Field>
       )}
       {runtime === "web" && pushSupported() && <PushNotificationsField />}
+      {runtime === "web" && (
+        <Field
+          label="Reload app"
+          hint="Fetch the latest version. Use this if the app looks out of date after an update."
+        >
+          <Button size="sm" variant="outline" disabled={reloading} onClick={() => void reloadApp()}>
+            {reloading ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />} Reload
+          </Button>
+        </Field>
+      )}
       <Field label="Runtime">
         <span className="text-sm text-neutral-400">{runtime}</span>
       </Field>
