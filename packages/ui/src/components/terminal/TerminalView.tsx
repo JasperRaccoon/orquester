@@ -332,20 +332,46 @@ export const TerminalView: React.FC<{
     container.addEventListener("contextmenu", onContextMenu, true);
 
     // --- Touch drag-to-scroll (mobile) -------------------------------------
-    // The scrollable .xterm-viewport sits UNDER .xterm-screen, and xterm's
-    // touch→mouse shim turns a drag into a selection/mouse-report event — so a
-    // drag never scrolls natively. Translate a one-finger vertical drag into
-    // term.scrollLines(). Direction is content-follows-finger (finger down →
-    // older history). Touch events only fire on touch input, so desktop
-    // mouse/trackpad (xterm's own wheel handler) is unaffected.
+    // xterm's touch→mouse shim turns a one-finger drag into a selection /
+    // mouse-report event, so a drag never scrolls natively — and with nothing
+    // consuming the gesture the mobile browser runs its OWN pull-to-refresh /
+    // overscroll and reloads the page. Translate a one-finger vertical drag into
+    // scrolling ourselves and preventDefault so the browser can't. Direction is
+    // content-follows-finger (finger down → older history).
+    //
+    // Agents (claude/codex) run in the ALTERNATE screen, which has no xterm
+    // scrollback, so term.scrollLines() can't move it — instead forward the drag
+    // to the app as wheel events (it has mouse reporting on and scrolls its own
+    // transcript, exactly as a desktop mouse wheel does). The normal buffer
+    // (shells) scrolls xterm's own scrollback. Below the slop threshold the touch
+    // still passes through, so tap-to-focus, TUI button taps, mouse-report clicks
+    // and long-press selection keep working. Touch events only fire on touch
+    // input, so desktop mouse/trackpad (xterm's own wheel handler) is unaffected.
     let touchY: number | null = null; // last clientY of the active 1-finger drag
     let touchAccum = 0; // unconsumed vertical px delta
     let touchRowHeight = 0; // px per row, measured at touchstart
     let touchDragging = false; // crossed the slop threshold → we own the gesture
+    // Forward `lines` wheel notches to the app (alt-screen). Dispatching a real
+    // wheel event on xterm's screen element lets xterm encode it in whatever
+    // mouse protocol the app negotiated (SGR/normal), or fall back to its own
+    // alternate-scroll arrow keys — far more robust than emitting escapes here.
+    const forwardWheel = (lines: number) => {
+      const screen = container.querySelector<HTMLElement>(".xterm-screen") ?? container;
+      const step = lines > 0 ? 1 : -1; // deltaY sign: +down (newer) / −up (older)
+      for (let i = 0; i < Math.abs(lines); i += 1) {
+        screen.dispatchEvent(
+          new WheelEvent("wheel", {
+            deltaY: step,
+            deltaMode: 1, // DOM_DELTA_LINE → deltaY is in lines, not pixels
+            bubbles: true,
+            cancelable: true
+          })
+        );
+      }
+    };
     const onTouchStart = (event: TouchEvent) => {
-      // Ignore multi-touch (pinch) and full-screen TUIs (alt-screen has no
-      // scrollback — leave those touches to xterm).
-      if (event.touches.length !== 1 || term.buffer.active.type === "alternate") {
+      // Ignore multi-touch (pinch/zoom) — leave those to the browser/xterm.
+      if (event.touches.length !== 1) {
         touchY = null;
         return;
       }
@@ -369,11 +395,15 @@ export const TerminalView: React.FC<{
         return; // small move: let xterm have tap / long-press
       }
       touchDragging = true;
-      event.preventDefault(); // stop native scroll + xterm's touch→mouse select
+      event.preventDefault(); // stop native pull-to-refresh + xterm's touch→mouse select
       event.stopPropagation(); // stop the document-level shim (bubble phase)
       if (touchRowHeight > 0 && Math.abs(touchAccum) >= touchRowHeight) {
         const lines = Math.trunc(touchAccum / touchRowHeight);
-        term.scrollLines(lines);
+        if (term.buffer.active.type === "alternate") {
+          forwardWheel(lines);
+        } else {
+          term.scrollLines(lines);
+        }
         touchAccum -= lines * touchRowHeight;
       }
     };

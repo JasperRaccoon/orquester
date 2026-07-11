@@ -8,6 +8,16 @@ body,
   height: 100%;
 }
 
+/* Kill the mobile browser's pull-to-refresh / overscroll chaining: a downward
+   swipe to scroll a terminal was otherwise reloading the whole SPA. The app
+   shell is a fixed-height, overflow-hidden surface, so there is no legitimate
+   in-page overscroll to preserve. Web-only (this stylesheet is not loaded by the
+   Electron host). */
+html,
+body {
+  overscroll-behavior: none;
+}
+
 /* Standalone (installed PWA) safe-area padding so the iOS status bar / home
    indicator don't overlap the app chrome. env() insets are 0 in a normal
    browser tab, so this is inert outside standalone mode. */
