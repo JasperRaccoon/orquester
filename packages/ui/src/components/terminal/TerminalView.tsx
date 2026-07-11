@@ -351,6 +351,16 @@ export const TerminalView: React.FC<{
     let touchAccum = 0; // unconsumed vertical px delta
     let touchRowHeight = 0; // px per row, measured at touchstart
     let touchDragging = false; // crossed the slop threshold → we own the gesture
+    // A drag must not ALSO open the soft keyboard (the "scroll opens the
+    // keyboard" jank). xterm focuses its textarea from a `mousedown`, and on
+    // touch that mousedown is a browser *compatibility* event synthesized from
+    // the gesture. Our slop threshold can't cancel the FIRST touchmove (that
+    // would swallow jittery taps), so the browser still emits that mousedown
+    // after a slow drag → xterm focuses → keyboard. While/just-after a drag we
+    // open a short window during which those compat mouse events are swallowed
+    // (see swallowSyntheticMouse). A plain tap never opens the window, so it
+    // still focuses natively and brings up the keyboard.
+    let swallowMouseUntil = 0;
     // Forward `lines` wheel notches to the app (alt-screen). Dispatching a real
     // wheel event on xterm's screen element lets xterm encode it in whatever
     // mouse protocol the app negotiated (SGR/normal), or fall back to its own
@@ -395,6 +405,7 @@ export const TerminalView: React.FC<{
         return; // small move: let xterm have tap / long-press
       }
       touchDragging = true;
+      swallowMouseUntil = performance.now() + 350; // suppress this drag's compat mouse burst
       event.preventDefault(); // stop native pull-to-refresh + xterm's touch→mouse select
       event.stopPropagation(); // stop the document-level shim (bubble phase)
       if (touchRowHeight > 0 && Math.abs(touchAccum) >= touchRowHeight) {
@@ -411,15 +422,30 @@ export const TerminalView: React.FC<{
       if (touchDragging) {
         event.preventDefault(); // swallow the synthetic tap/click after a drag
         event.stopPropagation();
+        swallowMouseUntil = performance.now() + 350; // …and the trailing compat mouse burst
       }
       touchY = null;
       touchDragging = false;
+    };
+    // Swallow the compatibility mouse events a drag leaves behind, in the CAPTURE
+    // phase so they never reach xterm's mousedown→focus() handler (on `.xterm`, a
+    // descendant of this container). Only active in the brief post-drag window; a
+    // tap leaves it 0, so the tap stays fully native — it focuses and opens the
+    // keyboard. Desktop never arms the window (no touch drag), so real clicks pass.
+    const swallowSyntheticMouse = (event: MouseEvent) => {
+      if (performance.now() < swallowMouseUntil) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
     };
     // passive:false so preventDefault() works inside the move handler.
     container.addEventListener("touchstart", onTouchStart, { passive: false });
     container.addEventListener("touchmove", onTouchMove, { passive: false });
     container.addEventListener("touchend", onTouchEnd);
     container.addEventListener("touchcancel", onTouchEnd);
+    container.addEventListener("mousedown", swallowSyntheticMouse, true);
+    container.addEventListener("mouseup", swallowSyntheticMouse, true);
+    container.addEventListener("click", swallowSyntheticMouse, true);
 
     // --- File drop & paste → upload + path injection -----------------------
     // dragenter/dragover must preventDefault so the browser allows a drop here;
@@ -633,6 +659,9 @@ export const TerminalView: React.FC<{
       container.removeEventListener("touchmove", onTouchMove);
       container.removeEventListener("touchend", onTouchEnd);
       container.removeEventListener("touchcancel", onTouchEnd);
+      container.removeEventListener("mousedown", swallowSyntheticMouse, true);
+      container.removeEventListener("mouseup", swallowSyntheticMouse, true);
+      container.removeEventListener("click", swallowSyntheticMouse, true);
       container.removeEventListener("dragenter", onDragEnter);
       container.removeEventListener("dragover", onDragOver);
       container.removeEventListener("dragleave", onDragLeave);
