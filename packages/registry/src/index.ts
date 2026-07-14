@@ -18,6 +18,8 @@ export interface RegistryEntryDef {
   env?: Readonly<Record<string, string>>;
   versionFlag?: string;
   installCmd?: string;
+  /** Windows override for installCmd; the daemon picks this on win32. installCmd stays the POSIX form. */
+  installCmdWin32?: string;
   updateCmd?: string;
 }
 
@@ -49,8 +51,13 @@ export const REGISTRY = {
       // streamed PTY; this switches it to flicker-free diff rendering.
       env: { CLAUDE_CODE_NO_FLICKER: "1" },
       versionFlag: "--version",
-      installCmd: "npm install -g @anthropic-ai/claude-code",
-      updateCmd: "npm update -g @anthropic-ai/claude-code"
+      // Native installer (not npm -g): it manages ~/.local/bin/claude as a symlink into
+      // ~/.local/share/claude/versions/<v> and flips it atomically on update, so a running
+      // agent's binary is never rewritten in place. npm -g rewrites the binary in place, which
+      // races Claude Code's own "binary changed -> self-restart" and dies with EACCES/ENOENT.
+      installCmd: "curl -fsSL https://claude.ai/install.sh | bash",
+      installCmdWin32: 'powershell -NoProfile -Command "irm https://claude.ai/install.ps1 | iex"',
+      updateCmd: "claude update"
     },
     {
       id: "codex",

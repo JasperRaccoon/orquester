@@ -18,7 +18,12 @@ ExecStartPre=/usr/bin/mkdir -p /var/lib/orquester/tmp
 # ENOENT". Point npm at a prefix inside ReadWritePaths and put its bin/ on PATH
 # so the daemon can also resolve and launch the agents it installs.
 Environment=NPM_CONFIG_PREFIX=/var/lib/orquester/.npm-global
-Environment=PATH=/var/lib/orquester/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# ~/.local/bin first: Claude Code's native installer (install.sh / `claude update`) manages a
+# symlink there into ~/.local/share/claude/versions/<v>, flipped atomically on update — so a
+# running agent's binary is never rewritten in place. (npm -g rewrites the binary in place, which
+# races the agent's own "binary changed → self-restart" and dies with EACCES/ENOENT mid-swap.)
+# .npm-global/bin still follows for the other npm-installed agents (codex, opencode, ...).
+Environment=PATH=/var/lib/orquester/.local/bin:/var/lib/orquester/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStartPre=/usr/bin/mkdir -p /var/lib/orquester/.npm-global/bin
 # This monorepo is noEmit (TS is run via tsx, same as `pnpm dev:daemon`); there is
 # no standalone dist build, so run the daemon through tsx as a single node process.

@@ -84,7 +84,8 @@ function materialize(list: readonly RegistryEntryDef[]): RegistryDef[] {
     if (s.launchViaShell) d.launchViaShell = true;
     if (s.env && Object.keys(s.env).length > 0) d.env = { ...s.env };
     if (s.versionFlag) d.versionFlag = s.versionFlag;
-    if (s.installCmd) d.installCmd = s.installCmd;
+    const installCmd = process.platform === "win32" && s.installCmdWin32 ? s.installCmdWin32 : s.installCmd;
+    if (installCmd) d.installCmd = installCmd;
     if (s.updateCmd) d.updateCmd = s.updateCmd;
     return d;
   });
