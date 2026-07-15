@@ -75,7 +75,7 @@ export const MainView: React.FC = () => {
   const gridTracks = useGridTracks();
   const gridRef = React.useRef<HTMLDivElement | null>(null);
   const activateTab = useAppStore((s) => s.activateTab);
-  const closeTab = useAppStore((s) => s.closeTab);
+  const requestCloseTab = useAppStore((s) => s.requestCloseTab);
 
   // Grid is a desktop-only layout; a persisted "grid" falls back to tab view on
   // narrow viewports (the toggle isn't shown there either). A workspace context
@@ -290,7 +290,7 @@ export const MainView: React.FC = () => {
                   aria-label="Close tab"
                   onClick={(event) => {
                     event.stopPropagation();
-                    void closeTab(tab.id);
+                    void requestCloseTab(tab.id);
                   }}
                   className="flex h-4 w-4 items-center justify-center rounded text-neutral-500 hover:bg-neutral-700 hover:text-neutral-100"
                 >

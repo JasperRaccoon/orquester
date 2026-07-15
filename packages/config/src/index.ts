@@ -310,6 +310,8 @@ export const appConfigSchema = z.object({
   useTitlebar: z.boolean().default(true),
   /** Desktop: keep the daemon running in a tray when the window is closed. */
   runInBackground: z.boolean().default(false),
+  /** Confirm before closing a live terminal/agent session tab (it ends the session). */
+  confirmCloseSession: z.boolean().default(true),
   /** Top-bar agent-usage widget preferences. */
   usage: usagePrefsSchema.default({})
 });

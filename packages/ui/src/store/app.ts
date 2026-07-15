@@ -321,6 +321,7 @@ let homeApi: ApiClient | null = null;
 export interface UiAppConfig {
   useTitlebar: boolean;
   runInBackground: boolean;
+  confirmCloseSession: boolean;
   usage: UsagePrefs;
 }
 
@@ -520,6 +521,8 @@ export interface AppState {
   // app config + settings modal
   appConfig: UiAppConfig;
   settingsOpen: boolean;
+  /** Tab id awaiting a close-confirm prompt (null = no prompt open). */
+  pendingCloseTabId: string | null;
   /** Mobile off-canvas sidebar drawer. */
   sidebarDrawerOpen: boolean;
 
@@ -633,6 +636,10 @@ export interface AppState {
   openFileBrowser: () => void;
   openGit: () => void;
   closeTab: (id: string) => Promise<void>;
+  /** Guarded close: opens a confirm for live sessions (returns true), else closes now. */
+  requestCloseTab: (id: string) => boolean;
+  confirmCloseTab: () => void;
+  cancelCloseTab: () => void;
   activateTab: (id: string) => void;
   setViewMode: (mode: ViewMode) => void;
   setTerminalFontSize: (size: number) => void;
@@ -687,8 +694,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   lockedUntil: null,
   connections: [],
   activeConnectionId: null,
-  appConfig: { useTitlebar: false, runInBackground: false, usage: DEFAULT_USAGE_PREFS },
+  appConfig: { useTitlebar: false, runInBackground: false, confirmCloseSession: true, usage: DEFAULT_USAGE_PREFS },
   settingsOpen: false,
+  pendingCloseTabId: null,
   sidebarDrawerOpen: false,
   authPrompt: null,
   authSalt: null,
@@ -1019,7 +1027,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({
       connections: [nextSetup.localConnection],
       activeConnectionId: nextSetup.localConnection.id,
-      appConfig: { useTitlebar: nextSetup.defaultUseTitlebar, runInBackground: false, usage: DEFAULT_USAGE_PREFS },
+      appConfig: {
+        useTitlebar: nextSetup.defaultUseTitlebar,
+        runInBackground: false,
+        confirmCloseSession: true,
+        usage: DEFAULT_USAGE_PREFS
+      },
       api: homeApi
     });
     await get().connect();
@@ -1036,6 +1049,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           appConfig: {
             useTitlebar: config.useTitlebar ?? state.appConfig.useTitlebar,
             runInBackground: config.runInBackground ?? state.appConfig.runInBackground,
+            confirmCloseSession: config.confirmCloseSession ?? state.appConfig.confirmCloseSession,
             usage: config.usage ?? state.appConfig.usage
           }
         }));
@@ -1478,6 +1492,28 @@ export const useAppStore = create<AppState>((set, get) => ({
       await api?.closeSession(id).catch(() => undefined);
     }
   },
+
+  requestCloseTab: (id) => {
+    const state = get();
+    const isSession = state.sessions.some((s) => s.id === id);
+    // Only live sessions are worth confirming — closing one kills the process.
+    if (isSession && state.appConfig.confirmCloseSession) {
+      set({ pendingCloseTabId: id });
+      return true;
+    }
+    void state.closeTab(id);
+    return false;
+  },
+
+  confirmCloseTab: () => {
+    const id = get().pendingCloseTabId;
+    set({ pendingCloseTabId: null });
+    if (id) {
+      void get().closeTab(id);
+    }
+  },
+
+  cancelCloseTab: () => set({ pendingCloseTabId: null }),
 
   activateTab: (id) =>
     set((state) => {

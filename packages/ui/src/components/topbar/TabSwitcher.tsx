@@ -55,7 +55,7 @@ export const TabSwitcher: React.FC = () => {
   const tabs = useProjectTabs();
   const activeId = useActiveTabId();
   const activateTab = useAppStore((s) => s.activateTab);
-  const closeTab = useAppStore((s) => s.closeTab);
+  const requestCloseTab = useAppStore((s) => s.requestCloseTab);
   const renameTab = useAppStore((s) => s.renameTab);
   const renameTodo = useAppStore((s) => s.renameTodo);
   const deleteTodo = useAppStore((s) => s.deleteTodo);
@@ -161,7 +161,11 @@ export const TabSwitcher: React.FC = () => {
               <button
                 type="button"
                 aria-label="Close tab"
-                onClick={() => void closeTab(tab.id)}
+                onClick={() => {
+                  // ConfirmDialog (z-100) renders below this sheet (z-110), so
+                  // drop the sheet when a confirm opens to surface it.
+                  if (requestCloseTab(tab.id)) close();
+                }}
                 className="flex h-9 w-9 shrink-0 items-center justify-center rounded text-neutral-400 hover:bg-neutral-800 hover:text-red-300"
               >
                 <X size={16} />

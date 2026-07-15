@@ -598,6 +598,15 @@ const AppSettings: React.FC = () => {
           onChange={(checked) => void updateAppConfig({ useTitlebar: checked })}
         />
       </Field>
+      <Field
+        label="Confirm before closing a session"
+        hint="Ask before closing an agent or terminal tab, since it ends the running session."
+      >
+        <Switch
+          checked={appConfig.confirmCloseSession}
+          onChange={(checked) => void updateAppConfig({ confirmCloseSession: checked })}
+        />
+      </Field>
       {runtime === "desktop" && (
         <Field
           label="Run in background"

@@ -46,7 +46,7 @@ export const TabStrip: React.FC = () => {
   const tabs = useProjectTabs();
   const activeTabId = useActiveTabId();
   const activateTab = useAppStore((s) => s.activateTab);
-  const closeTab = useAppStore((s) => s.closeTab);
+  const requestCloseTab = useAppStore((s) => s.requestCloseTab);
   const renameTab = useAppStore((s) => s.renameTab);
   const renameTodo = useAppStore((s) => s.renameTodo);
   const deleteTodo = useAppStore((s) => s.deleteTodo);
@@ -82,7 +82,7 @@ export const TabStrip: React.FC = () => {
     if (tab.type === "session") {
       return [
         { label: "Rename", icon: <Pencil size={13} />, onClick: () => setEditingId(tab.id) },
-        { label: "Close", icon: <X size={13} />, danger: true, onClick: () => void closeTab(tab.id) }
+        { label: "Close", icon: <X size={13} />, danger: true, onClick: () => void requestCloseTab(tab.id) }
       ];
     }
     if (tab.type === "todo") {
@@ -94,10 +94,10 @@ export const TabStrip: React.FC = () => {
           danger: true,
           onClick: () => setConfirmDelete({ todoId: tab.todoId, name: tab.title })
         },
-        { label: "Close", icon: <X size={13} />, onClick: () => void closeTab(tab.id) }
+        { label: "Close", icon: <X size={13} />, onClick: () => void requestCloseTab(tab.id) }
       ];
     }
-    return [{ label: "Close", icon: <X size={13} />, danger: true, onClick: () => void closeTab(tab.id) }];
+    return [{ label: "Close", icon: <X size={13} />, danger: true, onClick: () => void requestCloseTab(tab.id) }];
   };
 
   return (
@@ -183,7 +183,7 @@ export const TabStrip: React.FC = () => {
               aria-label="Close tab"
               onClick={(event) => {
                 event.stopPropagation();
-                void closeTab(tab.id);
+                void requestCloseTab(tab.id);
               }}
               className="flex h-4 w-4 items-center justify-center rounded text-neutral-500 opacity-0 transition-opacity hover:bg-neutral-700 hover:text-neutral-100 group-hover:opacity-100"
             >
