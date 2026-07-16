@@ -18,6 +18,17 @@ import { promisify } from "node:util";
 
 const run = promisify(execFile);
 
+type GitRunner = (
+  file: string,
+  args: string[],
+  options: {
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+    maxBuffer: number;
+    timeout?: number;
+  }
+) => Promise<{ stdout: string; stderr: string }>;
+
 /** Error carrying the HTTP status the route should reply with. */
 export class GitError extends Error {
   constructor(
@@ -49,6 +60,19 @@ export class GitError extends Error {
 export class GitService {
   /** Pinned HOME — the one `~` the daemon (and its terminals) use. */
   private readonly home = process.env.HOME ?? homedir();
+  /**
+   * Tail promise for each repository's mutation queue. Git protects individual
+   * files with lockfiles, but concurrent fetches can both read the same old ref
+   * and then race its compare-and-swap update. Keeping this in the shared daemon
+   * service serializes mutations across transports, browser tabs, and clients.
+   */
+  private readonly mutationTails = new Map<string, Promise<void>>();
+
+  private readonly runner: GitRunner;
+
+  constructor(options?: { runner?: GitRunner }) {
+    this.runner = options?.runner ?? (run as GitRunner);
+  }
 
   // --- Core runner ---------------------------------------------------------
 
@@ -71,7 +95,7 @@ export class GitService {
       ...(opts?.remote ? { GIT_TERMINAL_PROMPT: "0" } : {})
     };
     try {
-      const { stdout, stderr } = await run("git", args, {
+      const { stdout, stderr } = await this.runner("git", args, {
         cwd,
         env,
         maxBuffer: 64 * 1024 * 1024,
@@ -85,6 +109,33 @@ export class GitService {
       }
       throw new GitError(500, errText(error));
     }
+  }
+
+  /** Queue one mutation behind earlier mutations for the same canonical cwd. */
+  private async mutate<T>(cwd: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.mutationTails.get(cwd) ?? Promise.resolve();
+    const result = previous.catch(() => undefined).then(operation);
+    const tail = result.then(
+      () => undefined,
+      () => undefined
+    );
+    this.mutationTails.set(cwd, tail);
+
+    try {
+      return await result;
+    } finally {
+      if (this.mutationTails.get(cwd) === tail) {
+        this.mutationTails.delete(cwd);
+      }
+    }
+  }
+
+  /** Fetch every remote while already inside this repository's mutation queue. */
+  private fetchAll(cwd: string): Promise<{ stdout: string; stderr: string; code: number }> {
+    return this.exec(cwd, ["fetch", "--all", "--prune"], {
+      remote: true,
+      timeout: 60_000
+    });
   }
 
   // --- Read --------------------------------------------------------------
@@ -440,17 +491,21 @@ export class GitService {
 
   /** Stage files (or everything when `files` is empty). */
   async stage(cwd: string, files: string[]): Promise<GitOpResult> {
-    const args = files.length > 0 ? ["add", "--", ...files] : ["add", "-A"];
-    const { stdout, stderr } = await this.exec(cwd, args);
-    return { ok: true, output: combine(stdout, stderr) };
+    return this.mutate(cwd, async () => {
+      const args = files.length > 0 ? ["add", "--", ...files] : ["add", "-A"];
+      const { stdout, stderr } = await this.exec(cwd, args);
+      return { ok: true, output: combine(stdout, stderr) };
+    });
   }
 
   /** Unstage files (or the whole index when `files` is empty). */
   async unstage(cwd: string, files: string[]): Promise<GitOpResult> {
-    const args =
-      files.length > 0 ? ["restore", "--staged", "--", ...files] : ["reset", "-q", "HEAD", "--"];
-    const { stdout, stderr } = await this.exec(cwd, args);
-    return { ok: true, output: combine(stdout, stderr) };
+    return this.mutate(cwd, async () => {
+      const args =
+        files.length > 0 ? ["restore", "--staged", "--", ...files] : ["reset", "-q", "HEAD", "--"];
+      const { stdout, stderr } = await this.exec(cwd, args);
+      return { ok: true, output: combine(stdout, stderr) };
+    });
   }
 
   /**
@@ -463,12 +518,14 @@ export class GitService {
     if (!trimmed) {
       throw new GitError(400, "A commit summary is required.");
     }
-    const args = ["commit", "-m", trimmed];
-    if (description && description.trim()) {
-      args.push("-m", description);
-    }
-    const { stdout, stderr } = await this.exec(cwd, args);
-    return { ok: true, output: combine(stdout, stderr) };
+    return this.mutate(cwd, async () => {
+      const args = ["commit", "-m", trimmed];
+      if (description && description.trim()) {
+        args.push("-m", description);
+      }
+      const { stdout, stderr } = await this.exec(cwd, args);
+      return { ok: true, output: combine(stdout, stderr) };
+    });
   }
 
   /**
@@ -480,39 +537,39 @@ export class GitService {
     if (files.length === 0) {
       throw new GitError(400, "No files to discard.");
     }
-    const restore = await this.exec(cwd, ["restore", "--", ...files], { allowFail: true });
-    const clean = await this.exec(cwd, ["clean", "-fd", "--", ...files], { allowFail: true });
-    return { ok: true, output: combine(restore.stdout, restore.stderr, clean.stdout, clean.stderr) };
+    return this.mutate(cwd, async () => {
+      const restore = await this.exec(cwd, ["restore", "--", ...files], { allowFail: true });
+      const clean = await this.exec(cwd, ["clean", "-fd", "--", ...files], { allowFail: true });
+      return { ok: true, output: combine(restore.stdout, restore.stderr, clean.stdout, clean.stderr) };
+    });
   }
 
   /** Fetch all remotes, pruning stale tracking refs. */
   async fetch(cwd: string): Promise<GitOpResult> {
-    const { stdout, stderr } = await this.exec(cwd, ["fetch", "--all", "--prune"], {
-      remote: true,
-      timeout: 60_000
+    return this.mutate(cwd, async () => {
+      const { stdout, stderr } = await this.fetchAll(cwd);
+      return { ok: true, output: combine(stdout, stderr) };
     });
-    return { ok: true, output: combine(stdout, stderr) };
   }
 
   /**
-   * Pull the current branch. `--no-rebase` pins the reconciliation strategy to
-   * merge so a *divergent* branch (local commits the remote lacks AND remote
-   * commits we lack) fast-forwards when it can and otherwise records a merge
-   * commit — deterministically, never opening an editor (`--no-edit`). Without
-   * it, git ≥ 2.27 aborts a divergent pull with "Need to specify how to
-   * reconcile divergent branches" unless `pull.rebase` happens to be configured;
-   * forcing merge here is the GitHub-Desktop default and the one behavior the
-   * Pull button can promise every time. A merge that hits a conflict exits
-   * non-zero (→ GitError → the UI's error banner) and leaves the conflicted
-   * files in the working tree, where the Changes panel lists them to resolve +
-   * commit — which completes the merge.
+   * Pull the current branch as two explicit steps in one mutation slot: fetch
+   * every remote (pruning stale refs), then merge the current branch's upstream.
+   * Using `merge` after the explicit fetch avoids `git pull` performing a second,
+   * redundant fetch. This pins reconciliation to GitHub-Desktop-style merge:
+   * fast-forward when possible, otherwise create a merge commit, never opening
+   * an editor (`--no-edit`). A conflict exits non-zero (→ GitError → the UI's
+   * error banner) and remains in the working tree to resolve and commit.
    */
   async pull(cwd: string): Promise<GitOpResult> {
-    const { stdout, stderr } = await this.exec(cwd, ["pull", "--no-edit", "--no-rebase"], {
-      remote: true,
-      timeout: 60_000
+    return this.mutate(cwd, async () => {
+      const fetched = await this.fetchAll(cwd);
+      const merged = await this.exec(cwd, ["merge", "--no-edit", "@{upstream}"]);
+      return {
+        ok: true,
+        output: combine(fetched.stdout, fetched.stderr, merged.stdout, merged.stderr)
+      };
     });
-    return { ok: true, output: combine(stdout, stderr) };
   }
 
   /**
@@ -520,8 +577,10 @@ export class GitService {
    * helpful message; we surface that stderr rather than auto-setting upstream.
    */
   async push(cwd: string): Promise<GitOpResult> {
-    const { stdout, stderr } = await this.exec(cwd, ["push"], { remote: true, timeout: 60_000 });
-    return { ok: true, output: combine(stdout, stderr) };
+    return this.mutate(cwd, async () => {
+      const { stdout, stderr } = await this.exec(cwd, ["push"], { remote: true, timeout: 60_000 });
+      return { ok: true, output: combine(stdout, stderr) };
+    });
   }
 
   /** Switch branches. Rejects an empty branch (400). */
@@ -529,8 +588,10 @@ export class GitService {
     if (!branch?.trim()) {
       throw new GitError(400, "A branch name is required.");
     }
-    const { stdout, stderr } = await this.exec(cwd, ["checkout", branch]);
-    return { ok: true, output: combine(stdout, stderr) };
+    return this.mutate(cwd, async () => {
+      const { stdout, stderr } = await this.exec(cwd, ["checkout", branch]);
+      return { ok: true, output: combine(stdout, stderr) };
+    });
   }
 }
 
