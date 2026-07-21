@@ -56,6 +56,7 @@ interface Tab {
   errorMessage?: string;
   page: Page | null;
   cdp: CDPSession | null;
+  ensuring?: Promise<void>;
   sinks: Set<BrowserSink>;
   streaming: boolean;
   picking: boolean;
@@ -342,8 +343,18 @@ export class BrowserManager {
     }
   }
 
-  private async ensurePage(tab: Tab): Promise<void> {
-    if (tab.page && !tab.page.isClosed()) return;
+  private ensurePage(tab: Tab): Promise<void> {
+    if (tab.page && !tab.page.isClosed()) return Promise.resolve();
+    // Memoize in-flight creation so two concurrent subscribe/navigate/pick
+    // callers can't each pass the null-page guard and create two CDP pages
+    // (orphaning one page + doubling every screencast frame).
+    if (!tab.ensuring) {
+      tab.ensuring = this.createPage(tab).finally(() => { tab.ensuring = undefined; });
+    }
+    return tab.ensuring;
+  }
+
+  private async createPage(tab: Tab): Promise<void> {
     tab.status = "starting";
     this.emitUpdated(tab);
     const chrome = await this.chromeFor(tab.record.projectPath);
@@ -414,6 +425,13 @@ export class BrowserManager {
     // Ignore unsolicited/forged binding calls: a hostile page can invoke
     // window.__orquesterPick(...) at any time, but only an armed pick is real.
     if (!tab.picking) return;
+    // A hostile page can call window.__orquesterPick(<huge string>) directly,
+    // bypassing the budgeted in-page picker script; reject oversized payloads
+    // before buffering/parsing them. A legitimate payload is a few KB.
+    if (typeof raw !== "string" || raw.length > 256 * 1024) {
+      tab.picking = false;
+      return;
+    }
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
