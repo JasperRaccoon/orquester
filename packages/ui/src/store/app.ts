@@ -1110,6 +1110,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       workspaces: [],
       projects: [],
       sessions: [],
+      browsers: [],
       accounts: []
     });
     await get().connect();
