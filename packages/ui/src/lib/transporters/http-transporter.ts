@@ -9,6 +9,7 @@ import {
 } from "../transporter";
 import { FetchHttpClient, type HttpClient } from "../http-client";
 import { getSessionChannel } from "./ws-session-channel";
+import { getBrowserChannel, type WsBrowserChannel } from "./ws-browser-channel";
 
 export interface HttpTransporterOptions {
   baseUrl: string;
@@ -137,5 +138,14 @@ export class HttpTransporter implements Transporter {
    */
   sessionChannel(): SessionChannel {
     return getSessionChannel(this.baseUrl, this.credential);
+  }
+
+  /**
+   * Browser-tab screencast + control multiplexed over a single WebSocket
+   * (shared per origin), a sibling of {@link sessionChannel} kept separate so
+   * the terminals' text-only path is untouched.
+   */
+  browserChannel(): WsBrowserChannel {
+    return getBrowserChannel(this.baseUrl, this.credential);
   }
 }

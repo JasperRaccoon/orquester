@@ -86,6 +86,12 @@ export interface Transporter {
    * desktop unix socket) omit it and fall back to {@link openStream}/request.
    */
   sessionChannel?(): SessionChannel;
+  /**
+   * Optional multiplexed browser-tab channel (screencast + control). Present on
+   * HTTP transports only; the desktop unix socket omits it (v1 — browser tabs
+   * are HTTP-transport-only, which includes desktop-remote).
+   */
+  browserChannel?(): import("./transporters/ws-browser-channel").WsBrowserChannel;
 }
 
 /** Build a querystring (with leading `?`) from a query object, or "" if empty. */

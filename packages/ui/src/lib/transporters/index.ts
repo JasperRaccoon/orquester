@@ -4,6 +4,12 @@ import type { HttpClient } from "../http-client";
 import { HttpTransporter } from "./http-transporter";
 
 export { HttpTransporter, type HttpTransporterOptions } from "./http-transporter";
+export {
+  WsBrowserChannel,
+  getBrowserChannel,
+  wakeBrowserChannels,
+  type BrowserStreamHandlers
+} from "./ws-browser-channel";
 
 export interface CreateTransporterOptions {
   /** Custom HTTP client (e.g. the desktop Node client). Web defaults to fetch. */

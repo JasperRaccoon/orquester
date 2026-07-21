@@ -3,7 +3,10 @@ import type {
   AccountTestResult,
   AgentSummary,
   AuthInfoResponse,
+  BrowserSummary,
+  BrowserSuggestionsResponse,
   CreateAccountRequest,
+  CreateBrowserRequest,
   CreateProjectRequest,
   CreateSessionRequest,
   CreateTodoRequest,
@@ -62,6 +65,7 @@ import type {
   TransportMethod,
   TransportRequest
 } from "./transporter";
+import type { WsBrowserChannel } from "./transporters/ws-browser-channel";
 
 export interface ApiRequestOptions {
   query?: TransportRequest["query"];
@@ -627,6 +631,32 @@ export class ApiClient {
     return this.channel
       ? this.channel.openOutput(id, handlers)
       : this.transporter.openStream(`/api/sessions/${encodeURIComponent(id)}/output`, handlers);
+  }
+
+  // Browsers (server-side headless Chromium tabs)
+
+  listBrowsers(projectPath?: string, signal?: AbortSignal): Promise<BrowserSummary[]> {
+    return this.send("GET", "/api/browsers", {
+      query: projectPath ? { projectPath } : undefined,
+      signal
+    });
+  }
+
+  createBrowser(body: CreateBrowserRequest): Promise<BrowserSummary> {
+    return this.send("POST", "/api/browsers", { body });
+  }
+
+  closeBrowser(id: string): Promise<void> {
+    return this.send("DELETE", `/api/browsers/${encodeURIComponent(id)}`);
+  }
+
+  browserSuggestions(projectPath: string, signal?: AbortSignal): Promise<BrowserSuggestionsResponse> {
+    return this.send("GET", "/api/browsers/suggestions", { query: { projectPath }, signal });
+  }
+
+  /** Undefined on transports without browser streaming (desktop unix socket). */
+  browserChannel(): WsBrowserChannel | undefined {
+    return this.transporter.browserChannel?.();
   }
 }
 
