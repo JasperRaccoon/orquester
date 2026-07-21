@@ -60,6 +60,9 @@ interface Tab {
   sinks: Set<BrowserSink>;
   streaming: boolean;
   picking: boolean;
+  /** Identifier of the armed picker's new-document script (survives in-page
+   *  navigation); present only while picking, removed on disarm/pick. */
+  pickScriptId?: string;
   loading: boolean;
 }
 
@@ -217,8 +220,29 @@ export class BrowserManager {
     const tab = this.mustGet(id);
     await this.ensurePage(tab);
     tab.picking = on;
-    await tab.cdp!.send("Runtime.evaluate", { expression: on ? PICKER_SCRIPT : "0" });
-    await tab.cdp!.send("Runtime.evaluate", { expression: armPickerExpression(on) });
+    if (on) {
+      // Keep the picker armed across in-page navigations: install it as a
+      // new-document script too (removed again on disarm or after a pick).
+      if (!tab.pickScriptId) {
+        const installed = await tab.page!.evaluateOnNewDocument(
+          `${PICKER_SCRIPT}\n;${armPickerExpression(true)};`
+        );
+        tab.pickScriptId = installed.identifier;
+      }
+      await tab.cdp!.send("Runtime.evaluate", { expression: PICKER_SCRIPT });
+      await tab.cdp!.send("Runtime.evaluate", { expression: armPickerExpression(true) });
+    } else {
+      await this.removePickScript(tab);
+      await tab.cdp!.send("Runtime.evaluate", { expression: armPickerExpression(false) });
+    }
+  }
+
+  /** Best-effort removal of the armed picker's new-document script. */
+  private async removePickScript(tab: Tab): Promise<void> {
+    const identifier = tab.pickScriptId;
+    if (!identifier) return;
+    tab.pickScriptId = undefined;
+    await tab.page?.removeScriptToEvaluateOnNewDocument(identifier).catch(() => undefined);
   }
 
   dispatchPointer(id: string, kind: "move" | "down" | "up", x: number, y: number,
@@ -382,6 +406,7 @@ export class BrowserManager {
     tab.page = page;
     tab.cdp = await page.createCDPSession();
     tab.streaming = false;
+    tab.pickScriptId = undefined; // stale identifier from a previous page, if any
     await this.applyViewport(tab);
     await tab.cdp.send("Runtime.enable");
     await tab.cdp.send("Runtime.addBinding", { name: "__orquesterPick" });
@@ -449,6 +474,7 @@ export class BrowserManager {
     // before buffering/parsing them. A legitimate payload is a few KB.
     if (typeof raw !== "string" || raw.length > 256 * 1024) {
       tab.picking = false;
+      void this.removePickScript(tab);
       return;
     }
     let parsed: unknown;
@@ -461,6 +487,7 @@ export class BrowserManager {
     if (!payload) return;
     payload.page.viewportMode = tab.record.viewportMode;
     tab.picking = false;
+    void this.removePickScript(tab);
     try {
       const r = payload.target.rectViewport;
       if (r.width > 0 && r.height > 0 && tab.cdp) {
