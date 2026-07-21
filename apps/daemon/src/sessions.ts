@@ -1,4 +1,4 @@
-import type { CreateSessionRequest, RegistryEntry, SessionActivity, SessionSummary } from "@orquester/api";
+import type { AgentEventRequest, CreateSessionRequest, RegistryEntry, SessionActivity, SessionSummary } from "@orquester/api";
 import { type SessionRecord, type SessionsConfig, createDefaultSessionsConfig, parseSessionsConfig } from "@orquester/config";
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
@@ -19,6 +19,7 @@ import {
 } from "./tmux";
 import { renderText } from "./mcp/text.ts";
 import { ActivityTracker, type ActivityCause } from "./ansi-activity.ts";
+import { classifyAgentEvent } from "./agent-status.ts";
 
 /**
  * Small live ring kept only for HOT replay between a session's creation and the
@@ -59,6 +60,8 @@ export interface ISessionManager {
   /** Synchronous hot-ring snapshot (kept for callers that can't await). */
   buffer(id: string): string;
   activity(id: string): SessionActivity | undefined;
+  /** Apply a managed-hook event to a session's tracker. False = unknown session. */
+  agentEvent(id: string, req: AgentEventRequest): boolean;
   input(id: string, data: string): void;
   resize(id: string, cols: number, rows: number): void;
   rename(id: string, title: string): SessionSummary | undefined;
@@ -363,6 +366,7 @@ export class SessionManager implements ISessionManager {
       session.buffer = (session.buffer + data).slice(-MAX_BUFFER);
       session.tracker.noteOutput(data);
       session.emitter.emit("output", data);
+      this.lifecycle.emit("output", { id, data });
     });
     pty.onExit(({ exitCode }) => {
       // If close()/closeAll() already removed (or replaced) this session, the PTY
@@ -843,6 +847,7 @@ export class LocalSessionManager implements ISessionManager {
       session.buffer = (session.buffer + data).slice(-MAX_BUFFER);
       session.tracker.noteOutput(data);
       session.emitter.emit("output", data);
+      this.lifecycle.emit("output", { id, data });
     });
     pty.onExit(({ exitCode }) => {
       // If close()/closeAll() already removed (or replaced) this session, the PTY
