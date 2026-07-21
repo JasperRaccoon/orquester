@@ -57,6 +57,7 @@ import type {
   WorkspaceSummary
 } from "@orquester/api";
 import { RegistryService } from "./registry";
+import { AgentHooks } from "./agent-hooks";
 import { type ISessionManager, SessionError, createSessionManager } from "./sessions";
 import type { ActivityCause } from "./ansi-activity";
 import { TodoError, TodoListManager } from "./todos";
@@ -231,6 +232,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   const registry = new RegistryService(resolved.daemonDir);
   const tmux = new Tmux(resolved.tmuxSocket);
   const teamclaude = new TeamClaudeService(teamclaudeConfigPath(paths.baseDir));
+  const agentHooks = new AgentHooks(resolved.daemonDir, resolved.vars.userhome);
   const sessions = createSessionManager(registry, tmux, resolved.sessionsIndexFile, {
     resolveExtraEnv: async (entry) => {
       if (entry.id !== "claude" || entry.kind !== "agent") return null;
@@ -240,7 +242,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
       } catch (error) {
         throw new SessionError(error instanceof Error ? error.message : String(error));
       }
-    }
+    },
+    daemonSockPath: paths.socketPath,
+    onAgentLaunch: (entry) => agentHooks.ensureForEntry(entry.id)
   });
   const accounts = new AccountsService(resolved.accountsFile, resolved.keysDir);
   const git = new GitService();
