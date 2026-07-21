@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
-import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 interface Logger {
@@ -36,10 +36,18 @@ exit 0
 
 async function writeFileAtomic(path: string, content: string, mode: number): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  const tmp = `${path}.tmp`;
-  await writeFile(tmp, content, { encoding: "utf8", mode });
-  await chmod(tmp, mode).catch(() => undefined);
-  await rename(tmp, path);
+  // Unique temp name per write: concurrent installers share agent-hook.sh, so a
+  // fixed `${path}.tmp` would collide — the first rename wins and unlinks the
+  // tmp, and the loser's rename throws ENOENT (aborting its per-agent config).
+  const tmp = `${path}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(tmp, content, { encoding: "utf8", mode });
+    await chmod(tmp, mode).catch(() => undefined);
+    await rename(tmp, path);
+  } catch (error) {
+    await rm(tmp, { force: true }).catch(() => undefined);
+    throw error;
+  }
 }
 
 /**
