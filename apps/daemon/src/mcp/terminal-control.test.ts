@@ -141,7 +141,7 @@ test("listTabs projects activity fields for running tabs and omits them for exit
   const out = make(f).listTabs({ workspace: "w", project: "p" });
 
   assert.equal(out[0].activity, "working");
-  assert.equal(out[0].attention, true);
+  assert.equal(out[0].attention, "bell");
   assert.equal(out[0].lastOutputAt, new Date(recent).toISOString());
   assert.equal("activity" in out[1], false);
   assert.equal("attention" in out[1], false);
@@ -159,7 +159,7 @@ test("readTerminal reports idle activity from the tracker state", async () => {
 
   assert.equal(r.text, "quiet");
   assert.equal(r.activity, "idle");
-  assert.equal(r.attention, false);
+  assert.equal(r.attention, null);
   assert.equal(r.lastOutputAt, iso);
 });
 
@@ -298,7 +298,7 @@ test("waitForAttention returns immediately for already attention-flagged tabs", 
     title: "Claude",
     status: "running",
     activity: "working",
-    attention: true,
+    attention: "bell",
     lastOutputAt: recentIso,
   }]);
 });
@@ -332,7 +332,7 @@ test("waitForAttention waits for a watched bell and ignores other project and ne
   assert.equal(r.tabs[0].title, "Shell");
   assert.equal(r.tabs[0].status, "running");
   assert.equal(r.tabs[0].activity, "working");
-  assert.equal(r.tabs[0].attention, true);
+  assert.equal(r.tabs[0].attention, "bell");
   assert.equal(typeof r.tabs[0].lastOutputAt, "string");
 });
 

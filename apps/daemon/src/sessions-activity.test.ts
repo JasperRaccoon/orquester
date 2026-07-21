@@ -3,7 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { RegistryEntry } from "@orquester/api";
+import type { RegistryEntry, SessionActivity } from "@orquester/api";
+import type { ActivityCause } from "./ansi-activity.ts";
 import type { RegistryService } from "./registry.ts";
 import { buildLaunchCommand, LocalSessionManager } from "./sessions.ts";
 
@@ -37,7 +38,7 @@ test("LocalSessionManager tracks bell activity and clears attention on input", a
     },
   } as Pick<RegistryService, "get"> as RegistryService;
   const mgr = new LocalSessionManager(registry);
-  const activityEvents: Array<{ id: string; type: "bell" }> = [];
+  const activityEvents: Array<{ id: string; activity: SessionActivity; cause: ActivityCause }> = [];
 
   mgr.lifecycle.on("activity", (event) => activityEvents.push(event));
 
@@ -49,12 +50,16 @@ test("LocalSessionManager tracks bell activity and clears attention on input", a
       return snapshot?.attention ? snapshot : false;
     });
 
-    assert.equal(activity.attention, true);
-    assert.equal(typeof activity.lastOutputAt, "number");
-    assert.deepEqual(activityEvents, [{ id: session.id, type: "bell" }]);
+    assert.equal(activity.attention, "bell");
+    assert.equal(activity.state, "working");
+    assert.equal(typeof activity.lastOutputAt, "string");
+    const bellEvent = activityEvents.find((e) => e.cause === "bell");
+    assert.ok(bellEvent, "expected a bell-cause activity event");
+    assert.equal(bellEvent.id, session.id);
+    assert.equal(bellEvent.activity.attention, "bell");
 
     mgr.input(session.id, " ");
-    assert.equal(mgr.activity(session.id)?.attention, false);
+    assert.equal(mgr.activity(session.id)?.attention, null);
     assert.equal(mgr.activity("missing"), undefined);
   } finally {
     mgr.closeAll();
