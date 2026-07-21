@@ -24,6 +24,16 @@ export class BrowserError extends Error {
   }
 }
 
+// A Chromium launch failure that a `--no-sandbox` retry can plausibly recover:
+// either an explicit sandbox error, or an immediate post-connect crash (the
+// setuid sandbox aborting the zygote surfaces as "Target closed" / "Protocol
+// error" / "Connection closed"). The retry is bounded (one attempt) and flags
+// the browser as unsandboxed, so a false match at worst costs one extra launch.
+function isRetryableSandboxFailure(error: unknown): boolean {
+  const msg = error instanceof Error ? error.message : String(error);
+  return /sandbox|target closed|protocol error|connection closed/i.test(msg);
+}
+
 export interface BrowserSink {
   onFrame(jpeg: Buffer): void;
   onState(state: BrowserStateMessage): void;
@@ -301,14 +311,34 @@ export class BrowserManager {
       args: ["--headless=new", "--no-first-run", "--no-default-browser-check", "--disable-dev-shm-usage", "--mute-audio"]
     };
     try {
-      return { browser: await puppeteer.launch(base), sandboxed: true };
+      return { browser: await this.tryLaunch(base), sandboxed: true };
     } catch (error) {
       // Sandbox unavailable (no userns / setuid helper) is the one retryable
-      // launch failure — retry unsandboxed and FLAG it; never silently.
-      const msg = error instanceof Error ? error.message : String(error);
-      if (!/sandbox/i.test(msg)) throw error;
-      const browser = await puppeteer.launch({ ...base, args: [...base.args, "--no-sandbox"] });
+      // launch failure — retry unsandboxed and FLAG it; never silently. It can
+      // surface two ways: puppeteer.launch() throws with a "sandbox" message, or
+      // (on hosts where the setuid sandbox aborts *after* the pipe connects) the
+      // browser connects and then crashes when the first renderer target starts,
+      // reported as "Target closed" / "Protocol error". Probing in tryLaunch()
+      // turns the latter into a throw here so both take the unsandboxed path.
+      if (!isRetryableSandboxFailure(error)) throw error;
+      const browser = await this.tryLaunch({ ...base, args: [...base.args, "--no-sandbox"] });
       return { browser, sandboxed: false };
+    }
+  }
+
+  // Launch Chromium and force a renderer target to start, so a present-but-broken
+  // sandbox (which lets the browser pipe connect, then aborts the zygote) fails
+  // here instead of silently later in ensurePage(). On failure the browser is
+  // torn down so no orphan process leaks before the caller's retry.
+  private async tryLaunch(options: Parameters<typeof puppeteer.launch>[0]): Promise<Browser> {
+    const browser = await puppeteer.launch(options);
+    try {
+      const probe = await browser.newPage();
+      await probe.close();
+      return browser;
+    } catch (error) {
+      await browser.close().catch(() => undefined);
+      throw error;
     }
   }
 
