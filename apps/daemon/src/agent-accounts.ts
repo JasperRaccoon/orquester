@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile, readFile, readFile as fsReadFile, rm, chmod } from "node:fs/promises";
 import { dirname, join, isAbsolute } from "node:path";
-import type { AgentAccount, AgentAccountsResponse } from "@orquester/api";
+import { SYSTEM_ACCOUNT_ID, type AgentAccount, type AgentAccountsResponse } from "@orquester/api";
 import {
   parseAgentAccounts,
   createDefaultAgentAccounts,
@@ -144,11 +144,21 @@ export class AgentAccountsService {
     return this.list();
   }
 
+  /**
+   * Resolve the credential-home env for a launch AND the EFFECTIVE account id it
+   * pins (explicit selection → per-agent default). The caller records that
+   * effective id on the session so liveAccountIds() reflects the account actually
+   * in use — a session riding the default must not look idle to the refresher.
+   * Returns null (inherit $HOME, no pin) for a non-managed agent, an explicit
+   * System launch (SYSTEM_ACCOUNT_ID sentinel — bypasses the default), or when no
+   * account resolves.
+   */
   async resolveLaunchEnv(
     agent: string,
     accountId?: string
-  ): Promise<{ env: Record<string, string>; unset?: string[] } | null> {
+  ): Promise<{ env: Record<string, string>; unset?: string[]; accountId: string } | null> {
     if (agent !== "claude" && agent !== "codex") return null;
+    if (accountId === SYSTEM_ACCOUNT_ID) return null;
     const id = accountId ?? this.index.defaults[agent] ?? null;
     if (!id) return null;
     const record = this.getRecord(id);
@@ -156,9 +166,9 @@ export class AgentAccountsService {
     const home = this.homePath(agent, id);
     await assertOwnedAccountHome(this.opts.accountsDir, agent, id, home);
     if (agent === "claude") {
-      return { env: { CLAUDE_CONFIG_DIR: home }, unset: [...CLAUDE_AUTH_ENV_UNSET] };
+      return { env: { CLAUDE_CONFIG_DIR: home }, unset: [...CLAUDE_AUTH_ENV_UNSET], accountId: id };
     }
-    return { env: { CODEX_HOME: home } };
+    return { env: { CODEX_HOME: home }, accountId: id };
   }
 
   async markNeedsReauth(id: string, value: boolean): Promise<void> {

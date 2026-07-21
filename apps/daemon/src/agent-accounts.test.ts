@@ -74,6 +74,26 @@ test("resolveLaunchEnv falls back to the default account, then System(null)", as
   assert.equal(none, null);
 });
 
+test("resolveLaunchEnv returns the EFFECTIVE account id (explicit and default)", async () => {
+  const { svc } = await makeService();
+  const a = await svc.importAccount({ content: JSON.stringify({ claudeAiOauth: { accessToken: "t" } }), label: "A" });
+  const b = await svc.importAccount({ content: JSON.stringify({ claudeAiOauth: { accessToken: "u" } }), label: "B" });
+  // Explicit selection reports itself.
+  assert.equal((await svc.resolveLaunchEnv("claude", b.id))?.accountId, b.id);
+  // No explicit id → resolves to (and reports) the per-agent default, so the
+  // session is recorded under the account it actually uses — liveAccountIds()
+  // then sees it and the refresher won't rotate its live token.
+  assert.equal(svc.list().defaults.claude, a.id);
+  assert.equal((await svc.resolveLaunchEnv("claude"))?.accountId, a.id);
+});
+
+test("resolveLaunchEnv honors the SYSTEM_ACCOUNT_ID sentinel over a default", async () => {
+  const { svc } = await makeService();
+  await svc.importAccount({ content: JSON.stringify({ claudeAiOauth: { accessToken: "t" } }), label: "L" });
+  // A default exists, but an explicit System launch must bypass it (null → $HOME).
+  assert.equal(await svc.resolveLaunchEnv("claude", "system"), null);
+});
+
 test("remove deletes the home and clears it from defaults", async () => {
   const { svc } = await makeService();
   const acct = await svc.importAccount({ content: JSON.stringify({ tokens: { access_token: "a", id_token: jwt({ email: "d@d.com" }) } }) });

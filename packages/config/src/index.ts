@@ -496,6 +496,13 @@ export const sessionRecordSchema = z.object({
   kind: z.enum(["shell", "agent", "ide", "file-explorer", "browser"]),
   cwd: z.string(),
   createdAt: z.string(),
+  // Managed agent account the session was launched under (the EFFECTIVE resolved
+  // id — explicit selection or the per-agent default), if any. Persisted so a
+  // daemon restart's reattach keeps the account pin: liveAccountIds() must still
+  // see it (else the idle-account refresher could rotate a live account's
+  // single-use refresh token) and the tab keeps its account badge.
+  // Optional: absent for System/host-identity sessions and pre-field records.
+  accountId: z.string().optional(),
   // Last known PTY size, persisted so a daemon restart reattaches each session at
   // its real size instead of the 80×24 default — otherwise a running full-screen
   // TUI (agent) repaints into a small corner until the client re-sends a resize.

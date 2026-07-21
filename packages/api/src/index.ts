@@ -695,6 +695,14 @@ export interface SetAgentAccountDefaultsRequest {
 
 export type AgentAccountsEventType = "agent-accounts.changed";
 
+/**
+ * Sentinel `accountId` on a create-session request meaning "explicit System /
+ * host identity" — resolve to no managed account even when a per-agent default
+ * is set. Distinct from an OMITTED accountId, which resolves to the default.
+ * Managed account ids are UUIDs, so this can never collide with a real one.
+ */
+export const SYSTEM_ACCOUNT_ID = "system";
+
 export interface SessionSummary {
   id: string;
   kind: RegistryKind;

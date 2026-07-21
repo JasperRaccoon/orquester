@@ -88,8 +88,8 @@ export type ResolveSessionExtraEnv = (
   entry: RegistryEntry,
   accountId?: string
 ) =>
-  | Promise<{ env: Record<string, string>; unset?: string[] } | null>
-  | { env: Record<string, string>; unset?: string[] } | null;
+  | Promise<{ env: Record<string, string>; unset?: string[]; accountId?: string } | null>
+  | { env: Record<string, string>; unset?: string[]; accountId?: string } | null;
 
 export interface SessionManagerOptions {
   resolveExtraEnv?: ResolveSessionExtraEnv;
@@ -245,11 +245,19 @@ export class SessionManager implements ISessionManager {
 
     let extraEnv: Record<string, string> = {};
     let unsetEnv: string[] = [];
+    // The EFFECTIVE account the session runs under (explicit → per-agent default),
+    // as resolved by the env hook — NOT the raw request value. Recording this
+    // (rather than req.accountId) keeps liveAccountIds() honest: a session riding
+    // the default, or an explicit System launch, is reported as the account it
+    // actually uses, so the idle-account refresher never rotates a live account's
+    // single-use refresh token.
+    let accountId: string | undefined;
     try {
       const resolved = await this.options.resolveExtraEnv?.(entry, req.accountId);
       if (resolved) {
         extraEnv = resolved.env;
         unsetEnv = resolved.unset ?? [];
+        accountId = resolved.accountId;
       }
     } catch (error) {
       throw error instanceof SessionError
@@ -271,7 +279,7 @@ export class SessionManager implements ISessionManager {
       id,
       kind: entry.kind,
       refId: entry.id,
-      accountId: req.accountId,
+      accountId,
       title: req.title || entry.name,
       projectPath,
       cwd,
@@ -682,6 +690,10 @@ export class SessionManager implements ISessionManager {
         id: record.id,
         kind: record.kind,
         refId: record.refId,
+        // Restore the account pin so liveAccountIds() still sees a reattached
+        // account-pinned session (the refresher's zero-live-session gate depends
+        // on it) and the client keeps the tab's account badge.
+        accountId: record.accountId,
         title: record.title,
         projectPath: record.projectPath,
         cwd: record.cwd,
@@ -727,8 +739,8 @@ export class SessionManager implements ISessionManager {
 
   /** Map a live session to its persisted record shape. */
   private recordOf(session: Session): SessionRecord {
-    const { id, title, order, projectPath, refId, kind, cwd, createdAt, cols, rows } = session.summary;
-    return { id, title, order, projectPath, refId, kind, cwd, createdAt, cols, rows };
+    const { id, title, order, projectPath, refId, kind, cwd, createdAt, cols, rows, accountId } = session.summary;
+    return { id, title, order, projectPath, refId, kind, cwd, createdAt, cols, rows, accountId };
   }
 
   /**
@@ -809,11 +821,15 @@ export class LocalSessionManager implements ISessionManager {
 
     let extraEnv: Record<string, string> = {};
     let unsetEnv: string[] = [];
+    // The EFFECTIVE account the session runs under (explicit → per-agent default);
+    // see SessionManager.create for why we record this over the raw request value.
+    let accountId: string | undefined;
     try {
       const resolved = await this.options.resolveExtraEnv?.(entry, req.accountId);
       if (resolved) {
         extraEnv = resolved.env;
         unsetEnv = resolved.unset ?? [];
+        accountId = resolved.accountId;
       }
     } catch (error) {
       throw error instanceof SessionError
@@ -870,7 +886,7 @@ export class LocalSessionManager implements ISessionManager {
       id,
       kind: entry.kind,
       refId: entry.id,
-      accountId: req.accountId,
+      accountId,
       title: req.title || entry.name,
       projectPath,
       cwd,

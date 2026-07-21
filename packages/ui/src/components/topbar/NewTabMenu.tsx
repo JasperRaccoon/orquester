@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { FolderTree, GitBranch, Globe, ListTodo, Plus } from "lucide-react";
-import type { RegistryEntry } from "@orquester/api";
+import { SYSTEM_ACCOUNT_ID, type RegistryEntry } from "@orquester/api";
 import {
   AdaptiveMenu,
   DropdownEmpty,
@@ -17,14 +17,17 @@ import { useAppStore, useCurrentContext } from "../../store/app";
  * One installed-agent row in the "+" menu. When the agent (`claude`/`codex`) has
  * ≥1 managed account, it renders an inline account picker (System + managed
  * accounts, defaulting to that agent's configured default) and passes the chosen
- * account id as the 4th `openTab` argument so the session launches under it.
+ * account id as the 4th `openTab` argument so the session launches under it. The
+ * "System" option carries the SYSTEM_ACCOUNT_ID sentinel (not an empty/omitted
+ * value) so it forces the host identity even when a per-agent default is set —
+ * an omitted accountId would otherwise resolve back to that default.
  */
 const AgentRow: React.FC<{ agent: RegistryEntry }> = ({ agent }) => {
   const openTab = useAppStore((s) => s.openTab);
   const agentAccounts = useAppStore((s) => s.agentAccounts);
   const managed = (agentAccounts?.accounts ?? []).filter((a) => a.agent === agent.id);
-  const [picked, setPicked] = useState<string | undefined>(
-    agentAccounts?.defaults[agent.id as "claude" | "codex"] ?? undefined
+  const [picked, setPicked] = useState<string>(
+    agentAccounts?.defaults[agent.id as "claude" | "codex"] ?? SYSTEM_ACCOUNT_ID
   );
 
   return (
@@ -37,12 +40,12 @@ const AgentRow: React.FC<{ agent: RegistryEntry }> = ({ agent }) => {
       </DropdownItem>
       {managed.length > 0 ? (
         <select
-          value={picked ?? ""}
+          value={picked}
           onClick={(event) => event.stopPropagation()}
-          onChange={(event) => setPicked(event.target.value || undefined)}
+          onChange={(event) => setPicked(event.target.value)}
           className="mb-1 ml-8 mr-2 w-[calc(100%-2.75rem)] rounded bg-neutral-900 px-1 py-0.5 text-xs text-neutral-300 outline-none ring-1 ring-neutral-700"
         >
-          <option value="">System</option>
+          <option value={SYSTEM_ACCOUNT_ID}>System</option>
           {managed.map((a) => (
             <option key={a.id} value={a.id}>
               {a.label}
