@@ -455,7 +455,7 @@ export interface UsageAccount {
 }
 
 export interface AgentUsage {
-  id: "claude" | "codex";
+  id: string; // was "claude" | "codex"; opened up so new agents can report usage
   /** installed + logged in + at least one window present. */
   available: boolean;
   /** data known but the token/log is expired/old (last-known shown greyed). */
@@ -750,11 +750,44 @@ export interface AgentEventRequest {
   payload?: unknown;
 }
 
+export type AgentAccountAgent = "claude" | "codex";
+
+export interface AgentAccount {
+  id: string;
+  agent: AgentAccountAgent;
+  label: string;
+  email: string | null;
+  plan: string | null;
+  needsReauth: boolean;
+  createdAt: string;
+  importedAt: string;
+}
+
+export interface AgentAccountsResponse {
+  accounts: AgentAccount[];
+  defaults: { claude: string | null; codex: string | null };
+}
+
+export interface ImportAgentAccountRequest {
+  content?: string;
+  from?: string;
+  label?: string;
+}
+
+export interface SetAgentAccountDefaultsRequest {
+  claude?: string | null;
+  codex?: string | null;
+}
+
+export type AgentAccountsEventType = "agent-accounts.changed";
+
 export interface SessionSummary {
   id: string;
   kind: RegistryKind;
   /** Registry entry id this session was launched from (e.g. "bash", "claude"). */
   refId: string;
+  /** Managed agent account this session was launched under, if any. */
+  accountId?: string;
   title: string;
   /** Project the tab belongs to ("" = not bound to a project). */
   projectPath: string;
@@ -778,6 +811,7 @@ export interface CreateSessionRequest {
   cols?: number;
   rows?: number;
   title?: string;
+  accountId?: string;
 }
 
 export interface RenameSessionRequest {
