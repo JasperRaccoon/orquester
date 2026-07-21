@@ -456,6 +456,18 @@ export class SessionManager implements ISessionManager {
     return this.sessions.get(id)?.tracker.snapshot();
   }
 
+  agentEvent(id: string, req: AgentEventRequest): boolean {
+    const session = this.sessions.get(id);
+    if (!session || session.summary.status !== "running") {
+      return false;
+    }
+    const cls = classifyAgentEvent(req.source, req.event, req.payload);
+    if (cls !== null) {
+      session.tracker.applyHookEvent(cls);
+    }
+    return true;
+  }
+
   /**
    * Boundary summary carrying live activity for a running session (never
    * persisted). Exited sessions return the bare summary — no activity.
@@ -902,6 +914,18 @@ export class LocalSessionManager implements ISessionManager {
 
   activity(id: string): SessionActivity | undefined {
     return this.sessions.get(id)?.tracker.snapshot();
+  }
+
+  agentEvent(id: string, req: AgentEventRequest): boolean {
+    const session = this.sessions.get(id);
+    if (!session || session.summary.status !== "running") {
+      return false;
+    }
+    const cls = classifyAgentEvent(req.source, req.event, req.payload);
+    if (cls !== null) {
+      session.tracker.applyHookEvent(cls);
+    }
+    return true;
   }
 
   /**

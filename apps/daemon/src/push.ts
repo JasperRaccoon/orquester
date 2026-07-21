@@ -69,7 +69,7 @@ export function isValidPushEndpoint(raw: string): boolean {
 export class PushService {
   private config: PushConfig | null = null;
   private loading: Promise<PushConfig> | null = null;
-  /** Last-push timestamp per session id, for the per-session debounce. */
+  /** Last-push timestamp per `<sessionId>:<type>` key, for the per-type debounce. */
   private readonly lastPushAt = new Map<string, number>();
 
   constructor(
@@ -166,38 +166,49 @@ export class PushService {
   }
 
   /**
-   * Push an "attention" notification for a session that rang the bell. Debounced
-   * to at most one push per {@link DEBOUNCE_MS} per session. Logs, never throws.
+   * Debounce guard keyed by `<sessionId>:<type>`. Evicts stale entries (so the
+   * map stays bounded — session ids are never otherwise removed on close), then
+   * returns true if `key` pushed within the last {@link DEBOUNCE_MS}.
    */
-  async notifyAttention(session: SessionSummary): Promise<void> {
-    try {
-      const now = Date.now();
-      // Evict entries that can no longer affect the debounce window, so the map
-      // stays bounded to sessions that rang a bell within the last DEBOUNCE_MS
-      // (session ids are never otherwise removed on close).
-      for (const [id, ts] of this.lastPushAt) {
-        if (now - ts >= DEBOUNCE_MS) {
-          this.lastPushAt.delete(id);
-        }
+  private debounced(key: string, now: number): boolean {
+    for (const [k, ts] of this.lastPushAt) {
+      if (now - ts >= DEBOUNCE_MS) {
+        this.lastPushAt.delete(k);
       }
-      const last = this.lastPushAt.get(session.id) ?? 0;
-      if (now - last < DEBOUNCE_MS) {
+    }
+    const last = this.lastPushAt.get(key) ?? 0;
+    if (now - last < DEBOUNCE_MS) {
+      return true;
+    }
+    this.lastPushAt.set(key, now);
+    return false;
+  }
+
+  /** Bell fallback push for sessions without hook coverage. */
+  async notifyAttention(session: SessionSummary): Promise<void> {
+    await this.notify(session, "bell", "needs your attention");
+  }
+
+  /** Structural push from agent-hook transitions ("needs-input" | "finished"). */
+  async notifyStructural(session: SessionSummary, type: "needs-input" | "finished"): Promise<void> {
+    await this.notify(session, type, type === "finished" ? "finished" : "needs your input");
+  }
+
+  private async notify(session: SessionSummary, type: string, verb: string): Promise<void> {
+    try {
+      if (this.debounced(`${session.id}:${type}`, Date.now())) {
         return;
       }
-      this.lastPushAt.set(session.id, now);
-
       const project = session.projectPath ? basename(session.projectPath) : "";
       const payload = JSON.stringify({
-        title: project
-          ? `${session.title} in ${project} needs your attention`
-          : `${session.title} needs your attention`,
+        title: project ? `${session.title} in ${project} ${verb}` : `${session.title} ${verb}`,
         body: "",
         tag: `session-${session.id}`,
         sessionId: session.id
       });
       await this.deliver(payload);
     } catch (error) {
-      this.logger.error("push notifyAttention failed", error);
+      this.logger.error("push notify failed", error);
     }
   }
 

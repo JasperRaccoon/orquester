@@ -1,6 +1,7 @@
 import type {
   AccountSummary,
   AccountTestResult,
+  AgentEventRequest,
   AgentUsage,
   CreateAccountRequest,
   CreateProjectRequest,
@@ -32,11 +33,14 @@ import type {
   PushSubscribeRequest,
   PushTestResponse,
   PushUnsubscribeRequest,
+  RegistryKind,
   RegistryResponse,
   RenameSessionRequest,
   RepoSummary,
   ReorderSessionsRequest,
   ServerInfoResponse,
+  SessionActivity,
+  SessionActivityEvent,
   SessionInputRequest,
   SessionResizeRequest,
   SessionSummary,
@@ -54,6 +58,7 @@ import type {
 } from "@orquester/api";
 import { RegistryService } from "./registry";
 import { type ISessionManager, SessionError, createSessionManager } from "./sessions";
+import type { ActivityCause } from "./ansi-activity";
 import { TodoError, TodoListManager } from "./todos";
 import { Tmux } from "./tmux";
 import { Broadcaster } from "./broadcaster";
@@ -311,19 +316,38 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   sessions.lifecycle.on("updated", (s: SessionSummary) =>
     broadcaster.publish("sessions", "session.updated", s)
   );
-  // Terminal-bell attention → Web Push. This lifecycle signal is deliberately
-  // NOT on the /events Broadcaster (see the PWA design doc); the push service
-  // hooks the session manager's emitter directly. Only AGENT bells push — shell
-  // beeps must not. notifyAttention is debounced + log-never-throw.
-  sessions.lifecycle.on("activity", (event: { id: string; type: string }) => {
-    if (event.type !== "bell") {
-      return;
+  // Activity transitions → event bus (all clients render the same dot) AND push.
+  // Push policy: structural hook attentions push per-type; bells push only for
+  // agent sessions that have never delivered a hook event (no double-notify).
+  sessions.lifecycle.on(
+    "activity",
+    (event: {
+      id: string;
+      activity: SessionActivity;
+      cause: ActivityCause;
+      hasHookSource: boolean;
+      kind: RegistryKind;
+    }) => {
+      broadcaster.publish("sessions", "session.activity", {
+        id: event.id,
+        activity: event.activity
+      } satisfies SessionActivityEvent);
+      if (event.kind !== "agent") {
+        return;
+      }
+      const summary = sessions.get(event.id);
+      if (!summary) {
+        return;
+      }
+      if (event.cause === "hook" && event.activity.attention === "needs-input") {
+        void push.notifyStructural(summary, "needs-input");
+      } else if (event.cause === "hook" && event.activity.attention === "finished") {
+        void push.notifyStructural(summary, "finished");
+      } else if (event.cause === "bell" && !event.hasHookSource) {
+        void push.notifyAttention(summary);
+      }
     }
-    const summary = sessions.get(event.id);
-    if (summary?.kind === "agent") {
-      void push.notifyAttention(summary);
-    }
-  });
+  );
 
   // To-do list lifecycle → event bus (channel "todos"). Each payload is a full
   // TodoListRecord; clients reconcile their cache/tabs by id (§6).
@@ -1836,6 +1860,28 @@ function createServer(
       return reply.code(204).send();
     }
   );
+
+  if (options.mode === "local") {
+    // Managed agent hooks report lifecycle events here (see the agent-status
+    // design doc). Socket-only: sessions always run on the daemon's host, and
+    // the unix socket is the single-user trust boundary — the HTTP transport
+    // never exposes this surface. 204 fail-open on unknown events so a hook
+    // can never break an agent.
+    app.post<{ Params: { id: string }; Body: AgentEventRequest }>(
+      "/api/sessions/:id/agent-event",
+      async (request, reply): Promise<void> => {
+        const body = request.body ?? ({} as AgentEventRequest);
+        if (
+          (body.source !== "claude" && body.source !== "codex" && body.source !== "opencode") ||
+          typeof body.event !== "string"
+        ) {
+          return reply.code(204).send();
+        }
+        const known = sessions.agentEvent(request.params.id, body);
+        return reply.code(known ? 204 : 404).send();
+      }
+    );
+  }
 
   // Accept a file dropped/pasted onto a terminal, persist it to a daemon-private
   // dir, and return the absolute on-disk path (the client injects that path into
