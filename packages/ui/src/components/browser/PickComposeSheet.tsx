@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useRef, useState } from "react";
 import { Crosshair, Send, X } from "lucide-react";
 import type { BrowserPickPayload } from "@orquester/api";
 import { useAppStore } from "../../store/app";
@@ -30,6 +30,12 @@ export const PickComposeSheet: React.FC<{
   const [intent, setIntent] = useState<PickIntent>("fix");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Uploads that already succeeded for this batch, keyed by payload identity —
+  // a retry after a partial failure reuses them instead of re-uploading and
+  // orphaning duplicate design-pick-*.png files in the agent's upload dir.
+  // Keyed per target session too: a path is only valid for the session it was
+  // uploaded to.
+  const uploadedRef = useRef(new WeakMap<BrowserPickPayload, { targetId: string; path: string }>());
 
   const sendToAgent = async () => {
     if (!api || !targetId || payloads.length === 0) return;
@@ -41,13 +47,17 @@ export const PickComposeSheet: React.FC<{
       for (let i = 0; i < payloads.length; i++) {
         const payload = payloads[i];
         let screenshotPath: string | undefined;
-        if (payload.screenshotBase64) {
+        const cached = uploadedRef.current.get(payload);
+        if (cached && cached.targetId === targetId) {
+          screenshotPath = cached.path;
+        } else if (payload.screenshotBase64) {
           const uploaded = await api.uploadSessionFile(targetId, {
             name: payloads.length === 1 ? "design-pick.png" : `design-pick-${i + 1}.png`,
             type: "image/png",
             dataBase64: payload.screenshotBase64
           });
           screenshotPath = uploaded.path;
+          uploadedRef.current.set(payload, { targetId, path: uploaded.path });
         }
         picks.push({ payload, screenshotPath });
       }

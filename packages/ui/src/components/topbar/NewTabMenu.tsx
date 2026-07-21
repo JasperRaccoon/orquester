@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { FolderTree, GitBranch, Globe, ListTodo, Plus } from "lucide-react";
 import { SYSTEM_ACCOUNT_ID, type RegistryEntry } from "@orquester/api";
+import { CHROMIUM_FAMILY_IDS } from "@orquester/registry";
 import {
   AdaptiveMenu,
   DropdownEmpty,
@@ -81,7 +82,9 @@ export const NewTabMenu: React.FC = () => {
   // stream frames. The desktop unix socket has no browserChannel, so a browser
   // record would open a dead blank tab — gate the entry on the channel too.
   const browserHasChannel = !!api?.browserChannel();
-  const browserHostReady = registry.browsers.some((b) => b.enabled);
+  // Only Chromium-family entries count: firefox/system-browser can be enabled
+  // on a host the daemon's puppeteer-core resolver would still 409 on.
+  const browserHostReady = registry.browsers.some((b) => b.enabled && CHROMIUM_FAMILY_IDS.has(b.id));
 
   const trigger = (
     <IconButton label="New tab" className="app-no-drag">

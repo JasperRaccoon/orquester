@@ -871,10 +871,16 @@ export const useAppStore = create<AppState>((set, get) => ({
       // Settings → GitHub refills it. (project-repo-linking bug fix.)
       get().loadAccounts()
     ]);
-    // A newer flow may have preempted us during the fan-out: its closeEvents()
-    // already tore our stream down — don't flush stale buffered events or arm
-    // a second health probe.
+    // Preempted during the fan-out. A newer establish() tears our stream down
+    // via closeEvents(), but stopReconnect()/scheduleLockedReconnect() bump
+    // reconnectGen WITHOUT closing — that would leave this stream live,
+    // pushing into a buffer nobody ever flushes. Drop the buffer and, if our
+    // subscription is still the current one, close it ourselves.
     if (reconnectGenAtStart !== reconnectGen) {
+      eventBuffer = null;
+      if (gen === eventsGen) {
+        closeEvents();
+      }
       return;
     }
 
@@ -1531,11 +1537,18 @@ export const useAppStore = create<AppState>((set, get) => ({
     // it (the desktop unix socket) would create a dead blank tab. Refuse rather
     // than open one with no way to render.
     if (!api.browserChannel()) return;
-    const browser = await api.createBrowser({ projectPath: currentProject.path, url });
-    set((state) => ({
-      browsers: upsertBrowser(state.browsers, browser),
-      activeTabByProject: { ...state.activeTabByProject, [currentProject.path]: browser.id }
-    }));
+    try {
+      const browser = await api.createBrowser({ projectPath: currentProject.path, url });
+      set((state) => ({
+        browsers: upsertBrowser(state.browsers, browser),
+        activeTabByProject: { ...state.activeTabByProject, [currentProject.path]: browser.id }
+      }));
+    } catch (error) {
+      // Callers fire-and-forget (void openBrowser()); don't leak an unhandled
+      // rejection. The daemon's 409 carries a useful message (no chromium on
+      // host) — log it so the failure is at least diagnosable.
+      console.error("Browser tab create failed:", error);
+    }
   },
 
   closeTab: async (id) => {

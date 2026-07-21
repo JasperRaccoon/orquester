@@ -75,6 +75,9 @@ export class BrowserManager {
   readonly lifecycle = new EventEmitter();
   private readonly tabs = new Map<string, Tab>();
   private readonly chromes = new Map<string, Promise<Chrome>>();
+  /** In-flight per-project Chromium teardowns; launch() waits on these so a
+   *  relaunch can't race the dying process for the profile dir. */
+  private readonly closingChromes = new Map<string, Promise<void>>();
   // Serialize on-disk writes: concurrent persist() calls (framenavigated + load
   // fire close together) would otherwise race the same tmp file and corrupt it.
   private persistChain: Promise<void> = Promise.resolve();
@@ -147,7 +150,22 @@ export class BrowserManager {
     if (![...this.tabs.values()].some((t) => t.record.projectPath === project)) {
       const pending = this.chromes.get(project);
       this.chromes.delete(project);
-      if (pending) (await pending.catch(() => null))?.browser.close().catch(() => undefined);
+      if (pending) {
+        // Await the process exit (browser.close() resolves on exit) so the
+        // profile's SingletonLock is released, and publish the teardown so a
+        // same-project relaunch queues behind it instead of racing the dying
+        // Chromium for the deterministic userDataDir.
+        const closing = pending
+          .catch(() => null)
+          .then((chrome) => chrome?.browser.close().catch(() => undefined))
+          .then(() => undefined);
+        this.closingChromes.set(project, closing);
+        try {
+          await closing;
+        } finally {
+          if (this.closingChromes.get(project) === closing) this.closingChromes.delete(project);
+        }
+      }
     }
     await this.persist();
     this.lifecycle.emit("closed", { id });
@@ -344,6 +362,7 @@ export class BrowserManager {
   }
 
   private async launch(projectPath: string): Promise<Chrome> {
+    await this.closingChromes.get(projectPath);
     const executablePath = this.opts.resolveChromium();
     if (!executablePath) throw new BrowserError("No chromium/chrome binary found on the daemon host", 409);
     const hash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);

@@ -244,3 +244,19 @@ export const REGISTRY = {
     { id: "system-browser", name: "Default Browser", kind: "browser", bin: [] as const }
   ] as const
 } as const;
+
+/**
+ * Registry browser ids that speak CDP and can be driven by the daemon's
+ * server-side browser tabs (Design Mode). Firefox and the empty-bin
+ * "system-browser" fallback are deliberately excluded: they may be `enabled`
+ * on a host that has no Chromium at all, and only Chromium-family binaries
+ * work under puppeteer-core. Shared by the daemon's resolver and the UI's
+ * new-tab gate so the menu never offers a browser the daemon will 409.
+ */
+export const CHROMIUM_FAMILY_IDS: ReadonlySet<string> = new Set([
+  "chrome",
+  "chromium",
+  "brave",
+  "edge",
+  "vivaldi"
+]);
