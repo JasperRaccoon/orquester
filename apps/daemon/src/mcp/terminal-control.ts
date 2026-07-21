@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { statSync } from "node:fs";
-import type { ProjectSummary, SessionSummary, WorkspaceSummary } from "@orquester/api";
+import type { ProjectSummary, SessionActivity, SessionSummary, WorkspaceSummary } from "@orquester/api";
 import { isValidName } from "@orquester/config";
 import { assertInsideFsRoot } from "@orquester/config/fs";
 import type { ISessionManager } from "../sessions.ts";
@@ -85,15 +85,10 @@ export class TerminalControl {
       return {};
     }
     const fields: { activity: "working" | "idle"; attention: boolean; lastOutputAt?: string } = {
-      activity:
-        activity.lastOutputAt !== null && Date.now() - activity.lastOutputAt < ACTIVITY_WORKING_MS
-          ? "working"
-          : "idle",
-      attention: activity.attention,
+      activity: activity.state === "waiting" ? "working" : activity.state,
+      attention: activity.attention !== null,
+      lastOutputAt: activity.lastOutputAt ?? undefined
     };
-    if (activity.lastOutputAt !== null) {
-      fields.lastOutputAt = new Date(activity.lastOutputAt).toISOString();
-    }
     return fields;
   }
 
@@ -290,8 +285,8 @@ export class TerminalControl {
         sig?.removeEventListener("abort", onAbort);
         resolve(result);
       };
-      const onActivity = (event: { id: string; type: string }) => {
-        if (event.type !== "bell" || !watchedIds.has(event.id)) {
+      const onActivity = (event: { id: string; activity: SessionActivity }) => {
+        if (!watchedIds.has(event.id) || event.activity.attention === null) {
           return;
         }
         const tab = sessions.get(event.id) ?? watched.find((t) => t.id === event.id);

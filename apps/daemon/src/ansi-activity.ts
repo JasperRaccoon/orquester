@@ -97,33 +97,138 @@ export class BellScanner {
   }
 }
 
-export interface ActivitySnapshot {
-  lastOutputAt: number | null;
-  attention: boolean;
-}
+import type { SessionActivity, SessionAttention } from "@orquester/api";
 
+/** Silence (ms) after the last output before working → idle. */
+export const IDLE_MS = 3000;
+
+export type ActivityCause = "output" | "idle" | "bell" | "hook" | "input";
+export type HookEventClass = "working" | "waiting" | "done";
+
+/**
+ * Per-session activity state machine — the daemon-side single source of truth
+ * behind SessionSummary.activity and "session.activity" events. Structural
+ * hook events (agent lifecycle) outrank byte-stream heuristics: output flow
+ * never overrides "waiting", and a bell never downgrades a structural
+ * attention. `onChange` fires only on real transitions (state or attention
+ * changed), never on every output chunk.
+ */
 export class ActivityTracker {
   private readonly scanner = new BellScanner();
   private lastOutputAt: number | null = null;
-  private attention = false;
+  private state: SessionActivity["state"] = "idle";
+  private attention: SessionAttention | null = null;
+  private hookSource = false;
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
 
-  onOutput(chunk: string, now: number): boolean {
+  constructor(
+    private readonly onChange?: (snapshot: SessionActivity, cause: ActivityCause) => void
+  ) {}
+
+  get hasHookSource(): boolean {
+    return this.hookSource;
+  }
+
+  noteOutput(chunk: string, now: number = Date.now()): void {
     this.lastOutputAt = now;
     const rang = this.scanner.feed(chunk) > 0;
-    if (rang) {
-      this.attention = true;
+    let changed = false;
+    if (this.state === "idle") {
+      this.state = "working";
+      changed = true;
     }
-    return rang;
+    // "waiting" is structural — a TUI repaint at a permission prompt must not
+    // clear it, so output only rearms the idle timer for the "working" state.
+    if (this.state === "working") {
+      this.armIdleTimer();
+    }
+    if (rang && this.attention === null) {
+      this.attention = "bell";
+      changed = true;
+    }
+    if (changed) {
+      this.emit(rang ? "bell" : "output");
+    } else if (rang) {
+      this.emit("bell");
+    }
   }
 
-  onInput(): void {
-    this.attention = false;
+  noteInput(): void {
+    let changed = false;
+    if (this.attention !== null) {
+      this.attention = null;
+      changed = true;
+    }
+    // Answering a prompt produces no hook event in any agent; the user's
+    // keystrokes are the answer. Optimistically resume "working" — the next
+    // hook event corrects if wrong.
+    if (this.state === "waiting") {
+      this.state = "working";
+      this.armIdleTimer();
+      changed = true;
+    }
+    if (changed) {
+      this.emit("input");
+    }
   }
 
-  snapshot(): ActivitySnapshot {
+  applyHookEvent(cls: HookEventClass): void {
+    this.hookSource = true;
+    const before = this.key();
+    if (cls === "working") {
+      this.state = "working";
+      this.attention = null;
+      this.armIdleTimer();
+    } else if (cls === "waiting") {
+      this.state = "waiting";
+      this.attention = "needs-input";
+      this.clearIdleTimer();
+    } else {
+      this.state = "idle";
+      this.attention = "finished";
+      this.clearIdleTimer();
+    }
+    if (this.key() !== before) {
+      this.emit("hook");
+    }
+  }
+
+  snapshot(): SessionActivity {
     return {
-      lastOutputAt: this.lastOutputAt,
+      state: this.state,
       attention: this.attention,
+      lastOutputAt: this.lastOutputAt === null ? null : new Date(this.lastOutputAt).toISOString()
     };
+  }
+
+  dispose(): void {
+    this.clearIdleTimer();
+  }
+
+  private armIdleTimer(): void {
+    this.clearIdleTimer();
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = null;
+      if (this.state === "working") {
+        this.state = "idle";
+        this.emit("idle");
+      }
+    }, IDLE_MS);
+    this.idleTimer.unref?.();
+  }
+
+  private clearIdleTimer(): void {
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
+  }
+
+  private key(): string {
+    return `${this.state}|${this.attention ?? ""}`;
+  }
+
+  private emit(cause: ActivityCause): void {
+    this.onChange?.(this.snapshot(), cause);
   }
 }

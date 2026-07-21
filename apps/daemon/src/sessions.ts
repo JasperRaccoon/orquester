@@ -1,4 +1,4 @@
-import type { CreateSessionRequest, RegistryEntry, SessionSummary } from "@orquester/api";
+import type { CreateSessionRequest, RegistryEntry, SessionActivity, SessionSummary } from "@orquester/api";
 import { type SessionRecord, type SessionsConfig, createDefaultSessionsConfig, parseSessionsConfig } from "@orquester/config";
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
@@ -18,7 +18,7 @@ import {
   tmuxVersionOk
 } from "./tmux";
 import { renderText } from "./mcp/text.ts";
-import { ActivityTracker, type ActivitySnapshot } from "./ansi-activity.ts";
+import { ActivityTracker, type ActivityCause } from "./ansi-activity.ts";
 
 /**
  * Small live ring kept only for HOT replay between a session's creation and the
@@ -47,7 +47,7 @@ export class SessionError extends Error {}
  * `shutdown` are still present on the local backend (they just don't persist).
  */
 export interface ISessionManager {
-  /** Emits "created" | "exited" | "updated" (SessionSummary), "closed" ({ id }), and "activity" ({ id, type: "bell" }). */
+  /** Emits "created" | "exited" | "updated" (SessionSummary), "closed" ({ id }), and "activity" ({ id, activity, cause, hasHookSource, kind }). */
   readonly lifecycle: EventEmitter;
   create(req: CreateSessionRequest): Promise<SessionSummary>;
   list(projectPath?: string): SessionSummary[];
@@ -58,7 +58,7 @@ export interface ISessionManager {
   captureText(id: string, opts?: { lines?: number }): Promise<string>;
   /** Synchronous hot-ring snapshot (kept for callers that can't await). */
   buffer(id: string): string;
-  activity(id: string): ActivitySnapshot | undefined;
+  activity(id: string): SessionActivity | undefined;
   input(id: string, data: string): void;
   resize(id: string, cols: number, rows: number): void;
   rename(id: string, title: string): SessionSummary | undefined;
@@ -85,6 +85,10 @@ export type ResolveSessionExtraEnv = (
 
 export interface SessionManagerOptions {
   resolveExtraEnv?: ResolveSessionExtraEnv;
+  /** Absolute path to the daemon's unix socket, injected into agent sessions for hook delivery. */
+  daemonSockPath?: string;
+  /** Fire-and-forget notification that an agent session is launching (hook installers). */
+  onAgentLaunch?: (entry: RegistryEntry) => void;
 }
 
 /**
@@ -206,7 +210,7 @@ export class SessionManager implements ISessionManager {
   private sessions = new Map<string, Session>();
   /** Coalesces resize-driven index writes (≤ one per second) so the latest size persists. */
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Emits "created" | "exited" | "updated" (SessionSummary), "closed" ({ id }), and "activity" ({ id, type: "bell" }). */
+  /** Emits "created" | "exited" | "updated" (SessionSummary), "closed" ({ id }), and "activity" ({ id, activity, cause, hasHookSource, kind }). */
   readonly lifecycle = new EventEmitter();
 
   constructor(
@@ -256,7 +260,16 @@ export class SessionManager implements ISessionManager {
       createdAt: new Date().toISOString()
     };
 
-    const session: Session = { summary, pty: null, buffer: "", tracker: new ActivityTracker(), emitter: new EventEmitter() };
+    const tracker = new ActivityTracker((activity, cause) => {
+      this.lifecycle.emit("activity", {
+        id,
+        activity,
+        cause,
+        hasHookSource: tracker.hasHookSource,
+        kind: summary.kind
+      });
+    });
+    const session: Session = { summary, pty: null, buffer: "", tracker, emitter: new EventEmitter() };
     this.sessions.set(id, session);
 
     // 1) Spawn the command INSIDE tmux (detached), 2) attach a streaming PTY to
@@ -271,6 +284,18 @@ export class SessionManager implements ISessionManager {
       COLORTERM: "truecolor",
       ...entry.env
     } as Record<string, string>;
+
+    if (entry.kind === "agent") {
+      env.ORQUESTER_SESSION_ID = id;
+      if (this.options.daemonSockPath) {
+        env.ORQUESTER_DAEMON_SOCK = this.options.daemonSockPath;
+      }
+      try {
+        this.options.onAgentLaunch?.(entry);
+      } catch {
+        // hook installation is best-effort; never blocks a session launch
+      }
+    }
 
     // A bare shell launched via `tmux new-session -- bash` runs non-interactively
     // and exits immediately (status 1) — unlike LocalSessionManager's node-pty,
@@ -300,9 +325,9 @@ export class SessionManager implements ISessionManager {
     }
     this.attach(session);
 
-    this.lifecycle.emit("created", { ...summary });
+    this.lifecycle.emit("created", this.withActivity(session));
     void this.persistIndex();
-    return { ...summary };
+    return this.withActivity(session);
   }
 
   /**
@@ -336,9 +361,7 @@ export class SessionManager implements ISessionManager {
         return;
       }
       session.buffer = (session.buffer + data).slice(-MAX_BUFFER);
-      if (session.tracker.onOutput(data, Date.now())) {
-        this.lifecycle.emit("activity", { id, type: "bell" });
-      }
+      session.tracker.noteOutput(data);
       session.emitter.emit("output", data);
     });
     pty.onExit(({ exitCode }) => {
@@ -362,8 +385,9 @@ export class SessionManager implements ISessionManager {
         session.summary.status = "exited";
         session.summary.exitCode = exitCode;
         session.pty = null;
+        session.tracker.dispose();
         session.emitter.emit("exit", exitCode);
-        this.lifecycle.emit("exited", { ...session.summary });
+        this.lifecycle.emit("exited", this.withActivity(session));
         void this.persistIndex();
       });
     });
@@ -371,14 +395,14 @@ export class SessionManager implements ISessionManager {
 
   list(projectPath?: string): SessionSummary[] {
     const all = [...this.sessions.values()]
-      .map((s) => ({ ...s.summary }))
+      .map((s) => this.withActivity(s))
       .sort((a, b) => a.order - b.order || a.createdAt.localeCompare(b.createdAt));
     return projectPath === undefined ? all : all.filter((s) => s.projectPath === projectPath);
   }
 
   get(id: string): SessionSummary | undefined {
     const session = this.sessions.get(id);
-    return session ? { ...session.summary } : undefined;
+    return session ? this.withActivity(session) : undefined;
   }
 
   /**
@@ -424,13 +448,23 @@ export class SessionManager implements ISessionManager {
     return this.sessions.get(id)?.buffer ?? "";
   }
 
-  activity(id: string): ActivitySnapshot | undefined {
+  activity(id: string): SessionActivity | undefined {
     return this.sessions.get(id)?.tracker.snapshot();
+  }
+
+  /**
+   * Boundary summary carrying live activity for a running session (never
+   * persisted). Exited sessions return the bare summary — no activity.
+   */
+  private withActivity(session: Session): SessionSummary {
+    return session.summary.status === "running"
+      ? { ...session.summary, activity: session.tracker.snapshot() }
+      : { ...session.summary };
   }
 
   input(id: string, data: string): void {
     const session = this.sessions.get(id);
-    session?.tracker.onInput();
+    session?.tracker.noteInput();
     session?.pty?.write(data);
   }
 
@@ -470,9 +504,9 @@ export class SessionManager implements ISessionManager {
     const trimmed = title.trim();
     const fallback = this.registry.get(session.summary.refId)?.name ?? session.summary.refId;
     session.summary.title = trimmed || fallback;
-    this.lifecycle.emit("updated", { ...session.summary });
+    this.lifecycle.emit("updated", this.withActivity(session));
     void this.persistIndex();
-    return { ...session.summary };
+    return this.withActivity(session);
   }
 
   /** Reassign per-project tab order from an ordered id list (unknown ids ignored). */
@@ -482,7 +516,7 @@ export class SessionManager implements ISessionManager {
       const session = this.sessions.get(id);
       if (session && session.summary.projectPath === projectPath && session.summary.order !== index) {
         session.summary.order = index;
-        this.lifecycle.emit("updated", { ...session.summary });
+        this.lifecycle.emit("updated", this.withActivity(session));
         changed = true;
       }
     });
@@ -505,6 +539,7 @@ export class SessionManager implements ISessionManager {
     // Kill the tmux session too — otherwise the command keeps running headless
     // and would be re-adopted on the next boot.
     void this.tmux.killSession(id);
+    session.tracker.dispose();
     this.sessions.delete(id);
     this.lifecycle.emit("closed", { id });
     void this.persistIndex();
@@ -616,7 +651,16 @@ export class SessionManager implements ISessionManager {
         order: record.order,
         createdAt: record.createdAt
       };
-      const session: Session = { summary, pty: null, buffer: "", tracker: new ActivityTracker(), emitter: new EventEmitter() };
+      const tracker = new ActivityTracker((activity, cause) => {
+        this.lifecycle.emit("activity", {
+          id: record.id,
+          activity,
+          cause,
+          hasHookSource: tracker.hasHookSource,
+          kind: summary.kind
+        });
+      });
+      const session: Session = { summary, pty: null, buffer: "", tracker, emitter: new EventEmitter() };
       this.sessions.set(record.id, session);
       this.attach(session);
     }
@@ -703,7 +747,7 @@ export class SessionManager implements ISessionManager {
  */
 export class LocalSessionManager implements ISessionManager {
   private sessions = new Map<string, Session>();
-  /** Emits "created" | "exited" | "updated" (SessionSummary), "closed" ({ id }), and "activity" ({ id, type: "bell" }). */
+  /** Emits "created" | "exited" | "updated" (SessionSummary), "closed" ({ id }), and "activity" ({ id, activity, cause, hasHookSource, kind }). */
   readonly lifecycle = new EventEmitter();
 
   constructor(
@@ -737,19 +781,33 @@ export class LocalSessionManager implements ISessionManager {
       .reduce((max, s) => Math.max(max, s.summary.order), -1);
 
     const launch = buildLaunchCommand(entry, { tmux: false });
+    const env = {
+      ...sessionEnvBase(),
+      TERM: "xterm-256color",
+      COLORTERM: "truecolor",
+      PATH: sessionPath(),
+      ...entry.env,
+      ...addonEnv
+    } as Record<string, string>;
+
+    if (entry.kind === "agent") {
+      env.ORQUESTER_SESSION_ID = id;
+      if (this.options.daemonSockPath) {
+        env.ORQUESTER_DAEMON_SOCK = this.options.daemonSockPath;
+      }
+      try {
+        this.options.onAgentLaunch?.(entry);
+      } catch {
+        // hook installation is best-effort; never blocks a session launch
+      }
+    }
+
     const pty = spawn(launch.bin, launch.args, {
       name: "xterm-256color",
       cwd,
       cols,
       rows,
-      env: {
-        ...sessionEnvBase(),
-        TERM: "xterm-256color",
-        COLORTERM: "truecolor",
-        PATH: sessionPath(),
-        ...entry.env,
-        ...addonEnv
-      } as Record<string, string>
+      env
     });
 
     const summary: SessionSummary = {
@@ -766,7 +824,16 @@ export class LocalSessionManager implements ISessionManager {
       createdAt: new Date().toISOString()
     };
 
-    const session: Session = { summary, pty, buffer: "", tracker: new ActivityTracker(), emitter: new EventEmitter() };
+    const tracker = new ActivityTracker((activity, cause) => {
+      this.lifecycle.emit("activity", {
+        id,
+        activity,
+        cause,
+        hasHookSource: tracker.hasHookSource,
+        kind: summary.kind
+      });
+    });
+    const session: Session = { summary, pty, buffer: "", tracker, emitter: new EventEmitter() };
     this.sessions.set(id, session);
 
     pty.onData((data) => {
@@ -774,9 +841,7 @@ export class LocalSessionManager implements ISessionManager {
         return;
       }
       session.buffer = (session.buffer + data).slice(-MAX_BUFFER);
-      if (session.tracker.onOutput(data, Date.now())) {
-        this.lifecycle.emit("activity", { id, type: "bell" });
-      }
+      session.tracker.noteOutput(data);
       session.emitter.emit("output", data);
     });
     pty.onExit(({ exitCode }) => {
@@ -791,24 +856,25 @@ export class LocalSessionManager implements ISessionManager {
       session.summary.status = "exited";
       session.summary.exitCode = exitCode;
       session.pty = null;
+      session.tracker.dispose();
       session.emitter.emit("exit", exitCode);
-      this.lifecycle.emit("exited", { ...session.summary });
+      this.lifecycle.emit("exited", this.withActivity(session));
     });
 
-    this.lifecycle.emit("created", { ...summary });
-    return { ...summary };
+    this.lifecycle.emit("created", this.withActivity(session));
+    return this.withActivity(session);
   }
 
   list(projectPath?: string): SessionSummary[] {
     const all = [...this.sessions.values()]
-      .map((s) => ({ ...s.summary }))
+      .map((s) => this.withActivity(s))
       .sort((a, b) => a.order - b.order || a.createdAt.localeCompare(b.createdAt));
     return projectPath === undefined ? all : all.filter((s) => s.projectPath === projectPath);
   }
 
   get(id: string): SessionSummary | undefined {
     const session = this.sessions.get(id);
-    return session ? { ...session.summary } : undefined;
+    return session ? this.withActivity(session) : undefined;
   }
 
   /** No durable store here; the hot in-memory ring is the only scrollback. */
@@ -829,13 +895,23 @@ export class LocalSessionManager implements ISessionManager {
     return this.sessions.get(id)?.buffer ?? "";
   }
 
-  activity(id: string): ActivitySnapshot | undefined {
+  activity(id: string): SessionActivity | undefined {
     return this.sessions.get(id)?.tracker.snapshot();
+  }
+
+  /**
+   * Boundary summary carrying live activity for a running session (never
+   * persisted). Exited sessions return the bare summary — no activity.
+   */
+  private withActivity(session: Session): SessionSummary {
+    return session.summary.status === "running"
+      ? { ...session.summary, activity: session.tracker.snapshot() }
+      : { ...session.summary };
   }
 
   input(id: string, data: string): void {
     const session = this.sessions.get(id);
-    session?.tracker.onInput();
+    session?.tracker.noteInput();
     session?.pty?.write(data);
   }
 
@@ -857,8 +933,8 @@ export class LocalSessionManager implements ISessionManager {
     const trimmed = title.trim();
     const fallback = this.registry.get(session.summary.refId)?.name ?? session.summary.refId;
     session.summary.title = trimmed || fallback;
-    this.lifecycle.emit("updated", { ...session.summary });
-    return { ...session.summary };
+    this.lifecycle.emit("updated", this.withActivity(session));
+    return this.withActivity(session);
   }
 
   /** Reassign per-project tab order from an ordered id list (unknown ids ignored). */
@@ -867,7 +943,7 @@ export class LocalSessionManager implements ISessionManager {
       const session = this.sessions.get(id);
       if (session && session.summary.projectPath === projectPath && session.summary.order !== index) {
         session.summary.order = index;
-        this.lifecycle.emit("updated", { ...session.summary });
+        this.lifecycle.emit("updated", this.withActivity(session));
       }
     });
   }
@@ -883,6 +959,7 @@ export class LocalSessionManager implements ISessionManager {
     } catch {
       /* already gone */
     }
+    session.tracker.dispose();
     this.sessions.delete(id);
     this.lifecycle.emit("closed", { id });
     return true;

@@ -1,10 +1,9 @@
 import { EventEmitter } from "node:events";
 import { mock, test } from "node:test";
 import assert from "node:assert/strict";
-import type { CreateSessionRequest, SessionSummary } from "@orquester/api";
+import type { CreateSessionRequest, SessionActivity, SessionSummary } from "@orquester/api";
 import type { ISessionManager } from "../sessions.ts";
 import {
-  ACTIVITY_WORKING_MS,
   TerminalControl,
   TabNotFound,
   AmbiguousTab,
@@ -21,7 +20,7 @@ export class FakeManager implements Partial<ISessionManager> {
   created: CreateSessionRequest[] = [];
   create?: ISessionManager["create"];
   texts = new Map<string, string>();
-  activityMap = new Map<string, { lastOutputAt: number | null; attention: boolean }>();
+  activityMap = new Map<string, SessionActivity>();
   private subs = new Map<string, { out: (d: string) => void; exit: (c: number) => void }[]>();
 
   add(s: Partial<SessionSummary> & { id: string; title: string; projectPath: string }): SessionSummary {
@@ -49,8 +48,13 @@ export class FakeManager implements Partial<ISessionManager> {
   emitOutput(id: string, data: string) { (this.subs.get(id) ?? []).forEach((s) => s.out(data)); }
   emitExit(id: string, code = 0) { (this.subs.get(id) ?? []).forEach((s) => s.exit(code)); }
   ringBell(id: string) {
-    this.activityMap.set(id, { lastOutputAt: Date.now(), attention: true });
-    this.lifecycle.emit("activity", { id, type: "bell" });
+    const activity: SessionActivity = {
+      state: "working",
+      attention: "bell",
+      lastOutputAt: new Date().toISOString(),
+    };
+    this.activityMap.set(id, activity);
+    this.lifecycle.emit("activity", { id, activity });
   }
   lifecycleExit(id: string) {
     const tab = this.get(id);
@@ -128,10 +132,11 @@ test("readTerminal returns clean text + status", async () => {
 test("listTabs projects activity fields for running tabs and omits them for exited tabs", () => {
   const f = new FakeManager();
   const recent = Date.now();
+  const recentIso = new Date(recent).toISOString();
   const active = f.add({ id: "active", title: "Claude", projectPath: "/ws/w/p", status: "running" });
   const old = f.add({ id: "old", title: "Done", projectPath: "/ws/w/p", status: "exited", exitCode: 0 });
-  f.activityMap.set(active.id, { lastOutputAt: recent, attention: true });
-  f.activityMap.set(old.id, { lastOutputAt: recent, attention: true });
+  f.activityMap.set(active.id, { state: "working", attention: "bell", lastOutputAt: recentIso });
+  f.activityMap.set(old.id, { state: "working", attention: "bell", lastOutputAt: recentIso });
 
   const out = make(f).listTabs({ workspace: "w", project: "p" });
 
@@ -143,11 +148,11 @@ test("listTabs projects activity fields for running tabs and omits them for exit
   assert.equal("lastOutputAt" in out[1], false);
 });
 
-test("readTerminal reports idle activity when output is older than the working window", async () => {
+test("readTerminal reports idle activity from the tracker state", async () => {
   const f = new FakeManager();
-  const old = Date.now() - ACTIVITY_WORKING_MS - 1;
+  const iso = new Date().toISOString();
   f.add({ id: "a", title: "Claude", projectPath: "/ws/w/p", status: "running" });
-  f.activityMap.set("a", { lastOutputAt: old, attention: false });
+  f.activityMap.set("a", { state: "idle", attention: null, lastOutputAt: iso });
   f.texts.set("a", "quiet");
 
   const r = await make(f).readTerminal({ tabId: "a" });
@@ -155,7 +160,7 @@ test("readTerminal reports idle activity when output is older than the working w
   assert.equal(r.text, "quiet");
   assert.equal(r.activity, "idle");
   assert.equal(r.attention, false);
-  assert.equal(r.lastOutputAt, new Date(old).toISOString());
+  assert.equal(r.lastOutputAt, iso);
 });
 
 test("writeInput: no submit writes just the text (no CR)", async () => {
@@ -279,10 +284,11 @@ test("waitForIdle: abort returns aborted, skips capture, cleans up", async () =>
 test("waitForAttention returns immediately for already attention-flagged tabs", async () => {
   const f = new FakeManager();
   const recent = Date.now();
+  const recentIso = new Date(recent).toISOString();
   f.add({ id: "a", title: "Claude", projectPath: "/ws/w/p", status: "running" });
   f.add({ id: "b", title: "Shell", projectPath: "/ws/w/p", status: "running" });
-  f.activityMap.set("a", { lastOutputAt: recent, attention: true });
-  f.activityMap.set("b", { lastOutputAt: recent, attention: false });
+  f.activityMap.set("a", { state: "working", attention: "bell", lastOutputAt: recentIso });
+  f.activityMap.set("b", { state: "working", attention: null, lastOutputAt: recentIso });
 
   const r = await make(f).waitForAttention({ workspace: "w", project: "p" });
 
@@ -293,7 +299,7 @@ test("waitForAttention returns immediately for already attention-flagged tabs", 
     status: "running",
     activity: "working",
     attention: true,
-    lastOutputAt: new Date(recent).toISOString(),
+    lastOutputAt: recentIso,
   }]);
 });
 
