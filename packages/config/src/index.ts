@@ -294,21 +294,33 @@ export function createLocalConnection(socketPath: string): LocalConnectionConfig
 
 // app.json (desktop app config)
 
-export const usagePrefsSchema = z.object({
-  /** Master switch for the top-bar usage widget (also gates daemon polling). */
-  enabled: z.boolean().default(true),
-  claude: z.boolean().default(true),
-  codex: z.boolean().default(true),
-  /** Which agent drives the collapsed chip. */
-  chip: z.enum(["busiest", "claude", "codex"]).default("busiest"),
-  /**
-   * How to render multi-account Claude usage (TeamClaude): pooled aggregate bars
-   * or a per-account breakdown.
-   */
-  view: z.enum(["aggregate", "accounts"]).default("aggregate")
-});
-
+export const usagePrefsSchema = z
+  .object({
+    /** Master switch for the top-bar usage widget (also gates daemon polling). */
+    enabled: z.boolean().default(true),
+    // Legacy per-agent booleans (pre-record). Optional; folded into `agents`.
+    claude: z.boolean().optional(),
+    codex: z.boolean().optional(),
+    agents: z.record(z.string(), z.boolean()).default({}),
+    /** Which agent drives the collapsed chip. */
+    chip: z.enum(["busiest", "claude", "codex"]).default("busiest"),
+    /**
+     * How to render multi-account Claude usage (TeamClaude): pooled aggregate bars
+     * or a per-account breakdown.
+     */
+    view: z.enum(["aggregate", "accounts"]).default("aggregate")
+  })
+  .transform((p) => {
+    const agents = { ...p.agents };
+    if (p.claude !== undefined && agents.claude === undefined) agents.claude = p.claude;
+    if (p.codex !== undefined && agents.codex === undefined) agents.codex = p.codex;
+    return { enabled: p.enabled, agents, chip: p.chip, view: p.view };
+  });
 export type UsagePrefs = z.infer<typeof usagePrefsSchema>;
+
+export function usageAgentEnabled(prefs: UsagePrefs, id: string): boolean {
+  return prefs.enabled && (prefs.agents[id] ?? true);
+}
 
 // agent-accounts.json (managed per-agent accounts; daemon-side)
 

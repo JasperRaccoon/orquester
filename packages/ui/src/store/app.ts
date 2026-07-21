@@ -123,8 +123,7 @@ const EMPTY_REGISTRY: RegistryResponse = {
 
 const DEFAULT_USAGE_PREFS: UsagePrefs = {
   enabled: true,
-  claude: true,
-  codex: true,
+  agents: {},
   chip: "busiest",
   view: "aggregate"
 };

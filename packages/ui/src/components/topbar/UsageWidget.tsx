@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { ChevronDown, Gauge, RefreshCw } from "lucide-react";
 import type { AgentUsage, UsageAccount, UsageWindow } from "@orquester/api";
+import { usageAgentEnabled } from "@orquester/config";
 import { AdaptiveMenu } from "../ui";
 import { getRegistryIcon } from "../../icons";
 import { useAppStore } from "../../store/app";
@@ -88,7 +89,7 @@ export const UsageWidget: React.FC = () => {
   const [localView, setLocalView] = useState<"aggregate" | "accounts" | null>(null);
 
   if (!prefs.enabled || !usage) return null;
-  const agents = usage.agents.filter((a) => a.available && (a.id === "claude" ? prefs.claude : prefs.codex));
+  const agents = usage.agents.filter((a) => a.available && usageAgentEnabled(prefs, a.id));
   if (agents.length === 0) return null;
 
   const driver = pickDriver(agents, prefs.chip);
@@ -100,7 +101,9 @@ export const UsageWidget: React.FC = () => {
   // Included agents that are enabled in prefs but aren't logged in (so not present
   // in the live snapshot) get a muted, actionable row in the panel.
   const present = new Set(agents.map((a) => a.id));
-  const missing = (["claude", "codex"] as const).filter((id) => prefs[id] && !present.has(id));
+  const missing = (["claude", "codex"] as const).filter(
+    (id) => usageAgentEnabled(prefs, id) && !present.has(id)
+  );
   // Honest "as of": the most recent successful reading among the shown agents.
   const freshestAsOf = agents
     .map((a) => a.asOf)

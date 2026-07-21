@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import type { AgentUsage, UsageResponse } from "@orquester/api";
-import type { UsagePrefs } from "@orquester/config";
+import { usageAgentEnabled, type UsagePrefs } from "@orquester/config";
 
 export interface UsageServiceDeps {
   /** Returns the Claude agent (possibly stale) or null when not logged in. */
@@ -20,8 +20,7 @@ export interface UsageServiceDeps {
 
 const DEFAULT_PREFS: UsagePrefs = {
   enabled: true,
-  claude: true,
-  codex: true,
+  agents: {},
   chip: "busiest",
   view: "aggregate"
 };
@@ -38,11 +37,11 @@ export class UsageService {
   async recompute(): Promise<void> {
     const prefs = await this.deps.getPrefs().catch(() => DEFAULT_PREFS);
     const agents: AgentUsage[] = [];
-    if (prefs.enabled && prefs.claude) {
+    if (usageAgentEnabled(prefs, "claude")) {
       const c = await this.deps.fetchClaude().catch(() => null);
       if (c) agents.push(c);
     }
-    if (prefs.enabled && prefs.codex) {
+    if (usageAgentEnabled(prefs, "codex")) {
       const x = await this.deps.readCodex().catch(() => null);
       if (x) agents.push(x);
     }

@@ -515,10 +515,16 @@ const UsageSettings: React.FC = () => {
         <Switch checked={prefs.enabled} onChange={(v) => setUsage({ enabled: v })} />
       </Field>
       <Field label="Claude Code" hint={agentHint("claude")}>
-        <Switch checked={prefs.claude} onChange={(v) => setUsage({ claude: v })} />
+        <Switch
+          checked={prefs.agents.claude ?? true}
+          onChange={(v) => setUsage({ agents: { ...prefs.agents, claude: v } })}
+        />
       </Field>
       <Field label="Codex" hint={agentHint("codex")}>
-        <Switch checked={prefs.codex} onChange={(v) => setUsage({ codex: v })} />
+        <Switch
+          checked={prefs.agents.codex ?? true}
+          onChange={(v) => setUsage({ agents: { ...prefs.agents, codex: v } })}
+        />
       </Field>
       <Field label="Chip shows" hint="Which agent drives the collapsed chip.">
         <div className="flex gap-1">

@@ -5,7 +5,7 @@ import { UsageService } from "./usage";
 
 const claude: AgentUsage = { id: "claude", available: true, stale: false, session: { percent: 45 }, weekly: { percent: 69 } };
 const codex: AgentUsage = { id: "codex", available: true, stale: false, session: { percent: 3 }, weekly: { percent: 37 } };
-const allOn: UsagePrefs = { enabled: true, claude: true, codex: true, chip: "busiest", view: "aggregate" };
+const allOn: UsagePrefs = { enabled: true, agents: { claude: true, codex: true }, chip: "busiest", view: "aggregate" };
 
 function make(over: Partial<UsagePrefs> = {}, c: AgentUsage | null = claude) {
   const changed: unknown[] = [];
@@ -34,7 +34,7 @@ const t = async () => {
   assert.equal(a.changed.length, 1);
 
   // Disabling an agent drops it and re-emits.
-  const b = make({ codex: false });
+  const b = make({ agents: { claude: true, codex: false } });
   await b.svc.snapshot(true);
   const snapB = await b.svc.snapshot(false);
   assert.deepEqual(snapB.agents.map((x) => x.id), ["claude"]);
