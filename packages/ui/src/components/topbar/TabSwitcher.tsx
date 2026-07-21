@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { ChevronDown, Circle, FolderTree, GitBranch, ListTodo, Pencil, Trash2, X } from "lucide-react";
+import { ChevronDown, Circle, FolderTree, GitBranch, Globe, ListTodo, Pencil, Trash2, X } from "lucide-react";
 import { BottomSheet, ConfirmDialog, DropdownEmpty } from "../ui";
 import { SessionStatusDot } from "../ui/session-status-dot";
 import { cn } from "../../lib/cn";
@@ -7,7 +7,12 @@ import { getRegistryIcon } from "../../icons";
 import { useActiveTabId, useAppStore, useProjectTabs } from "../../store/app";
 import type { ProjectTab } from "../../store/app";
 
-const tabLabel = (tab: ProjectTab) => (tab.type === "session" ? tab.session.title : tab.title);
+const tabLabel = (tab: ProjectTab) =>
+  tab.type === "session"
+    ? tab.session.title
+    : tab.type === "browser"
+      ? tab.browser.title || "Browser"
+      : tab.title;
 const tabIcon = (tab: ProjectTab, size = 16) =>
   tab.type === "session" ? (
     getRegistryIcon(tab.session.kind, tab.session.refId, size)
@@ -15,6 +20,8 @@ const tabIcon = (tab: ProjectTab, size = 16) =>
     <GitBranch size={size} />
   ) : tab.type === "todo" ? (
     <ListTodo size={size} />
+  ) : tab.type === "browser" ? (
+    <Globe size={size} />
   ) : (
     <FolderTree size={size} />
   );

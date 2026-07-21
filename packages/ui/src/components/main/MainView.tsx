@@ -1,5 +1,5 @@
 import React from "react";
-import { FolderTree, GitBranch, LayoutGrid, ListTodo, MousePointerClick, X } from "lucide-react";
+import { FolderTree, GitBranch, Globe, LayoutGrid, ListTodo, MousePointerClick, X } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { EmptyState } from "./EmptyState";
 import { TerminalView } from "../terminal";
@@ -29,13 +29,19 @@ function cellIcon(tab: ProjectTab): React.ReactNode {
     <GitBranch size={13} />
   ) : tab.type === "todo" ? (
     <ListTodo size={13} />
+  ) : tab.type === "browser" ? (
+    <Globe size={13} />
   ) : (
     <FolderTree size={13} />
   );
 }
 
 function cellTitle(tab: ProjectTab): string {
-  return tab.type === "session" ? tab.session.title : tab.title;
+  return tab.type === "session"
+    ? tab.session.title
+    : tab.type === "browser"
+      ? tab.browser.title || "Browser"
+      : tab.title;
 }
 
 /** Grid columns for a tab count: 1→1, 2-4→2, 5-9→3, 10+→4 (capped). */
@@ -308,6 +314,9 @@ export const MainView: React.FC = () => {
                   <GitView projectPath={ctx.kind === "project" ? ctx.project.path : ""} active={show} />
                 ) : tab.type === "files" ? (
                   <FileBrowser rootPath={ctx.kind === "project" ? ctx.project.path : ""} active={show} />
+                ) : tab.type === "browser" ? (
+                  // Temporary: Task 9 replaces this with the real BrowserView.
+                  null
                 ) : (
                   <TodoView todoId={tab.todoId} active={active} />
                 )}

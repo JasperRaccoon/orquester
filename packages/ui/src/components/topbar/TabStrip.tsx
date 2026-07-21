@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { FolderTree, GitBranch, ListTodo, Pencil, Trash2, X } from "lucide-react";
+import { FolderTree, GitBranch, Globe, ListTodo, Pencil, Trash2, X } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { getRegistryIcon } from "../../icons";
 import { ConfirmDialog } from "../ui";
@@ -107,13 +107,19 @@ export const TabStrip: React.FC = () => {
         const isSession = tab.type === "session";
         const canRename = isSession || tab.type === "todo";
         const editing = editingId === tab.id;
-        const title = isSession ? tab.session.title : tab.title;
+        const title = isSession
+          ? tab.session.title
+          : tab.type === "browser"
+            ? tab.browser.title || "Browser"
+            : tab.title;
         const icon = isSession ? (
           getRegistryIcon(tab.session.kind, tab.session.refId, 13)
         ) : tab.type === "git" ? (
           <GitBranch size={13} />
         ) : tab.type === "todo" ? (
           <ListTodo size={13} />
+        ) : tab.type === "browser" ? (
+          <Globe size={13} />
         ) : (
           <FolderTree size={13} />
         );
