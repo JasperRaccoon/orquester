@@ -152,6 +152,7 @@ in production (`--appdir`). The daemon persists **JSON, not a database**:
             tmux.sock (dedicated tmux server)         sessions.json (reattach index)
             workspaces.json  accounts.json  keys/ (0700 per-account SSH keys)  logs/
             env/ (optional per-launcher env files, e.g. opencode.env)
+            hooks/ (managed agent hook script)
   workspaces/   <workspace>/<project> dirs (the file-browser sandbox root, fsRoot)
 ```
 
@@ -300,8 +301,12 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
   `index.html` for any missing GET, so a missing `sw.js` silently serves HTML and breaks the
   service worker. Run `pnpm build` after touching either. Web Push state lives in
   `<appdir>/daemon/push.json` (chmod 0600 — it holds the VAPID **private** key, never returned by
-  any API); pushes fire only from **agent**-session bells (shell beeps never push), debounced
-  per session. The SW never intercepts `/api`, `/events`, `/ws`, `/health`, `/mcp` or non-GET
+  any API); pushes fire from agent-session status: hook-reporting agents (claude/codex/opencode
+  via managed hooks → `POST /api/sessions/:id/agent-event`, unix-socket-only) send distinct
+  "needs your input" / "finished" pushes; agents without hook coverage keep the bell fallback.
+  Debounced 30 s per session per type. Session activity (working/waiting/idle + attention) lives
+  on `SessionSummary.activity` and streams as `session.activity` events — the UI never re-derives
+  it. The SW never intercepts `/api`, `/events`, `/ws`, `/health`, `/mcp` or non-GET
   requests. Registration is web-host-only (`apps/web/src/pwa.ts`, PROD-gated) — Electron never
   touches it.
 
