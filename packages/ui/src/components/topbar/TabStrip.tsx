@@ -51,6 +51,7 @@ export const TabStrip: React.FC = () => {
   const renameTodo = useAppStore((s) => s.renameTodo);
   const deleteTodo = useAppStore((s) => s.deleteTodo);
   const reorderTabs = useAppStore((s) => s.reorderTabs);
+  const agentAccounts = useAppStore((s) => s.agentAccounts);
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
@@ -106,6 +107,10 @@ export const TabStrip: React.FC = () => {
         const active = tab.id === activeTabId;
         const isSession = tab.type === "session";
         const canRename = isSession || tab.type === "todo";
+        const accountId = tab.type === "session" ? tab.session.accountId : undefined;
+        const accountLabel = accountId
+          ? agentAccounts?.accounts.find((a) => a.id === accountId)?.label
+          : undefined;
         const editing = editingId === tab.id;
         const title = isSession
           ? tab.session.title
@@ -181,6 +186,11 @@ export const TabStrip: React.FC = () => {
             ) : (
               <span className="max-w-[140px] truncate">{title}</span>
             )}
+            {accountLabel ? (
+              <span className="ml-1 rounded bg-neutral-800 px-1 text-[10px] text-neutral-400">
+                {accountLabel}
+              </span>
+            ) : null}
             {isSession ? (
               <SessionStatusDot sessionId={tab.id} status={tab.session.status} className="ml-0.5" />
             ) : null}

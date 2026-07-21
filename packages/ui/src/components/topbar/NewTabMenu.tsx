@@ -1,5 +1,6 @@
-import React from "react";
+import React, { useState } from "react";
 import { FolderTree, GitBranch, Globe, ListTodo, Plus } from "lucide-react";
+import type { RegistryEntry } from "@orquester/api";
 import {
   AdaptiveMenu,
   DropdownEmpty,
@@ -11,6 +12,47 @@ import {
 import { getRegistryIcon } from "../../icons";
 import { useRegistry } from "../../hooks";
 import { useAppStore, useCurrentContext } from "../../store/app";
+
+/**
+ * One installed-agent row in the "+" menu. When the agent (`claude`/`codex`) has
+ * ≥1 managed account, it renders an inline account picker (System + managed
+ * accounts, defaulting to that agent's configured default) and passes the chosen
+ * account id as the 4th `openTab` argument so the session launches under it.
+ */
+const AgentRow: React.FC<{ agent: RegistryEntry }> = ({ agent }) => {
+  const openTab = useAppStore((s) => s.openTab);
+  const agentAccounts = useAppStore((s) => s.agentAccounts);
+  const managed = (agentAccounts?.accounts ?? []).filter((a) => a.agent === agent.id);
+  const [picked, setPicked] = useState<string | undefined>(
+    agentAccounts?.defaults[agent.id as "claude" | "codex"] ?? undefined
+  );
+
+  return (
+    <>
+      <DropdownItem
+        icon={getRegistryIcon("agent", agent.id, 14)}
+        onClick={() => void openTab("agent", agent.id, agent.name, picked)}
+      >
+        {agent.name}
+      </DropdownItem>
+      {managed.length > 0 ? (
+        <select
+          value={picked ?? ""}
+          onClick={(event) => event.stopPropagation()}
+          onChange={(event) => setPicked(event.target.value || undefined)}
+          className="mb-1 ml-8 mr-2 w-[calc(100%-2.75rem)] rounded bg-neutral-900 px-1 py-0.5 text-xs text-neutral-300 outline-none ring-1 ring-neutral-700"
+        >
+          <option value="">System</option>
+          {managed.map((a) => (
+            <option key={a.id} value={a.id}>
+              {a.label}
+            </option>
+          ))}
+        </select>
+      ) : null}
+    </>
+  );
+};
 
 /**
  * The "+" new-tab button. In a project it lists detected shells and INSTALLED
@@ -112,13 +154,7 @@ export const NewTabMenu: React.FC = () => {
       <DropdownLabel>Agents</DropdownLabel>
       {agents.length === 0 && <DropdownEmpty>No agents installed</DropdownEmpty>}
       {agents.map((agent) => (
-        <DropdownItem
-          key={agent.id}
-          icon={getRegistryIcon("agent", agent.id, 14)}
-          onClick={() => void openTab("agent", agent.id, agent.name)}
-        >
-          {agent.name}
-        </DropdownItem>
+        <AgentRow key={agent.id} agent={agent} />
       ))}
     </AdaptiveMenu>
   );

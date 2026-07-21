@@ -602,7 +602,7 @@ export interface AppState {
   loadAgentAccounts: () => Promise<void>;
   installAgent: (id: string) => Promise<void>;
   updateAgent: (id: string) => Promise<void>;
-  openTab: (kind: RegistryKind, refId: string, title?: string) => Promise<void>;
+  openTab: (kind: RegistryKind, refId: string, title?: string, accountId?: string) => Promise<void>;
   openFileBrowser: () => void;
   openGit: () => void;
   openBrowser: (url?: string) => Promise<void>;
@@ -1425,7 +1425,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     await get().api?.updateRegistryEntry(id).catch(() => undefined);
   },
 
-  openTab: async (kind, refId, title) => {
+  openTab: async (kind, refId, title, accountId) => {
     const api = get().api;
     if (!api) {
       return;
@@ -1436,7 +1436,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       refId,
       title,
       projectPath: project?.path ?? "",
-      cwd: project?.path
+      cwd: project?.path,
+      accountId
     });
     set((state) => ({
       sessions: upsertSession(state.sessions, session),
