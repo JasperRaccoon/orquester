@@ -416,12 +416,16 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   todos.lifecycle.on("deleted", (r) => broadcaster.publish("todos", "todo.deleted", r));
 
   // Server-side browser tabs (Design Mode). Chromium resolves through the
-  // registry's probed browser entries; no bundled download.
+  // registry's probed browser entries; no bundled download. Only CDP-speaking
+  // (Chromium-family) browsers can drive puppeteer-core — Firefox and the
+  // empty-bin "system-browser" entry are excluded so a Firefox-only host yields
+  // a clean 409 "no chromium" instead of a confusing CDP/"Target closed" error.
+  const CHROMIUM_FAMILY = new Set(["chrome", "chromium", "brave", "edge", "vivaldi"]);
   const browsers = new BrowserManager({
     indexFile: resolved.browsersIndexFile,
     profilesDir: resolved.browserProfilesDir,
     resolveChromium: () =>
-      registry.list().browsers.find((b) => b.enabled && b.resolvedBin)?.resolvedBin
+      registry.list().browsers.find((b) => CHROMIUM_FAMILY.has(b.id) && b.enabled && b.resolvedBin)?.resolvedBin
   });
   await browsers.load();
   browsers.lifecycle.on("created", (b) => broadcaster.publish("browser", "browser.created", b));

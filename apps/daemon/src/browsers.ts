@@ -198,7 +198,16 @@ export class BrowserManager {
   async setViewport(id: string, mode: BrowserViewportMode): Promise<void> {
     const tab = this.mustGet(id);
     tab.record.viewportMode = mode;
-    if (tab.cdp) await this.applyViewport(tab);
+    if (tab.cdp) {
+      await this.applyViewport(tab);
+      // Restart the screencast so maxWidth/maxHeight track the new viewport;
+      // otherwise a mobile→desktop toggle keeps the 390px cap and Chromium
+      // downscales the 1280-wide render into a blurry frame.
+      if (tab.streaming) {
+        await this.stopScreencast(tab);
+        await this.startScreencast(tab);
+      }
+    }
     await this.persist();
     this.emitUpdated(tab);
     this.pushState(tab);
@@ -293,9 +302,19 @@ export class BrowserManager {
   private chromeFor(projectPath: string): Promise<Chrome> {
     let pending = this.chromes.get(projectPath);
     if (!pending) {
-      pending = this.launch(projectPath);
-      this.chromes.set(projectPath, pending);
-      pending.catch(() => this.chromes.delete(projectPath));
+      const launched = this.launch(projectPath);
+      pending = launched;
+      this.chromes.set(projectPath, launched);
+      launched.catch(() => this.chromes.delete(projectPath));
+      // Evict a browser that dies at runtime (renderer OOM taking Chromium down,
+      // host kill, etc.) so the next subscribe/navigate relaunches instead of
+      // reusing a dead Promise<Chrome> forever. Capture `launched` so a newer
+      // entry (from a relaunch) isn't clobbered by a stale disconnect.
+      launched.then((chrome) => {
+        chrome.browser.once("disconnected", () => {
+          if (this.chromes.get(projectPath) === launched) this.chromes.delete(projectPath);
+        });
+      }).catch(() => undefined);
     }
     return pending;
   }
