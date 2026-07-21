@@ -243,8 +243,22 @@ export class AgentHooks {
     }
   }
 
+  // --- opencode: status plugin in the global plugin dir ---------------------
+
   private async installOpenCode(): Promise<void> {
-    // Task 7
+    const pluginPath = join(this.homeDir, ".config", "opencode", "plugin", "orquester-status.js");
+    const source = openCodePluginSource();
+    let current = "";
+    try {
+      current = await readFile(pluginPath, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw error;
+      }
+    }
+    if (current !== source) {
+      await writeFileAtomic(pluginPath, source, 0o644);
+    }
   }
 }
 
@@ -328,4 +342,99 @@ function upsertCodexTrustBlock(content: string, key: string, hash: string): stri
     `trusted_hash = "${escapeTomlString(hash)}"`
   ];
   return [...lines.slice(0, headerIdx), ...replacement, ...lines.slice(blockEnd)].join("\n");
+}
+
+/**
+ * OpenCode status plugin. Runs inside OpenCode's own runtime, so transport is
+ * node:http over the daemon's unix socket (no curl). Design notes:
+ *  - no-ops without ORQUESTER_SESSION_ID/ORQUESTER_DAEMON_SOCK (runs outside
+ *    Orquester, or on Windows);
+ *  - opaque ctx, no destructuring — OpenCode may invoke the factory with
+ *    undefined during startup;
+ *  - child-session guard: a tool-spawned child session's busy/idle must not
+ *    flip the pane; parent lookup fails CLOSED (assume child);
+ *  - no message-part subscription at all (state transitions only).
+ */
+function openCodePluginSource(): string {
+  return `// orquester-managed status plugin v${SCRIPT_VERSION} — do not edit (rewritten by the daemon)
+import http from "node:http";
+
+const SESSION_ID = process.env.ORQUESTER_SESSION_ID || "";
+const SOCK = process.env.ORQUESTER_DAEMON_SOCK || "";
+
+function post(event, payload) {
+  if (!SESSION_ID || !SOCK) return;
+  try {
+    const body = JSON.stringify({ source: "opencode", event, payload: payload || {} });
+    const req = http.request(
+      {
+        socketPath: SOCK,
+        path: "/api/sessions/" + SESSION_ID + "/agent-event",
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+        timeout: 1500
+      },
+      (res) => res.resume()
+    );
+    req.on("error", () => {});
+    req.on("timeout", () => req.destroy());
+    req.end(body);
+  } catch {
+    // never let status reporting break the agent
+  }
+}
+
+export const OrquesterStatusPlugin = async (ctx) => {
+  const client = ctx && ctx.client ? ctx.client : null;
+  const childCache = new Map();
+
+  async function isChildSession(sessionID) {
+    if (!sessionID) return true; // fail closed
+    if (childCache.has(sessionID)) return childCache.get(sessionID);
+    let child = true; // fail closed on lookup errors
+    try {
+      if (client && client.session && typeof client.session.get === "function") {
+        const info = await client.session.get({ path: { id: sessionID } });
+        const data = info && (info.data || info);
+        child = Boolean(data && data.parentID);
+      }
+    } catch {
+      child = true;
+    }
+    childCache.set(sessionID, child);
+    return child;
+  }
+
+  let lastStatus = "";
+
+  return {
+    event: async (input) => {
+      const event = input && input.event ? input.event : null;
+      if (!event || !event.type) return;
+      const props = event.properties || {};
+      if (event.type === "permission.asked") {
+        post("PermissionRequest", {});
+        return;
+      }
+      if (event.type === "question.asked") {
+        post("AskUserQuestion", {});
+        return;
+      }
+      if (event.type === "session.status" || event.type === "session.idle" || event.type === "session.error") {
+        const sessionID = props.sessionID || (props.status && props.status.sessionID) || "";
+        if (await isChildSession(sessionID)) return;
+        const statusType =
+          event.type === "session.status" && props.status && props.status.type
+            ? props.status.type
+            : "idle";
+        const busy = statusType === "busy" || statusType === "retry";
+        const next = busy ? "SessionBusy" : "SessionIdle";
+        if (next === lastStatus) return;
+        lastStatus = next;
+        post(next, {});
+      }
+    }
+  };
+};
+`;
 }
