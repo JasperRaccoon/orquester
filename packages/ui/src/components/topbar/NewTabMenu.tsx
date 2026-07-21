@@ -1,5 +1,5 @@
 import React from "react";
-import { FolderTree, GitBranch, ListTodo, Plus } from "lucide-react";
+import { FolderTree, GitBranch, Globe, ListTodo, Plus } from "lucide-react";
 import {
   AdaptiveMenu,
   DropdownEmpty,
@@ -22,6 +22,7 @@ export const NewTabMenu: React.FC = () => {
   const openTab = useAppStore((s) => s.openTab);
   const openFileBrowser = useAppStore((s) => s.openFileBrowser);
   const openGit = useAppStore((s) => s.openGit);
+  const openBrowser = useAppStore((s) => s.openBrowser);
   const ctx = useCurrentContext();
   const todos = useAppStore((s) => s.todos);
   const createTodo = useAppStore((s) => s.createTodo);
@@ -79,6 +80,13 @@ export const NewTabMenu: React.FC = () => {
       <DropdownItem icon={<GitBranch size={14} />} onClick={() => openGit()}>
         Git
       </DropdownItem>
+      {registry.browsers.some((b) => b.enabled) ? (
+        <DropdownItem icon={<Globe size={14} />} onClick={() => void openBrowser()}>
+          Browser
+        </DropdownItem>
+      ) : (
+        <DropdownEmpty>Browser — install chromium on the host</DropdownEmpty>
+      )}
       <DropdownItem
         icon={<ListTodo size={14} />}
         onClick={() => ctx && void createTodo("project", ctx.key, "to-dos")}

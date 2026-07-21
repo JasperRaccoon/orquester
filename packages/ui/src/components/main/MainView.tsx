@@ -6,6 +6,7 @@ import { TerminalView } from "../terminal";
 import { FileBrowser } from "../files";
 import { GitView } from "../git";
 import { TodoView } from "../todo";
+import { BrowserView } from "../browser";
 import { getRegistryIcon } from "../../icons";
 import { SessionStatusDot } from "../ui/session-status-dot";
 import { ResizeHandle } from "../ui";
@@ -315,8 +316,7 @@ export const MainView: React.FC = () => {
                 ) : tab.type === "files" ? (
                   <FileBrowser rootPath={ctx.kind === "project" ? ctx.project.path : ""} active={show} />
                 ) : tab.type === "browser" ? (
-                  // Temporary: Task 9 replaces this with the real BrowserView.
-                  null
+                  <BrowserView browser={tab.browser} active={active} />
                 ) : (
                   <TodoView todoId={tab.todoId} active={active} />
                 )}
