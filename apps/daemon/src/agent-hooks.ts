@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
@@ -138,11 +139,193 @@ export class AgentHooks {
     }
   }
 
+  // --- codex: hooks.json + config.toml trust entries ------------------------
+  //
+  // Codex >= 0.129 silently drops any hook without a matching
+  // [hooks.state."<key>"] trust block whose trusted_hash equals Codex's own
+  // canonical-JSON sha256 of the hook definition. We replicate that hash
+  // (mirrors codex-rs command_hook_hash via Orca's config-toml-trust.ts).
+  // Accepted risk: Codex owns the algorithm — if it drifts, hooks stop firing
+  // and sessions degrade to quiescence; the log hint tells the user to run
+  // /hooks in Codex to approve manually.
+
   private async installCodex(): Promise<void> {
-    // Task 6
+    const codexHome = join(this.homeDir, ".codex");
+    const hooksJsonPath = join(codexHome, "hooks.json");
+    const configTomlPath = join(codexHome, "config.toml");
+
+    const CODEX_EVENTS: Array<{ name: string; label: string; matcher?: string }> = [
+      { name: "SessionStart", label: "session_start" },
+      { name: "UserPromptSubmit", label: "user_prompt_submit" },
+      { name: "PreToolUse", label: "pre_tool_use", matcher: "*" },
+      { name: "PermissionRequest", label: "permission_request", matcher: "*" },
+      { name: "PostToolUse", label: "post_tool_use", matcher: "*" },
+      { name: "Stop", label: "stop" }
+    ];
+
+    // 1) hooks.json — Claude-shaped { hooks: { Event: [group…] } }. Codex
+    // rejects unknown top-level fields, so preserve only "hooks".
+    let hooksDoc: { hooks: Record<string, unknown[]> } = { hooks: {} };
+    try {
+      const parsed = JSON.parse(await readFile(hooksJsonPath, "utf8")) as {
+        hooks?: Record<string, unknown[]>;
+      };
+      if (parsed && typeof parsed === "object" && parsed.hooks && typeof parsed.hooks === "object") {
+        hooksDoc = { hooks: parsed.hooks };
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw error; // malformed user file — do not clobber
+      }
+    }
+
+    const managedFor = (event: { name: string; matcher?: string }) => ({
+      ...(event.matcher !== undefined ? { matcher: event.matcher } : {}),
+      hooks: [
+        {
+          type: "command",
+          command: `"${this.scriptPath}" codex ${event.name}`,
+          timeout: 10
+        }
+      ]
+    });
+    const hooksDirMarker = join(this.daemonDir, "hooks");
+    const isOurs = (group: unknown): boolean =>
+      JSON.stringify(group ?? "").includes(hooksDirMarker);
+
+    let changed = false;
+    // Trust identity depends on the group index — compute AFTER the final
+    // array shape is known.
+    const trustTargets: Array<{ label: string; matcher?: string; groupIndex: number; command: string }> = [];
+    for (const event of CODEX_EVENTS) {
+      const managed = managedFor(event);
+      const groups = Array.isArray(hooksDoc.hooks[event.name])
+        ? hooksDoc.hooks[event.name]
+        : [];
+      const withoutOurs = groups.filter((g) => !isOurs(g));
+      const current = groups.find(isOurs);
+      const next = [...withoutOurs, managed]; // append: user group indices stay stable
+      if (JSON.stringify(current) !== JSON.stringify(managed) || groups.length !== next.length) {
+        hooksDoc.hooks[event.name] = next;
+        changed = true;
+      } else {
+        hooksDoc.hooks[event.name] = groups;
+      }
+      trustTargets.push({
+        label: event.label,
+        matcher: event.matcher,
+        groupIndex: (hooksDoc.hooks[event.name] as unknown[]).length - 1,
+        command: (managed.hooks[0] as { command: string }).command
+      });
+    }
+    if (changed) {
+      await writeFileAtomic(hooksJsonPath, `${JSON.stringify(hooksDoc, null, 2)}\n`, 0o644);
+    }
+
+    // 2) config.toml trust blocks — written LAST so a half-write can't point
+    // at a nonexistent hook.
+    let toml = "";
+    try {
+      toml = await readFile(configTomlPath, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw error;
+      }
+    }
+    let tomlNext = toml;
+    for (const t of trustTargets) {
+      const key = `${hooksJsonPath}:${t.label}:${t.groupIndex}:0`;
+      const hash = codexTrustHash(t.label, t.command, t.matcher);
+      tomlNext = upsertCodexTrustBlock(tomlNext, key, hash);
+    }
+    if (tomlNext !== toml) {
+      await writeFileAtomic(configTomlPath, tomlNext, 0o644);
+    }
   }
 
   private async installOpenCode(): Promise<void> {
     // Task 7
   }
+}
+
+/** Recursively sort object keys (Codex's canonical_json); arrays keep order. */
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(canonicalize);
+  }
+  if (value && typeof value === "object") {
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+      sorted[key] = canonicalize((value as Record<string, unknown>)[key]);
+    }
+    return sorted;
+  }
+  return value;
+}
+
+/**
+ * Mirrors codex-rs command_hook_hash: sha256 over canonical JSON of
+ * { event_name, hooks: [handler], matcher? }. Codex drops matchers on
+ * user_prompt_submit/stop before hashing (codex-rs matcher_pattern_for_event),
+ * so including one there would yield a hash Codex never writes.
+ */
+function codexTrustHash(eventLabel: string, command: string, matcher?: string): string {
+  const handler = { type: "command", command, timeout: 10, async: false };
+  const identity: Record<string, unknown> = { event_name: eventLabel, hooks: [handler] };
+  const effectiveMatcher =
+    eventLabel === "user_prompt_submit" || eventLabel === "stop" ? undefined : matcher;
+  if (effectiveMatcher !== undefined) {
+    identity.matcher = effectiveMatcher;
+  }
+  const serialized = JSON.stringify(canonicalize(identity));
+  return `sha256:${createHash("sha256").update(serialized).digest("hex")}`;
+}
+
+function escapeTomlString(value: string): string {
+  return value
+    .replaceAll("\\", "\\\\")
+    .replaceAll('"', '\\"')
+    .replaceAll("\b", "\\b")
+    .replaceAll("\f", "\\f")
+    .replaceAll("\n", "\\n")
+    .replaceAll("\r", "\\r")
+    .replaceAll("\t", "\\t");
+}
+
+/**
+ * Upsert one [hooks.state."<key>"] block (enabled + trusted_hash), replacing an
+ * existing block for the same key. Line-based: a block ends at the next table
+ * header or EOF. Preserves a user-set `enabled = false`.
+ */
+function upsertCodexTrustBlock(content: string, key: string, hash: string): string {
+  const header = `[hooks.state."${escapeTomlString(key)}"]`;
+  const lines = content.length === 0 ? [] : content.split("\n");
+  const headerIdx = lines.findIndex((line) => line.trim() === header);
+  if (headerIdx === -1) {
+    const block = [header, "enabled = true", `trusted_hash = "${escapeTomlString(hash)}"`];
+    const out = [...lines];
+    if (out.length > 0 && out[out.length - 1].trim() !== "") {
+      out.push("");
+    }
+    out.push(...block, "");
+    return out.join("\n");
+  }
+  let end = headerIdx + 1;
+  while (end < lines.length && !/^\s*\[/.test(lines[end])) {
+    end++;
+  }
+  const block = lines.slice(headerIdx, end);
+  // Don't consume the blank separator / trailing EOF line before the next
+  // header — leave it in the tail so the rewrite is byte-identical on re-run.
+  let blockEnd = end;
+  while (blockEnd > headerIdx + 1 && lines[blockEnd - 1].trim() === "") {
+    blockEnd--;
+  }
+  const disabled = block.some((l) => /^\s*enabled\s*=\s*false\s*$/.test(l));
+  const replacement = [
+    header,
+    `enabled = ${!disabled}`,
+    `trusted_hash = "${escapeTomlString(hash)}"`
+  ];
+  return [...lines.slice(0, headerIdx), ...replacement, ...lines.slice(blockEnd)].join("\n");
 }
