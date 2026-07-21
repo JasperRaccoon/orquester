@@ -3,6 +3,7 @@ import { create, type StoreApi } from "zustand";
 import { ApiClient, ApiError } from "../lib/api-client";
 import { createTransporter } from "../lib/transporters";
 import { wakeSessionChannels } from "../lib/transporters/ws-session-channel";
+import { wakeBrowserChannels } from "../lib/transporters/ws-browser-channel";
 import { toRemoteConfig, toUiConnection } from "../lib/connections";
 import {
   buildCredential,
@@ -953,6 +954,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     // Terminal WS: redial a dead socket now, ping-probe a half-dead one (mobile
     // kills sockets without a close event; readyState lies).
     wakeSessionChannels();
+    // Browser screencast WS: same redial/ping-probe on visibility regain.
+    wakeBrowserChannels();
 
     const api = get().api;
     if (!api) {
