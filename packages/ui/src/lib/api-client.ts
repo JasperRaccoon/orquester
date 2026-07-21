@@ -51,6 +51,7 @@ import type {
   TodoScope,
   UpdateTodoRequest,
   UsageResponse,
+  UsageTokensResponse,
   WorkspaceSummary
 } from "@orquester/api";
 import type { AppConfig, DaemonConfig, RemoteConnectionConfig } from "@orquester/config";
@@ -490,6 +491,10 @@ export class ApiClient {
 
   getUsage(force?: boolean, signal?: AbortSignal): Promise<UsageResponse> {
     return this.send("GET", `/api/usage${force ? "?refresh=1" : ""}`, { signal });
+  }
+
+  getUsageTokens(force?: boolean, signal?: AbortSignal): Promise<UsageTokensResponse> {
+    return this.send("GET", `/api/usage/tokens${force ? "?refresh=1" : ""}`, { signal });
   }
 
   getAgentAccounts(signal?: AbortSignal): Promise<AgentAccountsResponse> {

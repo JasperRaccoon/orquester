@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { ChevronDown, Gauge, RefreshCw } from "lucide-react";
 import type { AgentUsage, UsageAccount, UsageWindow } from "@orquester/api";
 import { usageAgentEnabled } from "@orquester/config";
@@ -88,10 +88,18 @@ const AgentSection: React.FC<{ agent: AgentUsage; view: "aggregate" | "accounts"
 
 export const UsageWidget: React.FC = () => {
   const usage = useAppStore((s) => s.usage);
+  const usageTokens = useAppStore((s) => s.usageTokens);
   const prefs = useAppStore((s) => s.appConfig.usage);
   const loadUsage = useAppStore((s) => s.loadUsage);
+  const loadUsageTokens = useAppStore((s) => s.loadUsageTokens);
   const updateAppConfig = useAppStore((s) => s.updateAppConfig);
   const [localView, setLocalView] = useState<"aggregate" | "accounts" | null>(null);
+  const [tab, setTab] = useState<"windows" | "cost">("windows");
+
+  // Fetch token/cost aggregates the first time the Cost tab is opened.
+  useEffect(() => {
+    if (tab === "cost" && !usageTokens) void loadUsageTokens();
+  }, [tab, usageTokens, loadUsageTokens]);
 
   if (!prefs.enabled || !usage) return null;
   const agents = usage.agents.filter((a) => a.available && usageAgentEnabled(prefs, a.id));
@@ -147,39 +155,83 @@ export const UsageWidget: React.FC = () => {
           <RefreshCw size={13} />
         </button>
       </div>
-      {hasMulti && (
-        <div className="flex gap-1 px-3 pt-1">
-          {(
-            [
-              ["aggregate", "Aggregated"],
-              ["accounts", "Per account"]
-            ] as const
-          ).map(([id, label]) => (
-            <button
-              key={id}
-              type="button"
-              className={`rounded px-2 py-0.5 text-[11px] ${
-                view === id ? "bg-neutral-700 text-neutral-100" : "text-neutral-500 hover:text-neutral-300"
-              }`}
-              onClick={(e) => {
-                e.stopPropagation();
-                setLocalView(id);
-                void updateAppConfig({ usage: { ...prefs, view: id } });
-              }}
-            >
-              {label}
-            </button>
+      <div className="flex gap-1 px-3 pt-1">
+        {(
+          [
+            ["windows", "Windows"],
+            ["cost", "Cost"]
+          ] as const
+        ).map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            className={`rounded px-2 py-0.5 text-[11px] ${
+              tab === id ? "bg-neutral-700 text-neutral-100" : "text-neutral-500 hover:text-neutral-300"
+            }`}
+            onClick={(e) => {
+              e.stopPropagation();
+              setTab(id);
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      {tab === "windows" ? (
+        <>
+          {hasMulti && (
+            <div className="flex gap-1 px-3 pt-1">
+              {(
+                [
+                  ["aggregate", "Aggregated"],
+                  ["accounts", "Per account"]
+                ] as const
+              ).map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  className={`rounded px-2 py-0.5 text-[11px] ${
+                    view === id ? "bg-neutral-700 text-neutral-100" : "text-neutral-500 hover:text-neutral-300"
+                  }`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setLocalView(id);
+                    void updateAppConfig({ usage: { ...prefs, view: id } });
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
+          {agents.map((a) => (
+            <AgentSection key={a.id} agent={a} view={view} />
           ))}
+          {missing.map((id) => (
+            <div key={id} className="px-3 py-2 text-xs text-neutral-500">
+              {labelForAgent(id)} — not logged in <span className="text-neutral-600">(run {id} login)</span>
+            </div>
+          ))}
+        </>
+      ) : null}
+      {tab === "cost" ? (
+        <div className="max-h-64 overflow-auto px-3 pb-2 text-xs">
+          {(usageTokens?.rows ?? []).map((r) => (
+            <div key={`${r.agent}-${r.model}-${r.day}`} className="flex justify-between gap-3 py-0.5">
+              <span className="truncate">
+                {labelForAgent(r.agent)} · {r.model} · {r.day}
+              </span>
+              <span className="tabular-nums text-neutral-400">
+                {(r.inputTokens + r.outputTokens).toLocaleString()} tok ·{" "}
+                {r.costUsd == null ? "—" : `$${r.costUsd.toFixed(2)}`}
+              </span>
+            </div>
+          ))}
+          <p className="mt-2 text-[10px] text-neutral-600">
+            API-equivalent estimate; subscription usage isn't billed per token.
+          </p>
         </div>
-      )}
-      {agents.map((a) => (
-        <AgentSection key={a.id} agent={a} view={view} />
-      ))}
-      {missing.map((id) => (
-        <div key={id} className="px-3 py-2 text-xs text-neutral-500">
-          {labelForAgent(id)} — not logged in <span className="text-neutral-600">(run {id} login)</span>
-        </div>
-      ))}
+      ) : null}
     </AdaptiveMenu>
   );
 };

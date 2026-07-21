@@ -66,7 +66,8 @@ import type {
   SessionActivityEvent,
   TodoListRecord,
   TodoScope,
-  UsageResponse
+  UsageResponse,
+  UsageTokensResponse
 } from "@orquester/api";
 import type { UsagePrefs } from "@orquester/config";
 
@@ -505,6 +506,7 @@ export interface AppState {
   // data
   registry: RegistryResponse;
   usage: UsageResponse | null;
+  usageTokens: UsageTokensResponse | null;
   agentAccounts: AgentAccountsResponse | null;
   workspaces: WorkspaceSummary[];
   accounts: AccountSummary[];
@@ -599,6 +601,7 @@ export interface AppState {
   loadSessions: () => Promise<void>;
   loadRegistry: () => Promise<void>;
   loadUsage: (force?: boolean) => Promise<void>;
+  loadUsageTokens: (force?: boolean) => Promise<void>;
   loadAgentAccounts: () => Promise<void>;
   installAgent: (id: string) => Promise<void>;
   updateAgent: (id: string) => Promise<void>;
@@ -672,6 +675,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   currentProject: null,
   registry: EMPTY_REGISTRY,
   usage: null,
+  usageTokens: null,
   agentAccounts: null,
   workspaces: [],
   accounts: [],
@@ -824,6 +828,35 @@ export const useAppStore = create<AppState>((set, get) => ({
     // Successful connect resets the consecutive-lockout counter.
     lockedCycles = 0;
     set({ connectionStatus: "connected", reconnectAttempt: 0, connectionError: null, lockedUntil: null, authPrompt: null });
+
+    // Live event sync — opened BEFORE the snapshot fan-out, buffering into a
+    // queue until the snapshots are installed. The broadcaster has no replay,
+    // so subscribing after the fan-out loses any transition emitted between
+    // "snapshot generated" and "subscription open" (e.g. a session flipping to
+    // waiting), leaving stale state until the next event. Events that arrive
+    // during the fan-out are same-age or newer than the snapshots, so a
+    // post-install replay converges. The stream ending unexpectedly is the
+    // primary disconnect signal.
+    closeEvents();
+    const gen = eventsGen;
+    lastEventAt = Date.now();
+    let eventBuffer: EventMessage[] | null = [];
+    eventsUnsubscribe = active.openEvents(
+      (event) => {
+        lastEventAt = Date.now();
+        if (eventBuffer) {
+          eventBuffer.push(event);
+        } else {
+          get().applyEvent(event);
+        }
+      },
+      () => {
+        if (gen === eventsGen) {
+          get().handleDisconnect();
+        }
+      }
+    );
+
     await Promise.all([
       get().loadWorkspaces(),
       get().loadSessions(),
@@ -838,28 +871,20 @@ export const useAppStore = create<AppState>((set, get) => ({
       // Settings → GitHub refills it. (project-repo-linking bug fix.)
       get().loadAccounts()
     ]);
-    // A newer flow may have preempted us during the fan-out: don't open a
-    // duplicate events stream or arm a second health probe.
+    // A newer flow may have preempted us during the fan-out: its closeEvents()
+    // already tore our stream down — don't flush stale buffered events or arm
+    // a second health probe.
     if (reconnectGenAtStart !== reconnectGen) {
       return;
     }
 
-    // Live event sync. The stream ending unexpectedly (e.g. the transport was
-    // restarted) is the primary disconnect signal.
-    closeEvents();
-    const gen = eventsGen;
-    lastEventAt = Date.now();
-    eventsUnsubscribe = active.openEvents(
-      (event) => {
-        lastEventAt = Date.now();
-        get().applyEvent(event);
-      },
-      () => {
-        if (gen === eventsGen) {
-          get().handleDisconnect();
-        }
-      }
-    );
+    // Snapshots installed: replay events buffered during the fan-out, then
+    // switch the stream to direct delivery.
+    const buffered = eventBuffer;
+    eventBuffer = null;
+    for (const event of buffered) {
+      get().applyEvent(event);
+    }
 
     // Health probe: detect a dropped/restarted transport and auto-reconnect.
     // A silently stalled /events stream (killed while the tab was frozen, no
@@ -1363,11 +1388,13 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     try {
       const sessions = await api.listSessions();
-      // Seed the activity map from the snapshots the daemon ships on running
-      // sessions, so dots are correct on first paint / after a reload before any
-      // "session.activity" event arrives.
-      set((state) => {
-        const activityById = { ...state.activityById };
+      // REBUILD the activity map solely from the snapshots the daemon ships on
+      // running sessions (dots correct on first paint / reload). Never copy the
+      // old map: a session that exited while we were disconnected arrives
+      // without `activity`, and a carried-over entry would show it working or
+      // waiting forever.
+      set(() => {
+        const activityById: Record<string, SessionActivity> = {};
         for (const s of sessions) {
           if (s.activity) {
             activityById[s.id] = s.activity;
@@ -1399,6 +1426,18 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     try {
       set({ usage: await api.getUsage(force) });
+    } catch {
+      /* keep current */
+    }
+  },
+
+  loadUsageTokens: async (force) => {
+    const api = get().api;
+    if (!api) {
+      return;
+    }
+    try {
+      set({ usageTokens: await api.getUsageTokens(force) });
     } catch {
       /* keep current */
     }
