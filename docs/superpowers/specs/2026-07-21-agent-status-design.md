@@ -114,8 +114,9 @@ a warning and degrades to bell/quiescence — never blocks the session spawn.
   (matcher `*`), `PermissionRequest`, `Notification`, `Stop`; preserve all user content;
   write back atomically (tmp + rename). Malformed existing JSON → abort install, keep file
   untouched.
-- **codex** — upsert managed entries in `~/.codex/hooks.json` (our hook **prepended** so a
-  slow user hook can't delay status) for `session_start`, `user_prompt_submit`,
+- **codex** — upsert managed entries in `~/.codex/hooks.json` (our hook **appended** —
+  Codex runs matching command hooks concurrently, so ordering doesn't delay status, and
+  appending never shifts user groups' index-based trust keys) for `session_start`, `user_prompt_submit`,
   `pre_tool_use`, `permission_request`, `post_tool_use`, `stop`, plus **trust entries in
   `~/.codex/config.toml`** replicating Orca's direct trust-hash lane (reference:
   `config-toml-trust.ts` in the Orca source). Accepted risk: Codex owns the hash

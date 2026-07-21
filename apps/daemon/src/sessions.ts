@@ -96,7 +96,11 @@ export interface SessionManagerOptions {
   /** Absolute path to the daemon's unix socket, injected into agent sessions for hook delivery. */
   daemonSockPath?: string;
   /** Fire-and-forget notification that an agent session is launching (hook installers). */
-  onAgentLaunch?: (entry: RegistryEntry, launchEnv: Record<string, string>) => void;
+  /**
+   * Awaited before the agent process spawns so managed hooks are on disk when
+   * the agent reads its config on startup. Must never reject.
+   */
+  onAgentLaunch?: (entry: RegistryEntry, launchEnv: Record<string, string>) => void | Promise<void>;
 }
 
 /**
@@ -309,7 +313,9 @@ export class SessionManager implements ISessionManager {
         env.ORQUESTER_DAEMON_SOCK = this.options.daemonSockPath;
       }
       try {
-        this.options.onAgentLaunch?.(entry, extraEnv);
+        // Await: the agent reads its config at startup, so the managed-hook
+        // install must complete (or fail) before the process spawns.
+        await this.options.onAgentLaunch?.(entry, extraEnv);
       } catch {
         // hook installation is best-effort; never blocks a session launch
       }
@@ -485,6 +491,7 @@ export class SessionManager implements ISessionManager {
       return false;
     }
     const cls = classifyAgentEvent(req.source, req.event, req.payload);
+    session.tracker.noteHookSource();
     if (cls !== null) {
       session.tracker.applyHookEvent(cls);
     }
@@ -843,7 +850,9 @@ export class LocalSessionManager implements ISessionManager {
         env.ORQUESTER_DAEMON_SOCK = this.options.daemonSockPath;
       }
       try {
-        this.options.onAgentLaunch?.(entry, extraEnv);
+        // Await: the agent reads its config at startup, so the managed-hook
+        // install must complete (or fail) before the process spawns.
+        await this.options.onAgentLaunch?.(entry, extraEnv);
       } catch {
         // hook installation is best-effort; never blocks a session launch
       }
@@ -962,6 +971,7 @@ export class LocalSessionManager implements ISessionManager {
       return false;
     }
     const cls = classifyAgentEvent(req.source, req.event, req.payload);
+    session.tracker.noteHookSource();
     if (cls !== null) {
       session.tracker.applyHookEvent(cls);
     }

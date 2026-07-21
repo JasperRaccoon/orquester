@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 interface Logger {
@@ -7,7 +7,12 @@ interface Logger {
 }
 
 /** Bump when the script body changes so existing installs get rewritten. */
-const SCRIPT_VERSION = 1;
+const SCRIPT_VERSION = 2;
+
+/** POSIX single-quote: safe against every shell metacharacter, incl. embedded quotes. */
+function shellQuotePosix(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
 
 /**
  * POSIX hook transport: no-op without a session id (agent launched outside
@@ -34,7 +39,27 @@ exit 0
 `;
 }
 
-async function writeFileAtomic(path: string, content: string, mode: number): Promise<void> {
+/**
+ * Atomic write that PRESERVES an existing target's permission bits by default —
+ * user configs (Claude settings.json, Codex config.toml) can be 0600 and hold
+ * secrets; replacing them must not widen access. `defaultMode` applies only to
+ * newly created files (or always, with `preserveExistingMode: false`, for the
+ * executable hook script whose mode must stay 0755).
+ */
+async function writeFileAtomic(
+  path: string,
+  content: string,
+  defaultMode: number,
+  preserveExistingMode = true
+): Promise<void> {
+  let mode = defaultMode;
+  if (preserveExistingMode) {
+    try {
+      mode = (await stat(path)).mode & 0o777;
+    } catch {
+      // new file → defaultMode
+    }
+  }
   await mkdir(dirname(path), { recursive: true });
   // Unique temp name per write: concurrent installers share agent-hook.sh, so a
   // fixed `${path}.tmp` would collide — the first rename wins and unlinks the
@@ -56,7 +81,8 @@ async function writeFileAtomic(path: string, content: string, mode: number): Pro
  * bell/quiescence fallback. Never throws into the session-create path.
  */
 export class AgentHooks {
-  private readonly done = new Set<string>();
+  /** One in-flight install per entry+target; concurrent launches share it. */
+  private readonly inflight = new Map<string, Promise<void>>();
 
   constructor(
     private readonly daemonDir: string,
@@ -69,29 +95,41 @@ export class AgentHooks {
   }
 
   /**
-   * Fire-and-forget; deduped per entry id + config-dir target per daemon
-   * lifetime. `launchEnv` is the session's resolved addon env: account-bound
-   * sessions run with CLAUDE_CONFIG_DIR / CODEX_HOME pointing at a per-account
-   * home (agent-accounts), and the hooks must land where THAT agent process
+   * Install (or revalidate) the managed hooks for one agent + config-dir
+   * target. AWAITED by the session managers before the agent spawns, so a
+   * first launch can't read its config before the hooks are on disk. Runs on
+   * every launch (installs are idempotent), which also repairs hooks removed
+   * or edited during the daemon's lifetime; concurrent launches of the same
+   * target coalesce onto one in-flight install. Never rejects — any failure
+   * logs and the session degrades to the bell/quiescence fallback.
+   *
+   * `launchEnv` is the session's resolved addon env: account-bound sessions
+   * run with CLAUDE_CONFIG_DIR / CODEX_HOME pointing at a per-account home
+   * (agent-accounts), and the hooks must land where THAT agent process
    * actually reads its config — not in the daemon user's default home.
    */
-  ensureForEntry(entryId: string, launchEnv: Record<string, string> = {}): void {
+  ensureForEntry(entryId: string, launchEnv: Record<string, string> = {}): Promise<void> {
     if (process.platform === "win32") {
-      return;
+      return Promise.resolve();
     }
     const target = this.configTarget(entryId, launchEnv);
     if (!target) {
-      return;
+      return Promise.resolve();
     }
     const key = `${entryId}:${target}`;
-    if (this.done.has(key)) {
-      return;
+    const existing = this.inflight.get(key);
+    if (existing) {
+      return existing;
     }
-    this.done.add(key);
-    void this.install(entryId, target).catch((error) => {
-      this.done.delete(key); // retry on the next launch
-      this.logger.error(`agent-hooks: install failed for ${entryId} (${target})`, error);
-    });
+    const run = this.install(entryId, target)
+      .catch((error) => {
+        this.logger.error(`agent-hooks: install failed for ${entryId} (${target})`, error);
+      })
+      .finally(() => {
+        this.inflight.delete(key);
+      });
+    this.inflight.set(key, run);
+    return run;
   }
 
   /** The directory the launched agent process reads its config from. */
@@ -109,7 +147,7 @@ export class AgentHooks {
   }
 
   private async install(entryId: string, targetDir: string): Promise<void> {
-    await writeFileAtomic(this.scriptPath, hookScript(), 0o755);
+    await writeFileAtomic(this.scriptPath, hookScript(), 0o755, false);
     if (entryId === "claude") {
       await this.installClaude(targetDir);
     } else if (entryId === "codex") {
@@ -135,10 +173,15 @@ export class AgentHooks {
         throw error;
       }
     }
-    const hooks =
-      settings.hooks && typeof settings.hooks === "object" && !Array.isArray(settings.hooks)
-        ? (settings.hooks as Record<string, unknown>)
-        : {};
+    // Deep-validate before mutating: an unrecognized hooks shape (string,
+    // array, …) must abort untouched, not be silently replaced.
+    if (
+      "hooks" in settings &&
+      (typeof settings.hooks !== "object" || settings.hooks === null || Array.isArray(settings.hooks))
+    ) {
+      throw new Error("settings.json has an unrecognized hooks shape; leaving it untouched");
+    }
+    const hooks = (settings.hooks as Record<string, unknown> | undefined) ?? {};
     const events: Array<{ event: string; matcher?: string }> = [
       { event: "UserPromptSubmit" },
       { event: "PreToolUse", matcher: "*" },
@@ -147,14 +190,19 @@ export class AgentHooks {
       { event: "Notification" },
       { event: "Stop" }
     ];
+    for (const { event } of events) {
+      if (hooks[event] !== undefined && !Array.isArray(hooks[event])) {
+        throw new Error(`settings.json hooks.${event} is not an array; leaving it untouched`);
+      }
+    }
     let changed = false;
     for (const { event, matcher } of events) {
-      const command = `"${this.scriptPath}" claude ${event}`;
+      const command = `${shellQuotePosix(this.scriptPath)} claude ${event}`;
       const managed = {
         ...(matcher !== undefined ? { matcher } : {}),
         hooks: [{ type: "command", command, timeout: 10 }]
       };
-      const groups = Array.isArray(hooks[event]) ? (hooks[event] as unknown[]) : [];
+      const groups = (hooks[event] as unknown[] | undefined) ?? [];
       // Managed marker: any command referencing our hooks dir. Replace stale
       // versions in place; append when absent; leave user hooks untouched.
       const isOurs = (group: unknown): boolean =>
@@ -168,7 +216,9 @@ export class AgentHooks {
     }
     if (changed) {
       settings.hooks = hooks;
-      await writeFileAtomic(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, 0o644);
+      // 0600 default for a NEW file (settings can hold secrets); an existing
+      // file keeps its own mode via writeFileAtomic's stat-preserve.
+      await writeFileAtomic(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, 0o600);
     }
   }
 
@@ -195,28 +245,42 @@ export class AgentHooks {
       { name: "Stop", label: "stop" }
     ];
 
-    // 1) hooks.json — Claude-shaped { hooks: { Event: [group…] } }. Codex
-    // rejects unknown top-level fields, so preserve only "hooks".
-    let hooksDoc: { hooks: Record<string, unknown[]> } = { hooks: {} };
+    // 1) hooks.json — Claude-shaped { hooks: { Event: [group…] } }. Preserve
+    // the user's whole document (Codex documents top-level metadata like
+    // `description`); we only mutate the `hooks` member. Deep-validate before
+    // mutating — an unrecognized shape aborts untouched.
+    let doc: Record<string, unknown> = {};
     try {
-      const parsed = JSON.parse(await readFile(hooksJsonPath, "utf8")) as {
-        hooks?: Record<string, unknown[]>;
-      };
-      if (parsed && typeof parsed === "object" && parsed.hooks && typeof parsed.hooks === "object") {
-        hooksDoc = { hooks: parsed.hooks };
+      const parsed = JSON.parse(await readFile(hooksJsonPath, "utf8")) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("hooks.json is not an object; leaving it untouched");
+      }
+      doc = parsed as Record<string, unknown>;
+      if (
+        "hooks" in doc &&
+        (typeof doc.hooks !== "object" || doc.hooks === null || Array.isArray(doc.hooks))
+      ) {
+        throw new Error("hooks.json has an unrecognized hooks shape; leaving it untouched");
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
         throw error; // malformed user file — do not clobber
       }
     }
+    const docHooks = (doc.hooks as Record<string, unknown> | undefined) ?? {};
+    for (const event of CODEX_EVENTS) {
+      if (docHooks[event.name] !== undefined && !Array.isArray(docHooks[event.name])) {
+        throw new Error(`hooks.json hooks.${event.name} is not an array; leaving it untouched`);
+      }
+    }
+    const hooksDoc = { hooks: docHooks as Record<string, unknown[]> };
 
     const managedFor = (event: { name: string; matcher?: string }) => ({
       ...(event.matcher !== undefined ? { matcher: event.matcher } : {}),
       hooks: [
         {
           type: "command",
-          command: `"${this.scriptPath}" codex ${event.name}`,
+          command: `${shellQuotePosix(this.scriptPath)} codex ${event.name}`,
           timeout: 10
         }
       ]
@@ -251,7 +315,8 @@ export class AgentHooks {
       });
     }
     if (changed) {
-      await writeFileAtomic(hooksJsonPath, `${JSON.stringify(hooksDoc, null, 2)}\n`, 0o644);
+      doc.hooks = hooksDoc.hooks;
+      await writeFileAtomic(hooksJsonPath, `${JSON.stringify(doc, null, 2)}\n`, 0o600);
     }
 
     // 2) config.toml trust blocks — written LAST so a half-write can't point
@@ -264,6 +329,15 @@ export class AgentHooks {
         throw error;
       }
     }
+    // The line-based upsert can't parse full TOML; its concrete corruption
+    // vector is multiline strings, whose CONTENT can contain lines that look
+    // like table headers. Refuse to patch such files rather than risk
+    // corrupting them (session degrades to bell/quiescence).
+    if (toml.includes('"""') || toml.includes("'''")) {
+      throw new Error(
+        "config.toml contains multiline strings; skipping trust-block upsert (run /hooks in Codex to approve manually)"
+      );
+    }
     let tomlNext = toml;
     for (const t of trustTargets) {
       const key = `${hooksJsonPath}:${t.label}:${t.groupIndex}:0`;
@@ -271,7 +345,7 @@ export class AgentHooks {
       tomlNext = upsertCodexTrustBlock(tomlNext, key, hash);
     }
     if (tomlNext !== toml) {
-      await writeFileAtomic(configTomlPath, tomlNext, 0o644);
+      await writeFileAtomic(configTomlPath, tomlNext, 0o600);
     }
   }
 
@@ -423,18 +497,21 @@ export const OrquesterStatusPlugin = async (ctx) => {
   async function isChildSession(sessionID) {
     if (!sessionID) return true; // fail closed
     if (childCache.has(sessionID)) return childCache.get(sessionID);
-    let child = true; // fail closed on lookup errors
     try {
       if (client && client.session && typeof client.session.get === "function") {
         const info = await client.session.get({ path: { id: sessionID } });
         const data = info && (info.data || info);
-        child = Boolean(data && data.parentID);
+        if (data && typeof data === "object") {
+          const child = Boolean(data.parentID);
+          childCache.set(sessionID, child); // cache SUCCESSFUL lookups only
+          return child;
+        }
       }
     } catch {
-      child = true;
+      // fall through: fail closed for this event, but retry on the next one —
+      // a cached transient failure would suppress the session's status forever
     }
-    childCache.set(sessionID, child);
-    return child;
+    return true;
   }
 
   let lastStatus = "";

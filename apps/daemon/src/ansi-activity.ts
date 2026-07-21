@@ -172,6 +172,16 @@ export class ActivityTracker {
     }
   }
 
+  /**
+   * Latch hook coverage without a transition — called for every valid managed
+   * hook delivery, including events that classify to no structural state
+   * (e.g. a generic Claude Notification), so bells demote to state-only as
+   * soon as ANY hook event has arrived.
+   */
+  noteHookSource(): void {
+    this.hookSource = true;
+  }
+
   applyHookEvent(cls: HookEventClass): void {
     this.hookSource = true;
     const before = this.key();
