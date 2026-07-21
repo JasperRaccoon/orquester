@@ -68,36 +68,61 @@ export class AgentHooks {
     return join(this.daemonDir, "hooks", "agent-hook.sh");
   }
 
-  /** Fire-and-forget; deduped per entry id per daemon lifetime. */
-  ensureForEntry(entryId: string): void {
-    if (this.done.has(entryId) || process.platform === "win32") {
+  /**
+   * Fire-and-forget; deduped per entry id + config-dir target per daemon
+   * lifetime. `launchEnv` is the session's resolved addon env: account-bound
+   * sessions run with CLAUDE_CONFIG_DIR / CODEX_HOME pointing at a per-account
+   * home (agent-accounts), and the hooks must land where THAT agent process
+   * actually reads its config — not in the daemon user's default home.
+   */
+  ensureForEntry(entryId: string, launchEnv: Record<string, string> = {}): void {
+    if (process.platform === "win32") {
       return;
     }
-    this.done.add(entryId);
-    void this.install(entryId).catch((error) => {
-      this.done.delete(entryId); // retry on the next launch
-      this.logger.error(`agent-hooks: install failed for ${entryId}`, error);
+    const target = this.configTarget(entryId, launchEnv);
+    if (!target) {
+      return;
+    }
+    const key = `${entryId}:${target}`;
+    if (this.done.has(key)) {
+      return;
+    }
+    this.done.add(key);
+    void this.install(entryId, target).catch((error) => {
+      this.done.delete(key); // retry on the next launch
+      this.logger.error(`agent-hooks: install failed for ${entryId} (${target})`, error);
     });
   }
 
-  private async install(entryId: string): Promise<void> {
-    if (entryId !== "claude" && entryId !== "codex" && entryId !== "opencode") {
-      return;
+  /** The directory the launched agent process reads its config from. */
+  private configTarget(entryId: string, launchEnv: Record<string, string>): string | null {
+    switch (entryId) {
+      case "claude":
+        return launchEnv.CLAUDE_CONFIG_DIR || join(this.homeDir, ".claude");
+      case "codex":
+        return launchEnv.CODEX_HOME || join(this.homeDir, ".codex");
+      case "opencode":
+        return launchEnv.OPENCODE_CONFIG_DIR || join(this.homeDir, ".config", "opencode");
+      default:
+        return null;
     }
+  }
+
+  private async install(entryId: string, targetDir: string): Promise<void> {
     await writeFileAtomic(this.scriptPath, hookScript(), 0o755);
     if (entryId === "claude") {
-      await this.installClaude();
+      await this.installClaude(targetDir);
     } else if (entryId === "codex") {
-      await this.installCodex();
+      await this.installCodex(targetDir);
     } else {
-      await this.installOpenCode();
+      await this.installOpenCode(targetDir);
     }
   }
 
   // --- claude: managed hooks block in ~/.claude/settings.json ---------------
 
-  private async installClaude(): Promise<void> {
-    const settingsPath = join(this.homeDir, ".claude", "settings.json");
+  private async installClaude(configDir: string): Promise<void> {
+    const settingsPath = join(configDir, "settings.json");
     let settings: Record<string, unknown> = {};
     try {
       settings = JSON.parse(await readFile(settingsPath, "utf8")) as Record<string, unknown>;
@@ -157,8 +182,7 @@ export class AgentHooks {
   // and sessions degrade to quiescence; the log hint tells the user to run
   // /hooks in Codex to approve manually.
 
-  private async installCodex(): Promise<void> {
-    const codexHome = join(this.homeDir, ".codex");
+  private async installCodex(codexHome: string): Promise<void> {
     const hooksJsonPath = join(codexHome, "hooks.json");
     const configTomlPath = join(codexHome, "config.toml");
 
@@ -253,8 +277,8 @@ export class AgentHooks {
 
   // --- opencode: status plugin in the global plugin dir ---------------------
 
-  private async installOpenCode(): Promise<void> {
-    const pluginPath = join(this.homeDir, ".config", "opencode", "plugin", "orquester-status.js");
+  private async installOpenCode(configDir: string): Promise<void> {
+    const pluginPath = join(configDir, "plugin", "orquester-status.js");
     const source = openCodePluginSource();
     let current = "";
     try {

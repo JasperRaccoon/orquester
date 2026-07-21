@@ -96,7 +96,7 @@ export interface SessionManagerOptions {
   /** Absolute path to the daemon's unix socket, injected into agent sessions for hook delivery. */
   daemonSockPath?: string;
   /** Fire-and-forget notification that an agent session is launching (hook installers). */
-  onAgentLaunch?: (entry: RegistryEntry) => void;
+  onAgentLaunch?: (entry: RegistryEntry, launchEnv: Record<string, string>) => void;
 }
 
 /**
@@ -309,7 +309,7 @@ export class SessionManager implements ISessionManager {
         env.ORQUESTER_DAEMON_SOCK = this.options.daemonSockPath;
       }
       try {
-        this.options.onAgentLaunch?.(entry);
+        this.options.onAgentLaunch?.(entry, extraEnv);
       } catch {
         // hook installation is best-effort; never blocks a session launch
       }
@@ -843,7 +843,7 @@ export class LocalSessionManager implements ISessionManager {
         env.ORQUESTER_DAEMON_SOCK = this.options.daemonSockPath;
       }
       try {
-        this.options.onAgentLaunch?.(entry);
+        this.options.onAgentLaunch?.(entry, extraEnv);
       } catch {
         // hook installation is best-effort; never blocks a session launch
       }

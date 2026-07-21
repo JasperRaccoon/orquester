@@ -259,7 +259,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
       }
     },
     daemonSockPath: paths.socketPath,
-    onAgentLaunch: (entry) => agentHooks.ensureForEntry(entry.id)
+    onAgentLaunch: (entry, launchEnv) => agentHooks.ensureForEntry(entry.id, launchEnv)
   });
   const accounts = new AccountsService(resolved.accountsFile, resolved.keysDir);
   const git = new GitService();
