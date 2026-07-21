@@ -3,6 +3,7 @@ import type {
   AccountTestResult,
   AgentEventRequest,
   AgentUsage,
+  BrowserClientMessage,
   BrowserSuggestionsResponse,
   BrowserSummary,
   CreateAccountRequest,
@@ -59,6 +60,7 @@ import type {
   UsageWindow,
   WorkspaceSummary
 } from "@orquester/api";
+import { BROWSER_FRAME_TYPE_JPEG } from "@orquester/api";
 import { RegistryService } from "./registry";
 import { BrowserError, BrowserManager } from "./browsers";
 import { UrlWatcher } from "./url-watcher";
@@ -2304,6 +2306,104 @@ function createServer(
         }
         subs.clear();
         resyncPending.clear();
+      });
+    });
+  });
+
+  // Browser-tab streaming: binary JPEG frames out, JSON control in. Kept off
+  // /ws so the terminal channel's text-only fast path is untouched.
+  void app.register(async (instance) => {
+    await instance.register(websocketPlugin);
+    instance.get("/ws-browser", { websocket: true }, (socket, request) => {
+      if (options.authRequired) {
+        const token = (request.query as { token?: string }).token;
+        if (!authorizeCredential(token, config.transports.http.username, config.transports.http.passwordHash)) {
+          socket.close(1008, "unauthorized");
+          return;
+        }
+      }
+
+      const subs = new Map<string, () => void>();
+      const SEND_HWM = 1_500_000; // skip frames when the socket is backed up (mobile data)
+      const sendJson = (msg: unknown) => {
+        try {
+          socket.send(JSON.stringify(msg));
+        } catch {
+          /* socket closing */
+        }
+      };
+      const sendFrame = (id: string, jpeg: Buffer) => {
+        if (socket.bufferedAmount > SEND_HWM) return; // latest-frame-wins; CDP acks continue
+        const header = Buffer.alloc(37);
+        header.writeUInt8(BROWSER_FRAME_TYPE_JPEG, 0);
+        header.write(id, 1, 36, "ascii");
+        try {
+          socket.send(Buffer.concat([header, jpeg]));
+        } catch {
+          /* socket closing */
+        }
+      };
+
+      socket.on("message", async (raw, isBinary) => {
+        if (isBinary) return; // client never sends binary
+        let msg: BrowserClientMessage;
+        try {
+          msg = JSON.parse(raw.toString());
+        } catch {
+          return;
+        }
+        if (msg.t === "ping") {
+          sendJson({ t: "pong" });
+          return;
+        }
+        const id = "id" in msg ? msg.id : undefined;
+        if (!id) return;
+
+        if (msg.t === "sub") {
+          subs.get(id)?.();
+          const placeholder = () => {};
+          subs.set(id, placeholder);
+          const unsub = await services.browsers
+            .subscribe(id, {
+              onFrame: (jpeg) => sendFrame(id, jpeg),
+              onState: (state) => sendJson(state),
+              onPicked: (payload) => sendJson({ t: "picked", id, payload }),
+              onEnd: () => sendJson({ t: "end", id })
+            })
+            .catch(() => null);
+          if (!unsub) {
+            subs.delete(id);
+            sendJson({ t: "end", id });
+            return;
+          }
+          if (subs.get(id) !== placeholder) {
+            unsub();
+            return;
+          } // raced by unsub — honor it
+          subs.set(id, unsub);
+        } else if (msg.t === "unsub") {
+          subs.get(id)?.();
+          subs.delete(id);
+        } else if (msg.t === "pointer") {
+          services.browsers.dispatchPointer(id, msg.kind, msg.x, msg.y, msg.button, msg.modifiers, msg.clickCount);
+        } else if (msg.t === "wheel") {
+          services.browsers.dispatchWheel(id, msg.x, msg.y, msg.dx, msg.dy);
+        } else if (msg.t === "key") {
+          services.browsers.dispatchKey(id, msg.kind, msg.key, msg.code, msg.text, msg.modifiers);
+        } else if (msg.t === "touch") {
+          services.browsers.dispatchTouch(id, msg.kind, msg.points);
+        } else if (msg.t === "nav") {
+          await services.browsers.navigate(id, msg.action, msg.url).catch(() => undefined);
+        } else if (msg.t === "viewport") {
+          await services.browsers.setViewport(id, msg.mode).catch(() => undefined);
+        } else if (msg.t === "pick") {
+          await services.browsers.setPick(id, msg.on).catch(() => undefined);
+        }
+      });
+
+      socket.on("close", () => {
+        for (const unsub of subs.values()) unsub();
+        subs.clear();
       });
     });
   });
