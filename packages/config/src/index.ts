@@ -140,6 +140,11 @@ export function pushConfigPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "push.json");
 }
 
+/** Cached token/cost scan (Claude JSONL + Codex sessions); 0600. */
+export function usageTokensCacheFile(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "usage-tokens.json");
+}
+
 /** `yyyy-mm-dd` in local time. */
 export function localDateStamp(date = new Date()): string {
   const year = date.getFullYear();

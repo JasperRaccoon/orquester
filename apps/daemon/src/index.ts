@@ -71,6 +71,7 @@ import { AgentAccountError } from "./agent-account-paths.ts";
 import { PushService, isValidPushEndpoint } from "./push";
 import { GitError, GitService } from "./git";
 import { UsageService } from "./usage";
+import { UsageTokensScanner } from "./usage-tokens";
 import { createClaudeSource, createCodexSource, readUsagePrefs } from "./usage-sources";
 import { listArchiveEntries } from "./archive";
 import { resolveZipTool, spawnDirZip } from "./zip";
@@ -112,6 +113,7 @@ import {
   sessionsIndexPath,
   tmuxSocketPath,
   todosIndexPath,
+  usageTokensCacheFile,
   workspacesMetaPath,
   isValidName
 } from "@orquester/config";
@@ -279,12 +281,21 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   });
   usage.events.on("changed", (u) => broadcaster.publish("usage", "usage.changed", u));
   usage.start();
+  const usageTokens = new UsageTokensScanner({
+    userhome: resolved.vars.userhome,
+    cacheFile: usageTokensCacheFile(paths.baseDir),
+    now: () => Date.now()
+  });
+  await usageTokens.init();
   {
     const { watch } = await import("node:fs");
     let debounce: ReturnType<typeof setTimeout> | undefined;
     const nudge = () => {
       clearTimeout(debounce);
-      debounce = setTimeout(() => void usage.recompute(), 500);
+      debounce = setTimeout(() => {
+        void usage.recompute();
+        void usageTokens.recompute();
+      }, 500);
     };
     for (const dir of [
       join(process.env.CODEX_HOME || join(resolved.vars.userhome, ".codex"), "sessions"),
@@ -392,7 +403,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   });
 
   const services: Services = {
-    registry, sessions, accounts, git, todos, usage, push, broadcaster, agentAccounts, browsers, urlWatcher
+    registry, sessions, accounts, git, todos, usage, usageTokens, push, broadcaster, agentAccounts, browsers, urlWatcher
   };
 
   // The static web build the HTTP transport optionally serves.
@@ -484,6 +495,7 @@ interface Services {
   git: GitService;
   todos: TodoListManager;
   usage: UsageService;
+  usageTokens: UsageTokensScanner;
   push: PushService;
   broadcaster: Broadcaster;
   agentAccounts: AgentAccountsService;
@@ -501,7 +513,7 @@ function createServer(
   services: Services,
   options: { authRequired: boolean; mode: "local" | "remote"; serveWeb?: string }
 ): FastifyInstance {
-  const { registry, sessions, accounts, git, todos, usage, push, agentAccounts } = services;
+  const { registry, sessions, accounts, git, todos, usage, usageTokens, push, agentAccounts } = services;
 
   const app = Fastify({
     // Remote requests arrive via Caddy on loopback (reverse_proxy 127.0.0.1:47831),
@@ -1729,6 +1741,11 @@ function createServer(
   app.get<{ Querystring: { refresh?: string } }>("/api/usage", async (request): Promise<UsageResponse> =>
     usage.snapshot(request.query.refresh === "1")
   );
+
+  app.get("/api/usage/tokens", async (request) => {
+    const force = (request.query as { refresh?: string })?.refresh === "1";
+    return usageTokens.snapshot(force);
+  });
 
   // Managed agent accounts (Claude/Codex credential homes) — import/list/remove/defaults.
   app.get("/api/agent-accounts", async () => agentAccounts.list());

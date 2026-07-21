@@ -485,6 +485,22 @@ export interface UsageResponse {
 
 export type UsageEventType = "usage.changed";
 
+export interface UsageTokenRow {
+  agent: string;
+  model: string;
+  day: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  costUsd: number | null;
+  costSource: "api_equivalent";
+}
+export interface UsageTokensResponse {
+  rows: UsageTokenRow[];
+  asOf: string;
+}
+
 // Web Push — the PWA subscribes browsers to attention pushes that fire when an
 // agent session rings the terminal bell. The daemon owns a VAPID keypair; only
 // the public key ever crosses the wire (the private key stays in push.json).
