@@ -279,19 +279,39 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     createClaudeSource({ userhome: resolved.vars.userhome, now: () => Date.now(), claudeHome: home, logger: console });
   const codexAccountSource = (home?: string) =>
     createCodexSource({ userhome: resolved.vars.userhome, now: () => Date.now(), codexHome: home, logger: console });
+  // Each usage source keeps its rate-limit backoff (429/Retry-After) and last-good
+  // reading in closure state, so it MUST outlive a single recompute — the fs
+  // watcher can fire recompute() every 500ms. Build each source once (keyed by
+  // agent + resolved home; "" = the System account) and reuse it, so a fresh
+  // closure with backoffUntil=0 isn't created on every recompute (which would
+  // hammer the usage endpoints and drop the last-known values).
+  const usageSources = new Map<string, () => Promise<AgentUsage | null>>();
+  const usageSource = (
+    agent: "claude" | "codex",
+    make: (home?: string) => () => Promise<AgentUsage | null>,
+    home?: string
+  ): (() => Promise<AgentUsage | null>) => {
+    const key = `${agent}:${home ?? ""}`;
+    let source = usageSources.get(key);
+    if (!source) {
+      source = make(home);
+      usageSources.set(key, source);
+    }
+    return source;
+  };
 
   async function agentWithAccounts(
     agent: "claude" | "codex",
     makeSource: (home?: string) => () => Promise<AgentUsage | null>
   ): Promise<AgentUsage | null> {
     const prefs = await readUsagePrefs(resolved.appConfigFile);
-    const base = await makeSource()(); // System account
+    const base = await usageSource(agent, makeSource)(); // System account
     if (prefs.view !== "accounts") return base;
     const managed = agentAccounts.list().accounts.filter((a) => a.agent === agent);
     if (managed.length === 0) return base;
     const accounts: UsageAccount[] = [];
     for (const acct of managed) {
-      const u = await makeSource(agentAccounts.homePath(agent, acct.id))().catch(() => null);
+      const u = await usageSource(agent, makeSource, agentAccounts.homePath(agent, acct.id))().catch(() => null);
       accounts.push({
         id: acct.id,
         label: acct.label,
