@@ -6,8 +6,13 @@ import { AdaptiveMenu } from "../ui";
 import { getRegistryIcon } from "../../icons";
 import { useAppStore } from "../../store/app";
 import { barClass, formatAgo, formatClock, formatCountdown, gaugeClass, minutesSince, pickDriver, windowMax } from "./usage-format";
+import { REGISTRY } from "@orquester/registry";
 
-const AGENT_LABEL: Record<AgentUsage["id"], string> = { claude: "Claude Code", codex: "Codex" };
+function labelForAgent(id: string): string {
+  const entry = REGISTRY.agents?.find((a) => a.id === id);
+  if (entry) return entry.name;
+  return id.charAt(0).toUpperCase() + id.slice(1);
+}
 
 const Bar: React.FC<{ label: string; window: UsageWindow | null; muted: boolean }> = ({ label, window, muted }) => {
   const pct = window?.percent ?? 0;
@@ -55,7 +60,7 @@ const AgentSection: React.FC<{ agent: AgentUsage; view: "aggregate" | "accounts"
       <div className="flex items-center justify-between">
         <p className="flex items-center gap-1.5 text-sm text-neutral-200">
           {getRegistryIcon("agent", agent.id, 14)}
-          <span>{AGENT_LABEL[agent.id]} Usage</span>
+          <span>{labelForAgent(agent.id)} Usage</span>
         </p>
         {agent.plan && <span className="text-xs text-neutral-500">{agent.plan}</span>}
       </div>
@@ -100,10 +105,11 @@ export const UsageWidget: React.FC = () => {
 
   // Included agents that are enabled in prefs but aren't logged in (so not present
   // in the live snapshot) get a muted, actionable row in the panel.
-  const present = new Set(agents.map((a) => a.id));
-  const missing = (["claude", "codex"] as const).filter(
-    (id) => usageAgentEnabled(prefs, id) && !present.has(id)
-  );
+  const present = new Set(usage.agents.map((a) => a.id));
+  const missing = Object.entries(prefs.agents)
+    .filter(([, on]) => on)
+    .map(([id]) => id)
+    .filter((id) => !present.has(id));
   // Honest "as of": the most recent successful reading among the shown agents.
   const freshestAsOf = agents
     .map((a) => a.asOf)
@@ -171,7 +177,7 @@ export const UsageWidget: React.FC = () => {
       ))}
       {missing.map((id) => (
         <div key={id} className="px-3 py-2 text-xs text-neutral-500">
-          {AGENT_LABEL[id]} — not logged in <span className="text-neutral-600">(run {id} login)</span>
+          {labelForAgent(id)} — not logged in <span className="text-neutral-600">(run {id} login)</span>
         </div>
       ))}
     </AdaptiveMenu>
