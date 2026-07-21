@@ -66,7 +66,7 @@ export const PROMPT_HINT =
   " Interactive MENU (numbered options + `❯` + an 'Esc to cancel' hint)? SINGLE-select: write_input the option NUMBER (or one send_keys arrow, then Enter). MULTI-select ('[ ]' checkboxes): a NUMBER only TOGGLES that option — toggle the ones you want (read between), then send_keys ['Tab'] to reach Submit/Next; the finish row is UNNUMBERED, so never a number and NOT the 'Type something' option. In a multi-question batch (Question N of M) answer EVERY question; at the final Review pick 'Submit answers' only when none remain unanswered. NEVER send Escape to a question you mean to answer: it cancels the whole batch and your next write becomes a stray message. Plain `❯` box (no numbered options): write_input with submit:true. Judge from the screen text, not `settled`.";
 
 export const ATTENTION_HINT =
-  " attention:true = the tab rang the terminal BELL (Claude Code rings when it finishes or needs input) — read_terminal next and answer. Only bell-ringing TUIs raise it; for plain shells and non-bell TUIs use wait_for_idle.";
+  " attention is WHY the tab wants you: 'needs-input' / 'finished' come from the agent's own hooks (claude/codex/opencode), 'bell' from a terminal BELL, null = nothing pending — read_terminal next and answer. Agents without hook coverage and plain shells only ever raise 'bell'; for non-attention quiescence use wait_for_idle.";
 
 export const READ_FILE_DESC =
   "Read a text file inside the workspace sandbox. Path may be absolute or relative to the sandbox root. Supports byte-offset paging with offset/maxBytes; default window is 64KB (65536 bytes), max 256KB. truncated:true means advance offset and read again. Binary files are refused.";
@@ -178,7 +178,7 @@ function buildServer(deps: McpDeps, signal: AbortSignal): McpServer {
     todos.toggleItem(a.id, a.item, a.checked)
   );
   tool("wait_for_attention",
-    "Block until a watched tab needs you (bell or exit). workspace+project watches every running tab; add tab/tabId for one. Already-flagged tabs return instantly; tabs:[] on timeout." + ATTENTION_HINT + PROMPT_HINT,
+    "Block until a watched tab needs you (agent needs-input/finished, bell, or exit). workspace+project watches every running tab; add tab/tabId for one. Already-flagged tabs return instantly; tabs:[] on timeout." + ATTENTION_HINT + PROMPT_HINT,
     { ...sel, timeoutMs: z.number().int().optional() },
     (a) =>
       control.waitForAttention(

@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { statSync } from "node:fs";
-import type { ProjectSummary, SessionActivity, SessionSummary, WorkspaceSummary } from "@orquester/api";
+import type { ProjectSummary, SessionActivity, SessionAttention, SessionSummary, WorkspaceSummary } from "@orquester/api";
 import { isValidName } from "@orquester/config";
 import { assertInsideFsRoot } from "@orquester/config/fs";
 import type { ISessionManager } from "../sessions.ts";
@@ -10,7 +10,6 @@ import { encodeKey } from "./keys.ts";
 const DEFAULT_IDLE_MS = 1000;
 const DEFAULT_TIMEOUT_MS = 120_000; // 2 min
 const MAX_TIMEOUT_MS = 600_000;     // 10 min ceiling
-export const ACTIVITY_WORKING_MS = 3000;
 // On submit, send Enter as its OWN write this long after the text. A coding-agent TUI
 // (Claude Code) treats a bulk single-chunk write ending in CR as a *paste* and keeps
 // the trailing newline literal — so `${data}\r` in one write types the message but never
@@ -31,8 +30,8 @@ export type AttentionResult = {
     id: string;
     title: string;
     status: SessionSummary["status"];
-    activity?: "working" | "idle";
-    attention?: boolean;
+    activity?: SessionActivity["state"];
+    attention?: SessionAttention | null;
     lastOutputAt?: string;
   }[];
   settled: boolean;
@@ -84,12 +83,11 @@ export class TerminalControl {
     if (!activity) {
       return {};
     }
-    const fields: { activity: "working" | "idle"; attention: boolean; lastOutputAt?: string } = {
-      activity: activity.state === "waiting" ? "working" : activity.state,
-      attention: activity.attention !== null,
+    return {
+      activity: activity.state,
+      attention: activity.attention,
       lastOutputAt: activity.lastOutputAt ?? undefined
     };
-    return fields;
   }
 
   private attentionTab(t: SessionSummary): AttentionResult["tabs"][number] {
