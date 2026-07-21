@@ -58,7 +58,14 @@ import type {
   UiConnection,
   WorkspaceSummary
 } from "../types";
-import type { TodoListRecord, TodoScope, UsageResponse } from "@orquester/api";
+import type {
+  BrowserSummary,
+  SessionActivity,
+  SessionActivityEvent,
+  TodoListRecord,
+  TodoScope,
+  UsageResponse
+} from "@orquester/api";
 import type { UsagePrefs } from "@orquester/config";
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -374,7 +381,8 @@ export type ProjectTab =
   | { id: string; type: "session"; session: SessionSummary }
   | { id: string; type: "files"; title: string }
   | { id: string; type: "git"; title: string }
-  | { id: string; type: "todo"; todoId: string; title: string };
+  | { id: string; type: "todo"; todoId: string; title: string }
+  | { id: string; type: "browser"; browser: BrowserSummary };
 
 /** What the tab strip + MainView are showing. A project (full tab set) or a
  *  workspace (to-do tabs only). The `key` is the map key for all per-context tab state:
@@ -401,57 +409,6 @@ export function todoRefOf(ctx: TabContext): { scope: TodoScope; refKey: string }
     : { scope: "workspace", refKey: ctx.key };
 }
 
-/**
- * Client-derived per-session activity that drives the status dot. `state`
- * reflects output flow (working = PTY output within the last
- * {@link IDLE_THRESHOLD_MS}; idle = quiet, i.e. waiting for the user).
- * `attention` is raised when an agent rings the terminal bell and is cleared
- * once the user looks at / types into the session.
- */
-export interface SessionActivity {
-  state: "working" | "idle";
-  attention: boolean;
-}
-
-/** Silence (ms) after the last PTY output before a session is deemed idle/waiting. */
-const IDLE_THRESHOLD_MS = 3000;
-/** Per-session quiescence timers (module-level: timers aren't store state). */
-const idleTimers = new Map<string, ReturnType<typeof setTimeout>>();
-
-/** Cancel a session's pending quiescence timer, if any. */
-function clearIdleTimer(id: string): void {
-  const existing = idleTimers.get(id);
-  if (existing) {
-    clearTimeout(existing);
-    idleTimers.delete(id);
-  }
-}
-
-/**
- * (Re)arm a session's quiescence timer. Each output chunk pushes the deadline
- * out; after {@link IDLE_THRESHOLD_MS} with no further output the session flips
- * working → idle (its bell-driven `attention` flag is preserved).
- */
-function rearmIdleTimer(
-  id: string,
-  get: StoreApi<AppState>["getState"],
-  set: StoreApi<AppState>["setState"]
-): void {
-  clearIdleTimer(id);
-  idleTimers.set(
-    id,
-    setTimeout(() => {
-      idleTimers.delete(id);
-      const current = get().activityById[id];
-      if (current?.state === "working") {
-        set((state) => ({
-          activityById: { ...state.activityById, [id]: { state: "idle", attention: current.attention } }
-        }));
-      }
-    }, IDLE_THRESHOLD_MS)
-  );
-}
-
 /** Drop a session's activity entry (returns the same ref when absent → no-op set). */
 function dropActivity(
   activityById: Record<string, SessionActivity>,
@@ -473,6 +430,14 @@ function upsertSession(sessions: SessionSummary[], next: SessionSummary): Sessio
   const copy = [...sessions];
   copy[index] = { ...copy[index], ...next };
   return copy;
+}
+
+function upsertBrowser(browsers: BrowserSummary[], browser: BrowserSummary): BrowserSummary[] {
+  const at = browsers.findIndex((b) => b.id === browser.id);
+  if (at === -1) return [...browsers, browser];
+  const next = browsers.slice();
+  next[at] = browser;
+  return next;
 }
 
 /** Replace a to-do record by id (or append if new). */
@@ -547,6 +512,8 @@ export interface AppState {
 
   /** All daemon sessions; a project's sessions are its tabs. */
   sessions: SessionSummary[];
+  /** All server-side browser tabs; a project's browsers are its tabs (after sessions). */
+  browsers: BrowserSummary[];
   /** Client-derived working/idle + attention per session id (drives the status dot). */
   activityById: Record<string, SessionActivity>;
   /** Client-local tool tabs (file browser) per project path. */
@@ -635,6 +602,7 @@ export interface AppState {
   openTab: (kind: RegistryKind, refId: string, title?: string) => Promise<void>;
   openFileBrowser: () => void;
   openGit: () => void;
+  openBrowser: (url?: string) => Promise<void>;
   closeTab: (id: string) => Promise<void>;
   /** Guarded close: opens a confirm for live sessions (returns true), else closes now. */
   requestCloseTab: (id: string) => boolean;
@@ -676,11 +644,7 @@ export interface AppState {
   saveTodoBody: (id: string, body: string) => Promise<void>;
   deleteTodo: (id: string) => Promise<void>;
 
-  /** Record output activity for a session (→ working; re-arms its idle timer). */
-  noteSessionActivity: (id: string) => void;
-  /** Record a terminal bell for a session (→ idle + attention; awaiting the user). */
-  noteSessionBell: (id: string) => void;
-  /** Clear a session's attention flag (the user looked at / typed into it). */
+  /** Locally acknowledge a session's attention (focus-on-tab; server clears on input). */
   clearSessionAttention: (id: string) => void;
 
   applyEvent: (event: EventMessage) => void;
@@ -711,6 +675,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   projects: [],
   projectsLoading: false,
   sessions: [],
+  browsers: [],
   activityById: {},
   fileTabsByProject: {},
   gitTabsByProject: {},
@@ -858,6 +823,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     await Promise.all([
       get().loadWorkspaces(),
       get().loadSessions(),
+      // Browser tabs are optional (older daemons return 404) — tolerate absence.
+      active.listBrowsers().then((browsers) => set({ browsers })).catch(() => set({ browsers: [] })),
       get().loadRegistry(),
       get().loadUsage(),
       // Reload git accounts on every (re)connect too — otherwise a daemon
@@ -1361,6 +1328,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       const active = state.activeTabByProject[project.path];
       const fallback = firstTabId(
         state.sessions,
+        state.browsers,
         state.fileTabsByProject,
         state.gitTabsByProject,
         state.todoTabsByContext,
@@ -1386,7 +1354,19 @@ export const useAppStore = create<AppState>((set, get) => ({
       return;
     }
     try {
-      set({ sessions: await api.listSessions() });
+      const sessions = await api.listSessions();
+      // Seed the activity map from the snapshots the daemon ships on running
+      // sessions, so dots are correct on first paint / after a reload before any
+      // "session.activity" event arrives.
+      set((state) => {
+        const activityById = { ...state.activityById };
+        for (const s of sessions) {
+          if (s.activity) {
+            activityById[s.id] = s.activity;
+          }
+        }
+        return { sessions, activityById };
+      });
     } catch (error) {
       console.error("[orquester] failed to load sessions", error);
     }
@@ -1484,12 +1464,31 @@ export const useAppStore = create<AppState>((set, get) => ({
       };
     }),
 
+  openBrowser: async (url) => {
+    const { api, currentProject } = get();
+    if (!api || !currentProject) return;
+    const browser = await api.createBrowser({ projectPath: currentProject.path, url });
+    set((state) => ({
+      browsers: upsertBrowser(state.browsers, browser),
+      activeTabByProject: { ...state.activeTabByProject, [currentProject.path]: browser.id }
+    }));
+  },
+
   closeTab: async (id) => {
     const api = get().api;
     const isSession = get().sessions.some((s) => s.id === id);
-    set((state) => (isSession ? removeSession(state, id) : removeLocalTab(state, id)));
+    const isBrowser = !isSession && get().browsers.some((b) => b.id === id);
+    set((state) =>
+      isSession
+        ? removeSession(state, id)
+        : isBrowser
+          ? removeBrowser(state, id)
+          : removeLocalTab(state, id)
+    );
     if (isSession) {
       await api?.closeSession(id).catch(() => undefined);
+    } else if (isBrowser) {
+      await api?.closeBrowser(id).catch(() => undefined);
     }
   },
 
@@ -1769,35 +1768,16 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((state) => removeTodoEverywhere(state, id));
   },
 
-  noteSessionActivity: (id) => {
-    rearmIdleTimer(id, get, set);
-    const current = get().activityById[id];
-    // Already shown as working with nothing to clear → the timer re-arm above is
-    // all that's needed; skip the set() so a streaming burst doesn't churn renders.
-    if (current && current.state === "working" && !current.attention) {
-      return;
-    }
-    set((state) => ({
-      activityById: { ...state.activityById, [id]: { state: "working", attention: false } }
-    }));
-  },
-
-  noteSessionBell: (id) => {
-    // The bell is an explicit "done — your turn": go idle immediately (skip the
-    // quiescence wait) and raise attention so the dot pulses until acknowledged.
-    clearIdleTimer(id);
-    set((state) => ({
-      activityById: { ...state.activityById, [id]: { state: "idle", attention: true } }
-    }));
-  },
-
   clearSessionAttention: (id) => {
+    // The daemon clears attention on input; focusing a tab sends no input, so
+    // acknowledgment-on-focus is client-local. Null out the local rendering — a
+    // later server event overwrites it with the authoritative snapshot.
     const current = get().activityById[id];
-    if (!current || !current.attention) {
+    if (!current || current.attention === null) {
       return;
     }
     set((state) => ({
-      activityById: { ...state.activityById, [id]: { ...current, attention: false } }
+      activityById: { ...state.activityById, [id]: { ...current, attention: null } }
     }));
   },
 
@@ -1820,7 +1800,22 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
       return;
     }
+    if (event.channel === "browser") {
+      if (event.type === "browser.created" || event.type === "browser.updated") {
+        const summary = event.payload as BrowserSummary;
+        set((state) => ({ browsers: upsertBrowser(state.browsers, summary) }));
+      } else if (event.type === "browser.closed") {
+        const { id } = event.payload as { id: string };
+        set((state) => removeBrowser(state, id));
+      }
+      return;
+    }
     if (event.channel !== "sessions") {
+      return;
+    }
+    if (event.type === "session.activity") {
+      const { id, activity } = event.payload as SessionActivityEvent;
+      set((state) => ({ activityById: { ...state.activityById, [id]: activity } }));
       return;
     }
     if (
@@ -1830,17 +1825,23 @@ export const useAppStore = create<AppState>((set, get) => ({
     ) {
       const summary = event.payload as SessionSummary;
       // A real process exit makes activity meaningless (the gray "exited" dot
-      // wins): drop tracking + the pending timer so a late quiescence fire can't
-      // resurrect a working/idle dot on a dead session.
+      // wins): drop tracking so a stale working/idle dot can't linger on a dead
+      // session.
       if (event.type === "session.exited") {
-        clearIdleTimer(summary.id);
         set((state) => ({
           sessions: upsertSession(state.sessions, summary),
           activityById: dropActivity(state.activityById, summary.id)
         }));
         return;
       }
-      set((state) => ({ sessions: upsertSession(state.sessions, summary) }));
+      // Seed the activity snapshot the daemon ships on the summary (running
+      // sessions only); server "session.activity" events keep it fresh after.
+      set((state) => ({
+        sessions: upsertSession(state.sessions, summary),
+        ...(summary.activity
+          ? { activityById: { ...state.activityById, [summary.id]: summary.activity } }
+          : {})
+      }));
     } else if (event.type === "session.closed") {
       const { id } = event.payload as { id: string };
       set((state) => removeSession(state, id));
@@ -1848,9 +1849,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   }
 }));
 
-/** First remaining tab id for a context (session, then file, then git, then to-do). */
+/** First remaining tab id for a context (session, then browser, then file, then git, then to-do). */
 function firstTabId(
   sessions: SessionSummary[],
+  browsers: BrowserSummary[],
   fileTabs: Record<string, FileTab[]>,
   gitTabs: Record<string, GitTab[]>,
   todoTabs: Record<string, TodoTab[]>,
@@ -1858,6 +1860,7 @@ function firstTabId(
 ): string | null {
   return (
     sessions.find((s) => s.projectPath === path)?.id ??
+    browsers.find((b) => b.projectPath === path)?.id ??
     fileTabs[path]?.[0]?.id ??
     gitTabs[path]?.[0]?.id ??
     todoTabs[path]?.[0]?.id ??
@@ -1869,6 +1872,7 @@ function reassignActive(
   activeTabByProject: Record<string, string | null>,
   removedId: string,
   sessions: SessionSummary[],
+  browsers: BrowserSummary[],
   fileTabs: Record<string, FileTab[]>,
   gitTabs: Record<string, GitTab[]>,
   todoTabs: Record<string, TodoTab[]>
@@ -1876,14 +1880,13 @@ function reassignActive(
   const next = { ...activeTabByProject };
   for (const [path, activeId] of Object.entries(next)) {
     if (activeId === removedId) {
-      next[path] = firstTabId(sessions, fileTabs, gitTabs, todoTabs, path);
+      next[path] = firstTabId(sessions, browsers, fileTabs, gitTabs, todoTabs, path);
     }
   }
   return next;
 }
 
 function removeSession(state: AppState, id: string): Partial<AppState> {
-  clearIdleTimer(id);
   const sessions = state.sessions.filter((s) => s.id !== id);
   return {
     sessions,
@@ -1892,6 +1895,24 @@ function removeSession(state: AppState, id: string): Partial<AppState> {
       state.activeTabByProject,
       id,
       sessions,
+      state.browsers,
+      state.fileTabsByProject,
+      state.gitTabsByProject,
+      state.todoTabsByContext
+    )
+  };
+}
+
+/** Drop a server-side browser tab by id, reassigning the active tab if it was active. */
+function removeBrowser(state: AppState, id: string): Partial<AppState> {
+  const browsers = state.browsers.filter((b) => b.id !== id);
+  return {
+    browsers,
+    activeTabByProject: reassignActive(
+      state.activeTabByProject,
+      id,
+      state.sessions,
+      browsers,
       state.fileTabsByProject,
       state.gitTabsByProject,
       state.todoTabsByContext
@@ -1921,6 +1942,7 @@ function removeLocalTab(state: AppState, id: string): Partial<AppState> {
       state.activeTabByProject,
       id,
       state.sessions,
+      state.browsers,
       fileTabsByProject,
       gitTabsByProject,
       todoTabsByContext
@@ -2058,6 +2080,7 @@ export function useCurrentContext(): TabContext | null {
  */
 export function useProjectTabs(): ProjectTab[] {
   const sessions = useAppStore((s) => s.sessions);
+  const browsers = useAppStore((s) => s.browsers);
   const fileTabsByProject = useAppStore((s) => s.fileTabsByProject);
   const gitTabsByProject = useAppStore((s) => s.gitTabsByProject);
   const todoTabsByContext = useAppStore((s) => s.todoTabsByContext);
@@ -2092,8 +2115,13 @@ export function useProjectTabs(): ProjectTab[] {
       type: "git",
       title: t.title
     }));
-    return [...sessionTabs, ...fileTabs, ...gitTabs, ...todoTabs];
-  }, [sessions, fileTabsByProject, gitTabsByProject, todoTabsByContext, project, workspace]);
+    const browserTabs = browsers
+      .filter((b) => b.projectPath === key)
+      .slice()
+      .sort((a, b) => a.order - b.order || a.createdAt.localeCompare(b.createdAt))
+      .map<ProjectTab>((browser) => ({ id: browser.id, type: "browser", browser }));
+    return [...sessionTabs, ...browserTabs, ...fileTabs, ...gitTabs, ...todoTabs];
+  }, [sessions, browsers, fileTabsByProject, gitTabsByProject, todoTabsByContext, project, workspace]);
 }
 
 export function useActiveTabId(): string | null {

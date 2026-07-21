@@ -5,14 +5,16 @@ import { useSessionActivity } from "../../store/app";
 import type { SessionStatus } from "../../types";
 
 /**
- * Per-session status light shown on tabs and grid-cell headers:
- *   • gray          — the process has exited
- *   • amber         — working (PTY output flowing within the last few seconds)
- *   • green         — idle / waiting for the user to type
- *   • pulsing green — an agent rang the terminal bell and is awaiting the user
+ * Per-session status light shown on tabs and grid-cell headers, driven entirely
+ * by the daemon's authoritative activity snapshot (see {@link useSessionActivity}):
+ *   • gray         — the process has exited
+ *   • amber        — working (agent/PTY busy)
+ *   • amber pulse  — waiting / needs your input
+ *   • green        — idle
+ *   • green pulse  — finished, or a bell rang (awaiting the user)
  *
- * Subscribes to just this session's activity slice (see {@link useSessionActivity}),
- * so only its own dot re-renders when the session transitions.
+ * Subscribes to just this session's activity slice, so only its own dot
+ * re-renders when the session transitions.
  */
 export const SessionStatusDot: React.FC<{
   sessionId: string;
@@ -29,16 +31,32 @@ export const SessionStatusDot: React.FC<{
       />
     );
   }
-  const working = activity?.state === "working";
-  const attention = activity?.attention ?? false;
+  const state = activity?.state ?? "idle";
+  const attention = activity?.attention ?? null;
+  const label =
+    attention === "needs-input"
+      ? "Needs your input"
+      : attention === "finished"
+        ? "Finished"
+        : attention === "bell"
+          ? "Waiting for you"
+          : state === "working"
+            ? "Working"
+            : state === "waiting"
+              ? "Waiting"
+              : "Idle";
   return (
     <Circle
       size={7}
-      aria-label={working ? "Working" : attention ? "Waiting for you" : "Idle"}
+      aria-label={label}
       className={cn(
         "shrink-0",
-        working ? "fill-amber-400 text-amber-400" : "fill-green-400 text-green-400",
-        attention && "animate-pulse",
+        state === "working"
+          ? "fill-amber-400 text-amber-400"
+          : state === "waiting"
+            ? "fill-amber-400 text-amber-400"
+            : "fill-green-400 text-green-400",
+        (attention !== null || state === "waiting") && "animate-pulse",
         className
       )}
     />

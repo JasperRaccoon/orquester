@@ -569,15 +569,6 @@ export const TerminalView: React.FC<{
       void api.sendSessionInput(session.id, data);
     });
 
-    // Agents ring the terminal bell (BEL) when they finish / want attention.
-    // Treat it as an explicit "your turn": go idle now (skip the quiescence wait)
-    // and pulse the status dot. Scoped to agents so a shell's completion beep
-    // doesn't masquerade as "waiting for you".
-    const bellSub =
-      session.kind === "agent"
-        ? term.onBell(() => useAppStore.getState().noteSessionBell(session.id))
-        : null;
-
     const resizeObserver = new ResizeObserver(() => applyFit());
     resizeObserver.observe(container);
 
@@ -639,9 +630,6 @@ export const TerminalView: React.FC<{
       onData: (chunk) => {
         term.write(chunk);
         forceAgentRepaint();
-        // Output flowing → working; re-arms the quiescence timer (guarded so a
-        // streaming burst doesn't churn the store).
-        useAppStore.getState().noteSessionActivity(session.id);
       },
       onEnd: () => term.write("\r\n\x1b[2m[session ended]\x1b[0m\r\n"),
       // Multiplexed socket reconnected → clear before the buffer replay so the
@@ -676,7 +664,6 @@ export const TerminalView: React.FC<{
         cancelAnimationFrame(repaintRaf);
       }
       inputSub.dispose();
-      bellSub?.dispose();
       firstRenderFit.dispose();
       resizeObserver.disconnect();
       term.dispose();
