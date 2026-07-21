@@ -23,6 +23,7 @@ export const NewTabMenu: React.FC = () => {
   const openFileBrowser = useAppStore((s) => s.openFileBrowser);
   const openGit = useAppStore((s) => s.openGit);
   const openBrowser = useAppStore((s) => s.openBrowser);
+  const api = useAppStore((s) => s.api);
   const ctx = useCurrentContext();
   const todos = useAppStore((s) => s.todos);
   const createTodo = useAppStore((s) => s.createTodo);
@@ -31,6 +32,11 @@ export const NewTabMenu: React.FC = () => {
 
   const shells = registry.shells.filter((s) => s.enabled);
   const agents = registry.agents.filter((a) => a.enabled);
+  // Browser tabs need BOTH chromium detected on the host AND a transport that can
+  // stream frames. The desktop unix socket has no browserChannel, so a browser
+  // record would open a dead blank tab — gate the entry on the channel too.
+  const browserHasChannel = !!api?.browserChannel();
+  const browserHostReady = registry.browsers.some((b) => b.enabled);
 
   const trigger = (
     <IconButton label="New tab" className="app-no-drag">
@@ -80,10 +86,12 @@ export const NewTabMenu: React.FC = () => {
       <DropdownItem icon={<GitBranch size={14} />} onClick={() => openGit()}>
         Git
       </DropdownItem>
-      {registry.browsers.some((b) => b.enabled) ? (
+      {browserHasChannel && browserHostReady ? (
         <DropdownItem icon={<Globe size={14} />} onClick={() => void openBrowser()}>
           Browser
         </DropdownItem>
+      ) : !browserHasChannel ? (
+        <DropdownEmpty>Browser — needs a remote (HTTP) connection</DropdownEmpty>
       ) : (
         <DropdownEmpty>Browser — install chromium on the host</DropdownEmpty>
       )}

@@ -78,8 +78,28 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
     const canvas = canvasRef.current;
     if (!canvas) return null;
     const rect = canvas.getBoundingClientRect(); // includes the zoom transform
-    const x = ((clientX - rect.left) / rect.width) * vp.w;
-    const y = ((clientY - rect.top) / rect.height) * vp.h;
+    // The canvas element box can be a different aspect than the raster: `h-full`
+    // makes height definite while `max-w-full` clamps width, so `object-contain`
+    // letterboxes the drawn image inside the box (common in mobile-portrait with
+    // the wide desktop viewport). Map against the actual contained image rect, not
+    // the full element box, or taps land on the wrong element. The zoom transform
+    // scales box + letterbox uniformly, so ratios computed from the transformed
+    // rect stay exact.
+    const boxAspect = rect.width / rect.height;
+    const imgAspect = vp.w / vp.h;
+    let imgW = rect.width;
+    let imgH = rect.height;
+    let padX = 0;
+    let padY = 0;
+    if (boxAspect > imgAspect) {
+      imgW = rect.height * imgAspect; // height-limited: pillarbox left/right
+      padX = (rect.width - imgW) / 2;
+    } else {
+      imgH = rect.width / imgAspect; // width-limited: letterbox top/bottom
+      padY = (rect.height - imgH) / 2;
+    }
+    const x = ((clientX - rect.left - padX) / imgW) * vp.w;
+    const y = ((clientY - rect.top - padY) / imgH) * vp.h;
     if (x < 0 || y < 0 || x > vp.w || y > vp.h) return null;
     return { x: Math.round(x), y: Math.round(y) };
   }, [vp.w, vp.h]);
@@ -212,7 +232,14 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
 
       <div ref={wrapRef} className="relative min-h-0 flex-1 touch-none overflow-hidden"
         onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}>
-        {state?.status === "crashed" || state?.status === "error" ? (
+        {!channel ? (
+          // No screencast transport (e.g. the desktop unix socket): the browser
+          // record exists on the daemon but no frames can stream, so explain
+          // instead of showing a silent blank canvas.
+          <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-sm text-neutral-400">
+            <span>Browser tabs require a remote (HTTP) connection.</span>
+          </div>
+        ) : state?.status === "crashed" || state?.status === "error" ? (
           <div className="flex h-full flex-col items-center justify-center gap-3 text-sm text-neutral-400">
             <span>{state.status === "crashed" ? "Browser crashed" : (browser.errorMessage ?? "Browser failed to start")}</span>
             <button type="button" onClick={() => navigate("reload")}

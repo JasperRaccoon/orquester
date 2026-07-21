@@ -1469,6 +1469,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   openBrowser: async (url) => {
     const { api, currentProject } = get();
     if (!api || !currentProject) return;
+    // Browser tabs stream frames over the WS browser channel; a transport without
+    // it (the desktop unix socket) would create a dead blank tab. Refuse rather
+    // than open one with no way to render.
+    if (!api.browserChannel()) return;
     const browser = await api.createBrowser({ projectPath: currentProject.path, url });
     set((state) => ({
       browsers: upsertBrowser(state.browsers, browser),
