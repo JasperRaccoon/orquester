@@ -25,11 +25,12 @@ function retryAfterMs(res: Response, floorMs: number): number {
 export function createClaudeSource(opts: {
   userhome: string;
   now: () => number;
+  claudeHome?: string;
   fetchImpl?: typeof fetch;
   logger?: Pick<Console, "warn">;
 }): () => Promise<AgentUsage | null> {
   const doFetch = opts.fetchImpl ?? fetch;
-  const claudeHome = process.env.CLAUDE_CONFIG_DIR || join(opts.userhome, ".claude");
+  const claudeHome = opts.claudeHome || process.env.CLAUDE_CONFIG_DIR || join(opts.userhome, ".claude");
   const credsFile = join(claudeHome, ".credentials.json");
   let lastGood: AgentUsage | null = null;
   let backoffUntil = 0;

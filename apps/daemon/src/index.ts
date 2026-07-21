@@ -2,6 +2,7 @@ import type {
   AccountSummary,
   AccountTestResult,
   AgentEventRequest,
+  AgentUsage,
   BrowserClientMessage,
   BrowserSuggestionsResponse,
   BrowserSummary,
@@ -52,6 +53,7 @@ import type {
   SessionUploadRequest,
   SessionUploadResponse,
   UpdateTodoRequest,
+  UsageAccount,
   UsageResponse,
   WorkspaceSummary
 } from "@orquester/api";
@@ -272,10 +274,41 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // Stream registry changes (install/update status, detected versions) to clients.
   registry.events.on("changed", (entry) => broadcaster.publish("registry", "registry.changed", entry));
   agentAccounts.events.on("changed", (payload) => broadcaster.publish("agent-accounts", "agent-accounts.changed", payload));
-  const baseClaude = createClaudeSource({ userhome: resolved.vars.userhome, now: () => Date.now(), logger: console });
+  const claudeAccountSource = (home?: string) =>
+    createClaudeSource({ userhome: resolved.vars.userhome, now: () => Date.now(), claudeHome: home, logger: console });
+  const codexAccountSource = (home?: string) =>
+    createCodexSource({ userhome: resolved.vars.userhome, now: () => Date.now(), codexHome: home, logger: console });
+
+  async function agentWithAccounts(
+    agent: "claude" | "codex",
+    makeSource: (home?: string) => () => Promise<AgentUsage | null>
+  ): Promise<AgentUsage | null> {
+    const prefs = await readUsagePrefs(resolved.appConfigFile);
+    const base = await makeSource()(); // System account
+    if (prefs.view !== "accounts") return base;
+    const managed = agentAccounts.list().accounts.filter((a) => a.agent === agent);
+    if (managed.length === 0) return base;
+    const accounts: UsageAccount[] = [];
+    for (const acct of managed) {
+      const u = await makeSource(agentAccounts.homePath(agent, acct.id))().catch(() => null);
+      accounts.push({
+        id: acct.id,
+        label: acct.label,
+        available: u?.available ?? false,
+        stale: u?.stale ?? true,
+        plan: u?.plan,
+        session: u?.session ?? null,
+        weekly: u?.weekly ?? null,
+        asOf: u?.asOf
+      });
+    }
+    const head = base ?? { id: agent, available: accounts.some((a) => a.available), stale: true, session: null, weekly: null };
+    return { ...head, accounts, aggregate: { strategy: "worst-account", accountCount: accounts.length } };
+  }
+
   const usage = new UsageService({
-    fetchClaude: baseClaude,
-    readCodex: createCodexSource({ userhome: resolved.vars.userhome, now: () => Date.now() }),
+    fetchClaude: () => agentWithAccounts("claude", claudeAccountSource),
+    readCodex: () => agentWithAccounts("codex", codexAccountSource),
     getPrefs: () => readUsagePrefs(resolved.appConfigFile),
     now: () => Date.now()
   });
