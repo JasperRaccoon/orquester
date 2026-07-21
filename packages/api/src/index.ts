@@ -831,6 +831,138 @@ export type SessionInputMessage =
   | { type: "input"; data: string }
   | { type: "resize"; cols: number; rows: number };
 
+// Browsers — a server-side headless Chromium tab owned by the daemon (one
+// Chromium PROCESS per project, one CDP page per tab). Streamed over /ws-browser.
+
+export type BrowserViewportMode = "desktop" | "mobile";
+
+export type BrowserStatus = "stopped" | "starting" | "running" | "crashed" | "error";
+
+export interface BrowserSummary {
+  id: string;
+  projectPath: string;
+  /** Last known URL (persisted; re-navigated to on relaunch). */
+  url: string;
+  /** Last known page title ("" until first load). */
+  title: string;
+  viewportMode: BrowserViewportMode;
+  /** Per-project tab sort key (ascending); assigned by the daemon. */
+  order: number;
+  createdAt: string;
+  status: BrowserStatus;
+  /** False when Chromium had to be launched with --no-sandbox (UI shows a warning). */
+  sandboxed: boolean;
+  /** Launch/runtime error tail when status === "error". */
+  errorMessage?: string;
+}
+
+export interface CreateBrowserRequest {
+  projectPath: string;
+  /** Initial URL; defaults to "about:blank". */
+  url?: string;
+}
+
+export interface BrowserSuggestionsResponse {
+  /** Detected dev-server origins for the project, most recent first (≤ 8). */
+  urls: string[];
+}
+
+// Design Mode pick payload. Extracted in-page, then RE-CLAMPED server-side
+// (see apps/daemon/src/browser-pick.ts) — page output is hostile.
+
+export interface BrowserPickTarget {
+  tagName: string;
+  /** Verified-unique CSS selector (bottom-up, :nth-of-type disambiguated). */
+  selector: string;
+  /** Human-readable ancestor path, e.g. "div#app > main > button.save". */
+  elementPath: string;
+  cssClasses: string[];
+  /** Allow-listed attributes only. */
+  attributes: Record<string, string>;
+  /** ~16-property getComputedStyle subset. */
+  computedStyles: Record<string, string>;
+  rectViewport: { x: number; y: number; width: number; height: number };
+  accessibility: { role: string; name: string };
+  /** React _debugSource, when the dev build provides it: "file:line:col". */
+  reactSource?: string;
+  reactComponents?: string[];
+  textSnippet: string;
+  /** outerHTML, scripts stripped, ≤ 4096 chars. */
+  htmlSnippet: string;
+}
+
+export interface BrowserPickPayload {
+  page: {
+    /** Origin + path only (query/hash stripped). */
+    url: string;
+    title: string;
+    viewport: { width: number; height: number };
+    viewportMode: BrowserViewportMode;
+  };
+  target: BrowserPickTarget;
+  /** Cropped PNG (element rect + 8px pad), base64, ≤ 2 MB; omitted on overflow. */
+  screenshotBase64?: string;
+}
+
+// /ws-browser wire protocol. Server→client pixels are BINARY frames:
+// [u8 type=BROWSER_FRAME_TYPE_JPEG][36-byte tab id (uuid ascii)][JPEG bytes].
+// Everything else is JSON text.
+
+export const BROWSER_FRAME_TYPE_JPEG = 1;
+
+export interface BrowserStateMessage {
+  t: "state";
+  id: string;
+  url: string;
+  title: string;
+  loading: boolean;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  viewportMode: BrowserViewportMode;
+  status: BrowserStatus;
+  sandboxed: boolean;
+}
+
+export type BrowserServerJsonMessage =
+  | BrowserStateMessage
+  | { t: "picked"; id: string; payload: BrowserPickPayload }
+  | { t: "end"; id: string }
+  | { t: "pong" };
+
+export type BrowserClientMessage =
+  | { t: "sub"; id: string }
+  | { t: "unsub"; id: string }
+  | {
+      t: "pointer";
+      id: string;
+      kind: "move" | "down" | "up";
+      x: number;
+      y: number;
+      button: "none" | "left" | "middle" | "right";
+      modifiers: number;
+      clickCount: number;
+    }
+  | { t: "wheel"; id: string; x: number; y: number; dx: number; dy: number }
+  | {
+      t: "key";
+      id: string;
+      kind: "down" | "up" | "char";
+      key: string;
+      code: string;
+      text?: string;
+      modifiers: number;
+    }
+  | {
+      t: "touch";
+      id: string;
+      kind: "start" | "move" | "end";
+      points: Array<{ x: number; y: number }>;
+    }
+  | { t: "nav"; id: string; action: "goto" | "back" | "forward" | "reload"; url?: string }
+  | { t: "viewport"; id: string; mode: BrowserViewportMode }
+  | { t: "pick"; id: string; on: boolean }
+  | { t: "ping" };
+
 export interface EventMessage<TPayload = unknown> {
   id: string;
   channel: string;

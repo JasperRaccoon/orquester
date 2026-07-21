@@ -123,6 +123,14 @@ export function sessionsIndexPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "sessions.json");
 }
 
+export function browsersIndexPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "browsers.json");
+}
+
+export function browserProfilesDir(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "browser-profiles");
+}
+
 export function todosIndexPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "todos.json");
 }
@@ -455,6 +463,35 @@ export const sessionsConfigSchema = z.object({
 
 export type SessionRecord = z.infer<typeof sessionRecordSchema>;
 export type SessionsConfig = z.infer<typeof sessionsConfigSchema>;
+
+/** One persisted browser tab. The Chromium PROCESS does not survive a daemon
+ *  restart (it is a daemon child, unlike tmux) — only the tab record does;
+ *  first subscribe after boot relaunches and re-navigates. */
+export const browserRecordSchema = z.object({
+  id: z.string().min(1),
+  projectPath: z.string(),
+  url: z.string(),
+  title: z.string().default(""),
+  viewportMode: z.enum(["desktop", "mobile"]).default("desktop"),
+  order: z.number(),
+  createdAt: z.string()
+});
+
+export const browsersFileSchema = z.object({
+  version: z.literal(1),
+  browsers: z.array(browserRecordSchema).default([])
+});
+
+export type BrowserRecord = z.infer<typeof browserRecordSchema>;
+export type BrowsersFile = z.infer<typeof browsersFileSchema>;
+
+export function parseBrowsersFile(value: unknown): BrowsersFile {
+  return browsersFileSchema.parse(value);
+}
+
+export function createDefaultBrowsersFile(): BrowsersFile {
+  return { version: 1, browsers: [] };
+}
 
 export function createDefaultSessionsConfig(): SessionsConfig {
   return sessionsConfigSchema.parse({ sessions: [] });
