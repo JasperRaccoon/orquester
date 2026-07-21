@@ -23,6 +23,7 @@
     "bcryptjs": "^3.0.3",
     "fastify": "^4.28.1",
     "node-pty": "^1.1.0",
+    "puppeteer-core": "^24.0.0",
     "web-push": "^3.6.7",
     "zod": "^3.25.67"
   },
