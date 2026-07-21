@@ -3,7 +3,10 @@ import type {
   AccountTestResult,
   AgentEventRequest,
   AgentUsage,
+  BrowserSuggestionsResponse,
+  BrowserSummary,
   CreateAccountRequest,
+  CreateBrowserRequest,
   CreateProjectRequest,
   CreateSessionRequest,
   CreateTodoRequest,
@@ -57,6 +60,8 @@ import type {
   WorkspaceSummary
 } from "@orquester/api";
 import { RegistryService } from "./registry";
+import { BrowserError, BrowserManager } from "./browsers";
+import { UrlWatcher } from "./url-watcher";
 import { AgentHooks } from "./agent-hooks";
 import { type ISessionManager, SessionError, createSessionManager } from "./sessions";
 import type { ActivityCause } from "./ansi-activity";
@@ -87,6 +92,8 @@ import {
   type WorkspacesConfig,
   accountsConfigPath,
   appConfigPath,
+  browserProfilesDir,
+  browsersIndexPath,
   createDefaultAppConfig,
   createDefaultClientConfig,
   createDefaultDaemonConfig,
@@ -152,6 +159,10 @@ interface ResolvedPaths {
   tmuxSocket: string;
   /** <appdir>/daemon/sessions.json — the reattach index. */
   sessionsIndexFile: string;
+  /** <appdir>/daemon/browsers.json — the browser-tab index. */
+  browsersIndexFile: string;
+  /** <appdir>/daemon/browser-profiles — per-project Chromium user-data dirs (0700). */
+  browserProfilesDir: string;
   /** <appdir>/daemon/todos.json — the managed to-do list index. */
   todosIndexFile: string;
   /** <appdir>/daemon/push.json — Web Push VAPID keypair + subscriptions (0600). */
@@ -207,6 +218,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     workspacesMetaFile: workspacesMetaPath(paths.baseDir),
     tmuxSocket: tmuxSocketPath(paths.baseDir),
     sessionsIndexFile: sessionsIndexPath(paths.baseDir),
+    browsersIndexFile: browsersIndexPath(paths.baseDir),
+    browserProfilesDir: browserProfilesDir(paths.baseDir),
     todosIndexFile: todosIndexPath(paths.baseDir),
     pushConfigFile: pushConfigPath(paths.baseDir),
     workspacesDir: expandVars(config.workspacesDir, paths.vars),
@@ -359,7 +372,29 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   todos.lifecycle.on("updated", (r) => broadcaster.publish("todos", "todo.updated", r));
   todos.lifecycle.on("deleted", (r) => broadcaster.publish("todos", "todo.deleted", r));
 
-  const services: Services = { registry, sessions, accounts, git, todos, usage, push, broadcaster, teamclaude };
+  // Server-side browser tabs (Design Mode). Chromium resolves through the
+  // registry's probed browser entries; no bundled download.
+  const browsers = new BrowserManager({
+    indexFile: resolved.browsersIndexFile,
+    profilesDir: resolved.browserProfilesDir,
+    resolveChromium: () =>
+      registry.list().browsers.find((b) => b.enabled && b.resolvedBin)?.resolvedBin
+  });
+  await browsers.load();
+  browsers.lifecycle.on("created", (b) => broadcaster.publish("browser", "browser.created", b));
+  browsers.lifecycle.on("updated", (b) => broadcaster.publish("browser", "browser.updated", b));
+  browsers.lifecycle.on("closed", (p) => broadcaster.publish("browser", "browser.closed", p));
+
+  // Dev-server URL suggestions: fed from every session's PTY output.
+  const urlWatcher = new UrlWatcher();
+  sessions.lifecycle.on("output", ({ id, data }: { id: string; data: string }) => {
+    const summary = sessions.get(id);
+    if (summary?.projectPath) urlWatcher.ingest(summary.projectPath, data);
+  });
+
+  const services: Services = {
+    registry, sessions, accounts, git, todos, usage, push, broadcaster, teamclaude, browsers, urlWatcher
+  };
 
   // The static web build the HTTP transport optionally serves.
   const webDirEnv = options.webDir ?? env.ORQUESTER_WEB_DIR;
@@ -426,6 +461,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // the next boot reattaches; the local backend has no server, so its shutdown()
     // terminates the child PTYs (they'd die with the daemon regardless).
     sessions.shutdown();
+    await browsers.shutdown();
     await stopHttp();
     const unixClosed = unixServer.close();
     unixServer.server.closeAllConnections?.();
@@ -452,6 +488,8 @@ interface Services {
   push: PushService;
   broadcaster: Broadcaster;
   teamclaude: TeamClaudeService;
+  browsers: BrowserManager;
+  urlWatcher: UrlWatcher;
   /** Restart the HTTP transport (set in main once the lifecycle exists). */
   reloadHttp?: () => Promise<void>;
 }
@@ -803,6 +841,8 @@ function createServer(
       // not the realpath, or symlinked workspace roots (e.g. /tmp → /private/tmp)
       // never match and the dir is removed while sessions keep running.
       sessions.closeByProjectPrefix(target);
+      // Cascade-close this project's browser tabs (kills its Chromium too).
+      await services.browsers.closeForProject(target);
       // Cascade-delete this project's to-do lists (match `target`, the raw-join
       // path used as the list refKey — not the realpath `safe`).
       await todos.deleteByProjectPath(target);
@@ -1865,6 +1905,47 @@ function createServer(
     }
   );
 
+  // Browser tabs — server-side Chromium (Design Mode). CRUD only here; the
+  // live stream + input ride /ws-browser.
+  app.get<{ Querystring: { projectPath?: string } }>(
+    "/api/browsers",
+    async (request): Promise<BrowserSummary[]> =>
+      services.browsers.list(request.query.projectPath)
+  );
+
+  app.get<{ Querystring: { projectPath?: string } }>(
+    "/api/browsers/suggestions",
+    async (request): Promise<BrowserSuggestionsResponse> => {
+      const projectPath = request.query.projectPath;
+      return { urls: projectPath ? services.urlWatcher.suggestions(projectPath) : [] };
+    }
+  );
+
+  app.post<{ Body: CreateBrowserRequest }>(
+    "/api/browsers",
+    async (request, reply): Promise<BrowserSummary | void> => {
+      const body = request.body ?? ({} as CreateBrowserRequest);
+      if (!body.projectPath) {
+        return reply.code(400).send({ code: "INVALID_REQUEST", message: "projectPath is required." });
+      }
+      try {
+        return await services.browsers.create(body.projectPath, body.url);
+      } catch (error) {
+        const status = error instanceof BrowserError ? error.statusCode : 500;
+        const message = error instanceof Error ? error.message : "Failed to create browser tab.";
+        return reply.code(status).send({ code: "BROWSER_UNAVAILABLE", message });
+      }
+    }
+  );
+
+  app.delete<{ Params: { id: string } }>(
+    "/api/browsers/:id",
+    async (request, reply): Promise<void> => {
+      await services.browsers.close(request.params.id);
+      return reply.code(204).send();
+    }
+  );
+
   if (options.mode === "local") {
     // Managed agent hooks report lifecycle events here (see the agent-status
     // design doc). Socket-only: sessions always run on the daemon's host, and
@@ -2834,6 +2915,7 @@ async function prepareDirs(resolved: ResolvedPaths): Promise<void> {
   await mkdir(resolved.logsDir, { recursive: true });
   await mkdir(resolved.workspacesDir, { recursive: true });
   await mkdir(resolved.keysDir, { recursive: true, mode: 0o700 });
+  await mkdir(resolved.browserProfilesDir, { recursive: true, mode: 0o700 });
 }
 
 function sanitizeDaemonConfig(config: DaemonConfig): DaemonConfig {
