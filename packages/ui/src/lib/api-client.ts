@@ -43,17 +43,11 @@ import type {
   SessionSummary,
   SessionUploadRequest,
   SessionUploadResponse,
-  TeamClaudeApiKeyRequest,
-  TeamClaudeImportRequest,
-  TeamClaudePriorityRequest,
-  TeamClaudeSettingsUpdate,
-  TeamClaudeStatus,
   TodoListRecord,
   TodoScope,
   UpdateTodoRequest,
   UsageResponse,
-  WorkspaceSummary,
-  AddonsResponse
+  WorkspaceSummary
 } from "@orquester/api";
 import type { AppConfig, DaemonConfig, RemoteConnectionConfig } from "@orquester/config";
 import type { UiConnection } from "../types";
@@ -504,48 +498,6 @@ export class ApiClient {
 
   registryVersion(id: string): Promise<RegistryActionResult> {
     return this.send("GET", `/api/registry/${encodeURIComponent(id)}/version`);
-  }
-
-  // Addons (TeamClaude, …)
-
-  listAddons(signal?: AbortSignal): Promise<AddonsResponse> {
-    return this.send("GET", "/api/addons", { signal });
-  }
-
-  installAddon(id: string): Promise<{ started: boolean }> {
-    return this.send("POST", `/api/addons/${encodeURIComponent(id)}/install`);
-  }
-
-  updateAddon(id: string): Promise<{ started: boolean }> {
-    return this.send("POST", `/api/addons/${encodeURIComponent(id)}/update`);
-  }
-
-  getTeamClaudeStatus(signal?: AbortSignal): Promise<TeamClaudeStatus> {
-    return this.send("GET", "/api/addons/teamclaude", { signal });
-  }
-
-  updateTeamClaude(body: TeamClaudeSettingsUpdate): Promise<TeamClaudeStatus> {
-    return this.send("PUT", "/api/addons/teamclaude", { body });
-  }
-
-  importTeamClaude(req: TeamClaudeImportRequest = {}): Promise<TeamClaudeStatus> {
-    return this.send("POST", "/api/addons/teamclaude/import", { body: req });
-  }
-
-  addTeamClaudeApiKey(req: TeamClaudeApiKeyRequest): Promise<TeamClaudeStatus> {
-    return this.send("POST", "/api/addons/teamclaude/api-key", { body: req });
-  }
-
-  removeTeamClaudeAccount(name: string): Promise<TeamClaudeStatus> {
-    return this.send("DELETE", "/api/addons/teamclaude/accounts", { body: { name } });
-  }
-
-  toggleTeamClaudeAccount(name: string, disabled: boolean): Promise<TeamClaudeStatus> {
-    return this.send("POST", "/api/addons/teamclaude/accounts/toggle", { body: { name, disabled } });
-  }
-
-  setTeamClaudePriority(req: TeamClaudePriorityRequest): Promise<TeamClaudeStatus> {
-    return this.send("POST", "/api/addons/teamclaude/accounts/priority", { body: req });
   }
 
   /** Launch an ide/file-explorer/browser target on a path. */

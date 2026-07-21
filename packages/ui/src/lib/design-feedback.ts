@@ -2,6 +2,14 @@ import type { BrowserPickPayload } from "@orquester/api";
 
 export type PickIntent = "fix" | "change" | "question";
 
+// C0/C1 control chars minus \t and \n. The feedback markdown is delivered into
+// an agent's PTY as a bracketed paste (\x1b[200~…\x1b[201~\r); a raw ESC in the
+// (hostile) page-derived snippets — e.g. the literal bytes \x1b[201~ — would end
+// paste mode early and let the following bytes run as typed keystrokes, a
+// command injection. The daemon re-clamps too, but strip client-side as well so
+// the wrap is never fed control bytes regardless of what reached the client.
+const CONTROL_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g;
+
 /**
  * Render a pick into the Markdown block pasted into an agent's PTY (Orca's
  * "Design Feedback" format). The screenshot is referenced by daemon-side path
@@ -40,5 +48,5 @@ export function formatDesignFeedback(
   if (target.htmlSnippet) lines.push("", "**HTML:**", "```html", target.htmlSnippet, "```");
   if (opts.screenshotPath) lines.push("", `**Screenshot:** ${opts.screenshotPath}`);
   lines.push("", `**Feedback:** ${opts.comment.trim() || "(none)"}`);
-  return lines.join("\n");
+  return lines.join("\n").replace(CONTROL_RE, "");
 }

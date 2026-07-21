@@ -22,6 +22,13 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
   const [state, setState] = useState<BrowserStateMessage | null>(null);
   const [urlDraft, setUrlDraft] = useState(browser.url === "about:blank" ? "" : browser.url);
   const [urlFocused, setUrlFocused] = useState(false);
+  // Live focus mirror read inside onState (which closes over stale urlFocused
+  // because the subscribe effect deliberately doesn't re-run on focus changes).
+  const urlFocusedRef = useRef(false);
+  // Monotonic frame counters for latest-frame-wins: async JPEG decodes can
+  // finish out of order, so an older frame must never paint over a newer one.
+  const frameSeq = useRef(0);
+  const lastDrawnSeq = useRef(0);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [picking, setPicking] = useState(false);
   const [pick, setPick] = useState<BrowserPickPayload | null>(null);
@@ -35,23 +42,28 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
   // view shows it frozen). No replay semantic: resubscribe re-primes.
   useEffect(() => {
     if (!channel || !active) return;
-    const canvas = canvasRef.current;
     const handle = channel.open(browser.id, {
       onFrame: (jpeg) => {
+        const seq = ++frameSeq.current;
         void createImageBitmap(new Blob([jpeg], { type: "image/jpeg" })).then((bmp) => {
+          // Drop a frame whose decode lost the race to a newer one, and read the
+          // canvas fresh — it remounts as a new node after a crash → Relaunch.
+          if (seq < lastDrawnSeq.current) { bmp.close(); return; }
+          const canvas = canvasRef.current;
           const ctx = canvas?.getContext("2d");
-          if (!canvas || !ctx) return;
+          if (!canvas || !ctx) { bmp.close(); return; }
           if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
             canvas.width = bmp.width;
             canvas.height = bmp.height;
           }
           ctx.drawImage(bmp, 0, 0);
+          lastDrawnSeq.current = seq;
           bmp.close();
         });
       },
       onState: (s) => {
         setState(s);
-        if (!urlFocused) setUrlDraft(s.url === "about:blank" ? "" : s.url);
+        if (!urlFocusedRef.current) setUrlDraft(s.url === "about:blank" ? "" : s.url);
       },
       onPicked: (payload) => { setPicking(false); setPick(payload); },
       onEnd: () => {}
@@ -171,8 +183,8 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
           <input
             value={urlDraft}
             onChange={(e) => setUrlDraft(e.target.value)}
-            onFocus={() => { setUrlFocused(true); loadSuggestions(); }}
-            onBlur={() => setUrlFocused(false)}
+            onFocus={() => { urlFocusedRef.current = true; setUrlFocused(true); loadSuggestions(); }}
+            onBlur={() => { urlFocusedRef.current = false; setUrlFocused(false); }}
             list={`browser-suggestions-${browser.id}`}
             placeholder="Enter URL (e.g. localhost:5173)"
             spellCheck={false} autoCapitalize="off" autoCorrect="off"

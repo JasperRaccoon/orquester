@@ -140,15 +140,6 @@ export function pushConfigPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "push.json");
 }
 
-/**
- * Orquester-owned TeamClaude toggle/settings mirror. Account OAuth material stays
- * in TeamClaude's own config (`~/.config/teamclaude.json`) — never duplicated here.
- * Written 0600 by the daemon.
- */
-export function teamclaudeConfigPath(baseDir: string): string {
-  return joinPath(daemonConfigDir(baseDir), "teamclaude.json");
-}
-
 /** `yyyy-mm-dd` in local time. */
 export function localDateStamp(date = new Date()): string {
   const year = date.getFullYear();
@@ -305,8 +296,8 @@ export const usagePrefsSchema = z
     /** Which agent drives the collapsed chip. */
     chip: z.enum(["busiest", "claude", "codex"]).default("busiest"),
     /**
-     * How to render multi-account Claude usage (TeamClaude): pooled aggregate bars
-     * or a per-account breakdown.
+     * How to render multi-account Claude usage: pooled aggregate bars or a
+     * per-account breakdown.
      */
     view: z.enum(["aggregate", "accounts"]).default("aggregate")
   })
@@ -613,68 +604,6 @@ export function createDefaultPushConfig(): PushConfig {
 
 export function parsePushConfig(raw: unknown): PushConfig {
   return pushConfigSchema.parse(raw);
-}
-
-// teamclaude.json — Orquester-side enablement of the TeamClaude multi-account
-// proxy addon. Tokens live in TeamClaude's own config; this only stores whether
-// Orquester should route Claude Code sessions through the local proxy and a few
-// non-secret knobs mirrored into TeamClaude's config when changed.
-
-export const teamclaudeStormRampSchema = z.object({
-  enabled: z.boolean().default(true),
-  startConc: z.coerce.number().int().min(1).default(1),
-  stepConc: z.coerce.number().int().min(1).default(1),
-  stepMs: z.coerce.number().int().min(1).default(250),
-  windowMs: z.coerce.number().int().min(0).default(30000)
-});
-
-export const teamclaudeConfigSchema = z.object({
-  version: z.literal(1).default(1),
-  /** Master switch: when true, new Claude Code sessions launch via the proxy. */
-  enabled: z.boolean().default(false),
-  /** Local TeamClaude proxy port (default matches TeamClaude's 3456). */
-  port: z.coerce.number().int().min(1).max(65535).default(3456),
-  /** Quota utilization (0–1) at which TeamClaude rotates accounts. */
-  switchThreshold: z.coerce.number().min(0).max(1).default(0.98),
-  /** Background quotaprobe interval seconds (`0` = off). */
-  quotaProbeSeconds: z.coerce.number().int().min(0).default(0),
-  /** Keep-warm interval seconds (`0` = off). */
-  warmupSeconds: z.coerce.number().int().min(0).default(0),
-  autoUpdate: z.boolean().default(true),
-  upstream: z.string().min(1).default("https://api.anthropic.com"),
-  stormRamp: teamclaudeStormRampSchema.default({}),
-  sxMode: z.enum(["always", "429", "off"]).default("off")
-});
-
-export type TeamClaudeConfig = z.infer<typeof teamclaudeConfigSchema>;
-
-export function createDefaultTeamClaudeConfig(): TeamClaudeConfig {
-  return teamclaudeConfigSchema.parse({});
-}
-
-export function parseTeamClaudeConfig(raw: unknown): TeamClaudeConfig {
-  return teamclaudeConfigSchema.parse(raw);
-}
-
-export const teamclaudeSettingsUpdateSchema = z
-  .object({
-    enabled: z.boolean().optional(),
-    port: z.coerce.number().int().min(1).max(65535).optional(),
-    switchThreshold: z.coerce.number().min(0).max(1).optional(),
-    quotaProbeSeconds: z.coerce.number().int().min(0).optional(),
-    warmupSeconds: z.coerce.number().int().min(0).optional(),
-    autoUpdate: z.boolean().optional(),
-    upstream: z.string().trim().min(1).optional(),
-    stormRamp: teamclaudeStormRampSchema.partial().strict().optional(),
-    sxMode: z.enum(["always", "429", "off"]).optional(),
-    sxApiKey: z.string().optional()
-  })
-  .strict();
-
-export type ParsedTeamClaudeSettingsUpdate = z.infer<typeof teamclaudeSettingsUpdateSchema>;
-
-export function parseTeamClaudeSettingsUpdate(raw: unknown): ParsedTeamClaudeSettingsUpdate {
-  return teamclaudeSettingsUpdateSchema.parse(raw);
 }
 
 // ClientConfig — what the daemon reports about how to reach itself.}
