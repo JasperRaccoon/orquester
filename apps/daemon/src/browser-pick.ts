@@ -26,10 +26,19 @@ const STYLE_PROPS = [
   "font-weight", "line-height", "text-align", "z-index"
 ] as const;
 
+// C0/C1 control chars minus \t and \n. Stripped because the picked payload is
+// delivered into a PTY as a bracketed paste (\x1b[200~…\x1b[201~\r); a raw ESC
+// in page text (e.g. the sequence \x1b[201~) would break out of the paste and
+// let the following bytes run as typed keystrokes — a command injection.
+const CONTROL_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g;
+
 function str(v: unknown, max: number): string {
   // Redact BEFORE slicing so the replacement can't push us over `max` and so a
-  // secret straddling the cap boundary is still fully caught.
-  return typeof v === "string" ? v.replace(SECRET_RE, "$1=<redacted>").slice(0, max) : "";
+  // secret straddling the cap boundary is still fully caught; strip control
+  // chars at the same boundary so hostile page output can't inject into a PTY.
+  return typeof v === "string"
+    ? v.replace(CONTROL_RE, "").replace(SECRET_RE, "$1=<redacted>").slice(0, max)
+    : "";
 }
 
 function num(v: unknown): number {
@@ -74,7 +83,7 @@ export function clampBrowserPickPayload(raw: unknown): BrowserPickPayload | null
   if (typeof target.computedStyles === "object" && target.computedStyles !== null) {
     for (const prop of STYLE_PROPS) {
       const v = (target.computedStyles as Record<string, unknown>)[prop];
-      if (typeof v === "string") computedStyles[prop] = v.slice(0, 128);
+      if (typeof v === "string") computedStyles[prop] = v.replace(CONTROL_RE, "").slice(0, 128);
     }
   }
 

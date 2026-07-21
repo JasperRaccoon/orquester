@@ -61,6 +61,9 @@ export class BrowserManager {
   readonly lifecycle = new EventEmitter();
   private readonly tabs = new Map<string, Tab>();
   private readonly chromes = new Map<string, Promise<Chrome>>();
+  // Serialize on-disk writes: concurrent persist() calls (framenavigated + load
+  // fire close together) would otherwise race the same tmp file and corrupt it.
+  private persistChain: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly opts: {
@@ -326,9 +329,9 @@ export class BrowserManager {
       if (event.name === "__orquesterPick") void this.onPickReport(tab, event.payload);
     });
     page.on("framenavigated", (frame) => {
-      if (frame === page.mainFrame()) void this.syncRecord(tab);
+      if (frame === page.mainFrame()) void this.syncRecord(tab).catch(() => undefined);
     });
-    page.on("load", () => { tab.loading = false; void this.syncRecord(tab); });
+    page.on("load", () => { tab.loading = false; void this.syncRecord(tab).catch(() => undefined); });
     page.on("close", () => {
       if (this.tabs.get(tab.record.id) !== tab) return; // our own close()
       tab.page = null; tab.cdp = null; tab.streaming = false;
@@ -342,7 +345,7 @@ export class BrowserManager {
       tab.loading = true;
       void page.goto(tab.record.url, { waitUntil: "domcontentloaded", timeout: 30_000 })
         .catch(() => undefined)
-        .finally(() => { tab.loading = false; void this.syncRecord(tab); });
+        .finally(() => { tab.loading = false; void this.syncRecord(tab).catch(() => undefined); });
     }
     this.emitUpdated(tab);
   }
@@ -378,6 +381,9 @@ export class BrowserManager {
   }
 
   private async onPickReport(tab: Tab, raw: string): Promise<void> {
+    // Ignore unsolicited/forged binding calls: a hostile page can invoke
+    // window.__orquesterPick(...) at any time, but only an armed pick is real.
+    if (!tab.picking) return;
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
@@ -391,15 +397,21 @@ export class BrowserManager {
     try {
       const r = payload.target.rectViewport;
       if (r.width > 0 && r.height > 0 && tab.cdp) {
-        const shot = await tab.cdp.send("Page.captureScreenshot", {
-          format: "png",
-          clip: {
-            x: Math.max(0, r.x - 8), y: Math.max(0, r.y - 8),
-            width: r.width + 16, height: r.height + 16, scale: 1
+        // Clamp the clip to the emulated viewport so a fabricated 1e9-px rect
+        // can't drive captureScreenshot into a renderer OOM.
+        const vp = VIEWPORTS[tab.record.viewportMode];
+        const x = Math.min(Math.max(0, r.x - 8), vp.width);
+        const y = Math.min(Math.max(0, r.y - 8), vp.height);
+        const width = Math.min(r.width + 16, vp.width - x);
+        const height = Math.min(r.height + 16, vp.height - y);
+        if (width > 0 && height > 0) {
+          const shot = await tab.cdp.send("Page.captureScreenshot", {
+            format: "png",
+            clip: { x, y, width, height, scale: 1 }
+          });
+          if (Buffer.byteLength(shot.data, "base64") <= SCREENSHOT_MAX_BYTES) {
+            payload.screenshotBase64 = shot.data;
           }
-        });
-        if (Buffer.byteLength(shot.data, "base64") <= SCREENSHOT_MAX_BYTES) {
-          payload.screenshotBase64 = shot.data;
         }
       }
     } catch {
@@ -430,12 +442,23 @@ export class BrowserManager {
     for (const sink of tab.sinks) sink.onState(state);
   }
 
-  private async persist(): Promise<void> {
+  private persist(): Promise<void> {
+    // Chain every write so only one is in flight; a unique tmp name per write
+    // means even a bug in the chain can't make two writers share a tmp file.
+    const next = this.persistChain.then(
+      () => this.writeIndex(),
+      () => this.writeIndex()
+    );
+    this.persistChain = next.catch(() => undefined);
+    return next;
+  }
+
+  private async writeIndex(): Promise<void> {
     const file = {
       version: 1 as const,
       browsers: [...this.tabs.values()].map((t) => t.record)
     };
-    const tmp = `${this.opts.indexFile}.tmp`;
+    const tmp = `${this.opts.indexFile}.${randomUUID()}.tmp`;
     await mkdir(dirname(this.opts.indexFile), { recursive: true });
     await writeFile(tmp, JSON.stringify(file, null, 2), "utf8");
     await rename(tmp, this.opts.indexFile);
