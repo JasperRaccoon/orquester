@@ -718,6 +718,38 @@ export interface OpenResult {
 
 export type SessionStatus = "running" | "exited";
 
+/** Coarse liveness of a session, derived by the daemon (single source of truth). */
+export type SessionActivityState = "working" | "waiting" | "idle";
+
+/**
+ * Why the session wants the user's eyes. "bell" = terminal BEL with no
+ * structural hook info; "needs-input"/"finished" come from agent hooks.
+ */
+export type SessionAttention = "bell" | "needs-input" | "finished";
+
+export interface SessionActivity {
+  state: SessionActivityState;
+  attention: SessionAttention | null;
+  /** ISO timestamp of the last PTY output, null before first output. */
+  lastOutputAt: string | null;
+}
+
+/** Payload of the "session.activity" event (channel "sessions"). */
+export interface SessionActivityEvent {
+  id: string;
+  activity: SessionActivity;
+}
+
+/** Agents whose managed hooks report structural status to the daemon. */
+export type AgentEventSource = "claude" | "codex" | "opencode";
+
+/** Body of POST /api/sessions/:id/agent-event (unix-socket transport only). */
+export interface AgentEventRequest {
+  source: AgentEventSource;
+  event: string;
+  payload?: unknown;
+}
+
 export interface SessionSummary {
   id: string;
   kind: RegistryKind;
@@ -734,6 +766,8 @@ export interface SessionSummary {
   /** Per-project tab sort key (ascending); assigned by the daemon. */
   order: number;
   createdAt: string;
+  /** Live activity snapshot; absent in persisted indexes and for exited sessions. */
+  activity?: SessionActivity;
 }
 
 export interface CreateSessionRequest {
