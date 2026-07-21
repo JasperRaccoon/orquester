@@ -76,6 +76,8 @@ export interface ISessionManager {
   closeAll(): void;
   /** Reattach to surviving sessions on boot (no-op for the local backend). */
   reattach(): Promise<void>;
+  /** Account ids currently in use by a running session (for the idle-account refresher). */
+  liveAccountIds(): Set<string>;
 }
 
 /**

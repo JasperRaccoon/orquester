@@ -30,6 +30,7 @@ import type {
   GitOpResult,
   GitStatusResponse,
   HealthResponse,
+  ImportAgentAccountRequest,
   OpenRequest,
   OpenResult,
   ProjectSummary,
@@ -43,6 +44,7 @@ import type {
   RepoSummary,
   ReorderSessionsRequest,
   ServerInfoResponse,
+  SetAgentAccountDefaultsRequest,
   SessionActivity,
   SessionActivityEvent,
   SessionInputRequest,
@@ -71,6 +73,8 @@ import { TodoError, TodoListManager } from "./todos";
 import { Tmux } from "./tmux";
 import { Broadcaster } from "./broadcaster";
 import { AccountError, AccountsService } from "./accounts";
+import { AgentAccountsService } from "./agent-accounts.ts";
+import { AgentAccountError } from "./agent-account-paths.ts";
 import { PushService, isValidPushEndpoint } from "./push";
 import { GitError, GitService } from "./git";
 import { UsageService } from "./usage";
@@ -93,6 +97,8 @@ import {
   type RemotesConfig,
   type WorkspacesConfig,
   accountsConfigPath,
+  agentAccountsDir,
+  agentAccountsFile,
   appConfigPath,
   browserProfilesDir,
   browsersIndexPath,
@@ -248,12 +254,17 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   const tmux = new Tmux(resolved.tmuxSocket);
   const teamclaude = new TeamClaudeService(teamclaudeConfigPath(paths.baseDir));
   const agentHooks = new AgentHooks(resolved.daemonDir, resolved.vars.userhome);
+  const agentAccounts = new AgentAccountsService({
+    indexFile: agentAccountsFile(paths.baseDir),
+    accountsDir: agentAccountsDir(paths.baseDir),
+    now: () => Date.now(),
+    logger: console
+  });
   const sessions = createSessionManager(registry, tmux, resolved.sessionsIndexFile, {
-    resolveExtraEnv: async (entry) => {
-      if (entry.id !== "claude" || entry.kind !== "agent") return null;
+    resolveExtraEnv: async (entry, accountId) => {
+      if (entry.kind !== "agent") return null;
       try {
-        const launch = await teamclaude.resolveClaudeLaunchEnv();
-        return launch?.env ? { env: launch.env } : null;
+        return await agentAccounts.resolveLaunchEnv(entry.id, accountId);
       } catch (error) {
         throw new SessionError(error instanceof Error ? error.message : String(error));
       }
@@ -269,6 +280,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   const broadcaster = new Broadcaster();
   // Stream registry changes (install/update status, detected versions) to clients.
   registry.events.on("changed", (entry) => broadcaster.publish("registry", "registry.changed", entry));
+  agentAccounts.events.on("changed", (payload) => broadcaster.publish("agent-accounts", "agent-accounts.changed", payload));
   teamclaude.events.on("changed", (entry) => broadcaster.publish("addons", "addon.changed", entry));
   teamclaude.events.on("status", (status) => broadcaster.publish("addons", "teamclaude.status", status));
   const baseClaude = createClaudeSource({ userhome: resolved.vars.userhome, now: () => Date.now(), logger: console });
@@ -311,6 +323,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // (KillMode=process keeps the tmux server alive across restarts). No-op on the
   // local backend. Best-effort: a tmux/socket error must not block startup.
   await sessions.reattach().catch((error) => console.error("Session reattach failed", error));
+  await agentAccounts.init();
+  agentAccounts.startRefresher(() => sessions.liveAccountIds());
   // Sweep terminal-upload dirs for sessions that didn't survive (orphans from a
   // crash): keep only dirs whose id matches a now-live session. Best-effort.
   await sweepOrphanUploads(
@@ -395,7 +409,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   });
 
   const services: Services = {
-    registry, sessions, accounts, git, todos, usage, push, broadcaster, teamclaude, browsers, urlWatcher
+    registry, sessions, accounts, git, todos, usage, push, broadcaster, teamclaude, agentAccounts, browsers, urlWatcher
   };
 
   // The static web build the HTTP transport optionally serves.
@@ -458,6 +472,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
 
   const stop = async () => {
     usage.stop();
+    agentAccounts.stopRefresher();
     await teamclaude.stop().catch(() => undefined);
     // Detach (don't kill) sessions: the tmux backend leaves its server running so
     // the next boot reattaches; the local backend has no server, so its shutdown()
@@ -490,6 +505,7 @@ interface Services {
   push: PushService;
   broadcaster: Broadcaster;
   teamclaude: TeamClaudeService;
+  agentAccounts: AgentAccountsService;
   browsers: BrowserManager;
   urlWatcher: UrlWatcher;
   /** Restart the HTTP transport (set in main once the lifecycle exists). */
@@ -504,7 +520,7 @@ function createServer(
   services: Services,
   options: { authRequired: boolean; mode: "local" | "remote"; serveWeb?: string }
 ): FastifyInstance {
-  const { registry, sessions, accounts, git, todos, usage, push, teamclaude } = services;
+  const { registry, sessions, accounts, git, todos, usage, push, teamclaude, agentAccounts } = services;
 
   const app = Fastify({
     // Remote requests arrive via Caddy on loopback (reverse_proxy 127.0.0.1:47831),
@@ -1732,6 +1748,40 @@ function createServer(
   app.get<{ Querystring: { refresh?: string } }>("/api/usage", async (request): Promise<UsageResponse> =>
     usage.snapshot(request.query.refresh === "1")
   );
+
+  // Managed agent accounts (Claude/Codex credential homes) — import/list/remove/defaults.
+  app.get("/api/agent-accounts", async () => agentAccounts.list());
+
+  app.post("/api/agent-accounts", async (request, reply) => {
+    const body = (request.body ?? {}) as ImportAgentAccountRequest;
+    try {
+      return await agentAccounts.importAccount(body);
+    } catch (error) {
+      if (error instanceof AgentAccountError) return reply.code(400).send({ error: error.message });
+      throw error;
+    }
+  });
+
+  app.delete("/api/agent-accounts/:id", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    try {
+      await agentAccounts.removeAccount(id);
+      return { ok: true };
+    } catch (error) {
+      if (error instanceof AgentAccountError) return reply.code(400).send({ error: error.message });
+      throw error;
+    }
+  });
+
+  app.put("/api/agent-accounts/defaults", async (request, reply) => {
+    const body = (request.body ?? {}) as SetAgentAccountDefaultsRequest;
+    try {
+      return await agentAccounts.setDefaults(body);
+    } catch (error) {
+      if (error instanceof AgentAccountError) return reply.code(400).send({ error: error.message });
+      throw error;
+    }
+  });
 
   app.get<{ Params: { id: string } }>("/api/registry/:id/version", async (request) =>
     registry.version(request.params.id)
