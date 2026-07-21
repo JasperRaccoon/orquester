@@ -253,7 +253,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
       if (entry.id !== "claude" || entry.kind !== "agent") return null;
       try {
         const launch = await teamclaude.resolveClaudeLaunchEnv();
-        return launch?.env ?? null;
+        return launch?.env ? { env: launch.env } : null;
       } catch (error) {
         throw new SessionError(error instanceof Error ? error.message : String(error));
       }

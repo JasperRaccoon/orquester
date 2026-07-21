@@ -83,8 +83,11 @@ export interface ISessionManager {
  * Return null/undefined to leave the launch alone. Throw SessionError to reject create.
  */
 export type ResolveSessionExtraEnv = (
-  entry: RegistryEntry
-) => Promise<Record<string, string> | null | undefined> | Record<string, string> | null | undefined;
+  entry: RegistryEntry,
+  accountId?: string
+) =>
+  | Promise<{ env: Record<string, string>; unset?: string[] } | null>
+  | { env: Record<string, string>; unset?: string[] } | null;
 
 export interface SessionManagerOptions {
   resolveExtraEnv?: ResolveSessionExtraEnv;
@@ -162,14 +165,16 @@ function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
-async function writeAddonEnvLaunchScript(
+export async function writeAddonEnvLaunchScript(
   launch: { bin: string; args: string[] },
-  env: Record<string, string>
+  env: Record<string, string>,
+  unset: string[] = []
 ): Promise<{ bin: string; args: string[]; cleanup: () => Promise<void> }> {
   const entries = Object.entries(env).filter(
     ([key, value]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key) && !value.includes("\0")
   );
-  if (entries.length === 0) {
+  const unsets = unset.filter((key) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key));
+  if (entries.length === 0 && unsets.length === 0) {
     return { ...launch, cleanup: async () => undefined };
   }
 
@@ -181,6 +186,7 @@ async function writeAddonEnvLaunchScript(
   const dir = await mkdtemp(join(tmpdir(), "orquester-launch-"));
   const script = join(dir, "launch.sh");
   const exports = entries.map(([key, value]) => `export ${key}=${shellQuote(value)}`);
+  const unsetLines = unsets.map((key) => `unset ${key}`);
   const command = [shellQuote(launch.bin), ...launch.args.map(shellQuote)].join(" ");
   await writeFile(
     script,
@@ -189,6 +195,7 @@ async function writeAddonEnvLaunchScript(
       'script_dir=${0%/*}',
       'rm -f -- "$0"',
       'rmdir "$script_dir" 2>/dev/null || true',
+      ...unsetLines,
       ...exports,
       `exec ${command}`,
       ""
@@ -230,9 +237,14 @@ export class SessionManager implements ISessionManager {
       throw new SessionError(`Registry entry "${req.refId}" is not available.`);
     }
 
-    let addonEnv: Record<string, string> = {};
+    let extraEnv: Record<string, string> = {};
+    let unsetEnv: string[] = [];
     try {
-      addonEnv = (await this.options.resolveExtraEnv?.(entry)) ?? {};
+      const resolved = await this.options.resolveExtraEnv?.(entry, req.accountId);
+      if (resolved) {
+        extraEnv = resolved.env;
+        unsetEnv = resolved.unset ?? [];
+      }
     } catch (error) {
       throw error instanceof SessionError
         ? error
@@ -253,6 +265,7 @@ export class SessionManager implements ISessionManager {
       id,
       kind: entry.kind,
       refId: entry.id,
+      accountId: req.accountId,
       title: req.title || entry.name,
       projectPath,
       cwd,
@@ -309,7 +322,7 @@ export class SessionManager implements ISessionManager {
     // spawned as a child of a real shell, matching the path that works from a
     // Bash tab while preserving direct binary resolution/version checks.
     const baseLaunch = buildLaunchCommand(entry, { tmux: true });
-    const wrapped = await writeAddonEnvLaunchScript(baseLaunch, addonEnv);
+    const wrapped = await writeAddonEnvLaunchScript(baseLaunch, extraEnv, unsetEnv);
     try {
       await this.tmux.newSession({ id, cols, rows, cwd, env, bin: wrapped.bin, args: wrapped.args });
     } catch (error) {
@@ -407,6 +420,14 @@ export class SessionManager implements ISessionManager {
   get(id: string): SessionSummary | undefined {
     const session = this.sessions.get(id);
     return session ? this.withActivity(session) : undefined;
+  }
+
+  liveAccountIds(): Set<string> {
+    const ids = new Set<string>();
+    for (const s of this.sessions.values()) {
+      if (s.summary.status === "running" && s.summary.accountId) ids.add(s.summary.accountId);
+    }
+    return ids;
   }
 
   /**
@@ -777,9 +798,14 @@ export class LocalSessionManager implements ISessionManager {
       throw new SessionError(`Registry entry "${req.refId}" is not available.`);
     }
 
-    let addonEnv: Record<string, string> = {};
+    let extraEnv: Record<string, string> = {};
+    let unsetEnv: string[] = [];
     try {
-      addonEnv = (await this.options.resolveExtraEnv?.(entry)) ?? {};
+      const resolved = await this.options.resolveExtraEnv?.(entry, req.accountId);
+      if (resolved) {
+        extraEnv = resolved.env;
+        unsetEnv = resolved.unset ?? [];
+      }
     } catch (error) {
       throw error instanceof SessionError
         ? error
@@ -803,8 +829,11 @@ export class LocalSessionManager implements ISessionManager {
       COLORTERM: "truecolor",
       PATH: sessionPath(),
       ...entry.env,
-      ...addonEnv
+      ...extraEnv
     } as Record<string, string>;
+    // The direct node-pty backend has no launch wrapper, so honor `unset` by
+    // removing those keys from the child's environment before spawning.
+    for (const key of unsetEnv) delete env[key];
 
     if (entry.kind === "agent") {
       env.ORQUESTER_SESSION_ID = id;
@@ -830,6 +859,7 @@ export class LocalSessionManager implements ISessionManager {
       id,
       kind: entry.kind,
       refId: entry.id,
+      accountId: req.accountId,
       title: req.title || entry.name,
       projectPath,
       cwd,
@@ -892,6 +922,14 @@ export class LocalSessionManager implements ISessionManager {
   get(id: string): SessionSummary | undefined {
     const session = this.sessions.get(id);
     return session ? this.withActivity(session) : undefined;
+  }
+
+  liveAccountIds(): Set<string> {
+    const ids = new Set<string>();
+    for (const s of this.sessions.values()) {
+      if (s.summary.status === "running" && s.summary.accountId) ids.add(s.summary.accountId);
+    }
+    return ids;
   }
 
   /** No durable store here; the hot in-memory ring is the only scrollback. */
