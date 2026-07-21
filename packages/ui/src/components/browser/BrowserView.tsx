@@ -31,7 +31,8 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
   const lastDrawnSeq = useRef(0);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [picking, setPicking] = useState(false);
-  const [pick, setPick] = useState<BrowserPickPayload | null>(null);
+  // Picks accumulate into one batch ("Pick another" re-arms) and send together.
+  const [picks, setPicks] = useState<BrowserPickPayload[]>([]);
   const [zoom, setZoom] = useState({ scale: 1, tx: 0, ty: 0 });
   const gesture = useRef<{ dist: number; scale: number; tx: number; ty: number; cx: number; cy: number } | null>(null);
 
@@ -65,7 +66,7 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
         setState(s);
         if (!urlFocusedRef.current) setUrlDraft(s.url === "about:blank" ? "" : s.url);
       },
-      onPicked: (payload) => { setPicking(false); setPick(payload); },
+      onPicked: (payload) => { setPicking(false); setPicks((prev) => [...prev, payload]); },
       onEnd: () => {}
     });
     return () => handle.close();
@@ -271,8 +272,17 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
           onKeyDown={onKey("down")} onKeyUp={onKey("up")}
           onChange={(e) => { e.target.value = ""; }}
         />
-        {pick && (
-          <PickComposeSheet payload={pick} projectPath={browser.projectPath} onClose={() => setPick(null)} />
+        {picks.length > 0 && (
+          <PickComposeSheet
+            payloads={picks}
+            projectPath={browser.projectPath}
+            onRemove={(index) => setPicks((prev) => prev.filter((_, i) => i !== index))}
+            onPickAnother={() => {
+              setPicking(true);
+              send?.({ t: "pick", id: browser.id, on: true });
+            }}
+            onClose={() => setPicks([])}
+          />
         )}
       </div>
     </div>
