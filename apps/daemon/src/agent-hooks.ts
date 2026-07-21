@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 interface Logger {
@@ -12,6 +12,45 @@ const SCRIPT_VERSION = 2;
 /** POSIX single-quote: safe against every shell metacharacter, incl. embedded quotes. */
 function shellQuotePosix(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+/**
+ * Upper bound on how long a session launch waits for hook installation. The
+ * install itself keeps running (and stays coalesced in the in-flight map);
+ * this only stops a wedged filesystem on a config home from blocking
+ * session creation.
+ */
+const INSTALL_LAUNCH_TIMEOUT_MS = 5000;
+
+function withLaunchTimeout(run: Promise<void>): Promise<void> {
+  return Promise.race([
+    run,
+    new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, INSTALL_LAUNCH_TIMEOUT_MS);
+      timer.unref?.();
+    })
+  ]);
+}
+
+/** Command strings of a Claude/Codex-shaped hook group ({ hooks: [{command}] }). */
+function groupCommands(group: unknown): string[] {
+  const hooks = (group as { hooks?: unknown })?.hooks;
+  if (!Array.isArray(hooks)) {
+    return [];
+  }
+  return hooks
+    .map((h) => (h as { command?: unknown })?.command)
+    .filter((c): c is string => typeof c === "string");
+}
+
+/**
+ * Managed-group marker: match by the managed script's file name (like Orca's
+ * installer sweep) via STRUCTURED extraction, not JSON.stringify substring —
+ * shell quoting and JSON escaping would break a raw-path substring match for
+ * exotic appdir paths, and a moved appdir should still sweep stale entries.
+ */
+function isManagedGroup(group: unknown): boolean {
+  return groupCommands(group).some((c) => c.includes("agent-hook.sh"));
 }
 
 /**
@@ -52,23 +91,33 @@ async function writeFileAtomic(
   defaultMode: number,
   preserveExistingMode = true
 ): Promise<void> {
+  // Write THROUGH symlinks: users symlink agent configs into dotfiles repos,
+  // and rename() onto the link path would replace the link with a regular
+  // file — silently severing the dotfiles setup. realpath resolves to the
+  // final target; a missing/broken path keeps the given one.
+  let target = path;
+  try {
+    target = await realpath(path);
+  } catch {
+    // ENOENT (new file, or broken link) → write at the given path
+  }
   let mode = defaultMode;
   if (preserveExistingMode) {
     try {
-      mode = (await stat(path)).mode & 0o777;
+      mode = (await stat(target)).mode & 0o777;
     } catch {
       // new file → defaultMode
     }
   }
-  await mkdir(dirname(path), { recursive: true });
+  await mkdir(dirname(target), { recursive: true });
   // Unique temp name per write: concurrent installers share agent-hook.sh, so a
   // fixed `${path}.tmp` would collide — the first rename wins and unlinks the
   // tmp, and the loser's rename throws ENOENT (aborting its per-agent config).
-  const tmp = `${path}.${randomUUID()}.tmp`;
+  const tmp = `${target}.${randomUUID()}.tmp`;
   try {
     await writeFile(tmp, content, { encoding: "utf8", mode });
     await chmod(tmp, mode).catch(() => undefined);
-    await rename(tmp, path);
+    await rename(tmp, target);
   } catch (error) {
     await rm(tmp, { force: true }).catch(() => undefined);
     throw error;
@@ -119,7 +168,7 @@ export class AgentHooks {
     const key = `${entryId}:${target}`;
     const existing = this.inflight.get(key);
     if (existing) {
-      return existing;
+      return withLaunchTimeout(existing);
     }
     const run = this.install(entryId, target)
       .catch((error) => {
@@ -129,7 +178,7 @@ export class AgentHooks {
         this.inflight.delete(key);
       });
     this.inflight.set(key, run);
-    return run;
+    return withLaunchTimeout(run);
   }
 
   /** The directory the launched agent process reads its config from. */
@@ -203,12 +252,10 @@ export class AgentHooks {
         hooks: [{ type: "command", command, timeout: 10 }]
       };
       const groups = (hooks[event] as unknown[] | undefined) ?? [];
-      // Managed marker: any command referencing our hooks dir. Replace stale
-      // versions in place; append when absent; leave user hooks untouched.
-      const isOurs = (group: unknown): boolean =>
-        JSON.stringify(group ?? "").includes(join(this.daemonDir, "hooks"));
-      const withoutOurs = groups.filter((g) => !isOurs(g));
-      const current = groups.find(isOurs);
+      // Replace stale managed versions in place; append when absent; leave
+      // user hooks untouched.
+      const withoutOurs = groups.filter((g) => !isManagedGroup(g));
+      const current = groups.find(isManagedGroup);
       if (JSON.stringify(current) !== JSON.stringify(managed)) {
         hooks[event] = [...withoutOurs, managed];
         changed = true;
@@ -235,6 +282,25 @@ export class AgentHooks {
   private async installCodex(codexHome: string): Promise<void> {
     const hooksJsonPath = join(codexHome, "hooks.json");
     const configTomlPath = join(codexHome, "config.toml");
+
+    // Read config.toml FIRST and refuse multiline-string files BEFORE touching
+    // hooks.json — the line-based trust upsert can't parse full TOML, and a
+    // multiline string's content can contain table-header-looking lines.
+    // Guarding up front leaves BOTH files untouched (no half-installed inert
+    // hooks, no error-log churn from rewriting an already-current hooks.json).
+    let toml = "";
+    try {
+      toml = await readFile(configTomlPath, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw error;
+      }
+    }
+    if (toml.includes('"""') || toml.includes("'''")) {
+      throw new Error(
+        "config.toml contains multiline strings; skipping managed hooks (run /hooks in Codex to approve manually)"
+      );
+    }
 
     const CODEX_EVENTS: Array<{ name: string; label: string; matcher?: string }> = [
       { name: "SessionStart", label: "session_start" },
@@ -285,10 +351,6 @@ export class AgentHooks {
         }
       ]
     });
-    const hooksDirMarker = join(this.daemonDir, "hooks");
-    const isOurs = (group: unknown): boolean =>
-      JSON.stringify(group ?? "").includes(hooksDirMarker);
-
     let changed = false;
     // Trust identity depends on the group index — compute AFTER the final
     // array shape is known.
@@ -298,8 +360,8 @@ export class AgentHooks {
       const groups = Array.isArray(hooksDoc.hooks[event.name])
         ? hooksDoc.hooks[event.name]
         : [];
-      const withoutOurs = groups.filter((g) => !isOurs(g));
-      const current = groups.find(isOurs);
+      const withoutOurs = groups.filter((g) => !isManagedGroup(g));
+      const current = groups.find(isManagedGroup);
       const next = [...withoutOurs, managed]; // append: user group indices stay stable
       if (JSON.stringify(current) !== JSON.stringify(managed) || groups.length !== next.length) {
         hooksDoc.hooks[event.name] = next;
@@ -320,24 +382,7 @@ export class AgentHooks {
     }
 
     // 2) config.toml trust blocks — written LAST so a half-write can't point
-    // at a nonexistent hook.
-    let toml = "";
-    try {
-      toml = await readFile(configTomlPath, "utf8");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        throw error;
-      }
-    }
-    // The line-based upsert can't parse full TOML; its concrete corruption
-    // vector is multiline strings, whose CONTENT can contain lines that look
-    // like table headers. Refuse to patch such files rather than risk
-    // corrupting them (session degrades to bell/quiescence).
-    if (toml.includes('"""') || toml.includes("'''")) {
-      throw new Error(
-        "config.toml contains multiline strings; skipping trust-block upsert (run /hooks in Codex to approve manually)"
-      );
-    }
+    // at a nonexistent hook. (Multiline-string guard already ran up top.)
     let tomlNext = toml;
     for (const t of trustTargets) {
       const key = `${hooksJsonPath}:${t.label}:${t.groupIndex}:0`;
