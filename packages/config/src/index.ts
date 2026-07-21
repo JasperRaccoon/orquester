@@ -310,6 +310,46 @@ export const usagePrefsSchema = z.object({
 
 export type UsagePrefs = z.infer<typeof usagePrefsSchema>;
 
+// agent-accounts.json (managed per-agent accounts; daemon-side)
+
+export const agentAccountSchema = z.object({
+  id: z.string(),
+  agent: z.enum(["claude", "codex"]),
+  label: z.string(),
+  email: z.string().nullable().default(null),
+  plan: z.string().nullable().default(null),
+  needsReauth: z.boolean().default(false),
+  createdAt: z.string(),
+  importedAt: z.string()
+});
+export const agentAccountsSchema = z.object({
+  accounts: z.array(agentAccountSchema).default([]),
+  defaults: z
+    .object({
+      claude: z.string().nullable().default(null),
+      codex: z.string().nullable().default(null)
+    })
+    .default({ claude: null, codex: null })
+});
+export type AgentAccountRecord = z.infer<typeof agentAccountSchema>;
+export type AgentAccountsIndex = z.infer<typeof agentAccountsSchema>;
+
+export function parseAgentAccounts(raw: unknown): AgentAccountsIndex {
+  return agentAccountsSchema.parse(raw);
+}
+export function createDefaultAgentAccounts(): AgentAccountsIndex {
+  return { accounts: [], defaults: { claude: null, codex: null } };
+}
+export function agentAccountsFile(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "agent-accounts.json");
+}
+export function agentAccountsDir(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "agent-accounts");
+}
+export function agentAccountHome(baseDir: string, agent: string, id: string): string {
+  return joinPath(agentAccountsDir(baseDir), agent, id, "home");
+}
+
 export const appConfigSchema = z.object({
   version: z.literal(1).default(1),
   /** Connection opened on launch. "local" is always available. */
