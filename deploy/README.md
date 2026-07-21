@@ -22,4 +22,18 @@ and `docs/superpowers/plans/2026-06-19-remote-phase0-vps-provisioning.md`.
 Archive previews want `p7zip-full` or `libarchive-tools` (`bsdtar`) on PATH; `provision-devtools.sh`
 installs `libarchive-tools`. Without either, archives degrade to a download card.
 
+### Browser tabs (Design Mode) — host Chromium
+
+Browser tabs need a chromium/chrome binary on the daemon host. On Ubuntu,
+**do not** `apt install chromium` (it's a snap — confined, breaks under the
+service's systemd hardening). Install Google Chrome's .deb instead:
+
+    wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+    sudo apt-get install -y ./google-chrome-stable_current_amd64.deb
+
+The daemon detects it through the registry probe; no config needed. Profiles
+(cookies) live under /var/lib/orquester/daemon/browser-profiles (0700).
+If Chromium can't sandbox on the host, the daemon retries with --no-sandbox
+and the UI shows a shield warning on the tab.
+
 Never commit the real `daemon.env`.

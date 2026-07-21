@@ -46,8 +46,10 @@ detection; detection + "Open on…" for shells/IDEs/explorers/browsers; xterm.js
 WebSocket-multiplexed PTY streaming, scrollback replay and resize; a CodeMirror file editor;
 tab drag-reorder + inline rename (server-authoritative); a per-project grid view; remote access
 with TLS, username+password auth, per-IP login throttling, and tmux persistence; per-workspace
-git/GitHub SSH identities; and an installable **PWA** web client (service worker + Web Push
-notifications on agent-session bells).
+git/GitHub SSH identities; **browser tabs (Design Mode)** — a server-side headless Chromium per
+project streamed as an interactive tab over a `/ws-browser` channel, with an element picker that
+delivers HTML/CSS/screenshot payloads into agent PTYs; and an installable **PWA** web client
+(service worker + Web Push notifications on agent-session bells).
 
 ---
 
@@ -454,4 +456,5 @@ password secrecy + patching remain the real mitigations. It costs two loosened u
 | Wire contracts / message types | `packages/api/src/index.ts` |
 | Client store + transport + WS channel | `packages/ui/src/store/app.ts`, `packages/ui/src/lib/api-client.ts`, `packages/ui/src/lib/transporters/ws-session-channel.ts` |
 | Electron embedding | `apps/desktop/src/main.ts` |
+| Browser tabs (Design Mode) | `apps/daemon/src/browsers.ts`, `apps/daemon/src/browser-pick.ts`, `packages/ui/src/components/browser/` |
 | Deployment | `deploy/` + `docs/superpowers/specs|plans/2026-06-19-remote-*.md` |
