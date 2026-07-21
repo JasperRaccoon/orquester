@@ -84,6 +84,39 @@ export function parseCodexUsage(rateLimits: unknown, now: number): AgentUsage {
   };
 }
 
+function whamWindow(w: unknown, now: number): UsageWindow | null {
+  if (typeof w !== "object" || w === null) return null;
+  const o = w as Record<string, unknown>;
+  const pct = typeof o.used_percent === "number" ? o.used_percent : null;
+  if (pct === null) return null;
+  const resetSec = typeof o.reset_at === "number" ? o.reset_at : null;
+  const win: UsageWindow = { percent: Math.max(0, Math.min(100, pct)) };
+  if (resetSec !== null && resetSec * 1000 > now - 86_400_000) win.resetsAt = new Date(resetSec * 1000).toISOString();
+  return win;
+}
+
+function titleCasePlan(plan: unknown): string | undefined {
+  if (typeof plan !== "string" || !plan) return undefined;
+  return plan.charAt(0).toUpperCase() + plan.slice(1);
+}
+
+export function parseCodexWhamUsage(json: unknown, now: number): AgentUsage {
+  const root = typeof json === "object" && json !== null ? (json as Record<string, unknown>) : {};
+  const rl = typeof root.rate_limit === "object" && root.rate_limit !== null ? (root.rate_limit as Record<string, unknown>) : {};
+  const session = whamWindow(rl.primary_window, now);
+  const weekly = whamWindow(rl.secondary_window, now);
+  const available = session !== null || weekly !== null;
+  return {
+    id: "codex",
+    available,
+    stale: false,
+    plan: titleCasePlan(root.plan_type),
+    session,
+    weekly,
+    asOf: available ? new Date(now).toISOString() : undefined
+  };
+}
+
 /** Scan rollout JSONL lines from the end for the last token_count event's rate_limits. */
 export function findLastCodexTokenCount(lines: string[]): unknown | null {
   for (let i = lines.length - 1; i >= 0; i--) {

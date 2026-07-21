@@ -73,7 +73,7 @@ async function codexTests() {
   const codex = join(home, ".codex");
   const day = join(codex, "sessions", "2026", "07", "07");
   await mkdir(day, { recursive: true });
-  await writeFile(join(codex, "auth.json"), JSON.stringify({ auth_mode: "chatgpt", tokens: {} }));
+  await writeFile(join(codex, "auth.json"), JSON.stringify({ auth_mode: "chatgpt", tokens: { access_token: "tok" } }));
 
   // Older file WITH a real token_count.
   const older = join(day, "rollout-2026-07-07T06-00-00-aaaa.jsonl");
@@ -96,8 +96,9 @@ async function codexTests() {
   await utimes(older, new Date(NOW - 3_600_000), new Date(NOW - 3_600_000));
   await utimes(newer, new Date(NOW - 60_000), new Date(NOW - 60_000));
 
-  // REGRESSION: the empty newest file must fall back to the older one, not null.
-  const a = await createCodexSource({ userhome: home, now })();
+  // REGRESSION: with the wham endpoint unavailable (5xx), the log-scrape fallback must
+  // still fall back from the empty newest file to the older one with data, not null.
+  const a = await createCodexSource({ userhome: home, now, fetchImpl: async () => jsonRes(500, {}) })();
   assert.ok(a, "must fall back to the older file with data, not null");
   assert.equal(a.available, true);
   assert.equal(a.session?.percent, 3);

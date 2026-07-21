@@ -2,9 +2,10 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { AgentUsage } from "@orquester/api";
 import { type UsagePrefs, parseAppConfig } from "@orquester/config";
-import { claudePlanLabel, findLastCodexTokenCount, parseClaudeUsage, parseCodexUsage } from "./usage-parse";
+import { claudePlanLabel, findLastCodexTokenCount, parseClaudeUsage, parseCodexUsage, parseCodexWhamUsage } from "./usage-parse";
 
 const CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
+const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 
 export async function readUsagePrefs(appConfigFile: string): Promise<UsagePrefs> {
   try {
@@ -111,11 +112,12 @@ async function rolloutsNewestFirst(sessionsDir: string): Promise<string[]> {
   return files.sort((a, b) => b.mtime - a.mtime).map((f) => f.full);
 }
 
-export function createCodexSource(opts: {
-  userhome: string;
+/** Fallback usage reader: scrape the newest Codex rollout log for a token_count. */
+function createCodexLogScrapeSource(opts: {
+  codexHome: string;
   now: () => number;
 }): () => Promise<AgentUsage | null> {
-  const codexHome = process.env.CODEX_HOME || join(opts.userhome, ".codex");
+  const { codexHome } = opts;
   return async () => {
     let signedIn = false;
     try {
@@ -143,5 +145,66 @@ export function createCodexSource(opts: {
     }
     // Signed in but no usable reading yet → present + updating (not "not logged in").
     return signedIn ? { id: "codex", available: true, stale: true, session: null, weekly: null } : null;
+  };
+}
+
+export function createCodexSource(opts: {
+  userhome: string;
+  now: () => number;
+  codexHome?: string;
+  fetchImpl?: typeof fetch;
+  logger?: Pick<Console, "warn">;
+}): () => Promise<AgentUsage | null> {
+  const doFetch = opts.fetchImpl ?? fetch;
+  const codexHome = opts.codexHome || process.env.CODEX_HOME || join(opts.userhome, ".codex");
+  const authFile = join(codexHome, "auth.json");
+  let lastGood: AgentUsage | null = null;
+  let backoffUntil = 0;
+  const scrapeFallback = createCodexLogScrapeSource({ codexHome, now: opts.now });
+
+  return async () => {
+    let tokens: { access_token?: string; account_id?: string } | undefined;
+    try {
+      tokens = JSON.parse(await readFile(authFile, "utf8"))?.tokens;
+    } catch {
+      return null; // not logged in
+    }
+    if (!tokens?.access_token) return null;
+
+    const signedIn = (): AgentUsage =>
+      lastGood ? { ...lastGood, stale: true } : { id: "codex", available: true, stale: true, session: null, weekly: null };
+    const now = opts.now();
+    if (now < backoffUntil) return (await scrapeFallback()) ?? signedIn();
+
+    try {
+      const headers: Record<string, string> = {
+        Authorization: `Bearer ${tokens.access_token}`,
+        "User-Agent": "codex-cli",
+        "OpenAI-Beta": "codex-1",
+        originator: "Codex Desktop",
+        Accept: "application/json"
+      };
+      if (tokens.account_id) headers["ChatGPT-Account-Id"] = tokens.account_id;
+      const res = await doFetch(CODEX_USAGE_URL, { headers });
+      if (res.status === 429) {
+        backoffUntil = now + retryAfterMs(res, 5 * 60_000);
+        opts.logger?.warn?.("usage: codex usage endpoint rate-limited (429); backing off");
+        return (await scrapeFallback()) ?? signedIn();
+      }
+      if (!res.ok) {
+        backoffUntil = now + 60_000;
+        return (await scrapeFallback()) ?? signedIn();
+      }
+      const agent = parseCodexWhamUsage(await res.json(), now);
+      if (agent.available) {
+        lastGood = agent;
+        return lastGood;
+      }
+      return (await scrapeFallback()) ?? signedIn();
+    } catch (err) {
+      opts.logger?.warn?.(`usage: codex fetch failed: ${String(err)}`);
+      backoffUntil = now + 60_000;
+      return (await scrapeFallback()) ?? signedIn();
+    }
   };
 }
