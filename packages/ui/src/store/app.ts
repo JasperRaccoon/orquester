@@ -60,6 +60,7 @@ import type {
   WorkspaceSummary
 } from "../types";
 import type {
+  AgentAccountsResponse,
   BrowserSummary,
   SessionActivity,
   SessionActivityEvent,
@@ -504,6 +505,7 @@ export interface AppState {
   // data
   registry: RegistryResponse;
   usage: UsageResponse | null;
+  agentAccounts: AgentAccountsResponse | null;
   workspaces: WorkspaceSummary[];
   accounts: AccountSummary[];
   workspacesLoading: boolean;
@@ -597,6 +599,7 @@ export interface AppState {
   loadSessions: () => Promise<void>;
   loadRegistry: () => Promise<void>;
   loadUsage: (force?: boolean) => Promise<void>;
+  loadAgentAccounts: () => Promise<void>;
   installAgent: (id: string) => Promise<void>;
   updateAgent: (id: string) => Promise<void>;
   openTab: (kind: RegistryKind, refId: string, title?: string) => Promise<void>;
@@ -669,6 +672,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   currentProject: null,
   registry: EMPTY_REGISTRY,
   usage: null,
+  agentAccounts: null,
   workspaces: [],
   accounts: [],
   workspacesLoading: false,
@@ -827,6 +831,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       active.listBrowsers().then((browsers) => set({ browsers })).catch(() => set({ browsers: [] })),
       get().loadRegistry(),
       get().loadUsage(),
+      get().loadAgentAccounts(),
       // Reload git accounts on every (re)connect too — otherwise a daemon
       // restart leaves `accounts` stale (it was only filled by the one-time
       // initConnections path), so the workspace/project pickers go empty until
@@ -1399,6 +1404,18 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
+  loadAgentAccounts: async () => {
+    const api = get().api;
+    if (!api) {
+      return;
+    }
+    try {
+      set({ agentAccounts: await api.getAgentAccounts() });
+    } catch {
+      /* keep current */
+    }
+  },
+
   installAgent: async (id) => {
     // Status (installing/installed/error) arrives via the "registry" event bus.
     await get().api?.installRegistryEntry(id).catch(() => undefined);
@@ -1791,6 +1808,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   applyEvent: (event) => {
     if (event.channel === "usage") {
       set({ usage: event.payload as UsageResponse });
+      return;
+    }
+    if (event.channel === "agent-accounts") {
+      set({ agentAccounts: event.payload as AgentAccountsResponse });
       return;
     }
     if (event.channel === "registry" && event.type === "registry.changed") {

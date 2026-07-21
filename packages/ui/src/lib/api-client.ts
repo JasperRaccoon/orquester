@@ -1,6 +1,8 @@
 import type {
   AccountSummary,
   AccountTestResult,
+  AgentAccount,
+  AgentAccountsResponse,
   AgentSummary,
   AuthInfoResponse,
   BrowserSummary,
@@ -29,6 +31,7 @@ import type {
   GitOpResult,
   GitStatusResponse,
   HealthResponse,
+  ImportAgentAccountRequest,
   OpenResult,
   OpenTargetSummary,
   ProjectSummary,
@@ -43,6 +46,7 @@ import type {
   SessionSummary,
   SessionUploadRequest,
   SessionUploadResponse,
+  SetAgentAccountDefaultsRequest,
   TodoListRecord,
   TodoScope,
   UpdateTodoRequest,
@@ -486,6 +490,22 @@ export class ApiClient {
 
   getUsage(force?: boolean, signal?: AbortSignal): Promise<UsageResponse> {
     return this.send("GET", `/api/usage${force ? "?refresh=1" : ""}`, { signal });
+  }
+
+  getAgentAccounts(signal?: AbortSignal): Promise<AgentAccountsResponse> {
+    return this.send("GET", "/api/agent-accounts", { signal });
+  }
+
+  importAgentAccount(req: ImportAgentAccountRequest): Promise<AgentAccount> {
+    return this.send("POST", "/api/agent-accounts", { body: req });
+  }
+
+  removeAgentAccount(id: string): Promise<{ ok: true }> {
+    return this.send("DELETE", `/api/agent-accounts/${encodeURIComponent(id)}`);
+  }
+
+  setAgentAccountDefaults(req: SetAgentAccountDefaultsRequest): Promise<AgentAccountsResponse> {
+    return this.send("PUT", "/api/agent-accounts/defaults", { body: req });
   }
 
   installRegistryEntry(id: string): Promise<RegistryActionResult> {

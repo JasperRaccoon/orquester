@@ -15,6 +15,7 @@ import {
   RefreshCw,
   Server,
   Trash2,
+  Users,
   X
 } from "lucide-react";
 import type { DaemonConfig } from "@orquester/config";
@@ -25,13 +26,15 @@ import { getRegistryIcon } from "../../icons";
 import { useIsDesktop, useRegistry } from "../../hooks";
 import { useApi, useOrquester } from "../../context/orquester-context";
 import { useAppStore } from "../../store/app";
+import { AgentAccountsSettings } from "./AgentAccountsSettings";
 
-type Section = "app" | "agents" | "usage" | "github" | "daemon";
+type Section = "app" | "agents" | "accounts" | "usage" | "github" | "daemon";
 
 const SECTIONS: { id: Section; label: string; icon: React.ReactNode; desc: string }[] = [
   { id: "app", label: "App", icon: <AppWindow size={16} />, desc: "Titlebar, runtime, active server" },
   { id: "usage", label: "Usage", icon: <Gauge size={16} />, desc: "Top-bar usage widget for Claude Code & Codex" },
   { id: "agents", label: "Agents", icon: <Boxes size={16} />, desc: "Install, update and view harness versions" },
+  { id: "accounts", label: "Accounts", icon: <Users size={16} />, desc: "Managed Claude & Codex accounts for launching agents" },
   { id: "github", label: "GitHub", icon: <Github size={16} />, desc: "Connect accounts and per-workspace git identities" },
   { id: "daemon", label: "Daemon", icon: <Server size={16} />, desc: "Workspaces dir, external HTTP access" }
 ];
@@ -41,6 +44,8 @@ const renderSection = (id: Section) =>
     <AppSettings />
   ) : id === "agents" ? (
     <AgentsSettings />
+  ) : id === "accounts" ? (
+    <AgentAccountsSettings />
   ) : id === "usage" ? (
     <UsageSettings />
   ) : id === "github" ? (
@@ -53,15 +58,19 @@ const labelOf = (id: Section) => SECTIONS.find((s) => s.id === id)?.label ?? "";
 export const SettingsModal: React.FC = () => {
   const open = useAppStore((s) => s.settingsOpen);
   const setOpen = useAppStore((s) => s.setSettingsOpen);
+  const loadAgentAccounts = useAppStore((s) => s.loadAgentAccounts);
   const isDesktop = useIsDesktop();
   const [section, setSection] = useState<Section | null>(null);
 
-  // Reset to the category list each time it closes (mobile shows list first).
+  // Reset to the category list each time it closes (mobile shows list first);
+  // refresh managed accounts on open in case another client changed them.
   useEffect(() => {
     if (!open) {
       setSection(null);
+    } else {
+      void loadAgentAccounts();
     }
-  }, [open]);
+  }, [open, loadAgentAccounts]);
 
   const close = () => setOpen(false);
 
