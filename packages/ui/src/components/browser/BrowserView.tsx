@@ -5,6 +5,7 @@ import {
 import type { BrowserPickPayload, BrowserStateMessage, BrowserSummary } from "@orquester/api";
 import { useAppStore } from "../../store/app";
 import { cn } from "../../lib/cn";
+import { PickComposeSheet } from "./PickComposeSheet";
 
 const VIEWPORT = { desktop: { w: 1280, h: 800 }, mobile: { w: 390, h: 844 } } as const;
 
@@ -232,8 +233,7 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
           onChange={(e) => { e.target.value = ""; }}
         />
         {pick && (
-          /* Task 10 replaces this stub with <PickComposeSheet …/> */
-          <div className="absolute inset-x-0 bottom-0" data-pick-stub onClick={() => setPick(null)} />
+          <PickComposeSheet payload={pick} projectPath={browser.projectPath} onClose={() => setPick(null)} />
         )}
       </div>
     </div>
