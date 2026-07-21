@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile, readFile, rm, chmod } from "node:fs/promises";
+import { mkdir, writeFile, readFile, readFile as fsReadFile, rm, chmod } from "node:fs/promises";
 import { dirname, join, isAbsolute } from "node:path";
 import type { AgentAccount, AgentAccountsResponse } from "@orquester/api";
 import {
@@ -11,6 +11,13 @@ import {
 } from "@orquester/config";
 import { assertOwnedAccountHome, AgentAccountError, ACCOUNT_MARKER } from "./agent-account-paths.ts";
 import { detectAgentFromBlob, claudePlanFromBlob, parseCodexIdentity } from "./agent-account-identity.ts";
+import {
+  REFRESH_INTERVAL_MS,
+  REFRESH_MARGIN_MS,
+  selectAccountsToRefresh,
+  mergeClaudeRefreshedCreds,
+  refreshClaudeToken
+} from "./agent-account-refresh.ts";
 
 export const CLAUDE_AUTH_ENV_UNSET = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"];
 
@@ -26,6 +33,7 @@ export interface AgentAccountsOptions {
 export class AgentAccountsService {
   readonly events = new EventEmitter();
   private index: AgentAccountsIndex = createDefaultAgentAccounts();
+  private refreshTimer?: ReturnType<typeof setInterval>;
 
   constructor(private readonly opts: AgentAccountsOptions) {}
 
@@ -159,6 +167,61 @@ export class AgentAccountsService {
     record.needsReauth = value;
     await this.persist();
     this.emitChanged();
+  }
+
+  startRefresher(getLiveAccountIds: () => Set<string>): void {
+    if (this.refreshTimer) return;
+    const run = () => void this.refreshIdleAccounts(getLiveAccountIds()).catch((e) => this.opts.logger?.warn?.(`account refresh failed: ${String(e)}`));
+    this.refreshTimer = setInterval(run, REFRESH_INTERVAL_MS);
+    this.refreshTimer.unref?.();
+    run(); // once on start (after reattach, callers pass current live ids)
+  }
+
+  stopRefresher(): void {
+    if (this.refreshTimer) clearInterval(this.refreshTimer);
+    this.refreshTimer = undefined;
+  }
+
+  private async readClaudeExpiry(id: string): Promise<number | null> {
+    try {
+      const creds = JSON.parse(await fsReadFile(join(this.homePath("claude", id), ".credentials.json"), "utf8"));
+      const exp = creds?.claudeAiOauth?.expiresAt;
+      return typeof exp === "number" ? exp : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async refreshIdleAccounts(live: Set<string>): Promise<void> {
+    const now = this.opts.now();
+    const expiries = new Map<string, number | null>();
+    for (const a of this.index.accounts) {
+      // Only Claude self-refreshes here; Codex is left to its CLI (see spec 1.5).
+      expiries.set(a.id, a.agent === "claude" ? await this.readClaudeExpiry(a.id) : now + REFRESH_INTERVAL_MS * 10);
+    }
+    const due = selectAccountsToRefresh(this.index.accounts, live, expiries, now, REFRESH_MARGIN_MS).filter(
+      (a) => a.agent === "claude"
+    );
+    for (const acct of due) {
+      const home = this.homePath("claude", acct.id);
+      await assertOwnedAccountHome(this.opts.accountsDir, "claude", acct.id, home);
+      const credsPath = join(home, ".credentials.json");
+      let creds: any;
+      try {
+        creds = JSON.parse(await fsReadFile(credsPath, "utf8"));
+      } catch {
+        continue;
+      }
+      const refreshToken = creds?.claudeAiOauth?.refreshToken;
+      if (typeof refreshToken !== "string") continue;
+      const out = await refreshClaudeToken(refreshToken);
+      if (out.ok) {
+        await writeFile(credsPath, JSON.stringify(mergeClaudeRefreshedCreds(creds, out)), { mode: 0o600 });
+        if (acct.needsReauth) await this.markNeedsReauth(acct.id, false);
+      } else if (out.invalidGrant) {
+        await this.markNeedsReauth(acct.id, true);
+      }
+    }
   }
 
   async persist(): Promise<void> {
