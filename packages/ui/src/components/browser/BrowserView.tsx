@@ -162,6 +162,63 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
     hiddenInputRef.current?.focus({ preventScroll: true });
   };
 
+  const composingRef = useRef(false);
+
+  const sendSyntheticKey = (key: string, code: string, keyCode: number, text?: string) => {
+    if (!send) return;
+    send({ t: "key", id: browser.id, kind: "down", key, code, keyCode, text, modifiers: 0 });
+    send({ t: "key", id: browser.id, kind: "up", key, code, keyCode, modifiers: 0 });
+  };
+
+  // Hidden-input path, IME-aware: Android soft keyboards do NOT emit real
+  // keydowns for text (key "Unidentified", keyCode 229) — characters exist
+  // only as beforeinput/composition events. Control keys forward from
+  // keydown; text forwards from beforeinput/compositionend as insertText.
+  // Exactly one of the two paths preventDefaults per keystroke, so hardware
+  // keyboards (which fire both) never double-type: a cancelled keydown never
+  // reaches beforeinput, and a printable keydown is left alone so
+  // beforeinput fires and is cancelled there instead.
+  const onHiddenKey = (kind: "down" | "up") => (e: React.KeyboardEvent) => {
+    if (!send) return;
+    if (e.key === "Unidentified" || e.keyCode === 229) return; // IME noise
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "v") return; // paste chord
+    if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) return; // text → beforeinput
+    e.preventDefault();
+    send({
+      t: "key", id: browser.id, kind, key: e.key, code: e.code,
+      keyCode: e.keyCode || undefined,
+      text: kind === "down" && e.key === "Enter" ? "\r" : undefined,
+      modifiers: modifiersOf(e)
+    });
+  };
+
+  const onHiddenBeforeInput = (e: React.FormEvent<HTMLInputElement>) => {
+    const ev = e.nativeEvent as InputEvent;
+    // Composition text (autocorrect/word suggestions) is not cancelable and
+    // updates per keystroke with the whole word — forward once at compositionend.
+    if (composingRef.current || ev.inputType === "insertCompositionText") return;
+    if (ev.inputType === "insertText" && ev.data) {
+      ev.preventDefault();
+      send?.({ t: "insertText", id: browser.id, text: ev.data });
+    } else if (ev.inputType === "insertLineBreak") {
+      ev.preventDefault();
+      sendSyntheticKey("Enter", "Enter", 13, "\r");
+    } else if (ev.inputType === "deleteContentBackward") {
+      ev.preventDefault();
+      sendSyntheticKey("Backspace", "Backspace", 8);
+    }
+  };
+
+  const onHiddenComposition = (phase: "start" | "end") => (e: React.CompositionEvent<HTMLInputElement>) => {
+    if (phase === "start") {
+      composingRef.current = true;
+      return;
+    }
+    composingRef.current = false;
+    if (e.data && send) send({ t: "insertText", id: browser.id, text: e.data });
+    e.currentTarget.value = "";
+  };
+
   const onPaste = (e: React.ClipboardEvent) => {
     // The remote Chromium can't see this device's clipboard: forward the text
     // and inject it via Input.insertText at the remote focus.
@@ -303,9 +360,12 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
           aria-label="Remote browser keyboard input"
           className="absolute bottom-0 left-0 h-px w-px opacity-0"
           style={{ fontSize: 16 }}
-          autoCapitalize="off" autoCorrect="off" autoComplete="off"
-          onKeyDown={onKey("down")} onKeyUp={onKey("up")} onPaste={onPaste}
-          onChange={(e) => { e.target.value = ""; }}
+          autoCapitalize="off" autoCorrect="off" autoComplete="off" spellCheck={false}
+          onKeyDown={onHiddenKey("down")} onKeyUp={onHiddenKey("up")} onPaste={onPaste}
+          onBeforeInput={onHiddenBeforeInput}
+          onCompositionStart={onHiddenComposition("start")}
+          onCompositionEnd={onHiddenComposition("end")}
+          onBlur={(e) => { e.currentTarget.value = ""; composingRef.current = false; }}
         />
         {picks.length > 0 && (
           <PickComposeSheet
