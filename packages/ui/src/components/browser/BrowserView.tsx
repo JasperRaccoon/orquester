@@ -163,7 +163,15 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
   const onKey = (kind: "down" | "up") => (e: React.KeyboardEvent) => {
     if (!send) return;
     e.preventDefault();
-    send({ t: "key", id: browser.id, kind, key: e.key, code: e.code, modifiers: modifiersOf(e) });
+    send({
+      t: "key", id: browser.id, kind, key: e.key, code: e.code,
+      // keyCode → CDP windowsVirtualKeyCode: without it Backspace/Delete/
+      // arrows/Enter are inert in the remote page. Enter also needs text "\r"
+      // to produce a submit/newline (no char event fires for it below).
+      keyCode: e.keyCode || undefined,
+      text: kind === "down" && e.key === "Enter" ? "\r" : undefined,
+      modifiers: modifiersOf(e)
+    });
     if (kind === "down" && e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
       send({ t: "key", id: browser.id, kind: "char", key: e.key, code: e.code, text: e.key, modifiers: modifiersOf(e) });
     }

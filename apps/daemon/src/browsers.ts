@@ -41,8 +41,12 @@ export interface BrowserSink {
   onEnd(): void;
 }
 
+// deviceScaleFactor 2 on BOTH modes: clients are overwhelmingly HiDPI, and a
+// dsf-1 1280px frame stretched over a retina canvas reads as blurry. Frames
+// are streamed at CSS×dsf (see startScreencast) — input coordinates stay in
+// CSS pixels throughout, so dsf never touches the pointer math.
 const VIEWPORTS: Record<BrowserViewportMode, { width: number; height: number; deviceScaleFactor: number; mobile: boolean }> = {
-  desktop: { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false },
+  desktop: { width: 1280, height: 800, deviceScaleFactor: 2, mobile: false },
   mobile: { width: 390, height: 844, deviceScaleFactor: 2, mobile: true }
 };
 
@@ -280,11 +284,17 @@ export class BrowserManager {
   }
 
   dispatchKey(id: string, kind: "down" | "up" | "char", key: string, code: string,
-    text: string | undefined, modifiers: number): void {
+    text: string | undefined, modifiers: number, keyCode?: number): void {
     const cdp = this.tabs.get(id)?.cdp;
     if (!cdp) return;
     const type = kind === "down" ? "keyDown" : kind === "up" ? "keyUp" : "char";
-    void cdp.send("Input.dispatchKeyEvent", { type, key, code, text, modifiers }).catch(() => undefined);
+    // windowsVirtualKeyCode is what makes Chromium act on non-printable keys
+    // (Backspace/Delete/arrows/Tab/Enter). Without it, keyDown of an editing
+    // key is silently inert inside inputs — the classic CDP keyboard gotcha.
+    void cdp.send("Input.dispatchKeyEvent", {
+      type, key, code, text, modifiers,
+      ...(keyCode ? { windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode } : {})
+    }).catch(() => undefined);
   }
 
   dispatchTouch(id: string, kind: "start" | "move" | "end", points: Array<{ x: number; y: number }>): void {
@@ -472,8 +482,14 @@ export class BrowserManager {
       const jpeg = Buffer.from(frame.data, "base64");
       for (const sink of tab.sinks) sink.onFrame(jpeg);
     });
+    // Cap at CSS×dsf so the full rendered resolution reaches the client (the
+    // old CSS-px cap silently downscaled dsf-2 mobile frames to 390px wide).
     await tab.cdp.send("Page.startScreencast", {
-      format: "jpeg", quality: 60, maxWidth: vp.width, maxHeight: vp.height, everyNthFrame: 1
+      format: "jpeg",
+      quality: 70,
+      maxWidth: vp.width * vp.deviceScaleFactor,
+      maxHeight: vp.height * vp.deviceScaleFactor,
+      everyNthFrame: 1
     });
   }
 

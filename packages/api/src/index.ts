@@ -493,7 +493,13 @@ export interface UsageTokenRow {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  /** 1h-TTL subset of cacheWriteTokens (bills at 2x input instead of 1.25x).
+   *  Optional: absent in cache files persisted before this field existed. */
+  cacheWrite1hTokens?: number;
   costUsd: number | null;
+  /** Per-class share of costUsd (cache = reads + writes). Optional: absent in
+   *  cache files persisted before this field existed; null for unpriced models. */
+  costBreakdown?: { input: number; output: number; cache: number } | null;
   costSource: "api_equivalent";
 }
 export interface UsageTokensResponse {
@@ -907,6 +913,9 @@ export type BrowserClientMessage =
       code: string;
       text?: string;
       modifiers: number;
+      /** DOM keyCode → CDP windowsVirtualKeyCode; required for Chromium to act
+       *  on non-printable keys (Backspace/Delete/arrows/Enter). */
+      keyCode?: number;
     }
   | {
       t: "touch";

@@ -2470,7 +2470,7 @@ function createServer(
         } else if (msg.t === "wheel") {
           services.browsers.dispatchWheel(id, msg.x, msg.y, msg.dx, msg.dy);
         } else if (msg.t === "key") {
-          services.browsers.dispatchKey(id, msg.kind, msg.key, msg.code, msg.text, msg.modifiers);
+          services.browsers.dispatchKey(id, msg.kind, msg.key, msg.code, msg.text, msg.modifiers, msg.keyCode);
         } else if (msg.t === "touch") {
           services.browsers.dispatchTouch(id, msg.kind, msg.points);
         } else if (msg.t === "nav") {
