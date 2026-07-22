@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Crosshair, Send, X } from "lucide-react";
 import type { BrowserPickPayload } from "@orquester/api";
 import { useAppStore } from "../../store/app";
@@ -26,6 +26,14 @@ export const PickComposeSheet: React.FC<{
     [sessions, projectPath]
   );
   const [targetId, setTargetId] = useState<string>(agents[0]?.id ?? "");
+  // The initial seed is mount-time only; agents open/close while the sheet is
+  // up (e.g. user picks an element FIRST, then starts Claude). Re-seed when
+  // the current target is empty or gone so Send enables without a manual pick.
+  useEffect(() => {
+    if (!targetId || !agents.some((a) => a.id === targetId)) {
+      setTargetId(agents[0]?.id ?? "");
+    }
+  }, [agents, targetId]);
   const [comment, setComment] = useState("");
   const [intent, setIntent] = useState<PickIntent>("fix");
   const [sending, setSending] = useState(false);
