@@ -10,9 +10,12 @@ import {
   cliproxyStateFile,
   createDefaultCliProxyState
 } from "@orquester/config";
+import Fastify from "fastify";
+import type { CliProxyStatus } from "@orquester/api";
 import type { RegistryService } from "./registry.ts";
 import { Broadcaster } from "./broadcaster.ts";
 import { CliProxyManager } from "./cliproxy.ts";
+import { composeExtraEnv, registerCliProxyRoutes, resolveLaunchModel } from "./index.ts";
 
 type ProbeResult = { ok: boolean; reachable?: boolean; models?: string[] };
 
@@ -244,4 +247,115 @@ test("healthy → registry claudex/claudemix enabled; probe loss → disabled wi
   const lastClaudemix = [...h.registryCalls].reverse().find((c) => c.id === "claudemix");
   assert.deepEqual(lastClaudex, { id: "claudex", enabled: false, disabledReason: "proxy down" });
   assert.deepEqual(lastClaudemix, { id: "claudemix", enabled: false, disabledReason: "proxy down" });
+});
+
+// --- Task 9: /api/cliproxy routes + launch-env composition + model gate --------
+
+function fakeRouteManager() {
+  const calls = { enable: 0, disable: [] as boolean[], setConfig: [] as Array<{ cfg: unknown; force: boolean }> };
+  const status: CliProxyStatus = {
+    state: "off",
+    reasons: [],
+    detail: null,
+    version: null,
+    defaultModel: "gpt-5.6-sol",
+    backgroundModel: "gpt-5.6-sol",
+    providers: [],
+    accounts: [],
+    activeSessionCount: 0,
+    testedClaudeCliVersion: null
+  };
+  const manager = {
+    status: () => status,
+    enable: async () => {
+      calls.enable++;
+    },
+    disable: async (force: boolean) => {
+      calls.disable.push(force);
+      return { ok: true, affectedSessions: 0 };
+    },
+    setConfig: async (cfg: { defaultModel?: string; backgroundModel?: string }, force: boolean) => {
+      calls.setConfig.push({ cfg, force });
+      return { ok: true };
+    }
+  };
+  return { manager, calls };
+}
+
+test("cliproxy mutations: 403 on local mode, reach the handler on remote mode", async () => {
+  const daemonDir = join(mkdtempSync(join(tmpdir(), "orq-cliproxy-routes-")), "daemon");
+  // Local (unix socket): the mutating route is registered but refuses.
+  {
+    const { manager, calls } = fakeRouteManager();
+    const app = Fastify();
+    registerCliProxyRoutes(app, { manager, mode: "local", daemonDir });
+    await app.ready();
+    const res = await app.inject({ method: "POST", url: "/api/cliproxy/enable" });
+    assert.equal(res.statusCode, 403);
+    assert.match(res.json().error, /HTTP transport/);
+    assert.equal(calls.enable, 0, "local mutation must not reach the manager");
+    await app.close();
+  }
+  // Remote (authenticated HTTP): the same route runs and returns status.
+  {
+    const { manager, calls } = fakeRouteManager();
+    const app = Fastify();
+    registerCliProxyRoutes(app, { manager, mode: "remote", daemonDir });
+    await app.ready();
+    const res = await app.inject({ method: "POST", url: "/api/cliproxy/enable" });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.json().state, "off");
+    assert.equal(calls.enable, 1);
+    await app.close();
+  }
+});
+
+test("GET /api/cliproxy returns the CliProxyStatus shape incl. reasons[]", async () => {
+  const daemonDir = join(mkdtempSync(join(tmpdir(), "orq-cliproxy-status-")), "daemon");
+  const { manager } = fakeRouteManager();
+  const app = Fastify();
+  registerCliProxyRoutes(app, { manager, mode: "local", daemonDir });
+  await app.ready();
+  const res = await app.inject({ method: "GET", url: "/api/cliproxy" });
+  assert.equal(res.statusCode, 200);
+  const body = res.json();
+  assert.ok(Array.isArray(body.reasons), "reasons[] present");
+  assert.equal(body.state, "off");
+  assert.equal(typeof body.defaultModel, "string");
+  assert.equal(typeof body.activeSessionCount, "number");
+  await app.close();
+});
+
+test("composeExtraEnv: cliproxy env wins on collision, accountId preserved, unsets concatenated", () => {
+  const a = { env: { CLAUDE_CONFIG_DIR: "/home/a", FOO: "1" }, unset: ["A_UNSET"], accountId: "acc-1" };
+  const b = { env: { CLAUDE_CONFIG_DIR: "/proxy-home", ANTHROPIC_AUTH_TOKEN: "tok" }, unset: ["B_UNSET"] };
+  const r = composeExtraEnv(a, b);
+  assert.ok(r);
+  assert.equal(r.env.CLAUDE_CONFIG_DIR, "/proxy-home", "b wins on collision");
+  assert.equal(r.env.FOO, "1");
+  assert.equal(r.env.ANTHROPIC_AUTH_TOKEN, "tok");
+  assert.equal(r.accountId, "acc-1", "accountId preserved from a");
+  assert.deepEqual(r.unset, ["A_UNSET", "B_UNSET"], "unsets concatenated");
+  assert.equal(composeExtraEnv(null, null), null);
+  // A managed-account contribution with no cliproxy contribution passes through.
+  const only = composeExtraEnv({ env: { CODEX_HOME: "/h" }, accountId: "x" }, null);
+  assert.deepEqual(only, { env: { CODEX_HOME: "/h" }, accountId: "x" });
+});
+
+test("session model gate: model on refId 'claude' → 400; 'claudex' passes through validateModel", async () => {
+  const seen: Array<{ entryId: string; model?: string }> = [];
+  const validateModel = async (entryId: string, model: string | undefined) => {
+    seen.push({ entryId, model });
+    return { ok: true as const, effectiveModel: model ?? "gpt-5.6-sol" };
+  };
+
+  const rejected = await resolveLaunchModel("claude", "kimi-k3", validateModel);
+  assert.equal(rejected.ok, false);
+  if (rejected.ok === false) assert.match(String(rejected.body.error), /claudex\/claudemix/);
+  assert.equal(seen.length, 0, "validateModel is not consulted for non-managed launchers");
+
+  const passed = await resolveLaunchModel("claudex", "kimi-k3", validateModel);
+  assert.equal(passed.ok, true);
+  if (passed.ok) assert.equal(passed.effectiveModel, "kimi-k3");
+  assert.deepEqual(seen, [{ entryId: "claudex", model: "kimi-k3" }], "claudex is routed through validateModel");
 });

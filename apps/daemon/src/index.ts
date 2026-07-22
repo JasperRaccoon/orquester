@@ -6,6 +6,7 @@ import type {
   BrowserClientMessage,
   BrowserSuggestionsResponse,
   BrowserSummary,
+  CliProxyStatus,
   CreateAccountRequest,
   CreateBrowserRequest,
   CreateProjectRequest,
@@ -66,7 +67,8 @@ import { AgentHooks } from "./agent-hooks";
 import { type ISessionManager, SessionError, createSessionManager } from "./sessions";
 import type { ActivityCause } from "./ansi-activity";
 import { TodoError, TodoListManager } from "./todos";
-import { Tmux } from "./tmux";
+import { Tmux, tmuxAvailable, tmuxVersionOk } from "./tmux";
+import { CliProxyManager } from "./cliproxy";
 import { Broadcaster } from "./broadcaster";
 import { AccountError, AccountsService } from "./accounts";
 import { AgentAccountsService } from "./agent-accounts.ts";
@@ -99,7 +101,11 @@ import {
   browserProfilesDir,
   browsersIndexPath,
   createDefaultAppConfig,
-  createDefaultCliProxyState,
+  cliproxyHomeDir,
+  cliproxyStateFile,
+  cliproxyTokenFile,
+  parseCliProxyState,
+  MODEL_NAME_RE,
   createDefaultClientConfig,
   createDefaultDaemonConfig,
   createDefaultRemotesConfig,
@@ -126,7 +132,7 @@ import { assertInsideFsRoot, FsSandboxError } from "@orquester/config/fs";
 import fastifyStatic from "@fastify/static";
 import websocketPlugin from "@fastify/websocket";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
-import { createReadStream, createWriteStream, existsSync, type WriteStream } from "node:fs";
+import { createReadStream, createWriteStream, existsSync, readFileSync, type WriteStream } from "node:fs";
 import { mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir, platform as osPlatform } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -315,7 +321,14 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     resolveExtraEnv: async (entry, ctx) => {
       if (entry.kind !== "agent") return null;
       try {
-        return await agentAccounts.resolveLaunchEnv(entry.id, ctx.accountId);
+        // Managed-account identity (Claude/Codex homes) composed with the
+        // cliproxy contributor (auth token + isolated config home + per-launch
+        // model) for the claudex/claudemix launchers. The contributor wins on
+        // any collision; the managed account keeps the effective accountId.
+        return composeExtraEnv(
+          await agentAccounts.resolveLaunchEnv(entry.id, ctx.accountId),
+          cliproxyContributor(entry.id, ctx, resolved.daemonDir)
+        );
       } catch (error) {
         throw new SessionError(error instanceof Error ? error.message : String(error));
       }
@@ -532,16 +545,50 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     if (summary?.projectPath) urlWatcher.ingest(summary.projectPath, data);
   });
 
-  // Phase-1 permissive model resolver: accept any model, resolving an omitted
-  // pick to the configured default. Task 9 replaces this with the real
-  // CliProxyManager.validateModel (a bounded live-catalog probe).
-  const validateModel: ValidateModel = async (_entryId, model) => ({
-    ok: true,
-    effectiveModel: model ?? createDefaultCliProxyState().defaultModel
+  // The managed CLIProxyAPI process backing the claudex/claudemix launchers.
+  // All process control + I/O is injected: on a tmux host the proxy runs in a
+  // dedicated (reaper-immune) service session; otherwise there is no managed
+  // proxy in Phase 1 (spawnDirect returns null → the launchers stay disabled).
+  const cliproxyTmux = tmuxAvailable() && tmuxVersionOk() ? tmux : null;
+  const cliproxy = new CliProxyManager({
+    daemonDir: resolved.daemonDir,
+    appdir: paths.baseDir,
+    registry,
+    broadcaster,
+    adapters: {
+      probe: probeCliProxy,
+      tmux: cliproxyTmux,
+      spawnDirect: () => null,
+      liveDependentSessionCount: () =>
+        sessions
+          .list()
+          .filter((s) => (s.refId === "claudex" || s.refId === "claudemix") && s.status === "running").length,
+      now: () => Date.now()
+    }
   });
+
+  // Per-launch model resolution/validation for claudex/claudemix rides the
+  // CliProxyManager: request pick wins over the default, verified against a
+  // fresh, bounded live-catalog probe.
+  const validateModel: ValidateModel = (entryId, model) => cliproxy.validateModel(entryId, model);
   const services: Services = {
-    registry, sessions, validateModel, accounts, git, todos, usage, usageTokens, push, broadcaster, agentAccounts, browsers, urlWatcher
+    registry, sessions, validateModel, cliproxy, accounts, git, todos, usage, usageTokens, push, broadcaster, agentAccounts, browsers, urlWatcher
   };
+
+  // Boot the managed proxy AFTER reattach (adoption must see the final session
+  // set) and BEFORE any transport serves. init() loads persisted state/secrets
+  // and runs ownership-verified adoption; a disabled proxy (the default) just
+  // marks the launchers disabled. Best-effort — a proxy failure must not block
+  // the daemon.
+  await cliproxy.init().catch((error) => console.error("CliProxy init failed", error));
+  // Drive crash supervision: an owned-but-dead proxy is respawned with bounded
+  // backoff; after the cap it latches error. Unref'd so it never holds exit.
+  const cliproxyHealthTimer = setInterval(() => void cliproxy.checkHealth(), 15_000);
+  cliproxyHealthTimer.unref?.();
+  // The persistence-lost respawn window reopens once every dependent session has
+  // drained; re-evaluate whenever the live session set shrinks.
+  sessions.lifecycle.on("exited", () => cliproxy.handleSessionSetChanged());
+  sessions.lifecycle.on("closed", () => cliproxy.handleSessionSetChanged());
 
   // The static web build the HTTP transport optionally serves.
   const webDirEnv = options.webDir ?? env.ORQUESTER_WEB_DIR;
@@ -603,6 +650,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
 
   const stop = async () => {
     usage.stop();
+    clearInterval(cliproxyHealthTimer);
     agentAccounts.stopRefresher();
     // Detach (don't kill) sessions: the tmux backend leaves its server running so
     // the next boot reattaches; the local backend has no server, so its shutdown()
@@ -636,11 +684,189 @@ export type ValidateModel = (
   model: string | undefined
 ) => Promise<{ ok: true; effectiveModel: string } | { ok: false; error: string }>;
 
+/** One launch-env contribution: env vars, optional unsets, effective account. */
+type LaunchEnv = { env: Record<string, string>; unset?: string[]; accountId?: string };
+
+/**
+ * Merge two launch-env contributions into one. `b` (the cliproxy contributor)
+ * wins on any key collision; `unset` lists concatenate; the effective
+ * `accountId` is preserved from `a` (the managed-account resolution — the
+ * cliproxy contributor never carries one). Returns null when neither contributes.
+ */
+export function composeExtraEnv(a: LaunchEnv | null, b: LaunchEnv | null): LaunchEnv | null {
+  if (!a && !b) return null;
+  const unset = [...(a?.unset ?? []), ...(b?.unset ?? [])];
+  const merged: LaunchEnv = { env: { ...a?.env, ...b?.env } };
+  if (unset.length > 0) merged.unset = unset;
+  if (a?.accountId !== undefined) merged.accountId = a.accountId;
+  return merged;
+}
+
+/**
+ * Launch-env for the managed claudex/claudemix launchers: the proxy auth token
+ * (read from the 0600 projection, kept off argv) and the entry's isolated Claude
+ * config home, plus the per-launch model pin when one was chosen (the base URL
+ * and default model ride the registry entry's env file). Null for every other
+ * launcher.
+ */
+function cliproxyContributor(
+  entryId: string,
+  ctx: { accountId?: string; model?: string },
+  daemonDir: string
+): LaunchEnv | null {
+  if (entryId !== "claudex" && entryId !== "claudemix") return null;
+  const env: Record<string, string> = { CLAUDE_CONFIG_DIR: cliproxyHomeDir(daemonDir, entryId) };
+  try {
+    const token = readFileSync(cliproxyTokenFile(daemonDir), "utf8").trim();
+    if (token) env.ANTHROPIC_AUTH_TOKEN = token;
+  } catch {
+    // Proxy not provisioned yet — the launcher wrapper still injects the token
+    // from the same file at exec, so a missing projection is not fatal here.
+  }
+  if (ctx.model) {
+    env.ANTHROPIC_MODEL = ctx.model;
+    env.CLAUDE_CODE_SUBAGENT_MODEL = ctx.model;
+  }
+  return { env };
+}
+
+/**
+ * Gate the optional per-launch `model` on a create-session request. It is valid
+ * ONLY for claudex/claudemix — there it is resolved/validated by the injected
+ * seam (request pick wins over the configured default) and the CONCRETE effective
+ * model is returned; for every other launcher a model is a client error.
+ */
+export async function resolveLaunchModel(
+  refId: string,
+  model: string | undefined,
+  validateModel: ValidateModel
+): Promise<
+  { ok: true; effectiveModel: string | undefined } | { ok: false; body: Record<string, unknown> }
+> {
+  if (refId === "claudex" || refId === "claudemix") {
+    const result = await validateModel(refId, model);
+    if (!result.ok) return { ok: false, body: { code: "SESSION_UNAVAILABLE", message: result.error } };
+    return { ok: true, effectiveModel: result.effectiveModel };
+  }
+  if (model !== undefined) {
+    return { ok: false, body: { error: "model is only valid for claudex/claudemix", entryId: refId } };
+  }
+  return { ok: true, effectiveModel: undefined };
+}
+
+/** Bounded HTTP probe of the local proxy's `/v1/models` — the manager's live
+ *  reachability + key-acceptance + catalog signal. Connection refused (nothing
+ *  on the port) resolves `reachable:false`; a non-200 means the port answered but
+ *  our key was rejected (`reachable:true, ok:false`). */
+async function probeCliProxy(
+  port: number,
+  apiKey: string
+): Promise<{ ok: boolean; reachable?: boolean; models?: string[] }> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/v1/models`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(2000)
+    });
+    if (res.status !== 200) return { ok: false, reachable: true };
+    const body = (await res.json().catch(() => null)) as { data?: Array<{ id?: unknown }> } | null;
+    const models = Array.isArray(body?.data)
+      ? body.data.map((m) => m.id).filter((id): id is string => typeof id === "string")
+      : [];
+    return { ok: true, reachable: true, models };
+  } catch {
+    return { ok: false, reachable: false };
+  }
+}
+
+/** The subset of {@link CliProxyManager} the routes drive — structural so route
+ *  tests can inject a fake without standing up the whole manager. */
+interface CliProxyRouteManager {
+  status(): CliProxyStatus;
+  enable(): Promise<void>;
+  disable(force: boolean): Promise<{ ok: boolean; affectedSessions?: number }>;
+  setConfig(
+    cfg: { defaultModel?: string; backgroundModel?: string },
+    force: boolean
+  ): Promise<{ ok: boolean; affectedSessions?: number }>;
+}
+
+/**
+ * Register the `/api/cliproxy` surface (spec §3). Read routes (status, models)
+ * are open on both transports; mutating routes (enable/disable/config) are
+ * HTTP-transport-only — the socket-served instance registers the same paths but
+ * refuses with 403 (the socket is unauthenticated and every agent session holds
+ * its path). Login + OpenRouter-key flows are Phase 2 — reserved here as 501.
+ */
+export function registerCliProxyRoutes(
+  app: FastifyInstance,
+  opts: { manager: CliProxyRouteManager; mode: "local" | "remote"; daemonDir: string }
+): void {
+  const { manager, mode, daemonDir } = opts;
+  // Returns true (and sends the 403) when a mutation is attempted over the
+  // unauthenticated unix socket.
+  const refusedOnSocket = (reply: FastifyReply): boolean => {
+    if (mode === "local") {
+      reply.code(403).send({ error: "cliproxy mutations require the authenticated HTTP transport" });
+      return true;
+    }
+    return false;
+  };
+
+  app.get("/api/cliproxy", async (): Promise<CliProxyStatus> => manager.status());
+
+  app.get("/api/cliproxy/models", async () => {
+    // Last-known catalog + asOf from persisted state (opportunistic refresh is a
+    // Phase-2 concern — it needs the proxy secret). A missing/partial file
+    // degrades to an empty catalog, never a crash.
+    try {
+      const state = parseCliProxyState(JSON.parse(await readFile(cliproxyStateFile(daemonDir), "utf8")));
+      return state.modelCatalog ?? { models: [], asOf: null };
+    } catch {
+      return { models: [], asOf: null };
+    }
+  });
+
+  app.post("/api/cliproxy/enable", async (_request, reply) => {
+    if (refusedOnSocket(reply)) return;
+    await manager.enable();
+    return manager.status();
+  });
+
+  app.post("/api/cliproxy/disable", async (request, reply) => {
+    if (refusedOnSocket(reply)) return;
+    const body = (request.body ?? {}) as { force?: boolean };
+    return manager.disable(Boolean(body.force));
+  });
+
+  app.put("/api/cliproxy/config", async (request, reply) => {
+    if (refusedOnSocket(reply)) return;
+    const body = (request.body ?? {}) as { defaultModel?: string; backgroundModel?: string; force?: boolean };
+    for (const m of [body.defaultModel, body.backgroundModel]) {
+      if (m !== undefined && !MODEL_NAME_RE.test(m)) {
+        return reply.code(400).send({ error: `invalid model name: ${JSON.stringify(m)}` });
+      }
+    }
+    return manager.setConfig({ defaultModel: body.defaultModel, backgroundModel: body.backgroundModel }, Boolean(body.force));
+  });
+
+  // Phase-2 surface (login device-auth + OpenRouter key). Reserved so the shape
+  // is stable; wired once the spike settles the provider flows.
+  const pending = async (_request: unknown, reply: FastifyReply) =>
+    reply.code(501).send({ error: "pending spike findings" });
+  app.post("/api/cliproxy/login/start", pending);
+  app.get("/api/cliproxy/login/status", pending);
+  app.post("/api/cliproxy/login/cancel", pending);
+  app.post("/api/cliproxy/login/callback", pending);
+  app.post("/api/cliproxy/openrouter/key", pending);
+}
+
 interface Services {
   registry: RegistryService;
   sessions: ISessionManager;
   /** Resolve a per-launch model for claudex/claudemix (see {@link ValidateModel}). */
   validateModel: ValidateModel;
+  /** The managed CLIProxyAPI lifecycle backing the claudex/claudemix launchers. */
+  cliproxy: CliProxyManager;
   accounts: AccountsService;
   git: GitService;
   todos: TodoListManager;
@@ -1959,6 +2185,14 @@ function createServer(
     return registry.openTarget(body.targetId, body.path);
   });
 
+  // The managed CLIProxyAPI surface (status/models/enable/disable/config +
+  // reserved Phase-2 login flows). Mutations are refused over the unix socket.
+  registerCliProxyRoutes(app, {
+    manager: services.cliproxy,
+    mode: options.mode,
+    daemonDir: resolved.daemonDir
+  });
+
   // Sessions (PTYs)
   app.get<{ Querystring: { projectPath?: string } }>(
     "/api/sessions",
@@ -1971,18 +2205,11 @@ function createServer(
     // every other refId it is a client error. For the two managed launchers the
     // pick (or an omitted default) is resolved/validated by the injected seam,
     // and the CONCRETE effective model — not the raw request field — is launched.
-    let effectiveModel: string | undefined;
-    if (body.refId === "claudex" || body.refId === "claudemix") {
-      const result = await validateModel(body.refId, body.model);
-      if (!result.ok) {
-        return reply.code(400).send({ code: "SESSION_UNAVAILABLE", message: result.error });
-      }
-      effectiveModel = result.effectiveModel;
-    } else if (body.model !== undefined) {
-      return reply
-        .code(400)
-        .send({ error: "model is only valid for claudex/claudemix", entryId: body.refId });
+    const resolvedModel = await resolveLaunchModel(body.refId, body.model, validateModel);
+    if (!resolvedModel.ok) {
+      return reply.code(400).send(resolvedModel.body);
     }
+    const effectiveModel = resolvedModel.effectiveModel;
     try {
       return await sessions.create({ ...body, model: effectiveModel });
     } catch (error) {
