@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile, readFile, readFile as fsReadFile, rm, chmod, symlink, lstat, readlink, copyFile } from "node:fs/promises";
+import { mkdir, writeFile, readFile, readFile as fsReadFile, rm, chmod, symlink, lstat, readlink, readdir, rename, copyFile } from "node:fs/promises";
 import { dirname, join, isAbsolute } from "node:path";
 import { SYSTEM_ACCOUNT_ID, type AgentAccount, type AgentAccountsResponse } from "@orquester/api";
 import {
@@ -213,16 +213,52 @@ export class AgentAccountsService {
       // so share one file. The daemon's hook installer writes THROUGH the symlink
       // (writeFileAtomic realpaths its target), keeping the share intact.
       await this.ensureSharedFileSymlink(join(this.systemClaudeDir(), "settings.json"), join(home, "settings.json"));
+      // Conversation history lives in projects/ — share it so every account sees
+      // (and appends to) the same "resume session" list.
+      await this.ensureSharedDirSymlink(join(this.systemClaudeDir(), "projects"), join(home, "projects"));
     } else {
       // config.toml (MCPs, model defaults, project trust) and hooks.json hold no
       // identity — auth.json carries that — so share them live. Both are written
       // by the daemon's hook installer, which follows the symlink.
       await this.ensureSharedFileSymlink(join(this.systemCodexHome(), "config.toml"), join(home, "config.toml"));
       await this.ensureSharedFileSymlink(join(this.systemCodexHome(), "hooks.json"), join(home, "hooks.json"));
+      await this.ensureSharedDirSymlink(join(this.systemCodexHome(), "sessions"), join(home, "sessions"));
       for (const marker of [".personality_migration", ".sandbox_migration"]) {
         await this.copyIfMissing(join(this.systemCodexHome(), marker), join(home, marker));
       }
     }
+  }
+
+  /** Share a conversation-history DIR (Claude projects/, Codex sessions/). If the
+   *  home already has its own, best-effort merge its contents into the shared store
+   *  (moving only entries the store lacks), then replace it with the symlink. */
+  private async ensureSharedDirSymlink(target: string, linkPath: string): Promise<void> {
+    try {
+      await lstat(target);
+    } catch {
+      return; // no shared store yet
+    }
+    let st: Awaited<ReturnType<typeof lstat>> | null = null;
+    try {
+      st = await lstat(linkPath);
+    } catch {
+      /* absent */
+    }
+    if (st) {
+      if (st.isSymbolicLink()) {
+        if ((await readlink(linkPath).catch(() => null)) === target) return; // already shared
+        await rm(linkPath, { force: true }).catch(() => undefined);
+      } else if (st.isDirectory()) {
+        for (const child of await readdir(linkPath).catch(() => [] as string[])) {
+          await rename(join(linkPath, child), join(target, child)).catch(() => undefined); // skip collisions
+        }
+        if ((await readdir(linkPath).catch(() => ["x"])).length > 0) return; // couldn't fully merge — leave as-is
+        await rm(linkPath, { recursive: true, force: true }).catch(() => undefined);
+      } else {
+        return; // a regular file where a dir is expected — leave it
+      }
+    }
+    await symlink(target, linkPath).catch((e) => this.opts.logger?.warn?.(`shared dir symlink ${linkPath} failed: ${String(e)}`));
   }
 
   /** Seed `<home>/.claude.json`. First seed copies the system config minus identity

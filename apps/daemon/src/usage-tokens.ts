@@ -1,4 +1,4 @@
-import { open, readFile, readdir, stat, writeFile, mkdir } from "node:fs/promises";
+import { open, readFile, readdir, stat, writeFile, mkdir, realpath } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import type { UsageTokenRow, UsageTokensResponse } from "@orquester/api";
 
@@ -326,9 +326,9 @@ export class UsageTokensScanner {
 
   private async doRecompute(): Promise<void> {
     const files: { path: string; agent: "claude" | "codex" }[] = [];
-    for (const dir of this.homeDirs("claude", "CLAUDE_CONFIG_DIR", "projects"))
+    for (const dir of await this.homeDirs("claude", "CLAUDE_CONFIG_DIR", "projects"))
       for (const f of await walkJsonl(dir)) files.push({ path: f, agent: "claude" });
-    for (const dir of this.homeDirs("codex", "CODEX_HOME", "sessions"))
+    for (const dir of await this.homeDirs("codex", "CODEX_HOME", "sessions"))
       for (const f of await walkJsonl(dir)) files.push({ path: f, agent: "codex" });
 
     // Drop cache entries for files that no longer exist.
@@ -423,11 +423,26 @@ export class UsageTokensScanner {
 
   /** Host home + every managed-account home for an agent (M3: managed-account
    *  sessions write transcripts under their own CONFIG_DIR/CODEX_HOME). */
-  private homeDirs(agent: "claude" | "codex", envVar: string, subdir: string): string[] {
+  private async homeDirs(agent: "claude" | "codex", envVar: string, subdir: string): Promise<string[]> {
     const host = join(process.env[envVar] || join(this.opts.userhome, agent === "claude" ? ".claude" : ".codex"), subdir);
     const managed = (this.opts.accountHomes?.() ?? [])
       .filter((a) => a.agent === agent)
       .map((a) => join(a.home, subdir));
-    return [host, ...managed];
+    // Managed homes now symlink their history dir to the shared store — dedupe by
+    // realpath so a shared transcript isn't counted once per account.
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const dir of [host, ...managed]) {
+      let real = dir;
+      try {
+        real = await realpath(dir);
+      } catch {
+        /* missing dir → keep the given path (walkJsonl handles absence) */
+      }
+      if (seen.has(real)) continue;
+      seen.add(real);
+      out.push(dir);
+    }
+    return out;
   }
 }

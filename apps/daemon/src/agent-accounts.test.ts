@@ -278,3 +278,33 @@ test("resolveLaunchEnv shares Codex config.toml + hooks.json (replaces stale rea
   assert.match(await readFile(join(home, "config.toml"), "utf8"), /mcp_servers\.foo/);
   assert.equal((await lstat(join(home, "hooks.json"))).isSymbolicLink(), true);
 });
+
+test("resolveLaunchEnv shares chat history: symlinks projects/ (Claude), merging a non-empty home in", async () => {
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const base = await mkdtemp(join(tmpdir(), "orq-hist-"));
+  await mkdir(join(base, ".claude", "projects", "p1"), { recursive: true });
+  await writeFile(join(base, ".claude", "projects", "p1", "sys.jsonl"), "sys");
+  const svc = new AgentAccountsService({ indexFile: join(base, "idx.json"), accountsDir: join(base, "agent-accounts"), userhome: base, now: () => 1 });
+  await svc.init();
+  const acct = await svc.importAccount({ content: JSON.stringify({ claudeAiOauth: { accessToken: "t" } }), label: "L" });
+  const home = svc.homePath("claude", acct.id);
+  await mkdir(join(home, "projects", "p2"), { recursive: true }); // account's own local conversation
+  await writeFile(join(home, "projects", "p2", "acct.jsonl"), "acct");
+  await svc.resolveLaunchEnv("claude", acct.id);
+  assert.equal((await lstat(join(home, "projects"))).isSymbolicLink(), true);
+  assert.equal(await readFile(join(base, ".claude", "projects", "p2", "acct.jsonl"), "utf8"), "acct"); // merged into shared store
+  assert.equal(await readFile(join(home, "projects", "p1", "sys.jsonl"), "utf8"), "sys"); // system history now visible via the link
+});
+
+test("resolveLaunchEnv symlinks an empty/absent Codex sessions/ to the shared store", async () => {
+  delete process.env.CODEX_HOME;
+  const base = await mkdtemp(join(tmpdir(), "orq-hist2-"));
+  await mkdir(join(base, ".codex", "sessions", "s1"), { recursive: true });
+  const svc = new AgentAccountsService({ indexFile: join(base, "idx.json"), accountsDir: join(base, "agent-accounts"), userhome: base, now: () => 1 });
+  await svc.init();
+  const acct = await svc.importAccount({ content: JSON.stringify({ tokens: { access_token: "a", id_token: jwt({ email: "z@z" }) } }) });
+  const home = svc.homePath("codex", acct.id);
+  await svc.resolveLaunchEnv("codex", acct.id);
+  assert.equal((await lstat(join(home, "sessions"))).isSymbolicLink(), true);
+  assert.equal((await lstat(join(home, "sessions", "s1"))).isDirectory(), true); // reads through to shared sessions
+});
