@@ -171,9 +171,30 @@ export const PICKER_SCRIPT = String.raw`
     box.style.display = "block";
     box.style.left = r.left + "px"; box.style.top = r.top + "px";
     box.style.width = r.width + "px"; box.style.height = r.height + "px";
+    // Self-calibrate against page zoom / root scale. Apps that set a global
+    // `zoom:` (or transform scale) on html/body/#root put the overlay's
+    // styling space and getBoundingClientRect space out of sync, so the
+    // highlight lands offset and mis-sized. Both the target rect `r` and the
+    // just-placed box are measured with the SAME API in the SAME space, so
+    // the discrepancy is a linear map: fix scale first, then any residual
+    // translation. No-ops (0 extra style writes) on unzoomed pages.
+    let f = 1;
+    const b1 = box.getBoundingClientRect();
+    if (r.width > 0 && b1.width > 0 && Math.abs(b1.width - r.width) > 0.5) {
+      f = b1.width / r.width;
+      box.style.left = r.left / f + "px"; box.style.top = r.top / f + "px";
+      box.style.width = r.width / f + "px"; box.style.height = r.height / f + "px";
+    }
+    const b2 = box.getBoundingClientRect();
+    if (Math.abs(b2.left - r.left) > 0.5 || Math.abs(b2.top - r.top) > 0.5) {
+      box.style.left = (parseFloat(box.style.left) + (r.left - b2.left) / f) + "px";
+      box.style.top = (parseFloat(box.style.top) + (r.top - b2.top) / f) + "px";
+    }
+    const boxLeft = parseFloat(box.style.left);
+    const boxTop = parseFloat(box.style.top);
     label.style.display = "block";
-    label.style.left = r.left + "px";
-    label.style.top = (r.top > 24 ? r.top - 22 : r.bottom + 4) + "px";
+    label.style.left = boxLeft + "px";
+    label.style.top = (boxTop > 24 ? boxTop - 22 : boxTop + r.height / f + 4) + "px";
     label.textContent = current.tagName.toLowerCase()
       + (current.id ? "#" + current.id : "")
       + " " + Math.round(r.width) + "×" + Math.round(r.height);
