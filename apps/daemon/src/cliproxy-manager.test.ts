@@ -224,6 +224,21 @@ test("validateModel: request model wins over default; unknown model fails naming
     assert.equal(r.ok, false);
     t.mock.timers.reset();
   }
+  // (d) omitted model resolves the configured default and validates it against the catalog.
+  {
+    const h = setup();
+    h.setProbe({ ok: true, models: ["gpt-5.6-sol", "model-a"] });
+    const r = await h.mgr.validateModel("claudex");
+    assert.deepEqual(r, { ok: true, effectiveModel: "gpt-5.6-sol" });
+  }
+  // (e) omitted model whose resolved default is absent from the catalog fails, naming the provider.
+  {
+    const h = setup();
+    h.setProbe({ ok: true, models: ["model-a"] }); // default "gpt-5.6-sol" not offered
+    const r = await h.mgr.validateModel("claudex");
+    assert.equal(r.ok, false);
+    if (r.ok === false) assert.match(r.error, /gpt-5\.6-sol|provider|offered/i);
+  }
 });
 
 test("healthy → registry claudex/claudemix enabled; probe loss → disabled with 'proxy down'", async () => {
