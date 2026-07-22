@@ -41,7 +41,8 @@ Owns everything under `<appdir>/daemon/cliproxy/`:
 
 ```
 cliproxy/
-  bin/cli-proxy-api   # release binary, SHA-256-verified install (see below)
+  bin/cli-proxy-api   # patched source build, SHA-256-verified inputs (see below + §7)
+  src/                # pinned upstream source tag + applied patch set (build workspace)
   bin.prev/           # previous verified binary, kept for rollback
   config.yaml         # generated, 0600
   auth/               # 0700; provider credential JSONs, 0600, auto-refreshed by the proxy
@@ -51,10 +52,13 @@ cliproxy/
                       # tested claude-CLI version (see CLI-coupling below)
 ```
 
-**Binary install.** Pinned version **and per-platform SHA-256 digest** (hardcoded per
-release bump, updated deliberately). Download over HTTPS to a private temp file, verify
-digest, then atomically install; keep the prior verified binary in `bin.prev/` for
-rollback. Reject unsupported OS/arch. A pinned tag alone is not integrity verification.
+**Binary install.** The proxy is built from the pinned upstream **source** tag with our
+patch set applied (see §7 — this is what makes Kimi work day one). All inputs are
+integrity-verified: pinned version + SHA-256 digest for the source tarball and for the
+Go toolchain tarball (hardcoded per bump, updated deliberately); download over HTTPS to
+a private temp file, verify, build, then atomically install; keep the prior verified
+binary in `bin.prev/` for rollback. Reject unsupported OS/arch. A pinned tag alone is
+not integrity verification.
 
 **Generated `config.yaml`**: `host: 127.0.0.1`, `port: 8317`, one generated `api-keys`
 entry (`crypto.randomBytes`), `remote-management.secret-key` (generated;
@@ -273,16 +277,24 @@ array. The only correct layer is the translator itself: omit `content` when
 gated on kimi/moonshot model names, plus `reasoning_content` handling if thinking mode
 is ever enabled.
 
-**Build strategy (explicit, resolves the fork-vs-upstream contradiction):**
+**Build strategy (explicit, resolves the fork-vs-upstream contradiction): we ship a
+patched build from day one — Kimi is configured from the start, not gated on upstream.**
 
-1. Upstream the one-line translator fix to CLIProxyAPI (tiny, spec-correct, benefits all
-   users).
-2. Until a release containing it is pinned, the **`kimi-k3` alias is not configured** —
-   Kimi routing is gated on the fix being present in the shipped binary. claudex/
-   claudemix work fully with gpt-*/claude-* meanwhile.
-3. If upstreaming stalls, fall back to a maintained patched build (documented patch file
-   in-repo, applied to the pinned source tag, built in CI or on the VPS) — a deliberate
-   commitment, recorded here, not an implicit assumption.
+1. The translator fix lives in-repo as a documented patch file
+   (`deploy/cliproxy-patches/*.patch`: omit `content` when `tool_calls` present, gated
+   on kimi/moonshot model names, plus the `reasoning_content` guard). Applied to the
+   pinned upstream source tag.
+2. `CliProxyManager` installs from a **source build**: download the pinned source
+   tarball (SHA-256-verified, same integrity rules as §1), apply the patch set, build
+   with a pinned Go toolchain (≥1.24 — newer than distro apt; fetched as an
+   SHA-256-verified upstream tarball into the appdir, or preinstalled by
+   `provision-devtools.sh`), install atomically with the same `bin.prev/` rollback.
+   Patch-application failure on a version bump is a loud manager error (`error:
+   patch conflict`), never a silent fall-through to an unpatched binary.
+3. Upstream the fix in parallel (tiny, spec-correct, benefits everyone). Once a pinned
+   upstream release contains it, the patch file is dropped and the manager reverts to
+   plain release-binary installs — the patch set shrinking to empty is the exit
+   criterion for the source-build path.
 
 Additional Kimi operational constraints for workflows: temperature range [0,1] (clamp
 via `payload.override` — top-level params ARE config-reachable), `tool_choice:
@@ -314,8 +326,9 @@ workspace) must verify:
 5. **Partial-failure behavior**: the canonical tri-model workflow must handle 1-of-3
    reviewer failure (OpenRouter latency, translation error) gracefully; document that
    the harness does not retry subagent provider errors.
-6. Kimi path (once §7 gate passes): empty-content fix verified end-to-end, control-token
-   leakage checked, prompt-caching/latency on the `claude-*` path acceptable.
+6. Kimi path (against the patched build): empty-content fix verified end-to-end on a
+   deep tool loop, control-token leakage checked, prompt-caching/latency on the
+   `claude-*` path acceptable.
 
 Known trade-off: in `claudemix` sessions all Anthropic traffic transits the local proxy;
 a proxy or CLI-version break can take that session type down. Stock `claude` stays
@@ -357,8 +370,8 @@ the inverse failure (CLI update breaking the proxy path first).
 4. `/api/cliproxy` routes + wire types + login flows.
 5. Settings UI (Model proxy section) + launcher menu `disabledReason` + notifications.
 6. Hooks family mapping + tests; polish (icons, tab badges).
-7. Deploy, browser smoke test, real workflow dry-run (Fable plans → Sol executes →
-   cross-review; Kimi joins once §7 gate passes).
+7. Deploy, browser smoke test, real workflow dry-run — the full tri-model flow: Fable
+   plans, Kimi designs, Sol executes, three-model cross-review.
 
 ## Verification
 
