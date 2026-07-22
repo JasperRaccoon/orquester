@@ -99,6 +99,7 @@ import {
   browserProfilesDir,
   browsersIndexPath,
   createDefaultAppConfig,
+  createDefaultCliProxyState,
   createDefaultClientConfig,
   createDefaultDaemonConfig,
   createDefaultRemotesConfig,
@@ -311,10 +312,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     logger: console
   });
   const sessions = createSessionManager(registry, tmux, resolved.sessionsIndexFile, {
-    resolveExtraEnv: async (entry, accountId) => {
+    resolveExtraEnv: async (entry, ctx) => {
       if (entry.kind !== "agent") return null;
       try {
-        return await agentAccounts.resolveLaunchEnv(entry.id, accountId);
+        return await agentAccounts.resolveLaunchEnv(entry.id, ctx.accountId);
       } catch (error) {
         throw new SessionError(error instanceof Error ? error.message : String(error));
       }
@@ -531,8 +532,15 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     if (summary?.projectPath) urlWatcher.ingest(summary.projectPath, data);
   });
 
+  // Phase-1 permissive model resolver: accept any model, resolving an omitted
+  // pick to the configured default. Task 9 replaces this with the real
+  // CliProxyManager.validateModel (a bounded live-catalog probe).
+  const validateModel: ValidateModel = async (_entryId, model) => ({
+    ok: true,
+    effectiveModel: model ?? createDefaultCliProxyState().defaultModel
+  });
   const services: Services = {
-    registry, sessions, accounts, git, todos, usage, usageTokens, push, broadcaster, agentAccounts, browsers, urlWatcher
+    registry, sessions, validateModel, accounts, git, todos, usage, usageTokens, push, broadcaster, agentAccounts, browsers, urlWatcher
   };
 
   // The static web build the HTTP transport optionally serves.
@@ -617,9 +625,22 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   };
 }
 
+/**
+ * Validate/resolve a per-launch `model` for the claudex/claudemix launchers.
+ * Phase 1 wires a permissive default (resolve to the configured default model);
+ * Task 7's CliProxyManager provides the real implementation (a fresh bounded
+ * catalog probe) in Task 9. Returns the concrete catalog string to launch with.
+ */
+export type ValidateModel = (
+  entryId: string,
+  model: string | undefined
+) => Promise<{ ok: true; effectiveModel: string } | { ok: false; error: string }>;
+
 interface Services {
   registry: RegistryService;
   sessions: ISessionManager;
+  /** Resolve a per-launch model for claudex/claudemix (see {@link ValidateModel}). */
+  validateModel: ValidateModel;
   accounts: AccountsService;
   git: GitService;
   todos: TodoListManager;
@@ -642,7 +663,7 @@ function createServer(
   services: Services,
   options: { authRequired: boolean; mode: "local" | "remote"; serveWeb?: string }
 ): FastifyInstance {
-  const { registry, sessions, accounts, git, todos, usage, usageTokens, push, agentAccounts } = services;
+  const { registry, sessions, validateModel, accounts, git, todos, usage, usageTokens, push, agentAccounts } = services;
 
   const app = Fastify({
     // Remote requests arrive via Caddy on loopback (reverse_proxy 127.0.0.1:47831),
@@ -1945,8 +1966,25 @@ function createServer(
   );
 
   app.post("/api/sessions", async (request, reply): Promise<SessionSummary | void> => {
+    const body = (request.body ?? {}) as CreateSessionRequest;
+    // Per-launch `model` is valid ONLY for the claudex/claudemix launchers; for
+    // every other refId it is a client error. For the two managed launchers the
+    // pick (or an omitted default) is resolved/validated by the injected seam,
+    // and the CONCRETE effective model — not the raw request field — is launched.
+    let effectiveModel: string | undefined;
+    if (body.refId === "claudex" || body.refId === "claudemix") {
+      const result = await validateModel(body.refId, body.model);
+      if (!result.ok) {
+        return reply.code(400).send({ code: "SESSION_UNAVAILABLE", message: result.error });
+      }
+      effectiveModel = result.effectiveModel;
+    } else if (body.model !== undefined) {
+      return reply
+        .code(400)
+        .send({ error: "model is only valid for claudex/claudemix", entryId: body.refId });
+    }
     try {
-      return await sessions.create((request.body ?? {}) as CreateSessionRequest);
+      return await sessions.create({ ...body, model: effectiveModel });
     } catch (error) {
       const message = error instanceof SessionError ? error.message : "Failed to create session.";
       return reply.code(400).send({ code: "SESSION_UNAVAILABLE", message });
