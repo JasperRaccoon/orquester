@@ -249,10 +249,8 @@ export class AgentAccountsService {
         if ((await readlink(linkPath).catch(() => null)) === target) return; // already shared
         await rm(linkPath, { force: true }).catch(() => undefined);
       } else if (st.isDirectory()) {
-        for (const child of await readdir(linkPath).catch(() => [] as string[])) {
-          await rename(join(linkPath, child), join(target, child)).catch(() => undefined); // skip collisions
-        }
-        if ((await readdir(linkPath).catch(() => ["x"])).length > 0) return; // couldn't fully merge — leave as-is
+        await this.mergeInto(linkPath, target);
+        if ((await readdir(linkPath).catch(() => ["x"])).length > 0) return; // un-mergeable leftovers — leave as-is
         await rm(linkPath, { recursive: true, force: true }).catch(() => undefined);
       } else {
         return; // a regular file where a dir is expected — leave it
@@ -305,6 +303,38 @@ export class AgentAccountsService {
       return;
     }
     await symlink(target, linkPath).catch((e) => this.opts.logger?.warn?.(`symlink ${linkPath} failed: ${String(e)}`));
+  }
+
+  /** Recursively move everything from `src` into `dst`: move whole entries the
+   *  store lacks, and for a directory that exists on both sides recurse so
+   *  differently-named session files inside a shared project dir all land in the
+   *  store. A same-named file (same session id ⇒ a duplicate) is left in the store
+   *  and its src copy dropped, so `src` ends up empty and can become the symlink. */
+  private async mergeInto(src: string, dst: string): Promise<void> {
+    let entries;
+    try {
+      entries = await readdir(src, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    await mkdir(dst, { recursive: true }).catch(() => undefined);
+    for (const e of entries) {
+      const s = join(src, e.name);
+      const d = join(dst, e.name);
+      let dStat: Awaited<ReturnType<typeof lstat>> | null = null;
+      try {
+        dStat = await lstat(d);
+      } catch {
+        /* absent in the store */
+      }
+      if (!dStat) {
+        await rename(s, d).catch(() => undefined); // move the whole entry
+      } else if (e.isDirectory() && dStat.isDirectory()) {
+        await this.mergeInto(s, d); // recurse into a colliding dir
+        await rm(s, { recursive: true, force: true }).catch(() => undefined); // drop the now-duplicate-only subtree
+      }
+      // else: file/type collision (duplicate) → keep the store's, drop nothing here
+    }
   }
 
   /** Like ensureSymlink, but for daemon-written shared config FILES (settings.json,

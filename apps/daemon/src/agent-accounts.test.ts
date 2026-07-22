@@ -308,3 +308,20 @@ test("resolveLaunchEnv symlinks an empty/absent Codex sessions/ to the shared st
   assert.equal((await lstat(join(home, "sessions"))).isSymbolicLink(), true);
   assert.equal((await lstat(join(home, "sessions", "s1"))).isDirectory(), true); // reads through to shared sessions
 });
+
+test("shared history recursively merges a COLLIDING project dir, then symlinks", async () => {
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const base = await mkdtemp(join(tmpdir(), "orq-histc-"));
+  await mkdir(join(base, ".claude", "projects", "P"), { recursive: true }); // system project P
+  await writeFile(join(base, ".claude", "projects", "P", "s1.jsonl"), "sys");
+  const svc = new AgentAccountsService({ indexFile: join(base, "idx.json"), accountsDir: join(base, "agent-accounts"), userhome: base, now: () => 1 });
+  await svc.init();
+  const acct = await svc.importAccount({ content: JSON.stringify({ claudeAiOauth: { accessToken: "t" } }), label: "L" });
+  const home = svc.homePath("claude", acct.id);
+  await mkdir(join(home, "projects", "P"), { recursive: true }); // SAME project name (collides)
+  await writeFile(join(home, "projects", "P", "s2.jsonl"), "acct"); // but a different session file
+  await svc.resolveLaunchEnv("claude", acct.id);
+  assert.equal((await lstat(join(home, "projects"))).isSymbolicLink(), true); // merged fully → symlinked
+  assert.equal(await readFile(join(base, ".claude", "projects", "P", "s1.jsonl"), "utf8"), "sys"); // system's kept
+  assert.equal(await readFile(join(base, ".claude", "projects", "P", "s2.jsonl"), "utf8"), "acct"); // account's merged in
+});
