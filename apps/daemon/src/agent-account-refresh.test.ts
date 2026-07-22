@@ -40,6 +40,15 @@ test("mergeClaudeRefreshedCreds preserves other fields", () => {
   assert.equal(merged.claudeAiOauth.subscriptionType, "max");
 });
 
+test("mergeClaudeRefreshedCreds converts expires_in to an absolute expiresAt (ms)", () => {
+  const merged = mergeClaudeRefreshedCreds(
+    { claudeAiOauth: { accessToken: "old", expiresAt: 1 } },
+    { access_token: "a", refresh_token: "r", expires_in: 3600 },
+    1_000
+  );
+  assert.equal(merged.claudeAiOauth.expiresAt, 1_000 + 3_600_000);
+});
+
 test("refreshClaudeToken maps a 200 body", async () => {
   const fake: typeof fetch = async () =>
     new Response(JSON.stringify({ access_token: "A", refresh_token: "R", expires_at: 9 }), { status: 200 });
@@ -57,6 +66,14 @@ test("refreshClaudeToken flags invalid_grant", async () => {
   const out = await refreshClaudeToken("r", fake);
   assert.equal(out.ok, false);
   if (!out.ok) assert.equal(out.invalidGrant, true);
+});
+
+test("refreshClaudeToken parses expires_in", async () => {
+  const fake: typeof fetch = async () =>
+    new Response(JSON.stringify({ access_token: "A", refresh_token: "R", expires_in: 3600 }), { status: 200 });
+  const out = await refreshClaudeToken("r", fake);
+  assert.equal(out.ok, true);
+  if (out.ok) assert.equal(out.expires_in, 3600);
 });
 
 test("refreshCodexToken maps a 200 body", async () => {

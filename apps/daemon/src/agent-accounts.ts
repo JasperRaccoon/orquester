@@ -22,6 +22,9 @@ import {
 } from "./agent-account-refresh.ts";
 
 export const CLAUDE_AUTH_ENV_UNSET = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"];
+// A stray host OPENAI_API_KEY makes codex bill the API instead of the managed
+// ChatGPT account; strip it so file-based (auth.json) sign-in wins.
+export const CODEX_AUTH_ENV_UNSET = ["OPENAI_API_KEY"];
 
 const CRED_FILENAME = { claude: ".credentials.json", codex: "auth.json" } as const;
 
@@ -175,7 +178,7 @@ export class AgentAccountsService {
     if (agent === "claude") {
       return { env: { CLAUDE_CONFIG_DIR: home }, unset: [...CLAUDE_AUTH_ENV_UNSET], accountId: id };
     }
-    return { env: { CODEX_HOME: home }, accountId: id };
+    return { env: { CODEX_HOME: home }, unset: [...CODEX_AUTH_ENV_UNSET], accountId: id };
   }
 
   async markNeedsReauth(id: string, value: boolean): Promise<void> {
@@ -240,7 +243,7 @@ export class AgentAccountsService {
         if (typeof refreshToken !== "string") return;
         const out = await refreshClaudeToken(refreshToken, this.opts.fetchImpl);
         if (out.ok) {
-          await writeFile(credsPath, JSON.stringify(mergeClaudeRefreshedCreds(creds, out)), { mode: 0o600 });
+          await writeFile(credsPath, JSON.stringify(mergeClaudeRefreshedCreds(creds, out, this.opts.now())), { mode: 0o600 });
           if (record.needsReauth) await this.markNeedsReauth(id, false);
         } else if (out.invalidGrant) {
           await this.markNeedsReauth(id, true);
@@ -265,6 +268,11 @@ export class AgentAccountsService {
    *  rarely-used account never strands an expiring token. Accounts with a live
    *  session are left to their own CLI (that's the single-use-token race gate). */
   async ensureFreshForUsage(agent: "claude" | "codex", id: string, live: Set<string>): Promise<void> {
+    // `live` is a snapshot: a session could start for this account during the
+    // refresh below and its CLI could rotate the same single-use refresh token.
+    // The window is sub-second; worst case one side gets invalid_grant and the
+    // account is flagged needsReauth (recoverable by re-import), not silent data
+    // loss. The intra-daemon `refreshing` guard covers the common case.
     if (live.has(id)) return;
     const record = this.getRecord(id);
     if (!record || record.agent !== agent) return;

@@ -341,7 +341,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   const usageTokens = new UsageTokensScanner({
     userhome: resolved.vars.userhome,
     cacheFile: usageTokensCacheFile(paths.baseDir),
-    now: () => Date.now()
+    now: () => Date.now(),
+    accountHomes: () =>
+      agentAccounts.list().accounts.map((a) => ({ agent: a.agent, home: agentAccounts.homePath(a.agent, a.id) }))
   });
   await usageTokens.init();
   {
@@ -1810,6 +1812,13 @@ function createServer(
 
   app.post("/api/agent-accounts", async (request, reply) => {
     const body = (request.body ?? {}) as ImportAgentAccountRequest;
+    // Reading an arbitrary host path bypasses the /api/fs sandbox, so allow it
+    // only over the local unix socket; remote clients must upload `content`.
+    if (options.mode === "remote" && body.from?.trim()) {
+      return reply.code(403).send({
+        error: "Importing from a host path is only allowed locally over the unix socket; upload the file content instead."
+      });
+    }
     try {
       return await agentAccounts.importAccount(body);
     } catch (error) {

@@ -84,7 +84,15 @@ function dayOf(iso: string | undefined, fallbackMs: number): string {
 export class UsageTokensScanner {
   private cache: UsageTokensResponse = { rows: [], asOf: new Date(0).toISOString() };
 
-  constructor(private readonly opts: { userhome: string; cacheFile: string; now: () => number }) {}
+  constructor(
+    private readonly opts: {
+      userhome: string;
+      cacheFile: string;
+      now: () => number;
+      /** Extra credential homes to scan (managed accounts) beyond the host home. */
+      accountHomes?: () => { agent: "claude" | "codex"; home: string }[];
+    }
+  ) {}
 
   async init(): Promise<void> {
     try {
@@ -108,85 +116,102 @@ export class UsageTokensScanner {
     await writeFile(this.opts.cacheFile, JSON.stringify(this.cache), { mode: 0o600 });
   }
 
+  /** Host home + every managed-account home for an agent (M3: managed-account
+   *  sessions write transcripts under their own CONFIG_DIR/CODEX_HOME). */
+  private homeDirs(agent: "claude" | "codex", envVar: string, subdir: string): string[] {
+    const host = join(process.env[envVar] || join(this.opts.userhome, agent === "claude" ? ".claude" : ".codex"), subdir);
+    const managed = (this.opts.accountHomes?.() ?? [])
+      .filter((a) => a.agent === agent)
+      .map((a) => join(a.home, subdir));
+    return [host, ...managed];
+  }
+
   private async scanClaude(raw: RawRow[]): Promise<void> {
-    const dir = join(process.env.CLAUDE_CONFIG_DIR || join(this.opts.userhome, ".claude"), "projects");
-    for (const file of await walkJsonl(dir)) {
-      let mtimeMs = this.opts.now();
-      try {
-        mtimeMs = (await stat(file)).mtimeMs;
-      } catch {
-        /* ignore */
-      }
-      let text: string;
-      try {
-        text = await readFile(file, "utf8");
-      } catch {
-        continue;
-      }
-      for (const line of text.split("\n")) {
-        if (!line.trim()) continue;
-        let obj: any;
+    for (const dir of this.homeDirs("claude", "CLAUDE_CONFIG_DIR", "projects")) {
+      for (const file of await walkJsonl(dir)) {
+        let mtimeMs = this.opts.now();
         try {
-          obj = JSON.parse(line);
+          mtimeMs = (await stat(file)).mtimeMs;
+        } catch {
+          /* ignore */
+        }
+        let text: string;
+        try {
+          text = await readFile(file, "utf8");
         } catch {
           continue;
         }
-        const u = obj?.message?.usage;
-        if (!u) continue;
-        raw.push({
-          agent: "claude",
-          model: obj?.message?.model ?? "unknown",
-          day: dayOf(obj?.timestamp, mtimeMs),
-          input: u.input_tokens ?? 0,
-          output: u.output_tokens ?? 0,
-          cacheRead: u.cache_read_input_tokens ?? 0,
-          cacheWrite: u.cache_creation_input_tokens ?? 0
-        });
+        for (const line of text.split("\n")) {
+          if (!line.trim()) continue;
+          let obj: any;
+          try {
+            obj = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          const u = obj?.message?.usage;
+          if (!u) continue;
+          raw.push({
+            agent: "claude",
+            model: obj?.message?.model ?? "unknown",
+            day: dayOf(obj?.timestamp, mtimeMs),
+            input: u.input_tokens ?? 0,
+            output: u.output_tokens ?? 0,
+            cacheRead: u.cache_read_input_tokens ?? 0,
+            cacheWrite: u.cache_creation_input_tokens ?? 0
+          });
+        }
       }
     }
   }
 
   private async scanCodex(raw: RawRow[]): Promise<void> {
-    const dir = join(process.env.CODEX_HOME || join(this.opts.userhome, ".codex"), "sessions");
-    for (const file of await walkJsonl(dir)) {
-      let mtimeMs = this.opts.now();
-      try {
-        mtimeMs = (await stat(file)).mtimeMs;
-      } catch {
-        /* ignore */
-      }
-      let text: string;
-      try {
-        text = await readFile(file, "utf8");
-      } catch {
-        continue;
-      }
-      let prevTotal = 0;
-      let model = "unknown";
-      for (const line of text.split("\n")) {
-        if (!line.trim()) continue;
-        let obj: any;
+    for (const dir of this.homeDirs("codex", "CODEX_HOME", "sessions")) {
+      for (const file of await walkJsonl(dir)) {
+        let mtimeMs = this.opts.now();
         try {
-          obj = JSON.parse(line);
+          mtimeMs = (await stat(file)).mtimeMs;
+        } catch {
+          /* ignore */
+        }
+        let text: string;
+        try {
+          text = await readFile(file, "utf8");
         } catch {
           continue;
         }
-        if (typeof obj?.model === "string") model = obj.model;
-        const tc = obj?.payload?.token_count ?? obj?.token_count;
-        if (!tc) continue;
-        const total = tc.total_tokens ?? 0;
-        const delta = Math.max(0, total - prevTotal);
-        prevTotal = total;
-        if (delta === 0) continue;
-        raw.push({
-          agent: "codex",
-          model,
-          day: dayOf(obj?.timestamp, mtimeMs),
-          input: tc.input_tokens ?? 0,
-          output: tc.output_tokens ?? 0,
-          cacheRead: tc.cached_input_tokens ?? tc.cache_read_input_tokens ?? 0,
-          cacheWrite: 0
-        });
+        let prevTotal = 0;
+        let model = "unknown";
+        for (const line of text.split("\n")) {
+          if (!line.trim()) continue;
+          let obj: any;
+          try {
+            obj = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          if (typeof obj?.model === "string") model = obj.model;
+          else if (typeof obj?.payload?.model === "string") model = obj.payload.model;
+          // Real rollout shape: { type:"event_msg", payload:{ type:"token_count",
+          // info:{ total_token_usage, last_token_usage } } }. `last_token_usage` is
+          // the per-turn delta; gate on the cumulative total advancing so repeated
+          // events aren't double-counted.
+          if (obj?.type !== "event_msg" || obj?.payload?.type !== "token_count") continue;
+          const info = obj.payload.info;
+          const total = info?.total_token_usage?.total_tokens ?? 0;
+          if (total <= prevTotal) continue;
+          prevTotal = total;
+          const last = info?.last_token_usage ?? {};
+          raw.push({
+            agent: "codex",
+            model,
+            day: dayOf(obj?.timestamp, mtimeMs),
+            input: last.input_tokens ?? 0,
+            output: last.output_tokens ?? 0,
+            cacheRead: last.cached_input_tokens ?? last.cache_read_input_tokens ?? 0,
+            cacheWrite: 0
+          });
+        }
       }
     }
   }

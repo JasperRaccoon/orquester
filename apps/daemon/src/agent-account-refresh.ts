@@ -29,12 +29,17 @@ export function selectAccountsToRefresh(
 
 export function mergeClaudeRefreshedCreds(
   existing: any,
-  refreshed: { access_token: string; refresh_token: string; expires_at?: number }
+  refreshed: { access_token: string; refresh_token: string; expires_at?: number; expires_in?: number },
+  now = Date.now()
 ): any {
   const oauth = { ...(existing?.claudeAiOauth ?? {}) };
   oauth.accessToken = refreshed.access_token;
   oauth.refreshToken = refreshed.refresh_token;
-  if (refreshed.expires_at !== undefined) oauth.expiresAt = refreshed.expires_at;
+  // OAuth token endpoints return `expires_in` (seconds from now); the on-disk
+  // credential stores an absolute `expiresAt` (ms). Convert so the refreshed
+  // token isn't treated as already-expired. Fall back to an absolute `expires_at`.
+  if (refreshed.expires_in !== undefined) oauth.expiresAt = now + refreshed.expires_in * 1000;
+  else if (refreshed.expires_at !== undefined) oauth.expiresAt = refreshed.expires_at;
   return { ...existing, claudeAiOauth: oauth };
 }
 
@@ -42,7 +47,8 @@ export async function refreshClaudeToken(
   refreshToken: string,
   fetchImpl: typeof fetch = fetch
 ): Promise<
-  { ok: true; access_token: string; refresh_token: string; expires_at?: number } | { ok: false; invalidGrant: boolean }
+  | { ok: true; access_token: string; refresh_token: string; expires_at?: number; expires_in?: number }
+  | { ok: false; invalidGrant: boolean }
 > {
   let res: Response;
   try {
@@ -63,9 +69,15 @@ export async function refreshClaudeToken(
     }
     return { ok: false, invalidGrant };
   }
-  const body = (await res.json()) as { access_token?: string; refresh_token?: string; expires_at?: number };
+  const body = (await res.json()) as { access_token?: string; refresh_token?: string; expires_at?: number; expires_in?: number };
   if (!body.access_token || !body.refresh_token) return { ok: false, invalidGrant: false };
-  return { ok: true, access_token: body.access_token, refresh_token: body.refresh_token, expires_at: body.expires_at };
+  return {
+    ok: true,
+    access_token: body.access_token,
+    refresh_token: body.refresh_token,
+    expires_at: body.expires_at,
+    expires_in: body.expires_in
+  };
 }
 
 export function mergeCodexRefreshedTokens(

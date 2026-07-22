@@ -173,3 +173,11 @@ test("ensureFreshForUsage skips a token that is not near expiry", async () => {
   await svc.ensureFreshForUsage("codex", acct.id, new Set());
   assert.equal(called, 0);
 });
+
+test("resolveLaunchEnv unsets OPENAI_API_KEY for a managed Codex session", async () => {
+  const { svc } = await makeService();
+  const acct = await svc.importAccount({ content: JSON.stringify({ tokens: { access_token: "a", id_token: jwt({ email: "z@z.com" }) } }) });
+  const env = await svc.resolveLaunchEnv("codex", acct.id);
+  assert.equal(env?.env.CODEX_HOME, svc.homePath("codex", acct.id));
+  assert.deepEqual(env?.unset, ["OPENAI_API_KEY"]);
+});
