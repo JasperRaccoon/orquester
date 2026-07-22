@@ -40,7 +40,7 @@ import {
   type PaneSizeKey,
   type PaneSizes
 } from "../lib/panel-sizes";
-import type { AppConfigAdapter } from "../lib/app-config";
+import { normalizeUsagePrefs, type AppConfigAdapter } from "../lib/app-config";
 import type { HttpClient } from "../lib/http-client";
 import type { Transporter } from "../lib/transporter";
 import { workspaceService } from "../services";
@@ -1074,7 +1074,7 @@ export const useAppStore = create<AppState>((set, get) => ({
             useTitlebar: config.useTitlebar ?? state.appConfig.useTitlebar,
             runInBackground: config.runInBackground ?? state.appConfig.runInBackground,
             confirmCloseSession: config.confirmCloseSession ?? state.appConfig.confirmCloseSession,
-            usage: config.usage ?? state.appConfig.usage
+            usage: normalizeUsagePrefs(config.usage, state.appConfig.usage)
           }
         }));
       }
