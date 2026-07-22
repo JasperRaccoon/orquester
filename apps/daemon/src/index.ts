@@ -2473,6 +2473,8 @@ function createServer(
           services.browsers.dispatchKey(id, msg.kind, msg.key, msg.code, msg.text, msg.modifiers, msg.keyCode);
         } else if (msg.t === "touch") {
           services.browsers.dispatchTouch(id, msg.kind, msg.points);
+        } else if (msg.t === "insertText" && typeof msg.text === "string") {
+          services.browsers.insertText(id, msg.text);
         } else if (msg.t === "nav") {
           await services.browsers.navigate(id, msg.action, msg.url).catch(() => undefined);
         } else if (msg.t === "viewport") {

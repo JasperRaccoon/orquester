@@ -160,8 +160,21 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
     hiddenInputRef.current?.focus({ preventScroll: true });
   };
 
+  const onPaste = (e: React.ClipboardEvent) => {
+    // The remote Chromium can't see this device's clipboard: forward the text
+    // and inject it via Input.insertText at the remote focus.
+    e.preventDefault();
+    const text = e.clipboardData.getData("text/plain");
+    if (text && send) send({ t: "insertText", id: browser.id, text });
+  };
+
   const onKey = (kind: "down" | "up") => (e: React.KeyboardEvent) => {
     if (!send) return;
+    // Don't forward (or preventDefault) the paste chord: preventDefault here
+    // would suppress the client's paste event, and forwarding Ctrl+V would
+    // make the remote Chromium paste ITS OWN (stale) clipboard on top of the
+    // insertText from onPaste.
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "v") return;
     e.preventDefault();
     send({
       t: "key", id: browser.id, kind, key: e.key, code: e.code,
@@ -261,7 +274,7 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
             ref={canvasRef}
             tabIndex={0}
             onPointerMove={onPointer("move")} onPointerDown={onPointer("down")} onPointerUp={onPointer("up")}
-            onWheel={onWheel} onKeyDown={onKey("down")} onKeyUp={onKey("up")}
+            onWheel={onWheel} onKeyDown={onKey("down")} onKeyUp={onKey("up")} onPaste={onPaste}
             onContextMenu={(e) => e.preventDefault()}
             className="mx-auto block h-full max-w-full object-contain outline-none"
             style={{
@@ -277,7 +290,7 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
           aria-hidden
           className="absolute -left-[9999px] top-0 h-px w-px opacity-0"
           autoCapitalize="off" autoCorrect="off"
-          onKeyDown={onKey("down")} onKeyUp={onKey("up")}
+          onKeyDown={onKey("down")} onKeyUp={onKey("up")} onPaste={onPaste}
           onChange={(e) => { e.target.value = ""; }}
         />
         {picks.length > 0 && (

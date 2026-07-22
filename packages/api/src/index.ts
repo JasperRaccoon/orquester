@@ -923,6 +923,13 @@ export type BrowserClientMessage =
       kind: "start" | "move" | "end";
       points: Array<{ x: number; y: number }>;
     }
+  | {
+      /** Client clipboard text → CDP Input.insertText into the remote focus
+       *  (the remote Chromium cannot see the viewer's clipboard). */
+      t: "insertText";
+      id: string;
+      text: string;
+    }
   | { t: "nav"; id: string; action: "goto" | "back" | "forward" | "reload"; url?: string }
   | { t: "viewport"; id: string; mode: BrowserViewportMode }
   | { t: "pick"; id: string; on: boolean }

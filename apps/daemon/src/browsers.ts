@@ -297,6 +297,14 @@ export class BrowserManager {
     }).catch(() => undefined);
   }
 
+  insertText(id: string, text: string): void {
+    const cdp = this.tabs.get(id)?.cdp;
+    if (!cdp || typeof text !== "string" || text.length === 0) return;
+    // Viewer-clipboard paste. Cap defensively — Input.insertText is synchronous
+    // in the renderer and a multi-MB paste would stall it.
+    void cdp.send("Input.insertText", { text: text.slice(0, 262_144) }).catch(() => undefined);
+  }
+
   dispatchTouch(id: string, kind: "start" | "move" | "end", points: Array<{ x: number; y: number }>): void {
     const cdp = this.tabs.get(id)?.cdp;
     if (!cdp) return;
