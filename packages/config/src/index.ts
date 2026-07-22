@@ -643,6 +643,75 @@ export function parseClientConfig(value: unknown): ClientConfig {
   return clientConfigSchema.parse(value);
 }
 
+// cliproxy — managed CLIProxyAPI service state, secrets, and on-disk layout.
+
+/** Allowed characters for a model name (env writer, routes, wrapper `--model`). */
+export const MODEL_NAME_RE = /^[A-Za-z0-9._/-]{1,128}$/;
+
+export const cliProxyStateSchema = z.object({
+  enabled: z.boolean().default(false),
+  version: z.string().nullable().default(null),
+  versionSha256: z.string().nullable().default(null),
+  goVersion: z.string().nullable().default(null),
+  goSha256: z.string().nullable().default(null),
+  defaultModel: z.string().default("gpt-5.6-sol"),
+  backgroundModel: z.string().default("gpt-5.6-sol"),
+  port: z.number().int().default(8317),
+  modelCatalog: z
+    .object({ models: z.array(z.string()), asOf: z.string() })
+    .nullable()
+    .default(null),
+  testedClaudeCliVersion: z.string().nullable().default(null)
+});
+
+export type CliProxyState = z.infer<typeof cliProxyStateSchema>;
+
+export function createDefaultCliProxyState(): CliProxyState {
+  return cliProxyStateSchema.parse({});
+}
+
+/** safeParse + default fallback: an unreadable state file must not brick the daemon. */
+export function parseCliProxyState(raw: unknown): CliProxyState {
+  const result = cliProxyStateSchema.safeParse(raw);
+  return result.success ? result.data : createDefaultCliProxyState();
+}
+
+export const cliProxySecretsSchema = z.object({
+  apiKey: z.string(),
+  managementSecret: z.string(),
+  openRouterKey: z.string().nullable()
+});
+
+export type CliProxySecrets = z.infer<typeof cliProxySecretsSchema>;
+
+/**
+ * Fail-closed: a schema failure returns the literal `"corrupt"` rather than a
+ * default. Callers MUST NOT regenerate on corruption (would orphan a live
+ * proxy keyed on the old secret).
+ */
+export function parseCliProxySecrets(raw: unknown): CliProxySecrets | "corrupt" {
+  const result = cliProxySecretsSchema.safeParse(raw);
+  return result.success ? result.data : "corrupt";
+}
+
+/** The managed CLIProxyAPI directory, given the daemon config directory. */
+export function cliproxyDir(daemonDir: string): string {
+  return joinPath(daemonDir, "cliproxy");
+}
+export function cliproxyStateFile(daemonDir: string): string {
+  return joinPath(cliproxyDir(daemonDir), "state.json");
+}
+export function cliproxySecretsFile(daemonDir: string): string {
+  return joinPath(cliproxyDir(daemonDir), "secrets.json");
+}
+export function cliproxyTokenFile(daemonDir: string): string {
+  return joinPath(cliproxyDir(daemonDir), "token");
+}
+/** Per-registry-entry managed Claude home (shared config seeded in). */
+export function cliproxyHomeDir(daemonDir: string, entryId: string): string {
+  return joinPath(cliproxyDir(daemonDir), "claude-home-" + entryId);
+}
+
 /** Reject names that would escape the workspaces directory. */
 export function isValidName(name: string | undefined): name is string {
   return (
