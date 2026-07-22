@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import type { AgentUsage } from "@orquester/api";
-import { barClass, formatAgo, formatCountdown, gaugeClass, minutesSince, pickDriver, usageLevel, windowMax } from "./usage-format";
+import { usagePrefsSchema } from "@orquester/config";
+import { barClass, formatAgo, formatCountdown, gaugeClass, minutesSince, missingUsageAgents, pickDriver, usageLevel, windowMax } from "./usage-format";
 
 const claude: AgentUsage = { id: "claude", available: true, stale: false, session: { percent: 10 }, weekly: { percent: 20 } };
 const codex: AgentUsage = { id: "codex", available: true, stale: false, session: { percent: 80 }, weekly: { percent: 5 } };
@@ -43,5 +44,16 @@ assert.equal(formatAgo("2026-07-07T07:59:40Z", t0), "just now");
 assert.equal(formatAgo("2026-07-07T07:46:00Z", t0), "14m ago");
 assert.equal(formatAgo("2026-07-07T06:00:00Z", t0), "2h ago");
 assert.equal(formatAgo(undefined, t0), "");
+
+// missingUsageAgents: default-enabled (absent from prefs.agents) but logged-out
+// agents still surface a hint; present or explicitly-disabled ones don't.
+const freshPrefs = usagePrefsSchema.parse({}); // enabled, agents: {}
+assert.deepEqual(missingUsageAgents(freshPrefs, []), ["claude", "codex"]);
+assert.deepEqual(missingUsageAgents(freshPrefs, ["claude"]), ["codex"]);
+const codexOff = usagePrefsSchema.parse({ agents: { codex: false } });
+assert.deepEqual(missingUsageAgents(codexOff, []), ["claude"]);
+// Master switch off → nothing is enabled, so nothing is "missing".
+const allOff = usagePrefsSchema.parse({ enabled: false });
+assert.deepEqual(missingUsageAgents(allOff, []), []);
 
 console.log("usage-format.check OK");

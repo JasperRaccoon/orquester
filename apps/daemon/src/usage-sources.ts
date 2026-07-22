@@ -168,9 +168,11 @@ export function createCodexSource(opts: {
     try {
       tokens = JSON.parse(await readFile(authFile, "utf8"))?.tokens;
     } catch {
-      return null; // not logged in
+      // auth.json missing/unreadable → still try the rollout logs (a session may
+      // have logged token_count events even without a usable oauth token here).
+      return scrapeFallback();
     }
-    if (!tokens?.access_token) return null;
+    if (!tokens?.access_token) return scrapeFallback();
 
     const signedIn = (): AgentUsage =>
       lastGood ? { ...lastGood, stale: true } : { id: "codex", available: true, stale: true, session: null, weekly: null };

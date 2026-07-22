@@ -5,7 +5,7 @@ import { usageAgentEnabled } from "@orquester/config";
 import { AdaptiveMenu } from "../ui";
 import { getRegistryIcon } from "../../icons";
 import { useAppStore } from "../../store/app";
-import { barClass, formatAgo, formatClock, formatCountdown, gaugeClass, minutesSince, pickDriver, windowMax } from "./usage-format";
+import { barClass, formatAgo, formatClock, formatCountdown, gaugeClass, minutesSince, missingUsageAgents, pickDriver, windowMax } from "./usage-format";
 import { REGISTRY } from "@orquester/registry";
 
 function labelForAgent(id: string): string {
@@ -113,11 +113,7 @@ export const UsageWidget: React.FC = () => {
 
   // Included agents that are enabled in prefs but aren't logged in (so not present
   // in the live snapshot) get a muted, actionable row in the panel.
-  const present = new Set(usage.agents.map((a) => a.id));
-  const missing = Object.entries(prefs.agents)
-    .filter(([, on]) => on)
-    .map(([id]) => id)
-    .filter((id) => !present.has(id));
+  const missing = missingUsageAgents(prefs, usage.agents.map((a) => a.id));
   // Honest "as of": the most recent successful reading among the shown agents.
   const freshestAsOf = agents
     .map((a) => a.asOf)

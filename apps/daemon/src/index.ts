@@ -55,6 +55,7 @@ import type {
   UpdateTodoRequest,
   UsageAccount,
   UsageResponse,
+  UsageWindow,
   WorkspaceSummary
 } from "@orquester/api";
 import { BROWSER_FRAME_TYPE_JPEG } from "@orquester/api";
@@ -197,6 +198,60 @@ export interface RunningDaemon {
   stop: () => Promise<void>;
 }
 
+/**
+ * Fold the System ("base") reading plus every managed account into a single
+ * head AgentUsage using the advertised "worst-account" strategy: for each of the
+ * session and weekly windows independently, surface the window with the highest
+ * utilization (percent used) across all sources — the account closest to its
+ * quota, i.e. the worst remaining. This is what the top-bar chip and the pooled
+ * bars render; the per-account breakdown stays in `accounts` untouched.
+ *
+ * `base` is the System account (null when the user runs managed accounts only).
+ * Windows may be null on any source (not signed in / no data yet) and are simply
+ * skipped. If nothing has any window, the head windows stay null.
+ */
+export function aggregateWorstAccountUsage(
+  agent: string,
+  base: AgentUsage | null,
+  accounts: UsageAccount[]
+): AgentUsage {
+  type Source = { stale: boolean; asOf?: string; session: UsageWindow | null; weekly: UsageWindow | null };
+  const sources: Source[] = [];
+  if (base) sources.push({ stale: base.stale, asOf: base.asOf, session: base.session, weekly: base.weekly });
+  for (const a of accounts) sources.push({ stale: a.stale, asOf: a.asOf, session: a.session, weekly: a.weekly });
+
+  // Pick the window with the highest percent for a given field, carrying the
+  // freshness/timestamp of the source it came from (an honest "as of").
+  const worst = (pick: (s: Source) => UsageWindow | null): { window: UsageWindow | null; stale: boolean; asOf?: string } => {
+    let best: { window: UsageWindow; stale: boolean; asOf?: string } | null = null;
+    for (const s of sources) {
+      const w = pick(s);
+      if (!w) continue;
+      if (best === null || w.percent > best.window.percent) {
+        best = { window: w, stale: s.stale, asOf: s.asOf };
+      }
+    }
+    return best ?? { window: null, stale: true, asOf: undefined };
+  };
+
+  const session = worst((s) => s.session);
+  const weekly = worst((s) => s.weekly);
+  const staleAccountCount = accounts.filter((a) => a.stale).length;
+
+  return {
+    id: base?.id ?? agent,
+    available: (base?.available ?? false) || accounts.some((a) => a.available),
+    // The chip greys out only when neither shown window is a fresh reading.
+    stale: session.stale && weekly.stale,
+    plan: base?.plan ?? accounts.find((a) => a.plan)?.plan,
+    session: session.window,
+    weekly: weekly.window,
+    asOf: session.asOf ?? weekly.asOf ?? base?.asOf,
+    accounts,
+    aggregate: { strategy: "worst-account", accountCount: accounts.length, staleAccountCount }
+  };
+}
+
 export async function startDaemon(options: StartDaemonOptions = {}): Promise<RunningDaemon> {
   const cwd = options.cwd ?? process.cwd();
   const env = options.env ?? process.env;
@@ -326,8 +381,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
         asOf: u?.asOf
       });
     }
-    const head = base ?? { id: agent, available: accounts.some((a) => a.available), stale: true, session: null, weekly: null };
-    return { ...head, accounts, aggregate: { strategy: "worst-account", accountCount: accounts.length } };
+    return aggregateWorstAccountUsage(agent, base, accounts);
   }
 
   const usage = new UsageService({

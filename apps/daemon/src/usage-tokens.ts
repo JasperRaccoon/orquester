@@ -12,12 +12,26 @@ export const MODEL_PRICING: Record<string, { input: number; output: number; cach
   "gpt-5.4-codex": { input: 1.25, output: 10, cacheRead: 0.125 }
 };
 
+// Transcripts record versioned model ids (e.g. "claude-opus-4-8-20260115") that
+// never equal the bare pricing keys. Resolve a raw id to a known key by exact
+// match, then by longest matching prefix (which also absorbs a trailing
+// `-YYYYMMDD` release-date suffix). Genuinely unknown models resolve to null.
+export function resolveModelKey(model: string): string | null {
+  if (MODEL_PRICING[model]) return model;
+  let best: string | null = null;
+  for (const key of Object.keys(MODEL_PRICING)) {
+    if (model.startsWith(key + "-") && (!best || key.length > best.length)) best = key;
+  }
+  return best;
+}
+
 export function estimateCostUsd(
   _agent: string,
   model: string,
   tok: { input: number; output: number; cacheRead: number; cacheWrite: number }
 ): number | null {
-  const p = MODEL_PRICING[model];
+  const key = resolveModelKey(model);
+  const p = key ? MODEL_PRICING[key] : undefined;
   if (!p) return null;
   const per = (n: number, price: number | undefined) => (price ? (n / 1_000_000) * price : 0);
   return per(tok.input, p.input) + per(tok.output, p.output) + per(tok.cacheRead, p.cacheRead) + per(tok.cacheWrite, p.cacheWrite);
@@ -31,6 +45,9 @@ interface RawRow {
   output: number;
   cacheRead: number;
   cacheWrite: number;
+  /** Stable identity for cross-file de-duplication (Claude resume/branch copies
+   *  prior turns, each still carrying message.usage). Undefined = always count. */
+  dedupId?: string;
 }
 
 export function aggregateRows(raw: RawRow[]): UsageTokenRow[] {
@@ -81,8 +98,108 @@ function dayOf(iso: string | undefined, fallbackMs: number): string {
   return Number.isNaN(d.getTime()) ? new Date(fallbackMs).toISOString().slice(0, 10) : d.toISOString().slice(0, 10);
 }
 
+/** Parse a Claude `projects/**.jsonl` transcript into per-turn rows. Each row
+ *  carries a dedupId (message.id + requestId, the fields ccusage hashes) so
+ *  turns copied into resumed/branched transcripts are counted only once. */
+function parseClaudeFile(text: string, mtimeMs: number): RawRow[] {
+  const rows: RawRow[] = [];
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    let obj: any;
+    try {
+      obj = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const u = obj?.message?.usage;
+    if (!u) continue;
+    const messageId = obj?.message?.id;
+    const requestId = obj?.requestId;
+    const dedupId =
+      typeof messageId === "string" && typeof requestId === "string" ? `${messageId}:${requestId}` : undefined;
+    rows.push({
+      agent: "claude",
+      model: obj?.message?.model ?? "unknown",
+      day: dayOf(obj?.timestamp, mtimeMs),
+      input: u.input_tokens ?? 0,
+      output: u.output_tokens ?? 0,
+      cacheRead: u.cache_read_input_tokens ?? 0,
+      cacheWrite: u.cache_creation_input_tokens ?? 0,
+      dedupId
+    });
+  }
+  return rows;
+}
+
+/** Codex rollout files carry the model on `turn_context`/`session_meta` records,
+ *  not on the `token_count` events. Read it from the real key paths, keeping the
+ *  older bare keys as fallback. */
+function extractCodexModel(obj: any): string | undefined {
+  const p = obj?.payload;
+  const candidates = [
+    obj?.model,
+    p?.model,
+    p?.turn_context?.model,
+    p?.thread_settings?.model,
+    p?.info?.model,
+    p?.collaboration_mode?.settings?.model
+  ];
+  for (const c of candidates) if (typeof c === "string") return c;
+  return undefined;
+}
+
+/** Parse a Codex `sessions/**.jsonl` rollout into per-turn rows. `last_token_usage`
+ *  is the per-turn delta; gate on the cumulative total advancing so repeated
+ *  events aren't double-counted. `input_tokens` already INCLUDES the cached
+ *  tokens, so subtract them and record the non-cached remainder as `input`
+ *  (cached goes to `cacheRead` and is billed at the cheaper cache-read rate). */
+function parseCodexFile(text: string, mtimeMs: number): RawRow[] {
+  const rows: RawRow[] = [];
+  let prevTotal = 0;
+  let model = "unknown";
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    let obj: any;
+    try {
+      obj = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const m = extractCodexModel(obj);
+    if (m) model = m;
+    if (obj?.type !== "event_msg" || obj?.payload?.type !== "token_count") continue;
+    const info = obj.payload.info;
+    const total = info?.total_token_usage?.total_tokens ?? 0;
+    if (total <= prevTotal) continue;
+    prevTotal = total;
+    const last = info?.last_token_usage ?? {};
+    const cached = last.cached_input_tokens ?? last.cache_read_input_tokens ?? 0;
+    rows.push({
+      agent: "codex",
+      model,
+      day: dayOf(obj?.timestamp, mtimeMs),
+      input: Math.max(0, (last.input_tokens ?? 0) - cached),
+      output: last.output_tokens ?? 0,
+      cacheRead: cached,
+      cacheWrite: 0
+    });
+  }
+  return rows;
+}
+
+interface FileEntry {
+  mtimeMs: number;
+  size: number;
+  rows: RawRow[];
+}
+
 export class UsageTokensScanner {
   private cache: UsageTokensResponse = { rows: [], asOf: new Date(0).toISOString() };
+  /** Per-file parse cache keyed by absolute path. Recompute only re-reads files
+   *  whose mtime/size changed or that are new, so cost scales with new bytes,
+   *  not total history. Cross-file dedup is resolved at assembly time (below),
+   *  so partial rescans stay correct. */
+  private fileCache = new Map<string, FileEntry>();
 
   constructor(
     private readonly opts: {
@@ -108,9 +225,55 @@ export class UsageTokensScanner {
   }
 
   async recompute(): Promise<void> {
+    const files: { path: string; agent: "claude" | "codex" }[] = [];
+    for (const dir of this.homeDirs("claude", "CLAUDE_CONFIG_DIR", "projects"))
+      for (const f of await walkJsonl(dir)) files.push({ path: f, agent: "claude" });
+    for (const dir of this.homeDirs("codex", "CODEX_HOME", "sessions"))
+      for (const f of await walkJsonl(dir)) files.push({ path: f, agent: "codex" });
+
+    // Drop cache entries for files that no longer exist.
+    const present = new Set(files.map((f) => f.path));
+    for (const path of [...this.fileCache.keys()]) if (!present.has(path)) this.fileCache.delete(path);
+
+    // Re-read only new/changed files (mtime or size differs from the cache).
+    const done = new Set<string>();
+    for (const { path, agent } of files) {
+      if (done.has(path)) continue; // a path can appear once per home dir; parse it once
+      done.add(path);
+      let st;
+      try {
+        st = await stat(path);
+      } catch {
+        this.fileCache.delete(path);
+        continue;
+      }
+      const cached = this.fileCache.get(path);
+      if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) continue;
+      let text: string;
+      try {
+        text = await readFile(path, "utf8");
+      } catch {
+        this.fileCache.delete(path);
+        continue;
+      }
+      const rows = agent === "claude" ? parseClaudeFile(text, st.mtimeMs) : parseCodexFile(text, st.mtimeMs);
+      this.fileCache.set(path, { mtimeMs: st.mtimeMs, size: st.size, rows });
+    }
+
+    // Assemble with deterministic cross-file dedup (first file wins by sorted
+    // path) so a partial rescan can't double-count a shared usage identity.
     const raw: RawRow[] = [];
-    await this.scanClaude(raw);
-    await this.scanCodex(raw);
+    const seen = new Set<string>();
+    for (const path of [...this.fileCache.keys()].sort()) {
+      for (const r of this.fileCache.get(path)!.rows) {
+        if (r.dedupId !== undefined) {
+          if (seen.has(r.dedupId)) continue;
+          seen.add(r.dedupId);
+        }
+        raw.push(r);
+      }
+    }
+
     this.cache = { rows: aggregateRows(raw), asOf: new Date(this.opts.now()).toISOString() };
     await mkdir(dirname(this.opts.cacheFile), { recursive: true });
     await writeFile(this.opts.cacheFile, JSON.stringify(this.cache), { mode: 0o600 });
@@ -124,95 +287,5 @@ export class UsageTokensScanner {
       .filter((a) => a.agent === agent)
       .map((a) => join(a.home, subdir));
     return [host, ...managed];
-  }
-
-  private async scanClaude(raw: RawRow[]): Promise<void> {
-    for (const dir of this.homeDirs("claude", "CLAUDE_CONFIG_DIR", "projects")) {
-      for (const file of await walkJsonl(dir)) {
-        let mtimeMs = this.opts.now();
-        try {
-          mtimeMs = (await stat(file)).mtimeMs;
-        } catch {
-          /* ignore */
-        }
-        let text: string;
-        try {
-          text = await readFile(file, "utf8");
-        } catch {
-          continue;
-        }
-        for (const line of text.split("\n")) {
-          if (!line.trim()) continue;
-          let obj: any;
-          try {
-            obj = JSON.parse(line);
-          } catch {
-            continue;
-          }
-          const u = obj?.message?.usage;
-          if (!u) continue;
-          raw.push({
-            agent: "claude",
-            model: obj?.message?.model ?? "unknown",
-            day: dayOf(obj?.timestamp, mtimeMs),
-            input: u.input_tokens ?? 0,
-            output: u.output_tokens ?? 0,
-            cacheRead: u.cache_read_input_tokens ?? 0,
-            cacheWrite: u.cache_creation_input_tokens ?? 0
-          });
-        }
-      }
-    }
-  }
-
-  private async scanCodex(raw: RawRow[]): Promise<void> {
-    for (const dir of this.homeDirs("codex", "CODEX_HOME", "sessions")) {
-      for (const file of await walkJsonl(dir)) {
-        let mtimeMs = this.opts.now();
-        try {
-          mtimeMs = (await stat(file)).mtimeMs;
-        } catch {
-          /* ignore */
-        }
-        let text: string;
-        try {
-          text = await readFile(file, "utf8");
-        } catch {
-          continue;
-        }
-        let prevTotal = 0;
-        let model = "unknown";
-        for (const line of text.split("\n")) {
-          if (!line.trim()) continue;
-          let obj: any;
-          try {
-            obj = JSON.parse(line);
-          } catch {
-            continue;
-          }
-          if (typeof obj?.model === "string") model = obj.model;
-          else if (typeof obj?.payload?.model === "string") model = obj.payload.model;
-          // Real rollout shape: { type:"event_msg", payload:{ type:"token_count",
-          // info:{ total_token_usage, last_token_usage } } }. `last_token_usage` is
-          // the per-turn delta; gate on the cumulative total advancing so repeated
-          // events aren't double-counted.
-          if (obj?.type !== "event_msg" || obj?.payload?.type !== "token_count") continue;
-          const info = obj.payload.info;
-          const total = info?.total_token_usage?.total_tokens ?? 0;
-          if (total <= prevTotal) continue;
-          prevTotal = total;
-          const last = info?.last_token_usage ?? {};
-          raw.push({
-            agent: "codex",
-            model,
-            day: dayOf(obj?.timestamp, mtimeMs),
-            input: last.input_tokens ?? 0,
-            output: last.output_tokens ?? 0,
-            cacheRead: last.cached_input_tokens ?? last.cache_read_input_tokens ?? 0,
-            cacheWrite: 0
-          });
-        }
-      }
-    }
   }
 }

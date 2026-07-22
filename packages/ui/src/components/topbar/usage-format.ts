@@ -1,7 +1,22 @@
 import type { AgentUsage } from "@orquester/api";
-import type { UsagePrefs as _Prefs } from "@orquester/config";
+import { usageAgentEnabled, type UsagePrefs as _Prefs } from "@orquester/config";
 
 type Chip = _Prefs["chip"];
+
+/** The agents the daemon can report usage for (source of truth for defaults). */
+export const USAGE_AGENT_IDS = ["claude", "codex"] as const;
+
+/**
+ * Enabled usage agents that aren't in the live snapshot (not logged in), so the
+ * panel can show an actionable "run <id> login" hint. Derives the candidate set
+ * from every known usage agent filtered by `usageAgentEnabled` — the same source
+ * of truth that decides an agent is enabled — so default-enabled agents (absent
+ * from `prefs.agents`) still surface their hint.
+ */
+export function missingUsageAgents(prefs: _Prefs, presentIds: Iterable<string>): string[] {
+  const present = new Set(presentIds);
+  return USAGE_AGENT_IDS.filter((id) => usageAgentEnabled(prefs, id) && !present.has(id));
+}
 
 export function windowMax(a: AgentUsage): number {
   return Math.max(a.session?.percent ?? 0, a.weekly?.percent ?? 0);

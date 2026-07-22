@@ -411,11 +411,30 @@ export function todoRefOf(ctx: TabContext): { scope: TodoScope; refKey: string }
     : { scope: "workspace", refKey: ctx.key };
 }
 
+// Monotonic sequence bumped on every "session.activity" event. `loadSessions`
+// snapshots the counter before its (awaited) fetch, then refuses to let the
+// snapshot overwrite any activity entry an event freshened *while the fetch was
+// in flight* — otherwise a "needs your input" dot that arrived mid-fetch would
+// revert to the older listSessions state until the next event. Module-level (the
+// store is a singleton) and read at set-time, so overlapping loadSessions calls
+// each compare against their own start marker and race safely.
+let activityEventSeq = 0;
+const activityEventSeqById = new Map<string, number>();
+
+function bumpActivityEventSeq(id: string): number {
+  activityEventSeq += 1;
+  activityEventSeqById.set(id, activityEventSeq);
+  return activityEventSeq;
+}
+
 /** Drop a session's activity entry (returns the same ref when absent → no-op set). */
 function dropActivity(
   activityById: Record<string, SessionActivity>,
   id: string
 ): Record<string, SessionActivity> {
+  // A session id is a UUID (never reused), so a leftover seq entry can't cause a
+  // false "keep" later; we prune here only to bound the map's growth.
+  activityEventSeqById.delete(id);
   if (!(id in activityById)) {
     return activityById;
   }
@@ -1392,17 +1411,26 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (!api) {
       return;
     }
+    // Capture the activity-event counter *before* the awaited fetch: any
+    // "session.activity" event applied during the await is fresher than this
+    // snapshot and must survive it.
+    const fetchStartSeq = activityEventSeq;
     try {
       const sessions = await api.listSessions();
       // REBUILD the activity map solely from the snapshots the daemon ships on
       // running sessions (dots correct on first paint / reload). Never copy the
-      // old map: a session that exited while we were disconnected arrives
-      // without `activity`, and a carried-over entry would show it working or
-      // waiting forever.
-      set(() => {
+      // old map wholesale: a session that exited while we were disconnected
+      // arrives without `activity`, and a carried-over entry would show it
+      // working or waiting forever. But for a session an event freshened *during*
+      // this fetch, keep the current (event-driven) entry instead of the older
+      // snapshot value.
+      set((state) => {
         const activityById: Record<string, SessionActivity> = {};
         for (const s of sessions) {
-          if (s.activity) {
+          const eventSeq = activityEventSeqById.get(s.id) ?? 0;
+          if (eventSeq > fetchStartSeq && s.id in state.activityById) {
+            activityById[s.id] = state.activityById[s.id];
+          } else if (s.activity) {
             activityById[s.id] = s.activity;
           }
         }
@@ -1896,6 +1924,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     if (event.type === "session.activity") {
       const { id, activity } = event.payload as SessionActivityEvent;
+      // Mark this entry as event-freshened so an in-flight loadSessions snapshot
+      // can't revert it (see activityEventSeq).
+      bumpActivityEventSeq(id);
       set((state) => ({ activityById: { ...state.activityById, [id]: activity } }));
       return;
     }

@@ -109,6 +109,28 @@ async function codexTests() {
   // API-key mode → null (no subscription quota to read).
   await writeFile(join(codex, "auth.json"), JSON.stringify({ OPENAI_API_KEY: "sk-x" }));
   assert.equal(await createCodexSource({ userhome: home, now })(), null, "api-key mode → null");
+
+  // REGRESSION (F8): auth.json missing (or no access_token) must NOT return null —
+  // usage rendered purely from rollout token_count events must still fall back to the
+  // log-scrape reading, mirroring the old scan-rollouts-when-unauthenticated behavior.
+  const noAuth = await mkdtemp(join(tmpdir(), "usage-codex-noauth-"));
+  const noAuthCodex = join(noAuth, ".codex");
+  const noAuthDay = join(noAuthCodex, "sessions", "2026", "07", "07");
+  await mkdir(noAuthDay, { recursive: true });
+  const noAuthRollout = join(noAuthDay, "rollout-2026-07-07T06-00-00-cccc.jsonl");
+  await writeFile(noAuthRollout, JSON.stringify(tc) + "\n");
+  await utimes(noAuthRollout, new Date(NOW - 3_600_000), new Date(NOW - 3_600_000));
+  // No auth.json at all → still scrape the rollout log for the reading.
+  const scraped = await createCodexSource({ userhome: noAuth, now, fetchImpl: async () => jsonRes(500, {}) })();
+  assert.ok(scraped, "missing auth.json must fall back to rollout log scrape, not null");
+  assert.equal(scraped.available, true);
+  assert.equal(scraped.session?.percent, 3);
+  assert.equal(scraped.weekly?.percent, 37);
+  // auth.json present but without tokens.access_token → same log-scrape fallback.
+  await writeFile(join(noAuthCodex, "auth.json"), JSON.stringify({ tokens: {} }));
+  const scraped2 = await createCodexSource({ userhome: noAuth, now, fetchImpl: async () => jsonRes(500, {}) })();
+  assert.ok(scraped2, "auth.json without access_token must fall back to rollout log scrape, not null");
+  assert.equal(scraped2.session?.percent, 3);
 }
 
 await claudeTests();

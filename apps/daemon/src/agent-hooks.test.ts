@@ -129,6 +129,43 @@ test("codex install preserves metadata, appends after user groups, and writes 06
   }
 });
 
+test("codex trust block is keyed to the managed group's actual index when it is not last", async () => {
+  const s = await scratch();
+  try {
+    const daemonDir = join(s, "d");
+    const codexHome = join(s, "h", ".codex");
+    await mkdir(codexHome, { recursive: true });
+    // Pre-existing hooks.json where the managed group sits BEFORE a user group
+    // and already matches what the installer would write (so the unchanged/else
+    // branch preserves this order). Trust must key on index 0, not length-1.
+    const scriptPath = join(daemonDir, "hooks", "agent-hook.sh");
+    const managed = {
+      hooks: [{ type: "command", command: `'${scriptPath}' codex Stop`, timeout: 10 }]
+    };
+    const user = { hooks: [{ type: "command", command: "/usr/bin/mine" }] };
+    const hooksJsonPath = join(codexHome, "hooks.json");
+    await writeFile(hooksJsonPath, JSON.stringify({ hooks: { Stop: [managed, user] } }));
+
+    await new AgentHooks(daemonDir, join(s, "h"), silent).ensureForEntry("codex", {});
+
+    // Order preserved: managed still first.
+    const doc = JSON.parse(await readFile(hooksJsonPath, "utf8"));
+    assert.ok(JSON.stringify(doc.hooks.Stop[0]).includes("agent-hook.sh"), "managed group stays at index 0");
+
+    const toml = await readFile(join(codexHome, "config.toml"), "utf8");
+    assert.ok(
+      toml.includes(`[hooks.state."${hooksJsonPath}:stop:0:0"]`),
+      "trust block keyed to the managed group's actual index (0), not length-1"
+    );
+    assert.ok(
+      !toml.includes(`[hooks.state."${hooksJsonPath}:stop:1:0"]`),
+      "trust block is NOT keyed to the user group's index (1)"
+    );
+  } finally {
+    await rm(s, { recursive: true, force: true });
+  }
+});
+
 test("codex install refuses a multiline-string config.toml BEFORE touching hooks.json", async () => {
   const s = await scratch();
   try {

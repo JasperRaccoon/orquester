@@ -163,7 +163,7 @@ test("wait_for_attention tool is registered and delegates to TerminalControl", a
     const list = await postMcp(app, { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
     const tool = list.result.tools.find((t: { name: string }) => t.name === "wait_for_attention");
     assert.ok(tool, "wait_for_attention should be listed");
-    assert.match(tool.description, /attention:true/, "description should include attention semantics");
+    assert.match(tool.description, /attention is WHY the tab wants you/, "description should include attention semantics");
     assert.match(tool.description, /settled/, "description should include the terminal prompt hint");
 
     const result = await postMcp(app, {

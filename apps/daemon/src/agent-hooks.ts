@@ -369,10 +369,16 @@ export class AgentHooks {
       } else {
         hooksDoc.hooks[event.name] = groups;
       }
+      // Key the trust block to the managed group's ACTUAL position in the final
+      // array. The `changed` branch appends managed (last), but the else branch
+      // preserves the user's original order, where the managed group can sit
+      // anywhere — a length-1 assumption would trust the wrong index and Codex
+      // would silently drop the hook.
+      const finalGroups = hooksDoc.hooks[event.name] as unknown[];
       trustTargets.push({
         label: event.label,
         matcher: event.matcher,
-        groupIndex: (hooksDoc.hooks[event.name] as unknown[]).length - 1,
+        groupIndex: finalGroups.findIndex(isManagedGroup),
         command: (managed.hooks[0] as { command: string }).command
       });
     }
