@@ -4,10 +4,16 @@ import type { UsageTokenRow, UsageTokensResponse } from "@orquester/api";
 
 // USD per 1,000,000 tokens. Update when models ship. Subscription users don't
 // pay per token — this is an "API-equivalent" estimate, labeled as such.
-export const MODEL_PRICING: Record<string, { input: number; output: number; cacheRead?: number; cacheWrite?: number }> = {
-  "claude-opus-4-8": { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
-  "claude-sonnet-5": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
-  "claude-haiku-4-5": { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 },
+// cacheWrite5m/1h: prompt-cache writes bill 1.25x/2x input depending on TTL.
+export const MODEL_PRICING: Record<
+  string,
+  { input: number; output: number; cacheRead?: number; cacheWrite5m?: number; cacheWrite1h?: number }
+> = {
+  "claude-fable-5": { input: 10, output: 50, cacheRead: 1, cacheWrite5m: 12.5, cacheWrite1h: 20 },
+  "claude-opus-4-8": { input: 5, output: 25, cacheRead: 0.5, cacheWrite5m: 6.25, cacheWrite1h: 10 },
+  "claude-sonnet-5": { input: 3, output: 15, cacheRead: 0.3, cacheWrite5m: 3.75, cacheWrite1h: 6 },
+  "claude-haiku-4-5": { input: 1, output: 5, cacheRead: 0.1, cacheWrite5m: 1.25, cacheWrite1h: 2 },
+  "gpt-5.6-sol": { input: 5, output: 30, cacheRead: 0.5 },
   "gpt-5.1-codex": { input: 1.25, output: 10, cacheRead: 0.125 },
   "gpt-5.4-codex": { input: 1.25, output: 10, cacheRead: 0.125 }
 };
@@ -25,16 +31,31 @@ export function resolveModelKey(model: string): string | null {
   return best;
 }
 
-export function estimateCostUsd(
-  _agent: string,
+export function estimateCostParts(
   model: string,
-  tok: { input: number; output: number; cacheRead: number; cacheWrite: number }
-): number | null {
+  tok: { input: number; output: number; cacheRead: number; cacheWrite: number; cacheWrite1h: number }
+): { input: number; output: number; cache: number } | null {
   const key = resolveModelKey(model);
   const p = key ? MODEL_PRICING[key] : undefined;
   if (!p) return null;
   const per = (n: number, price: number | undefined) => (price ? (n / 1_000_000) * price : 0);
-  return per(tok.input, p.input) + per(tok.output, p.output) + per(tok.cacheRead, p.cacheRead) + per(tok.cacheWrite, p.cacheWrite);
+  // cacheWrite is the total; cacheWrite1h is the (possibly zero) 1h-TTL subset.
+  const write1h = Math.min(tok.cacheWrite, tok.cacheWrite1h);
+  const write5m = tok.cacheWrite - write1h;
+  return {
+    input: per(tok.input, p.input),
+    output: per(tok.output, p.output),
+    cache: per(tok.cacheRead, p.cacheRead) + per(write5m, p.cacheWrite5m) + per(write1h, p.cacheWrite1h ?? p.cacheWrite5m)
+  };
+}
+
+export function estimateCostUsd(
+  _agent: string,
+  model: string,
+  tok: { input: number; output: number; cacheRead: number; cacheWrite: number; cacheWrite1h: number }
+): number | null {
+  const parts = estimateCostParts(model, tok);
+  return parts ? parts.input + parts.output + parts.cache : null;
 }
 
 interface RawRow {
@@ -45,6 +66,8 @@ interface RawRow {
   output: number;
   cacheRead: number;
   cacheWrite: number;
+  /** 1h-TTL subset of {@link cacheWrite} (bills at 2x input instead of 1.25x). */
+  cacheWrite1h: number;
   /** Stable identity for cross-file de-duplication (Claude resume/branch copies
    *  prior turns, each still carrying message.usage). Undefined = always count. */
   dedupId?: string;
@@ -56,20 +79,24 @@ export function aggregateRows(raw: RawRow[]): UsageTokenRow[] {
     const key = `${r.agent}|${r.model}|${r.day}`;
     const cur =
       byKey.get(key) ??
-      { agent: r.agent, model: r.model, day: r.day, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: null, costSource: "api_equivalent" as const };
+      { agent: r.agent, model: r.model, day: r.day, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, costUsd: null, costSource: "api_equivalent" as const };
     cur.inputTokens += r.input;
     cur.outputTokens += r.output;
     cur.cacheReadTokens += r.cacheRead;
     cur.cacheWriteTokens += r.cacheWrite;
+    cur.cacheWrite1hTokens = (cur.cacheWrite1hTokens ?? 0) + r.cacheWrite1h;
     byKey.set(key, cur);
   }
   for (const row of byKey.values()) {
-    row.costUsd = estimateCostUsd(row.agent, row.model, {
+    const parts = estimateCostParts(row.model, {
       input: row.inputTokens,
       output: row.outputTokens,
       cacheRead: row.cacheReadTokens,
-      cacheWrite: row.cacheWriteTokens
+      cacheWrite: row.cacheWriteTokens,
+      cacheWrite1h: row.cacheWrite1hTokens ?? 0
     });
+    row.costBreakdown = parts;
+    row.costUsd = parts ? parts.input + parts.output + parts.cache : null;
   }
   return [...byKey.values()].sort((a, b) => (a.day < b.day ? 1 : a.day > b.day ? -1 : a.model.localeCompare(b.model)));
 }
@@ -113,6 +140,13 @@ function parseClaudeFile(text: string, mtimeMs: number): RawRow[] {
     }
     const u = obj?.message?.usage;
     if (!u) continue;
+    const input = u.input_tokens ?? 0;
+    const output = u.output_tokens ?? 0;
+    const cacheRead = u.cache_read_input_tokens ?? 0;
+    const cacheWrite = u.cache_creation_input_tokens ?? 0;
+    // Zero-usage entries (e.g. the "<synthetic>" model on error turns) would
+    // only render as noise rows.
+    if (input + output + cacheRead + cacheWrite === 0) continue;
     const messageId = obj?.message?.id;
     const requestId = obj?.requestId;
     const dedupId =
@@ -121,10 +155,11 @@ function parseClaudeFile(text: string, mtimeMs: number): RawRow[] {
       agent: "claude",
       model: obj?.message?.model ?? "unknown",
       day: dayOf(obj?.timestamp, mtimeMs),
-      input: u.input_tokens ?? 0,
-      output: u.output_tokens ?? 0,
-      cacheRead: u.cache_read_input_tokens ?? 0,
-      cacheWrite: u.cache_creation_input_tokens ?? 0,
+      input,
+      output,
+      cacheRead,
+      cacheWrite,
+      cacheWrite1h: u.cache_creation?.ephemeral_1h_input_tokens ?? 0,
       dedupId
     });
   }
@@ -188,7 +223,8 @@ function parseCodexFile(text: string, mtimeMs: number, state: CodexParseState): 
       input: Math.max(0, (last.input_tokens ?? 0) - cached),
       output: last.output_tokens ?? 0,
       cacheRead: cached,
-      cacheWrite: 0
+      cacheWrite: 0,
+      cacheWrite1h: 0
     });
   }
   return rows;

@@ -6,13 +6,24 @@ import { join } from "node:path";
 import { estimateCostUsd, resolveModelKey, aggregateRows, UsageTokensScanner } from "./usage-tokens.ts";
 
 test("estimateCostUsd multiplies by the per-million price table", () => {
-  // claude-opus-4-8: input 5, output 25, cacheRead 0.5, cacheWrite 6.25 per 1M
-  const cost = estimateCostUsd("claude", "claude-opus-4-8", { input: 1_000_000, output: 1_000_000, cacheRead: 0, cacheWrite: 0 });
+  // claude-opus-4-8: input 5, output 25, cacheRead 0.5, cacheWrite5m 6.25 per 1M
+  const cost = estimateCostUsd("claude", "claude-opus-4-8", { input: 1_000_000, output: 1_000_000, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 });
   assert.equal(cost, 30);
 });
 
+test("1h-TTL cache writes bill at 2x input, 5m at 1.25x", () => {
+  // 1M total writes, 400k of them 1h: 600k*6.25 + 400k*10 = 3.75 + 4.00
+  const cost = estimateCostUsd("claude", "claude-opus-4-8", { input: 0, output: 0, cacheRead: 0, cacheWrite: 1_000_000, cacheWrite1h: 400_000 });
+  assert.equal(cost, 7.75);
+});
+
+test("fable and gpt-5.6-sol are priced", () => {
+  assert.equal(estimateCostUsd("claude", "claude-fable-5", { input: 1_000_000, output: 1_000_000, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 }), 60);
+  assert.equal(estimateCostUsd("codex", "gpt-5.6-sol", { input: 1_000_000, output: 1_000_000, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 }), 35);
+});
+
 test("unknown model yields null cost", () => {
-  assert.equal(estimateCostUsd("claude", "made-up-model", { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }), null);
+  assert.equal(estimateCostUsd("claude", "made-up-model", { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 }), null);
 });
 
 test("versioned model ids resolve to the bare pricing key (F1)", () => {
@@ -23,14 +34,14 @@ test("versioned model ids resolve to the bare pricing key (F1)", () => {
   assert.equal(resolveModelKey("claude-opus-4-8"), "claude-opus-4-8");
   assert.equal(resolveModelKey("mystery-model"), null);
   // A versioned id must yield a real cost, not null.
-  const cost = estimateCostUsd("claude", "claude-opus-4-8-20260115", { input: 1_000_000, output: 0, cacheRead: 0, cacheWrite: 0 });
+  const cost = estimateCostUsd("claude", "claude-opus-4-8-20260115", { input: 1_000_000, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 });
   assert.equal(cost, 5);
 });
 
 test("aggregateRows groups by agent/model/day and sums tokens", () => {
   const rows = aggregateRows([
-    { agent: "claude", model: "claude-opus-4-8", day: "2026-07-07", input: 10, output: 2, cacheRead: 1, cacheWrite: 0 },
-    { agent: "claude", model: "claude-opus-4-8", day: "2026-07-07", input: 5, output: 3, cacheRead: 0, cacheWrite: 0 }
+    { agent: "claude", model: "claude-opus-4-8", day: "2026-07-07", input: 10, output: 2, cacheRead: 1, cacheWrite: 0, cacheWrite1h: 0 },
+    { agent: "claude", model: "claude-opus-4-8", day: "2026-07-07", input: 5, output: 3, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 }
   ]);
   assert.equal(rows.length, 1);
   assert.equal(rows[0].inputTokens, 15);
@@ -89,6 +100,43 @@ test("scanClaude also walks managed-account homes", async () => {
   assert.ok(row);
   assert.equal(row?.inputTokens, 7);
   assert.equal(row?.outputTokens, 3);
+});
+
+test("scanClaude reads the 1h cache-write split and skips zero-usage rows", async () => {
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const home = await mkdtemp(join(tmpdir(), "orq-utok-1h-"));
+  const pdir = join(home, ".claude", "projects", "p");
+  await mkdir(pdir, { recursive: true });
+  const line = (o: unknown) => JSON.stringify(o);
+  await writeFile(
+    join(pdir, "t.jsonl"),
+    [
+      line({
+        timestamp: "2026-07-07T00:00:00Z",
+        requestId: "r1",
+        message: {
+          id: "m1",
+          model: "claude-opus-4-8",
+          usage: {
+            input_tokens: 2,
+            output_tokens: 10,
+            cache_read_input_tokens: 100,
+            cache_creation_input_tokens: 50,
+            cache_creation: { ephemeral_5m_input_tokens: 20, ephemeral_1h_input_tokens: 30 }
+          }
+        }
+      }),
+      // Zero-usage synthetic row must not surface at all.
+      line({ timestamp: "2026-07-07T00:00:00Z", message: { model: "<synthetic>", usage: { input_tokens: 0, output_tokens: 0 } } })
+    ].join("\n"),
+    "utf8"
+  );
+  const scanner = new UsageTokensScanner({ userhome: home, cacheFile: join(home, "c.json"), now: T0 });
+  await scanner.init();
+  const snap = await scanner.snapshot(true);
+  assert.equal(snap.rows.length, 1);
+  assert.equal(snap.rows[0].cacheWriteTokens, 50);
+  assert.equal(snap.rows[0].cacheWrite1hTokens, 30);
 });
 
 test("scanClaude dedupes repeated message.id+requestId across files (F2)", async () => {
