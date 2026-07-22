@@ -1,7 +1,8 @@
 # claudex addon — Claude Code harness × GPT via managed CLIProxyAPI
 
-Date: 2026-07-22 · Status: approved design, hardened through two tri-model review
-rounds (Claude, Codex, Kimi K3) + Moonshot-error research · pre-implementation
+Date: 2026-07-22 · Status: approved design, hardened through four tri-model review
+rounds (two primed, two blind — Claude, Codex, Kimi K3) + Moonshot-error research ·
+pre-implementation
 
 ## Purpose
 
@@ -47,14 +48,19 @@ cliproxy/
   config.yaml         # generated, 0600 (NB: the proxy HASHES the plaintext secret-key
                       # in here at startup — config.yaml is not a secret store we can
                       # read back)
-  secrets.json        # 0600: the daemon's own plaintext copy of the local API key +
-                      # management secret (survives restarts; see "Secrets are stable")
-  token               # 0600: just the local API key, read by the wrapper bins
+  secrets.json        # 0600: THE authoritative secret store — local API key,
+                      # management secret, OpenRouter key (survives restarts; see
+                      # "Secrets are stable"). config.yaml and token are projections.
+  token               # 0600: derived copy of the local API key, read by wrapper bins
   auth/               # 0700; provider credential JSONs, 0600, auto-refreshed by the proxy
-  claude-home/        # dedicated CLAUDE_CONFIG_DIR for claudex/claudemix sessions (see §2)
-  logs/               # proxy request log, rotated, 0600
-  cliproxy.json       # manager state: enabled, pinned version + sha256, default model,
-                      # backgroundModel, tested claude-CLI version (see below)
+  claude-home-claudex/    # dedicated CLAUDE_CONFIG_DIR per entry (see §2 — two homes,
+  claude-home-claudemix/  # never one; cross-entry resume isolation)
+  logs/               # proxy request log, rotated by the proxy's own log config, 0600
+  cliproxy.json       # manager state: enabled, pinned version + sha256, exact pinned Go
+                      # version + sha256, default model, backgroundModel, port
+                      # (loopback-only override, default 8317), last-known model
+                      # catalog + asOf (chip source while proxy is offline), tested
+                      # claude-CLI version (see below)
 ```
 
 **Binary install.** While the patch set is non-empty (see §7), the proxy is built from
@@ -73,7 +79,12 @@ auto-downloads whatever toolchain the module requests, bypassing the digest pin)
 version is a **single exact pinned version** recorded in `cliproxy.json` alongside the
 digests, not a floor. Module dependencies are fetched in a dedicated substate via
 `go mod download` — integrity-checked by the pinned tag's `go.sum` + the Go checksum
-database, not by our digests — then compiled offline (`GOPROXY=off`). Version bumps are
+database, not by our digests — then compiled offline (`GOPROXY=off`). The build runs
+under the hardened systemd sandbox (`ProtectSystem=strict`), so **every Go working dir
+is pinned into the appdir explicitly** — `GOCACHE`, `GOMODCACHE`, `GOPATH`, `GOTMPDIR`
+all under `<appdir>/daemon/cliproxy/` — never left to `$HOME` defaults that merely
+happen to be writable. Build timeout and disk-space thresholds are named constants
+decided in the implementation plan, not improvised. Version bumps are
 **manual-only** (no auto-update checks); a patch conflict on bump leaves `bin/`
 untouched — the old proxy keeps running — and the error names the failing patch/hunk.
 Enable is **async and idempotent**: it returns immediately and the build runs through
@@ -102,12 +113,20 @@ temperature range [0,1]). The §8 spike measures real cost per slot.
 **Secrets are stable — and persisted outside `config.yaml`.** CLIProxyAPI **hashes the
 plaintext `secret-key` inside `config.yaml` at startup**, so the config file cannot be
 read back for management-API auth after a restart; the daemon persists its own plaintext
-copies in `secrets.json` (0600, hardened writes, zod-schema'd). The local API key and
-management secret are generated once and **persist across all ordinary config rewrites
-and restarts** — live sessions snapshot their env at launch, so key regeneration would
-silently break every running claudex session. Rotation is a separate explicit operation
-following the `force` pattern: warn with the affected-session count → explicit confirm →
-regenerate, accepting that those sessions break.
+copies in `secrets.json` (0600, hardened writes, zod-schema'd). **`secrets.json` is the
+single authoritative store** — for the local API key, the management secret, AND the
+OpenRouter key (config regeneration must re-emit the key, so it cannot live "in
+config.yaml" any more than the management secret can); `config.yaml` and the `token`
+file are derived projections rewritten from it. The local API key and management secret
+are generated once and **persist across all ordinary config rewrites and restarts** —
+live sessions snapshot their env at launch, so key regeneration would silently break
+every running claudex session. **A corrupt `secrets.json` fails closed**: the loader
+distinguishes missing (first enable → generate) from corrupt (→ `error` state, no
+regeneration, no config rewrite — regenerating would orphan every live session and the
+surviving proxy), following the session-index precedent of never taking destructive
+action on a bad file. Rotation is a separate explicit operation following the `force`
+pattern: warn with the affected-session count → explicit confirm → regenerate,
+accepting that those sessions break.
 
 **Process model.** The proxy runs on the daemon's dedicated tmux server under a session
 name **outside the `orq-` namespace** (e.g. `orqsvc-cliproxy`). This is load-bearing:
@@ -116,21 +135,31 @@ name **outside the `orq-` namespace** (e.g. `orqsvc-cliproxy`). This is load-bea
 opposite of the intended persistence. Requires either the distinct prefix (with
 `listSessions()` scans untouched) or an explicit reserved-name exclusion in the reaper;
 a daemon test must prove a restart does not reap the proxy session. Net-new `Tmux`
-surface is required: **every existing public method prepends `orq-`** (create, has,
-kill, resize — and the socket/raw runner are private), so the manager gets dedicated
-raw-name service-session methods rather than reusing the session-scoped ones.
+surface is required: **every existing session-scoped public method prepends `orq-`**
+(`newSession`, `hasSession`, `killSession`, the capture methods — and the socket/raw
+runner are private; there is no session-scoped resize, that lives on the attach PTY),
+so the manager gets dedicated raw-name service-session methods enumerated from the real
+class rather than reusing the session-scoped ones.
 
-**Adoption is ownership-verified, not health-only.** On boot, in order: (1) check our
-tmux server for the service session (owned → probe with our key, adopt or restart if
-unhealthy); (2) no owned session but port 8317 answers → **foreign listener**: report
-`error: port conflict`, never adopt or kill an unverified process; (3) otherwise spawn,
-then poll readiness with bounded backoff; (4) **no tmux session but port answers with
-our key** (e.g. the proxy survived outside tmux after a crash-recovery edge): track it
-best-effort as an external process — it is not and cannot become a child of the
-restarted daemon — mark `persistence-lost`, and respawn under tmux at the next safe
-window (no active sessions), a condition **re-evaluated on every session-set change and
-on a slow poll** (unowned "later" triggers are how respawns never actually run; a test
-asserts `persistence-lost` eventually clears). All transitions serialized. Status shape is
+**Adoption is ownership-verified, not health-only — and the authenticated probe comes
+FIRST.** On boot, in order: (1) our tmux server has the service session → probe with our
+key; adopt if healthy, restart if not. (2) No owned tmux session but the port answers →
+**probe with our key before classifying** (probe-order matters; classifying "foreign" on
+port-liveness alone would mislabel our own surviving proxy): key accepted → it is ours,
+running outside tmux (crash-recovery edge) — track it best-effort as an external process
+(it is not and cannot become a child of the restarted daemon), mark `persistence-lost`,
+and respawn under tmux at the next safe window (no active sessions), a condition
+**re-evaluated on every session-set change and on a slow poll**; the daemon test for
+this asserts clearance *under the stated invariant that sessions eventually drain* —
+on a server that never idles, `persistence-lost` legitimately persists and stays
+warn-only. Key rejected → **foreign listener**: report `error: port conflict`, never
+adopt or kill an unverified process (a loopback-only port override in `cliproxy.json`
+exists for the legitimate-permanent-occupant case). (3) Nothing on the port → spawn,
+then poll readiness with bounded backoff. **Runtime crash supervision** (not just
+boot-time): when the health probe finds an owned-but-dead proxy mid-run, the manager
+respawns with bounded exponential backoff (3 attempts), then latches `error` and
+notifies — "mark degraded and wait for a daemon restart" is not an acceptable
+availability cliff for a loopback service. All transitions serialized. Status shape is
 `{ state, reasons: string[] }` — `state ∈ off | downloading | building | starting |
 healthy | degraded | error`, and `degraded` carries one reason per cause so multiple can
 compose (`provider codex missing from /v1/models`, `CLI version drift`,
@@ -143,8 +172,10 @@ Reason→consequence is explicit: provider-credential reasons (`codex auth expir
 with last-known env retained. A status `detail` field carries build substage text.
 
 **Restart/disable honors live sessions.** Default: config changes that need a proxy
-restart are **hard-refused** while any claudex/claudemix session is active (the API
-returns the affected session count). A distinct explicit `force: true` operation exists
+restart are **hard-refused** while any **daemon-managed** claudex/claudemix session is
+active (the API returns the affected session count; the guarantee is explicitly scoped
+to daemon-managed sessions — wrapper-launched `claudex -p` processes are invisible to
+this accounting, per §2, and can be broken by a non-force restart). A distinct explicit `force: true` operation exists
 for "I accept breaking N sessions" — disclosure alone is not quiescence. **Disable is
 force-gated identically to restart**, synchronous once confirmed, and cancels an
 in-flight build (workspace discarded); it marks the launchers visible-but-disabled (per
@@ -169,8 +200,12 @@ termination on shutdown (same degradation the session manager accepts).
 ### 2. Registry entries, env files, dedicated home, wrapper bins
 
 Two new static agent entries in `packages/registry/src/index.ts`, both `bin: ["claude"]`,
-with **explicitly specified `args`** (decide per entry whether to inherit stock claude's
-`--dangerously-skip-permissions --effort max --verbose`; `bin` alone inherits nothing):
+with **explicitly specified `args`** (`bin` alone inherits nothing). **Decided**: both
+entries carry the same args as the stock `claude` entry —
+`--dangerously-skip-permissions --effort max --verbose` — matching how codex/opencode
+already run in yolo mode on this host (explicit user decision). Stated consequence:
+wrapper-bin invocations (`claudex -p` from any session or workflow) run with the same
+full autonomy.
 
 | id | Display name | Main model | Role |
 |---|---|---|---|
@@ -184,11 +219,15 @@ minimum `gpt-5.6-sol` and `kimi-k3`, sourced from the last-known proxy catalog w
 stale/disabled treatment when a chip's model has vanished (never a silent fallback).
 Net-new pieces, all in scope:
 
-- `CreateSessionRequest.model?` (honored only for these entry ids), **validated
-  fail-closed at create time against a fresh `/v1/models` probe** — bounded (≤2 s) and
-  **scoped to the requested model's provider** (an OpenRouter outage must not block a
-  GPT launch); on probe failure/timeout the create fails with an error naming the
-  provider status. A stale client pick must never launch and die mid-session.
+- `CreateSessionRequest.model?` — **rejected with a 400 naming the entry id when sent
+  for any other entry** (never silently ignored). For these entries, every daemon
+  launch resolves `effectiveModel = request.model ?? persisted defaultModel` and
+  validates **that value** fail-closed against a fresh `/v1/models` probe — bounded
+  (≤2 s) and **scoped to the effective model's provider** (an OpenRouter outage must
+  not block a GPT launch); on probe failure/timeout the create fails with an error
+  naming the provider status. An omitted field gets the same validation as an explicit
+  one — a stale *default* must not launch and die mid-session either. (Wrapper-bin
+  invocations cannot get this daemon-side guarantee; documented in §2 Wrapper bins.)
 - `ResolveSessionExtraEnv` gains a launch-context parameter carrying `model` (today its
   signature is `(entry, accountId)` — the request never reaches it); both session-backend
   call sites and the `index.ts` wiring change; the account contributor and the new
@@ -203,11 +242,15 @@ Net-new pieces, all in scope:
   the launcher-menu filter changed to render visible-but-disabled entries (today it
   filters `enabled` out entirely).
 
-The Settings dropdown sets the default chip. The background/haiku-slot model
-(`backgroundModel`, persisted in `cliproxy.json`) is validated at set-time, applies to
-**both** entries' env generation (claudemix's haiku slot is explicitly this value too —
-unset would silently route background calls who-knows-where), defaults to a cheap
-`gpt-*`, and is **never** touched by a per-launch main-model pick.
+**Default-model precedence has one source of truth: `cliproxy.json.defaultModel`.**
+The Settings dropdown writes it; env-file regeneration (`ANTHROPIC_MODEL`) follows from
+it; the client's `preferredModelByAgent` is a **per-client chip preselection only** —
+it decides which chip renders highlighted, is passed as `request.model` on launch, and
+is never authoritative (divergence across browsers resolves to whatever each launch
+explicitly sends, falling back to the persisted default). The background/haiku-slot
+model (`backgroundModel`, persisted in `cliproxy.json`) is validated at set-time,
+applies to **both** entries' env generation, defaults to a cheap `gpt-*`, and is
+**never** touched by a per-launch main-model pick.
 
 Distinct ids are load-bearing: `resolveLaunchEnv` (agent-accounts.ts) only matches
 `claude`/`codex`, so these entries never get a managed account home and never hit the
@@ -246,14 +289,22 @@ Registry `entry.env` reaches sessions via `tmux new-session -e` — argv-visible
   `CLAUDE_CODE_SUBAGENT_MODEL`, `CLAUDE_CODE_ALWAYS_ENABLE_EFFORT=1`,
   `CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY=3`, `ENABLE_TOOL_SEARCH=false`,
   `CLAUDE_CODE_NO_FLICKER=1`, and `CLAUDE_CONFIG_DIR=<its dedicated home>` (non-secret;
-  dual-channel rationale below). (`claudemix.env`: base URL + `CLAUDE_CONFIG_DIR` +
-  flags only; main model stays the CLI default. Exact set refined by the spike.)
+  dual-channel rationale below). `claudemix.env`, enumerated in full for the same
+  invariant: `ANTHROPIC_BASE_URL`, `CLAUDE_CONFIG_DIR=<its home>`,
+  `ANTHROPIC_DEFAULT_HAIKU_MODEL=<backgroundModel>` (required — "flags only" would
+  silently route claudemix background calls to the CLI default, exactly the failure the
+  backgroundModel invariant forbids), `CLAUDE_CODE_ALWAYS_ENABLE_EFFORT=1`,
+  `CLAUDE_CODE_NO_FLICKER=1`; main model deliberately unset (Fable via CLI default).
+  Exact set refined by the spike.
 - **`ANTHROPIC_AUTH_TOKEN` travels the addon-env channel**: a new contributor in the
-  `resolveExtraEnv` path returns it for these entry ids, injected via the existing 0600
-  one-shot wrapper script (`writeAddonEnvLaunchScript`), never `-e` argv. Note honestly:
-  the token still ends up in the claude process environment (`/proc/<pid>/environ`,
-  same-UID readable) — 0600 files and loopback do not isolate secrets from other
-  processes running as the same user.
+  `resolveExtraEnv` path returns it for these entry ids. On the **tmux backend** it is
+  injected via the existing 0600 one-shot wrapper script (`writeAddonEnvLaunchScript`),
+  never `-e` argv; on the **local (node-pty) backend** there is no wrapper — `extraEnv`
+  is merged directly into the child environment (still never argv). Both backends are
+  described and tested as they actually are. Note honestly: the token ends up in the
+  claude process environment either way (`/proc/<pid>/environ`, same-UID readable) —
+  0600 files and loopback do not isolate secrets from other processes running as the
+  same user.
 - **`CLAUDE_CONFIG_DIR` is non-secret and deliberately appears in BOTH channels** with
   identical values: in each entry's env file (so the wrapper bins inherit the dedicated
   home — without this, `claudex -p` from a shell would silently fall back to the shared
@@ -295,9 +346,16 @@ them; acceptable, VPS-first). This makes both modes callable primitives from any
 
 ### 3. Daemon API, wire types, events
 
-New routes under `/api/cliproxy`, protected by the same remote-HTTP bearer auth as every
-`/api` route; **no secret material is ever returned** (not the local key, not the
-management secret, not credential contents):
+New routes under `/api/cliproxy`; **no secret material is ever returned** (not the
+local key, not the management secret, not credential contents). **Transport authz is
+explicit and asymmetric**: read-only routes (status, models, logs metadata) follow the
+normal rule (bearer auth over remote HTTP, open over the local Unix socket like other
+local routes). **Mutating routes (enable/disable/config/login/key/rotation) are
+HTTP-transport-only with bearer auth — refused over the Unix socket.** Rationale: the
+socket is unauthenticated by design and every agent session receives its path
+(`ORQUESTER_DAEMON_SOCK`, for hook events); without this rule, any daemon-launched
+agent — or a prompt-injected workflow — could silently mutate proxy credentials and
+configuration:
 
 - `GET  /api/cliproxy` — full status: manager state, version, per-provider status
   (`codex | claude | openrouter` → ok/missing/expired + last-verified), connected
@@ -318,7 +376,11 @@ management secret, not credential contents):
   a second flow **for the same provider** supersedes the previous one — flows for
   different providers run concurrently).
 - `POST /api/cliproxy/login/cancel` — `{ flowId }`.
-- `POST /api/cliproxy/openrouter/key` — set/import the OpenRouter key.
+- `POST /api/cliproxy/openrouter/key` — set/import the OpenRouter key (stored in
+  `secrets.json`, projected into `config.yaml`; the projection requires a proxy
+  restart, so this route is restart-gated with the same force-confirm treatment —
+  unlike device-auth completions, which land in `auth/` and are hot-discovered by the
+  proxy without restart; the spike confirms that hot-discovery behavior).
 - `POST /api/cliproxy/login/callback` — `{ flowId, callbackUrlOrCode }`: relay for
   providers whose OAuth completes via a browser redirect to localhost. The proxy is
   loopback-only and Caddy exposes only Orquester, so a redirect can never reach the
@@ -361,9 +423,19 @@ other. So:
   auths.)
 - **OpenRouter**: plain API key, no refresh semantics — import from OpenCode's store
   (`~/.local/share/opencode/auth.json`, `openrouter.key` — confirmed present on this
-  host) or paste in Settings. Key lands only in the proxy's `config.yaml` (0600).
+  host) or paste in Settings. Stored in `secrets.json` (the authoritative store);
+  `config.yaml` carries only the projected copy.
 
-Multiple accounts of one provider round-robin automatically.
+Multiple accounts of one provider round-robin automatically. **Health probes are
+per-credential, not per-provider**: with N accounts round-robining, a provider-level
+probe can hit only healthy accounts while user requests fail 1/N of the time on an
+expired one — the provider status chip degrades if *any* registered credential fails
+its probe. Rollback of a proxy version is a **manual explicit operation** (API action
+that atomically swaps `bin.prev/` back and re-pins), not an automatic behavior.
+**Accepted-risk note (ToS)**: routing ChatGPT/Codex and Claude *subscriptions* through
+an API-emulating local proxy is the kind of use providers have historically restricted;
+account-action risk is explicitly accepted by the user, same as the community guide
+this design is based on.
 
 **Credential concentration acknowledged**: `auth/` concentrates Codex OAuth + Claude
 OAuth + OpenRouter key in one place, alongside (not instead of) the managed-account
@@ -398,12 +470,15 @@ shared proxy panel:
   only `configTarget` would route them to the OpenCode-style installer). Hook installs
   target each entry's dedicated home of §2 via the launch-env `CLAUDE_CONFIG_DIR`.
   Tests cover install + activity for each id.
-- **Usage attribution, honestly stated**: alias sessions carry no managed `accountId`,
-  and transcript scanning classifies Claude-harness records as `claude` regardless of
-  the proxied provider. Existing Codex/Claude account usage rows still reflect
-  subscription burn (same accounts upstream), but per-session/per-model attribution for
-  proxy traffic is **not** provided in this iteration; the proxy request log
-  (§3 `logs/tail`) is the interim answer. Proper attribution is future work.
+- **Usage attribution, honestly stated**: alias sessions carry no managed `accountId`.
+  Transcript records discovered under the proxy homes are **tagged with the launcher
+  id and excluded from the Claude aggregate** (the §2 contract — the scanner's current
+  hardcoded `agent: "claude"` classification is changed as part of extending it; §2
+  and this section state one contract, not two). Existing Codex/Claude account usage
+  rows still reflect subscription burn (same accounts upstream), but per-session/
+  per-model attribution for proxy traffic is **not** provided in this iteration; the
+  proxy request log (§3 `logs/tail`) is the interim answer. Proper attribution is
+  future work.
 
 ### 7. Kimi K3 / Moonshot: the translator patch is a hard gate
 
@@ -435,9 +510,10 @@ patched build from day one — Kimi is configured from the start, not gated on u
    wrong form fails silently with a green suite: Kimi breaks exactly as before).
 2. `CliProxyManager` installs from a **source build**: download the pinned source
    tarball (SHA-256-verified, same integrity rules as §1), apply the patch set, build
-   with a pinned Go toolchain (≥1.24 — newer than distro apt; fetched as an
-   SHA-256-verified upstream tarball into the appdir, or preinstalled by
-   `provision-devtools.sh`), install atomically with the same `bin.prev/` rollback.
+   with the **single exact pinned Go toolchain version** from §1 (fetched as an
+   SHA-256-verified upstream tarball into the appdir — the ONLY toolchain source; no
+   preinstalled/distro alternative, which would break reproducibility and isn't
+   provisioned anyway), install atomically with the same `bin.prev/` rollback.
    Patch-application failure on a version bump is a loud manager error (`error:
    patch conflict`), never a silent fall-through to an unpatched binary.
 3. Upstream the fix in parallel (tiny, spec-correct, benefits everyone). Once a pinned
@@ -489,11 +565,16 @@ the inverse failure (CLI update breaking the proxy path first).
 ## Security
 
 - Proxy binds `127.0.0.1` only; never exposed through Caddy/ufw.
-- Generated local API key + management secret: `crypto.randomBytes`, stored only in
-  `config.yaml` (0600); token delivered to sessions via the 0600 addon-env wrapper, not
-  argv. Registry env remains non-secret by invariant. Redaction: registry `env` is
-  stripped from all API responses/broadcasts (`publicEntry`) — that protects the wire,
-  not `/proc`; same-UID visibility is accepted and documented.
+- Generated local API key + management secret + OpenRouter key: `crypto.randomBytes`
+  (generated ones), **authoritatively stored in `secrets.json`** (0600, fail-closed on
+  corruption per §1); `config.yaml` holds only projected/hashed forms and the `token`
+  file a derived copy for wrapper bins. Token delivered to daemon-launched sessions via
+  the addon-env channel (0600 one-shot wrapper on tmux; direct child env on the local
+  backend), never argv. Registry env remains non-secret by invariant. Redaction:
+  registry `env` is stripped from all API responses/broadcasts (`publicEntry`) — that
+  protects the wire, not `/proc`; same-UID visibility is accepted and documented.
+- `/api/cliproxy` mutations are HTTP-bearer-only and refused over the Unix socket
+  (agents hold the socket path; see §3).
 - Auth dir 0700, credential files 0600; env dir 0700, atomic 0600 writes, symlink
   refusal; dotenv parsed as data, never `source`d; model names charset-validated.
 - `config.yaml` and credential mutations get **the same hardening as the env files**
@@ -545,7 +626,10 @@ the inverse failure (CLI update breaking the proxy path first).
   and offline module compile (`GOPROXY=off`), wrapper-bin assertions
   (`CLAUDE_CONFIG_DIR` of the launched process + token sourced from the `token` file),
   management-API auth surviving a daemon restart (via `secrets.json`, not the hashed
-  `config.yaml`), the login callback relay, `logs/tail` returning metadata only, the
+  `config.yaml`), corrupt-`secrets.json` failing closed (no regeneration), cliproxy
+  mutations refused over the Unix socket, `effectiveModel` validation when the request
+  omits `model`, adoption probing before foreign classification, per-credential health
+  degradation, the login callback relay, `logs/tail` returning metadata only, the
   patch gate matching both alias and resolved model names, and the raw-name service
   tmux methods.
 - Never launch/restart a daemon against this checkout; live verification happens on
