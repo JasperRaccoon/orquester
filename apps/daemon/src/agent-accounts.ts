@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile, readFile, readFile as fsReadFile, rm, chmod, symlink, lstat, copyFile } from "node:fs/promises";
+import { mkdir, writeFile, readFile, readFile as fsReadFile, rm, chmod, symlink, lstat, readlink, copyFile } from "node:fs/promises";
 import { dirname, join, isAbsolute } from "node:path";
 import { SYSTEM_ACCOUNT_ID, type AgentAccount, type AgentAccountsResponse } from "@orquester/api";
 import {
@@ -208,10 +208,17 @@ export class AgentAccountsService {
       await this.seedClaudeConfig(home);
       await this.ensureSymlink(join(this.systemClaudeDir(), "skills"), join(home, "skills"));
       await this.ensureSymlink(join(this.systemClaudeDir(), "plugins"), join(home, "plugins"));
+      // settings.json (user hooks + permissions + the daemon's managed hook) is
+      // account-agnostic — the managed hook command is identical for every home —
+      // so share one file. The daemon's hook installer writes THROUGH the symlink
+      // (writeFileAtomic realpaths its target), keeping the share intact.
+      await this.ensureSharedFileSymlink(join(this.systemClaudeDir(), "settings.json"), join(home, "settings.json"));
     } else {
-      // config.toml holds no identity (MCPs, model defaults, project trust) → share
-      // it live via a symlink; auth.json (imported) carries the per-account identity.
-      await this.ensureSymlink(join(this.systemCodexHome(), "config.toml"), join(home, "config.toml"));
+      // config.toml (MCPs, model defaults, project trust) and hooks.json hold no
+      // identity — auth.json carries that — so share them live. Both are written
+      // by the daemon's hook installer, which follows the symlink.
+      await this.ensureSharedFileSymlink(join(this.systemCodexHome(), "config.toml"), join(home, "config.toml"));
+      await this.ensureSharedFileSymlink(join(this.systemCodexHome(), "hooks.json"), join(home, "hooks.json"));
       for (const marker of [".personality_migration", ".sandbox_migration"]) {
         await this.copyIfMissing(join(this.systemCodexHome(), marker), join(home, marker));
       }
@@ -262,6 +269,29 @@ export class AgentAccountsService {
       return;
     }
     await symlink(target, linkPath).catch((e) => this.opts.logger?.warn?.(`symlink ${linkPath} failed: ${String(e)}`));
+  }
+
+  /** Like ensureSymlink, but for daemon-written shared config FILES (settings.json,
+   *  config.toml, hooks.json): replace a stale regular file or wrong symlink so the
+   *  home always points at the single shared source. Never touches a directory. */
+  private async ensureSharedFileSymlink(target: string, linkPath: string): Promise<void> {
+    try {
+      await lstat(target);
+    } catch {
+      return; // no system file to share yet
+    }
+    let st: Awaited<ReturnType<typeof lstat>> | null = null;
+    try {
+      st = await lstat(linkPath);
+    } catch {
+      /* absent */
+    }
+    if (st) {
+      if (st.isSymbolicLink() && (await readlink(linkPath).catch(() => null)) === target) return; // already correct
+      if (st.isDirectory()) return; // never replace a directory
+      await rm(linkPath, { force: true }).catch(() => undefined);
+    }
+    await symlink(target, linkPath).catch((e) => this.opts.logger?.warn?.(`shared symlink ${linkPath} failed: ${String(e)}`));
   }
 
   private async copyIfMissing(src: string, dst: string): Promise<void> {

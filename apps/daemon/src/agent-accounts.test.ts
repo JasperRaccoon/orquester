@@ -244,3 +244,37 @@ test("resolveLaunchEnv seeds a Codex home: symlinked config.toml + migration mar
   assert.equal(await readFile(join(home, ".personality_migration"), "utf8"), "1");
   assert.equal(await readFile(join(home, ".sandbox_migration"), "utf8"), "2");
 });
+
+test("resolveLaunchEnv shares Claude settings.json (symlink, replaces a stale real file)", async () => {
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const base = await mkdtemp(join(tmpdir(), "orq-set-"));
+  await mkdir(join(base, ".claude"), { recursive: true });
+  await writeFile(join(base, ".claude.json"), JSON.stringify({ mcpServers: {} }));
+  await writeFile(join(base, ".claude", "settings.json"), JSON.stringify({ hooks: { Stop: [{ user: 1 }] } }));
+  const svc = new AgentAccountsService({ indexFile: join(base, "idx.json"), accountsDir: join(base, "agent-accounts"), userhome: base, now: () => 1 });
+  await svc.init();
+  const acct = await svc.importAccount({ content: JSON.stringify({ claudeAiOauth: { accessToken: "t" } }), label: "L" });
+  const home = svc.homePath("claude", acct.id);
+  await writeFile(join(home, "settings.json"), JSON.stringify({ hooks: { Stop: [{ managed: 1 }] } })); // stale daemon-written file
+  await svc.resolveLaunchEnv("claude", acct.id);
+  assert.equal((await lstat(join(home, "settings.json"))).isSymbolicLink(), true);
+  const via = JSON.parse(await readFile(join(home, "settings.json"), "utf8"));
+  assert.deepEqual(via.hooks.Stop, [{ user: 1 }]); // reads through to the shared system settings
+});
+
+test("resolveLaunchEnv shares Codex config.toml + hooks.json (replaces stale real files)", async () => {
+  delete process.env.CODEX_HOME;
+  const base = await mkdtemp(join(tmpdir(), "orq-chooks-"));
+  await mkdir(join(base, ".codex"), { recursive: true });
+  await writeFile(join(base, ".codex", "config.toml"), "model='sys'\n[mcp_servers.foo]\n");
+  await writeFile(join(base, ".codex", "hooks.json"), JSON.stringify({ hooks: { Stop: [{ user: 1 }] } }));
+  const svc = new AgentAccountsService({ indexFile: join(base, "idx.json"), accountsDir: join(base, "agent-accounts"), userhome: base, now: () => 1 });
+  await svc.init();
+  const acct = await svc.importAccount({ content: JSON.stringify({ tokens: { access_token: "a", id_token: jwt({ email: "z@z" }) } }) });
+  const home = svc.homePath("codex", acct.id);
+  await writeFile(join(home, "config.toml"), "model='stale'\n"); // stale real file (old daemon trust write)
+  await svc.resolveLaunchEnv("codex", acct.id);
+  assert.equal((await lstat(join(home, "config.toml"))).isSymbolicLink(), true);
+  assert.match(await readFile(join(home, "config.toml"), "utf8"), /mcp_servers\.foo/);
+  assert.equal((await lstat(join(home, "hooks.json"))).isSymbolicLink(), true);
+});
