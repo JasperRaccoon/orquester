@@ -360,11 +360,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     agent: "claude" | "codex",
     makeSource: (home?: string) => () => Promise<AgentUsage | null>
   ): Promise<AgentUsage | null> {
-    const prefs = await readUsagePrefs(resolved.appConfigFile);
     const base = await usageSource(agent, makeSource)(); // System account
-    if (prefs.view !== "accounts") return base;
     const managed = agentAccounts.list().accounts.filter((a) => a.agent === agent);
+    // No managed accounts → the System reading is the whole story.
     if (managed.length === 0) return base;
+    // Otherwise always surface every managed account so the panel can show them all.
     const accounts: UsageAccount[] = [];
     const live = sessions.liveAccountIds();
     for (const acct of managed) {

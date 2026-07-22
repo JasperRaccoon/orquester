@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React from "react";
 import { FolderTree, GitBranch, Globe, ListTodo, Plus } from "lucide-react";
 import { SYSTEM_ACCOUNT_ID, type RegistryEntry } from "@orquester/api";
 import { CHROMIUM_FAMILY_IDS } from "@orquester/registry";
@@ -13,46 +13,62 @@ import {
 import { getRegistryIcon } from "../../icons";
 import { useRegistry } from "../../hooks";
 import { useAppStore, useCurrentContext } from "../../store/app";
+import { cn } from "../../lib/cn";
+import { shortAccountLabel } from "../../lib/account-label";
 
 /**
- * One installed-agent row in the "+" menu. When the agent (`claude`/`codex`) has
- * ≥1 managed account, it renders an inline account picker (System + managed
- * accounts, defaulting to that agent's configured default) and passes the chosen
- * account id as the 4th `openTab` argument so the session launches under it. The
- * "System" option carries the SYSTEM_ACCOUNT_ID sentinel (not an empty/omitted
- * value) so it forces the host identity even when a per-agent default is set —
- * an omitted accountId would otherwise resolve back to that default.
+ * One installed-agent row in the "+" menu. Clicking the row launches the agent
+ * under the account selected below. When the agent (`claude`/`codex`) has ≥1
+ * managed account, it renders a row of account chips (System + managed accounts);
+ * the choice is remembered per agent (client-local) so opening several tabs for
+ * one account doesn't re-prompt. "System" carries the SYSTEM_ACCOUNT_ID sentinel
+ * (not an omitted value) so it forces the host identity over any per-agent default.
  */
 const AgentRow: React.FC<{ agent: RegistryEntry }> = ({ agent }) => {
   const openTab = useAppStore((s) => s.openTab);
   const agentAccounts = useAppStore((s) => s.agentAccounts);
+  const preferred = useAppStore((s) => s.preferredAccountByAgent[agent.id]);
+  const setPreferredAccount = useAppStore((s) => s.setPreferredAccount);
   const managed = (agentAccounts?.accounts ?? []).filter((a) => a.agent === agent.id);
-  const [picked, setPicked] = useState<string>(
-    agentAccounts?.defaults[agent.id as "claude" | "codex"] ?? SYSTEM_ACCOUNT_ID
-  );
+
+  const options = [
+    { id: SYSTEM_ACCOUNT_ID, label: "System" },
+    ...managed.map((a) => ({ id: a.id, label: shortAccountLabel(a.label) }))
+  ];
+  const fallback = agentAccounts?.defaults[agent.id as "claude" | "codex"] ?? SYSTEM_ACCOUNT_ID;
+  const wanted = preferred ?? fallback;
+  const selected = options.some((o) => o.id === wanted) ? wanted : SYSTEM_ACCOUNT_ID;
 
   return (
     <>
       <DropdownItem
         icon={getRegistryIcon("agent", agent.id, 14)}
-        onClick={() => void openTab("agent", agent.id, agent.name, picked)}
+        onClick={() => void openTab("agent", agent.id, agent.name, selected)}
       >
         {agent.name}
       </DropdownItem>
       {managed.length > 0 ? (
-        <select
-          value={picked}
+        <div
+          className="mb-1.5 ml-8 mr-2 flex flex-wrap gap-1"
           onClick={(event) => event.stopPropagation()}
-          onChange={(event) => setPicked(event.target.value)}
-          className="mb-1 ml-8 mr-2 w-[calc(100%-2.75rem)] rounded bg-neutral-900 px-1 py-0.5 text-xs text-neutral-300 outline-none ring-1 ring-neutral-700"
         >
-          <option value={SYSTEM_ACCOUNT_ID}>System</option>
-          {managed.map((a) => (
-            <option key={a.id} value={a.id}>
-              {a.label}
-            </option>
+          {options.map((o) => (
+            <button
+              key={o.id}
+              type="button"
+              onClick={() => setPreferredAccount(agent.id, o.id)}
+              className={cn(
+                "max-w-full truncate rounded px-1.5 py-0.5 text-[11px] transition-colors",
+                o.id === selected
+                  ? "bg-sky-500/15 text-sky-300 ring-1 ring-sky-500/40"
+                  : "bg-neutral-800 text-neutral-400 ring-1 ring-transparent hover:bg-neutral-700 hover:text-neutral-200"
+              )}
+              title={o.label}
+            >
+              {o.label}
+            </button>
           ))}
-        </select>
+        </div>
       ) : null}
     </>
   );

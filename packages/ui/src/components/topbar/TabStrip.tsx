@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { FolderTree, GitBranch, Globe, ListTodo, Pencil, Trash2, X } from "lucide-react";
 import { cn } from "../../lib/cn";
+import { shortAccountLabel } from "../../lib/account-label";
 import { getRegistryIcon } from "../../icons";
 import { ConfirmDialog } from "../ui";
 import { ContextMenu, type ContextMenuItem } from "../ui/context-menu";
@@ -109,7 +110,7 @@ export const TabStrip: React.FC = () => {
         const canRename = isSession || tab.type === "todo";
         const accountId = tab.type === "session" ? tab.session.accountId : undefined;
         const accountLabel = accountId
-          ? agentAccounts?.accounts.find((a) => a.id === accountId)?.label
+          ? shortAccountLabel(agentAccounts?.accounts.find((a) => a.id === accountId)?.label)
           : undefined;
         const editing = editingId === tab.id;
         const title = isSession

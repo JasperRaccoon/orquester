@@ -16,6 +16,7 @@ import {
   storeUsername
 } from "../lib/auth";
 import { loadViewModes, saveViewModes, type ViewMode } from "../lib/view-mode";
+import { loadPreferredAccounts, savePreferredAccounts } from "../lib/preferred-account";
 import {
   clampTerminalFontSize,
   loadTerminalFontSize,
@@ -554,6 +555,8 @@ export interface AppState {
   activeTabByProject: Record<string, string | null>;
   /** Per-project layout choice (tab view vs grid view); persisted client-side. */
   viewModeByProject: Record<string, ViewMode>;
+  /** Last account chosen per agent in the launcher (client-local, persisted). */
+  preferredAccountByAgent: Record<string, string>;
   /** Global terminal font size (px); persisted client-side, per device. */
   terminalFontSize: number;
   /** Global sidebar width (px); persisted client-side, per device. */
@@ -635,6 +638,7 @@ export interface AppState {
   cancelCloseTab: () => void;
   activateTab: (id: string) => void;
   setViewMode: (mode: ViewMode) => void;
+  setPreferredAccount: (agent: string, accountId: string) => void;
   setTerminalFontSize: (size: number) => void;
   nudgeTerminalFontSize: (delta: number) => void;
   /**
@@ -710,6 +714,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   todos: [],
   activeTabByProject: {},
   viewModeByProject: loadViewModes(),
+  preferredAccountByAgent: loadPreferredAccounts(),
   terminalFontSize: loadTerminalFontSize(),
   sidebarWidth: loadSidebarWidth(),
   paneSizesByProject: loadPaneSizes(),
@@ -1638,6 +1643,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       const viewModeByProject = { ...state.viewModeByProject, [project.path]: mode };
       saveViewModes(viewModeByProject);
       return { viewModeByProject };
+    }),
+
+  setPreferredAccount: (agent, accountId) =>
+    set((state) => {
+      const preferredAccountByAgent = { ...state.preferredAccountByAgent, [agent]: accountId };
+      savePreferredAccounts(preferredAccountByAgent);
+      return { preferredAccountByAgent };
     }),
 
   setTerminalFontSize: (size) =>
