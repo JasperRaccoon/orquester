@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ArrowLeft, ArrowRight, Crosshair, Monitor, RotateCw, ShieldAlert, Smartphone
+  ArrowLeft, ArrowRight, Crosshair, Keyboard, Monitor, RotateCw, ShieldAlert, Smartphone
 } from "lucide-react";
 import type { BrowserPickPayload, BrowserStateMessage, BrowserSummary } from "@orquester/api";
 import { useAppStore } from "../../store/app";
+import { useIsDesktop } from "../../hooks";
 import { cn } from "../../lib/cn";
 import { PickComposeSheet } from "./PickComposeSheet";
 
@@ -37,6 +38,7 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
   const gesture = useRef<{ dist: number; scale: number; tx: number; ty: number; cx: number; cy: number } | null>(null);
 
   const channel = useMemo(() => api?.browserChannel(), [api]);
+  const isDesktop = useIsDesktop();
   const vp = VIEWPORT[state?.viewportMode ?? browser.viewportMode];
 
   // Subscribe while active; the canvas keeps its last frame when hidden (grid
@@ -245,6 +247,15 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
           className={cn("rounded p-1 hover:bg-neutral-800", picking ? "text-sky-400" : "text-neutral-400")}>
           <Crosshair size={14} />
         </button>
+        {!isDesktop && (
+          /* Focusing inside a button CLICK is the trusted-gesture path iOS
+             reliably raises the soft keyboard for — touchend focus is flaky. */
+          <button type="button" aria-label="Show keyboard"
+            onClick={() => hiddenInputRef.current?.focus({ preventScroll: true })}
+            className="rounded p-1 text-neutral-400 hover:bg-neutral-800">
+            <Keyboard size={14} />
+          </button>
+        )}
         {state && !state.sandboxed && (
           <span title="Chromium is running without its sandbox on this host">
             <ShieldAlert size={14} className="text-amber-500" />
@@ -284,12 +295,15 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
             }}
           />
         )}
-        {/* Off-screen input: keeps the mobile soft keyboard up; keystrokes forward as CDP keys. */}
+        {/* Invisible ON-SCREEN input (iOS refuses/blurs keyboard for far-offscreen
+            fields): 1×1 px, opacity 0, 16px font so iOS doesn't zoom on focus.
+            Keystrokes forward as CDP keys. */}
         <input
           ref={hiddenInputRef}
-          aria-hidden
-          className="absolute -left-[9999px] top-0 h-px w-px opacity-0"
-          autoCapitalize="off" autoCorrect="off"
+          aria-label="Remote browser keyboard input"
+          className="absolute bottom-0 left-0 h-px w-px opacity-0"
+          style={{ fontSize: 16 }}
+          autoCapitalize="off" autoCorrect="off" autoComplete="off"
           onKeyDown={onKey("down")} onKeyUp={onKey("up")} onPaste={onPaste}
           onChange={(e) => { e.target.value = ""; }}
         />
