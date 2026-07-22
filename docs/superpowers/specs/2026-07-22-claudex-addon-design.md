@@ -122,8 +122,19 @@ with **explicitly specified `args`** (decide per entry whether to inherit stock 
 
 | id | Display name | Main model | Role |
 |---|---|---|---|
-| `claudex` | Claude × GPT | configurable, default `gpt-5.6-sol` | pure GPT escape hatch |
+| `claudex` | Claude × GPT/Kimi | **picked per launch** (chips: GPT, Kimi, …), default `gpt-5.6-sol` | non-Anthropic escape hatch |
 | `claudemix` | Claude × Mixed | Fable (Claude OAuth via proxy) | mixed-model orchestrator |
+
+**Per-launch model choice for `claudex`.** The launcher row shows model chips (the same
+interaction pattern as the existing per-agent account chips, persisted client-side like
+`preferred-account`): at minimum `gpt-5.6-sol` and `kimi-k3`, sourced from the proxy
+catalog. Mechanism: `CreateSessionRequest` gains an optional `model` field (honored only
+for these entry ids); the addon-env contributor injects `ANTHROPIC_MODEL` /
+`CLAUDE_CODE_SUBAGENT_MODEL` for the chosen model per session, overriding the env-file
+default. The Settings dropdown sets the default chip. The background/haiku-slot model is
+configured separately (a cheap `gpt-*` by default) and does not follow the main-model
+pick — Kimi as the compaction/title model is a cost/latency trap, and per-launch main
+models must not silently re-route the background slot.
 
 Distinct ids are load-bearing: `resolveLaunchEnv` (agent-accounts.ts) only matches
 `claude`/`codex`, so these entries never get a managed account home and never hit the
@@ -186,7 +197,9 @@ management secret, not credential contents):
   count, last CLI smoke-check result.
 - `POST /api/cliproxy/enable` / `disable` — disable reports affected live sessions.
 - `GET  /api/cliproxy/models` — proxied `/v1/models` (dropdown source).
-- `PUT  /api/cliproxy/config` — `{ defaultModel }` (validated against catalog + charset).
+- `PUT  /api/cliproxy/config` — `{ defaultModel, backgroundModel? }` (validated against
+  catalog + charset). Per-launch choice rides `POST /api/sessions` via the new optional
+  `model` field (same validation), not this route.
 - `POST /api/cliproxy/login/start` — `{ provider }` → `{ url, userCode?, expiresAt }`.
 - `GET  /api/cliproxy/login/status` — terminal states included:
   `pending | done | expired | superseded | error` (device codes expire ~15 min; starting
@@ -240,9 +253,10 @@ shared proxy panel:
 - Connect actions per provider: device-code dialog (resumable, copyable code, expiry
   countdown, cancel), opt-in import-from-managed-account (with the dual-refresher
   warning), OpenRouter import/paste.
-- Default-model dropdown for `claudex`: **always renders the persisted selection even
-  when the catalog fetch fails** ("proxy offline — list may be stale"); never blanks a
-  saved value.
+- Default-model dropdown for `claudex` (sets the default launcher chip): **always
+  renders the persisted selection even when the catalog fetch fails** ("proxy offline —
+  list may be stale"); never blanks a saved value. Launcher-row model chips (GPT / Kimi
+  / …) handle the per-launch pick; tab badges show the chosen model.
 - Enable/disable with live-session impact confirm; disabled launchers show their
   `disabledReason` here and in the "+" menu.
 - Distinct icons/colors for the two entries and tab badges showing the backing model —
