@@ -11,8 +11,8 @@ inside Orquester on the VPS. Two outcomes:
 1. **Escape hatch** (`claudex`): when Anthropic usage runs out, launch the same harness
    (tools, skills, UI) on GPT.
 2. **Mixed-model orchestration** (`claudemix`): a Fable-driven session whose Workflow
-   scripts / subagents can fan out to `gpt-*` models — plan on Fable, execute on Sol,
-   cross-review with both, in one session.
+   scripts / subagents can fan out to other model families — plan on Fable, design on
+   Kimi K3 (OpenRouter), execute on Sol, then a multi-model cross-review, in one session.
 
 Reference: the "claudex" community guide (CLIProxyAPI + `ANTHROPIC_BASE_URL` alias),
 adapted from a laptop/zsh setup to a headless single-user server managed by the daemon.
@@ -23,8 +23,9 @@ adapted from a laptop/zsh setup to a headless single-user server managed by the 
 claudex/claudemix session (claude CLI)
   └─ ANTHROPIC_BASE_URL=http://127.0.0.1:8317  +  ANTHROPIC_AUTH_TOKEN=<local key>
        └─ CLIProxyAPI (daemon-managed, loopback only)
-            ├─ gpt-*    → OpenAI Codex backend (Codex OAuth, from managed Codex account)
-            └─ claude-* → Anthropic API (Claude OAuth, from managed Claude account)
+            ├─ gpt-*      → OpenAI Codex backend (Codex OAuth, from managed Codex account)
+            ├─ claude-*   → Anthropic API (Claude OAuth, from managed Claude account)
+            └─ kimi-k3, … → OpenRouter (openai-compatibility provider, plain API key)
 ```
 
 CLIProxyAPI (github.com/router-for-me/CLIProxyAPI, MIT, static Go binary) speaks the
@@ -47,8 +48,10 @@ cliproxy/
 
 Generated `config.yaml`: `host: 127.0.0.1`, `port: 8317`, one generated `api-keys` entry
 (`crypto.randomBytes`), `remote-management.secret-key` (generated; `allow-remote: false`),
-`auth-dir` pointing at `auth/`, and `payload.override` forcing `reasoning.effort: high`
-on `gpt-*`/codex requests.
+`auth-dir` pointing at `auth/`, `payload.override` forcing `reasoning.effort: high`
+on `gpt-*`/codex requests, and — when an OpenRouter key is configured — an
+`openai-compatibility` provider (`base-url: https://openrouter.ai/api/v1`) with model
+aliases so short names (`kimi-k3` → `moonshotai/kimi-k3`) appear in the merged catalog.
 
 Process model: the proxy runs as `orq-cliproxy` on the daemon's **existing dedicated tmux
 server**, so it survives daemon restarts exactly like sessions do. On boot the manager
@@ -135,6 +138,11 @@ A `cliproxy.changed` event on `/events` keeps clients live.
   it on any device; daemon polls to completion.
 - Tokens self-refresh afterwards (proxy background workers). Multiple accounts of the
   same provider round-robin automatically.
+- **API-key providers (OpenRouter)**: no OAuth at all. Import reads the key from
+  OpenCode's store (`~/.local/share/opencode/auth.json`, `openrouter.key` — confirmed
+  present on this host, 0600), or the user pastes a key in Settings. The key lands only
+  in the proxy's `config.yaml` (0600); like all credentials it is never returned by any
+  route. Provider is optional — `claudex`/`claudemix` enablement does not depend on it.
 
 ### 5. Settings UI (`packages/ui`)
 
@@ -143,6 +151,8 @@ Settings → Agents gains a "Claudex — GPT via Claude harness" card:
 - Proxy status: off / downloading / starting / healthy / error, with version.
 - Connected provider accounts (emails), with Connect actions per provider
   (import-from-managed-account buttons, device-code fallback dialog showing URL + code).
+- OpenRouter row: "Import from OpenCode" (when its auth.json has a key) or paste-a-key
+  field; shows connected state only, never the key.
 - Default model dropdown for `claudex` (from `/api/cliproxy/models`).
 - Enable/disable toggle.
 
@@ -161,9 +171,12 @@ become enabled, like any agent.
 ### 7. Mixed-model workflows (`claudemix`) — verification spike first
 
 The point of `claudemix`: inside one Fable session, Workflow scripts call
-`agent(prompt, {model: "gpt-5.6-sol"})` (or use a custom agent type whose frontmatter
-pins `model: gpt-5.6-sol`) and the proxy routes those subagent requests to the Codex
-backend while the main loop stays on Fable via Claude OAuth.
+`agent(prompt, {model: "gpt-5.6-sol"})` or `{model: "kimi-k3"}` (or use custom agent
+types whose frontmatter pins the model) and the proxy routes each subagent request to
+its provider — Codex backend, OpenRouter, or Anthropic — while the main loop stays on
+Fable via Claude OAuth. Canonical example: Fable plans, a Kimi K3 agent does the
+frontend/design work, Sol agents execute, then a three-model review panel judges the
+result.
 
 Before building UI on top, a spike must verify (in a separate checkout / on deploy —
 never against the live daemon serving this workspace):
@@ -175,6 +188,8 @@ never against the live daemon serving this workspace):
    provider, but smoke-test: auth, streaming, tool use).
 3. Prompt caching and effort flags survive the proxy hop on the `claude-*` path without
    pathological cost/latency regressions.
+4. OpenRouter routing: `kimi-k3` alias resolves via `openai-compatibility`, tool use and
+   streaming behave in the Claude harness (cheap check — plain API key, no OAuth).
 
 Known trade-off: in `claudemix` sessions all Anthropic traffic transits the local proxy —
 a proxy bug or version bump can break that session type. The stock `claude` entry stays
