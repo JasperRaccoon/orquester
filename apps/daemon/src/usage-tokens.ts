@@ -1,4 +1,4 @@
-import { readFile, readdir, stat, writeFile, mkdir } from "node:fs/promises";
+import { open, readFile, readdir, stat, writeFile, mkdir } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import type { UsageTokenRow, UsageTokensResponse } from "@orquester/api";
 
@@ -148,15 +148,22 @@ function extractCodexModel(obj: any): string | undefined {
   return undefined;
 }
 
-/** Parse a Codex `sessions/**.jsonl` rollout into per-turn rows. `last_token_usage`
- *  is the per-turn delta; gate on the cumulative total advancing so repeated
- *  events aren't double-counted. `input_tokens` already INCLUDES the cached
- *  tokens, so subtract them and record the non-cached remainder as `input`
- *  (cached goes to `cacheRead` and is billed at the cheaper cache-read rate). */
-function parseCodexFile(text: string, mtimeMs: number): RawRow[] {
+/** Codex line-parser state carried across incremental chunks of one file: the
+ *  last seen model (turn_context/session_meta records precede the token_count
+ *  events they describe) and the cumulative-total gate. */
+interface CodexParseState {
+  prevTotal: number;
+  model: string;
+}
+
+/** Parse a chunk of a Codex `sessions/**.jsonl` rollout into per-turn rows,
+ *  advancing `state` (see {@link CodexParseState}). `last_token_usage` is the
+ *  per-turn delta; gate on the cumulative total advancing so repeated events
+ *  aren't double-counted. `input_tokens` already INCLUDES the cached tokens,
+ *  so subtract them and record the non-cached remainder as `input` (cached
+ *  goes to `cacheRead` and is billed at the cheaper cache-read rate). */
+function parseCodexFile(text: string, mtimeMs: number, state: CodexParseState): RawRow[] {
   const rows: RawRow[] = [];
-  let prevTotal = 0;
-  let model = "unknown";
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
     let obj: any;
@@ -166,17 +173,17 @@ function parseCodexFile(text: string, mtimeMs: number): RawRow[] {
       continue;
     }
     const m = extractCodexModel(obj);
-    if (m) model = m;
+    if (m) state.model = m;
     if (obj?.type !== "event_msg" || obj?.payload?.type !== "token_count") continue;
     const info = obj.payload.info;
     const total = info?.total_token_usage?.total_tokens ?? 0;
-    if (total <= prevTotal) continue;
-    prevTotal = total;
+    if (total <= state.prevTotal) continue;
+    state.prevTotal = total;
     const last = info?.last_token_usage ?? {};
     const cached = last.cached_input_tokens ?? last.cache_read_input_tokens ?? 0;
     rows.push({
       agent: "codex",
-      model,
+      model: state.model,
       day: dayOf(obj?.timestamp, mtimeMs),
       input: Math.max(0, (last.input_tokens ?? 0) - cached),
       output: last.output_tokens ?? 0,
@@ -190,7 +197,17 @@ function parseCodexFile(text: string, mtimeMs: number): RawRow[] {
 interface FileEntry {
   mtimeMs: number;
   size: number;
+  /** Byte offset just past the last complete ("\n"-terminated) line parsed.
+   *  An append-only growth re-reads from here, not from byte 0 — active
+   *  multi-MB transcripts made full re-reads a sustained CPU hog. */
+  bytesParsed: number;
+  /** Rows parsed from the complete region (before {@link bytesParsed}). */
   rows: RawRow[];
+  /** Rows from the unterminated tail line, REPLACED on every update so a tail
+   *  that later gains its newline is never counted twice. */
+  tailRows: RawRow[];
+  /** Codex line-parser state at {@link bytesParsed} (claude is stateless). */
+  codexState: CodexParseState;
 }
 
 export class UsageTokensScanner {
@@ -201,6 +218,11 @@ export class UsageTokensScanner {
    *  so partial rescans stay correct. */
   private fileCache = new Map<string, FileEntry>();
 
+  private inflight: Promise<void> | null = null;
+  private rerun = false;
+  private lastRunMs = 0;
+  private cooldownTimer: ReturnType<typeof setTimeout> | undefined;
+
   constructor(
     private readonly opts: {
       userhome: string;
@@ -208,6 +230,8 @@ export class UsageTokensScanner {
       now: () => number;
       /** Extra credential homes to scan (managed accounts) beyond the host home. */
       accountHomes?: () => { agent: "claude" | "codex"; home: string }[];
+      /** Watcher-triggered recomputes run at most once per this window (default 30 s). */
+      minRecomputeIntervalMs?: number;
     }
   ) {}
 
@@ -224,7 +248,47 @@ export class UsageTokensScanner {
     return this.cache;
   }
 
+  /** File-watcher entry point: rate-limited (leading run + one coalesced
+   *  trailing run per cooldown window). With dozens of live agent sessions the
+   *  watcher fires continuously; unthrottled recomputes pegged a full core. */
+  requestRecompute(): void {
+    const interval = this.opts.minRecomputeIntervalMs ?? 30_000;
+    const due = this.lastRunMs + interval - this.opts.now();
+    if (due <= 0) {
+      this.lastRunMs = this.opts.now();
+      void this.recompute();
+      return;
+    }
+    if (this.cooldownTimer) return; // trailing run already scheduled
+    this.cooldownTimer = setTimeout(() => {
+      this.cooldownTimer = undefined;
+      this.lastRunMs = this.opts.now();
+      void this.recompute();
+    }, due);
+    this.cooldownTimer.unref?.();
+  }
+
+  /** Single-flight: a recompute requested while one runs coalesces into one
+   *  follow-up pass instead of piling up concurrent directory walks. */
   async recompute(): Promise<void> {
+    if (this.inflight) {
+      this.rerun = true;
+      return this.inflight;
+    }
+    this.inflight = (async () => {
+      try {
+        do {
+          this.rerun = false;
+          await this.doRecompute();
+        } while (this.rerun);
+      } finally {
+        this.inflight = null;
+      }
+    })();
+    return this.inflight;
+  }
+
+  private async doRecompute(): Promise<void> {
     const files: { path: string; agent: "claude" | "codex" }[] = [];
     for (const dir of this.homeDirs("claude", "CLAUDE_CONFIG_DIR", "projects"))
       for (const f of await walkJsonl(dir)) files.push({ path: f, agent: "claude" });
@@ -235,7 +299,8 @@ export class UsageTokensScanner {
     const present = new Set(files.map((f) => f.path));
     for (const path of [...this.fileCache.keys()]) if (!present.has(path)) this.fileCache.delete(path);
 
-    // Re-read only new/changed files (mtime or size differs from the cache).
+    // Re-read only new/changed files (mtime or size differs from the cache) —
+    // and for append-only growth, only the appended bytes.
     const done = new Set<string>();
     for (const { path, agent } of files) {
       if (done.has(path)) continue; // a path can appear once per home dir; parse it once
@@ -249,15 +314,7 @@ export class UsageTokensScanner {
       }
       const cached = this.fileCache.get(path);
       if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) continue;
-      let text: string;
-      try {
-        text = await readFile(path, "utf8");
-      } catch {
-        this.fileCache.delete(path);
-        continue;
-      }
-      const rows = agent === "claude" ? parseClaudeFile(text, st.mtimeMs) : parseCodexFile(text, st.mtimeMs);
-      this.fileCache.set(path, { mtimeMs: st.mtimeMs, size: st.size, rows });
+      await this.updateFile(path, agent, { mtimeMs: st.mtimeMs, size: st.size });
     }
 
     // Assemble with deterministic cross-file dedup (first file wins by sorted
@@ -265,7 +322,8 @@ export class UsageTokensScanner {
     const raw: RawRow[] = [];
     const seen = new Set<string>();
     for (const path of [...this.fileCache.keys()].sort()) {
-      for (const r of this.fileCache.get(path)!.rows) {
+      const entry = this.fileCache.get(path)!;
+      for (const r of [...entry.rows, ...entry.tailRows]) {
         if (r.dedupId !== undefined) {
           if (seen.has(r.dedupId)) continue;
           seen.add(r.dedupId);
@@ -277,6 +335,54 @@ export class UsageTokensScanner {
     this.cache = { rows: aggregateRows(raw), asOf: new Date(this.opts.now()).toISOString() };
     await mkdir(dirname(this.opts.cacheFile), { recursive: true });
     await writeFile(this.opts.cacheFile, JSON.stringify(this.cache), { mode: 0o600 });
+  }
+
+  /** Parse a changed file into its cache entry. Append-only growth (size grew)
+   *  reads from the cached byte offset; anything else (new file, truncation,
+   *  same-size mtime change) is a full re-read. Only complete lines advance
+   *  `bytesParsed`; the unterminated tail is parsed into `tailRows` with a
+   *  cloned codex state, and re-parsed (replaced) once more bytes arrive. */
+  private async updateFile(
+    path: string,
+    agent: "claude" | "codex",
+    st: { mtimeMs: number; size: number }
+  ): Promise<void> {
+    const cached = this.fileCache.get(path);
+    const incremental = cached !== undefined && st.size > cached.size;
+    const entry: FileEntry = incremental
+      ? cached
+      : { mtimeMs: 0, size: 0, bytesParsed: 0, rows: [], tailRows: [], codexState: { prevTotal: 0, model: "unknown" } };
+    const start = incremental ? entry.bytesParsed : 0;
+    let buf: Buffer;
+    try {
+      const fh = await open(path, "r");
+      try {
+        const len = Math.max(0, st.size - start);
+        const b = Buffer.alloc(len);
+        const { bytesRead } = await fh.read(b, 0, len, start);
+        buf = b.subarray(0, bytesRead);
+      } finally {
+        await fh.close();
+      }
+    } catch {
+      this.fileCache.delete(path);
+      return;
+    }
+    const lastNl = buf.lastIndexOf(0x0a);
+    const completeBuf = lastNl >= 0 ? buf.subarray(0, lastNl + 1) : Buffer.alloc(0);
+    const tailBuf = lastNl >= 0 ? buf.subarray(lastNl + 1) : buf;
+    if (agent === "claude") {
+      entry.rows.push(...parseClaudeFile(completeBuf.toString("utf8"), st.mtimeMs));
+      entry.tailRows = tailBuf.length > 0 ? parseClaudeFile(tailBuf.toString("utf8"), st.mtimeMs) : [];
+    } else {
+      entry.rows.push(...parseCodexFile(completeBuf.toString("utf8"), st.mtimeMs, entry.codexState));
+      entry.tailRows =
+        tailBuf.length > 0 ? parseCodexFile(tailBuf.toString("utf8"), st.mtimeMs, { ...entry.codexState }) : [];
+    }
+    entry.bytesParsed = start + completeBuf.length;
+    entry.mtimeMs = st.mtimeMs;
+    entry.size = st.size;
+    this.fileCache.set(path, entry);
   }
 
   /** Host home + every managed-account home for an agent (M3: managed-account

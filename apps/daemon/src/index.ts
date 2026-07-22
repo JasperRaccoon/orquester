@@ -402,17 +402,31 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   await usageTokens.init();
   {
     const { watch } = await import("node:fs");
+    // With dozens of live agent sessions the watchers fire continuously; keep
+    // the debounce coarse and route the transcript scan through the scanner's
+    // rate-limited entry point (leading + trailing run per 30 s window). An
+    // unthrottled 500 ms nudge re-parsed every active transcript nonstop and
+    // pegged the daemon's event loop (multi-second terminal latency).
     let debounce: ReturnType<typeof setTimeout> | undefined;
     const nudge = () => {
       clearTimeout(debounce);
       debounce = setTimeout(() => {
         void usage.recompute();
-        void usageTokens.recompute();
-      }, 500);
+        usageTokens.requestRecompute();
+      }, 5_000);
+      debounce.unref?.();
     };
+    // Watch only the transcript roots (claude writes debug/statsig/todo files
+    // all over its config dir — those must not trigger scans).
+    const claudeConfig = process.env.CLAUDE_CONFIG_DIR || join(resolved.vars.userhome, ".claude");
+    // Fall back to the config dir while projects/ doesn't exist yet (first
+    // run): fs.watch can't attach to a missing dir, and transcripts would
+    // otherwise go unwatched until a restart. The nudge is rate-limited, so
+    // the noisier fallback watch is still cheap.
+    const claudeProjects = join(claudeConfig, "projects");
     for (const dir of [
       join(process.env.CODEX_HOME || join(resolved.vars.userhome, ".codex"), "sessions"),
-      process.env.CLAUDE_CONFIG_DIR || join(resolved.vars.userhome, ".claude")
+      existsSync(claudeProjects) ? claudeProjects : claudeConfig
     ]) {
       try {
         const watcher = watch(dir, { recursive: true }, nudge);
