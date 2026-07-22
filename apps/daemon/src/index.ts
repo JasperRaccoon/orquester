@@ -2449,6 +2449,7 @@ function createServer(
               onFrame: (jpeg) => sendFrame(id, jpeg),
               onState: (state) => sendJson(state),
               onPicked: (payload) => sendJson({ t: "picked", id, payload }),
+              onFocus: (editable) => sendJson({ t: "focus", id, editable }),
               onEnd: () => sendJson({ t: "end", id })
             })
             .catch(() => null);

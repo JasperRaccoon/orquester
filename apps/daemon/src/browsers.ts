@@ -12,6 +12,7 @@ import {
 } from "@orquester/api";
 import { type BrowserRecord, createDefaultBrowsersFile, parseBrowsersFile } from "@orquester/config";
 import {
+  FOCUS_WATCH_SCRIPT,
   PICKER_SCRIPT,
   SCREENSHOT_MAX_BYTES,
   armPickerExpression,
@@ -38,6 +39,8 @@ export interface BrowserSink {
   onFrame(jpeg: Buffer): void;
   onState(state: BrowserStateMessage): void;
   onPicked(payload: BrowserPickPayload): void;
+  /** Remote focus moved onto/off a text-editable element (mobile keyboard hint). */
+  onFocus?(editable: boolean): void;
   onEnd(): void;
 }
 
@@ -447,9 +450,18 @@ export class BrowserManager {
     await this.applyViewport(tab);
     await tab.cdp.send("Runtime.enable");
     await tab.cdp.send("Runtime.addBinding", { name: "__orquesterPick" });
+    await tab.cdp.send("Runtime.addBinding", { name: "__orquesterFocus" });
     tab.cdp.on("Runtime.bindingCalled", (event) => {
       if (event.name === "__orquesterPick") void this.onPickReport(tab, event.payload);
+      else if (event.name === "__orquesterFocus") {
+        const editable = event.payload === "1"; // hostile payload: compared only
+        for (const sink of tab.sinks) sink.onFocus?.(editable);
+      }
     });
+    // Focus watcher lives for the page's whole life (unlike the picker, which
+    // installs/removes per arm).
+    await page.evaluateOnNewDocument(FOCUS_WATCH_SCRIPT);
+    await tab.cdp.send("Runtime.evaluate", { expression: FOCUS_WATCH_SCRIPT }).catch(() => undefined);
     page.on("framenavigated", (frame) => {
       if (frame === page.mainFrame()) void this.syncRecord(tab).catch(() => undefined);
     });

@@ -39,6 +39,10 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
 
   const channel = useMemo(() => api?.browserChannel(), [api]);
   const isDesktop = useIsDesktop();
+  // Ref mirror so the subscribe effect's handlers see the current value
+  // without resubscribing the stream on viewport-width changes.
+  const isDesktopRef = useRef(isDesktop);
+  isDesktopRef.current = isDesktop;
   const vp = VIEWPORT[state?.viewportMode ?? browser.viewportMode];
 
   // Subscribe while active; the canvas keeps its last frame when hidden (grid
@@ -69,6 +73,16 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
         if (!urlFocusedRef.current) setUrlDraft(s.url === "about:blank" ? "" : s.url);
       },
       onPicked: (payload) => { setPicking(false); setPicks((prev) => [...prev, payload]); },
+      // Auto keyboard on mobile, terminal-style: the remote page reports when
+      // focus lands on a text-editable element (~1 RTT after the tap, inside
+      // Android's transient-activation window) → raise the soft keyboard;
+      // dismiss it when remote focus leaves. Desktop keeps its own focus flow
+      // (blurring there would kill arrow-key scrolling on the canvas).
+      onFocus: (editable) => {
+        if (isDesktopRef.current) return;
+        if (editable) hiddenInputRef.current?.focus({ preventScroll: true });
+        else hiddenInputRef.current?.blur();
+      },
       onEnd: () => {}
     });
     return () => handle.close();

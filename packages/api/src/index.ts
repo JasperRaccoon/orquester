@@ -888,6 +888,9 @@ export interface BrowserStateMessage {
 export type BrowserServerJsonMessage =
   | BrowserStateMessage
   | { t: "picked"; id: string; payload: BrowserPickPayload }
+  /** Remote focus moved onto (true) / off (false) a text-editable element —
+   *  drives the mobile client's auto keyboard raise/dismiss. */
+  | { t: "focus"; id: string; editable: boolean }
   | { t: "end"; id: string }
   | { t: "pong" };
 

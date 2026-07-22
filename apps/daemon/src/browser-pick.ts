@@ -125,6 +125,44 @@ export function clampBrowserPickPayload(raw: unknown): BrowserPickPayload | null
   };
 }
 
+/**
+ * In-page focus watcher: reports whether the active element is text-editable
+ * through the CDP binding window.__orquesterFocus ("1"/"0"). Installed for the
+ * page's whole life (new-document + current doc); drives the mobile client's
+ * automatic soft-keyboard raise/dismiss. Payload is hostile-page-controlled but
+ * only ever compared to the literal "1" server-side.
+ * NOTE: no backticks or slash-star sequences in this string - it lives inside
+ * a template literal.
+ */
+export const FOCUS_WATCH_SCRIPT = String.raw`
+(() => {
+  if (window.__orqFocusWatch) return;
+  window.__orqFocusWatch = 1;
+  const NON_TEXT = /^(button|checkbox|radio|submit|reset|file|image|range|color|hidden)$/i;
+  function editable(el) {
+    if (!el) return false;
+    if (el.isContentEditable) return true;
+    const tag = el.tagName;
+    if (tag === "TEXTAREA") return !el.disabled && !el.readOnly;
+    if (tag === "INPUT") return !el.disabled && !el.readOnly && !NON_TEXT.test(el.type || "text");
+    return false;
+  }
+  let last = null, timer = null;
+  function check() {
+    const v = editable(document.activeElement) ? "1" : "0";
+    if (v === last) return;
+    last = v;
+    try { window.__orquesterFocus(v); } catch (e) {}
+  }
+  function queue() {
+    clearTimeout(timer);
+    timer = setTimeout(check, 50);
+  }
+  document.addEventListener("focusin", queue, true);
+  document.addEventListener("focusout", queue, true);
+})();
+`;
+
 /** Expression evaluated to arm/disarm the picker after PICKER_SCRIPT is installed. */
 export function armPickerExpression(on: boolean): string {
   return `window.__orqPicker && window.__orqPicker.${on ? "arm" : "disarm"}()`;

@@ -10,6 +10,8 @@ export interface BrowserStreamHandlers {
   onFrame(jpeg: ArrayBuffer): void;
   onState(state: BrowserStateMessage): void;
   onPicked(payload: BrowserPickPayload): void;
+  /** Remote focus moved onto/off a text-editable element (mobile keyboard hint). */
+  onFocus?(editable: boolean): void;
   onEnd(): void;
 }
 
@@ -147,6 +149,7 @@ export class WsBrowserChannel {
       if (!handlers) return;
       if (msg.t === "state") handlers.onState(msg);
       else if (msg.t === "picked") handlers.onPicked(msg.payload);
+      else if (msg.t === "focus") handlers.onFocus?.(msg.editable);
       else if (msg.t === "end") handlers.onEnd();
     };
 
