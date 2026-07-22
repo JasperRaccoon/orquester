@@ -6,6 +6,16 @@ import { basename, delimiter, isAbsolute, join } from "node:path";
 /** Prefix for every orquester-owned tmux session (`orq-<uuid>`). */
 export const TMUX_SESSION_PREFIX = "orq-";
 
+/**
+ * Prefix for daemon-owned *service* sessions (e.g. the managed CLIProxyAPI
+ * process). It must NOT start with `TMUX_SESSION_PREFIX` — the reaper scans
+ * `list-sessions` for `orq-` names, and reattach() reaps orphans there; a service
+ * session named `orq-…` would be mistaken for a user session and reaped. Because
+ * `"orqsvc-".startsWith("orq-") === false` (char 3 is `s`, not `-`), service
+ * sessions are invisible to `listSessions()` and thus immune.
+ */
+export const SERVICE_SESSION_PREFIX = "orqsvc-";
+
 /** Derive the tmux session name from a session id. */
 export function tmuxName(id: string): string {
   return `${TMUX_SESSION_PREFIX}${id}`;
@@ -433,5 +443,63 @@ export class Tmux {
   /** Kill a session (used to reap orphans / forget on close). */
   async killSession(id: string): Promise<void> {
     await this.run(["kill-session", "-t", tmuxName(id)]);
+  }
+
+  /**
+   * Create a detached *service* session that runs `bin args...` inside tmux, using
+   * `opts.name` verbatim (no `orq-` prefixing). Unlike newSession, the name is the
+   * caller's responsibility — and it MUST live in the `orqsvc-` namespace so the
+   * reaper (which scans `orq-` names via listSessions) never sees or kills it.
+   * Throws unless the name starts with SERVICE_SESSION_PREFIX, guarding against a
+   * service session accidentally landing in the reaped namespace. Mirrors
+   * newSession's construction (env via `-e`, cwd, detached, session PATH on the
+   * new-session client) minus the pane size, which a background process doesn't need.
+   */
+  async newServiceSession(opts: {
+    name: string;
+    cwd: string;
+    env: Record<string, string>;
+    bin: string;
+    args: string[];
+  }): Promise<void> {
+    if (!opts.name.startsWith(SERVICE_SESSION_PREFIX)) {
+      throw new Error(
+        `service session name must start with "${SERVICE_SESSION_PREFIX}" (got "${opts.name}")`
+      );
+    }
+    const envArgs = Object.entries(opts.env)
+      .filter(([, value]) => !value.includes("\n"))
+      .flatMap(([key, value]) => ["-e", `${key}=${value}`]);
+    const result = await this.run(
+      [
+        "new-session",
+        "-d",
+        "-s",
+        opts.name,
+        "-c",
+        opts.cwd,
+        ...envArgs,
+        "--",
+        opts.bin,
+        ...opts.args
+        // The pane inherits THIS new-session client's env (not the `-e` vars
+        // above), so the session PATH must be set here to expose user-local tools.
+      ],
+      { PATH: sessionPath() }
+    );
+    if (result.code !== 0) {
+      throw new Error(`tmux new-session (service) failed (${result.code}): ${result.stderr.trim()}`);
+    }
+  }
+
+  /** True if a live service session with this exact name exists on this server. */
+  async hasServiceSession(name: string): Promise<boolean> {
+    const result = await this.run(["has-session", "-t", `=${name}`]);
+    return result.code === 0;
+  }
+
+  /** Kill a service session by its exact name. */
+  async killServiceSession(name: string): Promise<void> {
+    await this.run(["kill-session", "-t", `=${name}`]);
   }
 }
