@@ -8,7 +8,7 @@ import type {
 import { REGISTRY, type RegistryEntryDef } from "@orquester/registry";
 import { exec, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { accessSync, constants } from "node:fs";
+import { accessSync, constants, readdirSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { delimiter, isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -66,6 +66,46 @@ function resolveBin(cands: string[]): string | undefined {
     }
   }
   return undefined;
+}
+
+/**
+ * Chromium binaries that puppeteer/playwright tooling drops into the daemon
+ * user's caches (~/.cache/puppeteer/chrome/<ver>/chrome-linux64/chrome,
+ * ~/.cache/ms-playwright/chromium-<rev>/chrome-linux[64]/chrome). They are not on
+ * PATH — so the plain probe misses them — but puppeteer-core drives them fine,
+ * and on a VPS they're often the ONLY Chromium present (installed by agent
+ * tooling). Probed as fallback candidates for the "chromium" registry entry so
+ * browser tabs (Design Mode) light up on such hosts. resolveBin() filters by
+ * executability, so listing paths that don't exist is harmless.
+ */
+function chromiumCacheCandidates(): string[] {
+  if (process.platform === "win32") {
+    return [];
+  }
+  const home = process.env.HOME || "";
+  if (!home) {
+    return [];
+  }
+  const out: string[] = [];
+  const layouts: Array<{ root: string; match: RegExp; leaf: string[] }> = [
+    { root: join(home, ".cache", "puppeteer", "chrome"), match: /^linux-/, leaf: ["chrome-linux64", "chrome"] },
+    { root: join(home, ".cache", "puppeteer", "chrome"), match: /^mac-/, leaf: ["chrome-mac-arm64", "Google Chrome for Testing.app", "Contents", "MacOS", "Google Chrome for Testing"] },
+    { root: join(home, ".cache", "ms-playwright"), match: /^chromium-\d+$/, leaf: ["chrome-linux64", "chrome"] },
+    { root: join(home, ".cache", "ms-playwright"), match: /^chromium-\d+$/, leaf: ["chrome-linux", "chrome"] }
+  ];
+  for (const { root, match, leaf } of layouts) {
+    let entries: string[];
+    try {
+      entries = readdirSync(root);
+    } catch {
+      continue;
+    }
+    // Descending name sort ≈ newest version first (good enough for a fallback).
+    for (const name of entries.filter((n) => match.test(n)).sort().reverse()) {
+      out.push(join(root, name, ...leaf));
+    }
+  }
+  return out;
 }
 
 function osOpener(): string[] {
@@ -252,7 +292,11 @@ export class RegistryService {
   }
 
   private async resolveDef(def: RegistryDef): Promise<RegistryEntry> {
-    const resolvedBin = resolveBin(def.bin);
+    const candidates =
+      def.id === "chromium" && def.kind === "browser"
+        ? [...def.bin, ...chromiumCacheCandidates()]
+        : def.bin;
+    const resolvedBin = resolveBin(candidates);
     const envFromFile = await this.loadEnvFile(def.id, def.envFile);
     const env = mergeEnv(def.env, envFromFile);
     return {
