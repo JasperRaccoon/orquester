@@ -6,6 +6,28 @@ interface Logger {
   error(...args: unknown[]): void;
 }
 
+/**
+ * Canonical agent family for a registry entry id. Hook installation, config
+ * targeting, and the installer dispatch all key on the FAMILY, never the raw id
+ * — the claudex/claudemix launchers run the real `claude` binary against the
+ * managed CLIProxyAPI, so they must receive claude-shaped hooks + config, not
+ * fall through to the opencode installer. Unknown ids get no managed hooks.
+ */
+export function agentFamily(entryId: string): "claude" | "codex" | "opencode" | null {
+  switch (entryId) {
+    case "claude":
+    case "claudex":
+    case "claudemix":
+      return "claude";
+    case "codex":
+      return "codex";
+    case "opencode":
+      return "opencode";
+    default:
+      return null;
+  }
+}
+
 /** Bump when the script body changes so existing installs get rewritten. */
 const SCRIPT_VERSION = 2;
 
@@ -183,7 +205,7 @@ export class AgentHooks {
 
   /** The directory the launched agent process reads its config from. */
   private configTarget(entryId: string, launchEnv: Record<string, string>): string | null {
-    switch (entryId) {
+    switch (agentFamily(entryId)) {
       case "claude":
         return launchEnv.CLAUDE_CONFIG_DIR || join(this.homeDir, ".claude");
       case "codex":
@@ -197,12 +219,16 @@ export class AgentHooks {
 
   private async install(entryId: string, targetDir: string): Promise<void> {
     await writeFileAtomic(this.scriptPath, hookScript(), 0o755, false);
-    if (entryId === "claude") {
-      await this.installClaude(targetDir);
-    } else if (entryId === "codex") {
-      await this.installCodex(targetDir);
-    } else {
-      await this.installOpenCode(targetDir);
+    switch (agentFamily(entryId)) {
+      case "claude":
+        await this.installClaude(targetDir);
+        break;
+      case "codex":
+        await this.installCodex(targetDir);
+        break;
+      case "opencode":
+        await this.installOpenCode(targetDir);
+        break;
     }
   }
 
