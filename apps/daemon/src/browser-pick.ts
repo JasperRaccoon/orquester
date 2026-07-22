@@ -172,9 +172,9 @@ export const PICKER_SCRIPT = String.raw`
     box.style.left = r.left + "px"; box.style.top = r.top + "px";
     box.style.width = r.width + "px"; box.style.height = r.height + "px";
     // Self-calibrate against page zoom / root scale. Apps that set a global
-    // `zoom:` (or transform scale) on html/body/#root put the overlay's
+    // "zoom:" (or transform scale) on html/body/#root put the overlay's
     // styling space and getBoundingClientRect space out of sync, so the
-    // highlight lands offset and mis-sized. Both the target rect `r` and the
+    // highlight lands offset and mis-sized. Both the target rect r and the
     // just-placed box are measured with the SAME API in the SAME space, so
     // the discrepancy is a linear map: fix scale first, then any residual
     // translation. No-ops (0 extra style writes) on unzoomed pages.
