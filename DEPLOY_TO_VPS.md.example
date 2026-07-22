@@ -16,6 +16,15 @@ behind Caddy on 443; the daemon listens on loopback `127.0.0.1:47831`.
    git push origin main
    ```
 2. **Deploy each VPS** (run the one-liners below). They're independent.
+3. **Browser smoke test each deployed URL** (mandatory after web/ui changes):
+   ```sh
+   node scripts/smoke-web.mjs https://example.com
+   ```
+   Loads the SPA headlessly with clean storage **and** with legacy localStorage
+   fixtures (`scripts/smoke-web-fixtures.json`); fails on any uncaught page
+   error, console error, or empty `#root`. Catches the "health curl is green but
+   the page crashes on users' stale persisted state" class. Runs from your dev
+   machine; needs a system Chrome/Chromium (`SMOKE_CHROME=` to override).
 
 ## Targets
 

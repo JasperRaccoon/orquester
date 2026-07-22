@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { AppWrapper, AppShell } from "./components/layout";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { OrquesterProvider, type WindowControls } from "./context/orquester-context";
 import { ApiClient } from "./lib/api-client";
 import { createTransporter } from "./lib/transporters";
@@ -116,15 +117,17 @@ export const OrquesterApp: React.FC<OrquesterAppProps> = ({
   }, []);
 
   return (
-    <OrquesterProvider
-      runtime={runtime}
-      api={api}
-      useTitlebar={titlebar}
-      windowControls={windowControls}
-    >
-      <AppWrapper>
-        <AppShell />
-      </AppWrapper>
-    </OrquesterProvider>
+    <ErrorBoundary>
+      <OrquesterProvider
+        runtime={runtime}
+        api={api}
+        useTitlebar={titlebar}
+        windowControls={windowControls}
+      >
+        <AppWrapper>
+          <AppShell />
+        </AppWrapper>
+      </OrquesterProvider>
+    </ErrorBoundary>
   );
 };

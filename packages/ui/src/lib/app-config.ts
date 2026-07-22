@@ -24,12 +24,39 @@ export function normalizeUsagePrefs(value: unknown, fallback: UsagePrefs): Usage
   return parsed.success ? parsed.data : fallback;
 }
 
+/**
+ * Field-wise validation of a stored app-config blob (repo rule: raw JSON.parse
+ * output never reaches typed code without validation + fallback — payloads
+ * written by old bundles outlive deploys). Valid fields pass through, absent
+ * fields stay absent (so per-host defaults still win in the store's merge),
+ * wrong-typed fields are dropped, and `usage` goes through its zod schema
+ * (which also migrates the legacy pre-record shape).
+ */
+export function sanitizeStoredAppConfig(raw: unknown): Partial<AppConfig> {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return {};
+  }
+  const rec = raw as Record<string, unknown>;
+  const out: Partial<AppConfig> = {};
+  if (typeof rec.activeConnectionId === "string" && rec.activeConnectionId.length > 0) {
+    out.activeConnectionId = rec.activeConnectionId;
+  }
+  if (typeof rec.useTitlebar === "boolean") out.useTitlebar = rec.useTitlebar;
+  if (typeof rec.runInBackground === "boolean") out.runInBackground = rec.runInBackground;
+  if (typeof rec.confirmCloseSession === "boolean") out.confirmCloseSession = rec.confirmCloseSession;
+  if (rec.usage !== undefined) {
+    const usage = usagePrefsSchema.safeParse(rec.usage);
+    if (usage.success) out.usage = usage.data;
+  }
+  return out;
+}
+
 export function createLocalStorageAppConfigAdapter(key = "orquester.app"): AppConfigAdapter {
   return {
     async load() {
       try {
         const raw = localStorage.getItem(key);
-        return raw ? (JSON.parse(raw) as Partial<AppConfig>) : {};
+        return raw ? sanitizeStoredAppConfig(JSON.parse(raw)) : {};
       } catch {
         return {};
       }

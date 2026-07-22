@@ -271,6 +271,13 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
 - **tmux is version-gated.** Persistence needs tmux ≥ 3.2; otherwise the daemon silently uses the
   no-persistence `LocalSessionManager`. Never assume sessions survive a restart on Windows/stock
   macOS.
+- **Adapter/localStorage loads must go through a schema (or field-wise validation) with
+  fallback — old bundles' payloads outlive deploys.** Raw `JSON.parse` output must never reach
+  typed code: a `usage` blob persisted by a pre-migration bundle once crashed the whole web
+  client on load ("Cannot read properties of undefined"). Pattern: zod `safeParse` + default
+  fallback (see `packages/ui/src/lib/app-config.ts`) or per-field `typeof` validation (see
+  `panel-sizes.ts` / `view-mode.ts` / `search-options.ts`). Review for this whenever adding a
+  persisted client-side shape or changing an existing one.
 - **Secrets never cross the wire.** Plaintext passwords are migrated to bcrypt at rest;
   `sanitizeDaemonConfig` masks username/passwordHash/fsRoot; SSH private keys and GitHub PATs are
   never returned by any API; the `?token=` is redacted from logs. *(A bound workspace's PAT **is**
@@ -411,6 +418,12 @@ curl -fsS http://127.0.0.1:47831/health
 - **Daemon code changes need no rebuild** — tsx runs the new source after `systemctl restart`.
   Only the web SPA (`apps/web/dist`) needs `pnpm build`. Caddy needs a reload only if the
   Caddyfile changes.
+- **After any web/ui deploy, run the browser smoke test** (mandatory, after the health curl):
+  `node scripts/smoke-web.mjs https://<your-domain>` from your dev machine. It loads the
+  deployed SPA headlessly with clean storage **and** with legacy localStorage fixtures
+  (`scripts/smoke-web-fixtures.json`) and fails on any uncaught page error, console error, or
+  an empty `#root` — catching the "deploy looks fine, page dies on real users' stale state"
+  class the health curl can't see. Needs a local Chrome/Chromium (`SMOKE_CHROME=` to override).
 - **Unit changes need `daemon-reload`.** `deploy/orquester.service` carries the loosened sandbox
   that makes scoped sudo work; a routine `systemctl restart` does **not** re-read the unit. On an
   existing VPS run `provision-devtools.sh` once (build deps + sudoers drop-in + user tools;

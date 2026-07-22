@@ -1,0 +1,11 @@
+{
+  "legacy-usage-prefs-pre-agents-record": {
+    "orquester.app": "{\"version\":1,\"activeConnectionId\":\"local\",\"useTitlebar\":false,\"runInBackground\":false,\"confirmCloseSession\":true,\"usage\":{\"enabled\":true,\"claude\":true,\"codex\":false,\"chip\":\"busiest\"}}"
+  },
+  "corrupt-app-config": {
+    "orquester.app": "{\"version\":1,\"useTitlebar\":\"yes\",\"usage\":{\"chip\":\"not-an-agent\"}}"
+  },
+  "garbage-app-config": {
+    "orquester.app": "not json at all"
+  }
+}
