@@ -508,7 +508,11 @@ export const sessionRecordSchema = z.object({
   // TUI (agent) repaints into a small corner until the client re-sends a resize.
   // Optional: records written before this field existed simply fall back.
   cols: z.number().int().positive().optional(),
-  rows: z.number().int().positive().optional()
+  rows: z.number().int().positive().optional(),
+  // Effective per-launch model for claudex/claudemix sessions, persisted so a
+  // reattach after a daemon restart keeps the tab pinned to the model it was
+  // launched with. Optional: absent for every other launcher and pre-field records.
+  model: z.string().optional()
 });
 
 export const sessionsConfigSchema = z.object({

@@ -591,6 +591,13 @@ export interface RegistryEntry {
   env?: Record<string, string>;
   /** True only when a candidate bin resolved AND the entry is not disabled. */
   enabled: boolean;
+  /**
+   * Human-readable reason the entry is currently disabled at runtime (e.g. the
+   * managed proxy is down or an upstream credential expired). Surfaced only when
+   * effective `enabled` is false and the daemon set a runtime reason; absent
+   * otherwise. Lets the UI explain a greyed-out launcher instead of hiding it.
+   */
+  disabledReason?: string;
   /** Absolute path of the resolved bin, when found. */
   resolvedBin?: string;
   /** Flag to print a version (agents only), e.g. "--version". */
@@ -701,6 +708,31 @@ export interface SetAgentAccountDefaultsRequest {
 
 export type AgentAccountsEventType = "agent-accounts.changed";
 
+// CliProxy — the managed CLIProxyAPI process backing the claudex/claudemix
+// launchers. Status is read-only over both transports; mutations are HTTP-only.
+
+/** Upstream identity providers the managed proxy brokers. */
+export type CliProxyProviderId = "codex" | "claude" | "openrouter";
+
+export interface CliProxyProviderStatus {
+  provider: CliProxyProviderId;
+  state: "ok" | "missing" | "expired";
+  lastVerifiedAt: string | null;
+}
+
+export interface CliProxyStatus {
+  state: "off" | "downloading" | "building" | "starting" | "healthy" | "degraded" | "error";
+  reasons: string[];
+  detail: string | null;
+  version: string | null;
+  defaultModel: string;
+  backgroundModel: string;
+  providers: CliProxyProviderStatus[];
+  accounts: { id: string; provider: CliProxyProviderId; label: string; email?: string }[];
+  activeSessionCount: number;
+  testedClaudeCliVersion: string | null;
+}
+
 /**
  * Sentinel `accountId` on a create-session request meaning "explicit System /
  * host identity" — resolve to no managed account even when a per-agent default
@@ -727,6 +759,12 @@ export interface SessionSummary {
   /** Per-project tab sort key (ascending); assigned by the daemon. */
   order: number;
   createdAt: string;
+  /**
+   * Effective model this session was launched with, for the claudex/claudemix
+   * launchers only (the per-launch model pick, resolved to the concrete catalog
+   * string). Absent for every other launcher and for pre-field records.
+   */
+  model?: string;
   /** Live activity snapshot; absent in persisted indexes and for exited sessions. */
   activity?: SessionActivity;
 }
@@ -740,6 +778,12 @@ export interface CreateSessionRequest {
   rows?: number;
   title?: string;
   accountId?: string;
+  /**
+   * Per-launch model pick — valid only for the claudex/claudemix launchers,
+   * rejected with 400 for any other refId. Omitted → the manager's configured
+   * default model. Validated against the proxy's live catalog before launch.
+   */
+  model?: string;
 }
 
 export interface RenameSessionRequest {

@@ -19,6 +19,12 @@ export interface RegistryEntryDef {
   /** Windows override for installCmd; the daemon picks this on win32. installCmd stays the POSIX form. */
   installCmdWin32?: string;
   updateCmd?: string;
+  /**
+   * When false, the entry is disabled at rest even if its bin resolves — a
+   * daemon service (the CliProxyManager) enables it at runtime once its backing
+   * infrastructure is healthy. Absent/true means "enabled as soon as bin found".
+   */
+  enabledAtRest?: boolean;
 }
 
 /**
@@ -94,6 +100,31 @@ export const REGISTRY = {
       versionFlag: "--version",
       installCmd: "npm install -g opencode-ai",
       updateCmd: "npm update -g opencode-ai"
+    },
+    {
+      // Claude Code driven through the managed CLIProxyAPI against a GPT/Kimi
+      // catalog. Reuses the `claude` binary; the CliProxyManager enables it at
+      // runtime once the proxy is healthy (disabled at rest).
+      id: "claudex",
+      name: "Claude × GPT/Kimi",
+      kind: "agent",
+      bin: ["claude"] as const,
+      args: ["--dangerously-skip-permissions", "--effort", "max", "--verbose"] as const,
+      env: { CLAUDE_CODE_NO_FLICKER: "1" },
+      versionFlag: "--version",
+      enabledAtRest: false
+    },
+    {
+      // Claude Code with a mixed model set (Claude OAuth main loop + GPT/Kimi
+      // side channels) through the managed proxy. Also runtime-enabled.
+      id: "claudemix",
+      name: "Claude × Mixed",
+      kind: "agent",
+      bin: ["claude"] as const,
+      args: ["--dangerously-skip-permissions", "--effort", "max", "--verbose"] as const,
+      env: { CLAUDE_CODE_NO_FLICKER: "1" },
+      versionFlag: "--version",
+      enabledAtRest: false
     }
   ] as const,
 
