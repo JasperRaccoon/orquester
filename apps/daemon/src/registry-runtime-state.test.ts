@@ -60,6 +60,30 @@ test("reresolve re-reads env file but cannot resurrect a runtime-disabled entry"
   }
 });
 
+test("setRuntimeState enable overrides enabledAtRest:false on a resolved entry", async () => {
+  // The regression guard: an entry disabled at rest (enabledAtRest:false) with a
+  // resolved bin must flip ON when a backing service calls setRuntimeState(enabled:true).
+  // The old computeEnabled ANDed `enabledAtRest !== false` unconditionally, so the
+  // manager's "healthy proxy enables the launchers" could never take effect.
+  const root = await mkdtemp(join(tmpdir(), "orquester-registry-runtime-enable-"));
+  await mkdir(join(root, "env"));
+  await writeFile(
+    join(root, "agents.json"),
+    JSON.stringify([
+      { id: "claudex", name: "claudex", kind: "agent", bin: [process.execPath], enabledAtRest: false }
+    ])
+  );
+  const registry = new RegistryService(root);
+  await registry.init();
+  try {
+    assert.equal(registry.get("claudex")!.enabled, false); // disabled at rest
+    registry.setRuntimeState("claudex", { enabled: true }); // proxy healthy
+    assert.equal(registry.get("claudex")!.enabled, true); // now launchable
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("setRuntimeState enable is gated by enabledAtRest:false on the real claudex def", async () => {
   // No agents.json override here: the static claudex/claudemix defs carry enabledAtRest:false,
   // so a healthy bin + runtime-enabled must NOT flip them on at rest (only reresolve/status can,

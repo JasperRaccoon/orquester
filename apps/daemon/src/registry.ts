@@ -357,11 +357,12 @@ export class RegistryService {
    */
   private computeEnabled(def: RegistryDef, resolvedBin: string | undefined): { enabled: boolean; disabledReason?: string } {
     const runtime = this.runtimeState.get(def.id);
-    const enabled =
-      Boolean(resolvedBin) &&
-      def.enabled !== false &&
-      def.enabledAtRest !== false &&
-      runtime?.enabled !== false;
+    // A runtime override (from a backing service) wins outright; without one,
+    // `enabledAtRest` sets the default. So `enabledAtRest:false` disables a
+    // launcher at rest yet still lets the service turn it on when its
+    // infrastructure is healthy — it must not veto the runtime decision.
+    const runtimeDecision = runtime ? runtime.enabled : def.enabledAtRest !== false;
+    const enabled = Boolean(resolvedBin) && def.enabled !== false && runtimeDecision;
     const disabledReason = !enabled && runtime?.disabledReason ? runtime.disabledReason : undefined;
     return { enabled, disabledReason };
   }
@@ -463,6 +464,7 @@ function normalizeDef(item: unknown, defaultKind: RegistryKind): RegistryDef | n
     env: env && Object.keys(env).length > 0 ? env : undefined,
     envFile,
     enabled: typeof obj.enabled === "boolean" ? obj.enabled : undefined,
+    enabledAtRest: obj.enabledAtRest === false ? false : undefined,
     versionFlag: typeof obj.versionFlag === "string" ? obj.versionFlag : undefined,
     installCmd: typeof obj.installCmd === "string" ? obj.installCmd : undefined,
     updateCmd: typeof obj.updateCmd === "string" ? obj.updateCmd : undefined
