@@ -315,7 +315,7 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
           {(state?.viewportMode ?? browser.viewportMode) === "desktop" ? <Monitor size={14} /> : <Smartphone size={14} />}
         </button>
         <button type="button" aria-label="Pick element" onClick={togglePick}
-          className={cn("rounded p-1 hover:bg-neutral-800", picking ? "text-sky-400" : "text-neutral-400")}>
+          className={cn("rounded p-1 hover:bg-neutral-800", picking ? "bg-neutral-700 text-neutral-100" : "text-neutral-400")}>
           <Crosshair size={14} />
         </button>
         {!isDesktop && (
