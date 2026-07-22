@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
-import { mkdtemp, readFile, stat } from "node:fs/promises";
+import { mkdtemp, readFile, stat, mkdir, writeFile, lstat } from "node:fs/promises";
 import { join } from "node:path";
 import { AgentAccountsService } from "./agent-accounts.ts";
 
@@ -15,6 +15,7 @@ async function makeService() {
   const svc = new AgentAccountsService({
     indexFile: join(base, "agent-accounts.json"),
     accountsDir: join(base, "agent-accounts"),
+    userhome: base,
     now: () => 1_000
   });
   await svc.init();
@@ -116,6 +117,7 @@ async function makeServiceWithFetch(now: number, fetchImpl: typeof fetch) {
   const svc = new AgentAccountsService({
     indexFile: join(base, "agent-accounts.json"),
     accountsDir: join(base, "agent-accounts"),
+    userhome: base,
     now: () => now,
     fetchImpl
   });
@@ -180,4 +182,65 @@ test("resolveLaunchEnv unsets OPENAI_API_KEY for a managed Codex session", async
   const env = await svc.resolveLaunchEnv("codex", acct.id);
   assert.equal(env?.env.CODEX_HOME, svc.homePath("codex", acct.id));
   assert.deepEqual(env?.unset, ["OPENAI_API_KEY"]);
+});
+
+test("resolveLaunchEnv seeds a Claude home: onboarding, mcps, stripped identity, symlinked skills/plugins", async () => {
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const base = await mkdtemp(join(tmpdir(), "orq-seed-"));
+  await writeFile(
+    join(base, ".claude.json"),
+    JSON.stringify({ oauthAccount: { emailAddress: "sys@x" }, userID: "u1", mcpServers: { foo: { command: "x" } }, hasCompletedOnboarding: false, tipsHistory: { a: 1 } })
+  );
+  await mkdir(join(base, ".claude", "skills"), { recursive: true });
+  await mkdir(join(base, ".claude", "plugins"), { recursive: true });
+  const svc = new AgentAccountsService({ indexFile: join(base, "idx.json"), accountsDir: join(base, "agent-accounts"), userhome: base, now: () => 1 });
+  await svc.init();
+  const acct = await svc.importAccount({ content: JSON.stringify({ claudeAiOauth: { accessToken: "t" } }), label: "L" });
+  await svc.resolveLaunchEnv("claude", acct.id);
+  const home = svc.homePath("claude", acct.id);
+  const cj = JSON.parse(await readFile(join(home, ".claude.json"), "utf8"));
+  assert.equal(cj.hasCompletedOnboarding, true);
+  assert.deepEqual(Object.keys(cj.mcpServers), ["foo"]);
+  assert.equal("oauthAccount" in cj, false);
+  assert.equal("userID" in cj, false);
+  assert.deepEqual(cj.tipsHistory, { a: 1 });
+  assert.equal((await lstat(join(home, "skills"))).isSymbolicLink(), true);
+  assert.equal((await lstat(join(home, "plugins"))).isSymbolicLink(), true);
+});
+
+test("Claude re-sync refreshes mcpServers but preserves the account's own identity", async () => {
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const base = await mkdtemp(join(tmpdir(), "orq-seed2-"));
+  await mkdir(join(base, ".claude"), { recursive: true });
+  await writeFile(join(base, ".claude.json"), JSON.stringify({ mcpServers: { foo: {} }, hasCompletedOnboarding: false }));
+  const svc = new AgentAccountsService({ indexFile: join(base, "idx.json"), accountsDir: join(base, "agent-accounts"), userhome: base, now: () => 1 });
+  await svc.init();
+  const acct = await svc.importAccount({ content: JSON.stringify({ claudeAiOauth: { accessToken: "t" } }), label: "L" });
+  const home = svc.homePath("claude", acct.id);
+  await svc.resolveLaunchEnv("claude", acct.id);
+  const cj1 = JSON.parse(await readFile(join(home, ".claude.json"), "utf8"));
+  cj1.oauthAccount = { emailAddress: "acct@x" }; // claude bound its own identity
+  await writeFile(join(home, ".claude.json"), JSON.stringify(cj1));
+  await writeFile(join(base, ".claude.json"), JSON.stringify({ mcpServers: { foo: {}, bar: {} }, hasCompletedOnboarding: false })); // system added an MCP
+  await svc.resolveLaunchEnv("claude", acct.id);
+  const cj2 = JSON.parse(await readFile(join(home, ".claude.json"), "utf8"));
+  assert.deepEqual(Object.keys(cj2.mcpServers).sort(), ["bar", "foo"]);
+  assert.equal(cj2.oauthAccount.emailAddress, "acct@x");
+});
+
+test("resolveLaunchEnv seeds a Codex home: symlinked config.toml + migration markers", async () => {
+  delete process.env.CODEX_HOME;
+  const base = await mkdtemp(join(tmpdir(), "orq-seedc-"));
+  await mkdir(join(base, ".codex"), { recursive: true });
+  await writeFile(join(base, ".codex", "config.toml"), "model='x'\n[mcp_servers.foo]\n");
+  await writeFile(join(base, ".codex", ".personality_migration"), "1");
+  await writeFile(join(base, ".codex", ".sandbox_migration"), "2");
+  const svc = new AgentAccountsService({ indexFile: join(base, "idx.json"), accountsDir: join(base, "agent-accounts"), userhome: base, now: () => 1 });
+  await svc.init();
+  const acct = await svc.importAccount({ content: JSON.stringify({ tokens: { access_token: "a", id_token: jwt({ email: "z@z" }) } }) });
+  await svc.resolveLaunchEnv("codex", acct.id);
+  const home = svc.homePath("codex", acct.id);
+  assert.equal((await lstat(join(home, "config.toml"))).isSymbolicLink(), true);
+  assert.equal(await readFile(join(home, ".personality_migration"), "utf8"), "1");
+  assert.equal(await readFile(join(home, ".sandbox_migration"), "utf8"), "2");
 });

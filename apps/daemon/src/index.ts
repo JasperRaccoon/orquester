@@ -306,6 +306,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   const agentAccounts = new AgentAccountsService({
     indexFile: agentAccountsFile(paths.baseDir),
     accountsDir: agentAccountsDir(paths.baseDir),
+    userhome: resolved.vars.userhome,
     now: () => Date.now(),
     logger: console
   });

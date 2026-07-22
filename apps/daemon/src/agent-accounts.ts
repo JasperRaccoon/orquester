@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile, readFile, readFile as fsReadFile, rm, chmod } from "node:fs/promises";
+import { mkdir, writeFile, readFile, readFile as fsReadFile, rm, chmod, symlink, lstat, copyFile } from "node:fs/promises";
 import { dirname, join, isAbsolute } from "node:path";
 import { SYSTEM_ACCOUNT_ID, type AgentAccount, type AgentAccountsResponse } from "@orquester/api";
 import {
@@ -31,6 +31,8 @@ const CRED_FILENAME = { claude: ".credentials.json", codex: "auth.json" } as con
 export interface AgentAccountsOptions {
   indexFile: string;
   accountsDir: string;
+  /** Daemon HOME — the source of the shared Claude/Codex config seeded into homes. */
+  userhome: string;
   now: () => number;
   logger?: Pick<Console, "warn">;
   /** Injectable for tests; defaults to the global fetch inside the refresh calls. */
@@ -175,10 +177,101 @@ export class AgentAccountsService {
     if (!record || record.agent !== agent) return null;
     const home = this.homePath(agent, id);
     await assertOwnedAccountHome(this.opts.accountsDir, agent, id, home);
+    // A bare home (only credentials) is seen as a fresh install: Claude/Codex read
+    // onboarding flags, MCP servers, skills/plugins and settings relative to
+    // CLAUDE_CONFIG_DIR/CODEX_HOME. Seed the shared, non-credential config from the
+    // system home so managed sessions keep them. Best-effort — never block a launch.
+    await this.syncAccountHome(agent, home).catch((e) =>
+      this.opts.logger?.warn?.(`account home sync failed for ${agent}/${id}: ${String(e)}`)
+    );
     if (agent === "claude") {
       return { env: { CLAUDE_CONFIG_DIR: home }, unset: [...CLAUDE_AUTH_ENV_UNSET], accountId: id };
     }
     return { env: { CODEX_HOME: home }, unset: [...CODEX_AUTH_ENV_UNSET], accountId: id };
+  }
+
+  /** System config sources (the daemon's own HOME). The `.claude.json` file sits
+   *  at HOME level unless CLAUDE_CONFIG_DIR relocates it into the config dir. */
+  private systemClaudeConfigFile(): string {
+    const dir = process.env.CLAUDE_CONFIG_DIR;
+    return dir ? join(dir, ".claude.json") : join(this.opts.userhome, ".claude.json");
+  }
+  private systemClaudeDir(): string {
+    return process.env.CLAUDE_CONFIG_DIR || join(this.opts.userhome, ".claude");
+  }
+  private systemCodexHome(): string {
+    return process.env.CODEX_HOME || join(this.opts.userhome, ".codex");
+  }
+
+  private async syncAccountHome(agent: "claude" | "codex", home: string): Promise<void> {
+    if (agent === "claude") {
+      await this.seedClaudeConfig(home);
+      await this.ensureSymlink(join(this.systemClaudeDir(), "skills"), join(home, "skills"));
+      await this.ensureSymlink(join(this.systemClaudeDir(), "plugins"), join(home, "plugins"));
+    } else {
+      // config.toml holds no identity (MCPs, model defaults, project trust) → share
+      // it live via a symlink; auth.json (imported) carries the per-account identity.
+      await this.ensureSymlink(join(this.systemCodexHome(), "config.toml"), join(home, "config.toml"));
+      for (const marker of [".personality_migration", ".sandbox_migration"]) {
+        await this.copyIfMissing(join(this.systemCodexHome(), marker), join(home, marker));
+      }
+    }
+  }
+
+  /** Seed `<home>/.claude.json`. First seed copies the system config minus identity
+   *  (oauthAccount/userID) with onboarding forced true; later launches only refresh
+   *  the MCP list, preserving the identity/state Claude has since written. */
+  private async seedClaudeConfig(home: string): Promise<void> {
+    let sys: any;
+    try {
+      sys = JSON.parse(await fsReadFile(this.systemClaudeConfigFile(), "utf8"));
+    } catch {
+      return; // no system config to seed from
+    }
+    const homeFile = join(home, ".claude.json");
+    let existing: any = null;
+    try {
+      existing = JSON.parse(await fsReadFile(homeFile, "utf8"));
+    } catch {
+      /* first seed */
+    }
+    let next: any;
+    if (!existing || Object.keys(existing).length === 0) {
+      next = { ...sys };
+      delete next.oauthAccount;
+      delete next.userID;
+      next.hasCompletedOnboarding = true;
+    } else {
+      next = { ...existing, mcpServers: sys.mcpServers ?? existing.mcpServers ?? {}, hasCompletedOnboarding: true };
+    }
+    const serialized = JSON.stringify(next);
+    if (JSON.stringify(existing) === serialized) return; // idempotent: no write churn
+    await writeFile(homeFile, serialized, { mode: 0o600 });
+  }
+
+  private async ensureSymlink(target: string, linkPath: string): Promise<void> {
+    try {
+      await lstat(linkPath);
+      return; // already present (symlink or real dir) — leave it
+    } catch {
+      /* not present */
+    }
+    try {
+      await lstat(target); // only link to something that exists
+    } catch {
+      return;
+    }
+    await symlink(target, linkPath).catch((e) => this.opts.logger?.warn?.(`symlink ${linkPath} failed: ${String(e)}`));
+  }
+
+  private async copyIfMissing(src: string, dst: string): Promise<void> {
+    try {
+      await lstat(dst);
+      return;
+    } catch {
+      /* missing */
+    }
+    await copyFile(src, dst).catch(() => undefined); // src may not exist — fine
   }
 
   async markNeedsReauth(id: string, value: boolean): Promise<void> {
