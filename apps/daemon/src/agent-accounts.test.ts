@@ -110,3 +110,66 @@ test("index and API responses carry no token material", async () => {
   assert.equal(indexRaw.includes("SECRET"), false);
   assert.equal(JSON.stringify(svc.list()).includes("SECRET"), false);
 });
+
+async function makeServiceWithFetch(now: number, fetchImpl: typeof fetch) {
+  const base = await mkdtemp(join(tmpdir(), "orq-fresh-"));
+  const svc = new AgentAccountsService({
+    indexFile: join(base, "agent-accounts.json"),
+    accountsDir: join(base, "agent-accounts"),
+    now: () => now,
+    fetchImpl
+  });
+  await svc.init();
+  return svc;
+}
+
+function codexBlob(accessExpSec: number): string {
+  return JSON.stringify({
+    tokens: {
+      access_token: jwt({ exp: accessExpSec }),
+      refresh_token: "OLDR",
+      account_id: "acc1",
+      id_token: jwt({ email: "c@x.com" })
+    }
+  });
+}
+
+test("ensureFreshForUsage refreshes an idle Codex account whose token is expiring", async () => {
+  const now = 1_000_000;
+  let called = 0;
+  const svc = await makeServiceWithFetch(now, async () => {
+    called++;
+    return new Response(JSON.stringify({ access_token: "NEW", refresh_token: "NEWR", id_token: jwt({ email: "c@x.com" }) }), { status: 200 });
+  });
+  const acct = await svc.importAccount({ content: codexBlob(Math.floor((now + 60_000) / 1000)) });
+  await svc.ensureFreshForUsage("codex", acct.id, new Set());
+  assert.equal(called, 1);
+  const auth = JSON.parse(await readFile(join(svc.homePath("codex", acct.id), "auth.json"), "utf8"));
+  assert.equal(auth.tokens.access_token, "NEW");
+  assert.equal(auth.tokens.refresh_token, "NEWR");
+  assert.equal(auth.tokens.account_id, "acc1"); // preserved
+});
+
+test("ensureFreshForUsage does not refresh an account with a live session", async () => {
+  const now = 1_000_000;
+  let called = 0;
+  const svc = await makeServiceWithFetch(now, async () => {
+    called++;
+    return new Response("{}", { status: 200 });
+  });
+  const acct = await svc.importAccount({ content: codexBlob(Math.floor((now + 60_000) / 1000)) });
+  await svc.ensureFreshForUsage("codex", acct.id, new Set([acct.id]));
+  assert.equal(called, 0);
+});
+
+test("ensureFreshForUsage skips a token that is not near expiry", async () => {
+  const now = 1_000_000;
+  let called = 0;
+  const svc = await makeServiceWithFetch(now, async () => {
+    called++;
+    return new Response("{}", { status: 200 });
+  });
+  const acct = await svc.importAccount({ content: codexBlob(Math.floor((now + 60 * 60_000) / 1000)) });
+  await svc.ensureFreshForUsage("codex", acct.id, new Set());
+  assert.equal(called, 0);
+});

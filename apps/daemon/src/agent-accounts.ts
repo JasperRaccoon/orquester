@@ -10,13 +10,15 @@ import {
   type AgentAccountsIndex
 } from "@orquester/config";
 import { assertOwnedAccountHome, AgentAccountError, ACCOUNT_MARKER } from "./agent-account-paths.ts";
-import { detectAgentFromBlob, claudePlanFromBlob, parseCodexIdentity } from "./agent-account-identity.ts";
+import { detectAgentFromBlob, claudePlanFromBlob, parseCodexIdentity, decodeJwtPayload } from "./agent-account-identity.ts";
 import {
   REFRESH_INTERVAL_MS,
   REFRESH_MARGIN_MS,
   selectAccountsToRefresh,
   mergeClaudeRefreshedCreds,
-  refreshClaudeToken
+  refreshClaudeToken,
+  mergeCodexRefreshedTokens,
+  refreshCodexToken
 } from "./agent-account-refresh.ts";
 
 export const CLAUDE_AUTH_ENV_UNSET = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"];
@@ -28,12 +30,17 @@ export interface AgentAccountsOptions {
   accountsDir: string;
   now: () => number;
   logger?: Pick<Console, "warn">;
+  /** Injectable for tests; defaults to the global fetch inside the refresh calls. */
+  fetchImpl?: typeof fetch;
 }
 
 export class AgentAccountsService {
   readonly events = new EventEmitter();
   private index: AgentAccountsIndex = createDefaultAgentAccounts();
   private refreshTimer?: ReturnType<typeof setInterval>;
+  /** Account ids with an in-flight refresh, so the hourly loop and the usage
+   *  path never double-spend one account's single-use refresh token. */
+  private refreshing = new Set<string>();
 
   constructor(private readonly opts: AgentAccountsOptions) {}
 
@@ -192,45 +199,89 @@ export class AgentAccountsService {
     this.refreshTimer = undefined;
   }
 
-  private async readClaudeExpiry(id: string): Promise<number | null> {
+  /** Access-token expiry in unix ms, or null if unknown. Claude stores it in
+   *  `.credentials.json`; Codex embeds it in the access-token JWT `exp` (seconds). */
+  private async readExpiry(agent: "claude" | "codex", id: string): Promise<number | null> {
     try {
-      const creds = JSON.parse(await fsReadFile(join(this.homePath("claude", id), ".credentials.json"), "utf8"));
-      const exp = creds?.claudeAiOauth?.expiresAt;
-      return typeof exp === "number" ? exp : null;
+      const home = this.homePath(agent, id);
+      if (agent === "claude") {
+        const creds = JSON.parse(await fsReadFile(join(home, ".credentials.json"), "utf8"));
+        const exp = creds?.claudeAiOauth?.expiresAt;
+        return typeof exp === "number" ? exp : null;
+      }
+      const auth = JSON.parse(await fsReadFile(join(home, "auth.json"), "utf8"));
+      const claims = typeof auth?.tokens?.access_token === "string" ? decodeJwtPayload(auth.tokens.access_token) : null;
+      const exp = claims?.exp;
+      return typeof exp === "number" ? exp * 1000 : null;
     } catch {
       return null;
     }
+  }
+
+  /** Refresh one managed account's OAuth token and persist it in place. De-duped
+   *  per account so two callers can't spend the same single-use refresh token. */
+  private async refreshAccount(agent: "claude" | "codex", id: string): Promise<void> {
+    if (this.refreshing.has(id)) return;
+    this.refreshing.add(id);
+    try {
+      const record = this.getRecord(id);
+      if (!record || record.agent !== agent) return;
+      const home = this.homePath(agent, id);
+      await assertOwnedAccountHome(this.opts.accountsDir, agent, id, home);
+      const credsPath = join(home, CRED_FILENAME[agent]);
+      let creds: any;
+      try {
+        creds = JSON.parse(await fsReadFile(credsPath, "utf8"));
+      } catch {
+        return;
+      }
+      if (agent === "claude") {
+        const refreshToken = creds?.claudeAiOauth?.refreshToken;
+        if (typeof refreshToken !== "string") return;
+        const out = await refreshClaudeToken(refreshToken, this.opts.fetchImpl);
+        if (out.ok) {
+          await writeFile(credsPath, JSON.stringify(mergeClaudeRefreshedCreds(creds, out)), { mode: 0o600 });
+          if (record.needsReauth) await this.markNeedsReauth(id, false);
+        } else if (out.invalidGrant) {
+          await this.markNeedsReauth(id, true);
+        }
+      } else {
+        const refreshToken = creds?.tokens?.refresh_token;
+        if (typeof refreshToken !== "string") return;
+        const out = await refreshCodexToken(refreshToken, this.opts.fetchImpl);
+        if (out.ok) {
+          await writeFile(credsPath, JSON.stringify(mergeCodexRefreshedTokens(creds, out)), { mode: 0o600 });
+          if (record.needsReauth) await this.markNeedsReauth(id, false);
+        } else if (out.invalidGrant) {
+          await this.markNeedsReauth(id, true);
+        }
+      }
+    } finally {
+      this.refreshing.delete(id);
+    }
+  }
+
+  /** Refresh-and-persist before displaying an idle account's usage, so viewing a
+   *  rarely-used account never strands an expiring token. Accounts with a live
+   *  session are left to their own CLI (that's the single-use-token race gate). */
+  async ensureFreshForUsage(agent: "claude" | "codex", id: string, live: Set<string>): Promise<void> {
+    if (live.has(id)) return;
+    const record = this.getRecord(id);
+    if (!record || record.agent !== agent) return;
+    const exp = await this.readExpiry(agent, id);
+    if (exp != null && exp > this.opts.now() + REFRESH_MARGIN_MS) return;
+    await this.refreshAccount(agent, id);
   }
 
   private async refreshIdleAccounts(live: Set<string>): Promise<void> {
     const now = this.opts.now();
     const expiries = new Map<string, number | null>();
     for (const a of this.index.accounts) {
-      // Only Claude self-refreshes here; Codex is left to its CLI (see spec 1.5).
-      expiries.set(a.id, a.agent === "claude" ? await this.readClaudeExpiry(a.id) : now + REFRESH_INTERVAL_MS * 10);
+      expiries.set(a.id, await this.readExpiry(a.agent, a.id));
     }
-    const due = selectAccountsToRefresh(this.index.accounts, live, expiries, now, REFRESH_MARGIN_MS).filter(
-      (a) => a.agent === "claude"
-    );
+    const due = selectAccountsToRefresh(this.index.accounts, live, expiries, now, REFRESH_MARGIN_MS);
     for (const acct of due) {
-      const home = this.homePath("claude", acct.id);
-      await assertOwnedAccountHome(this.opts.accountsDir, "claude", acct.id, home);
-      const credsPath = join(home, ".credentials.json");
-      let creds: any;
-      try {
-        creds = JSON.parse(await fsReadFile(credsPath, "utf8"));
-      } catch {
-        continue;
-      }
-      const refreshToken = creds?.claudeAiOauth?.refreshToken;
-      if (typeof refreshToken !== "string") continue;
-      const out = await refreshClaudeToken(refreshToken);
-      if (out.ok) {
-        await writeFile(credsPath, JSON.stringify(mergeClaudeRefreshedCreds(creds, out)), { mode: 0o600 });
-        if (acct.needsReauth) await this.markNeedsReauth(acct.id, false);
-      } else if (out.invalidGrant) {
-        await this.markNeedsReauth(acct.id, true);
-      }
+      await this.refreshAccount(acct.agent, acct.id);
     }
   }
 

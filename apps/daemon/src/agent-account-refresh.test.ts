@@ -1,6 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { selectAccountsToRefresh, mergeClaudeRefreshedCreds, refreshClaudeToken, REFRESH_MARGIN_MS } from "./agent-account-refresh.ts";
+import {
+  selectAccountsToRefresh,
+  mergeClaudeRefreshedCreds,
+  refreshClaudeToken,
+  mergeCodexRefreshedTokens,
+  refreshCodexToken,
+  REFRESH_MARGIN_MS
+} from "./agent-account-refresh.ts";
 import type { AgentAccountRecord } from "@orquester/config";
 
 function rec(id: string, agent: "claude" | "codex" = "claude"): AgentAccountRecord {
@@ -50,4 +57,36 @@ test("refreshClaudeToken flags invalid_grant", async () => {
   const out = await refreshClaudeToken("r", fake);
   assert.equal(out.ok, false);
   if (!out.ok) assert.equal(out.invalidGrant, true);
+});
+
+test("refreshCodexToken maps a 200 body", async () => {
+  const fake: typeof fetch = async () =>
+    new Response(JSON.stringify({ access_token: "A", refresh_token: "R", id_token: "I", expires_in: 3600 }), { status: 200 });
+  const out = await refreshCodexToken("r", fake);
+  assert.equal(out.ok, true);
+  if (out.ok) {
+    assert.equal(out.access_token, "A");
+    assert.equal(out.refresh_token, "R");
+    assert.equal(out.id_token, "I");
+  }
+});
+
+test("refreshCodexToken flags invalid_grant", async () => {
+  const fake: typeof fetch = async () =>
+    new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 });
+  const out = await refreshCodexToken("r", fake);
+  assert.equal(out.ok, false);
+  if (!out.ok) assert.equal(out.invalidGrant, true);
+});
+
+test("mergeCodexRefreshedTokens preserves account_id and overwrites tokens", () => {
+  const merged = mergeCodexRefreshedTokens(
+    { tokens: { access_token: "old", refresh_token: "oldr", id_token: "oldi", account_id: "acc" }, OPENAI_API_KEY: null },
+    { access_token: "new", refresh_token: "newr", id_token: "newi" }
+  );
+  assert.equal(merged.tokens.access_token, "new");
+  assert.equal(merged.tokens.refresh_token, "newr");
+  assert.equal(merged.tokens.id_token, "newi");
+  assert.equal(merged.tokens.account_id, "acc");
+  assert.equal(merged.OPENAI_API_KEY, null);
 });

@@ -310,7 +310,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     const managed = agentAccounts.list().accounts.filter((a) => a.agent === agent);
     if (managed.length === 0) return base;
     const accounts: UsageAccount[] = [];
+    const live = sessions.liveAccountIds();
     for (const acct of managed) {
+      // Keep an idle account's token warm so its usage never renders stale.
+      await agentAccounts.ensureFreshForUsage(agent, acct.id, live).catch(() => undefined);
       const u = await usageSource(agent, makeSource, agentAccounts.homePath(agent, acct.id))().catch(() => null);
       accounts.push({
         id: acct.id,
