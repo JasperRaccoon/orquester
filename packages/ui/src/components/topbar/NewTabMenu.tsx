@@ -17,39 +17,169 @@ import { cn } from "../../lib/cn";
 import { shortAccountLabel } from "../../lib/account-label";
 
 /**
+ * The proxy launchers pin *which provider family* their account chips come from:
+ * routing through the managed proxy is by model name, so `claudex` picks a
+ * seeded **Codex** account (its GPT/Kimi escape hatch) and `claudemix` picks a
+ * seeded **Claude** account (the Fable main loop). The launcher's own id never
+ * matches a managed account (`a.agent` is only `"claude"`/`"codex"`), so without
+ * this remap the chips would never appear (spec §2/§5).
+ */
+const PROXY_ACCOUNT_FAMILY: Record<string, "claude" | "codex"> = {
+  claudemix: "claude",
+  claudex: "codex"
+};
+
+/**
+ * Distinct icon tint per proxy launcher — the two ids differ by only two letters
+ * (`claudex`/`claudemix`), so a shared generic bot icon reads as one entry;
+ * colouring them apart is a §5 usability requirement.
+ */
+const PROXY_ICON_TONE: Record<string, string> = {
+  claudex: "text-amber-400",
+  claudemix: "text-violet-400"
+};
+
+/** Model chips shown for `claudex` when the live proxy catalog is unavailable. */
+const DEFAULT_PROXY_MODELS = ["gpt-5.6-sol", "kimi-k3"];
+
+const isProxyLauncher = (id: string): boolean => id in PROXY_ACCOUNT_FAMILY;
+
+/** Kimi routes through keyless OpenRouter, so a picked account is irrelevant. */
+const isKimiModel = (model: string | undefined): boolean =>
+  !!model && model.toLowerCase().includes("kimi");
+
+/** Short chip label for a backing model, e.g. `gpt-5.6-sol` → `sol`, `kimi-k3` → `kimi`. */
+const shortModelLabel = (model: string): string => {
+  const lower = model.toLowerCase();
+  if (lower.includes("kimi")) return "kimi";
+  const parts = model.split(/[/-]/).filter(Boolean);
+  return parts[parts.length - 1] ?? model;
+};
+
+/**
  * One installed-agent row in the "+" menu. Clicking the row launches the agent
- * under the account selected below. When the agent (`claude`/`codex`) has ≥1
- * managed account, it renders a row of account chips (System + managed accounts);
- * the choice is remembered per agent (client-local) so opening several tabs for
- * one account doesn't re-prompt. "System" carries the SYSTEM_ACCOUNT_ID sentinel
- * (not an omitted value) so it forces the host identity over any per-agent default.
+ * under the account (and, for `claudex`, the model) selected below. When the
+ * agent has ≥1 managed account for its family it renders a row of account chips
+ * (System + managed accounts); `claudex` additionally renders a model-chip row.
+ * Both choices are remembered per launcher id (client-local) so opening several
+ * tabs doesn't re-prompt. "System" carries the SYSTEM_ACCOUNT_ID sentinel (not an
+ * omitted value) so it forces the host identity over any per-agent default.
+ *
+ * Proxy launchers whose backing proxy is down render **visible-but-disabled**
+ * (greyed, non-clickable, with the daemon's `disabledReason`) rather than
+ * vanishing, so the escape hatch is discoverable even when it's unavailable
+ * (spec §2). Non-proxy disabled agents are filtered out upstream as before.
  */
 const AgentRow: React.FC<{ agent: RegistryEntry }> = ({ agent }) => {
   const openTab = useAppStore((s) => s.openTab);
   const agentAccounts = useAppStore((s) => s.agentAccounts);
   const preferred = useAppStore((s) => s.preferredAccountByAgent[agent.id]);
   const setPreferredAccount = useAppStore((s) => s.setPreferredAccount);
-  const managed = (agentAccounts?.accounts ?? []).filter((a) => a.agent === agent.id);
+  const preferredModel = useAppStore((s) => s.preferredModelByAgent[agent.id]);
+  const setPreferredModel = useAppStore((s) => s.setPreferredModel);
+  const cliproxy = useAppStore((s) => s.cliproxy);
+  const cliproxyModels = useAppStore((s) => s.cliproxyModels);
+
+  // A proxy launcher draws its accounts from the mapped provider family; every
+  // other agent draws from its own id (the pre-proxy behaviour).
+  const family = PROXY_ACCOUNT_FAMILY[agent.id];
+  const accountKey = family ?? agent.id;
+  const managed = (agentAccounts?.accounts ?? []).filter((a) => a.agent === accountKey);
 
   const options = [
     { id: SYSTEM_ACCOUNT_ID, label: "System" },
     ...managed.map((a) => ({ id: a.id, label: shortAccountLabel(a.label) }))
   ];
-  const fallback = agentAccounts?.defaults[agent.id as "claude" | "codex"] ?? SYSTEM_ACCOUNT_ID;
+  const fallback = agentAccounts?.defaults[accountKey as "claude" | "codex"] ?? SYSTEM_ACCOUNT_ID;
   const wanted = preferred ?? fallback;
-  const selected = options.some((o) => o.id === wanted) ? wanted : SYSTEM_ACCOUNT_ID;
+  const selectedAccount = options.some((o) => o.id === wanted) ? wanted : SYSTEM_ACCOUNT_ID;
+
+  // Model chips are a `claudex`-only affordance (claudemix's model is fixed to
+  // the Claude main loop; its choice is the account instead).
+  const showModels = agent.id === "claudex";
+  const baseModels = cliproxyModels?.models?.length ? cliproxyModels.models : DEFAULT_PROXY_MODELS;
+  const selectedModel = preferredModel ?? cliproxy?.defaultModel ?? baseModels[0];
+  const modelOptions = React.useMemo(() => {
+    const set = new Set(baseModels);
+    // Never drop a persisted pick even if the catalog no longer lists it — show
+    // it (stale) rather than silently falling back to another model (spec §2).
+    if (selectedModel) set.add(selectedModel);
+    return [...set];
+  }, [baseModels, selectedModel]);
+
+  // Kimi is keyless (OpenRouter) → its account chip has no effect; dim the row.
+  const accountDimmed = showModels && isKimiModel(selectedModel);
+
+  // Visible-but-disabled: a proxy launcher whose proxy is down (spec §2).
+  if (!agent.enabled) {
+    return (
+      <div
+        className="mb-0.5 flex w-full cursor-not-allowed items-center gap-2 rounded px-2 py-1.5 text-left text-sm text-neutral-500"
+        title={agent.disabledReason ?? "Unavailable"}
+      >
+        <span className={cn("flex h-4 w-4 items-center justify-center opacity-60", PROXY_ICON_TONE[agent.id])}>
+          {getRegistryIcon("agent", agent.id, 14)}
+        </span>
+        <span className="min-w-0 flex-1 truncate">
+          {agent.name}
+          {agent.disabledReason ? (
+            <span className="ml-1 text-[11px] text-neutral-600">— {agent.disabledReason}</span>
+          ) : null}
+        </span>
+      </div>
+    );
+  }
 
   return (
     <>
       <DropdownItem
-        icon={getRegistryIcon("agent", agent.id, 14)}
-        onClick={() => void openTab("agent", agent.id, agent.name, selected)}
+        icon={
+          <span className={cn("flex h-4 w-4 items-center justify-center", PROXY_ICON_TONE[agent.id])}>
+            {getRegistryIcon("agent", agent.id, 14)}
+          </span>
+        }
+        onClick={() =>
+          void openTab(
+            "agent",
+            agent.id,
+            agent.name,
+            selectedAccount,
+            showModels ? selectedModel : undefined
+          )
+        }
       >
         {agent.name}
       </DropdownItem>
-      {managed.length > 0 ? (
+      {showModels ? (
         <div
           className="mb-1.5 ml-8 mr-2 flex flex-wrap gap-1"
+          onClick={(event) => event.stopPropagation()}
+        >
+          {modelOptions.map((m) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => setPreferredModel(agent.id, m)}
+              className={cn(
+                "max-w-full truncate rounded px-1.5 py-0.5 text-[11px] transition-colors",
+                m === selectedModel
+                  ? "bg-amber-500/15 text-amber-300 ring-1 ring-amber-500/40"
+                  : "bg-neutral-800 text-neutral-400 ring-1 ring-transparent hover:bg-neutral-700 hover:text-neutral-200"
+              )}
+              title={m}
+            >
+              {m}
+            </button>
+          ))}
+        </div>
+      ) : null}
+      {managed.length > 0 ? (
+        <div
+          className={cn(
+            "mb-1.5 ml-8 mr-2 flex flex-wrap gap-1 transition-opacity",
+            accountDimmed && "pointer-events-none opacity-40"
+          )}
+          title={accountDimmed ? "Kimi routes through OpenRouter (keyless) — account is ignored" : undefined}
           onClick={(event) => event.stopPropagation()}
         >
           {options.map((o) => (
@@ -59,7 +189,7 @@ const AgentRow: React.FC<{ agent: RegistryEntry }> = ({ agent }) => {
               onClick={() => setPreferredAccount(agent.id, o.id)}
               className={cn(
                 "max-w-full truncate rounded px-1.5 py-0.5 text-[11px] transition-colors",
-                o.id === selected
+                o.id === selectedAccount
                   ? "bg-sky-500/15 text-sky-300 ring-1 ring-sky-500/40"
                   : "bg-neutral-800 text-neutral-400 ring-1 ring-transparent hover:bg-neutral-700 hover:text-neutral-200"
               )}
@@ -93,7 +223,10 @@ export const NewTabMenu: React.FC = () => {
   const registry = useRegistry();
 
   const shells = registry.shells.filter((s) => s.enabled);
-  const agents = registry.agents.filter((a) => a.enabled);
+  // Enabled agents show normally; a *disabled proxy launcher* stays visible
+  // (greyed, with a reason) so the GPT/Kimi escape hatch is discoverable even
+  // when its proxy is down (spec §2). Other disabled agents remain hidden.
+  const agents = registry.agents.filter((a) => a.enabled || isProxyLauncher(a.id));
   // Browser tabs need BOTH chromium detected on the host AND a transport that can
   // stream frames. The desktop unix socket has no browserChannel, so a browser
   // record would open a dead blank tab — gate the entry on the channel too.
