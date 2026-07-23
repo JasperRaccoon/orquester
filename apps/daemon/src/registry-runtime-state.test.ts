@@ -84,10 +84,11 @@ test("setRuntimeState enable overrides enabledAtRest:false on a resolved entry",
   }
 });
 
-test("setRuntimeState enable is gated by enabledAtRest:false on the real claudex def", async () => {
-  // No agents.json override here: the static claudex/claudemix defs carry enabledAtRest:false,
-  // so a healthy bin + runtime-enabled must NOT flip them on at rest (only reresolve/status can,
-  // and only when the real bin resolves). This guards the def-level gate in computeEnabled.
+test("the real claudex def stays disabled at rest (enabledAtRest:false) with no runtime override", async () => {
+  // No agents.json override and no setRuntimeState call: the static claudex/claudemix
+  // defs carry enabledAtRest:false, so out of the box — before any backing service
+  // couples the launcher — the entry reports disabled regardless of whether its bin
+  // resolves. (The enable-override path is covered by the neighboring test.)
   const root = await mkdtemp(join(tmpdir(), "orquester-registry-runtime-rest-"));
   const registry = new RegistryService(root);
   await registry.init();

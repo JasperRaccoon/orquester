@@ -1,6 +1,7 @@
 import React from "react";
 import { FolderTree, GitBranch, Globe, ListTodo, Plus } from "lucide-react";
 import { SYSTEM_ACCOUNT_ID, type RegistryEntry } from "@orquester/api";
+import { isOpenRouterModel } from "@orquester/config";
 import { CHROMIUM_FAMILY_IDS } from "@orquester/registry";
 import {
   AdaptiveMenu,
@@ -44,9 +45,10 @@ const DEFAULT_PROXY_MODELS = ["gpt-5.6-sol", "kimi-k3"];
 
 const isProxyLauncher = (id: string): boolean => id in PROXY_ACCOUNT_FAMILY;
 
-/** Kimi routes through keyless OpenRouter, so a picked account is irrelevant. */
-const isKimiModel = (model: string | undefined): boolean =>
-  !!model && model.toLowerCase().includes("kimi");
+/** An OpenRouter/Kimi model routes through the shared keyless provider, so a
+ *  picked account is irrelevant. Shares the daemon's predicate so the UI and the
+ *  wire agree on which models neutralize the account. */
+const modelIgnoresAccount = (model: string | undefined): boolean => !!model && isOpenRouterModel(model);
 
 /** Short chip label for a backing model, e.g. `gpt-5.6-sol` → `sol`, `kimi-k3` → `kimi`. */
 const shortModelLabel = (model: string): string => {
@@ -107,8 +109,9 @@ const AgentRow: React.FC<{ agent: RegistryEntry }> = ({ agent }) => {
     return [...set];
   }, [baseModels, selectedModel]);
 
-  // Kimi is keyless (OpenRouter) → its account chip has no effect; dim the row.
-  const accountDimmed = showModels && isKimiModel(selectedModel);
+  // An OpenRouter/Kimi model is keyless → its account chip has no effect; dim the
+  // row AND drop the account on launch so a stale pick can't reattach a prefix.
+  const accountDimmed = showModels && modelIgnoresAccount(selectedModel);
 
   // Visible-but-disabled: a proxy launcher whose proxy is down (spec §2).
   if (!agent.enabled) {
@@ -143,7 +146,9 @@ const AgentRow: React.FC<{ agent: RegistryEntry }> = ({ agent }) => {
             "agent",
             agent.id,
             agent.name,
-            selectedAccount,
+            // A keyless OpenRouter/Kimi pick carries the System sentinel (no account)
+            // so the daemon never stamps a per-account routing prefix on it.
+            accountDimmed ? SYSTEM_ACCOUNT_ID : selectedAccount,
             showModels ? selectedModel : undefined
           )
         }

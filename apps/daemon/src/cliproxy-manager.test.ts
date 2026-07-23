@@ -8,9 +8,12 @@ import {
   cliproxyDir,
   cliproxySecretsFile,
   cliproxyStateFile,
-  createDefaultCliProxyState
+  createDefaultCliProxyState,
+  parseCliProxyState
 } from "@orquester/config";
 import Fastify from "fastify";
+import { writeProjections } from "./cliproxy-files.ts";
+import { setOpenRouterKey as realSetOpenRouterKey } from "./cliproxy-secrets.ts";
 import type { CliProxyProviderStatus, CliProxyStatus } from "@orquester/api";
 import { SYSTEM_ACCOUNT_ID } from "@orquester/api";
 import type { RegistryService } from "./registry.ts";
@@ -68,6 +71,8 @@ function setup() {
     await writeBin(daemonDir);
     return { version: "v7.2.95" };
   };
+  let rollbackCount = 0;
+  let rollbackImpl: () => Promise<boolean> = async () => false;
   const sysDir = join(root, "sysclaude");
 
   const mgr = new CliProxyManager({
@@ -82,6 +87,10 @@ function setup() {
       liveDependentSessionCount: () => liveCount,
       now: () => clock,
       install: () => installImpl(),
+      rollback: () => {
+        rollbackCount++;
+        return rollbackImpl();
+      },
       systemClaudeDir: () => sysDir
     }
   });
@@ -112,6 +121,10 @@ function setup() {
     installCount: () => installCount,
     setInstall: (f: () => Promise<{ version: string }>) => {
       installImpl = f;
+    },
+    rollbackCount: () => rollbackCount,
+    setRollback: (f: () => Promise<boolean>) => {
+      rollbackImpl = f;
     },
     sysDir
   };
@@ -145,7 +158,7 @@ test("boot: port answers + our key accepted → persistence-lost (not foreign)",
   assert.equal(h.tmuxCalls.killService, 0);
 });
 
-test("persistence-lost proxy is re-parented under tmux once sessions drain, not just relabeled", async () => {
+test("persistence-lost proxy is re-parented under tmux once sessions drain AND the port frees, not just relabeled", async () => {
   const h = setup();
   await writeEnabledState(h.daemonDir);
   h.setHasService(false);
@@ -164,8 +177,15 @@ test("persistence-lost proxy is re-parented under tmux once sessions drain, not 
   );
   assert.equal(h.tmuxCalls.newService, 0, "no re-parent spawn while sessions are live");
 
-  // Sessions drain → re-parent: external cleared only AFTER a tmux-hosted spawn.
+  // Sessions drain and the survivor exits: the port stays quiet until OUR tmux
+  // spawn brings it back. Re-parent then spawns exactly once and clears external
+  // only AFTER the tmux-hosted spawn probes healthy.
   h.setLive(0);
+  h.setProbeFn(async () =>
+    h.tmuxCalls.newService > 0
+      ? { ok: true, reachable: true, models: ["gpt-5.6-sol"] }
+      : { ok: false, reachable: false }
+  );
   h.mgr.handleSessionSetChanged();
   await h.mgr.checkHealth(); // settle: chains onto the transition queue after the re-parent
   assert.equal(h.tmuxCalls.newService, 1, "re-parented under tmux exactly once");
@@ -292,6 +312,32 @@ test("validateModel: request model wins over default; unknown model fails naming
     const r = await h.mgr.validateModel("claudex");
     assert.equal(r.ok, false);
     if (r.ok === false) assert.match(r.error, /gpt-5\.6-sol|provider|offered/i);
+  }
+});
+
+test("validateModel: claudemix with no request model resolves claudeDefaultModel, NOT defaultModel", async () => {
+  // (a) claudemix + no request model + a catalog offering the claude default → ok,
+  // resolving "claude-fable-5" (would previously have failed probing gpt-5.6-sol).
+  {
+    const h = setup();
+    h.setProbe({ ok: true, models: ["claude-fable-5", "claude-sonnet-5"] });
+    const r = await h.mgr.validateModel("claudemix");
+    assert.deepEqual(r, { ok: true, effectiveModel: "claude-fable-5" });
+  }
+  // (b) claudemix + a catalog WITHOUT any claude model → fails, naming the claude model.
+  {
+    const h = setup();
+    h.setProbe({ ok: true, models: ["gpt-5.6-sol"] });
+    const r = await h.mgr.validateModel("claudemix");
+    assert.equal(r.ok, false);
+    if (r.ok === false) assert.match(r.error, /claude/i);
+  }
+  // (c) claudex is unchanged — it still resolves defaultModel (gpt-5.6-sol).
+  {
+    const h = setup();
+    h.setProbe({ ok: true, models: ["gpt-5.6-sol"] });
+    const r = await h.mgr.validateModel("claudex");
+    assert.deepEqual(r, { ok: true, effectiveModel: "gpt-5.6-sol" });
   }
 });
 
@@ -494,13 +540,111 @@ test("status per-provider state gates launchers: codex seeded → claudex on, cl
   assert.ok(lastClaudemix?.disabledReason, "claudemix carries a disabledReason");
 });
 
+test("setOpenRouterKey (manager): refuses without force while sessions live; with force stores the key + marks openrouter ok", async () => {
+  const h = setup();
+  h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
+  await h.mgr.enable();
+  assert.equal(h.mgr.status().state, "healthy");
+
+  // A live dependent session blocks the (restart-gated) key change unless forced.
+  h.setLive(2);
+  const gated = await h.mgr.setOpenRouterKey("sk-or-abc", false);
+  assert.deepEqual(gated, { ok: false, affectedSessions: 2 });
+  const secrets1 = JSON.parse(await readFile(cliproxySecretsFile(h.daemonDir), "utf8"));
+  assert.equal(secrets1.openRouterKey, null, "nothing stored while gated");
+  assert.equal(
+    h.mgr.status().providers.find((p) => p.provider === "openrouter")?.state,
+    "missing",
+    "openrouter still missing while gated"
+  );
+
+  // Forced through: persists the key, updates in-memory secrets + provider state.
+  const forced = await h.mgr.setOpenRouterKey("sk-or-abc", true);
+  assert.equal(forced.ok, true);
+  const secrets2 = JSON.parse(await readFile(cliproxySecretsFile(h.daemonDir), "utf8"));
+  assert.equal(secrets2.openRouterKey, "sk-or-abc", "key persisted to secrets.json");
+  assert.equal(
+    h.mgr.status().providers.find((p) => p.provider === "openrouter")?.state,
+    "ok",
+    "openrouter provider flips ok in-memory after the forced set"
+  );
+});
+
+test("seeded accounts persist: a manager over a state file with a seeded codex account reports codex ok + enables claudex, no re-seed", async () => {
+  const h = setup();
+  // A persisted state file: enabled + one seeded codex account (routing projection
+  // only, no token material) — exactly what a prior daemon would have written.
+  const state = {
+    ...createDefaultCliProxyState(),
+    enabled: true,
+    seededAccounts: [
+      { provider: "codex", accountId: "65eebd90-01d1-4063-b743-c4a5713f5519", label: "a@b.com", prefix: "acc65eebd90" }
+    ]
+  };
+  await mkdir(cliproxyDir(h.daemonDir), { recursive: true });
+  await writeFile(cliproxyStateFile(h.daemonDir), JSON.stringify(state), "utf8");
+  h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
+
+  await h.mgr.init();
+
+  // Provider availability is rebuilt from persisted state — no re-seed needed.
+  assert.equal(h.mgr.status().providers.find((p) => p.provider === "codex")?.state, "ok");
+  const lastClaudex = [...h.registryCalls].reverse().find((c) => c.id === "claudex");
+  assert.equal(lastClaudex?.enabled, true, "claudex enabled from the persisted codex account");
+});
+
+test("enable: a freshly-installed binary that never probes healthy rolls back to bin.prev and respawns", async () => {
+  const h = setup();
+  // The fresh install lands a binary but the proxy never comes up; a prior binary
+  // survives in bin.prev/. Model that as: probe fails until rollback restores it.
+  let rolledBack = false;
+  h.setRollback(async () => {
+    rolledBack = true;
+    return true; // bin.prev existed → restored
+  });
+  h.setProbeFn(async () =>
+    rolledBack
+      ? { ok: true, reachable: true, models: ["gpt-5.6-sol"] }
+      : { ok: false, reachable: false }
+  );
+
+  await h.mgr.enable();
+
+  assert.equal(h.rollbackCount(), 1, "rollback attempted exactly once");
+  assert.ok(rolledBack, "rollback restored the previous binary");
+  assert.equal(h.mgr.status().state, "healthy", "healthy after the rollback respawn");
+});
+
+test("reparent: an external survivor still answering on drain stays persistence-lost — no spawn, no error latch", async () => {
+  const h = setup();
+  await writeEnabledState(h.daemonDir);
+  h.setHasService(false);
+  // The out-of-tmux survivor keeps answering with our key throughout.
+  h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
+
+  await h.mgr.init();
+  assert.ok(h.mgr.status().reasons.includes("persistence-lost"), "boots persistence-lost");
+
+  // Sessions drain, but the port is still held by a proxy we hold no handle to:
+  // re-parenting must NOT spawn into the conflict; it stays degraded, warn-only.
+  h.setLive(0);
+  h.mgr.handleSessionSetChanged();
+  await h.mgr.checkHealth(); // settle: chains after the re-parent attempt
+
+  const st = h.mgr.status();
+  assert.equal(st.state, "degraded", "not error-latched");
+  assert.ok(st.reasons.includes("persistence-lost"), "still persistence-lost");
+  assert.equal(h.tmuxCalls.newService, 0, "no spawn into a port still held by the survivor");
+});
+
 // --- Task 9: /api/cliproxy routes + launch-env composition + model gate --------
 
-function fakeRouteManager() {
+function fakeRouteManager(daemonDir?: string) {
   const calls = {
     enable: 0,
     disable: [] as boolean[],
     setConfig: [] as Array<{ cfg: unknown; force: boolean }>,
+    openRouter: [] as Array<{ key: string; force: boolean }>,
     seed: [] as Array<{ req: { provider: "codex" | "claude"; accountId: string }; cred: unknown }>
   };
   const status: CliProxyStatus = {
@@ -524,12 +668,32 @@ function fakeRouteManager() {
       calls.disable.push(force);
       return { ok: true, affectedSessions: 0 };
     },
-    setConfig: async (cfg: { defaultModel?: string; backgroundModel?: string }, force: boolean) => {
+    setConfig: async (
+      cfg: { defaultModel?: string; backgroundModel?: string; claudeDefaultModel?: string },
+      force: boolean
+    ) => {
       calls.setConfig.push({ cfg, force });
       // Restart-gated like the real manager: refuse while live sessions exist
       // unless forced.
       const live = status.activeSessionCount;
       if (live > 0 && !force) return { ok: false, affectedSessions: live };
+      return { ok: true, affectedSessions: force ? live : 0 };
+    },
+    // Mirrors the real manager's persist → re-project → gate cycle so the route
+    // test's on-disk assertions (secrets.json + config.yaml) stay meaningful while
+    // the route merely delegates + maps the {ok} gate to HTTP codes.
+    setOpenRouterKey: async (key: string, force: boolean) => {
+      calls.openRouter.push({ key, force });
+      const live = status.activeSessionCount;
+      if (live > 0 && !force) return { ok: false, affectedSessions: live };
+      const secrets = await realSetOpenRouterKey(daemonDir!, key);
+      let st = createDefaultCliProxyState();
+      try {
+        st = parseCliProxyState(JSON.parse(await readFile(cliproxyStateFile(daemonDir!), "utf8")));
+      } catch {
+        // no persisted state — defaults stand
+      }
+      await writeProjections(daemonDir!, secrets, st);
       return { ok: true, affectedSessions: force ? live : 0 };
     },
     seedProvider: async (
@@ -654,7 +818,7 @@ test("seed route is refused over the unix socket (403); no seed, no ownership fl
 test("openrouter/key route stores the key, re-projects config.yaml, and is restart-gated", async () => {
   const root = mkdtempSync(join(tmpdir(), "orq-cliproxy-or-"));
   const daemonDir = join(root, "daemon");
-  const { manager, status } = fakeRouteManager();
+  const { manager, status } = fakeRouteManager(daemonDir);
   const { agentAccounts } = fakeAgentAccounts(daemonDir);
   const app = Fastify();
   registerCliProxyRoutes(app, { manager, mode: "remote", daemonDir, agentAccounts });
@@ -729,7 +893,10 @@ test("PUT /api/cliproxy/config: success resolves the full CliProxyStatus (not th
   assert.ok(Array.isArray(body.reasons), "reasons[] present");
   assert.equal(typeof body.defaultModel, "string");
   assert.equal(body.ok, undefined, "the internal gate result must not leak to the wire");
-  assert.deepEqual(calls.setConfig.at(-1), { cfg: { defaultModel: "kimi-k3", backgroundModel: undefined }, force: false });
+  assert.deepEqual(calls.setConfig.at(-1), {
+    cfg: { defaultModel: "kimi-k3", backgroundModel: undefined, claudeDefaultModel: undefined },
+    force: false
+  });
 
   // Restart-gated: a live dependent session blocks the change unless forced.
   status.activeSessionCount = 2;
@@ -808,6 +975,23 @@ test("cliproxyContributor: a real account prefixes the effective model; System/u
 
   // A non-managed launcher never contributes.
   assert.equal(cliproxyContributor("claude", { accountId: "abc-1", model: "x" }, daemonDir), null);
+});
+
+test("cliproxyContributor: an OpenRouter/Kimi model is emitted bare even with an account; other models are prefixed", () => {
+  const daemonDir = join(mkdtempSync(join(tmpdir(), "orq-cliproxy-kimi-")), "daemon");
+  const accountId = "14137047-1111-2222-3333-444455556666";
+
+  // Kimi routes through the keyless OpenRouter provider → NO account prefix, even
+  // when a real managed account was picked (a stale pick must not misroute it).
+  const kimi = cliproxyContributor("claudex", { accountId, model: "kimi-k3" }, daemonDir);
+  assert.ok(kimi);
+  assert.equal(kimi.env.ANTHROPIC_MODEL, "kimi-k3");
+  assert.equal(kimi.env.CLAUDE_CODE_SUBAGENT_MODEL, "kimi-k3");
+
+  // A non-OpenRouter model with the same account IS prefixed (the routing default).
+  const gpt = cliproxyContributor("claudex", { accountId, model: "gpt-5.6-sol" }, daemonDir);
+  assert.ok(gpt);
+  assert.equal(gpt.env.ANTHROPIC_MODEL, "acc14137047/gpt-5.6-sol");
 });
 
 test("composeExtraEnv: cliproxy env wins on collision, accountId preserved, unsets concatenated", () => {

@@ -1109,7 +1109,7 @@ export class HttpOrquesterApiClient implements OrquesterApi {
   }
 
   setCliProxyConfig(
-    cfg: { defaultModel?: string; backgroundModel?: string },
+    cfg: { defaultModel?: string; backgroundModel?: string; claudeDefaultModel?: string },
     force?: boolean
   ): Promise<CliProxyStatus> {
     return this.put("/api/cliproxy/config", { ...cfg, force: Boolean(force) });

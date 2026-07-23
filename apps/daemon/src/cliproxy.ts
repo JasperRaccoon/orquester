@@ -14,9 +14,10 @@ import {
 } from "@orquester/config";
 import type { Broadcaster } from "./broadcaster.ts";
 import { seedHome, writeProjections } from "./cliproxy-files.ts";
-import { loadOrInitSecrets } from "./cliproxy-secrets.ts";
+import { loadOrInitSecrets, setOpenRouterKey } from "./cliproxy-secrets.ts";
 import {
   accessTokenFreshMs,
+  accountPrefix,
   claudeStorageFromCredentials,
   codexStorageFromAuthJson
 } from "./cliproxy-seed.ts";
@@ -71,6 +72,13 @@ export interface CliProxyAdapters {
    * requiring an already-present binary.
    */
   install?(): Promise<{ version: string }>;
+  /**
+   * Restore the previously-installed proxy binary from `bin.prev/` (production:
+   * `rollbackBinary`). Returns true when a prior binary existed and was restored.
+   * `enable()` uses it as a last resort when a freshly-installed binary never
+   * probes healthy. Absent → no rollback attempted.
+   */
+  rollback?(): Promise<boolean>;
   /** Source Claude config dir `seedHome` copies shared config from (production:
    *  `CLAUDE_CONFIG_DIR || ~/.claude`). */
   systemClaudeDir?(): string;
@@ -153,6 +161,11 @@ export class CliProxyManager {
   init(): Promise<void> {
     return this.transition(async () => {
       this.state = await this.loadState();
+      // Rebuild the in-memory proxy-owned account map from persisted state so a
+      // restart keeps provider availability (and the launcher coupling) without a
+      // re-seed. Persisted records carry no token freshness, so they rehydrate as
+      // "ok"; a stale credential re-degrades on the next seed/verify.
+      this.rebuildSeededAccounts();
       if (!this.state.enabled) {
         this.setState("off", []);
         this.applyRegistryCoupling();
@@ -209,7 +222,23 @@ export class CliProxyManager {
 
       this.setState("starting", []);
       await this.spawn(false);
-      const probed = await this.probe();
+      let probed = await this.probe();
+      // A freshly-installed binary that never probes healthy: if a previous binary
+      // survives in bin.prev/, roll back and respawn once before latching error.
+      // `rollback()` returns false when there is nothing to roll back to.
+      if (!probed.ok && this.adapters.rollback) {
+        const rolled = await this.adapters.rollback();
+        if (rolled) {
+          await this.spawn(true);
+          probed = await this.probe();
+          if (probed.ok) {
+            this.becomeHealthy(probed.models);
+            this.setState("healthy", ["rolled back to previous binary"]);
+            await this.persist();
+            return;
+          }
+        }
+      }
       if (probed.ok) {
         this.becomeHealthy(probed.models);
       } else {
@@ -248,13 +277,15 @@ export class CliProxyManager {
    * while sessions are live unless forced (disclosure alone is not quiescence).
    */
   setConfig(
-    cfg: { defaultModel?: string; backgroundModel?: string },
+    cfg: { defaultModel?: string; backgroundModel?: string; claudeDefaultModel?: string },
     force: boolean
   ): Promise<{ ok: boolean; affectedSessions?: number }> {
     return this.transition(async () => {
       const changesDefault = cfg.defaultModel !== undefined && cfg.defaultModel !== this.state.defaultModel;
       const changesBackground =
         cfg.backgroundModel !== undefined && cfg.backgroundModel !== this.state.backgroundModel;
+      // claudeDefaultModel only feeds validateModel's default resolution — it is not
+      // written into config.yaml/env projections, so changing it needs no restart.
       const needsRestart = (changesDefault || changesBackground) && this.st !== "off";
       const live = this.adapters.liveDependentSessionCount();
       if (needsRestart && !force && live > 0) {
@@ -262,6 +293,7 @@ export class CliProxyManager {
       }
       if (cfg.defaultModel !== undefined) this.state.defaultModel = cfg.defaultModel;
       if (cfg.backgroundModel !== undefined) this.state.backgroundModel = cfg.backgroundModel;
+      if (cfg.claudeDefaultModel !== undefined) this.state.claudeDefaultModel = cfg.claudeDefaultModel;
       if (this.secrets && this.state.enabled) {
         await writeProjections(this.daemonDir, this.secrets, this.state);
         if (needsRestart) {
@@ -274,6 +306,40 @@ export class CliProxyManager {
           this.setState(this.st, this.reasons);
         }
       }
+      await this.persist();
+      return { ok: true, affectedSessions: force ? live : 0 };
+    });
+  }
+
+  /**
+   * Set the OpenRouter API key, owning the whole projection+restart cycle. The key
+   * lives in config.yaml (a projection the proxy reads only at startup), so a
+   * change is restart-gated exactly like {@link setConfig}: refused while
+   * daemon-managed sessions are live unless forced. On proceed it persists the key
+   * via the secrets store, updates the in-memory secrets, re-projects config.yaml,
+   * restarts the proxy (kill + spawn + probe), recouples the launchers to the
+   * now-available openrouter provider, and broadcasts + persists.
+   */
+  setOpenRouterKey(key: string, force: boolean): Promise<{ ok: boolean; affectedSessions?: number }> {
+    return this.transition(async () => {
+      const needsRestart = this.st !== "off";
+      const live = this.adapters.liveDependentSessionCount();
+      if (needsRestart && !force && live > 0) {
+        return { ok: false, affectedSessions: live };
+      }
+      this.secrets = await setOpenRouterKey(this.daemonDir, key);
+      if (this.state.enabled) {
+        await writeProjections(this.daemonDir, this.secrets, this.state);
+        if (needsRestart) {
+          this.setState("starting", []);
+          await this.spawn(true);
+          const probed = await this.probe();
+          if (probed.ok) this.becomeHealthy(probed.models);
+          else this.fail("proxy down");
+        }
+      }
+      this.applyRegistryCoupling();
+      this.broadcaster.publish("cliproxy", "cliproxy.changed", this.status());
       await this.persist();
       return { ok: true, affectedSessions: force ? live : 0 };
     });
@@ -317,14 +383,21 @@ export class CliProxyManager {
           ? String((storage as Record<string, unknown>).email)
           : undefined;
       const lastVerifiedAt = new Date(this.adapters.now()).toISOString();
+      const label = email ?? req.accountId;
       this.seededAccounts.set(req.accountId, {
         id: req.accountId,
         provider: req.provider,
-        label: email ?? req.accountId,
+        label,
         email,
         state: "ok",
         lastVerifiedAt
       });
+      // Persist the routing-relevant projection (no token material) so a restart
+      // rebuilds this account's provider availability without a re-seed (spec §4).
+      const persisted = { provider: req.provider, accountId: req.accountId, label, prefix: accountPrefix(req.accountId) };
+      const existing = this.state.seededAccounts.findIndex((a) => a.accountId === req.accountId);
+      if (existing >= 0) this.state.seededAccounts[existing] = persisted;
+      else this.state.seededAccounts.push(persisted);
 
       // Hot-discovered: re-probe to refresh the catalog, then recouple launchers
       // to the now-available provider and rebroadcast the enriched status.
@@ -344,8 +417,14 @@ export class CliProxyManager {
    * verify it against a fresh, time-bounded probe. Not serialized through the
    * transition queue — it is a read-only check that must run concurrently.
    */
-  async validateModel(_entryId: string, model?: string): Promise<ValidateResult> {
-    const effectiveModel = model ?? this.state.defaultModel;
+  async validateModel(entryId: string, model?: string): Promise<ValidateResult> {
+    // claudemix (the Claude Fable main loop) resolves its OWN default when a launch
+    // names none — never `defaultModel`, which is claudex's Codex/GPT default. A
+    // Codex-seeded setup would otherwise route claudemix to GPT (or a prefixed
+    // gpt model) and the UI never sends a model for claudemix.
+    const configuredDefault =
+      entryId === "claudemix" ? this.state.claudeDefaultModel : this.state.defaultModel;
+    const effectiveModel = model ?? configuredDefault;
     if (!MODEL_NAME_RE.test(effectiveModel)) {
       return { ok: false, error: `invalid model name "${effectiveModel}"` };
     }
@@ -413,8 +492,26 @@ export class CliProxyManager {
   private async reparentIfDrained(): Promise<void> {
     if (!this.adapters.tmux) return;
     if (this.adapters.liveDependentSessionCount() > 0) return;
+    // Kill only what we actually own: the tmux service session (a no-op for a
+    // truly external, out-of-tmux survivor) and a direct child if one exists.
+    await this.adapters.tmux.killServiceSession(SERVICE_SESSION_NAME).catch(() => undefined);
+    if (this.directHandle) {
+      this.directHandle.kill();
+      this.directHandle = null;
+    }
+    // Re-probe: if the port STILL answers with our key, the survivor is an external
+    // proxy we hold no handle to and cannot kill. Spawning now would collide on the
+    // port and latch error — stay persistence-lost (warn-only) instead.
+    const still = await this.probe();
+    if (still.ok) {
+      this.external = true;
+      this.setState("degraded", ["persistence-lost"]);
+      this.applyRegistryCoupling();
+      return;
+    }
+    // Port is free → safe to spawn a fresh tmux-hosted proxy and re-parent.
     this.setState("starting", []);
-    await this.spawn(true);
+    await this.spawn(false);
     const probed = await this.probe();
     if (probed.ok) {
       this.external = false;
@@ -620,6 +717,20 @@ export class CliProxyManager {
       this.registry.setRuntimeState("claudemix", {
         enabled: false,
         disabledReason: "no claude credential"
+      });
+    }
+  }
+
+  /** Rehydrate the in-memory account map from persisted `state.seededAccounts`. */
+  private rebuildSeededAccounts(): void {
+    this.seededAccounts.clear();
+    for (const a of this.state.seededAccounts) {
+      this.seededAccounts.set(a.accountId, {
+        id: a.accountId,
+        provider: a.provider,
+        label: a.label,
+        state: "ok",
+        lastVerifiedAt: null
       });
     }
   }

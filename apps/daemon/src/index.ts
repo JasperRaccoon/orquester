@@ -71,9 +71,7 @@ import type { ActivityCause } from "./ansi-activity";
 import { TodoError, TodoListManager } from "./todos";
 import { Tmux, tmuxAvailable, tmuxVersionOk } from "./tmux";
 import { CliProxyManager } from "./cliproxy";
-import { CLIPROXY_RELEASE, defaultFetchTarball, installBinary } from "./cliproxy-install.ts";
-import { setOpenRouterKey } from "./cliproxy-secrets.ts";
-import { writeProjections } from "./cliproxy-files.ts";
+import { CLIPROXY_RELEASE, defaultFetchTarball, installBinary, rollbackBinary } from "./cliproxy-install.ts";
 import { accountPrefix } from "./cliproxy-seed.ts";
 import { Broadcaster } from "./broadcaster";
 import { AccountError, AccountsService } from "./accounts";
@@ -113,6 +111,7 @@ import {
   cliproxyTokenFile,
   parseCliProxyState,
   MODEL_NAME_RE,
+  isOpenRouterModel,
   createDefaultClientConfig,
   createDefaultDaemonConfig,
   createDefaultRemotesConfig,
@@ -599,6 +598,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
         const { version } = await installBinary(resolved.daemonDir, { fetchTarball: defaultFetchTarball });
         return { version: version || CLIPROXY_RELEASE.version };
       },
+      // Last-resort recovery: restore the prior binary from bin.prev/ when a fresh
+      // install never probes healthy (see CliProxyManager.enable).
+      rollback: () => rollbackBinary(resolved.daemonDir),
       // Shared, non-credential Claude config `seedHome` copies into each dedicated
       // launcher home: the host's CLAUDE_CONFIG_DIR, else ~/.claude.
       systemClaudeDir: () => env.CLAUDE_CONFIG_DIR || join(resolved.vars.userhome, ".claude")
@@ -770,7 +772,12 @@ export function cliproxyContributor(
     // from the same file at exec, so a missing projection is not fatal here.
   }
   if (ctx.model) {
-    const routesToAccount = Boolean(ctx.accountId) && ctx.accountId !== SYSTEM_ACCOUNT_ID;
+    // An OpenRouter/Kimi model is served by the shared keyless OpenRouter provider,
+    // never a seeded per-account credential — emit it BARE regardless of accountId
+    // (a per-account prefix would misroute it). The daemon enforces this at the
+    // wire so a stale account pick can't reattach a prefix (spec §2).
+    const routesToAccount =
+      Boolean(ctx.accountId) && ctx.accountId !== SYSTEM_ACCOUNT_ID && !isOpenRouterModel(ctx.model);
     const effectiveModel = routesToAccount ? `${accountPrefix(ctx.accountId)}/${ctx.model}` : ctx.model;
     env.ANTHROPIC_MODEL = effectiveModel;
     env.CLAUDE_CODE_SUBAGENT_MODEL = effectiveModel;
@@ -833,9 +840,10 @@ interface CliProxyRouteManager {
   enable(): Promise<void>;
   disable(force: boolean): Promise<{ ok: boolean; affectedSessions?: number }>;
   setConfig(
-    cfg: { defaultModel?: string; backgroundModel?: string },
+    cfg: { defaultModel?: string; backgroundModel?: string; claudeDefaultModel?: string },
     force: boolean
   ): Promise<{ ok: boolean; affectedSessions?: number }>;
+  setOpenRouterKey(key: string, force: boolean): Promise<{ ok: boolean; affectedSessions?: number }>;
   seedProvider(
     req: { provider: "codex" | "claude"; accountId: string },
     read: (provider: "codex" | "claude", accountId: string) => Promise<unknown>
@@ -857,7 +865,8 @@ const MANAGED_CRED_FILENAME = { claude: ".credentials.json", codex: "auth.json" 
  * are open on both transports; mutating routes (enable/disable/config) are
  * HTTP-transport-only — the socket-served instance registers the same paths but
  * refuses with 403 (the socket is unauthenticated and every agent session holds
- * its path). Login + OpenRouter-key flows are Phase 2 — reserved here as 501.
+ * its path). The OpenRouter-key flow delegates its persist → re-project → restart
+ * cycle to the manager so disk and in-memory state stay in lockstep.
  */
 export function registerCliProxyRoutes(
   app: FastifyInstance,
@@ -907,8 +916,13 @@ export function registerCliProxyRoutes(
 
   app.put("/api/cliproxy/config", async (request, reply): Promise<CliProxyStatus | undefined> => {
     if (refusedOnSocket(reply)) return;
-    const body = (request.body ?? {}) as { defaultModel?: string; backgroundModel?: string; force?: boolean };
-    for (const m of [body.defaultModel, body.backgroundModel]) {
+    const body = (request.body ?? {}) as {
+      defaultModel?: string;
+      backgroundModel?: string;
+      claudeDefaultModel?: string;
+      force?: boolean;
+    };
+    for (const m of [body.defaultModel, body.backgroundModel, body.claudeDefaultModel]) {
       if (m !== undefined && !MODEL_NAME_RE.test(m)) {
         reply.code(400).send({ error: `invalid model name: ${JSON.stringify(m)}` });
         return;
@@ -920,7 +934,11 @@ export function registerCliProxyRoutes(
     // resolves the full CliProxyStatus the wire contract (setCliProxyConfig)
     // promises, not the internal {ok, affectedSessions} gate result.
     const res = await manager.setConfig(
-      { defaultModel: body.defaultModel, backgroundModel: body.backgroundModel },
+      {
+        defaultModel: body.defaultModel,
+        backgroundModel: body.backgroundModel,
+        claudeDefaultModel: body.claudeDefaultModel
+      },
       Boolean(body.force)
     );
     if (!res.ok) {
@@ -961,26 +979,21 @@ export function registerCliProxyRoutes(
   // Store the OpenRouter API key and re-project config.yaml (spec §3). The key
   // lives in the config.yaml projection, which the proxy reads only at startup —
   // so a change is restart-gated: refused while dependent sessions are live unless
-  // forced (disclosure alone is not quiescence, as with disable/config).
+  // forced (disclosure alone is not quiescence, as with disable/config). The whole
+  // persist → re-project → restart cycle is owned by the manager so the in-memory
+  // secrets + provider state stay in lockstep with disk (a bare route write left
+  // them stale until the next restart).
   app.post("/api/cliproxy/openrouter/key", async (request, reply) => {
     if (refusedOnSocket(reply)) return;
     const body = (request.body ?? {}) as { key?: string; force?: boolean };
     const key = typeof body.key === "string" ? body.key.trim() : "";
     if (!key) return reply.code(400).send({ error: "key is required" });
-    const live = manager.status().activeSessionCount;
-    if (live > 0 && !body.force) {
-      return reply.code(409).send({ ok: false, affectedSessions: live });
+    const res = await manager.setOpenRouterKey(key, Boolean(body.force));
+    if (!res.ok) {
+      reply.code(409).send({ ok: false, affectedSessions: res.affectedSessions });
+      return;
     }
-    const secrets = await setOpenRouterKey(daemonDir, key);
-    // parseCliProxyState falls back to defaults for a missing/partial file.
-    let state = parseCliProxyState(null);
-    try {
-      state = parseCliProxyState(JSON.parse(await readFile(cliproxyStateFile(daemonDir), "utf8")));
-    } catch {
-      // No persisted state yet — the defaults above stand.
-    }
-    await writeProjections(daemonDir, secrets, state);
-    return { ok: true, affectedSessions: live };
+    return { ok: true, affectedSessions: res.affectedSessions ?? 0 };
   });
 }
 

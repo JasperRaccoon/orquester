@@ -656,6 +656,19 @@ export function parseClientConfig(value: unknown): ClientConfig {
 /** Allowed characters for a model name (env writer, routes, wrapper `--model`). */
 export const MODEL_NAME_RE = /^[A-Za-z0-9._/-]{1,128}$/;
 
+/**
+ * Predicate — single source of truth for "this model routes through the keyless
+ * OpenRouter provider (Kimi / moonshotai)". Such a model must NEVER carry a
+ * per-account routing prefix: it is served by the shared OpenRouter key, not by
+ * any seeded Codex/Claude credential. Any `acc<hex>/` routing prefix is stripped
+ * before the test so a caller can pass either the bare or the already-prefixed
+ * model. Used daemon-side (launch contributor) and in the UI (chip neutralization).
+ */
+export function isOpenRouterModel(model: string): boolean {
+  const bare = model.replace(/^acc[0-9a-fA-F]+\//, "");
+  return /^(kimi|moonshotai\/)/i.test(bare);
+}
+
 export const cliProxyStateSchema = z.object({
   enabled: z.boolean().default(false),
   version: z.string().nullable().default(null),
@@ -663,12 +676,31 @@ export const cliProxyStateSchema = z.object({
   goVersion: z.string().nullable().default(null),
   goSha256: z.string().nullable().default(null),
   defaultModel: z.string().default("gpt-5.6-sol"),
+  /** Default model for the claudemix launcher (the Claude Fable main loop) when a
+   *  launch names none. Distinct from `defaultModel` (claudex's Codex/GPT default)
+   *  so a Codex-seeded setup never routes claudemix to GPT. */
+  claudeDefaultModel: z.string().default("claude-fable-5"),
   backgroundModel: z.string().default("gpt-5.6-sol"),
   port: z.number().int().default(8317),
   modelCatalog: z
     .object({ models: z.array(z.string()), asOf: z.string() })
     .nullable()
     .default(null),
+  /**
+   * Managed accounts seeded into the proxy's `auth/` dir, persisted so a daemon
+   * restart rebuilds provider availability (and the launcher coupling) without a
+   * re-seed. Only the routing-relevant projection is stored — never token material.
+   */
+  seededAccounts: z
+    .array(
+      z.object({
+        provider: z.enum(["codex", "claude"]),
+        accountId: z.string(),
+        label: z.string(),
+        prefix: z.string()
+      })
+    )
+    .default([]),
   testedClaudeCliVersion: z.string().nullable().default(null)
 });
 
