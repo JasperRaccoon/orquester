@@ -17,6 +17,7 @@ import {
 } from "../lib/auth";
 import { loadViewModes, saveViewModes, type ViewMode } from "../lib/view-mode";
 import { loadPreferredAccounts, savePreferredAccounts } from "../lib/preferred-account";
+import { loadPreferredModels, savePreferredModels } from "../lib/preferred-model";
 import {
   clampTerminalFontSize,
   loadTerminalFontSize,
@@ -63,6 +64,9 @@ import type {
 import type {
   AgentAccountsResponse,
   BrowserSummary,
+  CliProxyProviderStatus,
+  CliProxySeedRequest,
+  CliProxyStatus,
   SessionActivity,
   SessionActivityEvent,
   TodoListRecord,
@@ -528,6 +532,10 @@ export interface AppState {
   usage: UsageResponse | null;
   usageTokens: UsageTokensResponse | null;
   agentAccounts: AgentAccountsResponse | null;
+  /** Managed model-proxy status (claudex/claudemix backing), or null before first load. */
+  cliproxy: CliProxyStatus | null;
+  /** The proxy's live model catalog + its snapshot time, or null before first load. */
+  cliproxyModels: { models: string[]; asOf: string | null } | null;
   workspaces: WorkspaceSummary[];
   accounts: AccountSummary[];
   workspacesLoading: boolean;
@@ -557,6 +565,8 @@ export interface AppState {
   viewModeByProject: Record<string, ViewMode>;
   /** Last account chosen per agent in the launcher (client-local, persisted). */
   preferredAccountByAgent: Record<string, string>;
+  /** Last backing model chosen per agent (claudex/claudemix) in the launcher (client-local, persisted). */
+  preferredModelByAgent: Record<string, string>;
   /** Global terminal font size (px); persisted client-side, per device. */
   terminalFontSize: number;
   /** Global sidebar width (px); persisted client-side, per device. */
@@ -625,9 +635,22 @@ export interface AppState {
   loadUsage: (force?: boolean) => Promise<void>;
   loadUsageTokens: (force?: boolean) => Promise<void>;
   loadAgentAccounts: () => Promise<void>;
+  /** Fetch the managed model-proxy status + model catalog into the store. */
+  loadCliProxy: () => Promise<void>;
+  enableCliProxy: () => Promise<void>;
+  disableCliProxy: (force?: boolean) => Promise<{ ok: boolean; affectedSessions?: number }>;
+  seedCliProxyAccount: (req: CliProxySeedRequest) => Promise<CliProxyProviderStatus>;
+  setCliProxyOpenRouterKey: (key: string, force?: boolean) => Promise<void>;
+  setCliProxyDefaultModel: (model: string) => Promise<void>;
   installAgent: (id: string) => Promise<void>;
   updateAgent: (id: string) => Promise<void>;
-  openTab: (kind: RegistryKind, refId: string, title?: string, accountId?: string) => Promise<void>;
+  openTab: (
+    kind: RegistryKind,
+    refId: string,
+    title?: string,
+    accountId?: string,
+    model?: string
+  ) => Promise<void>;
   openFileBrowser: () => void;
   openGit: () => void;
   openBrowser: (url?: string) => Promise<void>;
@@ -639,6 +662,7 @@ export interface AppState {
   activateTab: (id: string) => void;
   setViewMode: (mode: ViewMode) => void;
   setPreferredAccount: (agent: string, accountId: string) => void;
+  setPreferredModel: (agent: string, model: string) => void;
   setTerminalFontSize: (size: number) => void;
   nudgeTerminalFontSize: (delta: number) => void;
   /**
@@ -700,6 +724,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   usage: null,
   usageTokens: null,
   agentAccounts: null,
+  cliproxy: null,
+  cliproxyModels: null,
   workspaces: [],
   accounts: [],
   workspacesLoading: false,
@@ -715,6 +741,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   activeTabByProject: {},
   viewModeByProject: loadViewModes(),
   preferredAccountByAgent: loadPreferredAccounts(),
+  preferredModelByAgent: loadPreferredModels(),
   terminalFontSize: loadTerminalFontSize(),
   sidebarWidth: loadSidebarWidth(),
   paneSizesByProject: loadPaneSizes(),
@@ -889,6 +916,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       get().loadRegistry(),
       get().loadUsage(),
       get().loadAgentAccounts(),
+      get().loadCliProxy(),
       // Reload git accounts on every (re)connect too — otherwise a daemon
       // restart leaves `accounts` stale (it was only filled by the one-time
       // initConnections path), so the workspace/project pickers go empty until
@@ -1494,6 +1522,77 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
+  loadCliProxy: async () => {
+    const api = get().api;
+    if (!api) {
+      return;
+    }
+    // Status and the model catalog are fetched independently: a failed model
+    // fetch must NOT blank a good status (the panel still shows the persisted
+    // defaultModel), and vice versa.
+    try {
+      set({ cliproxy: await api.getCliProxyStatus() });
+    } catch {
+      /* keep current */
+    }
+    try {
+      set({ cliproxyModels: await api.getCliProxyModels() });
+    } catch {
+      /* keep current */
+    }
+  },
+
+  enableCliProxy: async () => {
+    const api = get().api;
+    if (!api) {
+      return;
+    }
+    // Optimistically adopt the returned status; the live "cliproxy.changed"
+    // stream keeps refining it through the download/build/start substages.
+    const status = await api.enableCliProxy();
+    set({ cliproxy: status });
+  },
+
+  disableCliProxy: async (force) => {
+    const api = get().api;
+    if (!api) {
+      return { ok: false };
+    }
+    const res = await api.disableCliProxy(force);
+    await get().loadCliProxy();
+    return res;
+  },
+
+  seedCliProxyAccount: async (req) => {
+    const api = get().api;
+    if (!api) {
+      throw new Error("not connected");
+    }
+    const provider = await api.seedCliProxyAccount(req);
+    await get().loadCliProxy();
+    return provider;
+  },
+
+  setCliProxyOpenRouterKey: async (key, force) => {
+    const api = get().api;
+    if (!api) {
+      return;
+    }
+    // The route returns { ok, affectedSessions } (writes projections; may not
+    // emit a status event), so refresh the status explicitly afterward.
+    await api.setCliProxyOpenRouterKey(key, force);
+    await get().loadCliProxy();
+  },
+
+  setCliProxyDefaultModel: async (model) => {
+    const api = get().api;
+    if (!api) {
+      return;
+    }
+    const status = await api.setCliProxyConfig({ defaultModel: model });
+    set({ cliproxy: status });
+  },
+
   installAgent: async (id) => {
     // Status (installing/installed/error) arrives via the "registry" event bus.
     await get().api?.installRegistryEntry(id).catch(() => undefined);
@@ -1503,7 +1602,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     await get().api?.updateRegistryEntry(id).catch(() => undefined);
   },
 
-  openTab: async (kind, refId, title, accountId) => {
+  openTab: async (kind, refId, title, accountId, model) => {
     const api = get().api;
     if (!api) {
       return;
@@ -1515,7 +1614,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       title,
       projectPath: project?.path ?? "",
       cwd: project?.path,
-      accountId
+      accountId,
+      model
     });
     set((state) => ({
       sessions: upsertSession(state.sessions, session),
@@ -1650,6 +1750,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       const preferredAccountByAgent = { ...state.preferredAccountByAgent, [agent]: accountId };
       savePreferredAccounts(preferredAccountByAgent);
       return { preferredAccountByAgent };
+    }),
+
+  setPreferredModel: (agent, model) =>
+    set((state) => {
+      const preferredModelByAgent = { ...state.preferredModelByAgent, [agent]: model };
+      savePreferredModels(preferredModelByAgent);
+      return { preferredModelByAgent };
     }),
 
   setTerminalFontSize: (size) =>
@@ -1910,6 +2017,16 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (event.channel === "registry" && event.type === "registry.changed") {
       const entry = event.payload as RegistryEntry;
       set((state) => ({ registry: applyRegistryEntry(state.registry, entry) }));
+      return;
+    }
+    if (event.channel === "cliproxy") {
+      // "cliproxy.changed" carries the full status; other cliproxy events (e.g.
+      // "cliproxy.crashed") also imply the status shifted — refetch to be safe.
+      if (event.type === "cliproxy.changed") {
+        set({ cliproxy: event.payload as CliProxyStatus });
+      } else {
+        void get().loadCliProxy();
+      }
       return;
     }
     if (event.channel === "todos") {
