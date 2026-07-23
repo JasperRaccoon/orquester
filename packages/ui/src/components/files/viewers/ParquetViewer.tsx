@@ -34,6 +34,10 @@ export const ParquetViewer: React.FC<{
   const [range, setRange] = useState({ top: 0, height: 0 });
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const prevPathRef = useRef<string | null>(null);
+  // Mirrors `meta` for the async catch handler: null means nothing is shown yet
+  // (initial load / just switched files), so a failed fetch is a hard failure
+  // rather than a revertable sort request.
+  const metaRef = useRef<FsParquetResponse | null>(null);
   // Generation guard: bumped on every path/sort change so stale responses are dropped.
   const genRef = useRef(0);
   const inflightRef = useRef<Set<number>>(new Set());
@@ -47,6 +51,7 @@ export const ParquetViewer: React.FC<{
     prevPathRef.current = path;
     if (pathChanged) {
       setMeta(null);
+      metaRef.current = null;
       setFailed(false);
       setChunks(new Map());
       setWidths(null);
@@ -64,6 +69,7 @@ export const ParquetViewer: React.FC<{
       .then((data) => {
         if (gen !== genRef.current) return;
         setMeta(data);
+        metaRef.current = data;
         setSortLoading(false);
         setChunks(new Map([[0, data.rows]]));
         setWidths((w) => w ?? estimateWidths(data));
@@ -71,9 +77,12 @@ export const ParquetViewer: React.FC<{
       })
       .catch(() => {
         if (gen !== genRef.current || controller.signal.aborted) return;
-        if (pathChanged) setFailed(true);
+        // Decide on what is actually on screen, not the stale `pathChanged`
+        // closure (which is false on the sort-cleared re-run that fetches a
+        // freshly opened file). Nothing shown yet -> hard failure; otherwise a
+        // sort request was rejected (e.g. too many rows) -> revert to unsorted.
+        if (metaRef.current === null) setFailed(true);
         else {
-          // Sort request rejected (e.g. too many rows to sort) — revert to unsorted.
           setSortLoading(false);
           setSort(null);
         }

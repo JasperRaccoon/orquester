@@ -209,9 +209,14 @@ function compareValues(a: unknown, b: unknown): number {
  *  "one read per contiguous run" approach issues ~limit separate reads that
  *  each re-decompress the *entire* row group — catastrophic on the common
  *  single-row-group file (a windowed sorted fetch took ~40s and never cached).
- *  Instead we decompress each *touched* row group at most once, reuse the last
- *  one across calls (single-slot cache keyed by path/mtime/group), and index
- *  into it in memory. Scrolling/paging under a warm sort is then near-free. */
+ *  Instead we bucket the window's indices by row group and decompress each
+ *  touched group at most once, extract only the ~limit rows we actually need
+ *  out of it, then drop the group before moving to the next — so peak memory is
+ *  O(one row group + limit rows), never O(all touched groups) even when a
+ *  scattered window touches every group of a multi-GB file. The last group
+ *  decompressed is retained across calls (single-slot cache keyed by
+ *  path/mtime/group), so scrolling/paging a contiguous sorted window — which
+ *  lands mostly in one group — reuses it and is near-free. */
 async function readRowsByIndex(
   absPath: string,
   mtimeMs: number,
@@ -231,35 +236,43 @@ async function readRowsByIndex(
     for (let gi = 0; gi < bounds.length; gi++) if (row < bounds[gi].end) return gi;
     return bounds.length - 1;
   };
-  // Decompress each touched group once; seed from the cross-call slot.
-  const cache = new Map<number, Record<string, unknown>[]>();
-  if (rowGroupSlot && rowGroupSlot.path === absPath && rowGroupSlot.mtimeMs === mtimeMs) {
-    cache.set(rowGroupSlot.groupIndex, rowGroupSlot.rows);
-  }
-  let lastGi = -1;
+  // Bucket the requested indices by their row group so each group is
+  // decompressed exactly once regardless of how the sort scattered them.
+  const byGroup = new Map<number, number[]>();
   for (const row of indices) {
     const gi = groupOf(row);
-    if (!cache.has(gi)) {
-      cache.set(
-        gi,
-        await parquetReadObjects({
-          file,
-          metadata,
-          rowStart: bounds[gi].start,
-          rowEnd: bounds[gi].end,
-          compressors
-        })
-      );
-    }
+    const list = byGroup.get(gi);
+    if (list) list.push(row);
+    else byGroup.set(gi, [row]);
+  }
+  // At most one full group in flight at a time, plus the cross-call cached group
+  // seeded here (reused without decompressing when it's one we need).
+  const seed =
+    rowGroupSlot && rowGroupSlot.path === absPath && rowGroupSlot.mtimeMs === mtimeMs ? rowGroupSlot : null;
+  const result = new Map<number, Record<string, unknown>>();
+  let lastRows: Record<string, unknown>[] | null = null;
+  let lastGi = -1;
+  for (const [gi, rows] of byGroup) {
+    const groupRows =
+      seed && seed.groupIndex === gi
+        ? seed.rows
+        : await parquetReadObjects({
+            file,
+            metadata,
+            rowStart: bounds[gi].start,
+            rowEnd: bounds[gi].end,
+            compressors
+          });
+    // Keep only the rows we need; the rest of `groupRows` becomes collectable
+    // once it goes out of scope on the next iteration (except the cached one).
+    for (const row of rows) result.set(row, groupRows[row - bounds[gi].start]);
+    lastRows = groupRows;
     lastGi = gi;
   }
-  if (lastGi >= 0) {
-    rowGroupSlot = { path: absPath, mtimeMs, groupIndex: lastGi, rows: cache.get(lastGi)! };
+  if (lastGi >= 0 && lastRows) {
+    rowGroupSlot = { path: absPath, mtimeMs, groupIndex: lastGi, rows: lastRows };
   }
-  return indices.map((row) => {
-    const gi = groupOf(row);
-    return cache.get(gi)![row - bounds[gi].start];
-  });
+  return indices.map((row) => result.get(row)!);
 }
 
 /** JSON-safe, size-capped cell value for the wire. */
