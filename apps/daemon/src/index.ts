@@ -61,6 +61,7 @@ import type {
 import { BROWSER_FRAME_TYPE_JPEG } from "@orquester/api";
 import { RegistryService } from "./registry";
 import { BrowserError, BrowserManager } from "./browsers";
+import { redactUrlTokens, sanitizeDevtoolsPath } from "./devtools.js";
 import { UrlWatcher } from "./url-watcher";
 import { AgentHooks } from "./agent-hooks";
 import { type ISessionManager, SessionError, createSessionManager } from "./sessions";
@@ -131,6 +132,7 @@ import { homedir, platform as osPlatform } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { stat } from "node:fs/promises";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { request as httpRequest, type IncomingMessage } from "node:http";
 import bcrypt from "bcryptjs";
 
 const daemonId = randomUUID();
@@ -656,10 +658,11 @@ function createServer(
       level: "info",
       stream: logStream,
       serializers: {
-        // Strip the WS `?token=` from request logs (TLS protects it on the wire,
-        // but it must never land in plaintext logs). Other query params are kept.
+        // Strip credentials from request logs (TLS protects them on the wire,
+        // but they must never land in plaintext logs): the WS/download ?token=
+        // and its percent-encoded form inside the DevTools iframe's ?wss= value.
         req(request: { method: string; url: string }) {
-          return { method: request.method, url: request.url.replace(/([?&]token=)[^&]*/i, "$1[redacted]") };
+          return { method: request.method, url: redactUrlTokens(request.url) };
         }
       }
     }
@@ -2030,6 +2033,66 @@ function createServer(
     }
   );
 
+  // Embedded-DevTools frontend assets — reverse-proxied from the tab's own
+  // Chromium, which serves a prebuilt, version-matched DevTools bundle at
+  // /devtools/*. Remote-only (HTTP transport); never on the unix socket.
+  // Unauthenticated within remote by design: these are generic Chrome files at
+  // the same trust level as the SPA bundle, behind an unguessable tab UUID —
+  // the sensitive channel is the authenticated /ws-devtools proxy, and the
+  // DevTools frontend is sandboxed + CSP-locked client-side (see Task 5/6).
+  // Chromium's /json/* discovery endpoints are deliberately NOT reachable here
+  // (the sanitizer pins the path under /devtools/).
+  if (options.mode === "remote") {
+    app.get<{ Params: { browserId: string; "*": string } }>(
+      "/devtools-frontend/:browserId/*",
+      async (request, reply) => {
+        const rest = sanitizeDevtoolsPath(request.params["*"]);
+        if (!rest) {
+          return reply.code(404).send({ code: "NOT_FOUND", message: "Route not found." });
+        }
+        let port: number;
+        try {
+          port = await services.browsers.devtoolsPort(request.params.browserId);
+        } catch (error) {
+          const status = error instanceof BrowserError ? error.statusCode : 500;
+          return reply.code(status).send({ code: "BROWSER_UNAVAILABLE", message: "Browser tab is not running." });
+        }
+        const upstream = await new Promise<IncomingMessage>((resolvePromise, rejectPromise) => {
+          const req = httpRequest(
+            {
+              host: "127.0.0.1",
+              port,
+              path: `/devtools/${rest}`,
+              method: "GET",
+              // Chrome 403s any non-localhost Host (DNS-rebinding guard); the
+              // public hostname from the Caddy hop must never reach it.
+              headers: { host: `127.0.0.1:${port}` },
+              // Unauthenticated route → never let a request pin a
+              // daemon→Chromium connection open indefinitely.
+              timeout: 10_000
+            },
+            resolvePromise
+          );
+          req.on("timeout", () => req.destroy(new Error("devtools upstream timeout")));
+          req.on("error", rejectPromise);
+          // Client (or the proxy) went away → tear the upstream down so it
+          // can't accumulate. Fastify aborts request.raw on client disconnect.
+          request.raw.on("close", () => req.destroy());
+          req.end();
+        }).catch(() => null);
+        if (!upstream) {
+          return reply.code(502).send({ code: "BROWSER_UNAVAILABLE", message: "DevTools upstream unreachable." });
+        }
+        // If the client already left, drop the upstream response too.
+        request.raw.on("close", () => upstream.destroy());
+        void reply.header("cache-control", "no-store");
+        const contentType = upstream.headers["content-type"];
+        if (contentType) void reply.header("content-type", contentType);
+        return reply.code(upstream.statusCode ?? 502).send(upstream);
+      }
+    );
+  }
+
   if (options.mode === "local") {
     // Managed agent hooks report lifecycle events here (see the agent-status
     // design doc). Socket-only: sessions always run on the daemon's host, and
@@ -2532,7 +2595,9 @@ function createServer(
         url.startsWith("/api") ||
         url.startsWith("/health") ||
         url.startsWith("/events") ||
-        url.startsWith("/mcp");
+        url.startsWith("/mcp") ||
+        url.startsWith("/devtools-frontend") ||
+        url.startsWith("/ws-devtools");
       if (request.method !== "GET" || isApi) {
         return reply.code(404).send({ code: "NOT_FOUND", message: "Route not found." });
       }

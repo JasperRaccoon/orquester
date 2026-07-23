@@ -16,3 +16,39 @@ export function parseDebugPort(wsEndpoint: string): number | null {
     return null;
   }
 }
+
+/**
+ * Validate the wildcard tail of /devtools-frontend/:browserId/* before it is
+ * appended to the upstream /devtools/ path. Rejects traversal (raw or
+ * percent-encoded), backslashes, empty segments and absurd lengths — the
+ * upstream also serves /json/* (page URLs/titles), which must stay unreachable
+ * through this proxy.
+ */
+export function sanitizeDevtoolsPath(rest: string): string | null {
+  if (typeof rest !== "string" || rest.length === 0 || rest.length > 2048) return null;
+  if (rest.includes("\\") || rest.includes("\0")) return null;
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(rest);
+  } catch {
+    return null;
+  }
+  if (decoded.includes("\\") || decoded.includes("\0")) return null;
+  for (const candidate of [rest, decoded]) {
+    if (candidate.split("/").some((s) => s === "" || s === "." || s === "..")) return null;
+  }
+  return rest;
+}
+
+/**
+ * Redact credentials from a request URL before it reaches the logs: the plain
+ * `?token=` form (WS auth + /api/fs/download) AND its percent-encoded form
+ * `token%3D`, which appears inside the DevTools iframe's nested `?wss=` value
+ * on /devtools-frontend inspector.html requests — the plain-form regex alone
+ * would log the credential there.
+ */
+export function redactUrlTokens(url: string): string {
+  return url
+    .replace(/([?&]token=)[^&]*/gi, "$1[redacted]")
+    .replace(/(token%3D)[^&]*/gi, "$1[redacted]");
+}
