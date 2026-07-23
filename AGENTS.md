@@ -48,7 +48,7 @@ tab drag-reorder + inline rename (server-authoritative); a per-project grid view
 with TLS, username+password auth, per-IP login throttling, and tmux persistence; per-workspace
 git/GitHub SSH identities; **browser tabs (Design Mode)** — a server-side headless Chromium per
 project streamed as an interactive tab over a `/ws-browser` channel, with an element picker that
-delivers HTML/CSS/screenshot payloads into agent PTYs; and an installable **PWA** web client
+delivers HTML/CSS/screenshot payloads into agent PTYs, and embedded Chrome DevTools (the browser's own version-matched frontend proxied by the daemon — right-dock split, pop-out window, full-screen on mobile); and an installable **PWA** web client
 (service worker + Web Push notifications on agent-session bells).
 
 ---
@@ -316,6 +316,19 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
   it. The SW never intercepts `/api`, `/events`, `/ws`, `/health`, `/mcp` or non-GET
   requests. Registration is web-host-only (`apps/web/src/pwa.ts`, PROD-gated) — Electron never
   touches it.
+- **Browser-tab Chromium exposes a loopback debug port.** The per-project headless
+  Chromium launches with `--remote-debugging-port=0` (not the stdio pipe) so the
+  embedded DevTools can attach; the daemon proxies its frontend at
+  `/devtools-frontend/:browserId/*` (generic Chrome assets) and its CDP WS at
+  `/ws-devtools/:browserId` (`?token=` auth). Both routes are **remote-transport
+  only** (never on the unauthenticated unix socket). The port is unauthenticated
+  **on-host** — same trust level as the scoped-sudo terminal sessions on this
+  single-user box. The DevTools frontend is served same-origin, so it's contained
+  two ways: the UI iframe is `sandbox`ed without `allow-same-origin` (opaque origin,
+  no access to the credential in `localStorage`), and the Caddyfile's
+  `/devtools-frontend/*` CSP island locks `connect-src`/`form-action` to `'self'`
+  (so even a pop-out window can't exfiltrate the credential off-origin). Deploys
+  need that Caddy carve-out or the iframe is blocked by `X-Frame-Options: DENY`.
 
 ---
 

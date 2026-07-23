@@ -3,7 +3,29 @@
 orquester.example.com {
     reverse_proxy 127.0.0.1:47831       # WebSocket upgrade handled automatically
     encode zstd gzip
-    header {
+
+    # The embedded Chrome DevTools frontend (proxied from the project's headless
+    # Chromium under /devtools-frontend/) is its own CSP island: the SPA's strict
+    # CSP + X-Frame-Options DENY would block both the bundle (workers, wasm,
+    # inline handling) and the iframe that embeds it. But the security-critical
+    # directives STAY LOCKED here: connect-src/form-action 'self' contain any
+    # credential exfiltration by the frontend (or a pop-out same-origin window),
+    # and frame-ancestors 'self' limits who may frame it to the app. script-src
+    # is permissive (the bundle needs eval/wasm) — that's fine because it can't
+    # send data off-origin. (All non-CSP headers except X-Frame-Options are kept,
+    # incl. Permissions-Policy — matching the @app block.)
+    @devtools path /devtools-frontend/*
+    header @devtools {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer"
+        Permissions-Policy "camera=(), microphone=(), geolocation=(), interest-cohort=()"
+        Content-Security-Policy "default-src 'self'; connect-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; worker-src 'self' blob:; child-src 'self' blob:; frame-ancestors 'self'; base-uri 'self'; form-action 'self'"
+        -Server
+    }
+
+    @app not path /devtools-frontend/*
+    header @app {
         Strict-Transport-Security "max-age=31536000; includeSubDomains"
         X-Content-Type-Options "nosniff"
         X-Frame-Options "DENY"
@@ -12,9 +34,9 @@ orquester.example.com {
         # Tune CSP to the SPA: xterm/codemirror use inline styles; WS needs wss:;
         # the file-preview viewers load images/audio/video as blob: object URLs and
         # pdf.js spins up a worker (which can be a blob:), so img/media/worker-src
-        # must allow blob:. The HTML preview renders from a blob: iframe, so
-        # frame-src must allow blob: too (frame-ancestors 'none' still forbids the
-        # app itself from being framed by anyone).
+        # must allow blob:. The HTML preview renders from a blob: iframe and the
+        # DevTools panel from a same-origin iframe, so frame-src allows 'self' blob:
+        # (frame-ancestors 'none' still forbids the app itself from being framed).
         Content-Security-Policy "default-src 'self'; connect-src 'self' wss:; img-src 'self' data: blob: https://avatars.githubusercontent.com; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self' blob:; manifest-src 'self'; frame-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
         -Server
     }
