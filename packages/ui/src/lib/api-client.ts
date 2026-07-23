@@ -18,6 +18,7 @@ import type {
   FsCapabilitiesResponse,
   FsFilesResponse,
   FsListResponse,
+  FsParquetResponse,
   FsReadResponse,
   FsSearchRequest,
   FsSearchResponse,
@@ -280,6 +281,23 @@ export class ApiClient {
 
   listArchive(path: string, signal?: AbortSignal): Promise<FsArchiveResponse> {
     return this.send("GET", "/api/fs/archive", { query: { path }, signal });
+  }
+
+  readParquet(
+    path: string,
+    opts: { offset?: number; limit?: number; orderBy?: string; desc?: boolean } = {},
+    signal?: AbortSignal
+  ): Promise<FsParquetResponse> {
+    return this.send("GET", "/api/fs/parquet", {
+      query: {
+        path,
+        offset: opts.offset,
+        limit: opts.limit,
+        orderBy: opts.orderBy,
+        desc: opts.desc ? "1" : undefined
+      },
+      signal
+    });
   }
 
   listProjectFiles(path: string, signal?: AbortSignal): Promise<FsFilesResponse> {
