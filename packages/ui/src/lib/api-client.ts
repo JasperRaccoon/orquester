@@ -328,6 +328,28 @@ export class ApiClient {
   }
 
   /**
+   * URL of the embedded DevTools frontend for a browser tab, or null when the
+   * transport can't reach it (the desktop unix socket — same availability as
+   * browser tabs). The frontend assets are proxied from the tab's Chromium;
+   * the ws/wss param points the frontend at the daemon's authenticated CDP
+   * proxy, with the bearer riding as ?token= (the /ws-browser trick). The
+   * token therefore appears in the iframe/pop-out URL — accepted for a
+   * single-user tool; see the design doc's security note.
+   */
+  buildDevtoolsUrl(browserId: string): string | null {
+    if (this.transportKind !== "http") {
+      return null;
+    }
+    const base = this.connection.endpoint.replace(/\/$/, "");
+    const hostPath = `${base.replace(/^https?:\/\//, "")}/ws-devtools/${browserId}`;
+    const wsValue = this.connection.password
+      ? `${hostPath}?token=${encodeURIComponent(this.connection.password)}`
+      : hostPath;
+    const param = base.startsWith("https") ? "wss" : "ws";
+    return `${base}/devtools-frontend/${browserId}/inspector.html?${param}=${encodeURIComponent(wsValue)}`;
+  }
+
+  /**
    * Buffered download (file bytes or a folder zip) for transports without a
    * native download URL (the desktop unix socket). Rides requestBytes, the same
    * channel readFileBytes uses.
