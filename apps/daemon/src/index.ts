@@ -125,6 +125,7 @@ import { CHROMIUM_FAMILY_IDS } from "@orquester/registry";
 import { assertInsideFsRoot, FsSandboxError } from "@orquester/config/fs";
 import fastifyStatic from "@fastify/static";
 import websocketPlugin from "@fastify/websocket";
+import { WebSocket as UpstreamWebSocket } from "ws";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import { createReadStream, createWriteStream, existsSync, type WriteStream } from "node:fs";
 import { mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
@@ -2555,6 +2556,113 @@ function createServer(
       });
     });
   });
+
+  // Embedded-DevTools CDP WebSocket — remote-only (HTTP transport). The real
+  // DevTools frontend speaks raw CDP to the tab's page target through this
+  // authenticated pipe (?token= because browsers can't set WS headers). Routed
+  // by our stable tab id; the volatile Chrome target id is resolved at upgrade
+  // time so the iframe URL survives tab relaunches. DevTools attaches as a
+  // SECOND CDP session — multi-session is native since Chrome 63 and doesn't
+  // disturb the screencast/picker session.
+  if (options.mode === "remote") {
+    void app.register(async (instance) => {
+      await instance.register(websocketPlugin);
+      instance.get<{ Params: { browserId: string } }>(
+        "/ws-devtools/:browserId",
+        { websocket: true },
+        (socket, request) => {
+          if (options.authRequired) {
+            const token = (request.query as { token?: string }).token;
+            if (!authorizeCredential(token, config.transports.http.username, config.transports.http.passwordHash)) {
+              socket.close(1008, "unauthorized");
+              return;
+            }
+          }
+
+          // CDP is stateful → never drop frames; PAUSE/RESUME on a high-water
+          // mark instead. A single frame is capped by maxPayload; the pre-open
+          // client queue is bounded by bytes AND count (fail-closed).
+          const SEND_HWM = 8 * 1024 * 1024;
+          const PENDING_MAX_BYTES = 8 * 1024 * 1024;
+          const PENDING_MAX_MSGS = 512;
+
+          let upstream: UpstreamWebSocket | null = null;
+          let closed = false;
+          const pending: Array<{ data: Buffer; binary: boolean }> = [];
+          let pendingBytes = 0;
+
+          const closeBoth = (code: number, reason: string) => {
+            if (closed) return;
+            closed = true;
+            try { socket.close(code, reason); } catch { /* closing */ }
+            try { upstream?.close(); } catch { /* closing */ }
+          };
+          // Pause `from` until `bufferedAmount` on `to` drains below the HWM.
+          const relievePressure = (from: { pause(): void; resume(): void }, to: { bufferedAmount: number }) => {
+            from.pause();
+            const check = () => {
+              if (closed) return;
+              if (to.bufferedAmount > SEND_HWM) setTimeout(check, 25);
+              else from.resume();
+            };
+            check();
+          };
+
+          // Attach the client listener SYNCHRONOUSLY (fastify-websocket drops
+          // messages that arrive before a listener exists): buffer into the
+          // bounded queue until the upstream handshake completes.
+          socket.on("message", (data: Buffer, isBinary: boolean) => {
+            if (closed) return;
+            if (upstream && upstream.readyState === UpstreamWebSocket.OPEN) {
+              upstream.send(data, { binary: isBinary });
+              if (upstream.bufferedAmount > SEND_HWM) relievePressure(socket, upstream);
+              return;
+            }
+            pendingBytes += data.length;
+            pending.push({ data, binary: isBinary });
+            if (pending.length > PENDING_MAX_MSGS || pendingBytes > PENDING_MAX_BYTES) {
+              closeBoth(1011, "devtools buffer overflow");
+            }
+          });
+          socket.on("close", () => closeBoth(1000, "client closed"));
+          socket.on("error", () => closeBoth(1011, "client error"));
+
+          void (async () => {
+            let endpoint: { port: number; targetId: string };
+            try {
+              endpoint = await services.browsers.devtoolsEndpoint(request.params.browserId);
+            } catch {
+              closeBoth(1011, "browser tab not running");
+              return;
+            }
+            if (closed) return;
+            upstream = new UpstreamWebSocket(
+              `ws://127.0.0.1:${endpoint.port}/devtools/page/${endpoint.targetId}`,
+              {
+                // Loopback Host (Chrome's DNS-rebinding guard); ws sends no
+                // Origin, so Chrome's CDP origin check passes without an
+                // allowlist — that's why no --remote-allow-origins is set.
+                headers: { host: `127.0.0.1:${endpoint.port}` },
+                maxPayload: 32 * 1024 * 1024
+              }
+            );
+            upstream.on("open", () => {
+              for (const m of pending) upstream!.send(m.data, { binary: m.binary });
+              pending.length = 0;
+              pendingBytes = 0;
+            });
+            upstream.on("message", (data, isBinary) => {
+              if (closed) return;
+              try { socket.send(data as Buffer, { binary: isBinary }); } catch { /* closing */ }
+              if (socket.bufferedAmount > SEND_HWM) relievePressure(upstream!, socket);
+            });
+            upstream.on("close", () => closeBoth(1000, "devtools upstream closed"));
+            upstream.on("error", () => closeBoth(1011, "devtools upstream error"));
+          })();
+        }
+      );
+    });
+  }
 
   // Terminal-control MCP — HTTP-only. The unix socket is unauthenticated, so full
   // terminal drive must never be reachable there; register /mcp only on remote.
