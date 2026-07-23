@@ -139,6 +139,36 @@ test("boot: port answers + our key accepted → persistence-lost (not foreign)",
   assert.equal(h.tmuxCalls.killService, 0);
 });
 
+test("persistence-lost proxy is re-parented under tmux once sessions drain, not just relabeled", async () => {
+  const h = setup();
+  await writeEnabledState(h.daemonDir);
+  h.setHasService(false);
+  h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
+
+  // Boot-adopt an out-of-tmux own proxy (probe ok, no tmux session) → persistence-lost.
+  await h.mgr.init();
+  assert.ok(h.mgr.status().reasons.includes("persistence-lost"), "boots into persistence-lost");
+
+  // A live dependent session: a health tick must NOT clear external / relabel healthy.
+  h.setLive(1);
+  await h.mgr.checkHealth();
+  assert.ok(
+    h.mgr.status().reasons.includes("persistence-lost"),
+    "still persistence-lost while a session is bound to the external proxy"
+  );
+  assert.equal(h.tmuxCalls.newService, 0, "no re-parent spawn while sessions are live");
+
+  // Sessions drain → re-parent: external cleared only AFTER a tmux-hosted spawn.
+  h.setLive(0);
+  h.mgr.handleSessionSetChanged();
+  await h.mgr.checkHealth(); // settle: chains onto the transition queue after the re-parent
+  assert.equal(h.tmuxCalls.newService, 1, "re-parented under tmux exactly once");
+  assert.ok(
+    !h.mgr.status().reasons.includes("persistence-lost"),
+    "external cleared after a tmux-hosted spawn"
+  );
+});
+
 test("boot: port answers + key rejected → error 'port conflict', no kill/adopt", async () => {
   const h = setup();
   await writeEnabledState(h.daemonDir);

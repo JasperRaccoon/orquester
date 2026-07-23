@@ -367,20 +367,37 @@ export class CliProxyManager {
   /** Re-evaluate the persistence-lost respawn window when the session set changes. */
   handleSessionSetChanged(): void {
     if (!this.external) return;
+    // No-tmux mode legitimately stays external — a direct respawn is no more
+    // durable, so there is nothing to re-parent into.
+    if (!this.adapters.tmux) return;
     if (this.adapters.liveDependentSessionCount() > 0) return;
     void this.transition(async () => {
-      if (!this.external || this.adapters.liveDependentSessionCount() > 0) return;
-      this.setState("starting", []);
-      await this.spawn(true);
-      const probed = await this.probe();
-      if (probed.ok) {
-        this.external = false;
-        this.becomeHealthy(probed.models);
-      } else {
-        this.fail("proxy down");
-      }
+      if (!this.external) return;
+      await this.reparentIfDrained();
       await this.persist();
     });
+  }
+
+  /**
+   * Re-parent a persistence-lost (external, out-of-tmux) proxy back under tmux.
+   * Runs only when tmux is available (no-tmux mode legitimately stays external)
+   * and no dependent session is still bound to the surviving proxy. Kills the
+   * external proxy, respawns under tmux, and clears `external` ONLY after the
+   * tmux-hosted spawn probes healthy — a probe-healthy but durability-degraded
+   * proxy stays `persistence-lost` until then, never silently relabeled healthy.
+   */
+  private async reparentIfDrained(): Promise<void> {
+    if (!this.adapters.tmux) return;
+    if (this.adapters.liveDependentSessionCount() > 0) return;
+    this.setState("starting", []);
+    await this.spawn(true);
+    const probed = await this.probe();
+    if (probed.ok) {
+      this.external = false;
+      this.becomeHealthy(probed.models);
+    } else {
+      this.fail("proxy down");
+    }
   }
 
   /**
@@ -394,7 +411,11 @@ export class CliProxyManager {
       if (this.st !== "healthy" && this.st !== "degraded") return;
       const probed = await this.probe();
       if (probed.ok) {
-        this.becomeHealthy(probed.models);
+        // A persistence-lost (external, out-of-tmux) proxy is probe-healthy but
+        // durability-degraded: re-parent it under tmux once sessions drain rather
+        // than relabeling it healthy in place. Until then it stays degraded.
+        if (this.external) await this.reparentIfDrained();
+        else this.becomeHealthy(probed.models);
         await this.persist();
         return;
       }
