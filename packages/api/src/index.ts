@@ -734,6 +734,17 @@ export interface CliProxyStatus {
 }
 
 /**
+ * Body for `POST /api/cliproxy/accounts/seed` — the credential path. The daemon
+ * reads that managed account's credential, converts it into CLIProxyAPI's
+ * auth-file schema, stamps the deterministic routing prefix, and writes it into
+ * `auth/` (spec §4). No secret material crosses this request.
+ */
+export interface CliProxySeedRequest {
+  provider: "codex" | "claude";
+  accountId: string;
+}
+
+/**
  * Sentinel `accountId` on a create-session request meaning "explicit System /
  * host identity" — resolve to no managed account even when a per-agent default
  * is set. Distinct from an OMITTED accountId, which resolves to the default.

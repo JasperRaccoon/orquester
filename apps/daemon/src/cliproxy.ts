@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { CliProxyStatus } from "@orquester/api";
+import type { CliProxyProviderId, CliProxyProviderStatus, CliProxyStatus } from "@orquester/api";
 import {
   type CliProxySecrets,
   type CliProxyState,
@@ -15,6 +15,11 @@ import {
 import type { Broadcaster } from "./broadcaster.ts";
 import { seedHome, writeProjections } from "./cliproxy-files.ts";
 import { loadOrInitSecrets } from "./cliproxy-secrets.ts";
+import {
+  accessTokenFreshMs,
+  claudeStorageFromCredentials,
+  codexStorageFromAuthJson
+} from "./cliproxy-seed.ts";
 import type { RegistryService } from "./registry.ts";
 import { SERVICE_SESSION_PREFIX, type Tmux } from "./tmux.ts";
 
@@ -28,8 +33,25 @@ const MAX_RESPAWNS = 3;
 const BACKOFF_BASE_MS = 1000;
 /** `validateModel` bounds its freshness probe so a hung proxy can't stall a launch. */
 const VALIDATE_PROBE_TIMEOUT_MS = 2000;
+/**
+ * A credential must have at least this much life left to be seeded. Seeding a
+ * near-expired token would make the proxy immediately refresh it — the very
+ * dual-refresher rotation the owner rule (spec §4) exists to avoid. Refuse
+ * instead and ask the user to refresh the account in Orquester first.
+ */
+const SEED_FRESH_THRESHOLD_MS = 5 * 60 * 1000;
 
 type ProbeResult = { ok: boolean; reachable?: boolean; models?: string[] };
+
+/** A managed account seeded into the proxy's `auth/` dir (proxy-owned mapping). */
+interface SeededAccount {
+  id: string;
+  provider: CliProxyProviderId;
+  label: string;
+  email?: string;
+  state: "ok" | "expired";
+  lastVerifiedAt: string | null;
+}
 
 /**
  * Injected side-effect surface, faked wholesale under test. `probe` reports
@@ -83,6 +105,14 @@ export class CliProxyManager {
   private nextRespawnAt = 0;
   private directHandle: { kill(): void } | null = null;
 
+  /**
+   * Accounts seeded into `auth/`, keyed by accountId — the in-memory proxy-owned
+   * mapping (spec §4). Drives `status().accounts` and per-provider registry
+   * coupling. Kept in-memory this phase; a restart rebuilds provider availability
+   * from a fresh probe, and accounts are re-seeded idempotently by the UI.
+   */
+  private readonly seededAccounts = new Map<string, SeededAccount>();
+
   /** Serializes every transition — the tail of the in-flight chain. */
   private queue: Promise<unknown> = Promise.resolve();
 
@@ -107,8 +137,13 @@ export class CliProxyManager {
       version: this.state.version,
       defaultModel: this.state.defaultModel,
       backgroundModel: this.state.backgroundModel,
-      providers: [],
-      accounts: [],
+      providers: this.providerStatuses(),
+      accounts: [...this.seededAccounts.values()].map((a) => ({
+        id: a.id,
+        provider: a.provider,
+        label: a.label,
+        ...(a.email ? { email: a.email } : {})
+      })),
       activeSessionCount: this.adapters.liveDependentSessionCount(),
       testedClaudeCliVersion: this.state.testedClaudeCliVersion
     };
@@ -241,6 +276,66 @@ export class CliProxyManager {
       }
       await this.persist();
       return { ok: true, affectedSessions: force ? live : 0 };
+    });
+  }
+
+  /**
+   * Seed a managed account's credential into the proxy's `auth/` dir (spec §4 —
+   * the sole credential path, no device-auth flow). Reads the managed credential
+   * via the injected `read`, converts it to CLIProxyAPI's auth-file schema
+   * (Task 2), stamps the deterministic per-account routing `prefix`, and writes
+   * it 0600. **Freshness guard:** a token with less than
+   * {@link SEED_FRESH_THRESHOLD_MS} of life is refused with `expired` rather than
+   * seeded, so the proxy never immediately refreshes it and desyncs the managed
+   * account's rotating refresh token (dual-refresher rule). The proxy
+   * hot-discovers the new file — no restart. The caller marks the account
+   * proxy-owned via the accounts service (Task 3).
+   */
+  seedProvider(
+    req: { provider: "codex" | "claude"; accountId: string },
+    read: (provider: "codex" | "claude", accountId: string) => Promise<unknown>
+  ): Promise<CliProxyProviderStatus> {
+    return this.transition(async () => {
+      const cred = await read(req.provider, req.accountId);
+      const { file, storage } =
+        req.provider === "codex"
+          ? codexStorageFromAuthJson(cred, req.accountId)
+          : claudeStorageFromCredentials(cred, req.accountId);
+
+      // Freshness guard — refuse a near-expired token to avoid a proxy refresh.
+      if (accessTokenFreshMs(storage as { expired: string }) <= SEED_FRESH_THRESHOLD_MS) {
+        return { provider: req.provider, state: "expired", lastVerifiedAt: null };
+      }
+
+      const authDir = join(cliproxyDir(this.daemonDir), "auth");
+      await mkdir(authDir, { recursive: true, mode: 0o700 });
+      await writeFile(join(authDir, file), JSON.stringify(storage, null, 2), { mode: 0o600 });
+
+      const email =
+        typeof (storage as Record<string, unknown>).email === "string" &&
+        (storage as Record<string, unknown>).email
+          ? String((storage as Record<string, unknown>).email)
+          : undefined;
+      const lastVerifiedAt = new Date(this.adapters.now()).toISOString();
+      this.seededAccounts.set(req.accountId, {
+        id: req.accountId,
+        provider: req.provider,
+        label: email ?? req.accountId,
+        email,
+        state: "ok",
+        lastVerifiedAt
+      });
+
+      // Hot-discovered: re-probe to refresh the catalog, then recouple launchers
+      // to the now-available provider and rebroadcast the enriched status.
+      const probed = await this.probe();
+      if (probed.ok && probed.models) {
+        this.state.modelCatalog = { models: probed.models, asOf: lastVerifiedAt };
+      }
+      this.applyRegistryCoupling();
+      this.broadcaster.publish("cliproxy", "cliproxy.changed", this.status());
+      await this.persist();
+      return { provider: req.provider, state: "ok", lastVerifiedAt };
     });
   }
 
@@ -444,19 +539,80 @@ export class CliProxyManager {
   }
 
   /**
-   * Reason→consequence coupling (spec §1): a launchable proxy (`healthy`, or a
-   * warn-only `degraded`) enables the dependent entries; otherwise they are
-   * visible-but-disabled with a "proxy down" reason.
+   * Reason→consequence coupling (spec §1 + §4). A down proxy disables both
+   * entries ("proxy down"). A launchable proxy with no seeded providers yet stays
+   * optimistic (both enabled — nothing to gate on). Once credentials exist, each
+   * entry is gated on its required provider: `claudex` needs codex OR openrouter,
+   * `claudemix` needs claude; a missing/expired required provider leaves the entry
+   * visible-but-disabled with an explanatory reason.
    */
   private applyRegistryCoupling(): void {
     const launchable = this.st === "healthy" || this.st === "degraded";
-    for (const id of DEPENDENT_ENTRY_IDS) {
-      if (launchable) {
-        this.registry.setRuntimeState(id, { enabled: true });
-      } else {
+    if (!launchable) {
+      for (const id of DEPENDENT_ENTRY_IDS) {
         this.registry.setRuntimeState(id, { enabled: false, disabledReason: "proxy down" });
       }
+      return;
     }
+    if (!this.hasProviderInfo()) {
+      for (const id of DEPENDENT_ENTRY_IDS) this.registry.setRuntimeState(id, { enabled: true });
+      return;
+    }
+    const codexOk = this.providerState("codex") === "ok";
+    const claudeOk = this.providerState("claude") === "ok";
+    const openrouterOk = this.providerState("openrouter") === "ok";
+    if (codexOk || openrouterOk) {
+      this.registry.setRuntimeState("claudex", { enabled: true });
+    } else {
+      this.registry.setRuntimeState("claudex", {
+        enabled: false,
+        disabledReason: "no codex or openrouter credential"
+      });
+    }
+    if (claudeOk) {
+      this.registry.setRuntimeState("claudemix", { enabled: true });
+    } else {
+      this.registry.setRuntimeState("claudemix", {
+        enabled: false,
+        disabledReason: "no claude credential"
+      });
+    }
+  }
+
+  /** Whether any provider knowledge exists yet (seeded account or OpenRouter key). */
+  private hasProviderInfo(): boolean {
+    return this.seededAccounts.size > 0 || Boolean(this.secrets?.openRouterKey);
+  }
+
+  /**
+   * Aggregate per-provider state: openrouter is `ok` when a key is configured;
+   * codex/claude are `missing` with no seeded account, `expired` if any seeded
+   * credential is stale (probes are per-credential, so one bad account degrades
+   * the whole provider — spec §4), else `ok`.
+   */
+  private providerState(provider: CliProxyProviderId): "ok" | "missing" | "expired" {
+    if (provider === "openrouter") return this.secrets?.openRouterKey ? "ok" : "missing";
+    const accts = [...this.seededAccounts.values()].filter((a) => a.provider === provider);
+    if (accts.length === 0) return "missing";
+    if (accts.some((a) => a.state === "expired")) return "expired";
+    return "ok";
+  }
+
+  /** The three brokered providers with their aggregate state + last-verified time. */
+  private providerStatuses(): CliProxyProviderStatus[] {
+    const providers: CliProxyProviderId[] = ["codex", "claude", "openrouter"];
+    return providers.map((provider) => {
+      const verified = [...this.seededAccounts.values()]
+        .filter((a) => a.provider === provider)
+        .map((a) => a.lastVerifiedAt)
+        .filter((t): t is string => t !== null)
+        .sort();
+      return {
+        provider,
+        state: this.providerState(provider),
+        lastVerifiedAt: verified.length > 0 ? verified[verified.length - 1] : null
+      };
+    });
   }
 
   private backoffMs(attempt: number): number {

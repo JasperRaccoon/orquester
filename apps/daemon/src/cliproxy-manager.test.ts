@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, statSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -18,6 +18,9 @@ import { CliProxyManager } from "./cliproxy.ts";
 import { composeExtraEnv, registerCliProxyRoutes, resolveLaunchModel } from "./index.ts";
 
 type ProbeResult = { ok: boolean; reachable?: boolean; models?: string[] };
+
+const b64url = (o: object) => Buffer.from(JSON.stringify(o)).toString("base64url");
+const fakeJwt = (payload: object) => `x.${b64url(payload)}.y`;
 
 function setup() {
   const root = mkdtempSync(join(tmpdir(), "orq-cliproxy-mgr-"));
@@ -324,6 +327,90 @@ test("corrupt secrets.json → enable latches error, installs nothing, writes no
   assert.ok(st.reasons.some((r) => /corrupt|secret/i.test(r)), `reasons=${JSON.stringify(st.reasons)}`);
   assert.equal(h.installCount(), 0, "corrupt secrets must install nothing");
   assert.equal(existsSync(join(cliproxyDir(h.daemonDir), "config.yaml")), false, "no config rewrite");
+});
+
+// --- Task 5: provider status + credential seeding with freshness guard ---------
+
+test("seedProvider writes a prefixed auth file 0600, records the account, marks the provider ok", async () => {
+  const h = setup();
+  h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
+  await h.mgr.enable();
+
+  const accountId = "65eebd90-01d1-4063-b743-c4a5713f5519";
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  const authJson = {
+    tokens: {
+      id_token: fakeJwt({ email: "a@b.com", "https://api.openai.com/auth": { chatgpt_account_id: "acct-123" } }),
+      access_token: fakeJwt({ exp }),
+      refresh_token: "rt",
+      account_id: "raw"
+    },
+    last_refresh: "2026-07-22T07:30:06Z"
+  };
+  const status = await h.mgr.seedProvider({ provider: "codex", accountId }, async () => authJson);
+  assert.equal(status.provider, "codex");
+  assert.equal(status.state, "ok");
+
+  const authFile = join(cliproxyDir(h.daemonDir), "auth", "codex-acc65eebd90.json");
+  assert.ok(existsSync(authFile), "auth file written under auth/");
+  assert.equal(statSync(authFile).mode & 0o777, 0o600, "auth file is 0600");
+
+  const acct = h.mgr.status().accounts.find((a) => a.id === accountId);
+  assert.ok(acct, "account recorded in status");
+  assert.equal(acct?.provider, "codex");
+  assert.equal(acct?.email, "a@b.com");
+
+  const codex = h.mgr.status().providers.find((p) => p.provider === "codex");
+  assert.equal(codex?.state, "ok");
+});
+
+test("seedProvider refuses a stale token with 'expired' and writes no auth file (no dual-refresh)", async () => {
+  const h = setup();
+  h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
+  await h.mgr.enable();
+
+  const accountId = "14137047-98b2-4cf1-9b54-b18a22a85a62";
+  const staleExp = Math.floor(Date.now() / 1000) - 3600;
+  const authJson = {
+    tokens: {
+      id_token: fakeJwt({ email: "s@t.com" }),
+      access_token: fakeJwt({ exp: staleExp }),
+      refresh_token: "rt"
+    }
+  };
+  const status = await h.mgr.seedProvider({ provider: "codex", accountId }, async () => authJson);
+  assert.equal(status.state, "expired");
+
+  const authFile = join(cliproxyDir(h.daemonDir), "auth", "codex-acc14137047.json");
+  assert.equal(existsSync(authFile), false, "stale token must not be seeded");
+  assert.equal(h.mgr.status().accounts.length, 0, "no account recorded on refusal");
+});
+
+test("status per-provider state gates launchers: codex seeded → claudex on, claude absent → claudemix off", async () => {
+  const h = setup();
+  h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
+  await h.mgr.enable();
+
+  const accountId = "65eebd90-01d1-4063-b743-c4a5713f5519";
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  const authJson = {
+    tokens: {
+      id_token: fakeJwt({ email: "a@b.com", "https://api.openai.com/auth": { chatgpt_account_id: "acct-9" } }),
+      access_token: fakeJwt({ exp }),
+      refresh_token: "rt"
+    }
+  };
+  await h.mgr.seedProvider({ provider: "codex", accountId }, async () => authJson);
+
+  const providers = h.mgr.status().providers;
+  assert.equal(providers.find((p) => p.provider === "codex")?.state, "ok");
+  assert.equal(providers.find((p) => p.provider === "claude")?.state, "missing");
+
+  const lastClaudex = [...h.registryCalls].reverse().find((c) => c.id === "claudex");
+  const lastClaudemix = [...h.registryCalls].reverse().find((c) => c.id === "claudemix");
+  assert.equal(lastClaudex?.enabled, true, "claudex enabled: codex present");
+  assert.equal(lastClaudemix?.enabled, false, "claudemix disabled: no claude credential");
+  assert.ok(lastClaudemix?.disabledReason, "claudemix carries a disabledReason");
 });
 
 // --- Task 9: /api/cliproxy routes + launch-env composition + model gate --------
