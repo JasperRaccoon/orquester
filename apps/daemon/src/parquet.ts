@@ -43,6 +43,18 @@ interface SortSlot {
 }
 let sortSlot: SortSlot | null = null;
 
+/** Single-slot cache of one decompressed row group. A sort permutation scatters
+ *  indices, but they still land in a handful of row groups; caching the last one
+ *  we decompressed means scrolling/paging under a warm sort reuses it instead of
+ *  re-decompressing per scattered index. Keyed by (path, mtime, rowGroupIndex). */
+interface RowGroupSlot {
+  path: string;
+  mtimeMs: number;
+  groupIndex: number;
+  rows: Record<string, unknown>[];
+}
+let rowGroupSlot: RowGroupSlot | null = null;
+
 export async function readParquetWindow(
   absPath: string,
   opts: ParquetWindowOptions = {}
@@ -73,9 +85,10 @@ export async function readParquetWindow(
           `Too many rows to sort (${rowCount.toLocaleString()} > ${MAX_SORT_ROWS.toLocaleString()}).`
         );
       }
-      const order = await sortedOrder(absPath, file, metadata, rowCount, orderBy, opts.desc ?? false);
+      const { mtimeMs } = await stat(absPath);
+      const order = await sortedOrder(absPath, mtimeMs, file, metadata, rowCount, orderBy, opts.desc ?? false);
       const indices = Array.from(order.subarray(offset, Math.min(offset + limit, rowCount)));
-      raw = await readRowsByIndex(file, metadata, indices);
+      raw = await readRowsByIndex(absPath, mtimeMs, file, metadata, indices);
     } else {
       raw = await parquetReadObjects({
         file,
@@ -141,13 +154,13 @@ function typeLabel(node: SchemaNode): string {
 /** Cached (or freshly computed) row order for a sorted view. */
 async function sortedOrder(
   absPath: string,
+  mtimeMs: number,
   file: Parameters<typeof parquetReadObjects>[0]["file"],
   metadata: Parameters<typeof parquetReadObjects>[0]["metadata"],
   rowCount: number,
   column: string,
   desc: boolean
 ): Promise<Uint32Array> {
-  const { mtimeMs } = await stat(absPath);
   if (
     sortSlot &&
     sortSlot.path === absPath &&
@@ -190,30 +203,63 @@ function compareValues(a: unknown, b: unknown): number {
   return sa < sb ? -1 : sa > sb ? 1 : 0;
 }
 
-/** Fetch scattered row indices by grouping them into contiguous ascending runs. */
+/** Fetch scattered row indices by decompressing whole row groups.
+ *
+ *  A sort permutation scatters indices across a row group, so the naive
+ *  "one read per contiguous run" approach issues ~limit separate reads that
+ *  each re-decompress the *entire* row group — catastrophic on the common
+ *  single-row-group file (a windowed sorted fetch took ~40s and never cached).
+ *  Instead we decompress each *touched* row group at most once, reuse the last
+ *  one across calls (single-slot cache keyed by path/mtime/group), and index
+ *  into it in memory. Scrolling/paging under a warm sort is then near-free. */
 async function readRowsByIndex(
+  absPath: string,
+  mtimeMs: number,
   file: Parameters<typeof parquetReadObjects>[0]["file"],
-  metadata: Parameters<typeof parquetReadObjects>[0]["metadata"],
+  metadata: Awaited<ReturnType<typeof parquetMetadataAsync>>,
   indices: number[]
 ): Promise<Record<string, unknown>[]> {
-  const tagged = indices.map((row, pos) => ({ row, pos })).sort((x, y) => x.row - y.row);
-  const out = new Array<Record<string, unknown>>(indices.length);
-  let i = 0;
-  while (i < tagged.length) {
-    let j = i;
-    while (j + 1 < tagged.length && tagged[j + 1].row === tagged[j].row + 1) j++;
-    const rowStart = tagged[i].row;
-    const chunk = await parquetReadObjects({
-      file,
-      metadata,
-      rowStart,
-      rowEnd: tagged[j].row + 1,
-      compressors
-    });
-    for (let k = i; k <= j; k++) out[tagged[k].pos] = chunk[tagged[k].row - rowStart];
-    i = j + 1;
+  // Cumulative row offsets so a row index maps to its row group.
+  const bounds: { start: number; end: number }[] = [];
+  let acc = 0;
+  for (const g of metadata.row_groups) {
+    const n = Number(g.num_rows);
+    bounds.push({ start: acc, end: acc + n });
+    acc += n;
   }
-  return out;
+  const groupOf = (row: number): number => {
+    for (let gi = 0; gi < bounds.length; gi++) if (row < bounds[gi].end) return gi;
+    return bounds.length - 1;
+  };
+  // Decompress each touched group once; seed from the cross-call slot.
+  const cache = new Map<number, Record<string, unknown>[]>();
+  if (rowGroupSlot && rowGroupSlot.path === absPath && rowGroupSlot.mtimeMs === mtimeMs) {
+    cache.set(rowGroupSlot.groupIndex, rowGroupSlot.rows);
+  }
+  let lastGi = -1;
+  for (const row of indices) {
+    const gi = groupOf(row);
+    if (!cache.has(gi)) {
+      cache.set(
+        gi,
+        await parquetReadObjects({
+          file,
+          metadata,
+          rowStart: bounds[gi].start,
+          rowEnd: bounds[gi].end,
+          compressors
+        })
+      );
+    }
+    lastGi = gi;
+  }
+  if (lastGi >= 0) {
+    rowGroupSlot = { path: absPath, mtimeMs, groupIndex: lastGi, rows: cache.get(lastGi)! };
+  }
+  return indices.map((row) => {
+    const gi = groupOf(row);
+    return cache.get(gi)![row - bounds[gi].start];
+  });
 }
 
 /** JSON-safe, size-capped cell value for the wire. */
