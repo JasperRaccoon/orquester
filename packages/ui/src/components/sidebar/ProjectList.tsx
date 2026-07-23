@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import {
   Box,
   ChevronLeft,
+  ClipboardCopy,
   FolderPlus,
   ListTodo,
   MoreVertical,
@@ -21,6 +22,7 @@ import {
 import { NewItemInput } from "./NewItemInput";
 import { NewProjectModal } from "./NewProjectModal";
 import { useAppStore } from "../../store/app";
+import { copyText } from "../../lib/clipboard";
 import type { ProjectSummary } from "../../types";
 import type { TodoListRecord } from "@orquester/api";
 
@@ -55,6 +57,11 @@ export const ProjectList: React.FC = () => {
     .sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
 
   const menuItems = (project: ProjectSummary): ContextMenuItem[] => [
+    {
+      label: "Copy Full Path",
+      icon: <ClipboardCopy size={13} />,
+      onClick: () => void copyText(project.path)
+    },
     {
       label: "Delete",
       icon: <Trash2 size={13} />,

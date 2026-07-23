@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from "react";
-import { Check, Folder, FolderPlus, MoreVertical, Plus, Trash2 } from "lucide-react";
+import { Check, ClipboardCopy, Folder, FolderPlus, MoreVertical, Plus, Trash2 } from "lucide-react";
 import { cn } from "../../lib/cn";
 import {
   Button,
@@ -16,6 +16,7 @@ import {
   type ContextMenuItem
 } from "../ui";
 import { useAppStore } from "../../store/app";
+import { copyText } from "../../lib/clipboard";
 import type { WorkspaceSummary } from "../../types";
 
 /** Root sidebar view: the list of workspace folders. */
@@ -42,6 +43,11 @@ export const WorkspaceList: React.FC = () => {
   }, [accounts]);
 
   const menuItems = (workspace: WorkspaceSummary): ContextMenuItem[] => [
+    {
+      label: "Copy Full Path",
+      icon: <ClipboardCopy size={13} />,
+      onClick: () => void copyText(workspace.path)
+    },
     {
       label: "Delete",
       icon: <Trash2 size={13} />,
