@@ -278,7 +278,9 @@ async function readRowsByIndex(
 /** JSON-safe, size-capped cell value for the wire. */
 function serializeCell(value: unknown): unknown {
   if (value === null || value === undefined) return null;
-  if (typeof value === "number" || typeof value === "boolean") return value;
+  // NaN/±Infinity are legal DOUBLE values but not legal JSON — send as strings.
+  if (typeof value === "number") return Number.isFinite(value) ? value : String(value);
+  if (typeof value === "boolean") return value;
   if (typeof value === "string") return capString(value);
   if (typeof value === "bigint") {
     return value >= BigInt(Number.MIN_SAFE_INTEGER) && value <= BigInt(Number.MAX_SAFE_INTEGER)

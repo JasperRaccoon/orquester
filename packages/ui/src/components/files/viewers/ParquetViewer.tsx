@@ -41,6 +41,8 @@ export const ParquetViewer: React.FC<{
   // Generation guard: bumped on every path/sort change so stale responses are dropped.
   const genRef = useRef(0);
   const inflightRef = useRef<Set<number>>(new Set());
+  // Aborts the current generation's scroll-driven chunk fetches on path/sort change.
+  const chunkAbortRef = useRef<AbortController | null>(null);
 
   // First window (and re-fetch on sort change). On a sort change the previous
   // rows stay mounted until the new first window lands — no layout flash.
@@ -64,6 +66,8 @@ export const ParquetViewer: React.FC<{
       setSortLoading(true);
     }
     const controller = new AbortController();
+    const chunkController = new AbortController();
+    chunkAbortRef.current = chunkController;
     api
       .readParquet(path, { offset: 0, limit: CHUNK, orderBy: sort?.column, desc: sort?.desc }, controller.signal)
       .then((data) => {
@@ -71,6 +75,9 @@ export const ParquetViewer: React.FC<{
         setMeta(data);
         metaRef.current = data;
         setSortLoading(false);
+        // Wholesale-replace discards any chunk that raced in ahead of this first
+        // window — reset the in-flight set with it so those chunks can refetch.
+        inflightRef.current = new Set();
         setChunks(new Map([[0, data.rows]]));
         setWidths((w) => w ?? estimateWidths(data));
         scrollRef.current?.scrollTo({ top: 0 });
@@ -87,7 +94,10 @@ export const ParquetViewer: React.FC<{
           setSort(null);
         }
       });
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      chunkController.abort();
+    };
   }, [api, path, sort]);
 
   const loadChunk = useCallback(
@@ -96,9 +106,14 @@ export const ParquetViewer: React.FC<{
       inflightRef.current.add(index);
       const gen = genRef.current;
       api
-        .readParquet(path, { offset: index * CHUNK, limit: CHUNK, orderBy: sort?.column, desc: sort?.desc })
+        .readParquet(
+          path,
+          { offset: index * CHUNK, limit: CHUNK, orderBy: sort?.column, desc: sort?.desc },
+          chunkAbortRef.current?.signal
+        )
         .then((data) => {
           if (gen !== genRef.current) return;
+          inflightRef.current.delete(index);
           setChunks((prev) => new Map(prev).set(index, data.rows));
         })
         .catch(() => {
