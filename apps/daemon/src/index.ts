@@ -419,8 +419,14 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     userhome: resolved.vars.userhome,
     cacheFile: usageTokensCacheFile(paths.baseDir),
     now: () => Date.now(),
-    accountHomes: () =>
-      agentAccounts.list().accounts.map((a) => ({ agent: a.agent, home: agentAccounts.homePath(a.agent, a.id) }))
+    accountHomes: () => [
+      ...agentAccounts.list().accounts.map((a) => ({ agent: a.agent, home: agentAccounts.homePath(a.agent, a.id) })),
+      // The proxy homes are Claude-format config dirs, but their GPT/Kimi
+      // transcripts must be attributed to the launcher id, NOT the Claude
+      // aggregate (else they inflate the "Anthropic quota left" signal).
+      { agent: "claude" as const, home: cliproxyHomeDir(resolved.daemonDir, "claudex"), launcherId: "claudex" },
+      { agent: "claude" as const, home: cliproxyHomeDir(resolved.daemonDir, "claudemix"), launcherId: "claudemix" }
+    ]
   });
   await usageTokens.init();
   {
@@ -447,9 +453,16 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // otherwise go unwatched until a restart. The nudge is rate-limited, so
     // the noisier fallback watch is still cheap.
     const claudeProjects = join(claudeConfig, "projects");
+    // Also watch the proxy homes' transcript roots so live claudex/claudemix
+    // sessions update usage (the scanner already covers them; without the watch
+    // they only refresh on the periodic poll / a restart).
+    const proxyProjects = ["claudex", "claudemix"]
+      .map((id) => join(cliproxyHomeDir(resolved.daemonDir, id), "projects"))
+      .filter((dir) => existsSync(dir));
     for (const dir of [
       join(process.env.CODEX_HOME || join(resolved.vars.userhome, ".codex"), "sessions"),
-      existsSync(claudeProjects) ? claudeProjects : claudeConfig
+      existsSync(claudeProjects) ? claudeProjects : claudeConfig,
+      ...proxyProjects
     ]) {
       try {
         const watcher = watch(dir, { recursive: true }, nudge);

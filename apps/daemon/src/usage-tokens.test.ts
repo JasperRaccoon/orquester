@@ -305,6 +305,45 @@ test("an unterminated tail line is counted once, then not double-counted when co
   assert.equal((await scanner.snapshot(true)).rows.find((r) => r.agent === "claude")?.inputTokens, 15);
 });
 
+test("proxy-home transcripts are tagged with the launcher id, not folded into the claude aggregate", async () => {
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const home = await mkdtemp(join(tmpdir(), "orq-utok-proxy-"));
+  // A system-home transcript stays tagged `claude`.
+  const sysPdir = join(home, ".claude", "projects", "p");
+  await mkdir(sysPdir, { recursive: true });
+  await writeFile(
+    join(sysPdir, "t.jsonl"),
+    JSON.stringify({ timestamp: "2026-07-07T00:00:00Z", requestId: "rs", message: { id: "ms", model: "claude-opus-4-8", usage: { input_tokens: 4, output_tokens: 1 } } }),
+    "utf8"
+  );
+  // A transcript under cliproxy/claude-home-claudex/projects/… must be tagged
+  // `claudex` (GPT/Kimi tokens must never inflate the Anthropic-quota signal).
+  const proxyHome = join(home, "cliproxy", "claude-home-claudex");
+  const proxyPdir = join(proxyHome, "projects", "p");
+  await mkdir(proxyPdir, { recursive: true });
+  await writeFile(
+    join(proxyPdir, "t.jsonl"),
+    JSON.stringify({ timestamp: "2026-07-07T00:00:00Z", requestId: "rp", message: { id: "mp", model: "gpt-5.4-codex", usage: { input_tokens: 9, output_tokens: 2 } } }),
+    "utf8"
+  );
+  const scanner = new UsageTokensScanner({
+    userhome: home,
+    cacheFile: join(home, "c.json"),
+    now: T0,
+    accountHomes: () => [{ agent: "claude", home: proxyHome, launcherId: "claudex" }]
+  });
+  await scanner.init();
+  const snap = await scanner.snapshot(true);
+  const claudeRows = snap.rows.filter((r) => r.agent === "claude");
+  const claudexRows = snap.rows.filter((r) => r.agent === "claudex");
+  // System-home transcript stays `claude`.
+  assert.equal(claudeRows.reduce((a, r) => a + r.inputTokens, 0), 4);
+  // Proxy-home transcript is tagged `claudex`, excluded from the claude aggregate.
+  assert.ok(claudexRows.length > 0);
+  assert.equal(claudexRows.reduce((a, r) => a + r.inputTokens, 0), 9);
+  assert.equal(claudeRows.some((r) => r.inputTokens === 9), false);
+});
+
 test("requestRecompute coalesces bursts: leading run + one trailing run per cooldown window", async () => {
   const home = await mkdtemp(join(tmpdir(), "orq-utok-cool-"));
   let clock = 1_000_000;
