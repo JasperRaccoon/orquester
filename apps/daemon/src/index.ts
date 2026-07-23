@@ -78,6 +78,7 @@ import { UsageService } from "./usage";
 import { UsageTokensScanner } from "./usage-tokens";
 import { createClaudeSource, createCodexSource, readUsagePrefs } from "./usage-sources";
 import { listArchiveEntries } from "./archive";
+import { ParquetRequestError, readParquetWindow } from "./parquet";
 import { resolveZipTool, spawnDirZip } from "./zip";
 import { FsSearchError, listProjectFiles, searchProjectFiles } from "./search";
 import { TerminalControl } from "./mcp/terminal-control.ts";
@@ -1352,6 +1353,48 @@ export function createServer(
       void reply.code(400).send({
         code: "FS_ERROR",
         message: error instanceof Error ? error.message : "Cannot read archive."
+      });
+    }
+  });
+
+  // Read a parquet file's schema + a window of rows for the preview viewer.
+  // Windowed server-side (hyparquet random-access) — no file-size cap; sort
+  // (orderBy/desc) is served from a cached row order after the first scan.
+  app.get<{
+    Querystring: { path?: string; offset?: string; limit?: string; orderBy?: string; desc?: string };
+  }>("/api/fs/parquet", async (request, reply) => {
+    const { path, offset, limit, orderBy, desc } = request.query;
+    if (!path) {
+      void reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
+      return;
+    }
+    try {
+      const safe = await assertInsideFsRoot(resolved.fsRoot, path);
+      const info = await stat(safe);
+      if (!info.isFile()) {
+        void reply.code(400).send({ code: "FS_ERROR", message: "Not a file." });
+        return;
+      }
+      void reply.send(
+        await readParquetWindow(safe, {
+          offset: offset === undefined ? undefined : Number(offset),
+          limit: limit === undefined ? undefined : Number(limit),
+          orderBy,
+          desc: desc === "1"
+        })
+      );
+    } catch (error) {
+      if (error instanceof FsSandboxError) {
+        void reply.code(403).send({ code: "FS_FORBIDDEN", message: error.message });
+        return;
+      }
+      if (error instanceof ParquetRequestError) {
+        void reply.code(400).send({ code: "FS_ERROR", message: error.message });
+        return;
+      }
+      void reply.code(400).send({
+        code: "FS_ERROR",
+        message: error instanceof Error ? error.message : "Cannot read parquet file."
       });
     }
   });
