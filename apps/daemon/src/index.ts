@@ -2643,7 +2643,10 @@ export function createServer(
                 // Origin, so Chrome's CDP origin check passes without an
                 // allowlist — that's why no --remote-allow-origins is set.
                 headers: { host: `127.0.0.1:${endpoint.port}` },
-                maxPayload: 32 * 1024 * 1024
+                maxPayload: 32 * 1024 * 1024,
+                // Mirror the asset route's 10s guard: a hung CDP handshake must
+                // not leave the client+upstream sockets open indefinitely.
+                handshakeTimeout: 10_000
               }
             );
             upstream.on("open", () => {
