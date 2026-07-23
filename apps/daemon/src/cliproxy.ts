@@ -364,6 +364,30 @@ export class CliProxyManager {
     return { ok: true, effectiveModel };
   }
 
+  /**
+   * Launch-time pre-flight (spec §8.4): partition the models a claudemix session
+   * will reference into those the live catalog offers (`ok`) and those it does not
+   * (`missing`). Best-effort by design — a workflow's `agent({model})` strings are
+   * dynamic, so this is a catalog snapshot the create path attaches as a warning,
+   * not a hard gate on every future call. An unreachable/hung proxy (bounded probe)
+   * confirms nothing, so every referenced model reports `missing`.
+   */
+  async preflightModels(models: string[]): Promise<{ ok: string[]; missing: string[] }> {
+    if (models.length === 0) return { ok: [], missing: [] };
+    if (!this.secrets) {
+      const loaded = await loadOrInitSecrets(this.daemonDir);
+      if (loaded.state !== "corrupt") this.secrets = loaded.secrets;
+    }
+    const probed = await this.probeBounded(VALIDATE_PROBE_TIMEOUT_MS);
+    const catalog = new Set(probed.ok ? probed.models ?? [] : []);
+    const ok: string[] = [];
+    const missing: string[] = [];
+    for (const model of models) {
+      (catalog.has(model) ? ok : missing).push(model);
+    }
+    return { ok, missing };
+  }
+
   /** Re-evaluate the persistence-lost respawn window when the session set changes. */
   handleSessionSetChanged(): void {
     if (!this.external) return;

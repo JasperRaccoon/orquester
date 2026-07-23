@@ -295,6 +295,51 @@ test("validateModel: request model wins over default; unknown model fails naming
   }
 });
 
+test("preflightModels: partitions referenced models into ok/missing against a fresh catalog", async (t) => {
+  // Referenced models split into those the catalog offers and those it doesn't.
+  {
+    const h = setup();
+    h.setProbe({ ok: true, models: ["gpt-5.6-sol", "kimi-k3"] });
+    const r = await h.mgr.preflightModels(["gpt-5.6-sol", "nope-1"]);
+    assert.deepEqual(r, { ok: ["gpt-5.6-sol"], missing: ["nope-1"] });
+  }
+  // All present → nothing missing.
+  {
+    const h = setup();
+    h.setProbe({ ok: true, models: ["gpt-5.6-sol", "kimi-k3", "claude-fable-5"] });
+    const r = await h.mgr.preflightModels(["gpt-5.6-sol", "kimi-k3"]);
+    assert.deepEqual(r, { ok: ["gpt-5.6-sol", "kimi-k3"], missing: [] });
+  }
+  // Best-effort: an unreachable proxy can't confirm anything → everything is missing.
+  {
+    const h = setup();
+    h.setProbe({ ok: false, reachable: false });
+    const r = await h.mgr.preflightModels(["gpt-5.6-sol"]);
+    assert.deepEqual(r, { ok: [], missing: ["gpt-5.6-sol"] });
+  }
+  // Empty input → empty partitions (no probe needed).
+  {
+    const h = setup();
+    h.setProbe({ ok: true, models: ["gpt-5.6-sol"] });
+    const r = await h.mgr.preflightModels([]);
+    assert.deepEqual(r, { ok: [], missing: [] });
+  }
+  // A hanging probe resolves to a bounded failure within 2s (fake timer) → all missing.
+  {
+    const h = setup();
+    await writeBin(h.daemonDir);
+    h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
+    await h.mgr.enable(); // load secrets so preflightModels has no fs await before the race
+    h.setProbeFn(() => new Promise<ProbeResult>(() => {})); // never resolves
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const pending = h.mgr.preflightModels(["gpt-5.6-sol"]);
+    t.mock.timers.tick(2000);
+    const r = await pending;
+    assert.deepEqual(r, { ok: [], missing: ["gpt-5.6-sol"] });
+    t.mock.timers.reset();
+  }
+});
+
 test("healthy → registry claudex/claudemix enabled; probe loss → disabled with 'proxy down'", async () => {
   const h = setup();
   await writeBin(h.daemonDir);
