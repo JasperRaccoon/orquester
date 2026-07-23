@@ -17,7 +17,7 @@ export const CLIPROXY_HOME_MARKER = ".orq-cliproxy-home";
  * Atomic 0600/0700 write that refuses to be redirected through a symlinked
  * target (parent realpath-canonicalized, final path rebuilt from real parent).
  */
-async function writeHardened(file: string, content: string, mode: number, dirMode = 0o700): Promise<void> {
+export async function writeHardened(file: string, content: string, mode: number, dirMode = 0o700): Promise<void> {
   const parent = dirname(file);
   await mkdir(parent, { recursive: true, mode: dirMode });
   const realParent = await realpath(parent);
@@ -91,8 +91,9 @@ function renderEnvFile(entries: Array<[string, string]>): string {
   return entries.map(([k, v]) => `${k}=${v}`).join("\n") + "\n";
 }
 
-/** POSIX-sh wrapper: parses the env file as data (no `source`), reads the token
- *  file, and (for claudex) accepts a validated `--model`, then `exec claude`. */
+/** POSIX-sh wrapper for MANUAL shell use only (not the Orquester launch path): parses
+ *  the env file as data (no `source`), reads the token file, and (for claudex) accepts a
+ *  validated `--model`, then `exec claude`. Kept consistent with the launch env file. */
 function renderWrapper(entryId: "claudex" | "claudemix", envFile: string, tokenFile: string): string {
   return [
     "#!/bin/sh",
@@ -162,6 +163,13 @@ export async function writeProjections(
   await writeHardened(join(envDir, "claudex.env"), claudexEnv, 0o600);
   await writeHardened(join(envDir, "claudemix.env"), claudemixEnv, 0o600);
 
+  // These two wrapper bins are for MANUAL terminal use only — i.e. a person running
+  // `claudex`/`claudemix` directly from a shell. The Orquester session-launch path does
+  // NOT use them: the claudex/claudemix registry entries declare bin: ["claude"]
+  // (packages/registry/src/index.ts), so RegistryService.resolveBin picks the plain
+  // `claude` binary, and per-session config is supplied by <daemonDir>/env/<id>.env plus
+  // cliproxyContributor (apps/daemon/src/index.ts). They are an intentional, supported
+  // convenience surface (pinned by cliproxy-files.test.ts), not dead code.
   await writeHardened(
     join(binDir, "claudex"),
     renderWrapper("claudex", join(envDir, "claudex.env"), tokenFile),

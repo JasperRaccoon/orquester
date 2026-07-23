@@ -5,7 +5,7 @@ import { MainView } from "../main";
 import { SettingsModal } from "../settings";
 import { AuthModal } from "../auth";
 import { MobileKeyBar } from "../terminal";
-import { ConnectionStatusToast } from "../status";
+import { ConnectionStatusToast, ModelWarningToast } from "../status";
 import { CloseSessionConfirm } from "./CloseSessionConfirm";
 
 /**
@@ -24,5 +24,6 @@ export const AppShell: React.FC = () => (
     <AuthModal />
     <CloseSessionConfirm />
     <ConnectionStatusToast />
+    <ModelWarningToast />
   </div>
 );

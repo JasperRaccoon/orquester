@@ -790,6 +790,14 @@ export interface SessionSummary {
    * string). Absent for every other launcher and for pre-field records.
    */
   model?: string;
+  /**
+   * Launch-time model pre-flight (spec §8.4): referenced/configured models that
+   * the live catalog did NOT offer when this claudex/claudemix session launched.
+   * Advisory only — a missing model warns, it never blocks the launch — and it is
+   * a one-time launch snapshot: absent for other launchers, when nothing was
+   * missing, and on re-listed/persisted records.
+   */
+  missingModels?: string[];
   /** Live activity snapshot; absent in persisted indexes and for exited sessions. */
   activity?: SessionActivity;
 }

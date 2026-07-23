@@ -550,6 +550,13 @@ export interface AppState {
   browsers: BrowserSummary[];
   /** Client-derived working/idle + attention per session id (drives the status dot). */
   activityById: Record<string, SessionActivity>;
+  /**
+   * Transient launch-time notice: models a just-launched claudex/claudemix
+   * session referenced but the live proxy catalog lacked
+   * (SessionSummary.missingModels — a create-response-only snapshot). Advisory,
+   * dismissible, never persisted; cleared on dismiss or the next launch.
+   */
+  modelWarning: { title: string; models: string[] } | null;
   /** Client-local tool tabs (file browser) per project path. */
   fileTabsByProject: Record<string, FileTab[]>;
   /** Client-local Git tabs (GitHub-Desktop-style) per project path. */
@@ -660,6 +667,8 @@ export interface AppState {
     accountId?: string,
     model?: string
   ) => Promise<void>;
+  /** Dismiss the transient missing-models launch notice. */
+  dismissModelWarning: () => void;
   openFileBrowser: () => void;
   openGit: () => void;
   openBrowser: (url?: string) => Promise<void>;
@@ -743,6 +752,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   sessions: [],
   browsers: [],
   activityById: {},
+  modelWarning: null,
   fileTabsByProject: {},
   gitTabsByProject: {},
   todoTabsByContext: {},
@@ -1643,9 +1653,18 @@ export const useAppStore = create<AppState>((set, get) => ({
       sessions: upsertSession(state.sessions, session),
       activeTabByProject: project
         ? { ...state.activeTabByProject, [project.path]: session.id }
-        : state.activeTabByProject
+        : state.activeTabByProject,
+      // Surface the daemon's launch-time pre-flight: a claudex/claudemix session
+      // whose referenced models the live catalog lacked. Advisory only — the
+      // launch still happened — so it's a dismissible toast, not a blocker.
+      modelWarning:
+        session.missingModels && session.missingModels.length > 0
+          ? { title: session.title, models: session.missingModels }
+          : state.modelWarning
     }));
   },
+
+  dismissModelWarning: () => set({ modelWarning: null }),
 
   openFileBrowser: () =>
     set((state) => {

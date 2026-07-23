@@ -723,7 +723,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
 export type ValidateModel = (
   entryId: string,
   model: string | undefined
-) => Promise<{ ok: true; effectiveModel: string } | { ok: false; error: string }>;
+) => Promise<
+  { ok: true; effectiveModel: string; catalog?: string[] } | { ok: false; error: string }
+>;
 
 /** One launch-env contribution: env vars, optional unsets, effective account. */
 type LaunchEnv = { env: Record<string, string>; unset?: string[]; accountId?: string };
@@ -803,12 +805,13 @@ export async function resolveLaunchModel(
   model: string | undefined,
   validateModel: ValidateModel
 ): Promise<
-  { ok: true; effectiveModel: string | undefined } | { ok: false; body: Record<string, unknown> }
+  | { ok: true; effectiveModel: string | undefined; catalog?: string[] }
+  | { ok: false; body: Record<string, unknown> }
 > {
   if (refId === "claudex" || refId === "claudemix") {
     const result = await validateModel(refId, model);
     if (!result.ok) return { ok: false, body: { code: "SESSION_UNAVAILABLE", message: result.error } };
-    return { ok: true, effectiveModel: result.effectiveModel };
+    return { ok: true, effectiveModel: result.effectiveModel, catalog: result.catalog };
   }
   if (model !== undefined) {
     return { ok: false, body: { error: "model is only valid for claudex/claudemix", entryId: refId } };
@@ -867,6 +870,10 @@ interface CliProxyRouteAccounts {
 
 /** On-disk credential filename per managed agent (the seed route's read source). */
 const MANAGED_CRED_FILENAME = { claude: ".credentials.json", codex: "auth.json" } as const;
+
+/** Account ids are server-minted UUIDs; this charset rejects any path separator
+ *  or dot before the id reaches homePath() / accountPrefix() (traversal guard). */
+const ACCOUNT_ID_RE = /^[A-Za-z0-9_-]+$/;
 
 /**
  * Register the `/api/cliproxy` surface (spec §3). Read routes (status, models)
@@ -973,18 +980,49 @@ export function registerCliProxyRoutes(
     if (body.provider !== "codex" && body.provider !== "claude") {
       return reply.code(400).send({ error: "provider must be 'codex' or 'claude'" });
     }
-    if (typeof body.accountId !== "string" || !body.accountId) {
+    if (typeof body.accountId !== "string" || !body.accountId || !ACCOUNT_ID_RE.test(body.accountId)) {
       return reply.code(400).send({ error: "accountId is required" });
     }
     const provider = body.provider;
     const accountId = body.accountId;
+    // Ownership only makes sense when the proxy is actually running: seeding flips
+    // proxyOwned=true, which yields Orquester's refresher to the proxy (single-
+    // refresher rule). If the proxy is down, that yield refreshes nobody — a
+    // zero-refresher hole. Refuse the seed unless the proxy is launchable (mirrors
+    // applyRegistryCoupling's `healthy || degraded` predicate in cliproxy.ts), so
+    // we never write an auth file or claim ownership when nothing can refresh it.
+    const proxyState = manager.status().state;
+    if (proxyState !== "healthy" && proxyState !== "degraded") {
+      return reply.code(409).send({ error: "cliproxy must be running to seed an account", state: proxyState });
+    }
     const read = async (p: "codex" | "claude", id: string): Promise<unknown> => {
       const file = join(agentAccounts.homePath(p, id), MANAGED_CRED_FILENAME[p]);
-      return JSON.parse(await readFile(file, "utf8"));
+      try {
+        return JSON.parse(await readFile(file, "utf8"));
+      } catch (err) {
+        // A charset-valid accountId with no on-disk credential yields ENOENT here.
+        // Tag it precisely at the read path (not a broad catch around seedProvider)
+        // so an unrelated ENOENT deeper in seedProvider can't be misreported as 404.
+        if ((err as { code?: string }).code === "ENOENT") {
+          const missing = new Error("account credential not found") as Error & { code: string };
+          missing.code = "ORQ_CRED_MISSING";
+          throw missing;
+        }
+        throw err;
+      }
     };
-    const status = await manager.seedProvider({ provider, accountId }, read);
-    // Only claim ownership once the credential actually landed — a stale/expired
-    // token is refused (not seeded), so the proxy owns nothing to refresh.
+    let status: CliProxyProviderStatus;
+    try {
+      status = await manager.seedProvider({ provider, accountId }, read);
+    } catch (err) {
+      if ((err as { code?: string }).code === "ORQ_CRED_MISSING") {
+        return reply.code(404).send({ error: "account credential not found", accountId });
+      }
+      throw err;
+    }
+    // Ownership is claimed only when the proxy is running (gated above) AND the
+    // credential actually landed — a stale/expired token is refused (not seeded),
+    // so the proxy owns nothing to refresh.
     if (status.state === "ok") await agentAccounts.markProxyOwned(accountId, true);
     return status;
   });
@@ -993,14 +1031,16 @@ export function registerCliProxyRoutes(
   // Orquester's single-refresher ownership (spec §4). The manager drops the auth
   // file + seeded-account state; the route ALWAYS re-marks the account non-proxy-
   // owned (markProxyOwned is idempotent) so ownership is restored even on a
-  // map/accounts-service mismatch. No secret material crosses the response.
+  // map/accounts-service mismatch. Intentionally UNgated on proxy health (unlike
+  // seed) — releasing ownership must always succeed so an account is never stranded
+  // proxy-owned after the proxy stops. No secret material crosses the response.
   app.post("/api/cliproxy/accounts/unseed", async (request, reply) => {
     if (refusedOnSocket(reply)) return;
     const body = (request.body ?? {}) as Partial<CliProxyUnseedRequest>;
     if (body.provider !== "codex" && body.provider !== "claude") {
       return reply.code(400).send({ error: "provider must be 'codex' or 'claude'" });
     }
-    if (typeof body.accountId !== "string" || !body.accountId) {
+    if (typeof body.accountId !== "string" || !body.accountId || !ACCOUNT_ID_RE.test(body.accountId)) {
       return reply.code(400).send({ error: "accountId is required" });
     }
     const provider = body.provider;
@@ -1060,7 +1100,7 @@ function createServer(
   services: Services,
   options: { authRequired: boolean; mode: "local" | "remote"; serveWeb?: string }
 ): FastifyInstance {
-  const { registry, sessions, validateModel, accounts, git, todos, usage, usageTokens, push, agentAccounts } = services;
+  const { registry, sessions, validateModel, cliproxy, accounts, git, todos, usage, usageTokens, push, agentAccounts } = services;
 
   const app = Fastify({
     // Remote requests arrive via Caddy on loopback (reverse_proxy 127.0.0.1:47831),
@@ -2382,12 +2422,36 @@ function createServer(
       return reply.code(400).send(resolvedModel.body);
     }
     const effectiveModel = resolvedModel.effectiveModel;
+    const modelCatalog = resolvedModel.catalog;
+    let summary: SessionSummary;
     try {
-      return await sessions.create({ ...body, model: effectiveModel });
+      summary = await sessions.create({ ...body, model: effectiveModel });
     } catch (error) {
       const message = error instanceof SessionError ? error.message : "Failed to create session.";
       return reply.code(400).send({ code: "SESSION_UNAVAILABLE", message });
     }
+    // Launch-time model pre-flight (spec §8.4): warn — never block — when a model
+    // this managed session references is absent from the live catalog. The MAIN
+    // model was already hard-validated by resolveLaunchModel; this snapshots the
+    // other configured models (the Sol/background models the canonical claudemix
+    // workflow routes subagents to) best-effort. Workflow `agent({model})` strings
+    // are dynamic, so this is an advisory catalog snapshot, not a hard gate. Runs
+    // after the launch so a missing model can only warn, never refuse it.
+    if (body.refId === "claudex" || body.refId === "claudemix") {
+      const status = cliproxy.status();
+      const referenced = [
+        ...new Set(
+          [effectiveModel, status.defaultModel, status.backgroundModel].filter(
+            (m): m is string => Boolean(m)
+          )
+        )
+      ];
+      const preflight = await cliproxy.preflightModels(referenced, modelCatalog);
+      if (preflight.missing.length > 0) {
+        summary = { ...summary, missingModels: preflight.missing };
+      }
+    }
+    return summary;
   });
 
   app.delete<{ Params: { id: string } }>(

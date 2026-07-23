@@ -13,7 +13,7 @@ import {
   parseCliProxyState
 } from "@orquester/config";
 import type { Broadcaster } from "./broadcaster.ts";
-import { seedHome, writeProjections } from "./cliproxy-files.ts";
+import { seedHome, writeHardened, writeProjections } from "./cliproxy-files.ts";
 import { loadOrInitSecrets, setOpenRouterKey } from "./cliproxy-secrets.ts";
 import {
   accessTokenFreshMs,
@@ -84,7 +84,9 @@ export interface CliProxyAdapters {
   systemClaudeDir?(): string;
 }
 
-type ValidateResult = { ok: true; effectiveModel: string } | { ok: false; error: string };
+type ValidateResult =
+  | { ok: true; effectiveModel: string; catalog: string[] }
+  | { ok: false; error: string };
 
 /**
  * Owns the managed CLIProxyAPI lifecycle as a serialized state machine: a single
@@ -207,6 +209,9 @@ export class CliProxyManager {
         this.state.enabled = true;
 
         // Install the pinned binary (injected). Pre-wiring fallback: require one.
+        // Snapshot the on-disk (bin.prev candidate) version before install overwrites
+        // it, so a rollback can revert state.version to the binary actually restored.
+        const priorVersion = this.state.version;
         if (this.adapters.install) {
           this.setState("starting", [], "downloading proxy binary");
           const installed = await this.adapters.install();
@@ -219,6 +224,7 @@ export class CliProxyManager {
 
         // Derived projections + both isolated managed homes from the shared config.
         await writeProjections(this.daemonDir, this.secrets, this.state);
+        await this.reresolveDependents();
         const sysDir = this.resolveSystemClaudeDir();
         await seedHome(this.daemonDir, "claudex", sysDir);
         await seedHome(this.daemonDir, "claudemix", sysDir);
@@ -232,6 +238,8 @@ export class CliProxyManager {
         if (!probed.ok && this.adapters.rollback) {
           const rolled = await this.adapters.rollback();
           if (rolled) {
+            // Restored the prev binary — revert version to match what's on disk.
+            this.state.version = priorVersion;
             await this.spawn(true);
             probed = await this.probe();
             if (probed.ok) {
@@ -303,6 +311,7 @@ export class CliProxyManager {
       if (cfg.claudeDefaultModel !== undefined) this.state.claudeDefaultModel = cfg.claudeDefaultModel;
       if (this.secrets && this.state.enabled) {
         await writeProjections(this.daemonDir, this.secrets, this.state);
+        await this.reresolveDependents();
         if (needsRestart) {
           this.setState("starting", []);
           await this.spawn(true);
@@ -337,6 +346,7 @@ export class CliProxyManager {
       this.secrets = await setOpenRouterKey(this.daemonDir, key);
       if (this.state.enabled) {
         await writeProjections(this.daemonDir, this.secrets, this.state);
+        await this.reresolveDependents();
         if (needsRestart) {
           this.setState("starting", []);
           await this.spawn(true);
@@ -381,8 +391,7 @@ export class CliProxyManager {
       }
 
       const authDir = join(cliproxyDir(this.daemonDir), "auth");
-      await mkdir(authDir, { recursive: true, mode: 0o700 });
-      await writeFile(join(authDir, file), JSON.stringify(storage, null, 2), { mode: 0o600 });
+      await writeHardened(join(authDir, file), JSON.stringify(storage, null, 2), 0o600);
 
       const email =
         typeof (storage as Record<string, unknown>).email === "string" &&
@@ -485,7 +494,7 @@ export class CliProxyManager {
     if (!models.includes(effectiveModel)) {
       return { ok: false, error: `model "${effectiveModel}" is not offered by any configured provider` };
     }
-    return { ok: true, effectiveModel };
+    return { ok: true, effectiveModel, catalog: models };
   }
 
   /**
@@ -496,14 +505,25 @@ export class CliProxyManager {
    * not a hard gate on every future call. An unreachable/hung proxy (bounded probe)
    * confirms nothing, so every referenced model reports `missing`.
    */
-  async preflightModels(models: string[]): Promise<{ ok: string[]; missing: string[] }> {
+  async preflightModels(
+    models: string[],
+    catalogList?: string[],
+  ): Promise<{ ok: string[]; missing: string[] }> {
     if (models.length === 0) return { ok: [], missing: [] };
-    if (!this.secrets) {
-      const loaded = await loadOrInitSecrets(this.daemonDir);
-      if (loaded.state !== "corrupt") this.secrets = loaded.secrets;
+    let catalog: Set<string>;
+    if (catalogList !== undefined) {
+      // Reuse a catalog already fetched by an immediately-preceding validateModel
+      // probe (managed create path) — the two probes were milliseconds apart, and
+      // this pre-flight is advisory, so a second bounded round-trip is pure waste.
+      catalog = new Set(catalogList);
+    } else {
+      if (!this.secrets) {
+        const loaded = await loadOrInitSecrets(this.daemonDir);
+        if (loaded.state !== "corrupt") this.secrets = loaded.secrets;
+      }
+      const probed = await this.probeBounded(VALIDATE_PROBE_TIMEOUT_MS);
+      catalog = new Set(probed.ok ? probed.models ?? [] : []);
     }
-    const probed = await this.probeBounded(VALIDATE_PROBE_TIMEOUT_MS);
-    const catalog = new Set(probed.ok ? probed.models ?? [] : []);
     const ok: string[] = [];
     const missing: string[] = [];
     for (const model of models) {
@@ -773,6 +793,20 @@ export class CliProxyManager {
         disabledReason: "no claude credential"
       });
     }
+  }
+
+  /**
+   * Reload the dependent launchers' env from the projections just written to disk.
+   * `writeProjections` writes env/claudex.env + env/claudemix.env (ANTHROPIC_BASE_URL,
+   * ANTHROPIC_MODEL, CLAUDE_CONFIG_DIR, …), but the registry caches `entry.env` from
+   * resolveDef at boot; without this a daemon that booted with the proxy disabled has
+   * no ANTHROPIC_BASE_URL in the cache, so `claude` launches against api.anthropic.com
+   * with the proxy's local key (401) until a restart. reresolve preserves runtimeState
+   * (it cannot resurrect a runtime-disabled entry), so it only reloads env and never
+   * fights applyRegistryCoupling.
+   */
+  private async reresolveDependents(): Promise<void> {
+    for (const id of DEPENDENT_ENTRY_IDS) await this.registry.reresolve(id);
   }
 
   /** Rehydrate the in-memory account map from persisted `state.seededAccounts`. */

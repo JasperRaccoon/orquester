@@ -39,7 +39,8 @@ function setup() {
   const registry = {
     setRuntimeState: (id: string, s: { enabled: boolean; disabledReason?: string }) => {
       registryCalls.push({ id, enabled: s.enabled, disabledReason: s.disabledReason });
-    }
+    },
+    reresolve: async (_id: string) => {}
   } as unknown as RegistryService;
 
   const events: Array<{ type: string; payload: unknown }> = [];
@@ -274,7 +275,7 @@ test("validateModel: request model wins over default; unknown model fails naming
     const h = setup();
     h.setProbe({ ok: true, models: ["model-a", "gpt-5.6-sol"] });
     const r = await h.mgr.validateModel("claudex", "model-a");
-    assert.deepEqual(r, { ok: true, effectiveModel: "model-a" });
+    assert.deepEqual(r, { ok: true, effectiveModel: "model-a", catalog: ["model-a", "gpt-5.6-sol"] });
   }
   // (b) a model absent from the catalog fails, naming the provider.
   {
@@ -303,7 +304,7 @@ test("validateModel: request model wins over default; unknown model fails naming
     const h = setup();
     h.setProbe({ ok: true, models: ["gpt-5.6-sol", "model-a"] });
     const r = await h.mgr.validateModel("claudex");
-    assert.deepEqual(r, { ok: true, effectiveModel: "gpt-5.6-sol" });
+    assert.deepEqual(r, { ok: true, effectiveModel: "gpt-5.6-sol", catalog: ["gpt-5.6-sol", "model-a"] });
   }
   // (e) omitted model whose resolved default is absent from the catalog fails, naming the provider.
   {
@@ -322,7 +323,7 @@ test("validateModel: claudemix with no request model resolves claudeDefaultModel
     const h = setup();
     h.setProbe({ ok: true, models: ["claude-fable-5", "claude-sonnet-5"] });
     const r = await h.mgr.validateModel("claudemix");
-    assert.deepEqual(r, { ok: true, effectiveModel: "claude-fable-5" });
+    assert.deepEqual(r, { ok: true, effectiveModel: "claude-fable-5", catalog: ["claude-fable-5", "claude-sonnet-5"] });
   }
   // (b) claudemix + a catalog WITHOUT any claude model → fails, naming the claude model.
   {
@@ -337,7 +338,7 @@ test("validateModel: claudemix with no request model resolves claudeDefaultModel
     const h = setup();
     h.setProbe({ ok: true, models: ["gpt-5.6-sol"] });
     const r = await h.mgr.validateModel("claudex");
-    assert.deepEqual(r, { ok: true, effectiveModel: "gpt-5.6-sol" });
+    assert.deepEqual(r, { ok: true, effectiveModel: "gpt-5.6-sol", catalog: ["gpt-5.6-sol"] });
   }
 });
 
@@ -973,7 +974,8 @@ test("seed route (remote): reads the managed credential, seeds, marks proxy-owne
   const cred = { claudeAiOauth: { accessToken: "at", refreshToken: "rt", expiresAt: 9_999_999_999_000 } };
   await writeFile(join(home, ".credentials.json"), JSON.stringify(cred), "utf8");
 
-  const { manager, calls } = fakeRouteManager();
+  const { manager, calls, status } = fakeRouteManager();
+  status.state = "healthy"; // seed route is gated on the proxy being launchable
   const { agentAccounts, marks } = fakeAgentAccounts(home);
   const app = Fastify();
   registerCliProxyRoutes(app, { manager, mode: "remote", daemonDir, agentAccounts });
@@ -990,6 +992,50 @@ test("seed route (remote): reads the managed credential, seeds, marks proxy-owne
   assert.deepEqual(calls.seed[0].req, { provider: "claude", accountId });
   assert.deepEqual(calls.seed[0].cred, cred, "route reads the managed .credentials.json via agentAccounts");
   assert.deepEqual(marks, [{ id: accountId, owned: true }], "account marked proxy-owned after a successful seed");
+  await app.close();
+});
+
+test("seed route refuses (409) when the proxy is not running; no seed, no ownership flip", async () => {
+  const daemonDir = join(mkdtempSync(join(tmpdir(), "orq-cliproxy-seed-down-")), "daemon");
+  const { manager, calls, status } = fakeRouteManager(); // status.state defaults to "off"
+  const { agentAccounts, marks } = fakeAgentAccounts(daemonDir);
+  const app = Fastify();
+  registerCliProxyRoutes(app, { manager, mode: "remote", daemonDir, agentAccounts });
+  await app.ready();
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/cliproxy/accounts/seed",
+    payload: { provider: "claude", accountId: "14137047-1111-2222-3333-444455556666" }
+  });
+  assert.equal(res.statusCode, 409);
+  assert.equal(res.json().state, status.state);
+  assert.equal(calls.seed.length, 0, "no auth file written when the proxy is down");
+  assert.equal(marks.length, 0, "ownership never claimed when the proxy is down");
+  await app.close();
+});
+
+test("seed route returns 404 (not 500) for a charset-valid accountId with no on-disk credential", async () => {
+  const root = mkdtempSync(join(tmpdir(), "orq-cliproxy-seed-missing-"));
+  const daemonDir = join(root, "daemon");
+  const home = join(root, "acct-home");
+  await mkdir(home, { recursive: true }); // home exists but has NO .credentials.json
+  const accountId = "14137047-1111-2222-3333-444455556666";
+
+  const { manager, calls, status } = fakeRouteManager();
+  status.state = "healthy"; // clears the 409 proxy-health gate
+  const { agentAccounts, marks } = fakeAgentAccounts(home);
+  const app = Fastify();
+  registerCliProxyRoutes(app, { manager, mode: "remote", daemonDir, agentAccounts });
+  await app.ready();
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/cliproxy/accounts/seed",
+    payload: { provider: "claude", accountId }
+  });
+  assert.equal(res.statusCode, 404, "missing credential → clean 404, not an uncaught ENOENT 500");
+  assert.equal(res.json().accountId, accountId);
+  assert.equal(calls.seed.length, 0, "read throws before the fake records a seed call");
+  assert.equal(marks.length, 0, "ownership never flipped on the 404 path");
   await app.close();
 });
 
