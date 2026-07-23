@@ -53,6 +53,14 @@ function setup() {
   let clock = 1000;
   let liveCount = 0;
 
+  let installCount = 0;
+  let installImpl: () => Promise<{ version: string }> = async () => {
+    installCount++;
+    await writeBin(daemonDir);
+    return { version: "v7.2.95" };
+  };
+  const sysDir = join(root, "sysclaude");
+
   const mgr = new CliProxyManager({
     daemonDir,
     appdir: root,
@@ -63,7 +71,9 @@ function setup() {
       tmux,
       spawnDirect: () => null,
       liveDependentSessionCount: () => liveCount,
-      now: () => clock
+      now: () => clock,
+      install: () => installImpl(),
+      systemClaudeDir: () => sysDir
     }
   });
 
@@ -89,7 +99,12 @@ function setup() {
     },
     setLive: (n: number) => {
       liveCount = n;
-    }
+    },
+    installCount: () => installCount,
+    setInstall: (f: () => Promise<{ version: string }>) => {
+      installImpl = f;
+    },
+    sysDir
   };
 }
 
@@ -262,6 +277,53 @@ test("healthy → registry claudex/claudemix enabled; probe loss → disabled wi
   const lastClaudemix = [...h.registryCalls].reverse().find((c) => c.id === "claudemix");
   assert.deepEqual(lastClaudex, { id: "claudex", enabled: false, disabledReason: "proxy down" });
   assert.deepEqual(lastClaudemix, { id: "claudemix", enabled: false, disabledReason: "proxy down" });
+});
+
+test("enable installs, projects config+token+env, seeds both homes, spawns, enables launchers", async () => {
+  const h = setup();
+  h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
+
+  await h.mgr.enable();
+
+  assert.equal(h.installCount(), 1, "install adapter runs exactly once");
+  const dir = cliproxyDir(h.daemonDir);
+  assert.ok(existsSync(join(dir, "config.yaml")), "config.yaml projected");
+  assert.ok(existsSync(join(dir, "token")), "token projected");
+  assert.ok(
+    existsSync(join(dir, "claude-home-claudex", ".orq-cliproxy-home")),
+    "claudex home seeded with marker"
+  );
+  assert.ok(
+    existsSync(join(dir, "claude-home-claudemix", ".orq-cliproxy-home")),
+    "claudemix home seeded with marker"
+  );
+  assert.equal(h.mgr.status().state, "healthy");
+  assert.ok(
+    h.registryCalls.some((c) => c.id === "claudex" && c.enabled === true),
+    "claudex enabled after enable"
+  );
+  assert.ok(
+    h.registryCalls.some((c) => c.id === "claudemix" && c.enabled === true),
+    "claudemix enabled after enable"
+  );
+});
+
+test("corrupt secrets.json → enable latches error, installs nothing, writes no config", async () => {
+  const h = setup();
+  const secFile = cliproxySecretsFile(h.daemonDir);
+  await mkdir(dirname(secFile), { recursive: true });
+  await writeFile(secFile, "{ not json", { mode: 0o600 });
+  h.setInstall(async () => {
+    throw new Error("should not install");
+  });
+
+  await h.mgr.enable();
+
+  const st = h.mgr.status();
+  assert.equal(st.state, "error");
+  assert.ok(st.reasons.some((r) => /corrupt|secret/i.test(r)), `reasons=${JSON.stringify(st.reasons)}`);
+  assert.equal(h.installCount(), 0, "corrupt secrets must install nothing");
+  assert.equal(existsSync(join(cliproxyDir(h.daemonDir), "config.yaml")), false, "no config rewrite");
 });
 
 // --- Task 9: /api/cliproxy routes + launch-env composition + model gate --------

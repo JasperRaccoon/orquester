@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import type { CliProxyStatus } from "@orquester/api";
 import {
@@ -12,7 +13,7 @@ import {
   parseCliProxyState
 } from "@orquester/config";
 import type { Broadcaster } from "./broadcaster.ts";
-import { writeProjections } from "./cliproxy-files.ts";
+import { seedHome, writeProjections } from "./cliproxy-files.ts";
 import { loadOrInitSecrets } from "./cliproxy-secrets.ts";
 import type { RegistryService } from "./registry.ts";
 import { SERVICE_SESSION_PREFIX, type Tmux } from "./tmux.ts";
@@ -42,6 +43,15 @@ export interface CliProxyAdapters {
   spawnDirect(bin: string, args: string[]): { kill(): void } | null; // no-tmux fallback
   liveDependentSessionCount(): number; // daemon-managed claudex/claudemix sessions
   now(): number;
+  /**
+   * Install the pinned proxy binary into `cliproxy/bin` (Task 7 wires the real
+   * verified-download installer). Absent (pre-wiring) → `enable()` falls back to
+   * requiring an already-present binary.
+   */
+  install?(): Promise<{ version: string }>;
+  /** Source Claude config dir `seedHome` copies shared config from (production:
+   *  `CLAUDE_CONFIG_DIR || ~/.claude`). */
+  systemClaudeDir?(): string;
 }
 
 type ValidateResult = { ok: true; effectiveModel: string } | { ok: false; error: string };
@@ -126,18 +136,17 @@ export class CliProxyManager {
   }
 
   /**
-   * Async + idempotent. Phase 1 requires an already-installed binary at
-   * `cliproxy/bin/cli-proxy-api` (the build pipeline is Phase 2); a missing
-   * binary latches `error` with reason "binary not installed".
+   * Async + idempotent orchestration (Phase 2): secrets → install → projections →
+   * seed both managed homes → spawn → probe → healthy. Secrets are loaded FIRST
+   * and fail-closed on corruption so a bad store installs nothing and rewrites no
+   * projections. Without an injected `install` adapter (pre-Task-7 wiring) it
+   * falls back to requiring an already-present binary, latching `error` with
+   * "binary not installed" if absent.
    */
   enable(): Promise<void> {
     return this.transition(async () => {
       this.errorLatched = false;
-      if (!existsSync(this.binPath())) {
-        this.state.enabled = false;
-        this.fail("binary not installed");
-        return;
-      }
+      // Secrets first — fail closed BEFORE installing or writing anything.
       const loaded = await loadOrInitSecrets(this.daemonDir);
       if (loaded.state === "corrupt") {
         this.fail("cliproxy secrets are corrupt");
@@ -145,7 +154,24 @@ export class CliProxyManager {
       }
       this.secrets = loaded.secrets;
       this.state.enabled = true;
+
+      // Install the pinned binary (injected). Pre-wiring fallback: require one.
+      if (this.adapters.install) {
+        this.setState("starting", [], "downloading proxy binary");
+        const installed = await this.adapters.install();
+        this.state.version = installed.version;
+      } else if (!existsSync(this.binPath())) {
+        this.state.enabled = false;
+        this.fail("binary not installed");
+        return;
+      }
+
+      // Derived projections + both isolated managed homes from the shared config.
       await writeProjections(this.daemonDir, this.secrets, this.state);
+      const sysDir = this.resolveSystemClaudeDir();
+      await seedHome(this.daemonDir, "claudex", sysDir);
+      await seedHome(this.daemonDir, "claudemix", sysDir);
+
       this.setState("starting", []);
       await this.spawn(false);
       const probed = await this.probe();
@@ -156,6 +182,12 @@ export class CliProxyManager {
       }
       await this.persist();
     });
+  }
+
+  /** Source dir `seedHome` copies shared Claude config from. */
+  private resolveSystemClaudeDir(): string {
+    if (this.adapters.systemClaudeDir) return this.adapters.systemClaudeDir();
+    return process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
   }
 
   /** Force-gated stop. Refuses while daemon-managed sessions are live unless forced. */
