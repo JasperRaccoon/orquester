@@ -14,7 +14,6 @@
 
 - **⛔ Never restart the live daemon serving this checkout.** The §8 routing verification and live end-to-end run **on the deploy target** (or a separate checkout), per AGENTS.md — not against this workspace's daemon.
 - The canonical workflow must handle **1-of-3 subagent failure** gracefully (spec §8.5): wrapped `agent()` calls, configurable quorum (default 2-of-3), failures surfaced — the harness does not retry provider errors.
-- The **30-min cost measurement (spec §8.3) runs only on explicit user go-ahead** (spends subscription quota) — it is a gated optional step, not a blocker.
 - Deploy is non-interactive (`CI=1`), stdin detached (`</dev/null`), confirmed by the live bundle hash (AGENTS.md deploy rules).
 - Commit per task, by-name, on `main`.
 
@@ -112,15 +111,14 @@ Drive the real deployed UI (agent-browser MCP or manual) — the full user journ
 - [ ] **Step 2:** "+" menu shows `claudex` (model row GPT/Kimi + Codex account row) and `claudemix` (Claude account row), both enabled. Launch **claudex on `gpt-5.6-sol`** → reply works; launch **claudex on `kimi-k3`** → a deep tool loop works (no empty-content 400 — spike F3); tab badges show the model.
 - [ ] **Step 3:** Launch **claudemix**; run `.claude/workflows/claudemix-tri-model.js` on a small real task → confirm Fable plans, Kimi designs, Sol executes, the tri-model review returns a quorum verdict, and a forced 1-of-3 reviewer failure degrades gracefully (spec §8.5).
 - [ ] **Step 4:** Confirm usage attribution — GPT/Kimi tokens appear tagged to the launchers, **not** inflating the Claude account quota (spec §6, Part-2 Task 6).
-- [ ] **Step 5 (GATED — explicit user go-ahead only):** the 30-min cost measurement (spec §8.3): a ~30-min claudex session vs a native Codex session; confirm haiku-slot calls stay on the cheap `backgroundModel`. Skip unless the user explicitly authorizes the spend.
-- [ ] **Step 6:** Record everything in the log; commit the log.
+- [ ] **Step 5:** Record everything in the log; commit the log.
 
 ---
 
 ## Self-Review (write-time)
 
 - **Spec coverage (Part 3):** §8 canonical workflow + quorum/partial-failure → Task 2; §8.1/§8.4 routing + unknown-model surface → Tasks 1/3; §2 prefix routing live proof → Task 3; deploy → Task 4; full live journey + §6 attribution → Task 5; §8.3 cost → Task 5 (gated). Nothing deferred.
-- **Placeholder scan:** none — the only gated item is the cost measurement (explicit spend), clearly marked; the routing/e2e tasks are empirical logs by nature.
+- **Placeholder scan:** none — the routing/e2e tasks are empirical logs by nature. No device-auth and no cost-measurement task exist (both removed by explicit decision).
 - **Type/name consistency:** the workflow uses the deployed model names verified in the spikes (`gpt-5.6-sol`, `kimi-k3`, `claude-*`); `preflightModels` is the single pre-flight entry point (Task 1) referenced by the create path.
 
 ---
@@ -131,4 +129,4 @@ Drive the real deployed UI (agent-browser MCP or manual) — the full user journ
 2. **Part 2 (frontend)** — wire/client, Settings panel, launcher chips, tab badge, usage attribution. *(Depends on Part 1's routes/types.)*
 3. **Part 3 (workflow + deploy)** — canonical workflow, §8 routing verification, deploy, live e2e. *(Depends on Parts 1–2 being live.)*
 
-Execute in order; each part is committed to `main` and independently reviewable. The one gated action across the whole build is the 30-min cost measurement (explicit go-ahead).
+Execute in order; each part is committed to `main` and independently reviewable. There are no gated or deferred actions in the build — device-auth login and the cost measurement were both removed by explicit decision.

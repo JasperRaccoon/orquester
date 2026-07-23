@@ -849,14 +849,12 @@ export function registerCliProxyRoutes(
     return manager.setConfig({ defaultModel: body.defaultModel, backgroundModel: body.backgroundModel }, Boolean(body.force));
   });
 
-  // Phase-2 surface (login device-auth + OpenRouter key). Reserved so the shape
-  // is stable; wired once the spike settles the provider flows.
+  // Phase-2 surface (credential seeding + OpenRouter key). Reserved so the shape
+  // is stable; wired in the daemon build plan (Part 1). Credentials come from
+  // seeding managed accounts by conversion — there is no device-auth login flow.
   const pending = async (_request: unknown, reply: FastifyReply) =>
-    reply.code(501).send({ error: "pending spike findings" });
-  app.post("/api/cliproxy/login/start", pending);
-  app.get("/api/cliproxy/login/status", pending);
-  app.post("/api/cliproxy/login/cancel", pending);
-  app.post("/api/cliproxy/login/callback", pending);
+    reply.code(501).send({ error: "not yet implemented" });
+  app.post("/api/cliproxy/accounts/seed", pending);
   app.post("/api/cliproxy/openrouter/key", pending);
 }
 

@@ -168,6 +168,6 @@ apps/daemon/src/usage-tokens.test.ts               MODIFY  attribution test
 
 ## Self-Review (write-time)
 
-- **Spec coverage (Part 2):** §3 wire/client → Task 1; store/events/persistence → Task 2; §5 Settings panel + provider seed chips → Task 3; §2/§5 launcher model+account chips + family remap + disabled rendering → Task 4; tab badge → Task 5; §6 usage attribution → Task 6. Nothing deferred; device-auth `login/*` UI is the one cut optional add-on (Part 1 rationale).
+- **Spec coverage (Part 2):** §3 wire/client → Task 1; store/events/persistence → Task 2; §5 Settings panel + provider seed chips → Task 3; §2/§5 launcher model+account chips + family remap + disabled rendering → Task 4; tab badge → Task 5; §6 usage attribution → Task 6. Nothing deferred; there is no device-auth login UI (seeding is the only credential path).
 - **Placeholder scan:** none — components specified at contract level with concrete store/props; UI verified via browser drive + web smoke (there is no UI unit runner, per AGENTS.md).
 - **Type consistency:** `CliProxyStatus`/`CliProxyProviderStatus`/`CliProxySeedRequest` single-sourced from `@orquester/api` (Part 1) through `ApiClient` (Task 1) → store (Task 2) → components (Tasks 3–5); `preferredModelByAgent` mirrors `preferredAccountByAgent` exactly; `PROXY_ACCOUNT_FAMILY` is the one launcher-id→family map (Task 4).

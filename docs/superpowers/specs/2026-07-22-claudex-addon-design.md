@@ -27,8 +27,8 @@ adapted from a laptop/zsh setup to a headless single-user server managed by the 
 claudex/claudemix session (claude CLI)
   └─ ANTHROPIC_BASE_URL=http://127.0.0.1:8317  +  ANTHROPIC_AUTH_TOKEN=<local key>
        └─ CLIProxyAPI (daemon-managed, loopback only)
-            ├─ gpt-*      → OpenAI Codex backend (Codex OAuth, proxy-owned device auth)
-            ├─ claude-*   → Anthropic API (Claude OAuth, proxy-owned device auth)
+            ├─ gpt-*      → OpenAI Codex backend (Codex OAuth, seeded from a managed account)
+            ├─ claude-*   → Anthropic API (Claude OAuth, seeded from a managed account)
             └─ kimi-k3, … → OpenRouter (openai-compatibility provider, plain API key)
 ```
 
@@ -384,7 +384,7 @@ New routes under `/api/cliproxy`; **no secret material is ever returned** (not t
 local key, not the management secret, not credential contents). **Transport authz is
 explicit and asymmetric**: read-only routes (status, models, logs metadata) follow the
 normal rule (bearer auth over remote HTTP, open over the local Unix socket like other
-local routes). **Mutating routes (enable/disable/config/login/key/rotation) are
+local routes). **Mutating routes (enable/disable/config/seed/key/rotation) are
 HTTP-transport-only with bearer auth — refused over the Unix socket.** Rationale: the
 socket is unauthenticated by design and every agent session receives its path
 (`ORQUESTER_DAEMON_SOCK`, for hook events); without this rule, any daemon-launched
@@ -401,16 +401,8 @@ configuration:
 - `PUT  /api/cliproxy/config` — `{ defaultModel, backgroundModel? }` (validated against
   catalog + charset). Per-launch choice rides `POST /api/sessions` via the new optional
   `model` field (same validation), not this route.
-- `POST /api/cliproxy/login/start` — `{ provider, label? }` →
-  `{ flowId, url, userCode?, expiresAt }`. `label` is required for Claude device auth
-  (the credential carries no email; label is the display identity, matching the managed-
-  account import convention).
-- `GET  /api/cliproxy/login/status?flowId=…` — terminal states included:
-  `pending | done | expired | superseded | error` (device codes expire ~15 min; starting
-  a second flow **for the same provider** supersedes the previous one — flows for
-  different providers run concurrently).
-- `POST /api/cliproxy/login/cancel` — `{ flowId }`.
-- `POST /api/cliproxy/accounts/seed` — **the primary credential path** (spike-proven):
+- `POST /api/cliproxy/accounts/seed` — **the credential path** (spike-proven; there is no
+  device-auth login flow):
   `{ provider: "codex"|"claude", accountId }` → the daemon reads that managed account's
   credential and **converts** it into CLIProxyAPI's auth-file schema, **stamps the
   deterministic `prefix` (`acc<first-8-hex-of-accountId>`)** so the account is per-launch
@@ -421,15 +413,8 @@ configuration:
 - `POST /api/cliproxy/openrouter/key` — set/import the OpenRouter key (stored in
   `secrets.json`, projected into `config.yaml`; the projection requires a proxy
   restart, so this route is restart-gated with the same force-confirm treatment —
-  unlike credential seeding / device-auth completions, which land in `auth/` and are
-  hot-discovered by the proxy without restart — spike-confirmed).
-- `POST /api/cliproxy/login/callback` — `{ flowId, callbackUrlOrCode }`: relay for
-  providers whose OAuth completes via a browser redirect to localhost. The proxy is
-  loopback-only and Caddy exposes only Orquester, so a redirect can never reach the
-  proxy directly — the user pastes the callback URL/code from their browser and the
-  daemon submits it to the proxy's management API (which supports callback
-  submission). The spike determines per provider whether pure device-code polling
-  suffices or this relay is required.
+  unlike credential seeding, which lands in `auth/` and is hot-discovered by the proxy
+  without restart — spike-confirmed).
 - `GET  /api/cliproxy/logs/tail` — recent request **metadata only**: timestamp, model,
   provider, HTTP status, token counts. Request/response **bodies are never returned**
   (prompts routinely contain pasted secrets and file contents; header redaction alone
@@ -438,7 +423,7 @@ configuration:
   rotated, and still never cross this API.
 
 Contract work is explicit scope: request/response types in `packages/api`
-(`CliProxyStatus`, `CliProxyLoginState`, …), `ApiClient` methods, zustand store
+(`CliProxyStatus`, `CliProxySeedRequest`, …), `ApiClient` methods, zustand store
 state/actions, `cliproxy.changed` event handling with reconnect refetch, and
 loading/error states — enumerated in the implementation plan, not improvised.
 `cliproxy.json` and `secrets.json` get **versioned zod schemas, `safeParse`-with-
@@ -446,12 +431,14 @@ default loaders, and path helpers in `@orquester/config`**, per the repo's rule 
 raw `JSON.parse` output never reaches typed code — a partial or older file must
 degrade, not crash the daemon.
 
-### 4. Credentials: seed by conversion from managed accounts (primary); device-auth fallback
+### 4. Credentials: seed by conversion from managed accounts (the only path)
 
-**Spike-updated decision (2026-07-23): seed by file conversion first.** The sub-spike
-proved both Codex and Claude OAuth seed into the proxy by converting the existing managed-
-account credential into CLIProxyAPI's auth-file schema and dropping it in `auth/` — **no
-browser/device flow**. Each seeded file also carries a **`prefix`** (`Auth.Prefix`, source-
+**Spike-updated decision (2026-07-23): seed by file conversion — no device-auth login.**
+The sub-spike proved both Codex and Claude OAuth seed into the proxy by converting the
+existing managed-account credential into CLIProxyAPI's auth-file schema and dropping it in
+`auth/` — **no browser/device flow**. Since the whole point is using the accounts already
+in Orquester, seeding is the sole credential path; there is deliberately **no device-auth
+login flow** (it would need a separate management-API sub-spike for a path we don't need). Each seeded file also carries a **`prefix`** (`Auth.Prefix`, source-
 confirmed to route file-backed OAuth: a `<prefix>/<model>` request targets that exact
 credential) = `acc<first-8-hex-of-accountId>`, which is what makes per-launch account
 selection work (§2) and lets multiple accounts of one provider coexist and be chosen
@@ -476,23 +463,15 @@ individually. This is the primary path (`POST /api/cliproxy/accounts/seed`):
   (`~/.local/share/opencode/auth.json`, `openrouter.key` — confirmed present) or paste in
   Settings. Stored in `secrets.json` (authoritative); `config.yaml` carries the projection.
 
-**The dual-refresher hazard is managed, not avoided by device-auth.** Two independent
-refreshers of the same rotating refresh token invalidate each other. The spike sidestepped
-it by seeding while the source access token was **fresh** (no refresh fired; managed files
-untouched), but that's timing luck, not a design. The **owner rule**: once the proxy holds
-a seeded copy, **Orquester stops refreshing that managed account** (the account service's
+**The dual-refresher hazard is managed by an owner rule.** Two independent refreshers of
+the same rotating refresh token invalidate each other. The spike sidestepped it by seeding
+while the source access token was **fresh** (no refresh fired; managed files untouched),
+but that's timing luck, not a design. The **owner rule**: once the proxy holds a seeded
+copy, **Orquester stops refreshing that managed account** (the account service's
 `ensureFreshForUsage`/idle refresh must skip accounts marked proxy-owned), so exactly one
 refresher exists. Seeding records the `(provider, accountId)` → proxy-owned mapping;
 un-seeding restores Orquester's ownership. A re-seed is always available if the chains ever
 desync.
-
-**Device-auth is the fallback**, not the primary — for accounts not already in Orquester,
-or if conversion ever fails on a future credential format. It uses the proxy management
-API (`codex-auth-url`/`anthropic-auth-url` + status polling) via the `login/*` routes; the
-`login/callback` relay covers redirect-style flows since the proxy is loopback-only behind
-Caddy. (Spike note: the management `status` path 404'd, but seeding sidesteps the
-management API entirely; the login/* fallback still needs the management-API endpoints
-verified in a Phase-2 step before that fallback UI is built.)
 
 Multiple accounts of one provider round-robin automatically. **Health probes are
 per-credential, not per-provider**: with N accounts round-robining, a provider-level
@@ -519,10 +498,9 @@ shared proxy panel:
 
 - Manager state incl. `degraded`, with **per-provider status chips**
   (codex ✓ / claude ✓ / openrouter ✗) each with last-verified time.
-- Connect actions per provider: **primary is "Seed from managed account"** — a
-  one-click picker of the existing Claude/Codex accounts (spike-proven file conversion,
-  no browser); a **device-code dialog** (resumable, copyable code, expiry countdown,
-  cancel) is the fallback for accounts not in Orquester; OpenRouter import/paste.
+- Connect actions per provider: **"Seed from managed account"** — a one-click picker of
+  the existing Claude/Codex accounts (spike-proven file conversion, no browser, no device
+  login); OpenRouter import-from-OpenCode / paste-key.
 - **Per-launch account chips on the two launchers** (mirroring stock Claude/Codex): the
   `claudex` row shows a `System` chip + each seeded **Codex** account; the `claudemix`
   row shows `System` + each seeded **Claude** account. The chip sets
@@ -605,19 +583,16 @@ never the live daemon serving this workspace):
    the harness routing knob.)
 2. ~~Claude-subscription OAuth through the proxy for the main loop~~ — **DONE** (spike:
    `claude --model claude-sonnet-4-5` functional via seeded Claude OAuth).
-3. **Real cost measurement**: a ~30-min claudex session vs a native Codex session —
-   whether haiku-slot calls stay on the cheap `backgroundModel`. (Deferred pending explicit
-   go-ahead — it spends real subscription quota.)
-4. **Unknown-model error surface**: exact behavior when a workflow references a model
+3. **Unknown-model error surface**: exact behavior when a workflow references a model
    absent from the catalog (harness retry? silent fallback? opaque subagent error) —
    feeds a pre-flight check: at claudemix launch, referenced/configured models are
    validated against `/v1/models` with a warning before work starts.
-5. **Partial-failure behavior is a required authoring pattern, not documentation**: the
+4. **Partial-failure behavior is a required authoring pattern, not documentation**: the
    canonical tri-model workflow ships with `agent()` calls wrapped, a configurable
    review quorum (default 2-of-3), and failures surfaced in the review output; the
    harness does not retry subagent provider errors, so the script owns degradation. The
    §Verification dry-run exercises a **forced** 1-of-3 reviewer failure.
-6. ~~Kimi empty-content on a deep tool loop~~ — **DONE** (spike: 24-tool-call loop, zero
+5. ~~Kimi empty-content on a deep tool loop~~ — **DONE** (spike: 24-tool-call loop, zero
    400s on the stock binary). Still confirm control-token stripping and `claude-*`
    caching/latency during the Phase-2 dry-run.
 
@@ -661,20 +636,27 @@ the inverse failure (CLI update breaking the proxy path first).
   and **rejected**: Kimi ships day one via the patched source build (explicit user
   decision; the source-build machinery is accepted cost).
 
-## Implementation order (sketch for the plan)
+## Implementation order
 
-1. Spike (§8, plus §7 Kimi gate probing + credential device-auth flows against a manual
-   CLIProxyAPI install on separate paths). Findings feed the plan.
-2. `CliProxyManager`: verified download, config generation, tmux lifecycle outside
-   `orq-`, ownership-verified adoption, health/degraded probing, state, events.
-3. Registry: entries, net-new `reresolve`/`setRuntimeState` + `disabledReason`, env-file
-   generation + hardening, addon-env contributor for token + `CLAUDE_CONFIG_DIR`,
-   wrapper bins, dedicated claude-home seeding.
-4. `/api/cliproxy` routes + wire types + login flows.
-5. Settings UI (Model proxy section) + launcher menu `disabledReason` + notifications.
-6. Hooks family mapping + tests; polish (icons, tab badges).
-7. Deploy, browser smoke test, real workflow dry-run — the full tri-model flow: Fable
-   plans, Kimi designs, Sol executes, three-model cross-review.
+**Done:** the Task-0 spike + OAuth-seeding sub-spike (findings in `docs/superpowers/spikes/`),
+and **Phase 1** — daemon scaffolding, registry runtime state, tmux service methods, per-launch
+model plumbing, secret store + projections + wrapper bins + home seeder, hook-family mapping,
+`/api/cliproxy` routes (built + green, 288/288 daemon tests).
+
+**Remaining work is fully planned in `docs/superpowers/plans/` as three parts (all written,
+none deferred):**
+1. **Part 1 — daemon** (`2026-07-23-claudex-addon-phase2.md`): stock-binary install (sha256,
+   no source build), credential seeding by conversion + per-account prefix routing, enable()
+   orchestration + seedHome wiring, provider status, persistence-lost re-parent, seed/openrouter
+   routes.
+2. **Part 2 — frontend** (`…-frontend.md`): `ApiClient`/store, Settings "Model proxy" panel,
+   launcher **model + account chips** with the provider-family remap, disabled rendering, tab
+   badges, usage attribution.
+3. **Part 3 — workflow + deploy** (`…-workflow-deploy.md`): the canonical Fable→Kimi→Sol→tri-
+   model-review workflow with quorum, §8 in-session routing verification, deploy, full live e2e.
+
+There is no device-auth login flow and no cost-measurement task (both removed by explicit
+decision — seeding covers credentials; cost is not measured autonomously).
 
 ## Verification
 
@@ -685,18 +667,18 @@ the inverse failure (CLI update breaking the proxy path first).
   runtime enable/disable with `disabledReason` (incl. the reresolve-vs-runtime-state
   race), stable-secret config rewrites, foreign-port conflict handling, hook-family
   dispatch for both new ids, wrapper-env parsing, per-launch model propagation +
-  persistence across restart/reattach, two concurrent provider login flows, dedicated-
-  home seeding (no `projects/` sharing) + usage-scanner coverage, `backgroundModel`
-  restart persistence, rejection of Go toolchain auto-switching (`GOTOOLCHAIN=local`)
-  and offline module compile (`GOPROXY=off`), wrapper-bin assertions
-  (`CLAUDE_CONFIG_DIR` of the launched process + token sourced from the `token` file),
-  management-API auth surviving a daemon restart (via `secrets.json`, not the hashed
-  `config.yaml`), corrupt-`secrets.json` failing closed (no regeneration), cliproxy
-  mutations refused over the Unix socket, `effectiveModel` validation when the request
-  omits `model`, adoption probing before foreign classification, per-credential health
-  degradation, the login callback relay, `logs/tail` returning metadata only, the
-  patch gate matching both alias and resolved model names, and the raw-name service
-  tmux methods.
+  persistence across restart/reattach, per-account **prefix routing** (distinct prefixes;
+  `<prefix>/<model>` targets the right seeded credential), credential seeding by conversion
+  (Codex/Claude field mappings) with the fresh-token guard, the proxy-owned single-refresher
+  rule, dedicated-home seeding (no `projects/` sharing) + usage-scanner coverage + launcher-id
+  tagging, `backgroundModel` restart persistence, sha256-verified stock-binary install +
+  rollback, wrapper-bin assertions (`CLAUDE_CONFIG_DIR` of the launched process + token
+  sourced from the `token` file), management-API auth surviving a daemon restart (via
+  `secrets.json`, not the hashed `config.yaml`), corrupt-`secrets.json` failing closed (no
+  regeneration), cliproxy mutations refused over the Unix socket, `effectiveModel` validation
+  when the request omits `model`, adoption probing before foreign classification, per-
+  credential health degradation, `logs/tail` returning metadata only, and the raw-name
+  service tmux methods.
 - Never launch/restart a daemon against this checkout; live verification happens on
   deploy or a separate checkout, per AGENTS.md.
 - Post-deploy: health curl, browser smoke test (`scripts/smoke-web.mjs`), CLI-coupling
