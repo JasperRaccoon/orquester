@@ -251,6 +251,31 @@ test("crash supervision: 3 failed respawns → error latch + single notification
   assert.equal(crashed.length, 1);
 });
 
+test("enable: a throwing install does not persist enabled:true (generic catch path)", async () => {
+  const h = setup();
+  h.setInstall(async () => {
+    throw new Error("sha256 mismatch");
+  });
+  await h.mgr.enable();
+  assert.equal(h.mgr.status().state, "error");
+  // init() gates bootAdopt() on the persisted flag, so a failed enable must fail closed.
+  const persisted = parseCliProxyState(
+    JSON.parse(await readFile(cliproxyStateFile(h.daemonDir), "utf8"))
+  );
+  assert.equal(persisted.enabled, false, "a failed enable must not persist enabled:true");
+});
+
+test("enable: a proxy that never probes healthy does not persist enabled:true (proxy-down path)", async () => {
+  const h = setup();
+  h.setProbe({ ok: false, reachable: false });
+  await h.mgr.enable();
+  assert.equal(h.mgr.status().state, "error");
+  const persisted = parseCliProxyState(
+    JSON.parse(await readFile(cliproxyStateFile(h.daemonDir), "utf8"))
+  );
+  assert.equal(persisted.enabled, false);
+});
+
 test("disable without force + 2 live sessions → {ok:false, affectedSessions:2}; with force → kills service session", async () => {
   const h = setup();
   await writeBin(h.daemonDir);
@@ -267,6 +292,31 @@ test("disable without force + 2 live sessions → {ok:false, affectedSessions:2}
   assert.equal(forced.ok, true);
   assert.ok(h.tmuxCalls.killService > killsBefore, "force disable kills the service session");
   assert.equal(h.mgr.status().state, "off");
+  // A normal tmux-owned disable emits NO warning (guards against always-warning regression).
+  assert.deepEqual(h.mgr.status().reasons, []);
+});
+
+test("disable: an externally-adopted proxy can't be killed → off with a port warning, launchers disabled", async () => {
+  const h = setup();
+  await writeEnabledState(h.daemonDir);
+  h.setHasService(false);
+  h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
+
+  // Boot-adopt an out-of-tmux own proxy (probe ok, no tmux session) → persistence-lost/external.
+  await h.mgr.init();
+  assert.ok(h.mgr.status().reasons.includes("persistence-lost"), "boots into persistence-lost");
+
+  const res = await h.mgr.disable(false);
+  assert.equal(res.ok, true);
+  assert.equal(h.mgr.status().state, "off");
+  const reasons = h.mgr.status().reasons;
+  assert.ok(reasons.length >= 1, `expected a warning, got ${JSON.stringify(reasons)}`);
+  assert.ok(
+    reasons.some((r) => /external proxy/.test(r) && r.includes(String(8317))),
+    `expected an external-proxy warning naming the port, got ${JSON.stringify(reasons)}`
+  );
+  // Warn-only: never respawns to reclaim the port.
+  assert.equal(h.tmuxCalls.newService, 0);
 });
 
 test("validateModel: request model wins over default; unknown model fails naming provider; probe hang → bounded failure ≤2s", async (t) => {
@@ -621,6 +671,15 @@ test("unseedProvider removes the auth file, drops the account, degrades the prov
   );
   const persisted = parseCliProxyState(JSON.parse(await readFile(cliproxyStateFile(h.daemonDir), "utf8")));
   assert.deepEqual(persisted.seededAccounts, [], "persisted seededAccounts emptied");
+  // persist() must route through writeHardened (atomic temp+rename with mode 0o600),
+  // not a plain writeFile: the 0o600 mode is the discriminating signal — a bare
+  // writeFile would leave the umask default (typically 0o644). This proves the
+  // torn-write-safe write path is actually taken, not just that a file exists.
+  assert.equal(
+    statSync(cliproxyStateFile(h.daemonDir)).mode & 0o777,
+    0o600,
+    "state.json written 0600 by writeHardened's atomic path"
+  );
 });
 
 test("unseedProvider is idempotent on an unknown id", async () => {

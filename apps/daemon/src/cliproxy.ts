@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { CliProxyProviderId, CliProxyProviderStatus, CliProxyStatus } from "@orquester/api";
@@ -253,10 +253,15 @@ export class CliProxyManager {
         if (probed.ok) {
           this.becomeHealthy(probed.models);
         } else {
+          // Fail closed: don't persist enabled:true, or next boot's init() re-runs
+          // bootAdopt() against a proxy that never came up. Mirrors the reset above.
+          this.state.enabled = false;
           this.fail("proxy down");
         }
         await this.persist();
       } catch (error) {
+        // Fail closed: a throw after line 209 must not persist enabled:true.
+        this.state.enabled = false;
         this.fail(error instanceof Error ? error.message : String(error));
         await this.persist();
       }
@@ -276,11 +281,22 @@ export class CliProxyManager {
       if (!force && live > 0) {
         return { ok: false, affectedSessions: live };
       }
+      // An externally-adopted proxy (out-of-tmux, no directHandle we own) can't be
+      // stopped by killProxy — it stays listening on the port. Honor the disable intent
+      // but warn that the port stays held until that process exits on its own.
+      const wasExternal = this.external;
       await this.killProxy();
       this.errorLatched = false;
       this.external = false;
       this.state.enabled = false;
-      this.setState("off", []);
+      this.setState(
+        "off",
+        wasExternal
+          ? [
+              `external proxy still listening on port ${this.state.port}; Orquester can't stop it — kill that process to free the port`
+            ]
+          : []
+      );
       this.applyRegistryCoupling();
       await this.persist();
       return { ok: true, affectedSessions: force ? live : 0 };
@@ -915,8 +931,11 @@ export class CliProxyManager {
   }
 
   private async persist(): Promise<void> {
-    await mkdir(cliproxyDir(this.daemonDir), { recursive: true });
-    await writeFile(cliproxyStateFile(this.daemonDir), JSON.stringify(this.state, null, 2), "utf8");
+    // Atomic temp-file + rename (writeHardened) so a torn write can't truncate
+    // state.json and make parseCliProxyState fall back to defaults — which would
+    // drop seededAccounts while accounts.json still says proxyOwned, desyncing the
+    // single-refresher rule. No secrets here, but 0600/symlink-refusal is harmless.
+    await writeHardened(cliproxyStateFile(this.daemonDir), JSON.stringify(this.state, null, 2), 0o600);
   }
 
   /** Chain `fn` onto the serialized transition queue and return its result. */
