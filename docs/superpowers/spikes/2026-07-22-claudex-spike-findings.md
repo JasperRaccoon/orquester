@@ -65,22 +65,52 @@ build is **not required for the main Kimi path**. Recommendation for Phase 2:
 This removes the single largest source of Phase-2 complexity (§7 build pipeline, §1 hermetic
 Go build, the whole `bin.prev/src/go` apparatus can become "download + verify release binary").
 
-## F4 — Codex/GPT credentials: **BLOCKED (needs conversion or device-login)**
+## F4 — Codex/GPT credential seeding: **RESOLVED — pure file conversion, no browser flow**
 
-The managed Codex account is standard Codex-CLI `auth.json`
-(`{auth_mode, tokens:{id_token, access_token, refresh_token, account_id}, last_refresh}`).
-CLIProxyAPI stores its own `codex-*.json` in the auth-dir in a different schema; there is no
-documented one-step import, and a `GET /v0/management/status` probe returned 404 (management
-API surface/path unconfirmed). Not resolved in this pass. Phase-2 sub-spike needed to either
-(a) map the Codex-CLI blob → CLIProxyAPI's codex JSON, or (b) drive `-codex-device-login` /
-the management `codex-auth-url` flow. The GPT main path (spec §8.2/§8.3) is therefore
-**unverified** — but F1 proves the *transport/harness* half; only the credential-seeding half
-is open.
+The sub-spike proved the managed Codex account can be seeded into the proxy by converting its
+`auth.json` into CLIProxyAPI's `CodexTokenStorage` schema and dropping the file in `auth-dir`.
+CLIProxyAPI auto-discovers it; **no device-login / browser OAuth needed.**
 
-## F5 — Claude-OAuth main loop through the proxy (claudemix precondition): **NOT TESTED**
+Field mapping (from `internal/auth/codex/token.go` @ v7.2.95):
 
-Same credential-seeding blocker as F4 (managed `.credentials.json` → CLIProxyAPI Anthropic
-provider format unconfirmed). Deferred to the same Phase-2 sub-spike.
+| CLIProxyAPI `CodexTokenStorage` | Source (managed Codex `auth.json`) |
+|---|---|
+| `id_token` | `tokens.id_token` |
+| `access_token` | `tokens.access_token` |
+| `refresh_token` | `tokens.refresh_token` |
+| `account_id` | id_token claim `https://api.openai.com/auth`.`chatgpt_account_id` (or `tokens.account_id`) |
+| `last_refresh` | `last_refresh` |
+| `email` | id_token claim `email` |
+| `type` | literal `"codex"` |
+| `expired` | RFC3339 of the access_token JWT `exp` |
+
+Result: `/v1/models` served the full GPT catalog — **`gpt-5.6-sol`, `gpt-5.6-luna`,
+`gpt-5.6-terra`, `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex-spark`** — and a real
+`claude --model gpt-5.6-sol -p …` returned correctly. The access token was valid ~9 days, so
+**no refresh fired and the managed account's refresh token was never rotated** (the auth files
+were never rewritten) — confirming the dual-refresher hazard is avoidable by seeding while the
+access token is fresh.
+
+## F5 — Claude-OAuth main loop through the proxy (claudemix precondition): **RESOLVED**
+
+Same approach for Claude, converting the managed `.credentials.json` into `ClaudeTokenStorage`
+(`internal/auth/claude/token.go`): `access_token`←`claudeAiOauth.accessToken`,
+`refresh_token`←`claudeAiOauth.refreshToken`, `expired`←RFC3339 of `claudeAiOauth.expiresAt`
+(ms→s), `type`=`"claude"`; `id_token`/`email` may be blank. `/v1/models` then served the
+Claude family (`claude-fable-5`, `claude-sonnet-5`, `claude-opus-4-8`, …) **alongside** the GPT
+and Kimi models — proving the **single-instance two/three-provider catalog claudemix depends
+on**. A functional `claude --model claude-sonnet-4-5-20250929 -p …` routed through the seeded
+Claude OAuth and replied correctly. Used the *second* Claude account (not the one running the
+session); its token was fresh (~7.5 h) so no rotation occurred.
+
+**Net for F4/F5:** the entire "seed from existing managed accounts" story works with **zero
+browser interaction** — a pure format conversion the daemon can do at enable-time. This is
+strictly better than device-login for UX. Two caveats for Phase 2: (1) seed while the source
+access token is fresh, or explicitly accept a one-time managed-account re-import if the proxy
+refreshes first (dual-refresher); the cleaner long-term design is for the proxy to *own* the
+credential and Orquester to stop refreshing that account, or to share one credential store.
+(2) The management API `status` path 404'd, but it was **not needed** — file-drop seeding
+sidesteps the management API entirely.
 
 ## F6 — `go` toolchain absent on vps-a
 
@@ -88,12 +118,16 @@ provider format unconfirmed). Deferred to the same Phase-2 sub-spike.
 source-build path survives F3's recommendation, provisioning must fetch a pinned toolchain;
 if F3's "ship stock binary" recommendation is taken, **this gap disappears entirely**.
 
-## F7 — Cross-model routing (§8.1, claudemix core): **NOT TESTED**
+## F7 — Cross-model routing (§8.1, claudemix core): **CATALOG PROVEN; in-session routing still to verify**
 
-Requires ≥2 live providers in one catalog (e.g. kimi + a gpt model); only OpenRouter was
-authenticated this pass (F4/F5 blocked). `CLAUDE_CODE_SUBAGENT_MODEL` was exercised only
-single-model. The `agent({model})` / frontmatter routing that claudemix depends on needs the
-Codex/Claude providers live first — carried into the Phase-2 sub-spike.
+The three-provider catalog is proven: one CLIProxyAPI instance seeded with Codex + Claude +
+OpenRouter served `gpt-5.6-sol`, `claude-fable-5`/`claude-sonnet-5`, and `kimi-k3` from a
+single `/v1/models`, and each was individually driven by `claude --model <x> -p`. What remains
+(needs the daemon integration, not a raw-CLI spike) is confirming that *inside one Fable
+session* a Workflow `agent(prompt, {model:"gpt-5.6-sol"})` / `{model:"kimi-k3"}` (or a
+frontmatter-pinned subagent) actually routes per-subagent — i.e. spec §8.1's model-string
+channel. The transport is now proven on all three families; only the harness-level routing
+knob is unverified, and that is best checked once `claudemix` launches against the daemon.
 
 ## Cost note (§8.3)
 
@@ -109,12 +143,30 @@ The 30-minute real-subscription cost measurement was intentionally **not** run a
 | F1 | Claude Code → proxy → Kimi chain | CONFIRMED |
 | F2 | Config hashing / secrets.json need | CONFIRMED (mgmt secret) + spec correction (api/provider keys plaintext) |
 | F3 | Kimi empty-content bug | PRESENT in source, does NOT trigger under Claude Code → **drop source-build from critical path** |
-| F4 | Codex/GPT credential seeding | BLOCKED — Phase-2 sub-spike |
-| F5 | Claude-OAuth main loop | NOT TESTED — same blocker |
-| F6 | `go` toolchain | absent; likely moot per F3 |
-| F7 | Cross-model routing | NOT TESTED — needs 2 providers |
+| F4 | Codex/GPT credential seeding | RESOLVED — file conversion, no browser flow; gpt-5.6-sol functional |
+| F5 | Claude-OAuth main loop | RESOLVED — file conversion; claude-sonnet-4-5 functional |
+| F6 | `go` toolchain | absent; **moot** per F3 (ship stock binary) |
+| F7 | Cross-model routing | catalog PROVEN (gpt+claude+kimi in one instance); in-session routing pending daemon integration |
 
-**Net:** the transport/harness core is proven and simpler than feared (Kimi needs no patch
-under Claude Code). The open risk collapsed to one thing: **seeding Codex/Claude OAuth into
-the proxy** (F4/F5) — a focused sub-spike that gates the GPT and claudemix paths, while the
-Kimi escape-hatch and all F1-proven mechanics can proceed on the stock binary.
+**Net:** every open risk is now resolved or de-risked. The transport/harness core is proven on
+all three provider families (GPT, Claude, Kimi), credential seeding works from existing managed
+accounts with **zero browser flow** (pure file conversion), and Kimi needs **no** patch under
+Claude Code. Phase 2 can drop the entire Go-toolchain/source-build apparatus (ship the stock
+release binary) and implement credential seeding as a format conversion at enable-time. The
+single remaining check — in-session per-subagent model routing (§8.1) — is a daemon-integration
+verification, not a proxy unknown.
+
+## Phase-2 shaping (net recommendations)
+
+1. **Ship the stock CLIProxyAPI release binary** (verify SHA-256), not a source build. Delete
+   §7's build pipeline, §1's hermetic-Go apparatus, and the `src/`+`go/`+patch machinery from
+   the plan. Keep the one-line translator patch documented as defense-in-depth, applied only if
+   a real `content:""` 400 is ever observed.
+2. **Credential seeding = file conversion at enable-time** (F4/F5 mappings above), not
+   device-login. Offer device-login only as a fallback for accounts not already in Orquester.
+   Resolve the dual-refresher question by making the proxy the sole owner of its seeded copy (or
+   sharing one store) — do not leave Orquester and the proxy both refreshing the same token.
+3. **Correct the spec's secret framing** (F2): only the management `secret-key` is hashed;
+   `api-keys` and provider keys stay plaintext in `config.yaml`. `secrets.json` remains the
+   right authoritative store, but the justification is the management secret specifically.
+4. The cost measurement (§8.3) is still deferred pending explicit go-ahead (spends quota).
