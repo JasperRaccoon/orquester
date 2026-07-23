@@ -637,7 +637,7 @@ interface Services {
   reloadHttp?: () => Promise<void>;
 }
 
-function createServer(
+export function createServer(
   config: DaemonConfig,
   resolved: ResolvedPaths,
   clientConfig: ClientConfig,
