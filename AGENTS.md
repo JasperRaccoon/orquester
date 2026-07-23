@@ -313,9 +313,11 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
   "needs your input" / "finished" pushes; agents without hook coverage keep the bell fallback.
   Debounced 30 s per session per type. Session activity (working/waiting/idle + attention) lives
   on `SessionSummary.activity` and streams as `session.activity` events — the UI never re-derives
-  it. The SW never intercepts `/api`, `/events`, `/ws`, `/health`, `/mcp` or non-GET
-  requests. Registration is web-host-only (`apps/web/src/pwa.ts`, PROD-gated) — Electron never
-  touches it.
+  it. The SW never intercepts `/api`, `/events`, `/ws`, `/health`, `/mcp`,
+  `/devtools-frontend`, `/ws-devtools` or non-GET requests (caching the proxied DevTools bundle or
+  falling its navigations back to `index.html` corrupts it → "Failed to convert value to
+  'Response'"; bump the SW `VERSION` when changing this list). Registration is web-host-only
+  (`apps/web/src/pwa.ts`, PROD-gated) — Electron never touches it.
 - **Browser-tab Chromium exposes a loopback debug port.** The per-project headless
   Chromium launches with `--remote-debugging-port=0` (not the stdio pipe) so the
   embedded DevTools can attach; the daemon proxies its frontend at
