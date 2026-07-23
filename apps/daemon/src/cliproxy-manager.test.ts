@@ -11,11 +11,17 @@ import {
   createDefaultCliProxyState
 } from "@orquester/config";
 import Fastify from "fastify";
-import type { CliProxyStatus } from "@orquester/api";
+import type { CliProxyProviderStatus, CliProxyStatus } from "@orquester/api";
+import { SYSTEM_ACCOUNT_ID } from "@orquester/api";
 import type { RegistryService } from "./registry.ts";
 import { Broadcaster } from "./broadcaster.ts";
 import { CliProxyManager } from "./cliproxy.ts";
-import { composeExtraEnv, registerCliProxyRoutes, resolveLaunchModel } from "./index.ts";
+import {
+  cliproxyContributor,
+  composeExtraEnv,
+  registerCliProxyRoutes,
+  resolveLaunchModel
+} from "./index.ts";
 
 type ProbeResult = { ok: boolean; reachable?: boolean; models?: string[] };
 
@@ -446,7 +452,12 @@ test("status per-provider state gates launchers: codex seeded → claudex on, cl
 // --- Task 9: /api/cliproxy routes + launch-env composition + model gate --------
 
 function fakeRouteManager() {
-  const calls = { enable: 0, disable: [] as boolean[], setConfig: [] as Array<{ cfg: unknown; force: boolean }> };
+  const calls = {
+    enable: 0,
+    disable: [] as boolean[],
+    setConfig: [] as Array<{ cfg: unknown; force: boolean }>,
+    seed: [] as Array<{ req: { provider: "codex" | "claude"; accountId: string }; cred: unknown }>
+  };
   const status: CliProxyStatus = {
     state: "off",
     reasons: [],
@@ -471,9 +482,29 @@ function fakeRouteManager() {
     setConfig: async (cfg: { defaultModel?: string; backgroundModel?: string }, force: boolean) => {
       calls.setConfig.push({ cfg, force });
       return { ok: true };
+    },
+    seedProvider: async (
+      req: { provider: "codex" | "claude"; accountId: string },
+      read: (provider: "codex" | "claude", accountId: string) => Promise<unknown>
+    ): Promise<CliProxyProviderStatus> => {
+      const cred = await read(req.provider, req.accountId);
+      calls.seed.push({ req, cred });
+      return { provider: req.provider, state: "ok", lastVerifiedAt: "2026-07-23T00:00:00Z" };
     }
   };
-  return { manager, calls };
+  return { manager, calls, status };
+}
+
+/** A minimal AgentAccountsService stand-in for the seed route (homePath + markProxyOwned). */
+function fakeAgentAccounts(home: string) {
+  const marks: Array<{ id: string; owned: boolean }> = [];
+  const agentAccounts = {
+    homePath: (_agent: string, _id: string) => home,
+    markProxyOwned: async (id: string, owned: boolean) => {
+      marks.push({ id, owned });
+    }
+  };
+  return { agentAccounts, marks };
 }
 
 test("cliproxy mutations: 403 on local mode, reach the handler on remote mode", async () => {
@@ -481,8 +512,9 @@ test("cliproxy mutations: 403 on local mode, reach the handler on remote mode", 
   // Local (unix socket): the mutating route is registered but refuses.
   {
     const { manager, calls } = fakeRouteManager();
+    const { agentAccounts } = fakeAgentAccounts(daemonDir);
     const app = Fastify();
-    registerCliProxyRoutes(app, { manager, mode: "local", daemonDir });
+    registerCliProxyRoutes(app, { manager, mode: "local", daemonDir, agentAccounts });
     await app.ready();
     const res = await app.inject({ method: "POST", url: "/api/cliproxy/enable" });
     assert.equal(res.statusCode, 403);
@@ -493,8 +525,9 @@ test("cliproxy mutations: 403 on local mode, reach the handler on remote mode", 
   // Remote (authenticated HTTP): the same route runs and returns status.
   {
     const { manager, calls } = fakeRouteManager();
+    const { agentAccounts } = fakeAgentAccounts(daemonDir);
     const app = Fastify();
-    registerCliProxyRoutes(app, { manager, mode: "remote", daemonDir });
+    registerCliProxyRoutes(app, { manager, mode: "remote", daemonDir, agentAccounts });
     await app.ready();
     const res = await app.inject({ method: "POST", url: "/api/cliproxy/enable" });
     assert.equal(res.statusCode, 200);
@@ -507,8 +540,9 @@ test("cliproxy mutations: 403 on local mode, reach the handler on remote mode", 
 test("GET /api/cliproxy returns the CliProxyStatus shape incl. reasons[]", async () => {
   const daemonDir = join(mkdtempSync(join(tmpdir(), "orq-cliproxy-status-")), "daemon");
   const { manager } = fakeRouteManager();
+  const { agentAccounts } = fakeAgentAccounts(daemonDir);
   const app = Fastify();
-  registerCliProxyRoutes(app, { manager, mode: "local", daemonDir });
+  registerCliProxyRoutes(app, { manager, mode: "local", daemonDir, agentAccounts });
   await app.ready();
   const res = await app.inject({ method: "GET", url: "/api/cliproxy" });
   assert.equal(res.statusCode, 200);
@@ -518,6 +552,143 @@ test("GET /api/cliproxy returns the CliProxyStatus shape incl. reasons[]", async
   assert.equal(typeof body.defaultModel, "string");
   assert.equal(typeof body.activeSessionCount, "number");
   await app.close();
+});
+
+test("seed route (remote): reads the managed credential, seeds, marks proxy-owned, returns status", async () => {
+  const root = mkdtempSync(join(tmpdir(), "orq-cliproxy-seed-"));
+  const daemonDir = join(root, "daemon");
+  const accountId = "14137047-1111-2222-3333-444455556666";
+  const home = join(root, "acct-home");
+  await mkdir(home, { recursive: true });
+  const cred = { claudeAiOauth: { accessToken: "at", refreshToken: "rt", expiresAt: 9_999_999_999_000 } };
+  await writeFile(join(home, ".credentials.json"), JSON.stringify(cred), "utf8");
+
+  const { manager, calls } = fakeRouteManager();
+  const { agentAccounts, marks } = fakeAgentAccounts(home);
+  const app = Fastify();
+  registerCliProxyRoutes(app, { manager, mode: "remote", daemonDir, agentAccounts });
+  await app.ready();
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/cliproxy/accounts/seed",
+    payload: { provider: "claude", accountId }
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().provider, "claude");
+  assert.equal(res.json().state, "ok");
+  assert.equal(calls.seed.length, 1, "seedProvider called once");
+  assert.deepEqual(calls.seed[0].req, { provider: "claude", accountId });
+  assert.deepEqual(calls.seed[0].cred, cred, "route reads the managed .credentials.json via agentAccounts");
+  assert.deepEqual(marks, [{ id: accountId, owned: true }], "account marked proxy-owned after a successful seed");
+  await app.close();
+});
+
+test("seed route is refused over the unix socket (403); no seed, no ownership flip", async () => {
+  const daemonDir = join(mkdtempSync(join(tmpdir(), "orq-cliproxy-seed-local-")), "daemon");
+  const { manager, calls } = fakeRouteManager();
+  const { agentAccounts, marks } = fakeAgentAccounts(daemonDir);
+  const app = Fastify();
+  registerCliProxyRoutes(app, { manager, mode: "local", daemonDir, agentAccounts });
+  await app.ready();
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/cliproxy/accounts/seed",
+    payload: { provider: "claude", accountId: "x" }
+  });
+  assert.equal(res.statusCode, 403);
+  assert.match(res.json().error, /HTTP transport/);
+  assert.equal(calls.seed.length, 0);
+  assert.equal(marks.length, 0);
+  await app.close();
+});
+
+test("openrouter/key route stores the key, re-projects config.yaml, and is restart-gated", async () => {
+  const root = mkdtempSync(join(tmpdir(), "orq-cliproxy-or-"));
+  const daemonDir = join(root, "daemon");
+  const { manager, status } = fakeRouteManager();
+  const { agentAccounts } = fakeAgentAccounts(daemonDir);
+  const app = Fastify();
+  registerCliProxyRoutes(app, { manager, mode: "remote", daemonDir, agentAccounts });
+  await app.ready();
+
+  // Restart-gated: the key lives in config.yaml (a projection the proxy reads only
+  // at startup), so a live dependent session blocks the change unless forced.
+  status.activeSessionCount = 2;
+  const gated = await app.inject({
+    method: "POST",
+    url: "/api/cliproxy/openrouter/key",
+    payload: { key: "sk-or-abc" }
+  });
+  assert.equal(gated.statusCode, 409);
+  assert.equal(gated.json().affectedSessions, 2);
+  assert.equal(existsSync(cliproxySecretsFile(daemonDir)), false, "nothing stored while gated");
+
+  // Forced through: stores the key and re-projects config.yaml with the openrouter block.
+  const forced = await app.inject({
+    method: "POST",
+    url: "/api/cliproxy/openrouter/key",
+    payload: { key: "sk-or-abc", force: true }
+  });
+  assert.equal(forced.statusCode, 200);
+  const secrets = JSON.parse(await readFile(cliproxySecretsFile(daemonDir), "utf8"));
+  assert.equal(secrets.openRouterKey, "sk-or-abc");
+  const config = await readFile(join(cliproxyDir(daemonDir), "config.yaml"), "utf8");
+  assert.match(config, /openrouter/);
+  assert.match(config, /sk-or-abc/);
+
+  // A missing key is a client error.
+  const bad = await app.inject({ method: "POST", url: "/api/cliproxy/openrouter/key", payload: {} });
+  assert.equal(bad.statusCode, 400);
+  await app.close();
+});
+
+test("openrouter/key route is refused over the unix socket (403)", async () => {
+  const daemonDir = join(mkdtempSync(join(tmpdir(), "orq-cliproxy-or-local-")), "daemon");
+  const { manager } = fakeRouteManager();
+  const { agentAccounts } = fakeAgentAccounts(daemonDir);
+  const app = Fastify();
+  registerCliProxyRoutes(app, { manager, mode: "local", daemonDir, agentAccounts });
+  await app.ready();
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/cliproxy/openrouter/key",
+    payload: { key: "sk-or-abc" }
+  });
+  assert.equal(res.statusCode, 403);
+  assert.equal(existsSync(cliproxySecretsFile(daemonDir)), false, "socket refusal writes nothing");
+  await app.close();
+});
+
+test("cliproxyContributor: a real account prefixes the effective model; System/undefined does not", () => {
+  const daemonDir = join(mkdtempSync(join(tmpdir(), "orq-cliproxy-contrib-")), "daemon");
+
+  // A real managed account stamps the deterministic per-account routing prefix.
+  const withAccount = cliproxyContributor(
+    "claudex",
+    { accountId: "14137047-1111-2222-3333-444455556666", model: "gpt-5.6-sol" },
+    daemonDir
+  );
+  assert.ok(withAccount);
+  assert.equal(withAccount.env.ANTHROPIC_MODEL, "acc14137047/gpt-5.6-sol");
+  assert.equal(withAccount.env.CLAUDE_CODE_SUBAGENT_MODEL, "acc14137047/gpt-5.6-sol");
+
+  // No account → the effective model is unprefixed (keyless OpenRouter/Kimi path).
+  const noAccount = cliproxyContributor("claudex", { model: "gpt-5.6-sol" }, daemonDir);
+  assert.ok(noAccount);
+  assert.equal(noAccount.env.ANTHROPIC_MODEL, "gpt-5.6-sol");
+  assert.equal(noAccount.env.CLAUDE_CODE_SUBAGENT_MODEL, "gpt-5.6-sol");
+
+  // The System sentinel is the host identity — treated as no account (no prefix).
+  const system = cliproxyContributor(
+    "claudemix",
+    { accountId: SYSTEM_ACCOUNT_ID, model: "claude-sonnet-4" },
+    daemonDir
+  );
+  assert.ok(system);
+  assert.equal(system.env.ANTHROPIC_MODEL, "claude-sonnet-4");
+
+  // A non-managed launcher never contributes.
+  assert.equal(cliproxyContributor("claude", { accountId: "abc-1", model: "x" }, daemonDir), null);
 });
 
 test("composeExtraEnv: cliproxy env wins on collision, accountId preserved, unsets concatenated", () => {

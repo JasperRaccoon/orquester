@@ -6,6 +6,8 @@ import type {
   BrowserClientMessage,
   BrowserSuggestionsResponse,
   BrowserSummary,
+  CliProxyProviderStatus,
+  CliProxySeedRequest,
   CliProxyStatus,
   CreateAccountRequest,
   CreateBrowserRequest,
@@ -59,7 +61,7 @@ import type {
   UsageWindow,
   WorkspaceSummary
 } from "@orquester/api";
-import { BROWSER_FRAME_TYPE_JPEG } from "@orquester/api";
+import { BROWSER_FRAME_TYPE_JPEG, SYSTEM_ACCOUNT_ID } from "@orquester/api";
 import { RegistryService } from "./registry";
 import { BrowserError, BrowserManager } from "./browsers";
 import { UrlWatcher } from "./url-watcher";
@@ -69,6 +71,10 @@ import type { ActivityCause } from "./ansi-activity";
 import { TodoError, TodoListManager } from "./todos";
 import { Tmux, tmuxAvailable, tmuxVersionOk } from "./tmux";
 import { CliProxyManager } from "./cliproxy";
+import { CLIPROXY_RELEASE, defaultFetchTarball, installBinary } from "./cliproxy-install.ts";
+import { setOpenRouterKey } from "./cliproxy-secrets.ts";
+import { writeProjections } from "./cliproxy-files.ts";
+import { accountPrefix } from "./cliproxy-seed.ts";
 import { Broadcaster } from "./broadcaster";
 import { AccountError, AccountsService } from "./accounts";
 import { AgentAccountsService } from "./agent-accounts.ts";
@@ -101,6 +107,7 @@ import {
   browserProfilesDir,
   browsersIndexPath,
   createDefaultAppConfig,
+  cliproxyDir,
   cliproxyHomeDir,
   cliproxyStateFile,
   cliproxyTokenFile,
@@ -132,6 +139,7 @@ import { assertInsideFsRoot, FsSandboxError } from "@orquester/config/fs";
 import fastifyStatic from "@fastify/static";
 import websocketPlugin from "@fastify/websocket";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
+import { spawn } from "node:child_process";
 import { createReadStream, createWriteStream, existsSync, readFileSync, type WriteStream } from "node:fs";
 import { mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir, platform as osPlatform } from "node:os";
@@ -547,9 +555,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
 
   // The managed CLIProxyAPI process backing the claudex/claudemix launchers.
   // All process control + I/O is injected: on a tmux host the proxy runs in a
-  // dedicated (reaper-immune) service session; otherwise there is no managed
-  // proxy in Phase 1 (spawnDirect returns null → the launchers stay disabled).
+  // dedicated (reaper-immune) service session; on a no-tmux host the direct
+  // child fallback runs it (non-persistent, dies with the daemon). Install pulls
+  // the pinned stock release, SHA-256-verified.
   const cliproxyTmux = tmuxAvailable() && tmuxVersionOk() ? tmux : null;
+  const cliproxyRunDir = cliproxyDir(resolved.daemonDir);
   const cliproxy = new CliProxyManager({
     daemonDir: resolved.daemonDir,
     appdir: paths.baseDir,
@@ -558,12 +568,27 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     adapters: {
       probe: probeCliProxy,
       tmux: cliproxyTmux,
-      spawnDirect: () => null,
+      // No-tmux fallback: a direct, non-detached child that reads config.yaml from
+      // the cliproxy run dir. Output is discarded (the daemon owns its own logs);
+      // it dies with the daemon (tmux is the durable path).
+      spawnDirect: (bin, args) => {
+        const child = spawn(bin, args, { cwd: cliproxyRunDir, detached: false, stdio: "ignore" });
+        child.on("error", (error) => console.error("cliproxy spawnDirect failed", error));
+        return { kill: () => child.kill() };
+      },
       liveDependentSessionCount: () =>
         sessions
           .list()
           .filter((s) => (s.refId === "claudex" || s.refId === "claudemix") && s.status === "running").length,
-      now: () => Date.now()
+      now: () => Date.now(),
+      // Pull + verify + atomically install the pinned stock binary (no source build).
+      install: async () => {
+        const { version } = await installBinary(resolved.daemonDir, { fetchTarball: defaultFetchTarball });
+        return { version: version || CLIPROXY_RELEASE.version };
+      },
+      // Shared, non-credential Claude config `seedHome` copies into each dedicated
+      // launcher home: the host's CLAUDE_CONFIG_DIR, else ~/.claude.
+      systemClaudeDir: () => env.CLAUDE_CONFIG_DIR || join(resolved.vars.userhome, ".claude")
     }
   });
 
@@ -708,8 +733,16 @@ export function composeExtraEnv(a: LaunchEnv | null, b: LaunchEnv | null): Launc
  * config home, plus the per-launch model pin when one was chosen (the base URL
  * and default model ride the registry entry's env file). Null for every other
  * launcher.
+ *
+ * Per-launch account routing (spec §2): when the launch names a real managed
+ * account (not the System sentinel / undefined), the effective model is prefixed
+ * with that account's deterministic routing prefix (`<accountPrefix>/<model>`) so
+ * the proxy routes it to exactly that seeded credential. The prefix is computed
+ * identically at seed time ({@link accountPrefix}), so no stored map is needed. A
+ * keyless pick (e.g. claudex → OpenRouter/Kimi) carries no account and stays
+ * unprefixed.
  */
-function cliproxyContributor(
+export function cliproxyContributor(
   entryId: string,
   ctx: { accountId?: string; model?: string },
   daemonDir: string
@@ -724,8 +757,10 @@ function cliproxyContributor(
     // from the same file at exec, so a missing projection is not fatal here.
   }
   if (ctx.model) {
-    env.ANTHROPIC_MODEL = ctx.model;
-    env.CLAUDE_CODE_SUBAGENT_MODEL = ctx.model;
+    const routesToAccount = Boolean(ctx.accountId) && ctx.accountId !== SYSTEM_ACCOUNT_ID;
+    const effectiveModel = routesToAccount ? `${accountPrefix(ctx.accountId)}/${ctx.model}` : ctx.model;
+    env.ANTHROPIC_MODEL = effectiveModel;
+    env.CLAUDE_CODE_SUBAGENT_MODEL = effectiveModel;
   }
   return { env };
 }
@@ -788,7 +823,21 @@ interface CliProxyRouteManager {
     cfg: { defaultModel?: string; backgroundModel?: string },
     force: boolean
   ): Promise<{ ok: boolean; affectedSessions?: number }>;
+  seedProvider(
+    req: { provider: "codex" | "claude"; accountId: string },
+    read: (provider: "codex" | "claude", accountId: string) => Promise<unknown>
+  ): Promise<CliProxyProviderStatus>;
 }
+
+/** The subset of {@link AgentAccountsService} the seed route drives — structural
+ *  so route tests can inject a stand-in without the whole service. */
+interface CliProxyRouteAccounts {
+  homePath(agent: string, id: string): string;
+  markProxyOwned(id: string, owned: boolean): Promise<void>;
+}
+
+/** On-disk credential filename per managed agent (the seed route's read source). */
+const MANAGED_CRED_FILENAME = { claude: ".credentials.json", codex: "auth.json" } as const;
 
 /**
  * Register the `/api/cliproxy` surface (spec §3). Read routes (status, models)
@@ -799,9 +848,14 @@ interface CliProxyRouteManager {
  */
 export function registerCliProxyRoutes(
   app: FastifyInstance,
-  opts: { manager: CliProxyRouteManager; mode: "local" | "remote"; daemonDir: string }
+  opts: {
+    manager: CliProxyRouteManager;
+    mode: "local" | "remote";
+    daemonDir: string;
+    agentAccounts: CliProxyRouteAccounts;
+  }
 ): void {
-  const { manager, mode, daemonDir } = opts;
+  const { manager, mode, daemonDir, agentAccounts } = opts;
   // Returns true (and sends the 403) when a mutation is attempted over the
   // unauthenticated unix socket.
   const refusedOnSocket = (reply: FastifyReply): boolean => {
@@ -849,13 +903,58 @@ export function registerCliProxyRoutes(
     return manager.setConfig({ defaultModel: body.defaultModel, backgroundModel: body.backgroundModel }, Boolean(body.force));
   });
 
-  // Phase-2 surface (credential seeding + OpenRouter key). Reserved so the shape
-  // is stable; wired in the daemon build plan (Part 1). Credentials come from
-  // seeding managed accounts by conversion — there is no device-auth login flow.
-  const pending = async (_request: unknown, reply: FastifyReply) =>
-    reply.code(501).send({ error: "not yet implemented" });
-  app.post("/api/cliproxy/accounts/seed", pending);
-  app.post("/api/cliproxy/openrouter/key", pending);
+  // Seed a managed account's credential into the proxy by conversion (spec §4 —
+  // the sole credential path, no device-auth flow). The daemon reads that
+  // account's on-disk credential, hands it to the manager (which converts + writes
+  // the prefixed auth file), then marks the account proxy-owned so Orquester's
+  // refresher yields to the proxy (single-refresher owner rule). No secret
+  // material crosses the request.
+  app.post("/api/cliproxy/accounts/seed", async (request, reply) => {
+    if (refusedOnSocket(reply)) return;
+    const body = (request.body ?? {}) as Partial<CliProxySeedRequest>;
+    if (body.provider !== "codex" && body.provider !== "claude") {
+      return reply.code(400).send({ error: "provider must be 'codex' or 'claude'" });
+    }
+    if (typeof body.accountId !== "string" || !body.accountId) {
+      return reply.code(400).send({ error: "accountId is required" });
+    }
+    const provider = body.provider;
+    const accountId = body.accountId;
+    const read = async (p: "codex" | "claude", id: string): Promise<unknown> => {
+      const file = join(agentAccounts.homePath(p, id), MANAGED_CRED_FILENAME[p]);
+      return JSON.parse(await readFile(file, "utf8"));
+    };
+    const status = await manager.seedProvider({ provider, accountId }, read);
+    // Only claim ownership once the credential actually landed — a stale/expired
+    // token is refused (not seeded), so the proxy owns nothing to refresh.
+    if (status.state === "ok") await agentAccounts.markProxyOwned(accountId, true);
+    return status;
+  });
+
+  // Store the OpenRouter API key and re-project config.yaml (spec §3). The key
+  // lives in the config.yaml projection, which the proxy reads only at startup —
+  // so a change is restart-gated: refused while dependent sessions are live unless
+  // forced (disclosure alone is not quiescence, as with disable/config).
+  app.post("/api/cliproxy/openrouter/key", async (request, reply) => {
+    if (refusedOnSocket(reply)) return;
+    const body = (request.body ?? {}) as { key?: string; force?: boolean };
+    const key = typeof body.key === "string" ? body.key.trim() : "";
+    if (!key) return reply.code(400).send({ error: "key is required" });
+    const live = manager.status().activeSessionCount;
+    if (live > 0 && !body.force) {
+      return reply.code(409).send({ ok: false, affectedSessions: live });
+    }
+    const secrets = await setOpenRouterKey(daemonDir, key);
+    // parseCliProxyState falls back to defaults for a missing/partial file.
+    let state = parseCliProxyState(null);
+    try {
+      state = parseCliProxyState(JSON.parse(await readFile(cliproxyStateFile(daemonDir), "utf8")));
+    } catch {
+      // No persisted state yet — the defaults above stand.
+    }
+    await writeProjections(daemonDir, secrets, state);
+    return { ok: true, affectedSessions: live };
+  });
 }
 
 interface Services {
@@ -2188,7 +2287,8 @@ function createServer(
   registerCliProxyRoutes(app, {
     manager: services.cliproxy,
     mode: options.mode,
-    daemonDir: resolved.daemonDir
+    daemonDir: resolved.daemonDir,
+    agentAccounts: services.agentAccounts
   });
 
   // Sessions (PTYs)
