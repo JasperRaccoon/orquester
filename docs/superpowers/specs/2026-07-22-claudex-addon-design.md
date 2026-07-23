@@ -209,10 +209,10 @@ already run in yolo mode on this host (explicit user decision). Stated consequen
 wrapper-bin invocations (`claudex -p` from any session or workflow) run with the same
 full autonomy.
 
-| id | Display name | Main model | Role |
+| id | Display name | Per-launch chips | Role |
 |---|---|---|---|
-| `claudex` | Claude × GPT/Kimi | **picked per launch** (chips: GPT, Kimi, …), default `gpt-5.6-sol` | non-Anthropic escape hatch |
-| `claudemix` | Claude × Mixed | Fable (Claude OAuth via proxy) | mixed-model orchestrator |
+| `claudex` | Claude × GPT/Kimi | **model** (GPT / Kimi, default `gpt-5.6-sol`) + **Codex account** | non-Anthropic escape hatch |
+| `claudemix` | Claude × Mixed | **Claude account** (which account backs the Fable main loop) | mixed-model orchestrator |
 
 **Per-launch model choice for `claudex` — honest plumbing inventory.** The launcher row
 shows model chips (visually like the account chips, but a **parallel new
@@ -243,6 +243,38 @@ Net-new pieces, all in scope:
   key (per the adapter-load rule in AGENTS.md), `openTab` extended to carry `model`, and
   the launcher-menu filter changed to render visible-but-disabled entries (today it
   filters `enabled` out entirely).
+
+**Per-launch ACCOUNT choice (the same UX as stock Claude/Codex chips) — via prefix
+routing.** Routing through the proxy is by model name, so to pin *which* seeded account a
+launch uses, each seeded account carries a stable CLIProxyAPI **`prefix`** (source-
+confirmed: `Auth.Prefix` "namespaces models for routing", and it works for file-backed
+OAuth — §4). A request for `<prefix>/<model>` targets exactly that account's credential.
+Mechanism, reusing the existing per-agent account machinery:
+
+- `CreateSessionRequest.accountId` (already exists for stock agents) is honored for
+  `claudex`/`claudemix` too. The launcher shows an **account chip row per launcher, from
+  the relevant provider family** — `claudex` → the seeded **Codex** accounts (this is
+  where **2+ Codex accounts** are chosen); `claudemix` → the seeded **Claude** accounts
+  (which account runs the Fable main loop). `System` = no prefix → the proxy round-robins
+  that provider's seeded credentials (or uses the single one).
+- The prefix is **deterministic from the accountId** (e.g. `acc<first-8-hex-of-uuid>`,
+  slug-safe, no stored map needed — computed identically at seed time and launch time).
+- The cliproxy contributor maps `(entryId, accountId, model)` → the prefixed model in the
+  launch env: `claudex` + Codex account X + `gpt-5.6-sol` → `ANTHROPIC_MODEL=accX/gpt-5.6-sol`
+  (Kimi picks ignore the account — OpenRouter is keyless); `claudemix` + Claude account Y
+  → `ANTHROPIC_MODEL=accY/<default claude model>` pinning the main loop to Y. `System`
+  leaves the model unprefixed. The chosen `accountId` is **persisted on the session
+  record** (like `model`) so a reattach re-pins the same account; the tab badge can show
+  both the model and a short account label.
+- **Scope note for v1:** each launcher's account row selects its *primary* provider's
+  account (Codex for claudex, Claude for claudemix). Secondary providers in a claudemix
+  session (its `gpt-*`/`kimi` subagents) use the **starred** Codex account / the OpenRouter
+  key by default; a secondary per-provider account picker is a later refinement, not v1.
+- Chips list **seeded** accounts (an account must be seeded into the proxy to be routable);
+  an un-seeded managed account can be offered with a one-click "seed & use" that seeds it
+  on first pick. Distinct-id launchers still don't get the managed-account *home* env — the
+  account choice here only selects the proxy credential via prefix, never a
+  `CLAUDE_CONFIG_DIR` (§2 dedicated homes stand).
 
 **Default-model precedence has one source of truth: `cliproxy.json.defaultModel`.**
 The Settings dropdown writes it; env-file regeneration (`ANTHROPIC_MODEL`) follows from
@@ -380,9 +412,12 @@ configuration:
 - `POST /api/cliproxy/login/cancel` — `{ flowId }`.
 - `POST /api/cliproxy/accounts/seed` — **the primary credential path** (spike-proven):
   `{ provider: "codex"|"claude", accountId }` → the daemon reads that managed account's
-  credential and **converts** it into CLIProxyAPI's auth-file schema, writing it 0600
-  into `auth/` (see §4 for the field mappings). No browser flow. Auto-discovered by the
-  proxy without restart. Returns the resulting provider status.
+  credential and **converts** it into CLIProxyAPI's auth-file schema, **stamps the
+  deterministic `prefix` (`acc<first-8-hex-of-accountId>`)** so the account is per-launch
+  routable (§2), writes it 0600 into `auth/`, and marks the account proxy-owned (§4 owner
+  rule). No browser flow. Auto-discovered by the proxy without restart. Returns the
+  resulting provider status. **N accounts per provider** are supported — each seed adds a
+  distinctly-prefixed credential; unprefixed (`System`) requests round-robin across them.
 - `POST /api/cliproxy/openrouter/key` — set/import the OpenRouter key (stored in
   `secrets.json`, projected into `config.yaml`; the projection requires a proxy
   restart, so this route is restart-gated with the same force-confirm treatment —
@@ -416,7 +451,11 @@ degrade, not crash the daemon.
 **Spike-updated decision (2026-07-23): seed by file conversion first.** The sub-spike
 proved both Codex and Claude OAuth seed into the proxy by converting the existing managed-
 account credential into CLIProxyAPI's auth-file schema and dropping it in `auth/` — **no
-browser/device flow**. This is the primary path (`POST /api/cliproxy/accounts/seed`):
+browser/device flow**. Each seeded file also carries a **`prefix`** (`Auth.Prefix`, source-
+confirmed to route file-backed OAuth: a `<prefix>/<model>` request targets that exact
+credential) = `acc<first-8-hex-of-accountId>`, which is what makes per-launch account
+selection work (§2) and lets multiple accounts of one provider coexist and be chosen
+individually. This is the primary path (`POST /api/cliproxy/accounts/seed`):
 
 - **Codex** → CLIProxyAPI `CodexTokenStorage` (`internal/auth/codex/token.go`), from the
   managed `auth.json`:
@@ -484,6 +523,14 @@ shared proxy panel:
   one-click picker of the existing Claude/Codex accounts (spike-proven file conversion,
   no browser); a **device-code dialog** (resumable, copyable code, expiry countdown,
   cancel) is the fallback for accounts not in Orquester; OpenRouter import/paste.
+- **Per-launch account chips on the two launchers** (mirroring stock Claude/Codex): the
+  `claudex` row shows a `System` chip + each seeded **Codex** account; the `claudemix`
+  row shows `System` + each seeded **Claude** account. The chip sets
+  `CreateSessionRequest.accountId`; the daemon maps it to the account's prefix (§2). This
+  is a launcher-id → provider-family mapping in `NewTabMenu` (the existing chip block is
+  gated on `accounts.filter(a => a.agent === agent.id)`, which is empty for these ids —
+  so it needs the family remap, not just a re-render). `claudex` shows the model row (GPT/
+  Kimi) *and* the account row; the account row is dimmed when Kimi is the picked model.
 - Default-model dropdown for `claudex` (sets the default launcher chip): **always
   renders the persisted selection even when the catalog fetch fails** ("proxy offline —
   list may be stale"); never blanks a saved value. Launcher-row model chips (GPT / Kimi

@@ -36,7 +36,7 @@ packages/api/src/index.ts                  MODIFY  CliProxySeedRequest + provide
 docs/superpowers/spikes/2026-07-23-claudex-phase2-live.md   CREATE  Task 9 live-verification log
 ```
 
-Phase 3 (separate plan): Settings "Model proxy" UI, provider chips, seed-from-account picker, device-code fallback dialog + `login/*` routes (needs a management-API sub-spike first — see spec §4 note), model chips + `NewTabMenu` disabled rendering, `ApiClient`/store wiring, usage scanner/watcher extension. Phase 4: claudemix canonical workflow + §8 harness-routing checks + deploy + cost measurement.
+Phase 3 (separate plan): Settings "Model proxy" UI, provider chips, seed-from-account picker, device-code fallback dialog + `login/*` routes (needs a management-API sub-spike first — see spec §4 note), model chips + **per-launcher account chips** (claudex→Codex family, claudemix→Claude family; the `NewTabMenu` launcher-id→provider-family remap of spec §5) + `NewTabMenu` disabled rendering, `ApiClient`/store wiring, usage scanner/watcher extension. (Phase 2 lands the daemon half of per-launch account routing — the prefix on seeds and the contributor mapping — so Phase 3's chips are pure UI over an already-working mechanism.) Phase 4: claudemix canonical workflow + §8 harness-routing checks + deploy + cost measurement.
 
 ---
 
@@ -128,8 +128,9 @@ test("installBinary rejects a sha256 mismatch and does not install", async () =>
 **Interfaces:**
 - Produces (pure functions — no I/O, fully unit-testable with synthetic blobs):
   - `function jwtClaims(jwt: string): Record<string, unknown>` — base64url-decode the payload segment; `{}` on malformed.
-  - `function codexStorageFromAuthJson(authJson: unknown): { file: string; storage: object }` — from the managed Codex `auth.json` shape `{tokens:{id_token,access_token,refresh_token,account_id}, last_refresh}`, produce the `CodexTokenStorage` object per spec §4 (`type:"codex"`, `email`/`account_id` from the id_token claim `https://api.openai.com/auth`, `expired` = RFC3339 of the access_token `exp`), and a filename `codex-<sanitized-email>.json`. Throws `Error("codex auth.json missing tokens")` if shape invalid.
-  - `function claudeStorageFromCredentials(creds: unknown): { file: string; storage: object }` — from `{claudeAiOauth:{accessToken,refreshToken,expiresAt}}`, produce `ClaudeTokenStorage` (`type:"claude"`, `expired` = RFC3339 of `expiresAt` ms, `id_token`/`email` blank), filename `claude-<accountId>.json` (accountId passed alongside).
+  - `function accountPrefix(accountId: string): string` — the deterministic per-account routing prefix (§2): `"acc" + accountId.replace(/-/g, "").slice(0, 8)`. Slug-safe (matches `MODEL_NAME_RE` path segment). Computed identically here (seed) and in the contributor (launch), so no stored map is needed.
+  - `function codexStorageFromAuthJson(authJson: unknown, accountId: string): { file: string; storage: object }` — from the managed Codex `auth.json` shape `{tokens:{id_token,access_token,refresh_token,account_id}, last_refresh}`, produce the `CodexTokenStorage` object per spec §4 (`type:"codex"`, `email`/`account_id` from the id_token claim `https://api.openai.com/auth`, `expired` = RFC3339 of the access_token `exp`) **plus a top-level `prefix: accountPrefix(accountId)`** (CLIProxyAPI flattens it to `Auth.Prefix`), and a filename `codex-<accountPrefix>.json`. Throws `Error("codex auth.json missing tokens")` if shape invalid.
+  - `function claudeStorageFromCredentials(creds: unknown, accountId: string): { file: string; storage: object }` — from `{claudeAiOauth:{accessToken,refreshToken,expiresAt}}`, produce `ClaudeTokenStorage` (`type:"claude"`, `expired` = RFC3339 of `expiresAt` ms, `id_token`/`email` blank) **plus `prefix: accountPrefix(accountId)`**, filename `claude-<accountPrefix>.json`.
   - `function accessTokenFreshMs(storage: { expired: string }): number` — ms until the `expired` timestamp (negative if past) — the caller warns/blocks on a stale token to avoid triggering a proxy refresh (dual-refresher).
   - RFC3339 formatting helper (avoid `Date.now()` in pure funcs — take the token's own exp; no wall-clock needed for conversion).
 
@@ -159,17 +160,25 @@ test("codex conversion maps fields from tokens + id_token claim", () => {
   assert.match(file, /^codex-.*\.json$/);
 });
 
-test("claude conversion maps from claudeAiOauth", () => {
+test("claude conversion maps from claudeAiOauth and stamps a routing prefix", () => {
   const creds = { claudeAiOauth: { accessToken: "at", refreshToken: "rt", expiresAt: 1784791605497 } };
-  const { file, storage } = claudeStorageFromCredentials(creds, "acct-uuid") as any;
+  const { file, storage } = claudeStorageFromCredentials(creds, "14137047-98b2-4cf1") as any;
   assert.equal(storage.type, "claude");
   assert.equal(storage.access_token, "at");
   assert.equal(storage.expired, "2026-07-23T07:26:45Z"); // RFC3339 of 1784791605497 ms
-  assert.match(file, /^claude-acct-uuid\.json$/);
+  assert.equal(storage.prefix, "acc14137047");           // acc + first 8 hex, dashes stripped
+  assert.match(file, /^claude-acc14137047\.json$/);
+});
+
+test("two accounts of one provider get distinct prefixes → individually routable", () => {
+  const a = accountPrefix("65eebd90-01d1-4063-b743-c4a5713f5519");
+  const b = accountPrefix("14137047-98b2-4cf1-9b54-b18a22a85a62");
+  assert.notEqual(a, b);
+  assert.equal(a, "acc65eebd90"); // "acc" + first 8 hex of the dash-stripped uuid
 });
 
 test("invalid shapes throw, not silently produce garbage", () => {
-  assert.throws(() => codexStorageFromAuthJson({}), /missing tokens/);
+  assert.throws(() => codexStorageFromAuthJson({}, "x"), /missing tokens/);
   assert.throws(() => claudeStorageFromCredentials({}, "x"), /missing claudeAiOauth/);
 });
 ```
@@ -338,6 +347,7 @@ test("persistence-lost proxy is re-parented under tmux once sessions drain, not 
     - `POST /api/cliproxy/accounts/seed` — body `CliProxySeedRequest`; reads the managed credential via `agentAccounts`, calls `cliproxy.seedProvider(...)`, then `agentAccounts.markProxyOwned(accountId, true)` (owner rule). Returns provider status.
     - `POST /api/cliproxy/openrouter/key` — validates, stores via Phase-1 `setOpenRouterKey`, re-projects config, restart-gated (force-confirm) since the OpenRouter key is a `config.yaml` projection.
   - `seedHome` is now invoked from `enable()` (Task 4), so the `cliproxyContributor` `CLAUDE_CONFIG_DIR` points at a genuinely-seeded home — no separate wiring needed here, but add an assertion in Task 9.
+  - **Per-launch account routing (spec §2):** extend `cliproxyContributor(entryId, ctx, daemonDir)` (Phase-1) so that when `ctx.accountId` is a real account (not `System`/undefined), it prefixes the effective model with that account's prefix — `ANTHROPIC_MODEL`/`CLAUDE_CODE_SUBAGENT_MODEL` = `` `${accountPrefix(ctx.accountId)}/${effectiveModel}` `` (import `accountPrefix` from Task 2). For `claudex` a Kimi pick ignores the account (OpenRouter is keyless — no prefix); for `claudemix` the account prefixes the default Claude main-loop model. `ctx.accountId` already flows to the contributor (Phase-1 launch context) and is already persisted on the session record for stock agents, so reattach re-pins the same account with no new persistence work. Add a unit test: contributor with `{accountId:"14137047-…", model:"gpt-5.6-sol"}` on `claudex` → env `ANTHROPIC_MODEL=acc14137047/gpt-5.6-sol`; with `accountId` undefined → unprefixed.
 
 - [ ] **Step 1: Write the failing tests:** seed route on remote transport calls `seedProvider` + `markProxyOwned` and returns status; seed route on the Unix socket → 403; openrouter/key route stores + re-projects and is restart-gated.
 - [ ] **Step 2: Run to verify failure** → FAIL.
@@ -364,7 +374,8 @@ test("persistence-lost proxy is re-parented under tmux once sessions drain, not 
 This exercises the **real daemon modules** end-to-end against a real proxy, without touching the live daemon: a tiny `tsx` script calls `installBinary` → `writeProjections` → `codexStorageFromAuthJson`/`claudeStorageFromCredentials` → writes auth files → spawns the installed binary on a **spare port (18317)** with a throwaway `--config` under `~/claudex-p2/` → probes `/v1/models` → runs `claude -p` on `gpt-5.6-sol` and `kimi-k3`. Mirrors the Task-0 spike but through Phase-2 code, proving the modules compose. Seed only while access tokens are fresh (reuse the spike's freshness check); scrub the dir (live tokens) after.
 
 - [ ] **Step 1:** Write and run the `tsx` harness script (spare port, throwaway appdir); capture `/v1/models` + the two functional replies.
-- [ ] **Step 2:** Verify the seeded auth files were produced by `cliproxy-seed.ts` (not hand-rolled), config by `renderConfigYaml`, binary by `installBinary` (sha256 match logged).
+- [ ] **Step 1b (prefix routing — the per-account feature):** seed **both** Claude accounts (`7f46e0…` and `14137047…`) via `claudeStorageFromCredentials`, each with its `accountPrefix`. Then confirm `<prefixA>/claude-…` and `<prefixB>/claude-…` route to the *distinct* accounts — e.g. hit the proxy with each prefixed model and assert the two responses come from different accounts (distinguish via the account email in a probe, or a per-account rate-limit header). This is the live proof of spec §2's per-launch account selection. (Seed only while both access tokens are fresh; the 2nd Claude account was fresh in the sub-spike.)
+- [ ] **Step 2:** Verify the seeded auth files were produced by `cliproxy-seed.ts` (not hand-rolled) **and carry the `prefix` field**, config by `renderConfigYaml`, binary by `installBinary` (sha256 match logged).
 - [ ] **Step 3:** Kill the spare proxy; **scrub `~/claudex-p2/`** (holds live tokens). Confirm no managed-account auth file was rewritten (no refresh/rotation).
 - [ ] **Step 4:** Record results in the log doc; commit the log. (Do **not** run the 30-min cost measurement — deferred pending explicit go-ahead.)
 
@@ -372,7 +383,7 @@ This exercises the **real daemon modules** end-to-end against a real proxy, with
 
 ## Self-Review (performed at write time)
 
-- **Spec coverage (Phase-2 scope):** §1 stock-binary install + rollback → Task 1; §4 seed-by-conversion + owner rule → Tasks 2/3/5/7; §1 enable orchestration + seedHome wiring (Phase-1 carryover) → Task 4; §3 seed/openrouter routes + socket refusal → Task 7; §1 persistence-lost re-parent (Phase-1 review note) → Task 6; provider status/§3 → Task 5. Deferred to Phase 3/4 (stated): UI, wire-client, launcher rendering, usage attribution, device-auth `login/*` (needs a management-API sub-spike per spec §4), claudemix workflow + §8 routing, deploy, cost measurement.
+- **Spec coverage (Phase-2 scope):** §1 stock-binary install + rollback → Task 1; §4 seed-by-conversion + owner rule + **per-account prefix** → Tasks 2/3/5/7; §2 per-launch **account routing** (prefix stamping + contributor mapping — daemon half) → Tasks 2/5/7; §1 enable orchestration + seedHome wiring (Phase-1 carryover) → Task 4; §3 seed/openrouter routes + socket refusal → Task 7; §1 persistence-lost re-parent (Phase-1 review note) → Task 6; provider status/§3 → Task 5; live prefix-routing proof → Task 9. Deferred to Phase 3/4 (stated): the account/model **chip UI** (daemon half done here), wire-client, launcher rendering, usage attribution, device-auth `login/*` (needs a management-API sub-spike per spec §4), claudemix workflow + §8 routing, deploy, cost measurement.
 - **Placeholder scan:** none — the only injected fakes are test doubles; production adapters are named (`defaultFetchTarball`, real `spawnDirect`).
 - **Type consistency:** `CliProxyProviderStatus`/`CliProxyStatus` (Phase-1 `@orquester/api`) is what Task 5 populates and Task 7 serves; `installBinary(daemonDir, deps, expectedSha?)` identical in Tasks 1/4/7; `CliProxySeedRequest` single-sourced (Task 5) and consumed (Task 7); converter return `{file, storage}` identical in Tasks 2/5.
 - **Decomposition note:** UI + claudemix + deploy are intentionally separate plans — each Phase here produces daemon-testable software, and Phase 2 ends at "a real proxy the daemon can enable, seed, and serve," verified by Task 9.
