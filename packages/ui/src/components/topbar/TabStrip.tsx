@@ -13,6 +13,19 @@ import {
   type ProjectTab
 } from "../../store/app";
 
+/**
+ * Short chip label for a proxy session's backing model, e.g. `gpt-5.6-sol` →
+ * `sol`, `kimi-k3` → `kimi`. Mirrors the launcher-menu chip so a tab reads the
+ * same as the "+" pick it came from. Rendered from `SessionSummary.model` (the
+ * daemon-resolved record), so it survives refresh/reattach — never client state.
+ */
+const shortModelLabel = (model: string): string => {
+  const lower = model.toLowerCase();
+  if (lower.includes("kimi")) return "kimi";
+  const parts = model.split(/[/-]/).filter(Boolean);
+  return parts[parts.length - 1] ?? model;
+};
+
 /** Small inline editor shown in place of a tab label while renaming. */
 const TabRenameInput: React.FC<{
   initial: string;
@@ -112,6 +125,12 @@ export const TabStrip: React.FC = () => {
         const accountLabel = accountId
           ? shortAccountLabel(agentAccounts?.accounts.find((a) => a.id === accountId)?.label)
           : undefined;
+        // `model` is set by the daemon only for the claudex/claudemix proxy
+        // launchers, so its presence gates the backing-model badge.
+        const modelLabel =
+          tab.type === "session" && tab.session.model
+            ? shortModelLabel(tab.session.model)
+            : undefined;
         const editing = editingId === tab.id;
         const title = isSession
           ? tab.session.title
@@ -187,6 +206,14 @@ export const TabStrip: React.FC = () => {
             ) : (
               <span className="max-w-[140px] truncate">{title}</span>
             )}
+            {modelLabel ? (
+              <span
+                className="ml-1 rounded bg-amber-500/15 px-1 text-[10px] text-amber-300"
+                title={tab.type === "session" ? tab.session.model : undefined}
+              >
+                {modelLabel}
+              </span>
+            ) : null}
             {accountLabel ? (
               <span className="ml-1 rounded bg-neutral-800 px-1 text-[10px] text-neutral-400">
                 {accountLabel}
