@@ -1,8 +1,10 @@
 # claudex addon — Claude Code harness × GPT via managed CLIProxyAPI
 
-Date: 2026-07-22 · Status: approved design, hardened through four tri-model review
-rounds (two primed, two blind — Claude, Codex, Kimi K3) + Moonshot-error research ·
-pre-implementation
+Date: 2026-07-22 (spike-updated 2026-07-23) · Status: approved design, hardened through
+four tri-model review rounds (two primed, two blind — Claude, Codex, Kimi K3) + Moonshot
+research, then updated by the Task-0 spike + OAuth-seeding sub-spike
+(`docs/superpowers/spikes/2026-07-22-claudex-spike-findings.md`). **Phase 1 built + green
+(288/288 daemon tests); Phase 2 planned in `docs/superpowers/plans/`.**
 
 ## Purpose
 
@@ -40,10 +42,18 @@ auto-refresh; multiple accounts round-robin.
 
 Owns everything under `<appdir>/daemon/cliproxy/`:
 
+> **Spike-updated (2026-07-23, `docs/superpowers/spikes/2026-07-22-claudex-spike-findings.md`):**
+> the whole chain was proven on this VPS against the **stock** CLIProxyAPI v7.2.95 release
+> binary. The Kimi empty-content bug is present in source but **never triggers under Claude
+> Code** (Claude Code pairs text with tool calls), so the source-build/patch apparatus is
+> **removed** — we ship the verified stock binary. Codex and Claude OAuth **seed by pure file
+> conversion** of the existing managed-account credentials (no browser/device flow). Only the
+> management `secret-key` is hashed in `config.yaml`; the local API key and provider keys stay
+> plaintext there — so `secrets.json` stays authoritative for the management secret.
+
 ```
 cliproxy/
-  bin/cli-proxy-api   # patched source build, SHA-256-verified inputs (see below + §7)
-  src/                # pinned upstream source tag + applied patch set (build workspace)
+  bin/cli-proxy-api   # stock release binary, SHA-256-verified download (see below)
   bin.prev/           # previous verified binary, kept for rollback
   config.yaml         # generated, 0600 (NB: the proxy HASHES the plaintext secret-key
                       # in here at startup — config.yaml is not a secret store we can
@@ -56,43 +66,32 @@ cliproxy/
   claude-home-claudex/    # dedicated CLAUDE_CONFIG_DIR per entry (see §2 — two homes,
   claude-home-claudemix/  # never one; cross-entry resume isolation)
   logs/               # proxy request log, rotated by the proxy's own log config, 0600
-  cliproxy.json       # manager state: enabled, pinned version + sha256, exact pinned Go
-                      # version + sha256, default model, backgroundModel, port
-                      # (loopback-only override, default 8317), last-known model
-                      # catalog + asOf (chip source while proxy is offline), tested
-                      # claude-CLI version (see below)
+  cliproxy.json       # manager state: enabled, pinned version + sha256, default model,
+                      # backgroundModel, port (loopback-only override, default 8317),
+                      # last-known model catalog + asOf (chip source while proxy is
+                      # offline), tested claude-CLI version (see below)
 ```
 
-**Binary install.** While the patch set is non-empty (see §7), the proxy is built from
-the pinned upstream **source** tag with our patches applied; once the fix lands upstream
-the manager reverts to plain release-binary installs. All inputs are integrity-verified:
-pinned version + SHA-256 digest for the source tarball and for the Go toolchain tarball
-(hardcoded per bump, updated deliberately — note upstream is already on Go 1.26, so the
-pinned tag dictates the toolchain version); download over HTTPS to a private temp file,
-verify, build, then atomically install; keep the prior verified binary in `bin.prev/`
-for rollback. Reject unsupported OS/arch. A pinned tag alone is not integrity
-verification. **The build is pinned and reproducible** (not fully hermetic — say what
-is pinned by what): the toolchain and source tarballs are pinned by our SHA-256 digests;
-the manager invokes the verified toolchain by absolute path
-(`<appdir>/daemon/cliproxy/go/bin/go`) with `GOTOOLCHAIN=local` (without that, Go
-auto-downloads whatever toolchain the module requests, bypassing the digest pin); the Go
-version is a **single exact pinned version** recorded in `cliproxy.json` alongside the
-digests, not a floor. Module dependencies are fetched in a dedicated substate via
-`go mod download` — integrity-checked by the pinned tag's `go.sum` + the Go checksum
-database, not by our digests — then compiled offline (`GOPROXY=off`). The build runs
-under the hardened systemd sandbox (`ProtectSystem=strict`), so **every Go working dir
-is pinned into the appdir explicitly** — `GOCACHE`, `GOMODCACHE`, `GOPATH`, `GOTMPDIR`
-all under `<appdir>/daemon/cliproxy/` — never left to `$HOME` defaults that merely
-happen to be writable. Build timeout and disk-space thresholds are named constants
-decided in the implementation plan, not improvised. Version bumps are
-**manual-only** (no auto-update checks); a patch conflict on bump leaves `bin/`
-untouched — the old proxy keeps running — and the error names the failing patch/hunk.
-Enable is **async and idempotent**: it returns immediately and the build runs through
-substates (fetch / verify / patch / modules / compile) surfaced via the status `detail`
-field (the state stays `building` — the enum and the substates are one mechanism, not
-two), with a bounded timeout, a disk-space precheck, and diagnostic output retained on
-failure. A daemon restart mid-build discards the partial `src/` workspace and restarts
-the build cleanly; `bin/` is only ever replaced atomically after a successful compile.
+**Binary install (stock release, no build).** The manager downloads the **pinned
+CLIProxyAPI release binary** (`CLIProxyAPI_<ver>_linux_amd64.tar.gz`) over HTTPS to a
+private temp file, verifies it against a **hardcoded per-platform SHA-256 digest** (bumped
+deliberately with the version), extracts, and installs atomically; the prior verified
+binary is kept in `bin.prev/` for rollback. Reject unsupported OS/arch. A pinned tag alone
+is not integrity verification — the digest is. No Go toolchain, no source, no compile: the
+spike confirmed the stock binary is sufficient (Kimi included) for the Claude Code harness.
+Version bumps are **manual-only** (no auto-update checks). Enable is **async and
+idempotent**: it returns immediately and runs through substates (fetch / verify / install)
+surfaced via the status `detail` field (state stays `downloading`), with a bounded timeout,
+a disk-space precheck, and diagnostic output retained on failure; a daemon restart mid-
+download discards the partial temp file and `bin/` is only ever replaced atomically after a
+verified extract.
+
+**Kimi patch is defense-in-depth, not shipped.** The one-line translator fix (omit
+`content` when `tool_calls` present) stays documented in `deploy/cliproxy-patches/` but is
+**not applied** — it would only matter for a client that emits bare tool-call turns, which
+Claude Code does not. If a real `content:""` 400 is ever observed in the request log, that's
+the trigger to revisit a patched build; until then the stock binary ships. (Re-verify on any
+version bump — the bug line could change upstream.)
 
 **Generated `config.yaml`**: `host: 127.0.0.1`, `port: 8317`, one generated `api-keys`
 entry (`crypto.randomBytes`), `remote-management.secret-key` (generated;
@@ -111,12 +110,15 @@ owned client-side (`CLAUDE_CODE_ALWAYS_ENABLE_EFFORT=1` + per-launch effort env/
 temperature range [0,1]). The §8 spike measures real cost per slot.
 
 **Secrets are stable — and persisted outside `config.yaml`.** CLIProxyAPI **hashes the
-plaintext `secret-key` inside `config.yaml` at startup**, so the config file cannot be
-read back for management-API auth after a restart; the daemon persists its own plaintext
-copies in `secrets.json` (0600, hardened writes, zod-schema'd). **`secrets.json` is the
-single authoritative store** — for the local API key, the management secret, AND the
-OpenRouter key (config regeneration must re-emit the key, so it cannot live "in
-config.yaml" any more than the management secret can); `config.yaml` and the `token`
+plaintext `secret-key` (management secret) inside `config.yaml` at startup** — spike-
+confirmed — so it cannot be read back for management-API auth after a restart. (The
+`api-keys` local key and provider keys stay *plaintext* in `config.yaml`, also spike-
+confirmed — so the "can't read it back" reason applies specifically to the management
+secret; `secrets.json` is nonetheless the authoritative store for all of them, to avoid
+parsing config back and to keep one source for rotation.) The daemon persists its own
+plaintext copies in `secrets.json` (0600, hardened writes, zod-schema'd). **`secrets.json`
+is the single authoritative store** — for the local API key, the management secret, AND
+the OpenRouter key (config regeneration must re-emit them); `config.yaml` and the `token`
 file are derived projections rewritten from it. The local API key and management secret
 are generated once and **persist across all ordinary config rewrites and restarts** —
 live sessions snapshot their env at launch, so key regeneration would silently break
@@ -376,11 +378,16 @@ configuration:
   a second flow **for the same provider** supersedes the previous one — flows for
   different providers run concurrently).
 - `POST /api/cliproxy/login/cancel` — `{ flowId }`.
+- `POST /api/cliproxy/accounts/seed` — **the primary credential path** (spike-proven):
+  `{ provider: "codex"|"claude", accountId }` → the daemon reads that managed account's
+  credential and **converts** it into CLIProxyAPI's auth-file schema, writing it 0600
+  into `auth/` (see §4 for the field mappings). No browser flow. Auto-discovered by the
+  proxy without restart. Returns the resulting provider status.
 - `POST /api/cliproxy/openrouter/key` — set/import the OpenRouter key (stored in
   `secrets.json`, projected into `config.yaml`; the projection requires a proxy
   restart, so this route is restart-gated with the same force-confirm treatment —
-  unlike device-auth completions, which land in `auth/` and are hot-discovered by the
-  proxy without restart; the spike confirms that hot-discovery behavior).
+  unlike credential seeding / device-auth completions, which land in `auth/` and are
+  hot-discovered by the proxy without restart — spike-confirmed).
 - `POST /api/cliproxy/login/callback` — `{ flowId, callbackUrlOrCode }`: relay for
   providers whose OAuth completes via a browser redirect to localhost. The proxy is
   loopback-only and Caddy exposes only Orquester, so a redirect can never reach the
@@ -404,27 +411,49 @@ default loaders, and path helpers in `@orquester/config`**, per the repo's rule 
 raw `JSON.parse` output never reaches typed code — a partial or older file must
 degrade, not crash the daemon.
 
-### 4. Credentials: proxy-owned device auth first; import is opt-in with a caveat
+### 4. Credentials: seed by conversion from managed accounts (primary); device-auth fallback
 
-**Reversal of the earlier "import first" decision, for OAuth providers.** Cloning a
-managed account's OAuth blob into the proxy creates two independent refreshers of the
-same (rotating, effectively single-use) refresh token — Orquester's account service
-already serializes refreshes precisely because concurrent refreshers invalidate each
-other. So:
+**Spike-updated decision (2026-07-23): seed by file conversion first.** The sub-spike
+proved both Codex and Claude OAuth seed into the proxy by converting the existing managed-
+account credential into CLIProxyAPI's auth-file schema and dropping it in `auth/` — **no
+browser/device flow**. This is the primary path (`POST /api/cliproxy/accounts/seed`):
 
-- **Primary: separate device authorization owned by the proxy** (management API
-  `codex-auth-url`/`anthropic-auth-url` + status polling, or `-codex-device-login`
-  parsing). One-time URL+code per provider; tokens then self-refresh under a single
-  owner (the proxy). UI shows the code copyable + deep link, and the dialog re-renders
-  from `login/status` on open so a reconnected client resumes instead of hanging.
-- **Optional: import from a managed account**, offered with an explicit warning that the
-  source account's refresh chain may be invalidated and it should not remain in dual use.
-  (Kept because it's occasionally the only path, e.g. providers throttling new device
-  auths.)
-- **OpenRouter**: plain API key, no refresh semantics — import from OpenCode's store
-  (`~/.local/share/opencode/auth.json`, `openrouter.key` — confirmed present on this
-  host) or paste in Settings. Stored in `secrets.json` (the authoritative store);
-  `config.yaml` carries only the projected copy.
+- **Codex** → CLIProxyAPI `CodexTokenStorage` (`internal/auth/codex/token.go`), from the
+  managed `auth.json`:
+
+  | target field | source |
+  |---|---|
+  | `id_token` / `access_token` / `refresh_token` | `tokens.{id_token,access_token,refresh_token}` |
+  | `account_id` | id_token claim `https://api.openai.com/auth`.`chatgpt_account_id` |
+  | `email` | id_token claim `email` · `last_refresh` ← `last_refresh` |
+  | `type` | literal `"codex"` · `expired` ← RFC3339 of access_token `exp` |
+
+- **Claude** → `ClaudeTokenStorage` (`internal/auth/claude/token.go`), from the managed
+  `.credentials.json`: `access_token`←`claudeAiOauth.accessToken`,
+  `refresh_token`←`claudeAiOauth.refreshToken`, `expired`←RFC3339 of
+  `claudeAiOauth.expiresAt` (ms→s), `type`=`"claude"`; `id_token`/`email` may be blank.
+
+- **OpenRouter**: plain API key, no refresh — import from OpenCode's store
+  (`~/.local/share/opencode/auth.json`, `openrouter.key` — confirmed present) or paste in
+  Settings. Stored in `secrets.json` (authoritative); `config.yaml` carries the projection.
+
+**The dual-refresher hazard is managed, not avoided by device-auth.** Two independent
+refreshers of the same rotating refresh token invalidate each other. The spike sidestepped
+it by seeding while the source access token was **fresh** (no refresh fired; managed files
+untouched), but that's timing luck, not a design. The **owner rule**: once the proxy holds
+a seeded copy, **Orquester stops refreshing that managed account** (the account service's
+`ensureFreshForUsage`/idle refresh must skip accounts marked proxy-owned), so exactly one
+refresher exists. Seeding records the `(provider, accountId)` → proxy-owned mapping;
+un-seeding restores Orquester's ownership. A re-seed is always available if the chains ever
+desync.
+
+**Device-auth is the fallback**, not the primary — for accounts not already in Orquester,
+or if conversion ever fails on a future credential format. It uses the proxy management
+API (`codex-auth-url`/`anthropic-auth-url` + status polling) via the `login/*` routes; the
+`login/callback` relay covers redirect-style flows since the proxy is loopback-only behind
+Caddy. (Spike note: the management `status` path 404'd, but seeding sidesteps the
+management API entirely; the login/* fallback still needs the management-API endpoints
+verified in a Phase-2 step before that fallback UI is built.)
 
 Multiple accounts of one provider round-robin automatically. **Health probes are
 per-credential, not per-provider**: with N accounts round-robining, a provider-level
@@ -439,8 +468,8 @@ this design is based on.
 
 **Credential concentration acknowledged**: `auth/` concentrates Codex OAuth + Claude
 OAuth + OpenRouter key in one place, alongside (not instead of) the managed-account
-stores. Rotation story: revoke upstream, delete the auth file, re-run device auth.
-`/api/cliproxy` mutations carry the same remote-auth strength as account-management
+stores. Rotation story: revoke upstream, delete the auth file, re-seed (or re-run device
+auth). `/api/cliproxy` mutations carry the same remote-auth strength as account-management
 routes.
 
 ### 5. Settings UI (`packages/ui`)
@@ -451,9 +480,10 @@ shared proxy panel:
 
 - Manager state incl. `degraded`, with **per-provider status chips**
   (codex ✓ / claude ✓ / openrouter ✗) each with last-verified time.
-- Connect actions per provider: device-code dialog (resumable, copyable code, expiry
-  countdown, cancel), opt-in import-from-managed-account (with the dual-refresher
-  warning), OpenRouter import/paste.
+- Connect actions per provider: **primary is "Seed from managed account"** — a
+  one-click picker of the existing Claude/Codex accounts (spike-proven file conversion,
+  no browser); a **device-code dialog** (resumable, copyable code, expiry countdown,
+  cancel) is the fallback for accounts not in Orquester; OpenRouter import/paste.
 - Default-model dropdown for `claudex` (sets the default launcher chip): **always
   renders the persisted selection even when the catalog fetch fails** ("proxy offline —
   list may be stale"); never blanks a saved value. Launcher-row model chips (GPT / Kimi
@@ -480,51 +510,32 @@ shared proxy panel:
   proxy request log (§3 `logs/tail`) is the interim answer. Proper attribution is
   future work.
 
-### 7. Kimi K3 / Moonshot: the translator patch is a hard gate
+### 7. Kimi K3 / Moonshot: **no patch needed under Claude Code** (spike-resolved)
 
-Research (empirical + CLIProxyAPI source) established: Moonshot's API rejects any
+Research (empirical + CLIProxyAPI source) established that Moonshot's API rejects any
 historical assistant message whose `content` is an empty string — even with `tool_calls`
-— and CLIProxyAPI's Anthropic→OpenAI translator **manufactures exactly that shape**
-(`content: ""`) for every tool-only assistant turn. Claude-harness agents emit bare
-tool-call turns constantly, so unpatched, Kimi subagents fail on essentially every deep
-tool loop ("…message at position N with role 'assistant' must not be empty").
-OpenRouter does not sanitize (it relays Moonshot's 400 verbatim), provider-pinning to
-OSS hosts trades this for ~87% broken tool-call *generation*, Moonshot-direct hits the
-same validator, and the proxy's `payload.override` config cannot reach the `messages`
-array. The only correct layer is the translator itself: omit `content` when
-`tool_calls` are present (spec-valid OpenAI; the fix OpenCode/OpenClaw shipped), ideally
-gated on kimi/moonshot model names, plus `reasoning_content` handling if thinking mode
-is ever enabled.
+— and that CLIProxyAPI's Anthropic→OpenAI translator emits exactly that shape
+(`content: ""`) for a **bare** tool-call turn (no text). The original failure was
+OpenCode-specific.
 
-**Build strategy (explicit, resolves the fork-vs-upstream contradiction): we ship a
-patched build from day one — Kimi is configured from the start, not gated on upstream.**
+**The spike (2026-07-23) reproduced this NOT under Claude Code.** The `content: ""` line
+is still present in v7.2.95 source, but Claude Code **pairs preamble text with its tool
+calls** (`hasContent` is true), so the empty-content branch is never taken. A 24-tool-call
+Kimi loop through the stock binary completed with **zero** `must not be empty` / 400s.
 
-1. The translator fix lives in-repo as a documented patch file
-   (`deploy/cliproxy-patches/*.patch`: omit `content` when `tool_calls` present, gated
-   on kimi/moonshot model names, plus the `reasoning_content` guard). Applied to the
-   pinned upstream source tag. **The gate's model-string scope is specified, not
-   assumed**: §1 aliases `kimi-k3` → `moonshotai/kimi-k3`, so the string visible at the
-   translator's evaluation point may be the client alias or the resolved upstream name
-   depending on where aliasing happens in the pipeline — the patch matches **both
-   forms**, and patch-level unit tests exercise both (a gate that matches only the
-   wrong form fails silently with a green suite: Kimi breaks exactly as before).
-2. `CliProxyManager` installs from a **source build**: download the pinned source
-   tarball (SHA-256-verified, same integrity rules as §1), apply the patch set, build
-   with the **single exact pinned Go toolchain version** from §1 (fetched as an
-   SHA-256-verified upstream tarball into the appdir — the ONLY toolchain source; no
-   preinstalled/distro alternative, which would break reproducibility and isn't
-   provisioned anyway), install atomically with the same `bin.prev/` rollback.
-   Patch-application failure on a version bump is a loud manager error (`error:
-   patch conflict`), never a silent fall-through to an unpatched binary.
-3. Upstream the fix in parallel (tiny, spec-correct, benefits everyone). Once a pinned
-   upstream release contains it, the patch file is dropped and the manager reverts to
-   plain release-binary installs — the patch set shrinking to empty is the exit
-   criterion for the source-build path.
+**Decision: ship the stock binary; do not patch.** For the Claude Code harness specifically
+(both claudex and claudemix), Kimi works on the unmodified release. The one-line translator
+fix (omit `content` when `tool_calls` present, gated on kimi/moonshot model names, matching
+both the alias and resolved model strings) is kept **documented in
+`deploy/cliproxy-patches/`** as defense-in-depth, to be applied only if a real `content:""`
+400 is ever observed in the request log (e.g. from a subagent that emits a bare tool call).
+Re-verify on any version bump — the bug line could change upstream. This removes the entire
+Go-toolchain / source-build / patch-apply apparatus from Phase 2 (see §1).
 
 Additional Kimi operational constraints for workflows: temperature range [0,1] (clamp
 via `payload.override` — top-level params ARE config-reachable), `tool_choice:
 "required"` is k3-only (not k2.6), and streaming can leak raw `<|tool_call…|>` control
-tokens — the spike checks the response translator strips them.
+tokens — the Phase-2 daemon-integration check confirms the response translator strips them.
 
 ### 8. Mixed-model workflows (`claudemix`) — verification spike gates the build
 
@@ -534,16 +545,22 @@ proxy routes each subagent to its provider. Canonical example: Fable plans, a Ki
 agent does the frontend/design work, Sol agents execute, then a three-model review panel
 judges the result.
 
-The spike (separate checkout / on deploy — never the live daemon serving this
-workspace) must verify:
+**Spike-resolved (2026-07-23):** the transport is proven on all three families — one proxy
+instance seeded (by conversion) with Codex + Claude + OpenRouter served `gpt-5.6-sol`,
+`claude-fable-5`/`claude-sonnet-5`, and `kimi-k3` from one `/v1/models`, and each was driven
+functionally by `claude --model <x> -p`. What remains is **harness-level, not proxy-level**,
+and is verified once `claudemix` runs against the daemon (a separate checkout / on deploy —
+never the live daemon serving this workspace):
 
 1. Non-Anthropic model strings accepted by Workflow `agent()` `opts.model` /
-   `CLAUDE_CODE_SUBAGENT_MODEL` / agent frontmatter — which channel is reliable
-   (fallback order: frontmatter agentType → env → opts.model).
-2. Claude-subscription OAuth through CLIProxyAPI for the main loop (auth, streaming,
-   tool use).
+   `CLAUDE_CODE_SUBAGENT_MODEL` / agent frontmatter — which channel routes per-subagent
+   (fallback order: frontmatter agentType → env → opts.model). (Transport proven; this is
+   the harness routing knob.)
+2. ~~Claude-subscription OAuth through the proxy for the main loop~~ — **DONE** (spike:
+   `claude --model claude-sonnet-4-5` functional via seeded Claude OAuth).
 3. **Real cost measurement**: a ~30-min claudex session vs a native Codex session —
-   specifically whether haiku-slot calls escape the effort override scoping of §1.
+   whether haiku-slot calls stay on the cheap `backgroundModel`. (Deferred pending explicit
+   go-ahead — it spends real subscription quota.)
 4. **Unknown-model error surface**: exact behavior when a workflow references a model
    absent from the catalog (harness retry? silent fallback? opaque subagent error) —
    feeds a pre-flight check: at claudemix launch, referenced/configured models are
@@ -553,9 +570,9 @@ workspace) must verify:
    review quorum (default 2-of-3), and failures surfaced in the review output; the
    harness does not retry subagent provider errors, so the script owns degradation. The
    §Verification dry-run exercises a **forced** 1-of-3 reviewer failure.
-6. Kimi path (against the patched build): empty-content fix verified end-to-end on a
-   deep tool loop, control-token leakage checked, prompt-caching/latency on the
-   `claude-*` path acceptable.
+6. ~~Kimi empty-content on a deep tool loop~~ — **DONE** (spike: 24-tool-call loop, zero
+   400s on the stock binary). Still confirm control-token stripping and `claude-*`
+   caching/latency during the Phase-2 dry-run.
 
 Known trade-off: in `claudemix` sessions all Anthropic traffic transits the local proxy;
 a proxy or CLI-version break can take that session type down. Stock `claude` stays
@@ -580,7 +597,8 @@ the inverse failure (CLI update breaking the proxy path first).
 - `config.yaml` and credential mutations get **the same hardening as the env files**
   (atomic writes, parent-realpath check, symlink refusal) — it holds more secrets than
   they do; 0600 alone is not the bar.
-- Binary: pinned version + SHA-256 verification + rollback copy (see §1).
+- Binary: pinned **stock release** version + per-platform SHA-256 verification + rollback
+  copy (see §1). No source build / Go toolchain (removed per the spike).
 - `/api/cliproxy` sits behind the daemon's standard remote bearer auth; login flows
   expire, are cancellable, and are single-in-flight per provider.
 
