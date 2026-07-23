@@ -170,7 +170,9 @@ In `browsers.ts`, insert after `dispatchTouch()` (before `shutdown()`):
 ```ts
   /** Loopback debug port of the tab's (already running) Chromium — for the
    *  DevTools asset proxy. Deliberately does NOT launch anything: assets are
-   *  only fetched once the iframe renders, i.e. after the tab is up. */
+   *  only fetched once the iframe renders (after the tab is up), and the asset
+   *  route is unauthenticated — a request without credentials must never be
+   *  able to start a Chromium process. */
   async devtoolsPort(id: string): Promise<number> {
     const tab = this.mustGet(id);
     const pending = this.chromes.get(tab.record.projectPath);
@@ -213,13 +215,13 @@ git commit -m "feat(daemon): expose Chromium remote-debugging port for DevTools 
 ### Task 2: DevTools frontend asset proxy route
 
 **Files:**
-- Modify: `apps/daemon/src/devtools.ts` (add `sanitizeDevtoolsPath`)
+- Modify: `apps/daemon/src/devtools.ts` (add `sanitizeDevtoolsPath` + `redactUrlTokens`)
 - Modify: `apps/daemon/src/devtools.test.ts` (add tests)
-- Modify: `apps/daemon/src/index.ts` (new route after the `DELETE /api/browsers/:id` route ~line 2031; SPA-fallback reserved prefixes ~line 2531)
+- Modify: `apps/daemon/src/index.ts` (new route after the `DELETE /api/browsers/:id` route ~line 2031; SPA-fallback reserved prefixes ~line 2531; log serializer ~line 659)
 
 **Interfaces:**
 - Consumes: `services.browsers.devtoolsPort(id)` (Task 1), `BrowserError` (already imported in index.ts for the browser CRUD routes).
-- Produces: `GET /devtools-frontend/:browserId/*` — streams Chrome's `/devtools/*` assets. Task 5's iframe loads `/devtools-frontend/<id>/inspector.html?...`.
+- Produces: `GET /devtools-frontend/:browserId/*` — streams Chrome's `/devtools/*` assets. Task 5's iframe loads `/devtools-frontend/<id>/inspector.html?...`. Also `redactUrlTokens(url: string): string` (from `devtools.js`), used by the request-log serializer.
 
 - [ ] **Step 1: Write the failing tests for the path sanitizer**
 
@@ -284,7 +286,79 @@ export function sanitizeDevtoolsPath(rest: string): string | null {
 Run: `pnpm --filter @orquester/daemon exec node --import tsx --test src/devtools.test.ts`
 Expected: PASS (4 tests).
 
-- [ ] **Step 5: Add the proxy route to `index.ts`**
+- [ ] **Step 5: Write the failing tests for log-token redaction**
+
+The DevTools iframe URL carries the credential **percent-encoded** inside its `?wss=` value
+(`…inspector.html?wss=host%2Fws-devtools%2F<id>%3Ftoken%3D<cred>`). The existing serializer regex
+(`[?&]token=`) does not match that form, so without this fix every `/devtools-frontend/*`
+inspector.html request would log the credential — breaking the repo's "token never lands in logs"
+invariant.
+
+Append to `apps/daemon/src/devtools.test.ts`:
+
+```ts
+import { redactUrlTokens } from "./devtools.js";
+
+test("redactUrlTokens redacts the plain ?token= form", () => {
+  assert.equal(
+    redactUrlTokens("/ws-devtools/abc?token=SECRET"),
+    "/ws-devtools/abc?token=[redacted]"
+  );
+  assert.equal(
+    redactUrlTokens("/api/fs/download?path=x&token=SECRET"),
+    "/api/fs/download?path=x&token=[redacted]"
+  );
+});
+
+test("redactUrlTokens redacts the percent-encoded token inside the DevTools wss= value", () => {
+  assert.equal(
+    redactUrlTokens("/devtools-frontend/abc/inspector.html?wss=host%2Fws-devtools%2Fabc%3Ftoken%3DSECRET"),
+    "/devtools-frontend/abc/inspector.html?wss=host%2Fws-devtools%2Fabc%3Ftoken%3D[redacted]"
+  );
+});
+
+test("redactUrlTokens leaves token-free URLs untouched", () => {
+  assert.equal(redactUrlTokens("/api/browsers?projectPath=/x"), "/api/browsers?projectPath=/x");
+});
+```
+
+Run: `pnpm --filter @orquester/daemon exec node --import tsx --test src/devtools.test.ts`
+Expected: FAIL — `redactUrlTokens` is not exported.
+
+- [ ] **Step 6: Implement `redactUrlTokens` and swap the serializer to it**
+
+Append to `apps/daemon/src/devtools.ts`:
+
+```ts
+/**
+ * Redact credentials from a request URL before it reaches the logs: the plain
+ * `?token=` form (WS auth + /api/fs/download) AND its percent-encoded form
+ * `token%3D`, which appears inside the DevTools iframe's nested `?wss=` value
+ * on /devtools-frontend inspector.html requests — the plain-form regex alone
+ * would log the credential there.
+ */
+export function redactUrlTokens(url: string): string {
+  return url
+    .replace(/([?&]token=)[^&]*/gi, "$1[redacted]")
+    .replace(/(token%3D)[^&]*/gi, "$1[redacted]");
+}
+```
+
+In `apps/daemon/src/index.ts`, replace the request serializer body (~line 659):
+
+```ts
+        // Strip credentials from request logs (TLS protects them on the wire,
+        // but they must never land in plaintext logs): the WS/download ?token=
+        // and its percent-encoded form inside the DevTools iframe's ?wss= value.
+        req(request: { method: string; url: string }) {
+          return { method: request.method, url: redactUrlTokens(request.url) };
+        }
+```
+
+Run: `pnpm --filter @orquester/daemon exec node --import tsx --test src/devtools.test.ts`
+Expected: PASS (7 tests).
+
+- [ ] **Step 7: Add the proxy route to `index.ts`**
 
 Add imports at the top of `apps/daemon/src/index.ts` (with the other `node:` imports):
 
@@ -295,7 +369,7 @@ import { request as httpRequest, type IncomingMessage } from "node:http";
 and (with the local imports):
 
 ```ts
-import { sanitizeDevtoolsPath } from "./devtools.js";
+import { redactUrlTokens, sanitizeDevtoolsPath } from "./devtools.js";
 ```
 
 Insert after the `DELETE /api/browsers/:id` route (inside `createServer`, so `services`/`app` are in scope):
@@ -349,7 +423,7 @@ Insert after the `DELETE /api/browsers/:id` route (inside `createServer`, so `se
   );
 ```
 
-- [ ] **Step 6: Reserve the new prefixes in the SPA fallback**
+- [ ] **Step 8: Reserve the new prefixes in the SPA fallback**
 
 In the `setNotFoundHandler` block (~line 2531), extend `isApi`:
 
@@ -363,12 +437,12 @@ In the `setNotFoundHandler` block (~line 2531), extend `isApi`:
         url.startsWith("/ws-devtools");
 ```
 
-- [ ] **Step 7: Typecheck + tests**
+- [ ] **Step 9: Typecheck + tests**
 
 Run: `pnpm check` — expected clean.
 Run: `pnpm --filter @orquester/daemon test` — expected PASS.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
 git add apps/daemon/src/devtools.ts apps/daemon/src/devtools.test.ts apps/daemon/src/index.ts
@@ -496,7 +570,7 @@ git commit -m "feat(daemon): authenticated CDP WebSocket proxy for embedded DevT
 - Modify: `packages/ui/src/lib/panel-sizes.ts` (new section at the end)
 
 **Interfaces:**
-- Consumes: `ApiClient`'s existing `this.transportKind` (`"http" | "unix"`) and `this.connection.endpoint` / `this.connection.password` (exactly as `buildDownloadUrl` uses them).
+- Consumes: `ApiClient`'s existing `this.transportKind` (typed `string`; `"http"` on the HTTP transporter) and `this.connection.endpoint` / `this.connection.password` (exactly as `buildDownloadUrl` uses them).
 - Produces (Task 5 relies on these exact names):
   - `ApiClient.buildDevtoolsUrl(browserId: string): string | null`
   - `DEVTOOLS_SPLIT_DEFAULT = 0.45`, `DEVTOOLS_SPLIT_MIN = 0.2`, `DEVTOOLS_SPLIT_MAX = 0.8`
@@ -880,15 +954,17 @@ Run: `git status` — expected clean tree, all work committed.
 
 This checkout runs inside a live Orquester — do not start a daemon here. On the next deploy (per `DEPLOY_TO_VPS.md`, including `sudo systemctl restart orquester` and the Caddyfile install + `systemctl reload caddy`), verify:
 
-1. Open a project browser tab → toggle DevTools (Braces icon) → the dock opens and the frontend loads (no blank iframe, no CSP errors in the *client* browser's console).
-2. Console: `console.log` from the inspected page appears; evaluating an expression works.
-3. Elements: DOM tree renders; hovering highlights elements in the streamed viewport.
-4. Network: reload the page from the tab toolbar; requests appear with bodies.
-5. Sources: set a breakpoint in a page script; it pauses and steps.
-6. Drag the divider (width persists across a page reload; double-click resets), pop out to a window, close/reopen the tab (iframe remounts and reconnects).
-7. Mobile viewport (or a phone): the toggle swaps to full-screen DevTools and back; the screencast resumes on switch-back.
-8. Regression: element picker, viewport toggle, keyboard/paste input, and tab close (Chromium exits with the last tab) still work — the launch changed from pipe to port.
-9. `node scripts/smoke-web.mjs https://<domain>` passes.
+1. **Load-bearing first check:** with a browser tab open, `curl -fsS -o /dev/null -w '%{http_code}\n' "https://<domain>/devtools-frontend/<tabId>/inspector.html"` → `200`. A 404/502 means this host's Chromium build doesn't bundle the DevTools frontend (headless_shell-style binary) — the feature can't work on that binary; install full Chrome/Chromium.
+2. Open a project browser tab → toggle DevTools (Braces icon) → the dock opens and the frontend loads (no blank iframe, no CSP errors in the *client* browser's console).
+3. Console: `console.log` from the inspected page appears; evaluating an expression works.
+4. Elements: DOM tree renders; hovering highlights elements in the streamed viewport.
+5. Network: reload the page from the tab toolbar; requests appear with bodies.
+6. Sources: set a breakpoint in a page script; it pauses and steps.
+7. Drag the divider (width persists across a page reload; double-click resets), pop out to a window, close/reopen the tab (iframe remounts and reconnects).
+8. Mobile viewport (or a phone): the toggle swaps to full-screen DevTools and back; the screencast resumes on switch-back.
+9. Regression: element picker, viewport toggle, keyboard/paste input, and tab close (Chromium exits with the last tab) still work — the launch changed from pipe to port.
+10. Regression: daemon request logs contain no credential — grep the daemon log for the token after exercising DevTools (`[redacted]` must appear instead).
+11. `node scripts/smoke-web.mjs https://<domain>` passes.
 
 Known accepted quirks (from the spec — do not "fix" in this plan): DevTools' device toolbar fights our viewport emulation; the pop-out URL carries `?token=` into that device's history.
 

@@ -43,8 +43,10 @@ daemon with auth. No custom panel reimplementation.
 
 ### 1. Chromium launch: pipe → loopback debug port (`apps/daemon/src/browsers.ts`)
 
-- Remove `pipe: true`; add `--remote-debugging-port=0` (kernel-assigned, binds `127.0.0.1` only)
-  and `--remote-allow-origins=*` (safe: loopback-only port; real auth is at the daemon).
+- Remove `pipe: true` — puppeteer itself then launches Chromium with `--remote-debugging-port=0`
+  (kernel-assigned, binds `127.0.0.1` only; verified in puppeteer-core's ChromeLauncher, which adds
+  the flag whenever no `--remote-debugging-*` arg is present — do not pass it manually). Add
+  `--remote-allow-origins=*` (safe: loopback-only port; real auth is at the daemon).
 - Read the assigned port back from `browser.wsEndpoint()` and store `debugPort` on the per-project
   `Chrome` entry.
 - Everything else unchanged: sandbox retry, profile dirs, per-project lifecycle, screencast, picker.
@@ -66,6 +68,9 @@ daemon with auth. No custom panel reimplementation.
   endpoints are **not** exposed (they leak page URLs/titles).
 - The daemon strips/normalizes response headers as needed and must add this prefix to the SPA
   fallback's reserved list so unknown paths under it 404 instead of returning `index.html`.
+- The asset route never launches Chromium: an **unauthenticated** request must not be able to
+  allocate host resources. A tab whose Chromium isn't up yet gets a 409; the UI's status-keyed
+  iframe remounts once the tab reaches `running`, so the frame self-heals.
 
 **CDP WebSocket — `GET /ws-devtools/:browserId` (websocket)**
 - Sibling of `/ws-browser`: registered outside `/api` (WS can't set headers), authenticated via
@@ -121,6 +126,11 @@ own).
 
 - The loopback debug port is unauthenticated **on-host** — same trust level as the existing
   scoped-sudo terminal sessions on a single-user box. Note it in AGENTS.md's security section.
+- **Log redaction must cover the encoded token form.** The `inspector.html` request carries the
+  credential percent-encoded inside its `?wss=` value (`…%3Ftoken%3D<cred>`), which the existing
+  `[?&]token=` serializer regex does not match — every DevTools asset request would log the
+  credential. The request serializer must redact both the plain and encoded forms (a pure
+  `redactUrlTokens` helper, unit-tested).
 - Off-host, every DevTools path goes through the daemon: assets are inert Chrome files behind an
   unguessable tab UUID; the CDP WS requires the bearer credential.
 - `--remote-allow-origins=*` is confined to the loopback listener; the daemon strips `Origin`
@@ -146,7 +156,13 @@ own).
 
 ## Verification
 
-- `pnpm check` clean (the pre-commit gate; no test runner in this repo).
+- **Deploy-time risk #1:** the host Chromium must actually serve the bundled DevTools frontend at
+  `/devtools/inspector.html` under `--headless=new` (full Chrome/Chromium builds do; the old
+  `headless_shell` did not). First check after deploy, with a browser tab open:
+  `GET /devtools-frontend/<tabId>/inspector.html` must return 200 — a 404/502 means that binary
+  can't power this feature (shipping our own frontend assets is explicitly out of scope for v1).
+- `pnpm check` clean, plus `pnpm --filter @orquester/daemon test` (the daemon has a node:test
+  suite; the pure proxy helpers are unit-tested there).
 - This checkout runs inside a live Orquester instance — **do not** start a daemon here. Real
   end-to-end verification happens on a deploy or separate checkout: open a browser tab, toggle the
   dock, resize it, pop out, and exercise Console/Elements/Network/Sources against a dev server;
