@@ -48,7 +48,7 @@ tab drag-reorder + inline rename (server-authoritative); a per-project grid view
 with TLS, username+password auth, per-IP login throttling, and tmux persistence; per-workspace
 git/GitHub SSH identities; **browser tabs (Design Mode)** — a server-side headless Chromium per
 project streamed as an interactive tab over a `/ws-browser` channel, with an element picker that
-delivers HTML/CSS/screenshot payloads into agent PTYs, and embedded Chrome DevTools (the browser's own version-matched frontend proxied by the daemon — right-dock split, pop-out window, full-screen on mobile); and an installable **PWA** web client
+delivers HTML/CSS/screenshot payloads into agent PTYs, and embedded Chrome DevTools (the browser's own version-matched frontend proxied by the daemon — right-dock split on desktop, full-screen on mobile); and an installable **PWA** web client
 (service worker + Web Push notifications on agent-session bells).
 
 ---

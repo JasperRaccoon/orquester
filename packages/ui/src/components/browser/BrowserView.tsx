@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ArrowLeft, ArrowRight, Braces, Crosshair, ExternalLink, Keyboard, Monitor, RotateCw, ShieldAlert, Smartphone
+  ArrowLeft, ArrowRight, Braces, Crosshair, Keyboard, Monitor, RotateCw, ShieldAlert, Smartphone
 } from "lucide-react";
 import type { BrowserPickPayload, BrowserStateMessage, BrowserSummary } from "@orquester/api";
 import { useAppStore } from "../../store/app";
@@ -377,19 +377,6 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
           <button type="button" aria-label="Toggle DevTools" onClick={() => setDevtoolsOpen((v) => !v)}
             className={cn("rounded p-1 hover:bg-neutral-800", devtoolsOpen ? "bg-neutral-700 text-neutral-100" : "text-neutral-400")}>
             <Braces size={14} />
-          </button>
-        )}
-        {devtoolsUrl && (
-          <button type="button" aria-label="Open DevTools in new window"
-            onClick={() => {
-              // noopener,noreferrer severs window.opener; the pop-out is still a
-              // same-origin window but the @devtools CSP (connect-src 'self')
-              // contains any credential exfiltration.
-              window.open(devtoolsUrl, `orq-devtools-${browser.id}`, "noopener,noreferrer");
-              setDevtoolsOpen(false);
-            }}
-            className="rounded p-1 text-neutral-400 hover:bg-neutral-800">
-            <ExternalLink size={14} />
           </button>
         )}
         {!isDesktop && (
