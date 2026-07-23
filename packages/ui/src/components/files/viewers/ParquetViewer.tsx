@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { ArrowDown, ArrowUp, Loader2 } from "lucide-react";
 import type { FsParquetResponse } from "@orquester/api";
 import { useApi } from "../../../context/orquester-context";
 import { BinaryCard } from "./BinaryCard";
@@ -224,7 +225,7 @@ export const ParquetViewer: React.FC<{
   );
 };
 
-/** Column header. Task 5 renders it inert; Task 6 adds the sort interaction. */
+/** Column header: click cycles none -> asc -> desc -> none (server-side sort). */
 const HeaderCell: React.FC<{
   name: string;
   type: string;
@@ -232,15 +233,31 @@ const HeaderCell: React.FC<{
   sort: ParquetSort;
   sortLoading: boolean;
   onSort: (update: (prev: ParquetSort) => ParquetSort) => void;
-}> = ({ name, type, width }) => (
-  <div
-    className="flex shrink-0 items-center gap-1 overflow-hidden border-r border-neutral-800/60 px-2"
-    style={{ width }}
-  >
-    <span className="truncate font-semibold text-neutral-300">{name}</span>
-    <span className="truncate text-[10px] text-neutral-600">{type}</span>
-  </div>
-);
+}> = ({ name, type, width, sort, sortLoading, onSort }) => {
+  const active = sort?.column === name;
+  return (
+    <button
+      type="button"
+      title={`Sort by ${name}`}
+      onClick={() =>
+        onSort((prev) => (prev?.column !== name ? { column: name, desc: false } : prev.desc ? null : { column: name, desc: true }))
+      }
+      className="flex shrink-0 items-center gap-1 overflow-hidden border-r border-neutral-800/60 px-2 text-left hover:bg-neutral-800"
+      style={{ width }}
+    >
+      <span className="truncate font-semibold text-neutral-300">{name}</span>
+      <span className="truncate text-[10px] text-neutral-600">{type}</span>
+      {active &&
+        (sortLoading ? (
+          <Loader2 size={10} className="shrink-0 animate-spin text-neutral-400" />
+        ) : sort.desc ? (
+          <ArrowDown size={10} className="shrink-0 text-neutral-400" />
+        ) : (
+          <ArrowUp size={10} className="shrink-0 text-neutral-400" />
+        ))}
+    </button>
+  );
+};
 
 const Cell: React.FC<{ value: unknown }> = ({ value }) => {
   if (value === null) return <span className="italic text-neutral-700">null</span>;
