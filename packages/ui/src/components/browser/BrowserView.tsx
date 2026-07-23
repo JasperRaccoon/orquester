@@ -303,13 +303,13 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
         key={`${browser.id}:${browser.status}`}
         src={devtoolsUrl ?? undefined}
         title="DevTools"
-        // Opaque origin (no allow-same-origin) → cannot read the app's
-        // localStorage/credential (review #2). allow-popups lets DevTools open
-        // its own aux windows. VERIFY at deploy: if the frontend won't run
-        // sandboxed (its own storage is unavailable in an opaque origin), drop
-        // to no sandbox — the @devtools CSP connect-src 'self' still contains
-        // exfiltration. Document whichever holds.
-        sandbox="allow-scripts allow-popups"
+        // NOT sandboxed: verified at deploy that Chrome's real DevTools frontend
+        // requires same-origin (sessionStorage + same-origin subresource loads);
+        // an opaque-origin sandbox breaks it ("SecurityError: sessionStorage" +
+        // "origin 'null' blocked by CORS"). Containment is therefore the
+        // @devtools CSP alone — connect-src/form-action 'self' — so the frontend
+        // can read the same-origin credential but can't exfiltrate it off-origin
+        // (review #2, containment layer 2). Pop-outs use noopener,noreferrer.
         className="h-full w-full border-0 bg-neutral-950"
       />
     );

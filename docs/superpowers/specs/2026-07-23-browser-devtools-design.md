@@ -126,13 +126,14 @@ remote-gated).
   logs. If the frontend mangles the nested query at deploy-time verification, the fallback is a
   **short-lived opaque ticket** (a single-use ~30 s token minted by an authenticated endpoint),
   **not** a raw-credential path segment (which would evade log redaction).
-- **Security containment (the chosen model):** the iframe is `sandbox`ed **without**
-  `allow-same-origin` → opaque origin, so the DevTools frontend cannot read the app's `localStorage`
-  (which holds the reconstructable bearer). Defense-in-depth for the pop-out (a real same-origin
-  window that *can* read `localStorage`): the `@devtools` CSP locks `connect-src`/`form-action` to
-  `'self'`, so the credential can't be exfiltrated off-origin either way. Deploy-time verification
-  must confirm the frontend still runs under the opaque origin; if not, drop the sandbox and rely on
-  the CSP lock, recording which layer is active.
+- **Security containment (active model — resolved at deploy):** the iframe is **not** sandboxed.
+  Deploy verification showed Chrome's real DevTools frontend requires same-origin — an opaque-origin
+  sandbox (no `allow-same-origin`) breaks it with `SecurityError: sessionStorage` and an
+  `origin 'null'` CORS block on its own subresource loads. So the sole containment is the `@devtools`
+  CSP: `connect-src`/`form-action` locked to `'self'`. The frontend (and the same-origin pop-out)
+  can *read* the reconstructable bearer from `localStorage`, but the CSP prevents *exfiltrating* it
+  off-origin (no fetch/WS/form to any other host). Pop-outs additionally use `noopener,noreferrer`.
+  This is the documented layer-2 fallback from the original sandbox-first plan.
 - **Lifecycle:** the iframe is keyed on `browser.status` — when a stopped/crashed tab relaunches,
   the iframe remounts (the DevTools frontend does not auto-reconnect). While the tab is not
   `running`, the pane shows a placeholder instead of the iframe.
