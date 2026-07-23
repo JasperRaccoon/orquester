@@ -16,7 +16,8 @@ import {
   Server,
   Trash2,
   Users,
-  X
+  X,
+  Zap
 } from "lucide-react";
 import type { DaemonConfig } from "@orquester/config";
 import { cn } from "../../lib/cn";
@@ -27,13 +28,15 @@ import { useIsDesktop, useRegistry } from "../../hooks";
 import { useApi, useOrquester } from "../../context/orquester-context";
 import { useAppStore } from "../../store/app";
 import { AgentAccountsSettings } from "./AgentAccountsSettings";
+import { ModelProxySettings } from "./ModelProxySettings";
 
-type Section = "app" | "agents" | "accounts" | "usage" | "github" | "daemon";
+type Section = "app" | "agents" | "modelproxy" | "accounts" | "usage" | "github" | "daemon";
 
 const SECTIONS: { id: Section; label: string; icon: React.ReactNode; desc: string }[] = [
   { id: "app", label: "App", icon: <AppWindow size={16} />, desc: "Titlebar, runtime, active server" },
   { id: "usage", label: "Usage", icon: <Gauge size={16} />, desc: "Top-bar usage widget for Claude Code & Codex" },
   { id: "agents", label: "Agents", icon: <Boxes size={16} />, desc: "Install, update and view harness versions" },
+  { id: "modelproxy", label: "Model proxy", icon: <Zap size={16} />, desc: "Run GPT & Kimi in the Claude Code harness" },
   { id: "accounts", label: "Accounts", icon: <Users size={16} />, desc: "Managed Claude & Codex accounts for launching agents" },
   { id: "github", label: "GitHub", icon: <Github size={16} />, desc: "Connect accounts and per-workspace git identities" },
   { id: "daemon", label: "Daemon", icon: <Server size={16} />, desc: "Workspaces dir, external HTTP access" }
@@ -44,6 +47,8 @@ const renderSection = (id: Section) =>
     <AppSettings />
   ) : id === "agents" ? (
     <AgentsSettings />
+  ) : id === "modelproxy" ? (
+    <ModelProxySettings />
   ) : id === "accounts" ? (
     <AgentAccountsSettings />
   ) : id === "usage" ? (
