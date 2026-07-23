@@ -905,15 +905,29 @@ export function registerCliProxyRoutes(
     return manager.disable(Boolean(body.force));
   });
 
-  app.put("/api/cliproxy/config", async (request, reply) => {
+  app.put("/api/cliproxy/config", async (request, reply): Promise<CliProxyStatus | undefined> => {
     if (refusedOnSocket(reply)) return;
     const body = (request.body ?? {}) as { defaultModel?: string; backgroundModel?: string; force?: boolean };
     for (const m of [body.defaultModel, body.backgroundModel]) {
       if (m !== undefined && !MODEL_NAME_RE.test(m)) {
-        return reply.code(400).send({ error: `invalid model name: ${JSON.stringify(m)}` });
+        reply.code(400).send({ error: `invalid model name: ${JSON.stringify(m)}` });
+        return;
       }
     }
-    return manager.setConfig({ defaultModel: body.defaultModel, backgroundModel: body.backgroundModel }, Boolean(body.force));
+    // A model change re-projects config.yaml, which the proxy reads only at
+    // startup — so it is restart-gated like disable/openrouter: refused (409)
+    // while dependent sessions are live unless forced. On success the route
+    // resolves the full CliProxyStatus the wire contract (setCliProxyConfig)
+    // promises, not the internal {ok, affectedSessions} gate result.
+    const res = await manager.setConfig(
+      { defaultModel: body.defaultModel, backgroundModel: body.backgroundModel },
+      Boolean(body.force)
+    );
+    if (!res.ok) {
+      reply.code(409).send({ ok: false, affectedSessions: res.affectedSessions });
+      return;
+    }
+    return manager.status();
   });
 
   // Seed a managed account's credential into the proxy by conversion (spec §4 —

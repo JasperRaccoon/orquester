@@ -526,7 +526,11 @@ function fakeRouteManager() {
     },
     setConfig: async (cfg: { defaultModel?: string; backgroundModel?: string }, force: boolean) => {
       calls.setConfig.push({ cfg, force });
-      return { ok: true };
+      // Restart-gated like the real manager: refuse while live sessions exist
+      // unless forced.
+      const live = status.activeSessionCount;
+      if (live > 0 && !force) return { ok: false, affectedSessions: live };
+      return { ok: true, affectedSessions: force ? live : 0 };
     },
     seedProvider: async (
       req: { provider: "codex" | "claude"; accountId: string },
@@ -701,6 +705,76 @@ test("openrouter/key route is refused over the unix socket (403)", async () => {
   });
   assert.equal(res.statusCode, 403);
   assert.equal(existsSync(cliproxySecretsFile(daemonDir)), false, "socket refusal writes nothing");
+  await app.close();
+});
+
+test("PUT /api/cliproxy/config: success resolves the full CliProxyStatus (not the {ok} gate result); restart-gated → 409", async () => {
+  const daemonDir = join(mkdtempSync(join(tmpdir(), "orq-cliproxy-config-")), "daemon");
+  const { manager, calls, status } = fakeRouteManager();
+  const { agentAccounts } = fakeAgentAccounts(daemonDir);
+  const app = Fastify();
+  registerCliProxyRoutes(app, { manager, mode: "remote", daemonDir, agentAccounts });
+  await app.ready();
+
+  // Success: the route must return the CliProxyStatus shape the wire contract
+  // promises — providers[]/defaultModel/reasons — not {ok, affectedSessions}.
+  const ok = await app.inject({
+    method: "PUT",
+    url: "/api/cliproxy/config",
+    payload: { defaultModel: "kimi-k3" }
+  });
+  assert.equal(ok.statusCode, 200);
+  const body = ok.json();
+  assert.ok(Array.isArray(body.providers), "providers[] present → it is a CliProxyStatus");
+  assert.ok(Array.isArray(body.reasons), "reasons[] present");
+  assert.equal(typeof body.defaultModel, "string");
+  assert.equal(body.ok, undefined, "the internal gate result must not leak to the wire");
+  assert.deepEqual(calls.setConfig.at(-1), { cfg: { defaultModel: "kimi-k3", backgroundModel: undefined }, force: false });
+
+  // Restart-gated: a live dependent session blocks the change unless forced.
+  status.activeSessionCount = 2;
+  const gated = await app.inject({
+    method: "PUT",
+    url: "/api/cliproxy/config",
+    payload: { defaultModel: "kimi-k3" }
+  });
+  assert.equal(gated.statusCode, 409);
+  assert.equal(gated.json().affectedSessions, 2);
+
+  // Forced through → back to a 200 CliProxyStatus.
+  const forced = await app.inject({
+    method: "PUT",
+    url: "/api/cliproxy/config",
+    payload: { defaultModel: "kimi-k3", force: true }
+  });
+  assert.equal(forced.statusCode, 200);
+  assert.ok(Array.isArray(forced.json().providers));
+
+  // Invalid model name is a client error before the manager is consulted.
+  const bad = await app.inject({
+    method: "PUT",
+    url: "/api/cliproxy/config",
+    payload: { defaultModel: "bad model name!" }
+  });
+  assert.equal(bad.statusCode, 400);
+  await app.close();
+});
+
+test("PUT /api/cliproxy/config is refused over the unix socket (403); the manager is never consulted", async () => {
+  const daemonDir = join(mkdtempSync(join(tmpdir(), "orq-cliproxy-config-local-")), "daemon");
+  const { manager, calls } = fakeRouteManager();
+  const { agentAccounts } = fakeAgentAccounts(daemonDir);
+  const app = Fastify();
+  registerCliProxyRoutes(app, { manager, mode: "local", daemonDir, agentAccounts });
+  await app.ready();
+  const res = await app.inject({
+    method: "PUT",
+    url: "/api/cliproxy/config",
+    payload: { defaultModel: "kimi-k3" }
+  });
+  assert.equal(res.statusCode, 403);
+  assert.match(res.json().error, /HTTP transport/);
+  assert.equal(calls.setConfig.length, 0, "local mutation must not reach the manager");
   await app.close();
 });
 
