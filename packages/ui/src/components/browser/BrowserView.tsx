@@ -46,6 +46,23 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
   const [devtoolsSplit, setDevtoolsSplit] = useState<number>(loadDevtoolsSplit);
   const rowRef = useRef<HTMLDivElement>(null);
 
+  // Default the embedded DevTools' remote screencast OFF: we already render the
+  // page in the left pane, so DevTools' own screencast is a redundant second
+  // view. The frontend reads its `screencastEnabled` setting from localStorage
+  // (shared with the app — the iframe is same-origin, not sandboxed) on load;
+  // seed it before the user opens DevTools. Set-if-unset so anyone who turns it
+  // back on keeps their choice (DevTools then persists `true`).
+  useEffect(() => {
+    if (!devtoolsUrl) return;
+    try {
+      if (localStorage.getItem("screencastEnabled") === null) {
+        localStorage.setItem("screencastEnabled", "false");
+      }
+    } catch {
+      /* storage unavailable — DevTools just starts with its own default */
+    }
+  }, [devtoolsUrl]);
+
   const channel = useMemo(() => api?.browserChannel(), [api]);
   const isDesktop = useIsDesktop();
   // Ref mirror so the subscribe effect's handlers see the current value
