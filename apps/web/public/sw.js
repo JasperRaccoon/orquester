@@ -6,18 +6,23 @@
  *   - /assets/* (content-hashed): cache-first, trimmed to ~60 entries
  *   - root static files (icons, manifest): network-first, cache on success
  * Never-intercepted surfaces: non-GET requests and paths under /api, /events,
- * /ws, /health, /mcp reach the network untouched (auth, NDJSON streams,
- * websockets, tokenized downloads must not be handled by the SW).
+ * /ws, /health, /mcp, /devtools-frontend, /ws-devtools reach the network
+ * untouched (auth, NDJSON streams, websockets, tokenized downloads, and the
+ * proxied Chrome DevTools frontend/CDP must not be handled by the SW — caching
+ * or the offline index.html fallback would corrupt them, surfacing as
+ * "Failed to convert value to 'Response'").
  */
 
-var VERSION = "v3";
+var VERSION = "v4";
 var SHELL_CACHE = "orq-shell-" + VERSION;
 var ASSET_CACHE = "orq-assets-" + VERSION;
 var CURRENT_CACHES = [SHELL_CACHE, ASSET_CACHE];
 var ASSET_CACHE_LIMIT = 60;
 
 // Paths whose GETs must always hit the network directly (no respondWith).
-var BYPASS_PREFIXES = ["/api", "/events", "/ws", "/health", "/mcp"];
+// /devtools-frontend serves Chrome's own DevTools bundle (proxied) and must
+// never be cached or fall back to index.html; /ws-devtools is its CDP socket.
+var BYPASS_PREFIXES = ["/api", "/events", "/ws", "/health", "/mcp", "/devtools-frontend", "/ws-devtools"];
 
 self.addEventListener("install", function (event) {
   // Precache the app shell so the offline navigation fallback (which reads

@@ -22,15 +22,19 @@
     "@orquester/registry": "workspace:*",
     "bcryptjs": "^3.0.3",
     "fastify": "^4.28.1",
+    "hyparquet": "^1.26.2",
+    "hyparquet-compressors": "^1.1.1",
     "node-pty": "^1.1.0",
     "puppeteer-core": "^24.0.0",
     "web-push": "^3.6.7",
+    "ws": "^8.21.0",
     "zod": "^3.25.67"
   },
   "devDependencies": {
     "@types/bcryptjs": "^3.0.0",
     "@types/node": "^22.15.32",
     "@types/web-push": "^3.6.4",
+    "@types/ws": "^8.18.1",
     "tsx": "^4.20.3",
     "typescript": "^5.8.3"
   }

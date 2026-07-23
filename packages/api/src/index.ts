@@ -248,6 +248,27 @@ export interface FsArchiveResponse {
   reason?: string;
 }
 
+/** One column of a parquet file (from GET /api/fs/parquet). */
+export interface ParquetColumn {
+  name: string;
+  /** Human-readable type label, e.g. "INT64" | "STRING" | "TIMESTAMP" | "LIST". */
+  type: string;
+}
+
+export interface FsParquetResponse {
+  /** False when the file can't be parsed (corrupt, exotic codec). */
+  supported: boolean;
+  /** Total rows in the file (not the window). */
+  rowCount: number;
+  columns: ParquetColumn[];
+  /** Window of rows, positional per `columns`. Values are JSON-safe. */
+  rows: unknown[][];
+  /** Echo of the effective (clamped) window offset. */
+  offset: number;
+  /** Why unsupported, when supported is false. */
+  reason?: string;
+}
+
 export interface FsCreateRequest {
   path: string;
   kind: "file" | "dir";

@@ -18,6 +18,7 @@ import {
   armPickerExpression,
   clampBrowserPickPayload
 } from "./browser-pick.js";
+import { parseDebugPort } from "./devtools.js";
 
 export class BrowserError extends Error {
   constructor(message: string, public statusCode = 400) {
@@ -76,6 +77,8 @@ interface Tab {
 interface Chrome {
   browser: Browser;
   sandboxed: boolean;
+  /** Loopback remote-debugging port (DevTools frontend + CDP WS proxy). */
+  debugPort: number;
 }
 
 export class BrowserManager {
@@ -317,6 +320,34 @@ export class BrowserManager {
     }).catch(() => undefined);
   }
 
+  /** Loopback debug port of the tab's (already running) Chromium — for the
+   *  DevTools asset proxy. Deliberately does NOT launch anything: assets are
+   *  only fetched once the iframe renders (after the tab is up), and the asset
+   *  route is unauthenticated — a request without credentials must never be
+   *  able to start a Chromium process. */
+  async devtoolsPort(id: string): Promise<number> {
+    const tab = this.mustGet(id);
+    const pending = this.chromes.get(tab.record.projectPath);
+    if (!pending) throw new BrowserError("Browser tab is not running", 409);
+    return (await pending).debugPort;
+  }
+
+  /** Resolve the CDP endpoint the DevTools frontend attaches to. Routed by our
+   *  stable tab id and resolved at WS-upgrade time so the iframe URL survives
+   *  tab relaunches (Chrome's target id changes; ours doesn't). Rejects unless
+   *  the tab is already running — an authenticated WS must not spawn Chromium
+   *  (matches devtoolsPort + the spec; the DevTools toggle is only offered on a
+   *  running tab, and the asset route would 409 first regardless). */
+  async devtoolsEndpoint(id: string): Promise<{ port: number; targetId: string }> {
+    const tab = this.mustGet(id);
+    const cdp = tab.cdp;
+    if (!cdp || tab.status !== "running") throw new BrowserError("Browser tab is not running", 409);
+    // Target.getTargetInfo with no targetId returns the session's own target.
+    const info = await cdp.send("Target.getTargetInfo");
+    const chrome = await this.chromeFor(tab.record.projectPath);
+    return { port: chrome.debugPort, targetId: info.targetInfo.targetId };
+  }
+
   async shutdown(): Promise<void> {
     for (const tab of this.tabs.values()) {
       for (const sink of tab.sinks) sink.onEnd();
@@ -389,13 +420,23 @@ export class BrowserManager {
     const hash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
     const userDataDir = join(this.opts.profilesDir, hash);
     await mkdir(userDataDir, { recursive: true, mode: 0o700 });
+    // No `pipe: true`: puppeteer then launches with --remote-debugging-port=0
+    // (kernel-assigned, bound to 127.0.0.1), which the embedded-DevTools proxy
+    // needs — CDP over the stdio pipe exposes no endpoint DevTools can attach
+    // to. Deliberately NOT passing --remote-allow-origins: the daemon's proxy
+    // sends no Origin header (so Chrome's CDP origin check passes without an
+    // allowlist); Chrome only checks when an Origin IS present, so a page
+    // probing loopback with an Origin stays rejected. Keep the default.
     const base = {
-      executablePath, userDataDir, pipe: true, headless: true as const,
+      executablePath, userDataDir, headless: true as const,
       defaultViewport: null,
-      args: ["--headless=new", "--no-first-run", "--no-default-browser-check", "--disable-dev-shm-usage", "--mute-audio"]
+      args: [
+        "--headless=new", "--no-first-run", "--no-default-browser-check",
+        "--disable-dev-shm-usage", "--mute-audio"
+      ]
     };
     try {
-      return { browser: await this.tryLaunch(base), sandboxed: true };
+      return await this.launchWith(base, true);
     } catch (error) {
       // Sandbox unavailable (no userns / setuid helper) is the one retryable
       // launch failure — retry unsandboxed and FLAG it; never silently. It can
@@ -405,9 +446,18 @@ export class BrowserManager {
       // reported as "Target closed" / "Protocol error". Probing in tryLaunch()
       // turns the latter into a throw here so both take the unsandboxed path.
       if (!isRetryableSandboxFailure(error)) throw error;
-      const browser = await this.tryLaunch({ ...base, args: [...base.args, "--no-sandbox"] });
-      return { browser, sandboxed: false };
+      return await this.launchWith({ ...base, args: [...base.args, "--no-sandbox"] }, false);
     }
+  }
+
+  private async launchWith(options: Parameters<typeof puppeteer.launch>[0], sandboxed: boolean): Promise<Chrome> {
+    const browser = await this.tryLaunch(options);
+    const debugPort = parseDebugPort(browser.wsEndpoint());
+    if (debugPort === null) {
+      await browser.close().catch(() => undefined);
+      throw new BrowserError("Chromium did not expose a debugging endpoint", 500);
+    }
+    return { browser, sandboxed, debugPort };
   }
 
   // Launch Chromium and force a renderer target to start, so a present-but-broken

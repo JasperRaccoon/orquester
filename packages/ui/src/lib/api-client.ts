@@ -23,6 +23,7 @@ import type {
   FsCapabilitiesResponse,
   FsFilesResponse,
   FsListResponse,
+  FsParquetResponse,
   FsReadResponse,
   FsSearchRequest,
   FsSearchResponse,
@@ -309,6 +310,23 @@ export class ApiClient {
     return this.send("GET", "/api/fs/archive", { query: { path }, signal });
   }
 
+  readParquet(
+    path: string,
+    opts: { offset?: number; limit?: number; orderBy?: string; desc?: boolean } = {},
+    signal?: AbortSignal
+  ): Promise<FsParquetResponse> {
+    return this.send("GET", "/api/fs/parquet", {
+      query: {
+        path,
+        offset: opts.offset,
+        limit: opts.limit,
+        orderBy: opts.orderBy,
+        desc: opts.desc ? "1" : undefined
+      },
+      signal
+    });
+  }
+
   listProjectFiles(path: string, signal?: AbortSignal): Promise<FsFilesResponse> {
     return this.send("GET", "/api/fs/files", { query: { path }, signal });
   }
@@ -352,6 +370,28 @@ export class ApiClient {
       params.set("token", this.connection.password);
     }
     return `${base}/api/fs/download?${params.toString()}`;
+  }
+
+  /**
+   * URL of the embedded DevTools frontend for a browser tab, or null when the
+   * transport can't reach it (the desktop unix socket — same availability as
+   * browser tabs). The frontend assets are proxied from the tab's Chromium;
+   * the ws/wss param points the frontend at the daemon's authenticated CDP
+   * proxy, with the bearer riding as ?token= (the /ws-browser trick). The
+   * token therefore appears in the iframe/pop-out URL — accepted for a
+   * single-user tool; see the design doc's security note.
+   */
+  buildDevtoolsUrl(browserId: string): string | null {
+    if (this.transportKind !== "http") {
+      return null;
+    }
+    const base = this.connection.endpoint.replace(/\/$/, "");
+    const hostPath = `${base.replace(/^https?:\/\//, "")}/ws-devtools/${browserId}`;
+    const wsValue = this.connection.password
+      ? `${hostPath}?token=${encodeURIComponent(this.connection.password)}`
+      : hostPath;
+    const param = base.startsWith("https") ? "wss" : "ws";
+    return `${base}/devtools-frontend/${browserId}/inspector.html?${param}=${encodeURIComponent(wsValue)}`;
   }
 
   /**

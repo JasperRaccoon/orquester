@@ -1,11 +1,16 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ArrowLeft, ArrowRight, Crosshair, Keyboard, Monitor, RotateCw, ShieldAlert, Smartphone
+  ArrowLeft, ArrowRight, Braces, Crosshair, Keyboard, Monitor, RotateCw, ShieldAlert, Smartphone
 } from "lucide-react";
 import type { BrowserPickPayload, BrowserStateMessage, BrowserSummary } from "@orquester/api";
 import { useAppStore } from "../../store/app";
 import { useIsDesktop } from "../../hooks";
 import { cn } from "../../lib/cn";
+import { ResizeHandle } from "../ui/resize-handle";
+import {
+  DEVTOOLS_SPLIT_DEFAULT, DEVTOOLS_SPLIT_MAX, DEVTOOLS_SPLIT_MIN,
+  clampDevtoolsSplit, loadDevtoolsSplit, persistDevtoolsSplit
+} from "../../lib/panel-sizes";
 import { PickComposeSheet } from "./PickComposeSheet";
 
 const VIEWPORT = { desktop: { w: 1280, h: 800 }, mobile: { w: 390, h: 844 } } as const;
@@ -36,6 +41,27 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
   const [picks, setPicks] = useState<BrowserPickPayload[]>([]);
   const [zoom, setZoom] = useState({ scale: 1, tx: 0, ty: 0 });
   const gesture = useRef<{ dist: number; scale: number; tx: number; ty: number; cx: number; cy: number } | null>(null);
+  const devtoolsUrl = useMemo(() => api?.buildDevtoolsUrl(browser.id) ?? null, [api, browser.id]);
+  const [devtoolsOpen, setDevtoolsOpen] = useState(false);
+  const [devtoolsSplit, setDevtoolsSplit] = useState<number>(loadDevtoolsSplit);
+  const rowRef = useRef<HTMLDivElement>(null);
+
+  // Default the embedded DevTools' remote screencast OFF: we already render the
+  // page in the left pane, so DevTools' own screencast is a redundant second
+  // view. The frontend reads its `screencastEnabled` setting from localStorage
+  // (shared with the app — the iframe is same-origin, not sandboxed) on load;
+  // seed it before the user opens DevTools. Set-if-unset so anyone who turns it
+  // back on keeps their choice (DevTools then persists `true`).
+  useEffect(() => {
+    if (!devtoolsUrl) return;
+    try {
+      if (localStorage.getItem("screencastEnabled") === null) {
+        localStorage.setItem("screencastEnabled", "false");
+      }
+    } catch {
+      /* storage unavailable — DevTools just starts with its own default */
+    }
+  }, [devtoolsUrl]);
 
   const channel = useMemo(() => api?.browserChannel(), [api]);
   const isDesktop = useIsDesktop();
@@ -43,12 +69,16 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
   // without resubscribing the stream on viewport-width changes.
   const isDesktopRef = useRef(isDesktop);
   isDesktopRef.current = isDesktop;
+  // Mobile: DevTools takes the whole tab (a side split is hopeless on a phone
+  // and DevTools' UI is dense). The screencast pauses while swapped — no
+  // frames for a hidden canvas; re-subscribing re-primes on switch-back.
+  const devtoolsFullscreen = !isDesktop && devtoolsOpen;
   const vp = VIEWPORT[state?.viewportMode ?? browser.viewportMode];
 
   // Subscribe while active; the canvas keeps its last frame when hidden (grid
   // view shows it frozen). No replay semantic: resubscribe re-primes.
   useEffect(() => {
-    if (!channel || !active) return;
+    if (!channel || !active || devtoolsFullscreen) return;
     const handle = channel.open(browser.id, {
       onFrame: (jpeg) => {
         const seq = ++frameSeq.current;
@@ -88,7 +118,7 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
     return () => handle.close();
     // urlFocused deliberately omitted: resubscribing on focus would flash the stream.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [channel, browser.id, active]);
+  }, [channel, browser.id, active, devtoolsFullscreen]);
 
   // Client coords → server-viewport CSS pixels through letterbox scale + zoom.
   const toPage = useCallback((clientX: number, clientY: number) => {
@@ -276,6 +306,31 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
     void api?.browserSuggestions(browser.projectPath).then((r) => setSuggestions(r.urls)).catch(() => undefined);
   };
 
+  // Keyed on the EVENT-DRIVEN browser.status prop (not the frame-subscription
+  // `state`, which freezes when the mobile swap pauses the stream) so a
+  // relaunched/crashed tab remounts or shows the placeholder. The DevTools
+  // frontend does not auto-reconnect its CDP socket, hence the remount.
+  const devtoolsRunning = browser.status === "running" || browser.status === "starting";
+  const devtoolsFrame = !devtoolsRunning ? (
+      <div className="flex h-full items-center justify-center px-4 text-center text-sm text-neutral-500">
+        DevTools unavailable — the browser is not running
+      </div>
+    ) : (
+      <iframe
+        key={`${browser.id}:${browser.status}`}
+        src={devtoolsUrl ?? undefined}
+        title="DevTools"
+        // NOT sandboxed: verified at deploy that Chrome's real DevTools frontend
+        // requires same-origin (sessionStorage + same-origin subresource loads);
+        // an opaque-origin sandbox breaks it ("SecurityError: sessionStorage" +
+        // "origin 'null' blocked by CORS"). Containment is therefore the
+        // @devtools CSP alone — connect-src/form-action 'self' — so the frontend
+        // can read the same-origin credential but can't exfiltrate it off-origin
+        // (review #2, containment layer 2). Pop-outs use noopener,noreferrer.
+        className="h-full w-full border-0 bg-neutral-950"
+      />
+    );
+
   return (
     <div className="flex h-full w-full flex-col bg-neutral-950">
       <div className="flex h-9 shrink-0 items-center gap-1 border-b border-neutral-800 bg-neutral-900/40 px-2">
@@ -318,6 +373,12 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
           className={cn("rounded p-1 hover:bg-neutral-800", picking ? "bg-neutral-700 text-neutral-100" : "text-neutral-400")}>
           <Crosshair size={14} />
         </button>
+        {devtoolsUrl && (
+          <button type="button" aria-label="Toggle DevTools" onClick={() => setDevtoolsOpen((v) => !v)}
+            className={cn("rounded p-1 hover:bg-neutral-800", devtoolsOpen ? "bg-neutral-700 text-neutral-100" : "text-neutral-400")}>
+            <Braces size={14} />
+          </button>
+        )}
         {!isDesktop && (
           /* Focusing inside a button CLICK is the trusted-gesture path iOS
              reliably raises the soft keyboard for — touchend focus is flaky. */
@@ -334,8 +395,10 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
         )}
       </div>
 
-      <div ref={wrapRef} className="relative min-h-0 flex-1 touch-none overflow-hidden"
-        onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}>
+      <div ref={rowRef} className="flex min-h-0 flex-1">
+        <div ref={wrapRef}
+          className={cn("relative min-h-0 min-w-0 flex-1 touch-none overflow-hidden", devtoolsFullscreen && "hidden")}
+          onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}>
         {!channel ? (
           // No screencast transport (e.g. the desktop unix socket): the browser
           // record exists on the daemon but no frames can stream, so explain
@@ -389,6 +452,43 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
             onClose={() => setPicks([])}
           />
         )}
+        </div>
+        {devtoolsOpen && isDesktop && devtoolsUrl && (
+          <>
+            <ResizeHandle
+              orientation="vertical"
+              aria-label="Resize DevTools"
+              getCurrent={() => {
+                const w = rowRef.current?.getBoundingClientRect().width ?? 0;
+                return w * (1 - devtoolsSplit); // the divider drags the viewport (left) width
+              }}
+              clamp={(next) => {
+                const w = rowRef.current?.getBoundingClientRect().width ?? 0;
+                if (!w) return next;
+                return Math.min(Math.max(next, w * (1 - DEVTOOLS_SPLIT_MAX)), w * (1 - DEVTOOLS_SPLIT_MIN));
+              }}
+              onResize={(next) => {
+                const w = rowRef.current?.getBoundingClientRect().width ?? 0;
+                if (w) setDevtoolsSplit(clampDevtoolsSplit(1 - next / w));
+              }}
+              onCommit={(next) => {
+                const w = rowRef.current?.getBoundingClientRect().width ?? 0;
+                if (!w) return;
+                const fraction = clampDevtoolsSplit(1 - next / w);
+                setDevtoolsSplit(fraction);
+                persistDevtoolsSplit(fraction);
+              }}
+              onReset={() => {
+                setDevtoolsSplit(DEVTOOLS_SPLIT_DEFAULT);
+                persistDevtoolsSplit(DEVTOOLS_SPLIT_DEFAULT);
+              }}
+            />
+            <div className="min-h-0 shrink-0" style={{ width: `${devtoolsSplit * 100}%` }}>
+              {devtoolsFrame}
+            </div>
+          </>
+        )}
+        {devtoolsFullscreen && <div className="min-h-0 min-w-0 flex-1">{devtoolsFrame}</div>}
       </div>
     </div>
   );

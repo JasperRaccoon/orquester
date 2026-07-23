@@ -65,6 +65,7 @@ import type {
 import { BROWSER_FRAME_TYPE_JPEG, SYSTEM_ACCOUNT_ID } from "@orquester/api";
 import { RegistryService } from "./registry";
 import { BrowserError, BrowserManager } from "./browsers";
+import { redactUrlTokens, sanitizeDevtoolsPath } from "./devtools.js";
 import { UrlWatcher } from "./url-watcher";
 import { AgentHooks } from "./agent-hooks";
 import { type ISessionManager, SessionError, createSessionManager } from "./sessions";
@@ -84,6 +85,7 @@ import { UsageService } from "./usage";
 import { UsageTokensScanner } from "./usage-tokens";
 import { createClaudeSource, createCodexSource, readUsagePrefs } from "./usage-sources";
 import { listArchiveEntries } from "./archive";
+import { ParquetRequestError, readParquetWindow } from "./parquet";
 import { resolveZipTool, spawnDirZip } from "./zip";
 import { FsSearchError, listProjectFiles, searchProjectFiles } from "./search";
 import { TerminalControl } from "./mcp/terminal-control.ts";
@@ -138,6 +140,7 @@ import { CHROMIUM_FAMILY_IDS } from "@orquester/registry";
 import { assertInsideFsRoot, FsSandboxError } from "@orquester/config/fs";
 import fastifyStatic from "@fastify/static";
 import websocketPlugin from "@fastify/websocket";
+import { WebSocket as UpstreamWebSocket } from "ws";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import { spawn } from "node:child_process";
 import { createReadStream, createWriteStream, existsSync, readFileSync, type WriteStream } from "node:fs";
@@ -146,6 +149,7 @@ import { homedir, platform as osPlatform } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { stat } from "node:fs/promises";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { request as httpRequest, type IncomingMessage } from "node:http";
 import bcrypt from "bcryptjs";
 
 const daemonId = randomUUID();
@@ -1092,7 +1096,7 @@ interface Services {
   reloadHttp?: () => Promise<void>;
 }
 
-function createServer(
+export function createServer(
   config: DaemonConfig,
   resolved: ResolvedPaths,
   clientConfig: ClientConfig,
@@ -1114,10 +1118,11 @@ function createServer(
       level: "info",
       stream: logStream,
       serializers: {
-        // Strip the WS `?token=` from request logs (TLS protects it on the wire,
-        // but it must never land in plaintext logs). Other query params are kept.
+        // Strip credentials from request logs (TLS protects them on the wire,
+        // but they must never land in plaintext logs): the WS/download ?token=
+        // and its percent-encoded form inside the DevTools iframe's ?wss= value.
         req(request: { method: string; url: string }) {
-          return { method: request.method, url: request.url.replace(/([?&]token=)[^&]*/i, "$1[redacted]") };
+          return { method: request.method, url: redactUrlTokens(request.url) };
         }
       }
     }
@@ -1806,6 +1811,48 @@ function createServer(
       void reply.code(400).send({
         code: "FS_ERROR",
         message: error instanceof Error ? error.message : "Cannot read archive."
+      });
+    }
+  });
+
+  // Read a parquet file's schema + a window of rows for the preview viewer.
+  // Windowed server-side (hyparquet random-access) — no file-size cap; sort
+  // (orderBy/desc) is served from a cached row order after the first scan.
+  app.get<{
+    Querystring: { path?: string; offset?: string; limit?: string; orderBy?: string; desc?: string };
+  }>("/api/fs/parquet", async (request, reply) => {
+    const { path, offset, limit, orderBy, desc } = request.query;
+    if (!path) {
+      void reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
+      return;
+    }
+    try {
+      const safe = await assertInsideFsRoot(resolved.fsRoot, path);
+      const info = await stat(safe);
+      if (!info.isFile()) {
+        void reply.code(400).send({ code: "FS_ERROR", message: "Not a file." });
+        return;
+      }
+      void reply.send(
+        await readParquetWindow(safe, {
+          offset: offset === undefined ? undefined : Number(offset),
+          limit: limit === undefined ? undefined : Number(limit),
+          orderBy,
+          desc: desc === "1"
+        })
+      );
+    } catch (error) {
+      if (error instanceof FsSandboxError) {
+        void reply.code(403).send({ code: "FS_FORBIDDEN", message: error.message });
+        return;
+      }
+      if (error instanceof ParquetRequestError) {
+        void reply.code(400).send({ code: "FS_ERROR", message: error.message });
+        return;
+      }
+      void reply.code(400).send({
+        code: "FS_ERROR",
+        message: error instanceof Error ? error.message : "Cannot read parquet file."
       });
     }
   });
@@ -2531,6 +2578,66 @@ function createServer(
     }
   );
 
+  // Embedded-DevTools frontend assets — reverse-proxied from the tab's own
+  // Chromium, which serves a prebuilt, version-matched DevTools bundle at
+  // /devtools/*. Remote-only (HTTP transport); never on the unix socket.
+  // Unauthenticated within remote by design: these are generic Chrome files at
+  // the same trust level as the SPA bundle, behind an unguessable tab UUID —
+  // the sensitive channel is the authenticated /ws-devtools proxy, and the
+  // DevTools frontend is sandboxed + CSP-locked client-side (see Task 5/6).
+  // Chromium's /json/* discovery endpoints are deliberately NOT reachable here
+  // (the sanitizer pins the path under /devtools/).
+  if (options.mode === "remote") {
+    app.get<{ Params: { browserId: string; "*": string } }>(
+      "/devtools-frontend/:browserId/*",
+      async (request, reply) => {
+        const rest = sanitizeDevtoolsPath(request.params["*"]);
+        if (!rest) {
+          return reply.code(404).send({ code: "NOT_FOUND", message: "Route not found." });
+        }
+        let port: number;
+        try {
+          port = await services.browsers.devtoolsPort(request.params.browserId);
+        } catch (error) {
+          const status = error instanceof BrowserError ? error.statusCode : 500;
+          return reply.code(status).send({ code: "BROWSER_UNAVAILABLE", message: "Browser tab is not running." });
+        }
+        const upstream = await new Promise<IncomingMessage>((resolvePromise, rejectPromise) => {
+          const req = httpRequest(
+            {
+              host: "127.0.0.1",
+              port,
+              path: `/devtools/${rest}`,
+              method: "GET",
+              // Chrome 403s any non-localhost Host (DNS-rebinding guard); the
+              // public hostname from the Caddy hop must never reach it.
+              headers: { host: `127.0.0.1:${port}` },
+              // Unauthenticated route → never let a request pin a
+              // daemon→Chromium connection open indefinitely.
+              timeout: 10_000
+            },
+            resolvePromise
+          );
+          req.on("timeout", () => req.destroy(new Error("devtools upstream timeout")));
+          req.on("error", rejectPromise);
+          // Client (or the proxy) went away → tear the upstream down so it
+          // can't accumulate. Fastify aborts request.raw on client disconnect.
+          request.raw.on("close", () => req.destroy());
+          req.end();
+        }).catch(() => null);
+        if (!upstream) {
+          return reply.code(502).send({ code: "BROWSER_UNAVAILABLE", message: "DevTools upstream unreachable." });
+        }
+        // If the client already left, drop the upstream response too.
+        request.raw.on("close", () => upstream.destroy());
+        void reply.header("cache-control", "no-store");
+        const contentType = upstream.headers["content-type"];
+        if (contentType) void reply.header("content-type", contentType);
+        return reply.code(upstream.statusCode ?? 502).send(upstream);
+      }
+    );
+  }
+
   if (options.mode === "local") {
     // Managed agent hooks report lifecycle events here (see the agent-status
     // design doc). Socket-only: sessions always run on the daemon's host, and
@@ -2994,6 +3101,116 @@ function createServer(
     });
   });
 
+  // Embedded-DevTools CDP WebSocket — remote-only (HTTP transport). The real
+  // DevTools frontend speaks raw CDP to the tab's page target through this
+  // authenticated pipe (?token= because browsers can't set WS headers). Routed
+  // by our stable tab id; the volatile Chrome target id is resolved at upgrade
+  // time so the iframe URL survives tab relaunches. DevTools attaches as a
+  // SECOND CDP session — multi-session is native since Chrome 63 and doesn't
+  // disturb the screencast/picker session.
+  if (options.mode === "remote") {
+    void app.register(async (instance) => {
+      await instance.register(websocketPlugin);
+      instance.get<{ Params: { browserId: string } }>(
+        "/ws-devtools/:browserId",
+        { websocket: true },
+        (socket, request) => {
+          if (options.authRequired) {
+            const token = (request.query as { token?: string }).token;
+            if (!authorizeCredential(token, config.transports.http.username, config.transports.http.passwordHash)) {
+              socket.close(1008, "unauthorized");
+              return;
+            }
+          }
+
+          // CDP is stateful → never drop frames; PAUSE/RESUME on a high-water
+          // mark instead. A single frame is capped by maxPayload; the pre-open
+          // client queue is bounded by bytes AND count (fail-closed).
+          const SEND_HWM = 8 * 1024 * 1024;
+          const PENDING_MAX_BYTES = 8 * 1024 * 1024;
+          const PENDING_MAX_MSGS = 512;
+
+          let upstream: UpstreamWebSocket | null = null;
+          let closed = false;
+          const pending: Array<{ data: Buffer; binary: boolean }> = [];
+          let pendingBytes = 0;
+
+          const closeBoth = (code: number, reason: string) => {
+            if (closed) return;
+            closed = true;
+            try { socket.close(code, reason); } catch { /* closing */ }
+            try { upstream?.close(); } catch { /* closing */ }
+          };
+          // Pause `from` until `bufferedAmount` on `to` drains below the HWM.
+          const relievePressure = (from: { pause(): void; resume(): void }, to: { bufferedAmount: number }) => {
+            from.pause();
+            const check = () => {
+              if (closed) return;
+              if (to.bufferedAmount > SEND_HWM) setTimeout(check, 25);
+              else from.resume();
+            };
+            check();
+          };
+
+          // Attach the client listener SYNCHRONOUSLY (fastify-websocket drops
+          // messages that arrive before a listener exists): buffer into the
+          // bounded queue until the upstream handshake completes.
+          socket.on("message", (data: Buffer, isBinary: boolean) => {
+            if (closed) return;
+            if (upstream && upstream.readyState === UpstreamWebSocket.OPEN) {
+              upstream.send(data, { binary: isBinary });
+              if (upstream.bufferedAmount > SEND_HWM) relievePressure(socket, upstream);
+              return;
+            }
+            pendingBytes += data.length;
+            pending.push({ data, binary: isBinary });
+            if (pending.length > PENDING_MAX_MSGS || pendingBytes > PENDING_MAX_BYTES) {
+              closeBoth(1011, "devtools buffer overflow");
+            }
+          });
+          socket.on("close", () => closeBoth(1000, "client closed"));
+          socket.on("error", () => closeBoth(1011, "client error"));
+
+          void (async () => {
+            let endpoint: { port: number; targetId: string };
+            try {
+              endpoint = await services.browsers.devtoolsEndpoint(request.params.browserId);
+            } catch {
+              closeBoth(1011, "browser tab not running");
+              return;
+            }
+            if (closed) return;
+            upstream = new UpstreamWebSocket(
+              `ws://127.0.0.1:${endpoint.port}/devtools/page/${endpoint.targetId}`,
+              {
+                // Loopback Host (Chrome's DNS-rebinding guard); ws sends no
+                // Origin, so Chrome's CDP origin check passes without an
+                // allowlist — that's why no --remote-allow-origins is set.
+                headers: { host: `127.0.0.1:${endpoint.port}` },
+                maxPayload: 32 * 1024 * 1024,
+                // Mirror the asset route's 10s guard: a hung CDP handshake must
+                // not leave the client+upstream sockets open indefinitely.
+                handshakeTimeout: 10_000
+              }
+            );
+            upstream.on("open", () => {
+              for (const m of pending) upstream!.send(m.data, { binary: m.binary });
+              pending.length = 0;
+              pendingBytes = 0;
+            });
+            upstream.on("message", (data, isBinary) => {
+              if (closed) return;
+              try { socket.send(data as Buffer, { binary: isBinary }); } catch { /* closing */ }
+              if (socket.bufferedAmount > SEND_HWM) relievePressure(upstream!, socket);
+            });
+            upstream.on("close", () => closeBoth(1000, "devtools upstream closed"));
+            upstream.on("error", () => closeBoth(1011, "devtools upstream error"));
+          })();
+        }
+      );
+    });
+  }
+
   // Terminal-control MCP — HTTP-only. The unix socket is unauthenticated, so full
   // terminal drive must never be reachable there; register /mcp only on remote.
   if (options.mode === "remote") {
@@ -3033,7 +3250,9 @@ function createServer(
         url.startsWith("/api") ||
         url.startsWith("/health") ||
         url.startsWith("/events") ||
-        url.startsWith("/mcp");
+        url.startsWith("/mcp") ||
+        url.startsWith("/devtools-frontend") ||
+        url.startsWith("/ws-devtools");
       if (request.method !== "GET" || isApi) {
         return reply.code(404).send({ code: "NOT_FOUND", message: "Route not found." });
       }

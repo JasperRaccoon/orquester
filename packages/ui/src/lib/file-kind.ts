@@ -4,7 +4,7 @@
  * magic-byte sniffing; predictable and synchronous.
  */
 
-export type FileKind = "text" | "html" | "image" | "pdf" | "audio" | "video" | "archive" | "binary";
+export type FileKind = "text" | "html" | "image" | "pdf" | "audio" | "video" | "archive" | "binary" | "parquet";
 
 export interface FileKindInfo {
   kind: FileKind;
@@ -25,6 +25,7 @@ export const PREVIEW_CAP_BY_KIND: Record<FileKind, number> = {
   pdf: 25 * 1024 * 1024,
   audio: 25 * 1024 * 1024,
   binary: 25 * 1024 * 1024,
+  parquet: Number.POSITIVE_INFINITY, // windowed server-side, bytes never fetched
   archive: DOWNLOAD_MAX_BYTES, // listed server-side, not byte-fetched
   text: DOWNLOAD_MAX_BYTES, // text uses the separate 1 MB /api/fs/read route
   html: DOWNLOAD_MAX_BYTES // html also uses the text route (rendered in a sandboxed iframe)
@@ -62,7 +63,8 @@ const BY_EXT: Record<string, [FileKind, string]> = {
   gz: ["archive", "application/gzip"],
   tgz: ["archive", "application/gzip"],
   bz2: ["archive", "application/x-bzip2"],
-  xz: ["archive", "application/x-xz"]
+  xz: ["archive", "application/x-xz"],
+  parquet: ["parquet", "application/vnd.apache.parquet"]
 };
 
 /** Lowercased extension, collapsing `.tar.*` compound names to a known key. */

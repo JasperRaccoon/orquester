@@ -362,3 +362,57 @@ export function persistGridTracksReset(projectPath: string): void {
   delete map[projectPath];
   saveGridTracks(map);
 }
+
+/* ── Browser DevTools split (global width fraction) ─────────────────────── */
+
+/**
+ * Width of the DevTools dock as a fraction of the browser tab's row. A global
+ * scalar (not per-project): DevTools wants roughly the same share everywhere,
+ * and the fraction adapts to any container width. Same persistence contract
+ * as the stores above: SSR-safe, error-swallowing, validated + clamped on load.
+ */
+const DEVTOOLS_SPLIT_KEY = "orquester:devtools-split";
+
+export const DEVTOOLS_SPLIT_DEFAULT = 0.45;
+export const DEVTOOLS_SPLIT_MIN = 0.2;
+export const DEVTOOLS_SPLIT_MAX = 0.8;
+
+/** Clamp into the split range; non-finite input falls back to the default. */
+export function clampDevtoolsSplit(fraction: number): number {
+  if (!Number.isFinite(fraction)) {
+    return DEVTOOLS_SPLIT_DEFAULT;
+  }
+  return Math.min(DEVTOOLS_SPLIT_MAX, Math.max(DEVTOOLS_SPLIT_MIN, fraction));
+}
+
+/** Load the persisted split fraction (clamped), or the default on any failure. */
+export function loadDevtoolsSplit(): number {
+  try {
+    if (typeof localStorage === "undefined") {
+      return DEVTOOLS_SPLIT_DEFAULT;
+    }
+    const raw = localStorage.getItem(DEVTOOLS_SPLIT_KEY);
+    if (!raw) {
+      return DEVTOOLS_SPLIT_DEFAULT;
+    }
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed <= 0 || parsed >= 1) {
+      return DEVTOOLS_SPLIT_DEFAULT;
+    }
+    return clampDevtoolsSplit(parsed);
+  } catch {
+    return DEVTOOLS_SPLIT_DEFAULT;
+  }
+}
+
+/** Persist the split fraction; a storage failure is non-fatal. */
+export function persistDevtoolsSplit(fraction: number): void {
+  try {
+    if (typeof localStorage === "undefined") {
+      return;
+    }
+    localStorage.setItem(DEVTOOLS_SPLIT_KEY, String(clampDevtoolsSplit(fraction)));
+  } catch {
+    /* ignore quota/availability errors — the split stays in-memory only */
+  }
+}
