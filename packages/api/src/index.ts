@@ -1088,6 +1088,44 @@ export class HttpOrquesterApiClient implements OrquesterApi {
     return this.get(`/api/usage${force ? "?refresh=1" : ""}`);
   }
 
+  // CliProxy — the managed CLIProxyAPI backing the claudex/claudemix launchers.
+  // Status/models read over either transport; mutations are HTTP-only (403 over
+  // the Unix socket) and never carry secret material.
+
+  getCliProxyStatus(): Promise<CliProxyStatus> {
+    return this.get("/api/cliproxy");
+  }
+
+  getCliProxyModels(): Promise<{ models: string[]; asOf: string | null }> {
+    return this.get("/api/cliproxy/models");
+  }
+
+  enableCliProxy(): Promise<CliProxyStatus> {
+    return this.post("/api/cliproxy/enable");
+  }
+
+  disableCliProxy(force?: boolean): Promise<{ ok: boolean; affectedSessions?: number }> {
+    return this.post("/api/cliproxy/disable", { force: Boolean(force) });
+  }
+
+  setCliProxyConfig(
+    cfg: { defaultModel?: string; backgroundModel?: string },
+    force?: boolean
+  ): Promise<CliProxyStatus> {
+    return this.put("/api/cliproxy/config", { ...cfg, force: Boolean(force) });
+  }
+
+  seedCliProxyAccount(req: CliProxySeedRequest): Promise<CliProxyProviderStatus> {
+    return this.post("/api/cliproxy/accounts/seed", req);
+  }
+
+  setCliProxyOpenRouterKey(
+    key: string,
+    force?: boolean
+  ): Promise<{ ok: boolean; affectedSessions?: number }> {
+    return this.post("/api/cliproxy/openrouter/key", { key, force: Boolean(force) });
+  }
+
   deleteFsEntry(path: string): Promise<{ ok: true }> {
     return this.delete(`/api/fs?path=${encodeURIComponent(path)}`);
   }
@@ -1140,6 +1178,27 @@ export class HttpOrquesterApiClient implements OrquesterApi {
 
     // 204 No Content (e.g. POST /api/accounts/:id/token) has an empty body —
     // response.json() would throw. Void-returning callers get undefined.
+    if (response.status === 204) {
+      return undefined as T;
+    }
+
+    return response.json() as Promise<T>;
+  }
+
+  private async put<T>(path: string, body?: unknown): Promise<T> {
+    const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+      method: "PUT",
+      headers: {
+        ...this.authHeaders(),
+        ...(body === undefined ? {} : { "Content-Type": "application/json" })
+      },
+      body: body === undefined ? undefined : JSON.stringify(body)
+    });
+
+    if (!response.ok) {
+      throw new Error(`Orquester API request failed: ${response.status} ${response.statusText}`);
+    }
+
     if (response.status === 204) {
       return undefined as T;
     }

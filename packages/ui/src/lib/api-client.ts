@@ -11,6 +11,9 @@ import type {
   CreateBrowserRequest,
   CreateProjectRequest,
   CreateSessionRequest,
+  CliProxyProviderStatus,
+  CliProxySeedRequest,
+  CliProxyStatus,
   CreateTodoRequest,
   CreateWorkspaceRequest,
   EventMessage,
@@ -511,6 +514,43 @@ export class ApiClient {
 
   setAgentAccountDefaults(req: SetAgentAccountDefaultsRequest): Promise<AgentAccountsResponse> {
     return this.send("PUT", "/api/agent-accounts/defaults", { body: req });
+  }
+
+  // CliProxy — the managed CLIProxyAPI backing the claudex/claudemix launchers.
+  // Status/models read over either transport; mutations are HTTP-only.
+
+  getCliProxyStatus(signal?: AbortSignal): Promise<CliProxyStatus> {
+    return this.send("GET", "/api/cliproxy", { signal });
+  }
+
+  getCliProxyModels(signal?: AbortSignal): Promise<{ models: string[]; asOf: string | null }> {
+    return this.send("GET", "/api/cliproxy/models", { signal });
+  }
+
+  enableCliProxy(): Promise<CliProxyStatus> {
+    return this.send("POST", "/api/cliproxy/enable");
+  }
+
+  disableCliProxy(force?: boolean): Promise<{ ok: boolean; affectedSessions?: number }> {
+    return this.send("POST", "/api/cliproxy/disable", { body: { force: Boolean(force) } });
+  }
+
+  setCliProxyConfig(
+    cfg: { defaultModel?: string; backgroundModel?: string },
+    force?: boolean
+  ): Promise<CliProxyStatus> {
+    return this.send("PUT", "/api/cliproxy/config", { body: { ...cfg, force: Boolean(force) } });
+  }
+
+  seedCliProxyAccount(req: CliProxySeedRequest): Promise<CliProxyProviderStatus> {
+    return this.send("POST", "/api/cliproxy/accounts/seed", { body: req });
+  }
+
+  setCliProxyOpenRouterKey(
+    key: string,
+    force?: boolean
+  ): Promise<{ ok: boolean; affectedSessions?: number }> {
+    return this.send("POST", "/api/cliproxy/openrouter/key", { body: { key, force: Boolean(force) } });
   }
 
   installRegistryEntry(id: string): Promise<RegistryActionResult> {
