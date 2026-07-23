@@ -6,6 +6,7 @@ import { ImageViewer } from "./viewers/ImageViewer";
 import { BinaryCard } from "./viewers/BinaryCard";
 import { MediaViewer } from "./viewers/MediaViewer";
 import { ArchiveViewer } from "./viewers/ArchiveViewer";
+import { ParquetViewer } from "./viewers/ParquetViewer";
 import { PdfViewer } from "./viewers/PdfViewer";
 import { HtmlViewer } from "./viewers/HtmlViewer";
 import { useApi } from "../../context/orquester-context";
@@ -55,6 +56,18 @@ export const FilePreview: React.FC<{
   // HTML renders in a sandboxed iframe with a Preview | Source toggle (text route).
   if (kind === "html") {
     return <HtmlViewer path={path} onBack={onBack} />;
+  }
+
+  // Parquet is windowed from the daemon (no byte fetch) — size caps don't apply.
+  if (kind === "parquet") {
+    return (
+      <>
+        <PreviewHeader path={path} name={name} onBack={onBack} />
+        <div className="min-h-0 flex-1 overflow-hidden">
+          <ParquetViewer path={path} name={name} size={size} mime={mime} fetchBytes={fetchBytes} />
+        </div>
+      </>
+    );
   }
 
   const overCeiling = size > DOWNLOAD_MAX_BYTES;
