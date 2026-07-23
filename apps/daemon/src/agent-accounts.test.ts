@@ -176,6 +176,27 @@ test("ensureFreshForUsage skips a token that is not near expiry", async () => {
   assert.equal(called, 0);
 });
 
+test("a proxy-owned account is never refreshed by the account service (single-refresher rule)", async () => {
+  const now = 1_000_000;
+  let called = 0;
+  const svc = await makeServiceWithFetch(now, async () => {
+    called++;
+    return new Response(JSON.stringify({ access_token: "NEW", refresh_token: "NEWR", id_token: jwt({ email: "c@x.com" }) }), { status: 200 });
+  });
+  // Token is near expiry, so an unowned account would normally refresh.
+  const acct = await svc.importAccount({ content: codexBlob(Math.floor((now + 60_000) / 1000)) });
+  await svc.markProxyOwned(acct.id, true);
+  await svc.ensureFreshForUsage("codex", acct.id, new Set());
+  assert.equal(called, 0, "proxy-owned → no refresh (the proxy is the sole refresher)");
+  // The flag is persisted on the record.
+  assert.equal(svc.getRecord(acct.id)?.proxyOwned, true);
+  // Ownership released → the account service resumes refreshing.
+  await svc.markProxyOwned(acct.id, false);
+  await svc.ensureFreshForUsage("codex", acct.id, new Set());
+  assert.equal(called, 1, "ownership released → refresh resumes");
+  assert.equal(svc.getRecord(acct.id)?.proxyOwned, false);
+});
+
 test("resolveLaunchEnv unsets OPENAI_API_KEY for a managed Codex session", async () => {
   const { svc } = await makeService();
   const acct = await svc.importAccount({ content: JSON.stringify({ tokens: { access_token: "a", id_token: jwt({ email: "z@z.com" }) } }) });

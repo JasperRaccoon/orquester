@@ -378,6 +378,18 @@ export class AgentAccountsService {
     this.emitChanged();
   }
 
+  /** Record whether the CLIProxyAPI proxy owns this account's token refresh. While
+   *  `owned`, the account service must not refresh it (the proxy is the single
+   *  refresher — two refreshers of one rotating token invalidate each other).
+   *  Un-owning restores Orquester's refresh responsibility. */
+  async markProxyOwned(id: string, owned: boolean): Promise<void> {
+    const record = this.getRecord(id);
+    if (!record || (record.proxyOwned ?? false) === owned) return;
+    record.proxyOwned = owned;
+    await this.persist();
+    this.emitChanged();
+  }
+
   startRefresher(getLiveAccountIds: () => Set<string>): void {
     if (this.refreshTimer) return;
     const run = () => void this.refreshIdleAccounts(getLiveAccountIds()).catch((e) => this.opts.logger?.warn?.(`account refresh failed: ${String(e)}`));
@@ -418,6 +430,9 @@ export class AgentAccountsService {
     try {
       const record = this.getRecord(id);
       if (!record || record.agent !== agent) return;
+      // Owner rule: the proxy is the sole refresher for a seeded (proxy-owned)
+      // account. Skip so two refreshers can't invalidate the same rotating token.
+      if (record.proxyOwned) return;
       const home = this.homePath(agent, id);
       await assertOwnedAccountHome(this.opts.accountsDir, agent, id, home);
       const credsPath = join(home, CRED_FILENAME[agent]);

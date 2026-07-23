@@ -327,6 +327,10 @@ export const agentAccountSchema = z.object({
   email: z.string().nullable().default(null),
   plan: z.string().nullable().default(null),
   needsReauth: z.boolean().default(false),
+  /** Once the CLIProxyAPI proxy holds a seeded copy of this account's OAuth
+   *  credential, the proxy becomes its sole token refresher; the account service
+   *  stops refreshing it (dual-refresher owner rule). Un-seeding clears this. */
+  proxyOwned: z.boolean().optional(),
   createdAt: z.string(),
   importedAt: z.string()
 });
