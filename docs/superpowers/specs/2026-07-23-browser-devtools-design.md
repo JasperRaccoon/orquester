@@ -45,43 +45,64 @@ daemon with auth. No custom panel reimplementation.
 
 - Remove `pipe: true` — puppeteer itself then launches Chromium with `--remote-debugging-port=0`
   (kernel-assigned, binds `127.0.0.1` only; verified in puppeteer-core's ChromeLauncher, which adds
-  the flag whenever no `--remote-debugging-*` arg is present — do not pass it manually). Add
-  `--remote-allow-origins=*` (safe: loopback-only port; real auth is at the daemon).
+  the flag whenever no `--remote-debugging-*` arg is present — do not pass it manually).
+- **Do not** add `--remote-allow-origins`: the daemon's proxy sends no `Origin` header, so Chrome's
+  CDP origin check passes without an allowlist; `*` would needlessly nullify that defense (a
+  hostile page probing loopback *with* an Origin should stay rejected).
 - Read the assigned port back from `browser.wsEndpoint()` and store `debugPort` on the per-project
   `Chrome` entry.
 - Everything else unchanged: sandbox retry, profile dirs, per-project lifecycle, screencast, picker.
 - Target resolution: a tab's DevTools target id is fetched on demand via the tab's existing
   `CDPSession` — `Target.getTargetInfo` (no args) returns the session's own `targetId`. Resolved at
   WS-upgrade time so a relaunched tab (new target) needs no new client URL.
-- New service surface: `browsers.devtoolsEndpoint(tabId)` → `{ port, targetId }`; throws
-  `BrowserError` 409 when the tab is not `running`.
+- New service surface: `browsers.devtoolsPort(tabId)` → `number` (never launches) and
+  `browsers.devtoolsEndpoint(tabId)` → `{ port, targetId }`; **both throw `BrowserError` 409 unless
+  the tab is already `running`** — neither launches Chromium (an unauthenticated asset request and
+  an authenticated WS request alike must not spawn a host process; the DevTools toggle is only
+  offered on a running tab).
 
-### 2. Daemon proxy — two new routes (HTTP transport only, `apps/daemon/src/index.ts`)
+### 2. Daemon proxy — two new routes (**remote/HTTP transport only**, `apps/daemon/src/index.ts`)
+
+Both routes are registered **only when `options.mode === "remote"`**. `createServer` also builds the
+unauthenticated unix-socket transport; neither route may exist there (matching how `/mcp` is
+remote-gated).
 
 **Frontend assets — `GET /devtools-frontend/:browserId/*`**
 - Reverse-proxies `*` to `http://127.0.0.1:<debugPort>/devtools/*` for the Chromium owning that
   tab's project, rewriting `Host` to `127.0.0.1:<debugPort>`.
 - `inspector.html` references its assets relatively, so everything stays under the
   `/devtools-frontend/<id>/` prefix.
-- Served **unauthenticated**, like the SPA bundle: the assets are generic Chrome files; the tab id
-  is an unguessable UUID; the sensitive channel is the WS below. Chromium's `/json/*` discovery
+- Unauthenticated within the remote transport, like the SPA bundle: the assets are generic Chrome
+  files behind an unguessable tab UUID. Containment of the *active* frontend (it can read the
+  same-origin credential) is done client-side — the iframe is sandboxed to an opaque origin and the
+  `@devtools` CSP locks `connect-src`/`form-action` (see §3, §4). Chromium's `/json/*` discovery
   endpoints are **not** exposed (they leak page URLs/titles).
+- **Hardening:** the upstream `http.request` carries a connection/idle timeout and is destroyed when
+  the client disconnects (`request.raw` close) — an unauthenticated route must never let requests
+  pin daemon→Chromium connections open indefinitely.
 - The daemon strips/normalizes response headers as needed and must add this prefix to the SPA
   fallback's reserved list so unknown paths under it 404 instead of returning `index.html`.
-- The asset route never launches Chromium: an **unauthenticated** request must not be able to
-  allocate host resources. A tab whose Chromium isn't up yet gets a 409; the UI's status-keyed
-  iframe remounts once the tab reaches `running`, so the frame self-heals.
+- The asset route never launches Chromium (unauthenticated → must not allocate host resources). A
+  tab whose Chromium isn't up yet gets a 409; the UI keys the iframe off `browser.status` and
+  remounts once the tab reaches `running`.
 
 **CDP WebSocket — `GET /ws-devtools/:browserId` (websocket)**
 - Sibling of `/ws-browser`: registered outside `/api` (WS can't set headers), authenticated via
   `?token=` with the same `authorizeCredential` check, closes `1008 unauthorized` on failure.
-  Token stays redacted from logs.
-- On upgrade: validate tab exists and is running → resolve `{port, targetId}` → dial
+  Token (plain and percent-encoded) stays redacted from logs via `redactUrlTokens`.
+- On upgrade: **attach the client `message` listener synchronously first** (fastify-websocket drops
+  messages that arrive before a listener exists — DevTools sends its enable batch immediately),
+  buffering into a bounded pre-open queue → resolve `{port, targetId}` (409 if not running) → dial
   `ws://127.0.0.1:<port>/devtools/page/<targetId>` with the `ws` client (add as an explicit daemon
   dependency; today it's only transitive via `@fastify/websocket`), `Host` rewritten to loopback,
-  `Origin` stripped → pipe frames both ways; either side closing closes the other.
-- Upstream dial failure or a non-running tab closes the client socket; the UI shows the
-  placeholder state.
+  no `Origin` sent → pipe frames both ways; either side closing closes the other.
+- **Backpressure & limits:** CDP is stateful, so frames are never dropped — each direction applies
+  pause/resume on a high-water mark, a single frame is capped by `maxPayload` (32 MiB), and the
+  pre-open client queue is bounded by bytes and count (fail-closed on overflow).
+- Upstream dial failure or a non-running tab closes the client socket. Note: a failure while the
+  tab stays `running` surfaces as the **DevTools frontend's own** disconnected page inside the
+  iframe (no custom health signal in v1); the Orquester placeholder covers only the
+  `browser.status`-not-running case.
 
 ### 3. UI (`packages/ui/src/components/browser/`)
 
@@ -93,31 +114,45 @@ daemon with auth. No custom panel reimplementation.
   (HTTP), matching browser-tab availability.
 - **Split (desktop/tablet):** flex row — canvas viewport left, `<iframe>` right, the shared
   `ResizeHandle` divider between them dragging the DevTools pane width.
-- **Mobile (existing coarse-pointer/mobile detection in `BrowserView`):** the DevTools toggle swaps
-  the tab content to the full-screen iframe; the toolbar keeps a Page ⇄ DevTools switch so
-  flipping is one tap. No divider.
+- **Mobile:** detection is `useIsDesktop()` = the `(min-width: 768px)` media query — a **width
+  breakpoint**, not pointer type (a narrow desktop window gets the mobile swap; a wide touch tablet
+  gets the split). Below the breakpoint the DevTools toggle swaps the tab content to the
+  full-screen iframe; the toolbar keeps a Page ⇄ DevTools switch so flipping is one tap. No divider.
+  The frame subscription is **paused** while swapped, so keying/placeholder must read the
+  event-driven `browser.status` prop, not the now-frozen subscription `state`.
 - **Iframe URL:** `/devtools-frontend/<id>/inspector.html?wss=<host>/ws-devtools/<id>?token=<cred>`
   (`ws=` instead of `wss=` on plain-HTTP dev). The credential accessor follows the existing
-  download-URL pattern on `ApiClient`. Implementation note: the token rides inside the `wss=`
-  query value and must survive the frontend's param parsing — verify during implementation; if the
-  frontend mangles nested query strings, fall back to a URL-encoded token path segment
-  (`/ws-devtools/<id>/<token>`).
-- **Lifecycle:** the iframe is keyed on the tab's status generation — when a stopped/crashed tab
-  relaunches, the iframe remounts (the DevTools frontend does not auto-reconnect). While the tab
-  is not `running`, the pane shows a placeholder instead of the iframe.
-- **Pop-out:** `window.open(iframeUrl, "orq-devtools-<id>")` and close the in-tab split. The page
-  and DevTools ride independent WS connections, so the tab keeps streaming. On mobile the pop-out
-  opens as a new browser tab. Known trade-off: the popped-out URL carries `?token=` and lands in
-  that device's browser history — same class as existing `?token=` download links; acceptable for
-  a single-user tool, short-lived tickets are a possible later hardening.
+  download-URL pattern on `ApiClient`; `redactUrlTokens` keeps the (percent-encoded) token out of
+  logs. If the frontend mangles the nested query at deploy-time verification, the fallback is a
+  **short-lived opaque ticket** (a single-use ~30 s token minted by an authenticated endpoint),
+  **not** a raw-credential path segment (which would evade log redaction).
+- **Security containment (the chosen model):** the iframe is `sandbox`ed **without**
+  `allow-same-origin` → opaque origin, so the DevTools frontend cannot read the app's `localStorage`
+  (which holds the reconstructable bearer). Defense-in-depth for the pop-out (a real same-origin
+  window that *can* read `localStorage`): the `@devtools` CSP locks `connect-src`/`form-action` to
+  `'self'`, so the credential can't be exfiltrated off-origin either way. Deploy-time verification
+  must confirm the frontend still runs under the opaque origin; if not, drop the sandbox and rely on
+  the CSP lock, recording which layer is active.
+- **Lifecycle:** the iframe is keyed on `browser.status` — when a stopped/crashed tab relaunches,
+  the iframe remounts (the DevTools frontend does not auto-reconnect). While the tab is not
+  `running`, the pane shows a placeholder instead of the iframe.
+- **Pop-out:** `window.open(iframeUrl, "orq-devtools-<id>", "noopener,noreferrer")` and close the
+  in-tab split. The page and DevTools ride independent WS connections, so the tab keeps streaming.
+  On mobile the pop-out opens as a new browser tab. Known trade-off: the popped-out URL carries
+  `?token=` and lands in that device's browser history — same class as existing `?token=` download
+  links; acceptable for a single-user tool, short-lived tickets are a possible later hardening.
 
 ### 4. Deploy — Caddyfile carve-out (mandatory)
 
-Add a path matcher for `/devtools-frontend/*` that:
-- drops `X-Frame-Options: DENY` and sets no `frame-ancestors 'none'` (otherwise the iframe is
-  blocked outright), and
-- exempts the path from the strict SPA CSP (the DevTools frontend needs its own workers/inline
-  handling); HSTS and the other non-CSP headers stay.
+Add a `path /devtools-frontend/*` matcher whose header block:
+- drops `X-Frame-Options: DENY` and sets `frame-ancestors 'self'` (otherwise the iframe is
+  blocked outright);
+- replaces the strict SPA CSP with a DevTools-tuned one that stays **locked on the
+  security-critical directives** — `connect-src 'self'` and `form-action 'self'` (containment: the
+  frontend/pop-out can't send the credential off-origin) — while loosening only `script-src`
+  (`'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'` for the bundle) and worker/child/img/font;
+- **keeps every non-CSP header except X-Frame-Options**, including `Permissions-Policy` (the `@app`
+  block is otherwise byte-identical to today's).
 
 No other infra changes. `pnpm build` is unaffected (no new frontend bundle — Chrome serves its
 own).
@@ -131,20 +166,30 @@ own).
   `[?&]token=` serializer regex does not match — every DevTools asset request would log the
   credential. The request serializer must redact both the plain and encoded forms (a pure
   `redactUrlTokens` helper, unit-tested).
-- Off-host, every DevTools path goes through the daemon: assets are inert Chrome files behind an
-  unguessable tab UUID; the CDP WS requires the bearer credential.
-- `--remote-allow-origins=*` is confined to the loopback listener; the daemon strips `Origin`
-  when proxying anyway.
+- Off-host, every DevTools path goes through the daemon: assets are behind an unguessable tab UUID;
+  the CDP WS requires the bearer credential. Both routes are **remote-only** (never on the
+  unauthenticated unix socket).
+- **The DevTools frontend is active same-origin code**, and the app origin stores the
+  reconstructable bearer (`base64(username:hash)`) in `localStorage`. It's contained two ways: the
+  UI iframe is sandboxed to an opaque origin (no `localStorage` access at all), and the `@devtools`
+  CSP locks `connect-src`/`form-action` to `'self'` so even the pop-out (same-origin, *can* read
+  `localStorage`) can't exfiltrate off-origin. This is the model chosen over serving DevTools from a
+  separate origin / behind a per-load ticket (heavier) or accepting the raw same-origin risk.
+- No `--remote-allow-origins` is set: the daemon's proxy sends no `Origin`, so Chrome's CDP origin
+  check passes without weakening it.
 
 ## Error handling summary
 
 | Condition | Behavior |
 |---|---|
-| Tab stopped/crashed | `devtoolsEndpoint` 409 → WS refused → UI placeholder; iframe remounts on relaunch |
+| Tab stopped/crashed (not running) | both routes 409 → UI shows placeholder (keyed on `browser.status`); iframe remounts on relaunch |
 | Bad/missing token on `/ws-devtools` | close `1008 unauthorized` (same as `/ws-browser`) |
-| Unknown tab id | asset route 404; WS close |
-| Upstream Chromium dies mid-session | upstream close propagates to client; tab status events drive the placeholder |
+| Unknown tab id | asset route 409/404; WS `devtoolsEndpoint` throws → close |
+| Client WS floods pre-open queue | bounded queue overflow → close `1011` (fail-closed) |
+| Upstream Chromium dies mid-session | upstream close propagates to client; `browser.status` events drive the placeholder |
+| Upstream fails while tab still running | DevTools frontend's own disconnected page (no custom health signal in v1) |
 | Chromium missing on host | unchanged: browser tab creation already 409s |
+| Either new route hit on the unix socket | not registered there (remote-only) → 404 / no upgrade |
 
 ## Out of scope (v1)
 
@@ -161,8 +206,14 @@ own).
   `headless_shell` did not). First check after deploy, with a browser tab open:
   `GET /devtools-frontend/<tabId>/inspector.html` must return 200 — a 404/502 means that binary
   can't power this feature (shipping our own frontend assets is explicitly out of scope for v1).
-- `pnpm check` clean, plus `pnpm --filter @orquester/daemon test` (the daemon has a node:test
-  suite; the pure proxy helpers are unit-tested there).
+- **Deploy-time risk #2 — sandbox compatibility:** confirm the DevTools frontend actually functions
+  inside `sandbox="allow-scripts allow-popups"` (opaque origin). If its own unavailable storage
+  breaks it, drop the sandbox attribute and rely on the `@devtools` CSP `connect-src 'self'`
+  containment — and record which layer is active.
+- `pnpm check` clean, plus `pnpm --filter @orquester/daemon test` — the pure proxy helpers
+  (`parseDebugPort`/`sanitizeDevtoolsPath`/`redactUrlTokens`) AND the two proxy routes have
+  node:test coverage (auth, remote-only registration, path-traversal, first-message preservation,
+  loopback Host rewrite) via `injectWS` + a fake loopback upstream.
 - This checkout runs inside a live Orquester instance — **do not** start a daemon here. Real
   end-to-end verification happens on a deploy or separate checkout: open a browser tab, toggle the
   dock, resize it, pop out, and exercise Console/Elements/Network/Sources against a dev server;

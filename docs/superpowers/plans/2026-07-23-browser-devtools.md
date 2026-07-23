@@ -37,7 +37,7 @@
   - `sanitizeDevtoolsPath(rest: string): string | null` (from `devtools.js`; implemented in Task 2's test-first steps but the file is created here)
   - `Chrome` gains `debugPort: number`
   - `BrowserManager.devtoolsPort(id: string): Promise<number>` — throws `BrowserError("Browser tab is not running", 409)` when the project's Chromium isn't up; **does not launch**.
-  - `BrowserManager.devtoolsEndpoint(id: string): Promise<{ port: number; targetId: string }>` — launches the page if needed (lazy restored tabs), 409 if it still isn't running.
+  - `BrowserManager.devtoolsEndpoint(id: string): Promise<{ port: number; targetId: string }>` — rejects with `BrowserError(409)` unless the tab is already `running`; **does not launch** (consistent with `devtoolsPort` and the spec — an authenticated WS must not spawn Chromium, and the asset route would 409 first anyway).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -127,14 +127,18 @@ Replace `launch()` (keep `tryLaunch()` as-is) with:
     // No `pipe: true`: puppeteer then launches with --remote-debugging-port=0
     // (kernel-assigned, bound to 127.0.0.1), which the embedded-DevTools proxy
     // needs — CDP over the stdio pipe exposes no endpoint DevTools can attach
-    // to. --remote-allow-origins is belt-and-suspenders: the daemon's WS proxy
-    // sends no Origin header, and the port never leaves loopback.
+    // to. Deliberately NOT passing --remote-allow-origins: the daemon's proxy
+    // sends no Origin header (so Chrome's CDP origin check passes without an
+    // allowlist), and `*` would needlessly disable that defense for any other
+    // absent-Origin... no — Chrome only checks when an Origin IS present; a
+    // page probing loopback with an Origin should stay rejected, so we keep
+    // the default (no allowlist).
     const base = {
       executablePath, userDataDir, headless: true as const,
       defaultViewport: null,
       args: [
         "--headless=new", "--no-first-run", "--no-default-browser-check",
-        "--disable-dev-shm-usage", "--mute-audio", "--remote-allow-origins=*"
+        "--disable-dev-shm-usage", "--mute-audio"
       ]
     };
     try {
@@ -182,11 +186,12 @@ In `browsers.ts`, insert after `dispatchTouch()` (before `shutdown()`):
 
   /** Resolve the CDP endpoint the DevTools frontend attaches to. Routed by our
    *  stable tab id and resolved at WS-upgrade time so the iframe URL survives
-   *  tab relaunches (Chrome's target id changes; ours doesn't). Launches the
-   *  page if needed so DevTools on a lazily-restored tab works. */
+   *  tab relaunches (Chrome's target id changes; ours doesn't). Rejects unless
+   *  the tab is already running — an authenticated WS must not spawn Chromium
+   *  (matches devtoolsPort + the spec; the DevTools toggle is only offered on a
+   *  running tab, and the asset route would 409 first regardless). */
   async devtoolsEndpoint(id: string): Promise<{ port: number; targetId: string }> {
     const tab = this.mustGet(id);
-    await this.ensurePage(tab);
     const cdp = tab.cdp;
     if (!cdp || tab.status !== "running") throw new BrowserError("Browser tab is not running", 409);
     // Target.getTargetInfo with no targetId returns the session's own target.
@@ -372,55 +377,68 @@ and (with the local imports):
 import { redactUrlTokens, sanitizeDevtoolsPath } from "./devtools.js";
 ```
 
-Insert after the `DELETE /api/browsers/:id` route (inside `createServer`, so `services`/`app` are in scope):
+Insert after the `DELETE /api/browsers/:id` route. **Gate the whole block on `if (options.mode === "remote")`** — `createServer` runs for both the unauthenticated unix socket and the HTTP transport, and (like `/mcp`) this must exist only on remote:
 
 ```ts
   // Embedded-DevTools frontend assets — reverse-proxied from the tab's own
   // Chromium, which serves a prebuilt, version-matched DevTools bundle at
-  // /devtools/*. Unauthenticated by design: these are generic Chrome files at
+  // /devtools/*. Remote-only (HTTP transport); never on the unix socket.
+  // Unauthenticated within remote by design: these are generic Chrome files at
   // the same trust level as the SPA bundle, behind an unguessable tab UUID —
-  // the sensitive channel is the authenticated /ws-devtools proxy. Chromium's
-  // /json/* discovery endpoints are deliberately NOT reachable here (the
-  // sanitizer pins the path under /devtools/).
-  app.get<{ Params: { browserId: string; "*": string } }>(
-    "/devtools-frontend/:browserId/*",
-    async (request, reply) => {
-      const rest = sanitizeDevtoolsPath(request.params["*"]);
-      if (!rest) {
-        return reply.code(404).send({ code: "NOT_FOUND", message: "Route not found." });
+  // the sensitive channel is the authenticated /ws-devtools proxy, and the
+  // DevTools frontend is sandboxed + CSP-locked client-side (see Task 5/6).
+  // Chromium's /json/* discovery endpoints are deliberately NOT reachable here
+  // (the sanitizer pins the path under /devtools/).
+  if (options.mode === "remote") {
+    app.get<{ Params: { browserId: string; "*": string } }>(
+      "/devtools-frontend/:browserId/*",
+      async (request, reply) => {
+        const rest = sanitizeDevtoolsPath(request.params["*"]);
+        if (!rest) {
+          return reply.code(404).send({ code: "NOT_FOUND", message: "Route not found." });
+        }
+        let port: number;
+        try {
+          port = await services.browsers.devtoolsPort(request.params.browserId);
+        } catch (error) {
+          const status = error instanceof BrowserError ? error.statusCode : 500;
+          return reply.code(status).send({ code: "BROWSER_UNAVAILABLE", message: "Browser tab is not running." });
+        }
+        const upstream = await new Promise<IncomingMessage>((resolvePromise, rejectPromise) => {
+          const req = httpRequest(
+            {
+              host: "127.0.0.1",
+              port,
+              path: `/devtools/${rest}`,
+              method: "GET",
+              // Chrome 403s any non-localhost Host (DNS-rebinding guard); the
+              // public hostname from the Caddy hop must never reach it.
+              headers: { host: `127.0.0.1:${port}` },
+              // Unauthenticated route → never let a request pin a
+              // daemon→Chromium connection open indefinitely.
+              timeout: 10_000
+            },
+            resolvePromise
+          );
+          req.on("timeout", () => req.destroy(new Error("devtools upstream timeout")));
+          req.on("error", rejectPromise);
+          // Client (or the proxy) went away → tear the upstream down so it
+          // can't accumulate. Fastify aborts request.raw on client disconnect.
+          request.raw.on("close", () => req.destroy());
+          req.end();
+        }).catch(() => null);
+        if (!upstream) {
+          return reply.code(502).send({ code: "BROWSER_UNAVAILABLE", message: "DevTools upstream unreachable." });
+        }
+        // If the client already left, drop the upstream response too.
+        request.raw.on("close", () => upstream.destroy());
+        void reply.header("cache-control", "no-store");
+        const contentType = upstream.headers["content-type"];
+        if (contentType) void reply.header("content-type", contentType);
+        return reply.code(upstream.statusCode ?? 502).send(upstream);
       }
-      let port: number;
-      try {
-        port = await services.browsers.devtoolsPort(request.params.browserId);
-      } catch (error) {
-        const status = error instanceof BrowserError ? error.statusCode : 500;
-        return reply.code(status).send({ code: "BROWSER_UNAVAILABLE", message: "Browser tab is not running." });
-      }
-      const upstream = await new Promise<IncomingMessage>((resolvePromise, rejectPromise) => {
-        const req = httpRequest(
-          {
-            host: "127.0.0.1",
-            port,
-            path: `/devtools/${rest}`,
-            method: "GET",
-            // Chrome 403s any non-localhost Host (DNS-rebinding guard); the
-            // public hostname from the Caddy hop must never reach it.
-            headers: { host: `127.0.0.1:${port}` }
-          },
-          resolvePromise
-        );
-        req.on("error", rejectPromise);
-        req.end();
-      }).catch(() => null);
-      if (!upstream) {
-        return reply.code(502).send({ code: "BROWSER_UNAVAILABLE", message: "DevTools upstream unreachable." });
-      }
-      void reply.header("cache-control", "no-store");
-      const contentType = upstream.headers["content-type"];
-      if (contentType) void reply.header("content-type", contentType);
-      return reply.code(upstream.statusCode ?? 502).send(upstream);
-    }
-  );
+    );
+  }
 ```
 
 - [ ] **Step 8: Reserve the new prefixes in the SPA fallback**
@@ -458,8 +476,13 @@ git commit -m "feat(daemon): proxy Chromium's bundled DevTools frontend per brow
 - Modify: `apps/daemon/src/index.ts` (new WS route after the `/ws-browser` register block ~line 2494)
 
 **Interfaces:**
-- Consumes: `services.browsers.devtoolsEndpoint(id)` (Task 1), `authorizeCredential` (already imported), `websocketPlugin` (already imported), the `options.authRequired` flag.
-- Produces: `GET /ws-devtools/:browserId?token=<cred>` websocket — a transparent byte pipe to `ws://127.0.0.1:<port>/devtools/page/<targetId>`. Task 4's `buildDevtoolsUrl` points the frontend's `ws=`/`wss=` param here.
+- Consumes: `services.browsers.devtoolsEndpoint(id)` (Task 1), `authorizeCredential` (already imported), `websocketPlugin` (already imported), the `options.authRequired`/`options.mode` flags.
+- Produces: `GET /ws-devtools/:browserId?token=<cred>` websocket (remote transport only) — a backpressure-aware byte pipe to `ws://127.0.0.1:<port>/devtools/page/<targetId>`. Task 4's `buildDevtoolsUrl` points the frontend's `ws=`/`wss=` param here.
+
+Design notes baked into the code below (from review):
+- The client `message` listener is attached **synchronously**, before the async endpoint resolution — `@fastify/websocket` drops messages that arrive before a listener exists, and DevTools sends its `enable` batch immediately on open.
+- CDP is stateful, so frames **cannot be dropped**; both directions apply **pause/resume backpressure** on a high-water mark, and the pre-open client queue is **bounded by bytes and count** (fail-closed on overflow). A single frame is capped by `maxPayload` (32 MiB, down from a naive 256 MiB).
+- Registered only when `options.mode === "remote"` — `createServer` also builds the unauthenticated unix-socket transport, where this must not exist.
 
 - [ ] **Step 1: Add the `ws` dependency**
 
@@ -481,72 +504,112 @@ import { WebSocket as UpstreamWebSocket } from "ws";
 Insert after the `/ws-browser` register block (after its closing `});` ~line 2494):
 
 ```ts
-  // Embedded-DevTools CDP WebSocket — the real DevTools frontend speaks raw
-  // CDP to the tab's page target through this authenticated pipe (sibling of
-  // /ws-browser: ?token= because browsers can't set WS headers). Routed by our
-  // stable tab id; the volatile Chrome target id is resolved at upgrade time,
-  // so the iframe URL survives tab relaunches. DevTools attaches as a SECOND
-  // CDP session on the page — multi-session is native since Chrome 63 and does
-  // not disturb the screencast/picker session.
-  void app.register(async (instance) => {
-    await instance.register(websocketPlugin);
-    instance.get<{ Params: { browserId: string } }>(
-      "/ws-devtools/:browserId",
-      { websocket: true },
-      (socket, request) => {
-        if (options.authRequired) {
-          const token = (request.query as { token?: string }).token;
-          if (!authorizeCredential(token, config.transports.http.username, config.transports.http.passwordHash)) {
-            socket.close(1008, "unauthorized");
-            return;
-          }
-        }
-        void (async () => {
-          let endpoint: { port: number; targetId: string };
-          try {
-            endpoint = await services.browsers.devtoolsEndpoint(request.params.browserId);
-          } catch {
-            socket.close(1011, "browser tab not running");
-            return;
-          }
-          const upstream = new UpstreamWebSocket(
-            `ws://127.0.0.1:${endpoint.port}/devtools/page/${endpoint.targetId}`,
-            {
-              // Host must read as loopback (Chrome's DNS-rebinding guard); no
-              // Origin header is sent, so --remote-allow-origins never bites.
-              headers: { host: `127.0.0.1:${endpoint.port}` },
-              // CDP responses can be MBs (Page.captureScreenshot, source text);
-              // ws' 100 MiB default is fine, set explicitly for intent.
-              maxPayload: 256 * 1024 * 1024
+  // Embedded-DevTools CDP WebSocket — remote-only (HTTP transport). The real
+  // DevTools frontend speaks raw CDP to the tab's page target through this
+  // authenticated pipe (?token= because browsers can't set WS headers). Routed
+  // by our stable tab id; the volatile Chrome target id is resolved at upgrade
+  // time so the iframe URL survives tab relaunches. DevTools attaches as a
+  // SECOND CDP session — multi-session is native since Chrome 63 and doesn't
+  // disturb the screencast/picker session.
+  if (options.mode === "remote") {
+    void app.register(async (instance) => {
+      await instance.register(websocketPlugin);
+      instance.get<{ Params: { browserId: string } }>(
+        "/ws-devtools/:browserId",
+        { websocket: true },
+        (socket, request) => {
+          if (options.authRequired) {
+            const token = (request.query as { token?: string }).token;
+            if (!authorizeCredential(token, config.transports.http.username, config.transports.http.passwordHash)) {
+              socket.close(1008, "unauthorized");
+              return;
             }
-          );
-          // Frontend messages that arrive before the upstream handshake
-          // completes must not be dropped — DevTools sends its enable batch
-          // immediately on open.
+          }
+
+          // CDP is stateful → never drop frames; PAUSE/RESUME on a high-water
+          // mark instead. A single frame is capped by maxPayload; the pre-open
+          // client queue is bounded by bytes AND count (fail-closed).
+          const SEND_HWM = 8 * 1024 * 1024;
+          const PENDING_MAX_BYTES = 8 * 1024 * 1024;
+          const PENDING_MAX_MSGS = 512;
+
+          let upstream: UpstreamWebSocket | null = null;
+          let closed = false;
           const pending: Array<{ data: Buffer; binary: boolean }> = [];
-          upstream.on("open", () => {
-            for (const m of pending) upstream.send(m.data, { binary: m.binary });
-            pending.length = 0;
-          });
+          let pendingBytes = 0;
+
+          const closeBoth = (code: number, reason: string) => {
+            if (closed) return;
+            closed = true;
+            try { socket.close(code, reason); } catch { /* closing */ }
+            try { upstream?.close(); } catch { /* closing */ }
+          };
+          // Pause `from` until `bufferedAmount` on `to` drains below the HWM.
+          const relievePressure = (from: { pause(): void; resume(): void }, to: { bufferedAmount: number }) => {
+            from.pause();
+            const check = () => {
+              if (closed) return;
+              if (to.bufferedAmount > SEND_HWM) setTimeout(check, 25);
+              else from.resume();
+            };
+            check();
+          };
+
+          // Attach the client listener SYNCHRONOUSLY (fastify-websocket drops
+          // messages that arrive before a listener exists): buffer into the
+          // bounded queue until the upstream handshake completes.
           socket.on("message", (data: Buffer, isBinary: boolean) => {
-            if (upstream.readyState === UpstreamWebSocket.OPEN) upstream.send(data, { binary: isBinary });
-            else if (upstream.readyState === UpstreamWebSocket.CONNECTING) pending.push({ data, binary: isBinary });
-          });
-          upstream.on("message", (data, isBinary) => {
-            try {
-              socket.send(data as Buffer, { binary: isBinary });
-            } catch {
-              /* client socket closing */
+            if (closed) return;
+            if (upstream && upstream.readyState === UpstreamWebSocket.OPEN) {
+              upstream.send(data, { binary: isBinary });
+              if (upstream.bufferedAmount > SEND_HWM) relievePressure(socket, upstream);
+              return;
+            }
+            pendingBytes += data.length;
+            pending.push({ data, binary: isBinary });
+            if (pending.length > PENDING_MAX_MSGS || pendingBytes > PENDING_MAX_BYTES) {
+              closeBoth(1011, "devtools buffer overflow");
             }
           });
-          upstream.on("close", () => socket.close());
-          upstream.on("error", () => socket.close(1011, "devtools upstream error"));
-          socket.on("close", () => upstream.close());
-          socket.on("error", () => upstream.close());
-        })();
-      }
-    );
-  });
+          socket.on("close", () => closeBoth(1000, "client closed"));
+          socket.on("error", () => closeBoth(1011, "client error"));
+
+          void (async () => {
+            let endpoint: { port: number; targetId: string };
+            try {
+              endpoint = await services.browsers.devtoolsEndpoint(request.params.browserId);
+            } catch {
+              closeBoth(1011, "browser tab not running");
+              return;
+            }
+            if (closed) return;
+            upstream = new UpstreamWebSocket(
+              `ws://127.0.0.1:${endpoint.port}/devtools/page/${endpoint.targetId}`,
+              {
+                // Loopback Host (Chrome's DNS-rebinding guard); ws sends no
+                // Origin, so Chrome's CDP origin check passes without an
+                // allowlist — that's why no --remote-allow-origins is set.
+                headers: { host: `127.0.0.1:${endpoint.port}` },
+                maxPayload: 32 * 1024 * 1024
+              }
+            );
+            upstream.on("open", () => {
+              for (const m of pending) upstream!.send(m.data, { binary: m.binary });
+              pending.length = 0;
+              pendingBytes = 0;
+            });
+            upstream.on("message", (data, isBinary) => {
+              if (closed) return;
+              try { socket.send(data as Buffer, { binary: isBinary }); } catch { /* closing */ }
+              if (socket.bufferedAmount > SEND_HWM) relievePressure(upstream!, socket);
+            });
+            upstream.on("close", () => closeBoth(1000, "devtools upstream closed"));
+            upstream.on("error", () => closeBoth(1011, "devtools upstream error"));
+          })();
+        }
+      );
+    });
+  }
 ```
 
 - [ ] **Step 3: Typecheck + tests**
@@ -606,7 +669,7 @@ Insert directly after `buildDownloadUrl` in `packages/ui/src/lib/api-client.ts`:
   }
 ```
 
-Implementation note (from the spec): the token rides inside the URL-encoded `wss=` value; the DevTools frontend decodes its query params and appends the whole value after `wss://`, which is the pattern browserless uses. If deploy-time verification (Task 7) shows the frontend mangling the nested `?token=`, the fallback is a token **path segment** instead: daemon route `/ws-devtools/:browserId/:token` (token also accepted from the path in the auth check) and `hostPath` becomes `${base…}/ws-devtools/${browserId}/${encodeURIComponent(password)}`.
+Implementation note (from the spec): the token rides inside the URL-encoded `wss=` value; the DevTools frontend decodes its query params and appends the whole value after `wss://`, which is the pattern browserless uses. `redactUrlTokens` (Task 2) catches this encoded form in the logs. **Do not** fall back to a token **path segment** (`/ws-devtools/:id/:token`) if the nested query mangles — a path-segment credential is not caught by `redactUrlTokens` and would leak into daemon *and* Caddy access logs. If the nested-query form fails at deploy-time verification, the correct fallback is a **short-lived opaque ticket**: a `POST /api/browsers/:id/devtools-ticket` (authenticated) that mints a single-use, ~30 s token the WS accepts in place of the bearer — never the raw credential in the URL. (Ticket minting is out of scope for v1 unless verification forces it.)
 
 - [ ] **Step 2: Add the split store to `panel-sizes.ts`**
 
@@ -691,10 +754,12 @@ git commit -m "feat(ui): DevTools URL builder and split-width persistence"
 - Produces: the user-facing feature. No exports consumed elsewhere.
 
 Behavior contract (from the spec):
-- Desktop: toggle button opens a **right dock** (viewport left, iframe right) separated by a vertical `ResizeHandle`; dragging resizes the dock width; the fraction persists; double-click resets to default.
-- Pop-out button opens the DevTools URL in a separate window and closes the dock.
+- Desktop (`useIsDesktop()` = the `(min-width: 768px)` media query — a **width breakpoint**, not pointer type, so a narrow desktop window gets the mobile swap and a wide touch tablet gets the split): toggle button opens a **right dock** (viewport left, iframe right) separated by a vertical `ResizeHandle`; dragging resizes the dock width; the fraction persists; double-click resets to default.
+- Pop-out button opens the DevTools URL in a separate window (`noopener,noreferrer`) and closes the dock.
 - Mobile (`!useIsDesktop()`): the toggle swaps the whole tab to the DevTools iframe; **the screencast subscription is paused** while swapped (no frames to a hidden canvas; re-subscribe re-primes on switch-back).
-- The iframe remounts when the tab's status changes (DevTools doesn't auto-reconnect after a relaunch); non-running tabs show a placeholder.
+- **Security (review #2):** the iframe is `sandbox`ed WITHOUT `allow-same-origin` so it runs in an opaque origin and cannot read the app's `localStorage` (which holds the reconstructable bearer). Defense-in-depth: the `@devtools` Caddy CSP (Task 6) locks `connect-src`/`form-action` to `'self'`, so even the pop-out (a real same-origin window that *can* read `localStorage`) cannot exfiltrate the credential off-origin.
+- **Keying (review #9):** the iframe/placeholder key off the event-driven `browser.status` **prop**, NOT the frame-subscription `state` — on mobile the subscription is paused, so `state` freezes; `browser.status` keeps updating from the store's `browser.*` events. A crash while mobile DevTools is open still flips to the placeholder and remounts on relaunch.
+- **Failure honesty (review #10):** a proxy/WS failure while the tab is still `running` is surfaced by the **DevTools frontend's own** disconnected/error page inside the iframe — React's `onError` doesn't fire for HTTP-status or in-frame WS errors, and we don't add a custom health signal in v1. The Orquester placeholder covers only the `browser.status`-not-running case.
 - Both buttons render only when `buildDevtoolsUrl` returns non-null (HTTP transport).
 
 - [ ] **Step 1: Imports and state**
@@ -765,7 +830,10 @@ Insert after the Pick button (`</button>` of "Pick element", before the `!isDesk
         {devtoolsUrl && (
           <button type="button" aria-label="Open DevTools in new window"
             onClick={() => {
-              window.open(devtoolsUrl, `orq-devtools-${browser.id}`);
+              // noopener,noreferrer severs window.opener; the pop-out is still a
+              // same-origin window but the @devtools CSP (connect-src 'self')
+              // contains any credential exfiltration.
+              window.open(devtoolsUrl, `orq-devtools-${browser.id}`, "noopener,noreferrer");
               setDevtoolsOpen(false);
             }}
             className="rounded p-1 text-neutral-400 hover:bg-neutral-800">
@@ -779,19 +847,27 @@ Insert after the Pick button (`</button>` of "Pick element", before the `!isDesk
 Define the iframe once, right before the `return` statement:
 
 ```tsx
-  // Keyed on status so a relaunched tab remounts the frontend (it does not
-  // auto-reconnect its CDP socket). devtoolsEndpoint launches the page lazily,
-  // so rendering before the first state message is fine.
-  const devtoolsFrame =
-    state && state.status !== "running" && state.status !== "starting" ? (
+  // Keyed on the EVENT-DRIVEN browser.status prop (not the frame-subscription
+  // `state`, which freezes when the mobile swap pauses the stream) so a
+  // relaunched/crashed tab remounts or shows the placeholder. The DevTools
+  // frontend does not auto-reconnect its CDP socket, hence the remount.
+  const devtoolsRunning = browser.status === "running" || browser.status === "starting";
+  const devtoolsFrame = !devtoolsRunning ? (
       <div className="flex h-full items-center justify-center px-4 text-center text-sm text-neutral-500">
         DevTools unavailable — the browser is not running
       </div>
     ) : (
       <iframe
-        key={`${browser.id}:${state?.status ?? "init"}`}
+        key={`${browser.id}:${browser.status}`}
         src={devtoolsUrl ?? undefined}
         title="DevTools"
+        // Opaque origin (no allow-same-origin) → cannot read the app's
+        // localStorage/credential (review #2). allow-popups lets DevTools open
+        // its own aux windows. VERIFY at deploy: if the frontend won't run
+        // sandboxed (its own storage is unavailable in an opaque origin), drop
+        // to no sandbox — the @devtools CSP connect-src 'self' still contains
+        // exfiltration. Document whichever holds.
+        sandbox="allow-scripts allow-popups"
         className="h-full w-full border-0 bg-neutral-950"
       />
     );
@@ -882,14 +958,20 @@ orquester.example.com {
     # The embedded Chrome DevTools frontend (proxied from the project's headless
     # Chromium under /devtools-frontend/) is its own CSP island: the SPA's strict
     # CSP + X-Frame-Options DENY would block both the bundle (workers, wasm,
-    # inline handling) and the same-origin iframe that embeds it. frame-ancestors
-    # 'self' still restricts WHO may frame it to the app itself.
+    # inline handling) and the iframe that embeds it. But the security-critical
+    # directives STAY LOCKED here: connect-src/form-action 'self' contain any
+    # credential exfiltration by the frontend (or a pop-out same-origin window),
+    # and frame-ancestors 'self' limits who may frame it to the app. script-src
+    # is permissive (the bundle needs eval/wasm) — that's fine because it can't
+    # send data off-origin. (All non-CSP headers except X-Frame-Options are kept,
+    # incl. Permissions-Policy — matching the @app block.)
     @devtools path /devtools-frontend/*
     header @devtools {
         Strict-Transport-Security "max-age=31536000; includeSubDomains"
         X-Content-Type-Options "nosniff"
         Referrer-Policy "no-referrer"
-        Content-Security-Policy "frame-ancestors 'self'"
+        Permissions-Policy "camera=(), microphone=(), geolocation=(), interest-cohort=()"
+        Content-Security-Policy "default-src 'self'; connect-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; worker-src 'self' blob:; child-src 'self' blob:; frame-ancestors 'self'; base-uri 'self'; form-action 'self'"
         -Server
     }
 
@@ -922,11 +1004,16 @@ In "Conventions & gotchas", append a bullet:
 - **Browser-tab Chromium exposes a loopback debug port.** The per-project headless
   Chromium launches with `--remote-debugging-port=0` (not the stdio pipe) so the
   embedded DevTools can attach; the daemon proxies its frontend at
-  `/devtools-frontend/:browserId/*` (unauthenticated, generic Chrome assets) and
-  its CDP WS at `/ws-devtools/:browserId` (`?token=` auth). The port is
-  unauthenticated **on-host** — same trust level as the scoped-sudo terminal
-  sessions on this single-user box. Deploys need the Caddyfile's `/devtools-frontend/*`
-  header carve-out or the iframe is blocked by `X-Frame-Options: DENY`.
+  `/devtools-frontend/:browserId/*` (generic Chrome assets) and its CDP WS at
+  `/ws-devtools/:browserId` (`?token=` auth). Both routes are **remote-transport
+  only** (never on the unauthenticated unix socket). The port is unauthenticated
+  **on-host** — same trust level as the scoped-sudo terminal sessions on this
+  single-user box. The DevTools frontend is served same-origin, so it's contained
+  two ways: the UI iframe is `sandbox`ed without `allow-same-origin` (opaque origin,
+  no access to the credential in `localStorage`), and the Caddyfile's
+  `/devtools-frontend/*` CSP island locks `connect-src`/`form-action` to `'self'`
+  (so even a pop-out window can't exfiltrate the credential off-origin). Deploys
+  need that Caddy carve-out or the iframe is blocked by `X-Frame-Options: DENY`.
 ```
 
 - [ ] **Step 3: Typecheck (unchanged code, cheap sanity) + commit**
@@ -940,7 +1027,71 @@ git commit -m "docs(deploy): CSP carve-out and notes for embedded DevTools"
 
 ---
 
-### Task 7: Final verification + hand-off checklist
+### Task 7: Route-level tests for the DevTools proxies
+
+**Files:**
+- Create: `apps/daemon/src/devtools-routes.test.ts`
+
+**Interfaces:**
+- Consumes: the exported `createServer` factory (`apps/daemon/src/index.ts` — confirm it's exported; if not, this task first adds `export` to it, a one-word change with no behavior impact) and `@fastify/websocket`'s `app.injectWS(path, { headers })` test helper (available in v10). A fake loopback upstream is a plain `node:http` server + `ws` `WebSocketServer` bound to `127.0.0.1:0`, injected via a `resolveChromium`/`BrowserManager` stub so no real Chromium launches.
+
+Why: Tasks 2–3 add two security-sensitive routes; the pure-helper tests (Task 1–2) don't exercise auth, Host rewriting, first-message preservation, the remote-only gate, or close propagation. These are the regressions most likely to slip.
+
+- [ ] **Step 1: Write the failing route tests**
+
+Create `apps/daemon/src/devtools-routes.test.ts`. Build a server via `createServer(...)` with a stub `services.browsers` exposing `devtoolsPort`/`devtoolsEndpoint` pointed at a fake loopback HTTP+WS upstream, and assert:
+
+```ts
+// (skeleton — fill in the stub wiring to the real createServer signature)
+import { strict as assert } from "node:assert";
+import { test } from "node:test";
+// ...construct fake upstream (http.Server + ws.WebSocketServer on 127.0.0.1:0),
+//    a stub BrowserManager, and two createServer instances: remote (authRequired)
+//    and local (unix).
+
+test("asset route 404s on path traversal and never reaches upstream", async () => {
+  // GET /devtools-frontend/<id>/..%2fjson%2flist → 404, upstream saw no request.
+});
+
+test("asset + ws routes are absent on the local (unix) transport", async () => {
+  // GET /devtools-frontend/<id>/inspector.html on the local instance → 404.
+  // injectWS('/ws-devtools/<id>') on the local instance → not upgraded.
+});
+
+test("ws route rejects a missing/invalid token with 1008 on the remote transport", async () => {
+  // injectWS('/ws-devtools/<id>') without ?token= → close code 1008.
+});
+
+test("ws route preserves a client message sent before the upstream handshake", async () => {
+  // Connect with a valid token, immediately send a CDP frame, and assert the
+  // fake upstream receives it once the handshake completes (proves the sync
+  // listener + pending queue).
+});
+
+test("ws route forwards the loopback Host header to upstream", async () => {
+  // The fake upstream asserts req.headers.host === `127.0.0.1:<port>`.
+});
+```
+
+- [ ] **Step 2: Run to verify they fail, then pass**
+
+Run: `pnpm --filter @orquester/daemon exec node --import tsx --test src/devtools-routes.test.ts`
+First run (before wiring the stub correctly / if `createServer` isn't exported): FAIL.
+After implementing: PASS (5 tests). If `injectWS` proves impractical for the pre-handshake-message assertion, drive the WS with a real client against `app.listen({ host: "127.0.0.1", port: 0 })` instead — still no Chromium involved.
+
+- [ ] **Step 3: Full gates + commit**
+
+Run: `pnpm check` — expected clean.
+Run: `pnpm --filter @orquester/daemon test` — expected all suites PASS.
+
+```bash
+git add apps/daemon/src/devtools-routes.test.ts apps/daemon/src/index.ts
+git commit -m "test(daemon): route-level coverage for the DevTools proxies"
+```
+
+---
+
+### Task 8: Final verification + hand-off checklist
 
 **Files:** none (verification only).
 
@@ -955,7 +1106,7 @@ Run: `git status` — expected clean tree, all work committed.
 This checkout runs inside a live Orquester — do not start a daemon here. On the next deploy (per `DEPLOY_TO_VPS.md`, including `sudo systemctl restart orquester` and the Caddyfile install + `systemctl reload caddy`), verify:
 
 1. **Load-bearing first check:** with a browser tab open, `curl -fsS -o /dev/null -w '%{http_code}\n' "https://<domain>/devtools-frontend/<tabId>/inspector.html"` → `200`. A 404/502 means this host's Chromium build doesn't bundle the DevTools frontend (headless_shell-style binary) — the feature can't work on that binary; install full Chrome/Chromium.
-2. Open a project browser tab → toggle DevTools (Braces icon) → the dock opens and the frontend loads (no blank iframe, no CSP errors in the *client* browser's console).
+2. Open a project browser tab → toggle DevTools (Braces icon) → the dock opens and the frontend loads (no blank iframe). **Sandbox-compat gate (review #2):** confirm the frontend actually *functions* inside `sandbox="allow-scripts allow-popups"` (opaque origin). If it's broken by its own unavailable storage, remove the `sandbox` attribute and rely on the `@devtools` CSP `connect-src 'self'` for containment — and update the spec/plan to record which layer is active. Check the *client* browser console for CSP violations and adjust the `@devtools` `script-src`/`worker-src` tokens if the bundle needs more (never loosen `connect-src`/`form-action`).
 3. Console: `console.log` from the inspected page appears; evaluating an expression works.
 4. Elements: DOM tree renders; hovering highlights elements in the streamed viewport.
 5. Network: reload the page from the tab toolbar; requests appear with bodies.
