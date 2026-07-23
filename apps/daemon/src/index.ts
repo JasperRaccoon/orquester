@@ -9,6 +9,7 @@ import type {
   CliProxyProviderStatus,
   CliProxySeedRequest,
   CliProxyStatus,
+  CliProxyUnseedRequest,
   CreateAccountRequest,
   CreateBrowserRequest,
   CreateProjectRequest,
@@ -730,8 +731,9 @@ type LaunchEnv = { env: Record<string, string>; unset?: string[]; accountId?: st
 /**
  * Merge two launch-env contributions into one. `b` (the cliproxy contributor)
  * wins on any key collision; `unset` lists concatenate; the effective
- * `accountId` is preserved from `a` (the managed-account resolution — the
- * cliproxy contributor never carries one). Returns null when neither contributes.
+ * `accountId` is taken from `a` (the managed-account resolution), falling back
+ * to `b` (the cliproxy contributor's pinned account). Returns null when neither
+ * contributes.
  */
 export function composeExtraEnv(a: LaunchEnv | null, b: LaunchEnv | null): LaunchEnv | null {
   if (!a && !b) return null;
@@ -739,6 +741,7 @@ export function composeExtraEnv(a: LaunchEnv | null, b: LaunchEnv | null): Launc
   const merged: LaunchEnv = { env: { ...a?.env, ...b?.env } };
   if (unset.length > 0) merged.unset = unset;
   if (a?.accountId !== undefined) merged.accountId = a.accountId;
+  else if (b?.accountId !== undefined) merged.accountId = b.accountId;
   return merged;
 }
 
@@ -771,6 +774,7 @@ export function cliproxyContributor(
     // Proxy not provisioned yet — the launcher wrapper still injects the token
     // from the same file at exec, so a missing projection is not fatal here.
   }
+  let accountId: string | undefined;
   if (ctx.model) {
     // An OpenRouter/Kimi model is served by the shared keyless OpenRouter provider,
     // never a seeded per-account credential — emit it BARE regardless of accountId
@@ -781,8 +785,11 @@ export function cliproxyContributor(
     const effectiveModel = routesToAccount ? `${accountPrefix(ctx.accountId)}/${ctx.model}` : ctx.model;
     env.ANTHROPIC_MODEL = effectiveModel;
     env.CLAUDE_CODE_SUBAGENT_MODEL = effectiveModel;
+    if (routesToAccount) accountId = ctx.accountId;
   }
-  return { env };
+  const result: LaunchEnv = { env };
+  if (accountId !== undefined) result.accountId = accountId;
+  return result;
 }
 
 /**
@@ -848,6 +855,7 @@ interface CliProxyRouteManager {
     req: { provider: "codex" | "claude"; accountId: string },
     read: (provider: "codex" | "claude", accountId: string) => Promise<unknown>
   ): Promise<CliProxyProviderStatus>;
+  unseedProvider(req: { provider: "codex" | "claude"; accountId: string }): Promise<CliProxyProviderStatus>;
 }
 
 /** The subset of {@link AgentAccountsService} the seed route drives — structural
@@ -911,7 +919,12 @@ export function registerCliProxyRoutes(
   app.post("/api/cliproxy/disable", async (request, reply) => {
     if (refusedOnSocket(reply)) return;
     const body = (request.body ?? {}) as { force?: boolean };
-    return manager.disable(Boolean(body.force));
+    const res = await manager.disable(Boolean(body.force));
+    if (!res.ok) {
+      reply.code(409).send({ ok: false, affectedSessions: res.affectedSessions });
+      return;
+    }
+    return res;
   });
 
   app.put("/api/cliproxy/config", async (request, reply): Promise<CliProxyStatus | undefined> => {
@@ -973,6 +986,27 @@ export function registerCliProxyRoutes(
     // Only claim ownership once the credential actually landed — a stale/expired
     // token is refused (not seeded), so the proxy owns nothing to refresh.
     if (status.state === "ok") await agentAccounts.markProxyOwned(accountId, true);
+    return status;
+  });
+
+  // Un-seed: remove a seeded account's credential from the proxy and restore
+  // Orquester's single-refresher ownership (spec §4). The manager drops the auth
+  // file + seeded-account state; the route ALWAYS re-marks the account non-proxy-
+  // owned (markProxyOwned is idempotent) so ownership is restored even on a
+  // map/accounts-service mismatch. No secret material crosses the response.
+  app.post("/api/cliproxy/accounts/unseed", async (request, reply) => {
+    if (refusedOnSocket(reply)) return;
+    const body = (request.body ?? {}) as Partial<CliProxyUnseedRequest>;
+    if (body.provider !== "codex" && body.provider !== "claude") {
+      return reply.code(400).send({ error: "provider must be 'codex' or 'claude'" });
+    }
+    if (typeof body.accountId !== "string" || !body.accountId) {
+      return reply.code(400).send({ error: "accountId is required" });
+    }
+    const provider = body.provider;
+    const accountId = body.accountId;
+    const status = await manager.unseedProvider({ provider, accountId });
+    await agentAccounts.markProxyOwned(accountId, false);
     return status;
   });
 

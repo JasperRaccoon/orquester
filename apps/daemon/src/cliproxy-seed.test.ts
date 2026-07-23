@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  accessTokenFreshMs,
   accountPrefix,
   claudeStorageFromCredentials,
   codexStorageFromAuthJson,
@@ -55,4 +56,12 @@ test("two accounts of one provider get distinct prefixes → individually routab
 test("invalid shapes throw, not silently produce garbage", () => {
   assert.throws(() => codexStorageFromAuthJson({}, "x"), /missing tokens/);
   assert.throws(() => claudeStorageFromCredentials({}, "x"), /missing claudeAiOauth/);
+});
+
+test("accessTokenFreshMs measures against the injected clock, not wall time", () => {
+  const now = Date.parse("2026-07-23T00:00:00Z");
+  assert.equal(accessTokenFreshMs({ expired: "2026-07-23T00:00:00Z" }, now), 0);
+  assert.equal(accessTokenFreshMs({ expired: "2026-07-23T00:00:00Z" }, now - 60_000), 60_000);
+  assert.equal(accessTokenFreshMs({ expired: "2026-07-23T00:00:00Z" }, now + 60_000), -60_000);
+  assert.equal(accessTokenFreshMs({ expired: "not-a-date" }, now), Number.NEGATIVE_INFINITY);
 });

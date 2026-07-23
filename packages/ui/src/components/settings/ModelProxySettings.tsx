@@ -3,7 +3,6 @@ import { Check, Loader2, Power, RefreshCw, X } from "lucide-react";
 import type { CliProxyProviderId, CliProxyProviderStatus, CliProxyStatus } from "@orquester/api";
 import { cn } from "../../lib/cn";
 import { Button, Input } from "../ui";
-import { useApi } from "../../context/orquester-context";
 import { useAppStore } from "../../store/app";
 
 const PROVIDER_LABEL: Record<CliProxyProviderId, string> = {
@@ -50,7 +49,6 @@ const formatVerified = (iso: string | null): string => {
 };
 
 export const ModelProxySettings: React.FC = () => {
-  const api = useApi();
   const status = useAppStore((s) => s.cliproxy);
   const models = useAppStore((s) => s.cliproxyModels);
   const agentAccounts = useAppStore((s) => s.agentAccounts);
@@ -58,8 +56,9 @@ export const ModelProxySettings: React.FC = () => {
   const enableCliProxy = useAppStore((s) => s.enableCliProxy);
   const disableCliProxy = useAppStore((s) => s.disableCliProxy);
   const seedCliProxyAccount = useAppStore((s) => s.seedCliProxyAccount);
+  const unseedCliProxyAccount = useAppStore((s) => s.unseedCliProxyAccount);
   const setCliProxyOpenRouterKey = useAppStore((s) => s.setCliProxyOpenRouterKey);
-  const setCliProxyDefaultModel = useAppStore((s) => s.setCliProxyDefaultModel);
+  const setCliProxyConfig = useAppStore((s) => s.setCliProxyConfig);
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -78,6 +77,26 @@ export const ModelProxySettings: React.FC = () => {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
+    }
+  };
+
+  // Restart-gated mutations (config/openrouter-key) refuse with { ok:false,
+  // affectedSessions } while dependent sessions are live; on refusal, confirm
+  // the session count with the user then re-attempt with force.
+  const withRestartConfirm = async (
+    attempt: (force: boolean) => Promise<CliProxyStatus | { ok: boolean; affectedSessions?: number }>
+  ): Promise<void> => {
+    const res = await attempt(false);
+    if (res && "ok" in res && res.ok === false) {
+      const n = res.affectedSessions ?? 0;
+      if (
+        window.confirm(
+          `This restarts the model proxy and will close ${n} running ` +
+            `session${n === 1 ? "" : "s"}. Continue?`
+        )
+      ) {
+        await attempt(true);
+      }
     }
   };
 
@@ -164,13 +183,21 @@ export const ModelProxySettings: React.FC = () => {
               accounts={(agentAccounts?.accounts ?? []).filter(
                 (a) => p.provider !== "openrouter" && a.agent === p.provider
               )}
+              seeded={status.accounts.filter((a) => a.provider === p.provider)}
               busy={busy}
               onSeed={(accountId) =>
                 run(() =>
                   seedCliProxyAccount({ provider: p.provider as "codex" | "claude", accountId })
                 )
               }
-              onSaveKey={(key) => run(() => setCliProxyOpenRouterKey(key))}
+              onUnseed={(accountId) =>
+                run(() =>
+                  unseedCliProxyAccount({ provider: p.provider as "codex" | "claude", accountId })
+                )
+              }
+              onSaveKey={(key) =>
+                run(() => withRestartConfirm((force) => setCliProxyOpenRouterKey(key, force)))
+              }
             />
           ))}
         </div>
@@ -186,7 +213,9 @@ export const ModelProxySettings: React.FC = () => {
           options={models?.models ?? []}
           stale={!models}
           disabled={busy}
-          onChange={(m) => run(() => setCliProxyDefaultModel(m))}
+          onChange={(m) =>
+            run(() => withRestartConfirm((force) => setCliProxyConfig({ defaultModel: m }, force)))
+          }
         />
         <ModelSelect
           label="Background model"
@@ -196,10 +225,7 @@ export const ModelProxySettings: React.FC = () => {
           stale={!models}
           disabled={busy}
           onChange={(m) =>
-            run(async () => {
-              await api.setCliProxyConfig({ backgroundModel: m });
-              await loadCliProxy();
-            })
+            run(() => withRestartConfirm((force) => setCliProxyConfig({ backgroundModel: m }, force)))
           }
         />
         {!models && (
@@ -215,10 +241,12 @@ export const ModelProxySettings: React.FC = () => {
 const ProviderRow: React.FC<{
   provider: CliProxyProviderStatus;
   accounts: { id: string; label: string; email: string | null }[];
+  seeded: { id: string; label: string; email?: string }[];
   busy: boolean;
   onSeed: (accountId: string) => void;
+  onUnseed: (accountId: string) => void;
   onSaveKey: (key: string) => void;
-}> = ({ provider, accounts, busy, onSeed, onSaveKey }) => {
+}> = ({ provider, accounts, seeded, busy, onSeed, onUnseed, onSaveKey }) => {
   const [seeding, setSeeding] = useState(false);
   const [keyEntry, setKeyEntry] = useState(false);
   const [key, setKey] = useState("");
@@ -288,6 +316,37 @@ const ProviderRow: React.FC<{
               </button>
             ))
           )}
+        </div>
+      )}
+
+      {!isOpenRouter && seeded.length > 0 && (
+        <div className="ml-8 mt-2 space-y-1 rounded-md border border-neutral-800 bg-neutral-950 p-2">
+          {seeded.map((a) => (
+            <div
+              key={a.id}
+              className="flex items-center gap-2 rounded px-2 py-1.5 text-sm text-neutral-200"
+            >
+              <span className="min-w-0 flex-1 truncate">{a.label}</span>
+              {a.email ? <span className="shrink-0 text-xs text-neutral-500">{a.email}</span> : null}
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  if (
+                    window.confirm(
+                      `Un-seed ${a.label}? Orquester will resume managing this account's ` +
+                        `token and the proxy will stop using it.`
+                    )
+                  ) {
+                    onUnseed(a.id);
+                  }
+                }}
+                className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-xs text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200 disabled:opacity-50"
+              >
+                <X size={12} /> Un-seed
+              </button>
+            </div>
+          ))}
         </div>
       )}
 

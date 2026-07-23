@@ -62,7 +62,7 @@ function setup() {
   let probeFn: (() => Promise<ProbeResult>) | null = null;
   const probe = async (): Promise<ProbeResult> => (probeFn ? probeFn() : probeResult);
 
-  let clock = 1000;
+  let clock = Date.now();
   let liveCount = 0;
 
   let installCount = 0;
@@ -456,6 +456,48 @@ test("corrupt secrets.json → enable latches error, installs nothing, writes no
   assert.equal(existsSync(join(cliproxyDir(h.daemonDir), "config.yaml")), false, "no config rewrite");
 });
 
+test("enable: a throwing install latches error (never wedged in 'starting') and stays retriable", async () => {
+  const h = setup();
+  h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
+  h.setInstall(async () => {
+    throw new Error("sha256 mismatch");
+  });
+
+  await h.mgr.enable();
+
+  const st = h.mgr.status();
+  assert.notEqual(st.state, "starting", "a throw must not wedge the manager in 'starting'");
+  assert.equal(st.state, "error");
+  assert.ok(st.reasons.some((r) => /sha256 mismatch/.test(r)), `reasons=${JSON.stringify(st.reasons)}`);
+
+  // Retriable: a working install now reaches healthy.
+  h.setInstall(async () => {
+    await writeBin(h.daemonDir);
+    return { version: "v7.2.95" };
+  });
+  await h.mgr.enable();
+  assert.equal(h.mgr.status().state, "healthy", "enable can be retried after the failure clears");
+});
+
+test("bootAdopt: a throw during (re)probe latches error, never stuck in 'starting'", async () => {
+  const h = setup();
+  await writeEnabledState(h.daemonDir);
+  h.setHasService(true);
+  let n = 0;
+  h.setProbeFn(async () => {
+    n++;
+    if (n === 1) return { ok: false, reachable: true };
+    throw new Error("reprobe blew up");
+  });
+
+  await h.mgr.init();
+
+  const st = h.mgr.status();
+  assert.notEqual(st.state, "starting", "a throw after setState('starting') must not wedge");
+  assert.equal(st.state, "error");
+  assert.ok(st.reasons.some((r) => /reprobe blew up/.test(r)), `reasons=${JSON.stringify(st.reasons)}`);
+});
+
 // --- Task 5: provider status + credential seeding with freshness guard ---------
 
 test("seedProvider writes a prefixed auth file 0600, records the account, marks the provider ok", async () => {
@@ -540,6 +582,64 @@ test("status per-provider state gates launchers: codex seeded → claudex on, cl
   assert.ok(lastClaudemix?.disabledReason, "claudemix carries a disabledReason");
 });
 
+test("unseedProvider removes the auth file, drops the account, degrades the provider, broadcasts", async () => {
+  const h = setup();
+  h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
+  await h.mgr.enable();
+
+  const accountId = "65eebd90-01d1-4063-b743-c4a5713f5519";
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  const authJson = {
+    tokens: {
+      id_token: fakeJwt({ email: "a@b.com", "https://api.openai.com/auth": { chatgpt_account_id: "acct-1" } }),
+      access_token: fakeJwt({ exp }),
+      refresh_token: "rt"
+    }
+  };
+  await h.mgr.seedProvider({ provider: "codex", accountId }, async () => authJson);
+  const authFile = join(cliproxyDir(h.daemonDir), "auth", "codex-acc65eebd90.json");
+  assert.ok(existsSync(authFile), "auth file written by seed");
+  assert.equal(h.mgr.status().accounts.length, 1);
+
+  const marker = h.events.length;
+  const status = await h.mgr.unseedProvider({ provider: "codex", accountId });
+
+  assert.equal(status.provider, "codex");
+  assert.equal(status.state, "missing");
+  assert.equal(existsSync(authFile), false, "auth file removed");
+  assert.equal(h.mgr.status().accounts.length, 0, "account dropped from status");
+  assert.equal(h.mgr.status().providers.find((p) => p.provider === "codex")?.state, "missing");
+  // Removing the last credential returns the manager to the pre-seed optimistic
+  // state (no provider info to gate on), so the launchers re-couple as enabled.
+  const lastClaudex = [...h.registryCalls].reverse().find((c) => c.id === "claudex");
+  assert.equal(lastClaudex?.enabled, true, "claudex re-coupled optimistically once no provider info remains");
+  assert.equal(lastClaudex?.disabledReason, undefined, "no disabledReason in the optimistic state");
+  assert.ok(
+    h.events.slice(marker).some((e) => e.type === "cliproxy.changed"),
+    "a cliproxy.changed event is broadcast on the un-seed"
+  );
+  const persisted = parseCliProxyState(JSON.parse(await readFile(cliproxyStateFile(h.daemonDir), "utf8")));
+  assert.deepEqual(persisted.seededAccounts, [], "persisted seededAccounts emptied");
+});
+
+test("unseedProvider is idempotent on an unknown id", async () => {
+  const h = setup();
+  h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
+  await h.mgr.enable();
+
+  const marker = h.events.length;
+  const status = await h.mgr.unseedProvider({ provider: "codex", accountId: "does-not-exist" });
+
+  assert.equal(status.provider, "codex");
+  assert.equal(status.state, "missing");
+  assert.equal(h.mgr.status().accounts.length, 0, "no accounts to remove");
+  assert.equal(
+    h.events.slice(marker).filter((e) => e.type === "cliproxy.changed").length,
+    0,
+    "no broadcast on an unknown id"
+  );
+});
+
 test("setOpenRouterKey (manager): refuses without force while sessions live; with force stores the key + marks openrouter ok", async () => {
   const h = setup();
   h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
@@ -591,6 +691,96 @@ test("seeded accounts persist: a manager over a state file with a seeded codex a
   assert.equal(h.mgr.status().providers.find((p) => p.provider === "codex")?.state, "ok");
   const lastClaudex = [...h.registryCalls].reverse().find((c) => c.id === "claudex");
   assert.equal(lastClaudex?.enabled, true, "claudex enabled from the persisted codex account");
+});
+
+test("boot: a persisted seeded account with a STALE on-disk auth file degrades to 'expired' and disables its launcher; a fresh file stays ok/enabled", async () => {
+  const accountId = "14137047-98b2-4cf1-9b54-b18a22a85a62";
+  const authFileName = "claude-acc14137047.json";
+  const persistedState = () => ({
+    ...createDefaultCliProxyState(),
+    enabled: true,
+    seededAccounts: [{ provider: "claude", accountId, label: "s@t.com", prefix: "acc14137047" }]
+  });
+
+  // (a) STALE auth file → provider degrades to expired, claudemix disabled.
+  {
+    const h = setup();
+    await mkdir(join(cliproxyDir(h.daemonDir), "auth"), { recursive: true });
+    await writeFile(cliproxyStateFile(h.daemonDir), JSON.stringify(persistedState()), "utf8");
+    await writeFile(
+      join(cliproxyDir(h.daemonDir), "auth", authFileName),
+      JSON.stringify({ type: "claude", expired: new Date(Date.now() - 3_600_000).toISOString() }),
+      "utf8"
+    );
+    h.setHasService(true);
+    h.setProbe({ ok: true, reachable: true, models: ["claude-fable-5"] });
+
+    await h.mgr.init();
+
+    assert.equal(h.mgr.status().providers.find((p) => p.provider === "claude")?.state, "expired");
+    const lastClaudemix = [...h.registryCalls].reverse().find((c) => c.id === "claudemix");
+    assert.equal(lastClaudemix?.enabled, false, "claudemix disabled: stale claude credential");
+  }
+
+  // (b) FRESH auth file → provider stays ok, claudemix enabled.
+  {
+    const h = setup();
+    await mkdir(join(cliproxyDir(h.daemonDir), "auth"), { recursive: true });
+    await writeFile(cliproxyStateFile(h.daemonDir), JSON.stringify(persistedState()), "utf8");
+    await writeFile(
+      join(cliproxyDir(h.daemonDir), "auth", authFileName),
+      JSON.stringify({ type: "claude", expired: new Date(Date.now() + 3_600_000).toISOString() }),
+      "utf8"
+    );
+    h.setHasService(true);
+    h.setProbe({ ok: true, reachable: true, models: ["claude-fable-5"] });
+
+    await h.mgr.init();
+
+    assert.equal(h.mgr.status().providers.find((p) => p.provider === "claude")?.state, "ok");
+    const lastClaudemix = [...h.registryCalls].reverse().find((c) => c.id === "claudemix");
+    assert.equal(lastClaudemix?.enabled, true, "claudemix enabled: fresh claude credential");
+  }
+});
+
+test("poll: a seeded credential that expires at runtime degrades to 'expired', disables its launcher, and broadcasts cliproxy.changed", async () => {
+  const h = setup();
+  h.setProbe({ ok: true, reachable: true, models: ["claude-fable-5"] });
+  await h.mgr.enable();
+
+  const accountId = "14137047-98b2-4cf1-9b54-b18a22a85a62";
+  const seeded = await h.mgr.seedProvider({ provider: "claude", accountId }, async () => ({
+    claudeAiOauth: { accessToken: "at", refreshToken: "rt", expiresAt: Date.now() + 3_600_000 }
+  }));
+  assert.equal(seeded.state, "ok");
+  assert.equal(h.mgr.status().providers.find((p) => p.provider === "claude")?.state, "ok");
+  assert.equal(
+    [...h.registryCalls].reverse().find((c) => c.id === "claudemix")?.enabled,
+    true,
+    "claudemix enabled after a fresh seed"
+  );
+
+  // The proxy-owned auth file goes stale out-of-band (a real expiry the proxy could
+  // not refresh). The next health poll must re-derive freshness and degrade it.
+  await writeFile(
+    join(cliproxyDir(h.daemonDir), "auth", "claude-acc14137047.json"),
+    JSON.stringify({ type: "claude", expired: new Date(Date.now() - 1000).toISOString() }),
+    "utf8"
+  );
+  const marker = h.events.length;
+
+  await h.mgr.checkHealth();
+
+  assert.equal(h.mgr.status().providers.find((p) => p.provider === "claude")?.state, "expired");
+  assert.equal(
+    [...h.registryCalls].reverse().find((c) => c.id === "claudemix")?.enabled,
+    false,
+    "claudemix disabled once the claude credential expires"
+  );
+  assert.ok(
+    h.events.slice(marker).some((e) => e.type === "cliproxy.changed"),
+    "a cliproxy.changed event is broadcast on the degradation"
+  );
 });
 
 test("enable: a freshly-installed binary that never probes healthy rolls back to bin.prev and respawns", async () => {
@@ -645,7 +835,8 @@ function fakeRouteManager(daemonDir?: string) {
     disable: [] as boolean[],
     setConfig: [] as Array<{ cfg: unknown; force: boolean }>,
     openRouter: [] as Array<{ key: string; force: boolean }>,
-    seed: [] as Array<{ req: { provider: "codex" | "claude"; accountId: string }; cred: unknown }>
+    seed: [] as Array<{ req: { provider: "codex" | "claude"; accountId: string }; cred: unknown }>,
+    unseed: [] as Array<{ provider: "codex" | "claude"; accountId: string }>
   };
   const status: CliProxyStatus = {
     state: "off",
@@ -703,6 +894,12 @@ function fakeRouteManager(daemonDir?: string) {
       const cred = await read(req.provider, req.accountId);
       calls.seed.push({ req, cred });
       return { provider: req.provider, state: "ok", lastVerifiedAt: "2026-07-23T00:00:00Z" };
+    },
+    unseedProvider: async (
+      req: { provider: "codex" | "claude"; accountId: string }
+    ): Promise<CliProxyProviderStatus> => {
+      calls.unseed.push({ provider: req.provider, accountId: req.accountId });
+      return { provider: req.provider, state: "missing", lastVerifiedAt: null };
     }
   };
   return { manager, calls, status };
@@ -811,6 +1008,47 @@ test("seed route is refused over the unix socket (403); no seed, no ownership fl
   assert.equal(res.statusCode, 403);
   assert.match(res.json().error, /HTTP transport/);
   assert.equal(calls.seed.length, 0);
+  assert.equal(marks.length, 0);
+  await app.close();
+});
+
+test("unseed route (remote): calls unseedProvider, marks proxy-owned false, returns status", async () => {
+  const daemonDir = join(mkdtempSync(join(tmpdir(), "orq-cliproxy-unseed-")), "daemon");
+  const accountId = "14137047-1111-2222-3333-444455556666";
+  const { manager, calls } = fakeRouteManager();
+  const { agentAccounts, marks } = fakeAgentAccounts(daemonDir);
+  const app = Fastify();
+  registerCliProxyRoutes(app, { manager, mode: "remote", daemonDir, agentAccounts });
+  await app.ready();
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/cliproxy/accounts/unseed",
+    payload: { provider: "claude", accountId }
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().provider, "claude");
+  assert.equal(res.json().state, "missing");
+  assert.equal(calls.unseed.length, 1, "unseedProvider called once");
+  assert.deepEqual(calls.unseed[0], { provider: "claude", accountId });
+  assert.deepEqual(marks, [{ id: accountId, owned: false }], "account ownership restored to Orquester");
+  await app.close();
+});
+
+test("unseed route is refused over the unix socket (403); no unseed, no ownership flip", async () => {
+  const daemonDir = join(mkdtempSync(join(tmpdir(), "orq-cliproxy-unseed-local-")), "daemon");
+  const { manager, calls } = fakeRouteManager();
+  const { agentAccounts, marks } = fakeAgentAccounts(daemonDir);
+  const app = Fastify();
+  registerCliProxyRoutes(app, { manager, mode: "local", daemonDir, agentAccounts });
+  await app.ready();
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/cliproxy/accounts/unseed",
+    payload: { provider: "claude", accountId: "x" }
+  });
+  assert.equal(res.statusCode, 403);
+  assert.match(res.json().error, /HTTP transport/);
+  assert.equal(calls.unseed.length, 0);
   assert.equal(marks.length, 0);
   await app.close();
 });

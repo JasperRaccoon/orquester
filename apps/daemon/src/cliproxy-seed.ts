@@ -122,7 +122,7 @@ export function claudeStorageFromCredentials(
  * The caller warns/blocks on a stale token before seeding, to avoid triggering a
  * proxy-side refresh of a nearly-expired token (dual-refresher rule).
  */
-export function accessTokenFreshMs(storage: { expired: string }): number {
+export function accessTokenFreshMs(storage: { expired: string }, now: number = Date.now()): number {
   const t = Date.parse(storage.expired);
-  return Number.isNaN(t) ? Number.NEGATIVE_INFINITY : t - Date.now();
+  return Number.isNaN(t) ? Number.NEGATIVE_INFINITY : t - now;
 }

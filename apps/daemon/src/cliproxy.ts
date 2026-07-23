@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { CliProxyProviderId, CliProxyProviderStatus, CliProxyStatus } from "@orquester/api";
@@ -164,7 +164,8 @@ export class CliProxyManager {
       // Rebuild the in-memory proxy-owned account map from persisted state so a
       // restart keeps provider availability (and the launcher coupling) without a
       // re-seed. Persisted records carry no token freshness, so they rehydrate as
-      // "ok"; a stale credential re-degrades on the next seed/verify.
+      // "ok"; refreshSeededFreshness() below re-derives real freshness from the
+      // on-disk auth files at boot and again on every health poll.
       this.rebuildSeededAccounts();
       if (!this.state.enabled) {
         this.setState("off", []);
@@ -179,6 +180,7 @@ export class CliProxyManager {
         return;
       }
       this.secrets = loaded.secrets;
+      await this.refreshSeededFreshness();
       await this.bootAdopt();
     });
   }
@@ -193,58 +195,63 @@ export class CliProxyManager {
    */
   enable(): Promise<void> {
     return this.transition(async () => {
-      this.errorLatched = false;
-      // Secrets first — fail closed BEFORE installing or writing anything.
-      const loaded = await loadOrInitSecrets(this.daemonDir);
-      if (loaded.state === "corrupt") {
-        this.fail("cliproxy secrets are corrupt");
-        return;
-      }
-      this.secrets = loaded.secrets;
-      this.state.enabled = true;
+      try {
+        this.errorLatched = false;
+        // Secrets first — fail closed BEFORE installing or writing anything.
+        const loaded = await loadOrInitSecrets(this.daemonDir);
+        if (loaded.state === "corrupt") {
+          this.fail("cliproxy secrets are corrupt");
+          return;
+        }
+        this.secrets = loaded.secrets;
+        this.state.enabled = true;
 
-      // Install the pinned binary (injected). Pre-wiring fallback: require one.
-      if (this.adapters.install) {
-        this.setState("starting", [], "downloading proxy binary");
-        const installed = await this.adapters.install();
-        this.state.version = installed.version;
-      } else if (!existsSync(this.binPath())) {
-        this.state.enabled = false;
-        this.fail("binary not installed");
-        return;
-      }
+        // Install the pinned binary (injected). Pre-wiring fallback: require one.
+        if (this.adapters.install) {
+          this.setState("starting", [], "downloading proxy binary");
+          const installed = await this.adapters.install();
+          this.state.version = installed.version;
+        } else if (!existsSync(this.binPath())) {
+          this.state.enabled = false;
+          this.fail("binary not installed");
+          return;
+        }
 
-      // Derived projections + both isolated managed homes from the shared config.
-      await writeProjections(this.daemonDir, this.secrets, this.state);
-      const sysDir = this.resolveSystemClaudeDir();
-      await seedHome(this.daemonDir, "claudex", sysDir);
-      await seedHome(this.daemonDir, "claudemix", sysDir);
+        // Derived projections + both isolated managed homes from the shared config.
+        await writeProjections(this.daemonDir, this.secrets, this.state);
+        const sysDir = this.resolveSystemClaudeDir();
+        await seedHome(this.daemonDir, "claudex", sysDir);
+        await seedHome(this.daemonDir, "claudemix", sysDir);
 
-      this.setState("starting", []);
-      await this.spawn(false);
-      let probed = await this.probe();
-      // A freshly-installed binary that never probes healthy: if a previous binary
-      // survives in bin.prev/, roll back and respawn once before latching error.
-      // `rollback()` returns false when there is nothing to roll back to.
-      if (!probed.ok && this.adapters.rollback) {
-        const rolled = await this.adapters.rollback();
-        if (rolled) {
-          await this.spawn(true);
-          probed = await this.probe();
-          if (probed.ok) {
-            this.becomeHealthy(probed.models);
-            this.setState("healthy", ["rolled back to previous binary"]);
-            await this.persist();
-            return;
+        this.setState("starting", []);
+        await this.spawn(false);
+        let probed = await this.probe();
+        // A freshly-installed binary that never probes healthy: if a previous binary
+        // survives in bin.prev/, roll back and respawn once before latching error.
+        // `rollback()` returns false when there is nothing to roll back to.
+        if (!probed.ok && this.adapters.rollback) {
+          const rolled = await this.adapters.rollback();
+          if (rolled) {
+            await this.spawn(true);
+            probed = await this.probe();
+            if (probed.ok) {
+              this.becomeHealthy(probed.models);
+              this.setState("healthy", ["rolled back to previous binary"]);
+              await this.persist();
+              return;
+            }
           }
         }
+        if (probed.ok) {
+          this.becomeHealthy(probed.models);
+        } else {
+          this.fail("proxy down");
+        }
+        await this.persist();
+      } catch (error) {
+        this.fail(error instanceof Error ? error.message : String(error));
+        await this.persist();
       }
-      if (probed.ok) {
-        this.becomeHealthy(probed.models);
-      } else {
-        this.fail("proxy down");
-      }
-      await this.persist();
     });
   }
 
@@ -369,7 +376,7 @@ export class CliProxyManager {
           : claudeStorageFromCredentials(cred, req.accountId);
 
       // Freshness guard — refuse a near-expired token to avoid a proxy refresh.
-      if (accessTokenFreshMs(storage as { expired: string }) <= SEED_FRESH_THRESHOLD_MS) {
+      if (accessTokenFreshMs(storage as { expired: string }, this.adapters.now()) <= SEED_FRESH_THRESHOLD_MS) {
         return { provider: req.provider, state: "expired", lastVerifiedAt: null };
       }
 
@@ -409,6 +416,44 @@ export class CliProxyManager {
       this.broadcaster.publish("cliproxy", "cliproxy.changed", this.status());
       await this.persist();
       return { provider: req.provider, state: "ok", lastVerifiedAt };
+    });
+  }
+
+  /**
+   * Reverse a seed (spec §4): remove one seeded account's credential from the
+   * proxy's `auth/` dir and the seeded-account state, restoring Orquester's
+   * single-refresher ownership (the caller flips `markProxyOwned` off). The proxy
+   * hot-discovers the removed file — no restart — so this is symmetric to
+   * {@link seedProvider}: same serialized queue, same deterministic per-account
+   * filename, best-effort re-probe + launcher recoupling + broadcast. Idempotent:
+   * an unknown accountId performs no file/state mutation, no broadcast, no persist,
+   * and just returns the current provider status. Never throws.
+   */
+  unseedProvider(req: { provider: "codex" | "claude"; accountId: string }): Promise<CliProxyProviderStatus> {
+    return this.transition(async () => {
+      const existing = this.seededAccounts.get(req.accountId);
+      if (existing) {
+        const file = join(
+          cliproxyDir(this.daemonDir),
+          "auth",
+          `${existing.provider}-${accountPrefix(existing.id)}.json`
+        );
+        await rm(file, { force: true }).catch(() => undefined);
+        this.seededAccounts.delete(req.accountId);
+        const idx = this.state.seededAccounts.findIndex((a) => a.accountId === req.accountId);
+        if (idx >= 0) this.state.seededAccounts.splice(idx, 1);
+        // Hot-discovered removal: re-probe so a shrunk provider set refreshes the
+        // catalog, then recouple launchers and rebroadcast the reduced status.
+        const probed = await this.probe();
+        if (probed.ok && probed.models) {
+          this.state.modelCatalog = { models: probed.models, asOf: new Date(this.adapters.now()).toISOString() };
+        }
+        this.applyRegistryCoupling();
+        this.broadcaster.publish("cliproxy", "cliproxy.changed", this.status());
+        await this.persist();
+      }
+      const provider = existing?.provider ?? req.provider;
+      return this.providerStatuses().find((p) => p.provider === provider)!;
     });
   }
 
@@ -537,6 +582,10 @@ export class CliProxyManager {
         // than relabeling it healthy in place. Until then it stays degraded.
         if (this.external) await this.reparentIfDrained();
         else this.becomeHealthy(probed.models);
+        if (await this.refreshSeededFreshness()) {
+          this.applyRegistryCoupling();
+          this.broadcaster.publish("cliproxy", "cliproxy.changed", this.status());
+        }
         await this.persist();
         return;
       }
@@ -574,44 +623,49 @@ export class CliProxyManager {
    *   (3) nothing on the port → spawn and poll readiness.
    */
   private async bootAdopt(): Promise<void> {
-    const name = SERVICE_SESSION_NAME;
-    if (this.adapters.tmux && (await this.adapters.tmux.hasServiceSession(name))) {
-      const probed = await this.probe();
-      if (probed.ok) {
-        this.becomeHealthy(probed.models);
+    try {
+      const name = SERVICE_SESSION_NAME;
+      if (this.adapters.tmux && (await this.adapters.tmux.hasServiceSession(name))) {
+        const probed = await this.probe();
+        if (probed.ok) {
+          this.becomeHealthy(probed.models);
+          await this.persist();
+          return;
+        }
+        this.setState("starting", []);
+        await this.spawn(true);
+        const reprobed = await this.probe();
+        if (reprobed.ok) this.becomeHealthy(reprobed.models);
+        else this.fail("proxy down");
         await this.persist();
         return;
       }
+
+      const probed = await this.probe();
+      if (probed.ok) {
+        this.external = true;
+        this.setState("degraded", ["persistence-lost"]);
+        this.applyRegistryCoupling();
+        await this.persist();
+        return;
+      }
+      if (probed.reachable) {
+        this.setState("error", ["port conflict"]);
+        this.applyRegistryCoupling();
+        await this.persist();
+        return;
+      }
+
       this.setState("starting", []);
-      await this.spawn(true);
-      const reprobed = await this.probe();
-      if (reprobed.ok) this.becomeHealthy(reprobed.models);
+      await this.spawn(false);
+      const spawned = await this.probe();
+      if (spawned.ok) this.becomeHealthy(spawned.models);
       else this.fail("proxy down");
       await this.persist();
-      return;
-    }
-
-    const probed = await this.probe();
-    if (probed.ok) {
-      this.external = true;
-      this.setState("degraded", ["persistence-lost"]);
-      this.applyRegistryCoupling();
+    } catch (error) {
+      this.fail(error instanceof Error ? error.message : String(error));
       await this.persist();
-      return;
     }
-    if (probed.reachable) {
-      this.setState("error", ["port conflict"]);
-      this.applyRegistryCoupling();
-      await this.persist();
-      return;
-    }
-
-    this.setState("starting", []);
-    await this.spawn(false);
-    const spawned = await this.probe();
-    if (spawned.ok) this.becomeHealthy(spawned.models);
-    else this.fail("proxy down");
-    await this.persist();
   }
 
   private async spawn(killFirst: boolean): Promise<void> {
@@ -733,6 +787,44 @@ export class CliProxyManager {
         lastVerifiedAt: null
       });
     }
+  }
+
+  /**
+   * Re-derive each seeded account's freshness from its on-disk auth file (the
+   * proxy-owned source of truth it rewrites on every refresh). A readable file with
+   * a stale `expired` degrades the account to `expired`; a fresh one restores `ok`;
+   * a missing/unreadable/`expired`-less file leaves the current state untouched
+   * (conservative — the persisted-account-without-auth-file case rehydrates
+   * optimistically). Returns whether any account's state changed. Called on boot and
+   * on the health poll so a credential that expires at runtime degrades the provider
+   * chip (spec §4) without needing a re-seed.
+   */
+  private async refreshSeededFreshness(): Promise<boolean> {
+    let changed = false;
+    for (const account of this.seededAccounts.values()) {
+      const file = join(
+        cliproxyDir(this.daemonDir),
+        "auth",
+        `${account.provider}-${accountPrefix(account.id)}.json`
+      );
+      let expired: string;
+      try {
+        const parsed = JSON.parse(await readFile(file, "utf8"));
+        if (!parsed || typeof parsed !== "object" || typeof (parsed as { expired?: unknown }).expired !== "string") {
+          continue;
+        }
+        expired = (parsed as { expired: string }).expired;
+      } catch {
+        continue;
+      }
+      const next =
+        accessTokenFreshMs({ expired }, this.adapters.now()) > SEED_FRESH_THRESHOLD_MS ? "ok" : "expired";
+      if (account.state !== next) {
+        account.state = next;
+        changed = true;
+      }
+    }
+    return changed;
   }
 
   /** Whether any provider knowledge exists yet (seeded account or OpenRouter key). */

@@ -10,7 +10,7 @@
  * websockets, tokenized downloads must not be handled by the SW).
  */
 
-var VERSION = "v1";
+var VERSION = "v3";
 var SHELL_CACHE = "orq-shell-" + VERSION;
 var ASSET_CACHE = "orq-assets-" + VERSION;
 var CURRENT_CACHES = [SHELL_CACHE, ASSET_CACHE];

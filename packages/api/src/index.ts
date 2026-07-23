@@ -714,6 +714,13 @@ export type AgentAccountsEventType = "agent-accounts.changed";
 /** Upstream identity providers the managed proxy brokers. */
 export type CliProxyProviderId = "codex" | "claude" | "openrouter";
 
+/**
+ * A restart-gated cliproxy mutation (config/openrouter-key/disable) refused
+ * because dependent sessions are live — the parsed 409 body. Callers re-attempt
+ * with `force` after confirming with the user.
+ */
+export type CliProxyMutationRefusal = { ok: false; affectedSessions: number };
+
 export interface CliProxyProviderStatus {
   provider: CliProxyProviderId;
   state: "ok" | "missing" | "expired";
@@ -743,6 +750,13 @@ export interface CliProxySeedRequest {
   provider: "codex" | "claude";
   accountId: string;
 }
+
+/**
+ * Body for `POST /api/cliproxy/accounts/unseed` — the reverse of a seed. Removes
+ * the seeded credential from the proxy's `auth/` dir and restores Orquester's
+ * ownership of the managed account's token (spec §4). Same shape as a seed.
+ */
+export type CliProxyUnseedRequest = CliProxySeedRequest;
 
 /**
  * Sentinel `accountId` on a create-session request meaning "explicit System /
@@ -1105,25 +1119,32 @@ export class HttpOrquesterApiClient implements OrquesterApi {
   }
 
   disableCliProxy(force?: boolean): Promise<{ ok: boolean; affectedSessions?: number }> {
-    return this.post("/api/cliproxy/disable", { force: Boolean(force) });
+    return this.mutateAllowingRefusal("POST", "/api/cliproxy/disable", { force: Boolean(force) });
   }
 
   setCliProxyConfig(
     cfg: { defaultModel?: string; backgroundModel?: string; claudeDefaultModel?: string },
     force?: boolean
-  ): Promise<CliProxyStatus> {
-    return this.put("/api/cliproxy/config", { ...cfg, force: Boolean(force) });
+  ): Promise<CliProxyStatus | CliProxyMutationRefusal> {
+    return this.mutateAllowingRefusal("PUT", "/api/cliproxy/config", { ...cfg, force: Boolean(force) });
   }
 
   seedCliProxyAccount(req: CliProxySeedRequest): Promise<CliProxyProviderStatus> {
     return this.post("/api/cliproxy/accounts/seed", req);
   }
 
+  unseedCliProxyAccount(req: CliProxyUnseedRequest): Promise<CliProxyProviderStatus> {
+    return this.post("/api/cliproxy/accounts/unseed", req);
+  }
+
   setCliProxyOpenRouterKey(
     key: string,
     force?: boolean
   ): Promise<{ ok: boolean; affectedSessions?: number }> {
-    return this.post("/api/cliproxy/openrouter/key", { key, force: Boolean(force) });
+    return this.mutateAllowingRefusal("POST", "/api/cliproxy/openrouter/key", {
+      key,
+      force: Boolean(force)
+    });
   }
 
   deleteFsEntry(path: string): Promise<{ ok: true }> {
@@ -1194,6 +1215,41 @@ export class HttpOrquesterApiClient implements OrquesterApi {
       },
       body: body === undefined ? undefined : JSON.stringify(body)
     });
+
+    if (!response.ok) {
+      throw new Error(`Orquester API request failed: ${response.status} ${response.statusText}`);
+    }
+
+    if (response.status === 204) {
+      return undefined as T;
+    }
+
+    return response.json() as Promise<T>;
+  }
+
+  // POST/PUT for the restart-gated cliproxy mutations: a 409 refusal is a
+  // first-class value ({ ok:false, affectedSessions }), not an exception, so the
+  // caller can offer a force-confirm flow; every other non-2xx still throws.
+  private async mutateAllowingRefusal<T>(
+    method: "POST" | "PUT",
+    path: string,
+    body?: unknown
+  ): Promise<T> {
+    const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+      method,
+      headers: {
+        ...this.authHeaders(),
+        ...(body === undefined ? {} : { "Content-Type": "application/json" })
+      },
+      body: body === undefined ? undefined : JSON.stringify(body)
+    });
+
+    if (response.status === 409) {
+      const parsed = (await response.json().catch(() => null)) as
+        | { affectedSessions?: number }
+        | null;
+      return { ok: false, affectedSessions: parsed?.affectedSessions ?? 0 } as T;
+    }
 
     if (!response.ok) {
       throw new Error(`Orquester API request failed: ${response.status} ${response.statusText}`);

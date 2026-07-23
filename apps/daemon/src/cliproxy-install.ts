@@ -13,7 +13,7 @@ import { chmod, mkdir, readFile, rename, rm, stat } from "node:fs/promises";
 import { createWriteStream } from "node:fs";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { cliproxyDir } from "@orquester/config";
 
@@ -100,8 +100,18 @@ export async function installBinary(
     }
 
     await mkdir(extractDir, { recursive: true, mode: 0o700 });
-    await exec("tar", ["-xzf", tarball, "-C", extractDir, BINARY_NAME]);
-    const extracted = join(extractDir, BINARY_NAME);
+    const listing = await exec("tar", ["-tzf", tarball]);
+    const entries = listing.stdout.split(/\r?\n/).filter((line) => line.length > 0);
+    const candidates = entries.filter((entry) => !entry.endsWith("/") && basename(entry) === BINARY_NAME);
+    if (candidates.length === 0) {
+      throw new Error("cliproxy binary '" + BINARY_NAME + "' not found in release tarball");
+    }
+    if (candidates.length > 1) {
+      throw new Error("cliproxy binary '" + BINARY_NAME + "' matched multiple release tarball entries: " + candidates.join(", "));
+    }
+    const entryPath = candidates[0];
+    await exec("tar", ["-xzf", tarball, "-C", extractDir, entryPath]);
+    const extracted = join(extractDir, entryPath);
 
     await mkdir(binDir, { recursive: true, mode: 0o700 });
     if (await exists(binPath)) {

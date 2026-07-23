@@ -11,9 +11,11 @@ import type {
   CreateBrowserRequest,
   CreateProjectRequest,
   CreateSessionRequest,
+  CliProxyMutationRefusal,
   CliProxyProviderStatus,
   CliProxySeedRequest,
   CliProxyStatus,
+  CliProxyUnseedRequest,
   CreateTodoRequest,
   CreateWorkspaceRequest,
   EventMessage,
@@ -132,6 +134,28 @@ export class ApiClient {
     }
 
     return response.data;
+  }
+
+  /**
+   * POST/PUT for the restart-gated cliproxy mutations: the daemon answers a live
+   * dependent-session conflict with 409 { ok:false, affectedSessions }. Turn that
+   * into a first-class refusal value (not an ApiError throw) so the caller can
+   * offer a force-confirm flow; every other non-2xx still throws via {@link send}.
+   */
+  private async mutateAllowingRefusal<T>(
+    method: TransportMethod,
+    path: string,
+    body?: unknown
+  ): Promise<T | CliProxyMutationRefusal> {
+    try {
+      return await this.send<T>(method, path, { body });
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        const parsed = e.body as { affectedSessions?: number } | null | undefined;
+        return { ok: false, affectedSessions: parsed?.affectedSessions ?? 0 };
+      }
+      throw e;
+    }
   }
 
   /**
@@ -532,25 +556,40 @@ export class ApiClient {
   }
 
   disableCliProxy(force?: boolean): Promise<{ ok: boolean; affectedSessions?: number }> {
-    return this.send("POST", "/api/cliproxy/disable", { body: { force: Boolean(force) } });
+    return this.mutateAllowingRefusal<{ ok: boolean; affectedSessions?: number }>(
+      "POST",
+      "/api/cliproxy/disable",
+      { force: Boolean(force) }
+    );
   }
 
   setCliProxyConfig(
     cfg: { defaultModel?: string; backgroundModel?: string },
     force?: boolean
-  ): Promise<CliProxyStatus> {
-    return this.send("PUT", "/api/cliproxy/config", { body: { ...cfg, force: Boolean(force) } });
+  ): Promise<CliProxyStatus | CliProxyMutationRefusal> {
+    return this.mutateAllowingRefusal<CliProxyStatus>("PUT", "/api/cliproxy/config", {
+      ...cfg,
+      force: Boolean(force)
+    });
   }
 
   seedCliProxyAccount(req: CliProxySeedRequest): Promise<CliProxyProviderStatus> {
     return this.send("POST", "/api/cliproxy/accounts/seed", { body: req });
   }
 
+  unseedCliProxyAccount(req: CliProxyUnseedRequest): Promise<CliProxyProviderStatus> {
+    return this.send("POST", "/api/cliproxy/accounts/unseed", { body: req });
+  }
+
   setCliProxyOpenRouterKey(
     key: string,
     force?: boolean
   ): Promise<{ ok: boolean; affectedSessions?: number }> {
-    return this.send("POST", "/api/cliproxy/openrouter/key", { body: { key, force: Boolean(force) } });
+    return this.mutateAllowingRefusal<{ ok: boolean; affectedSessions?: number }>(
+      "POST",
+      "/api/cliproxy/openrouter/key",
+      { key, force: Boolean(force) }
+    );
   }
 
   installRegistryEntry(id: string): Promise<RegistryActionResult> {

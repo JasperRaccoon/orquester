@@ -64,9 +64,11 @@ import type {
 import type {
   AgentAccountsResponse,
   BrowserSummary,
+  CliProxyMutationRefusal,
   CliProxyProviderStatus,
   CliProxySeedRequest,
   CliProxyStatus,
+  CliProxyUnseedRequest,
   SessionActivity,
   SessionActivityEvent,
   TodoListRecord,
@@ -640,8 +642,15 @@ export interface AppState {
   enableCliProxy: () => Promise<void>;
   disableCliProxy: (force?: boolean) => Promise<{ ok: boolean; affectedSessions?: number }>;
   seedCliProxyAccount: (req: CliProxySeedRequest) => Promise<CliProxyProviderStatus>;
-  setCliProxyOpenRouterKey: (key: string, force?: boolean) => Promise<void>;
-  setCliProxyDefaultModel: (model: string) => Promise<void>;
+  unseedCliProxyAccount: (req: CliProxyUnseedRequest) => Promise<CliProxyProviderStatus>;
+  setCliProxyOpenRouterKey: (
+    key: string,
+    force?: boolean
+  ) => Promise<{ ok: boolean; affectedSessions?: number }>;
+  setCliProxyConfig: (
+    cfg: { defaultModel?: string; backgroundModel?: string; claudeDefaultModel?: string },
+    force?: boolean
+  ) => Promise<CliProxyStatus | CliProxyMutationRefusal>;
   installAgent: (id: string) => Promise<void>;
   updateAgent: (id: string) => Promise<void>;
   openTab: (
@@ -1573,24 +1582,37 @@ export const useAppStore = create<AppState>((set, get) => ({
     return provider;
   },
 
+  unseedCliProxyAccount: async (req) => {
+    const api = get().api;
+    if (!api) {
+      throw new Error("not connected");
+    }
+    const provider = await api.unseedCliProxyAccount(req);
+    await get().loadCliProxy();
+    return provider;
+  },
+
   setCliProxyOpenRouterKey: async (key, force) => {
     const api = get().api;
     if (!api) {
-      return;
+      return { ok: false, affectedSessions: 0 };
     }
     // The route returns { ok, affectedSessions } (writes projections; may not
     // emit a status event), so refresh the status explicitly afterward.
-    await api.setCliProxyOpenRouterKey(key, force);
+    const res = await api.setCliProxyOpenRouterKey(key, force);
     await get().loadCliProxy();
+    return res;
   },
 
-  setCliProxyDefaultModel: async (model) => {
+  setCliProxyConfig: async (cfg, force) => {
     const api = get().api;
     if (!api) {
-      return;
+      return { ok: false, affectedSessions: 0 };
     }
-    const status = await api.setCliProxyConfig({ defaultModel: model });
-    set({ cliproxy: status });
+    const res = await api.setCliProxyConfig(cfg, force);
+    if ("ok" in res) return res;
+    set({ cliproxy: res });
+    return res;
   },
 
   installAgent: async (id) => {
