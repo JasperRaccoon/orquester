@@ -261,8 +261,13 @@ Mechanism, reusing the existing per-agent account machinery:
   slug-safe, no stored map needed — computed identically at seed time and launch time).
 - The cliproxy contributor maps `(entryId, accountId, model)` → the prefixed model in the
   launch env: `claudex` + Codex account X + `gpt-5.6-sol` → `ANTHROPIC_MODEL=accX/gpt-5.6-sol`
-  (Kimi picks ignore the account — OpenRouter is keyless); `claudemix` + Claude account Y
-  → `ANTHROPIC_MODEL=accY/<default claude model>` pinning the main loop to Y. `System`
+  (**Kimi picks ignore the account enforced daemon-side** — the contributor never
+  prefixes an OpenRouter model, and the UI passes System; OpenRouter is keyless);
+  `claudemix` resolves its **own `claudeDefaultModel`** (persisted in cliproxy state,
+  default `claude-fable-5`, configurable via `PUT /api/cliproxy/config`) — never the
+  claudex GPT `defaultModel` — so `claudemix` + Claude account Y →
+  `ANTHROPIC_MODEL=accY/<claudeDefaultModel>` pinning the main loop to Y, and validation
+  probes the Claude provider (a Claude-only setup launches claudemix fine). `System`
   leaves the model unprefixed. The chosen `accountId` is **persisted on the session
   record** (like `model`) so a reattach re-pins the same account; the tab badge can show
   both the model and a short account label.
@@ -328,7 +333,11 @@ Registry `entry.env` reaches sessions via `tmux new-session -e` — argv-visible
   `ANTHROPIC_DEFAULT_HAIKU_MODEL=<backgroundModel>` (required — "flags only" would
   silently route claudemix background calls to the CLI default, exactly the failure the
   backgroundModel invariant forbids), `CLAUDE_CODE_ALWAYS_ENABLE_EFFORT=1`,
-  `CLAUDE_CODE_NO_FLICKER=1`; main model deliberately unset (Fable via CLI default).
+  `CLAUDE_CODE_NO_FLICKER=1`; the env file carries no main model — the per-launch
+  contributor emits `ANTHROPIC_MODEL=<claudeDefaultModel>` (default `claude-fable-5`,
+  account-prefixed when an account is picked), which is what makes account pinning and
+  Claude-provider validation work; "unset in the env file" and "resolved per launch"
+  compose, they don't conflict.
   Exact set refined by the spike.
 - **`ANTHROPIC_AUTH_TOKEN` travels the addon-env channel**: a new contributor in the
   `resolveExtraEnv` path returns it for these entry ids. On the **tmux backend** it is
