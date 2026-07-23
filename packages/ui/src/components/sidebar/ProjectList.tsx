@@ -95,9 +95,17 @@ export const ProjectList: React.FC = () => {
         </span>
         <Dropdown
           trigger={
-            <IconButton label="New">
+            // A non-button element: Dropdown wraps the trigger in its OWN
+            // <button>, so an IconButton here would nest <button> in <button>
+            // (invalid HTML + a React warning). Mirror IconButton's styling on
+            // a span instead — same pattern as FileBrowser's upload menu.
+            <span
+              aria-label="New"
+              title="New"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-md text-neutral-400 transition-colors hover:bg-neutral-800 hover:text-neutral-100"
+            >
               <Plus size={16} />
-            </IconButton>
+            </span>
           }
           align="right"
           width="w-44"
