@@ -7,6 +7,7 @@ import {
   type CliProxySecrets,
   type CliProxyState,
   MODEL_NAME_RE,
+  OPENROUTER_ALIAS_MODELS,
   cliproxyDir,
   cliproxyStateFile,
   createDefaultCliProxyState,
@@ -73,6 +74,12 @@ export interface CliProxyAdapters {
   now(): number;
   /** Delay between spawn-probe retries (production: real setTimeout; tests: instant). */
   sleep?(ms: number): Promise<void>;
+  /**
+   * Verify an OpenRouter key against openrouter.ai (production: GET /api/v1/key).
+   * "rejected" = the service explicitly refused the key (401/403); "unknown" =
+   * network failure/timeout — the key is stored but left unverified.
+   */
+  verifyOpenRouterKey?(key: string): Promise<"ok" | "rejected" | "unknown">;
   /**
    * Install the pinned proxy binary into `cliproxy/bin` (Task 7 wires the real
    * verified-download installer). Absent (pre-wiring) → `enable()` falls back to
@@ -261,6 +268,7 @@ export class CliProxyManager {
         }
         if (probed.ok) {
           this.becomeHealthy(probed.models);
+          await this.refreshOpenRouterVerification();
         } else {
           // Fail closed: don't persist enabled:true, or next boot's init() re-runs
           // bootAdopt() against a proxy that never came up. Mirrors the reset above.
@@ -364,13 +372,28 @@ export class CliProxyManager {
    * restarts the proxy (kill + spawn + probe), recouples the launchers to the
    * now-available openrouter provider, and broadcasts + persists.
    */
-  setOpenRouterKey(key: string, force: boolean): Promise<{ ok: boolean; affectedSessions?: number }> {
+  setOpenRouterKey(
+    key: string,
+    force: boolean
+  ): Promise<{ ok: boolean; affectedSessions?: number; error?: string }> {
     return this.transition(async () => {
       const needsRestart = this.st !== "off";
       const live = this.adapters.liveDependentSessionCount();
       if (needsRestart && !force && live > 0) {
         return { ok: false, affectedSessions: live };
       }
+      // Verify against openrouter.ai BEFORE storing: an explicitly-rejected key
+      // is refused outright; a network-inconclusive check stores it unverified
+      // (verifiedAt stays null) rather than blocking on openrouter's uptime.
+      let verifiedAt: string | null = null;
+      if (this.adapters.verifyOpenRouterKey) {
+        const verdict = await this.adapters.verifyOpenRouterKey(key);
+        if (verdict === "rejected") {
+          return { ok: false, error: "OpenRouter rejected this key" };
+        }
+        if (verdict === "ok") verifiedAt = new Date(this.adapters.now()).toISOString();
+      }
+      this.state.openRouterKeyVerifiedAt = verifiedAt;
       this.secrets = await setOpenRouterKey(this.daemonDir, key);
       if (this.state.enabled) {
         await writeProjections(this.daemonDir, this.secrets, this.state);
@@ -677,6 +700,7 @@ export class CliProxyManager {
         const probed = await this.probe();
         if (probed.ok) {
           this.becomeHealthy(probed.models);
+          await this.refreshOpenRouterVerification();
           await this.persist();
           return;
         }
@@ -744,7 +768,16 @@ export class CliProxyManager {
 
   private async probe(): Promise<ProbeResult> {
     if (!this.secrets) return { ok: false, reachable: false };
-    return this.adapters.probe(this.state.port, this.secrets.apiKey);
+    const result = await this.adapters.probe(this.state.port, this.secrets.apiKey);
+    // CLIProxyAPI routes openai-compatibility aliases (config.yaml, written by
+    // us) but never lists them in /v1/models — union them in here so the stored
+    // catalog, validateModel and preflight all see kimi while a key is set.
+    if (result.ok && this.secrets.openRouterKey) {
+      const models = new Set(result.models ?? []);
+      for (const alias of OPENROUTER_ALIAS_MODELS) models.add(alias);
+      return { ...result, models: [...models] };
+    }
+    return result;
   }
 
   /** Poll {@link probe} until it answers ok or the startup window lapses.
@@ -764,6 +797,18 @@ export class CliProxyManager {
   private sleep(ms: number): Promise<void> {
     if (this.adapters.sleep) return this.adapters.sleep(ms);
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /** Backfill a missing OpenRouter verification (keys stored before the
+   *  verification flow existed, or a previously-inconclusive check). Best-effort:
+   *  "unknown"/"rejected" here leaves the stamp null rather than erroring. */
+  private async refreshOpenRouterVerification(): Promise<void> {
+    if (!this.secrets?.openRouterKey || this.state.openRouterKeyVerifiedAt) return;
+    if (!this.adapters.verifyOpenRouterKey) return;
+    const verdict = await this.adapters.verifyOpenRouterKey(this.secrets.openRouterKey);
+    if (verdict === "ok") {
+      this.state.openRouterKeyVerifiedAt = new Date(this.adapters.now()).toISOString();
+    }
   }
 
   private probeBounded(ms: number): Promise<ProbeResult> {
@@ -931,6 +976,15 @@ export class CliProxyManager {
   private providerStatuses(): CliProxyProviderStatus[] {
     const providers: CliProxyProviderId[] = ["codex", "claude", "openrouter"];
     return providers.map((provider) => {
+      // openrouter has no seeded accounts — its verification signal is the
+      // key-check timestamp, not credential freshness.
+      if (provider === "openrouter") {
+        return {
+          provider,
+          state: this.providerState(provider),
+          lastVerifiedAt: this.state.openRouterKeyVerifiedAt
+        };
+      }
       const verified = [...this.seededAccounts.values()]
         .filter((a) => a.provider === provider)
         .map((a) => a.lastVerifiedAt)

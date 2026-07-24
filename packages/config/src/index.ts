@@ -669,6 +669,22 @@ export function isOpenRouterModel(model: string): boolean {
   return /^(kimi|moonshotai\/)/i.test(bare);
 }
 
+/**
+ * Aliases the daemon itself writes into config.yaml's `openai-compatibility`
+ * block. CLIProxyAPI routes them but never advertises them in `/v1/models`, so
+ * the manager unions these into every probed catalog while an OpenRouter key is
+ * configured — without this, kimi is absent from the UI and refused at launch.
+ */
+export const OPENROUTER_ALIAS_MODELS = ["kimi-k3"] as const;
+
+/**
+ * The launcher-facing model picks (chips + settings dropdowns). The live catalog
+ * is the *validity* signal, not the menu: it enumerates every model of every
+ * seeded account (plus acc-prefixed duplicates and image models), which is noise
+ * as a picker. The UI intersects this curated list with the catalog.
+ */
+export const CURATED_PROXY_MODELS = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "kimi-k3"] as const;
+
 export const cliProxyStateSchema = z.object({
   enabled: z.boolean().default(false),
   version: z.string().nullable().default(null),
@@ -681,6 +697,9 @@ export const cliProxyStateSchema = z.object({
    *  so a Codex-seeded setup never routes claudemix to GPT. */
   claudeDefaultModel: z.string().default("claude-fable-5"),
   backgroundModel: z.string().default("gpt-5.6-luna"),
+  /** Last successful verification of the OpenRouter key against openrouter.ai
+   *  (null = key never verified, or last verification attempt was inconclusive). */
+  openRouterKeyVerifiedAt: z.string().nullable().default(null),
   port: z.number().int().default(8317),
   modelCatalog: z
     .object({ models: z.array(z.string()), asOf: z.string() })

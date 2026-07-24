@@ -74,6 +74,8 @@ function setup() {
   };
   let rollbackCount = 0;
   let rollbackImpl: () => Promise<boolean> = async () => false;
+  let verifyOpenRouterImpl: (key: string) => Promise<"ok" | "rejected" | "unknown"> = async () =>
+    "unknown";
   const sysDir = join(root, "sysclaude");
 
   const mgr = new CliProxyManager({
@@ -88,6 +90,7 @@ function setup() {
       liveDependentSessionCount: () => liveCount,
       now: () => clock,
       sleep: async () => {},
+      verifyOpenRouterKey: (key: string) => verifyOpenRouterImpl(key),
       install: () => installImpl(),
       rollback: () => {
         rollbackCount++;
@@ -127,6 +130,9 @@ function setup() {
     rollbackCount: () => rollbackCount,
     setRollback: (f: () => Promise<boolean>) => {
       rollbackImpl = f;
+    },
+    setVerifyOpenRouter: (f: (key: string) => Promise<"ok" | "rejected" | "unknown">) => {
+      verifyOpenRouterImpl = f;
     },
     sysDir
   };
@@ -759,6 +765,41 @@ test("setOpenRouterKey (manager): refuses without force while sessions live; wit
     "ok",
     "openrouter provider flips ok in-memory after the forced set"
   );
+});
+
+test("setOpenRouterKey: an openrouter-rejected key is refused with an error and never stored", async () => {
+  const h = setup();
+  h.setVerifyOpenRouter(async () => "rejected");
+  const res = await h.mgr.setOpenRouterKey("sk-or-bad", false);
+  assert.equal(res.ok, false);
+  assert.equal(res.error, "OpenRouter rejected this key");
+  // Refusal happens before the secrets store is even created/touched.
+  const raw = await readFile(cliproxySecretsFile(h.daemonDir), "utf8").catch(() => null);
+  const storedKey = raw === null ? null : JSON.parse(raw).openRouterKey;
+  assert.equal(storedKey, null, "a rejected key must not be stored");
+  assert.equal(h.mgr.status().providers.find((p) => p.provider === "openrouter")?.state, "missing");
+});
+
+test("setOpenRouterKey: a verified key stamps lastVerifiedAt and the catalog gains the kimi alias", async () => {
+  const h = setup();
+  h.setVerifyOpenRouter(async () => "ok");
+  // Key set while off (no restart needed), then enable: CLIProxyAPI never lists
+  // openai-compat aliases in /v1/models, so the manager must union them in.
+  const set = await h.mgr.setOpenRouterKey("sk-or-good", false);
+  assert.equal(set.ok, true);
+  const openrouter = h.mgr.status().providers.find((p) => p.provider === "openrouter");
+  assert.equal(openrouter?.state, "ok");
+  assert.ok(openrouter?.lastVerifiedAt, "verification stamps lastVerifiedAt");
+
+  h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
+  await h.mgr.enable();
+  assert.equal(h.mgr.status().state, "healthy");
+  const persisted = parseCliProxyState(
+    JSON.parse(await readFile(cliproxyStateFile(h.daemonDir), "utf8"))
+  );
+  assert.deepEqual(persisted.modelCatalog?.models.sort(), ["gpt-5.6-sol", "kimi-k3"]);
+  const validated = await h.mgr.validateModel("claudex", "kimi-k3");
+  assert.equal(validated.ok, true, "kimi launches must pass catalog validation");
 });
 
 test("seeded accounts persist: a manager over a state file with a seeded codex account reports codex ok + enables claudex, no re-seed", async () => {

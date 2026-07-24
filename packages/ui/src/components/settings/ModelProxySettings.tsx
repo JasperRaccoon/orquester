@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Check, Loader2, Power, RefreshCw, X } from "lucide-react";
 import type { CliProxyProviderId, CliProxyProviderStatus, CliProxyStatus } from "@orquester/api";
+import { CURATED_PROXY_MODELS } from "@orquester/config";
 import { cn } from "../../lib/cn";
 import { Button, Input } from "../ui";
 import { useAppStore } from "../../store/app";
@@ -51,6 +52,17 @@ const formatVerified = (iso: string | null): string => {
 export const ModelProxySettings: React.FC = () => {
   const status = useAppStore((s) => s.cliproxy);
   const models = useAppStore((s) => s.cliproxyModels);
+  // Curated picks confirmed by the live catalog (the raw catalog lists every
+  // seeded account's models + acc-prefixed duplicates — noise as a picker).
+  // With no catalog, offer the whole curated list; ModelSelect keeps a stale
+  // saved value visible either way.
+  const curatedOptions = useMemo(() => {
+    const catalog = models?.models ?? [];
+    const confirmed = catalog.length
+      ? CURATED_PROXY_MODELS.filter((m) => catalog.includes(m))
+      : [...CURATED_PROXY_MODELS];
+    return confirmed.length ? confirmed : [...CURATED_PROXY_MODELS];
+  }, [models]);
   const agentAccounts = useAppStore((s) => s.agentAccounts);
   const loadCliProxy = useAppStore((s) => s.loadCliProxy);
   const enableCliProxy = useAppStore((s) => s.enableCliProxy);
@@ -210,7 +222,7 @@ export const ModelProxySettings: React.FC = () => {
           label="Default model"
           hint="What claudex runs unless a launch chip overrides it."
           value={status.defaultModel}
-          options={models?.models ?? []}
+          options={curatedOptions}
           stale={!models}
           disabled={busy}
           onChange={(m) =>
@@ -221,7 +233,7 @@ export const ModelProxySettings: React.FC = () => {
           label="Background model"
           hint="Used for lightweight background turns (summaries, titles)."
           value={status.backgroundModel}
-          options={models?.models ?? []}
+          options={curatedOptions}
           stale={!models}
           disabled={busy}
           onChange={(m) =>
@@ -254,7 +266,11 @@ const ProviderRow: React.FC<{
   const isOpenRouter = provider.provider === "openrouter";
 
   const stateText = ok
-    ? formatVerified(provider.lastVerifiedAt)
+    ? isOpenRouter && !provider.lastVerifiedAt
+      ? // A stored key whose verification was inconclusive (network) — honest
+        // label instead of the contradictory green-check "never verified".
+        "key set — not verified yet"
+      : formatVerified(provider.lastVerifiedAt)
     : provider.state === "expired"
       ? "expired — re-seed to refresh"
       : "not connected";

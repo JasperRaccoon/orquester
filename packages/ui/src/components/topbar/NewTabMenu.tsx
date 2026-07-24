@@ -1,7 +1,7 @@
 import React from "react";
 import { FolderTree, GitBranch, Globe, ListTodo, Plus } from "lucide-react";
 import { SYSTEM_ACCOUNT_ID, type RegistryEntry } from "@orquester/api";
-import { isOpenRouterModel } from "@orquester/config";
+import { CURATED_PROXY_MODELS, isOpenRouterModel } from "@orquester/config";
 import { CHROMIUM_FAMILY_IDS } from "@orquester/registry";
 import {
   AdaptiveMenu,
@@ -40,8 +40,8 @@ const PROXY_ICON_TONE: Record<string, string> = {
   claudemix: "text-violet-400"
 };
 
-/** Model chips shown for `claudex` when the live proxy catalog is unavailable. */
-const DEFAULT_PROXY_MODELS = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "kimi-k3"];
+/** Model chips for `claudex`: the curated picks, not the raw catalog dump. */
+const DEFAULT_PROXY_MODELS: string[] = [...CURATED_PROXY_MODELS];
 
 const isProxyLauncher = (id: string): boolean => id in PROXY_ACCOUNT_FAMILY;
 
@@ -100,7 +100,15 @@ const AgentRow: React.FC<{ agent: RegistryEntry }> = ({ agent }) => {
   // Model chips are a `claudex`-only affordance (claudemix's model is fixed to
   // the Claude main loop; its choice is the account instead).
   const showModels = agent.id === "claudex";
-  const baseModels = cliproxyModels?.models?.length ? cliproxyModels.models : DEFAULT_PROXY_MODELS;
+  // The live catalog enumerates EVERYTHING the proxy serves (every seeded
+  // account's models + acc-prefixed duplicates) — as a picker that's noise.
+  // Offer the curated picks the catalog confirms; all of them if none confirm
+  // (catalog empty/stale), so the chips never vanish entirely.
+  const catalogModels = cliproxyModels?.models ?? [];
+  const curatedAvailable = catalogModels.length
+    ? DEFAULT_PROXY_MODELS.filter((m) => catalogModels.includes(m))
+    : DEFAULT_PROXY_MODELS;
+  const baseModels = curatedAvailable.length ? curatedAvailable : DEFAULT_PROXY_MODELS;
   const selectedModel = preferredModel ?? cliproxy?.defaultModel ?? baseModels[0];
   const modelOptions = React.useMemo(() => {
     const set = new Set(baseModels);

@@ -584,6 +584,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     broadcaster,
     adapters: {
       probe: probeCliProxy,
+      verifyOpenRouterKey,
       tmux: cliproxyTmux,
       // No-tmux fallback: a direct, non-detached child that reads config.yaml from
       // the cliproxy run dir. Output is discarded (the daemon owns its own logs);
@@ -847,6 +848,23 @@ async function probeCliProxy(
   }
 }
 
+/** Verify an OpenRouter key against openrouter.ai's key-info endpoint. Only an
+ *  explicit 401/403 counts as rejection; anything else (5xx, network, timeout)
+ *  is inconclusive so a flaky network can't block storing a good key. */
+async function verifyOpenRouterKey(key: string): Promise<"ok" | "rejected" | "unknown"> {
+  try {
+    const res = await fetch("https://openrouter.ai/api/v1/key", {
+      headers: { Authorization: `Bearer ${key}` },
+      signal: AbortSignal.timeout(5000)
+    });
+    if (res.status === 200) return "ok";
+    if (res.status === 401 || res.status === 403) return "rejected";
+    return "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
 /** The subset of {@link CliProxyManager} the routes drive — structural so route
  *  tests can inject a fake without standing up the whole manager. */
 interface CliProxyRouteManager {
@@ -857,7 +875,10 @@ interface CliProxyRouteManager {
     cfg: { defaultModel?: string; backgroundModel?: string; claudeDefaultModel?: string },
     force: boolean
   ): Promise<{ ok: boolean; affectedSessions?: number }>;
-  setOpenRouterKey(key: string, force: boolean): Promise<{ ok: boolean; affectedSessions?: number }>;
+  setOpenRouterKey(
+    key: string,
+    force: boolean
+  ): Promise<{ ok: boolean; affectedSessions?: number; error?: string }>;
   seedProvider(
     req: { provider: "codex" | "claude"; accountId: string },
     read: (provider: "codex" | "claude", accountId: string) => Promise<unknown>
@@ -1068,6 +1089,12 @@ export function registerCliProxyRoutes(
     if (!key) return reply.code(400).send({ error: "key is required" });
     const res = await manager.setOpenRouterKey(key, Boolean(body.force));
     if (!res.ok) {
+      // A rejected key is a caller error (400 with the reason); a live-session
+      // gate stays a 409 refusal the UI resolves with force.
+      if (res.error) {
+        reply.code(400).send({ error: res.error });
+        return;
+      }
       reply.code(409).send({ ok: false, affectedSessions: res.affectedSessions });
       return;
     }
