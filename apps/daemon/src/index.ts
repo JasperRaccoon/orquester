@@ -615,7 +615,12 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
       systemClaudeConfigFile: () =>
         env.CLAUDE_CONFIG_DIR
           ? join(env.CLAUDE_CONFIG_DIR, ".claude.json")
-          : join(resolved.vars.userhome, ".claude.json")
+          : join(resolved.vars.userhome, ".claude.json"),
+      // Write-back target for two-way credential sync (proxy auth/ ↔ managed
+      // home): refresh-token rotation means the two copies MUST converge or
+      // whichever side refreshes second gets logged out.
+      managedCredentialPath: (provider, accountId) =>
+        join(agentAccounts.homePath(provider, accountId), MANAGED_CRED_FILENAME[provider])
     }
   });
 

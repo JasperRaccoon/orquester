@@ -97,7 +97,9 @@ function setup() {
         return rollbackImpl();
       },
       systemClaudeDir: () => sysDir,
-      systemClaudeConfigFile: () => join(sysDir, ".claude.json")
+      systemClaudeConfigFile: () => join(sysDir, ".claude.json"),
+      managedCredentialPath: (provider: "codex" | "claude", accountId: string) =>
+        join(root, "managed-creds", `${provider}-${accountId}.json`)
     }
   });
 
@@ -801,6 +803,84 @@ test("setOpenRouterKey: a verified key stamps lastVerifiedAt and the catalog gai
   assert.deepEqual(persisted.modelCatalog?.models.sort(), ["gpt-5.6-sol", "kimi-k3"]);
   const validated = await h.mgr.validateModel("claudex", "kimi-k3");
   assert.equal(validated.ok, true, "kimi launches must pass catalog validation");
+});
+
+const SYNC_ACCOUNT = "14137047-98b2-4cf1-9b54-b18a22a85a62";
+
+/** Persist an enabled state with one seeded claude account, plus both credential
+ *  copies, then init() — which runs the sync inside refreshSeededFreshness. */
+async function setupClaudeSync(
+  h: ReturnType<typeof setup>,
+  opts: { proxyExpiry: number; managedExpiry: number }
+): Promise<{ authFile: string; credPath: string }> {
+  const state = {
+    ...createDefaultCliProxyState(),
+    enabled: true,
+    seededAccounts: [
+      { provider: "claude", accountId: SYNC_ACCOUNT, label: "j@x.com", prefix: "acc14137047" }
+    ]
+  };
+  await mkdir(cliproxyDir(h.daemonDir), { recursive: true });
+  await writeFile(cliproxyStateFile(h.daemonDir), JSON.stringify(state));
+  const authFile = join(cliproxyDir(h.daemonDir), "auth", "claude-acc14137047.json");
+  await mkdir(dirname(authFile), { recursive: true });
+  await writeFile(
+    authFile,
+    JSON.stringify({
+      type: "claude",
+      access_token: "PROXY_ACCESS",
+      refresh_token: "PROXY_REFRESH",
+      email: "j@x.com",
+      expired: new Date(opts.proxyExpiry).toISOString(),
+      prefix: "acc14137047"
+    })
+  );
+  const credPath = join(h.root, "managed-creds", `claude-${SYNC_ACCOUNT}.json`);
+  await mkdir(dirname(credPath), { recursive: true });
+  await writeFile(
+    credPath,
+    JSON.stringify({
+      claudeAiOauth: {
+        accessToken: opts.managedExpiry > opts.proxyExpiry ? "MANAGED_ACCESS" : "",
+        refreshToken: opts.managedExpiry > opts.proxyExpiry ? "MANAGED_REFRESH" : "",
+        expiresAt: opts.managedExpiry,
+        scopes: ["user:inference"],
+        subscriptionType: "max"
+      }
+    })
+  );
+  return { authFile, credPath };
+}
+
+test("credential sync: a proxy-refreshed token is written back into the managed home (repairs a wiped login)", async () => {
+  const h = setup();
+  const now = Date.now();
+  // Managed copy wiped-on-401 (empty tokens, expiresAt 0); proxy copy fresh.
+  const { credPath } = await setupClaudeSync(h, { proxyExpiry: now + 8 * 3600_000, managedExpiry: 0 });
+  h.setProbe({ ok: true, reachable: true, models: ["claude-fable-5"] });
+  await h.mgr.init();
+  const cred = JSON.parse(await readFile(credPath, "utf8"));
+  assert.equal(cred.claudeAiOauth.accessToken, "PROXY_ACCESS");
+  assert.equal(cred.claudeAiOauth.refreshToken, "PROXY_REFRESH");
+  assert.ok(cred.claudeAiOauth.expiresAt > now, "expiry propagated");
+  assert.equal(cred.claudeAiOauth.subscriptionType, "max", "non-token fields preserved");
+});
+
+test("credential sync: a session-refreshed managed token is written back into the proxy auth file", async () => {
+  const h = setup();
+  const now = Date.now();
+  // Managed copy refreshed by a live session (later expiry); proxy copy stale.
+  const { authFile } = await setupClaudeSync(h, {
+    proxyExpiry: now - 3600_000,
+    managedExpiry: now + 6 * 3600_000
+  });
+  h.setProbe({ ok: true, reachable: true, models: ["claude-fable-5"] });
+  await h.mgr.init();
+  const storage = JSON.parse(await readFile(authFile, "utf8"));
+  assert.equal(storage.access_token, "MANAGED_ACCESS");
+  assert.equal(storage.refresh_token, "MANAGED_REFRESH");
+  assert.equal(storage.email, "j@x.com", "proxy-maintained metadata preserved");
+  assert.ok(Date.parse(storage.expired) > now, "expiry propagated");
 });
 
 test("seeded accounts persist: a manager over a state file with a seeded codex account reports codex ok + enables claudex, no re-seed", async () => {

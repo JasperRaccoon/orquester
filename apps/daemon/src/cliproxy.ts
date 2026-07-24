@@ -20,7 +20,8 @@ import {
   accessTokenFreshMs,
   accountPrefix,
   claudeStorageFromCredentials,
-  codexStorageFromAuthJson
+  codexStorageFromAuthJson,
+  jwtClaims
 } from "./cliproxy-seed.ts";
 import type { RegistryService } from "./registry.ts";
 import { SERVICE_SESSION_PREFIX, type Tmux } from "./tmux.ts";
@@ -99,6 +100,9 @@ export interface CliProxyAdapters {
   /** Source system `.claude.json` — HOME-level sibling of ~/.claude unless
    *  CLAUDE_CONFIG_DIR relocates it into the config dir (agent-accounts rule). */
   systemClaudeConfigFile?(): string;
+  /** Path of a managed account's on-disk credential (claude `.credentials.json` /
+   *  codex `auth.json`) — the write-back target for two-way credential sync. */
+  managedCredentialPath?(provider: "codex" | "claude", accountId: string): string;
 }
 
 type ValidateResult =
@@ -951,6 +955,9 @@ export class CliProxyManager {
    * chip (spec §4) without needing a re-seed.
    */
   private async refreshSeededFreshness(): Promise<boolean> {
+    // Converge the two credential copies BEFORE judging freshness, so a
+    // proxy-side refresh reads as "ok" here and reaches the managed home.
+    await this.syncSeededCredentials();
     let changed = false;
     for (const account of this.seededAccounts.values()) {
       const file = join(
@@ -976,6 +983,117 @@ export class CliProxyManager {
       }
     }
     return changed;
+  }
+
+  /**
+   * Two-way credential sync between each seeded account's TWO on-disk copies:
+   * the proxy's `auth/` storage and the managed home's credential file. OAuth
+   * refresh tokens are single-use (rotated on refresh), and BOTH sides refresh
+   * independently — CLIProxyAPI's 15-minute auto-refresh loop, and Claude
+   * Code/Codex's own built-in refresh inside normal managed-account sessions.
+   * Without sync, whichever side refreshes first invalidates the other's
+   * refresh token; the loser then 401s and logs the account out ("Login
+   * expired" wiping a live `.credentials.json` is exactly how this shipped
+   * broken). Runs on every health poll: the copy with the LATER access-token
+   * expiry is the one that refreshed most recently and wins; its token pair is
+   * propagated to the other side. Best-effort per account — a failed sync
+   * leaves the freshness pass to surface staleness.
+   */
+  private async syncSeededCredentials(): Promise<void> {
+    if (!this.adapters.managedCredentialPath) return;
+    for (const account of this.seededAccounts.values()) {
+      if (account.provider === "openrouter") continue; // key-based, no credential copies
+      try {
+        await this.syncSeededCredential(account.provider, account.id);
+      } catch {
+        // best-effort: never let one bad credential file break the health poll
+      }
+    }
+  }
+
+  private async syncSeededCredential(provider: "codex" | "claude", accountId: string): Promise<void> {
+    const authFile = join(cliproxyDir(this.daemonDir), "auth", `${provider}-${accountPrefix(accountId)}.json`);
+    const credPath = this.adapters.managedCredentialPath!(provider, accountId);
+    let proxy: Record<string, unknown>;
+    let managed: Record<string, unknown>;
+    try {
+      proxy = JSON.parse(await readFile(authFile, "utf8")) as Record<string, unknown>;
+      managed = JSON.parse(await readFile(credPath, "utf8")) as Record<string, unknown>;
+    } catch {
+      return; // either copy missing/unreadable — nothing to converge
+    }
+    if (!proxy || typeof proxy !== "object" || !managed || typeof managed !== "object") return;
+
+    const proxyAccess = typeof proxy.access_token === "string" ? proxy.access_token : "";
+    const proxyExpiry = typeof proxy.expired === "string" ? Date.parse(proxy.expired) : NaN;
+
+    let managedAccess = "";
+    let managedExpiry = NaN;
+    if (provider === "claude") {
+      const oauth = managed.claudeAiOauth;
+      if (!oauth || typeof oauth !== "object") return; // unknown shape — hands off
+      const o = oauth as Record<string, unknown>;
+      managedAccess = typeof o.accessToken === "string" ? o.accessToken : "";
+      managedExpiry = typeof o.expiresAt === "number" ? o.expiresAt : NaN;
+    } else {
+      const tokens = managed.tokens;
+      if (!tokens || typeof tokens !== "object") return;
+      const t = tokens as Record<string, unknown>;
+      managedAccess = typeof t.access_token === "string" ? t.access_token : "";
+      const exp = jwtClaims(managedAccess).exp;
+      managedExpiry = typeof exp === "number" ? exp * 1000 : NaN;
+    }
+
+    if (proxyAccess === managedAccess) return; // already in sync
+    const proxyNewer =
+      Boolean(proxyAccess) &&
+      Number.isFinite(proxyExpiry) &&
+      (!Number.isFinite(managedExpiry) || proxyExpiry > managedExpiry);
+    const managedNewer =
+      Boolean(managedAccess) &&
+      Number.isFinite(managedExpiry) &&
+      (!Number.isFinite(proxyExpiry) || managedExpiry > proxyExpiry);
+
+    if (proxyNewer) {
+      // proxy → managed home: merge the fresh token pair, preserve everything else
+      // (scopes, subscriptionType, …) — this also repairs a wiped-on-401 file.
+      if (provider === "claude") {
+        const oauth = { ...(managed.claudeAiOauth as Record<string, unknown>) };
+        oauth.accessToken = proxyAccess;
+        if (typeof proxy.refresh_token === "string" && proxy.refresh_token) {
+          oauth.refreshToken = proxy.refresh_token;
+        }
+        oauth.expiresAt = proxyExpiry;
+        await writeHardened(credPath, JSON.stringify({ ...managed, claudeAiOauth: oauth }), 0o600);
+      } else {
+        const tokens = { ...(managed.tokens as Record<string, unknown>) };
+        tokens.access_token = proxyAccess;
+        if (typeof proxy.refresh_token === "string" && proxy.refresh_token) {
+          tokens.refresh_token = proxy.refresh_token;
+        }
+        if (typeof proxy.id_token === "string" && proxy.id_token) tokens.id_token = proxy.id_token;
+        const next: Record<string, unknown> = { ...managed, tokens };
+        if (typeof proxy.last_refresh === "string" && proxy.last_refresh) {
+          next.last_refresh = proxy.last_refresh;
+        }
+        await writeHardened(credPath, JSON.stringify(next), 0o600);
+      }
+    } else if (managedNewer) {
+      // managed home → proxy: reconvert, but only overwrite the token fields so
+      // proxy-maintained metadata (email, disabled, …) survives.
+      const conv =
+        provider === "claude"
+          ? claudeStorageFromCredentials(managed, accountId)
+          : codexStorageFromAuthJson(managed, accountId);
+      const next = { ...proxy };
+      for (const key of ["access_token", "refresh_token", "id_token", "expired", "last_refresh"]) {
+        const value = conv.storage[key];
+        if (typeof value === "string" && value) next[key] = value;
+      }
+      await writeHardened(authFile, JSON.stringify(next), 0o600);
+    }
+    // Equal expiries with different tokens: undecidable — leave for the next
+    // refresh on either side to break the tie.
   }
 
   /** Whether any provider knowledge exists yet (seeded account or OpenRouter key). */
