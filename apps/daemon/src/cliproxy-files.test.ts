@@ -56,10 +56,21 @@ test("projections: token==apiKey; claudex.env contains ANTHROPIC_MODEL + CLAUDE_
   assert.ok(claudex.includes(`CLAUDE_CONFIG_DIR=${cliproxyHomeDir(dir, "claudex")}`), "claudex home");
   assert.equal((await stat(join(dir, "env", "claudex.env"))).mode & 0o777, 0o600);
 
+  // Picker slots: curated GPT rows always; Kimi's Fable slot only with a key.
+  assert.ok(claudex.includes("ANTHROPIC_DEFAULT_OPUS_MODEL=gpt-5.6-sol"), "sol slot");
+  assert.ok(claudex.includes("ANTHROPIC_DEFAULT_SONNET_MODEL=gpt-5.6-terra"), "terra slot");
+  assert.ok(!claudex.includes("ANTHROPIC_DEFAULT_FABLE_MODEL"), "no kimi slot without a key");
+
   const claudemix = await readFile(join(dir, "env", "claudemix.env"), "utf8");
   assert.ok(claudemix.includes("ANTHROPIC_DEFAULT_HAIKU_MODEL=gpt-5.6-cheap"), "claudemix background model");
   assert.ok(claudemix.includes(`CLAUDE_CONFIG_DIR=${cliproxyHomeDir(dir, "claudemix")}`), "claudemix home");
   assert.ok(!/^ANTHROPIC_MODEL=/m.test(claudemix), "claudemix has no main model override");
+  assert.ok(claudemix.includes("ANTHROPIC_CUSTOM_MODEL_OPTION=gpt-5.6-sol"), "claudemix custom GPT row");
+
+  // With an OpenRouter key, claudex gains the Kimi Fable slot.
+  await writeProjections(dir, { ...secrets, openRouterKey: "OR_KEY" }, state);
+  const claudexOr = await readFile(join(dir, "env", "claudex.env"), "utf8");
+  assert.ok(claudexOr.includes("ANTHROPIC_DEFAULT_FABLE_MODEL=kimi-k3"), "kimi slot with a key");
 });
 
 test("wrapper: generated script has no 'source', reads token file path, claudex handles --model", async () => {

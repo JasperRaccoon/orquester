@@ -146,6 +146,25 @@ export async function writeProjections(
     ["ANTHROPIC_BASE_URL", baseUrl],
     ["ANTHROPIC_MODEL", state.defaultModel],
     ["ANTHROPIC_DEFAULT_HAIKU_MODEL", state.backgroundModel],
+    ["ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME", state.backgroundModel],
+    ["ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION", "Background model (via proxy)"],
+    // Remap the /model picker's named slots to the curated GPT set: the stock
+    // Claude tier rows are dead ends in the GPT launcher (they'd send Claude
+    // model ids through the Codex credential). Kimi rides the Fable slot only
+    // while an OpenRouter key exists to serve it.
+    ["ANTHROPIC_DEFAULT_OPUS_MODEL", "gpt-5.6-sol"],
+    ["ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", "GPT-5.6 Sol"],
+    ["ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION", "OpenAI flagship — deepest reasoning"],
+    ["ANTHROPIC_DEFAULT_SONNET_MODEL", "gpt-5.6-terra"],
+    ["ANTHROPIC_DEFAULT_SONNET_MODEL_NAME", "GPT-5.6 Terra"],
+    ["ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION", "Balanced everyday coding"],
+    ...(secrets.openRouterKey
+      ? ([
+          ["ANTHROPIC_DEFAULT_FABLE_MODEL", "kimi-k3"],
+          ["ANTHROPIC_DEFAULT_FABLE_MODEL_NAME", "Kimi K3"],
+          ["ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION", "Moonshot Kimi via OpenRouter"]
+        ] as Array<[string, string]>)
+      : []),
     ["CLAUDE_CODE_SUBAGENT_MODEL", state.defaultModel],
     ["CLAUDE_CODE_ALWAYS_ENABLE_EFFORT", "1"],
     ["CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY", "3"],
@@ -157,6 +176,13 @@ export async function writeProjections(
     ["ANTHROPIC_BASE_URL", baseUrl],
     ["CLAUDE_CONFIG_DIR", claudemixHome],
     ["ANTHROPIC_DEFAULT_HAIKU_MODEL", state.backgroundModel],
+    ["ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME", state.backgroundModel],
+    ["ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION", "Background model (via proxy)"],
+    // Claude Code supports exactly ONE additive picker row — spend it on the
+    // claudex GPT default. Terra/Kimi stay reachable via free-form `/model`.
+    ["ANTHROPIC_CUSTOM_MODEL_OPTION", state.defaultModel],
+    ["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME", state.defaultModel],
+    ["ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION", "GPT via the managed proxy"],
     ["CLAUDE_CODE_ALWAYS_ENABLE_EFFORT", "1"],
     ["CLAUDE_CODE_NO_FLICKER", "1"]
   ]);

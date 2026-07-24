@@ -712,9 +712,14 @@ export class CliProxyManager {
    */
   private async bootAdopt(): Promise<void> {
     try {
-      // Converge the managed homes before adopting: idempotent, and it heals
-      // homes seeded by an older daemon (e.g. without the onboarding flag).
+      // Converge the managed homes AND derived projections before adopting:
+      // idempotent, and it heals artifacts written by an older daemon (missing
+      // onboarding flag, outdated launcher env files) on a plain restart.
       await this.seedHomes();
+      if (this.secrets) {
+        await writeProjections(this.daemonDir, this.secrets, this.state);
+        await this.reresolveDependents();
+      }
       const name = SERVICE_SESSION_NAME;
       if (this.adapters.tmux && (await this.adapters.tmux.hasServiceSession(name))) {
         const probed = await this.probe();

@@ -1,11 +1,36 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { cliproxyStateFile } from "@orquester/config";
 import { writeAddonEnvLaunchScript } from "./sessions.ts";
 import { cliproxyContributor, composeExtraEnv } from "./index.ts";
 
 const DIR = "/nonexistent/daemon";
 const ACCOUNT = "abcdef12-3456-7890-abcd-ef1234567890";
+const OTHER = "11112222-3456-7890-abcd-ef1234567890";
+
+/** Temp daemonDir with a state.json seeding the given accounts. */
+async function daemonDirWithSeeded(
+  accounts: Array<{ provider: "codex" | "claude"; accountId: string }>
+): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "orq-launchenv-"));
+  const stateFile = cliproxyStateFile(dir);
+  await mkdir(join(stateFile, ".."), { recursive: true });
+  await writeFile(
+    stateFile,
+    JSON.stringify({
+      seededAccounts: accounts.map((a) => ({
+        provider: a.provider,
+        accountId: a.accountId,
+        label: "x",
+        prefix: `acc${a.accountId.slice(0, 8)}`
+      }))
+    })
+  );
+  return dir;
+}
 
 test("wrapper exports env and unsets requested keys", async () => {
   const w = await writeAddonEnvLaunchScript({ bin: "claude", args: ["--foo"] }, { CLAUDE_CONFIG_DIR: "/x/home" }, ["ANTHROPIC_API_KEY"]);
@@ -52,6 +77,27 @@ test("cliproxyContributor pins the account for claudemix", () => {
   assert.ok(res);
   assert.equal(res.accountId, ACCOUNT);
   assert.equal(res.env.ANTHROPIC_MODEL, "accabcdef12/claude-fable-5");
+});
+
+test("cliproxyContributor: the sole seeded account of a provider launches BARE (no acc prefix leak)", async () => {
+  const dir = await daemonDirWithSeeded([
+    { provider: "codex", accountId: ACCOUNT },
+    { provider: "claude", accountId: OTHER } // different provider — no ambiguity
+  ]);
+  const res = cliproxyContributor("claudex", { accountId: ACCOUNT, model: "gpt-5.6-sol" }, dir);
+  assert.ok(res);
+  assert.equal(res.env.ANTHROPIC_MODEL, "gpt-5.6-sol", "no prefix when routing is unambiguous");
+  assert.equal(res.accountId, ACCOUNT, "account still recorded for attribution");
+});
+
+test("cliproxyContributor: a second seeded account of the same provider forces the prefix", async () => {
+  const dir = await daemonDirWithSeeded([
+    { provider: "codex", accountId: ACCOUNT },
+    { provider: "codex", accountId: OTHER }
+  ]);
+  const res = cliproxyContributor("claudex", { accountId: ACCOUNT, model: "gpt-5.6-sol" }, dir);
+  assert.ok(res);
+  assert.equal(res.env.ANTHROPIC_MODEL, "accabcdef12/gpt-5.6-sol");
 });
 
 test("cliproxyContributor returns null for a non-proxy entry", () => {

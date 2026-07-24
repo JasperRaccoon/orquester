@@ -773,6 +773,26 @@ export function composeExtraEnv(a: LaunchEnv | null, b: LaunchEnv | null): Launc
  * keyless pick (e.g. claudex → OpenRouter/Kimi) carries no account and stays
  * unprefixed.
  */
+/** True when the model must carry the account routing prefix: the picked account
+ *  shares its provider with ANOTHER seeded account (disambiguation genuinely
+ *  needed), the pick isn't seeded at all, or the state is unreadable — in the
+ *  ambiguous cases the prefix is kept (safe routing pin, launch validation
+ *  rejects a prefix the catalog doesn't serve). */
+function needsAccountPrefix(daemonDir: string, accountId: string): boolean {
+  try {
+    const state = parseCliProxyState(
+      JSON.parse(readFileSync(cliproxyStateFile(daemonDir), "utf8"))
+    );
+    const mine = state.seededAccounts.find((a) => a.accountId === accountId);
+    if (!mine) return true;
+    return state.seededAccounts.some(
+      (a) => a.provider === mine.provider && a.accountId !== accountId
+    );
+  } catch {
+    return true;
+  }
+}
+
 export function cliproxyContributor(
   entryId: string,
   ctx: { accountId?: string; model?: string },
@@ -795,7 +815,13 @@ export function cliproxyContributor(
     // wire so a stale account pick can't reattach a prefix (spec §2).
     const routesToAccount =
       Boolean(ctx.accountId) && ctx.accountId !== SYSTEM_ACCOUNT_ID && !isOpenRouterModel(ctx.model);
-    const effectiveModel = routesToAccount ? `${accountPrefix(ctx.accountId)}/${ctx.model}` : ctx.model;
+    // The acc<hex>/ prefix exists to pin ONE of several same-provider credentials;
+    // with a single seeded account it adds nothing but leaks into every visible
+    // model string inside the session (banner, /model). Emit bare when the pick
+    // is the sole seeded account of its provider — the proxy routes it to the
+    // only credential anyway.
+    const prefixed = routesToAccount && needsAccountPrefix(daemonDir, ctx.accountId as string);
+    const effectiveModel = prefixed ? `${accountPrefix(ctx.accountId)}/${ctx.model}` : ctx.model;
     env.ANTHROPIC_MODEL = effectiveModel;
     env.CLAUDE_CODE_SUBAGENT_MODEL = effectiveModel;
     if (routesToAccount) accountId = ctx.accountId;
