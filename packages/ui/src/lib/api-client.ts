@@ -79,10 +79,14 @@ export interface ApiRequestOptions {
 }
 
 function serverMessageFromBody(body: unknown): string | null {
-  if (body && typeof body === "object" && "message" in body) {
-    const message = (body as { message?: unknown }).message;
-    if (typeof message === "string" && message.trim()) {
-      return message.trim();
+  // Daemon error bodies carry either `{ message }` (git/registry) or `{ error }`
+  // (cliproxy refusals, fs) — accept both so refusal reasons reach the UI.
+  if (body && typeof body === "object") {
+    for (const key of ["message", "error"] as const) {
+      const value = (body as Record<string, unknown>)[key];
+      if (typeof value === "string" && value.trim()) {
+        return value.trim();
+      }
     }
   }
   return null;

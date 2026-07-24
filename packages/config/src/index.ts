@@ -680,7 +680,7 @@ export const cliProxyStateSchema = z.object({
    *  launch names none. Distinct from `defaultModel` (claudex's Codex/GPT default)
    *  so a Codex-seeded setup never routes claudemix to GPT. */
   claudeDefaultModel: z.string().default("claude-fable-5"),
-  backgroundModel: z.string().default("gpt-5.6-sol"),
+  backgroundModel: z.string().default("gpt-5.6-luna"),
   port: z.number().int().default(8317),
   modelCatalog: z
     .object({ models: z.array(z.string()), asOf: z.string() })

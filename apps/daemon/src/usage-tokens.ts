@@ -14,6 +14,8 @@ export const MODEL_PRICING: Record<
   "claude-sonnet-5": { input: 3, output: 15, cacheRead: 0.3, cacheWrite5m: 3.75, cacheWrite1h: 6 },
   "claude-haiku-4-5": { input: 1, output: 5, cacheRead: 0.1, cacheWrite5m: 1.25, cacheWrite1h: 2 },
   "gpt-5.6-sol": { input: 5, output: 30, cacheRead: 0.5 },
+  "gpt-5.6-terra": { input: 2.5, output: 15, cacheRead: 0.25 },
+  "gpt-5.6-luna": { input: 1, output: 6, cacheRead: 0.1 },
   "gpt-5.1-codex": { input: 1.25, output: 10, cacheRead: 0.125 },
   "gpt-5.4-codex": { input: 1.25, output: 10, cacheRead: 0.125 }
 };

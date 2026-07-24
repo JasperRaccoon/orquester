@@ -41,7 +41,7 @@ const PROXY_ICON_TONE: Record<string, string> = {
 };
 
 /** Model chips shown for `claudex` when the live proxy catalog is unavailable. */
-const DEFAULT_PROXY_MODELS = ["gpt-5.6-sol", "kimi-k3"];
+const DEFAULT_PROXY_MODELS = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "kimi-k3"];
 
 const isProxyLauncher = (id: string): boolean => id in PROXY_ACCOUNT_FAMILY;
 
@@ -67,10 +67,11 @@ const shortModelLabel = (model: string): string => {
  * tabs doesn't re-prompt. "System" carries the SYSTEM_ACCOUNT_ID sentinel (not an
  * omitted value) so it forces the host identity over any per-agent default.
  *
- * Proxy launchers whose backing proxy is down render **visible-but-disabled**
- * (greyed, non-clickable, with the daemon's `disabledReason`) rather than
- * vanishing, so the escape hatch is discoverable even when it's unavailable
- * (spec §2). Non-proxy disabled agents are filtered out upstream as before.
+ * Proxy launchers whose backing proxy is enabled-but-down render
+ * **visible-but-disabled** (greyed, non-clickable, with the daemon's
+ * `disabledReason`) so the outage is discoverable (spec §2); when the proxy is
+ * off (user-disabled) they are hidden entirely. Non-proxy disabled agents are
+ * filtered out upstream as before.
  */
 const AgentRow: React.FC<{ agent: RegistryEntry }> = ({ agent }) => {
   const openTab = useAppStore((s) => s.openTab);
@@ -113,8 +114,12 @@ const AgentRow: React.FC<{ agent: RegistryEntry }> = ({ agent }) => {
   // row AND drop the account on launch so a stale pick can't reattach a prefix.
   const accountDimmed = showModels && modelIgnoresAccount(selectedModel);
 
-  // Visible-but-disabled: a proxy launcher whose proxy is down (spec §2).
+  // A deliberately-off proxy (user disabled it, or status not loaded yet) hides
+  // its launchers entirely — advertising an escape hatch the user turned off is
+  // noise. Only an *enabled-but-unhealthy* proxy renders visible-but-disabled
+  // (greyed, with the daemon's reason) so the outage is discoverable (spec §2).
   if (!agent.enabled) {
+    if (!cliproxy || cliproxy.state === "off") return null;
     return (
       <div
         className="mb-0.5 flex w-full cursor-not-allowed items-center gap-2 rounded px-2 py-1.5 text-left text-sm text-neutral-500"

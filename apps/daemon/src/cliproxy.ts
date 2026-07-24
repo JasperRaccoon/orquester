@@ -34,6 +34,11 @@ const MAX_RESPAWNS = 3;
 const BACKOFF_BASE_MS = 1000;
 /** `validateModel` bounds its freshness probe so a hung proxy can't stall a launch. */
 const VALIDATE_PROBE_TIMEOUT_MS = 2000;
+/** Startup window a freshly-spawned proxy gets to bind its port before it is
+ *  declared down: the binary fetches remote model catalogs before listening
+ *  (~1-2 s cold), so a single immediate probe misreads a booting proxy. */
+const SPAWN_PROBE_ATTEMPTS = 20;
+const SPAWN_PROBE_INTERVAL_MS = 500;
 /**
  * A credential must have at least this much life left to be seeded. Seeding a
  * near-expired token would make the proxy immediately refresh it — the very
@@ -66,6 +71,8 @@ export interface CliProxyAdapters {
   spawnDirect(bin: string, args: string[]): { kill(): void } | null; // no-tmux fallback
   liveDependentSessionCount(): number; // daemon-managed claudex/claudemix sessions
   now(): number;
+  /** Delay between spawn-probe retries (production: real setTimeout; tests: instant). */
+  sleep?(ms: number): Promise<void>;
   /**
    * Install the pinned proxy binary into `cliproxy/bin` (Task 7 wires the real
    * verified-download installer). Absent (pre-wiring) → `enable()` falls back to
@@ -230,8 +237,10 @@ export class CliProxyManager {
         await seedHome(this.daemonDir, "claudemix", sysDir);
 
         this.setState("starting", []);
-        await this.spawn(false);
-        let probed = await this.probe();
+        // killFirst: a previously-failed enable can leave an orphaned service
+        // session holding the port/name; reclaim it rather than colliding.
+        await this.spawn(true);
+        let probed = await this.probeUntilReady();
         // A freshly-installed binary that never probes healthy: if a previous binary
         // survives in bin.prev/, roll back and respawn once before latching error.
         // `rollback()` returns false when there is nothing to roll back to.
@@ -241,7 +250,7 @@ export class CliProxyManager {
             // Restored the prev binary — revert version to match what's on disk.
             this.state.version = priorVersion;
             await this.spawn(true);
-            probed = await this.probe();
+            probed = await this.probeUntilReady();
             if (probed.ok) {
               this.becomeHealthy(probed.models);
               this.setState("healthy", ["rolled back to previous binary"]);
@@ -255,7 +264,10 @@ export class CliProxyManager {
         } else {
           // Fail closed: don't persist enabled:true, or next boot's init() re-runs
           // bootAdopt() against a proxy that never came up. Mirrors the reset above.
+          // Also reap the spawned-but-unready proxy so it can't linger as an
+          // orphan holding the port while the manager reports "off".
           this.state.enabled = false;
+          await this.killProxy();
           this.fail("proxy down");
         }
         await this.persist();
@@ -331,7 +343,7 @@ export class CliProxyManager {
         if (needsRestart) {
           this.setState("starting", []);
           await this.spawn(true);
-          const probed = await this.probe();
+          const probed = await this.probeUntilReady();
           if (probed.ok) this.becomeHealthy(probed.models);
           else this.fail("proxy down");
         } else {
@@ -366,7 +378,7 @@ export class CliProxyManager {
         if (needsRestart) {
           this.setState("starting", []);
           await this.spawn(true);
-          const probed = await this.probe();
+          const probed = await this.probeUntilReady();
           if (probed.ok) this.becomeHealthy(probed.models);
           else this.fail("proxy down");
         }
@@ -670,7 +682,7 @@ export class CliProxyManager {
         }
         this.setState("starting", []);
         await this.spawn(true);
-        const reprobed = await this.probe();
+        const reprobed = await this.probeUntilReady();
         if (reprobed.ok) this.becomeHealthy(reprobed.models);
         else this.fail("proxy down");
         await this.persist();
@@ -694,7 +706,7 @@ export class CliProxyManager {
 
       this.setState("starting", []);
       await this.spawn(false);
-      const spawned = await this.probe();
+      const spawned = await this.probeUntilReady();
       if (spawned.ok) this.becomeHealthy(spawned.models);
       else this.fail("proxy down");
       await this.persist();
@@ -733,6 +745,25 @@ export class CliProxyManager {
   private async probe(): Promise<ProbeResult> {
     if (!this.secrets) return { ok: false, reachable: false };
     return this.adapters.probe(this.state.port, this.secrets.apiKey);
+  }
+
+  /** Poll {@link probe} until it answers ok or the startup window lapses.
+   *  Connection-refused resolves instantly (no timeout burned), so a bare probe
+   *  right after spawn() races the proxy's slow bind — every spawn→verdict path
+   *  must use this instead. */
+  private async probeUntilReady(): Promise<ProbeResult> {
+    let last: ProbeResult = { ok: false, reachable: false };
+    for (let attempt = 0; attempt < SPAWN_PROBE_ATTEMPTS; attempt++) {
+      last = await this.probe();
+      if (last.ok) return last;
+      await this.sleep(SPAWN_PROBE_INTERVAL_MS);
+    }
+    return last;
+  }
+
+  private sleep(ms: number): Promise<void> {
+    if (this.adapters.sleep) return this.adapters.sleep(ms);
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   private probeBounded(ms: number): Promise<ProbeResult> {

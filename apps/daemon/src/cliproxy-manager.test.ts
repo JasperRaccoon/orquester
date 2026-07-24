@@ -87,6 +87,7 @@ function setup() {
       spawnDirect: () => null,
       liveDependentSessionCount: () => liveCount,
       now: () => clock,
+      sleep: async () => {},
       install: () => installImpl(),
       rollback: () => {
         rollbackCount++;
@@ -274,6 +275,36 @@ test("enable: a proxy that never probes healthy does not persist enabled:true (p
     JSON.parse(await readFile(cliproxyStateFile(h.daemonDir), "utf8"))
   );
   assert.equal(persisted.enabled, false);
+});
+
+test("enable: a slow-binding proxy that answers on a later probe attempt becomes healthy (startup race)", async () => {
+  const h = setup();
+  // The real binary fetches remote catalogs before binding (~1-2 s): the first
+  // probes hit connection-refused, then the port comes up. Single-shot probing
+  // misread this as "proxy down" — enable must poll the startup window instead.
+  let calls = 0;
+  h.setProbeFn(async () => {
+    calls++;
+    if (calls < 4) return { ok: false, reachable: false };
+    return { ok: true, reachable: true, models: ["gpt-5.6-sol"] };
+  });
+  await h.mgr.enable();
+  assert.equal(h.mgr.status().state, "healthy");
+  const persisted = parseCliProxyState(
+    JSON.parse(await readFile(cliproxyStateFile(h.daemonDir), "utf8"))
+  );
+  assert.equal(persisted.enabled, true);
+});
+
+test("enable: a proxy that never probes healthy is reaped — no orphan left holding the port", async () => {
+  const h = setup();
+  h.setProbe({ ok: false, reachable: false });
+  await h.mgr.enable();
+  assert.equal(h.mgr.status().state, "error");
+  // One kill reclaiming any stale service session before spawn, one reaping the
+  // spawned-but-unready proxy on failure. Without the reap, the orphan keeps the
+  // port while the manager reports "off", and the next enable collides.
+  assert.equal(h.tmuxCalls.killService, 2);
 });
 
 test("disable without force + 2 live sessions → {ok:false, affectedSessions:2}; with force → kills service session", async () => {
