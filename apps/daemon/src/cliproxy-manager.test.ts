@@ -96,7 +96,8 @@ function setup() {
         rollbackCount++;
         return rollbackImpl();
       },
-      systemClaudeDir: () => sysDir
+      systemClaudeDir: () => sysDir,
+      systemClaudeConfigFile: () => join(sysDir, ".claude.json")
     }
   });
 

@@ -184,12 +184,14 @@ export async function writeProjections(
 
 /** Copy `<systemClaudeDir>/.claude.json` into the home minus identity
  *  (oauthAccount/userID), onboarding forced true — mirrors `seedClaudeConfig`. */
-async function seedClaudeJson(home: string, systemClaudeDir: string): Promise<void> {
+async function seedClaudeJson(home: string, systemClaudeConfigFile: string): Promise<void> {
   let sys: Record<string, unknown>;
   try {
-    sys = JSON.parse(await readFile(join(systemClaudeDir, ".claude.json"), "utf8")) as Record<string, unknown>;
+    sys = JSON.parse(await readFile(systemClaudeConfigFile, "utf8")) as Record<string, unknown>;
   } catch {
-    return; // no system config to seed from
+    // No system config to copy — still force the onboarding flag, or Claude
+    // Code runs its first-run theme/login flow inside the fresh proxy home.
+    sys = {};
   }
   const homeFile = join(home, ".claude.json");
   let existing: Record<string, unknown> | null = null;
@@ -253,7 +255,13 @@ async function copyIfMissing(src: string, dst: string): Promise<void> {
 export async function seedHome(
   daemonDir: string,
   entryId: "claudex" | "claudemix",
-  systemClaudeDir: string
+  systemClaudeDir: string,
+  // The system `.claude.json` sits at HOME level (sibling of ~/.claude), NOT
+  // inside the config dir, unless CLAUDE_CONFIG_DIR relocates it — same
+  // resolution as agent-accounts. Passed explicitly so the two layouts can't
+  // be conflated again (reading `<dir>/.claude.json` silently seeded nothing
+  // in production and every proxy session got the onboarding flow).
+  systemClaudeConfigFile: string
 ): Promise<void> {
   const home = cliproxyHomeDir(daemonDir, entryId);
   const markerPath = join(home, CLIPROXY_HOME_MARKER);
@@ -283,7 +291,7 @@ export async function seedHome(
     await writeFile(markerPath, entryId, { mode: 0o600 });
   }
 
-  await seedClaudeJson(home, systemClaudeDir);
+  await seedClaudeJson(home, systemClaudeConfigFile);
   await ensureSymlink(join(systemClaudeDir, "skills"), join(home, "skills"));
   await ensureSymlink(join(systemClaudeDir, "plugins"), join(home, "plugins"));
   await copyIfMissing(join(systemClaudeDir, "settings.json"), join(home, "settings.json"));

@@ -96,6 +96,9 @@ export interface CliProxyAdapters {
   /** Source Claude config dir `seedHome` copies shared config from (production:
    *  `CLAUDE_CONFIG_DIR || ~/.claude`). */
   systemClaudeDir?(): string;
+  /** Source system `.claude.json` — HOME-level sibling of ~/.claude unless
+   *  CLAUDE_CONFIG_DIR relocates it into the config dir (agent-accounts rule). */
+  systemClaudeConfigFile?(): string;
 }
 
 type ValidateResult =
@@ -239,9 +242,7 @@ export class CliProxyManager {
         // Derived projections + both isolated managed homes from the shared config.
         await writeProjections(this.daemonDir, this.secrets, this.state);
         await this.reresolveDependents();
-        const sysDir = this.resolveSystemClaudeDir();
-        await seedHome(this.daemonDir, "claudex", sysDir);
-        await seedHome(this.daemonDir, "claudemix", sysDir);
+        await this.seedHomes();
 
         this.setState("starting", []);
         // killFirst: a previously-failed enable can leave an orphaned service
@@ -292,6 +293,22 @@ export class CliProxyManager {
   private resolveSystemClaudeDir(): string {
     if (this.adapters.systemClaudeDir) return this.adapters.systemClaudeDir();
     return process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
+  }
+
+  private resolveSystemClaudeConfigFile(): string {
+    if (this.adapters.systemClaudeConfigFile) return this.adapters.systemClaudeConfigFile();
+    const dir = process.env.CLAUDE_CONFIG_DIR;
+    return dir ? join(dir, ".claude.json") : join(homedir(), ".claude.json");
+  }
+
+  /** Idempotent re-seed of both managed homes (enable + boot): keeps existing
+   *  homes converging on the current seed shape — e.g. a missing `.claude.json`
+   *  (onboarding flag) heals on the next daemon restart, not the next enable. */
+  private async seedHomes(): Promise<void> {
+    const sysDir = this.resolveSystemClaudeDir();
+    const sysConfig = this.resolveSystemClaudeConfigFile();
+    await seedHome(this.daemonDir, "claudex", sysDir, sysConfig);
+    await seedHome(this.daemonDir, "claudemix", sysDir, sysConfig);
   }
 
   /** Force-gated stop. Refuses while daemon-managed sessions are live unless forced. */
@@ -695,6 +712,9 @@ export class CliProxyManager {
    */
   private async bootAdopt(): Promise<void> {
     try {
+      // Converge the managed homes before adopting: idempotent, and it heals
+      // homes seeded by an older daemon (e.g. without the onboarding flag).
+      await this.seedHomes();
       const name = SERVICE_SESSION_NAME;
       if (this.adapters.tmux && (await this.adapters.tmux.hasServiceSession(name))) {
         const probed = await this.probe();

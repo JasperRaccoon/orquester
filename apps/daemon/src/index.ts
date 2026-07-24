@@ -609,7 +609,13 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
       rollback: () => rollbackBinary(resolved.daemonDir),
       // Shared, non-credential Claude config `seedHome` copies into each dedicated
       // launcher home: the host's CLAUDE_CONFIG_DIR, else ~/.claude.
-      systemClaudeDir: () => env.CLAUDE_CONFIG_DIR || join(resolved.vars.userhome, ".claude")
+      systemClaudeDir: () => env.CLAUDE_CONFIG_DIR || join(resolved.vars.userhome, ".claude"),
+      // The system .claude.json is a HOME-level sibling of ~/.claude unless
+      // CLAUDE_CONFIG_DIR relocates it (same rule as agent-accounts).
+      systemClaudeConfigFile: () =>
+        env.CLAUDE_CONFIG_DIR
+          ? join(env.CLAUDE_CONFIG_DIR, ".claude.json")
+          : join(resolved.vars.userhome, ".claude.json")
     }
   });
 

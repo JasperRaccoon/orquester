@@ -96,7 +96,7 @@ test("seedHome: 0700, marker, .claude.json identity stripped, projects/ absent, 
   );
   await writeFile(join(sysDir, "settings.json"), "{}");
 
-  await seedHome(dir, "claudex", sysDir);
+  await seedHome(dir, "claudex", sysDir, join(sysDir, ".claude.json"));
   const home = cliproxyHomeDir(dir, "claudex");
 
   assert.equal((await stat(home)).mode & 0o777, 0o700);
@@ -112,5 +112,30 @@ test("seedHome: 0700, marker, .claude.json identity stripped, projects/ absent, 
   assert.ok(existsSync(join(home, "settings.json")), "settings.json seeded");
 
   // Re-entry with the correct marker is a no-op (no throw).
-  await seedHome(dir, "claudex", sysDir);
+  await seedHome(dir, "claudex", sysDir, join(sysDir, ".claude.json"));
+});
+
+test("seedHome: HOME-level system .claude.json (sibling of ~/.claude) seeds the onboarding flag", async () => {
+  const dir = await makeDir();
+  // Production layout without CLAUDE_CONFIG_DIR: ~/.claude/ is the config dir,
+  // but .claude.json sits NEXT TO it at HOME level — reading <dir>/.claude.json
+  // found nothing and every proxy session got the first-run onboarding flow.
+  const homeLevel = await mkdtemp(join(tmpdir(), "orq-syshome-"));
+  const sysDir = join(homeLevel, ".claude");
+  await mkdir(sysDir, { recursive: true });
+  await writeFile(join(homeLevel, ".claude.json"), JSON.stringify({ userID: "uid", theme: "dark" }));
+
+  await seedHome(dir, "claudex", sysDir, join(homeLevel, ".claude.json"));
+  const cj = JSON.parse(await readFile(join(cliproxyHomeDir(dir, "claudex"), ".claude.json"), "utf8"));
+  assert.equal(cj.hasCompletedOnboarding, true, "onboarding forced");
+  assert.equal(cj.userID, undefined, "identity stripped");
+  assert.equal(cj.theme, "dark", "shared config copied");
+});
+
+test("seedHome: no system .claude.json anywhere still writes hasCompletedOnboarding", async () => {
+  const dir = await makeDir();
+  const sysDir = await mkdtemp(join(tmpdir(), "orq-sysempty-"));
+  await seedHome(dir, "claudex", sysDir, join(sysDir, ".claude.json"));
+  const cj = JSON.parse(await readFile(join(cliproxyHomeDir(dir, "claudex"), ".claude.json"), "utf8"));
+  assert.equal(cj.hasCompletedOnboarding, true);
 });
