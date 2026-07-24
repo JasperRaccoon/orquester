@@ -79,9 +79,12 @@ export function renderConfigYaml(secrets: CliProxySecrets, state: CliProxyState)
       '    base-url: "https://openrouter.ai/api/v1"',
       "    api-key-entries:",
       `      - api-key: ${JSON.stringify(secrets.openRouterKey)}`,
-      "        models:",
-      '          - name: "moonshotai/kimi-k3"',
-      '            alias: "kimi-k3"'
+      // `models` is a PROVIDER-level key (sibling of api-key-entries). Nested
+      // under an entry it parses fine but registers ZERO models — the provider
+      // loads and every request 502s "unknown provider for model kimi-k3".
+      "    models:",
+      '      - name: "moonshotai/kimi-k3"',
+      '        alias: "kimi-k3"'
     );
   }
   return lines.join("\n") + "\n";
