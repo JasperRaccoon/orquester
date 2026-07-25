@@ -156,6 +156,32 @@ test("seedHome: no system .claude.json anywhere still writes hasCompletedOnboard
   assert.equal(cj.hasCompletedOnboarding, true);
 });
 
+test("seedHome: seeds managed model-pinned subagents; kimi rides the OpenRouter flag", async () => {
+  const dir = await makeDir();
+  const sysDir = await mkdtemp(join(tmpdir(), "orq-sysclaude-"));
+  await writeFile(join(sysDir, ".claude.json"), "{}");
+  const agents = join(cliproxyHomeDir(dir, "claudemix"), "agents");
+
+  // Key state unknown (secrets not loaded): GPT agents seeded, kimi untouched.
+  await seedHome(dir, "claudemix", sysDir, join(sysDir, ".claude.json"));
+  const sol = await readFile(join(agents, "gpt-sol.md"), "utf8");
+  assert.ok(sol.includes("name: gpt-sol"), "sol named");
+  assert.ok(sol.includes("model: gpt-5.6-sol"), "sol pinned");
+  assert.ok(existsSync(join(agents, "gpt-terra.md")), "terra seeded");
+  assert.ok(existsSync(join(agents, "gpt-luna.md")), "luna seeded");
+  assert.ok(!existsSync(join(agents, "kimi.md")), "kimi absent while key state unknown");
+
+  // Key present: kimi appears, pinned to kimi-k3.
+  await seedHome(dir, "claudemix", sysDir, join(sysDir, ".claude.json"), true);
+  assert.ok((await readFile(join(agents, "kimi.md"), "utf8")).includes("model: kimi-k3"), "kimi pinned");
+
+  // Key gone: the managed kimi.md is removed; user agents are never touched.
+  await writeFile(join(agents, "mine.md"), "---\nname: mine\n---\nbody\n");
+  await seedHome(dir, "claudemix", sysDir, join(sysDir, ".claude.json"), false);
+  assert.ok(!existsSync(join(agents, "kimi.md")), "kimi removed with the key");
+  assert.equal(await readFile(join(agents, "mine.md"), "utf8"), "---\nname: mine\n---\nbody\n", "user agent untouched");
+});
+
 test("seedHome: forces autoCompactEnabled:true into an existing settings.json, preserving other keys", async () => {
   const dir = await makeDir();
   const sysDir = await mkdtemp(join(tmpdir(), "orq-sysac-"));

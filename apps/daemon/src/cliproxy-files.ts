@@ -308,6 +308,64 @@ async function mergeManagedSettings(home: string): Promise<void> {
   await writeFile(file, JSON.stringify(next, null, 2), { mode: 0o600 });
 }
 
+/** Model-pinned subagent definitions rewritten into every managed home's
+ *  `agents/` on each seed pass, so e.g. `subagent_type: "gpt-luna"` runs that
+ *  subagent on the pinned proxy model. Agent frontmatter `model:` is the only
+ *  per-subagent model mechanism Claude Code supports, and it accepts arbitrary
+ *  ids (verified 2026-07-25 through the proxy on all three routes: main on
+ *  fable, subagents on luna/kimi). Kimi is gated like its /model picker slot —
+ *  only while an OpenRouter key exists to serve it; unknown key state leaves
+ *  the file as-is. User agents under other filenames are never touched. */
+const MANAGED_AGENTS: Array<{
+  file: string;
+  name: string;
+  model: string;
+  blurb: string;
+  openRouterGated?: boolean;
+}> = [
+  { file: "gpt-sol.md", name: "gpt-sol", model: "gpt-5.6-sol", blurb: "GPT-5.6 Sol (OpenAI flagship — deepest reasoning)" },
+  { file: "gpt-terra.md", name: "gpt-terra", model: "gpt-5.6-terra", blurb: "GPT-5.6 Terra (balanced everyday coding)" },
+  { file: "gpt-luna.md", name: "gpt-luna", model: "gpt-5.6-luna", blurb: "GPT-5.6 Luna (fast, low cost)" },
+  { file: "kimi.md", name: "kimi", model: "kimi-k3", blurb: "Kimi K3 via OpenRouter (1M-token context)", openRouterGated: true }
+];
+
+function renderManagedAgent(agent: (typeof MANAGED_AGENTS)[number]): string {
+  return [
+    "---",
+    `name: ${agent.name}`,
+    `description: General-purpose subagent pinned to ${agent.blurb} through the managed proxy. Use when asked to delegate work to this model, or for a cross-model second opinion.`,
+    `model: ${agent.model}`,
+    "---",
+    "",
+    "<!-- orq-managed: rewritten on every daemon seed pass; edits will be lost. -->",
+    "",
+    `You are a general-purpose subagent running on ${agent.model}. Complete the delegated task with the available tools. Your final message is returned verbatim to the orchestrator, so end it with the concrete results.`,
+    ""
+  ].join("\n");
+}
+
+async function seedManagedAgents(home: string, openRouterKimi: boolean | undefined): Promise<void> {
+  const dir = join(home, "agents");
+  await mkdir(dir, { recursive: true });
+  for (const agent of MANAGED_AGENTS) {
+    const file = join(dir, agent.file);
+    if (agent.openRouterGated) {
+      if (openRouterKimi === undefined) continue; // key state unknown — don't churn
+      if (!openRouterKimi) {
+        await rm(file, { force: true });
+        continue;
+      }
+    }
+    const content = renderManagedAgent(agent);
+    try {
+      if ((await readFile(file, "utf8")) === content) continue; // no write churn
+    } catch {
+      /* absent */
+    }
+    await writeFile(file, content, { mode: 0o600 });
+  }
+}
+
 /**
  * Seed a per-entry managed Claude home (0700) with a `.orq-cliproxy-home` marker
  * (content = entryId): identity-free `.claude.json`, live-shared `skills/` +
@@ -325,7 +383,10 @@ export async function seedHome(
   // resolution as agent-accounts. Passed explicitly so the two layouts can't
   // be conflated again (reading `<dir>/.claude.json` silently seeded nothing
   // in production and every proxy session got the onboarding flow).
-  systemClaudeConfigFile: string
+  systemClaudeConfigFile: string,
+  // Whether an OpenRouter key exists (gates the managed kimi subagent);
+  // undefined = secrets not loaded, leave the kimi file untouched.
+  openRouterKimi?: boolean
 ): Promise<void> {
   const home = cliproxyHomeDir(daemonDir, entryId);
   const markerPath = join(home, CLIPROXY_HOME_MARKER);
@@ -360,4 +421,5 @@ export async function seedHome(
   await ensureSymlink(join(systemClaudeDir, "plugins"), join(home, "plugins"));
   await copyIfMissing(join(systemClaudeDir, "settings.json"), join(home, "settings.json"));
   await mergeManagedSettings(home);
+  await seedManagedAgents(home, openRouterKimi);
 }

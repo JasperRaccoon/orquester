@@ -313,8 +313,9 @@ export class CliProxyManager {
   private async seedHomes(): Promise<void> {
     const sysDir = this.resolveSystemClaudeDir();
     const sysConfig = this.resolveSystemClaudeConfigFile();
-    await seedHome(this.daemonDir, "claudex", sysDir, sysConfig);
-    await seedHome(this.daemonDir, "claudemix", sysDir, sysConfig);
+    const kimi = this.secrets ? Boolean(this.secrets.openRouterKey) : undefined;
+    await seedHome(this.daemonDir, "claudex", sysDir, sysConfig, kimi);
+    await seedHome(this.daemonDir, "claudemix", sysDir, sysConfig, kimi);
   }
 
   /** Force-gated stop. Refuses while daemon-managed sessions are live unless forced. */
@@ -426,6 +427,9 @@ export class CliProxyManager {
       }
       this.state.openRouterKeyVerifiedAt = verifiedAt;
       this.secrets = await setOpenRouterKey(this.daemonDir, key);
+      // Converge the managed kimi subagent with the new key state immediately
+      // (enable/boot are the only other seed points).
+      await this.seedHomes();
       if (this.state.enabled) {
         await writeProjections(this.daemonDir, this.secrets, this.state);
         await this.reresolveDependents();
