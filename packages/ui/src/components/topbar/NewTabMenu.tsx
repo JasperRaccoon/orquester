@@ -1,7 +1,7 @@
 import React from "react";
 import { FolderTree, GitBranch, Globe, ListTodo, Plus } from "lucide-react";
 import { SYSTEM_ACCOUNT_ID, type RegistryEntry } from "@orquester/api";
-import { CURATED_PROXY_MODELS, isOpenRouterModel } from "@orquester/config";
+import { CURATED_PROXY_MODEL_IDS, isOpenRouterModel } from "@orquester/config";
 import { CHROMIUM_FAMILY_IDS } from "@orquester/registry";
 import {
   AdaptiveMenu,
@@ -41,7 +41,7 @@ const PROXY_ICON_TONE: Record<string, string> = {
 };
 
 /** Model chips for `claudex`: the curated picks, not the raw catalog dump. */
-const DEFAULT_PROXY_MODELS: string[] = [...CURATED_PROXY_MODELS];
+const DEFAULT_PROXY_MODELS: string[] = [...CURATED_PROXY_MODEL_IDS];
 
 const isProxyLauncher = (id: string): boolean => id in PROXY_ACCOUNT_FAMILY;
 

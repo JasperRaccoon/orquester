@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Check, Loader2, Power, RefreshCw, X } from "lucide-react";
 import type { CliProxyProviderId, CliProxyProviderStatus, CliProxyStatus } from "@orquester/api";
-import { CURATED_PROXY_MODELS } from "@orquester/config";
+import { CURATED_PROXY_MODEL_IDS } from "@orquester/config";
 import { cn } from "../../lib/cn";
 import { Button, Input } from "../ui";
 import { useAppStore } from "../../store/app";
@@ -59,9 +59,9 @@ export const ModelProxySettings: React.FC = () => {
   const curatedOptions = useMemo(() => {
     const catalog = models?.models ?? [];
     const confirmed = catalog.length
-      ? CURATED_PROXY_MODELS.filter((m) => catalog.includes(m))
-      : [...CURATED_PROXY_MODELS];
-    return confirmed.length ? confirmed : [...CURATED_PROXY_MODELS];
+      ? CURATED_PROXY_MODEL_IDS.filter((m) => catalog.includes(m))
+      : [...CURATED_PROXY_MODEL_IDS];
+    return confirmed.length ? confirmed : [...CURATED_PROXY_MODEL_IDS];
   }, [models]);
   const agentAccounts = useAppStore((s) => s.agentAccounts);
   const loadCliProxy = useAppStore((s) => s.loadCliProxy);
