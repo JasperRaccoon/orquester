@@ -608,7 +608,11 @@ export class ApiClient {
   }
 
   setCliProxyConfig(
-    cfg: { defaultModel?: string; backgroundModel?: string },
+    cfg: {
+      defaultModel?: string;
+      backgroundModel?: string;
+      modelOverrides?: Record<string, { contextWindow?: number; compactWindow?: number; compactPct?: number }>;
+    },
     force?: boolean
   ): Promise<CliProxyStatus | CliProxyMutationRefusal> {
     return this.mutateAllowingRefusal<CliProxyStatus>("PUT", "/api/cliproxy/config", {

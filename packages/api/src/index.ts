@@ -755,6 +755,8 @@ export interface CliProxyStatus {
   version: string | null;
   defaultModel: string;
   backgroundModel: string;
+  /** Per-model compact-window overrides (empty record when none set). */
+  modelOverrides: Record<string, { contextWindow?: number; compactWindow?: number; compactPct?: number }>;
   providers: CliProxyProviderStatus[];
   accounts: { id: string; provider: CliProxyProviderId; label: string; email?: string }[];
   activeSessionCount: number;

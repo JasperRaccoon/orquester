@@ -95,6 +95,7 @@ import { registerMcp } from "./mcp/server.ts";
 import {
   type AppConfig,
   type ClientConfig,
+  type CliProxyModelOverrides,
   type CliProxyState,
   type ConfigVars,
   type DaemonConfig,
@@ -113,6 +114,7 @@ import {
   cliproxyHomeDir,
   cliproxyStateFile,
   cliproxyTokenFile,
+  cliProxyModelOverridesSchema,
   compactEnvForModel,
   parseCliProxyState,
   MODEL_NAME_RE,
@@ -933,7 +935,12 @@ interface CliProxyRouteManager {
   enable(): Promise<void>;
   disable(force: boolean): Promise<{ ok: boolean; affectedSessions?: number }>;
   setConfig(
-    cfg: { defaultModel?: string; backgroundModel?: string; claudeDefaultModel?: string },
+    cfg: {
+      defaultModel?: string;
+      backgroundModel?: string;
+      claudeDefaultModel?: string;
+      modelOverrides?: CliProxyModelOverrides;
+    },
     force: boolean
   ): Promise<{ ok: boolean; affectedSessions?: number }>;
   setOpenRouterKey(
@@ -1026,6 +1033,7 @@ export function registerCliProxyRoutes(
       defaultModel?: string;
       backgroundModel?: string;
       claudeDefaultModel?: string;
+      modelOverrides?: unknown;
       force?: boolean;
     };
     for (const m of [body.defaultModel, body.backgroundModel, body.claudeDefaultModel]) {
@@ -1034,19 +1042,30 @@ export function registerCliProxyRoutes(
         return;
       }
     }
+    const cfg: {
+      defaultModel?: string;
+      backgroundModel?: string;
+      claudeDefaultModel?: string;
+      modelOverrides?: CliProxyModelOverrides;
+    } = {
+      defaultModel: body.defaultModel,
+      backgroundModel: body.backgroundModel,
+      claudeDefaultModel: body.claudeDefaultModel
+    };
+    if (body.modelOverrides !== undefined) {
+      const parsed = cliProxyModelOverridesSchema.safeParse(body.modelOverrides);
+      if (!parsed.success) {
+        reply.code(400).send({ error: "invalid modelOverrides" });
+        return;
+      }
+      cfg.modelOverrides = parsed.data;
+    }
     // A model change re-projects config.yaml, which the proxy reads only at
     // startup — so it is restart-gated like disable/openrouter: refused (409)
     // while dependent sessions are live unless forced. On success the route
     // resolves the full CliProxyStatus the wire contract (setCliProxyConfig)
     // promises, not the internal {ok, affectedSessions} gate result.
-    const res = await manager.setConfig(
-      {
-        defaultModel: body.defaultModel,
-        backgroundModel: body.backgroundModel,
-        claudeDefaultModel: body.claudeDefaultModel
-      },
-      Boolean(body.force)
-    );
+    const res = await manager.setConfig(cfg, Boolean(body.force));
     if (!res.ok) {
       reply.code(409).send({ ok: false, affectedSessions: res.affectedSessions });
       return;

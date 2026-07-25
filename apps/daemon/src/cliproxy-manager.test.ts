@@ -5,6 +5,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
+  type CliProxyModelOverrides,
   cliproxyDir,
   cliproxySecretsFile,
   cliproxyStateFile,
@@ -1040,6 +1041,22 @@ test("reparent: an external survivor still answering on drain stays persistence-
   assert.equal(h.tmuxCalls.newService, 0, "no spawn into a port still held by the survivor");
 });
 
+test("setConfig: modelOverrides persist without a restart and surface on status", async () => {
+  const h = setup();
+  h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
+  await h.mgr.enable();
+  const spawnsBefore = h.tmuxCalls.newService;
+  h.setLive(2); // live sessions must NOT gate an overrides-only change
+  const res = await h.mgr.setConfig({ modelOverrides: { "kimi-k3": { compactWindow: 500000 } } }, false);
+  assert.equal(res.ok, true);
+  assert.equal(h.tmuxCalls.newService, spawnsBefore, "no proxy restart for overrides");
+  assert.deepEqual(h.mgr.status().modelOverrides, { "kimi-k3": { compactWindow: 500000 } });
+  const persisted = parseCliProxyState(
+    JSON.parse(await readFile(cliproxyStateFile(h.daemonDir), "utf8"))
+  );
+  assert.deepEqual(persisted.modelOverrides, { "kimi-k3": { compactWindow: 500000 } });
+});
+
 // --- Task 9: /api/cliproxy routes + launch-env composition + model gate --------
 
 function fakeRouteManager(daemonDir?: string) {
@@ -1058,6 +1075,7 @@ function fakeRouteManager(daemonDir?: string) {
     version: null,
     defaultModel: "gpt-5.6-sol",
     backgroundModel: "gpt-5.6-sol",
+    modelOverrides: {},
     providers: [],
     accounts: [],
     activeSessionCount: 0,
@@ -1073,7 +1091,12 @@ function fakeRouteManager(daemonDir?: string) {
       return { ok: true, affectedSessions: 0 };
     },
     setConfig: async (
-      cfg: { defaultModel?: string; backgroundModel?: string; claudeDefaultModel?: string },
+      cfg: {
+        defaultModel?: string;
+        backgroundModel?: string;
+        claudeDefaultModel?: string;
+        modelOverrides?: CliProxyModelOverrides;
+      },
       force: boolean
     ) => {
       calls.setConfig.push({ cfg, force });
