@@ -126,6 +126,22 @@ echo \"\$new\"
 echo '============================================================'"
 }
 
+cmd_provision() {
+  local name="$1"
+  load_target "$CONF" "$name"
+  build_ssh_args
+  [ -n "$T_DOMAIN" ] || die "target '$name': provision requires 'domain' in targets.conf"
+  [ -n "$T_REPO" ]   || die "target '$name': provision requires 'repo' in targets.conf"
+  info "=== provision $name ($T_USER@$T_HOST, domain $T_DOMAIN) ==="
+  info "prerequisite: a DNS A record for $T_DOMAIN must already point at $T_HOST"
+  RUN_AS_ROOT=1 run_payload "$here/deploy/lib/remote-provision.sh" \
+    "DOMAIN=$T_DOMAIN" "REPO=$T_REPO" "BRANCH=$T_BRANCH" || die "provision failed"
+  if [ "$DRY_RUN" -eq 1 ]; then return 0; fi
+  info "checking https://$T_DOMAIN/api/auth/info (TLS issuance can take a moment)"
+  curl -fsS --retry 10 --retry-delay 3 "https://$T_DOMAIN/api/auth/info"; echo
+  ok "$name provisioned"
+}
+
 # run_for_targets <fn> <selector>: per-target, continue on failure, summarize.
 run_for_targets() {
   local fn="$1" sel="$2" t rc=0 names results=""
@@ -178,6 +194,9 @@ main() {
   cmd="$1"; shift
   case "$cmd" in
     deploy) run_for_targets cmd_deploy_target "${1:-all}" ;;
+    provision)
+      [ $# -eq 1 ] || die "usage: ./deploy.sh provision <target>"
+      cmd_provision "$1" ;;
     verify) run_for_targets cmd_verify_target "${1:-all}" ;;
     rollback)
       [ $# -eq 2 ] || die "usage: ./deploy.sh rollback <target> <sha>"
