@@ -78,10 +78,31 @@ load_target() {
     case "$T_KEY" in "~"*) T_KEY="$HOME${T_KEY#\~}" ;; esac
     [ -f "$T_KEY" ] || die "target '$name': ssh key not found: $T_KEY"
   fi
+  # ssh_opts feeds BOTH ssh and scp (build_ssh_args -> run_payload), and their
+  # short flags disagree: `-p 2222` is a port for ssh but "preserve times" plus a
+  # stray source operand for scp, which would fail mid-copy with a baffling
+  # "2222: No such file or directory". Only `-o Name=value` means the same thing
+  # to both, so reject everything else here with an actionable message.
+  if [ -n "$T_SSH_OPTS" ]; then
+    local tok want_val=0
+    # shellcheck disable=SC2086
+    for tok in $T_SSH_OPTS; do
+      if [ "$want_val" -eq 1 ]; then want_val=0; continue; fi
+      case "$tok" in
+        -o) want_val=1 ;;
+        -o?*) ;;
+        *) die "target '$name': ssh_opts accepts only '-o Name=value' options (it is passed to scp too, where ssh short flags mean something else) — got '$tok'; e.g. use '-o Port=2222' instead of '-p 2222'" ;;
+      esac
+    done
+    [ "$want_val" -eq 0 ] || die "target '$name': ssh_opts ends with a dangling '-o'"
+  fi
 }
 
 # ---------- ssh / payload execution ----------
-build_ssh_args() { # fills global SSH_ARGS array from T_*
+# Fills the global SSH_ARGS array from T_*. NOTE: run_payload reuses it verbatim
+# for scp, so every element must be understood identically by ssh and scp —
+# load_target enforces that for ssh_opts ('-o Name=value' only).
+build_ssh_args() {
   SSH_ARGS=(-o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new)
   if [ -n "$T_KEY" ]; then
     SSH_ARGS=("${SSH_ARGS[@]}" -i "$T_KEY" -o IdentitiesOnly=yes)

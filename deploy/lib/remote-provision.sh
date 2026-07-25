@@ -70,11 +70,13 @@ GENERATED_PASSWORD=""
 if [ ! -f /etc/orquester/daemon.env ]; then
   mkdir -p /etc/orquester
   GENERATED_PASSWORD="$(openssl rand -base64 32)"
+  # Create the file already-restricted: a plain `> file` redirect would use
+  # root's umask (0644 on stock Ubuntu) and leave the plaintext password
+  # world-readable until the chmod lands.
+  install -m 600 -o orquester -g orquester /dev/null /etc/orquester/daemon.env
   # base64 alphabet never contains '|' or '&' -> safe as sed replacement
   sed "s|replace-with-a-32+char-random-secret|$GENERATED_PASSWORD|" \
     deploy/daemon.env.example > /etc/orquester/daemon.env
-  chown orquester:orquester /etc/orquester/daemon.env
-  chmod 600 /etc/orquester/daemon.env
 else
   log "daemon.env already exists — leaving it untouched"
 fi

@@ -13,7 +13,11 @@
 #             deploy key + known_hosts entry for root ON THE VPS — a fresh box
 #             has neither; use an https:// URL for a public repo.
 #   branch    default main
-#   ssh_opts  extra ssh flags, whitespace-separated
+#   ssh_opts  extra options, whitespace-separated — `-o Name=value` pairs ONLY.
+#             The same list is passed to BOTH ssh and scp, which do not share
+#             their short-flag vocabulary (ssh's `-p 2222` is scp's "preserve
+#             times" + a stray operand), so short flags are rejected up front.
+#             Custom port: `-o Port=2222`. Jump host: `-o ProxyJump=user@host`.
 #
 # No value may contain spaces, except ssh_opts.
 

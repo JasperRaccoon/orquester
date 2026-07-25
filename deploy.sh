@@ -144,6 +144,10 @@ ${s:+$s }grep -q '^ORQUESTER_HTTP_PASSWORD=' \"\$env_file\" || { echo \"rotate-p
 before=\$(salt || true)
 new=\$(openssl rand -base64 32)
 ${s:+$s }sed -i \"s|^ORQUESTER_HTTP_PASSWORD=.*|ORQUESTER_HTTP_PASSWORD=\$new|\" \"\$env_file\"
+# From here the new password exists only on this box. If anything below aborts
+# (restart fails, /health never comes up) \`set -e\` would exit silently and the
+# operator would never see it — always leave the recovery hint behind.
+trap 'echo \"rotate-password: FAILED after the new password was written — the daemon may be down (${s:+$s }systemctl status orquester).\" >&2; echo \"rotate-password: read the installed value with: ${s:+$s }grep ORQUESTER_HTTP_PASSWORD \$env_file\" >&2' ERR
 if ${s:+$s }test -f \"\$cfg\"; then
   ${s:+$s }node -e \"const fs=require('fs'),f=process.argv[1],c=JSON.parse(fs.readFileSync(f,'utf8'));if(c.transports&&c.transports.http)delete c.transports.http.passwordHash;fs.writeFileSync(f,JSON.stringify(c,null,2)+'\n')\" \"\$cfg\"
 fi
