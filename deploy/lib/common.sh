@@ -17,6 +17,7 @@ die()  { printf '%s[deploy] ERROR:%s %s\n' "$C_RED" "$C_RST" "$*" >&2; exit 1; }
 trim() { printf '%s' "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
 
 list_targets() { # list_targets <conf>
+  [ -f "$1" ] || die "no targets file at $1 — copy deploy/targets.conf.example to deploy/targets.conf and fill in your hosts"
   sed -n 's/^[[:space:]]*\[\([^]]*\)\][[:space:]]*$/\1/p' "$1"
 }
 

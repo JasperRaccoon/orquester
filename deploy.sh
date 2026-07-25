@@ -139,7 +139,7 @@ cmd_rotate_password() {
   remote_run "set -e
 env_file=/etc/orquester/daemon.env
 cfg=/var/lib/orquester/daemon/daemon.json
-salt() { curl -fsS http://127.0.0.1:47831/api/auth/info | sed -n 's/.*\"salt\":\"\([^\"]*\)\".*/\1/p'; }
+salt() { curl -fsS --retry 5 --retry-delay 1 http://127.0.0.1:47831/api/auth/info | sed -n 's/.*\"salt\":\"\([^\"]*\)\".*/\1/p'; }
 ${s:+$s }grep -q '^ORQUESTER_HTTP_PASSWORD=' \"\$env_file\" || { echo \"rotate-password: no ORQUESTER_HTTP_PASSWORD= line in \$env_file — nothing rotated\" >&2; exit 1; }
 before=\$(salt || true)
 new=\$(openssl rand -base64 32)
@@ -150,8 +150,22 @@ fi
 ${s:+$s }systemctl restart orquester
 curl -fsS --retry 25 --retry-delay 1 --retry-connrefused http://127.0.0.1:47831/health; echo
 after=\$(salt || true)
-if [ -z \"\$after\" ] || [ \"\$after\" = \"\$before\" ]; then
+if [ \"\$after\" = \"\$before\" ] && [ -n \"\$after\" ]; then
   echo 'rotate-password: FAILED — the stored hash did not change, the OLD password is still valid' >&2
+  echo \"rotate-password: read the installed value with: ${s:+$s }grep ORQUESTER_HTTP_PASSWORD \$env_file\" >&2
+  exit 1
+fi
+if [ -z \"\$after\" ]; then
+  # The health check passed, so the daemon is up and has already re-hashed the
+  # NEW password — it is live even though the salt fetch came back empty. Never
+  # swallow it here or the operator is locked out of a password only the VPS knows.
+  echo 'rotate-password: WARNING — could not read /api/auth/info to confirm the rotation.' >&2
+  echo 'The new password below is most likely already ACTIVE. Verify by logging in.' >&2
+  echo \"If it is not, read the installed value with: ${s:+$s }grep ORQUESTER_HTTP_PASSWORD \$env_file\" >&2
+  echo '============================================================'
+  echo 'NEW PASSWORD (shown once — save it now):'
+  echo \"\$new\"
+  echo '============================================================'
   exit 1
 fi
 echo '============================================================'
@@ -182,6 +196,9 @@ cmd_provision() {
 # trap hands STEP back through a temp file, since it can't set the parent's var.
 run_for_targets() {
   local fn="$1" sel="$2" t rc=0 names results=""
+  # Same actionable message as load_target's: the `all` selector (the default for
+  # deploy/verify) must not fall through to a raw sed error on a first run.
+  [ -f "$CONF" ] || die "no targets file at $CONF — copy deploy/targets.conf.example to deploy/targets.conf and fill in your hosts"
   if [ "$sel" = "all" ]; then
     names="$(list_targets "$CONF")"
     [ -n "$names" ] || die "no targets defined in $CONF"

@@ -18,6 +18,15 @@ and `docs/superpowers/plans/2026-06-19-remote-phase0-vps-provisioning.md`.
   `uv`/`cargo-audit` in the appdir.
 - `sudoers.d/orquester-pkg` → scoped passwordless sudo (`apt`/`apt-get`/`dpkg`) for the service user.
   ≈root — see `docs/superpowers/specs/2026-07-01-vps-session-devtools-scoped-sudo-design.md`.
+- `targets.conf.example` → copy to `deploy/targets.conf` (**gitignored** — real hosts, never committed)
+  and fill in one `[name]` section per VPS.
+- `lib/` → helpers for the repo-root `./deploy.sh` (deploy / provision / verify / rollback / logs /
+  rotate-password): `common.sh` (targets.conf parser, ssh/scp helpers, output) plus the payloads
+  `remote-update.sh` and `remote-provision.sh`, which are `scp`'d to the VPS and run there.
+  Design: `docs/superpowers/specs/2026-07-25-deploy-sh-lifecycle-tool-design.md`.
+
+`./deploy.sh provision <target>` installs the templates above onto a fresh VPS; the rest of this
+file documents what those templates are for.
 
 Archive previews want `p7zip-full` or `libarchive-tools` (`bsdtar`) on PATH; `provision-devtools.sh`
 installs `libarchive-tools`. Without either, archives degrade to a download card.
