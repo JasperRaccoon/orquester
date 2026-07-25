@@ -340,12 +340,11 @@ Stack: Ubuntu LTS, Node 20, pnpm, tmux, Caddy 2, ufw — daemon as a hardened sy
 Caddy as the TLS reverse proxy. Templates live in `deploy/`. Use placeholders
 `orquester.example.com` / `203.0.113.10` (never commit a real domain/IP/secret).
 
-> **Before deploying, check for a local `DEPLOY_TO_VPS.md` at the repo root.** It's a
-> **gitignored**, per-machine runbook that records the actual VPS targets (host, SSH login,
-> key, sudo) and copy-paste deploy commands for this checkout — the fastest way to know
-> *where* and *how* to deploy. If it's missing, copy `DEPLOY_TO_VPS.md.example` to
-> `DEPLOY_TO_VPS.md` and fill in real values (which stay off git). The generic procedure is in
-> **Routine updates** below.
+> **Deploys go through `./deploy.sh`** (deploy / provision / verify / rollback / logs /
+> rotate-password). Real host definitions live in the **gitignored** `deploy/targets.conf`
+> (copy `deploy/targets.conf.example`); machine-specific notes live in the gitignored
+> `DEPLOY_TO_VPS.md` (copy `DEPLOY_TO_VPS.md.example`). Check both before deploying. The
+> manual command sequences below remain as reference/fallback for what the script runs.
 
 ### Model
 
@@ -374,6 +373,10 @@ Caddy as the TLS reverse proxy. Templates live in `deploy/`. Use placeholders
   it's bcrypt-hashed into `daemon.json` on first load.
 
 ### First-time provisioning
+
+> **Preferred: `./deploy.sh provision <target>`** — runs this sequence on a fresh Ubuntu
+> VPS (needs `domain` + `repo` in `deploy/targets.conf`; generates the HTTP password on the
+> VPS and prints it once). The manual sequence below is the reference.
 
 ```bash
 # 1. Service user (home = the appdir)
@@ -415,6 +418,10 @@ sudo ufw allow 22/tcp && sudo ufw allow 443/tcp && sudo ufw --force enable
 ```
 
 ### Routine updates
+
+> **Preferred: `./deploy.sh deploy all`** — runs exactly this sequence per target, plus
+> bundle-hash verification and the browser smoke test, with the CI=1 / stdin-detach /
+> no-pipes gotchas enforced structurally. The manual sequence below is the reference.
 
 ```bash
 cd /opt/orquester

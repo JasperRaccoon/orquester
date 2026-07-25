@@ -1,98 +1,65 @@
 # Deploy to VPS — runbook (TEMPLATE)
 
-> **Copy this to `DEPLOY_TO_VPS.md` and fill in real values.** The real file is
-> **gitignored** (it holds your hosts/logins/keys) — never commit it. Private SSH
-> keys live in `~/.ssh/`, not here. Placeholders below use the repo convention
-> (`203.0.113.x`); replace every `<…>` and example value with yours.
+> **Copy this to `DEPLOY_TO_VPS.md` and record anything machine-specific.** The
+> real file is **gitignored** — never commit it. Host definitions live in
+> `deploy/targets.conf` (also gitignored): copy `deploy/targets.conf.example`
+> and fill in real hosts/keys. Private SSH keys live in `~/.ssh/`, not here.
 
-How to ship the current `main` to your production VPS(es). Each runs the daemon
-as a hardened systemd service from `/opt/orquester` (appdir `/var/lib/orquester`),
-behind Caddy on 443; the daemon listens on loopback `127.0.0.1:47831`.
+All lifecycle operations go through **`./deploy.sh`** (run from the repo root on
+your dev machine). Each VPS runs the daemon as a hardened systemd service from
+`/opt/orquester` (appdir `/var/lib/orquester`) behind Caddy on 443; the daemon
+listens on loopback `127.0.0.1:47831`.
 
 ## TL;DR
 
-1. **Push first** — the VPSes pull from `origin/main`:
-   ```sh
-   git push origin main
-   ```
-2. **Deploy each VPS** (run the one-liners below). They're independent.
-3. **Browser smoke test each deployed URL** (mandatory after web/ui changes):
-   ```sh
-   node scripts/smoke-web.mjs https://example.com
-   ```
-   Loads the SPA headlessly with clean storage **and** with legacy localStorage
-   fixtures (`scripts/smoke-web-fixtures.json`); fails on any uncaught page
-   error, console error, or empty `#root`. Catches the "health curl is green but
-   the page crashes on users' stale persisted state" class. Runs from your dev
-   machine; needs a system Chrome/Chromium (`SMOKE_CHROME=` to override).
-
-## Targets
-
-| Name | Host (IP) | SSH login | Key | Privilege | Domain |
-|------|-----------|-----------|-----|-----------|--------|
-| **vps-a** | `203.0.113.10` | `root` | `~/.ssh/<key_a>` | runs as root, **no sudo** | `example.com` |
-| **vps-b** | `203.0.113.20` | `<user>` | `~/.ssh/<key_b>` | **`sudo` for git/pnpm/chown/systemctl** | `example.net` |
-
-Notes / per-host quirks to record here:
-- Whether the host has a `~/.ssh/config` entry (and whether it sets `User`), so you know if you must connect as `<user>@host` explicitly.
-- Whether you need `-i ~/.ssh/<key>`, `-o IdentitiesOnly=yes`, and/or `-o StrictHostKeyChecking=accept-new` (e.g. a host key that rotates).
-- Whether `/opt/orquester` is root-owned (⇒ a non-root login needs `sudo` for git/pnpm/chown/systemctl, ideally NOPASSWD).
-
-## Deploy — a root-login VPS
-
 ```sh
-ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new root@203.0.113.10 'set -e
-  cd /opt/orquester
-  git fetch origin -q && git reset --hard origin/main
-  echo "HEAD=$(git rev-parse --short HEAD)"
-  CI=1 ELECTRON_SKIP_BINARY_DOWNLOAD=1 pnpm install --frozen-lockfile </dev/null
-  ELECTRON_SKIP_BINARY_DOWNLOAD=1 pnpm --filter @orquester/web build </dev/null
-  chown -R root:root /opt/orquester
-  systemctl restart orquester
-  curl -fsS --retry 25 --retry-delay 1 --retry-connrefused http://127.0.0.1:47831/health; echo
-  echo "service=$(systemctl is-active orquester)"'
+git push origin main          # the VPSes pull from origin — push first
+./deploy.sh deploy all        # update + restart + verify every target
 ```
 
-## Deploy — a sudo-login VPS (non-root user)
+`deploy` refuses to run if your tree is dirty or local HEAD isn't pushed.
 
-```sh
-ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new -o IdentitiesOnly=yes -i ~/.ssh/<key_b> <user>@203.0.113.20 'set -e
-  cd /opt/orquester
-  sudo git fetch origin -q && sudo git reset --hard origin/main
-  echo "HEAD=$(sudo git rev-parse --short HEAD)"
-  sudo CI=1 ELECTRON_SKIP_BINARY_DOWNLOAD=1 pnpm install --frozen-lockfile </dev/null
-  sudo ELECTRON_SKIP_BINARY_DOWNLOAD=1 pnpm --filter @orquester/web build </dev/null
-  sudo chown -R root:root /opt/orquester
-  sudo systemctl restart orquester
-  curl -fsS --retry 25 --retry-delay 1 --retry-connrefused http://127.0.0.1:47831/health; echo
-  echo "service=$(systemctl is-active orquester)"'
-```
+## Commands
 
-## What each step does
+| Command | What it does |
+|---|---|
+| `./deploy.sh deploy [target\|all]` | fetch/reset to `origin/<branch>`, `pnpm install`, SPA build, chown, restart, health check, live bundle hash — then the browser smoke test (`scripts/smoke-web.mjs`) if the target has a `domain` and a local Chrome exists. |
+| `./deploy.sh provision <target>` | first-time setup of a fresh Ubuntu VPS (user, Node 20, pnpm, Caddy, clone, daemon.env with a generated password shown **once**, systemd, devtools, ufw). Needs `domain` + `repo` in targets.conf and the DNS A record already pointing at the host. |
+| `./deploy.sh verify [target\|all]` | read-only: HEAD, `/health`, service state, bundle hash. |
+| `./deploy.sh rollback <target> <sha>` | reset to `<sha>`, rebuild, restart, verify. |
+| `./deploy.sh logs <target> [-n N]` | tail the daemon journal. |
+| `./deploy.sh rotate-password <target>` | new HTTP password, installed + shown once. |
 
-| Step | Why |
-|------|-----|
-| `git fetch + reset --hard origin/main` | Tree is root-owned (immutable code); reset to the pushed commit. |
-| `CI=1 pnpm install --frozen-lockfile` | Reconciles deps to the lockfile. **`CI=1` is non-negotiable**: it makes pnpm non-interactive, so a *"reinstall modules from scratch? (Y/n)"* prompt (fired when `node_modules` was built by a different pnpm version) **auto-proceeds** instead of wedging the non-TTY deploy. `--frozen-lockfile` installs exactly what's locked and **fails loudly** on lockfile drift; it's a fast no-op when deps are unchanged. |
-| `pnpm --filter @orquester/web build` | Rebuilds the **served SPA** (`apps/web/dist`). Only needed when `web`/`ui`/`api` changed — harmless to always run. The **daemon** needs no build (tsx runs the new `.ts` after restart). |
-| `chown -R root:root /opt/orquester` | Keep code root-owned (avoids git "dubious ownership"; the daemon runs as a different user). |
-| `systemctl restart orquester` | Near-instant graceful restart. `KillMode=process` ⇒ the tmux server + all terminal/agent sessions **survive** and the daemon reattaches. |
-| health `curl` | Expect `{"ok":true}`. `--retry-connrefused` rides out the ~1–2 s restart window (a few `connection refused` lines are normal). |
+Add `--dry-run` (first argument) to print every local and remote command
+without executing anything.
 
-## Gotchas
+## Per-host notes (record yours here)
 
-- **Push before deploying** — the VPSes only see what's on `origin/main`.
-- **Always run the install with `CI=1`.** Without it, pnpm's interactive *"reinstall modules from scratch? (Y/n)"* prompt blocks on the non-TTY SSH and silently breaks the deploy (it skips installing new deps, then the build fails to resolve them). `CI=1 … pnpm install --frozen-lockfile` is safe to run every time — a fast no-op when nothing changed.
-- **Never pipe the build through `| tail`/`| grep`.** A pipeline's exit status is the *last* command's, so `set -e` won't catch a failed `vite build` — the script would march past it and `systemctl restart` into a stale/broken `dist`. Run the build bare (let `set -e` abort), or redirect to a file and check `$?`.
-- **Detach pnpm's stdin (`</dev/null`) — critical inside a piped `bash -s`.** If you wrap a multi-step deploy as `ssh host 'bash -s' <<'EOF' … EOF` (or `sudo bash -s`), a `pnpm install`/`build` in that script **reads the remaining script lines from stdin** (pnpm reads stdin — e.g. on its *"ignored build scripts → run pnpm approve-builds"* notice), so every step **after** pnpm silently never runs and the deploy looks done while the bundle/Caddy were never touched. The one-liners above already append `</dev/null` to each pnpm command. If you must run a longer combined script, **write it to a file and `bash file`** rather than piping it to `bash -s`. Always confirm a deploy by the **live bundle hash** (`curl -s http://127.0.0.1:47831/ | grep -o 'index-[^.]*\.js'`), not by the SSH output.
-- **Daemon-only changes need no build** — just `systemctl restart`. Only the SPA needs `pnpm build`.
-- **Caddy** only needs a reload if `deploy/Caddyfile` changed (`systemctl reload caddy`).
-- **Browser cache:** after a web change, hard-reload the open app (Cmd/Ctrl+Shift+R).
-- `47831` is loopback-only; never exposed. Caddy (443) is the public face.
+- Whether the host needs `ssh_opts` quirks (rotating host key → `-o
+  StrictHostKeyChecking=accept-new`, forced identity → key= entry, …).
+- Anything nonstandard about the box (custom port, jump host, etc.).
+
+## Gotchas the script already enforces (don't work around them)
+
+- **Push first** — deploy refuses on dirty tree / unpushed HEAD; the VPSes only
+  see `origin/<branch>`.
+- **`CI=1 pnpm install --frozen-lockfile`** — non-interactive; a pnpm version
+  mismatch prompt would silently wedge a non-TTY deploy.
+- **`</dev/null` on every pnpm call, payloads scp'd (never `bash -s`)** — pnpm
+  reads stdin and would eat the rest of a piped script.
+- **No pipes around the build** — a piped `vite build` failure would be masked
+  and a stale/broken `dist` restarted into.
+- **Verification is observed state** — health endpoint + live bundle hash, not
+  SSH output. After a web change, hard-reload the browser (Cmd/Ctrl+Shift+R).
+- **Caddy** — if `deploy/Caddyfile` changed, the deploy prints a reminder to
+  reconcile `/etc/caddy/Caddyfile` by hand (it has your real domain in it).
 
 ## Troubleshooting
 
-- Logs: `journalctl -u orquester -n 50 --no-pager` (prefix `sudo` for a non-root login).
-- Service state: `systemctl status orquester`.
-- Rolled back? `git reset --hard <good-sha>` then rebuild + restart.
-- Rotate the password: edit `/etc/orquester/daemon.env` (`ORQUESTER_HTTP_PASSWORD`), `systemctl restart orquester` (re-hashes into `daemon.json`).
+- `./deploy.sh logs <target> -n 100` (journalctl) · `systemctl status orquester` on the host.
+- Bad deploy? `./deploy.sh rollback <target> <good-sha>`.
+- Password leaked? `./deploy.sh rotate-password <target>`.
+- One-time devtools/scoped-sudo catch-up for older hosts: run
+  `deploy/provision-devtools.sh` on the host, then
+  `systemctl daemon-reload && systemctl restart orquester` (new VPSes get it
+  via `provision`).
