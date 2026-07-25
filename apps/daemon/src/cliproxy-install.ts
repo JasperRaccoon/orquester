@@ -239,6 +239,10 @@ export async function buildPatchedBinary(
         env: {
           ...process.env,
           GOTOOLCHAIN: "local",
+          // Fully pinned build dirs: the daemon's HOME is the appdir, so the
+          // default GOPATH ($HOME/go) would collide with the GOROOT install at
+          // <appdir>/go ("GOPATH and GOROOT are the same directory").
+          GOPATH: join(appdir, "tmp", "go-path"),
           GOCACHE: join(appdir, "tmp", "go-cache"),
           GOMODCACHE: join(appdir, "tmp", "go-mod"),
           GOFLAGS: "-mod=mod"
