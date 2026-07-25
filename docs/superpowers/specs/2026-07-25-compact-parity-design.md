@@ -99,7 +99,7 @@ Verified against Claude Code v2.1.219 docs and empirically on vps-a (2026-07-25)
   | gpt-5.6-terra | 200,000 | 200,000 | 75 | 150k |
   | gpt-5.6-luna | 200,000 | 200,000 | 75 | 150k |
   | kimi-k3 | 1,048,576 | 450,000 | unset (default) | 417k (450k − 33k) |
-  | any `claude-*` (claudemix) | — (native) | 200,000 | unset (default) | 167k (native formula) |
+  | any `claude-*` (claudemix) | — (native) | 1,048,576 (arming; clamped) | unset (default) | native per believed window |
 
   Rationale: the gpt trigger (75% of the compact window) leaves ~50k headroom below the measured
   wall (sol accepted 173k, rejected by 205k) — comfortably covering the compact request's own
@@ -108,10 +108,18 @@ Verified against Claude Code v2.1.219 docs and empirically on vps-a (2026-07-25)
   absorbs the worst-case drift and the 12k reserve regression outright, and keeps the
   summarization request itself far from any wall; the status line shows the true 1M meter
   (documented decoupling — honest capacity, early compaction, intended). Claude models get
-  `compactWindow=200,000` purely as the **#65585 arming value** — behind our base URL proactive
-  compaction is otherwise gated off even for genuine Claude models; 200k reproduces native
-  behavior exactly (trigger 167k), and reactive recovery also still works there since Anthropic's
-  own error wording passes through.
+  `compactWindow=1,048,576` purely as the **#65585 arming value**: Claude Code clamps
+  `AUTO_COMPACT_WINDOW` to the model's believed window, so a 200k Claude model compacts at its
+  native 167k, an extended/1M model at its native threshold — the emitted number's only job is
+  to defeat the third-party-base-URL gate, never to shrink a window. This matters concretely:
+  the seeded OAuth route was probed accepting a **456,557-token** `claude-fable-5` request
+  (2026-07-25), so hard-coding 200k would have compacted fable sessions ~5× too early — and
+  1M is now simply the *default* window for current opus-class models (Opus 5, launched
+  2026-07-24 with a native 1M window, is the new Claude Code opus default), so any hard-coded
+  claude window would rot with every model launch. If a
+  Claude model's believed window ever exceeds what the route actually serves, reactive recovery
+  still catches it — Anthropic's own "prompt is too long" wording passes through on the Claude
+  path.
 
 - **Overrides:** `cliProxyState` gains an optional `modelOverrides` record
   (`{ [modelId]: { contextWindow?, compactWindow?, compactPct? } }`), zod-defaulted (additive —
@@ -156,11 +164,23 @@ Verified against Claude Code v2.1.219 docs and empirically on vps-a (2026-07-25)
 - **Compaction cost/effort:** compaction inherits the session's effort (max on claudex). A
   proxy-side effort-cap on compaction requests (detectable by the summarization marker string)
   is a **future** optimization, not in scope. Same for CLIProxyAPI-native Codex compaction and
-  `count_tokens` work (already implemented proxy-side). The single highest-leverage *future*
-  proxy patch (confirmed by binary analysis): rewriting provider context-overflow errors to
-  Anthropic's literal `prompt is too long: <n> tokens > <max> maximum` phrasing, which would
-  restore the reactive safety net on gpt/kimi routes — deferred because we ship the stock
-  CLIProxyAPI binary and this needs an upstream PR or a maintained patch.
+  `count_tokens` work (already implemented proxy-side).
+
+### 3.4 Proxy patch: normalize provider overflow errors (in scope, final phase)
+
+The highest-leverage backstop fix (binary-confirmed): CLIProxyAPI rewrites provider
+context-overflow errors to Anthropic's literal phrasing
+`prompt is too long: <n> tokens > <max> maximum` so Claude Code's reactive compact-and-retry
+recognizes them on gpt/kimi routes (it string-matches case-insensitively on "prompt is too
+long" / "input is too long for requested model"; the Codex path's "Your input exceeds the
+context window…" and OpenRouter's "Provider returned error" both miss). Mechanism follows the
+established `deploy/cliproxy-patches/` precedent (the documented Kimi translator patch):
+a small, documented patch against the pinned CLIProxyAPI version, mapping the known overflow
+signatures per upstream (Codex, OpenRouter) at the error-translation layer. The implementation
+plan decides the delivery route — reviving the shelved source-build apparatus for a patched
+binary vs. an upstream PR with a version bump — with the patch file itself committed either
+way. This restores the reactive safety net end-to-end: proactive thresholds remain the primary
+defense; the rewrite makes the last-resort path work instead of wedging.
 
 ## 4. Testing
 
