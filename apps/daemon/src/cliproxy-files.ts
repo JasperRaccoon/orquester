@@ -277,10 +277,33 @@ async function copyIfMissing(src: string, dst: string): Promise<void> {
   await writeFile(dst, content, { mode: 0o600 });
 }
 
+/** Settings keys the daemon owns in every managed proxy home. Force-merged on
+ *  every seed pass (enable + boot) so a stale one-time copy can't freeze them
+ *  (spec 2026-07-25-compact-parity-design.md §3.1); all other keys — user
+ *  edits, theme, hooks — are preserved. */
+const MANAGED_HOME_SETTINGS: Record<string, unknown> = { autoCompactEnabled: true };
+
+async function mergeManagedSettings(home: string): Promise<void> {
+  const file = join(home, "settings.json");
+  let existing: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(await readFile(file, "utf8"));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      existing = parsed as Record<string, unknown>;
+    }
+  } catch {
+    // absent or malformed — managed keys alone become the file
+  }
+  const next = { ...existing, ...MANAGED_HOME_SETTINGS };
+  if (JSON.stringify(next) === JSON.stringify(existing)) return; // no write churn
+  await writeFile(file, JSON.stringify(next, null, 2), { mode: 0o600 });
+}
+
 /**
  * Seed a per-entry managed Claude home (0700) with a `.orq-cliproxy-home` marker
  * (content = entryId): identity-free `.claude.json`, live-shared `skills/` +
- * `plugins/` symlinks, and a one-time `settings.json`. **Never** touches
+ * `plugins/` symlinks, and a one-time `settings.json` copy with the managed
+ * keys force-merged on top. **Never** touches
  * `projects/` — cross-entry transcript isolation is the whole point (spec §2).
  * Refuses a symlinked home and validates the marker on re-entry.
  */
@@ -327,4 +350,5 @@ export async function seedHome(
   await ensureSymlink(join(systemClaudeDir, "skills"), join(home, "skills"));
   await ensureSymlink(join(systemClaudeDir, "plugins"), join(home, "plugins"));
   await copyIfMissing(join(systemClaudeDir, "settings.json"), join(home, "settings.json"));
+  await mergeManagedSettings(home);
 }

@@ -150,3 +150,36 @@ test("seedHome: no system .claude.json anywhere still writes hasCompletedOnboard
   const cj = JSON.parse(await readFile(join(cliproxyHomeDir(dir, "claudex"), ".claude.json"), "utf8"));
   assert.equal(cj.hasCompletedOnboarding, true);
 });
+
+test("seedHome: forces autoCompactEnabled:true into an existing settings.json, preserving other keys", async () => {
+  const dir = await makeDir();
+  const sysDir = await mkdtemp(join(tmpdir(), "orq-sysac-"));
+  await writeFile(join(sysDir, "settings.json"), JSON.stringify({ autoCompactEnabled: false, theme: "dark" }));
+  await seedHome(dir, "claudex", sysDir, join(sysDir, ".claude.json"));
+  const settings = JSON.parse(
+    await readFile(join(cliproxyHomeDir(dir, "claudex"), "settings.json"), "utf8")
+  );
+  assert.equal(settings.autoCompactEnabled, true, "managed key forced");
+  assert.equal(settings.theme, "dark", "other keys preserved");
+});
+
+test("seedHome: creates settings.json with managed keys when the system has none", async () => {
+  const dir = await makeDir();
+  const sysDir = await mkdtemp(join(tmpdir(), "orq-sysnone-"));
+  await seedHome(dir, "claudex", sysDir, join(sysDir, ".claude.json"));
+  const settings = JSON.parse(
+    await readFile(join(cliproxyHomeDir(dir, "claudex"), "settings.json"), "utf8")
+  );
+  assert.equal(settings.autoCompactEnabled, true);
+});
+
+test("seedHome: settings merge is idempotent and survives a malformed file", async () => {
+  const dir = await makeDir();
+  const sysDir = await mkdtemp(join(tmpdir(), "orq-sysbad-"));
+  await seedHome(dir, "claudex", sysDir, join(sysDir, ".claude.json"));
+  const file = join(cliproxyHomeDir(dir, "claudex"), "settings.json");
+  await writeFile(file, "{not json");
+  await seedHome(dir, "claudex", sysDir, join(sysDir, ".claude.json")); // must not throw
+  const settings = JSON.parse(await readFile(file, "utf8"));
+  assert.equal(settings.autoCompactEnabled, true, "malformed file replaced with managed keys");
+});
