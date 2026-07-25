@@ -1,5 +1,15 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useApi } from "../context/orquester-context";
+
+// A successful tree rename records oldPath → newPath here so an open editor
+// "follows" its file instead of re-reading it — the bytes on disk are unchanged
+// by a rename, and a reload would silently discard unsaved edits. Consumed (and
+// cleared) by the hook instance that observes the matching path change.
+const renameCarry = new Map<string, string>(); // newPath -> oldPath
+
+export function noteFileRenamed(oldPath: string, newPath: string): void {
+  renameCarry.set(newPath, oldPath);
+}
 
 export interface FileTextState {
   content: string;
@@ -27,13 +37,24 @@ export function useFileText(path: string): FileTextState {
   const [truncated, setTruncated] = useState(false);
   const [saving, setSaving] = useState(false);
 
+  // Path whose content the buffer currently holds, for the rename carry-over.
+  const loadedPathRef = useRef<string | null>(null);
+
   useEffect(() => {
+    // A pure rename of the loaded file: keep the buffer (and its dirty state)
+    // instead of re-reading — the content on disk is identical.
+    if (renameCarry.get(path) === loadedPathRef.current && loadedPathRef.current !== null) {
+      renameCarry.delete(path);
+      loadedPathRef.current = path;
+      return;
+    }
     let active = true;
     setState("loading");
     api
       .readFile(path)
       .then((res) => {
         if (!active) return;
+        loadedPathRef.current = path;
         setContent(res.content);
         setOriginal(res.content);
         setTruncated(res.truncated);

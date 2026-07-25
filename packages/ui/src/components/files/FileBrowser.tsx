@@ -10,6 +10,7 @@ import {
   Folder,
   FolderDown,
   FolderPlus,
+  Pencil,
   RefreshCw,
   Trash2,
   Upload
@@ -30,7 +31,8 @@ import {
 import { FilePreview } from "./FilePreview";
 import { SearchPanel } from "./SearchPanel";
 import { useApi } from "../../context/orquester-context";
-import { usePollWhileActive, useIsDesktop } from "../../hooks";
+import { ApiError } from "../../lib/api-client";
+import { usePollWhileActive, useIsDesktop, noteFileRenamed } from "../../hooks";
 import { useAppStore } from "../../store/app";
 import { PANE_DEFAULTS, PANE_FLEX_RESERVE, clampPaneWidth } from "../../lib/panel-sizes";
 import { gatherFromDataTransfer, gatherFromInput } from "../../lib/files";
@@ -102,6 +104,9 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ 
   const [error, setError] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<{ path: string; name: string; kind: "dir" | "file" } | null>(null);
+  const [renaming, setRenaming] = useState<MenuTarget | null>(null);
+  // Conflict message shown under the inline rename input (the input stays open).
+  const [renameError, setRenameError] = useState<string | null>(null);
   // Whether the server can zip a folder. Optimistic (true) until the probe
   // answers, so a fast right-click before it resolves still works on a capable
   // server; if the server has no tool the folder item disables itself.
@@ -331,6 +336,101 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ 
     }
   };
 
+  // Mirrors `renaming` for async handlers: a 409 that lands after the input
+  // already blurred away must fall back to the top error strip, not the (gone)
+  // inline message. The busy ref swallows a second Enter while a rename is in
+  // flight (the re-POST would 400 on the now-missing old path).
+  const renamingRef = useRef<MenuTarget | null>(null);
+  const renameBusyRef = useRef(false);
+
+  const startRename = (target: MenuTarget) => {
+    setRenameError(null);
+    setRenaming(target);
+    renamingRef.current = target;
+  };
+
+  const cancelRename = () => {
+    setRenaming(null);
+    setRenameError(null);
+    renamingRef.current = null;
+  };
+
+  const submitRename = async (target: MenuTarget, rawName: string) => {
+    if (renameBusyRef.current) return;
+    const newName = rawName.trim();
+    // The untrimmed comparison first: Enter on an untouched name is always a
+    // cancel, even for a name with leading/trailing whitespace on disk.
+    if (rawName === target.name || !newName || newName === target.name) {
+      cancelRename();
+      return;
+    }
+    setError(null);
+    renameBusyRef.current = true;
+    try {
+      await api.renameFsEntry(target.path, newName);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        const message = e.serverMessage ?? "A file or folder with that name already exists.";
+        if (renamingRef.current?.path === target.path) {
+          // Name conflict: keep the editor open so the user can pick another name.
+          setRenameError(message);
+        } else {
+          setError(message);
+        }
+      } else {
+        cancelRename();
+        setError("Could not rename.");
+      }
+      return;
+    } finally {
+      renameBusyRef.current = false;
+    }
+    const oldPath = target.path;
+    const newPath = joinPath(parentOf(oldPath), newName);
+    const rewrite = (p: string) =>
+      p === oldPath ? newPath : p.startsWith(oldPath + "/") ? newPath + p.slice(oldPath.length) : p;
+    cancelRename();
+    setExpanded((prev) => {
+      const next = new Set<string>();
+      prev.forEach((d) => next.add(rewrite(d)));
+      return next;
+    });
+    // Rewrite cache keys AND entry paths so an expanded subtree keeps rendering
+    // (and the live poll re-fetches live paths) until the reload below lands.
+    setChildrenByPath((prev) => {
+      const next: Record<string, FsEntry[]> = {};
+      for (const [d, entries] of Object.entries(prev)) {
+        next[rewrite(d)] = entries.map((en) =>
+          en.path === oldPath ? { ...en, path: newPath, name: newName } : { ...en, path: rewrite(en.path) }
+        );
+      }
+      return next;
+    });
+    setSelectedFile((prev) => {
+      if (!prev) return prev;
+      const next = rewrite(prev);
+      // Tell the editor hook this path change is a rename, not a navigation,
+      // so an open (possibly dirty) buffer follows the file instead of being
+      // re-read and discarded. Idempotent, so safe inside the updater.
+      if (next !== prev) noteFileRenamed(prev, next);
+      return next;
+    });
+    setActiveDir((prev) => rewrite(prev));
+    await loadDir(parentOf(oldPath));
+    // A list response for the old path issued before the rename may have raced
+    // its key back in after the rewrite above; prune dead keys so the live poll
+    // stops re-fetching a path that no longer exists (same concern the delete
+    // flow handles).
+    setChildrenByPath((prev) => {
+      if (!(oldPath in prev) && !Object.keys(prev).some((d) => d.startsWith(oldPath + "/"))) return prev;
+      const next: Record<string, FsEntry[]> = {};
+      for (const [d, entries] of Object.entries(prev)) {
+        if (d !== oldPath && !d.startsWith(oldPath + "/")) next[d] = entries;
+      }
+      return next;
+    });
+  };
+
   const menuItems: ContextMenuItem[] = menu
     ? [
         { label: "New File", icon: <FilePlus size={14} />, onClick: () => startCreate(menu.dir, "file") },
@@ -355,6 +455,11 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ 
                 label: "Copy Full Path",
                 icon: <ClipboardCopy size={14} />,
                 onClick: () => void copyText(menu.target!.path)
+              },
+              {
+                label: "Rename",
+                icon: <Pencil size={14} />,
+                onClick: () => startRename(menu.target!)
               },
               { label: "Delete", icon: <Trash2 size={14} />, onClick: () => setDeleting(menu.target!) }
             ]
@@ -531,6 +636,13 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ 
             onOpenMenu={openMenu}
             onDragTo={setDropTarget}
             onDropTo={(dir, dt) => void onDropTo(dir, dt)}
+            renaming={renaming}
+            renameError={renameError}
+            renameOnDoubleClick={isDesktop}
+            onStartRename={startRename}
+            onSubmitRename={(target, name) => void submitRename(target, name)}
+            onCancelRename={cancelRename}
+            onRenameEdit={() => setRenameError(null)}
           />
         </div>
       </div>
@@ -625,6 +737,19 @@ interface TreeLevelProps {
   onOpenMenu: (x: number, y: number, dir: string, target?: MenuTarget) => void;
   onDragTo: (dir: string | null) => void;
   onDropTo: (dir: string, dt: DataTransfer) => void;
+  renaming: MenuTarget | null;
+  renameError: string | null;
+  onStartRename: (target: MenuTarget) => void;
+  onSubmitRename: (target: MenuTarget, newName: string) => void;
+  onCancelRename: () => void;
+  /** Clears a stale conflict message as soon as the user edits the name. */
+  onRenameEdit: () => void;
+  /**
+   * Whether double-clicking a name starts a rename. Off below md: there a
+   * double-tap has already opened the file and hidden the tree pane, which
+   * would strand an invisible rename input (long-press → Rename covers touch).
+   */
+  renameOnDoubleClick: boolean;
 }
 
 const TreeLevel: React.FC<TreeLevelProps> = (props) => {
@@ -654,6 +779,32 @@ const TreeLevel: React.FC<TreeLevelProps> = (props) => {
         const isOpen = props.expanded.has(entry.path);
         const isActive =
           entry.path === props.selectedFile || (isDir && entry.path === props.activeDir);
+        if (props.renaming?.path === entry.path) {
+          return (
+            <React.Fragment key={entry.path}>
+              <div style={{ paddingLeft: 8 + props.depth * 12 }} className="flex flex-col gap-1 py-1 pr-2">
+                <div className="flex items-center gap-1.5">
+                  <span className="w-[13px] shrink-0" />
+                  {isDir ? (
+                    <Folder size={14} className="shrink-0 text-neutral-500" />
+                  ) : (
+                    <File size={14} className="shrink-0 text-neutral-600" />
+                  )}
+                  <RenameInput
+                    initial={entry.name}
+                    onSubmit={(value) => props.onSubmitRename(entry, value)}
+                    onCancel={props.onCancelRename}
+                    onEdit={props.onRenameEdit}
+                  />
+                </div>
+                {props.renameError && (
+                  <p className="pl-[27px] text-[11px] text-red-400">{props.renameError}</p>
+                )}
+              </div>
+              {isDir && isOpen && <TreeLevel {...props} dir={entry.path} depth={props.depth + 1} />}
+            </React.Fragment>
+          );
+        }
         return (
           <React.Fragment key={entry.path}>
             <button
@@ -733,12 +884,61 @@ const TreeLevel: React.FC<TreeLevelProps> = (props) => {
               ) : (
                 <File size={14} className="shrink-0 text-neutral-600" />
               )}
-              <span className="flex-1 truncate">{entry.name}</span>
+              <span
+                className="flex-1 truncate"
+                onDoubleClick={(e) => {
+                  if (!props.renameOnDoubleClick) return;
+                  // Rename on name double-click; stop it from also toggling the
+                  // dir / reselecting the file via the row button.
+                  e.preventDefault();
+                  e.stopPropagation();
+                  props.onStartRename({ path: entry.path, name: entry.name, kind: entry.kind });
+                }}
+              >
+                {entry.name}
+              </span>
             </button>
             {isDir && isOpen && <TreeLevel {...props} dir={entry.path} depth={props.depth + 1} />}
           </React.Fragment>
         );
       })}
     </>
+  );
+};
+
+/** Inline editor shown in place of a tree row's name while renaming. */
+const RenameInput: React.FC<{
+  initial: string;
+  onSubmit: (value: string) => void;
+  onCancel: () => void;
+  onEdit: () => void;
+}> = ({ initial, onSubmit, onCancel, onEdit }) => {
+  const [value, setValue] = useState(initial);
+  return (
+    <Input
+      autoFocus
+      value={value}
+      // 16px on mobile (text-base) prevents iOS from zooming on focus.
+      className="h-6 flex-1 px-1.5 text-base md:text-sm"
+      onFocus={(e) => e.currentTarget.select()}
+      onChange={(e) => {
+        setValue(e.target.value);
+        onEdit();
+      }}
+      onClick={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
+      // Clicking elsewhere cancels. After a 409 the input keeps focus (Enter
+      // doesn't blur), so the conflict flow never hits this.
+      onBlur={onCancel}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          onSubmit(value);
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          onCancel();
+        }
+      }}
+    />
   );
 };
