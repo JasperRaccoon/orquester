@@ -95,6 +95,7 @@ import { registerMcp } from "./mcp/server.ts";
 import {
   type AppConfig,
   type ClientConfig,
+  type CliProxyState,
   type ConfigVars,
   type DaemonConfig,
   type DaemonPaths,
@@ -112,6 +113,7 @@ import {
   cliproxyHomeDir,
   cliproxyStateFile,
   cliproxyTokenFile,
+  compactEnvForModel,
   parseCliProxyState,
   MODEL_NAME_RE,
   isOpenRouterModel,
@@ -778,24 +780,26 @@ export function composeExtraEnv(a: LaunchEnv | null, b: LaunchEnv | null): Launc
  * keyless pick (e.g. claudex → OpenRouter/Kimi) carries no account and stays
  * unprefixed.
  */
+/** Best-effort read of the persisted cliproxy state (contributor-side: launch
+ *  env must never throw). Null when absent/unreadable. */
+function readCliProxyState(daemonDir: string): CliProxyState | null {
+  try {
+    return parseCliProxyState(JSON.parse(readFileSync(cliproxyStateFile(daemonDir), "utf8")));
+  } catch {
+    return null;
+  }
+}
+
 /** True when the model must carry the account routing prefix: the picked account
  *  shares its provider with ANOTHER seeded account (disambiguation genuinely
  *  needed), the pick isn't seeded at all, or the state is unreadable — in the
  *  ambiguous cases the prefix is kept (safe routing pin, launch validation
  *  rejects a prefix the catalog doesn't serve). */
-function needsAccountPrefix(daemonDir: string, accountId: string): boolean {
-  try {
-    const state = parseCliProxyState(
-      JSON.parse(readFileSync(cliproxyStateFile(daemonDir), "utf8"))
-    );
-    const mine = state.seededAccounts.find((a) => a.accountId === accountId);
-    if (!mine) return true;
-    return state.seededAccounts.some(
-      (a) => a.provider === mine.provider && a.accountId !== accountId
-    );
-  } catch {
-    return true;
-  }
+function needsAccountPrefix(state: CliProxyState | null, accountId: string): boolean {
+  if (!state) return true;
+  const mine = state.seededAccounts.find((a) => a.accountId === accountId);
+  if (!mine) return true;
+  return state.seededAccounts.some((a) => a.provider === mine.provider && a.accountId !== accountId);
 }
 
 export function cliproxyContributor(
@@ -812,6 +816,7 @@ export function cliproxyContributor(
     // Proxy not provisioned yet — the launcher wrapper still injects the token
     // from the same file at exec, so a missing projection is not fatal here.
   }
+  const state = readCliProxyState(daemonDir);
   let accountId: string | undefined;
   if (ctx.model) {
     // An OpenRouter/Kimi model is served by the shared keyless OpenRouter provider,
@@ -825,12 +830,30 @@ export function cliproxyContributor(
     // model string inside the session (banner, /model). Emit bare when the pick
     // is the sole seeded account of its provider — the proxy routes it to the
     // only credential anyway.
-    const prefixed = routesToAccount && needsAccountPrefix(daemonDir, ctx.accountId as string);
+    const prefixed = routesToAccount && needsAccountPrefix(state, ctx.accountId as string);
     const effectiveModel = prefixed ? `${accountPrefix(ctx.accountId)}/${ctx.model}` : ctx.model;
     env.ANTHROPIC_MODEL = effectiveModel;
     // Deliberately no CLAUDE_CODE_SUBAGENT_MODEL: subagents inherit the current
     // main model, so an in-session /model switch applies to them too.
     if (routesToAccount) accountId = ctx.accountId;
+  }
+  // Per-launch compact env (spec 2026-07-25-compact-parity-design.md §3.2):
+  // proactive auto-compaction is gated off behind a third-party base URL
+  // (claude-code #65585), so AUTO_COMPACT_WINDOW is mandatory arming for every
+  // launcher. Resolution is per-model; a modelless claudemix launch is the
+  // Claude main loop, a modelless claudex launch runs the configured default.
+  const compactModel = ctx.model ?? (entryId === "claudemix" ? "claude" : state?.defaultModel);
+  if (compactModel) {
+    const compact = compactEnvForModel(compactModel, state?.modelOverrides);
+    if (compact) {
+      if (compact.maxContextTokens !== undefined) {
+        env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(compact.maxContextTokens);
+      }
+      env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(compact.autoCompactWindow);
+      if (compact.autoCompactPct !== undefined) {
+        env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = String(compact.autoCompactPct);
+      }
+    }
   }
   const result: LaunchEnv = { env };
   if (accountId !== undefined) result.accountId = accountId;
