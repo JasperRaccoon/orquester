@@ -134,8 +134,7 @@ const EMPTY_REGISTRY: RegistryResponse = {
 const DEFAULT_USAGE_PREFS: UsagePrefs = {
   enabled: true,
   agents: {},
-  chip: "busiest",
-  view: "aggregate"
+  chip: "busiest"
 };
 
 /**

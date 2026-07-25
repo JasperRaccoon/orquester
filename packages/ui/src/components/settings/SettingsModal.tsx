@@ -513,11 +513,6 @@ const UsageSettings: React.FC = () => {
     { value: "codex", label: "Codex" }
   ];
 
-  const VIEW_OPTIONS: { value: NonNullable<typeof prefs.view>; label: string }[] = [
-    { value: "aggregate", label: "Aggregated" },
-    { value: "accounts", label: "Per account" }
-  ];
-
   return (
     <div className="divide-y divide-neutral-800">
       <Field label="Show usage in the top bar" hint="A compact quota chip that opens a details panel.">
@@ -545,28 +540,6 @@ const UsageSettings: React.FC = () => {
               className={cn(
                 "rounded-md px-2 py-1 text-xs",
                 prefs.chip === o.value
-                  ? "bg-neutral-700 text-neutral-100"
-                  : "text-neutral-400 hover:bg-neutral-800"
-              )}
-            >
-              {o.label}
-            </button>
-          ))}
-        </div>
-      </Field>
-      <Field
-        label="Claude multi-account view"
-        hint="For multi-account Claude usage, show pooled quota or each account’s bars."
-      >
-        <div className="flex gap-1">
-          {VIEW_OPTIONS.map((o) => (
-            <button
-              key={o.value}
-              type="button"
-              onClick={() => setUsage({ view: o.value })}
-              className={cn(
-                "rounded-md px-2 py-1 text-xs",
-                (prefs.view ?? "aggregate") === o.value
                   ? "bg-neutral-700 text-neutral-100"
                   : "text-neutral-400 hover:bg-neutral-800"
               )}

@@ -299,18 +299,13 @@ export const usagePrefsSchema = z
     codex: z.boolean().optional(),
     agents: z.record(z.string(), z.boolean()).default({}),
     /** Which agent drives the collapsed chip. */
-    chip: z.enum(["busiest", "claude", "codex"]).default("busiest"),
-    /**
-     * How to render multi-account Claude usage: pooled aggregate bars or a
-     * per-account breakdown.
-     */
-    view: z.enum(["aggregate", "accounts"]).default("aggregate")
+    chip: z.enum(["busiest", "claude", "codex"]).default("busiest")
   })
   .transform((p) => {
     const agents = { ...p.agents };
     if (p.claude !== undefined && agents.claude === undefined) agents.claude = p.claude;
     if (p.codex !== undefined && agents.codex === undefined) agents.codex = p.codex;
-    return { enabled: p.enabled, agents, chip: p.chip, view: p.view };
+    return { enabled: p.enabled, agents, chip: p.chip };
   });
 export type UsagePrefs = z.infer<typeof usagePrefsSchema>;
 
