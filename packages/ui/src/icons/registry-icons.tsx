@@ -10,6 +10,8 @@ import type { RegistryKind } from "../types";
 
 // Agents - bare ids only, matching daemon + user SVGs
 import Claude from "./agents/claude.svg?react";
+import ClaudeMix from "./agents/claudemix.svg?react";
+import ClaudeX from "./agents/claudex.svg?react";
 import Codex from "./agents/codex.svg?react";
 import DeepSeek from "./agents/deepseek.svg?react";
 import Gemini from "./agents/gemini.svg?react";
@@ -61,6 +63,10 @@ const generic: Partial<Record<RegistryKind, React.ComponentType<React.SVGProps<S
 const specific: Record<string, React.ComponentType<React.SVGProps<SVGSVGElement>>> = {
   // agents (bare ids)
   claude: Claude,
+  // Proxy launchers: the Claude Code spark silhouette in foreign paint —
+  // claudex wears a GPT→Kimi gradient, claudemix wears all three provider hues.
+  claudex: ClaudeX,
+  claudemix: ClaudeMix,
   codex: Codex,
   deepseek: DeepSeek,
   gemini: Gemini,

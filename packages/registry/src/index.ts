@@ -106,7 +106,7 @@ export const REGISTRY = {
       // catalog. Reuses the `claude` binary; the CliProxyManager enables it at
       // runtime once the proxy is healthy (disabled at rest).
       id: "claudex",
-      name: "Claude × GPT/Kimi",
+      name: "Claude Code × GPT/Kimi",
       kind: "agent",
       bin: ["claude"] as const,
       args: ["--dangerously-skip-permissions", "--effort", "max", "--verbose"] as const,
@@ -118,7 +118,7 @@ export const REGISTRY = {
       // Claude Code with a mixed model set (Claude OAuth main loop + GPT/Kimi
       // side channels) through the managed proxy. Also runtime-enabled.
       id: "claudemix",
-      name: "Claude × Mixed",
+      name: "Claude Code × Mixed",
       kind: "agent",
       bin: ["claude"] as const,
       args: ["--dangerously-skip-permissions", "--effort", "max", "--verbose"] as const,
