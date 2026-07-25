@@ -1,0 +1,71 @@
+diff --git a/internal/translator/openai/claude/openai_claude_request.go b/internal/translator/openai/claude/openai_claude_request.go
+index 6884885..008dda3 100644
+--- a/internal/translator/openai/claude/openai_claude_request.go
++++ b/internal/translator/openai/claude/openai_claude_request.go
+@@ -6,6 +6,7 @@
+ package claude
+ 
+ import (
++	"regexp"
+ 	"strings"
+ 
+ 	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
+@@ -19,6 +20,12 @@ import (
+ // ConvertClaudeRequestToOpenAI parses and transforms an Anthropic API request into OpenAI Chat Completions API format.
+ // It extracts the model name, system instruction, message contents, and tool declarations
+ // from the raw JSON request and returns them in the format expected by the OpenAI API.
++// Moonshot rejects historical assistant messages whose content is an empty
++// string even when tool_calls are present ("content must not be empty"); the
++// OpenAI spec treats content as optional alongside tool_calls, so for those
++// models the field is omitted instead of emitted as "".
++var emptyContentRejectingModel = regexp.MustCompile(`(?i)kimi|moonshot`)
++
+ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream bool) []byte {
+ 	rawJSON := inputRawJSON
+ 	// Base OpenAI Chat Completions API template
+@@ -244,7 +251,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream
+ 						// Add content (as array if we have items, empty string if reasoning-only)
+ 						if hasContent {
+ 							msgJSON, _ = sjson.SetRawBytes(msgJSON, "content", translatorcommon.JoinRawArray(contentItems))
+-						} else {
++						} else if !(hasToolCalls && emptyContentRejectingModel.MatchString(modelName)) {
+ 							// Ensure content field exists for OpenAI compatibility
+ 							msgJSON, _ = sjson.SetBytes(msgJSON, "content", "")
+ 						}
+diff --git a/internal/translator/openai/claude/openai_claude_request_test.go b/internal/translator/openai/claude/openai_claude_request_test.go
+index 40b33ea..778bbaf 100644
+--- a/internal/translator/openai/claude/openai_claude_request_test.go
++++ b/internal/translator/openai/claude/openai_claude_request_test.go
+@@ -869,3 +869,32 @@ func TestConvertClaudeRequestToOpenAI_StripsClaudeCodeAttribution(t *testing.T)
+ 		t.Fatalf("Unexpected system content: %q", got)
+ 	}
+ }
++
++func TestConvertClaudeRequestToOpenAIOmitsEmptyContentForKimiBareToolCall(t *testing.T) {
++	input := []byte(`{"model":"kimi-k3","messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"read","input":{"path":"a.txt"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"data"}]}]}`)
++
++	out := ConvertClaudeRequestToOpenAI("moonshotai/kimi-k3", input, false)
++
++	messages := gjson.GetBytes(out, "messages").Array()
++	if len(messages) < 2 {
++		t.Fatalf("expected >=2 messages, got %d: %s", len(messages), out)
++	}
++	assistant := messages[0]
++	if assistant.Get("role").String() != "assistant" || !assistant.Get("tool_calls").Exists() {
++		t.Fatalf("messages[0] should be assistant with tool_calls: %s", assistant.Raw)
++	}
++	if assistant.Get("content").Exists() {
++		t.Fatalf("kimi bare tool-call turn must OMIT content, got: %s", assistant.Raw)
++	}
++}
++
++func TestConvertClaudeRequestToOpenAIKeepsEmptyContentForOtherModels(t *testing.T) {
++	input := []byte(`{"model":"gpt-5.6-sol","messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"read","input":{"path":"a.txt"}}]}]}`)
++
++	out := ConvertClaudeRequestToOpenAI("gpt-5.6-sol", input, false)
++
++	assistant := gjson.GetBytes(out, "messages").Array()[0]
++	if !assistant.Get("content").Exists() || assistant.Get("content").String() != "" {
++		t.Fatalf("non-kimi models keep the empty content field, got: %s", assistant.Raw)
++	}
++}

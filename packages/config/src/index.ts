@@ -677,13 +677,87 @@ export function isOpenRouterModel(model: string): boolean {
  */
 export const OPENROUTER_ALIAS_MODELS = ["kimi-k3"] as const;
 
+export interface CuratedProxyModel {
+  id: string;
+  /** Real backend context ceiling → CLAUDE_CODE_MAX_CONTEXT_TOKENS. */
+  contextWindow: number;
+  /** Proactive compaction window → CLAUDE_CODE_AUTO_COMPACT_WINDOW (default: contextWindow). */
+  compactWindow?: number;
+  /** Trigger percentage → CLAUDE_AUTOCOMPACT_PCT_OVERRIDE (default: Claude Code's native formula). */
+  compactPct?: number;
+}
+
 /**
- * The launcher-facing model picks (chips + settings dropdowns). The live catalog
- * is the *validity* signal, not the menu: it enumerates every model of every
- * seeded account (plus acc-prefixed duplicates and image models), which is noise
- * as a picker. The UI intersects this curated list with the catalog.
+ * The launcher-facing model picks (chips + settings dropdowns) WITH the
+ * measured compact metadata (spec 2026-07-25-compact-parity-design.md §3.2).
+ * Windows are measured backend ceilings, not marketing numbers.
+ *
+ * The live catalog is the *validity* signal, not the menu: it enumerates every
+ * model of every seeded account (plus acc-prefixed duplicates and image models),
+ * which is noise as a picker. The UI intersects this curated list with the catalog.
  */
-export const CURATED_PROXY_MODELS = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "kimi-k3"] as const;
+export const CURATED_PROXY_MODELS: readonly CuratedProxyModel[] = [
+  { id: "gpt-5.6-sol", contextWindow: 200_000, compactPct: 75 },
+  { id: "gpt-5.6-terra", contextWindow: 200_000, compactPct: 75 },
+  { id: "gpt-5.6-luna", contextWindow: 200_000, compactPct: 75 },
+  { id: "kimi-k3", contextWindow: 1_048_576, compactWindow: 450_000 }
+];
+
+export const CURATED_PROXY_MODEL_IDS: readonly string[] = CURATED_PROXY_MODELS.map((m) => m.id);
+
+/**
+ * Arming value for Claude-family ids: proactive auto-compaction is gated OFF on
+ * non-first-party base URLs (claude-code #65585) unless AUTO_COMPACT_WINDOW is
+ * set; Claude Code clamps the value to the model's believed window, so this
+ * never shrinks anything — its only job is to defeat the gate.
+ */
+export const CLAUDE_ARMING_COMPACT_WINDOW = 1_048_576;
+
+export const cliProxyModelOverridesSchema = z.record(
+  z.object({
+    contextWindow: z.number().int().positive().optional(),
+    compactWindow: z.number().int().positive().optional(),
+    compactPct: z.number().int().min(1).max(100).optional()
+  })
+);
+export type CliProxyModelOverrides = z.infer<typeof cliProxyModelOverridesSchema>;
+
+export interface CompactEnv {
+  maxContextTokens?: number;
+  autoCompactWindow: number;
+  autoCompactPct?: number;
+}
+
+/**
+ * Resolve the compact env for a launch model (spec §3.2): strip the acc<hex>/
+ * routing prefix; `claude*` ids get the arming value only (native window
+ * detection + native trigger formula do the rest); other ids resolve
+ * override → curated → null (uncurated stays reactive-only, same as today).
+ */
+export function compactEnvForModel(
+  model: string,
+  overrides?: CliProxyModelOverrides
+): CompactEnv | null {
+  let bare = model.replace(/^acc[0-9a-fA-F]+\//, "");
+  if (bare.startsWith("claude")) {
+    return { autoCompactWindow: CLAUDE_ARMING_COMPACT_WINDOW };
+  }
+  // The OpenRouter full name routes the same model as its curated alias
+  // (config.yaml maps moonshotai/kimi-k3 → kimi-k3) — resolve them identically
+  // so a full-name launch isn't silently left without compact arming.
+  bare = bare.replace(/^moonshotai\//, "");
+  const curated = CURATED_PROXY_MODELS.find((m) => m.id === bare);
+  const override = overrides?.[bare];
+  const contextWindow = override?.contextWindow ?? curated?.contextWindow;
+  if (contextWindow === undefined) return null;
+  const env: CompactEnv = {
+    maxContextTokens: contextWindow,
+    autoCompactWindow: override?.compactWindow ?? curated?.compactWindow ?? contextWindow
+  };
+  const pct = override?.compactPct ?? curated?.compactPct;
+  if (pct !== undefined) env.autoCompactPct = pct;
+  return env;
+}
 
 export const cliProxyStateSchema = z.object({
   enabled: z.boolean().default(false),
@@ -700,6 +774,8 @@ export const cliProxyStateSchema = z.object({
   /** Last successful verification of the OpenRouter key against openrouter.ai
    *  (null = key never verified, or last verification attempt was inconclusive). */
   openRouterKeyVerifiedAt: z.string().nullable().default(null),
+  /** Per-model compact-window overrides (spec §3.2); additive + defaulted. */
+  modelOverrides: cliProxyModelOverridesSchema.default({}),
   port: z.number().int().default(8317),
   modelCatalog: z
     .object({ models: z.array(z.string()), asOf: z.string() })

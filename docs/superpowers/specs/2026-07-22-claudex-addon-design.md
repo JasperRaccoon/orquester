@@ -86,12 +86,14 @@ a disk-space precheck, and diagnostic output retained on failure; a daemon resta
 download discards the partial temp file and `bin/` is only ever replaced atomically after a
 verified extract.
 
-**Kimi patch is defense-in-depth, not shipped.** The one-line translator fix (omit
-`content` when `tool_calls` present) stays documented in `deploy/cliproxy-patches/` but is
-**not applied** — it would only matter for a client that emits bare tool-call turns, which
-Claude Code does not. If a real `content:""` 400 is ever observed in the request log, that's
-the trigger to revisit a patched build; until then the stock binary ships. (Re-verify on any
-version bump — the bug line could change upstream.)
+**Kimi patch is defense-in-depth — SHIPPED as of 2026-07-25.** The one-line translator fix
+(omit `content` when `tool_calls` present, gated on kimi/moonshot model names) ships as
+`deploy/cliproxy-patches/0002-kimi-omit-empty-content-with-tool-calls.patch`. The original
+decision not to ship it rested on avoiding the Go-toolchain/source-build apparatus; that
+apparatus now exists for the overflow-normalization patch (0001), so this rides along at
+zero marginal cost. Whether an assistant turn carries preamble text is the model's choice,
+not the harness's — kimi itself can emit bare tool calls. (Re-verify both patches on any
+`CLIPROXY_SOURCE` version bump — the patched lines can change upstream.)
 
 **Generated `config.yaml`**: `host: 127.0.0.1`, `port: 8317`, one generated `api-keys`
 entry (`crypto.randomBytes`), `remote-management.secret-key` (generated;
@@ -104,7 +106,9 @@ and — when an OpenRouter key is configured — an `openai-compatibility` provi
 forcing `reasoning.effort: high` on all `gpt-*` is dropped entirely: it can't be scoped
 to "the main model" when the main model is chosen per launch and the config is static
 (and restarts are refused while sessions run), and a blanket override silently bills the
-haiku-slot/background calls (title generation, compaction) as high-effort Sol. Effort is
+haiku-slot/background calls (title generation) as high-effort Sol. (Compaction runs on the
+MAIN conversation model, not the haiku slot — see 2026-07-25-compact-parity-design.md §1.)
+Effort is
 owned client-side (`CLAUDE_CODE_ALWAYS_ENABLE_EFFORT=1` + per-launch effort env/flags).
 `payload.override` is reserved for provider-constraint clamps only (e.g. Kimi
 temperature range [0,1]). The §8 spike measures real cost per slot.

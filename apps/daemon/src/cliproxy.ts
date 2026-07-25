@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { CliProxyProviderId, CliProxyProviderStatus, CliProxyStatus } from "@orquester/api";
 import {
+  type CliProxyModelOverrides,
   type CliProxySecrets,
   type CliProxyState,
   MODEL_NAME_RE,
@@ -168,6 +169,7 @@ export class CliProxyManager {
       version: this.state.version,
       defaultModel: this.state.defaultModel,
       backgroundModel: this.state.backgroundModel,
+      modelOverrides: this.state.modelOverrides,
       providers: this.providerStatuses(),
       accounts: [...this.seededAccounts.values()].map((a) => ({
         id: a.id,
@@ -349,7 +351,12 @@ export class CliProxyManager {
    * while sessions are live unless forced (disclosure alone is not quiescence).
    */
   setConfig(
-    cfg: { defaultModel?: string; backgroundModel?: string; claudeDefaultModel?: string },
+    cfg: {
+      defaultModel?: string;
+      backgroundModel?: string;
+      claudeDefaultModel?: string;
+      modelOverrides?: CliProxyModelOverrides;
+    },
     force: boolean
   ): Promise<{ ok: boolean; affectedSessions?: number }> {
     return this.transition(async () => {
@@ -366,6 +373,9 @@ export class CliProxyManager {
       if (cfg.defaultModel !== undefined) this.state.defaultModel = cfg.defaultModel;
       if (cfg.backgroundModel !== undefined) this.state.backgroundModel = cfg.backgroundModel;
       if (cfg.claudeDefaultModel !== undefined) this.state.claudeDefaultModel = cfg.claudeDefaultModel;
+      // Overrides feed the launch-time contributor only (no projection, no
+      // restart) — replace wholesale so the UI's record is the whole truth.
+      if (cfg.modelOverrides !== undefined) this.state.modelOverrides = cfg.modelOverrides;
       if (this.secrets && this.state.enabled) {
         await writeProjections(this.daemonDir, this.secrets, this.state);
         await this.reresolveDependents();
