@@ -73,7 +73,7 @@ import type { ActivityCause } from "./ansi-activity";
 import { TodoError, TodoListManager } from "./todos";
 import { Tmux, tmuxAvailable, tmuxVersionOk } from "./tmux";
 import { CliProxyManager } from "./cliproxy";
-import { CLIPROXY_RELEASE, defaultFetchTarball, installBinary, rollbackBinary } from "./cliproxy-install.ts";
+import { CLIPROXY_RELEASE, defaultFetchTarball, installBinary, listPatches, rollbackBinary } from "./cliproxy-install.ts";
 import { accountPrefix } from "./cliproxy-seed.ts";
 import { Broadcaster } from "./broadcaster";
 import { AccountError, AccountsService } from "./accounts";
@@ -603,9 +603,16 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
           .list()
           .filter((s) => (s.refId === "claudex" || s.refId === "claudemix") && s.status === "running").length,
       now: () => Date.now(),
-      // Pull + verify + atomically install the pinned stock binary (no source build).
+      // Pull + verify + atomically install the pinned binary. When committed
+      // patches exist (deploy/cliproxy-patches/*.patch), builds from the pinned
+      // source with them applied instead — self-shipped fixes, no upstream wait.
       install: async () => {
-        const { version } = await installBinary(resolved.daemonDir, { fetchTarball: defaultFetchTarball });
+        const { version } = await installBinary(
+          resolved.daemonDir,
+          { fetchTarball: defaultFetchTarball },
+          undefined,
+          { patches: await listPatches() }
+        );
         return { version: version || CLIPROXY_RELEASE.version };
       },
       // Last-resort recovery: restore the prior binary from bin.prev/ when a fresh

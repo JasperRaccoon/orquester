@@ -1,7 +1,13 @@
 # CLIProxyAPI patch: normalize provider context-overflow errors
 
-**Status:** authored, delivery via upstream PR (see below). Companion to the
-compact-parity design (docs/superpowers/specs/2026-07-25-compact-parity-design.md §3.4).
+**Status:** SHIPPED as `0001-normalize-context-overflow-errors.patch` — the daemon's
+installer builds CLIProxyAPI from the pinned source with committed patches applied
+(`buildPatchedBinary` in `apps/daemon/src/cliproxy-install.ts`; version reports as
+`v7.2.95+orq1`). Requires a Go toolchain at `<appdir>/go/bin/go` (deploy runbook) or on
+PATH. Verified end-to-end 2026-07-25: a >1M-token kimi-k3 request through the patched
+proxy returns `prompt is too long: 1107646 tokens > 1048576 maximum`. An upstream PR
+remains worthwhile so the patch can eventually retire. Companion to the compact-parity
+design (docs/superpowers/specs/2026-07-25-compact-parity-design.md §3.4).
 
 ## Why
 
@@ -33,14 +39,19 @@ upstream supplies them, else omitting them:
 
 Status code stays as upstream mapped it (400-class). Only `error.message` changes.
 
-## Delivery
+## Delivery (implemented)
 
-Stock-binary invariant holds (install pipeline pins version + sha256), so:
-1. Fork `router-for-me/CLIProxyAPI`, implement against the pinned tag, with unit tests
-   per executor (codex, openai-compat) covering the three signatures above.
-2. Submit upstream PR referencing Claude Code's reactive-recovery matching.
-3. When a release containing the fix ships, bump `CLIPROXY_RELEASE` (version + sha256)
-   in `apps/daemon/src/cliproxy-install.ts` — the normal upgrade path.
+`installBinary` dispatches on committed patches: when `deploy/cliproxy-patches/*.patch`
+exist, it downloads the pinned SOURCE tarball (`CLIPROXY_SOURCE`, sha256-verified),
+applies each patch with `git apply`, `go build ./cmd/server`, and promotes the result
+with the same `bin.prev/` rollback as the stock path. The patch itself lands at the
+Claude-protocol error chokepoint (`sdk/api/handlers/claude/code_handlers.go`,
+`claudeErrorDetailFromText` → `normalizeClaudeOverflow`): 400/413-class only (429
+"too many tokens per minute" rate-limit wordings pass through untouched), scans the
+OpenRouter `error.metadata.raw` nested detail, and updates the upstream package tests.
 
-Until merged, proactive thresholds (spec §3.2) are the primary and sufficient defense;
-this patch only restores the last-resort path.
+Retirement path: submit the patch upstream; when a release containing it ships, bump
+`CLIPROXY_RELEASE`, delete the `.patch`, and the installer reverts to stock automatically.
+
+Proactive thresholds (spec §3.2) remain the primary defense; this restores the
+last-resort reactive path.
