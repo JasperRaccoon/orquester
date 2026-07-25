@@ -23,6 +23,7 @@ import type {
   FsFilesResponse,
   FsListResponse,
   FsReadResponse,
+  FsRenameRequest,
   FsSearchResponse,
   FsUploadRequest,
   FsUploadResponse,
@@ -148,7 +149,7 @@ import { WebSocket as UpstreamWebSocket } from "ws";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import { spawn } from "node:child_process";
 import { createReadStream, createWriteStream, existsSync, readFileSync, type WriteStream } from "node:fs";
-import { mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, platform as osPlatform } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { stat } from "node:fs/promises";
@@ -2111,6 +2112,63 @@ export function createServer(
       return reply.code(400).send({
         code: "FS_ERROR",
         message: error instanceof Error ? error.message : "Cannot create entry."
+      });
+    }
+  });
+
+  // Rename a file or directory in place (same parent dir — not a move). Sibling
+  // of /api/fs/create: same fsRoot sandbox + error mapping. A name conflict is a
+  // 409 FS_EXISTS (not FS_ERROR) so the client keeps its inline editor open.
+  // The sandbox check realpaths the PARENT dir only, keeping the leaf literal:
+  // realpathing the entry itself would follow a symlink and rename its target
+  // (in the target's directory — pnpm's node_modules is full of such links),
+  // and on a case-insensitive FS it folds a case-only rename ("Foo" → "foo")
+  // back to the on-disk casing, turning it into a silent no-op. The dev+ino
+  // comparison still lets a case-only rename of the same inode through while a
+  // real occupant is a 409. Sessions running inside a renamed dir are left
+  // alone: their cwd follows the inode.
+  app.post("/api/fs/rename", async (request, reply): Promise<{ ok: true } | void> => {
+    const body = (request.body ?? {}) as Partial<FsRenameRequest>;
+    if (!body.path || typeof body.newName !== "string" || !body.newName.trim()) {
+      return reply.code(400).send({ code: "INVALID_REQUEST", message: "path and newName required." });
+    }
+    const newName = body.newName.trim();
+    if (/[\\/]/.test(newName) || newName === "." || newName === "..") {
+      return reply
+        .code(400)
+        .send({ code: "INVALID_REQUEST", message: "newName must be a plain file or folder name." });
+    }
+    try {
+      const realRoot = await realpath(resolved.fsRoot).catch(() => resolve(resolved.fsRoot));
+      const resolvedPath = resolve(body.path);
+      if (resolvedPath === realRoot || resolvedPath === resolve(resolved.fsRoot)) {
+        return reply.code(400).send({ code: "FS_ERROR", message: "Cannot rename the workspaces root." });
+      }
+      const parent = await assertInsideFsRoot(resolved.fsRoot, dirname(resolvedPath));
+      const source = join(parent, basename(resolvedPath));
+      if (newName === basename(source)) {
+        return { ok: true }; // no-op rename
+      }
+      // A single validated segment inside the sandboxed parent — inside fsRoot
+      // by construction, so no second realpath (which would reintroduce the
+      // symlink-follow and case-folding problems above).
+      const target = join(parent, newName);
+      const sourceStat = await lstat(source); // ENOENT → FS_ERROR below
+      const existing = await lstat(target).catch(() => null);
+      if (existing && !(existing.dev === sourceStat.dev && existing.ino === sourceStat.ino)) {
+        return reply
+          .code(409)
+          .send({ code: "FS_EXISTS", message: `A file or folder named "${newName}" already exists.` });
+      }
+      await rename(source, target);
+      return { ok: true };
+    } catch (error) {
+      if (error instanceof FsSandboxError) {
+        return reply.code(403).send({ code: "FS_FORBIDDEN", message: error.message });
+      }
+      return reply.code(400).send({
+        code: "FS_ERROR",
+        message: error instanceof Error ? error.message : "Cannot rename entry."
       });
     }
   });
