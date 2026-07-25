@@ -13,9 +13,10 @@ assert.deepEqual(legacy.agents, { claude: true, codex: false });
 assert.equal(usageAgentEnabled(legacy, "claude"), true);
 assert.equal(usageAgentEnabled(legacy, "codex"), false);
 
-// Current shape passes through unchanged.
+// Current shape passes through unchanged; a stale `view` key (persisted by
+// bundles that still had the multi-account-view setting) is stripped.
 const current = normalizeUsagePrefs({ enabled: false, agents: { claude: false }, chip: "codex", view: "accounts" }, fallback);
-assert.deepEqual(current, { enabled: false, agents: { claude: false }, chip: "codex", view: "accounts" });
+assert.deepEqual(current, { enabled: false, agents: { claude: false }, chip: "codex" });
 
 // Garbage/absent input falls back rather than propagating a bad object.
 assert.equal(normalizeUsagePrefs(undefined, fallback), fallback);

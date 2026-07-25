@@ -21,8 +21,7 @@ export interface UsageServiceDeps {
 const DEFAULT_PREFS: UsagePrefs = {
   enabled: true,
   agents: {},
-  chip: "busiest",
-  view: "aggregate"
+  chip: "busiest"
 };
 
 export class UsageService {
