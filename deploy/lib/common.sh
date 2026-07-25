@@ -62,6 +62,17 @@ load_target() {
   [ -n "$T_HOST" ] || die "target '$name': missing required key 'host'"
   [ -n "$T_USER" ] || die "target '$name': missing required key 'user'"
   case "$T_SUDO" in yes|no) ;; *) die "target '$name': 'sudo' must be 'yes' or 'no' (got '$T_SUDO')" ;; esac
+  # branch/domain/repo are interpolated into the remote command line — reject
+  # anything that could split it or inject a second command.
+  case "$T_BRANCH" in
+    ""|*[!0-9A-Za-z._/-]*) die "target '$name': 'branch' must match [0-9A-Za-z._/-]+ (got '$T_BRANCH')" ;;
+  esac
+  case "$T_DOMAIN" in
+    *[!0-9A-Za-z.-]*) die "target '$name': 'domain' must match [0-9A-Za-z.-]+ (got '$T_DOMAIN')" ;;
+  esac
+  case "$T_REPO" in
+    *[!0-9A-Za-z._:/@+-]*) die "target '$name': 'repo' has unsupported characters (got '$T_REPO')" ;;
+  esac
   if [ -n "$T_KEY" ]; then
     case "$T_KEY" in "~"*) T_KEY="$HOME${T_KEY#\~}" ;; esac
     [ -f "$T_KEY" ] || die "target '$name': ssh key not found: $T_KEY"
@@ -86,6 +97,10 @@ remote_run() { # remote_run <command-string>
     info "DRY-RUN ssh $T_USER@$T_HOST: $1"
     return 0
   fi
+  # SC2029: the caller composes the remote command string deliberately (values
+  # it wants expanded locally are already interpolated; remote-side ones are
+  # escaped as \$). Callers must validate anything user-supplied first.
+  # shellcheck disable=SC2029
   ssh "${SSH_ARGS[@]}" "$T_USER@$T_HOST" "$1"
 }
 
@@ -106,7 +121,10 @@ run_payload() {
   rtmp="$(ssh "${SSH_ARGS[@]}" "$T_USER@$T_HOST" 'mktemp /tmp/orq-deploy.XXXXXX')" || return 1
   [ -n "$rtmp" ] || return 1
   scp -q "${SSH_ARGS[@]}" "$payload" "$T_USER@$T_HOST:$rtmp" || return 1
+  # SC2029: $prefix/$*/$rtmp are meant to expand here, on the client side.
+  # shellcheck disable=SC2029
   ssh "${SSH_ARGS[@]}" "$T_USER@$T_HOST" "${prefix}env $* bash '$rtmp' </dev/null" || rc=$?
+  # shellcheck disable=SC2029
   ssh "${SSH_ARGS[@]}" "$T_USER@$T_HOST" "rm -f '$rtmp'" || true
   return "$rc"
 }

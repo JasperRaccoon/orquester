@@ -3,7 +3,9 @@
 # rotate-password. Targets: deploy/targets.conf (gitignored — copy
 # deploy/targets.conf.example). Design:
 # docs/superpowers/specs/2026-07-25-deploy-sh-lifecycle-tool-design.md
-set -euo pipefail
+# -E: without errtrace bash does not inherit the ERR trap into functions, and
+# everything below runs inside main()/cmd_* — the trap would be dead code.
+set -Eeuo pipefail
 trap 'printf "[deploy] failed at %s:%s\n" "${BASH_SOURCE[0]}" "$LINENO" >&2' ERR
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,6 +34,19 @@ EOF
 
 sudo_word() { # prints "sudo" (or nothing) for the current target
   if [ "$T_SUDO" = "yes" ]; then printf 'sudo'; fi
+}
+
+# Anything that ends up inside a remote command string must be validated first —
+# an unchecked argument is arbitrary code execution on the VPS.
+require_safe_ref() { # <value> <what>
+  case "$1" in
+    ""|*[!0-9A-Za-z._/-]*) die "$2 must match [0-9A-Za-z._/-]+ (got '$1')" ;;
+  esac
+}
+require_number() { # <value> <what>
+  case "$1" in
+    ""|*[!0-9]*) die "$2 must be a number (got '$1')" ;;
+  esac
 }
 
 # preflight: refuse to deploy anything that isn't pushed. Under --dry-run,
@@ -100,6 +115,7 @@ cmd_deploy_target() {
 
 cmd_rollback() {
   local name="$1" sha="$2" s
+  require_safe_ref "$sha" "rollback ref"
   load_target "$CONF" "$name"
   build_ssh_args
   s="$(sudo_word)"
@@ -115,11 +131,29 @@ cmd_rotate_password() {
   build_ssh_args
   s="$(sudo_word)"
   info "=== rotate-password $name ($T_USER@$T_HOST) ==="
+  # The daemon hashes ORQUESTER_HTTP_PASSWORD only when daemon.json has no
+  # passwordHash yet (migrateHttpPassword, apps/daemon/src/index.ts) — a restart
+  # alone leaves the OLD password valid. So: patch daemon.env, delete the stale
+  # hash, restart, then PROVE the rotation by comparing /api/auth/info's salt
+  # (the hash prefix) across the restart before printing anything.
   remote_run "set -e
+env_file=/etc/orquester/daemon.env
+cfg=/var/lib/orquester/daemon/daemon.json
+salt() { curl -fsS http://127.0.0.1:47831/api/auth/info | sed -n 's/.*\"salt\":\"\([^\"]*\)\".*/\1/p'; }
+${s:+$s }grep -q '^ORQUESTER_HTTP_PASSWORD=' \"\$env_file\" || { echo \"rotate-password: no ORQUESTER_HTTP_PASSWORD= line in \$env_file — nothing rotated\" >&2; exit 1; }
+before=\$(salt || true)
 new=\$(openssl rand -base64 32)
-${s:+$s }sed -i \"s|^ORQUESTER_HTTP_PASSWORD=.*|ORQUESTER_HTTP_PASSWORD=\$new|\" /etc/orquester/daemon.env
+${s:+$s }sed -i \"s|^ORQUESTER_HTTP_PASSWORD=.*|ORQUESTER_HTTP_PASSWORD=\$new|\" \"\$env_file\"
+if ${s:+$s }test -f \"\$cfg\"; then
+  ${s:+$s }node -e \"const fs=require('fs'),f=process.argv[1],c=JSON.parse(fs.readFileSync(f,'utf8'));if(c.transports&&c.transports.http)delete c.transports.http.passwordHash;fs.writeFileSync(f,JSON.stringify(c,null,2)+'\n')\" \"\$cfg\"
+fi
 ${s:+$s }systemctl restart orquester
 curl -fsS --retry 25 --retry-delay 1 --retry-connrefused http://127.0.0.1:47831/health; echo
+after=\$(salt || true)
+if [ -z \"\$after\" ] || [ \"\$after\" = \"\$before\" ]; then
+  echo 'rotate-password: FAILED — the stored hash did not change, the OLD password is still valid' >&2
+  exit 1
+fi
 echo '============================================================'
 echo 'NEW PASSWORD (shown once — save it now):'
 echo \"\$new\"
@@ -143,6 +177,9 @@ cmd_provision() {
 }
 
 # run_for_targets <fn> <selector>: per-target, continue on failure, summarize.
+# Each target runs in a SUBSHELL so a config-level `die` (missing key, bad ssh
+# key path) kills only that target instead of the whole run; the subshell's EXIT
+# trap hands STEP back through a temp file, since it can't set the parent's var.
 run_for_targets() {
   local fn="$1" sel="$2" t rc=0 names results=""
   if [ "$sel" = "all" ]; then
@@ -151,15 +188,19 @@ run_for_targets() {
   else
     names="$sel"
   fi
+  STEPFILE="$(mktemp "${TMPDIR:-/tmp}/orq-deploy-step.XXXXXX")"
   for t in $names; do
     STEP=""
-    if "$fn" "$t"; then
+    : > "$STEPFILE"
+    if ( trap 'printf "%s" "$STEP" > "$STEPFILE"' EXIT; "$fn" "$t" ); then
       results="${results}  $t: OK\n"
     else
+      STEP="$(cat "$STEPFILE")"
       results="${results}  $t: FAILED${STEP:+ (step: $STEP)}\n"
       rc=1
     fi
   done
+  rm -f "$STEPFILE"
   info "=== summary ==="
   printf '%b' "$results"
   return "$rc"
@@ -193,11 +234,13 @@ main() {
   if [ $# -eq 0 ]; then usage; exit 2; fi
   cmd="$1"; shift
   case "$cmd" in
-    deploy) run_for_targets cmd_deploy_target "${1:-all}" ;;
+    # `|| exit 1`: a recorded per-target failure is an expected outcome, not a
+    # crash — keep the ERR trap's "failed at <line>" noise out of the summary.
+    deploy) run_for_targets cmd_deploy_target "${1:-all}" || exit 1 ;;
     provision)
       [ $# -eq 1 ] || die "usage: ./deploy.sh provision <target>"
       cmd_provision "$1" ;;
-    verify) run_for_targets cmd_verify_target "${1:-all}" ;;
+    verify) run_for_targets cmd_verify_target "${1:-all}" || exit 1 ;;
     rollback)
       [ $# -eq 2 ] || die "usage: ./deploy.sh rollback <target> <sha>"
       cmd_rollback "$1" "$2" || die "rollback failed${STEP:+ (step: $STEP)}" ;;
@@ -209,7 +252,7 @@ main() {
       target="$1"; shift
       n=50
       if [ "${1:-}" = "-n" ]; then
-        n="${2:-}"; [ -n "$n" ] || die "logs: -n needs a number"
+        n="${2:-}"; require_number "$n" "logs: -n"
       fi
       cmd_logs "$target" "$n" ;;
     -h|--help|help) usage ;;

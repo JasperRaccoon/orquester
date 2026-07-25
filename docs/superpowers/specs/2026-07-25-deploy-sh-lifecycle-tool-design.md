@@ -152,9 +152,18 @@ sha. If the sha isn't present on the remote, the payload fails loudly.
 ### `./deploy.sh rotate-password <target>`
 
 On the VPS: generate a new password (`openssl rand -base64 32`), patch
-`ORQUESTER_HTTP_PASSWORD` in `/etc/orquester/daemon.env`, restart the daemon
-(re-hashes into `daemon.json`), health check, print the new password exactly
-once.
+`ORQUESTER_HTTP_PASSWORD` in `/etc/orquester/daemon.env`, **delete the stale
+`transports.http.passwordHash` from `<appdir>/daemon/daemon.json`**, restart the
+daemon, health check, print the new password exactly once.
+
+The hash deletion is not optional: `migrateHttpPassword()`
+(`apps/daemon/src/index.ts`) hashes the env plaintext only `if (!http.passwordHash)`,
+and an already-provisioned host always has one on disk — a restart alone would
+silently keep the OLD password valid. For the same reason the command refuses to
+run if `daemon.env` has no `ORQUESTER_HTTP_PASSWORD=` line (sed would be a no-op),
+and it proves the rotation by comparing the bcrypt salt from the public
+`/api/auth/info` before and after the restart, failing loudly *before* printing
+anything if the salt did not change.
 
 ## Remote execution mechanics (gotchas encoded structurally)
 

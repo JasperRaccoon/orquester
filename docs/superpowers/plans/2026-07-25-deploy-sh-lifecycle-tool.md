@@ -418,7 +418,9 @@ Also check the bad-ref path:
 PATH="$S/bin:$PATH" SUDO= REPO_DIR="$S/repo" RESET_REF=deadbeef bash deploy/lib/remote-update.sh; echo "exit=$?"
 ```
 
-Expected: `[remote-update] ref not found: deadbeef`, the ERR trap line, `exit=1`.
+Expected: `[remote-update] ref not found: deadbeef`, `exit=1`. (No ERR-trap line:
+the failing `git rev-parse` is the left side of an `||` list, which is exempt from
+errexit/ERR, and the explicit `exit 1` is not a failing command either.)
 
 - [ ] **Step 4: Commit**
 
@@ -703,6 +705,15 @@ echo '============================================================'"
 ```
 
 (Why `|` as the sed delimiter: the base64 alphabet is `A-Za-z0-9+/=` — it can contain `/` but never `|` or `&`, so the replacement is injection-safe.)
+
+> **Review round 1 correction (applied):** the `cmd_rotate_password` body above is
+> **not** sufficient — the daemon re-hashes `ORQUESTER_HTTP_PASSWORD` only when
+> `daemon.json` has no `passwordHash`, so a restart alone leaves the old password
+> valid. The shipped version additionally requires the `ORQUESTER_HTTP_PASSWORD=`
+> line to exist, deletes `transports.http.passwordHash` from
+> `/var/lib/orquester/daemon/daemon.json`, and verifies the salt from
+> `/api/auth/info` changed across the restart before printing the new password.
+> See the spec's `rotate-password` section.
 
 - [ ] **Step 2: Wire the new commands into `main`'s case**
 

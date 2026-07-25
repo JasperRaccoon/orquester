@@ -24,7 +24,7 @@ git push origin main          # the VPSes pull from origin — push first
 | Command | What it does |
 |---|---|
 | `./deploy.sh deploy [target\|all]` | fetch/reset to `origin/<branch>`, `pnpm install`, SPA build, chown, restart, health check, live bundle hash — then the browser smoke test (`scripts/smoke-web.mjs`) if the target has a `domain` and a local Chrome exists. |
-| `./deploy.sh provision <target>` | first-time setup of a fresh Ubuntu VPS (user, Node 20, pnpm, Caddy, clone, daemon.env with a generated password shown **once**, systemd, devtools, ufw). Needs `domain` + `repo` in targets.conf and the DNS A record already pointing at the host. |
+| `./deploy.sh provision <target>` | first-time setup of a fresh Ubuntu VPS (user, Node 20, pnpm, Caddy, clone, daemon.env with a generated password shown **once**, systemd, devtools, ufw). Needs `domain` + `repo` in targets.conf, the DNS A record already pointing at the host, and — for an `ssh` (`git@…`) `repo` URL — a deploy key + `known_hosts` entry for **root on the VPS** (a fresh box has neither; use an `https://` URL for a public repo). |
 | `./deploy.sh verify [target\|all]` | read-only: HEAD, `/health`, service state, bundle hash. |
 | `./deploy.sh rollback <target> <sha>` | reset to `<sha>`, rebuild, restart, verify. |
 | `./deploy.sh logs <target> [-n N]` | tail the daemon journal. |

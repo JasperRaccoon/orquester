@@ -376,7 +376,9 @@ Caddy as the TLS reverse proxy. Templates live in `deploy/`. Use placeholders
 
 > **Preferred: `./deploy.sh provision <target>`** — runs this sequence on a fresh Ubuntu
 > VPS (needs `domain` + `repo` in `deploy/targets.conf`; generates the HTTP password on the
-> VPS and prints it once). The manual sequence below is the reference.
+> VPS and prints it once). A `git@…` (ssh) `repo` URL additionally needs a deploy key +
+> `known_hosts` entry for **root on the VPS** — a fresh box has neither, so prefer an
+> `https://` URL for a public repo. The manual sequence below is the reference.
 
 ```bash
 # 1. Service user (home = the appdir)

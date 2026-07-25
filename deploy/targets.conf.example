@@ -9,7 +9,9 @@
 #             omit to let ~/.ssh/config decide
 #   domain    optional; enables the post-deploy browser smoke test and is
 #             required by `provision` (Caddy vhost)
-#   repo      git URL; required by `provision` only
+#   repo      git URL; required by `provision` only. A git@… (ssh) URL needs a
+#             deploy key + known_hosts entry for root ON THE VPS — a fresh box
+#             has neither; use an https:// URL for a public repo.
 #   branch    default main
 #   ssh_opts  extra ssh flags, whitespace-separated
 #

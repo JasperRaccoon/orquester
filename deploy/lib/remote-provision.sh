@@ -8,9 +8,11 @@
 set -euo pipefail
 trap 'echo "[provision] FAILED at line $LINENO" >&2' ERR
 
-[ "$(id -u)" -eq 0 ] || { echo "[provision] must run as root" >&2; exit 1; }
+# env validation first: a caller with a bad invocation should hear about that,
+# not about privileges.
 : "${DOMAIN:?DOMAIN is required}"
 : "${REPO:?REPO is required}"
+[ "$(id -u)" -eq 0 ] || { echo "[provision] must run as root" >&2; exit 1; }
 BRANCH="${BRANCH:-main}"
 export DEBIAN_FRONTEND=noninteractive
 
@@ -46,7 +48,14 @@ fi
 log "3/7 repo checkout + install + build"
 if [ ! -d /opt/orquester/.git ]; then
   mkdir -p /opt/orquester
-  git clone "$REPO" /opt/orquester
+  # An SSH clone URL needs a deploy key + known_hosts entry for root on THIS box;
+  # a fresh VPS has neither. Say so instead of dying on a bare ssh error.
+  git clone "$REPO" /opt/orquester || {
+    echo "[provision] git clone failed: $REPO" >&2
+    echo "[provision] an ssh URL (git@…) needs a deploy key in root's ~/.ssh plus a" >&2
+    echo "[provision] known_hosts entry on this VPS; for a public repo use an https:// URL." >&2
+    exit 1
+  }
 fi
 cd /opt/orquester
 git fetch origin -q
