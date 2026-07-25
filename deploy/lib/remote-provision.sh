@@ -6,7 +6,22 @@
 #   REPO    (required) git clone URL
 #   BRANCH  default main
 set -euo pipefail
-trap 'echo "[provision] FAILED at line $LINENO" >&2' ERR
+# The generated password is normally printed once at the very end. If a later
+# step aborts (daemon won't boot, Caddy, ufw), the password would exist only
+# inside root-readable /etc/orquester/daemon.env and a re-run would neither
+# regenerate nor reprint it — so the ERR trap must leave it behind.
+on_err() {
+  echo "[provision] FAILED at line $1" >&2
+  if [ -n "${GENERATED_PASSWORD:-}" ]; then
+    echo "[provision] NOTE: an HTTP password was already generated and installed in /etc/orquester/daemon.env:" >&2
+    echo '==============================================================' >&2
+    echo ' HTTP password (username from daemon.env, default: mapacho):' >&2
+    echo "   $GENERATED_PASSWORD" >&2
+    echo ' Save it NOW — a re-run will NOT regenerate or reprint it.' >&2
+    echo '==============================================================' >&2
+  fi
+}
+trap 'on_err $LINENO' ERR
 
 # env validation first: a caller with a bad invocation should hear about that,
 # not about privileges.
@@ -90,8 +105,21 @@ systemctl restart orquester
 curl -fsS --retry 30 --retry-delay 1 --retry-connrefused http://127.0.0.1:47831/health; echo
 
 log "6/7 Caddy vhost for $DOMAIN"
-sed "s|orquester.example.com|$DOMAIN|" deploy/Caddyfile > /etc/caddy/Caddyfile
-systemctl reload caddy || systemctl restart caddy
+# Re-run safe: never clobber an existing Caddyfile that drifted from the
+# template (hand reconciliation after a template update is expected — the
+# deploy payload explicitly tells the operator to do it).
+caddy_new="$(mktemp)"
+sed "s|orquester.example.com|$DOMAIN|" deploy/Caddyfile > "$caddy_new"
+if [ ! -f /etc/caddy/Caddyfile ]; then
+  install -m 0644 "$caddy_new" /etc/caddy/Caddyfile
+  systemctl reload caddy || systemctl restart caddy
+elif cmp -s "$caddy_new" /etc/caddy/Caddyfile; then
+  log "Caddyfile already up to date"
+else
+  log "WARNING: /etc/caddy/Caddyfile differs from the repo template — leaving it"
+  log "         untouched. Reconcile manually, then: systemctl reload caddy"
+fi
+rm -f "$caddy_new"
 
 log "7/7 firewall: allow 22 + 443 only"
 ufw allow 22/tcp

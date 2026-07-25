@@ -154,7 +154,12 @@ sha. If the sha isn't present on the remote, the payload fails loudly.
 On the VPS: generate a new password (`openssl rand -base64 32`), patch
 `ORQUESTER_HTTP_PASSWORD` in `/etc/orquester/daemon.env`, **delete the stale
 `transports.http.passwordHash` from `<appdir>/daemon/daemon.json`**, restart the
-daemon, health check, print the new password exactly once.
+daemon, health check, print the new password exactly once. Rotation is proven by
+comparing the `/api/auth/info` salt across the restart; an unchanged salt fails
+before printing. If the daemon is healthy but the salt cannot be read at all,
+the new password is still printed (it is almost certainly already active — never
+swallow a credential only the VPS knows) alongside a warning, and the command
+exits 1 so the operator verifies by logging in.
 
 The hash deletion is not optional: `migrateHttpPassword()`
 (`apps/daemon/src/index.ts`) hashes the env plaintext only `if (!http.passwordHash)`,

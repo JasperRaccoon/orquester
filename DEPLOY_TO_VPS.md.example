@@ -28,7 +28,7 @@ git push origin main          # the VPSes pull from origin — push first
 | `./deploy.sh verify [target\|all]` | read-only: HEAD, `/health`, service state, bundle hash. |
 | `./deploy.sh rollback <target> <sha>` | reset to `<sha>`, rebuild, restart, verify. |
 | `./deploy.sh logs <target> [-n N]` | tail the daemon journal. |
-| `./deploy.sh rotate-password <target>` | new HTTP password, installed + shown once. |
+| `./deploy.sh rotate-password <target>` | new HTTP password, installed + shown once (rotation is proven by an auth-salt change; if the daemon is healthy but the salt can't be read, the password is still printed with a warning and the command exits 1 — verify by logging in, or read it from `daemon.env` on the host). |
 
 Add `--dry-run` (first argument) to print every local and remote command
 without executing anything.

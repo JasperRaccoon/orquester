@@ -16,6 +16,15 @@ RESET_REF="${RESET_REF:-origin/$BRANCH}"
 
 cd "$REPO_DIR"
 old_head="$($SUDO git rev-parse HEAD)"
+# Base the Caddyfile-drift check on the last SUCCESSFUL deploy, not the current
+# checkout: a deploy that dies after `git reset` leaves the tree at the new HEAD,
+# and on the retry old==new would silently skip the reconcile reminder.
+state_file="$REPO_DIR/.git/orq-last-deployed-head"
+drift_base="$old_head"
+if last_ok="$($SUDO cat "$state_file" 2>/dev/null)" \
+   && $SUDO git rev-parse --verify --quiet "$last_ok^{commit}" >/dev/null 2>&1; then
+  drift_base="$last_ok"
+fi
 $SUDO git fetch origin -q
 $SUDO git rev-parse --verify --quiet "$RESET_REF^{commit}" >/dev/null \
   || { echo "[remote-update] ref not found: $RESET_REF" >&2; exit 1; }
@@ -29,14 +38,15 @@ $SUDO env CI=1 ELECTRON_SKIP_BINARY_DOWNLOAD=1 pnpm install --frozen-lockfile </
 $SUDO env ELECTRON_SKIP_BINARY_DOWNLOAD=1 pnpm --filter @orquester/web build </dev/null
 $SUDO chown -R root:root "$REPO_DIR"
 
-if ! $SUDO git diff --quiet "$old_head" "$new_head" -- deploy/Caddyfile; then
-  echo "[remote-update] NOTE: deploy/Caddyfile changed (${old_head:0:7}..${new_head:0:7})."
+if ! $SUDO git diff --quiet "$drift_base" "$new_head" -- deploy/Caddyfile; then
+  echo "[remote-update] NOTE: deploy/Caddyfile changed (${drift_base:0:7}..${new_head:0:7})."
   echo "[remote-update]       Reconcile /etc/caddy/Caddyfile by hand (it has the real domain"
   echo "[remote-update]       substituted), then: ${SUDO:+$SUDO }systemctl reload caddy"
 fi
 
 $SUDO systemctl restart orquester
 curl -fsS --retry 25 --retry-delay 1 --retry-connrefused http://127.0.0.1:47831/health; echo
+printf '%s\n' "$new_head" | $SUDO tee "$state_file" >/dev/null
 echo "[remote-update] service=$(systemctl is-active orquester)"
 echo "[remote-update] bundle=$(curl -s http://127.0.0.1:47831/ | grep -o 'index-[^.]*\.js' | head -n1)"
 echo "[remote-update] OK"
