@@ -131,7 +131,7 @@ Verified against Claude Code v2.1.219 docs and empirically on vps-a (2026-07-25)
 - **Launch-time emission:** `cliproxyContributor` (which already receives the per-launch model)
   emits, keyed on the **bare** model id (routing prefix `acc<hex>/` stripped first):
   - when the bare id starts with `claude` (claudemix, Claude-family launches):
-    `CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000` **only** — the #65585 arming value that restores
+    `CLAUDE_CODE_AUTO_COMPACT_WINDOW=1048576` **only** — the #65585 arming value that restores
     native proactive behavior behind a third-party base URL. No `MAX_CONTEXT_TOKENS` (no-op /
     gated for recognized Claude ids), no `PCT_OVERRIDE` (native 33k-buffer formula applies).
   - otherwise `CLAUDE_CODE_MAX_CONTEXT_TOKENS=<contextWindow>`,

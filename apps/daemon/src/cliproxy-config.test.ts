@@ -68,6 +68,13 @@ test("compactEnvForModel: overrides beat curated defaults, per field", () => {
   );
 });
 
+test("compactEnvForModel: the OpenRouter full name resolves like its curated alias", () => {
+  assert.deepEqual(compactEnvForModel("moonshotai/kimi-k3"), {
+    maxContextTokens: 1048576,
+    autoCompactWindow: 450000
+  });
+});
+
 test("compactEnvForModel: uncurated non-claude id with no override emits nothing", () => {
   assert.equal(compactEnvForModel("glm-5-air"), null);
 });

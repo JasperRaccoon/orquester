@@ -738,10 +738,14 @@ export function compactEnvForModel(
   model: string,
   overrides?: CliProxyModelOverrides
 ): CompactEnv | null {
-  const bare = model.replace(/^acc[0-9a-fA-F]+\//, "");
+  let bare = model.replace(/^acc[0-9a-fA-F]+\//, "");
   if (bare.startsWith("claude")) {
     return { autoCompactWindow: CLAUDE_ARMING_COMPACT_WINDOW };
   }
+  // The OpenRouter full name routes the same model as its curated alias
+  // (config.yaml maps moonshotai/kimi-k3 → kimi-k3) — resolve them identically
+  // so a full-name launch isn't silently left without compact arming.
+  bare = bare.replace(/^moonshotai\//, "");
   const curated = CURATED_PROXY_MODELS.find((m) => m.id === bare);
   const override = overrides?.[bare];
   const contextWindow = override?.contextWindow ?? curated?.contextWindow;

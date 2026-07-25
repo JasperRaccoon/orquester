@@ -271,7 +271,9 @@ export const ModelProxySettings: React.FC = () => {
           the built-in defaults; changes apply to new tabs (no proxy restart).
         </p>
         {CURATED_PROXY_MODELS.map((m) => {
-          const o = status.modelOverrides[m.id] ?? {};
+          // Defensive read: a stale bundle/daemon pairing can serve a status
+          // without the field (persisted-shape rule) — never crash the panel.
+          const o = (status.modelOverrides ?? {})[m.id] ?? {};
           return (
             <div key={m.id} className="flex items-center gap-2 text-sm">
               <span className="w-32 truncate text-neutral-300">{m.id}</span>
@@ -314,10 +316,16 @@ const NumberField: React.FC<{
   const [text, setText] = useState(value === undefined ? "" : String(value));
   useEffect(() => setText(value === undefined ? "" : String(value)), [value]);
   const commit = () => {
-    if (text.trim() === "") return onCommit(undefined);
+    if (text.trim() === "") {
+      if (value !== undefined) onCommit(undefined); // no-op blur must not PUT
+      return;
+    }
     const n = Number(text);
-    if (Number.isInteger(n) && n > 0) onCommit(n);
-    else setText(value === undefined ? "" : String(value)); // revert invalid input
+    if (Number.isInteger(n) && n > 0) {
+      if (n !== value) onCommit(n); // unchanged value must not PUT
+    } else {
+      setText(value === undefined ? "" : String(value)); // revert invalid input
+    }
   };
   return (
     <label className="flex items-center gap-1 text-xs text-neutral-500">

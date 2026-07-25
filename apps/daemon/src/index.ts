@@ -767,21 +767,6 @@ export function composeExtraEnv(a: LaunchEnv | null, b: LaunchEnv | null): Launc
   return merged;
 }
 
-/**
- * Launch-env for the managed claudex/claudemix launchers: the proxy auth token
- * (read from the 0600 projection, kept off argv) and the entry's isolated Claude
- * config home, plus the per-launch model pin when one was chosen (the base URL
- * and default model ride the registry entry's env file). Null for every other
- * launcher.
- *
- * Per-launch account routing (spec §2): when the launch names a real managed
- * account (not the System sentinel / undefined), the effective model is prefixed
- * with that account's deterministic routing prefix (`<accountPrefix>/<model>`) so
- * the proxy routes it to exactly that seeded credential. The prefix is computed
- * identically at seed time ({@link accountPrefix}), so no stored map is needed. A
- * keyless pick (e.g. claudex → OpenRouter/Kimi) carries no account and stays
- * unprefixed.
- */
 /** Best-effort read of the persisted cliproxy state (contributor-side: launch
  *  env must never throw). Null when absent/unreadable. */
 function readCliProxyState(daemonDir: string): CliProxyState | null {
@@ -804,6 +789,21 @@ function needsAccountPrefix(state: CliProxyState | null, accountId: string): boo
   return state.seededAccounts.some((a) => a.provider === mine.provider && a.accountId !== accountId);
 }
 
+/**
+ * Launch-env for the managed claudex/claudemix launchers: the proxy auth token
+ * (read from the 0600 projection, kept off argv) and the entry's isolated Claude
+ * config home, plus the per-launch model pin when one was chosen (the base URL
+ * and default model ride the registry entry's env file). Null for every other
+ * launcher.
+ *
+ * Per-launch account routing (spec §2): when the launch names a real managed
+ * account (not the System sentinel / undefined), the effective model is prefixed
+ * with that account's deterministic routing prefix (`<accountPrefix>/<model>`) so
+ * the proxy routes it to exactly that seeded credential. The prefix is computed
+ * identically at seed time ({@link accountPrefix}), so no stored map is needed. A
+ * keyless pick (e.g. claudex → OpenRouter/Kimi) carries no account and stays
+ * unprefixed.
+ */
 export function cliproxyContributor(
   entryId: string,
   ctx: { accountId?: string; model?: string },
