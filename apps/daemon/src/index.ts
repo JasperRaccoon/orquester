@@ -845,6 +845,19 @@ export function cliproxyContributor(
     const effectiveModel = prefixed ? `${accountPrefix(ctx.accountId)}/${ctx.model}` : ctx.model;
     env.ANTHROPIC_MODEL = effectiveModel;
     launchedModel = effectiveModel;
+    // A PREFIXED claude id is claude-family-classified just enough that Claude
+    // Code refuses CLAUDE_CODE_MAX_CONTEXT_TOKENS, yet its window detection
+    // still falls back to 200k — silently capping a 1M model (observed live on
+    // fable-5). The [1m] suffix is the documented per-model lever: Claude Code
+    // budgets the 1M window and strips the suffix before the request, so the
+    // proxy still sees the routable prefixed id (verified end-to-end). Skipped
+    // when a modelOverride declares the model 200k-class.
+    if (prefixed && ctx.model.startsWith("claude")) {
+      const overrideWindow = state?.modelOverrides?.[ctx.model]?.contextWindow;
+      if (overrideWindow === undefined || overrideWindow > 200_000) {
+        env.ANTHROPIC_MODEL = `${effectiveModel}[1m]`;
+      }
+    }
     // Deliberately no CLAUDE_CODE_SUBAGENT_MODEL: subagents inherit the current
     // main model, so an in-session /model switch applies to them too.
     if (routesToAccount) accountId = ctx.accountId;

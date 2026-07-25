@@ -58,17 +58,16 @@ test("compactEnvForModel: bare claude ids get the arming value only (native wind
   });
 });
 
-test("compactEnvForModel: PREFIXED claude ids declare the 1M window explicitly (unrecognized by Claude Code)", () => {
+test("compactEnvForModel: claude ids NEVER get maxContextTokens (refused when family-classified)", () => {
   assert.deepEqual(compactEnvForModel("acc14137047/claude-opus-5"), {
-    maxContextTokens: CLAUDE_ARMING_COMPACT_WINDOW,
     autoCompactWindow: CLAUDE_ARMING_COMPACT_WINDOW
   });
 });
 
-test("compactEnvForModel: prefixed-claude override (bare-id keyed) adjusts a 200k-class claude model", () => {
+test("compactEnvForModel: claude compactWindow/pct overrides pass through (bare-id keyed)", () => {
   assert.deepEqual(
-    compactEnvForModel("acc14137047/claude-3-5-haiku", { "claude-3-5-haiku": { contextWindow: 200000 } }),
-    { maxContextTokens: 200000, autoCompactWindow: 200000 }
+    compactEnvForModel("acc14137047/claude-3-5-haiku", { "claude-3-5-haiku": { compactWindow: 200000, compactPct: 80 } }),
+    { autoCompactWindow: 200000, autoCompactPct: 80 }
   );
 });
 

@@ -80,7 +80,7 @@ test("cliproxyContributor pins the account for claudemix", () => {
   const res = cliproxyContributor("claudemix", { accountId: ACCOUNT, model: "claude-fable-5" }, DIR);
   assert.ok(res);
   assert.equal(res.accountId, ACCOUNT);
-  assert.equal(res.env.ANTHROPIC_MODEL, "accabcdef12/claude-fable-5");
+  assert.equal(res.env.ANTHROPIC_MODEL, "accabcdef12/claude-fable-5[1m]");
 });
 
 test("cliproxyContributor: the sole seeded account of a provider launches BARE (no acc prefix leak)", async () => {
@@ -124,15 +124,30 @@ test("cliproxyContributor: kimi launch emits 1M window, 450k compact window, no 
   assert.equal(res.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, undefined);
 });
 
-test("cliproxyContributor: a PREFIXED claudemix launch declares the 1M window explicitly", () => {
-  // Unreadable state (DIR) forces the routing prefix; the prefixed id is not
-  // recognized by Claude Code (200k fallback), so MAX_CONTEXT_TOKENS must ride.
+test("cliproxyContributor: a PREFIXED claudemix launch rides the [1m] suffix (stripped client-side)", () => {
+  // Unreadable state (DIR) forces the routing prefix. The prefixed id is
+  // claude-family-classified enough that MAX_CONTEXT_TOKENS is refused, yet
+  // window detection falls back to 200k — [1m] is the working lever.
   const res = cliproxyContributor("claudemix", { accountId: ACCOUNT, model: "claude-fable-5" }, DIR);
   assert.ok(res);
-  assert.equal(res.env.ANTHROPIC_MODEL, "accabcdef12/claude-fable-5");
-  assert.equal(res.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, "1048576");
+  assert.equal(res.env.ANTHROPIC_MODEL, "accabcdef12/claude-fable-5[1m]");
+  assert.equal(res.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, undefined, "never for claude ids");
   assert.equal(res.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, "1048576");
   assert.equal(res.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, undefined);
+});
+
+test("cliproxyContributor: a 200k-class contextWindow override suppresses the [1m] suffix", async () => {
+  const dir = await daemonDirWithSeeded([
+    { provider: "claude", accountId: ACCOUNT },
+    { provider: "claude", accountId: OTHER }
+  ]);
+  const stateFile = cliproxyStateFile(dir);
+  const state = JSON.parse(await readFile(stateFile, "utf8"));
+  state.modelOverrides = { "claude-3-5-haiku": { contextWindow: 200000 } };
+  await writeFile(stateFile, JSON.stringify(state));
+  const res = cliproxyContributor("claudemix", { accountId: ACCOUNT, model: "claude-3-5-haiku" }, dir);
+  assert.ok(res);
+  assert.equal(res.env.ANTHROPIC_MODEL, "accabcdef12/claude-3-5-haiku", "no [1m] on a 200k-class model");
 });
 
 test("cliproxyContributor: a BARE claudemix launch (sole seeded claude account) stays arming-only", async () => {
