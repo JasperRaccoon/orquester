@@ -655,7 +655,15 @@ export interface AppState {
     force?: boolean
   ) => Promise<{ ok: boolean; affectedSessions?: number }>;
   setCliProxyConfig: (
-    cfg: { defaultModel?: string; backgroundModel?: string; claudeDefaultModel?: string },
+    cfg: {
+      defaultModel?: string;
+      backgroundModel?: string;
+      claudeDefaultModel?: string;
+      modelOverrides?: Record<
+        string,
+        { contextWindow?: number; compactWindow?: number; compactPct?: number }
+      >;
+    },
     force?: boolean
   ) => Promise<CliProxyStatus | CliProxyMutationRefusal>;
   installAgent: (id: string) => Promise<void>;

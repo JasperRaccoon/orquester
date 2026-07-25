@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Check, Loader2, Power, RefreshCw, X } from "lucide-react";
 import type { CliProxyProviderId, CliProxyProviderStatus, CliProxyStatus } from "@orquester/api";
-import { CURATED_PROXY_MODEL_IDS } from "@orquester/config";
+import { CURATED_PROXY_MODEL_IDS, CURATED_PROXY_MODELS } from "@orquester/config";
 import { cn } from "../../lib/cn";
 import { Button, Input } from "../ui";
 import { useAppStore } from "../../store/app";
@@ -122,6 +122,21 @@ export const ModelProxySettings: React.FC = () => {
 
   const enabled = status.state !== "off";
   const working = busy || isBusyState(status.state);
+
+  // Overrides are replaced wholesale by the route, so every edit sends the full
+  // next record; an entry with no fields left is dropped (back to curated).
+  const saveOverride = (
+    id: string,
+    patch: { contextWindow?: number; compactWindow?: number; compactPct?: number }
+  ) => {
+    const current = status.modelOverrides ?? {};
+    const merged = { ...(current[id] ?? {}), ...patch };
+    const cleaned = Object.fromEntries(Object.entries(merged).filter(([, v]) => v !== undefined));
+    const next = { ...current };
+    if (Object.keys(cleaned).length === 0) delete next[id];
+    else next[id] = cleaned;
+    run(() => setCliProxyConfig({ modelOverrides: next }));
+  };
 
   const toggle = () => {
     if (enabled) {
@@ -246,7 +261,77 @@ export const ModelProxySettings: React.FC = () => {
           </p>
         )}
       </section>
+
+      {/* Context windows — per-model compact tuning (spec §3.2). Values are the
+          launch-time env knobs; blank = curated default. */}
+      <section className="space-y-2">
+        <h3 className="text-sm font-medium text-neutral-200">Context windows</h3>
+        <p className="text-xs text-neutral-500">
+          Per-model context ceiling and auto-compact window for proxy launches. Blank fields use
+          the built-in defaults; changes apply to new tabs (no proxy restart).
+        </p>
+        {CURATED_PROXY_MODELS.map((m) => {
+          const o = status.modelOverrides[m.id] ?? {};
+          return (
+            <div key={m.id} className="flex items-center gap-2 text-sm">
+              <span className="w-32 truncate text-neutral-300">{m.id}</span>
+              <NumberField
+                label="window"
+                placeholder={String(m.contextWindow)}
+                value={o.contextWindow}
+                disabled={busy}
+                onCommit={(v) => saveOverride(m.id, { contextWindow: v })}
+              />
+              <NumberField
+                label="compact at"
+                placeholder={String(m.compactWindow ?? m.contextWindow)}
+                value={o.compactWindow}
+                disabled={busy}
+                onCommit={(v) => saveOverride(m.id, { compactWindow: v })}
+              />
+              <NumberField
+                label="pct"
+                placeholder={m.compactPct !== undefined ? String(m.compactPct) : "default"}
+                value={o.compactPct}
+                disabled={busy}
+                onCommit={(v) => saveOverride(m.id, { compactPct: v })}
+              />
+            </div>
+          );
+        })}
+      </section>
     </div>
+  );
+};
+
+const NumberField: React.FC<{
+  label: string;
+  placeholder: string;
+  value: number | undefined;
+  disabled: boolean;
+  onCommit: (v: number | undefined) => void;
+}> = ({ label, placeholder, value, disabled, onCommit }) => {
+  const [text, setText] = useState(value === undefined ? "" : String(value));
+  useEffect(() => setText(value === undefined ? "" : String(value)), [value]);
+  const commit = () => {
+    if (text.trim() === "") return onCommit(undefined);
+    const n = Number(text);
+    if (Number.isInteger(n) && n > 0) onCommit(n);
+    else setText(value === undefined ? "" : String(value)); // revert invalid input
+  };
+  return (
+    <label className="flex items-center gap-1 text-xs text-neutral-500">
+      {label}
+      <Input
+        className="w-24"
+        value={text}
+        placeholder={placeholder}
+        disabled={disabled}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => e.key === "Enter" && commit()}
+      />
+    </label>
   );
 };
 
