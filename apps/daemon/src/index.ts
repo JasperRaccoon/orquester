@@ -956,7 +956,7 @@ interface CliProxyRouteManager {
     force: boolean
   ): Promise<{ ok: boolean; affectedSessions?: number; error?: string }>;
   seedProvider(
-    req: { provider: "codex" | "claude"; accountId: string },
+    req: { provider: "codex" | "claude"; accountId: string; label?: string },
     read: (provider: "codex" | "claude", accountId: string) => Promise<unknown>
   ): Promise<CliProxyProviderStatus>;
   unseedProvider(req: { provider: "codex" | "claude"; accountId: string }): Promise<CliProxyProviderStatus>;
@@ -967,6 +967,9 @@ interface CliProxyRouteManager {
 interface CliProxyRouteAccounts {
   homePath(agent: string, id: string): string;
   markProxyOwned(id: string, owned: boolean): Promise<void>;
+  /** Human-facing label of a managed account (Claude credentials carry no email,
+   *  so without this the seeded entry displays the raw account UUID). */
+  accountLabel?(id: string): string | undefined;
 }
 
 /** On-disk credential filename per managed agent (the seed route's read source). */
@@ -1126,7 +1129,11 @@ export function registerCliProxyRoutes(
     };
     let status: CliProxyProviderStatus;
     try {
-      status = await manager.seedProvider({ provider, accountId }, read);
+      const accountLabel = agentAccounts.accountLabel?.(accountId);
+      status = await manager.seedProvider(
+        { provider, accountId, ...(accountLabel !== undefined ? { label: accountLabel } : {}) },
+        read
+      );
     } catch (err) {
       if ((err as { code?: string }).code === "ORQ_CRED_MISSING") {
         return reply.code(404).send({ error: "account credential not found", accountId });
@@ -2621,7 +2628,11 @@ export function createServer(
     manager: services.cliproxy,
     mode: options.mode,
     daemonDir: resolved.daemonDir,
-    agentAccounts: services.agentAccounts
+    agentAccounts: {
+      homePath: (agent, id) => services.agentAccounts.homePath(agent, id),
+      markProxyOwned: (id, owned) => services.agentAccounts.markProxyOwned(id, owned),
+      accountLabel: (id) => services.agentAccounts.list().accounts.find((a) => a.id === id)?.label
+    }
   });
 
   // Sessions (PTYs)

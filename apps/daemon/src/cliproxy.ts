@@ -457,7 +457,7 @@ export class CliProxyManager {
    * proxy-owned via the accounts service (Task 3).
    */
   seedProvider(
-    req: { provider: "codex" | "claude"; accountId: string },
+    req: { provider: "codex" | "claude"; accountId: string; label?: string },
     read: (provider: "codex" | "claude", accountId: string) => Promise<unknown>
   ): Promise<CliProxyProviderStatus> {
     return this.transition(async () => {
@@ -481,7 +481,9 @@ export class CliProxyManager {
           ? String((storage as Record<string, unknown>).email)
           : undefined;
       const lastVerifiedAt = new Date(this.adapters.now()).toISOString();
-      const label = email ?? req.accountId;
+      // Managed-account label first (human-facing; Claude credentials carry no
+      // email, which used to leave the raw UUID as the display label).
+      const label = req.label ?? email ?? req.accountId;
       this.seededAccounts.set(req.accountId, {
         id: req.accountId,
         provider: req.provider,

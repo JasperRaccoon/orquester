@@ -397,7 +397,7 @@ const ProviderRow: React.FC<{
           ))}
         {ok && !isOpenRouter && (
           <Button size="sm" variant="outline" disabled={busy} onClick={() => setSeeding((v) => !v)}>
-            <RefreshCw size={12} /> Re-seed
+            <RefreshCw size={12} /> Seed / Re-seed
           </Button>
         )}
       </div>
@@ -422,6 +422,11 @@ const ProviderRow: React.FC<{
               >
                 <span className="min-w-0 flex-1 truncate">{a.label}</span>
                 {a.email ? <span className="shrink-0 text-xs text-neutral-500">{a.email}</span> : null}
+                {seeded.some((s) => s.id === a.id) ? (
+                  <span className="shrink-0 text-[10px] text-emerald-400/70">seeded · click to refresh</span>
+                ) : (
+                  <span className="shrink-0 text-[10px] text-neutral-500">not seeded · click to add</span>
+                )}
               </button>
             ))
           )}

@@ -1549,3 +1549,46 @@ test("session model gate: model on refId 'claude' → 400; 'claudex' passes thro
   if (passed.ok) assert.equal(passed.effectiveModel, "kimi-k3");
   assert.deepEqual(seen, [{ entryId: "claudex", model: "kimi-k3" }], "claudex is routed through validateModel");
 });
+
+test("seedProvider: a managed-account label wins over converted email/UUID (claude has no email)", async () => {
+  const h = setup();
+  h.setProbe({ ok: true, reachable: true, models: ["claude-fable-5"] });
+  await h.mgr.enable();
+  const accountId = "7f46e45d-1111-2222-3333-444455556666";
+  const creds = {
+    claudeAiOauth: {
+      accessToken: "at",
+      refreshToken: "rt",
+      expiresAt: Date.now() + 3600_000
+    }
+  };
+  const status = await h.mgr.seedProvider(
+    { provider: "claude", accountId, label: "therealeduard465@gmail.com" },
+    async () => creds
+  );
+  assert.equal(status.state, "ok");
+  const acct = h.mgr.status().accounts.find((a) => a.id === accountId);
+  assert.equal(acct?.label, "therealeduard465@gmail.com", "label from the managed account, not the UUID");
+  const persisted = parseCliProxyState(
+    JSON.parse(await readFile(cliproxyStateFile(h.daemonDir), "utf8"))
+  );
+  assert.equal(
+    persisted.seededAccounts.find((a) => a.accountId === accountId)?.label,
+    "therealeduard465@gmail.com"
+  );
+});
+
+test("seedProvider: second claude account seeds ALONGSIDE the first (multi-account routing)", async () => {
+  const h = setup();
+  h.setProbe({ ok: true, reachable: true, models: ["claude-fable-5"] });
+  await h.mgr.enable();
+  const mk = (at: string) => ({
+    claudeAiOauth: { accessToken: at, refreshToken: "rt", expiresAt: Date.now() + 3600_000 }
+  });
+  await h.mgr.seedProvider({ provider: "claude", accountId: "14137047-aaaa-bbbb-cccc-ddddeeeeffff", label: "a@x.com" }, async () => mk("a1"));
+  await h.mgr.seedProvider({ provider: "claude", accountId: "7f46e45d-aaaa-bbbb-cccc-ddddeeeeffff", label: "b@x.com" }, async () => mk("b1"));
+  const claude = h.mgr.status().accounts.filter((a) => a.provider === "claude");
+  assert.equal(claude.length, 2, "both claude accounts seeded");
+  assert.ok(existsSync(join(cliproxyDir(h.daemonDir), "auth", "claude-acc14137047.json")));
+  assert.ok(existsSync(join(cliproxyDir(h.daemonDir), "auth", "claude-acc7f46e45d.json")));
+});
