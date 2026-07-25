@@ -733,9 +733,27 @@ export function compactEnvForModel(
   model: string,
   overrides?: CliProxyModelOverrides
 ): CompactEnv | null {
+  const hadPrefix = /^acc[0-9a-fA-F]+\//.test(model);
   let bare = model.replace(/^acc[0-9a-fA-F]+\//, "");
   if (bare.startsWith("claude")) {
-    return { autoCompactWindow: CLAUDE_ARMING_COMPACT_WINDOW };
+    // Bare claude ids are natively recognized — the arming value alone restores
+    // proactive compaction and Claude Code's own window detection stays correct.
+    if (!hadPrefix) return { autoCompactWindow: CLAUDE_ARMING_COMPACT_WINDOW };
+    // A PREFIXED claude id (multi-account routing) is NOT recognized by Claude
+    // Code and silently falls back to a 200k window — wasting ~80% of a 1M
+    // model (fable/opus-5/sonnet-5 are all 1M-class, and the OAuth route was
+    // probed serving >456k). MAX_CONTEXT_TOKENS applies directly to
+    // unrecognized ids, so declare the current-gen 1M explicitly; overrides
+    // (keyed by the BARE id) adjust older 200k-class claude models.
+    const override = overrides?.[bare];
+    const contextWindow = override?.contextWindow ?? CLAUDE_ARMING_COMPACT_WINDOW;
+    const env: CompactEnv = {
+      maxContextTokens: contextWindow,
+      autoCompactWindow: override?.compactWindow ?? contextWindow
+    };
+    const pct = override?.compactPct;
+    if (pct !== undefined) env.autoCompactPct = pct;
+    return env;
   }
   // The OpenRouter full name routes the same model as its curated alias
   // (config.yaml maps moonshotai/kimi-k3 → kimi-k3) — resolve them identically

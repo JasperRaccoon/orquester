@@ -828,6 +828,7 @@ export function cliproxyContributor(
   }
   const state = readCliProxyState(daemonDir);
   let accountId: string | undefined;
+  let launchedModel: string | undefined;
   if (ctx.model) {
     // An OpenRouter/Kimi model is served by the shared keyless OpenRouter provider,
     // never a seeded per-account credential — emit it BARE regardless of accountId
@@ -843,6 +844,7 @@ export function cliproxyContributor(
     const prefixed = routesToAccount && needsAccountPrefix(state, ctx.accountId as string);
     const effectiveModel = prefixed ? `${accountPrefix(ctx.accountId)}/${ctx.model}` : ctx.model;
     env.ANTHROPIC_MODEL = effectiveModel;
+    launchedModel = effectiveModel;
     // Deliberately no CLAUDE_CODE_SUBAGENT_MODEL: subagents inherit the current
     // main model, so an in-session /model switch applies to them too.
     if (routesToAccount) accountId = ctx.accountId;
@@ -850,9 +852,12 @@ export function cliproxyContributor(
   // Per-launch compact env (spec 2026-07-25-compact-parity-design.md §3.2):
   // proactive auto-compaction is gated off behind a third-party base URL
   // (claude-code #65585), so AUTO_COMPACT_WINDOW is mandatory arming for every
-  // launcher. Resolution is per-model; a modelless claudemix launch is the
-  // Claude main loop, a modelless claudex launch runs the configured default.
-  const compactModel = ctx.model ?? (entryId === "claudemix" ? "claude" : state?.defaultModel);
+  // launcher. Resolved from the EFFECTIVE model — a prefixed claude id is not
+  // recognized by Claude Code (200k fallback) and needs an explicit window,
+  // where the bare form would be natively recognized. A modelless claudemix
+  // launch is the Claude main loop; a modelless claudex launch runs the
+  // configured default.
+  const compactModel = launchedModel ?? (entryId === "claudemix" ? "claude" : state?.defaultModel);
   if (compactModel) {
     const compact = compactEnvForModel(compactModel, state?.modelOverrides);
     if (compact) {

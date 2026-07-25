@@ -124,12 +124,24 @@ test("cliproxyContributor: kimi launch emits 1M window, 450k compact window, no 
   assert.equal(res.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, undefined);
 });
 
-test("cliproxyContributor: claudemix claude launch gets the arming window only", () => {
+test("cliproxyContributor: a PREFIXED claudemix launch declares the 1M window explicitly", () => {
+  // Unreadable state (DIR) forces the routing prefix; the prefixed id is not
+  // recognized by Claude Code (200k fallback), so MAX_CONTEXT_TOKENS must ride.
   const res = cliproxyContributor("claudemix", { accountId: ACCOUNT, model: "claude-fable-5" }, DIR);
   assert.ok(res);
+  assert.equal(res.env.ANTHROPIC_MODEL, "accabcdef12/claude-fable-5");
+  assert.equal(res.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, "1048576");
   assert.equal(res.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, "1048576");
-  assert.equal(res.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, undefined, "never for claude ids");
   assert.equal(res.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, undefined);
+});
+
+test("cliproxyContributor: a BARE claudemix launch (sole seeded claude account) stays arming-only", async () => {
+  const dir = await daemonDirWithSeeded([{ provider: "claude", accountId: ACCOUNT }]);
+  const res = cliproxyContributor("claudemix", { accountId: ACCOUNT, model: "claude-fable-5" }, dir);
+  assert.ok(res);
+  assert.equal(res.env.ANTHROPIC_MODEL, "claude-fable-5", "sole account launches bare");
+  assert.equal(res.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, "1048576");
+  assert.equal(res.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, undefined, "native recognition — no override");
 });
 
 test("cliproxyContributor: claudemix modelless launch still gets the arming window", () => {

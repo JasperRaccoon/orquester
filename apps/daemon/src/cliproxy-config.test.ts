@@ -52,13 +52,24 @@ test("compactEnvForModel: acc-prefixed model resolves like its bare id", () => {
   });
 });
 
-test("compactEnvForModel: claude ids (bare or prefixed) get the arming value only", () => {
+test("compactEnvForModel: bare claude ids get the arming value only (native window detection)", () => {
   assert.deepEqual(compactEnvForModel("claude-fable-5"), {
     autoCompactWindow: CLAUDE_ARMING_COMPACT_WINDOW
   });
+});
+
+test("compactEnvForModel: PREFIXED claude ids declare the 1M window explicitly (unrecognized by Claude Code)", () => {
   assert.deepEqual(compactEnvForModel("acc14137047/claude-opus-5"), {
+    maxContextTokens: CLAUDE_ARMING_COMPACT_WINDOW,
     autoCompactWindow: CLAUDE_ARMING_COMPACT_WINDOW
   });
+});
+
+test("compactEnvForModel: prefixed-claude override (bare-id keyed) adjusts a 200k-class claude model", () => {
+  assert.deepEqual(
+    compactEnvForModel("acc14137047/claude-3-5-haiku", { "claude-3-5-haiku": { contextWindow: 200000 } }),
+    { maxContextTokens: 200000, autoCompactWindow: 200000 }
+  );
 });
 
 test("compactEnvForModel: overrides beat curated defaults, per field", () => {
