@@ -104,7 +104,9 @@ and — when an OpenRouter key is configured — an `openai-compatibility` provi
 forcing `reasoning.effort: high` on all `gpt-*` is dropped entirely: it can't be scoped
 to "the main model" when the main model is chosen per launch and the config is static
 (and restarts are refused while sessions run), and a blanket override silently bills the
-haiku-slot/background calls (title generation, compaction) as high-effort Sol. Effort is
+haiku-slot/background calls (title generation) as high-effort Sol. (Compaction runs on the
+MAIN conversation model, not the haiku slot — see 2026-07-25-compact-parity-design.md §1.)
+Effort is
 owned client-side (`CLAUDE_CODE_ALWAYS_ENABLE_EFFORT=1` + per-launch effort env/flags).
 `payload.override` is reserved for provider-constraint clamps only (e.g. Kimi
 temperature range [0,1]). The §8 spike measures real cost per slot.
