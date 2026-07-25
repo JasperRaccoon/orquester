@@ -67,6 +67,11 @@ test("projections: token==apiKey; claudex.env contains ANTHROPIC_MODEL + CLAUDE_
   assert.ok(!/^ANTHROPIC_MODEL=/m.test(claudemix), "claudemix has no main model override");
   assert.ok(claudemix.includes("ANTHROPIC_CUSTOM_MODEL_OPTION=gpt-5.6-sol"), "claudemix custom GPT row");
 
+  // Client-side tool search re-armed in both launchers (auto-disabled on a
+  // non-first-party base URL; verified safe through the proxy on all routes).
+  assert.ok(claudex.includes("ENABLE_TOOL_SEARCH=true"), "claudex tool search on");
+  assert.ok(claudemix.includes("ENABLE_TOOL_SEARCH=true"), "claudemix tool search on");
+
   // With an OpenRouter key, claudex gains the Kimi Fable slot.
   await writeProjections(dir, { ...secrets, openRouterKey: "OR_KEY" }, state);
   const claudexOr = await readFile(join(dir, "env", "claudex.env"), "utf8");

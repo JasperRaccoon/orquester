@@ -174,7 +174,13 @@ export async function writeProjections(
     // kimi-k3 (1M), and a large subagent died with "Prompt is too long".
     ["CLAUDE_CODE_ALWAYS_ENABLE_EFFORT", "1"],
     ["CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY", "3"],
-    ["ENABLE_TOOL_SEARCH", "false"],
+    // Deferred/on-demand tool loading is auto-disabled on a non-first-party
+    // ANTHROPIC_BASE_URL; this re-arms it. Safe here because tst mode is fully
+    // client-side (ToolSearch is a local tool; deferred tools are omitted from
+    // the request) — verified 2026-07-25 end-to-end through CLIProxyAPI
+    // v7.2.95+orq1 on all three routes (codex/gpt, openrouter/kimi, claude
+    // oauth). Saves the ~50k+ upfront MCP/deferred-tool schema overhead.
+    ["ENABLE_TOOL_SEARCH", "true"],
     ["CLAUDE_CODE_NO_FLICKER", "1"],
     ["CLAUDE_CONFIG_DIR", claudexHome]
   ]);
@@ -190,6 +196,9 @@ export async function writeProjections(
     ["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME", state.defaultModel],
     ["ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION", "GPT via the managed proxy"],
     ["CLAUDE_CODE_ALWAYS_ENABLE_EFFORT", "1"],
+    // Same rationale as claudex above; covers /model switches too — all three
+    // proxy routes tolerate the tst-mode wire shape.
+    ["ENABLE_TOOL_SEARCH", "true"],
     ["CLAUDE_CODE_NO_FLICKER", "1"]
   ]);
   await writeHardened(join(envDir, "claudex.env"), claudexEnv, 0o600);
