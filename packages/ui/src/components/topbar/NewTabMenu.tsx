@@ -30,16 +30,6 @@ const PROXY_ACCOUNT_FAMILY: Record<string, "claude" | "codex"> = {
   claudex: "codex"
 };
 
-/**
- * Distinct icon tint per proxy launcher — the two ids differ by only two letters
- * (`claudex`/`claudemix`), so a shared generic bot icon reads as one entry;
- * colouring them apart is a §5 usability requirement.
- */
-const PROXY_ICON_TONE: Record<string, string> = {
-  claudex: "text-amber-400",
-  claudemix: "text-violet-400"
-};
-
 /** Model chips for `claudex`: the curated picks, not the raw catalog dump. */
 const DEFAULT_PROXY_MODELS: string[] = [...CURATED_PROXY_MODEL_IDS];
 
@@ -133,7 +123,7 @@ const AgentRow: React.FC<{ agent: RegistryEntry }> = ({ agent }) => {
         className="mb-0.5 flex w-full cursor-not-allowed items-center gap-2 rounded px-2 py-1.5 text-left text-sm text-neutral-500"
         title={agent.disabledReason ?? "Unavailable"}
       >
-        <span className={cn("flex h-4 w-4 items-center justify-center opacity-60", PROXY_ICON_TONE[agent.id])}>
+        <span className="flex h-4 w-4 items-center justify-center opacity-60">
           {getRegistryIcon("agent", agent.id, 14)}
         </span>
         <span className="min-w-0 flex-1 truncate">
@@ -150,7 +140,7 @@ const AgentRow: React.FC<{ agent: RegistryEntry }> = ({ agent }) => {
     <>
       <DropdownItem
         icon={
-          <span className={cn("flex h-4 w-4 items-center justify-center", PROXY_ICON_TONE[agent.id])}>
+          <span className="flex h-4 w-4 items-center justify-center">
             {getRegistryIcon("agent", agent.id, 14)}
           </span>
         }
