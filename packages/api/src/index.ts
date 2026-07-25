@@ -274,6 +274,13 @@ export interface FsCreateRequest {
   kind: "file" | "dir";
 }
 
+export interface FsRenameRequest {
+  /** Absolute path (under fsRoot) of the entry to rename. */
+  path: string;
+  /** New basename — a single segment, no separators. The parent dir is unchanged. */
+  newName: string;
+}
+
 export interface FsWriteRequest {
   path: string;
   content: string;
@@ -1180,6 +1187,10 @@ export class HttpOrquesterApiClient implements OrquesterApi {
 
   deleteFsEntry(path: string): Promise<{ ok: true }> {
     return this.delete(`/api/fs?path=${encodeURIComponent(path)}`);
+  }
+
+  renameFsEntry(path: string, newName: string): Promise<{ ok: true }> {
+    return this.post("/api/fs/rename", { path, newName });
   }
 
   eventsUrl(): string {

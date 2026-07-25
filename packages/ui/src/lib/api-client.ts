@@ -435,6 +435,10 @@ export class ApiClient {
     return this.send("DELETE", "/api/fs", { query: { path } });
   }
 
+  renameFsEntry(path: string, newName: string): Promise<{ ok: true }> {
+    return this.send("POST", "/api/fs/rename", { body: { path, newName } });
+  }
+
   // --- To-do lists (daemon-persisted, synced) ------------------------------
 
   listTodos(scope: TodoScope, refKey: string, signal?: AbortSignal): Promise<TodoListRecord[]> {
