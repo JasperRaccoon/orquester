@@ -1452,13 +1452,16 @@ test("cliproxyContributor: a real account prefixes the effective model; System/u
   );
   assert.ok(withAccount);
   assert.equal(withAccount.env.ANTHROPIC_MODEL, "acc14137047/gpt-5.6-sol");
-  assert.equal(withAccount.env.CLAUDE_CODE_SUBAGENT_MODEL, "acc14137047/gpt-5.6-sol");
+  assert.equal(
+    withAccount.env.CLAUDE_CODE_SUBAGENT_MODEL,
+    undefined,
+    "no subagent pin — subagents inherit the current main model"
+  );
 
   // No account → the effective model is unprefixed (keyless OpenRouter/Kimi path).
   const noAccount = cliproxyContributor("claudex", { model: "gpt-5.6-sol" }, daemonDir);
   assert.ok(noAccount);
   assert.equal(noAccount.env.ANTHROPIC_MODEL, "gpt-5.6-sol");
-  assert.equal(noAccount.env.CLAUDE_CODE_SUBAGENT_MODEL, "gpt-5.6-sol");
 
   // The System sentinel is the host identity — treated as no account (no prefix).
   const system = cliproxyContributor(
@@ -1482,7 +1485,7 @@ test("cliproxyContributor: an OpenRouter/Kimi model is emitted bare even with an
   const kimi = cliproxyContributor("claudex", { accountId, model: "kimi-k3" }, daemonDir);
   assert.ok(kimi);
   assert.equal(kimi.env.ANTHROPIC_MODEL, "kimi-k3");
-  assert.equal(kimi.env.CLAUDE_CODE_SUBAGENT_MODEL, "kimi-k3");
+  assert.equal(kimi.env.CLAUDE_CODE_SUBAGENT_MODEL, undefined, "no subagent pin");
 
   // A non-OpenRouter model with the same account IS prefixed (the routing default).
   const gpt = cliproxyContributor("claudex", { accountId, model: "gpt-5.6-sol" }, daemonDir);

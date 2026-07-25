@@ -111,7 +111,7 @@ function renderWrapper(entryId: "claudex" | "claudemix", envFile: string, tokenF
     'ANTHROPIC_AUTH_TOKEN="$(cat "$TOKEN_FILE")"; export ANTHROPIC_AUTH_TOKEN',
     `if [ "${entryId}" = "claudex" ] && [ "\${1:-}" = "--model" ]; then`,
     "  case \"${2:-}\" in *[!A-Za-z0-9._/-]*|'') echo \"claudex: invalid --model\" >&2; exit 2;; esac",
-    '  export ANTHROPIC_MODEL="$2" CLAUDE_CODE_SUBAGENT_MODEL="$2"; shift 2',
+    '  export ANTHROPIC_MODEL="$2"; shift 2',
     "fi",
     'exec claude "$@"',
     ""
@@ -168,7 +168,10 @@ export async function writeProjections(
           ["ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION", "Moonshot Kimi via OpenRouter"]
         ] as Array<[string, string]>)
       : []),
-    ["CLAUDE_CODE_SUBAGENT_MODEL", state.defaultModel],
+    // No CLAUDE_CODE_SUBAGENT_MODEL pin: unset, subagents inherit the session's
+    // CURRENT model — so /model switches carry over. A pin to defaultModel left
+    // subagents on gpt-5.6-sol (~200k window) after the main loop moved to
+    // kimi-k3 (1M), and a large subagent died with "Prompt is too long".
     ["CLAUDE_CODE_ALWAYS_ENABLE_EFFORT", "1"],
     ["CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY", "3"],
     ["ENABLE_TOOL_SEARCH", "false"],

@@ -828,7 +828,8 @@ export function cliproxyContributor(
     const prefixed = routesToAccount && needsAccountPrefix(daemonDir, ctx.accountId as string);
     const effectiveModel = prefixed ? `${accountPrefix(ctx.accountId)}/${ctx.model}` : ctx.model;
     env.ANTHROPIC_MODEL = effectiveModel;
-    env.CLAUDE_CODE_SUBAGENT_MODEL = effectiveModel;
+    // Deliberately no CLAUDE_CODE_SUBAGENT_MODEL: subagents inherit the current
+    // main model, so an in-session /model switch applies to them too.
     if (routesToAccount) accountId = ctx.accountId;
   }
   const result: LaunchEnv = { env };

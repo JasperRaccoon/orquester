@@ -55,7 +55,11 @@ test("cliproxyContributor pins the account and prefixes the model for a real acc
   assert.ok(res);
   assert.equal(res.accountId, ACCOUNT);
   assert.equal(res.env.ANTHROPIC_MODEL, "accabcdef12/gpt-5.6-sol");
-  assert.equal(res.env.CLAUDE_CODE_SUBAGENT_MODEL, "accabcdef12/gpt-5.6-sol");
+  assert.equal(
+    res.env.CLAUDE_CODE_SUBAGENT_MODEL,
+    undefined,
+    "no subagent pin — subagents must follow in-session /model switches"
+  );
 });
 
 test("cliproxyContributor records no account for the System pick (round-robin)", () => {
