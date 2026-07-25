@@ -22,21 +22,26 @@ Request: `{ path: string, newName: string }` → `{ ok: true }`.
 
 Validation, in order:
 
-1. `path` and `newName` required, else `400 INVALID_REQUEST`.
+1. `path` and `newName` required (`newName` a string), else `400 INVALID_REQUEST`.
 2. `newName` must be a single clean segment: non-empty after trim, no `/` or `\`,
    not `.` or `..`, else `400 INVALID_REQUEST`.
-3. `assertInsideFsRoot` on `path` (source must exist — realpath-based, as delete
-   does) → `403 FS_FORBIDDEN` outside the sandbox.
-4. Refuse to rename the workspaces root itself (compare against the realpathed
-   `fsRoot`, like the delete route) → `400 FS_ERROR`.
-5. Destination = `join(dirname(source), newName)`, re-checked with
-   `assertInsideFsRoot` (defense in depth).
+3. Refuse to rename the workspaces root itself (compare `resolve(path)` against
+   both the raw and realpathed `fsRoot`) → `400 FS_ERROR`.
+4. Sandbox the **parent** directory: `assertInsideFsRoot(fsRoot, dirname(resolve(path)))`
+   → `403 FS_FORBIDDEN` outside; source = realpathed parent + the **literal**
+   basename. The leaf is deliberately never realpathed: realpathing it would
+   follow a symlink and rename its *target* in the target's directory (pnpm
+   `node_modules` is full of such links), and on a case-insensitive filesystem it
+   folds a case-only rename (`Foo` → `foo`) back to the on-disk casing, turning
+   it into a silent no-op.
+5. If `newName` equals the current basename exactly, short-circuit `{ ok: true }`
+   (no-op). Destination = realpathed parent + `newName` — inside the sandbox by
+   construction (single validated segment), so no second realpath.
 6. **Conflict check:** `lstat(destination)`. If it exists →
    `409 { code: "FS_EXISTS", message: 'A file or folder named "<newName>" already exists.' }`.
    Exception: if source and destination are the same inode (`dev` + `ino` match —
    a case-only rename on a case-insensitive filesystem, e.g. macOS desktop), fall
-   through and allow the rename. If `newName` equals the current basename exactly,
-   short-circuit `{ ok: true }` (no-op).
+   through and allow the rename. `lstat(source)` failing (ENOENT) → `400 FS_ERROR`.
 7. `fs.rename(source, destination)`; failures → `400 FS_ERROR` with the error
    message.
 
@@ -77,7 +82,11 @@ the generic `error` strip only if reuse is awkward; otherwise reuse `error`).
 like the create input), auto-focused with the text pre-selected, prefilled with the
 current name. Enter commits; Escape cancels; blur cancels (matching the create
 input) — except immediately after a conflict, where the input stays mounted (see
-below). The row's click/context handlers are inert for the renaming row.
+below). Editing the name clears a shown conflict message. The row's click/context
+handlers are inert for the renaming row. Double-click rename is desktop-only
+(≥ md): below that breakpoint the double-tap has already opened the file and
+hidden the tree pane, which would strand an invisible editor — touch renames via
+the long-press context menu.
 
 **Commit flow:**
 
@@ -89,13 +98,21 @@ below). The row's click/context handlers are inert for the renaming row.
      refreshed by the reload below; dropping stale subtree entries and letting the
      poll refill is fine as long as keys don't point at dead paths).
    - `selectedFile`: rewrite if it is or is under `oldPath` (`selectedSize`
-     unchanged).
+     unchanged), and record the old→new mapping via `noteFileRenamed` so
+     `useFileText` keeps an open (possibly dirty) editor buffer instead of
+     re-reading and discarding unsaved edits — the bytes on disk are unchanged
+     by a rename.
    - `activeDir`: rewrite if it is or is under `oldPath`.
-   - Reload the parent dir (`loadDir(parentOf(path))`), close the editor.
+   - Reload the parent dir (`loadDir(parentOf(path))`), close the editor, then
+     prune any `childrenByPath` keys still under `oldPath` (an in-flight poll
+     response can race a dead key back in; same concern the delete flow handles).
 3. On `ApiError` with status 409: keep the input open (attempted name still in
-   place) and show the server's conflict message.
+   place) and show the server's conflict message — unless the editor already
+   blurred away while the request was in flight, in which case the message goes
+   to the top error strip instead of being silently lost.
 4. On any other error: close the editor, show "Could not rename." in the error
-   strip.
+   strip. A second Enter while a rename is in flight is ignored (re-POSTing the
+   old path would 400 after the first rename lands).
 
 ## Testing
 
