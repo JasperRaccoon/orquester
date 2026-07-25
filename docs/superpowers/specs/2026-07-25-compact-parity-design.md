@@ -19,20 +19,39 @@ must be corrected in the same change.
 
 Verified against Claude Code v2.1.219 docs and empirically on vps-a (2026-07-25):
 
-- Behind `ANTHROPIC_BASE_URL`, unknown model ids are assumed to have a **200k** window and
-  auto-compaction is **reactive-only** (waits for a context-limit error) unless
-  `CLAUDE_CODE_AUTO_COMPACT_WINDOW` is set — that env var is the proactive switch.
+- Behind `ANTHROPIC_BASE_URL`, unknown model ids are assumed to have a **200k** window — and
+  **since v2.1.161 proactive auto-compaction is gated OFF entirely on non-first-party base URLs**
+  (claude-code issues #65585/#64802; binary-confirmed `firstParty` check). Setting
+  `CLAUDE_CODE_AUTO_COMPACT_WINDOW` is the documented workaround and re-arms proactive
+  compaction — it is therefore **mandatory arming for every launcher behind our proxy,
+  including claudemix's Claude models**, not a tuning knob.
 - `CLAUDE_CODE_MAX_CONTEXT_TOKENS` overrides the assumed window, applied directly for ids not
-  recognized as Claude models (v2.1.193+). For recognized `claude-*` ids it is a no-op unless
-  `DISABLE_COMPACT` is set (which we never set). `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` (1–100) can
-  only lower the trigger; it applies to main conversations and subagents. AUTO_COMPACT_WINDOW is
-  clamped to ≥100,000.
+  recognized as Claude models (v2.1.193+; binary shows an ungated read for non-`claude-*` ids).
+  For recognized `claude-*` ids it is a no-op unless `DISABLE_COMPACT` is set (which we never
+  set). `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` (1–100) can only lower the trigger; it applies to main
+  conversations and subagents. AUTO_COMPACT_WINDOW is clamped to ≥100,000.
+- **Verified compaction internals (binary analysis, v2.1.210 + v2.1.220 concordant):** default
+  trigger = `compactWindow − 33,000` (a 20,000-token summary reserve + 13,000 margin; a user's
+  "Autocompact buffer: 33k (16.5%)" dump matches to the token). The compact request itself sends
+  the full transcript and asks `max_tokens=32,000` while only 20,000 is reserved — a
+  **12k-token regression** (older builds passed a matching 20k override; raw error
+  `198667 + 20000 > 200000` on record in #8136). Net: at the default trigger the compact
+  request's own margin is ~1k, so **any token-count drift makes the compaction request itself
+  overflow the provider and fail** — this is the reported "kimi compaction fails because context
+  is already full" failure mode. Kimi drifts worst: Claude Code's between-turn estimates use a
+  Claude-style tokenizer while kimi counts heavier (3.7× measured on synthetic text), so real
+  context leads believed context.
+- **Failed compactions are silent:** notifications hidden since v2.1.41 (partially restored for
+  manual `/compact` in v2.1.216); a 3-strike circuit breaker then stops retrying with only a
+  debug log. Combined with the reactive-wording mismatch below, a wedged session gives no
+  visible warning. Large absolute margins are therefore the only robust defense.
 - **Spike (proactive fire):** a throwaway PTY session on `gpt-5.6-luna` through the managed
   proxy with `autoCompactEnabled:true`, `MAX_CONTEXT_TOKENS=200000`, `AUTO_COMPACT_WINDOW=100000`,
   `PCT_OVERRIDE=50` showed "N% until auto-compact" in the status line and **fired real
   compactions** — 3 completed cycles, 3 prose summary records in the transcript (no
-  tool-call-instead-of-summary failures). The rumored hard-gate behind non-first-party base URLs
-  does not reproduce. The session ended in the by-design thrashing guard because the test's
+  tool-call-instead-of-summary failures). This is consistent with the #65585 gate: the spike had
+  `AUTO_COMPACT_WINDOW` set, which re-arms proactive compaction behind a third-party base URL.
+  The session ended in the by-design thrashing guard because the test's
   single 100k tool output can never fit the 100k test window post-compact — not a stack failure.
 - **Ceilings (measured through our proxy):**
   - `gpt-5.6-sol` via Codex OAuth: accepted 173k, subagent died past that; `gpt-5.6-terra` and
@@ -74,18 +93,25 @@ Verified against Claude Code v2.1.219 docs and empirically on vps-a (2026-07-25)
   `{ id, contextWindow, compactWindow?, compactPct? }`, with a derived plain-id array for the two
   existing UI call sites. Defaults from the measured numbers:
 
-  | model | contextWindow | compactWindow | compactPct | trigger ≈ |
+  | model | contextWindow | compactWindow | compactPct | trigger |
   |---|---|---|---|---|
   | gpt-5.6-sol | 200,000 | 200,000 | 75 | 150k |
   | gpt-5.6-terra | 200,000 | 200,000 | 75 | 150k |
   | gpt-5.6-luna | 200,000 | 200,000 | 75 | 150k |
-  | kimi-k3 | 1,048,576 | 450,000 | unset (default) | ~435k |
+  | kimi-k3 | 1,048,576 | 450,000 | unset (default) | 417k (450k − 33k) |
+  | any `claude-*` (claudemix) | — (native) | 200,000 | unset (default) | 167k (native formula) |
 
-  Rationale: the gpt trigger leaves ~50k headroom below the measured wall (sol accepted 173k,
-  rejected by 205k) for the summarization request + output budget. Kimi deliberately compacts
-  around ~435k despite the 1M window — summarizing a near-1M transcript is a slow, expensive,
-  failure-prone single request; the status line will show the true 1M meter (documented
-  decoupling), which is intended: honest capacity display, early compaction.
+  Rationale: the gpt trigger (75% of the compact window) leaves ~50k headroom below the measured
+  wall (sol accepted 173k, rejected by 205k) — comfortably covering the compact request's own
+  32k `max_tokens` plus tokenizer drift, which is exactly the margin the default 33k buffer
+  lacks (the community kimi failure). Kimi compacts at 417k of its real 1M — the ~600k slack
+  absorbs the worst-case drift and the 12k reserve regression outright, and keeps the
+  summarization request itself far from any wall; the status line shows the true 1M meter
+  (documented decoupling — honest capacity, early compaction, intended). Claude models get
+  `compactWindow=200,000` purely as the **#65585 arming value** — behind our base URL proactive
+  compaction is otherwise gated off even for genuine Claude models; 200k reproduces native
+  behavior exactly (trigger 167k), and reactive recovery also still works there since Anthropic's
+  own error wording passes through.
 
 - **Overrides:** `cliProxyState` gains an optional `modelOverrides` record
   (`{ [modelId]: { contextWindow?, compactWindow?, compactPct? } }`), zod-defaulted (additive —
@@ -96,14 +122,18 @@ Verified against Claude Code v2.1.219 docs and empirically on vps-a (2026-07-25)
 
 - **Launch-time emission:** `cliproxyContributor` (which already receives the per-launch model)
   emits, keyed on the **bare** model id (routing prefix `acc<hex>/` stripped first):
-  - nothing when the bare id starts with `claude` — claudemix and Claude-family launches keep
-    fully native behavior;
+  - when the bare id starts with `claude` (claudemix, Claude-family launches):
+    `CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000` **only** — the #65585 arming value that restores
+    native proactive behavior behind a third-party base URL. No `MAX_CONTEXT_TOKENS` (no-op /
+    gated for recognized Claude ids), no `PCT_OVERRIDE` (native 33k-buffer formula applies).
   - otherwise `CLAUDE_CODE_MAX_CONTEXT_TOKENS=<contextWindow>`,
     `CLAUDE_CODE_AUTO_COMPACT_WINDOW=<compactWindow ?? contextWindow>`, and
     `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=<compactPct>` when set — resolved as
-    override → curated default → (uncurated id) no emission.
+    override → curated default → (uncurated non-claude id) no emission (safe: it stays
+    reactive-only, same as today).
   - When no model rides the launch (claudex default-model launch), resolve against the
-    configured `defaultModel` the same way.
+    configured `defaultModel` the same way. claudemix launches with no model resolve as
+    `claude-*` (arming value only).
 
 ### 3.3 Accepted limitations (explicit)
 
@@ -113,23 +143,32 @@ Verified against Claude Code v2.1.219 docs and empirically on vps-a (2026-07-25)
   `[1m]`-suffix per-model alternative was considered and rejected for now — extra moving parts,
   unverified proxy passthrough.)
 - **Prefixed Claude ids** (`accXX/claude-*`, only with ≥2 seeded Claude accounts) are not
-  recognized by Claude Code as Claude models and get the 200k assumption; we deliberately skip
-  emitting overrides for them (safe-conservative). Known cosmetic gap, revisit if multi-Claude
-  accounts become common.
+  recognized by Claude Code as Claude models and get the 200k assumption. The bare-id rule
+  treats them as Claude (prefix stripped first), so they receive the same 200k arming value —
+  which matches the assumption Claude Code applies to them anyway. Consistent, no special case.
 - **Thrashing guard:** a single tool output larger than the (window − trigger) slack can still
   wedge a session by design (3 strikes); with the production numbers this needs a ~50k+ single
   artifact on gpt. Not mitigated further.
+- **Compaction failures stay silent** (Claude Code hides them; 3-strike breaker with debug-only
+  logging). Our margins make failures unlikely, but Orquester does not add its own detection in
+  this iteration. A future improvement: watch session transcripts for climbing `preTokens`
+  without `compactMetadata.trigger:"auto"` records and surface a session warning.
 - **Compaction cost/effort:** compaction inherits the session's effort (max on claudex). A
   proxy-side effort-cap on compaction requests (detectable by the summarization marker string)
   is a **future** optimization, not in scope. Same for CLIProxyAPI-native Codex compaction and
-  `count_tokens` work (already implemented proxy-side).
+  `count_tokens` work (already implemented proxy-side). The single highest-leverage *future*
+  proxy patch (confirmed by binary analysis): rewriting provider context-overflow errors to
+  Anthropic's literal `prompt is too long: <n> tokens > <max> maximum` phrasing, which would
+  restore the reactive safety net on gpt/kimi routes — deferred because we ship the stock
+  CLIProxyAPI binary and this needs an upstream PR or a maintained patch.
 
 ## 4. Testing
 
 - Unit (contributor): per-model emission — sol/terra/luna values; kimi values; prefix-stripped
-  resolution (`acc…/gpt-5.6-sol` → sol numbers); `claude-*` and `acc…/claude-*` emit nothing;
-  override precedence (state override beats curated default); uncurated id emits nothing;
-  default-model launch resolves like an explicit pick.
+  resolution (`acc…/gpt-5.6-sol` → sol numbers); `claude-*` and `acc…/claude-*` emit the 200k
+  arming value only (no MAX_CONTEXT_TOKENS, no PCT); override precedence (state override beats
+  curated default); uncurated non-claude id emits nothing; default-model launch resolves like an
+  explicit pick; claudemix modelless launch gets the arming value.
 - Unit (settings merge): managed keys forced on existing file; other keys preserved; malformed
   file handled; file created when absent; idempotent (no write churn when converged).
 - Unit (state): `modelOverrides` roundtrip + absent-field default; `setConfig` accepts overrides
