@@ -1,0 +1,32 @@
+# Copy to deploy/targets.conf (GITIGNORED — real hosts live only there) and
+# fill in your VPSes. One [section] per host; used by ./deploy.sh.
+#
+# Keys:
+#   host      (required) IP or hostname
+#   user      (required) ssh login user
+#   sudo      yes|no (default no) — yes: remote commands run under NOPASSWD sudo
+#   key       optional ssh identity file (adds -i <key> -o IdentitiesOnly=yes);
+#             omit to let ~/.ssh/config decide
+#   domain    optional; enables the post-deploy browser smoke test and is
+#             required by `provision` (Caddy vhost)
+#   repo      git URL; required by `provision` only
+#   branch    default main
+#   ssh_opts  extra ssh flags, whitespace-separated
+#
+# No value may contain spaces, except ssh_opts.
+
+[vps-a]
+host   = 203.0.113.10
+user   = root
+key    = ~/.ssh/id_ed25519_vps
+sudo   = no
+domain = orquester.example.com
+repo   = git@github.com:you/orquester.git
+
+[vps-b]
+host   = 203.0.113.20
+user   = ubuntu
+key    = ~/.ssh/orq_deploy
+sudo   = yes
+domain = orquester.example.net
+repo   = git@github.com:you/orquester.git
