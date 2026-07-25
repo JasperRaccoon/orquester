@@ -2642,6 +2642,26 @@ export function createServer(
     }
     const effectiveModel = resolvedModel.effectiveModel;
     const modelCatalog = resolvedModel.catalog;
+    // A proxy launch pinning a managed account requires that account to be
+    // SEEDED: the acc<hex>/ routing prefix resolves against the proxy's auth
+    // files, so an unseeded pin can only 502 at runtime ("unknown provider for
+    // model acc…"). Keyless OpenRouter models carry no account and are exempt.
+    if (
+      (body.refId === "claudex" || body.refId === "claudemix") &&
+      body.accountId &&
+      body.accountId !== SYSTEM_ACCOUNT_ID &&
+      !(effectiveModel && isOpenRouterModel(effectiveModel))
+    ) {
+      const st = readCliProxyState(resolved.daemonDir);
+      const seeded = st?.seededAccounts.some((a) => a.accountId === body.accountId) ?? false;
+      if (!seeded) {
+        return reply.code(400).send({
+          code: "SESSION_UNAVAILABLE",
+          message:
+            "This account is not seeded into the model proxy. Seed it in Settings → Model proxy, or pick a seeded account."
+        });
+      }
+    }
     let summary: SessionSummary;
     try {
       summary = await sessions.create({ ...body, model: effectiveModel });

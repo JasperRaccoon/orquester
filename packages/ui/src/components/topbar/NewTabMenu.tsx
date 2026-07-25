@@ -77,7 +77,13 @@ const AgentRow: React.FC<{ agent: RegistryEntry }> = ({ agent }) => {
   // other agent draws from its own id (the pre-proxy behaviour).
   const family = PROXY_ACCOUNT_FAMILY[agent.id];
   const accountKey = family ?? agent.id;
-  const managed = (agentAccounts?.accounts ?? []).filter((a) => a.agent === accountKey);
+  // Proxy launchers may only pin accounts whose credentials are SEEDED into the
+  // proxy: an unseeded pin emits an acc<hex>/ routing prefix no auth file
+  // serves, and the session 502s at runtime ("unknown provider for model").
+  const seededIds = new Set((cliproxy?.accounts ?? []).map((a) => a.id));
+  const managed = (agentAccounts?.accounts ?? [])
+    .filter((a) => a.agent === accountKey)
+    .filter((a) => !family || seededIds.has(a.id));
 
   const options = [
     { id: SYSTEM_ACCOUNT_ID, label: "System" },
