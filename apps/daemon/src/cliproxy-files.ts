@@ -292,6 +292,26 @@ async function copyIfMissing(src: string, dst: string): Promise<void> {
  *  edits, theme, hooks — are preserved. */
 const MANAGED_HOME_SETTINGS: Record<string, unknown> = { autoCompactEnabled: true };
 
+/** Env keys scrubbed from a managed home's settings.json `env` block on every
+ *  seed pass. Model/endpoint routing belongs to the launcher env exclusively;
+ *  a copy of the SYSTEM settings.json (one-time `copyIfMissing` seed) can
+ *  smuggle these in and silently override it — a leaked
+ *  CLAUDE_CODE_SUBAGENT_MODEL=opus forced every proxy subagent (including the
+ *  gpt/kimi model-pinned agents) onto claude-opus-5 in production
+ *  (2026-07-25). Non-routing keys (MCP_TIMEOUT, …) are preserved. */
+const SCRUBBED_SETTINGS_ENV_KEYS = [
+  "CLAUDE_CODE_SUBAGENT_MODEL",
+  "ANTHROPIC_MODEL",
+  "ANTHROPIC_BASE_URL",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_DEFAULT_OPUS_MODEL",
+  "ANTHROPIC_DEFAULT_SONNET_MODEL",
+  "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+  "ANTHROPIC_DEFAULT_FABLE_MODEL",
+  "ANTHROPIC_CUSTOM_MODEL_OPTION"
+];
+
 async function mergeManagedSettings(home: string): Promise<void> {
   const file = join(home, "settings.json");
   let existing: Record<string, unknown> = {};
@@ -304,6 +324,12 @@ async function mergeManagedSettings(home: string): Promise<void> {
     // absent or malformed — managed keys alone become the file
   }
   const next = { ...existing, ...MANAGED_HOME_SETTINGS };
+  const env = next.env;
+  if (env && typeof env === "object" && !Array.isArray(env)) {
+    const scrubbed = { ...(env as Record<string, unknown>) };
+    for (const key of SCRUBBED_SETTINGS_ENV_KEYS) delete scrubbed[key];
+    next.env = scrubbed;
+  }
   if (JSON.stringify(next) === JSON.stringify(existing)) return; // no write churn
   await writeFile(file, JSON.stringify(next, null, 2), { mode: 0o600 });
 }

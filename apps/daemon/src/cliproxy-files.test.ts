@@ -156,6 +156,35 @@ test("seedHome: no system .claude.json anywhere still writes hasCompletedOnboard
   assert.equal(cj.hasCompletedOnboarding, true);
 });
 
+test("seedHome: scrubs model-routing env keys from a copied settings.json, keeps the rest", async () => {
+  const dir = await makeDir();
+  const sysDir = await mkdtemp(join(tmpdir(), "orq-sysclaude-"));
+  await writeFile(join(sysDir, ".claude.json"), "{}");
+  await writeFile(
+    join(sysDir, "settings.json"),
+    JSON.stringify({
+      theme: "dark",
+      env: { MCP_TIMEOUT: "60000", CLAUDE_CODE_SUBAGENT_MODEL: "opus", ANTHROPIC_BASE_URL: "http://stale:1" }
+    })
+  );
+
+  await seedHome(dir, "claudex", sysDir, join(sysDir, ".claude.json"));
+  const file = join(cliproxyHomeDir(dir, "claudex"), "settings.json");
+  const settings = JSON.parse(await readFile(file, "utf8"));
+  assert.equal(settings.env.CLAUDE_CODE_SUBAGENT_MODEL, undefined, "subagent pin scrubbed");
+  assert.equal(settings.env.ANTHROPIC_BASE_URL, undefined, "endpoint scrubbed");
+  assert.equal(settings.env.MCP_TIMEOUT, "60000", "non-routing env kept");
+  assert.equal(settings.theme, "dark", "other settings kept");
+  assert.equal(settings.autoCompactEnabled, true, "managed keys still merged");
+
+  // Re-seed heals a home whose settings picked the keys up from an OLD copy.
+  const polluted = { ...settings, env: { ...settings.env, CLAUDE_CODE_SUBAGENT_MODEL: "opus" } };
+  await writeFile(file, JSON.stringify(polluted));
+  await seedHome(dir, "claudex", sysDir, join(sysDir, ".claude.json"));
+  const healed = JSON.parse(await readFile(file, "utf8"));
+  assert.equal(healed.env.CLAUDE_CODE_SUBAGENT_MODEL, undefined, "existing home healed on re-seed");
+});
+
 test("seedHome: seeds managed model-pinned subagents; kimi rides the OpenRouter flag", async () => {
   const dir = await makeDir();
   const sysDir = await mkdtemp(join(tmpdir(), "orq-sysclaude-"));

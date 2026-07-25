@@ -109,7 +109,10 @@ export const REGISTRY = {
       name: "Claude Code × GPT/Kimi",
       kind: "agent",
       bin: ["claude"] as const,
-      args: ["--dangerously-skip-permissions", "--effort", "max", "--verbose"] as const,
+      // "high", not the plain-claude "max": Sol is already the slow deep tier,
+      // and max-effort turns there run into many minutes each. /effort in-tab
+      // overrides per session.
+      args: ["--dangerously-skip-permissions", "--effort", "high", "--verbose"] as const,
       env: { CLAUDE_CODE_NO_FLICKER: "1" },
       versionFlag: "--version",
       enabledAtRest: false
@@ -121,7 +124,8 @@ export const REGISTRY = {
       name: "Claude Code × Mixed",
       kind: "agent",
       bin: ["claude"] as const,
-      args: ["--dangerously-skip-permissions", "--effort", "max", "--verbose"] as const,
+      // "high" like claudex — GPT/Kimi side channels get painfully slow at max.
+      args: ["--dangerously-skip-permissions", "--effort", "high", "--verbose"] as const,
       env: { CLAUDE_CODE_NO_FLICKER: "1" },
       versionFlag: "--version",
       enabledAtRest: false
