@@ -872,6 +872,7 @@ const DaemonSettings: React.FC = () => {
           <PasswordVerify
             autoFocus
             message="Retype your password to turn this off."
+            onCancel={() => setConfirmDisable(false)}
             onVerified={() => {
               setConfirmDisable(false);
               setProtectArchived(false).catch(() =>

@@ -11,6 +11,8 @@ import {
 export interface PasswordVerifyProps {
   /** Called once the typed password matches the stored credential hash. */
   onVerified: () => void;
+  /** When given, renders a Cancel button that dismisses the surrounding surface. */
+  onCancel?: () => void;
   /** Short explainer shown above the field. */
   message?: string;
   autoFocus?: boolean;
@@ -34,6 +36,7 @@ export interface PasswordVerifyProps {
  */
 export const PasswordVerify: React.FC<PasswordVerifyProps> = ({
   onVerified,
+  onCancel,
   message,
   autoFocus
 }) => {
@@ -56,7 +59,6 @@ export const PasswordVerify: React.FC<PasswordVerifyProps> = ({
       onVerified();
     }
     // Inert-gate auto-pass fires once per mount by design.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   if (isLocal) {
@@ -71,6 +73,11 @@ export const PasswordVerify: React.FC<PasswordVerifyProps> = ({
         <p className="text-xs text-neutral-400">
           Sign in again to unlock this — no stored credential is available on this device.
         </p>
+        {onCancel && (
+          <Button size="sm" variant="ghost" onClick={onCancel}>
+            Cancel
+          </Button>
+        )}
       </div>
     );
   }
@@ -109,9 +116,16 @@ export const PasswordVerify: React.FC<PasswordVerifyProps> = ({
         className="h-8 w-full rounded-md border border-neutral-700 bg-neutral-900 px-2.5 text-sm text-neutral-100 placeholder:text-neutral-500 focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
       />
       {error && <p className="text-xs text-red-400">Wrong password. Try again.</p>}
-      <Button size="sm" disabled={!value} onClick={submit}>
-        Unlock
-      </Button>
+      <div className="flex items-center gap-2">
+        <Button size="sm" disabled={!value} onClick={submit}>
+          Unlock
+        </Button>
+        {onCancel && (
+          <Button size="sm" variant="ghost" onClick={onCancel}>
+            Cancel
+          </Button>
+        )}
+      </div>
     </div>
   );
 };

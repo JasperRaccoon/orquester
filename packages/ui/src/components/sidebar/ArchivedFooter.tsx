@@ -1,6 +1,13 @@
-import React, { useEffect, useState } from "react";
+import React, { useContext, useEffect, useState } from "react";
 import { Archive, ArchiveRestore } from "lucide-react";
-import { AdaptiveMenu, DropdownEmpty, DropdownItem, DropdownLabel, PasswordVerify } from "../ui";
+import {
+  AdaptiveMenu,
+  DropdownContext,
+  DropdownEmpty,
+  DropdownItem,
+  DropdownLabel,
+  PasswordVerify
+} from "../ui";
 import { useAppStore } from "../../store/app";
 
 /**
@@ -42,6 +49,9 @@ export const ArchivedFooter: React.FC = () => {
 };
 
 const ArchivedPanel: React.FC = () => {
+  // Dismissing the gate closes the whole menu (dropdown on desktop, bottom
+  // sheet on mobile) — both provide this context.
+  const { close } = useContext(DropdownContext);
   const protectArchived = useAppStore((s) => s.protectArchived);
   const protectArchivedLoaded = useAppStore((s) => s.protectArchivedLoaded);
   const loadProtectArchived = useAppStore((s) => s.loadProtectArchived);
@@ -72,6 +82,7 @@ const ArchivedPanel: React.FC = () => {
           autoFocus
           message="Enter your password to view archived items."
           onVerified={() => setVerified(true)}
+          onCancel={close}
         />
       </>
     );

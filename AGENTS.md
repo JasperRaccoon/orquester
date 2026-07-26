@@ -44,7 +44,10 @@ concurrent persistent terminal/agent sessions per project; an installable agent 
 (`claude`, `codex`, `gemini`, `deepseek`, `opencode` via `npm install -g`) with live version
 detection; detection + "Open on…" for shells/IDEs/explorers/browsers; xterm.js terminals with
 WebSocket-multiplexed PTY streaming, scrollback replay and resize; a CodeMirror file editor;
-tab drag-reorder + inline rename (server-authoritative); a per-project grid view; remote access
+tab drag-reorder + inline rename (server-authoritative); a per-project grid view; archivable
+workspaces/projects (a metadata-only `isArchived` flag — the directory is never touched —
+hidden from the sidebar and restorable from a muted "Archived" footer panel, optionally
+password-gated by the "Protect archived data" daemon toggle); remote access
 with TLS, username+password auth, per-IP login throttling, and tmux persistence; per-workspace
 git/GitHub SSH identities; **browser tabs (Design Mode)** — a server-side headless Chromium per
 project streamed as an interactive tab over a `/ws-browser` channel, with an element picker that
@@ -148,9 +151,10 @@ in production (`--appdir`). The daemon persists **JSON, not a database**:
 ```
 <appdir>/
   app/      app.json, remotes.json, logs/
-  daemon/   daemon.json (incl. bcrypt passwordHash)   daemon.sock (control socket)
+  daemon/   daemon.json (bcrypt passwordHash, protectArchivedData)  daemon.sock (control socket)
             tmux.sock (dedicated tmux server)         sessions.json (reattach index)
-            workspaces.json  accounts.json  keys/ (0700 per-account SSH keys)  logs/
+            workspaces.json (side-table: gitAccountId, createdAt, isArchived, archivedProjects)
+            accounts.json  keys/ (0700 per-account SSH keys)  logs/
             env/ (optional per-launcher env files, e.g. opencode.env)
             hooks/ (managed agent hook script)
   workspaces/   <workspace>/<project> dirs (the file-browser sandbox root, fsRoot)
