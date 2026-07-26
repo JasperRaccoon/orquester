@@ -1,5 +1,14 @@
 import React, { useMemo, useState } from "react";
-import { Check, ClipboardCopy, Folder, FolderPlus, MoreVertical, Plus, Trash2 } from "lucide-react";
+import {
+  Archive,
+  Check,
+  ClipboardCopy,
+  Folder,
+  FolderPlus,
+  MoreVertical,
+  Plus,
+  Trash2
+} from "lucide-react";
 import { cn } from "../../lib/cn";
 import {
   Button,
@@ -27,7 +36,11 @@ export const WorkspaceList: React.FC = () => {
   const openWorkspace = useAppStore((s) => s.openWorkspace);
   const createWorkspace = useAppStore((s) => s.createWorkspace);
   const deleteWorkspace = useAppStore((s) => s.deleteWorkspace);
+  const setWorkspaceArchived = useAppStore((s) => s.setWorkspaceArchived);
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
+
+  // Archived workspaces live only in the sidebar footer panel.
+  const visibleWorkspaces = workspaces.filter((w) => !w.isArchived);
 
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
@@ -47,6 +60,11 @@ export const WorkspaceList: React.FC = () => {
       label: "Copy Full Path",
       icon: <ClipboardCopy size={13} />,
       onClick: () => void copyText(workspace.path)
+    },
+    {
+      label: "Archive",
+      icon: <Archive size={13} />,
+      onClick: () => void setWorkspaceArchived(workspace.name, true)
     },
     {
       label: "Delete",
@@ -89,13 +107,13 @@ export const WorkspaceList: React.FC = () => {
       </div>
 
       <nav className="flex-1 space-y-px overflow-y-auto px-2 pb-2">
-        {loading && workspaces.length === 0 && (
+        {loading && visibleWorkspaces.length === 0 && (
           <p className="px-2 py-2 text-xs text-neutral-600">Loading…</p>
         )}
-        {!loading && workspaces.length === 0 && (
+        {!loading && visibleWorkspaces.length === 0 && (
           <p className="px-2 py-2 text-xs text-neutral-600">No workspaces yet</p>
         )}
-        {workspaces.map((workspace) => {
+        {visibleWorkspaces.map((workspace) => {
           const label = accountLabel(workspace.gitAccountId);
           return (
             <div

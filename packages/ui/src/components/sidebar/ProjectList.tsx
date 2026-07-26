@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import {
+  Archive,
   Box,
   ChevronLeft,
   ClipboardCopy,
@@ -36,6 +37,7 @@ export const ProjectList: React.FC = () => {
   const openProject = useAppStore((s) => s.openProject);
   const createProject = useAppStore((s) => s.createProject);
   const deleteProject = useAppStore((s) => s.deleteProject);
+  const setProjectArchived = useAppStore((s) => s.setProjectArchived);
   const todos = useAppStore((s) => s.todos);
   const createTodo = useAppStore((s) => s.createTodo);
   const openTodo = useAppStore((s) => s.openTodo);
@@ -52,6 +54,9 @@ export const ProjectList: React.FC = () => {
   const [pendingTodoDelete, setPendingTodoDelete] = useState<TodoListRecord | null>(null);
   const [creatingTodo, setCreatingTodo] = useState(false);
 
+  // Archived projects live only in the sidebar footer panel.
+  const visibleProjects = projects.filter((p) => !p.isArchived);
+
   const todoLists = todos
     .filter((t) => t.scope === "workspace" && t.refKey === currentWorkspace)
     .sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
@@ -61,6 +66,11 @@ export const ProjectList: React.FC = () => {
       label: "Copy Full Path",
       icon: <ClipboardCopy size={13} />,
       onClick: () => void copyText(project.path)
+    },
+    {
+      label: "Archive",
+      icon: <Archive size={13} />,
+      onClick: () => void setProjectArchived(project, true)
     },
     {
       label: "Delete",
@@ -134,13 +144,13 @@ export const ProjectList: React.FC = () => {
           />
         )}
 
-        {loading && projects.length === 0 && (
+        {loading && visibleProjects.length === 0 && (
           <p className="px-2 py-2 text-xs text-neutral-600">Loading…</p>
         )}
-        {!loading && projects.length === 0 && !creatingFolder && (
+        {!loading && visibleProjects.length === 0 && !creatingFolder && (
           <p className="px-2 py-2 text-xs text-neutral-600">No projects yet</p>
         )}
-        {projects.map((project) => (
+        {visibleProjects.map((project) => (
           <div
             key={project.path}
             onContextMenu={(event) => {

@@ -2,6 +2,7 @@ import React from "react";
 import { cn } from "../../lib/cn";
 import { WorkspaceList } from "./WorkspaceList";
 import { ProjectList } from "./ProjectList";
+import { ArchivedFooter } from "./ArchivedFooter";
 import { ServerSwitcher } from "../servers";
 import { ResizeHandle } from "../ui";
 import { useIsDesktop } from "../../hooks";
@@ -34,6 +35,7 @@ export const Sidebar: React.FC = () => {
           style={{ width: sidebarWidth, maxWidth: `calc(100% - ${PANE_FLEX_RESERVE}px)` }}
         >
           {currentWorkspace ? <ProjectList /> : <WorkspaceList />}
+          <ArchivedFooter />
           <ServerSwitcher />
         </aside>
         <ResizeHandle
@@ -63,6 +65,7 @@ export const Sidebar: React.FC = () => {
         )}
       >
         {currentWorkspace ? <ProjectList /> : <WorkspaceList />}
+        <ArchivedFooter />
         <ServerSwitcher />
       </aside>
     </>

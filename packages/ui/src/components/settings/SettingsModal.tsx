@@ -22,7 +22,7 @@ import {
 import type { DaemonConfig } from "@orquester/config";
 import { cn } from "../../lib/cn";
 import { disablePush, enablePush, getSubscription, pushSupported } from "../../lib/push";
-import { Button, Input, Modal, ModalCloseButton, Switch } from "../ui";
+import { Button, Input, Modal, ModalCloseButton, PasswordVerify, Switch } from "../ui";
 import { getRegistryIcon } from "../../icons";
 import { useIsDesktop, useRegistry } from "../../hooks";
 import { useApi, useOrquester } from "../../context/orquester-context";
@@ -727,6 +727,9 @@ const DaemonSettings: React.FC = () => {
   const connections = useAppStore((s) => s.connections);
   const activeId = useAppStore((s) => s.activeConnectionId);
   const isLocal = connections.find((c) => c.id === activeId)?.kind === "local";
+  const protectArchived = useAppStore((s) => s.protectArchived);
+  const setProtectArchived = useAppStore((s) => s.setProtectArchived);
+  const [confirmDisable, setConfirmDisable] = useState(false);
 
   const [workspacesDir, setWorkspacesDir] = useState("");
   const [httpEnabled, setHttpEnabled] = useState(false);
@@ -832,6 +835,24 @@ const DaemonSettings: React.FC = () => {
             </Field>
           </>
         )}
+
+        <Field
+          label="Protect archived data"
+          hint="Ask for the password before showing archived workspaces/projects. Changeable from any client; applies instantly."
+        >
+          <Switch
+            checked={protectArchived}
+            onChange={(next) => {
+              if (next) {
+                void setProtectArchived(true);
+              } else {
+                // Retype-to-disable (spec decision #6): the curtain must not be
+                // one-click removable on an unattended open session.
+                setConfirmDisable(true);
+              }
+            }}
+          />
+        </Field>
       </div>
 
       {message && <p className="text-xs text-neutral-400">{message}</p>}
@@ -841,6 +862,20 @@ const DaemonSettings: React.FC = () => {
           {busy ? "Saving…" : "Save daemon config"}
         </Button>
       )}
+
+      <Modal open={confirmDisable} onClose={() => setConfirmDisable(false)} className="w-80">
+        <div className="space-y-3 p-4">
+          <p className="text-sm text-neutral-200">Disable archived-data protection</p>
+          <PasswordVerify
+            autoFocus
+            message="Retype your password to turn this off."
+            onVerified={() => {
+              setConfirmDisable(false);
+              void setProtectArchived(false);
+            }}
+          />
+        </div>
+      </Modal>
     </div>
   );
 };
