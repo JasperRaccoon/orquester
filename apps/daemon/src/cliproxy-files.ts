@@ -370,6 +370,52 @@ function renderManagedAgent(agent: (typeof MANAGED_AGENTS)[number]): string {
   ].join("\n");
 }
 
+/** Claudemix-only managed user memory (`<home>/CLAUDE.md`, loaded into every
+ *  session of that home): tells the orchestrating Claude how to reach the
+ *  non-Claude models — without it, models improvise (codex/opencode CLIs,
+ *  pkill) instead of using the seeded subagent types. Claudex needs no note:
+ *  its main loop already IS the GPT set. Skipped while the OpenRouter key
+ *  state is unknown so kimi mentions can't flap on a secrets-less boot. */
+function renderManagedMemory(openRouterKimi: boolean): string {
+  const kimiAgent = openRouterKimi ? ', "kimi" (Kimi K3 — 1M-token context via OpenRouter)' : "";
+  const kimiModel = openRouterKimi ? ", kimi-k3" : "";
+  return [
+    "<!-- orq-managed: rewritten on every daemon seed pass; edits will be lost. -->",
+    "",
+    "# Model proxy: delegating to GPT" + (openRouterKimi ? " / Kimi" : ""),
+    "",
+    "This session runs through the Orquester model proxy, which also serves",
+    "non-Claude models:",
+    "",
+    "- To run a SUBAGENT on another model, call the Task tool with one of these",
+    `  subagent_type values: "gpt-sol" (GPT-5.6 Sol — deepest reasoning),`,
+    `  "gpt-terra" (balanced), "gpt-luna" (fast, low cost)${kimiAgent}.`,
+    "  Subagents spawned with any other type inherit the session's current main",
+    "  model.",
+    `- To switch the MAIN loop, /model accepts: gpt-5.6-sol, gpt-5.6-terra,`,
+    `  gpt-5.6-luna${kimiModel}.`,
+    "- Never try to reach these models through codex/opencode CLIs or raw APIs —",
+    "  the subagent types and /model ids above are the only supported path.",
+    ""
+  ].join("\n");
+}
+
+async function seedManagedMemory(
+  home: string,
+  entryId: "claudex" | "claudemix",
+  openRouterKimi: boolean | undefined
+): Promise<void> {
+  if (entryId !== "claudemix" || openRouterKimi === undefined) return;
+  const file = join(home, "CLAUDE.md");
+  const content = renderManagedMemory(openRouterKimi);
+  try {
+    if ((await readFile(file, "utf8")) === content) return; // no write churn
+  } catch {
+    /* absent */
+  }
+  await writeFile(file, content, { mode: 0o600 });
+}
+
 async function seedManagedAgents(home: string, openRouterKimi: boolean | undefined): Promise<void> {
   const dir = join(home, "agents");
   await mkdir(dir, { recursive: true });
@@ -448,4 +494,5 @@ export async function seedHome(
   await copyIfMissing(join(systemClaudeDir, "settings.json"), join(home, "settings.json"));
   await mergeManagedSettings(home);
   await seedManagedAgents(home, openRouterKimi);
+  await seedManagedMemory(home, entryId, openRouterKimi);
 }

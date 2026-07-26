@@ -211,6 +211,29 @@ test("seedHome: seeds managed model-pinned subagents; kimi rides the OpenRouter 
   assert.equal(await readFile(join(agents, "mine.md"), "utf8"), "---\nname: mine\n---\nbody\n", "user agent untouched");
 });
 
+test("seedHome: seeds the managed delegation CLAUDE.md into claudemix only, kimi line riding the key", async () => {
+  const dir = await makeDir();
+  const sysDir = await mkdtemp(join(tmpdir(), "orq-sysclaude-"));
+  await writeFile(join(sysDir, ".claude.json"), "{}");
+
+  // claudex never gets the memory file; claudemix with unknown key state doesn't either.
+  await seedHome(dir, "claudex", sysDir, join(sysDir, ".claude.json"), true);
+  assert.ok(!existsSync(join(cliproxyHomeDir(dir, "claudex"), "CLAUDE.md")), "claudex has no managed memory");
+  await seedHome(dir, "claudemix", sysDir, join(sysDir, ".claude.json"));
+  const memFile = join(cliproxyHomeDir(dir, "claudemix"), "CLAUDE.md");
+  assert.ok(!existsSync(memFile), "unknown key state writes nothing");
+
+  // Known key state writes it; kimi mentions track the flag.
+  await seedHome(dir, "claudemix", sysDir, join(sysDir, ".claude.json"), true);
+  const withKimi = await readFile(memFile, "utf8");
+  assert.ok(withKimi.includes('subagent_type values: "gpt-sol"'), "names the subagent types");
+  assert.ok(withKimi.includes('"kimi"') && withKimi.includes("kimi-k3"), "kimi listed with a key");
+  await seedHome(dir, "claudemix", sysDir, join(sysDir, ".claude.json"), false);
+  const withoutKimi = await readFile(memFile, "utf8");
+  assert.ok(!withoutKimi.includes("kimi"), "kimi absent without a key");
+  assert.ok(withoutKimi.includes("gpt-luna"), "gpt rows remain");
+});
+
 test("seedHome: forces autoCompactEnabled:true into an existing settings.json, preserving other keys", async () => {
   const dir = await makeDir();
   const sysDir = await mkdtemp(join(tmpdir(), "orq-sysac-"));
