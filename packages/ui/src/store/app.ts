@@ -538,6 +538,8 @@ export interface AppState {
   /** The proxy's live model catalog + its snapshot time, or null before first load. */
   cliproxyModels: { models: string[]; asOf: string | null } | null;
   workspaces: WorkspaceSummary[];
+  /** "Protect archived data" daemon flag (UI curtain; loaded on connect). */
+  protectArchived: boolean;
   accounts: AccountSummary[];
   workspacesLoading: boolean;
   projects: ProjectSummary[];
@@ -637,6 +639,10 @@ export interface AppState {
   createProject: (req: CreateProjectRequest) => Promise<void>;
   deleteProject: (project: ProjectSummary) => Promise<void>;
   openProject: (project: ProjectSummary) => void;
+  setWorkspaceArchived: (name: string, isArchived: boolean) => Promise<void>;
+  setProjectArchived: (project: ProjectSummary, isArchived: boolean) => Promise<void>;
+  loadProtectArchived: () => Promise<void>;
+  setProtectArchived: (enabled: boolean) => Promise<void>;
 
   loadSessions: () => Promise<void>;
   loadRegistry: () => Promise<void>;
@@ -752,6 +758,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   cliproxy: null,
   cliproxyModels: null,
   workspaces: [],
+  protectArchived: false,
   accounts: [],
   workspacesLoading: false,
   projects: [],
@@ -936,6 +943,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     await Promise.all([
       get().loadWorkspaces(),
+      get().loadProtectArchived(),
       get().loadSessions(),
       // Browser tabs are optional (older daemons return 404) — tolerate absence.
       active.listBrowsers().then((browsers) => set({ browsers })).catch(() => set({ browsers: [] })),
@@ -1438,6 +1446,63 @@ export const useAppStore = create<AppState>((set, get) => ({
       return next;
     });
     await get().loadProjects();
+  },
+
+  // Archive = navigation reset only. Unlike delete, do NOT call
+  // clearProjectLocalState: tab layout, pane sizes, and view mode must survive
+  // an unarchive (spec decision). Sessions keep running server-side.
+  setWorkspaceArchived: async (name, isArchived) => {
+    const api = get().api;
+    if (!api) {
+      return;
+    }
+    const ws = get().workspaces.find((w) => w.name === name);
+    await workspaceService.setWorkspaceArchived(api, name, isArchived);
+    if (isArchived) {
+      if (get().currentWorkspace === name) {
+        get().closeWorkspace();
+      }
+      const prefix = ws?.path;
+      const current = get().currentProject;
+      if (prefix && current && (current.path === prefix || current.path.startsWith(`${prefix}/`))) {
+        set({ currentProject: null });
+      }
+    }
+    await get().loadWorkspaces();
+  },
+
+  setProjectArchived: async (project, isArchived) => {
+    const api = get().api;
+    if (!api) {
+      return;
+    }
+    await workspaceService.setProjectArchived(api, project.workspace, project.name, isArchived);
+    if (isArchived && get().currentProject?.path === project.path) {
+      set({ currentProject: null });
+    }
+    await get().loadProjects();
+  },
+
+  loadProtectArchived: async () => {
+    const api = get().api;
+    if (!api) {
+      return;
+    }
+    try {
+      const config = await api.getDaemonConfig();
+      set({ protectArchived: config.protectArchivedData ?? false });
+    } catch {
+      /* older daemon without the field — keep the default (off) */
+    }
+  },
+
+  setProtectArchived: async (enabled) => {
+    const api = get().api;
+    if (!api) {
+      return;
+    }
+    const config = await api.setProtectArchived(enabled);
+    set({ protectArchived: config.protectArchivedData ?? enabled });
   },
 
   openProject: (project) => {

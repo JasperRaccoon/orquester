@@ -33,5 +33,22 @@ export const workspaceService = {
 
   deleteProject(api: ApiClient, workspace: string, name: string): Promise<void> {
     return api.deleteProject(workspace, name);
+  },
+
+  setWorkspaceArchived(
+    api: ApiClient,
+    name: string,
+    isArchived: boolean
+  ): Promise<WorkspaceSummary> {
+    return api.updateWorkspace(name, { isArchived });
+  },
+
+  setProjectArchived(
+    api: ApiClient,
+    workspace: string,
+    name: string,
+    isArchived: boolean
+  ): Promise<ProjectSummary> {
+    return api.updateProject(workspace, name, { isArchived });
   }
 };

@@ -116,10 +116,18 @@ function buildServer(deps: McpDeps, signal: AbortSignal): McpServer {
     });
 
   tool("list_workspaces", "List workspaces.", {}, async () =>
-    (await control.listWorkspacesProjected()).map((w) => ({ name: w.name, projectCount: w.projectCount }))
+    (await control.listWorkspacesProjected()).map((w) => ({
+      name: w.name,
+      projectCount: w.projectCount,
+      isArchived: w.isArchived ?? false
+    }))
   );
   tool("list_projects", "List a workspace's projects.", { workspace: z.string() }, async (a) =>
-    (await control.listProjectsProjected(a.workspace)).map((p) => ({ name: p.name, path: p.path }))
+    (await control.listProjectsProjected(a.workspace)).map((p) => ({
+      name: p.name,
+      path: p.path,
+      isArchived: p.isArchived ?? false
+    }))
   );
   tool("list_tabs", "List a project's tabs (sessions).", { workspace: z.string(), project: z.string() }, (a) =>
     control.listTabs({ workspace: a.workspace, project: a.project })

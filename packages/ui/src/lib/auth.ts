@@ -11,6 +11,20 @@ export function deriveAuthHash(password: string, salt: string): string {
 }
 
 /**
+ * Client-side check for the "Protect archived data" curtain: does the typed
+ * password match the per-endpoint stored credential hash? A bcrypt hash embeds
+ * its own salt, so this is a pure offline compare — nothing crosses the wire
+ * and the plaintext never leaves this call.
+ */
+export function verifyLocalPassword(password: string, storedHash: string): boolean {
+  try {
+    return bcrypt.compareSync(password, storedHash);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The wire credential for the HTTP transport: base64("<username>:<hash>")
  * (HTTP `Authorization: Bearer …` and WS `?token=…`), mirroring HTTP Basic with
  * the derived bcrypt hash standing in for the raw password. The raw password

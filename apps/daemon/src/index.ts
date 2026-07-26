@@ -50,6 +50,7 @@ import type {
   ReorderSessionsRequest,
   ServerInfoResponse,
   SetAgentAccountDefaultsRequest,
+  SetProtectArchivedRequest,
   SessionActivity,
   SessionActivityEvent,
   SessionInputRequest,
@@ -57,7 +58,9 @@ import type {
   SessionSummary,
   SessionUploadRequest,
   SessionUploadResponse,
+  UpdateProjectRequest,
   UpdateTodoRequest,
+  UpdateWorkspaceRequest,
   UsageAccount,
   UsageResponse,
   UsageWindow,
@@ -103,6 +106,7 @@ import {
   type DaemonPaths,
   type RemoteConnectionConfig,
   type RemotesConfig,
+  type WorkspaceMeta,
   type WorkspacesConfig,
   accountsConfigPath,
   agentAccountsDir,
@@ -1389,6 +1393,9 @@ export function createServer(
         version: 1,
         workspacesDir: body.workspacesDir ?? config.workspacesDir,
         logsDir: body.logsDir ?? config.logsDir,
+        // Not managed by this route (see the dedicated endpoint below) — carry
+        // the live value through so a config save can't silently reset it.
+        protectArchivedData: config.protectArchivedData,
         transports: {
           http: {
             ...config.transports.http,
@@ -1425,6 +1432,25 @@ export function createServer(
 
     return sanitizeDaemonConfig(config);
   });
+
+  // "Protect archived data" toggle. Deliberately allowed on BOTH transports —
+  // unlike the full daemon-config PUT above — because it guards a client-side
+  // UI curtain, not daemon security posture, and the remote web client must be
+  // able to flip it. The UI enforces retype-to-disable on its side. (Spec:
+  // docs/superpowers/specs/2026-07-26-archive-workspaces-projects-design.md)
+  app.put<{ Body: SetProtectArchivedRequest }>(
+    "/api/config/daemon/protect-archived",
+    async (request, reply): Promise<DaemonConfig | void> => {
+      if (typeof request.body?.enabled !== "boolean") {
+        return reply
+          .code(400)
+          .send({ code: "INVALID_CONFIG", message: "`enabled` must be a boolean." });
+      }
+      config.protectArchivedData = request.body.enabled;
+      await writeFile(resolved.configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+      return sanitizeDaemonConfig(config);
+    }
+  );
 
   if (options.mode === "local") {
     app.post("/api/daemon/shutdown", async (_request, reply) => {
@@ -1475,6 +1501,44 @@ export function createServer(
     return { name, path, projectCount: 0, gitAccountId: entry.gitAccountId ?? null, createdAt };
   });
 
+  app.put<{ Params: { workspace: string }; Body: UpdateWorkspaceRequest }>(
+    "/api/workspaces/:workspace",
+    async (request, reply): Promise<WorkspaceSummary | void> => {
+      const { workspace } = request.params;
+      if (!isValidName(workspace)) {
+        return reply.code(400).send({ code: "INVALID_NAME", message: "Invalid workspace name." });
+      }
+      const target = join(resolved.workspacesDir, workspace);
+      const safe = await resolveWithinWorkspaces(target, resolved.workspacesDir);
+      if (!safe) {
+        return reply.code(404).send();
+      }
+
+      // Merge into the meta entry — never replace it (that would clobber
+      // gitAccountId/createdAt). Workspaces predating the side-table get an
+      // entry created on the spot.
+      const meta = await readWorkspacesMeta(resolved.workspacesMetaFile);
+      const entry: WorkspaceMeta = meta.workspaces.find((w) => w.name === workspace) ?? {
+        name: workspace,
+        createdAt: new Date().toISOString(),
+        isArchived: false,
+        archivedProjects: []
+      };
+      if (typeof request.body?.isArchived === "boolean") {
+        entry.isArchived = request.body.isArchived;
+      }
+      meta.workspaces = [...meta.workspaces.filter((w) => w.name !== workspace), entry];
+      await writeWorkspacesMeta(resolved.workspacesMetaFile, meta);
+
+      const all = await listWorkspaces(resolved.workspacesDir, resolved.workspacesMetaFile);
+      const summary = all.find((w) => w.name === workspace);
+      if (!summary) {
+        return reply.code(404).send();
+      }
+      return summary;
+    }
+  );
+
   app.get<{ Params: { workspace: string } }>(
     "/api/workspaces/:workspace/projects",
     async (request, reply): Promise<ProjectSummary[] | void> => {
@@ -1482,7 +1546,44 @@ export function createServer(
       if (!isValidName(workspace)) {
         return reply.code(400).send({ code: "INVALID_NAME", message: "Invalid workspace name." });
       }
-      return listProjects(resolved.workspacesDir, workspace);
+      return listProjects(resolved.workspacesDir, workspace, resolved.workspacesMetaFile);
+    }
+  );
+
+  app.put<{ Params: { workspace: string; project: string }; Body: UpdateProjectRequest }>(
+    "/api/workspaces/:workspace/projects/:project",
+    async (request, reply): Promise<ProjectSummary | void> => {
+      const { workspace, project } = request.params;
+      if (!isValidName(workspace) || !isValidName(project)) {
+        return reply.code(400).send({ code: "INVALID_NAME", message: "Invalid name." });
+      }
+      const target = join(resolved.workspacesDir, workspace, project);
+      const safe = await resolveWithinWorkspaces(target, resolved.workspacesDir);
+      if (!safe) {
+        return reply.code(404).send();
+      }
+
+      // Same merge-not-replace rule as the workspace PUT above.
+      const meta = await readWorkspacesMeta(resolved.workspacesMetaFile);
+      const entry: WorkspaceMeta = meta.workspaces.find((w) => w.name === workspace) ?? {
+        name: workspace,
+        createdAt: new Date().toISOString(),
+        isArchived: false,
+        archivedProjects: []
+      };
+      if (typeof request.body?.isArchived === "boolean") {
+        const without = entry.archivedProjects.filter((name) => name !== project);
+        entry.archivedProjects = request.body.isArchived ? [...without, project] : without;
+      }
+      meta.workspaces = [...meta.workspaces.filter((w) => w.name !== workspace), entry];
+      await writeWorkspacesMeta(resolved.workspacesMetaFile, meta);
+
+      return {
+        name: project,
+        workspace,
+        path: target,
+        isArchived: entry.archivedProjects.includes(project)
+      };
     }
   );
 
@@ -1596,6 +1697,16 @@ export function createServer(
       // path used as the list refKey — not the realpath `safe`).
       await todos.deleteByProjectPath(target);
       await rm(safe, { recursive: true, force: true });
+
+      // Prune the archive flag so a recreated same-name project starts fresh
+      // (mirrors the workspace delete pruning its whole meta entry).
+      const meta = await readWorkspacesMeta(resolved.workspacesMetaFile);
+      const entry = meta.workspaces.find((w) => w.name === workspace);
+      if (entry?.archivedProjects.includes(project)) {
+        entry.archivedProjects = entry.archivedProjects.filter((name) => name !== project);
+        await writeWorkspacesMeta(resolved.workspacesMetaFile, meta);
+      }
+
       return reply.code(204).send();
     }
   );
@@ -3447,7 +3558,8 @@ export function createServer(
       workspacesDir: resolved.workspacesDir,
       fsRoot: resolved.fsRoot,
       listWorkspaces: () => listWorkspaces(resolved.workspacesDir, resolved.workspacesMetaFile),
-      listProjects: (workspace) => listProjects(resolved.workspacesDir, workspace),
+      listProjects: (workspace) =>
+        listProjects(resolved.workspacesDir, workspace, resolved.workspacesMetaFile),
     });
     registerMcp(app, {
       control,
@@ -3682,18 +3794,28 @@ async function listWorkspaces(
         path,
         projectCount: projects.length,
         gitAccountId: entry?.gitAccountId ?? null,
-        createdAt: entry?.createdAt
+        createdAt: entry?.createdAt,
+        isArchived: entry?.isArchived ?? false
       };
     })
   );
 }
 
-async function listProjects(workspacesDir: string, workspace: string): Promise<ProjectSummary[]> {
+async function listProjects(
+  workspacesDir: string,
+  workspace: string,
+  metaFile: string
+): Promise<ProjectSummary[]> {
   const names = await listDirectories(join(workspacesDir, workspace));
+  const meta = await readWorkspacesMeta(metaFile);
+  const archived = new Set(
+    meta.workspaces.find((w) => w.name === workspace)?.archivedProjects ?? []
+  );
   return names.map((name) => ({
     name,
     workspace,
-    path: join(workspacesDir, workspace, name)
+    path: join(workspacesDir, workspace, name),
+    isArchived: archived.has(name)
   }));
 }
 

@@ -19,3 +19,4 @@ export { DropdownContext } from "./dropdown";
 export { BottomSheet, type BottomSheetProps } from "./sheet";
 export { AdaptiveMenu, type AdaptiveMenuProps } from "./adaptive-menu";
 export { ResizeHandle, type ResizeHandleProps } from "./resize-handle";
+export * from "./password-verify";

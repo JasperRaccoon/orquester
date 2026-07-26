@@ -55,7 +55,9 @@ import type {
   SetAgentAccountDefaultsRequest,
   TodoListRecord,
   TodoScope,
+  UpdateProjectRequest,
   UpdateTodoRequest,
+  UpdateWorkspaceRequest,
   UsageResponse,
   UsageTokensResponse,
   WorkspaceSummary
@@ -216,6 +218,11 @@ export class ApiClient {
     return this.send("PUT", "/api/config/daemon", { body: patch });
   }
 
+  /** The one daemon-config field writable over remote HTTP (UI curtain toggle). */
+  setProtectArchived(enabled: boolean): Promise<DaemonConfig> {
+    return this.send("PUT", "/api/config/daemon/protect-archived", { body: { enabled } });
+  }
+
   // --- App config + remote servers (shared, daemon-persisted) --------------
 
   getAppConfig(signal?: AbortSignal): Promise<AppConfig> {
@@ -281,6 +288,22 @@ export class ApiClient {
 
   listProjects(workspace: string, signal?: AbortSignal): Promise<ProjectSummary[]> {
     return this.send("GET", `/api/workspaces/${encodeURIComponent(workspace)}/projects`, { signal });
+  }
+
+  updateWorkspace(name: string, req: UpdateWorkspaceRequest): Promise<WorkspaceSummary> {
+    return this.send("PUT", `/api/workspaces/${encodeURIComponent(name)}`, { body: req });
+  }
+
+  updateProject(
+    workspace: string,
+    name: string,
+    req: UpdateProjectRequest
+  ): Promise<ProjectSummary> {
+    return this.send(
+      "PUT",
+      `/api/workspaces/${encodeURIComponent(workspace)}/projects/${encodeURIComponent(name)}`,
+      { body: req }
+    );
   }
 
   // --- File browser --------------------------------------------------------
