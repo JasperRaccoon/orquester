@@ -21,3 +21,5 @@ release/
 .stage/daemon/*.sock
 .stage/workspaces/*
 !.stage/workspaces/.gitkeep
+# Local secrets (never commit)
+/.secrets/
