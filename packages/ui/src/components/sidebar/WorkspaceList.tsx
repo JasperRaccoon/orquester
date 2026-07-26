@@ -136,7 +136,12 @@ export const WorkspaceList: React.FC = () => {
                     {label}
                   </span>
                 )}
-                <span className="text-xs text-neutral-600">{workspace.projectCount}</span>
+                {/* Visible projects only — archived rows are filtered out of the
+                    list this badge sits next to, so counting them here would
+                    promise rows the user cannot see. */}
+                <span className="text-xs text-neutral-600">
+                  {Math.max(0, workspace.projectCount - (workspace.archivedProjectCount ?? 0))}
+                </span>
               </button>
               <button
                 type="button"

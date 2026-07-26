@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Archive, ArchiveRestore } from "lucide-react";
 import { AdaptiveMenu, DropdownEmpty, DropdownItem, DropdownLabel, PasswordVerify } from "../ui";
 import { useAppStore } from "../../store/app";
@@ -43,8 +43,26 @@ export const ArchivedFooter: React.FC = () => {
 
 const ArchivedPanel: React.FC = () => {
   const protectArchived = useAppStore((s) => s.protectArchived);
+  const protectArchivedLoaded = useAppStore((s) => s.protectArchivedLoaded);
+  const loadProtectArchived = useAppStore((s) => s.loadProtectArchived);
   // Fresh mount per open ⇒ the gate re-asks every time (spec decision #5).
-  const [verified, setVerified] = useState(!protectArchived);
+  // "Not yet known" counts as protected: connect() races this fetch against the
+  // workspace load, so the footer can be clickable before the flag lands, and a
+  // failed fetch leaves it unknown for the rest of the session. Failing open in
+  // either window is exactly what the curtain exists to prevent. (On a local
+  // unix-socket connection PasswordVerify is inert and auto-passes, so nothing
+  // is locked there.)
+  const [verified, setVerified] = useState(protectArchivedLoaded && !protectArchived);
+
+  // Self-heal a failed/in-flight connect-time load instead of staying gated all
+  // session; lift the gate as soon as the daemon confirms protection is off.
+  useEffect(() => {
+    if (!protectArchivedLoaded) {
+      void loadProtectArchived();
+    } else if (!protectArchived) {
+      setVerified(true);
+    }
+  }, [protectArchivedLoaded, protectArchived, loadProtectArchived]);
 
   if (!verified) {
     return (

@@ -153,7 +153,7 @@ import { WebSocket as UpstreamWebSocket } from "ws";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import { spawn } from "node:child_process";
 import { createReadStream, createWriteStream, existsSync, readFileSync, type WriteStream } from "node:fs";
-import { lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, platform as osPlatform } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { stat } from "node:fs/promises";
@@ -1416,12 +1416,17 @@ export function createServer(
       });
     }
 
-    await writeFile(resolved.configPath, `${JSON.stringify(merged, null, 2)}\n`, "utf8");
-
-    // Apply live in-process (no daemon restart): update the shared config + dirs,
-    // then hot-restart the HTTP transport so the new password/host/port/enabled
-    // take effect immediately. Sessions (PTYs) and the unix transport are untouched.
-    Object.assign(config, merged);
+    // Persist + apply inside the shared daemon.json queue: the protect-archived
+    // route below does a read-modify-write of the same file, and an unserialized
+    // interleaving would let its stale copy revert this save (e.g. a freshly set
+    // passwordHash) on disk while memory kept the new value.
+    await queueDaemonConfigWrite(async () => {
+      await writeJsonFile(resolved.configPath, merged);
+      // Apply live in-process (no daemon restart): update the shared config + dirs,
+      // then hot-restart the HTTP transport so the new password/host/port/enabled
+      // take effect immediately. Sessions (PTYs) and the unix transport are untouched.
+      Object.assign(config, merged);
+    });
     resolved.workspacesDir = expandVars(merged.workspacesDir, resolved.vars);
     resolved.fsRoot = merged.transports.http.fsRoot
       ? expandVars(merged.transports.http.fsRoot, resolved.vars)
@@ -1446,7 +1451,7 @@ export function createServer(
           .code(400)
           .send({ code: "INVALID_CONFIG", message: "`enabled` must be a boolean." });
       }
-      config.protectArchivedData = request.body.enabled;
+      const enabled = request.body.enabled;
       // Persist ONLY the field this route manages. daemon.json used to be
       // writable from the unix socket alone; now that a remote client can hit
       // this route, serializing the whole in-memory config would let a UI
@@ -1454,17 +1459,26 @@ export function createServer(
       // daemon.json hand-edited since boot). Re-read + re-validate the file and
       // patch the one field; fall back to the in-memory config if it is
       // missing/corrupt (first write after a fresh appdir).
-      let persisted: DaemonConfig;
-      try {
-        persisted = parseDaemonConfig(JSON.parse(await readFile(resolved.configPath, "utf8")));
-        persisted.protectArchivedData = request.body.enabled;
-        // Never write a plaintext password back out (boot already migrates the
-        // file; this guards a hand-edit made since).
-        migrateHttpPassword(persisted);
-      } catch {
-        persisted = config;
-      }
-      await writeFile(resolved.configPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
+      //
+      // The whole read-modify-write runs in the shared daemon.json queue so a
+      // concurrent PUT /api/config/daemon can neither be read half-applied nor
+      // be reverted by this write. The in-memory flag is flipped only AFTER the
+      // write lands — a failed write (EACCES/ENOSPC) must 500 with memory and
+      // disk still agreeing.
+      await queueDaemonConfigWrite(async () => {
+        let persisted: DaemonConfig;
+        try {
+          persisted = parseDaemonConfig(JSON.parse(await readFile(resolved.configPath, "utf8")));
+          persisted.protectArchivedData = enabled;
+          // Never write a plaintext password back out (boot already migrates the
+          // file; this guards a hand-edit made since).
+          migrateHttpPassword(persisted);
+        } catch {
+          persisted = { ...config, protectArchivedData: enabled };
+        }
+        await writeJsonFile(resolved.configPath, persisted);
+        config.protectArchivedData = enabled;
+      });
       return sanitizeDaemonConfig(config);
     }
   );
@@ -3828,10 +3842,14 @@ async function listWorkspaces(
       const path = join(workspacesDir, name);
       const projects = await listDirectories(path);
       const entry = byName.get(name);
+      // Counted against the directory listing, so names left over in
+      // `archivedProjects` for since-deleted dirs never inflate it.
+      const archived = new Set(entry?.archivedProjects ?? []);
       return {
         name,
         path,
         projectCount: projects.length,
+        archivedProjectCount: projects.filter((project) => archived.has(project)).length,
         gitAccountId: entry?.gitAccountId ?? null,
         createdAt: entry?.createdAt,
         isArchived: entry?.isArchived ?? false
@@ -3952,6 +3970,12 @@ async function readRemotesFile(file: string): Promise<RemotesConfig> {
   }
 }
 
+/**
+ * Tolerant read for the *read-only* paths (listings, lookups): a missing or
+ * unreadable workspaces.json degrades to an empty side-table so the sidebar
+ * still lists the directories on disk. Never use this as the basis of a write —
+ * see `readWorkspacesMetaStrict`.
+ */
 async function readWorkspacesMeta(file: string): Promise<WorkspacesConfig> {
   try {
     return parseWorkspacesConfig(JSON.parse(await readFile(file, "utf8")));
@@ -3960,8 +3984,54 @@ async function readWorkspacesMeta(file: string): Promise<WorkspacesConfig> {
   }
 }
 
+/**
+ * Read for the read-modify-write paths. Unlike the tolerant reader above this
+ * distinguishes "no file yet" (→ a fresh default, safe to write) from "the file
+ * exists but is unreadable/corrupt" (→ throw). Writing a default over a corrupt
+ * file would silently drop every workspace's gitAccountId/createdAt/archive
+ * state, so the mutation fails loud instead and leaves the file intact for
+ * hand-repair — mirroring `sessions.reattach()`, which refuses to reap orphans
+ * when sessions.json is corrupt.
+ */
+async function readWorkspacesMetaStrict(file: string): Promise<WorkspacesConfig> {
+  let raw: string;
+  try {
+    raw = await readFile(file, "utf8");
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") {
+      return createDefaultWorkspacesConfig();
+    }
+    throw error;
+  }
+  try {
+    return parseWorkspacesConfig(JSON.parse(raw));
+  } catch (error) {
+    throw new Error(
+      `workspaces.json is unreadable (${file}); refusing to overwrite it: ${String(error)}`
+    );
+  }
+}
+
 async function writeWorkspacesMeta(file: string, value: WorkspacesConfig): Promise<void> {
   await writeJsonFile(file, value);
+}
+
+/**
+ * Serializes every write of daemon.json. Both writers (the full
+ * `PUT /api/config/daemon` and the remote-allowed protect-archived toggle,
+ * which read-modify-writes the file) must share this queue: unserialized, the
+ * toggle's stale in-flight copy can revert a config save on disk while the live
+ * in-memory config keeps the new value — divergence that only surfaces at the
+ * next restart. Module-level on purpose: both transports run in one process.
+ */
+let daemonConfigQueue: Promise<unknown> = Promise.resolve();
+
+function queueDaemonConfigWrite<T>(task: () => Promise<T>): Promise<T> {
+  const run = daemonConfigQueue.then(task);
+  // Keep the chain alive after a failed write (a rejected queue head would
+  // reject every later write).
+  daemonConfigQueue = run.catch(() => undefined);
+  return run;
 }
 
 /**
@@ -3976,17 +4046,23 @@ let workspacesMetaQueue: Promise<unknown> = Promise.resolve();
 /**
  * Run `mutate` against a freshly read workspaces.json and persist the result,
  * with all such mutations serialized against each other (see the queue above).
- * The file is always rewritten, even when the mutation was a no-op — harmless,
- * and it keeps the helper's contract trivial.
+ * Two safety rules:
+ *  - the read is STRICT (`readWorkspacesMetaStrict`) — a corrupt file throws
+ *    instead of being silently replaced by an empty side-table;
+ *  - the write is skipped when the mutation changed nothing, so the no-op
+ *    prunes that run on every project create/delete never touch the file.
  */
 async function mutateWorkspacesMeta<T>(
   file: string,
   mutate: (meta: WorkspacesConfig) => T | Promise<T>
 ): Promise<T> {
   const run = workspacesMetaQueue.then(async () => {
-    const meta = await readWorkspacesMeta(file);
+    const meta = await readWorkspacesMetaStrict(file);
+    const before = JSON.stringify(meta);
     const result = await mutate(meta);
-    await writeWorkspacesMeta(file, meta);
+    if (JSON.stringify(meta) !== before) {
+      await writeWorkspacesMeta(file, meta);
+    }
     return result;
   });
   // Keep the chain alive after a failed mutation (a rejected queue head would
@@ -4015,9 +4091,32 @@ async function pruneArchivedProject(
   });
 }
 
+/**
+ * Persist JSON state atomically: write a sibling temp file, then rename over
+ * the target (rename is atomic within a filesystem). A crash or a SIGTERM
+ * hard-exit mid-write can therefore never leave a truncated half-JSON file
+ * behind — readers see either the old or the new content.
+ */
 async function writeJsonFile(file: string, value: unknown): Promise<void> {
   await mkdir(dirname(file), { recursive: true });
-  await writeFile(file, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+    // rename() carries the temp file's mode over, so replay the target's own
+    // mode first — a tightened daemon.json (it holds the bcrypt passwordHash)
+    // must not silently widen on every save.
+    const mode = await stat(file).then(
+      (info) => info.mode & 0o777,
+      () => undefined
+    );
+    if (mode !== undefined) {
+      await chmod(tmp, mode).catch(() => undefined);
+    }
+    await rename(tmp, file);
+  } catch (error) {
+    await rm(tmp, { force: true }).catch(() => undefined);
+    throw error;
+  }
 }
 
 /** bcrypt-hash a plaintext password (stable hash persisted at rest). Cost 12

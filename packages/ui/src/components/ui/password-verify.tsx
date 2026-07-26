@@ -1,7 +1,12 @@
 import React, { useEffect, useState } from "react";
 import { Button } from "./button";
 import { useAppStore } from "../../store/app";
-import { hashFromCredential, loadStoredHash, verifyLocalPassword } from "../../lib/auth";
+import {
+  asBcryptHash,
+  hashFromCredential,
+  loadStoredHash,
+  verifyLocalPassword
+} from "../../lib/auth";
 
 export interface PasswordVerifyProps {
   /** Called once the typed password matches the stored credential hash. */
@@ -36,8 +41,12 @@ export const PasswordVerify: React.FC<PasswordVerifyProps> = ({
   const isLocal = api?.connection.kind === "local";
   // localStorage first, then the live credential itself (storage can be
   // unavailable, and a seeded remote's credential comes from remotes.json).
+  // The cached value is validated exactly like the credential-derived one: an
+  // old-bundle/garbage entry must fall through to the live credential instead
+  // of shadowing it (bcrypt throws on a non-hash ⇒ the gate would never open).
   const storedHash = api
-    ? (loadStoredHash(api.connection.endpoint) ?? hashFromCredential(api.connection.password))
+    ? (asBcryptHash(loadStoredHash(api.connection.endpoint)) ??
+      hashFromCredential(api.connection.password))
     : undefined;
   const [value, setValue] = useState("");
   const [error, setError] = useState(false);

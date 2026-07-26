@@ -70,8 +70,14 @@ there is no passthrough to rely on.
 - New request type `UpdateWorkspaceRequest { isArchived?: boolean }` and
   `UpdateProjectRequest { isArchived?: boolean }` (update-shaped so future fields can
   join without a new route).
-- `OrquesterApi` interface + `HttpOrquesterApiClient` gain `updateWorkspace` /
-  `updateProject` methods.
+- `WorkspaceSummary` also gains `archivedProjectCount?: number` — how many of
+  `projectCount` are archived — so the sidebar's per-workspace badge can show the
+  number of *visible* projects without a second request (see Listing below).
+- The reference `OrquesterApi` interface / `HttpOrquesterApiClient` are **not**
+  extended (superseded by the plan's YAGNI decision, Task 2 Step 2: the reference
+  client covers no deletes or updates today either). The real client is
+  `packages/ui`'s `ApiClient`, which gains `updateWorkspace` / `updateProject` /
+  `setProtectArchived`.
 
 ### Routes (`apps/daemon/src/index.ts`)
 
@@ -105,7 +111,11 @@ Handler behavior:
 - **Archived items stay in API responses, flagged.** Clients filter. This keeps the MCP
   tools, `NewProjectModal` lookups, and delete flows working on the full list.
 - `projectCount` in `WorkspaceSummary` continues to count all projects, archived
-  included (unchanged).
+  included (unchanged). It is paired with `archivedProjectCount` — how many of
+  those directories are archived — so the sidebar badge can render
+  `projectCount - archivedProjectCount` and stay consistent with the filtered
+  list the row opens. It is counted against the directory listing, so names left
+  over in `archivedProjects` for deleted directories never inflate it.
 
 ### Cleanup coupling
 
@@ -113,8 +123,26 @@ Handler behavior:
   cannot leak onto a recreated same-name workspace. Unchanged.
 - `DELETE .../projects/:project` additionally prunes the project's name from
   `archivedProjects`.
+- **Create un-archives.** `POST /api/workspaces` (which is `mkdir -p`, so it also fires for
+  an already-existing name) merges into the meta entry and forces `isArchived: false`; all
+  three project-create paths (plain create, clone, create-repo) prune the name from
+  `archivedProjects`. Rationale: the caller just asked for that workspace/project to exist,
+  and an archived item is invisible in every client — without the reset, "create" would
+  appear to silently do nothing. The merge preserves `gitAccountId`/`createdAt` and the
+  workspace's other `archivedProjects`. Consequence to be aware of: creating a name that
+  collides with an archived item reveals the existing directory rather than reporting a
+  conflict (deliberate; a 409 was considered and rejected as more confusing for an item the
+  user cannot see).
 - A stale name in `archivedProjects` (directory removed outside orquester) is ignored by
   the directory join; harmless.
+- **Writes never self-heal a corrupt `workspaces.json`.** Read-only paths keep the tolerant
+  "parse failure ⇒ empty side-table" fallback, but every read-modify-write goes through a
+  strict read that distinguishes ENOENT (⇒ fresh default) from an unparseable file (⇒ throw,
+  route 500s, file left intact for hand-repair). Otherwise an unrelated project create/delete
+  could persist the empty default over a truncated file and drop every workspace's
+  `gitAccountId`. Mutations are serialized through a module-level queue, skip the write when
+  nothing changed, and land via write-temp-then-rename so a kill mid-write cannot truncate
+  the file in the first place.
 
 ### MCP surface (`apps/daemon/src/mcp/`)
 
@@ -193,6 +221,11 @@ no new localStorage schema/validation work is needed.
   it guards a UI curtain, not daemon security posture). Persists the flag to
   `daemon.json` and returns the sanitized config. The full `PUT /api/config/daemon`
   remains 403 over HTTP, unchanged.
+- Both writers of `daemon.json` share a module-level write queue and an atomic
+  (temp-file + rename) write, and the toggle re-reads/re-validates the file before patching
+  its one field — so the curtain toggle can never revert a concurrent config save (e.g. a
+  freshly set `passwordHash`) on disk. The in-memory flag is updated only after the write
+  succeeds, so a failed write returns 500 with memory and disk still in agreement.
 
 ### Settings UI
 
@@ -228,6 +261,12 @@ A small shared modal component (reused by the archived panel and the settings to
 - Toggle on → every click on the footer button opens the password prompt first; the
   panel (and its unarchive actions) renders only after verification. Closing and
   reopening re-prompts.
+- **Unknown ≠ off.** The store tracks the flag's *loaded* state separately from its value.
+  While the connect-time fetch is in flight, and after a failed fetch, the panel treats the
+  setting as ON (fail closed — the load races the workspace load, so the footer can be
+  clickable before the flag lands). The value itself stays at the daemon default so the
+  Settings switch never renders a state `daemon.json` does not have; opening the panel
+  retries the load, so a transient failure self-heals instead of gating the whole session.
 - **Local unix-socket clients (desktop) with no stored credential are exempt**: there
   is no password to verify against on the socket transport (auth is HTTP-only), so the
   gate is inert there and the panel opens directly. The curtain targets remote browser
@@ -237,8 +276,9 @@ A small shared modal component (reused by the archived panel and the settings to
 
 ## Error handling & edge cases
 
-- Old/corrupt `workspaces.json`: zod defaults handle old files; the existing
-  swallow-and-default fallback for corrupt files is unchanged.
+- Old/corrupt `workspaces.json`: zod defaults handle old files; the swallow-and-default
+  fallback stays for reads, but writes refuse to overwrite an unparseable file (see
+  "Cleanup coupling").
 - Archiving a workspace whose meta entry doesn't exist: entry is created on the spot.
 - Unarchiving from the panel when the underlying dir was deleted externally: refetch
   simply no longer lists it; stale `archivedProjects` names are ignored.

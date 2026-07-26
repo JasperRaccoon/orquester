@@ -35,6 +35,19 @@ export function buildCredential(username: string, hash: string): string {
 }
 
 /**
+ * Narrow an untrusted string to something `bcrypt.compare` can actually use.
+ * Persisted client-side values (localStorage) must never reach typed code
+ * unvalidated (repo rule): a stale/garbage cache entry would otherwise shadow a
+ * perfectly good live credential and make the archived-data gate permanently
+ * unopenable, because bcrypt throws on a non-hash and the caller reads that as
+ * "wrong password".
+ */
+export function asBcryptHash(value: string | undefined): string | undefined {
+  // bcrypt hashes start with $2a/$2b/$2y — anything else isn't comparable.
+  return typeof value === "string" && value.startsWith("$2") ? value : undefined;
+}
+
+/**
  * Pull the bcrypt hash back out of a wire credential (base64("<user>:<hash>")).
  * The in-memory credential is the authoritative copy — localStorage is only a
  * cache of it (writes are swallowed when storage is unavailable, and a seeded
@@ -49,9 +62,7 @@ export function hashFromCredential(credential: string | undefined): string | und
   try {
     const decoded = atob(credential);
     const separator = decoded.indexOf(":");
-    const hash = separator >= 0 ? decoded.slice(separator + 1) : "";
-    // bcrypt hashes start with $2a/$2b/$2y — anything else isn't comparable.
-    return hash.startsWith("$2") ? hash : undefined;
+    return asBcryptHash(separator >= 0 ? decoded.slice(separator + 1) : "");
   } catch {
     return undefined;
   }

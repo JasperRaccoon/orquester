@@ -540,6 +540,13 @@ export interface AppState {
   workspaces: WorkspaceSummary[];
   /** "Protect archived data" daemon flag (UI curtain; loaded on connect). */
   protectArchived: boolean;
+  /**
+   * Whether `protectArchived` reflects a value actually read from this daemon.
+   * False while the connect-time fetch is in flight and after a failed fetch —
+   * consumers must treat "not yet known" as protected (fail closed) rather than
+   * as off, and may re-run `loadProtectArchived()` to self-heal.
+   */
+  protectArchivedLoaded: boolean;
   accounts: AccountSummary[];
   workspacesLoading: boolean;
   projects: ProjectSummary[];
@@ -759,6 +766,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   cliproxyModels: null,
   workspaces: [],
   protectArchived: false,
+  protectArchivedLoaded: false,
   accounts: [],
   workspacesLoading: false,
   projects: [],
@@ -1220,6 +1228,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         workspaces: [],
         projects: [],
         protectArchived: false,
+        protectArchivedLoaded: false,
         authPrompt: { connectionId: api.connection.id }
       });
     }
@@ -1243,6 +1252,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       // Per-daemon flag: never let one server's curtain setting apply to the
       // next one. connect() reloads it from the newly selected daemon.
       protectArchived: false,
+      protectArchivedLoaded: false,
       sessions: [],
       browsers: [],
       accounts: []
@@ -1504,15 +1514,17 @@ export const useAppStore = create<AppState>((set, get) => ({
       const config = await api.getDaemonConfig();
       // An older daemon simply omits the field — that (and only that) is the
       // documented default-off case.
-      set({ protectArchived: config.protectArchivedData ?? false });
+      set({
+        protectArchived: config.protectArchivedData ?? false,
+        protectArchivedLoaded: true
+      });
     } catch {
-      // The request itself failed (throttle, 5xx, network blip). Don't fail
-      // open: dropping the curtain for the rest of the session on a transient
-      // error is exactly the case it guards. Keep it up for connections that
-      // can actually verify a password; on a local unix-socket connection
-      // there is no password to verify against (the gate is inert there), so
-      // leave it off. `selectConnection` already resets the flag per daemon.
-      set({ protectArchived: api.connection.kind !== "local" });
+      // The request itself failed (throttle, 5xx, network blip). Leave the
+      // value at the daemon default (off) so it can never drift ahead of
+      // daemon.json — the Settings switch renders this value — but keep
+      // `protectArchivedLoaded` false: consumers treat "unknown" as protected,
+      // so the curtain still does not drop open, and they can retry the load.
+      set({ protectArchived: false, protectArchivedLoaded: false });
     }
   },
 
@@ -1522,7 +1534,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       return;
     }
     const config = await api.setProtectArchived(enabled);
-    set({ protectArchived: config.protectArchivedData ?? enabled });
+    set({
+      protectArchived: config.protectArchivedData ?? enabled,
+      protectArchivedLoaded: true
+    });
   },
 
   openProject: (project) => {

@@ -34,7 +34,14 @@ export interface ServerInfoResponse {
 export interface WorkspaceSummary {
   name: string;
   path: string;
+  /** Every project directory on disk, archived ones included. */
   projectCount: number;
+  /**
+   * How many of `projectCount` are archived (and therefore filtered out of the
+   * sidebar). Absent on older daemons = 0. Clients that render a count of
+   * *visible* projects subtract this.
+   */
+  archivedProjectCount?: number;
   /**
    * Git account this workspace is bound to, from workspaces.json (Phase 4).
    * `null`/absent = no binding (default git identity). The UI resolves the id
