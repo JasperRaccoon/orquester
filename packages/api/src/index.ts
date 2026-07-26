@@ -43,6 +43,8 @@ export interface WorkspaceSummary {
   gitAccountId?: string | null;
   /** ISO creation timestamp from workspaces.json, when present. */
   createdAt?: string;
+  /** Hidden from the sidebar lists (workspaces.json flag). Absent = false. */
+  isArchived?: boolean;
 }
 
 /**
@@ -53,12 +55,36 @@ export interface ProjectSummary {
   name: string;
   workspace: string;
   path: string;
+  /** Hidden from the sidebar lists (workspaces.json flag). Absent = false. */
+  isArchived?: boolean;
 }
 
 export interface CreateWorkspaceRequest {
   name: string;
   /** Optional git account to bind (Phase 4 wires the picker; undefined here). */
   gitAccountId?: string;
+}
+
+/**
+ * Body for PUT /api/workspaces/:workspace. Update-shaped so future fields can
+ * join without a new route; today only the archive flag is settable.
+ */
+export interface UpdateWorkspaceRequest {
+  isArchived?: boolean;
+}
+
+/** Body for PUT /api/workspaces/:workspace/projects/:project. */
+export interface UpdateProjectRequest {
+  isArchived?: boolean;
+}
+
+/**
+ * Body for PUT /api/config/daemon/protect-archived — the one daemon-config
+ * field writable over remote HTTP (it guards a UI curtain, not daemon
+ * security posture; see the spec).
+ */
+export interface SetProtectArchivedRequest {
+  enabled: boolean;
 }
 
 /**

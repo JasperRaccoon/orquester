@@ -1453,7 +1453,13 @@ export function createServer(
     // Upsert the metadata side-table entry (keyed by name).
     const createdAt = new Date().toISOString();
     const meta = await readWorkspacesMeta(resolved.workspacesMetaFile);
-    const entry = { name, gitAccountId: body?.gitAccountId, createdAt };
+    const entry = {
+      name,
+      gitAccountId: body?.gitAccountId,
+      createdAt,
+      isArchived: false,
+      archivedProjects: []
+    };
     meta.workspaces = [...meta.workspaces.filter((w) => w.name !== name), entry];
     await writeWorkspacesMeta(resolved.workspacesMetaFile, meta);
 

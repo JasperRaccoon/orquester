@@ -190,6 +190,14 @@ export const daemonConfigSchema = z.object({
   // May contain $vars; expand with expandVars() before use.
   workspacesDir: z.string().min(1),
   logsDir: z.string().min(1),
+  /**
+   * "Protect archived data": the UI asks for the (retyped, non-autofilled)
+   * password before showing archived workspaces/projects. A client-side
+   * curtain, not a server boundary — archived items still appear (flagged)
+   * in API responses. Writable via PUT /api/config/daemon/protect-archived,
+   * which unlike the full config PUT is allowed over remote HTTP.
+   */
+  protectArchivedData: z.boolean().default(false),
   // Only the external HTTP transport is configurable here; the local unix
   // socket is always present and resolved at runtime (see resolveDaemonPaths).
   transports: z
@@ -462,7 +470,11 @@ export const workspaceMetaSchema = z.object({
   /** Git account this workspace is bound to (Phase 4); undefined = default identity. */
   gitAccountId: z.string().optional(),
   /** ISO timestamp the workspace was created through orquester. */
-  createdAt: z.string()
+  createdAt: z.string(),
+  /** Hidden from the sidebar lists; purely cosmetic — nothing on disk changes. */
+  isArchived: z.boolean().default(false),
+  /** Project dir names under this workspace that are archived. */
+  archivedProjects: z.array(z.string()).default([])
 });
 
 export const workspacesConfigSchema = z.object({
