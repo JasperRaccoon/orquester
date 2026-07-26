@@ -1476,15 +1476,22 @@ export function createServer(
     const path = join(resolved.workspacesDir, name);
     await mkdir(path, { recursive: true });
 
-    // Upsert the metadata side-table entry (keyed by name).
+    // Upsert the metadata side-table entry (keyed by name) — MERGE, never
+    // replace: `mkdir -p` succeeds on an existing dir, so this route also fires
+    // for a workspace that already exists but is hidden because it is archived.
+    // Replacing the entry outright would wipe that workspace's per-project
+    // archive flags (resurfacing projects the user archived) and its
+    // gitAccountId/createdAt. `isArchived` is reset to false on purpose: the
+    // caller just asked for this workspace to exist, so it must be visible.
     const createdAt = new Date().toISOString();
     const meta = await readWorkspacesMeta(resolved.workspacesMetaFile);
-    const entry = {
+    const previous = meta.workspaces.find((w) => w.name === name);
+    const entry: WorkspaceMeta = {
       name,
-      gitAccountId: body?.gitAccountId,
-      createdAt,
+      gitAccountId: body?.gitAccountId ?? previous?.gitAccountId,
+      createdAt: previous?.createdAt ?? createdAt,
       isArchived: false,
-      archivedProjects: []
+      archivedProjects: previous?.archivedProjects ?? []
     };
     meta.workspaces = [...meta.workspaces.filter((w) => w.name !== name), entry];
     await writeWorkspacesMeta(resolved.workspacesMetaFile, meta);
@@ -1498,7 +1505,14 @@ export function createServer(
       });
     }
 
-    return { name, path, projectCount: 0, gitAccountId: entry.gitAccountId ?? null, createdAt };
+    return {
+      name,
+      path,
+      projectCount: 0,
+      gitAccountId: entry.gitAccountId ?? null,
+      createdAt: entry.createdAt,
+      isArchived: false
+    };
   });
 
   app.put<{ Params: { workspace: string }; Body: UpdateWorkspaceRequest }>(
@@ -1605,7 +1619,12 @@ export function createServer(
         }
         const path = join(workspaceDir, name);
         await mkdir(path, { recursive: true });
-        return { name, workspace, path };
+        // `mkdir -p` also succeeds on an existing dir, so this can land on a
+        // project whose name is still in `archivedProjects` (archived, hence
+        // invisible in the sidebar). Prune it, or the "created" project would
+        // never show up. Mirrors the delete-side pruning.
+        await pruneArchivedProject(resolved.workspacesMetaFile, workspace, name);
+        return { name, workspace, path, isArchived: false };
       }
 
       // Repo modes (clone/create) resolve the GitHub account from the WORKSPACE's
@@ -1637,7 +1656,10 @@ export function createServer(
           }
           await mkdir(workspaceDir, { recursive: true });
           await accounts.cloneRepo(accountId, sshUrl, name, workspaceDir);
-          return { name, workspace, path };
+          // A stale archived name (dir removed outside orquester) would hide
+          // the fresh clone — prune it, same as the empty branch above.
+          await pruneArchivedProject(resolved.workspacesMetaFile, workspace, name);
+          return { name, workspace, path, isArchived: false };
         }
 
         if (body.source === "create") {
@@ -1658,7 +1680,8 @@ export function createServer(
           });
           await mkdir(workspaceDir, { recursive: true });
           await accounts.cloneRepo(accountId, repo.sshUrl, name, workspaceDir);
-          return { name, workspace, path };
+          await pruneArchivedProject(resolved.workspacesMetaFile, workspace, name);
+          return { name, workspace, path, isArchived: false };
         }
 
         return reply.code(400).send({ code: "INVALID_REQUEST", message: "Unknown project source." });
@@ -1700,12 +1723,7 @@ export function createServer(
 
       // Prune the archive flag so a recreated same-name project starts fresh
       // (mirrors the workspace delete pruning its whole meta entry).
-      const meta = await readWorkspacesMeta(resolved.workspacesMetaFile);
-      const entry = meta.workspaces.find((w) => w.name === workspace);
-      if (entry?.archivedProjects.includes(project)) {
-        entry.archivedProjects = entry.archivedProjects.filter((name) => name !== project);
-        await writeWorkspacesMeta(resolved.workspacesMetaFile, meta);
-      }
+      await pruneArchivedProject(resolved.workspacesMetaFile, workspace, project);
 
       return reply.code(204).send();
     }
@@ -3923,6 +3941,26 @@ async function readWorkspacesMeta(file: string): Promise<WorkspacesConfig> {
 
 async function writeWorkspacesMeta(file: string, value: WorkspacesConfig): Promise<void> {
   await writeJsonFile(file, value);
+}
+
+/**
+ * Drop a project name from its workspace's `archivedProjects`. Used on both
+ * delete and (re)create so a project directory that occupies a name left over
+ * in the archive list can never come back invisible: `listProjects` flags any
+ * listed name as archived and every client filters those rows out.
+ */
+async function pruneArchivedProject(
+  metaFile: string,
+  workspace: string,
+  project: string
+): Promise<void> {
+  const meta = await readWorkspacesMeta(metaFile);
+  const entry = meta.workspaces.find((w) => w.name === workspace);
+  if (!entry?.archivedProjects.includes(project)) {
+    return;
+  }
+  entry.archivedProjects = entry.archivedProjects.filter((name) => name !== project);
+  await writeWorkspacesMeta(metaFile, meta);
 }
 
 async function writeJsonFile(file: string, value: unknown): Promise<void> {

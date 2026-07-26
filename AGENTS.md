@@ -286,7 +286,10 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
   account. It stays on-host (same user), off any command line, and is still never returned by the
   API. `gh` must be installed on the host separately; it is not an npm package.)*
 - **Security boundary asymmetry.** `PUT /api/config/daemon` is **Unix-socket-only** (403 over
-  remote HTTP); `/api/accounts` *is* allowed remotely (safe — no key material is ever returned).
+  remote HTTP) — **except the single-field `PUT /api/config/daemon/protect-archived`, which is
+  allowed on both transports** (normal bearer auth) because it toggles a client-side UI curtain
+  ("Protect archived data"), not daemon security posture; `/api/accounts` *is* allowed remotely
+  (safe — no key material is ever returned).
 - **Archive preview is host-tool-gated.** `GET /api/fs/archive` lists archive contents by
   shelling out to `7z` (p7zip-full) or `bsdtar` (libarchive-tools). Without either on PATH,
   archives degrade gracefully to a download card (`supported:false`). Not an npm package.

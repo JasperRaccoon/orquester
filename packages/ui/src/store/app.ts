@@ -1231,6 +1231,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       currentProject: null,
       workspaces: [],
       projects: [],
+      // Per-daemon flag: never let one server's curtain setting apply to the
+      // next one. connect() reloads it from the newly selected daemon.
+      protectArchived: false,
       sessions: [],
       browsers: [],
       accounts: []
@@ -1492,7 +1495,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       const config = await api.getDaemonConfig();
       set({ protectArchived: config.protectArchivedData ?? false });
     } catch {
-      /* older daemon without the field — keep the default (off) */
+      // Older daemon without the field (or the fetch failed) — fall back to
+      // the documented default explicitly, so a value left over from an
+      // earlier daemon can never linger.
+      set({ protectArchived: false });
     }
   },
 

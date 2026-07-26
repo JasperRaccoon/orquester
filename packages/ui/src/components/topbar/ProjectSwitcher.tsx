@@ -11,6 +11,11 @@ export const ProjectSwitcher: React.FC = () => {
   const projectsLoading = useAppStore((s) => s.projectsLoading);
   const openProject = useAppStore((s) => s.openProject);
 
+  // Archived projects are hidden here exactly as in the sidebar's ProjectList:
+  // archived means "no navigation into it, unarchive first" (spec). The store
+  // keeps the full unfiltered list — other lookups depend on it.
+  const visibleProjects = projects.filter((p) => !p.isArchived);
+
   const trigger = (
     <span className="flex h-7 items-center gap-1.5 rounded-md px-2 text-sm font-medium text-neutral-100 hover:bg-neutral-800">
       <Box size={14} className="text-neutral-500" />
@@ -23,8 +28,10 @@ export const ProjectSwitcher: React.FC = () => {
     <AdaptiveMenu title="Projects" trigger={trigger} width="w-64">
       <DropdownLabel>{currentProject?.workspace ?? currentWorkspace ?? "Workspace"}</DropdownLabel>
       {projectsLoading && <DropdownEmpty>Loading…</DropdownEmpty>}
-      {!projectsLoading && projects.length === 0 && <DropdownEmpty>No projects</DropdownEmpty>}
-      {projects.map((project) => (
+      {!projectsLoading && visibleProjects.length === 0 && (
+        <DropdownEmpty>No projects</DropdownEmpty>
+      )}
+      {visibleProjects.map((project) => (
         <DropdownItem
           key={project.path}
           icon={project.path === currentProject?.path ? <Check size={14} /> : <Box size={14} />}

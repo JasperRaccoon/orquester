@@ -838,13 +838,15 @@ const DaemonSettings: React.FC = () => {
 
         <Field
           label="Protect archived data"
-          hint="Ask for the password before showing archived workspaces/projects. Changeable from any client; applies instantly."
+          hint="Ask for the password before showing archived workspaces/projects. Changeable from any client; other open clients pick it up on their next connect."
         >
           <Switch
             checked={protectArchived}
             onChange={(next) => {
               if (next) {
-                void setProtectArchived(true);
+                setProtectArchived(true).catch(() =>
+                  setMessage("Could not change archived-data protection.")
+                );
               } else {
                 // Retype-to-disable (spec decision #6): the curtain must not be
                 // one-click removable on an unattended open session.
@@ -871,7 +873,9 @@ const DaemonSettings: React.FC = () => {
             message="Retype your password to turn this off."
             onVerified={() => {
               setConfirmDisable(false);
-              void setProtectArchived(false);
+              setProtectArchived(false).catch(() =>
+                setMessage("Could not change archived-data protection.")
+              );
             }}
           />
         </div>
