@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Button } from "./button";
 import { useAppStore } from "../../store/app";
-import { loadStoredHash, verifyLocalPassword } from "../../lib/auth";
+import { hashFromCredential, loadStoredHash, verifyLocalPassword } from "../../lib/auth";
 
 export interface PasswordVerifyProps {
   /** Called once the typed password matches the stored credential hash. */
@@ -20,8 +20,12 @@ export interface PasswordVerifyProps {
  * surrounding form/username field, and 1Password/LastPass ignore attributes.
  * The typed value lives only in component state.
  *
- * With no stored hash (local unix-socket desktop — auth is HTTP-only), the
- * gate is inert: it auto-verifies on mount and renders nothing.
+ * On a LOCAL (unix-socket) connection there is no password at all — auth is
+ * HTTP-only — so the gate is inert there: it auto-verifies on mount and renders
+ * nothing. On an authenticated connection a missing stored hash is NOT taken as
+ * "no auth configured" (that would hand the curtain away after Sign out, or
+ * whenever localStorage was cleared/unavailable): the gate fails closed and
+ * asks the user to sign in again.
  */
 export const PasswordVerify: React.FC<PasswordVerifyProps> = ({
   onVerified,
@@ -29,20 +33,37 @@ export const PasswordVerify: React.FC<PasswordVerifyProps> = ({
   autoFocus
 }) => {
   const api = useAppStore((s) => s.api);
-  const storedHash = api ? loadStoredHash(api.connection.endpoint) : undefined;
+  const isLocal = api?.connection.kind === "local";
+  // localStorage first, then the live credential itself (storage can be
+  // unavailable, and a seeded remote's credential comes from remotes.json).
+  const storedHash = api
+    ? (loadStoredHash(api.connection.endpoint) ?? hashFromCredential(api.connection.password))
+    : undefined;
   const [value, setValue] = useState("");
   const [error, setError] = useState(false);
 
   useEffect(() => {
-    if (!storedHash) {
+    if (isLocal) {
       onVerified();
     }
     // Inert-gate auto-pass fires once per mount by design.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  if (!storedHash) {
+  if (isLocal) {
     return null;
+  }
+
+  if (!storedHash) {
+    // Authenticated connection with no credential to compare against (signed
+    // out, or storage cleared/unavailable). Never auto-pass here.
+    return (
+      <div className="space-y-2 px-2 py-1.5">
+        <p className="text-xs text-neutral-400">
+          Sign in again to unlock this — no stored credential is available on this device.
+        </p>
+      </div>
+    );
   }
 
   const submit = () => {

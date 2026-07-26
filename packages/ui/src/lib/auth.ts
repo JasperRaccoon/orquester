@@ -34,6 +34,29 @@ export function buildCredential(username: string, hash: string): string {
   return btoa(`${username}:${hash}`);
 }
 
+/**
+ * Pull the bcrypt hash back out of a wire credential (base64("<user>:<hash>")).
+ * The in-memory credential is the authoritative copy — localStorage is only a
+ * cache of it (writes are swallowed when storage is unavailable, and a seeded
+ * remote carries its credential in remotes.json instead). Used as the fallback
+ * source for the offline `verifyLocalPassword` compare so the archived-data
+ * curtain still works — and still fails closed when there is no credential.
+ */
+export function hashFromCredential(credential: string | undefined): string | undefined {
+  if (!credential) {
+    return undefined;
+  }
+  try {
+    const decoded = atob(credential);
+    const separator = decoded.indexOf(":");
+    const hash = separator >= 0 ? decoded.slice(separator + 1) : "";
+    // bcrypt hashes start with $2a/$2b/$2y — anything else isn't comparable.
+    return hash.startsWith("$2") ? hash : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 const keyFor = (endpoint: string) => `orquester.auth:${endpoint}`;
 
 export function loadStoredHash(endpoint: string): string | undefined {

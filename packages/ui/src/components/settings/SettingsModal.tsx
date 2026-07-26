@@ -787,7 +787,8 @@ const DaemonSettings: React.FC = () => {
       {!isLocal && (
         <div className="rounded-md border border-neutral-800 bg-neutral-950 p-3 text-xs text-neutral-400">
           Daemon settings can only be changed from the local app (unix socket). Connected over HTTP
-          they are read-only.
+          they are read-only — except “Protect archived data”, which has its own endpoint and can be
+          changed from any client.
         </div>
       )}
 

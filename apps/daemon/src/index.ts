@@ -1447,7 +1447,24 @@ export function createServer(
           .send({ code: "INVALID_CONFIG", message: "`enabled` must be a boolean." });
       }
       config.protectArchivedData = request.body.enabled;
-      await writeFile(resolved.configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+      // Persist ONLY the field this route manages. daemon.json used to be
+      // writable from the unix socket alone; now that a remote client can hit
+      // this route, serializing the whole in-memory config would let a UI
+      // curtain toggle silently overwrite any on-disk divergence (e.g. a
+      // daemon.json hand-edited since boot). Re-read + re-validate the file and
+      // patch the one field; fall back to the in-memory config if it is
+      // missing/corrupt (first write after a fresh appdir).
+      let persisted: DaemonConfig;
+      try {
+        persisted = parseDaemonConfig(JSON.parse(await readFile(resolved.configPath, "utf8")));
+        persisted.protectArchivedData = request.body.enabled;
+        // Never write a plaintext password back out (boot already migrates the
+        // file; this guards a hand-edit made since).
+        migrateHttpPassword(persisted);
+      } catch {
+        persisted = config;
+      }
+      await writeFile(resolved.configPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
       return sanitizeDaemonConfig(config);
     }
   );
@@ -1484,17 +1501,18 @@ export function createServer(
     // gitAccountId/createdAt. `isArchived` is reset to false on purpose: the
     // caller just asked for this workspace to exist, so it must be visible.
     const createdAt = new Date().toISOString();
-    const meta = await readWorkspacesMeta(resolved.workspacesMetaFile);
-    const previous = meta.workspaces.find((w) => w.name === name);
-    const entry: WorkspaceMeta = {
-      name,
-      gitAccountId: body?.gitAccountId ?? previous?.gitAccountId,
-      createdAt: previous?.createdAt ?? createdAt,
-      isArchived: false,
-      archivedProjects: previous?.archivedProjects ?? []
-    };
-    meta.workspaces = [...meta.workspaces.filter((w) => w.name !== name), entry];
-    await writeWorkspacesMeta(resolved.workspacesMetaFile, meta);
+    const entry = await mutateWorkspacesMeta(resolved.workspacesMetaFile, (meta) => {
+      const previous = meta.workspaces.find((w) => w.name === name);
+      const next: WorkspaceMeta = {
+        name,
+        gitAccountId: body?.gitAccountId ?? previous?.gitAccountId,
+        createdAt: previous?.createdAt ?? createdAt,
+        isArchived: false,
+        archivedProjects: previous?.archivedProjects ?? []
+      };
+      meta.workspaces = [...meta.workspaces.filter((w) => w.name !== name), next];
+      return next;
+    });
 
     // Bind the git account (immutable): write the include file + register the
     // global includeIf rule for this workspace's realpath. Best-effort — a
@@ -1530,19 +1548,20 @@ export function createServer(
 
       // Merge into the meta entry — never replace it (that would clobber
       // gitAccountId/createdAt). Workspaces predating the side-table get an
-      // entry created on the spot.
-      const meta = await readWorkspacesMeta(resolved.workspacesMetaFile);
-      const entry: WorkspaceMeta = meta.workspaces.find((w) => w.name === workspace) ?? {
-        name: workspace,
-        createdAt: new Date().toISOString(),
-        isArchived: false,
-        archivedProjects: []
-      };
-      if (typeof request.body?.isArchived === "boolean") {
-        entry.isArchived = request.body.isArchived;
-      }
-      meta.workspaces = [...meta.workspaces.filter((w) => w.name !== workspace), entry];
-      await writeWorkspacesMeta(resolved.workspacesMetaFile, meta);
+      // entry created on the spot. Serialized so a concurrent mutation of
+      // workspaces.json can't be lost.
+      await mutateWorkspacesMeta(resolved.workspacesMetaFile, (meta) => {
+        const entry: WorkspaceMeta = meta.workspaces.find((w) => w.name === workspace) ?? {
+          name: workspace,
+          createdAt: new Date().toISOString(),
+          isArchived: false,
+          archivedProjects: []
+        };
+        if (typeof request.body?.isArchived === "boolean") {
+          entry.isArchived = request.body.isArchived;
+        }
+        meta.workspaces = [...meta.workspaces.filter((w) => w.name !== workspace), entry];
+      });
 
       const all = await listWorkspaces(resolved.workspacesDir, resolved.workspacesMetaFile);
       const summary = all.find((w) => w.name === workspace);
@@ -1577,20 +1596,22 @@ export function createServer(
         return reply.code(404).send();
       }
 
-      // Same merge-not-replace rule as the workspace PUT above.
-      const meta = await readWorkspacesMeta(resolved.workspacesMetaFile);
-      const entry: WorkspaceMeta = meta.workspaces.find((w) => w.name === workspace) ?? {
-        name: workspace,
-        createdAt: new Date().toISOString(),
-        isArchived: false,
-        archivedProjects: []
-      };
-      if (typeof request.body?.isArchived === "boolean") {
-        const without = entry.archivedProjects.filter((name) => name !== project);
-        entry.archivedProjects = request.body.isArchived ? [...without, project] : without;
-      }
-      meta.workspaces = [...meta.workspaces.filter((w) => w.name !== workspace), entry];
-      await writeWorkspacesMeta(resolved.workspacesMetaFile, meta);
+      // Same merge-not-replace rule as the workspace PUT above (and the same
+      // serialization against concurrent workspaces.json writers).
+      const entry = await mutateWorkspacesMeta(resolved.workspacesMetaFile, (meta) => {
+        const next: WorkspaceMeta = meta.workspaces.find((w) => w.name === workspace) ?? {
+          name: workspace,
+          createdAt: new Date().toISOString(),
+          isArchived: false,
+          archivedProjects: []
+        };
+        if (typeof request.body?.isArchived === "boolean") {
+          const without = next.archivedProjects.filter((name) => name !== project);
+          next.archivedProjects = request.body.isArchived ? [...without, project] : without;
+        }
+        meta.workspaces = [...meta.workspaces.filter((w) => w.name !== workspace), next];
+        return next;
+      });
 
       return {
         name: project,
@@ -1757,9 +1778,9 @@ export function createServer(
       // its /private/tmp realpath differ — a post-rm fallback wouldn't match).
       await services.accounts.unbindWorkspace(target).catch(() => undefined);
       await rm(safe, { recursive: true, force: true });
-      const meta = await readWorkspacesMeta(resolved.workspacesMetaFile);
-      meta.workspaces = meta.workspaces.filter((w) => w.name !== workspace);
-      await writeWorkspacesMeta(resolved.workspacesMetaFile, meta);
+      await mutateWorkspacesMeta(resolved.workspacesMetaFile, (meta) => {
+        meta.workspaces = meta.workspaces.filter((w) => w.name !== workspace);
+      });
 
       return reply.code(204).send();
     }
@@ -3944,6 +3965,37 @@ async function writeWorkspacesMeta(file: string, value: WorkspacesConfig): Promi
 }
 
 /**
+ * Serializes every read-modify-write of workspaces.json. Without it two
+ * concurrent mutations (archive two projects at once, delete while archiving,
+ * …) both read the pre-write file and the second write silently drops the
+ * first one's change. Module-level on purpose: both transports (unix socket +
+ * HTTP) run in one process and must share the queue.
+ */
+let workspacesMetaQueue: Promise<unknown> = Promise.resolve();
+
+/**
+ * Run `mutate` against a freshly read workspaces.json and persist the result,
+ * with all such mutations serialized against each other (see the queue above).
+ * The file is always rewritten, even when the mutation was a no-op — harmless,
+ * and it keeps the helper's contract trivial.
+ */
+async function mutateWorkspacesMeta<T>(
+  file: string,
+  mutate: (meta: WorkspacesConfig) => T | Promise<T>
+): Promise<T> {
+  const run = workspacesMetaQueue.then(async () => {
+    const meta = await readWorkspacesMeta(file);
+    const result = await mutate(meta);
+    await writeWorkspacesMeta(file, meta);
+    return result;
+  });
+  // Keep the chain alive after a failed mutation (a rejected queue head would
+  // reject every later mutation).
+  workspacesMetaQueue = run.catch(() => undefined);
+  return run;
+}
+
+/**
  * Drop a project name from its workspace's `archivedProjects`. Used on both
  * delete and (re)create so a project directory that occupies a name left over
  * in the archive list can never come back invisible: `listProjects` flags any
@@ -3954,13 +4006,13 @@ async function pruneArchivedProject(
   workspace: string,
   project: string
 ): Promise<void> {
-  const meta = await readWorkspacesMeta(metaFile);
-  const entry = meta.workspaces.find((w) => w.name === workspace);
-  if (!entry?.archivedProjects.includes(project)) {
-    return;
-  }
-  entry.archivedProjects = entry.archivedProjects.filter((name) => name !== project);
-  await writeWorkspacesMeta(metaFile, meta);
+  await mutateWorkspacesMeta(metaFile, (meta) => {
+    const entry = meta.workspaces.find((w) => w.name === workspace);
+    if (!entry) {
+      return;
+    }
+    entry.archivedProjects = entry.archivedProjects.filter((name) => name !== project);
+  });
 }
 
 async function writeJsonFile(file: string, value: unknown): Promise<void> {

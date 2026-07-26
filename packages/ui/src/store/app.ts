@@ -1211,6 +1211,15 @@ export const useAppStore = create<AppState>((set, get) => ({
         reconnectAttempt: 0,
         connectionError: null,
         lockedUntil: null,
+        // Drop the signed-in daemon's data with the credential (same reset
+        // `selectConnection` does). Otherwise the sidebar keeps rendering the
+        // previous session's workspaces/projects behind the auth prompt — and
+        // the archived-items curtain has no stored hash left to verify against.
+        currentWorkspace: null,
+        currentProject: null,
+        workspaces: [],
+        projects: [],
+        protectArchived: false,
         authPrompt: { connectionId: api.connection.id }
       });
     }
@@ -1493,12 +1502,17 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     try {
       const config = await api.getDaemonConfig();
+      // An older daemon simply omits the field — that (and only that) is the
+      // documented default-off case.
       set({ protectArchived: config.protectArchivedData ?? false });
     } catch {
-      // Older daemon without the field (or the fetch failed) — fall back to
-      // the documented default explicitly, so a value left over from an
-      // earlier daemon can never linger.
-      set({ protectArchived: false });
+      // The request itself failed (throttle, 5xx, network blip). Don't fail
+      // open: dropping the curtain for the rest of the session on a transient
+      // error is exactly the case it guards. Keep it up for connections that
+      // can actually verify a password; on a local unix-socket connection
+      // there is no password to verify against (the gate is inert there), so
+      // leave it off. `selectConnection` already resets the flag per daemon.
+      set({ protectArchived: api.connection.kind !== "local" });
     }
   },
 
