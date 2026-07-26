@@ -25,6 +25,16 @@ layout, pane sizes, and view mode).
    Workspace entries gain `isArchived`; each entry gains `archivedProjects: string[]`
    (project dir names). No new file, no general per-project metadata table (YAGNI), no
    dot-marker files in user directories.
+4. **"Protect archived data" is a UI gate, not a server boundary.** With the toggle on,
+   the archived panel demands the password (retyped, never autofilled) before revealing
+   its list. Verification is client-side against the stored credential. The raw API
+   still returns archived items flagged — it's a privacy curtain against someone at an
+   open session, not a security boundary against someone holding the credential.
+5. **Re-prompt on every panel open.** No unlock timer, no per-session memory.
+6. **The toggle is remote-togglable, with retype-to-disable.** It lives in `daemon.json`
+   but gets its own small endpoint allowed over HTTP (unlike the full daemon-config
+   `PUT`, which stays unix-socket-only). Turning it ON is one click; turning it OFF
+   first demands the retyped password in the same no-autofill prompt.
 
 ## Backend
 
@@ -170,6 +180,61 @@ tabs must survive an unarchive. Sessions keep running server-side and reappear u
 Adapter note (repo convention): no new persisted client-local shapes are introduced, so
 no new localStorage schema/validation work is needed.
 
+## Protect archived data (password gate)
+
+### Config & endpoint (daemon)
+
+- `daemon.json` gains `protectArchivedData: z.boolean().default(false)` in the daemon
+  config schema (`packages/config`). It is **not** a secret — `sanitizeDaemonConfig`
+  keeps it, so every client can read it from the existing config GET.
+- New endpoint `PUT /api/config/daemon/protect-archived` with body
+  `{ enabled: boolean }` — available on **both** transports with normal bearer auth
+  (deliberate, documented exception to the daemon-config-writes-are-socket-only rule;
+  it guards a UI curtain, not daemon security posture). Persists the flag to
+  `daemon.json` and returns the sanitized config. The full `PUT /api/config/daemon`
+  remains 403 over HTTP, unchanged.
+
+### Settings UI
+
+- Daemon settings section gains a "Protect archived data" toggle (below Password):
+  label + subtitle "Ask for the password before showing archived workspaces/projects."
+- Unlike the other daemon fields, the toggle stays enabled over remote HTTP (it calls
+  the dedicated endpoint, not the read-only config form).
+- Turning **ON**: immediate call. Turning **OFF**: opens the password prompt first;
+  only on successful verification does the UI call the endpoint.
+
+### The password prompt
+
+A small shared modal component (reused by the archived panel and the settings toggle):
+
+- Single password field + Confirm/Cancel. Field is cleared on every mount, and the
+  typed value lives only in component state — never persisted, never logged.
+- **Anti-autofill measures**: `autoComplete="new-password"` (the reliable way to stop
+  password-manager/browser fill — `off` is widely ignored for password fields), a
+  non-credential `name`, no wrapping `<form>` with a username field, and
+  `data-1p-ignore`/`data-lpignore` attributes for the common password-manager
+  extensions. The user must physically type the password.
+- **Verification is fully client-side and offline**: the stored wire credential already
+  contains the bcrypt hash (which embeds its salt), so the prompt runs
+  `bcrypt.compare(typed, storedHash)` with the bcryptjs dependency the UI already has.
+  No network round trip, no plaintext on the wire — consistent with the existing
+  never-send-plaintext auth design.
+- Wrong password: inline error, field cleared, stays open. No throttle needed (it's a
+  local compare; the real login throttle guards the actual auth surface).
+
+### Gate behavior in the archived panel
+
+- Toggle off → footer button opens the panel directly (base feature behavior).
+- Toggle on → every click on the footer button opens the password prompt first; the
+  panel (and its unarchive actions) renders only after verification. Closing and
+  reopening re-prompts.
+- **Local unix-socket clients (desktop) with no stored credential are exempt**: there
+  is no password to verify against on the socket transport (auth is HTTP-only), so the
+  gate is inert there and the panel opens directly. The curtain targets remote browser
+  sessions, which is where an unattended open tab lives.
+- Edge: if the stored credential is stale (password rotated server-side while the tab
+  stayed open), the compare fails until re-login — acceptable; re-login refreshes it.
+
 ## Error handling & edge cases
 
 - Old/corrupt `workspaces.json`: zod defaults handle old files; the existing
@@ -192,7 +257,10 @@ Repo has no test runner. Done means:
    contents and `GET` flags), and verify the sidebar flows in the web UI (context menu →
    item disappears; muted footer appears with count; panel opens upward; unarchive
    restores; archiving the open workspace/project navigates away without losing tab
-   layout after unarchive). Per repo rules, the daemon is never restarted by the
+   layout after unarchive). For the password gate: flip the toggle from remote,
+   confirm the prompt appears on every panel open, wrong password is rejected, right
+   password reveals the list, the browser offers no autofill, and disabling the toggle
+   demands the retype. Per repo rules, the daemon is never restarted by the
    implementing agent — daemon code changes are verified by typecheck + review, and live
    verification happens on the user's running instance when they restart it, or via a
    separate checkout if explicitly requested.
@@ -203,3 +271,5 @@ Repo has no test runner. Done means:
 - No archiving-blocks-sessions or cascade behavior.
 - No rename or other workspace/project update fields (the `PUT` body shape leaves room).
 - No global "all archived items" view; the panel is strictly per-context.
+- No server-side hiding of archived data behind the password gate (UI curtain only, by
+  decision #4); no unlock timers or per-session unlock memory.
