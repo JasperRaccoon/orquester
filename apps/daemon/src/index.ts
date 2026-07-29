@@ -72,6 +72,7 @@ import { BrowserError, BrowserManager } from "./browsers";
 import { redactUrlTokens, sanitizeDevtoolsPath } from "./devtools.js";
 import { UrlWatcher } from "./url-watcher";
 import { AgentHooks } from "./agent-hooks";
+import { claudeTimeoutEnv } from "./agent-timeout-env.ts";
 import { type ISessionManager, SessionError, createSessionManager } from "./sessions";
 import type { ActivityCause } from "./ansi-activity";
 import { TodoError, TodoListManager } from "./todos";
@@ -342,13 +343,18 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     resolveExtraEnv: async (entry, ctx) => {
       if (entry.kind !== "agent") return null;
       try {
-        // Managed-account identity (Claude/Codex homes) composed with the
-        // cliproxy contributor (auth token + isolated config home + per-launch
-        // model) for the claudex/claudemix launchers. The contributor wins on
-        // any collision; the managed account keeps the effective accountId.
-        return composeExtraEnv(
+        // Claude harness stream/API timeout (spec
+        // 2026-07-29-claude-agent-timeout-setting-design.md §3). Read fresh per
+        // launch so a settings change applies to the next session with no daemon
+        // restart; readAppConfigFile already falls back to schema defaults on a
+        // missing or corrupt file, so this cannot throw.
+        const { claudeTimeoutMinutes } = (await readAppConfigFile(resolved.appConfigFile)).agents;
+        return buildAgentLaunchEnv(
+          entry.id,
+          ctx,
+          claudeTimeoutMinutes,
           await agentAccounts.resolveLaunchEnv(entry.id, ctx.accountId),
-          cliproxyContributor(entry.id, ctx, resolved.daemonDir)
+          resolved.daemonDir
         );
       } catch (error) {
         throw new SessionError(error instanceof Error ? error.message : String(error));
@@ -890,6 +896,33 @@ export function cliproxyContributor(
   const result: LaunchEnv = { env };
   if (accountId !== undefined) result.accountId = accountId;
   return result;
+}
+
+/**
+ * Compose the full launch env for one agent session from its three contributors.
+ * This is the whole body of the session manager's `resolveExtraEnv` seam, lifted
+ * out as a pure function (the managed-account contribution is passed in already
+ * resolved) so the composition — which contributor wins a key collision, and
+ * which launchers get the Claude timeout env — is exercised by tests rather than
+ * only by a live launch.
+ *
+ * Ordering contract: `cliproxyContributor` stays in the outermost `b` position
+ * so it keeps winning every key collision per its documented contract, while
+ * `accountEnv` stays in the outermost `a` position so the managed account keeps
+ * supplying the effective `accountId`. The three timeout keys collide with
+ * nothing.
+ */
+export function buildAgentLaunchEnv(
+  entryId: string,
+  ctx: { accountId?: string; model?: string },
+  claudeTimeoutMinutes: number,
+  accountEnv: LaunchEnv | null,
+  daemonDir: string
+): LaunchEnv | null {
+  return composeExtraEnv(
+    composeExtraEnv(accountEnv, claudeTimeoutEnv(entryId, claudeTimeoutMinutes)),
+    cliproxyContributor(entryId, ctx, daemonDir)
+  );
 }
 
 /**
