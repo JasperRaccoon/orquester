@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   AppWindow,
   Bell,
@@ -188,6 +188,45 @@ const AgentsSettings: React.FC = () => {
   const installAgent = useAppStore((s) => s.installAgent);
   const updateAgent = useAppStore((s) => s.updateAgent);
   const [filter, setFilter] = useState<AgentFilter>("all");
+  // Named `agentPrefs`, not `agents`: `agents` below is the filtered registry list.
+  const agentPrefs = useAppStore((s) => s.appConfig.agents);
+  const updateAgentPrefs = useAppStore((s) => s.updateAgentPrefs);
+  const [timeoutDraft, setTimeoutDraft] = useState(String(agentPrefs.claudeTimeoutMinutes));
+
+  // Re-sync when the value changes underneath us: it lives in the daemon's
+  // app.json (shared by every client of that daemon) and is refetched on each
+  // connect, so a switch of connection can bring in a different value.
+  useEffect(
+    () => setTimeoutDraft(String(agentPrefs.claudeTimeoutMinutes)),
+    [agentPrefs.claudeTimeoutMinutes]
+  );
+
+  /** Persist the draft if it is in range; returns false when it is not. */
+  const persistTimeout = () => {
+    const next = Number.parseInt(timeoutDraft, 10);
+    // Never persist something the daemon's zod schema would refuse.
+    if (!Number.isInteger(next) || next < 1 || next > 30) {
+      return false;
+    }
+    if (next !== agentPrefs.claudeTimeoutMinutes) {
+      void updateAgentPrefs({ ...agentPrefs, claudeTimeoutMinutes: next });
+    }
+    return true;
+  };
+
+  const commitTimeout = () => {
+    // Reject out-of-band values by snapping the field back.
+    if (!persistTimeout()) setTimeoutDraft(String(agentPrefs.claudeTimeoutMinutes));
+  };
+
+  // Blur alone is not a reliable commit point: the modal closes on a
+  // document-level Escape handler (and the panel switches tabs), which unmounts
+  // the focused input without React ever firing onBlur — the edit would be
+  // silently lost. Every other control here persists immediately, so commit on
+  // unmount too (persist only — no setState on an unmounted component).
+  const persistRef = useRef(persistTimeout);
+  persistRef.current = persistTimeout;
+  useEffect(() => () => void persistRef.current(), []);
 
   const agents = registry.agents.filter((a) =>
     filter === "installed" ? a.enabled : filter === "available" ? !a.enabled : true
@@ -201,6 +240,26 @@ const AgentsSettings: React.FC = () => {
 
   return (
     <div className="space-y-3">
+      <div className="rounded-lg border border-neutral-800 px-3">
+        <Field
+          label="Claude stream timeout"
+          hint="Minutes an idle Claude stream may stall before the harness aborts it. Applies to every Claude harness launched here (claude, claudex, claudemix) and to their subagents. 30 is the maximum the harness honors. Takes effect for newly launched sessions."
+        >
+          <Input
+            className="w-20"
+            type="number"
+            min={1}
+            max={30}
+            value={timeoutDraft}
+            onChange={(e) => setTimeoutDraft(e.target.value)}
+            onBlur={commitTimeout}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") e.currentTarget.blur();
+            }}
+          />
+        </Field>
+      </div>
+
       <div className="inline-flex rounded-lg bg-neutral-800/60 p-0.5 text-xs">
         {filters.map((f) => (
           <button
