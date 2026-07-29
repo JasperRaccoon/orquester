@@ -665,11 +665,16 @@ Expected: `CLEAN: no hand-edited overrides remain`
 
 - [ ] **Step 3: Restore the vps-b file from backup**
 
+Real host/user/key values live ONLY in the gitignored `deploy/targets.conf` (per
+AGENTS.md: never commit a real domain, IP, or secret). Read the `[vps-b]` section
+there for `$HOST`/`$USER`/`$KEY`, and prefix `sudo` only if that target sets
+`sudo = yes`.
+
 ```bash
-ssh -i /var/lib/orquester/.ssh/orq_deploy -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 \
-  ubuntu@152.228.139.179 \
-  'sudo cp -p /var/lib/orquester/.claude/settings.json.bak-timeouts /var/lib/orquester/.claude/settings.json &&
-   (sudo grep -q CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS /var/lib/orquester/.claude/settings.json && echo "STILL PRESENT" || echo "CLEAN")'
+ssh -i "$KEY" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 \
+  "$USER@$HOST" \
+  'cp -p /var/lib/orquester/.claude/settings.json.bak-timeouts /var/lib/orquester/.claude/settings.json &&
+   (grep -q CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS /var/lib/orquester/.claude/settings.json && echo "STILL PRESENT" || echo "CLEAN")'
 ```
 
 Expected: `CLEAN`
