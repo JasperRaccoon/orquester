@@ -321,6 +321,24 @@ export function usageAgentEnabled(prefs: UsagePrefs, id: string): boolean {
   return prefs.enabled && (prefs.agents[id] ?? true);
 }
 
+/**
+ * Agent-harness runtime preferences. Daemon-side and per-VPS: the daemon reads
+ * them at session launch, so every client that launches a session gets the same
+ * value. The parent group's `.default({})` on appConfigSchema is what lets a
+ * freshly provisioned VPS inherit these with no migration step.
+ */
+export const agentPrefsSchema = z.object({
+  /**
+   * Claude harness stream/API timeout, in minutes. Injected at session launch
+   * for every claude-family launcher (claude/claudex/claudemix). 30 is Claude
+   * Code's own hard clamp on the idle watchdogs (ODh = 1800000) — a larger
+   * value is silently floored by the harness, so it is rejected here rather
+   * than displayed as a number that does nothing.
+   */
+  claudeTimeoutMinutes: z.number().int().min(1).max(30).default(30)
+});
+export type AgentPrefs = z.infer<typeof agentPrefsSchema>;
+
 // agent-accounts.json (managed per-agent accounts; daemon-side)
 
 export const agentAccountSchema = z.object({
@@ -376,7 +394,9 @@ export const appConfigSchema = z.object({
   /** Confirm before closing a live terminal/agent session tab (it ends the session). */
   confirmCloseSession: z.boolean().default(true),
   /** Top-bar agent-usage widget preferences. */
-  usage: usagePrefsSchema.default({})
+  usage: usagePrefsSchema.default({}),
+  /** Agent-harness runtime preferences (see agentPrefsSchema). */
+  agents: agentPrefsSchema.default({})
 });
 
 export type AppConfig = z.infer<typeof appConfigSchema>;
