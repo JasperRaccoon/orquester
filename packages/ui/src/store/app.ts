@@ -42,7 +42,7 @@ import {
   type PaneSizeKey,
   type PaneSizes
 } from "../lib/panel-sizes";
-import { normalizeUsagePrefs, type AppConfigAdapter } from "../lib/app-config";
+import { normalizeAgentPrefs, normalizeUsagePrefs, type AppConfigAdapter } from "../lib/app-config";
 import type { HttpClient } from "../lib/http-client";
 import type { Transporter } from "../lib/transporter";
 import { workspaceService } from "../services";
@@ -76,7 +76,7 @@ import type {
   UsageResponse,
   UsageTokensResponse
 } from "@orquester/api";
-import type { UsagePrefs } from "@orquester/config";
+import type { AgentPrefs, UsagePrefs } from "@orquester/config";
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -136,6 +136,8 @@ const DEFAULT_USAGE_PREFS: UsagePrefs = {
   agents: {},
   chip: "busiest"
 };
+
+const DEFAULT_AGENT_PREFS: AgentPrefs = { claudeTimeoutMinutes: 30 };
 
 /**
  * Stable empty pane-sizes object for the {@link usePaneSizes} fallback. A fresh
@@ -338,6 +340,7 @@ export interface UiAppConfig {
   runInBackground: boolean;
   confirmCloseSession: boolean;
   usage: UsagePrefs;
+  agents: AgentPrefs;
 }
 
 /** Persist the remote-server list to the home daemon (shared across clients). */
@@ -631,6 +634,10 @@ export interface AppState {
   setSettingsOpen: (open: boolean) => void;
   setSidebarDrawer: (open: boolean) => void;
   updateAppConfig: (patch: Partial<UiAppConfig>) => Promise<void>;
+  /** Read `appConfig.agents` from the connected daemon (see updateAgentPrefs). */
+  loadAgentPrefs: () => Promise<void>;
+  /** Persist `appConfig.agents` to the connected daemon (see updateAgentPrefs). */
+  updateAgentPrefs: (next: AgentPrefs) => Promise<void>;
 
   // auth
   submitCredentials: (username: string, password: string) => Promise<void>;
@@ -749,7 +756,13 @@ export const useAppStore = create<AppState>((set, get) => ({
   lockedUntil: null,
   connections: [],
   activeConnectionId: null,
-  appConfig: { useTitlebar: false, runInBackground: false, confirmCloseSession: true, usage: DEFAULT_USAGE_PREFS },
+  appConfig: {
+    useTitlebar: false,
+    runInBackground: false,
+    confirmCloseSession: true,
+    usage: DEFAULT_USAGE_PREFS,
+    agents: DEFAULT_AGENT_PREFS
+  },
   settingsOpen: false,
   pendingCloseTabId: null,
   sidebarDrawerOpen: false,
@@ -959,6 +972,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       get().loadUsage(),
       get().loadAgentAccounts(),
       get().loadCliProxy(),
+      // Daemon-side agent prefs (Claude stream timeout). Loaded per connect so the
+      // panel shows the value of the daemon that will actually launch the session
+      // — including after a connection switch or a daemon restart.
+      get().loadAgentPrefs(),
       // Reload git accounts on every (re)connect too — otherwise a daemon
       // restart leaves `accounts` stale (it was only filled by the one-time
       // initConnections path), so the workspace/project pickers go empty until
@@ -1130,7 +1147,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         useTitlebar: nextSetup.defaultUseTitlebar,
         runInBackground: false,
         confirmCloseSession: true,
-        usage: DEFAULT_USAGE_PREFS
+        usage: DEFAULT_USAGE_PREFS,
+        agents: DEFAULT_AGENT_PREFS
       },
       api: homeApi
     });
@@ -1149,12 +1167,57 @@ export const useAppStore = create<AppState>((set, get) => ({
             useTitlebar: config.useTitlebar ?? state.appConfig.useTitlebar,
             runInBackground: config.runInBackground ?? state.appConfig.runInBackground,
             confirmCloseSession: config.confirmCloseSession ?? state.appConfig.confirmCloseSession,
-            usage: normalizeUsagePrefs(config.usage, state.appConfig.usage)
+            usage: normalizeUsagePrefs(config.usage, state.appConfig.usage),
+            // `agents` is deliberately NOT taken from `config`: it is daemon-side
+            // (the daemon reads app.json at session launch), so it is owned by
+            // loadAgentPrefs/updateAgentPrefs against the connected daemon, never
+            // by the per-client adapter. Reading the adapter's copy here would
+            // clobber the authoritative value fetched during connect.
+            agents: state.appConfig.agents
           }
         }));
       }
     } catch {
       /* keep defaults */
+    }
+  },
+
+  // The `agents` group is the one app-config field the DAEMON consumes: it reads
+  // app.json when launching a Claude session. The other fields are client-local
+  // and on web are persisted to localStorage by an AppConfigAdapter that cannot
+  // reach the daemon at all — so this group gets its own load/save pair, routed
+  // over the API of the currently connected daemon (the one that will run the
+  // session), not through the adapter and not through `homeApi` (which is built
+  // before auth and carries no credential on web).
+  loadAgentPrefs: async () => {
+    const api = get().api;
+    if (!api) {
+      return;
+    }
+    try {
+      const config = await api.getAppConfig();
+      set((state) => ({
+        appConfig: {
+          ...state.appConfig,
+          agents: normalizeAgentPrefs(config.agents, DEFAULT_AGENT_PREFS)
+        }
+      }));
+    } catch {
+      /* keep current (older daemon / transient failure) */
+    }
+  },
+
+  updateAgentPrefs: async (next) => {
+    const api = get().api;
+    const previous = get().appConfig.agents;
+    set((state) => ({ appConfig: { ...state.appConfig, agents: next } }));
+    try {
+      // The PUT merges `{...current, ...body}` server-side, so sending just this
+      // group leaves every other app.json field untouched.
+      await api?.updateAppConfig({ agents: next });
+    } catch {
+      // Don't leave the UI showing a value the daemon never accepted.
+      set((state) => ({ appConfig: { ...state.appConfig, agents: previous } }));
     }
   },
 
@@ -1184,7 +1247,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       activeConnectionId: get().activeConnectionId ?? "local",
       ...appConfig
     };
-    const result = adapter ? adapter.save(full) : homeApi?.updateAppConfig(appConfig);
+    // `agents` belongs to the CONNECTED daemon (loadAgentPrefs/updateAgentPrefs
+    // own it), while `homeApi` is the local one. Sending it here would copy a
+    // remote's claudeTimeoutMinutes into the local app.json whenever any other
+    // app setting is toggled while connected to that remote. The adapter branch
+    // keeps it as the documented write-only cache (nothing reads it back).
+    const { agents: _agents, ...localPersisted } = appConfig;
+    const result = adapter ? adapter.save(full) : homeApi?.updateAppConfig(localPersisted);
     await result?.catch(() => undefined);
   },
 

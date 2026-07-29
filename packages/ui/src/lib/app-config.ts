@@ -1,4 +1,10 @@
-import { usagePrefsSchema, type AppConfig, type UsagePrefs } from "@orquester/config";
+import {
+  agentPrefsSchema,
+  usagePrefsSchema,
+  type AgentPrefs,
+  type AppConfig,
+  type UsagePrefs
+} from "@orquester/config";
 
 /**
  * Persistence for the app's own config. It is per-client, so each runtime
@@ -21,6 +27,17 @@ export interface AppConfigAdapter {
 export function normalizeUsagePrefs(value: unknown, fallback: UsagePrefs): UsagePrefs {
   if (value == null) return fallback;
   const parsed = usagePrefsSchema.safeParse(value);
+  return parsed.success ? parsed.data : fallback;
+}
+
+/**
+ * Same contract as {@link normalizeUsagePrefs}, for the daemon-side `agents`
+ * group: a daemon on an older build answers `GET /api/config/app` without the
+ * key, and any hand-edited app.json can hold anything at all.
+ */
+export function normalizeAgentPrefs(value: unknown, fallback: AgentPrefs): AgentPrefs {
+  if (value == null) return fallback;
+  const parsed = agentPrefsSchema.safeParse(value);
   return parsed.success ? parsed.data : fallback;
 }
 
@@ -48,6 +65,10 @@ export function sanitizeStoredAppConfig(raw: unknown): Partial<AppConfig> {
     const usage = usagePrefsSchema.safeParse(rec.usage);
     if (usage.success) out.usage = usage.data;
   }
+  // `agents` is intentionally NOT restored from the stored blob: it is
+  // daemon-side (the daemon reads app.json at session launch), so the store
+  // loads it from the connected daemon instead. It is still written by the
+  // adapter's save() (which takes a whole AppConfig) — a write-only cache.
   return out;
 }
 
