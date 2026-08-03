@@ -237,7 +237,7 @@ export const WorkspaceList: React.FC = () => {
                     icon={accountId === account.id ? <Check size={14} /> : <span className="h-2 w-2" />}
                     onClick={() => setAccountId(account.id)}
                   >
-                    {account.label} <span className="text-neutral-500">@{account.githubLogin}</span>
+                    {account.label} <span className="text-neutral-500">@{account.login}</span>
                   </DropdownItem>
                 ))}
                 <DropdownSeparator />

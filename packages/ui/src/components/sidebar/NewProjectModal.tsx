@@ -132,10 +132,10 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose 
 
   // Owner options for create mode: the account login + any orgs it belongs to.
   const owners = useMemo(
-    () => (account ? [account.githubLogin, ...(orgs ?? [])] : []),
+    () => (account ? [account.login, ...(orgs ?? [])] : []),
     [account, orgs]
   );
-  const resolvedOwner = owner ?? account?.githubLogin ?? null;
+  const resolvedOwner = owner ?? account?.login ?? null;
 
   const filteredRepos = useMemo(() => {
     const list = repos ?? [];
@@ -389,7 +389,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose 
                       onClick={() => setOwner(o)}
                     >
                       {o}
-                      {account && o === account.githubLogin && (
+                      {account && o === account.login && (
                         <span className="ml-1 text-neutral-500">(you)</span>
                       )}
                     </DropdownItem>

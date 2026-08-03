@@ -19,6 +19,23 @@ const run = promisify(execFile);
 
 const GITHUB_API = "https://api.github.com";
 
+/**
+ * Display host for an account summary. Per-provider modules take this over
+ * later; today only GitHub accounts can be created.
+ */
+function displayHost(account: Account): string {
+  if (account.provider === "bitbucket-cloud") return "bitbucket.org";
+  if (account.provider === "bitbucket-server") {
+    if (!account.baseUrl) return "";
+    try {
+      return new URL(account.baseUrl).host;
+    } catch {
+      return "";
+    }
+  }
+  return "github.com";
+}
+
 /** Error carrying the HTTP status the route should reply with. */
 export class AccountError extends Error {
   constructor(
@@ -84,7 +101,11 @@ export class AccountsService {
     return {
       id: account.id,
       label: account.label,
+      provider: account.provider,
+      login: account.login,
+      // Mirrored for stale clients that still read `githubLogin`.
       githubLogin: account.login,
+      host: displayHost(account),
       gitName: account.gitName,
       gitEmail: account.gitEmail,
       publicKey: account.publicKey,

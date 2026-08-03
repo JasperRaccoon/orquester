@@ -624,7 +624,7 @@ export interface AppState {
   testAccount: (id: string) => Promise<AccountTestResult>;
   /** Repos the account can reach (for the clone picker). */
   listRepos: (accountId: string) => Promise<RepoSummary[]>;
-  /** Org logins the account belongs to (for the create-owner picker). */
+  /** Owner ids the account can create repos under (for the create-owner picker). */
   listOrgs: (accountId: string) => Promise<string[]>;
   /** Persist a token (enables repo access); refetches accounts so repoAccess flips. */
   setAccountToken: (accountId: string, token: string) => Promise<void>;
@@ -1405,7 +1405,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (!api) {
       throw new Error("Not connected.");
     }
-    return api.listOrgs(accountId);
+    const owners = await api.listOwners(accountId);
+    return owners.map((owner) => owner.id);
   },
 
   setAccountToken: async (accountId, token) => {

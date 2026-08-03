@@ -447,7 +447,7 @@ const GitHubSettings: React.FC = () => {
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm text-neutral-100">
                     {account.label}
-                    <span className="ml-1.5 text-neutral-500">@{account.githubLogin}</span>
+                    <span className="ml-1.5 text-neutral-500">@{account.login}</span>
                   </p>
                   <p className="truncate text-xs text-neutral-500">{account.gitEmail}</p>
                   <p className="truncate text-xs">

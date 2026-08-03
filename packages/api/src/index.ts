@@ -94,47 +94,76 @@ export interface SetProtectArchivedRequest {
   enabled: boolean;
 }
 
+/** Which git-hosting provider an account belongs to. */
+export type GitProviderId = "github" | "bitbucket-cloud" | "bitbucket-server";
+
 /**
  * Public view of a connected git account. Deliberately omits `keyPath`, the
- * GitHub `token`, and any private-key material — the daemon never returns
+ * provider `token`, and any private-key material — the daemon never returns
  * where/what the private key is, nor the token (only `repoAccess` reflects it).
  */
 export interface AccountSummary {
   id: string;
   label: string;
+  provider: GitProviderId;
+  login: string;
+  /** @deprecated mirror of `login` for stale clients. */
   githubLogin: string;
+  /** Display host ("github.com", "bitbucket.org", or the DC host[:port]). */
+  host: string;
   gitName: string;
   gitEmail: string;
   /** OpenSSH public key (safe to display/copy). */
   publicKey: string;
   /**
-   * True when a GitHub token is persisted for this account (`!!account.token`),
+   * True when a provider token is persisted for this account (`!!account.token`),
    * enabling repo list/create. The token itself is never returned.
    */
   repoAccess: boolean;
+  /** ISO expiry of the stored token, when the provider issues expiring tokens. */
+  tokenExpiresAt?: string;
+  /** DC manual key-upload pending; `manualKeyUrl` deep-links the paste page. */
+  keyPending?: boolean;
+  manualKeyUrl?: string;
   createdAt: string;
 }
 
-export interface CreateAccountRequest {
-  /** User-facing label; also used in the SSH key comment + GitHub key title. */
-  label: string;
-  /** GitHub PAT — used transiently to upload the key + read identity, then discarded. */
-  token: string;
-}
+/**
+ * Body for `POST /api/accounts`, discriminated on `provider` (optional and
+ * defaulting to "github" so existing callers keep working unchanged).
+ */
+export type CreateAccountRequest =
+  | { provider?: "github"; label: string; token: string }
+  | {
+      provider: "bitbucket-cloud";
+      label: string;
+      email: string;
+      token: string;
+      tokenExpiresAt?: string;
+    }
+  | {
+      provider: "bitbucket-server";
+      label: string;
+      baseUrl: string;
+      username: string;
+      token: string;
+      caCertPem?: string;
+      tokenExpiresAt?: string;
+    };
 
-/** Result of `POST /api/accounts/:id/test` (an `ssh -T git@github.com` probe). */
+/** Result of `POST /api/accounts/:id/test` (an `ssh -T` probe against the account's provider). */
 export interface AccountTestResult {
   ok: boolean;
-  /** GitHub login parsed from the "Hi <login>!" greeting, when ok. */
+  /** Provider login parsed from the SSH greeting, when ok. */
   login?: string;
   /** Human-readable detail (success greeting or failure reason). */
   message?: string;
 }
 
 /**
- * A GitHub repository the account can reach, as projected by
+ * A repository the account can reach, as projected by
  * `GET /api/accounts/:id/repos`. Carries only what the create-project picker
- * needs; the clone uses `sshUrl` (token never enters a clone URL/argv).
+ * needs; the clone prefers `sshUrl` (token never enters a clone URL/argv).
  */
 export interface RepoSummary {
   /** "owner/name". */
@@ -142,17 +171,26 @@ export interface RepoSummary {
   owner: string;
   name: string;
   private: boolean;
-  /** git@github.com:owner/name.git — the SSH clone URL. */
+  /** SSH clone URL (provider-specific form). */
   sshUrl: string;
+  /** HTTPS clone URL (fallback transport when SSH is unavailable). */
+  httpsUrl?: string;
   defaultBranch: string;
   description: string | null;
+}
+
+/** An owner a repo can be created under (user, GitHub org, BB workspace/project). */
+export interface OwnerSummary {
+  id: string;
+  label: string;
+  kind: "user" | "org" | "workspace" | "project";
 }
 
 /**
  * Body for `POST /api/workspaces/:workspace/projects`. Discriminated on
  * `source`, which is OPTIONAL and defaults to "empty" so existing callers (the
  * "New Folder"/name-only path) keep working unchanged. Repo modes resolve the
- * GitHub account from the workspace's `gitAccountId`.
+ * git account from the workspace's `gitAccountId`.
  */
 export type CreateProjectRequest =
   | { source?: "empty"; name: string }
@@ -1149,7 +1187,7 @@ export class HttpOrquesterApiClient implements OrquesterApi {
     return this.get(`/api/accounts/${encodeURIComponent(accountId)}/repos`);
   }
 
-  listOrgs(accountId: string): Promise<string[]> {
+  listOwners(accountId: string): Promise<OwnerSummary[]> {
     return this.get(`/api/accounts/${encodeURIComponent(accountId)}/orgs`);
   }
 

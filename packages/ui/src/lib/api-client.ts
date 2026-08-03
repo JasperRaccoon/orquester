@@ -40,6 +40,7 @@ import type {
   ImportAgentAccountRequest,
   OpenResult,
   OpenTargetSummary,
+  OwnerSummary,
   ProjectSummary,
   PushInfoResponse,
   PushSubscribeRequest,
@@ -264,12 +265,12 @@ export class ApiClient {
     return this.send("GET", `/api/accounts/${encodeURIComponent(accountId)}/repos`, { signal });
   }
 
-  /** Org logins the account belongs to (needs a persisted token; 400 otherwise). */
-  listOrgs(accountId: string, signal?: AbortSignal): Promise<string[]> {
+  /** Owners the account can create repos under (needs a persisted token; 400 otherwise). */
+  listOwners(accountId: string, signal?: AbortSignal): Promise<OwnerSummary[]> {
     return this.send("GET", `/api/accounts/${encodeURIComponent(accountId)}/orgs`, { signal });
   }
 
-  /** Persist a GitHub token for repo access. The token is only sent, never read back. */
+  /** Persist a provider token for repo access. The token is only sent, never read back. */
   setAccountToken(accountId: string, token: string): Promise<void> {
     return this.send("POST", `/api/accounts/${encodeURIComponent(accountId)}/token`, {
       body: { token }
