@@ -267,6 +267,24 @@ credential-line generation, accounts-schema migration (legacy `githubLogin` payl
 DC clone-link selection (http-name quirk, missing ssh). Live verification against real
 Bitbucket Cloud and a disposable DC instance is manual, post-implementation.
 
+## §4 Git tab (projects)
+
+The GitHub-Desktop-style Git tab (`apps/daemon/src/git.ts`,
+`packages/ui/src/components/git/`) is already host-agnostic: it runs plain git with the
+pinned `HOME` and has no provider logic (no PR links, no remote-URL parsing — its
+"GitHub" mentions are style-comment prose only). It therefore gains Bitbucket support
+**transitively** through the same `includeIf` include file every session inherits:
+`core.sshCommand` (Bitbucket key + daemon-owned known_hosts), the per-host
+`credential.<host>.helper` store for HTTPS remotes, and `http.<baseUrl>.sslCAInfo` for
+DC custom CAs. No code changes.
+
+Verification item: from a Bitbucket-bound workspace, exercise the Git tab end-to-end —
+status, fetch, pull, commit (identity = account `user.name`/`user.email`), push — against
+Bitbucket Cloud over SSH and against a DC instance over HTTPS with a custom CA.
+
+Provider-aware deep links ("open on remote", "create pull request") were considered and
+deferred; the Git tab has no such features for GitHub today either.
+
 ## Out of scope (v1)
 
 - GitLab / other forges (the provider interface is the extension point).
