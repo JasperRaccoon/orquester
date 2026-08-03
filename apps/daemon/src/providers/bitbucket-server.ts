@@ -283,12 +283,33 @@ export function pickCloneUrls(clone: Array<{ name: string; href: string }>): Clo
   return urls;
 }
 
+/** Escape a literal string for embedding in a RegExp source. */
+function escapeRe(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * RegExp source matching this account's base URL, with an optional `user@`
+ * userinfo segment allowed right after the scheme (DC's Clone dialog emits
+ * `https://<username>@host/context/scm/...`). The host itself stays literal, so
+ * userinfo can never stand in for a different instance.
+ */
+function baseUrlPattern(baseUrl: string): string {
+  const trimmed = baseUrl.replace(/\/+$/, "");
+  const match = /^(https?:\/\/)([\s\S]*)$/i.exec(trimmed);
+  return match ? `${escapeRe(match[1])}(?:[^@/]+@)?${escapeRe(match[2])}` : escapeRe(trimmed);
+}
+
 /**
  * Parse the DC repo forms, anchored to *this* account's instance so a URL from
  * another host (or another provider) is rejected rather than mis-cloned:
  * `{base}/scm/KEY/slug.git`, `{base}/projects/KEY/repos/slug/browse`,
  * `{base}/users/name/repos/slug/browse` (→ personal project `~name`),
  * `ssh://git@{sshHost}/KEY/slug.git`, and the `KEY/slug` / `~user/slug` shorthand.
+ *
+ * The HTTPS forms tolerate the `<username>@` userinfo segment DC's Clone dialog
+ * embeds; it is ignored (git gets credentials from the credential store), and it
+ * cannot smuggle in a foreign host because the instance host still has to match.
  */
 export function parseServerRepoUrl(input: string, ctx: UrlContext): ParsedRepo | null {
   const trimmed = input.trim();
@@ -301,7 +322,7 @@ export function parseServerRepoUrl(input: string, ctx: UrlContext): ParsedRepo |
   if (!ctx.baseUrl) {
     return null;
   }
-  const baseEsc = ctx.baseUrl.replace(/\/+$/, "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const baseEsc = baseUrlPattern(ctx.baseUrl);
   const patterns: Array<{ re: RegExp; personal: boolean }> = [
     { re: new RegExp(`^${baseEsc}/scm/(~?${part})/(${part}?)(?:\\.git)?/?$`, "i"), personal: false },
     { re: new RegExp(`^${baseEsc}/projects/(${part})/repos/(${part})/browse`, "i"), personal: false },
@@ -320,7 +341,7 @@ export function parseServerRepoUrl(input: string, ctx: UrlContext): ParsedRepo |
   // endpoint defaults to 7999 but admins move it).
   for (const host of sshCandidateHosts(ctx)) {
     const sshRe = new RegExp(
-      `^ssh://(?:[^@/]+@)?${host.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?::\\d+)?/(~?${part})/(${part}?)(?:\\.git)?$`,
+      `^ssh://(?:[^@/]+@)?${escapeRe(host)}(?::\\d+)?/(~?${part})/(${part}?)(?:\\.git)?$`,
       "i"
     );
     const match = trimmed.match(sshRe);

@@ -37,6 +37,27 @@ test("parseRepoUrl accepts scm/ssh/browse/personal/shorthand forms anchored to t
   assert.equal(parseServerRepoUrl("https://github.com/o/r", ctx), null);
 });
 
+test("parseRepoUrl accepts the https form with the embedded username the Clone dialog copies", () => {
+  // DC's "Clone" button yields https://<username>@host/context/scm/KEY/slug.git
+  assert.deepEqual(parseServerRepoUrl("https://jdoe@bb.corp.com/bitbucket/scm/PRJ/repo.git", ctx), {
+    owner: "PRJ",
+    repo: "repo"
+  });
+  assert.deepEqual(
+    parseServerRepoUrl("https://jdoe@bb.corp.com/bitbucket/projects/PRJ/repos/repo/browse", ctx),
+    { owner: "PRJ", repo: "repo" }
+  );
+  assert.deepEqual(
+    parseServerRepoUrl("https://jdoe@bb.corp.com/bitbucket/users/jdoe/repos/site/browse", ctx),
+    { owner: "~jdoe", repo: "site" }
+  );
+  // Still anchored to this account's instance: userinfo can't smuggle in another host.
+  assert.equal(
+    parseServerRepoUrl("https://bb.corp.com@evil.example.com/bitbucket/scm/PRJ/repo.git", ctx),
+    null
+  );
+});
+
 test("pickCloneUrls tolerates name:'http' meaning https and missing ssh", () => {
   assert.deepEqual(
     pickCloneUrls([

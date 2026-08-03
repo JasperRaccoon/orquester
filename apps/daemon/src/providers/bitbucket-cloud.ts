@@ -133,10 +133,18 @@ export function toCloudRepoSummary(repo: Json): RepoSummary {
   };
 }
 
-/** Parse `https://bitbucket.org/ws/r`, `git@[ssh.]bitbucket.org:ws/r.git`, or `ws/r`. */
+/**
+ * Parse `https://[user@]bitbucket.org/ws/r`, `git@[ssh.]bitbucket.org:ws/r.git`,
+ * or `ws/r`. The optional `user@` userinfo segment is what Bitbucket Cloud's
+ * Clone dialog actually puts on the clipboard (`https://<nickname>@…`); it is
+ * ignored — git gets credentials from the credential store instead.
+ */
 export function parseCloudRepoUrl(input: string): ParsedRepo | null {
   const part = "[A-Za-z0-9._-]+";
-  const httpsRe = new RegExp(`^https?://bitbucket\\.org/(${part})/(${part}?)(?:\\.git)?/?$`, "i");
+  const httpsRe = new RegExp(
+    `^https?://(?:[^@/]+@)?bitbucket\\.org/(${part})/(${part}?)(?:\\.git)?/?$`,
+    "i"
+  );
   const sshRe = new RegExp(`^git@(?:ssh\\.)?bitbucket\\.org:(${part})/(${part}?)(?:\\.git)?$`, "i");
   const shortRe = new RegExp(`^(${part})/(${part})$`);
   const match = input.match(httpsRe) ?? input.match(sshRe) ?? input.match(shortRe);

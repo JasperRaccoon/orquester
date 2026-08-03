@@ -21,6 +21,21 @@ test("parseRepoUrl accepts bitbucket.org https/ssh (old + new host)/shorthand", 
   assert.equal(bitbucketCloudProvider.parseRepoUrl("https://github.com/o/r", ctx), null);
 });
 
+test("parseRepoUrl accepts the https form with the embedded username the Clone dialog copies", () => {
+  // Bitbucket Cloud's "Clone" button yields https://<nickname>@bitbucket.org/ws/r.git
+  const ctx = {};
+  assert.deepEqual(
+    bitbucketCloudProvider.parseRepoUrl("https://jdoe@bitbucket.org/ws/r.git", ctx),
+    { owner: "ws", repo: "r" }
+  );
+  assert.deepEqual(
+    bitbucketCloudProvider.parseRepoUrl("https://x-bitbucket-api-token-auth@bitbucket.org/ws/r", ctx),
+    { owner: "ws", repo: "r" }
+  );
+  // The userinfo segment must not let another host through.
+  assert.equal(bitbucketCloudProvider.parseRepoUrl("https://bitbucket.org@evil.com/ws/r", ctx), null);
+});
+
 test("cloneUrls always emits the NEW ssh host", async () => {
   assert.deepEqual(
     await bitbucketCloudProvider.cloneUrls({ token: "t" }, { owner: "ws", repo: "r" }),
