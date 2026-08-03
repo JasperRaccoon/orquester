@@ -26,7 +26,11 @@ import { promisify } from "node:util";
 import { AccountError } from "./account-error";
 import { ensureKnownHosts } from "./known-hosts";
 import { providerFor } from "./providers";
-import { probeServer, serverVersionSupportsEd25519 } from "./providers/bitbucket-server";
+import {
+  invalidateDispatcher,
+  probeServer,
+  serverVersionSupportsEd25519
+} from "./providers/bitbucket-server";
 import {
   buildCredentialFileLine,
   type CreateRepoOpts,
@@ -378,6 +382,7 @@ export class AccountsService {
       await rm(keyPath, { force: true }).catch(() => undefined);
       await rm(`${keyPath}.pub`, { force: true }).catch(() => undefined);
       if (caPath) {
+        invalidateDispatcher(caPath);
         await rm(caPath, { force: true }).catch(() => undefined);
       }
     };
@@ -519,6 +524,10 @@ export class AccountsService {
     await rm(this.credentialsPath(account), { force: true }).catch(() => undefined);
     await rm(this.includePath(account), { force: true }).catch(() => undefined);
     await rm(this.cliEnvPath(account), { force: true }).catch(() => undefined);
+    if (account.caCertPath) {
+      // Release the pooled TLS dispatcher before deleting its CA bundle.
+      invalidateDispatcher(account.caCertPath);
+    }
     await rm(join(this.keysDirPath, `${account.id}.ca.pem`), { force: true }).catch(() => undefined);
     const config = await this.read();
     config.accounts = config.accounts.filter((a) => a.id !== id);

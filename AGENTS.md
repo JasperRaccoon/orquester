@@ -288,10 +288,19 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
   tokens (GitHub PATs, Bitbucket API/HTTP access tokens) are never returned by any API; the
   `?token=` is redacted from logs. *(A bound workspace's token **is** written to local 0600 files
   — a git-credentials store inside the per-account `includeIf` file, plus `~/.config/gh/hosts.yml`
-  (GitHub) or `<appdir>/daemon/keys/<id>.env` with `BITBUCKET_*` vars (Bitbucket) — so that
+  (GitHub) or `<appdir>/daemon/keys/<id>.env` (Bitbucket; see below) — so that
   workspace's terminals/agents can use HTTPS git + `gh` as the account. It stays on-host (same
   user), off any command line, and is still never returned by the API. `gh` must be installed on
   the host separately; it is not an npm package.)*
+- **Bitbucket session-CLI contract.** There is no `gh` equivalent for Bitbucket, so a bound
+  Bitbucket account instead writes `<appdir>/daemon/keys/<id>.env` (0600, shell-sourceable) that
+  agents/scripts can `source` on demand to call the REST API. Keys: `BITBUCKET_PROVIDER`
+  (`bitbucket-cloud` | `bitbucket-server`), `BITBUCKET_BASE_URL` (REST root —
+  `https://api.bitbucket.org/2.0` for Cloud, the instance base URL incl. context path for DC),
+  `BITBUCKET_USER` (Atlassian email for Cloud, username for DC), `BITBUCKET_TOKEN`, and
+  `BITBUCKET_AUTH`: `basic` ⇒ `curl -u "$BITBUCKET_USER:$BITBUCKET_TOKEN"`, `bearer` ⇒
+  `curl -H "Authorization: Bearer $BITBUCKET_TOKEN"`. Written by `AccountsService.syncCliAuth`;
+  never injected into session env by default.
 - **Git providers.** Provider-specific REST/URL/credential behavior lives in
   `apps/daemon/src/providers/` (`github`, `bitbucket-cloud`, `bitbucket-server` behind the
   `GitProvider` interface + `providerFor()`); `AccountsService` stays provider-agnostic (keygen,

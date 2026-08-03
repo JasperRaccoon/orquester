@@ -67,10 +67,24 @@ class DcHttpError extends AccountError {
   }
 }
 
-/** Per-account CA bundle → undici dispatcher; undefined means "system CAs". */
+/**
+ * Per-account CA bundle → undici dispatcher; undefined means "system CAs".
+ * Memoized per `caCertPath`: the PEM is immutable for an account's lifetime
+ * (a reconnect mints a new account id ⇒ a new path), and constructing a fresh
+ * Agent per call would re-read the file and do a full TLS handshake on every
+ * REST call/pagination page instead of pooling connections. Entries are
+ * released via `invalidateDispatcher` when the account (and its `.ca.pem`)
+ * is removed.
+ */
+const dispatcherCache = new Map<string, Agent>();
+
 async function dispatcherFor(caCertPath?: string): Promise<Agent | undefined> {
   if (!caCertPath) {
     return undefined;
+  }
+  const cached = dispatcherCache.get(caCertPath);
+  if (cached) {
+    return cached;
   }
   let ca: string;
   try {
@@ -81,7 +95,18 @@ async function dispatcherFor(caCertPath?: string): Promise<Agent | undefined> {
       "This account's CA certificate file is missing or unreadable — reconnect the account and paste the PEM bundle again."
     );
   }
-  return new Agent({ connect: { ca } });
+  const agent = new Agent({ connect: { ca } });
+  dispatcherCache.set(caCertPath, agent);
+  return agent;
+}
+
+/** Drop (and close) the pooled dispatcher for a removed account's CA bundle. */
+export function invalidateDispatcher(caCertPath: string): void {
+  const agent = dispatcherCache.get(caCertPath);
+  if (agent) {
+    dispatcherCache.delete(caCertPath);
+    void agent.close().catch(() => undefined);
+  }
 }
 
 /** OpenSSL/Node verification codes that mean "we don't trust this certificate". */

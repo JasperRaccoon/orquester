@@ -1191,8 +1191,11 @@ export class HttpOrquesterApiClient implements OrquesterApi {
     return this.get(`/api/accounts/${encodeURIComponent(accountId)}/orgs`);
   }
 
-  setAccountToken(accountId: string, token: string): Promise<void> {
-    return this.post(`/api/accounts/${encodeURIComponent(accountId)}/token`, { token });
+  setAccountToken(accountId: string, token: string, tokenExpiresAt?: string): Promise<void> {
+    return this.post(`/api/accounts/${encodeURIComponent(accountId)}/token`, {
+      token,
+      ...(tokenExpiresAt ? { tokenExpiresAt } : {})
+    });
   }
 
   uploadSessionFile(id: string, body: SessionUploadRequest): Promise<SessionUploadResponse> {
