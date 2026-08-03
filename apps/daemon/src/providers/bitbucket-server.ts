@@ -72,20 +72,81 @@ async function dispatcherFor(caCertPath?: string): Promise<Agent | undefined> {
   if (!caCertPath) {
     return undefined;
   }
-  const ca = await readFile(caCertPath, "utf8");
+  let ca: string;
+  try {
+    ca = await readFile(caCertPath, "utf8");
+  } catch {
+    throw new AccountError(
+      500,
+      "This account's CA certificate file is missing or unreadable — reconnect the account and paste the PEM bundle again."
+    );
+  }
   return new Agent({ connect: { ca } });
 }
 
-/** Authenticated DC REST call; throws `DcHttpError` on a non-2xx. */
-async function dc(
+/** OpenSSL/Node verification codes that mean "we don't trust this certificate". */
+const TLS_ERROR_CODES = new Set([
+  "CERT_HAS_EXPIRED",
+  "CERT_NOT_YET_VALID",
+  "CERT_UNTRUSTED",
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+  "SELF_SIGNED_CERT_IN_CHAIN",
+  "UNABLE_TO_GET_ISSUER_CERT",
+  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE"
+]);
+
+/** First `code` found on the error or anywhere down its `cause` chain. */
+function errorCode(error: unknown): string | undefined {
+  let current: unknown = error;
+  for (let depth = 0; depth < 5 && current && typeof current === "object"; depth += 1) {
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === "string") {
+      return code;
+    }
+    current = (current as { cause?: unknown }).cause;
+  }
+  return undefined;
+}
+
+/**
+ * Turn a rejected `fetch` into something a user can act on. Node surfaces every
+ * transport failure as `TypeError: fetch failed` and hides the real reason on
+ * `error.cause` — so a self-signed/internal-CA instance (the most common v1 DC
+ * setup) would otherwise read as a bare "fetch failed" with no pointer to the
+ * per-account CA field that fixes it.
+ */
+export function describeFetchFailure(error: unknown): string {
+  const code = errorCode(error);
+  if (code && TLS_ERROR_CODES.has(code)) {
+    return `TLS verification failed (${code}) — if the instance uses a self-signed or internal-CA certificate, add its CA certificate (PEM) to this account.`;
+  }
+  if (code) {
+    return `${code} — could not reach the instance (check the base URL, DNS, VPN and firewall).`;
+  }
+  return error instanceof Error ? error.message : "unknown error";
+}
+
+/** `fetch` with the transport failure mapped to an actionable `AccountError`. */
+async function dcFetch(url: string, init: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, init);
+  } catch (error) {
+    throw new AccountError(502, `Bitbucket Server request failed: ${describeFetchFailure(error)}`);
+  }
+}
+
+/** Authenticated DC REST call returning the decoded body + response headers. */
+async function dcRequest(
   creds: ProviderCreds,
   method: string,
   path: string,
   body?: unknown,
   retry = 1
-): Promise<any> {
+): Promise<{ data: any; headers: Headers }> {
   const dispatcher = await dispatcherFor(creds.caCertPath);
-  const response = await fetch(`${base(creds)}${path}`, {
+  const response = await dcFetch(`${base(creds)}${path}`, {
     method,
     // Bearer works for personal AND project/repo tokens, and survives DC 10.x
     // instances that disable Basic auth.
@@ -102,7 +163,7 @@ async function dc(
   if (response.status === 429 && retry > 0) {
     // DC rate limiting (token-bucket, admin-configured) — one backoff retry.
     await sleep(2000);
-    return dc(creds, method, path, body, retry - 1);
+    return dcRequest(creds, method, path, body, retry - 1);
   }
   if (!response.ok) {
     const text = (await response.text().catch(() => "")).slice(0, 300);
@@ -121,7 +182,20 @@ async function dc(
       response.status
     );
   }
-  return response.status === 204 ? undefined : response.json();
+  return {
+    data: response.status === 204 ? undefined : await response.json(),
+    headers: response.headers
+  };
+}
+
+/** Authenticated DC REST call; throws `DcHttpError` on a non-2xx. */
+async function dc(
+  creds: ProviderCreds,
+  method: string,
+  path: string,
+  body?: unknown
+): Promise<any> {
+  return (await dcRequest(creds, method, path, body)).data;
 }
 
 /** DC pagination: {values, isLastPage, nextPageStart}. */
@@ -148,10 +222,17 @@ export async function probeServer(
   caCertPath?: string
 ): Promise<{ version: string; displayName: string }> {
   const dispatcher = await dispatcherFor(caCertPath);
-  const response = await fetch(`${baseUrl.replace(/\/+$/, "")}/rest/api/1.0/application-properties`, {
-    headers: { Accept: "application/json", "User-Agent": "orquester" },
-    ...(dispatcher ? ({ dispatcher } as object) : {})
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl.replace(/\/+$/, "")}/rest/api/1.0/application-properties`, {
+      headers: { Accept: "application/json", "User-Agent": "orquester" },
+      ...(dispatcher ? ({ dispatcher } as object) : {})
+    });
+  } catch (error) {
+    // 400 (not 502): every failure here — untrusted certificate, wrong host —
+    // is fixed by the user editing the connect form (CA field / base URL).
+    throw new AccountError(400, `Could not reach the instance: ${describeFetchFailure(error)}`);
+  }
   if (!response.ok) {
     throw new AccountError(
       400,
@@ -176,19 +257,30 @@ export function serverVersionSupportsEd25519(version: string): boolean {
 }
 
 /**
- * Pick the HTTPS + SSH clone URLs out of a DC `links.clone[]` array. DC labels
- * the HTTPS entry `name: "http"` even when the href is https, and omits the
- * `ssh` entry entirely when the admin disabled SSH (→ HTTPS-only account).
- * Credentials the API embeds in the href (`https://jdoe@host/...`) are stripped —
- * git gets them from the credential store instead.
+ * Read the HTTPS + SSH clone URLs out of a DC `links.clone[]` array. DC labels
+ * the HTTPS entry `name: "http"` even when the href is https; it omits the `ssh`
+ * entry when the admin disabled SSH (→ HTTPS-only) and the `http` entry when the
+ * admin disabled HTTP(S) SCM hosting instance-wide (→ SSH-only). Either
+ * transport may therefore be absent. Credentials the API embeds in the href
+ * (`https://jdoe@host/...`) are stripped — git gets them from the credential
+ * store instead.
  */
-export function pickCloneUrls(clone: Array<{ name: string; href: string }>): CloneUrls {
+function readCloneUrls(clone: Array<{ name: string; href: string }>): CloneUrls {
   const https = clone.find((entry) => entry.name === "http" || entry.name === "https")?.href;
   const ssh = clone.find((entry) => entry.name === "ssh")?.href;
-  if (!https) {
-    throw new AccountError(502, "The repository exposes no HTTP clone URL.");
+  return { https: https ? https.replace(/^(https?:\/\/)[^@/]*@/, "$1") : undefined, ssh };
+}
+
+/**
+ * `readCloneUrls` for callers that need a usable transport (the clone path).
+ * Throws only when the repo exposes neither HTTPS nor SSH.
+ */
+export function pickCloneUrls(clone: Array<{ name: string; href: string }>): CloneUrls {
+  const urls = readCloneUrls(clone);
+  if (!urls.https && !urls.ssh) {
+    throw new AccountError(502, "The repository exposes no clone URL (neither HTTP(S) nor SSH).");
   }
-  return { https: https.replace(/^(https?:\/\/)[^@/]*@/, "$1"), ssh };
+  return urls;
 }
 
 /**
@@ -221,10 +313,14 @@ export function parseServerRepoUrl(input: string, ctx: UrlContext): ParsedRepo |
       return { owner: personal ? `~${match[1]}` : match[1], repo: match[2] };
     }
   }
-  if (ctx.sshHost) {
-    const [host, port] = ctx.sshHost.split(":");
+  // ssh:// URLs are anchored to the account's SSH host when one was resolved,
+  // and otherwise to the instance host from `baseUrl` — a brand-new DC account
+  // has no repo to read `sshHost` off yet, but our own repo picker still hands
+  // out ssh:// URLs to clone. Any port on those hosts is accepted (DC's SSH
+  // endpoint defaults to 7999 but admins move it).
+  for (const host of sshCandidateHosts(ctx)) {
     const sshRe = new RegExp(
-      `^ssh://git@${host.replace(/\./g, "\\.")}${port ? `:${port}` : ""}/(~?${part})/(${part}?)(?:\\.git)?$`,
+      `^ssh://(?:[^@/]+@)?${host.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?::\\d+)?/(~?${part})/(${part}?)(?:\\.git)?$`,
       "i"
     );
     const match = trimmed.match(sshRe);
@@ -235,38 +331,108 @@ export function parseServerRepoUrl(input: string, ctx: UrlContext): ParsedRepo |
   return null;
 }
 
-/** Map one DC repo JSON object to the wire `RepoSummary`. */
-function toServerRepoSummary(repo: any): RepoSummary {
+/** Hostnames an ssh:// clone URL for this account may legitimately point at. */
+function sshCandidateHosts(ctx: UrlContext): string[] {
+  const hosts: string[] = [];
+  if (ctx.sshHost) {
+    hosts.push(ctx.sshHost.split(":")[0]);
+  }
+  if (ctx.baseUrl) {
+    try {
+      hosts.push(new URL(ctx.baseUrl).hostname);
+    } catch {
+      /* unparseable baseUrl — the scm/browse patterns already rejected it */
+    }
+  }
+  return [...new Set(hosts.filter(Boolean))];
+}
+
+/**
+ * Map one DC repo JSON object to the wire `RepoSummary`, or `null` when the repo
+ * exposes no clone transport at all. Deliberately non-throwing: one odd repo
+ * must not fail the whole listing (and with it the repo picker).
+ */
+export function toServerRepoSummary(repo: any): RepoSummary | null {
   const projectKey: string = repo?.project?.key ?? "";
   const slug: string = repo?.slug ?? "";
-  const { https, ssh } = pickCloneUrls(repo?.links?.clone ?? []);
+  const { https, ssh } = readCloneUrls(repo?.links?.clone ?? []);
+  const primary = ssh ?? https;
+  if (!primary) {
+    return null;
+  }
   return {
     fullName: `${projectKey}/${slug}`,
     owner: projectKey,
     name: slug,
     private: repo?.public !== true,
     // HTTPS-only instances (SSH disabled) still need a usable clone URL here.
-    sshUrl: ssh ?? https,
-    httpsUrl: https,
+    sshUrl: primary,
+    ...(https ? { httpsUrl: https } : {}),
     // DC's repo JSON carries no default branch (it needs a second call per repo).
     defaultBranch: "",
     description: repo?.description ?? null
   };
 }
 
+/**
+ * Resolve the account login from DC's `X-AUSERNAME` response header (the user
+ * the request was actually authenticated as), cross-checked against the username
+ * the user typed. Throws when the token belongs to someone else, or when the
+ * instance served the request anonymously (public instance + bad token).
+ * Falls back to the typed username when the header is absent.
+ */
+export function resolveDcLogin(headerValue: string | null | undefined, typedUsername: string): string {
+  if (!headerValue) {
+    return typedUsername;
+  }
+  let authenticated = headerValue.trim();
+  try {
+    // DC percent-encodes non-ASCII usernames in the header.
+    authenticated = decodeURIComponent(authenticated);
+  } catch {
+    /* not percent-encoded — use it verbatim */
+  }
+  if (!authenticated || authenticated.toLowerCase() === "anonymous") {
+    throw new AccountError(
+      400,
+      "The instance served this request anonymously — the token was not accepted. Check that it is a valid HTTP access token for this instance."
+    );
+  }
+  if (authenticated.toLowerCase() !== typedUsername.trim().toLowerCase()) {
+    throw new AccountError(
+      400,
+      `This token authenticates as "${authenticated}", but the username entered is "${typedUsername}". Use that username, or a token belonging to "${typedUsername}".`
+    );
+  }
+  return authenticated;
+}
+
 export const bitbucketServerProvider: GitProvider = {
   id: "bitbucket-server",
   scopesHint: SCOPES,
 
+  /**
+   * The identity comes from the *instance*, not from what the user typed: DC
+   * echoes the authenticated user in `X-AUSERNAME` on every REST response, and
+   * any authenticated user can read any other user's profile — so trusting the
+   * typed username would happily create an account for "alice" out of Bob's
+   * token (SSH key uploaded to Bob, HTTPS credential line rejected, and
+   * `setToken`'s "this token authenticates as X" guard silently defeated).
+   */
   async getIdentity(creds: ProviderCreds): Promise<ProviderIdentity> {
     if (!creds.username) {
       throw new AccountError(400, "The Bitbucket Server username is required.");
     }
-    const user = await dc(creds, "GET", `/rest/api/1.0/users/${encodeURIComponent(creds.username)}`);
+    const { data: user, headers } = await dcRequest(
+      creds,
+      "GET",
+      `/rest/api/1.0/users/${encodeURIComponent(creds.username)}`
+    );
+    const login = resolveDcLogin(headers.get("x-ausername"), creds.username);
     return {
-      login: creds.username,
-      loginRef: user?.slug ?? creds.username,
-      name: user?.displayName ?? creds.username,
+      login,
+      loginRef: user?.slug ?? login,
+      name: user?.displayName ?? login,
       email: user?.emailAddress ?? ""
     };
   },
@@ -314,7 +480,11 @@ export const bitbucketServerProvider: GitProvider = {
 
   async listRepos(creds): Promise<RepoSummary[]> {
     const repos = await dcAll(creds, "/rest/api/1.0/repos?permission=REPO_READ");
-    return repos.map(toServerRepoSummary);
+    // A repo with no usable clone transport is skipped rather than failing the
+    // whole listing (which would blank the repo picker for the account).
+    return repos
+      .map(toServerRepoSummary)
+      .filter((repo): repo is RepoSummary => repo !== null);
   },
 
   /** Owners are projects, with the user's personal project (`~slug`) first. */
@@ -351,7 +521,14 @@ export const bitbucketServerProvider: GitProvider = {
         ...(opts.description ? { description: opts.description } : {})
       }
     );
-    return toServerRepoSummary(repo);
+    const summary = toServerRepoSummary(repo);
+    if (!summary) {
+      throw new AccountError(
+        502,
+        "The repository was created but exposes no clone URL (neither HTTP(S) nor SSH)."
+      );
+    }
+    return summary;
   },
 
   parseRepoUrl(input: string, ctx: UrlContext): ParsedRepo | null {

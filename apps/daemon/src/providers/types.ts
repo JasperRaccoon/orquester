@@ -48,10 +48,14 @@ export interface ParsedRepo {
   repo: string;
 }
 
-/** Clone transports for a repo; `ssh` is absent on HTTPS-only instances. */
+/**
+ * Clone transports for a repo. `ssh` is absent on HTTPS-only instances; `https`
+ * is absent on DC instances where the admin disabled HTTP(S) SCM hosting. At
+ * least one is always present (providers throw when a repo exposes neither).
+ */
 export interface CloneUrls {
   ssh?: string;
-  https: string;
+  https?: string;
 }
 
 /** Host + username for one git-credential-store entry. */

@@ -298,9 +298,18 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
   `includeIf` binding, credential files). Bitbucket Cloud SSH always uses `ssh.bitbucket.org`
   (the old `bitbucket.org` SSH host dies 2026-11-12) and REST auth is Basic `email:token` with a
   **scoped** Atlassian API token; Bitbucket Server/DC uses `Authorization: Bearer` and its clone
-  URLs come from the repo's `links.clone[]` — **never derived** (a DC instance may expose no SSH
-  entry at all ⇒ HTTPS-only). `Account.provider` is a zod discriminant with a preprocess that
+  URLs come from the repo's `links.clone[]` — **never derived** (either entry may be absent: no
+  `ssh` ⇒ HTTPS-only, no `http` ⇒ SSH-only, so a repo listing must tolerate both and skip a repo
+  with neither). DC identity comes from the instance's `X-AUSERNAME` response header, never from
+  the typed username. `Account.provider` is a zod discriminant with a preprocess that
   migrates legacy `githubLogin`/`githubKeyId` records.
+- **known_hosts pins name both Cloud hostnames.** `apps/daemon/src/known-hosts.ts` seeds
+  `bitbucket.org,ssh.bitbucket.org <type> <key>` lines into the daemon-owned
+  `<appdir>/daemon/keys/known_hosts`: OpenSSH matches on the hostname it dials, and all Cloud SSH
+  traffic dials `ssh.bitbucket.org`, so a `bitbucket.org`-only pin would silently degrade to TOFU
+  (`StrictHostKeyChecking=accept-new`). A once-per-process best-effort refresh from
+  `https://bitbucket.org/site/ssh` only ever *adds* lines for those two hosts. DC hosts are TOFU'd
+  into the same file.
 - **Security boundary asymmetry.** `PUT /api/config/daemon` is **Unix-socket-only** (403 over
   remote HTTP) — **except the single-field `PUT /api/config/daemon/protect-archived`, which is
   allowed on both transports** (normal bearer auth) because it toggles a client-side UI curtain

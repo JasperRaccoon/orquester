@@ -78,6 +78,25 @@ export function repoNameFrom(cloneUrl: string): string {
   return tail.replace(/\.git$/i, "");
 }
 
+/**
+ * Read a DC instance's SSH endpoint ("host" / "host:port") off the clone URLs
+ * the API reported for its repos. Admins can move SSH to another host/port, so
+ * it is never derived from the base URL — an instance with no readable repo
+ * simply has no SSH endpoint yet (see `ensureSshHost`).
+ */
+function sshHostFromRepos(repos: RepoSummary[]): string | undefined {
+  const ssh = repos.find((repo) => repo.sshUrl.startsWith("ssh://"))?.sshUrl;
+  if (!ssh) {
+    return undefined;
+  }
+  try {
+    const url = new URL(ssh);
+    return `${url.hostname}${url.port ? `:${url.port}` : ""}`;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Single-quote a value for a `source`-able env file (`'` → `'\''`). */
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
@@ -231,6 +250,37 @@ export class AccountsService {
   }
 
   /**
+   * DC only: `sshHost` is discovered from a repo's clone links at connect time,
+   * so an account connected before its instance had any readable repo has none —
+   * and would keep reporting "HTTPS-only" forever. Re-resolve it lazily
+   * (best-effort, before SSH-dependent operations) and persist what we find.
+   */
+  private async ensureSshHost(account: Account): Promise<Account> {
+    if (account.provider !== "bitbucket-server" || account.sshHost || !account.token) {
+      return account;
+    }
+    let sshHost: string | undefined;
+    try {
+      sshHost = sshHostFromRepos(
+        await providerFor(account.provider).listRepos(this.credsOf(account))
+      );
+    } catch {
+      return account; /* offline/forbidden — keep the account as-is */
+    }
+    if (!sshHost) {
+      return account; /* genuinely HTTPS-only (SSH disabled on the instance) */
+    }
+    const config = await this.read();
+    const stored = config.accounts.find((a) => a.id === account.id);
+    if (!stored) {
+      return account;
+    }
+    stored.sshHost = sshHost;
+    await this.write(config);
+    return stored;
+  }
+
+  /**
    * The daemon-owned known_hosts path for non-GitHub accounts (created/seeded on
    * demand), or null for GitHub (unchanged behavior) — and null if the file
    * cannot be written, in which case ssh falls back to the user's own file.
@@ -373,14 +423,9 @@ export class AccountsService {
         sshHost = "ssh.bitbucket.org";
       } else if (providerId === "bitbucket-server") {
         try {
-          const repos = await provider.listRepos(creds);
-          const ssh = repos.find((repo) => repo.sshUrl.startsWith("ssh://"))?.sshUrl;
-          if (ssh) {
-            const url = new URL(ssh);
-            sshHost = `${url.hostname}${url.port ? `:${url.port}` : ""}`;
-          }
+          sshHost = sshHostFromRepos(await provider.listRepos(creds));
         } catch {
-          /* HTTPS-only account (SSH disabled, or no readable repo yet) */
+          /* unreachable/forbidden listing — `ensureSshHost` retries later */
         }
       }
 
@@ -464,7 +509,7 @@ export class AccountsService {
 
   /** Probe auth: `ssh -T` against the account's provider with this account's key. */
   async test(id: string): Promise<AccountTestResult> {
-    const account = await this.requireAccount(id);
+    const account = await this.ensureSshHost(await this.requireAccount(id));
     const probe = providerFor(account.provider).sshProbe(this.urlCtx(account));
     if (!probe) {
       return { ok: false, message: "SSH is not available for this account (HTTPS-only)." };
@@ -594,7 +639,7 @@ export class AccountsService {
     destName: string | undefined,
     cwd: string
   ): Promise<{ name: string }> {
-    const account = await this.requireAccount(accountId);
+    const account = await this.ensureSshHost(await this.requireAccount(accountId));
     const provider = providerFor(account.provider);
     const parsed = provider.parseRepoUrl(input, this.urlCtx(account));
     if (!parsed) {
@@ -609,10 +654,14 @@ export class AccountsService {
       );
     }
     const urls = await provider.cloneUrls(this.credsOf(account), parsed);
-    // DC clone URLs are authoritative (never derived), so prefer whatever the
-    // API reported and fall back to HTTPS when SSH is disabled on the instance.
-    const cloneUrl =
-      urls.ssh && account.provider !== "bitbucket-server" ? urls.ssh : urls.ssh ?? urls.https;
+    // SSH first (the account's key is pinned for it); fall back to HTTPS when
+    // the transport is unavailable — a DC instance with SSH disabled, or an
+    // SSH-only one where the admin turned off HTTP(S) SCM hosting. DC clone URLs
+    // are authoritative (never derived), so whatever the API reported is used.
+    const cloneUrl = urls.ssh ?? urls.https;
+    if (!cloneUrl) {
+      throw new AccountError(502, "The repository exposes no clone URL (neither HTTP(S) nor SSH).");
+    }
     const name = destName ?? repoNameFrom(cloneUrl);
     // The derived name lands in `join(cwd, name)`; a repo literally named "." or
     // ".." would otherwise resolve outside the workspace dir.
