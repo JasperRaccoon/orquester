@@ -14,7 +14,7 @@ import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 
 import { AccountError } from "./account-error";
-import { type CreateRepoOptions, createRepo, listOrgs, listRepos } from "./repos";
+import { type CreateRepoOptions, githubProvider, listOrgs } from "./providers/github";
 
 // Re-exported so existing importers (`index.ts`, `repos.ts`) keep working after
 // the class moved to its own module (breaking a provider↔accounts import cycle).
@@ -343,10 +343,10 @@ export class AccountsService {
 
   /**
    * List repos the account can reach. Thin wrapper that reads the token (the
-   * only place it is read for REST) and delegates to `repos.ts`.
+   * only place it is read for REST) and delegates to the provider module.
    */
   async listRepos(id: string): Promise<RepoSummary[]> {
-    return listRepos(await this.requireToken(id));
+    return githubProvider.listRepos({ token: await this.requireToken(id) });
   }
 
   /** List the org logins the account belongs to (for the create-owner picker). */
@@ -356,8 +356,8 @@ export class AccountsService {
 
   /**
    * Create a repo for the account. `owner` may be the account's own login or an
-   * org it can create in; `repos.ts` chooses the user vs. org endpoint by
-   * comparing `owner` to the account's `login`.
+   * org it can create in; `providers/github.ts` chooses the user vs. org
+   * endpoint by comparing `owner` to the account's `login`.
    */
   async createRepo(
     id: string,
@@ -370,7 +370,11 @@ export class AccountsService {
     if (!account.token) {
       throw new AccountError(400, "This account has no GitHub token. Enable repo access first.");
     }
-    return createRepo(account.token, { ...opts, login: account.login });
+    return githubProvider.createRepo(
+      { token: account.token },
+      { login: account.login, name: account.gitName, email: account.gitEmail },
+      opts
+    );
   }
 
   /**
