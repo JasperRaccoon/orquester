@@ -511,6 +511,33 @@ export function parseAccountsConfig(value: unknown): AccountsConfig {
   return accountsConfigSchema.parse(value);
 }
 
+/**
+ * Serialize for persistence. On `github` records, mirrors the legacy
+ * `githubLogin`/`githubKeyId` fields alongside the new shape so the file stays
+ * parseable by PRE-provider daemons (whose schema required them) — a deploy
+ * rollback must not wipe connected GitHub accounts. `githubKeyId` was a number
+ * in the old schema, so it is only mirrored when `remoteKeyId` is numeric.
+ * `parseAccountsConfig` strips the mirrors again on load (round-trip safe).
+ * Bitbucket records get no mirrors: an old daemon cannot represent them.
+ */
+export function serializeAccountsConfig(config: AccountsConfig): unknown {
+  return {
+    ...config,
+    accounts: config.accounts.map((account) => {
+      if (account.provider !== "github") return account;
+      const numericKeyId =
+        account.remoteKeyId !== undefined && /^\d+$/.test(account.remoteKeyId)
+          ? Number(account.remoteKeyId)
+          : undefined;
+      return {
+        ...account,
+        githubLogin: account.login,
+        ...(numericKeyId !== undefined ? { githubKeyId: numericKeyId } : {})
+      };
+    })
+  };
+}
+
 // workspaces.json (daemon-side per-workspace metadata; keyed by workspace NAME)
 //
 // A lightweight side-table layered onto the filesystem listing of

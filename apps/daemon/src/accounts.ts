@@ -11,7 +11,8 @@ import {
   type AccountsConfig,
   createDefaultAccountsConfig,
   isValidName,
-  parseAccountsConfig
+  parseAccountsConfig,
+  serializeAccountsConfig
 } from "@orquester/config";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -177,7 +178,9 @@ export class AccountsService {
     await mkdir(dirname(this.configPath), { recursive: true });
     // 0600: accounts.json holds the provider token at rest (same care as keys/, 0700).
     // `mode` only applies on create, so chmod afterwards to also fix existing files.
-    await writeFile(this.configPath, `${JSON.stringify(config, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    // serializeAccountsConfig mirrors legacy githubLogin/githubKeyId on github
+    // records so a rolled-back (pre-provider) daemon can still parse the file.
+    await writeFile(this.configPath, `${JSON.stringify(serializeAccountsConfig(config), null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
     await chmod(this.configPath, 0o600).catch(() => undefined);
   }
 

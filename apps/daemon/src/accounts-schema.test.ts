@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseAccountsConfig } from "@orquester/config";
+import { parseAccountsConfig, serializeAccountsConfig } from "@orquester/config";
 
 const legacyAccount = {
   id: "a1", label: "work", githubLogin: "octo", gitName: "Octo", gitEmail: "o@x.com",
@@ -36,4 +36,39 @@ test("already-migrated payload is untouched (idempotent)", () => {
   const once = parseAccountsConfig({ version: 1, accounts: [legacyAccount] });
   const twice = parseAccountsConfig(JSON.parse(JSON.stringify(once)));
   assert.deepEqual(twice, once);
+});
+
+// Rollback safety: the serialized file must stay parseable by the PRE-provider
+// accountSchema (which required `githubLogin` and numeric `githubKeyId`), so a
+// deploy rollback does not wipe connected GitHub accounts.
+test("serialize mirrors githubLogin/githubKeyId on github records for old-daemon compat", () => {
+  const cfg = parseAccountsConfig({ version: 1, accounts: [legacyAccount] });
+  const out = serializeAccountsConfig(cfg) as { accounts: Array<Record<string, unknown>> };
+  assert.equal(out.accounts[0].githubLogin, "octo");
+  assert.equal(out.accounts[0].githubKeyId, 123);
+  assert.equal(out.accounts[0].login, "octo"); // new fields still present for the new daemon
+});
+
+test("serialize does not mirror legacy fields onto bitbucket records", () => {
+  const cfg = parseAccountsConfig({ version: 1, accounts: [{
+    id: "b1", label: "bb", provider: "bitbucket-cloud", login: "nick", loginRef: "{u-1}",
+    email: "n@x.com", gitName: "N", gitEmail: "n@x.com", publicKey: "ssh-ed25519 AAAA n",
+    keyPath: "/keys/b1", remoteKeyId: "{key-uuid}", token: "t", createdAt: "2026-08-03T00:00:00.000Z"
+  }] });
+  const out = serializeAccountsConfig(cfg) as { accounts: Array<Record<string, unknown>> };
+  assert.equal(out.accounts[0].githubLogin, undefined);
+  assert.equal(out.accounts[0].githubKeyId, undefined);
+});
+
+test("serialize→parse round-trips to the identical config", () => {
+  const cfg = parseAccountsConfig({ version: 1, accounts: [legacyAccount] });
+  assert.deepEqual(parseAccountsConfig(JSON.parse(JSON.stringify(serializeAccountsConfig(cfg)))), cfg);
+});
+
+test("serialize skips a non-numeric remoteKeyId (old schema required a number)", () => {
+  const cfg = parseAccountsConfig({ version: 1, accounts: [{ ...legacyAccount }] });
+  cfg.accounts[0].remoteKeyId = "{not-a-number}";
+  const out = serializeAccountsConfig(cfg) as { accounts: Array<Record<string, unknown>> };
+  assert.equal(out.accounts[0].githubKeyId, undefined);
+  assert.equal(out.accounts[0].githubLogin, "octo");
 });
