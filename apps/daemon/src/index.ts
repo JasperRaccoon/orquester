@@ -1774,7 +1774,9 @@ export function createServer(
         }
 
         if (body.source === "create") {
-          // Make the repo (REST), then clone the returned SSH URL.
+          // Make the repo (REST), then clone it over the transport the account
+          // can actually authenticate on (SSH, or HTTPS while a DC key upload
+          // is still pending).
           const name = body.name;
           if (!isValidName(name)) {
             return reply.code(400).send({ code: "INVALID_NAME", message: "Invalid name." });
@@ -1790,7 +1792,7 @@ export function createServer(
             ...(body.description ? { description: body.description } : {})
           });
           await mkdir(workspaceDir, { recursive: true });
-          await accounts.cloneRepo(accountId, repo.sshUrl, name, workspaceDir);
+          await accounts.cloneCreatedRepo(accountId, repo, name, workspaceDir);
           await pruneArchivedProject(resolved.workspacesMetaFile, workspace, name);
           return { name, workspace, path, isArchived: false };
         }

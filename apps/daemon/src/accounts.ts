@@ -72,6 +72,21 @@ export function sshCommandFor(account: Account, knownHostsPath: string | null): 
     : base;
 }
 
+/**
+ * Choose the transport to clone over. SSH is preferred — the account's key is
+ * pinned for it and no token ever touches the URL — EXCEPT while a Bitbucket DC
+ * key upload is still pending: that key was never installed on the instance, so
+ * SSH auth is guaranteed to fail (`Permission denied (publickey)`) even though
+ * the instance keeps advertising an SSH clone URL. The token-backed HTTPS URL is
+ * the transport that works until `confirmKey()` clears the flag.
+ */
+export function pickCloneUrl(
+  account: Pick<Account, "keyUploadPending">,
+  urls: { ssh?: string; https?: string }
+): string | undefined {
+  return account.keyUploadPending ? (urls.https ?? urls.ssh) : (urls.ssh ?? urls.https);
+}
+
 /** Derive the repo name (the dir `git clone` would create) from a clone URL. */
 export function repoNameFrom(cloneUrl: string): string {
   const tail = cloneUrl.split("/").pop() ?? "";
@@ -656,9 +671,10 @@ export class AccountsService {
     const urls = await provider.cloneUrls(this.credsOf(account), parsed);
     // SSH first (the account's key is pinned for it); fall back to HTTPS when
     // the transport is unavailable — a DC instance with SSH disabled, or an
-    // SSH-only one where the admin turned off HTTP(S) SCM hosting. DC clone URLs
-    // are authoritative (never derived), so whatever the API reported is used.
-    const cloneUrl = urls.ssh ?? urls.https;
+    // SSH-only one where the admin turned off HTTP(S) SCM hosting — or when the
+    // key upload is still pending (see `pickCloneUrl`). DC clone URLs are
+    // authoritative (never derived), so whatever the API reported is used.
+    const cloneUrl = pickCloneUrl(account, urls);
     if (!cloneUrl) {
       throw new AccountError(502, "The repository exposes no clone URL (neither HTTP(S) nor SSH).");
     }
@@ -673,6 +689,26 @@ export class AccountsService {
     }
     await this.cloneRepo(accountId, cloneUrl, name, cwd);
     return { name };
+  }
+
+  /**
+   * Clone a repo the daemon just created through the provider API. Picks the
+   * transport exactly like `cloneFromInput` (SSH unless the account's key upload
+   * is still pending), so the create flow stays usable on a DC account waiting
+   * for its manual key paste.
+   */
+  async cloneCreatedRepo(
+    id: string,
+    repo: Pick<RepoSummary, "sshUrl" | "httpsUrl">,
+    destName: string,
+    cwd: string
+  ): Promise<void> {
+    const account = await this.requireAccount(id);
+    const cloneUrl = pickCloneUrl(account, { ssh: repo.sshUrl, https: repo.httpsUrl });
+    if (!cloneUrl) {
+      throw new AccountError(502, "The repository exposes no clone URL (neither HTTP(S) nor SSH).");
+    }
+    await this.cloneRepo(id, cloneUrl, destName, cwd);
   }
 
   /**
