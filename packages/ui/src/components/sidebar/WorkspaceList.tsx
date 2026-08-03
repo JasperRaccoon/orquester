@@ -5,11 +5,13 @@ import {
   ClipboardCopy,
   Folder,
   FolderPlus,
+  Github,
   MoreVertical,
   Plus,
   Trash2
 } from "lucide-react";
 import { cn } from "../../lib/cn";
+import { BitbucketIcon } from "../../icons";
 import {
   Button,
   ConfirmDialog,
@@ -237,7 +239,15 @@ export const WorkspaceList: React.FC = () => {
                     icon={accountId === account.id ? <Check size={14} /> : <span className="h-2 w-2" />}
                     onClick={() => setAccountId(account.id)}
                   >
-                    {account.label} <span className="text-neutral-500">@{account.login}</span>
+                    {account.label}{" "}
+                    <span className="inline-flex items-center gap-1 text-neutral-500">
+                      {account.provider === "github" ? (
+                        <Github size={12} />
+                      ) : (
+                        <BitbucketIcon size={12} />
+                      )}
+                      @{account.login}
+                    </span>
                   </DropdownItem>
                 ))}
                 <DropdownSeparator />

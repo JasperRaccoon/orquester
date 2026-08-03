@@ -22,16 +22,25 @@ export interface NewProjectModalProps {
 type Mode = "empty" | "clone" | "create";
 type Visibility = "private" | "public";
 
+/** Paste-a-URL hints per provider — each provider parses its own URL forms. */
+const CLONE_PLACEHOLDER: Record<string, string> = {
+  github: "https://github.com/owner/repo, git@github.com:owner/repo.git, or owner/repo",
+  "bitbucket-cloud":
+    "https://bitbucket.org/workspace/repo, git@bitbucket.org:workspace/repo.git, or workspace/repo",
+  "bitbucket-server":
+    "https://host/scm/KEY/repo.git, ssh://git@host:7999/KEY/repo.git, a repo browse URL, or KEY/repo"
+};
+
 /**
  * Create-project modal mirroring {@link WorkspaceList}'s Modal + Dropdown
  * patterns. Three modes:
  * - **Empty** — a plain directory (always available).
  * - **Clone** — pick a repo the workspace's account can reach, or paste a URL.
- * - **Create new** — make a GitHub repo (under the account or one of its orgs)
- *   and clone it.
+ * - **Create new** — make a repo on the bound account's provider (under the
+ *   account itself or one of its orgs/workspaces/projects) and clone it.
  *
  * Repo modes require the current workspace to be linked to a git account that
- * has repo access (a persisted token). Repos/orgs load lazily when the modal
+ * has repo access (a persisted token). Repos/owners load lazily when the modal
  * opens. The token is never read here — only `repoAccess` gates the UI.
  */
 export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose }) => {
@@ -68,7 +77,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose 
   const [picked, setPicked] = useState<RepoSummary | null>(null);
 
   // Create mode.
-  const [orgs, setOrgs] = useState<OwnerSummary[] | null>(null);
+  const [owners, setOwners] = useState<OwnerSummary[] | null>(null);
   const [owner, setOwner] = useState<string | null>(null);
   const [visibility, setVisibility] = useState<Visibility>("private");
   const [description, setDescription] = useState("");
@@ -84,7 +93,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose 
     setReposError(null);
     setRepoQuery("");
     setPicked(null);
-    setOrgs(null);
+    setOwners(null);
     setOwner(null);
     setVisibility("private");
     setDescription("");
@@ -95,7 +104,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose 
     onClose();
   };
 
-  // Lazily load repos + orgs when the modal opens with repo access. Reset to
+  // Lazily load repos + owners when the modal opens with repo access. Reset to
   // Empty mode each open (account/access may have changed since last time).
   useEffect(() => {
     if (!open) {
@@ -120,27 +129,26 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose 
       });
     listOwners(account.id)
       .then((list) => {
-        if (active) setOrgs(list);
+        if (active) setOwners(list);
       })
       .catch(() => {
-        if (active) setOrgs([]);
+        if (active) setOwners([]);
       });
     return () => {
       active = false;
     };
   }, [open, account, repoAccess, listRepos, listOwners]);
 
-  // Owner ids for create mode. The daemon already returns the account itself
-  // plus its orgs/workspaces/projects; keep the login as a fallback for the
-  // window before owners load (or when the call fails).
-  const owners = useMemo(() => {
-    const ids = (orgs ?? []).map((o) => o.id);
-    if (account && !ids.includes(account.login)) {
-      ids.unshift(account.login);
-    }
-    return ids;
-  }, [account, orgs]);
-  const resolvedOwner = owner ?? account?.login ?? null;
+  // Owner choices for create mode. The daemon returns the account's own
+  // namespace (GitHub user / DC personal project, `kind: "user"`) plus its
+  // orgs/workspaces/projects. Bitbucket Cloud has no personal entry — repos
+  // always live in a workspace — so fall back to the first owner there.
+  const ownerList = owners ?? [];
+  const defaultOwner = useMemo(() => {
+    const list = owners ?? [];
+    return list.find((o) => o.kind === "user")?.id ?? list[0]?.id ?? null;
+  }, [owners]);
+  const resolvedOwner = owner ?? defaultOwner;
 
   const filteredRepos = useMemo(() => {
     const list = repos ?? [];
@@ -148,7 +156,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose 
     return q ? list.filter((r) => r.fullName.toLowerCase().includes(q)) : list;
   }, [repos, repoQuery]);
 
-  const openGitHubSettings = () => {
+  const openGitHostingSettings = () => {
     close();
     setSettingsOpen(true);
   };
@@ -224,7 +232,8 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose 
   ];
 
   const pickedRepoLabel = picked ? picked.fullName : "Select a repository…";
-  const ownerLabel = resolvedOwner ?? "Select owner…";
+  const ownerLabel =
+    ownerList.find((o) => o.id === resolvedOwner)?.label ?? resolvedOwner ?? "Select owner…";
 
   return (
     <Modal open={open} onClose={close} className="max-w-md">
@@ -269,10 +278,11 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose 
           {account && !repoAccess && (
             <div className="flex items-center justify-between gap-3 rounded-md border border-neutral-800 bg-neutral-950 p-3">
               <p className="text-[11px] text-neutral-400">
-                Repo access is off for <span className="text-neutral-200">{account.label}</span>. Add a
-                GitHub token to clone or create repositories.
+                Repo access is off for <span className="text-neutral-200">{account.label}</span>. Add a{" "}
+                {account.provider === "github" ? "GitHub" : "Bitbucket"} token to clone or create
+                repositories.
               </p>
-              <Button size="sm" variant="outline" className="shrink-0" onClick={openGitHubSettings}>
+              <Button size="sm" variant="outline" className="shrink-0" onClick={openGitHostingSettings}>
                 <Settings2 size={13} /> Enable repo access
               </Button>
             </div>
@@ -354,7 +364,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose 
               <div className="space-y-1.5">
                 <label className="text-xs text-neutral-400">…or paste a URL</label>
                 <Input
-                  placeholder="https://github.com/owner/repo, git@github.com:owner/repo.git, or owner/repo"
+                  placeholder={CLONE_PLACEHOLDER[account?.provider ?? "github"]}
                   value={url}
                   onChange={(e) => {
                     setUrl(e.target.value);
@@ -387,16 +397,16 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose 
                   }
                 >
                   <DropdownLabel>Owner</DropdownLabel>
-                  {owners.map((o) => (
+                  {ownerList.map((o) => (
                     <DropdownItem
-                      key={o}
-                      icon={resolvedOwner === o ? <Check size={14} /> : <span className="h-2 w-2" />}
-                      onClick={() => setOwner(o)}
+                      key={o.id}
+                      icon={
+                        resolvedOwner === o.id ? <Check size={14} /> : <span className="h-2 w-2" />
+                      }
+                      onClick={() => setOwner(o.id)}
                     >
-                      {o}
-                      {account && o === account.login && (
-                        <span className="ml-1 text-neutral-500">(you)</span>
-                      )}
+                      {o.label}
+                      {o.kind === "user" && <span className="ml-1 text-neutral-500">(you)</span>}
                     </DropdownItem>
                   ))}
                 </Dropdown>
