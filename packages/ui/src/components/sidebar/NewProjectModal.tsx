@@ -12,7 +12,7 @@ import {
   ModalCloseButton
 } from "../ui";
 import { useAppStore } from "../../store/app";
-import type { AccountSummary, RepoSummary } from "../../types";
+import type { AccountSummary, OwnerSummary, RepoSummary } from "../../types";
 
 export interface NewProjectModalProps {
   open: boolean;
@@ -40,7 +40,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose 
   const currentWorkspace = useAppStore((s) => s.currentWorkspace);
   const createProject = useAppStore((s) => s.createProject);
   const listRepos = useAppStore((s) => s.listRepos);
-  const listOrgs = useAppStore((s) => s.listOrgs);
+  const listOwners = useAppStore((s) => s.listOwners);
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
 
   // Resolve the workspace's linked account (the only one repo features use).
@@ -68,7 +68,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose 
   const [picked, setPicked] = useState<RepoSummary | null>(null);
 
   // Create mode.
-  const [orgs, setOrgs] = useState<string[] | null>(null);
+  const [orgs, setOrgs] = useState<OwnerSummary[] | null>(null);
   const [owner, setOwner] = useState<string | null>(null);
   const [visibility, setVisibility] = useState<Visibility>("private");
   const [description, setDescription] = useState("");
@@ -118,7 +118,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose 
       .finally(() => {
         if (active) setReposLoading(false);
       });
-    listOrgs(account.id)
+    listOwners(account.id)
       .then((list) => {
         if (active) setOrgs(list);
       })
@@ -128,13 +128,18 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose 
     return () => {
       active = false;
     };
-  }, [open, account, repoAccess, listRepos, listOrgs]);
+  }, [open, account, repoAccess, listRepos, listOwners]);
 
-  // Owner options for create mode: the account login + any orgs it belongs to.
-  const owners = useMemo(
-    () => (account ? [account.login, ...(orgs ?? [])] : []),
-    [account, orgs]
-  );
+  // Owner ids for create mode. The daemon already returns the account itself
+  // plus its orgs/workspaces/projects; keep the login as a fallback for the
+  // window before owners load (or when the call fails).
+  const owners = useMemo(() => {
+    const ids = (orgs ?? []).map((o) => o.id);
+    if (account && !ids.includes(account.login)) {
+      ids.unshift(account.login);
+    }
+    return ids;
+  }, [account, orgs]);
   const resolvedOwner = owner ?? account?.login ?? null;
 
   const filteredRepos = useMemo(() => {

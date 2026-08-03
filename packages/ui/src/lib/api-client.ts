@@ -270,11 +270,19 @@ export class ApiClient {
     return this.send("GET", `/api/accounts/${encodeURIComponent(accountId)}/orgs`, { signal });
   }
 
-  /** Persist a provider token for repo access. The token is only sent, never read back. */
-  setAccountToken(accountId: string, token: string): Promise<void> {
+  /**
+   * Persist a provider token for repo access. The token is only sent, never read
+   * back. `tokenExpiresAt` is user-entered (Bitbucket tokens always expire).
+   */
+  setAccountToken(accountId: string, token: string, tokenExpiresAt?: string): Promise<void> {
     return this.send("POST", `/api/accounts/${encodeURIComponent(accountId)}/token`, {
-      body: { token }
+      body: { token, ...(tokenExpiresAt ? { tokenExpiresAt } : {}) }
     });
+  }
+
+  /** DC manual-key flow: verify the pasted key landed, clear the pending flag. */
+  confirmAccountKey(accountId: string): Promise<AccountSummary> {
+    return this.send("POST", `/api/accounts/${encodeURIComponent(accountId)}/confirm-key`);
   }
 
   // Workspaces & projects (filesystem-backed)

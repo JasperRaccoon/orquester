@@ -50,8 +50,10 @@ import type {
   AccountSummary,
   AccountTestResult,
   ConnectionStatus,
+  CreateAccountRequest,
   CreateProjectRequest,
   EventMessage,
+  OwnerSummary,
   ProjectSummary,
   RegistryEntry,
   RegistryKind,
@@ -619,15 +621,21 @@ export interface AppState {
 
   // git accounts (daemon-persisted; shared across clients of this daemon)
   loadAccounts: () => Promise<void>;
-  addAccount: (input: { label: string; token: string }) => Promise<AccountSummary>;
+  /** Connect a provider account (GitHub PAT, Bitbucket Cloud/DC token). */
+  addAccount: (input: CreateAccountRequest) => Promise<AccountSummary>;
   removeAccount: (id: string) => Promise<void>;
   testAccount: (id: string) => Promise<AccountTestResult>;
   /** Repos the account can reach (for the clone picker). */
   listRepos: (accountId: string) => Promise<RepoSummary[]>;
-  /** Owner ids the account can create repos under (for the create-owner picker). */
-  listOrgs: (accountId: string) => Promise<string[]>;
-  /** Persist a token (enables repo access); refetches accounts so repoAccess flips. */
-  setAccountToken: (accountId: string, token: string) => Promise<void>;
+  /** Owners the account can create repos under (for the create-owner picker). */
+  listOwners: (accountId: string) => Promise<OwnerSummary[]>;
+  /**
+   * Persist a token (enables repo access); refetches accounts so repoAccess
+   * flips. `tokenExpiresAt` is user-entered (Bitbucket tokens always expire).
+   */
+  setAccountToken: (accountId: string, token: string, tokenExpiresAt?: string) => Promise<void>;
+  /** Bitbucket DC manual-key flow: verify the pasted key landed; refetches accounts. */
+  confirmAccountKey: (accountId: string) => Promise<void>;
 
   // app config + settings
   loadAppConfig: () => Promise<void>;
@@ -1374,7 +1382,13 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (!api) {
       throw new Error("Not connected.");
     }
-    const account = await api.createAccount({ label: input.label.trim(), token: input.token.trim() });
+    // Trim the fields every variant shares; provider-specific fields (email,
+    // baseUrl, username, CA PEM, expiry) pass through as the caller built them.
+    const account = await api.createAccount({
+      ...input,
+      label: input.label.trim(),
+      token: input.token.trim()
+    });
     await get().loadAccounts();
     return account;
   },
@@ -1400,22 +1414,31 @@ export const useAppStore = create<AppState>((set, get) => ({
     return api.listRepos(accountId);
   },
 
-  listOrgs: async (accountId) => {
+  listOwners: async (accountId) => {
     const api = get().api;
     if (!api) {
       throw new Error("Not connected.");
     }
-    const owners = await api.listOwners(accountId);
-    return owners.map((owner) => owner.id);
+    return api.listOwners(accountId);
   },
 
-  setAccountToken: async (accountId, token) => {
+  setAccountToken: async (accountId, token, tokenExpiresAt) => {
     const api = get().api;
     if (!api) {
       throw new Error("Not connected.");
     }
-    await api.setAccountToken(accountId, token.trim());
+    await api.setAccountToken(accountId, token.trim(), tokenExpiresAt);
     // Refetch so repoAccess flips in the UI (no broadcast; single-user).
+    await get().loadAccounts();
+  },
+
+  confirmAccountKey: async (accountId) => {
+    const api = get().api;
+    if (!api) {
+      throw new Error("Not connected.");
+    }
+    await api.confirmAccountKey(accountId);
+    // Refetch so the pending-key banner clears (no broadcast; single-user).
     await get().loadAccounts();
   },
 
