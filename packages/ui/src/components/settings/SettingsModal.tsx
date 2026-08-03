@@ -6,7 +6,9 @@ import {
   Check,
   ChevronLeft,
   ChevronRight,
+  Copy,
   Download,
+  ExternalLink,
   Gauge,
   Github,
   KeyRound,
@@ -19,18 +21,19 @@ import {
   X,
   Zap
 } from "lucide-react";
+import type { AccountSummary, CreateAccountRequest, GitProviderId } from "@orquester/api";
 import type { DaemonConfig } from "@orquester/config";
 import { cn } from "../../lib/cn";
 import { disablePush, enablePush, getSubscription, pushSupported } from "../../lib/push";
 import { Button, Input, Modal, ModalCloseButton, PasswordVerify, Switch } from "../ui";
-import { getRegistryIcon } from "../../icons";
+import { BitbucketIcon, getRegistryIcon } from "../../icons";
 import { useIsDesktop, useRegistry } from "../../hooks";
 import { useApi, useOrquester } from "../../context/orquester-context";
 import { useAppStore } from "../../store/app";
 import { AgentAccountsSettings } from "./AgentAccountsSettings";
 import { ModelProxySettings } from "./ModelProxySettings";
 
-type Section = "app" | "agents" | "modelproxy" | "accounts" | "usage" | "github" | "daemon";
+type Section = "app" | "agents" | "modelproxy" | "accounts" | "usage" | "git-hosting" | "daemon";
 
 const SECTIONS: { id: Section; label: string; icon: React.ReactNode; desc: string }[] = [
   { id: "app", label: "App", icon: <AppWindow size={16} />, desc: "Titlebar, runtime, active server" },
@@ -38,7 +41,12 @@ const SECTIONS: { id: Section; label: string; icon: React.ReactNode; desc: strin
   { id: "agents", label: "Agents", icon: <Boxes size={16} />, desc: "Install, update and view harness versions" },
   { id: "modelproxy", label: "Model proxy", icon: <Zap size={16} />, desc: "Run GPT & Kimi in the Claude Code harness" },
   { id: "accounts", label: "Accounts", icon: <Users size={16} />, desc: "Managed Claude & Codex accounts for launching agents" },
-  { id: "github", label: "GitHub", icon: <Github size={16} />, desc: "Connect accounts and per-workspace git identities" },
+  {
+    id: "git-hosting",
+    label: "Git hosting",
+    icon: <Github size={16} />,
+    desc: "Connect GitHub/Bitbucket accounts and per-workspace git identities"
+  },
   { id: "daemon", label: "Daemon", icon: <Server size={16} />, desc: "Workspaces dir, external HTTP access" }
 ];
 
@@ -53,8 +61,8 @@ const renderSection = (id: Section) =>
     <AgentAccountsSettings />
   ) : id === "usage" ? (
     <UsageSettings />
-  ) : id === "github" ? (
-    <GitHubSettings />
+  ) : id === "git-hosting" ? (
+    <GitHostingSettings />
   ) : (
     <DaemonSettings />
   );
@@ -337,7 +345,35 @@ const AgentsSettings: React.FC = () => {
 
 const firstLine = (text: string) => text.split("\n").find((l) => l.trim())?.trim().slice(0, 80) ?? "";
 
-const GitHubSettings: React.FC = () => {
+/** The three connectable git-hosting providers, in picker order. */
+const PROVIDERS: { id: GitProviderId; label: string; icon: React.ReactNode }[] = [
+  { id: "github", label: "GitHub", icon: <Github size={13} /> },
+  { id: "bitbucket-cloud", label: "Bitbucket", icon: <BitbucketIcon size={13} /> },
+  { id: "bitbucket-server", label: "Data Center", icon: <BitbucketIcon size={13} /> }
+];
+
+const providerIcon = (provider: GitProviderId, size: number) =>
+  provider === "github" ? <Github size={size} /> : <BitbucketIcon size={size} />;
+
+/** Placeholder for the per-account "enable repo access" token field. */
+const REPO_TOKEN_PLACEHOLDER: Record<GitProviderId, string> = {
+  github: "GitHub PAT (repo, read:org)",
+  "bitbucket-cloud": "API token (scoped Atlassian API token)",
+  "bitbucket-server": "API token (HTTP access token, Repository write)"
+};
+
+/**
+ * Whole days until a token expires, or null when the account carries no expiry
+ * (GitHub PATs may be non-expiring; Bitbucket tokens always expire). Unparsable
+ * values are treated as "no expiry" rather than rendering NaN.
+ */
+const daysUntilExpiry = (iso?: string): number | null => {
+  if (!iso) return null;
+  const at = Date.parse(iso);
+  return Number.isFinite(at) ? Math.ceil((at - Date.now()) / 86_400_000) : null;
+};
+
+const GitHostingSettings: React.FC = () => {
   const accounts = useAppStore((s) => s.accounts);
   const loadAccounts = useAppStore((s) => s.loadAccounts);
   const addAccount = useAppStore((s) => s.addAccount);
@@ -346,15 +382,26 @@ const GitHubSettings: React.FC = () => {
   const setAccountToken = useAppStore((s) => s.setAccountToken);
 
   const [adding, setAdding] = useState(false);
+  const [provider, setProvider] = useState<GitProviderId>("github");
   const [label, setLabel] = useState("");
   const [token, setToken] = useState("");
+  // Bitbucket-only connect fields (cloud: email; Data Center: baseUrl/username/CA).
+  const [email, setEmail] = useState("");
+  const [baseUrl, setBaseUrl] = useState("");
+  const [username, setUsername] = useState("");
+  const [caCertPem, setCaCertPem] = useState("");
+  const [tokenExpiresAt, setTokenExpiresAt] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Data Center instances that refuse token key-upload return a pending account;
+  // this drives the manual paste-the-key modal.
+  const [keyModalFor, setKeyModalFor] = useState<AccountSummary | null>(null);
   // Per-account test state, keyed by id.
   const [tests, setTests] = useState<Record<string, { ok: boolean; text: string } | "busy">>({});
   // Per-account "enable repo access" token entry: which row is open + its value.
   const [repoTokenFor, setRepoTokenFor] = useState<string | null>(null);
   const [repoToken, setRepoToken] = useState("");
+  const [repoTokenExpiresAt, setRepoTokenExpiresAt] = useState("");
   const [repoBusy, setRepoBusy] = useState(false);
   const [repoError, setRepoError] = useState<string | null>(null);
 
@@ -363,17 +410,52 @@ const GitHubSettings: React.FC = () => {
     void loadAccounts();
   }, [loadAccounts]);
 
+  const resetForm = () => {
+    setLabel("");
+    setToken("");
+    setEmail("");
+    setBaseUrl("");
+    setUsername("");
+    setCaCertPem("");
+    setTokenExpiresAt("");
+  };
+
+  const canConnect =
+    label.trim().length > 0 &&
+    token.trim().length > 0 &&
+    (provider !== "bitbucket-cloud" || email.trim().length > 0) &&
+    (provider !== "bitbucket-server" || (baseUrl.trim().length > 0 && username.trim().length > 0));
+
   const connect = async () => {
-    if (!label.trim() || !token.trim()) {
+    if (!canConnect) {
       return;
     }
     setBusy(true);
     setError(null);
     try {
-      await addAccount({ label, token });
+      // Discriminated on `provider` — the daemon picks the GitProvider from it.
+      const req: CreateAccountRequest =
+        provider === "bitbucket-cloud"
+          ? { provider, label, token, email: email.trim(), tokenExpiresAt: tokenExpiresAt || undefined }
+          : provider === "bitbucket-server"
+            ? {
+                provider,
+                label,
+                token,
+                baseUrl: baseUrl.trim(),
+                username: username.trim(),
+                caCertPem: caCertPem.trim() || undefined,
+                tokenExpiresAt: tokenExpiresAt || undefined
+              }
+            : { label, token };
+      const summary = await addAccount(req);
       setAdding(false);
-      setLabel("");
-      setToken("");
+      resetForm();
+      // Key upload was rejected by the instance — walk the user into the
+      // manual paste flow instead of leaving a half-set-up account behind.
+      if (summary.keyPending) {
+        setKeyModalFor(summary);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not connect the account.");
     } finally {
@@ -393,12 +475,14 @@ const GitHubSettings: React.FC = () => {
   const openRepoToken = (id: string) => {
     setRepoTokenFor(id);
     setRepoToken("");
+    setRepoTokenExpiresAt("");
     setRepoError(null);
   };
 
   const cancelRepoToken = () => {
     setRepoTokenFor(null);
     setRepoToken("");
+    setRepoTokenExpiresAt("");
     setRepoError(null);
   };
 
@@ -411,7 +495,7 @@ const GitHubSettings: React.FC = () => {
     try {
       // The token is only sent — never read back. setAccountToken refetches
       // accounts so `repoAccess` flips on success.
-      await setAccountToken(id, repoToken);
+      await setAccountToken(id, repoToken, repoTokenExpiresAt || undefined);
       cancelRepoToken();
     } catch (err) {
       setRepoError(err instanceof Error ? err.message : "Could not enable repo access.");
@@ -438,16 +522,20 @@ const GitHubSettings: React.FC = () => {
         {accounts.map((account) => {
           const test = tests[account.id];
           const editingToken = repoTokenFor === account.id;
+          const days = daysUntilExpiry(account.tokenExpiresAt);
           return (
             <div key={account.id} className="group px-3 py-2.5">
               <div className="flex items-center gap-3">
                 <span className="flex h-8 w-8 shrink-0 items-center justify-center text-neutral-400">
-                  <Github size={18} />
+                  {providerIcon(account.provider, 18)}
                 </span>
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm text-neutral-100">
                     {account.label}
                     <span className="ml-1.5 text-neutral-500">@{account.login}</span>
+                    {account.provider === "bitbucket-server" && (
+                      <span className="ml-1.5 text-xs text-neutral-600">{account.host}</span>
+                    )}
                   </p>
                   <p className="truncate text-xs text-neutral-500">{account.gitEmail}</p>
                   <p className="truncate text-xs">
@@ -458,6 +546,11 @@ const GitHubSettings: React.FC = () => {
                       </span>
                     ) : (
                       <span className="text-neutral-500">Repo access off</span>
+                    )}
+                    {days !== null && (
+                      <span className={cn("ml-2", days <= 30 ? "text-amber-500" : "text-neutral-500")}>
+                        {days <= 0 ? "token expired" : `token expires in ${days}d`}
+                      </span>
                     )}
                   </p>
                   {test && test !== "busy" && (
@@ -485,16 +578,38 @@ const GitHubSettings: React.FC = () => {
                 </button>
               </div>
 
+              {account.keyPending && (
+                <div className="ml-11 mt-2 flex items-center gap-2 rounded-md border border-amber-900/60 bg-amber-950/20 px-3 py-2">
+                  <p className="min-w-0 flex-1 text-xs text-amber-400">
+                    SSH key not installed yet — the instance would not accept it from the token.
+                  </p>
+                  <Button size="sm" variant="outline" onClick={() => setKeyModalFor(account)}>
+                    <KeyRound size={13} /> Finish setup
+                  </Button>
+                </div>
+              )}
+
               {editingToken && (
                 <div className="ml-11 mt-2 space-y-2 rounded-md border border-neutral-800 bg-neutral-950 p-3">
                   <Input
                     autoFocus
                     type="password"
-                    placeholder="GitHub PAT (repo, read:org)"
+                    placeholder={REPO_TOKEN_PLACEHOLDER[account.provider]}
                     value={repoToken}
                     onChange={(e) => setRepoToken(e.target.value)}
                     onKeyDown={(e) => e.key === "Enter" && void saveRepoToken(account.id)}
                   />
+                  {account.provider !== "github" && (
+                    <div className="flex items-center gap-2">
+                      <Input
+                        className="w-40"
+                        type="date"
+                        value={repoTokenExpiresAt}
+                        onChange={(e) => setRepoTokenExpiresAt(e.target.value)}
+                      />
+                      <span className="text-xs text-neutral-500">Expiry (optional)</span>
+                    </div>
+                  )}
                   <p className="text-xs text-neutral-500">
                     Stored securely on the daemon to list and create repositories. It is never
                     displayed again and never used on a clone command line.
@@ -519,20 +634,117 @@ const GitHubSettings: React.FC = () => {
 
       {adding ? (
         <div className="space-y-2 rounded-lg border border-neutral-800 p-3">
+          <div className="inline-flex rounded-lg bg-neutral-800/60 p-0.5 text-xs">
+            {PROVIDERS.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => setProvider(p.id)}
+                className={cn(
+                  "flex items-center gap-1.5 rounded-md px-2.5 py-1 transition-colors",
+                  provider === p.id
+                    ? "bg-neutral-700 text-neutral-100"
+                    : "text-neutral-400 hover:text-neutral-200"
+                )}
+              >
+                {p.icon}
+                {p.label}
+              </button>
+            ))}
+          </div>
+
           <Input placeholder="Label (e.g. work)" value={label} onChange={(e) => setLabel(e.target.value)} />
+
+          {provider === "bitbucket-cloud" && (
+            <Input
+              placeholder="Atlassian account email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+            />
+          )}
+
+          {provider === "bitbucket-server" && (
+            <>
+              <Input
+                placeholder="https://bitbucket.example.com/bitbucket"
+                value={baseUrl}
+                onChange={(e) => setBaseUrl(e.target.value)}
+              />
+              <Input
+                placeholder="Username on the instance"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+              />
+            </>
+          )}
+
           <Input
             type="password"
-            placeholder="GitHub PAT (write:public_key, user:email, read:user, repo, read:org)"
+            placeholder={
+              provider === "bitbucket-cloud"
+                ? "Scoped API token (read/write:repository, read:workspace, read:user, read/write:ssh-key)"
+                : provider === "bitbucket-server"
+                  ? "HTTP access token (Repository write)"
+                  : "GitHub PAT (write:public_key, user:email, read:user, repo, read:org)"
+            }
             value={token}
             onChange={(e) => setToken(e.target.value)}
           />
-          <p className="text-xs text-neutral-500">
-            The token uploads an SSH key and reads your identity. With the <code>repo</code> and{" "}
-            <code>read:org</code> scopes it is also stored securely on the daemon to list and create
-            repositories. It is never displayed again.
-          </p>
+
+          {provider !== "github" && (
+            <div className="flex items-center gap-2">
+              <Input
+                className="w-40"
+                type="date"
+                value={tokenExpiresAt}
+                onChange={(e) => setTokenExpiresAt(e.target.value)}
+              />
+              <span className="text-xs text-neutral-500">
+                {provider === "bitbucket-cloud"
+                  ? "Atlassian tokens expire (max 1 year) — enter the expiry you chose"
+                  : "Token expiry (optional) — used for the countdown badge"}
+              </span>
+            </div>
+          )}
+
+          {provider === "bitbucket-server" && (
+            <textarea
+              rows={3}
+              placeholder="PEM CA bundle (optional — for self-signed/internal certificates)"
+              value={caCertPem}
+              onChange={(e) => setCaCertPem(e.target.value)}
+              className="w-full rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1.5 font-mono text-xs text-neutral-200 outline-none placeholder:text-neutral-600 focus:border-neutral-500"
+            />
+          )}
+
+          {provider === "github" ? (
+            <p className="text-xs text-neutral-500">
+              The token uploads an SSH key and reads your identity. With the <code>repo</code> and{" "}
+              <code>read:org</code> scopes it is also stored securely on the daemon to list and create
+              repositories. It is never displayed again.
+            </p>
+          ) : (
+            <p className="text-xs text-neutral-500">
+              The token uploads an SSH key, reads your identity, and is stored securely on the daemon
+              to list and create repositories. It is never displayed again.
+              {provider === "bitbucket-cloud" && (
+                <>
+                  {" "}
+                  <a
+                    href="https://id.atlassian.com/manage-profile/security/api-tokens"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-neutral-300 underline hover:text-neutral-100"
+                  >
+                    Create a scoped API token…
+                  </a>
+                </>
+              )}
+            </p>
+          )}
+
           <div className="flex gap-2">
-            <Button size="sm" disabled={busy} onClick={() => void connect()}>
+            <Button size="sm" disabled={busy || !canConnect} onClick={() => void connect()}>
               {busy ? <Loader2 size={13} className="animate-spin" /> : null} Connect
             </Button>
             <Button size="sm" variant="outline" disabled={busy} onClick={() => setAdding(false)}>
@@ -545,7 +757,90 @@ const GitHubSettings: React.FC = () => {
           <Plus size={13} /> Add account…
         </Button>
       )}
+
+      {keyModalFor && (
+        <ManualKeyModal account={keyModalFor} onClose={() => setKeyModalFor(null)} />
+      )}
     </div>
+  );
+};
+
+/**
+ * Data Center fallback: the instance refused to install the SSH key from the
+ * token, so the user pastes the public key on the instance and we verify it
+ * landed (`POST /api/accounts/:id/confirm-key`).
+ */
+const ManualKeyModal: React.FC<{ account: AccountSummary; onClose: () => void }> = ({
+  account,
+  onClose
+}) => {
+  const confirmAccountKey = useAppStore((s) => s.confirmAccountKey);
+  const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(account.publicKey);
+      setCopied(true);
+    } catch {
+      setError("Could not copy — select the key above and copy it manually.");
+    }
+  };
+
+  const confirm = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await confirmAccountKey(account.id);
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "The key is not on the server yet.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal open onClose={onClose} className="w-full max-w-xl">
+      <div className="flex min-w-0 flex-1 flex-col gap-3 p-4">
+        <div className="flex items-center justify-between">
+          <p className="text-sm font-medium text-neutral-100">Add the SSH key manually</p>
+          <ModalCloseButton onClose={onClose} />
+        </div>
+        <p className="text-xs text-neutral-500">
+          {account.label} (@{account.login}) on {account.host} — the token could not install the key.
+          Paste this public key on the instance, then confirm below.
+        </p>
+        <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-all rounded-md border border-neutral-800 bg-neutral-950 p-2 font-mono text-xs text-neutral-300">
+          {account.publicKey}
+        </pre>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button size="sm" variant="outline" onClick={() => void copy()}>
+            {copied ? <Check size={13} /> : <Copy size={13} />} {copied ? "Copied" : "Copy key"}
+          </Button>
+          {account.manualKeyUrl && (
+            <a
+              href={account.manualKeyUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1.5 text-xs text-neutral-300 underline hover:text-neutral-100"
+            >
+              <ExternalLink size={13} /> Open the SSH keys page
+            </a>
+          )}
+        </div>
+        {error && <p className="text-xs text-red-400">{error}</p>}
+        <div className="flex gap-2">
+          <Button size="sm" disabled={busy} onClick={() => void confirm()}>
+            {busy ? <Loader2 size={13} className="animate-spin" /> : null} I&apos;ve added it
+          </Button>
+          <Button size="sm" variant="outline" disabled={busy} onClick={onClose}>
+            Later
+          </Button>
+        </div>
+      </div>
+    </Modal>
   );
 };
 
