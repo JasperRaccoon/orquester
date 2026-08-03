@@ -49,7 +49,7 @@ workspaces/projects (a metadata-only `isArchived` flag — the directory is neve
 hidden from the sidebar and restorable from a muted "Archived" footer panel, optionally
 password-gated by the "Protect archived data" daemon toggle); remote access
 with TLS, username+password auth, per-IP login throttling, and tmux persistence; per-workspace
-git/GitHub SSH identities; **browser tabs (Design Mode)** — a server-side headless Chromium per
+git identities (GitHub, Bitbucket Cloud, Bitbucket Server/DC); **browser tabs (Design Mode)** — a server-side headless Chromium per
 project streamed as an interactive tab over a `/ws-browser` channel, with an element picker that
 delivers HTML/CSS/screenshot payloads into agent PTYs, and embedded Chrome DevTools (the browser's own version-matched frontend proxied by the daemon — right-dock split on desktop, full-screen on mobile); and an installable **PWA** web client
 (service worker + Web Push notifications on agent-session bells).
@@ -127,7 +127,8 @@ conditionally starts the **HTTP** transport.
 **Key routes.** `GET /health` (bare `{ok:true}`); `GET /api/auth/info` (public: `{authRequired,
 salt, requiresUsername}` — never the username/hash); `/api/config/{daemon,client,app,remotes}`;
 `/api/workspaces` + `/projects` (CRUD; deletes are realpath-guarded and cascade-close sessions);
-`/api/accounts` (git/GitHub SSH identities; **never returns private keys or PATs**);
+`/api/accounts` (git-hosting SSH identities — GitHub/Bitbucket; **never returns private keys or
+tokens**);
 `/api/fs/*` (file browser, sandboxed to `fsRoot`, 1 MB read cap); `/api/registry` +
 `/:id/{version,install,update}`; `/api/sessions` CRUD + `/input` + `/resize` + `/reorder` +
 chunked `GET /:id/output`; `GET /events` (NDJSON event bus + heartbeat); `GET /ws`
@@ -283,12 +284,23 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
   `panel-sizes.ts` / `view-mode.ts` / `search-options.ts`). Review for this whenever adding a
   persisted client-side shape or changing an existing one.
 - **Secrets never cross the wire.** Plaintext passwords are migrated to bcrypt at rest;
-  `sanitizeDaemonConfig` masks username/passwordHash/fsRoot; SSH private keys and GitHub PATs are
-  never returned by any API; the `?token=` is redacted from logs. *(A bound workspace's PAT **is**
-  written to local 0600 files — a git-credentials store inside the per-account `includeIf` file +
-  `~/.config/gh/hosts.yml` — so that workspace's terminals/agents can use HTTPS git + `gh` as the
-  account. It stays on-host (same user), off any command line, and is still never returned by the
-  API. `gh` must be installed on the host separately; it is not an npm package.)*
+  `sanitizeDaemonConfig` masks username/passwordHash/fsRoot; SSH private keys and git-hosting
+  tokens (GitHub PATs, Bitbucket API/HTTP access tokens) are never returned by any API; the
+  `?token=` is redacted from logs. *(A bound workspace's token **is** written to local 0600 files
+  — a git-credentials store inside the per-account `includeIf` file, plus `~/.config/gh/hosts.yml`
+  (GitHub) or `<appdir>/daemon/keys/<id>.env` with `BITBUCKET_*` vars (Bitbucket) — so that
+  workspace's terminals/agents can use HTTPS git + `gh` as the account. It stays on-host (same
+  user), off any command line, and is still never returned by the API. `gh` must be installed on
+  the host separately; it is not an npm package.)*
+- **Git providers.** Provider-specific REST/URL/credential behavior lives in
+  `apps/daemon/src/providers/` (`github`, `bitbucket-cloud`, `bitbucket-server` behind the
+  `GitProvider` interface + `providerFor()`); `AccountsService` stays provider-agnostic (keygen,
+  `includeIf` binding, credential files). Bitbucket Cloud SSH always uses `ssh.bitbucket.org`
+  (the old `bitbucket.org` SSH host dies 2026-11-12) and REST auth is Basic `email:token` with a
+  **scoped** Atlassian API token; Bitbucket Server/DC uses `Authorization: Bearer` and its clone
+  URLs come from the repo's `links.clone[]` — **never derived** (a DC instance may expose no SSH
+  entry at all ⇒ HTTPS-only). `Account.provider` is a zod discriminant with a preprocess that
+  migrates legacy `githubLogin`/`githubKeyId` records.
 - **Security boundary asymmetry.** `PUT /api/config/daemon` is **Unix-socket-only** (403 over
   remote HTTP) — **except the single-field `PUT /api/config/daemon/protect-archived`, which is
   allowed on both transports** (normal bearer auth) because it toggles a client-side UI curtain
@@ -506,4 +518,5 @@ password secrecy + patching remain the real mitigations. It costs two loosened u
 | Client store + transport + WS channel | `packages/ui/src/store/app.ts`, `packages/ui/src/lib/api-client.ts`, `packages/ui/src/lib/transporters/ws-session-channel.ts` |
 | Electron embedding | `apps/desktop/src/main.ts` |
 | Browser tabs (Design Mode) | `apps/daemon/src/browsers.ts`, `apps/daemon/src/browser-pick.ts`, `packages/ui/src/components/browser/` |
+| Git hosting accounts (GitHub/Bitbucket) | `apps/daemon/src/accounts.ts`, `apps/daemon/src/providers/`, `packages/ui/src/components/settings/SettingsModal.tsx` |
 | Deployment | `deploy/` + `docs/superpowers/specs|plans/2026-06-19-remote-*.md` |

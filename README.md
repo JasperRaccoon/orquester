@@ -61,9 +61,10 @@ Coding agents are long-running, chatty processes that want your attention at unp
 - GitHub-Desktop-style git tab: stage/unstage, diffs, suggested commit messages, branch switcher, ahead/behind counts, fetch/pull/push, paged history.
 - Notion-style todo lists scoped to a project or workspace, synced through the daemon to every client.
 
-### 🔑 Git & GitHub identities
-- Connect multiple GitHub accounts; each workspace commits and pushes as its own identity via server-generated ed25519 keys and git `includeIf`.
-- PATs enable repo listing/creation and `gh` CLI auth inside that workspace's terminals — tokens never cross the wire and never appear on a command line.
+### 🔑 Git hosting identities
+- Connect multiple GitHub, Bitbucket Cloud and Bitbucket Server/Data Center accounts; each workspace commits and pushes as its own identity via server-generated SSH keys (uploaded to the provider for you) and git `includeIf`.
+- Tokens enable repo listing/creation, cloning from a picker or a pasted URL, and CLI auth inside that workspace's terminals — they never cross the wire and never appear on a command line.
+- Self-hosted Bitbucket is first class: custom CA bundle, context paths, `links.clone`-driven URLs, and a manual key-paste fallback when the instance won't accept key uploads over its API.
 
 ### 📱 Mobile & PWA
 - Installable PWA with offline app shell, visual-viewport-aware layout (nothing hides under the soft keyboard), and instant wake-from-sleep reconnect.
@@ -196,7 +197,7 @@ Single-user by design, and honest about it:
 
 - **The password never crosses the wire.** The client fetches the bcrypt salt and derives the hash locally; the server verifies in constant time with one identical 401 for every failure mode.
 - **Escalating per-IP login throttle** behind Caddy's forwarded IP, on top of whatever fail2ban you run.
-- **Secrets stay home**: SSH private keys, GitHub PATs and the VAPID push key are 0600 on disk and never returned by any API; `?token=` credentials are redacted from logs; daemon env vars are stripped from session environments.
+- **Secrets stay home**: SSH private keys, git-hosting tokens (GitHub PATs, Bitbucket API tokens) and the VAPID push key are 0600 on disk and never returned by any API; `?token=` credentials are redacted from logs; daemon env vars are stripped from session environments.
 - **Sandboxed filesystem API**: every path is realpath-checked against the workspaces root — no traversal, no symlink escapes; folder zips store symlinks instead of following them.
 - **Transport asymmetry**: daemon config writes and shutdown are Unix-socket-only; the MCP endpoint and DevTools proxy exist only on the authenticated remote transport.
 
