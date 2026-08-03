@@ -426,19 +426,36 @@ export function parseRemotesConfig(value: unknown): RemotesConfig {
   return remotesConfigSchema.parse(value);
 }
 
-// accounts.json (connected GitHub/git accounts; daemon-side).
+// accounts.json (connected git-hosting accounts; daemon-side).
 //
 // Each account owns a server-side ed25519 key (private key at `keyPath`, never
-// returned by any API) and a git identity. A scoped GitHub PAT may also be
+// returned by any API) and a git identity. A scoped provider token may also be
 // persisted (for REST: list/create repos); like the private key it is stored at
 // rest (`0600`) and NEVER returned by any API — clients only see `repoAccess`.
+
+export const gitProviderIdSchema = z.enum(["github", "bitbucket-cloud", "bitbucket-server"]);
+export type GitProviderId = z.infer<typeof gitProviderIdSchema>;
 
 export const accountSchema = z.object({
   id: z.string(),
   /** User-facing label (e.g. "work", "personal"). */
   label: z.string().min(1),
-  /** GitHub login the PAT authenticated as. */
-  githubLogin: z.string(),
+  /** Which forge this account belongs to. Legacy records default to github. */
+  provider: gitProviderIdSchema.default("github"),
+  /** Provider login (GitHub login, Bitbucket nickname, DC username). */
+  login: z.string(),
+  /** Secondary id some APIs need: BB Cloud account UUID (braces included), DC user slug. */
+  loginRef: z.string().optional(),
+  /** BB Cloud only: Atlassian account email (REST Basic auth username). */
+  email: z.string().optional(),
+  /** bitbucket-server only: instance base URL including any context path. */
+  baseUrl: z.string().optional(),
+  /** bitbucket-server only: absolute path to a PEM CA bundle under keys/. */
+  caCertPath: z.string().optional(),
+  /** Resolved SSH endpoint, "host" or "host:port" (e.g. "ssh.bitbucket.org", "bb.corp.com:7999"). */
+  sshHost: z.string().optional(),
+  /** ISO expiry of the stored token (Bitbucket tokens always expire; user-entered). */
+  tokenExpiresAt: z.string().optional(),
   /** `git config user.name` for this account (editable in the UI). */
   gitName: z.string(),
   /** `git config user.email` for this account (editable in the UI). */
@@ -447,10 +464,12 @@ export const accountSchema = z.object({
   publicKey: z.string(),
   /** Absolute path to the private key on the daemon host. NEVER exposed by any API. */
   keyPath: z.string(),
-  /** Id of the key on GitHub (for later removal); absent if the upload id was unknown. */
-  githubKeyId: z.number().optional(),
+  /** Id of the uploaded key on the provider (GitHub numeric id / BB key UUID), for later removal. */
+  remoteKeyId: z.string().optional(),
+  /** True while a DC instance rejected token key-upload and the user must paste the key manually. */
+  keyUploadPending: z.boolean().optional(),
   /**
-   * Scoped GitHub PAT for REST (list/create repos). Persisted at rest (`0600`);
+   * Scoped provider token for REST (list/create repos). Persisted at rest (`0600`);
    * NEVER exposed by any API / never crosses the wire — only
    * `AccountSummary.repoAccess` reflects its presence. On a bound workspace it
    * is additionally written to local 0600 files (a git-credentials store + gh
@@ -461,9 +480,24 @@ export const accountSchema = z.object({
   createdAt: z.string()
 });
 
+/** Migrates pre-provider records: githubLogin→login, githubKeyId→remoteKeyId (stringified). */
+const legacyAccountPreprocess = z.preprocess((value) => {
+  if (!value || typeof value !== "object") return value;
+  const rec = { ...(value as Record<string, unknown>) };
+  if (typeof rec.githubLogin === "string" && typeof rec.login !== "string") {
+    rec.login = rec.githubLogin;
+  }
+  delete rec.githubLogin;
+  if (typeof rec.githubKeyId === "number" && rec.remoteKeyId === undefined) {
+    rec.remoteKeyId = String(rec.githubKeyId);
+  }
+  delete rec.githubKeyId;
+  return rec;
+}, accountSchema);
+
 export const accountsConfigSchema = z.object({
   version: z.literal(1).default(1),
-  accounts: z.array(accountSchema).default([])
+  accounts: z.array(legacyAccountPreprocess).default([])
 });
 
 export type Account = z.infer<typeof accountSchema>;

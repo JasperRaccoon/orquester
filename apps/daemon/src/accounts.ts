@@ -77,14 +77,14 @@ export class AccountsService {
   }
 
   /**
-   * Strip `keyPath`/`githubKeyId`/`token` — the public projection the API
+   * Strip `keyPath`/`remoteKeyId`/`token` — the public projection the API
    * returns. `repoAccess` reflects whether a PAT is persisted, never the PAT.
    */
   private toSummary(account: Account): AccountSummary {
     return {
       id: account.id,
       label: account.label,
-      githubLogin: account.githubLogin,
+      githubLogin: account.login,
       gitName: account.gitName,
       gitEmail: account.gitEmail,
       publicKey: account.publicKey,
@@ -141,7 +141,7 @@ export class AccountsService {
         title: `orquester:${label}`,
         key: publicKey
       });
-      const githubKeyId = typeof upload?.id === "number" ? upload.id : undefined;
+      const remoteKeyId = typeof upload?.id === "number" ? String(upload.id) : undefined;
 
       // 3) Read identity: login + name, then primary verified email.
       const user = await this.github(token, "GET", "/user");
@@ -178,12 +178,13 @@ export class AccountsService {
       const account: Account = {
         id,
         label,
-        githubLogin,
+        provider: "github" as const,
+        login: githubLogin,
         gitName,
         gitEmail,
         publicKey,
         keyPath,
-        ...(githubKeyId !== undefined ? { githubKeyId } : {}),
+        ...(remoteKeyId !== undefined ? { remoteKeyId } : {}),
         token,
         createdAt: new Date().toISOString()
       };
@@ -210,7 +211,7 @@ export class AccountsService {
    * Disconnect an account. Blocked (409) while bound to any workspace — the
    * caller passes the names currently bound to it. Otherwise deletes the key
    * files + the account entry. (The PAT was never stored, so the GitHub key is
-   * removed manually; the title `orquester:<label>` / `githubKeyId` is shown.)
+   * removed manually; the title `orquester:<label>` / `remoteKeyId` is shown.)
    */
   async remove(id: string, boundWorkspaces: string[]): Promise<void> {
     const account = await this.find(id);
@@ -276,7 +277,7 @@ export class AccountsService {
   /**
    * Persist a GitHub PAT for an existing account (e.g. one connected before the
    * token was kept). Validates the token via `GET /user` and REJECTS it if the
-   * returned login differs from the account's `githubLogin` — guarding against
+   * returned login differs from the account's `login` — guarding against
    * wiring a typo'd token or a different identity. The PAT is stored at rest
    * (0600); it is never returned (only `repoAccess` flips).
    */
@@ -294,10 +295,10 @@ export class AccountsService {
     if (!login) {
       throw new AccountError(502, "GitHub did not return a login for this token.");
     }
-    if (login !== account.githubLogin) {
+    if (login !== account.login) {
       throw new AccountError(
         400,
-        `This token authenticates as "${login}", but this account is "${account.githubLogin}". Use a token for the right account.`
+        `This token authenticates as "${login}", but this account is "${account.login}". Use a token for the right account.`
       );
     }
     const config = await this.read();
@@ -341,7 +342,7 @@ export class AccountsService {
   /**
    * Create a repo for the account. `owner` may be the account's own login or an
    * org it can create in; `repos.ts` chooses the user vs. org endpoint by
-   * comparing `owner` to the account's `githubLogin`.
+   * comparing `owner` to the account's `login`.
    */
   async createRepo(
     id: string,
@@ -354,7 +355,7 @@ export class AccountsService {
     if (!account.token) {
       throw new AccountError(400, "This account has no GitHub token. Enable repo access first.");
     }
-    return createRepo(account.token, { ...opts, login: account.githubLogin });
+    return createRepo(account.token, { ...opts, login: account.login });
   }
 
   /**
@@ -415,7 +416,7 @@ export class AccountsService {
     const credsPath = this.credentialsPath(account);
     const credentialKey = "credential.https://github.com.helper";
     if (account.token) {
-      await writeFile(credsPath, `https://${account.githubLogin}:${account.token}@github.com\n`, {
+      await writeFile(credsPath, `https://${account.login}:${account.token}@github.com\n`, {
         encoding: "utf8",
         mode: 0o600
       });
@@ -446,7 +447,7 @@ export class AccountsService {
     const hosts =
       "github.com:\n" +
       `    oauth_token: ${account.token}\n` +
-      `    user: ${account.githubLogin}\n` +
+      `    user: ${account.login}\n` +
       "    git_protocol: ssh\n";
     await writeFile(hostsPath, hosts, { encoding: "utf8", mode: 0o600 });
     await chmod(hostsPath, 0o600).catch(() => undefined);
