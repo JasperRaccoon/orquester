@@ -568,15 +568,6 @@ export class AccountsService {
   }
 
   /**
-   * @deprecated Transitional shim for the `string[]`-shaped `/orgs` route; drops
-   * the "user" owner so the payload matches today's org-logins-only contract.
-   * Removed once the route returns `OwnerSummary[]`.
-   */
-  async listOrgs(id: string): Promise<string[]> {
-    return (await this.listOwners(id)).filter((owner) => owner.kind !== "user").map((owner) => owner.id);
-  }
-
-  /**
    * Create a repo for the account. `owner` is an id from `listOwners` (the
    * account's own login, a GitHub org, a Bitbucket workspace or a DC project).
    */

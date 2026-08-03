@@ -38,6 +38,7 @@ import type {
   ImportAgentAccountRequest,
   OpenRequest,
   OpenResult,
+  OwnerSummary,
   ProjectSummary,
   PushInfoResponse,
   PushSubscribeRequest,
@@ -1961,17 +1962,37 @@ export function createServer(
     }
   );
 
-  // Set/replace an account's GitHub PAT (for REST list/create repos). Validated
-  // against the account's githubLogin; stored at rest (0600), never returned.
-  app.post<{ Params: { id: string }; Body: { token?: string } }>(
+  // Set/replace an account's provider token (for REST list/create repos).
+  // Validated against the account's login; stored at rest (0600), never returned.
+  // `tokenExpiresAt` is user-entered (Bitbucket tokens always expire).
+  app.post<{ Params: { id: string }; Body: { token?: string; tokenExpiresAt?: string } }>(
     "/api/accounts/:id/token",
     async (request, reply): Promise<void> => {
       try {
-        await accounts.setToken(request.params.id, request.body?.token ?? "");
+        await accounts.setToken(
+          request.params.id,
+          request.body?.token ?? "",
+          request.body?.tokenExpiresAt
+        );
         return reply.code(204).send();
       } catch (error) {
         const status = error instanceof AccountError ? error.status : 500;
         const message = error instanceof Error ? error.message : "Could not save the token.";
+        return reply.code(status).send({ code: "ACCOUNT_ERROR", message });
+      }
+    }
+  );
+
+  // Bitbucket DC manual key-upload flow: the user pasted the public key on the
+  // instance; verify it landed and clear the pending flag.
+  app.post<{ Params: { id: string } }>(
+    "/api/accounts/:id/confirm-key",
+    async (request, reply): Promise<AccountSummary | void> => {
+      try {
+        return await accounts.confirmKey(request.params.id);
+      } catch (error) {
+        const status = error instanceof AccountError ? error.status : 500;
+        const message = error instanceof Error ? error.message : "Key confirmation failed.";
         return reply.code(status).send({ code: "ACCOUNT_ERROR", message });
       }
     }
@@ -1992,15 +2013,16 @@ export function createServer(
     }
   );
 
-  // List the org logins the account belongs to (create-owner picker). 400 if no token.
+  // Owners the account can create repos under (create-owner picker): the user +
+  // GitHub orgs, Bitbucket Cloud workspaces, or DC projects. 400 if no token.
   app.get<{ Params: { id: string } }>(
     "/api/accounts/:id/orgs",
-    async (request, reply): Promise<string[] | void> => {
+    async (request, reply): Promise<OwnerSummary[] | void> => {
       try {
-        return await accounts.listOrgs(request.params.id);
+        return await accounts.listOwners(request.params.id);
       } catch (error) {
         const status = error instanceof AccountError ? error.status : 500;
-        const message = error instanceof Error ? error.message : "Could not list organizations.";
+        const message = error instanceof Error ? error.message : "Could not list owners.";
         return reply.code(status).send({ code: "ACCOUNT_ERROR", message });
       }
     }
