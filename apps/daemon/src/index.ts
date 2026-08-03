@@ -1733,7 +1733,7 @@ export function createServer(
         return { name, workspace, path, isArchived: false };
       }
 
-      // Repo modes (clone/create) resolve the GitHub account from the WORKSPACE's
+      // Repo modes (clone/create) resolve the git account from the WORKSPACE's
       // gitAccountId. 400 if the workspace has no linked account (the no-token case
       // is enforced by the accounts methods, which throw AccountError(400)).
       const accountId = (await readWorkspacesMeta(resolved.workspacesMetaFile)).workspaces.find(
@@ -1742,30 +1742,35 @@ export function createServer(
       if (!accountId) {
         return reply.code(400).send({
           code: "NO_GIT_ACCOUNT",
-          message: "This workspace has no linked GitHub account."
+          message: "This workspace has no linked git account."
         });
       }
 
       try {
         if (body.source === "clone") {
-          const sshUrl = normalizeRepoUrl(body.url);
-          if (!sshUrl) {
-            return reply.code(400).send({ code: "INVALID_URL", message: "Unrecognized repository URL." });
+          if (typeof body.url !== "string" || body.url.trim().length === 0) {
+            return reply
+              .code(400)
+              .send({ code: "INVALID_URL", message: "A repository URL is required." });
           }
-          const name = body.name ?? repoNameFromSshUrl(sshUrl);
-          if (!isValidName(name)) {
+          // Provider-aware parse + clone (SSH preferred, HTTPS fallback) lives in
+          // the service, which also owns the already-exists check (it knows the
+          // final dir name once the URL is resolved).
+          const preferredName = body.name;
+          if (preferredName !== undefined && !isValidName(preferredName)) {
             return reply.code(400).send({ code: "INVALID_NAME", message: "Invalid name." });
           }
-          const path = join(workspaceDir, name);
-          if (existsSync(path)) {
-            return reply.code(409).send({ code: "ALREADY_EXISTS", message: `"${name}" already exists.` });
-          }
           await mkdir(workspaceDir, { recursive: true });
-          await accounts.cloneRepo(accountId, sshUrl, name, workspaceDir);
+          const { name } = await accounts.cloneFromInput(
+            accountId,
+            body.url,
+            preferredName,
+            workspaceDir
+          );
           // A stale archived name (dir removed outside orquester) would hide
           // the fresh clone — prune it, same as the empty branch above.
           await pruneArchivedProject(resolved.workspacesMetaFile, workspace, name);
-          return { name, workspace, path, isArchived: false };
+          return { name, workspace, path: join(workspaceDir, name), isArchived: false };
         }
 
         if (body.source === "create") {
@@ -3779,40 +3784,6 @@ function resolveAppdir(raw: string | undefined, cwd: string): string | undefined
     return undefined;
   }
   return resolve(cwd, raw);
-}
-
-/**
- * Normalize a GitHub repo reference to its SSH clone URL
- * (`git@github.com:owner/repo.git`). Accepts `https://github.com/owner/repo`
- * (optional `.git`), the SSH form itself, and the `owner/repo` shorthand.
- * Returns undefined if it can't be parsed (the route maps that to 400). The
- * clone uses SSH only — no token ever enters the URL.
- */
-function normalizeRepoUrl(url: string | undefined): string | undefined {
-  if (typeof url !== "string") {
-    return undefined;
-  }
-  const trimmed = url.trim();
-  const part = "[A-Za-z0-9._-]+";
-  const repoRe = new RegExp(`^(${part})/(${part}?)$`);
-  const httpsRe = new RegExp(`^https?://github\\.com/(${part})/(${part}?)(?:\\.git)?/?$`, "i");
-  const sshRe = new RegExp(`^git@github\\.com:(${part})/(${part}?)(?:\\.git)?$`, "i");
-  const match = trimmed.match(httpsRe) ?? trimmed.match(sshRe) ?? trimmed.match(repoRe);
-  if (!match) {
-    return undefined;
-  }
-  const owner = match[1];
-  const repo = match[2].replace(/\.git$/i, "");
-  if (!owner || !repo) {
-    return undefined;
-  }
-  return `git@github.com:${owner}/${repo}.git`;
-}
-
-/** Derive the repo name (the dir `git clone` would create) from an SSH clone URL. */
-function repoNameFromSshUrl(sshUrl: string): string {
-  const tail = sshUrl.split("/").pop() ?? "";
-  return tail.replace(/\.git$/i, "");
 }
 
 /** Root of the daemon-private terminal-upload store: <appdir>/daemon/uploads. */

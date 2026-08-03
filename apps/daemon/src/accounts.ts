@@ -10,6 +10,7 @@ import {
   type Account,
   type AccountsConfig,
   createDefaultAccountsConfig,
+  isValidName,
   parseAccountsConfig
 } from "@orquester/config";
 import { execFile } from "node:child_process";
@@ -613,6 +614,11 @@ export class AccountsService {
     const cloneUrl =
       urls.ssh && account.provider !== "bitbucket-server" ? urls.ssh : urls.ssh ?? urls.https;
     const name = destName ?? repoNameFrom(cloneUrl);
+    // The derived name lands in `join(cwd, name)`; a repo literally named "." or
+    // ".." would otherwise resolve outside the workspace dir.
+    if (!isValidName(name)) {
+      throw new AccountError(400, "The repository resolves to an invalid project name.");
+    }
     if (existsSync(join(cwd, name))) {
       throw new AccountError(409, "A project with this name already exists.");
     }
