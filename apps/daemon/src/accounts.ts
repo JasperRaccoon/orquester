@@ -13,7 +13,12 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 
+import { AccountError } from "./account-error";
 import { type CreateRepoOptions, createRepo, listOrgs, listRepos } from "./repos";
+
+// Re-exported so existing importers (`index.ts`, `repos.ts`) keep working after
+// the class moved to its own module (breaking a provider↔accounts import cycle).
+export { AccountError };
 
 const run = promisify(execFile);
 
@@ -34,17 +39,6 @@ function displayHost(account: Account): string {
     }
   }
   return "github.com";
-}
-
-/** Error carrying the HTTP status the route should reply with. */
-export class AccountError extends Error {
-  constructor(
-    public readonly status: number,
-    message: string
-  ) {
-    super(message);
-    this.name = "AccountError";
-  }
 }
 
 /**
