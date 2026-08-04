@@ -2,7 +2,7 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { AgentUsage } from "@orquester/api";
 import { type UsagePrefs, parseAppConfig } from "@orquester/config";
-import { claudePlanLabel, findLastCodexTokenCount, parseClaudeUsage, parseCodexUsage, parseCodexWhamUsage } from "./usage-parse";
+import { claudePlanLabel, currentWindow, findLastCodexTokenCount, parseClaudeUsage, parseCodexUsage, parseCodexWhamUsage } from "./usage-parse";
 
 const CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
@@ -47,9 +47,16 @@ export function createClaudeSource(opts: {
     // From here the user IS logged in — never return null (that renders as "not
     // logged in"). Report last-known greyed, or a signed-in "updating" placeholder.
     const creds = { subscriptionType: oauth.subscriptionType, rateLimitTier: oauth.rateLimitTier };
+    // Serving last-known numbers: drop any window whose reset has since passed —
+    // a frozen pre-reset reading (e.g. weekly 100%) must not outlive its window.
     const signedIn = (): AgentUsage =>
       lastGood
-        ? { ...lastGood, stale: true }
+        ? {
+            ...lastGood,
+            stale: true,
+            session: currentWindow(lastGood.session, opts.now()),
+            weekly: currentWindow(lastGood.weekly, opts.now())
+          }
         : { id: "claude", available: true, stale: true, plan: claudePlanLabel(creds), session: null, weekly: null };
 
     const now = opts.now();

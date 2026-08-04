@@ -568,6 +568,10 @@ export interface AgentUsage {
   asOf?: string;
   /** Per-account breakdown when the agent pools multiple accounts. */
   accounts?: UsageAccount[];
+  /** The System (daemon-home) login's own reading when managed accounts exist.
+   *  It participates in the worst-account aggregate, so the panel must be able
+   *  to show it — otherwise the head numbers can exceed every visible row. */
+  system?: UsageAccount;
   /** How the top-level session/weekly windows were aggregated. */
   aggregate?: {
     strategy: "equal-weight" | "capacity-weighted" | "source-provided" | "worst-account";

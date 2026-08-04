@@ -90,6 +90,7 @@ import { GitError, GitService } from "./git";
 import { UsageService } from "./usage";
 import { UsageTokensScanner } from "./usage-tokens";
 import { createClaudeSource, createCodexSource, readUsagePrefs } from "./usage-sources";
+import { currentWindow } from "./usage-parse";
 import { listArchiveEntries } from "./archive";
 import { ParquetRequestError, readParquetWindow } from "./parquet";
 import { resolveZipTool, spawnDirZip } from "./zip";
@@ -238,24 +239,29 @@ export interface RunningDaemon {
  *
  * `base` is the System account (null when the user runs managed accounts only).
  * Windows may be null on any source (not signed in / no data yet) and are simply
- * skipped. If nothing has any window, the head windows stay null.
+ * skipped, as is any window whose resetsAt has already passed (a stale source's
+ * frozen pre-reset reading must not outlive its window). Since the base drives
+ * the head numbers, it is also exposed as a `system` row so the panel can show
+ * every source the aggregate drew from. If nothing has any window, the head
+ * windows stay null.
  */
 export function aggregateWorstAccountUsage(
   agent: string,
   base: AgentUsage | null,
-  accounts: UsageAccount[]
+  accounts: UsageAccount[],
+  now: number
 ): AgentUsage {
   type Source = { stale: boolean; asOf?: string; session: UsageWindow | null; weekly: UsageWindow | null };
   const sources: Source[] = [];
   if (base) sources.push({ stale: base.stale, asOf: base.asOf, session: base.session, weekly: base.weekly });
   for (const a of accounts) sources.push({ stale: a.stale, asOf: a.asOf, session: a.session, weekly: a.weekly });
 
-  // Pick the window with the highest percent for a given field, carrying the
-  // freshness/timestamp of the source it came from (an honest "as of").
+  // Pick the still-current window with the highest percent for a given field,
+  // carrying the freshness/timestamp of the source it came from (an honest "as of").
   const worst = (pick: (s: Source) => UsageWindow | null): { window: UsageWindow | null; stale: boolean; asOf?: string } => {
     let best: { window: UsageWindow; stale: boolean; asOf?: string } | null = null;
     for (const s of sources) {
-      const w = pick(s);
+      const w = currentWindow(pick(s), now);
       if (!w) continue;
       if (best === null || w.percent > best.window.percent) {
         best = { window: w, stale: s.stale, asOf: s.asOf };
@@ -278,6 +284,18 @@ export function aggregateWorstAccountUsage(
     weekly: weekly.window,
     asOf: session.asOf ?? weekly.asOf ?? base?.asOf,
     accounts,
+    system: base
+      ? {
+          id: SYSTEM_ACCOUNT_ID,
+          label: "System",
+          available: base.available,
+          stale: base.stale,
+          plan: base.plan,
+          session: currentWindow(base.session, now),
+          weekly: currentWindow(base.weekly, now),
+          asOf: base.asOf
+        }
+      : undefined,
     aggregate: { strategy: "worst-account", accountCount: accounts.length, staleAccountCount }
   };
 }
@@ -424,7 +442,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
         asOf: u?.asOf
       });
     }
-    return aggregateWorstAccountUsage(agent, base, accounts);
+    return aggregateWorstAccountUsage(agent, base, accounts, Date.now());
   }
 
   const usage = new UsageService({

@@ -253,7 +253,15 @@ const AgentSection: React.FC<{ agent: AgentUsage }> = ({ agent }) => {
         <p className="text-[11px] text-amber-400">Updated {formatAgo(agent.asOf, Date.now())}</p>
       ) : null}
       {accounts.length > 0 ? (
-        accounts.map((a) => <AccountRow key={a.id} account={a} />)
+        <>
+          {accounts.map((a) => (
+            <AccountRow key={a.id} account={a} />
+          ))}
+          {/* The System (daemon-home) login pools into the worst-account head
+              numbers, so it must be visible — hidden, it can drive the chip
+              above every listed account. */}
+          {agent.system && <AccountRow key={agent.system.id} account={agent.system} />}
+        </>
       ) : (
         <>
           <Bar label="Current session (5 hours)" window={agent.session} muted={muted} />

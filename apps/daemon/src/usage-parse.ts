@@ -32,7 +32,16 @@ function codexPlanLabel(planType: unknown): string | undefined {
   return planType.charAt(0).toUpperCase() + planType.slice(1);
 }
 
-export function parseClaudeUsage(body: unknown, creds: ClaudeCreds, _now: number): AgentUsage {
+/** A window whose reset time has passed no longer describes current usage (the
+ *  quota re-filled); serving it would keep e.g. a pre-reset 100% alive. Windows
+ *  without a parseable resetsAt are assumed current. */
+export function currentWindow(w: UsageWindow | null, now: number): UsageWindow | null {
+  if (!w?.resetsAt) return w;
+  const t = Date.parse(w.resetsAt);
+  return Number.isFinite(t) && t <= now ? null : w;
+}
+
+export function parseClaudeUsage(body: unknown, creds: ClaudeCreds, now: number): AgentUsage {
   const b = (body ?? {}) as Record<string, any>;
   let session: UsageWindow | null = null;
   let weekly: UsageWindow | null = null;
@@ -52,6 +61,8 @@ export function parseClaudeUsage(body: unknown, creds: ClaudeCreds, _now: number
     }
   }
 
+  session = currentWindow(session, now);
+  weekly = currentWindow(weekly, now);
   return {
     id: "claude",
     available: session != null || weekly != null,
