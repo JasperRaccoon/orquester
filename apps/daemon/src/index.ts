@@ -131,6 +131,7 @@ import {
   MODEL_NAME_RE,
   ROUTER_PROVIDER_ID_RE,
   resolveRouterModel,
+  routerKeyCheckUrl,
   createDefaultClientConfig,
   createDefaultDaemonConfig,
   createDefaultRemotesConfig,
@@ -1004,16 +1005,17 @@ async function probeCliProxy(
 
 /** Verify a router provider's key: OpenRouter has a precise key-info endpoint,
  *  every other OpenAI-compatible gateway is probed with an authed GET /models.
- *  Only an explicit 401/403 counts as rejection; anything else (5xx, network,
- *  timeout) is inconclusive so a flaky network can't block storing a good key. */
+ *  The endpoint choice comes from `routerKeyCheckUrl`, which only uses
+ *  openrouter.ai when the provider's baseUrl really points there — `preset` is
+ *  provenance and survives a baseUrl edit, so trusting it alone would ship a
+ *  third-party gateway's key to openrouter.ai. Only an explicit 401/403 counts
+ *  as rejection; anything else (5xx, network, timeout) is inconclusive so a
+ *  flaky network can't block storing a good key. */
 async function verifyRouterKey(
   provider: RouterProvider,
   key: string
 ): Promise<"ok" | "rejected" | "unknown"> {
-  const url =
-    provider.preset === "openrouter"
-      ? "https://openrouter.ai/api/v1/key"
-      : `${provider.baseUrl.replace(/\/+$/, "")}/models`;
+  const url = routerKeyCheckUrl(provider);
   try {
     const res = await fetch(url, {
       headers: { Authorization: `Bearer ${key}` },

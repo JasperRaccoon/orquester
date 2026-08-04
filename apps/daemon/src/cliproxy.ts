@@ -14,7 +14,6 @@ import {
   type CliProxySecrets,
   type CliProxyState,
   MODEL_NAME_RE,
-  ROUTER_PRESETS,
   type RouterModel,
   type RouterProvider,
   cliproxyDir,
@@ -118,12 +117,6 @@ export interface CliProxyAdapters {
     provider: RouterProvider,
     key: string
   ): Promise<{ ok: true; models: string[] } | { ok: false; error: string }>;
-  /**
-   * LEGACY, unused by the manager — declared only so the still-wired
-   * `verifyOpenRouterKey` adapter in index.ts keeps type-checking until Task 7
-   * rewires it to {@link verifyRouterKey}. Delete with that wiring.
-   */
-  verifyOpenRouterKey?(key: string): Promise<"ok" | "rejected" | "unknown">;
   /**
    * Install the pinned proxy binary into `cliproxy/bin` (Task 7 wires the real
    * verified-download installer). Absent (pre-wiring) → `enable()` falls back to
@@ -545,7 +538,28 @@ export class CliProxyManager {
    * rather than blocking on the provider's uptime.
    */
   setRouterKey(id: string, key: string, force: boolean): Promise<RouterMutationResult> {
-    return this.transition(() => this.applyRouterKey(id, key, force));
+    return this.transition(async () => {
+      const provider = this.state.routerProviders.find((p) => p.id === id);
+      if (!provider) return { ok: false, error: "unknown provider" };
+      const needsRestart = this.st !== "off";
+      const live = this.adapters.liveDependentSessionCount();
+      if (needsRestart && !force && live > 0) return { ok: false, affectedSessions: live };
+      const verdict = await this.verifyKey(provider, key);
+      if (verdict === "rejected") return { ok: false, error: `${provider.label} rejected this key` };
+      let stored: CliProxySecrets;
+      try {
+        stored = await setRouterKeySecrets(this.daemonDir, id, key);
+      } catch (error) {
+        // A corrupt store refuses to be overwritten — surface it, mutate nothing.
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
+      this.secrets = stored;
+      provider.keyVerifiedAt = verdict === "ok" ? new Date(this.adapters.now()).toISOString() : null;
+      // Legacy at-rest mirror, kept one release for rollback safety.
+      if (id === "openrouter") this.state.openRouterKeyVerifiedAt = provider.keyVerifiedAt;
+      await this.afterRouterMutation(needsRestart);
+      return { ok: true, affectedSessions: force ? live : 0 };
+    });
   }
 
   /** Drop a router provider's key, keeping the provider record itself. */
@@ -589,56 +603,6 @@ export class CliProxyManager {
     }
     const res = await this.adapters.fetchRouterModels(provider, key);
     return res.ok ? res : { ok: false, code: "upstream", error: res.error };
-  }
-
-  /**
-   * LEGACY (spec §1): the pre-router OpenRouter-key entry point, kept only while
-   * `POST /api/cliproxy/openrouter/key` still exists (deleted with that route).
-   * It materializes the `openrouter` provider record from the shipped preset when
-   * absent and then runs the ordinary {@link setRouterKey} path, so the whole
-   * data-driven pipeline (projection, probe union, coupling) sees a normal
-   * provider. A refusal leaves no half-created provider row behind.
-   */
-  setOpenRouterKey(key: string, force: boolean): Promise<RouterMutationResult> {
-    return this.transition(async () => {
-      const needsRestart = this.st !== "off";
-      const live = this.adapters.liveDependentSessionCount();
-      if (needsRestart && !force && live > 0) {
-        return { ok: false, affectedSessions: live };
-      }
-      const before = this.state.routerProviders;
-      if (!before.some((p) => p.id === "openrouter")) {
-        this.state.routerProviders = [...before, this.openRouterProviderRecord()];
-      }
-      const res = await this.applyRouterKey("openrouter", key, force);
-      if (!res.ok) this.state.routerProviders = before;
-      return res;
-    });
-  }
-
-  /** {@link setRouterKey}'s body, callable from another transition (the legacy
-   *  OpenRouter path) — nesting `transition()` would deadlock the queue. */
-  private async applyRouterKey(id: string, key: string, force: boolean): Promise<RouterMutationResult> {
-    const provider = this.state.routerProviders.find((p) => p.id === id);
-    if (!provider) return { ok: false, error: "unknown provider" };
-    const needsRestart = this.st !== "off";
-    const live = this.adapters.liveDependentSessionCount();
-    if (needsRestart && !force && live > 0) return { ok: false, affectedSessions: live };
-    const verdict = await this.verifyKey(provider, key);
-    if (verdict === "rejected") return { ok: false, error: `${provider.label} rejected this key` };
-    let stored: CliProxySecrets;
-    try {
-      stored = await setRouterKeySecrets(this.daemonDir, id, key);
-    } catch (error) {
-      // A corrupt store refuses to be overwritten — surface it, mutate nothing.
-      return { ok: false, error: error instanceof Error ? error.message : String(error) };
-    }
-    this.secrets = stored;
-    provider.keyVerifiedAt = verdict === "ok" ? new Date(this.adapters.now()).toISOString() : null;
-    // Legacy at-rest mirror, kept one release for rollback safety.
-    if (id === "openrouter") this.state.openRouterKeyVerifiedAt = provider.keyVerifiedAt;
-    await this.afterRouterMutation(needsRestart);
-    return { ok: true, affectedSessions: force ? live : 0 };
   }
 
   /** Whether a key is currently stored for `id` (unknown while secrets are unloaded). */
@@ -1410,38 +1374,15 @@ export class CliProxyManager {
   }
 
   /**
-   * Verify a provider key through the injected adapter. Prefers the generic
-   * `verifyRouterKey`; while index.ts still injects only the legacy
-   * `verifyOpenRouterKey` (rewired in Task 7) that one covers the `openrouter`
-   * provider so the shipped verification doesn't silently lapse mid-migration.
-   * "unknown" when no adapter applies — store, but leave unverified.
+   * Verify a provider key through the injected adapter. "unknown" when no
+   * adapter is wired — store the key, but leave it unverified.
    */
   private async verifyKey(
     provider: RouterProvider,
     key: string
   ): Promise<"ok" | "rejected" | "unknown"> {
     if (this.adapters.verifyRouterKey) return this.adapters.verifyRouterKey(provider, key);
-    if (provider.id === "openrouter" && this.adapters.verifyOpenRouterKey) {
-      return this.adapters.verifyOpenRouterKey(key);
-    }
     return "unknown";
-  }
-
-  /** The `openrouter` provider record used for a legacy key verification —
-   *  the persisted one when it exists, else the shipped preset's shape. */
-  private openRouterProviderRecord(): RouterProvider {
-    const existing = this.state.routerProviders.find((p) => p.id === "openrouter");
-    if (existing) return existing;
-    const preset = ROUTER_PRESETS.find((p) => p.preset === "openrouter");
-    return {
-      id: "openrouter",
-      label: preset?.label ?? "OpenRouter",
-      baseUrl: preset?.baseUrl ?? "https://openrouter.ai/api/v1",
-      preset: "openrouter",
-      models: preset ? [...preset.models] : [],
-      keyVerifiedAt: null,
-      createdAt: new Date(this.adapters.now()).toISOString()
-    };
   }
 
   /**

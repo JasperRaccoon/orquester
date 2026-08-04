@@ -815,6 +815,14 @@ export function validateRouterProviders(providers: RouterProvider[]): string | n
     ids.add(p.id);
     for (const m of p.models) {
       for (const key of m.alias ? [m.name, m.alias] : [m.name]) {
+        // A router model may not shadow a curated (OAuth-account) model id:
+        // resolveRouterModel is the single routing source of truth, so a router
+        // model called `gpt-5.6-sol` would silently steal that pick — dropping
+        // the acc<hex>/ account prefix, skipping the seeded-account launch gate,
+        // and emitting a second config.yaml provider for the same model id.
+        if (CURATED_PROXY_MODEL_IDS.includes(key)) {
+          return `model "${key}" is a built-in model id and cannot be served by a router`;
+        }
         if (modelKeys.has(key)) return `model "${key}" is served by more than one provider`;
         modelKeys.add(key);
       }
@@ -844,6 +852,38 @@ export function resolveRouterModel(
 /** The id a router model is shown/keyed under (picker chips, overrides). */
 export function routerModelDisplayId(m: RouterModel): string {
   return m.alias ?? m.name;
+}
+
+/** OpenRouter's dedicated key-info endpoint (precise 401 on a bad key). */
+const OPENROUTER_KEY_INFO_URL = "https://openrouter.ai/api/v1/key";
+
+/** True when a base URL actually points at openrouter.ai. */
+export function isOpenRouterBaseUrl(baseUrl: string): boolean {
+  try {
+    const host = new URL(baseUrl).hostname.toLowerCase();
+    return host === "openrouter.ai" || host.endsWith(".openrouter.ai");
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The endpoint a provider's key is verified against: OpenRouter's precise
+ * `GET /key` only when the provider is the openrouter preset **and** its baseUrl
+ * still points at openrouter.ai; everything else gets an authed
+ * `GET {baseUrl}/models`.
+ *
+ * `preset` is provenance-only and survives a baseUrl edit (the Add-router form
+ * lets a preset chip be edited into any gateway), so keying the openrouter.ai
+ * endpoint off `preset` alone would transmit a third party's API key to
+ * openrouter.ai and stamp `keyVerifiedAt` from a service that never saw the real
+ * gateway. The host check is what makes the endpoint choice honest.
+ */
+export function routerKeyCheckUrl(provider: RouterProvider): string {
+  if (provider.preset === "openrouter" && isOpenRouterBaseUrl(provider.baseUrl)) {
+    return OPENROUTER_KEY_INFO_URL;
+  }
+  return `${provider.baseUrl.replace(/\/+$/, "")}/models`;
 }
 
 export interface CuratedProxyModel {
@@ -932,11 +972,16 @@ export function compactEnvForModel(
   if (routed) {
     const override = overrides?.[routerModelDisplayId(routed.model)] ?? overrides?.[routed.model.name];
     const contextWindow = override?.contextWindow ?? routed.model.contextWindow;
-    if (contextWindow === undefined) return null;
+    const compactWindow = override?.compactWindow ?? routed.model.compactWindow;
+    // "window" and "compact at" are independent optional fields in the Routers
+    // model editor. A compact window alone is still actionable — the claude
+    // branch above emits exactly that — so don't silently discard it just
+    // because the user left the context window blank.
+    if (contextWindow === undefined && compactWindow === undefined) return null;
     const env: CompactEnv = {
-      maxContextTokens: contextWindow,
-      autoCompactWindow: override?.compactWindow ?? routed.model.compactWindow ?? contextWindow
+      autoCompactWindow: compactWindow ?? (contextWindow as number)
     };
+    if (contextWindow !== undefined) env.maxContextTokens = contextWindow;
     const pct = override?.compactPct ?? routed.model.compactPct;
     if (pct !== undefined) env.autoCompactPct = pct;
     return env;
@@ -1054,29 +1099,36 @@ export function migrateLegacyOpenRouter(
     nextSecrets.routerKeys["openrouter"] &&
     !state.routerProviders.some((p) => p.id === "openrouter")
   ) {
-    nextState = {
-      ...state,
-      routerProviders: [
-        ...state.routerProviders,
-        {
-          id: "openrouter",
-          label: "OpenRouter",
-          baseUrl: "https://openrouter.ai/api/v1",
-          preset: "openrouter",
-          models: [
-            {
-              name: "moonshotai/kimi-k3",
-              alias: "kimi-k3",
-              contextWindow: 1_048_576,
-              compactWindow: 450_000
-            }
-          ],
-          keyVerifiedAt: state.openRouterKeyVerifiedAt,
-          createdAt: nowIso
-        }
-      ]
-    };
-    changed = true;
+    const seeded: RouterProvider[] = [
+      ...state.routerProviders,
+      {
+        id: "openrouter",
+        label: "OpenRouter",
+        baseUrl: "https://openrouter.ai/api/v1",
+        preset: "openrouter",
+        models: [
+          {
+            name: "moonshotai/kimi-k3",
+            alias: "kimi-k3",
+            contextWindow: 1_048_576,
+            compactWindow: 450_000
+          }
+        ],
+        keyVerifiedAt: state.openRouterKeyVerifiedAt,
+        createdAt: nowIso
+      }
+    ];
+    // Router CRUD works while the proxy is off, but this migration only runs on
+    // init()/enable() — so a user who upgraded with the proxy disabled can have
+    // already created a provider serving `kimi-k3`. Appending the seeded record
+    // blindly would then persist the exact cross-provider collision
+    // validateRouterProviders exists to prevent (and renderConfigYaml would emit
+    // both). On conflict, skip the seed: the migrated key stays in routerKeys, so
+    // nothing is lost and the user's own provider keeps serving the model.
+    if (validateRouterProviders(seeded) === null) {
+      nextState = { ...state, routerProviders: seeded };
+      changed = true;
+    }
   }
   return { state: nextState, secrets: nextSecrets, changed };
 }

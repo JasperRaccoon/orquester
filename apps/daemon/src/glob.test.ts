@@ -213,15 +213,35 @@ test("consecutive ** segments collapse and still match", () => {
 
 // --- linearity guard --------------------------------------------------------
 
-test("pathological many-star pattern stays linear (<100ms)", () => {
+test("pathological many-star pattern stays linear", () => {
   // A pattern that would blow up exponentially under a naive recursive matcher.
-  const field = `/${"*a".repeat(50)}x`;
-  const list = parseGlobList(field, "include");
+  // The guard is RELATIVE, not a wall-clock budget: the whole daemon suite runs its
+  // files in parallel, and an absolute millisecond budget with ~10% headroom flakes
+  // under that CPU contention. Timing a single-star pattern over the same path gives
+  // the machine's *current* linear cost, and contention scales both measurements
+  // together. Exponential backtracking overshoots by many orders of magnitude, so a
+  // generous factor still fails loudly on a real regression.
+  const list = parseGlobList(`/${"*a".repeat(50)}x`, "include");
+  const linear = parseGlobList("/*x", "include");
   const path = `${"a".repeat(4000)}b`; // long single segment, no trailing x → no match
-  const start = performance.now();
-  for (let i = 0; i < 200; i++) {
-    assert.equal(matchesGlobList(list, path), false);
-  }
-  const elapsed = performance.now() - start;
-  assert.ok(elapsed < 100, `expected <100ms, took ${elapsed.toFixed(1)}ms`);
+  const time = (compiled: ReturnType<typeof parseGlobList>): number => {
+    const start = performance.now();
+    for (let i = 0; i < 200; i++) {
+      assert.equal(matchesGlobList(compiled, path), false);
+    }
+    return performance.now() - start;
+  };
+  // Warm the JIT, then take the best of three runs on each — the minimum is the
+  // measurement least polluted by a scheduler preemption.
+  const best = (compiled: ReturnType<typeof parseGlobList>): number => {
+    time(compiled);
+    return Math.min(time(compiled), time(compiled), time(compiled));
+  };
+  const baseline = Math.max(best(linear), 1);
+  const elapsed = best(list);
+  // Observed ratio is ~1.5x (50 star states vs 1, both linear in path length).
+  assert.ok(
+    elapsed < baseline * 25,
+    `expected <${(baseline * 25).toFixed(1)}ms (25x the ${baseline.toFixed(1)}ms linear baseline), took ${elapsed.toFixed(1)}ms`
+  );
 });

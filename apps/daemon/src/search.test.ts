@@ -601,32 +601,42 @@ test("both engines: a capped mixed-case dir selects the IDENTICAL byte-order pre
 
 test("rg: an abort during the size-stat phase rejects and never resolves", { skip: !rgAvailable }, async () => {
   // The size-stat loop runs AFTER runRipgrep resolves; finding #3 was that it had no
-  // signal checks, so a request cancelled there still resolved a success payload. rg
-  // itself resolves in a small fraction of the runtime and the per-file stat loop
-  // dominates (~90%), so aborting at ~40% of the measured runtime reliably lands the
-  // signal after rg resolved but well before the stat loop finishes — the exact window.
+  // signal checks, so a request cancelled there still resolved a success payload.
+  // Landing the abort inside that window used to be timed off a calibration run
+  // (abort at 40% of the measured duration), which flaked under the parallel suite's
+  // CPU contention — the abort could arrive after the loop had already finished and
+  // the search resolved. The `onStatFile` seam fires INSIDE the loop, so the abort is
+  // deterministic: it is raised while the stat phase is provably still running.
   const dir = await mkdtemp(join(tmpdir(), "orq-rgstat-"));
   try {
-    for (let i = 0; i < 1000; i += 1) {
+    for (let i = 0; i < 20; i += 1) {
       const abs = join(dir, `d${String(i).padStart(4, "0")}`, "f.txt");
       await mkdir(join(abs, ".."), { recursive: true });
       await writeFile(abs, "cat here\n");
     }
-    const q = { query: "cat", engine: "rg" as const, maxResults: 1000 };
-    await searchProjectFiles(dir, dir, q); // warm the FS cache so timing is stable
-    const t0 = Date.now();
-    await searchProjectFiles(dir, dir, q);
-    const dur = Date.now() - t0;
-
     const controller = new AbortController();
-    const promise = searchProjectFiles(dir, dir, { ...q, signal: controller.signal });
-    setTimeout(() => controller.abort(), Math.max(10, Math.round(dur * 0.4)));
-    await assert.rejects(promise, (err: unknown) => {
-      assert.ok(err instanceof FsSearchError);
-      assert.equal(err.status, 499);
-      assert.equal(err.code, "REQUEST_ABORTED");
-      return true;
-    });
+    let statted = 0;
+    await assert.rejects(
+      searchProjectFiles(dir, dir, {
+        query: "cat",
+        engine: "rg",
+        maxResults: 1000,
+        signal: controller.signal,
+        onStatFile: () => {
+          statted += 1;
+          if (statted === 1) controller.abort();
+        }
+      }),
+      (err: unknown) => {
+        assert.ok(err instanceof FsSearchError);
+        assert.equal(err.status, 499);
+        assert.equal(err.code, "REQUEST_ABORTED");
+        return true;
+      }
+    );
+    // Proves the rejection came from the in-loop check, not from a pre-rg or
+    // post-loop one: the loop entered, and it stopped on the aborting iteration.
+    assert.equal(statted, 1, "the stat loop aborted on its first file, not after finishing");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

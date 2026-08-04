@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  CURATED_PROXY_MODEL_IDS,
   ROUTER_PRESETS,
   type RouterProvider,
   compactEnvForModel,
@@ -9,6 +10,7 @@ import {
   parseCliProxySecrets,
   parseCliProxyState,
   resolveRouterModel,
+  routerKeyCheckUrl,
   routerProviderSchema,
   validateRouterProviders
 } from "@orquester/config";
@@ -101,4 +103,91 @@ test("migrateLegacyOpenRouter seeds the openrouter provider and mirrors the key"
 test("ROUTER_PRESETS ship openrouter and tokenrouter with prefilled models", () => {
   const ids = ROUTER_PRESETS.map((p) => p.preset);
   assert.deepEqual([...ids].sort(), ["openrouter", "tokenrouter"]);
+});
+
+test("validateRouterProviders refuses a router model that shadows a curated model id", () => {
+  // resolveRouterModel is the single routing source of truth: a router model named
+  // `gpt-5.6-sol` would steal that curated pick (no acc<hex>/ prefix, seeded-account
+  // gate skipped, two config.yaml providers for one id).
+  const curated = CURATED_PROXY_MODEL_IDS[0] as string;
+  assert.match(
+    validateRouterProviders([{ ...tokenrouter, models: [{ name: curated }] }]) ?? "",
+    /built-in model id/
+  );
+  assert.match(
+    validateRouterProviders([
+      { ...tokenrouter, models: [{ name: "vendor/whatever", alias: curated }] }
+    ]) ?? "",
+    /built-in model id/
+  );
+});
+
+test("compactEnvForModel emits a router model's compact window even without a context window", () => {
+  // The Routers model editor exposes "window" and "compact at" independently; a
+  // compact-only entry must still arm auto-compaction rather than silently vanish.
+  const compactOnly: RouterProvider = {
+    ...tokenrouter,
+    models: [{ name: "vendor/only-compact", compactWindow: 200_000 }]
+  };
+  assert.deepEqual(compactEnvForModel("vendor/only-compact", undefined, [compactOnly]), {
+    autoCompactWindow: 200_000
+  });
+  // An override-supplied compact window works the same way.
+  const bare: RouterProvider = { ...tokenrouter, models: [{ name: "vendor/bare" }] };
+  assert.deepEqual(
+    compactEnvForModel("vendor/bare", { "vendor/bare": { compactWindow: 50_000 } }, [bare]),
+    { autoCompactWindow: 50_000 }
+  );
+  // Neither field set → still unknown (reactive-only), as before.
+  assert.equal(compactEnvForModel("vendor/bare", undefined, [bare]), null);
+});
+
+test("migrateLegacyOpenRouter skips the seeded record when it would collide with a user provider", () => {
+  // Router CRUD works while the proxy is OFF but the migration only runs on
+  // init()/enable(), so a user can already serve `kimi-k3` themselves. Appending
+  // the seeded openrouter record blindly would persist a duplicate model across
+  // two providers — the exact invariant validateRouterProviders guards.
+  const mine: RouterProvider = {
+    id: "mygateway",
+    label: "My Gateway",
+    baseUrl: "https://gw.example/v1",
+    preset: null,
+    models: [{ name: "moonshotai/kimi-k3", alias: "kimi-k3" }],
+    keyVerifiedAt: null,
+    createdAt: NOW
+  };
+  const state = { ...createDefaultCliProxyState(), routerProviders: [mine] };
+  const secrets = { apiKey: "a", managementSecret: "m", openRouterKey: "sk-or-x", routerKeys: {} };
+  const out = migrateLegacyOpenRouter(state, secrets, NOW);
+  assert.equal(out.secrets.routerKeys["openrouter"], "sk-or-x", "the key still migrates");
+  assert.deepEqual(
+    out.state.routerProviders.map((p) => p.id),
+    ["mygateway"],
+    "no colliding openrouter record appended"
+  );
+  assert.equal(validateRouterProviders(out.state.routerProviders), null);
+  // Still idempotent: a second pass changes nothing.
+  assert.equal(migrateLegacyOpenRouter(out.state, out.secrets, NOW).changed, false);
+});
+
+test("routerKeyCheckUrl only uses openrouter.ai when the baseUrl really points there", () => {
+  // A preset chip prefills `preset:"openrouter"`, but the form lets the baseUrl be
+  // edited to any gateway and the preset sticks. Trusting `preset` alone would send
+  // a third party's key to openrouter.ai and stamp keyVerifiedAt from a service that
+  // never saw the real gateway.
+  assert.equal(routerKeyCheckUrl(openrouter), "https://openrouter.ai/api/v1/key");
+  assert.equal(
+    routerKeyCheckUrl({ ...openrouter, baseUrl: "https://evil.example/v1" }),
+    "https://evil.example/v1/models"
+  );
+  assert.equal(
+    routerKeyCheckUrl({ ...openrouter, baseUrl: "https://openrouter.ai.evil.example/v1" }),
+    "https://openrouter.ai.evil.example/v1/models"
+  );
+  // Non-preset providers always use their own authed /models (trailing slashes trimmed).
+  assert.equal(routerKeyCheckUrl(tokenrouter), "https://api.tokenrouter.com/v1/models");
+  assert.equal(
+    routerKeyCheckUrl({ ...tokenrouter, baseUrl: "https://api.tokenrouter.com/v1//" }),
+    "https://api.tokenrouter.com/v1/models"
+  );
 });
