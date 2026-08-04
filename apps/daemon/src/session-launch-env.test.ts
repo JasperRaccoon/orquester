@@ -14,7 +14,7 @@ const OTHER = "11112222-3456-7890-abcd-ef1234567890";
 const NOW = "2026-08-04T00:00:00.000Z";
 
 /** A TokenRouter-style provider: no alias, and a model name the retired
- *  `isOpenRouterModel` regex happened to match (moonshotai/…). */
+ *  kimi/moonshotai routing regex happened to match (moonshotai/…). */
 const TOKENROUTER: RouterProvider = {
   id: "tokenrouter",
   label: "TokenRouter",
@@ -205,8 +205,18 @@ test("cliproxyContributor: gpt launch emits window + compact window + pct", () =
   assert.equal(res.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, "75");
 });
 
-test("cliproxyContributor: kimi launch emits 1M window, 450k compact window, no pct", () => {
+test("cliproxyContributor: a router model's own metadata drives the window, with no pct", () => {
+  // Compact metadata for a router model comes from the provider record only —
+  // there is no curated/hardcoded kimi entry behind it any more.
   const res = cliproxyContributor("claudex", { model: "kimi-k3" }, DIR);
+  assert.ok(res);
+  assert.equal(res.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, undefined, "unconfigured id: no window");
+  assert.equal(res.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, undefined);
+});
+
+test("cliproxyContributor: a configured router model emits its 1M window, 450k compact, no pct", async () => {
+  const dir = await daemonDirWithSeeded([], [OPENROUTER]);
+  const res = cliproxyContributor("claudex", { model: "kimi-k3" }, dir);
   assert.ok(res);
   assert.equal(res.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, "1048576");
   assert.equal(res.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, "450000");
@@ -265,11 +275,12 @@ test("cliproxyContributor: state modelOverrides beat curated defaults at launch"
   const dir = await daemonDirWithSeeded([]);
   const stateFile = cliproxyStateFile(dir);
   const state = JSON.parse(await readFile(stateFile, "utf8"));
-  state.modelOverrides = { "kimi-k3": { compactWindow: 500000 } };
+  state.modelOverrides = { "gpt-5.6-sol": { compactWindow: 500000 } };
   await writeFile(stateFile, JSON.stringify(state));
-  const res = cliproxyContributor("claudex", { model: "kimi-k3" }, dir);
+  const res = cliproxyContributor("claudex", { model: "gpt-5.6-sol" }, dir);
   assert.ok(res);
   assert.equal(res.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, "500000");
+  assert.equal(res.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, "200000", "unoverridden fields stay curated");
 });
 
 test("composeExtraEnv carries accountId from b when a is null", () => {

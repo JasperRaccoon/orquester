@@ -131,12 +131,3 @@ export async function clearRouterKey(
   await writeSecrets(daemonDir, next);
   return next;
 }
-
-/**
- * LEGACY wrapper — callers migrate to `setRouterKey`; deleted in cleanup (Task 12).
- * Preserves the old behavior exactly: the OpenRouter key lands in `routerKeys`
- * and in the legacy mirror field.
- */
-export async function setOpenRouterKey(daemonDir: string, key: string): Promise<CliProxySecrets> {
-  return setRouterKey(daemonDir, "openrouter", key);
-}

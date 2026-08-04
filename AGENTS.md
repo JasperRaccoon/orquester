@@ -156,8 +156,10 @@ in production (`--appdir`). The daemon persists **JSON, not a database**:
             tmux.sock (dedicated tmux server)         sessions.json (reattach index)
             workspaces.json (side-table: gitAccountId, createdAt, isArchived, archivedProjects)
             accounts.json  keys/ (0700 per-account SSH keys)  logs/
-            env/ (optional per-launcher env files, e.g. opencode.env)
+            env/ (per-launcher env files: opencode.env, and the generated claudex.env/claudemix.env)
             hooks/ (managed agent hook script)
+            cliproxy/ state.json (model proxy config + routerProviders)  secrets.json (0600)
+                      config.yaml (generated)  token  auth/  logs/  claude-home-<entryId>/
   workspaces/   <workspace>/<project> dirs (the file-browser sandbox root, fsRoot)
 ```
 
@@ -319,6 +321,40 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
   (`StrictHostKeyChecking=accept-new`). A once-per-process best-effort refresh from
   `https://bitbucket.org/site/ssh` only ever *adds* lines for those two hosts. DC hosts are TOFU'd
   into the same file.
+- **Model proxy (cliproxy) & router providers.** The "Model proxy" is a daemon-supervised
+  CLIProxyAPI process (`apps/daemon/src/cliproxy*.ts`) that lets the `claudex`/`claudemix`
+  launchers drive GPT (Codex OAuth), Claude OAuth and **router** models through the Claude Code
+  harness. Its state lives in `<appdir>/daemon/cliproxy/`: `state.json` (enabled, port, model
+  picks, `modelOverrides`, seeded accounts, **`routerProviders[]`**) and `secrets.json` (0600 —
+  proxy api key, management secret, **`routerKeys` = providerId → API key**). Keys never cross the
+  wire; `CliProxyStatus.routerProviders[].keyState` is `"none" | "set" | "verified"` only.
+  - **Router providers are data, not code.** A provider is
+    `{id (slug /^[a-z0-9][a-z0-9-]{0,31}$/, reserved: codex/claude), label, baseUrl (http(s)),
+    preset: "openrouter"|"tokenrouter"|null, models: [{name, alias?, contextWindow?, compactWindow?,
+    compactPct?}], keyVerifiedAt, createdAt}` (zod in `packages/config`). `ROUTER_PRESETS` only
+    *prefills* the create form — behavior always comes from the stored fields. Routing is
+    `resolveRouterModel(providers, model)` (matches name **or** alias, tolerating an `acc<hex>/`
+    prefix), the single source of truth for: bare-vs-account-prefixed launch model, the
+    seeded-account launch gate, `compactEnvForModel`, the probe catalog union, and the UI's
+    "keyless — account ignored" dimming. Never reintroduce a model-name regex.
+  - **`config.yaml` projection.** `renderConfigYaml` emits one `openai-compatibility` entry per
+    provider that has **both** a stored key and ≥1 model (keyless/model-less are skipped). Every
+    emitted string goes through `JSON.stringify` (a label/baseUrl is user text — YAML-injection
+    guard), and free-text labels reaching `claudex.env` go through `envSafeLabel`. **`models` is a
+    provider-level key** (sibling of `api-key-entries`); nested under an api-key entry it parses
+    but registers zero models and every request 502s `unknown provider for model <alias>`.
+  - **Mutations are HTTP-only and restart-gated.** `PUT/DELETE /api/cliproxy/providers/:id`,
+    `POST/DELETE /api/cliproxy/providers/:id/key` are 403 over the unix socket (`refusedOnSocket`)
+    and answer 409 `{ok:false, affectedSessions}` while dependent sessions are live unless
+    `force`. `GET /api/cliproxy/providers/:id/catalog` is read-only (404 unknown / 409 no key /
+    502 upstream). Key verification: openrouter-preset uses its `GET /key`, everything else an
+    authed `GET {baseUrl}/models` — only 401/403 rejects; network/timeout stores *unverified*.
+  - **Legacy mirror rule.** A pre-router `secrets.openRouterKey` migrates once at load
+    (`migrateLegacyOpenRouter`) into an `openrouter` provider + `routerKeys.openrouter`, copying
+    `state.openRouterKeyVerifiedAt` into `keyVerifiedAt`. Both legacy fields stay **written at
+    rest** one release for rollback safety (precedent 914ec27) — new code writes the mirror and
+    never reads it. The `claudex.env` Fable slot and the managed kimi agent are gated on
+    `routerKimiAvailable()` (some keyed provider serving name/alias `kimi-k3`), not on OpenRouter.
 - **Security boundary asymmetry.** `PUT /api/config/daemon` is **Unix-socket-only** (403 over
   remote HTTP) — **except the single-field `PUT /api/config/daemon/protect-archived`, which is
   allowed on both transports** (normal bearer auth) because it toggles a client-side UI curtain
@@ -537,4 +573,5 @@ password secrecy + patching remain the real mitigations. It costs two loosened u
 | Electron embedding | `apps/desktop/src/main.ts` |
 | Browser tabs (Design Mode) | `apps/daemon/src/browsers.ts`, `apps/daemon/src/browser-pick.ts`, `packages/ui/src/components/browser/` |
 | Git hosting accounts (GitHub/Bitbucket) | `apps/daemon/src/accounts.ts`, `apps/daemon/src/providers/`, `packages/ui/src/components/settings/SettingsModal.tsx` |
+| Model proxy + router providers | `apps/daemon/src/cliproxy.ts`, `apps/daemon/src/cliproxy-files.ts`, `apps/daemon/src/cliproxy-secrets.ts`, router schemas in `packages/config/src/index.ts`, `packages/ui/src/components/settings/ModelProxySettings.tsx` |
 | Deployment | `deploy/` + `docs/superpowers/specs|plans/2026-06-19-remote-*.md` |

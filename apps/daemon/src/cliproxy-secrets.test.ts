@@ -4,12 +4,7 @@ import { tmpdir } from "node:os";
 import { mkdtemp, mkdir, writeFile, readFile, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { cliproxySecretsFile } from "@orquester/config";
-import {
-  clearRouterKey,
-  loadOrInitSecrets,
-  setOpenRouterKey,
-  setRouterKey
-} from "./cliproxy-secrets.ts";
+import { clearRouterKey, loadOrInitSecrets, setRouterKey } from "./cliproxy-secrets.ts";
 
 async function makeDir() {
   return mkdtemp(join(tmpdir(), "orq-cliproxy-secrets-"));
@@ -50,13 +45,13 @@ test("secrets: corrupt file → {state:'corrupt'}, file untouched (mtime + conte
   assert.equal(after.mtimeMs, before.mtimeMs);
 });
 
-test("secrets: setOpenRouterKey rewrites the key, preserving the rest, at 0600", async () => {
+test("secrets: a router-key write preserves the rest of the file, at 0600", async () => {
   const dir = await makeDir();
   const created = await loadOrInitSecrets(dir);
   if (created.state === "corrupt") throw new Error("unexpected corrupt");
 
-  const updated = await setOpenRouterKey(dir, "sk-or-test");
-  assert.equal(updated.openRouterKey, "sk-or-test");
+  const updated = await setRouterKey(dir, "openrouter", "sk-or-test");
+  assert.equal(updated.routerKeys["openrouter"], "sk-or-test");
   assert.equal(updated.apiKey, created.secrets.apiKey);
   assert.equal(updated.managementSecret, created.secrets.managementSecret);
 
@@ -65,7 +60,7 @@ test("secrets: setOpenRouterKey rewrites the key, preserving the rest, at 0600",
 
   const reloaded = await loadOrInitSecrets(dir);
   assert.equal(reloaded.state, "loaded");
-  assert.equal(reloaded.secrets.openRouterKey, "sk-or-test");
+  assert.equal(reloaded.secrets.routerKeys["openrouter"], "sk-or-test");
 });
 
 test("setRouterKey stores under routerKeys and mirrors openrouter into the legacy field", async () => {

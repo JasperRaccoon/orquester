@@ -43,13 +43,6 @@ test("compactEnvForModel: curated gpt model resolves window + pct", () => {
   });
 });
 
-test("compactEnvForModel: kimi resolves 1M window with 450k compact window, no pct", () => {
-  assert.deepEqual(compactEnvForModel("kimi-k3"), {
-    maxContextTokens: 1048576,
-    autoCompactWindow: 450000
-  });
-});
-
 test("compactEnvForModel: acc-prefixed model resolves like its bare id", () => {
   assert.deepEqual(compactEnvForModel("acc65eebd90/gpt-5.6-terra"), {
     maxContextTokens: 200000,
@@ -84,11 +77,14 @@ test("compactEnvForModel: overrides beat curated defaults, per field", () => {
   );
 });
 
-test("compactEnvForModel: the OpenRouter full name resolves like its curated alias", () => {
-  assert.deepEqual(compactEnvForModel("moonshotai/kimi-k3"), {
-    maxContextTokens: 1048576,
-    autoCompactWindow: 450000
-  });
+test("compactEnvForModel: a router-shaped id with no configured provider resolves to nothing", () => {
+  // Regression for the retired name-shape magic: `moonshotai/…` (and the bare
+  // `kimi-k3` alias) used to resolve off a hardcoded curated entry + a
+  // `moonshotai/` strip. Compact metadata now comes ONLY from the provider
+  // record (see router-providers.test.ts), so an unconfigured id emits nothing.
+  assert.equal(compactEnvForModel("moonshotai/kimi-k3"), null);
+  assert.equal(compactEnvForModel("kimi-k3"), null);
+  assert.equal(compactEnvForModel("moonshotai/kimi-k3", undefined, []), null);
 });
 
 test("compactEnvForModel: uncurated non-claude id with no override emits nothing", () => {
@@ -111,8 +107,8 @@ test("cliProxyState: modelOverrides roundtrip and absent-field default", () => {
   assert.deepEqual(parsed.modelOverrides, { "kimi-k3": { compactWindow: 500000 } });
 });
 
-test("CURATED_PROXY_MODEL_IDS keeps the picker order sol, terra, luna, kimi", () => {
-  assert.deepEqual(CURATED_PROXY_MODEL_IDS, ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "kimi-k3"]);
+test("CURATED_PROXY_MODEL_IDS is the OAuth picker order sol, terra, luna (no router models)", () => {
+  assert.deepEqual(CURATED_PROXY_MODEL_IDS, ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]);
 });
 
 // --- Router-provider HTTP routes (spec 2026-08-04 §2) -------------------------

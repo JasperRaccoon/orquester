@@ -824,8 +824,8 @@ export function validateRouterProviders(providers: RouterProvider[]): string | n
 }
 
 /** Resolve a launch model (bare or acc<hex>/-prefixed, by full name or alias) to
- *  the router provider serving it. Null = not a router model. Replaces the old
- *  isOpenRouterModel regex as the single routing source of truth. */
+ *  the router provider serving it. Null = not a router model. The single routing
+ *  source of truth — it replaced a hardcoded kimi/moonshotai name regex. */
 export function resolveRouterModel(
   providers: readonly RouterProvider[],
   model: string
@@ -846,27 +846,6 @@ export function routerModelDisplayId(m: RouterModel): string {
   return m.alias ?? m.name;
 }
 
-/**
- * Predicate — single source of truth for "this model routes through the keyless
- * OpenRouter provider (Kimi / moonshotai)". Such a model must NEVER carry a
- * per-account routing prefix: it is served by the shared OpenRouter key, not by
- * any seeded Codex/Claude credential. Any `acc<hex>/` routing prefix is stripped
- * before the test so a caller can pass either the bare or the already-prefixed
- * model. Used daemon-side (launch contributor) and in the UI (chip neutralization).
- */
-export function isOpenRouterModel(model: string): boolean {
-  const bare = model.replace(/^acc[0-9a-fA-F]+\//, "");
-  return /^(kimi|moonshotai\/)/i.test(bare);
-}
-
-/**
- * Aliases the daemon itself writes into config.yaml's `openai-compatibility`
- * block. CLIProxyAPI routes them but never advertises them in `/v1/models`, so
- * the manager unions these into every probed catalog while an OpenRouter key is
- * configured — without this, kimi is absent from the UI and refused at launch.
- */
-export const OPENROUTER_ALIAS_MODELS = ["kimi-k3"] as const;
-
 export interface CuratedProxyModel {
   id: string;
   /** Real backend context ceiling → CLAUDE_CODE_MAX_CONTEXT_TOKENS. */
@@ -878,9 +857,12 @@ export interface CuratedProxyModel {
 }
 
 /**
- * The launcher-facing model picks (chips + settings dropdowns) WITH the
- * measured compact metadata (spec 2026-07-25-compact-parity-design.md §3.2).
- * Windows are measured backend ceilings, not marketing numbers.
+ * The launcher-facing model picks (chips + settings dropdowns) for the OAuth
+ * providers, WITH the measured compact metadata (spec
+ * 2026-07-25-compact-parity-design.md §3.2). Windows are measured backend
+ * ceilings, not marketing numbers. Router-served models are NOT listed here —
+ * they come from the user's `routerProviders` (spec 2026-08-04 §1) and the
+ * pickers union the two.
  *
  * The live catalog is the *validity* signal, not the menu: it enumerates every
  * model of every seeded account (plus acc-prefixed duplicates and image models),
@@ -889,8 +871,7 @@ export interface CuratedProxyModel {
 export const CURATED_PROXY_MODELS: readonly CuratedProxyModel[] = [
   { id: "gpt-5.6-sol", contextWindow: 200_000, compactPct: 75 },
   { id: "gpt-5.6-terra", contextWindow: 200_000, compactPct: 75 },
-  { id: "gpt-5.6-luna", contextWindow: 200_000, compactPct: 75 },
-  { id: "kimi-k3", contextWindow: 1_048_576, compactWindow: 450_000 }
+  { id: "gpt-5.6-luna", contextWindow: 200_000, compactPct: 75 }
 ];
 
 export const CURATED_PROXY_MODEL_IDS: readonly string[] = CURATED_PROXY_MODELS.map((m) => m.id);
@@ -922,14 +903,15 @@ export interface CompactEnv {
  * Resolve the compact env for a launch model (spec §3.2): strip the acc<hex>/
  * routing prefix; `claude*` ids get the arming value only (native window
  * detection + native trigger formula do the rest); other ids resolve
- * override → curated → null (uncurated stays reactive-only, same as today).
+ * override → router provider → curated → null (unknown ids stay reactive-only,
+ * same as today).
  */
 export function compactEnvForModel(
   model: string,
   overrides?: CliProxyModelOverrides,
   routerProviders?: readonly RouterProvider[]
 ): CompactEnv | null {
-  let bare = model.replace(/^acc[0-9a-fA-F]+\//, "");
+  const bare = model.replace(/^acc[0-9a-fA-F]+\//, "");
   if (bare.startsWith("claude")) {
     // Claude ids (bare or prefixed) get the arming value only. Never emit
     // MAX_CONTEXT_TOKENS for them: bare ids are natively recognized (no-op),
@@ -959,11 +941,6 @@ export function compactEnvForModel(
     if (pct !== undefined) env.autoCompactPct = pct;
     return env;
   }
-  // The OpenRouter full name routes the same model as its curated alias
-  // (config.yaml maps moonshotai/kimi-k3 → kimi-k3) — resolve them identically
-  // so a full-name launch isn't silently left without compact arming.
-  // (Legacy normalization; removed once curated kimi goes away.)
-  bare = bare.replace(/^moonshotai\//, "");
   const curated = CURATED_PROXY_MODELS.find((m) => m.id === bare);
   const override = overrides?.[bare];
   const contextWindow = override?.contextWindow ?? curated?.contextWindow;
