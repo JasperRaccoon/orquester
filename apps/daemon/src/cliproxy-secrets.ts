@@ -43,7 +43,8 @@ function generateSecrets(): CliProxySecrets {
   return {
     apiKey: randomBytes(24).toString("hex"),
     managementSecret: randomBytes(24).toString("hex"),
-    openRouterKey: null
+    openRouterKey: null,
+    routerKeys: {}
   };
 }
 

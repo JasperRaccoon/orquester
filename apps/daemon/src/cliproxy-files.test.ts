@@ -19,7 +19,8 @@ async function makeDir() {
 const secrets: CliProxySecrets = {
   apiKey: "LOCAL_API_KEY",
   managementSecret: "MGMT_SECRET",
-  openRouterKey: null
+  openRouterKey: null,
+  routerKeys: {}
 };
 
 test("config.yaml render: no openrouter block without key; block + alias with key; bodies logging off", () => {

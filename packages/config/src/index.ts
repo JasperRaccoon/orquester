@@ -744,6 +744,108 @@ export function parseClientConfig(value: unknown): ClientConfig {
 /** Allowed characters for a model name (env writer, routes, wrapper `--model`). */
 export const MODEL_NAME_RE = /^[A-Za-z0-9._/-]{1,128}$/;
 
+/** Router-provider ids are lowercase slugs; `codex`/`claude` are the OAuth pair. */
+export const ROUTER_PROVIDER_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+export const RESERVED_ROUTER_PROVIDER_IDS = ["codex", "claude"] as const;
+
+export const routerModelSchema = z.object({
+  name: z.string().regex(MODEL_NAME_RE),
+  alias: z.string().regex(MODEL_NAME_RE).optional(),
+  contextWindow: z.number().int().positive().optional(),
+  compactWindow: z.number().int().positive().optional(),
+  compactPct: z.number().int().min(1).max(100).optional()
+});
+export type RouterModel = z.infer<typeof routerModelSchema>;
+
+export const routerProviderSchema = z.object({
+  id: z.string().regex(ROUTER_PROVIDER_ID_RE),
+  label: z.string().min(1).max(64),
+  baseUrl: z
+    .string()
+    .max(512)
+    .refine((u) => {
+      try {
+        const parsed = new URL(u);
+        return parsed.protocol === "http:" || parsed.protocol === "https:";
+      } catch {
+        return false;
+      }
+    }, "baseUrl must be an http(s) URL"),
+  /** Provenance of the create-form prefill only — behavior always comes from the fields. */
+  preset: z.enum(["openrouter", "tokenrouter"]).nullable().default(null),
+  models: z.array(routerModelSchema).default([]),
+  keyVerifiedAt: z.string().nullable().default(null),
+  createdAt: z.string()
+});
+export type RouterProvider = z.infer<typeof routerProviderSchema>;
+
+/** Shipped presets: prefill the Settings create form; plain data afterwards. */
+export const ROUTER_PRESETS: readonly {
+  preset: "openrouter" | "tokenrouter";
+  label: string;
+  baseUrl: string;
+  models: RouterModel[];
+}[] = [
+  {
+    preset: "openrouter",
+    label: "OpenRouter",
+    baseUrl: "https://openrouter.ai/api/v1",
+    models: [
+      { name: "moonshotai/kimi-k3", alias: "kimi-k3", contextWindow: 1_048_576, compactWindow: 450_000 }
+    ]
+  },
+  {
+    preset: "tokenrouter",
+    label: "TokenRouter",
+    baseUrl: "https://api.tokenrouter.com/v1",
+    models: [{ name: "moonshotai/kimi-k3-free", contextWindow: 1_048_576, compactWindow: 450_000 }]
+  }
+];
+
+/** Cross-provider invariants a single-record zod parse can't see. Returns an
+ *  error message, or null when the array is coherent. */
+export function validateRouterProviders(providers: RouterProvider[]): string | null {
+  const ids = new Set<string>();
+  const modelKeys = new Set<string>();
+  for (const p of providers) {
+    if ((RESERVED_ROUTER_PROVIDER_IDS as readonly string[]).includes(p.id)) {
+      return `provider id "${p.id}" is reserved`;
+    }
+    if (ids.has(p.id)) return `duplicate provider id "${p.id}"`;
+    ids.add(p.id);
+    for (const m of p.models) {
+      for (const key of m.alias ? [m.name, m.alias] : [m.name]) {
+        if (modelKeys.has(key)) return `model "${key}" is served by more than one provider`;
+        modelKeys.add(key);
+      }
+    }
+  }
+  return null;
+}
+
+/** Resolve a launch model (bare or acc<hex>/-prefixed, by full name or alias) to
+ *  the router provider serving it. Null = not a router model. Replaces the old
+ *  isOpenRouterModel regex as the single routing source of truth. */
+export function resolveRouterModel(
+  providers: readonly RouterProvider[],
+  model: string
+): { providerId: string; provider: RouterProvider; model: RouterModel } | null {
+  const bare = model.replace(/^acc[0-9a-fA-F]+\//, "");
+  for (const provider of providers) {
+    for (const m of provider.models) {
+      if (m.name === bare || m.alias === bare) {
+        return { providerId: provider.id, provider, model: m };
+      }
+    }
+  }
+  return null;
+}
+
+/** The id a router model is shown/keyed under (picker chips, overrides). */
+export function routerModelDisplayId(m: RouterModel): string {
+  return m.alias ?? m.name;
+}
+
 /**
  * Predicate — single source of truth for "this model routes through the keyless
  * OpenRouter provider (Kimi / moonshotai)". Such a model must NEVER carry a
@@ -824,7 +926,8 @@ export interface CompactEnv {
  */
 export function compactEnvForModel(
   model: string,
-  overrides?: CliProxyModelOverrides
+  overrides?: CliProxyModelOverrides,
+  routerProviders?: readonly RouterProvider[]
 ): CompactEnv | null {
   let bare = model.replace(/^acc[0-9a-fA-F]+\//, "");
   if (bare.startsWith("claude")) {
@@ -841,9 +944,25 @@ export function compactEnvForModel(
     if (override?.compactPct !== undefined) env.autoCompactPct = override.compactPct;
     return env;
   }
+  // A router model resolves identically by full name or alias (config.yaml maps
+  // name → alias); overrides are keyed by the display id, falling back to the name.
+  const routed = routerProviders ? resolveRouterModel(routerProviders, bare) : null;
+  if (routed) {
+    const override = overrides?.[routerModelDisplayId(routed.model)] ?? overrides?.[routed.model.name];
+    const contextWindow = override?.contextWindow ?? routed.model.contextWindow;
+    if (contextWindow === undefined) return null;
+    const env: CompactEnv = {
+      maxContextTokens: contextWindow,
+      autoCompactWindow: override?.compactWindow ?? routed.model.compactWindow ?? contextWindow
+    };
+    const pct = override?.compactPct ?? routed.model.compactPct;
+    if (pct !== undefined) env.autoCompactPct = pct;
+    return env;
+  }
   // The OpenRouter full name routes the same model as its curated alias
   // (config.yaml maps moonshotai/kimi-k3 → kimi-k3) — resolve them identically
   // so a full-name launch isn't silently left without compact arming.
+  // (Legacy normalization; removed once curated kimi goes away.)
   bare = bare.replace(/^moonshotai\//, "");
   const curated = CURATED_PROXY_MODELS.find((m) => m.id === bare);
   const override = overrides?.[bare];
@@ -895,6 +1014,8 @@ export const cliProxyStateSchema = z.object({
       })
     )
     .default([]),
+  /** User-defined OpenAI-compatible router providers (spec 2026-08-04 §1). */
+  routerProviders: z.array(routerProviderSchema).default([]),
   testedClaudeCliVersion: z.string().nullable().default(null)
 });
 
@@ -913,7 +1034,11 @@ export function parseCliProxyState(raw: unknown): CliProxyState {
 export const cliProxySecretsSchema = z.object({
   apiKey: z.string(),
   managementSecret: z.string(),
-  openRouterKey: z.string().nullable()
+  /** LEGACY mirror of routerKeys["openrouter"] — kept at rest one release for
+   *  rollback safety; never read after migration. */
+  openRouterKey: z.string().nullable().default(null),
+  /** providerId → API key for router providers. */
+  routerKeys: z.record(z.string()).default({})
 });
 
 export type CliProxySecrets = z.infer<typeof cliProxySecretsSchema>;
@@ -926,6 +1051,57 @@ export type CliProxySecrets = z.infer<typeof cliProxySecretsSchema>;
 export function parseCliProxySecrets(raw: unknown): CliProxySecrets | "corrupt" {
   const result = cliProxySecretsSchema.safeParse(raw);
   return result.success ? result.data : "corrupt";
+}
+
+/**
+ * One-time legacy migration (spec §1): a pre-router `openRouterKey` becomes the
+ * seeded `openrouter` provider + routerKeys entry, preserving today's exact kimi
+ * wiring. The legacy fields are left in place as an at-rest mirror. Idempotent.
+ */
+export function migrateLegacyOpenRouter(
+  state: CliProxyState,
+  secrets: CliProxySecrets,
+  nowIso: string
+): { state: CliProxyState; secrets: CliProxySecrets; changed: boolean } {
+  let changed = false;
+  let nextSecrets = secrets;
+  if (secrets.openRouterKey && !secrets.routerKeys["openrouter"]) {
+    nextSecrets = {
+      ...secrets,
+      routerKeys: { ...secrets.routerKeys, openrouter: secrets.openRouterKey }
+    };
+    changed = true;
+  }
+  let nextState = state;
+  if (
+    nextSecrets.routerKeys["openrouter"] &&
+    !state.routerProviders.some((p) => p.id === "openrouter")
+  ) {
+    nextState = {
+      ...state,
+      routerProviders: [
+        ...state.routerProviders,
+        {
+          id: "openrouter",
+          label: "OpenRouter",
+          baseUrl: "https://openrouter.ai/api/v1",
+          preset: "openrouter",
+          models: [
+            {
+              name: "moonshotai/kimi-k3",
+              alias: "kimi-k3",
+              contextWindow: 1_048_576,
+              compactWindow: 450_000
+            }
+          ],
+          keyVerifiedAt: state.openRouterKeyVerifiedAt,
+          createdAt: nowIso
+        }
+      ]
+    };
+    changed = true;
+  }
+  return { state: nextState, secrets: nextSecrets, changed };
 }
 
 /** The managed CLIProxyAPI directory, given the daemon config directory. */
