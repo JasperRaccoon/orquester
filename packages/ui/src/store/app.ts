@@ -68,6 +68,7 @@ import type {
   BrowserSummary,
   CliProxyMutationRefusal,
   CliProxyProviderStatus,
+  CliProxyRouterProviderRequest,
   CliProxySeedRequest,
   CliProxyStatus,
   CliProxyUnseedRequest,
@@ -677,10 +678,27 @@ export interface AppState {
   disableCliProxy: (force?: boolean) => Promise<{ ok: boolean; affectedSessions?: number }>;
   seedCliProxyAccount: (req: CliProxySeedRequest) => Promise<CliProxyProviderStatus>;
   unseedCliProxyAccount: (req: CliProxyUnseedRequest) => Promise<CliProxyProviderStatus>;
-  setCliProxyOpenRouterKey: (
+  /** Create or update a router provider (id is its identity; key set separately). */
+  putCliProxyRouterProvider: (
+    id: string,
+    cfg: CliProxyRouterProviderRequest,
+    force?: boolean
+  ) => Promise<CliProxyStatus | CliProxyMutationRefusal>;
+  deleteCliProxyRouterProvider: (
+    id: string,
+    force?: boolean
+  ) => Promise<CliProxyStatus | CliProxyMutationRefusal>;
+  setCliProxyRouterKey: (
+    id: string,
     key: string,
     force?: boolean
   ) => Promise<{ ok: boolean; affectedSessions?: number }>;
+  clearCliProxyRouterKey: (
+    id: string,
+    force?: boolean
+  ) => Promise<{ ok: boolean; affectedSessions?: number }>;
+  /** Read-only: the models a keyed router advertises upstream (models picker). */
+  getCliProxyRouterCatalog: (id: string) => Promise<{ models: string[] }>;
   setCliProxyConfig: (
     cfg: {
       defaultModel?: string;
@@ -1802,16 +1820,62 @@ export const useAppStore = create<AppState>((set, get) => ({
     return provider;
   },
 
-  setCliProxyOpenRouterKey: async (key, force) => {
+  putCliProxyRouterProvider: async (id, cfg, force) => {
     const api = get().api;
     if (!api) {
       return { ok: false, affectedSessions: 0 };
     }
-    // The route returns { ok, affectedSessions } (writes projections; may not
-    // emit a status event), so refresh the status explicitly afterward.
-    const res = await api.setCliProxyOpenRouterKey(key, force);
+    const res = await api.putCliProxyRouterProvider(id, cfg, force);
+    // A refusal ({ ok:false, affectedSessions }) passes straight through to the
+    // caller's force-confirm flow and must NOT be adopted as a status.
+    if ("ok" in res) return res;
+    // Adopt the returned status immediately, then reload: provider models change
+    // the proxy's model catalog too, and only loadCliProxy refreshes that.
+    set({ cliproxy: res });
     await get().loadCliProxy();
     return res;
+  },
+
+  deleteCliProxyRouterProvider: async (id, force) => {
+    const api = get().api;
+    if (!api) {
+      return { ok: false, affectedSessions: 0 };
+    }
+    const res = await api.deleteCliProxyRouterProvider(id, force);
+    if ("ok" in res) return res;
+    set({ cliproxy: res });
+    await get().loadCliProxy();
+    return res;
+  },
+
+  setCliProxyRouterKey: async (id, key, force) => {
+    const api = get().api;
+    if (!api) {
+      return { ok: false, affectedSessions: 0 };
+    }
+    // The key routes return { ok, affectedSessions } (they write projections but
+    // may not emit a status event), so refresh the status explicitly afterward.
+    const res = await api.setCliProxyRouterKey(id, key, force);
+    await get().loadCliProxy();
+    return res;
+  },
+
+  clearCliProxyRouterKey: async (id, force) => {
+    const api = get().api;
+    if (!api) {
+      return { ok: false, affectedSessions: 0 };
+    }
+    const res = await api.clearCliProxyRouterKey(id, force);
+    await get().loadCliProxy();
+    return res;
+  },
+
+  getCliProxyRouterCatalog: async (id) => {
+    const api = get().api;
+    if (!api) {
+      throw new Error("not connected");
+    }
+    return api.getCliProxyRouterCatalog(id);
   },
 
   setCliProxyConfig: async (cfg, force) => {

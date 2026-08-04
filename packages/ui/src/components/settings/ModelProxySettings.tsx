@@ -1,7 +1,20 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { Check, Loader2, Power, RefreshCw, X } from "lucide-react";
-import type { CliProxyProviderId, CliProxyProviderStatus, CliProxyStatus } from "@orquester/api";
-import { CURATED_PROXY_MODEL_IDS, CURATED_PROXY_MODELS } from "@orquester/config";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { Check, Key, Loader2, Plus, Power, RefreshCw, Trash2, X } from "lucide-react";
+import type {
+  CliProxyProviderId,
+  CliProxyProviderStatus,
+  CliProxyRouterModel,
+  CliProxyRouterProviderRequest,
+  CliProxyRouterProviderStatus,
+  CliProxyStatus
+} from "@orquester/api";
+import {
+  CURATED_PROXY_MODELS,
+  CURATED_PROXY_MODEL_IDS,
+  MODEL_NAME_RE,
+  ROUTER_PRESETS,
+  ROUTER_PROVIDER_ID_RE
+} from "@orquester/config";
 import { cn } from "../../lib/cn";
 import { Button, Input } from "../ui";
 import { useAppStore } from "../../store/app";
@@ -48,27 +61,66 @@ const formatVerified = (iso: string | null): string => {
   return `verified ${Math.floor(hrs / 24)}d ago`;
 };
 
+/** The id a router model is shown and keyed under (picker chips, overrides). */
+const modelDisplayId = (m: CliProxyRouterModel): string => m.alias ?? m.name;
+
+type RunFn = (fn: () => Promise<unknown>) => Promise<void>;
+type RestartConfirmFn = (
+  attempt: (force: boolean) => Promise<CliProxyStatus | { ok: boolean; affectedSessions?: number }>
+) => Promise<void>;
+
 export const ModelProxySettings: React.FC = () => {
   const status = useAppStore((s) => s.cliproxy);
   const models = useAppStore((s) => s.cliproxyModels);
-  // Curated picks confirmed by the live catalog (the raw catalog lists every
-  // seeded account's models + acc-prefixed duplicates — noise as a picker).
-  // With no catalog, offer the whole curated list; ModelSelect keeps a stale
-  // saved value visible either way.
-  const curatedOptions = useMemo(() => {
+  // Every model the pickers may offer: the curated picks plus whatever the
+  // user's router providers serve (by display id). `?? []` guards a stale
+  // bundle/daemon pairing that predates routerProviders (persisted-shape rule).
+  const routerProviders = useMemo(() => status?.routerProviders ?? [], [status]);
+  const pickerIds = useMemo(() => {
+    const routerModelIds = routerProviders.flatMap((p) => p.models.map(modelDisplayId));
+    return [...new Set([...CURATED_PROXY_MODEL_IDS, ...routerModelIds])];
+  }, [routerProviders]);
+  // Picks confirmed by the live catalog (the raw catalog lists every seeded
+  // account's models + acc-prefixed duplicates — noise as a picker). With no
+  // catalog, offer the whole list; ModelSelect keeps a stale saved value visible
+  // either way.
+  const modelOptions = useMemo(() => {
     const catalog = models?.models ?? [];
-    const confirmed = catalog.length
-      ? CURATED_PROXY_MODEL_IDS.filter((m) => catalog.includes(m))
-      : [...CURATED_PROXY_MODEL_IDS];
-    return confirmed.length ? confirmed : [...CURATED_PROXY_MODEL_IDS];
-  }, [models]);
+    const confirmed = catalog.length ? pickerIds.filter((m) => catalog.includes(m)) : [...pickerIds];
+    return confirmed.length ? confirmed : [...pickerIds];
+  }, [models, pickerIds]);
+  // Context-window rows: curated models first, then any router model not already
+  // covered by a curated row of the same id.
+  const contextRows = useMemo(() => {
+    const rows: { id: string; contextWindow?: number; compactWindow?: number; compactPct?: number }[] =
+      CURATED_PROXY_MODELS.map((m) => ({
+        id: m.id,
+        contextWindow: m.contextWindow,
+        compactWindow: m.compactWindow,
+        compactPct: m.compactPct
+      }));
+    const seen = new Set(rows.map((r) => r.id));
+    for (const p of routerProviders) {
+      for (const m of p.models) {
+        const id = modelDisplayId(m);
+        if (seen.has(id)) continue;
+        seen.add(id);
+        rows.push({
+          id,
+          contextWindow: m.contextWindow,
+          compactWindow: m.compactWindow,
+          compactPct: m.compactPct
+        });
+      }
+    }
+    return rows;
+  }, [routerProviders]);
   const agentAccounts = useAppStore((s) => s.agentAccounts);
   const loadCliProxy = useAppStore((s) => s.loadCliProxy);
   const enableCliProxy = useAppStore((s) => s.enableCliProxy);
   const disableCliProxy = useAppStore((s) => s.disableCliProxy);
   const seedCliProxyAccount = useAppStore((s) => s.seedCliProxyAccount);
   const unseedCliProxyAccount = useAppStore((s) => s.unseedCliProxyAccount);
-  const setCliProxyOpenRouterKey = useAppStore((s) => s.setCliProxyOpenRouterKey);
   const setCliProxyConfig = useAppStore((s) => s.setCliProxyConfig);
 
   const [busy, setBusy] = useState(false);
@@ -79,7 +131,7 @@ export const ModelProxySettings: React.FC = () => {
     void loadCliProxy();
   }, [loadCliProxy]);
 
-  const run = async (fn: () => Promise<unknown>) => {
+  const run = useCallback<RunFn>(async (fn) => {
     setBusy(true);
     setError(null);
     try {
@@ -89,14 +141,12 @@ export const ModelProxySettings: React.FC = () => {
     } finally {
       setBusy(false);
     }
-  };
+  }, []);
 
-  // Restart-gated mutations (config/openrouter-key) refuse with { ok:false,
-  // affectedSessions } while dependent sessions are live; on refusal, confirm
-  // the session count with the user then re-attempt with force.
-  const withRestartConfirm = async (
-    attempt: (force: boolean) => Promise<CliProxyStatus | { ok: boolean; affectedSessions?: number }>
-  ): Promise<void> => {
+  // Restart-gated mutations (config/router provider/router key) refuse with
+  // { ok:false, affectedSessions } while dependent sessions are live; on refusal,
+  // confirm the session count with the user then re-attempt with force.
+  const withRestartConfirm = useCallback<RestartConfirmFn>(async (attempt) => {
     const res = await attempt(false);
     if (res && "ok" in res && res.ok === false) {
       const n = res.affectedSessions ?? 0;
@@ -109,7 +159,7 @@ export const ModelProxySettings: React.FC = () => {
         await attempt(true);
       }
     }
-  };
+  }, []);
 
   if (!status) {
     return (
@@ -123,7 +173,7 @@ export const ModelProxySettings: React.FC = () => {
   const working = busy || isBusyState(status.state);
 
   // Overrides are replaced wholesale by the route, so every edit sends the full
-  // next record; an entry with no fields left is dropped (back to curated).
+  // next record; an entry with no fields left is dropped (back to the default).
   const saveOverride = (
     id: string,
     patch: { contextWindow?: number; compactWindow?: number; compactPct?: number }
@@ -157,10 +207,11 @@ export const ModelProxySettings: React.FC = () => {
   return (
     <div className="space-y-6">
       <div>
-        <p className="text-sm text-neutral-200">Run GPT &amp; Kimi in the Claude Code harness.</p>
+        <p className="text-sm text-neutral-200">Run GPT &amp; router models in the Claude Code harness.</p>
         <p className="text-xs text-neutral-500">
           A managed proxy lets the <code>claudex</code> and <code>claudemix</code> launchers drive
-          other models through the same interface — seeded from your existing accounts, no extra login.
+          other models through the same interface — seeded from your existing accounts, plus any
+          OpenAI-compatible router you add.
         </p>
       </div>
 
@@ -198,9 +249,9 @@ export const ModelProxySettings: React.FC = () => {
 
       {error && <p className="text-xs text-red-400">{error}</p>}
 
-      {/* Per-provider chips */}
+      {/* OAuth accounts (codex/claude) — credential-seeded, no keys involved */}
       <section className="space-y-2">
-        <h3 className="text-sm font-medium text-neutral-200">Providers</h3>
+        <h3 className="text-sm font-medium text-neutral-200">Accounts</h3>
         <div className="divide-y divide-neutral-800 rounded-lg border border-neutral-800">
           {status.providers.map((p) => (
             <ProviderRow
@@ -209,23 +260,22 @@ export const ModelProxySettings: React.FC = () => {
               accounts={(agentAccounts?.accounts ?? []).filter((a) => a.agent === p.provider)}
               seeded={status.accounts.filter((a) => a.provider === p.provider)}
               busy={busy}
-              onSeed={(accountId) =>
-                run(() =>
-                  seedCliProxyAccount({ provider: p.provider as "codex" | "claude", accountId })
-                )
-              }
+              onSeed={(accountId) => run(() => seedCliProxyAccount({ provider: p.provider, accountId }))}
               onUnseed={(accountId) =>
-                run(() =>
-                  unseedCliProxyAccount({ provider: p.provider as "codex" | "claude", accountId })
-                )
-              }
-              onSaveKey={(key) =>
-                run(() => withRestartConfirm((force) => setCliProxyOpenRouterKey(key, force)))
+                run(() => unseedCliProxyAccount({ provider: p.provider, accountId }))
               }
             />
           ))}
         </div>
       </section>
+
+      {/* Key-based OpenAI-compatible routers (spec 2026-08-04 §3) */}
+      <RoutersSection
+        routers={routerProviders}
+        busy={busy}
+        run={run}
+        withRestartConfirm={withRestartConfirm}
+      />
 
       {/* Model defaults */}
       <section className="space-y-2">
@@ -234,7 +284,7 @@ export const ModelProxySettings: React.FC = () => {
           label="Default model"
           hint="What claudex runs unless a launch chip overrides it."
           value={status.defaultModel}
-          options={curatedOptions}
+          options={modelOptions}
           stale={!models}
           disabled={busy}
           onChange={(m) =>
@@ -245,7 +295,7 @@ export const ModelProxySettings: React.FC = () => {
           label="Background model"
           hint="Used for lightweight background turns (summaries, titles)."
           value={status.backgroundModel}
-          options={curatedOptions}
+          options={modelOptions}
           stale={!models}
           disabled={busy}
           onChange={(m) =>
@@ -260,30 +310,32 @@ export const ModelProxySettings: React.FC = () => {
       </section>
 
       {/* Context windows — per-model compact tuning (spec §3.2). Values are the
-          launch-time env knobs; blank = curated default. */}
+          launch-time env knobs; blank = the built-in / router-provider default. */}
       <section className="space-y-2">
         <h3 className="text-sm font-medium text-neutral-200">Context windows</h3>
         <p className="text-xs text-neutral-500">
           Per-model context ceiling and auto-compact window for proxy launches. Blank fields use
           the built-in defaults; changes apply to new tabs (no proxy restart).
         </p>
-        {CURATED_PROXY_MODELS.map((m) => {
+        {contextRows.map((m) => {
           // Defensive read: a stale bundle/daemon pairing can serve a status
           // without the field (persisted-shape rule) — never crash the panel.
           const o = (status.modelOverrides ?? {})[m.id] ?? {};
           return (
             <div key={m.id} className="flex items-center gap-2 text-sm">
-              <span className="w-32 truncate text-neutral-300">{m.id}</span>
+              <span className="w-32 truncate text-neutral-300" title={m.id}>
+                {m.id}
+              </span>
               <NumberField
                 label="window"
-                placeholder={String(m.contextWindow)}
+                placeholder={m.contextWindow !== undefined ? String(m.contextWindow) : "default"}
                 value={o.contextWindow}
                 disabled={busy}
                 onCommit={(v) => saveOverride(m.id, { contextWindow: v })}
               />
               <NumberField
                 label="compact at"
-                placeholder={String(m.compactWindow ?? m.contextWindow)}
+                placeholder={String(m.compactWindow ?? m.contextWindow ?? "default")}
                 value={o.compactWindow}
                 disabled={busy}
                 onCommit={(v) => saveOverride(m.id, { compactWindow: v })}
@@ -347,23 +399,12 @@ const ProviderRow: React.FC<{
   busy: boolean;
   onSeed: (accountId: string) => void;
   onUnseed: (accountId: string) => void;
-  onSaveKey: (key: string) => void;
-}> = ({ provider, accounts, seeded, busy, onSeed, onUnseed, onSaveKey }) => {
+}> = ({ provider, accounts, seeded, busy, onSeed, onUnseed }) => {
   const [seeding, setSeeding] = useState(false);
-  const [keyEntry, setKeyEntry] = useState(false);
-  const [key, setKey] = useState("");
   const ok = provider.state === "ok";
-  // `status.providers` is now the OAuth pair only — routers moved to their own
-  // list. Kept as a widened compare (always false today) so the key-entry branch
-  // below stays intact until the Routers section replaces it.
-  const isOpenRouter = (provider.provider as string) === "openrouter";
 
   const stateText = ok
-    ? isOpenRouter && !provider.lastVerifiedAt
-      ? // A stored key whose verification was inconclusive (network) — honest
-        // label instead of the contradictory green-check "never verified".
-        "key set — not verified yet"
-      : formatVerified(provider.lastVerifiedAt)
+    ? formatVerified(provider.lastVerifiedAt)
     : provider.state === "expired"
       ? "expired — re-seed to refresh"
       : "not connected";
@@ -385,24 +426,18 @@ const ProviderRow: React.FC<{
             {stateText}
           </p>
         </div>
-        {!ok &&
-          (isOpenRouter ? (
-            <Button size="sm" variant="outline" disabled={busy} onClick={() => setKeyEntry((v) => !v)}>
-              Add key
-            </Button>
+        <Button size="sm" variant="outline" disabled={busy} onClick={() => setSeeding((v) => !v)}>
+          {ok ? (
+            <>
+              <RefreshCw size={12} /> Seed / Re-seed
+            </>
           ) : (
-            <Button size="sm" variant="outline" disabled={busy} onClick={() => setSeeding((v) => !v)}>
-              Seed from account
-            </Button>
-          ))}
-        {ok && !isOpenRouter && (
-          <Button size="sm" variant="outline" disabled={busy} onClick={() => setSeeding((v) => !v)}>
-            <RefreshCw size={12} /> Seed / Re-seed
-          </Button>
-        )}
+            "Seed from account"
+          )}
+        </Button>
       </div>
 
-      {seeding && !isOpenRouter && (
+      {seeding && (
         <div className="ml-8 mt-2 space-y-1 rounded-md border border-neutral-800 bg-neutral-950 p-2">
           {accounts.length === 0 ? (
             <p className="text-xs text-neutral-500">
@@ -433,7 +468,7 @@ const ProviderRow: React.FC<{
         </div>
       )}
 
-      {!isOpenRouter && seeded.length > 0 && (
+      {seeded.length > 0 && (
         <div className="ml-8 mt-2 space-y-1 rounded-md border border-neutral-800 bg-neutral-950 p-2">
           {seeded.map((a) => (
             <div
@@ -463,44 +498,544 @@ const ProviderRow: React.FC<{
           ))}
         </div>
       )}
+    </div>
+  );
+};
 
-      {keyEntry && isOpenRouter && (
+const RoutersSection: React.FC<{
+  routers: CliProxyRouterProviderStatus[];
+  busy: boolean;
+  run: RunFn;
+  withRestartConfirm: RestartConfirmFn;
+}> = ({ routers, busy, run, withRestartConfirm }) => {
+  const putProvider = useAppStore((s) => s.putCliProxyRouterProvider);
+  const deleteProvider = useAppStore((s) => s.deleteCliProxyRouterProvider);
+  const setKey = useAppStore((s) => s.setCliProxyRouterKey);
+  const clearKey = useAppStore((s) => s.clearCliProxyRouterKey);
+  const [adding, setAdding] = useState(false);
+
+  return (
+    <section className="space-y-2">
+      <div className="flex items-center justify-between">
+        <div className="min-w-0">
+          <h3 className="text-sm font-medium text-neutral-200">Routers</h3>
+          <p className="text-xs text-neutral-500">
+            Key-based OpenAI-compatible gateways. Their models are keyless at launch — the account
+            chip does not apply.
+          </p>
+        </div>
+        <Button size="sm" variant="outline" disabled={busy} onClick={() => setAdding((v) => !v)}>
+          <Plus size={12} /> Add router
+        </Button>
+      </div>
+
+      {adding && (
+        <AddRouterForm
+          existingIds={routers.map((r) => r.id)}
+          busy={busy}
+          onCancel={() => setAdding(false)}
+          onCreate={(id, cfg) => {
+            setAdding(false);
+            void run(() => withRestartConfirm((force) => putProvider(id, cfg, force)));
+          }}
+        />
+      )}
+
+      <div className="divide-y divide-neutral-800 rounded-lg border border-neutral-800">
+        {routers.length === 0 && !adding && (
+          <p className="px-3 py-2.5 text-xs text-neutral-500">
+            No routers yet. Add OpenRouter, TokenRouter, or any OpenAI-compatible gateway.
+          </p>
+        )}
+        {routers.map((r) => (
+          <RouterRow
+            key={r.id}
+            router={r}
+            busy={busy}
+            onSaveKey={(key) => run(() => withRestartConfirm((force) => setKey(r.id, key, force)))}
+            onClearKey={() => run(() => withRestartConfirm((force) => clearKey(r.id, force)))}
+            onSaveModels={(models) =>
+              run(() =>
+                withRestartConfirm((force) =>
+                  putProvider(r.id, { label: r.label, baseUrl: r.baseUrl, preset: r.preset, models }, force)
+                )
+              )
+            }
+            onDelete={() => {
+              if (window.confirm(`Delete router "${r.label}" and its stored key?`)) {
+                void run(() => withRestartConfirm((force) => deleteProvider(r.id, force)));
+              }
+            }}
+          />
+        ))}
+      </div>
+    </section>
+  );
+};
+
+/** Slugify a label into a candidate provider id (lowercase, dash-separated). */
+const slugify = (s: string): string =>
+  s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 32);
+
+const AddRouterForm: React.FC<{
+  existingIds: string[];
+  busy: boolean;
+  onCancel: () => void;
+  onCreate: (id: string, cfg: CliProxyRouterProviderRequest) => void;
+}> = ({ existingIds, busy, onCancel, onCreate }) => {
+  const [preset, setPreset] = useState<"openrouter" | "tokenrouter" | null>(
+    ROUTER_PRESETS[0]?.preset ?? null
+  );
+  const initial = ROUTER_PRESETS.find((p) => p.preset === preset);
+  const [id, setId] = useState(initial ? initial.preset : "");
+  const [label, setLabel] = useState(initial ? initial.label : "");
+  const [baseUrl, setBaseUrl] = useState(initial ? initial.baseUrl : "");
+  const [models, setModels] = useState<CliProxyRouterModel[]>(
+    initial ? initial.models.map((m) => ({ ...m })) : []
+  );
+
+  // Switching preset re-prefills every field — the form is a create surface, so
+  // there is nothing worth preserving across the switch.
+  const choosePreset = (next: "openrouter" | "tokenrouter" | null) => {
+    setPreset(next);
+    const p = ROUTER_PRESETS.find((x) => x.preset === next);
+    setId(p ? p.preset : "");
+    setLabel(p ? p.label : "");
+    setBaseUrl(p ? p.baseUrl : "");
+    setModels(p ? p.models.map((m) => ({ ...m })) : []);
+  };
+
+  const idError = !id
+    ? "id is required"
+    : !ROUTER_PROVIDER_ID_RE.test(id)
+      ? "lowercase letters, digits and dashes only"
+      : existingIds.includes(id)
+        ? "a router with this id already exists"
+        : null;
+  const urlError = /^https?:\/\/\S+$/.test(baseUrl) ? null : "must be an http(s) URL";
+  const valid = !idError && !urlError && label.trim().length > 0;
+
+  return (
+    <div className="space-y-3 rounded-lg border border-neutral-800 bg-neutral-950 p-3">
+      <div className="flex flex-wrap gap-1.5">
+        {ROUTER_PRESETS.map((p) => (
+          <button
+            key={p.preset}
+            type="button"
+            disabled={busy}
+            onClick={() => choosePreset(p.preset)}
+            className={cn(
+              "rounded-full px-2.5 py-1 text-xs transition-colors disabled:opacity-50",
+              preset === p.preset
+                ? "bg-neutral-200 text-neutral-900"
+                : "border border-neutral-700 text-neutral-300 hover:bg-neutral-800"
+            )}
+          >
+            {p.label}
+          </button>
+        ))}
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => choosePreset(null)}
+          className={cn(
+            "rounded-full px-2.5 py-1 text-xs transition-colors disabled:opacity-50",
+            preset === null
+              ? "bg-neutral-200 text-neutral-900"
+              : "border border-neutral-700 text-neutral-300 hover:bg-neutral-800"
+          )}
+        >
+          Custom
+        </button>
+      </div>
+
+      <div className="grid gap-2 sm:grid-cols-2">
+        <label className="space-y-1 text-xs text-neutral-400">
+          <span>Label</span>
+          <Input
+            value={label}
+            placeholder="My router"
+            disabled={busy}
+            onChange={(e) => {
+              const next = e.target.value;
+              setLabel(next);
+              // Custom routers derive the id from the label until it's edited.
+              if (preset === null) setId(slugify(next));
+            }}
+          />
+        </label>
+        <label className="space-y-1 text-xs text-neutral-400">
+          <span>Id</span>
+          <Input value={id} placeholder="my-router" disabled={busy} onChange={(e) => setId(e.target.value)} />
+          {idError && <span className="block text-[11px] text-red-400">{idError}</span>}
+        </label>
+      </div>
+
+      <label className="block space-y-1 text-xs text-neutral-400">
+        <span>Base URL</span>
+        <Input
+          value={baseUrl}
+          placeholder="https://api.example.com/v1"
+          disabled={busy}
+          onChange={(e) => setBaseUrl(e.target.value)}
+        />
+        {urlError && <span className="block text-[11px] text-red-400">{urlError}</span>}
+      </label>
+
+      <p className="text-[11px] text-neutral-600">
+        {models.length > 0
+          ? `${models.length} preset model${models.length === 1 ? "" : "s"} will be enabled — edit them after adding the key.`
+          : "No models yet — add the key, then pick models from the router's catalog."}
+      </p>
+
+      <div className="flex gap-2">
+        <Button
+          size="sm"
+          disabled={busy || !valid}
+          onClick={() => onCreate(id, { label: label.trim(), baseUrl: baseUrl.trim(), preset, models })}
+        >
+          Add router
+        </Button>
+        <Button size="sm" variant="outline" disabled={busy} onClick={onCancel}>
+          Cancel
+        </Button>
+      </div>
+    </div>
+  );
+};
+
+const KEY_STATE_TEXT: Record<CliProxyRouterProviderStatus["keyState"], string> = {
+  none: "no key",
+  // A stored key whose verification was inconclusive (network) — honest label
+  // instead of a contradictory green-check "never verified".
+  set: "key set — not verified yet",
+  verified: "verified"
+};
+
+const RouterRow: React.FC<{
+  router: CliProxyRouterProviderStatus;
+  busy: boolean;
+  onSaveKey: (key: string) => void;
+  onClearKey: () => void;
+  onSaveModels: (models: CliProxyRouterModel[]) => void;
+  onDelete: () => void;
+}> = ({ router, busy, onSaveKey, onClearKey, onSaveModels, onDelete }) => {
+  const [keyEntry, setKeyEntry] = useState(false);
+  const [editingModels, setEditingModels] = useState(false);
+  const [key, setKey] = useState("");
+  const hasKey = router.keyState !== "none";
+  const stateText =
+    router.keyState === "verified" ? formatVerified(router.keyVerifiedAt) : KEY_STATE_TEXT[router.keyState];
+
+  const submitKey = () => {
+    const trimmed = key.trim();
+    if (!trimmed) return;
+    setKeyEntry(false);
+    setKey("");
+    onSaveKey(trimmed);
+  };
+
+  return (
+    <div className="px-3 py-2.5">
+      <div className="flex items-center gap-3">
+        <span
+          className={cn(
+            "flex h-5 w-5 shrink-0 items-center justify-center rounded-full",
+            hasKey ? "bg-emerald-900/50 text-emerald-300" : "bg-neutral-800 text-neutral-500"
+          )}
+        >
+          {hasKey ? <Check size={12} /> : <X size={12} />}
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm text-neutral-100">{router.label}</p>
+          <p className="truncate text-[11px] text-neutral-500">{router.baseUrl}</p>
+          <p className={cn("truncate text-xs", hasKey ? "text-emerald-400/80" : "text-neutral-500")}>
+            {stateText} · {router.models.length} model{router.models.length === 1 ? "" : "s"}
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5">
+          <Button size="sm" variant="outline" disabled={busy} onClick={() => setKeyEntry((v) => !v)}>
+            <Key size={12} /> {hasKey ? "Replace key" : "Add key"}
+          </Button>
+          <Button size="sm" variant="outline" disabled={busy} onClick={() => setEditingModels((v) => !v)}>
+            Models
+          </Button>
+          <Button size="sm" variant="ghost" disabled={busy} onClick={onDelete} title="Delete router">
+            <Trash2 size={12} />
+          </Button>
+        </div>
+      </div>
+
+      {keyEntry && (
         <div className="ml-8 mt-2 space-y-2 rounded-md border border-neutral-800 bg-neutral-950 p-2">
           <Input
             autoFocus
             type="password"
-            placeholder="OpenRouter API key (sk-or-…)"
+            placeholder="API key"
             value={key}
             onChange={(e) => setKey(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && key.trim()) {
-                setKeyEntry(false);
-                onSaveKey(key.trim());
-                setKey("");
-              }
+              if (e.key === "Enter") submitKey();
             }}
           />
           <p className="text-[11px] text-neutral-600">
-            Stored on the daemon and never displayed again. Imported into the proxy for Kimi routing.
+            Stored on the daemon and never displayed again. Imported into the proxy for this
+            router's models.
           </p>
           <div className="flex gap-2">
+            <Button size="sm" disabled={busy || !key.trim()} onClick={submitKey}>
+              Save key
+            </Button>
+            {hasKey && (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={busy}
+                onClick={() => {
+                  setKeyEntry(false);
+                  setKey("");
+                  onClearKey();
+                }}
+              >
+                Remove key
+              </Button>
+            )}
             <Button
               size="sm"
-              disabled={busy || !key.trim()}
+              variant="outline"
+              disabled={busy}
               onClick={() => {
                 setKeyEntry(false);
-                onSaveKey(key.trim());
                 setKey("");
               }}
             >
-              Save key
-            </Button>
-            <Button size="sm" variant="outline" disabled={busy} onClick={() => setKeyEntry(false)}>
               Cancel
             </Button>
           </div>
         </div>
       )}
+
+      {editingModels && (
+        <RouterModelsEditor
+          router={router}
+          busy={busy}
+          onCancel={() => setEditingModels(false)}
+          onSave={(models) => {
+            setEditingModels(false);
+            onSaveModels(models);
+          }}
+        />
+      )}
+    </div>
+  );
+};
+
+/** Cap on rendered catalog rows — real catalogs run 116–500+ entries. */
+const CATALOG_RENDER_LIMIT = 120;
+
+const RouterModelsEditor: React.FC<{
+  router: CliProxyRouterProviderStatus;
+  busy: boolean;
+  onCancel: () => void;
+  onSave: (models: CliProxyRouterModel[]) => void;
+}> = ({ router, busy, onCancel, onSave }) => {
+  const getCatalog = useAppStore((s) => s.getCliProxyRouterCatalog);
+  const [models, setModels] = useState<CliProxyRouterModel[]>(() => router.models.map((m) => ({ ...m })));
+  const [catalog, setCatalog] = useState<string[] | null>(null);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [query, setQuery] = useState("");
+  const [manual, setManual] = useState("");
+  const [manualError, setManualError] = useState<string | null>(null);
+
+  // Fetch the upstream catalog once per open. A failure is not fatal: the manual
+  // "add model id" path below covers it (spec §4).
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    getCatalog(router.id)
+      .then((res) => {
+        if (cancelled) return;
+        setCatalog(res.models);
+        setCatalogError(null);
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return;
+        setCatalog(null);
+        setCatalogError(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [getCatalog, router.id]);
+
+  const filtered = useMemo(() => {
+    if (!catalog) return [];
+    const q = query.trim().toLowerCase();
+    return q ? catalog.filter((m) => m.toLowerCase().includes(q)) : catalog;
+  }, [catalog, query]);
+
+  const toggle = (name: string) => {
+    setModels((prev) =>
+      prev.some((m) => m.name === name) ? prev.filter((m) => m.name !== name) : [...prev, { name }]
+    );
+  };
+
+  const patch = (name: string, next: Partial<CliProxyRouterModel>) => {
+    setModels((prev) => prev.map((m) => (m.name === name ? { ...m, ...next } : m)));
+  };
+
+  const addManual = () => {
+    const name = manual.trim();
+    if (!name) return;
+    if (!MODEL_NAME_RE.test(name)) {
+      setManualError("invalid model id");
+      return;
+    }
+    if (models.some((m) => m.name === name)) {
+      setManualError("already enabled");
+      return;
+    }
+    setModels((prev) => [...prev, { name }]);
+    setManual("");
+    setManualError(null);
+  };
+
+  return (
+    <div className="ml-8 mt-2 space-y-3 rounded-md border border-neutral-800 bg-neutral-950 p-2">
+      <div className="space-y-1">
+        <div className="flex items-center gap-2">
+          <Input
+            className="flex-1"
+            value={query}
+            placeholder={loading ? "Loading catalog…" : "Search catalog"}
+            disabled={busy || loading || !catalog}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+          {loading && <Loader2 size={13} className="animate-spin text-neutral-500" />}
+        </div>
+        {catalogError && (
+          <p className="text-[11px] text-amber-400/80">
+            Catalog unavailable ({catalogError}) — add model ids manually below.
+          </p>
+        )}
+        {catalog && (
+          <div className="max-h-56 space-y-0.5 overflow-y-auto rounded border border-neutral-800 p-1">
+            {filtered.length === 0 && (
+              <p className="px-1 py-1 text-[11px] text-neutral-500">No catalog models match.</p>
+            )}
+            {filtered.slice(0, CATALOG_RENDER_LIMIT).map((name) => (
+              <label
+                key={name}
+                className="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-xs text-neutral-200 hover:bg-neutral-800"
+              >
+                <input
+                  type="checkbox"
+                  disabled={busy}
+                  checked={models.some((m) => m.name === name)}
+                  onChange={() => toggle(name)}
+                />
+                <span className="min-w-0 flex-1 truncate">{name}</span>
+              </label>
+            ))}
+            {filtered.length > CATALOG_RENDER_LIMIT && (
+              <p className="px-1 py-1 text-[11px] text-neutral-500">
+                Showing {CATALOG_RENDER_LIMIT} of {filtered.length} — refine the search.
+              </p>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="space-y-1">
+        <p className="text-[11px] text-neutral-500">
+          Enabled models ({models.length}) — alias is the id shown in pickers; windows are optional.
+        </p>
+        {models.length === 0 && (
+          <p className="text-[11px] text-neutral-600">None enabled yet.</p>
+        )}
+        {models.map((m) => (
+          <div key={m.name} className="flex flex-wrap items-center gap-2 text-xs">
+            <span className="w-40 truncate text-neutral-300" title={m.name}>
+              {m.name}
+            </span>
+            <label className="flex items-center gap-1 text-neutral-500">
+              alias
+              <Input
+                className="w-28"
+                value={m.alias ?? ""}
+                placeholder="none"
+                disabled={busy}
+                onChange={(e) => {
+                  const v = e.target.value.trim();
+                  patch(m.name, { alias: v === "" ? undefined : v });
+                }}
+              />
+            </label>
+            <NumberField
+              label="window"
+              placeholder="default"
+              value={m.contextWindow}
+              disabled={busy}
+              onCommit={(v) => patch(m.name, { contextWindow: v })}
+            />
+            <NumberField
+              label="compact at"
+              placeholder="default"
+              value={m.compactWindow}
+              disabled={busy}
+              onCommit={(v) => patch(m.name, { compactWindow: v })}
+            />
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => toggle(m.name)}
+              className="rounded p-1 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200 disabled:opacity-50"
+              title="Remove model"
+            >
+              <X size={12} />
+            </button>
+          </div>
+        ))}
+      </div>
+
+      <div className="space-y-1">
+        <div className="flex items-center gap-2">
+          <Input
+            className="flex-1"
+            value={manual}
+            placeholder="Add model id manually (e.g. moonshotai/kimi-k3-free)"
+            disabled={busy}
+            onChange={(e) => {
+              setManual(e.target.value);
+              setManualError(null);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") addManual();
+            }}
+          />
+          <Button size="sm" variant="outline" disabled={busy || !manual.trim()} onClick={addManual}>
+            <Plus size={12} /> Add
+          </Button>
+        </div>
+        {manualError && <p className="text-[11px] text-red-400">{manualError}</p>}
+      </div>
+
+      <div className="flex gap-2">
+        <Button size="sm" disabled={busy} onClick={() => onSave(models)}>
+          Save models
+        </Button>
+        <Button size="sm" variant="outline" disabled={busy} onClick={onCancel}>
+          Cancel
+        </Button>
+      </div>
     </div>
   );
 };

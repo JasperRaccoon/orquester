@@ -13,6 +13,7 @@ import type {
   CreateSessionRequest,
   CliProxyMutationRefusal,
   CliProxyProviderStatus,
+  CliProxyRouterProviderRequest,
   CliProxySeedRequest,
   CliProxyStatus,
   CliProxyUnseedRequest,
@@ -145,18 +146,20 @@ export class ApiClient {
   }
 
   /**
-   * POST/PUT for the restart-gated cliproxy mutations: the daemon answers a live
-   * dependent-session conflict with 409 { ok:false, affectedSessions }. Turn that
-   * into a first-class refusal value (not an ApiError throw) so the caller can
+   * POST/PUT/DELETE for the restart-gated cliproxy mutations: the daemon answers
+   * a live dependent-session conflict with 409 { ok:false, affectedSessions }. Turn
+   * that into a first-class refusal value (not an ApiError throw) so the caller can
    * offer a force-confirm flow; every other non-2xx still throws via {@link send}.
+   * DELETE routes carry no body, so `force` rides the query string instead.
    */
   private async mutateAllowingRefusal<T>(
     method: TransportMethod,
     path: string,
-    body?: unknown
+    body?: unknown,
+    query?: ApiRequestOptions["query"]
   ): Promise<T | CliProxyMutationRefusal> {
     try {
-      return await this.send<T>(method, path, { body });
+      return await this.send<T>(method, path, { body, query });
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {
         const parsed = e.body as { affectedSessions?: number } | null | undefined;
@@ -665,15 +668,63 @@ export class ApiClient {
     return this.send("POST", "/api/cliproxy/accounts/unseed", { body: req });
   }
 
-  setCliProxyOpenRouterKey(
+  // Router providers (OpenRouter/TokenRouter presets or any custom
+  // OpenAI-compatible gateway). Every mutation is restart-gated exactly like
+  // setCliProxyConfig: a 409 comes back as { ok:false, affectedSessions } so the
+  // caller can re-attempt with `force`. Keys only ever travel INTO the daemon —
+  // no route here ever returns key material.
+
+  putCliProxyRouterProvider(
+    id: string,
+    cfg: CliProxyRouterProviderRequest,
+    force?: boolean
+  ): Promise<CliProxyStatus | CliProxyMutationRefusal> {
+    return this.mutateAllowingRefusal<CliProxyStatus>(
+      "PUT",
+      `/api/cliproxy/providers/${encodeURIComponent(id)}`,
+      { ...cfg, force: Boolean(force) }
+    );
+  }
+
+  deleteCliProxyRouterProvider(
+    id: string,
+    force?: boolean
+  ): Promise<CliProxyStatus | CliProxyMutationRefusal> {
+    return this.mutateAllowingRefusal<CliProxyStatus>(
+      "DELETE",
+      `/api/cliproxy/providers/${encodeURIComponent(id)}`,
+      undefined,
+      { force: force ? "true" : undefined }
+    );
+  }
+
+  setCliProxyRouterKey(
+    id: string,
     key: string,
     force?: boolean
   ): Promise<{ ok: boolean; affectedSessions?: number }> {
     return this.mutateAllowingRefusal<{ ok: boolean; affectedSessions?: number }>(
       "POST",
-      "/api/cliproxy/openrouter/key",
+      `/api/cliproxy/providers/${encodeURIComponent(id)}/key`,
       { key, force: Boolean(force) }
     );
+  }
+
+  clearCliProxyRouterKey(
+    id: string,
+    force?: boolean
+  ): Promise<{ ok: boolean; affectedSessions?: number }> {
+    return this.mutateAllowingRefusal<{ ok: boolean; affectedSessions?: number }>(
+      "DELETE",
+      `/api/cliproxy/providers/${encodeURIComponent(id)}/key`,
+      undefined,
+      { force: force ? "true" : undefined }
+    );
+  }
+
+  /** Browse the models a keyed router provider advertises upstream (read-only). */
+  getCliProxyRouterCatalog(id: string, signal?: AbortSignal): Promise<{ models: string[] }> {
+    return this.send("GET", `/api/cliproxy/providers/${encodeURIComponent(id)}/catalog`, { signal });
   }
 
   installRegistryEntry(id: string): Promise<RegistryActionResult> {

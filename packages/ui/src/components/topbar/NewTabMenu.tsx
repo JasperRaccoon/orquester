@@ -1,7 +1,7 @@
 import React from "react";
 import { FolderTree, GitBranch, Globe, ListTodo, Plus } from "lucide-react";
 import { SYSTEM_ACCOUNT_ID, type RegistryEntry } from "@orquester/api";
-import { CURATED_PROXY_MODEL_IDS, isOpenRouterModel } from "@orquester/config";
+import { CURATED_PROXY_MODEL_IDS } from "@orquester/config";
 import { CHROMIUM_FAMILY_IDS } from "@orquester/registry";
 import {
   AdaptiveMenu,
@@ -35,10 +35,9 @@ const DEFAULT_PROXY_MODELS: string[] = [...CURATED_PROXY_MODEL_IDS];
 
 const isProxyLauncher = (id: string): boolean => id in PROXY_ACCOUNT_FAMILY;
 
-/** An OpenRouter/Kimi model routes through the shared keyless provider, so a
- *  picked account is irrelevant. Shares the daemon's predicate so the UI and the
- *  wire agree on which models neutralize the account. */
-const modelIgnoresAccount = (model: string | undefined): boolean => !!model && isOpenRouterModel(model);
+/** The daemon strips this routing prefix before resolving a router model, so the
+ *  UI must too (a stale per-account pick can still carry one). */
+const stripAccountPrefix = (model: string): string => model.replace(/^acc[0-9a-fA-F]+\//, "");
 
 /** Short chip label for a backing model, e.g. `gpt-5.6-sol` → `sol`, `kimi-k3` → `kimi`. */
 const shortModelLabel = (model: string): string => {
@@ -96,15 +95,38 @@ const AgentRow: React.FC<{ agent: RegistryEntry }> = ({ agent }) => {
   // Model chips are a `claudex`-only affordance (claudemix's model is fixed to
   // the Claude main loop; its choice is the account instead).
   const showModels = agent.id === "claudex";
+  // Models served by a KEYED router provider are keyless — the account chip has
+  // no effect on them. Derived from live status (both the full name and the alias
+  // route), replacing the old hardcoded kimi/OpenRouter regex.
+  const routerInfo = React.useMemo(() => {
+    const labelByModel = new Map<string, string>(); // model id (name or alias) → provider label
+    const displayIds: string[] = []; // what the chips offer: alias when there is one
+    // `?? []` — a stale bundle's persisted status may predate routerProviders.
+    for (const p of cliproxy?.routerProviders ?? []) {
+      // Only a keyed provider is rendered into the proxy's config.yaml; an
+      // unkeyed one serves nothing, so it must not contribute chips.
+      if (p.keyState === "none") continue;
+      for (const m of p.models) {
+        labelByModel.set(m.name, p.label);
+        if (m.alias) labelByModel.set(m.alias, p.label);
+        displayIds.push(m.alias ?? m.name);
+      }
+    }
+    return { labelByModel, displayIds };
+  }, [cliproxy]);
+
   // The live catalog enumerates EVERYTHING the proxy serves (every seeded
   // account's models + acc-prefixed duplicates) — as a picker that's noise.
-  // Offer the curated picks the catalog confirms; all of them if none confirm
-  // (catalog empty/stale), so the chips never vanish entirely.
+  // Offer the curated picks plus the router-served ones the catalog confirms;
+  // all of them if none confirm (catalog empty/stale), so the chips never
+  // vanish entirely.
   const catalogModels = cliproxyModels?.models ?? [];
-  const curatedAvailable = catalogModels.length
-    ? DEFAULT_PROXY_MODELS.filter((m) => catalogModels.includes(m))
-    : DEFAULT_PROXY_MODELS;
-  const baseModels = curatedAvailable.length ? curatedAvailable : DEFAULT_PROXY_MODELS;
+  const pickIds = React.useMemo(
+    () => [...new Set([...DEFAULT_PROXY_MODELS, ...routerInfo.displayIds])],
+    [routerInfo]
+  );
+  const available = catalogModels.length ? pickIds.filter((m) => catalogModels.includes(m)) : pickIds;
+  const baseModels = available.length ? available : pickIds;
   const selectedModel = preferredModel ?? cliproxy?.defaultModel ?? baseModels[0];
   const modelOptions = React.useMemo(() => {
     const set = new Set(baseModels);
@@ -114,9 +136,12 @@ const AgentRow: React.FC<{ agent: RegistryEntry }> = ({ agent }) => {
     return [...set];
   }, [baseModels, selectedModel]);
 
-  // An OpenRouter/Kimi model is keyless → its account chip has no effect; dim the
+  // A router-served model is keyless → its account chip has no effect; dim the
   // row AND drop the account on launch so a stale pick can't reattach a prefix.
-  const accountDimmed = showModels && modelIgnoresAccount(selectedModel);
+  const routerLabel = selectedModel
+    ? routerInfo.labelByModel.get(stripAccountPrefix(selectedModel))
+    : undefined;
+  const accountDimmed = showModels && Boolean(routerLabel);
 
   // A deliberately-off proxy (user disabled it, or status not loaded yet) hides
   // its launchers entirely — advertising an escape hatch the user turned off is
@@ -155,8 +180,8 @@ const AgentRow: React.FC<{ agent: RegistryEntry }> = ({ agent }) => {
             "agent",
             agent.id,
             agent.name,
-            // A keyless OpenRouter/Kimi pick carries the System sentinel (no account)
-            // so the daemon never stamps a per-account routing prefix on it.
+            // A keyless router pick carries the System sentinel (no account) so
+            // the daemon never stamps a per-account routing prefix on it.
             accountDimmed ? SYSTEM_ACCOUNT_ID : selectedAccount,
             showModels ? selectedModel : undefined
           )
@@ -193,7 +218,11 @@ const AgentRow: React.FC<{ agent: RegistryEntry }> = ({ agent }) => {
             "mb-1.5 ml-8 mr-2 flex flex-wrap gap-1 transition-opacity",
             accountDimmed && "pointer-events-none opacity-40"
           )}
-          title={accountDimmed ? "Kimi routes through OpenRouter (keyless) — account is ignored" : undefined}
+          title={
+            accountDimmed
+              ? `${selectedModel} routes through ${routerLabel} (keyless) — account is ignored`
+              : undefined
+          }
           onClick={(event) => event.stopPropagation()}
         >
           {options.map((o) => (
