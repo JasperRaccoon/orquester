@@ -1390,9 +1390,13 @@ export function registerCliProxyRoutes(
     }
   );
 
-  // Read-only catalog browse — allowed on both transports like the other GETs.
-  // The stored key is used server-side; only model ids come back.
+  // Catalog browse is read-only in daemon state, but unlike the other GETs it
+  // makes an OUTBOUND request carrying the stored key — so it follows the
+  // mutation transport rule (403 on the unauthenticated unix socket) rather
+  // than the read rule. Keys can only be set over HTTP anyway, so a
+  // socket-only client never has a working provider to browse.
   app.get<{ Params: { id: string } }>("/api/cliproxy/providers/:id/catalog", async (request, reply) => {
+    if (refusedOnSocket(reply)) return;
     const res = await manager.fetchRouterCatalog(request.params.id);
     if (!res.ok) {
       if (res.code === "unknown") return reply.code(404).send({ error: res.error });

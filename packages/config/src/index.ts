@@ -1013,6 +1013,8 @@ export const cliProxyStateSchema = z.object({
   backgroundModel: z.string().default("gpt-5.6-luna"),
   /** Last successful verification of the OpenRouter key against openrouter.ai
    *  (null = key never verified, or last verification attempt was inconclusive). */
+  /** LEGACY mirror of the `openrouter` provider's `keyVerifiedAt` — kept written
+   *  at rest one release for rollback safety; never read after migration. */
   openRouterKeyVerifiedAt: z.string().nullable().default(null),
   /** Per-model compact-window overrides (spec §3.2); additive + defaulted. */
   modelOverrides: cliProxyModelOverridesSchema.default({}),
@@ -1076,6 +1078,22 @@ export function parseCliProxySecrets(raw: unknown): CliProxySecrets | "corrupt" 
 }
 
 /**
+ * Own-property, string-typed lookup of a router provider's stored key. A plain
+ * `routerKeys[id]` walks the prototype chain — a provider id like "constructor"
+ * (valid under ROUTER_PROVIDER_ID_RE) would read `Object.prototype.constructor`,
+ * count as "keyed", and emit garbage into config.yaml. Every keyed-ness check
+ * MUST go through this helper.
+ */
+export function getRouterKey(
+  routerKeys: Record<string, string>,
+  id: string
+): string | undefined {
+  if (!Object.prototype.hasOwnProperty.call(routerKeys, id)) return undefined;
+  const key = routerKeys[id];
+  return typeof key === "string" && key.length > 0 ? key : undefined;
+}
+
+/**
  * One-time legacy migration (spec §1): a pre-router `openRouterKey` becomes the
  * seeded `openrouter` provider + routerKeys entry, preserving today's exact kimi
  * wiring. The legacy fields are left in place as an at-rest mirror. Idempotent.
@@ -1087,7 +1105,18 @@ export function migrateLegacyOpenRouter(
 ): { state: CliProxyState; secrets: CliProxySecrets; changed: boolean } {
   let changed = false;
   let nextSecrets = secrets;
-  if (secrets.openRouterKey && !secrets.routerKeys["openrouter"]) {
+  // The legacy key belongs to openrouter.ai. If a user-created provider already
+  // occupies the "openrouter" id but points at a DIFFERENT host, attaching the
+  // key would hand it to that host on the next projection — the same
+  // key-to-wrong-destination class routerKeyCheckUrl guards against. Attach only
+  // when the id is free (we seed the canonical record below) or genuinely
+  // openrouter.ai; otherwise leave the legacy field untouched for a later run.
+  const existingOpenrouter = state.routerProviders.find((p) => p.id === "openrouter");
+  if (
+    secrets.openRouterKey &&
+    !getRouterKey(secrets.routerKeys, "openrouter") &&
+    (!existingOpenrouter || isOpenRouterBaseUrl(existingOpenrouter.baseUrl))
+  ) {
     nextSecrets = {
       ...secrets,
       routerKeys: { ...secrets.routerKeys, openrouter: secrets.openRouterKey }
@@ -1096,8 +1125,8 @@ export function migrateLegacyOpenRouter(
   }
   let nextState = state;
   if (
-    nextSecrets.routerKeys["openrouter"] &&
-    !state.routerProviders.some((p) => p.id === "openrouter")
+    getRouterKey(nextSecrets.routerKeys, "openrouter") &&
+    !existingOpenrouter
   ) {
     const seeded: RouterProvider[] = [
       ...state.routerProviders,

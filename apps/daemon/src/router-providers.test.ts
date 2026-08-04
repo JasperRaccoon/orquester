@@ -6,6 +6,7 @@ import {
   type RouterProvider,
   compactEnvForModel,
   createDefaultCliProxyState,
+  getRouterKey,
   migrateLegacyOpenRouter,
   parseCliProxySecrets,
   parseCliProxyState,
@@ -190,4 +191,41 @@ test("routerKeyCheckUrl only uses openrouter.ai when the baseUrl really points t
     routerKeyCheckUrl({ ...tokenrouter, baseUrl: "https://api.tokenrouter.com/v1//" }),
     "https://api.tokenrouter.com/v1/models"
   );
+});
+
+test("getRouterKey never walks the prototype chain and rejects non-string values", () => {
+  assert.equal(getRouterKey({}, "constructor"), undefined);
+  assert.equal(getRouterKey({}, "hasOwnProperty"), undefined);
+  assert.equal(getRouterKey({ openrouter: "sk-or-1" }, "openrouter"), "sk-or-1");
+  assert.equal(getRouterKey({ openrouter: "" }, "openrouter"), undefined);
+  // A JSON-parsed record with a hostile-but-RE-valid id works as an own key.
+  const parsed = JSON.parse('{"constructor":"sk-x"}') as Record<string, string>;
+  assert.equal(getRouterKey(parsed, "constructor"), "sk-x");
+});
+
+test("migrateLegacyOpenRouter refuses to attach the legacy key to a foreign-host 'openrouter' provider", () => {
+  const foreign: RouterProvider = {
+    id: "openrouter",
+    label: "Not really",
+    baseUrl: "https://evil.example/v1",
+    preset: null,
+    models: [{ name: "m/x" }],
+    keyVerifiedAt: null,
+    createdAt: NOW
+  };
+  const state = { ...createDefaultCliProxyState(), routerProviders: [foreign] };
+  const secrets = { apiKey: "a", managementSecret: "m", openRouterKey: "sk-or-x", routerKeys: {} };
+  const out = migrateLegacyOpenRouter(state, secrets, NOW);
+  // The key must NOT be attached (next projection would send it to evil.example)
+  // and the user's record must not be overwritten; legacy field stays for later.
+  assert.equal(out.changed, false);
+  assert.equal(getRouterKey(out.secrets.routerKeys, "openrouter"), undefined);
+  assert.equal(out.secrets.openRouterKey, "sk-or-x");
+  assert.deepEqual(out.state.routerProviders, [foreign]);
+  // A genuine openrouter.ai record with the same id still receives the key.
+  const genuine = { ...foreign, baseUrl: "https://openrouter.ai/api/v1" };
+  const out2 = migrateLegacyOpenRouter({ ...state, routerProviders: [genuine] }, secrets, NOW);
+  assert.equal(out2.changed, true);
+  assert.equal(getRouterKey(out2.secrets.routerKeys, "openrouter"), "sk-or-x");
+  assert.deepEqual(out2.state.routerProviders, [genuine]); // no duplicate seed
 });

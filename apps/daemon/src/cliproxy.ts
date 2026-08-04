@@ -19,6 +19,7 @@ import {
   cliproxyDir,
   cliproxyStateFile,
   createDefaultCliProxyState,
+  getRouterKey,
   migrateLegacyOpenRouter,
   parseCliProxyState,
   resolveRouterModel,
@@ -462,7 +463,8 @@ export class CliProxyManager {
    * providers). Only a **keyed** provider is rendered into config.yaml, so only
    * that case is a projection change — and therefore restart-gated exactly like
    * {@link setConfig}: refused while daemon-managed sessions are live unless
-   * forced. An edit keeps the record's `createdAt`, `preset` and `keyVerifiedAt`.
+   * forced. An edit keeps the record's `createdAt` and `preset`; `keyVerifiedAt`
+   * survives only while the baseUrl is unchanged (a retargeted key is unverified).
    */
   upsertRouterProvider(
     input: {
@@ -484,7 +486,12 @@ export class CliProxyManager {
         // `preset` is provenance of the create-form prefill only; an edit that
         // omits it must not silently orphan the record from its preset.
         preset: input.preset ?? existing?.preset ?? null,
-        keyVerifiedAt: existing?.keyVerifiedAt ?? null,
+        // A verification stamp certifies the key against a HOST. Editing the
+        // baseUrl retargets the stored key, so the stamp is void — keep it only
+        // when the destination is unchanged (refreshRouterVerification re-earns
+        // it against the new host on the next poll).
+        keyVerifiedAt:
+          existing && existing.baseUrl === input.baseUrl ? existing.keyVerifiedAt : null,
         createdAt: existing?.createdAt ?? new Date(this.adapters.now()).toISOString()
       });
       if (!candidate.success) {
@@ -503,6 +510,10 @@ export class CliProxyManager {
       const live = this.adapters.liveDependentSessionCount();
       if (needsRestart && !force && live > 0) return { ok: false, affectedSessions: live };
       this.state.routerProviders = next;
+      // Keep the legacy at-rest mirror tracking the openrouter record's stamp.
+      if (input.id === "openrouter") {
+        this.state.openRouterKeyVerifiedAt = candidate.data.keyVerifiedAt;
+      }
       this.resetDanglingModelPicks();
       await this.afterRouterMutation(needsRestart);
       return { ok: true, affectedSessions: force && needsRestart ? live : 0 };
@@ -541,7 +552,9 @@ export class CliProxyManager {
     return this.transition(async () => {
       const provider = this.state.routerProviders.find((p) => p.id === id);
       if (!provider) return { ok: false, error: "unknown provider" };
-      const needsRestart = this.st !== "off";
+      // config.yaml only renders a provider with a key AND ≥1 model, so keying a
+      // model-less provider changes no projection the proxy reads — no restart.
+      const needsRestart = this.st !== "off" && provider.models.length > 0;
       const live = this.adapters.liveDependentSessionCount();
       if (needsRestart && !force && live > 0) return { ok: false, affectedSessions: live };
       const verdict = await this.verifyKey(provider, key);
@@ -558,7 +571,7 @@ export class CliProxyManager {
       // Legacy at-rest mirror, kept one release for rollback safety.
       if (id === "openrouter") this.state.openRouterKeyVerifiedAt = provider.keyVerifiedAt;
       await this.afterRouterMutation(needsRestart);
-      return { ok: true, affectedSessions: force ? live : 0 };
+      return { ok: true, affectedSessions: force && needsRestart ? live : 0 };
     });
   }
 
@@ -596,7 +609,7 @@ export class CliProxyManager {
       const loaded = await loadOrInitSecrets(this.daemonDir);
       if (loaded.state !== "corrupt") this.secrets = loaded.secrets;
     }
-    const key = this.secrets?.routerKeys[id];
+    const key = this.secrets ? getRouterKey(this.secrets.routerKeys, id) : undefined;
     if (!key) return { ok: false, code: "no-key", error: "no API key stored for this provider" };
     if (!this.adapters.fetchRouterModels) {
       return { ok: false, code: "upstream", error: "catalog fetch unavailable" };
@@ -607,7 +620,7 @@ export class CliProxyManager {
 
   /** Whether a key is currently stored for `id` (unknown while secrets are unloaded). */
   private hasRouterKey(id: string): boolean {
-    return Boolean(this.secrets?.routerKeys[id]);
+    return this.secrets !== null && getRouterKey(this.secrets.routerKeys, id) !== undefined;
   }
 
   /** Remove a provider's key from the secrets store, reporting a corrupt store as
@@ -624,7 +637,8 @@ export class CliProxyManager {
   /** Router providers that can actually serve a launch right now (key stored). */
   private keyedProviders(): readonly RouterProvider[] {
     if (!this.secrets) return [];
-    return this.state.routerProviders.filter((p) => Boolean(this.secrets?.routerKeys[p.id]));
+    const routerKeys = this.secrets.routerKeys;
+    return this.state.routerProviders.filter((p) => getRouterKey(routerKeys, p.id) !== undefined);
   }
 
   /**
@@ -1037,7 +1051,7 @@ export class CliProxyManager {
       for (const p of this.state.routerProviders) {
         // Only a KEYED provider reaches config.yaml, so only its models are
         // actually routable — a keyless provider must not pollute the catalog.
-        if (!this.secrets.routerKeys[p.id]) continue;
+        if (getRouterKey(this.secrets.routerKeys, p.id) === undefined) continue;
         // CLIProxyAPI routes the openai-compatibility names/aliases we configure
         // but never lists them in /v1/models — union BOTH forms in so the stored
         // catalog, validateModel and preflight all see them.
@@ -1077,7 +1091,7 @@ export class CliProxyManager {
   private async refreshRouterVerification(): Promise<void> {
     if (!this.secrets) return;
     for (const p of this.state.routerProviders) {
-      const key = this.secrets.routerKeys[p.id];
+      const key = getRouterKey(this.secrets.routerKeys, p.id);
       if (!key || p.keyVerifiedAt) continue;
       const verdict = await this.verifyKey(p, key);
       if (verdict === "ok") {
@@ -1354,7 +1368,10 @@ export class CliProxyManager {
   private keyedRouterCount(): number {
     if (!this.secrets) return 0;
     return this.state.routerProviders.filter(
-      (p) => Boolean(this.secrets?.routerKeys[p.id]) && p.models.length > 0
+      (p) =>
+        this.secrets !== null &&
+        getRouterKey(this.secrets.routerKeys, p.id) !== undefined &&
+        p.models.length > 0
     ).length;
   }
 
@@ -1368,7 +1385,12 @@ export class CliProxyManager {
       models: p.models,
       // Parity note: with the proxy disabled, secrets are not loaded and keyState
       // reads "none" — the same off-state behavior the legacy openrouter row had.
-      keyState: this.secrets?.routerKeys[p.id] ? (p.keyVerifiedAt ? "verified" : "set") : "none",
+      keyState:
+        this.secrets && getRouterKey(this.secrets.routerKeys, p.id) !== undefined
+          ? p.keyVerifiedAt
+            ? "verified"
+            : "set"
+          : "none",
       keyVerifiedAt: p.keyVerifiedAt
     }));
   }

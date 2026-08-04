@@ -331,9 +331,19 @@ test("router key routes require a key and pass force through (body for POST, que
   await app.close();
 });
 
-test("catalog route maps unknown → 404, no-key → 409, upstream → 502, and is readable over the socket", async () => {
+test("catalog route maps unknown → 404, no-key → 409, upstream → 502, and is 403 over the socket", async () => {
   const { manager, results, calls } = fakeRouterRouteManager();
-  const app = routerRouteApp("local", manager); // read-only ⇒ allowed on the unix socket
+  // Unlike the other GETs, the catalog fetch makes an OUTBOUND request with the
+  // stored key, so it follows the mutation transport rule: refused on the socket.
+  const local = routerRouteApp("local", manager);
+  await local.ready();
+  assert.equal(
+    (await local.inject({ method: "GET", url: "/api/cliproxy/providers/tokenrouter/catalog" })).statusCode,
+    403
+  );
+  await local.close();
+
+  const app = routerRouteApp("remote", manager);
   await app.ready();
 
   const ok = await app.inject({ method: "GET", url: "/api/cliproxy/providers/tokenrouter/catalog" });

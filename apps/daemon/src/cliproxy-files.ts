@@ -7,7 +7,8 @@ import {
   MODEL_NAME_RE,
   cliproxyDir,
   cliproxyHomeDir,
-  cliproxyTokenFile
+  cliproxyTokenFile,
+  getRouterKey
 } from "@orquester/config";
 
 /** Marker file written into each managed home; content is the entry id. */
@@ -56,7 +57,7 @@ const KIMI_PICK = "kimi-k3";
 function kimiProvider(state: CliProxyState, secrets: CliProxySecrets): { label: string } | undefined {
   return state.routerProviders.find(
     (p) =>
-      Boolean(secrets.routerKeys[p.id]) &&
+      getRouterKey(secrets.routerKeys, p.id) !== undefined &&
       p.models.some((m) => m.name === KIMI_PICK || m.alias === KIMI_PICK)
   );
 }
@@ -93,17 +94,17 @@ export function renderConfigYaml(secrets: CliProxySecrets, state: CliProxyState)
     "api-keys:",
     `  - ${JSON.stringify(secrets.apiKey)}`
   ];
-  const keyed = state.routerProviders.filter(
-    (p) => Boolean(secrets.routerKeys[p.id]) && p.models.length > 0
-  );
+  const keyed = state.routerProviders
+    .map((p) => ({ p, key: getRouterKey(secrets.routerKeys, p.id) }))
+    .filter((e): e is { p: (typeof e)["p"]; key: string } => e.key !== undefined && e.p.models.length > 0);
   if (keyed.length > 0) {
     lines.push("openai-compatibility:");
-    for (const p of keyed) {
+    for (const { p, key } of keyed) {
       lines.push(
         `  - name: ${JSON.stringify(p.id)}`,
         `    base-url: ${JSON.stringify(p.baseUrl)}`,
         "    api-key-entries:",
-        `      - api-key: ${JSON.stringify(secrets.routerKeys[p.id])}`,
+        `      - api-key: ${JSON.stringify(key)}`,
         // `models` is a PROVIDER-level key (sibling of api-key-entries). Nested
         // under an entry it parses fine but registers ZERO models — the provider
         // loads and every request 502s "unknown provider for model <alias>".
