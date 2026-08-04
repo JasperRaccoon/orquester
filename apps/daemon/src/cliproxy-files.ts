@@ -48,11 +48,32 @@ function assertModel(name: string, label: string): void {
   }
 }
 
+/** The model id the Fable `/model` slot and the managed `kimi` subagent pin. */
+const KIMI_PICK = "kimi-k3";
+
+/** The router provider (if any) that is keyed AND serves the `kimi-k3` pick,
+ *  by full name or alias. Drives the Fable slot's label. */
+function kimiProvider(state: CliProxyState, secrets: CliProxySecrets): { label: string } | undefined {
+  return state.routerProviders.find(
+    (p) =>
+      Boolean(secrets.routerKeys[p.id]) &&
+      p.models.some((m) => m.name === KIMI_PICK || m.alias === KIMI_PICK)
+  );
+}
+
+/** True when some keyed router provider serves the `kimi-k3` pick (name or alias) —
+ *  the Fable-slot / managed-kimi gate, preserving the legacy OpenRouter behavior. */
+export function routerKimiAvailable(state: CliProxyState, secrets: CliProxySecrets): boolean {
+  return kimiProvider(state, secrets) !== undefined;
+}
+
 /**
  * Render the proxy's `config.yaml`. The proxy runs with cwd = the cliproxy dir,
- * so `auth-dir`/log paths are relative. The `openai-compatibility` provider
- * (with the `kimi-k3 → moonshotai/kimi-k3` alias) is emitted only when an
- * OpenRouter key is configured — no key means no block and no alias.
+ * so `auth-dir`/log paths are relative. Every user-defined router provider that
+ * has a stored API key and at least one model becomes an `openai-compatibility`
+ * entry — no key (or no models) means no entry and no aliases. The legacy
+ * `secrets.openRouterKey` is NOT read here; the manager migrates it into a
+ * `routerProviders` record (it stays on disk only as a rollback mirror).
  */
 export function renderConfigYaml(secrets: CliProxySecrets, state: CliProxyState): string {
   const lines: string[] = [
@@ -72,26 +93,40 @@ export function renderConfigYaml(secrets: CliProxySecrets, state: CliProxyState)
     "api-keys:",
     `  - ${JSON.stringify(secrets.apiKey)}`
   ];
-  if (secrets.openRouterKey) {
-    lines.push(
-      "openai-compatibility:",
-      '  - name: "openrouter"',
-      '    base-url: "https://openrouter.ai/api/v1"',
-      "    api-key-entries:",
-      `      - api-key: ${JSON.stringify(secrets.openRouterKey)}`,
-      // `models` is a PROVIDER-level key (sibling of api-key-entries). Nested
-      // under an entry it parses fine but registers ZERO models — the provider
-      // loads and every request 502s "unknown provider for model kimi-k3".
-      "    models:",
-      '      - name: "moonshotai/kimi-k3"',
-      '        alias: "kimi-k3"'
-    );
+  const keyed = state.routerProviders.filter(
+    (p) => Boolean(secrets.routerKeys[p.id]) && p.models.length > 0
+  );
+  if (keyed.length > 0) {
+    lines.push("openai-compatibility:");
+    for (const p of keyed) {
+      lines.push(
+        `  - name: ${JSON.stringify(p.id)}`,
+        `    base-url: ${JSON.stringify(p.baseUrl)}`,
+        "    api-key-entries:",
+        `      - api-key: ${JSON.stringify(secrets.routerKeys[p.id])}`,
+        // `models` is a PROVIDER-level key (sibling of api-key-entries). Nested
+        // under an entry it parses fine but registers ZERO models — the provider
+        // loads and every request 502s "unknown provider for model <alias>".
+        "    models:"
+      );
+      for (const m of p.models) {
+        lines.push(`      - name: ${JSON.stringify(m.name)}`);
+        if (m.alias) lines.push(`        alias: ${JSON.stringify(m.alias)}`);
+      }
+    }
   }
   return lines.join("\n") + "\n";
 }
 
 function renderEnvFile(entries: Array<[string, string]>): string {
   return entries.map(([k, v]) => `${k}=${v}`).join("\n") + "\n";
+}
+
+/** Collapse a user-supplied provider label to one safe env-file line: a newline
+ *  would append a forged `KEY=VALUE` row, and other control chars are noise. */
+function envSafeLabel(label: string): string {
+  const cleaned = label.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
+  return cleaned.slice(0, 64) || "router";
 }
 
 /** POSIX-sh wrapper for MANUAL shell use only (not the Orquester launch path): parses
@@ -132,6 +167,14 @@ export async function writeProjections(
 ): Promise<void> {
   assertModel(state.defaultModel, "default");
   assertModel(state.backgroundModel, "background");
+  // Router model names/aliases reach config.yaml (and, via the Fable slot, an
+  // env file) — validate them on the same charset before any write.
+  for (const p of state.routerProviders) {
+    for (const m of p.models) {
+      assertModel(m.name, `router ${p.id}`);
+      if (m.alias) assertModel(m.alias, `router ${p.id} alias`);
+    }
+  }
 
   const dir = cliproxyDir(daemonDir);
   const baseUrl = `http://127.0.0.1:${state.port}`;
@@ -141,6 +184,10 @@ export async function writeProjections(
   const tokenFile = cliproxyTokenFile(daemonDir);
   const claudexHome = cliproxyHomeDir(daemonDir, "claudex");
   const claudemixHome = cliproxyHomeDir(daemonDir, "claudemix");
+  // Provider labels are free-form user text that lands in an env-file VALUE;
+  // a newline in one would smuggle an extra `KEY=VALUE` row into claudex.env.
+  const kimiFound = kimiProvider(state, secrets);
+  const kimiServer = kimiFound ? { label: envSafeLabel(kimiFound.label) } : undefined;
 
   await writeHardened(join(dir, "config.yaml"), renderConfigYaml(secrets, state), 0o600);
   await writeHardened(tokenFile, `${secrets.apiKey}\n`, 0o600);
@@ -154,18 +201,18 @@ export async function writeProjections(
     // Remap the /model picker's named slots to the curated GPT set: the stock
     // Claude tier rows are dead ends in the GPT launcher (they'd send Claude
     // model ids through the Codex credential). Kimi rides the Fable slot only
-    // while an OpenRouter key exists to serve it.
+    // while some keyed router provider serves it.
     ["ANTHROPIC_DEFAULT_OPUS_MODEL", "gpt-5.6-sol"],
     ["ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", "GPT-5.6 Sol"],
     ["ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION", "OpenAI flagship — deepest reasoning"],
     ["ANTHROPIC_DEFAULT_SONNET_MODEL", "gpt-5.6-terra"],
     ["ANTHROPIC_DEFAULT_SONNET_MODEL_NAME", "GPT-5.6 Terra"],
     ["ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION", "Balanced everyday coding"],
-    ...(secrets.openRouterKey
+    ...(kimiServer
       ? ([
-          ["ANTHROPIC_DEFAULT_FABLE_MODEL", "kimi-k3"],
+          ["ANTHROPIC_DEFAULT_FABLE_MODEL", KIMI_PICK],
           ["ANTHROPIC_DEFAULT_FABLE_MODEL_NAME", "Kimi K3"],
-          ["ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION", "Moonshot Kimi via OpenRouter"]
+          ["ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION", `Moonshot Kimi via ${kimiServer.label}`]
         ] as Array<[string, string]>)
       : []),
     // No CLAUDE_CODE_SUBAGENT_MODEL pin: unset, subagents inherit the session's
@@ -340,19 +387,19 @@ async function mergeManagedSettings(home: string): Promise<void> {
  *  per-subagent model mechanism Claude Code supports, and it accepts arbitrary
  *  ids (verified 2026-07-25 through the proxy on all three routes: main on
  *  fable, subagents on luna/kimi). Kimi is gated like its /model picker slot —
- *  only while an OpenRouter key exists to serve it; unknown key state leaves
- *  the file as-is. User agents under other filenames are never touched. */
+ *  only while some keyed router provider serves `kimi-k3`; unknown key state
+ *  leaves the file as-is. User agents under other filenames are never touched. */
 const MANAGED_AGENTS: Array<{
   file: string;
   name: string;
   model: string;
   blurb: string;
-  openRouterGated?: boolean;
+  kimiGated?: boolean;
 }> = [
   { file: "gpt-sol.md", name: "gpt-sol", model: "gpt-5.6-sol", blurb: "GPT-5.6 Sol (OpenAI flagship — deepest reasoning)" },
   { file: "gpt-terra.md", name: "gpt-terra", model: "gpt-5.6-terra", blurb: "GPT-5.6 Terra (balanced everyday coding)" },
   { file: "gpt-luna.md", name: "gpt-luna", model: "gpt-5.6-luna", blurb: "GPT-5.6 Luna (fast, low cost)" },
-  { file: "kimi.md", name: "kimi", model: "kimi-k3", blurb: "Kimi K3 via OpenRouter (1M-token context)", openRouterGated: true }
+  { file: "kimi.md", name: "kimi", model: KIMI_PICK, blurb: "Kimi K3 via the configured router (1M-token context)", kimiGated: true }
 ];
 
 function renderManagedAgent(agent: (typeof MANAGED_AGENTS)[number]): string {
@@ -374,15 +421,15 @@ function renderManagedAgent(agent: (typeof MANAGED_AGENTS)[number]): string {
  *  session of that home): tells the orchestrating Claude how to reach the
  *  non-Claude models — without it, models improvise (codex/opencode CLIs,
  *  pkill) instead of using the seeded subagent types. Claudex needs no note:
- *  its main loop already IS the GPT set. Skipped while the OpenRouter key
+ *  its main loop already IS the GPT set. Skipped while the router key
  *  state is unknown so kimi mentions can't flap on a secrets-less boot. */
-function renderManagedMemory(openRouterKimi: boolean): string {
-  const kimiAgent = openRouterKimi ? ', "kimi" (Kimi K3 — 1M-token context via OpenRouter)' : "";
-  const kimiModel = openRouterKimi ? ", kimi-k3" : "";
+function renderManagedMemory(kimiAvailable: boolean): string {
+  const kimiAgent = kimiAvailable ? ', "kimi" (Kimi K3 — 1M-token context via the router)' : "";
+  const kimiModel = kimiAvailable ? `, ${KIMI_PICK}` : "";
   return [
     "<!-- orq-managed: rewritten on every daemon seed pass; edits will be lost. -->",
     "",
-    "# Model proxy: delegating to GPT" + (openRouterKimi ? " / Kimi" : ""),
+    "# Model proxy: delegating to GPT" + (kimiAvailable ? " / Kimi" : ""),
     "",
     "This session runs through the Orquester model proxy, which also serves",
     "non-Claude models:",
@@ -403,11 +450,11 @@ function renderManagedMemory(openRouterKimi: boolean): string {
 async function seedManagedMemory(
   home: string,
   entryId: "claudex" | "claudemix",
-  openRouterKimi: boolean | undefined
+  kimiAvailable: boolean | undefined
 ): Promise<void> {
-  if (entryId !== "claudemix" || openRouterKimi === undefined) return;
+  if (entryId !== "claudemix" || kimiAvailable === undefined) return;
   const file = join(home, "CLAUDE.md");
-  const content = renderManagedMemory(openRouterKimi);
+  const content = renderManagedMemory(kimiAvailable);
   try {
     if ((await readFile(file, "utf8")) === content) return; // no write churn
   } catch {
@@ -416,14 +463,14 @@ async function seedManagedMemory(
   await writeFile(file, content, { mode: 0o600 });
 }
 
-async function seedManagedAgents(home: string, openRouterKimi: boolean | undefined): Promise<void> {
+async function seedManagedAgents(home: string, kimiAvailable: boolean | undefined): Promise<void> {
   const dir = join(home, "agents");
   await mkdir(dir, { recursive: true });
   for (const agent of MANAGED_AGENTS) {
     const file = join(dir, agent.file);
-    if (agent.openRouterGated) {
-      if (openRouterKimi === undefined) continue; // key state unknown — don't churn
-      if (!openRouterKimi) {
+    if (agent.kimiGated) {
+      if (kimiAvailable === undefined) continue; // key state unknown — don't churn
+      if (!kimiAvailable) {
         await rm(file, { force: true });
         continue;
       }
@@ -456,9 +503,10 @@ export async function seedHome(
   // be conflated again (reading `<dir>/.claude.json` silently seeded nothing
   // in production and every proxy session got the onboarding flow).
   systemClaudeConfigFile: string,
-  // Whether an OpenRouter key exists (gates the managed kimi subagent);
-  // undefined = secrets not loaded, leave the kimi file untouched.
-  openRouterKimi?: boolean
+  // Whether some keyed router provider serves `kimi-k3` (gates the managed kimi
+  // subagent); undefined = secrets not loaded, leave the kimi file untouched.
+  // See routerKimiAvailable().
+  kimiAvailable?: boolean
 ): Promise<void> {
   const home = cliproxyHomeDir(daemonDir, entryId);
   const markerPath = join(home, CLIPROXY_HOME_MARKER);
@@ -493,6 +541,6 @@ export async function seedHome(
   await ensureSymlink(join(systemClaudeDir, "plugins"), join(home, "plugins"));
   await copyIfMissing(join(systemClaudeDir, "settings.json"), join(home, "settings.json"));
   await mergeManagedSettings(home);
-  await seedManagedAgents(home, openRouterKimi);
-  await seedManagedMemory(home, entryId, openRouterKimi);
+  await seedManagedAgents(home, kimiAvailable);
+  await seedManagedMemory(home, entryId, kimiAvailable);
 }

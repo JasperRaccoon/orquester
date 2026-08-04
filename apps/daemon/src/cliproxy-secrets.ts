@@ -83,17 +83,60 @@ export async function loadOrInitSecrets(daemonDir: string): Promise<LoadSecretsR
   return { state: "created", secrets };
 }
 
-/**
- * Set (or clear) the OpenRouter key, preserving the local API key and management
- * secret, and rewrite `secrets.json` with the same hardening. A corrupt store
- * throws — callers must not silently regenerate over it.
- */
-export async function setOpenRouterKey(daemonDir: string, key: string): Promise<CliProxySecrets> {
+/** Rewrite the whole secrets file with the standard hardening (corrupt store throws). */
+export async function writeSecrets(daemonDir: string, secrets: CliProxySecrets): Promise<void> {
+  await writeSecretFile(cliproxySecretsFile(daemonDir), JSON.stringify(secrets, null, 2), 0o600);
+}
+
+async function loadForMutation(daemonDir: string): Promise<CliProxySecrets> {
   const loaded = await loadOrInitSecrets(daemonDir);
   if (loaded.state === "corrupt") {
     throw new Error("cliproxy secrets are corrupt; refusing to overwrite");
   }
-  const next: CliProxySecrets = { ...loaded.secrets, openRouterKey: key };
-  await writeSecretFile(cliproxySecretsFile(daemonDir), JSON.stringify(next, null, 2), 0o600);
+  return loaded.secrets;
+}
+
+/**
+ * Set a router provider's API key. `openrouter` also maintains the legacy
+ * at-rest mirror (`openRouterKey`) for one-release rollback safety.
+ */
+export async function setRouterKey(
+  daemonDir: string,
+  providerId: string,
+  key: string
+): Promise<CliProxySecrets> {
+  const secrets = await loadForMutation(daemonDir);
+  const next: CliProxySecrets = {
+    ...secrets,
+    routerKeys: { ...secrets.routerKeys, [providerId]: key },
+    ...(providerId === "openrouter" ? { openRouterKey: key } : {})
+  };
+  await writeSecrets(daemonDir, next);
   return next;
+}
+
+/** Remove a router provider's API key (and the legacy mirror for `openrouter`). */
+export async function clearRouterKey(
+  daemonDir: string,
+  providerId: string
+): Promise<CliProxySecrets> {
+  const secrets = await loadForMutation(daemonDir);
+  const routerKeys = { ...secrets.routerKeys };
+  delete routerKeys[providerId];
+  const next: CliProxySecrets = {
+    ...secrets,
+    routerKeys,
+    ...(providerId === "openrouter" ? { openRouterKey: null } : {})
+  };
+  await writeSecrets(daemonDir, next);
+  return next;
+}
+
+/**
+ * LEGACY wrapper — callers migrate to `setRouterKey`; deleted in cleanup (Task 12).
+ * Preserves the old behavior exactly: the OpenRouter key lands in `routerKeys`
+ * and in the legacy mirror field.
+ */
+export async function setOpenRouterKey(daemonDir: string, key: string): Promise<CliProxySecrets> {
+  return setRouterKey(daemonDir, "openrouter", key);
 }

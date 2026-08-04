@@ -8,9 +8,10 @@ import {
   createDefaultCliProxyState,
   cliproxyTokenFile,
   cliproxyHomeDir,
-  type CliProxySecrets
+  type CliProxySecrets,
+  type RouterProvider
 } from "@orquester/config";
-import { renderConfigYaml, writeProjections, seedHome } from "./cliproxy-files.ts";
+import { renderConfigYaml, routerKimiAvailable, writeProjections, seedHome } from "./cliproxy-files.ts";
 
 async function makeDir() {
   return mkdtemp(join(tmpdir(), "orq-cliproxy-files-"));
@@ -23,8 +24,18 @@ const secrets: CliProxySecrets = {
   routerKeys: {}
 };
 
-test("config.yaml render: no openrouter block without key; block + alias with key; bodies logging off", () => {
-  const state = createDefaultCliProxyState();
+const openrouterProvider: RouterProvider = {
+  id: "openrouter",
+  label: "OpenRouter",
+  baseUrl: "https://openrouter.ai/api/v1",
+  preset: "openrouter",
+  models: [{ name: "moonshotai/kimi-k3", alias: "kimi-k3" }],
+  keyVerifiedAt: null,
+  createdAt: "t"
+};
+
+test("config.yaml render: no router block without a key; block + alias with a key; bodies logging off", () => {
+  const state = { ...createDefaultCliProxyState(), routerProviders: [openrouterProvider] };
   const y1 = renderConfigYaml(secrets, state);
   assert.ok(y1.includes("127.0.0.1"), "loopback host");
   assert.ok(y1.includes(String(state.port)), "port");
@@ -32,14 +43,98 @@ test("config.yaml render: no openrouter block without key; block + alias with ke
   assert.ok(y1.includes("MGMT_SECRET"), "management secret");
   assert.ok(/log-request-body:\s*false/.test(y1), "request bodies off");
   assert.ok(/log-response-body:\s*false/.test(y1), "response bodies off");
-  assert.ok(!y1.includes("openai-compatibility"), "no openrouter block without key");
-  assert.ok(!y1.includes("kimi-k3"), "no alias without key");
+  assert.ok(!y1.includes("openai-compatibility"), "no router block without a key");
+  assert.ok(!y1.includes("kimi-k3"), "no alias without a key");
 
-  const y2 = renderConfigYaml({ ...secrets, openRouterKey: "OR_KEY" }, state);
-  assert.ok(y2.includes("openai-compatibility"), "openrouter block present");
-  assert.ok(y2.includes("OR_KEY"), "openrouter key present");
+  const y2 = renderConfigYaml({ ...secrets, routerKeys: { openrouter: "OR_KEY" } }, state);
+  assert.ok(y2.includes("openai-compatibility"), "router block present");
+  assert.ok(y2.includes("OR_KEY"), "router key present");
   assert.ok(y2.includes("kimi-k3"), "alias present");
   assert.ok(y2.includes("moonshotai/kimi-k3"), "resolved model present");
+
+  // The legacy field alone no longer projects anything — routerProviders is the
+  // only source of truth (the manager migrates openRouterKey into one).
+  assert.ok(
+    !renderConfigYaml({ ...secrets, openRouterKey: "OR_KEY" }, createDefaultCliProxyState()).includes(
+      "openai-compatibility"
+    ),
+    "legacy key alone renders no provider block"
+  );
+});
+
+test("renderConfigYaml emits one openai-compatibility entry per keyed provider with models", () => {
+  const state = {
+    ...createDefaultCliProxyState(),
+    routerProviders: [
+      openrouterProvider,
+      {
+        id: "tokenrouter",
+        label: "TokenRouter",
+        baseUrl: "https://api.tokenrouter.com/v1",
+        preset: "tokenrouter" as const,
+        models: [{ name: "moonshotai/kimi-k3-free" }],
+        keyVerifiedAt: null,
+        createdAt: "t"
+      },
+      {
+        id: "keyless",
+        label: "NoKey",
+        baseUrl: "https://x.example/v1",
+        preset: null,
+        models: [{ name: "m/x" }],
+        keyVerifiedAt: null,
+        createdAt: "t"
+      },
+      {
+        id: "modelless",
+        label: "NoModels",
+        baseUrl: "https://y.example/v1",
+        preset: null,
+        models: [],
+        keyVerifiedAt: null,
+        createdAt: "t"
+      }
+    ]
+  };
+  const s = { ...secrets, routerKeys: { openrouter: "sk-or-1", tokenrouter: "sk-tr-1", modelless: "sk-m-1" } };
+  const yaml = renderConfigYaml(s, state);
+  assert.match(yaml, /name: "openrouter"/);
+  assert.match(yaml, /name: "tokenrouter"/);
+  assert.match(yaml, /base-url: "https:\/\/api\.tokenrouter\.com\/v1"/);
+  assert.match(yaml, /alias: "kimi-k3"/);
+  assert.match(yaml, /- api-key: "sk-tr-1"/);
+  assert.doesNotMatch(yaml, /keyless/, "keyless provider skipped");
+  assert.doesNotMatch(yaml, /modelless/, "provider with no models skipped");
+  // Exactly one `openai-compatibility:` header for all providers.
+  assert.equal(yaml.match(/^openai-compatibility:$/gm)?.length, 1);
+  // models stays PROVIDER-level: exactly one indent level under the provider item
+  assert.match(yaml, /    models:\n      - name: "moonshotai\/kimi-k3"/);
+});
+
+test("routerKimiAvailable tracks a keyed provider serving kimi-k3 by name or alias", () => {
+  const state = { ...createDefaultCliProxyState(), routerProviders: [openrouterProvider] };
+  assert.equal(routerKimiAvailable(state, secrets), false, "no key → unavailable");
+  assert.equal(
+    routerKimiAvailable(state, { ...secrets, routerKeys: { openrouter: "k" } }),
+    true,
+    "keyed provider with the kimi-k3 alias → available"
+  );
+  const byName = {
+    ...createDefaultCliProxyState(),
+    routerProviders: [
+      { ...openrouterProvider, id: "tr", label: "TokenRouter", models: [{ name: "kimi-k3" }] }
+    ]
+  };
+  assert.equal(routerKimiAvailable(byName, { ...secrets, routerKeys: { tr: "k" } }), true, "bare name matches");
+  const other = {
+    ...createDefaultCliProxyState(),
+    routerProviders: [{ ...openrouterProvider, models: [{ name: "moonshotai/kimi-k3-free" }] }]
+  };
+  assert.equal(
+    routerKimiAvailable(other, { ...secrets, routerKeys: { openrouter: "k" } }),
+    false,
+    "a different model id does not arm the kimi-k3 slot"
+  );
 });
 
 test("projections: token==apiKey; claudex.env contains ANTHROPIC_MODEL + CLAUDE_CONFIG_DIR; claudemix.env has haiku=backgroundModel and NO ANTHROPIC_MODEL", async () => {
@@ -73,10 +168,99 @@ test("projections: token==apiKey; claudex.env contains ANTHROPIC_MODEL + CLAUDE_
   assert.ok(claudex.includes("ENABLE_TOOL_SEARCH=true"), "claudex tool search on");
   assert.ok(claudemix.includes("ENABLE_TOOL_SEARCH=true"), "claudemix tool search on");
 
-  // With an OpenRouter key, claudex gains the Kimi Fable slot.
-  await writeProjections(dir, { ...secrets, openRouterKey: "OR_KEY" }, state);
+  // With a keyed router provider serving kimi-k3, claudex gains the Fable slot.
+  await writeProjections(
+    dir,
+    { ...secrets, routerKeys: { openrouter: "OR_KEY" } },
+    { ...state, routerProviders: [openrouterProvider] }
+  );
   const claudexOr = await readFile(join(dir, "env", "claudex.env"), "utf8");
   assert.ok(claudexOr.includes("ANTHROPIC_DEFAULT_FABLE_MODEL=kimi-k3"), "kimi slot with a key");
+});
+
+test("claudex.env Fable slot follows kimi-k3 availability across providers", async () => {
+  const dir = await makeDir();
+  const state = createDefaultCliProxyState();
+  const envFile = join(dir, "env", "claudex.env");
+
+  // A keyed provider serving the kimi-k3 alias arms the slot, labelled with the
+  // provider that actually serves it.
+  await writeProjections(
+    dir,
+    { ...secrets, routerKeys: { openrouter: "OR_KEY" } },
+    { ...state, routerProviders: [openrouterProvider] }
+  );
+  const armed = await readFile(envFile, "utf8");
+  assert.ok(armed.includes("ANTHROPIC_DEFAULT_FABLE_MODEL=kimi-k3"), "fable slot armed");
+  assert.ok(armed.includes("ANTHROPIC_DEFAULT_FABLE_MODEL_NAME=Kimi K3"), "fable slot named");
+  assert.ok(
+    armed.includes("ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION=Moonshot Kimi via OpenRouter"),
+    "fable description names the serving provider"
+  );
+
+  // A different provider serving the same pick relabels the slot.
+  await writeProjections(
+    dir,
+    { ...secrets, routerKeys: { tokenrouter: "TR_KEY" } },
+    {
+      ...state,
+      routerProviders: [
+        {
+          id: "tokenrouter",
+          label: "TokenRouter",
+          baseUrl: "https://api.tokenrouter.com/v1",
+          preset: "tokenrouter",
+          models: [{ name: "moonshotai/kimi-k3", alias: "kimi-k3" }],
+          keyVerifiedAt: null,
+          createdAt: "t"
+        }
+      ]
+    }
+  );
+  const relabelled = await readFile(envFile, "utf8");
+  assert.ok(
+    relabelled.includes("ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION=Moonshot Kimi via TokenRouter"),
+    "fable description follows the serving provider"
+  );
+
+  // No provider serves kimi-k3 → no Fable rows at all.
+  await writeProjections(
+    dir,
+    { ...secrets, routerKeys: { tokenrouter: "TR_KEY" } },
+    {
+      ...state,
+      routerProviders: [
+        {
+          id: "tokenrouter",
+          label: "TokenRouter",
+          baseUrl: "https://api.tokenrouter.com/v1",
+          preset: "tokenrouter",
+          models: [{ name: "moonshotai/kimi-k3-free" }],
+          keyVerifiedAt: null,
+          createdAt: "t"
+        }
+      ]
+    }
+  );
+  const disarmed = await readFile(envFile, "utf8");
+  assert.ok(!disarmed.includes("ANTHROPIC_DEFAULT_FABLE_MODEL"), "no fable rows without a kimi-k3 provider");
+});
+
+test("writeProjections rejects a poisoned router model name or alias", async () => {
+  const dir = await makeDir();
+  const state = createDefaultCliProxyState();
+  await assert.rejects(() =>
+    writeProjections(dir, { ...secrets, routerKeys: { openrouter: "k" } }, {
+      ...state,
+      routerProviders: [{ ...openrouterProvider, models: [{ name: "x; rm -rf" }] }]
+    })
+  );
+  await assert.rejects(() =>
+    writeProjections(dir, { ...secrets, routerKeys: { openrouter: "k" } }, {
+      ...state,
+      routerProviders: [{ ...openrouterProvider, models: [{ name: "ok/model", alias: "bad alias" }] }]
+    })
+  );
 });
 
 test("wrapper: generated script has no 'source', reads token file path, claudex handles --model", async () => {
@@ -186,7 +370,7 @@ test("seedHome: scrubs model-routing env keys from a copied settings.json, keeps
   assert.equal(healed.env.CLAUDE_CODE_SUBAGENT_MODEL, undefined, "existing home healed on re-seed");
 });
 
-test("seedHome: seeds managed model-pinned subagents; kimi rides the OpenRouter flag", async () => {
+test("seedHome: seeds managed model-pinned subagents; kimi rides the router availability flag", async () => {
   const dir = await makeDir();
   const sysDir = await mkdtemp(join(tmpdir(), "orq-sysclaude-"));
   await writeFile(join(sysDir, ".claude.json"), "{}");
