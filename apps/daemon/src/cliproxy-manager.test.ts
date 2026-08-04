@@ -17,7 +17,7 @@ import {
 } from "@orquester/config";
 import Fastify from "fastify";
 import { writeProjections } from "./cliproxy-files.ts";
-import { setOpenRouterKey as realSetOpenRouterKey } from "./cliproxy-secrets.ts";
+import { setRouterKey as realSetRouterKey } from "./cliproxy-secrets.ts";
 import type { CliProxyProviderStatus, CliProxyStatus } from "@orquester/api";
 import { SYSTEM_ACCOUNT_ID } from "@orquester/api";
 import type { RegistryService } from "./registry.ts";
@@ -82,6 +82,13 @@ function setup() {
     provider: RouterProvider,
     key: string
   ) => Promise<"ok" | "rejected" | "unknown"> = async () => "unknown";
+  let fetchRouterModelsImpl: (
+    provider: RouterProvider,
+    key: string
+  ) => Promise<{ ok: true; models: string[] } | { ok: false; error: string }> = async () => ({
+    ok: false,
+    error: "not stubbed"
+  });
   const sysDir = join(root, "sysclaude");
 
   const mgr = new CliProxyManager({
@@ -97,6 +104,7 @@ function setup() {
       now: () => clock,
       sleep: async () => {},
       verifyRouterKey: (provider: RouterProvider, key: string) => verifyRouterImpl(provider, key),
+      fetchRouterModels: (provider: RouterProvider, key: string) => fetchRouterModelsImpl(provider, key),
       install: () => installImpl(),
       rollback: () => {
         rollbackCount++;
@@ -144,6 +152,14 @@ function setup() {
       f: (provider: RouterProvider, key: string) => Promise<"ok" | "rejected" | "unknown">
     ) => {
       verifyRouterImpl = f;
+    },
+    setFetchRouterModels: (
+      f: (
+        provider: RouterProvider,
+        key: string
+      ) => Promise<{ ok: true; models: string[] } | { ok: false; error: string }>
+    ) => {
+      fetchRouterModelsImpl = f;
     },
     sysDir
   };
@@ -976,6 +992,260 @@ test("claudex coupling: a KEYLESS router provider + a claude account → disable
   assert.equal(lastClaudemix?.enabled, true, "claudemix still satisfied by the claude account");
 });
 
+// --- Task 5: router provider mutations (upsert/delete/key/catalog) ------------
+
+/** Boot a healthy, tmux-adopted manager over a persisted router-provider set. */
+async function initWithRouters(
+  h: ReturnType<typeof setup>,
+  providers: RouterProvider[],
+  routerKeys: Record<string, string> = {},
+  statePatch: Partial<CliProxyState> = {}
+): Promise<void> {
+  await writeEnabledState(h.daemonDir, { routerProviders: providers, ...statePatch });
+  await writeSecretsFile(h.daemonDir, { routerKeys });
+  h.setHasService(true); // adopt an already-running proxy → healthy (mutations are restart-gated)
+  h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
+  await h.mgr.init();
+}
+
+test("upsertRouterProvider: validates the record, restart-gates a KEYED change, and persists", async () => {
+  const h = setup();
+  await initWithRouters(
+    h,
+    [routerProvider("tokenrouter", { models: [{ name: "vendor/a" }] })],
+    { tokenrouter: "sk-tr" }
+  );
+  assert.equal(h.mgr.status().state, "healthy");
+
+  const reserved = await h.mgr.upsertRouterProvider(
+    { id: "codex", label: "Codex", baseUrl: "https://x.example/v1", models: [] },
+    false
+  );
+  assert.equal(reserved.ok, false);
+  assert.match(reserved.error ?? "", /reserved/);
+
+  // A model already served by another provider would make routing ambiguous.
+  const clash = await h.mgr.upsertRouterProvider(
+    { id: "other", label: "Other", baseUrl: "https://o.example/v1", models: [{ name: "vendor/a" }] },
+    false
+  );
+  assert.equal(clash.ok, false);
+  assert.match(clash.error ?? "", /vendor\/a/);
+
+  const badUrl = await h.mgr.upsertRouterProvider(
+    { id: "other", label: "Other", baseUrl: "ftp://o.example", models: [] },
+    false
+  );
+  assert.equal(badUrl.ok, false);
+  assert.ok(badUrl.error, "a schema failure reports an error, not a session gate");
+
+  // Nothing invalid reached the state.
+  assert.deepEqual(h.mgr.status().routerProviders.map((p) => p.id), ["tokenrouter"]);
+
+  // Editing a KEYED provider re-projects config.yaml → restart-gated.
+  const edit = {
+    id: "tokenrouter",
+    label: "TokenRouter",
+    baseUrl: "https://api.tokenrouter.com/v1",
+    models: [{ name: "vendor/a" }, { name: "vendor/b" }]
+  };
+  h.setLive(2);
+  const gated = await h.mgr.upsertRouterProvider(edit, false);
+  assert.deepEqual(gated, { ok: false, affectedSessions: 2 });
+
+  const spawnsBefore = h.tmuxCalls.newService;
+  const forced = await h.mgr.upsertRouterProvider(edit, true);
+  assert.equal(forced.ok, true);
+  assert.equal(forced.affectedSessions, 2);
+  assert.ok(h.tmuxCalls.newService > spawnsBefore, "a keyed provider change restarts the proxy");
+
+  const persisted = parseCliProxyState(
+    JSON.parse(await readFile(cliproxyStateFile(h.daemonDir), "utf8"))
+  );
+  const saved = persisted.routerProviders.find((p) => p.id === "tokenrouter");
+  assert.equal(saved?.label, "TokenRouter");
+  assert.equal(saved?.baseUrl, "https://api.tokenrouter.com/v1");
+  assert.deepEqual(saved?.models.map((m) => m.name), ["vendor/a", "vendor/b"]);
+  assert.equal(saved?.createdAt, "2026-08-04T00:00:00.000Z", "createdAt survives an edit");
+});
+
+test("upsertRouterProvider: a KEYLESS provider is not restart-gated (it never reaches config.yaml)", async () => {
+  const h = setup();
+  await initWithRouters(h, [], {});
+  h.setLive(3);
+  const spawnsBefore = h.tmuxCalls.newService;
+  const res = await h.mgr.upsertRouterProvider(
+    { id: "tokenrouter", label: "TokenRouter", baseUrl: "https://api.tokenrouter.com/v1", models: [{ name: "vendor/a" }] },
+    false
+  );
+  assert.equal(res.ok, true, "no key → no projection change → no session gate");
+  assert.equal(h.tmuxCalls.newService, spawnsBefore, "and no proxy restart");
+  assert.equal(h.mgr.status().routerProviders.find((p) => p.id === "tokenrouter")?.keyState, "none");
+});
+
+test("setRouterKey: rejected refuses, unknown stores unverified, ok stamps keyVerifiedAt + legacy mirror", async () => {
+  const h = setup();
+  await initWithRouters(h, [
+    routerProvider("openrouter", {
+      label: "OpenRouter",
+      preset: "openrouter",
+      models: [{ name: "moonshotai/kimi-k3", alias: "kimi-k3" }]
+    })
+  ]);
+
+  const unknown = await h.mgr.setRouterKey("nope", "sk-1", true);
+  assert.equal(unknown.ok, false);
+  assert.match(unknown.error ?? "", /unknown provider/);
+
+  h.setVerifyRouter(async () => "rejected");
+  const rejected = await h.mgr.setRouterKey("openrouter", "sk-bad", true);
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.error, "OpenRouter rejected this key");
+  const secrets1 = JSON.parse(await readFile(cliproxySecretsFile(h.daemonDir), "utf8"));
+  assert.equal(secrets1.routerKeys.openrouter, undefined, "a rejected key is never stored");
+
+  // Inconclusive (network) verification stores the key but leaves it unverified.
+  h.setVerifyRouter(async () => "unknown");
+  const inconclusive = await h.mgr.setRouterKey("openrouter", "sk-maybe", true);
+  assert.equal(inconclusive.ok, true);
+  assert.equal(
+    h.mgr.status().routerProviders.find((p) => p.id === "openrouter")?.keyState,
+    "set"
+  );
+
+  h.setVerifyRouter(async () => "ok");
+  const good = await h.mgr.setRouterKey("openrouter", "sk-good", true);
+  assert.equal(good.ok, true);
+  const row = h.mgr.status().routerProviders.find((p) => p.id === "openrouter");
+  assert.equal(row?.keyState, "verified");
+  assert.ok(row?.keyVerifiedAt);
+
+  const secrets2 = JSON.parse(await readFile(cliproxySecretsFile(h.daemonDir), "utf8"));
+  assert.equal(secrets2.routerKeys.openrouter, "sk-good");
+  assert.equal(secrets2.openRouterKey, "sk-good", "legacy at-rest mirror maintained");
+  const persisted = parseCliProxyState(
+    JSON.parse(await readFile(cliproxyStateFile(h.daemonDir), "utf8"))
+  );
+  assert.equal(
+    persisted.openRouterKeyVerifiedAt,
+    row?.keyVerifiedAt,
+    "legacy state mirror follows the openrouter verification"
+  );
+});
+
+test("setRouterKey: restart-gated while dependent sessions are live", async () => {
+  const h = setup();
+  await initWithRouters(h, [routerProvider("tokenrouter", { models: [{ name: "vendor/tr" }] })]);
+  h.setLive(2);
+  const gated = await h.mgr.setRouterKey("tokenrouter", "sk-tr", false);
+  assert.deepEqual(gated, { ok: false, affectedSessions: 2 });
+  const secrets = JSON.parse(await readFile(cliproxySecretsFile(h.daemonDir), "utf8"));
+  assert.equal(secrets.routerKeys.tokenrouter, undefined, "nothing stored while gated");
+});
+
+test("clearRouterKey: keeps the provider row, drops the key, and un-satisfies the claudex gate", async () => {
+  const h = setup();
+  await initWithRouters(
+    h,
+    [routerProvider("tokenrouter", { models: [{ name: "vendor/tr" }] })],
+    { tokenrouter: "sk-tr" },
+    {
+      // A seeded claude account makes provider info known, so the gate applies.
+      seededAccounts: [
+        {
+          provider: "claude",
+          accountId: "65eebd90-01d1-4063-b743-c4a5713f5519",
+          label: "claude a",
+          prefix: "acc65eebd90"
+        }
+      ]
+    }
+  );
+  assert.equal(
+    [...h.registryCalls].reverse().find((c) => c.id === "claudex")?.enabled,
+    true,
+    "the keyed router satisfies the codex-or-router gate"
+  );
+
+  const unknown = await h.mgr.clearRouterKey("nope", true);
+  assert.equal(unknown.ok, false);
+  assert.match(unknown.error ?? "", /unknown provider/);
+
+  const res = await h.mgr.clearRouterKey("tokenrouter", true);
+  assert.equal(res.ok, true);
+  const row = h.mgr.status().routerProviders.find((p) => p.id === "tokenrouter");
+  assert.equal(row?.keyState, "none", "the provider row survives, keyless");
+  assert.equal(row?.keyVerifiedAt, null);
+  const secrets = JSON.parse(await readFile(cliproxySecretsFile(h.daemonDir), "utf8"));
+  assert.equal(secrets.routerKeys.tokenrouter, undefined);
+  const lastClaudex = [...h.registryCalls].reverse().find((c) => c.id === "claudex");
+  assert.equal(lastClaudex?.enabled, false);
+  assert.equal(lastClaudex?.disabledReason, "no codex or router credential");
+});
+
+test("deleteRouterProvider: removes provider + key and resets a model pick that pointed at it", async () => {
+  const h = setup();
+  await initWithRouters(
+    h,
+    [routerProvider("tokenrouter", { models: [{ name: "vendor/tr" }] })],
+    { tokenrouter: "sk-tr" },
+    { defaultModel: "vendor/tr" }
+  );
+  assert.equal(h.mgr.status().defaultModel, "vendor/tr");
+
+  const unknown = await h.mgr.deleteRouterProvider("nope", true);
+  assert.equal(unknown.ok, false);
+  assert.match(unknown.error ?? "", /unknown provider/);
+
+  h.setLive(1);
+  const gated = await h.mgr.deleteRouterProvider("tokenrouter", false);
+  assert.deepEqual(gated, { ok: false, affectedSessions: 1 });
+  assert.equal(h.mgr.status().routerProviders.length, 1, "nothing removed while gated");
+
+  const res = await h.mgr.deleteRouterProvider("tokenrouter", true);
+  assert.equal(res.ok, true);
+  assert.deepEqual(h.mgr.status().routerProviders, []);
+  assert.equal(
+    h.mgr.status().defaultModel,
+    "gpt-5.6-sol",
+    "a model pick that no longer resolves falls back to the curated default"
+  );
+  const secrets = JSON.parse(await readFile(cliproxySecretsFile(h.daemonDir), "utf8"));
+  assert.equal(secrets.routerKeys.tokenrouter, undefined, "the provider's key goes with it");
+  const persisted = parseCliProxyState(
+    JSON.parse(await readFile(cliproxyStateFile(h.daemonDir), "utf8"))
+  );
+  assert.deepEqual(persisted.routerProviders, []);
+  assert.equal(persisted.defaultModel, "gpt-5.6-sol");
+});
+
+test("fetchRouterCatalog: unknown id, missing key, adapter success and upstream failure", async () => {
+  const h = setup();
+  await initWithRouters(h, [routerProvider("tokenrouter"), routerProvider("keyless")], {
+    tokenrouter: "sk-tr"
+  });
+
+  const unknown = await h.mgr.fetchRouterCatalog("nope");
+  assert.deepEqual(unknown, { ok: false, code: "unknown", error: "unknown provider" });
+
+  const noKey = await h.mgr.fetchRouterCatalog("keyless");
+  assert.equal(noKey.ok, false);
+  if (!noKey.ok) assert.equal(noKey.code, "no-key");
+
+  const seen: Array<{ id: string; key: string }> = [];
+  h.setFetchRouterModels(async (provider, key) => {
+    seen.push({ id: provider.id, key });
+    return { ok: true, models: ["vendor/a", "vendor/b"] };
+  });
+  const ok = await h.mgr.fetchRouterCatalog("tokenrouter");
+  assert.deepEqual(ok, { ok: true, models: ["vendor/a", "vendor/b"] });
+  assert.deepEqual(seen, [{ id: "tokenrouter", key: "sk-tr" }], "the stored key never leaves the daemon");
+
+  h.setFetchRouterModels(async () => ({ ok: false, error: "upstream responded 500" }));
+  const bad = await h.mgr.fetchRouterCatalog("tokenrouter");
+  assert.deepEqual(bad, { ok: false, code: "upstream", error: "upstream responded 500" });
+});
+
 const SYNC_ACCOUNT = "14137047-98b2-4cf1-9b54-b18a22a85a62";
 
 /** Persist an enabled state with one seeded claude account, plus both credential
@@ -1234,7 +1504,7 @@ function fakeRouteManager(daemonDir?: string) {
     enable: 0,
     disable: [] as boolean[],
     setConfig: [] as Array<{ cfg: unknown; force: boolean }>,
-    openRouter: [] as Array<{ key: string; force: boolean }>,
+    routerKey: [] as Array<{ id: string; key: string; force: boolean }>,
     seed: [] as Array<{ req: { provider: "codex" | "claude"; accountId: string }; cred: unknown }>,
     unseed: [] as Array<{ provider: "codex" | "claude"; accountId: string }>
   };
@@ -1280,23 +1550,41 @@ function fakeRouteManager(daemonDir?: string) {
     // Mirrors the real manager's persist → re-project → gate cycle so the route
     // test's on-disk assertions (secrets.json + config.yaml) stay meaningful while
     // the route merely delegates + maps the {ok} gate to HTTP codes.
-    setOpenRouterKey: async (key: string, force: boolean) => {
-      calls.openRouter.push({ key, force });
+    setRouterKey: async (id: string, key: string, force: boolean) => {
+      calls.routerKey.push({ id, key, force });
       const live = status.activeSessionCount;
       if (live > 0 && !force) return { ok: false, affectedSessions: live };
-      const stored = await realSetOpenRouterKey(daemonDir!, key);
+      const stored = await realSetRouterKey(daemonDir!, id, key);
       let st = createDefaultCliProxyState();
       try {
         st = parseCliProxyState(JSON.parse(await readFile(cliproxyStateFile(daemonDir!), "utf8")));
       } catch {
         // no persisted state — defaults stand
       }
-      // The real manager materializes the `openrouter` router provider from the
-      // legacy key before projecting; without it config.yaml has no provider block.
+      // A key alone projects nothing: config.yaml only renders providers that
+      // exist in state. For `openrouter` the real manager materializes the record
+      // from the legacy key, which is exactly what the migration helper does.
       const migrated = migrateLegacyOpenRouter(st, stored, "2026-08-04T00:00:00.000Z");
       await writeProjections(daemonDir!, migrated.secrets, migrated.state);
       return { ok: true, affectedSessions: force ? live : 0 };
     },
+    // The remaining router mutations are exercised against their own fake in
+    // cliproxy-config.test.ts; here they only have to exist for the route
+    // manager's structural type.
+    upsertRouterProvider: async (_input: unknown, force: boolean) => ({
+      ok: true,
+      affectedSessions: force ? status.activeSessionCount : 0
+    }),
+    deleteRouterProvider: async (_id: string, force: boolean) => ({
+      ok: true,
+      affectedSessions: force ? status.activeSessionCount : 0
+    }),
+    clearRouterKey: async (_id: string, force: boolean) => ({
+      ok: true,
+      affectedSessions: force ? status.activeSessionCount : 0
+    }),
+    fetchRouterCatalog: async (_id: string) =>
+      ({ ok: true, models: [] }) as { ok: true; models: string[] },
     seedProvider: async (
       req: { provider: "codex" | "claude"; accountId: string },
       read: (provider: "codex" | "claude", accountId: string) => Promise<unknown>
@@ -1508,7 +1796,7 @@ test("unseed route is refused over the unix socket (403); no unseed, no ownershi
   await app.close();
 });
 
-test("openrouter/key route stores the key, re-projects config.yaml, and is restart-gated", async () => {
+test("router key route stores the key, re-projects config.yaml, and is restart-gated", async () => {
   const root = mkdtempSync(join(tmpdir(), "orq-cliproxy-or-"));
   const daemonDir = join(root, "daemon");
   const { manager, status } = fakeRouteManager(daemonDir);
@@ -1522,7 +1810,7 @@ test("openrouter/key route stores the key, re-projects config.yaml, and is resta
   status.activeSessionCount = 2;
   const gated = await app.inject({
     method: "POST",
-    url: "/api/cliproxy/openrouter/key",
+    url: "/api/cliproxy/providers/openrouter/key",
     payload: { key: "sk-or-abc" }
   });
   assert.equal(gated.statusCode, 409);
@@ -1532,7 +1820,7 @@ test("openrouter/key route stores the key, re-projects config.yaml, and is resta
   // Forced through: stores the key and re-projects config.yaml with the openrouter block.
   const forced = await app.inject({
     method: "POST",
-    url: "/api/cliproxy/openrouter/key",
+    url: "/api/cliproxy/providers/openrouter/key",
     payload: { key: "sk-or-abc", force: true }
   });
   assert.equal(forced.statusCode, 200);
@@ -1543,12 +1831,12 @@ test("openrouter/key route stores the key, re-projects config.yaml, and is resta
   assert.match(config, /sk-or-abc/);
 
   // A missing key is a client error.
-  const bad = await app.inject({ method: "POST", url: "/api/cliproxy/openrouter/key", payload: {} });
+  const bad = await app.inject({ method: "POST", url: "/api/cliproxy/providers/openrouter/key", payload: {} });
   assert.equal(bad.statusCode, 400);
   await app.close();
 });
 
-test("openrouter/key route is refused over the unix socket (403)", async () => {
+test("router key route is refused over the unix socket (403)", async () => {
   const daemonDir = join(mkdtempSync(join(tmpdir(), "orq-cliproxy-or-local-")), "daemon");
   const { manager } = fakeRouteManager();
   const { agentAccounts } = fakeAgentAccounts(daemonDir);
@@ -1557,7 +1845,7 @@ test("openrouter/key route is refused over the unix socket (403)", async () => {
   await app.ready();
   const res = await app.inject({
     method: "POST",
-    url: "/api/cliproxy/openrouter/key",
+    url: "/api/cliproxy/providers/openrouter/key",
     payload: { key: "sk-or-abc" }
   });
   assert.equal(res.statusCode, 403);

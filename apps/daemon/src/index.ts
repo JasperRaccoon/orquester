@@ -7,6 +7,7 @@ import type {
   BrowserSuggestionsResponse,
   BrowserSummary,
   CliProxyProviderStatus,
+  CliProxyRouterProviderRequest,
   CliProxySeedRequest,
   CliProxyStatus,
   CliProxyUnseedRequest,
@@ -109,6 +110,8 @@ import {
   type DaemonPaths,
   type RemoteConnectionConfig,
   type RemotesConfig,
+  type RouterModel,
+  type RouterProvider,
   type WorkspaceMeta,
   type WorkspacesConfig,
   accountsConfigPath,
@@ -126,6 +129,7 @@ import {
   compactEnvForModel,
   parseCliProxyState,
   MODEL_NAME_RE,
+  ROUTER_PROVIDER_ID_RE,
   resolveRouterModel,
   createDefaultClientConfig,
   createDefaultDaemonConfig,
@@ -618,7 +622,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     broadcaster,
     adapters: {
       probe: probeCliProxy,
-      verifyOpenRouterKey,
+      verifyRouterKey,
+      fetchRouterModels,
       tmux: cliproxyTmux,
       // No-tmux fallback: a direct, non-detached child that reads config.yaml from
       // the cliproxy run dir. Output is discarded (the daemon owns its own logs);
@@ -997,12 +1002,20 @@ async function probeCliProxy(
   }
 }
 
-/** Verify an OpenRouter key against openrouter.ai's key-info endpoint. Only an
- *  explicit 401/403 counts as rejection; anything else (5xx, network, timeout)
- *  is inconclusive so a flaky network can't block storing a good key. */
-async function verifyOpenRouterKey(key: string): Promise<"ok" | "rejected" | "unknown"> {
+/** Verify a router provider's key: OpenRouter has a precise key-info endpoint,
+ *  every other OpenAI-compatible gateway is probed with an authed GET /models.
+ *  Only an explicit 401/403 counts as rejection; anything else (5xx, network,
+ *  timeout) is inconclusive so a flaky network can't block storing a good key. */
+async function verifyRouterKey(
+  provider: RouterProvider,
+  key: string
+): Promise<"ok" | "rejected" | "unknown"> {
+  const url =
+    provider.preset === "openrouter"
+      ? "https://openrouter.ai/api/v1/key"
+      : `${provider.baseUrl.replace(/\/+$/, "")}/models`;
   try {
-    const res = await fetch("https://openrouter.ai/api/v1/key", {
+    const res = await fetch(url, {
       headers: { Authorization: `Bearer ${key}` },
       signal: AbortSignal.timeout(5000)
     });
@@ -1011,6 +1024,29 @@ async function verifyOpenRouterKey(key: string): Promise<"ok" | "rejected" | "un
     return "unknown";
   } catch {
     return "unknown";
+  }
+}
+
+/** Fetch a router provider's OpenAI-style `/models` catalog with its stored key —
+ *  the "browse what this router offers" surface. Only model ids come back; the
+ *  key never leaves the daemon. */
+async function fetchRouterModels(
+  provider: RouterProvider,
+  key: string
+): Promise<{ ok: true; models: string[] } | { ok: false; error: string }> {
+  try {
+    const res = await fetch(`${provider.baseUrl.replace(/\/+$/, "")}/models`, {
+      headers: { Authorization: `Bearer ${key}` },
+      signal: AbortSignal.timeout(8000)
+    });
+    if (res.status !== 200) return { ok: false, error: `upstream responded ${res.status}` };
+    const body = (await res.json().catch(() => null)) as { data?: Array<{ id?: unknown }> } | null;
+    const models = Array.isArray(body?.data)
+      ? body.data.map((m) => m.id).filter((id): id is string => typeof id === "string")
+      : [];
+    return { ok: true, models };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 }
 
@@ -1029,10 +1065,32 @@ interface CliProxyRouteManager {
     },
     force: boolean
   ): Promise<{ ok: boolean; affectedSessions?: number }>;
-  setOpenRouterKey(
+  upsertRouterProvider(
+    input: {
+      id: string;
+      label: string;
+      baseUrl: string;
+      preset?: "openrouter" | "tokenrouter" | null;
+      models: RouterModel[];
+    },
+    force: boolean
+  ): Promise<{ ok: boolean; affectedSessions?: number; error?: string }>;
+  deleteRouterProvider(
+    id: string,
+    force: boolean
+  ): Promise<{ ok: boolean; affectedSessions?: number; error?: string }>;
+  setRouterKey(
+    id: string,
     key: string,
     force: boolean
   ): Promise<{ ok: boolean; affectedSessions?: number; error?: string }>;
+  clearRouterKey(
+    id: string,
+    force: boolean
+  ): Promise<{ ok: boolean; affectedSessions?: number; error?: string }>;
+  fetchRouterCatalog(
+    id: string
+  ): Promise<{ ok: true; models: string[] } | { ok: false; code: "unknown" | "no-key" | "upstream"; error: string }>;
   seedProvider(
     req: { provider: "codex" | "claude"; accountId: string; label?: string },
     read: (provider: "codex" | "claude", accountId: string) => Promise<unknown>
@@ -1248,30 +1306,99 @@ export function registerCliProxyRoutes(
     return status;
   });
 
-  // Store the OpenRouter API key and re-project config.yaml (spec §3). The key
-  // lives in the config.yaml projection, which the proxy reads only at startup —
-  // so a change is restart-gated: refused while dependent sessions are live unless
-  // forced (disclosure alone is not quiescence, as with disable/config). The whole
-  // persist → re-project → restart cycle is owned by the manager so the in-memory
-  // secrets + provider state stay in lockstep with disk (a bare route write left
-  // them stale until the next restart).
-  app.post("/api/cliproxy/openrouter/key", async (request, reply) => {
+  // Router providers (spec 2026-08-04 §2) — user-defined OpenAI-compatible
+  // gateways (OpenRouter, TokenRouter, anything else). Provider records and their
+  // API keys both land in the config.yaml projection, which the proxy reads only
+  // at startup, so every mutation here is restart-gated exactly like config/
+  // disable: refused (409) while dependent sessions are live unless forced. The
+  // whole persist → re-project → restart cycle is owned by the manager so disk and
+  // in-memory state stay in lockstep. Keys travel in but never back out.
+
+  // Create or replace a provider. The id is path-borne (it IS the record's
+  // identity); its charset is checked here so a bad id can't reach the store.
+  app.put<{ Params: { id: string } }>("/api/cliproxy/providers/:id", async (request, reply) => {
+    if (refusedOnSocket(reply)) return;
+    const id = request.params.id;
+    if (!ROUTER_PROVIDER_ID_RE.test(id)) {
+      return reply.code(400).send({ error: "invalid provider id" });
+    }
+    const body = (request.body ?? {}) as Partial<CliProxyRouterProviderRequest> & { force?: boolean };
+    if (typeof body.label !== "string" || typeof body.baseUrl !== "string" || !Array.isArray(body.models)) {
+      return reply.code(400).send({ error: "label, baseUrl and models are required" });
+    }
+    // Per-field validation (model charset, url scheme) belongs to the manager's
+    // schema parse — the route only guarantees the shape it forwards.
+    const res = await manager.upsertRouterProvider(
+      {
+        id,
+        label: body.label,
+        baseUrl: body.baseUrl,
+        preset: body.preset ?? null,
+        models: body.models as RouterModel[]
+      },
+      Boolean(body.force)
+    );
+    if (!res.ok) {
+      // A schema/invariant complaint is a caller error (400 with the reason); a
+      // live-session gate stays a 409 refusal the UI resolves with force.
+      if (res.error) return reply.code(400).send({ error: res.error });
+      return reply.code(409).send({ ok: false, affectedSessions: res.affectedSessions });
+    }
+    return manager.status();
+  });
+
+  app.delete<{ Params: { id: string }; Querystring: { force?: string } }>(
+    "/api/cliproxy/providers/:id",
+    async (request, reply) => {
+      if (refusedOnSocket(reply)) return;
+      const res = await manager.deleteRouterProvider(request.params.id, request.query.force === "true");
+      if (!res.ok) {
+        // The only error a delete can report is an unknown id → 404.
+        if (res.error) return reply.code(404).send({ error: res.error });
+        return reply.code(409).send({ ok: false, affectedSessions: res.affectedSessions });
+      }
+      return manager.status();
+    }
+  );
+
+  app.post<{ Params: { id: string } }>("/api/cliproxy/providers/:id/key", async (request, reply) => {
     if (refusedOnSocket(reply)) return;
     const body = (request.body ?? {}) as { key?: string; force?: boolean };
     const key = typeof body.key === "string" ? body.key.trim() : "";
     if (!key) return reply.code(400).send({ error: "key is required" });
-    const res = await manager.setOpenRouterKey(key, Boolean(body.force));
+    const res = await manager.setRouterKey(request.params.id, key, Boolean(body.force));
     if (!res.ok) {
-      // A rejected key is a caller error (400 with the reason); a live-session
-      // gate stays a 409 refusal the UI resolves with force.
-      if (res.error) {
-        reply.code(400).send({ error: res.error });
-        return;
-      }
-      reply.code(409).send({ ok: false, affectedSessions: res.affectedSessions });
-      return;
+      // Unknown id or a provider-rejected key — both caller errors.
+      if (res.error) return reply.code(400).send({ error: res.error });
+      return reply.code(409).send({ ok: false, affectedSessions: res.affectedSessions });
     }
     return { ok: true, affectedSessions: res.affectedSessions ?? 0 };
+  });
+
+  app.delete<{ Params: { id: string }; Querystring: { force?: string } }>(
+    "/api/cliproxy/providers/:id/key",
+    async (request, reply) => {
+      if (refusedOnSocket(reply)) return;
+      const res = await manager.clearRouterKey(request.params.id, request.query.force === "true");
+      if (!res.ok) {
+        if (res.error) return reply.code(404).send({ error: res.error });
+        return reply.code(409).send({ ok: false, affectedSessions: res.affectedSessions });
+      }
+      return { ok: true, affectedSessions: res.affectedSessions ?? 0 };
+    }
+  );
+
+  // Read-only catalog browse — allowed on both transports like the other GETs.
+  // The stored key is used server-side; only model ids come back.
+  app.get<{ Params: { id: string } }>("/api/cliproxy/providers/:id/catalog", async (request, reply) => {
+    const res = await manager.fetchRouterCatalog(request.params.id);
+    if (!res.ok) {
+      if (res.code === "unknown") return reply.code(404).send({ error: res.error });
+      // "no key yet" is a precondition failure, not an upstream fault.
+      if (res.code === "no-key") return reply.code(409).send({ error: res.error });
+      return reply.code(502).send({ error: res.error });
+    }
+    return { models: res.models };
   });
 }
 

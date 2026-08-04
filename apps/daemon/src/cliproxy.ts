@@ -9,21 +9,31 @@ import type {
   CliProxyStatus
 } from "@orquester/api";
 import {
+  CURATED_PROXY_MODEL_IDS,
   type CliProxyModelOverrides,
   type CliProxySecrets,
   type CliProxyState,
   MODEL_NAME_RE,
   ROUTER_PRESETS,
+  type RouterModel,
   type RouterProvider,
   cliproxyDir,
   cliproxyStateFile,
   createDefaultCliProxyState,
   migrateLegacyOpenRouter,
-  parseCliProxyState
+  parseCliProxyState,
+  resolveRouterModel,
+  routerProviderSchema,
+  validateRouterProviders
 } from "@orquester/config";
 import type { Broadcaster } from "./broadcaster.ts";
 import { routerKimiAvailable, seedHome, writeHardened, writeProjections } from "./cliproxy-files.ts";
-import { loadOrInitSecrets, setOpenRouterKey, writeSecrets } from "./cliproxy-secrets.ts";
+import {
+  clearRouterKey as clearRouterKeySecrets,
+  loadOrInitSecrets,
+  setRouterKey as setRouterKeySecrets,
+  writeSecrets
+} from "./cliproxy-secrets.ts";
 import {
   accessTokenFreshMs,
   accountPrefix,
@@ -56,8 +66,16 @@ const SPAWN_PROBE_INTERVAL_MS = 500;
  * instead and ask the user to refresh the account in Orquester first.
  */
 const SEED_FRESH_THRESHOLD_MS = 5 * 60 * 1000;
+/** Curated picks a dangling `defaultModel`/`backgroundModel` falls back to when
+ *  the router provider that served it is deleted or loses its key (spec §4). */
+const FALLBACK_DEFAULT_MODEL = "gpt-5.6-sol";
+const FALLBACK_BACKGROUND_MODEL = "gpt-5.6-luna";
 
 type ProbeResult = { ok: boolean; reachable?: boolean; models?: string[] };
+
+/** Uniform result of a router mutation: `error` = client mistake (400-ish),
+ *  `affectedSessions` without `error` = the restart refusal (409). */
+type RouterMutationResult = { ok: boolean; affectedSessions?: number; error?: string };
 
 /** A managed account seeded into the proxy's `auth/` dir (proxy-owned mapping). */
 interface SeededAccount {
@@ -445,65 +463,243 @@ export class CliProxyManager {
   }
 
   /**
-   * Set the OpenRouter API key, owning the whole projection+restart cycle. The key
-   * lives in config.yaml (a projection the proxy reads only at startup), so a
-   * change is restart-gated exactly like {@link setConfig}: refused while
-   * daemon-managed sessions are live unless forced. On proceed it persists the key
-   * via the secrets store, updates the in-memory secrets, re-projects config.yaml,
-   * restarts the proxy (kill + spawn + probe), recouples the launchers to the
-   * now-available openrouter provider, and broadcasts + persists.
-   *
-   * LEGACY (spec §1): superseded by the generic router-provider mutations. It now
-   * routes through the `openrouter` router provider — seeding it via the legacy
-   * migration when it doesn't exist yet — so the whole data-driven pipeline
-   * (config.yaml projection, probe union, coupling) sees a normal provider.
-   * Deleted once the routes move to `setRouterKey`.
+   * Create or replace a router provider (spec 2026-08-04 §2). The record is
+   * schema-checked on its own, then the whole array is checked for the invariants
+   * a single record can't see (reserved/duplicate ids, a model served by two
+   * providers). Only a **keyed** provider is rendered into config.yaml, so only
+   * that case is a projection change — and therefore restart-gated exactly like
+   * {@link setConfig}: refused while daemon-managed sessions are live unless
+   * forced. An edit keeps the record's `createdAt`, `preset` and `keyVerifiedAt`.
    */
-  setOpenRouterKey(
-    key: string,
+  upsertRouterProvider(
+    input: {
+      id: string;
+      label: string;
+      baseUrl: string;
+      preset?: "openrouter" | "tokenrouter" | null;
+      models: RouterModel[];
+    },
     force: boolean
-  ): Promise<{ ok: boolean; affectedSessions?: number; error?: string }> {
+  ): Promise<RouterMutationResult> {
+    return this.transition(async () => {
+      const existing = this.state.routerProviders.find((p) => p.id === input.id);
+      const candidate = routerProviderSchema.safeParse({
+        id: input.id,
+        label: input.label,
+        baseUrl: input.baseUrl,
+        models: input.models,
+        // `preset` is provenance of the create-form prefill only; an edit that
+        // omits it must not silently orphan the record from its preset.
+        preset: input.preset ?? existing?.preset ?? null,
+        keyVerifiedAt: existing?.keyVerifiedAt ?? null,
+        createdAt: existing?.createdAt ?? new Date(this.adapters.now()).toISOString()
+      });
+      if (!candidate.success) {
+        return {
+          ok: false,
+          error: `invalid provider: ${candidate.error.issues[0]?.message ?? "malformed record"}`
+        };
+      }
+      // Replace in place on an edit (stable UI ordering), append when new.
+      const next = existing
+        ? this.state.routerProviders.map((p) => (p.id === input.id ? candidate.data : p))
+        : [...this.state.routerProviders, candidate.data];
+      const invalid = validateRouterProviders(next);
+      if (invalid) return { ok: false, error: invalid };
+      const needsRestart = this.st !== "off" && this.hasRouterKey(input.id);
+      const live = this.adapters.liveDependentSessionCount();
+      if (needsRestart && !force && live > 0) return { ok: false, affectedSessions: live };
+      this.state.routerProviders = next;
+      this.resetDanglingModelPicks();
+      await this.afterRouterMutation(needsRestart);
+      return { ok: true, affectedSessions: force && needsRestart ? live : 0 };
+    });
+  }
+
+  /** Remove a router provider and its stored key. Restart-gated when the provider
+   *  was keyed (i.e. actually present in config.yaml). */
+  deleteRouterProvider(id: string, force: boolean): Promise<RouterMutationResult> {
+    return this.transition(async () => {
+      if (!this.state.routerProviders.some((p) => p.id === id)) {
+        return { ok: false, error: "unknown provider" };
+      }
+      const needsRestart = this.st !== "off" && this.hasRouterKey(id);
+      const live = this.adapters.liveDependentSessionCount();
+      if (needsRestart && !force && live > 0) return { ok: false, affectedSessions: live };
+      const cleared = await this.clearStoredRouterKey(id);
+      if (!cleared.ok) return cleared;
+      this.state.routerProviders = this.state.routerProviders.filter((p) => p.id !== id);
+      if (id === "openrouter") this.state.openRouterKeyVerifiedAt = null; // legacy at-rest mirror
+      this.resetDanglingModelPicks();
+      await this.afterRouterMutation(needsRestart);
+      return { ok: true, affectedSessions: force && needsRestart ? live : 0 };
+    });
+  }
+
+  /**
+   * Store a router provider's API key, owning the whole projection+restart cycle:
+   * the key lives in config.yaml (a projection the proxy reads only at startup),
+   * so the change is restart-gated like {@link setConfig}. The key is verified
+   * against the provider BEFORE it is stored — an explicitly-rejected key is
+   * refused outright, while a network-inconclusive check stores it *unverified*
+   * rather than blocking on the provider's uptime.
+   */
+  setRouterKey(id: string, key: string, force: boolean): Promise<RouterMutationResult> {
+    return this.transition(() => this.applyRouterKey(id, key, force));
+  }
+
+  /** Drop a router provider's key, keeping the provider record itself. */
+  clearRouterKey(id: string, force: boolean): Promise<RouterMutationResult> {
+    return this.transition(async () => {
+      const provider = this.state.routerProviders.find((p) => p.id === id);
+      if (!provider) return { ok: false, error: "unknown provider" };
+      const needsRestart = this.st !== "off" && this.hasRouterKey(id);
+      const live = this.adapters.liveDependentSessionCount();
+      if (needsRestart && !force && live > 0) return { ok: false, affectedSessions: live };
+      const cleared = await this.clearStoredRouterKey(id);
+      if (!cleared.ok) return cleared;
+      provider.keyVerifiedAt = null;
+      if (id === "openrouter") this.state.openRouterKeyVerifiedAt = null; // legacy at-rest mirror
+      this.resetDanglingModelPicks();
+      await this.afterRouterMutation(needsRestart);
+      return { ok: true, affectedSessions: force && needsRestart ? live : 0 };
+    });
+  }
+
+  /**
+   * Fetch a provider's upstream `/models` catalog with its stored key — the
+   * "browse what this router offers" surface behind the Settings model picker.
+   * Read-only, so (like {@link validateModel}) it deliberately does NOT queue
+   * behind the transition chain: a slow upstream must not stall a mutation.
+   * The key never leaves the daemon; only model ids come back.
+   */
+  async fetchRouterCatalog(
+    id: string
+  ): Promise<{ ok: true; models: string[] } | { ok: false; code: "unknown" | "no-key" | "upstream"; error: string }> {
+    const provider = this.state.routerProviders.find((p) => p.id === id);
+    if (!provider) return { ok: false, code: "unknown", error: "unknown provider" };
+    if (!this.secrets) {
+      const loaded = await loadOrInitSecrets(this.daemonDir);
+      if (loaded.state !== "corrupt") this.secrets = loaded.secrets;
+    }
+    const key = this.secrets?.routerKeys[id];
+    if (!key) return { ok: false, code: "no-key", error: "no API key stored for this provider" };
+    if (!this.adapters.fetchRouterModels) {
+      return { ok: false, code: "upstream", error: "catalog fetch unavailable" };
+    }
+    const res = await this.adapters.fetchRouterModels(provider, key);
+    return res.ok ? res : { ok: false, code: "upstream", error: res.error };
+  }
+
+  /**
+   * LEGACY (spec §1): the pre-router OpenRouter-key entry point, kept only while
+   * `POST /api/cliproxy/openrouter/key` still exists (deleted with that route).
+   * It materializes the `openrouter` provider record from the shipped preset when
+   * absent and then runs the ordinary {@link setRouterKey} path, so the whole
+   * data-driven pipeline (projection, probe union, coupling) sees a normal
+   * provider. A refusal leaves no half-created provider row behind.
+   */
+  setOpenRouterKey(key: string, force: boolean): Promise<RouterMutationResult> {
     return this.transition(async () => {
       const needsRestart = this.st !== "off";
       const live = this.adapters.liveDependentSessionCount();
       if (needsRestart && !force && live > 0) {
         return { ok: false, affectedSessions: live };
       }
-      // Verify against openrouter.ai BEFORE storing: an explicitly-rejected key
-      // is refused outright; a network-inconclusive check stores it unverified
-      // (verifiedAt stays null) rather than blocking on openrouter's uptime.
-      let verifiedAt: string | null = null;
-      const verdict = await this.verifyKey(this.openRouterProviderRecord(), key);
-      if (verdict === "rejected") {
-        return { ok: false, error: "OpenRouter rejected this key" };
+      const before = this.state.routerProviders;
+      if (!before.some((p) => p.id === "openrouter")) {
+        this.state.routerProviders = [...before, this.openRouterProviderRecord()];
       }
-      if (verdict === "ok") verifiedAt = new Date(this.adapters.now()).toISOString();
-      this.state.openRouterKeyVerifiedAt = verifiedAt;
-      this.secrets = await setOpenRouterKey(this.daemonDir, key);
-      // Materialize the `openrouter` router provider from the just-stored key so
-      // the projection/probe/coupling pipeline treats it like any other router.
-      await this.migrateLegacy();
-      const seeded = this.state.routerProviders.find((p) => p.id === "openrouter");
-      if (seeded) seeded.keyVerifiedAt = verifiedAt;
-      // Converge the managed kimi subagent with the new key state immediately
-      // (enable/boot are the only other seed points).
-      await this.seedHomes();
-      if (this.state.enabled) {
-        await writeProjections(this.daemonDir, this.secrets, this.state);
-        await this.reresolveDependents();
-        if (needsRestart) {
-          this.setState("starting", []);
-          await this.spawn(true);
-          const probed = await this.probeUntilReady();
-          if (probed.ok) this.becomeHealthy(probed.models);
-          else this.fail("proxy down");
-        }
-      }
-      this.applyRegistryCoupling();
-      this.broadcaster.publish("cliproxy", "cliproxy.changed", this.status());
-      await this.persist();
-      return { ok: true, affectedSessions: force ? live : 0 };
+      const res = await this.applyRouterKey("openrouter", key, force);
+      if (!res.ok) this.state.routerProviders = before;
+      return res;
     });
+  }
+
+  /** {@link setRouterKey}'s body, callable from another transition (the legacy
+   *  OpenRouter path) — nesting `transition()` would deadlock the queue. */
+  private async applyRouterKey(id: string, key: string, force: boolean): Promise<RouterMutationResult> {
+    const provider = this.state.routerProviders.find((p) => p.id === id);
+    if (!provider) return { ok: false, error: "unknown provider" };
+    const needsRestart = this.st !== "off";
+    const live = this.adapters.liveDependentSessionCount();
+    if (needsRestart && !force && live > 0) return { ok: false, affectedSessions: live };
+    const verdict = await this.verifyKey(provider, key);
+    if (verdict === "rejected") return { ok: false, error: `${provider.label} rejected this key` };
+    let stored: CliProxySecrets;
+    try {
+      stored = await setRouterKeySecrets(this.daemonDir, id, key);
+    } catch (error) {
+      // A corrupt store refuses to be overwritten — surface it, mutate nothing.
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    this.secrets = stored;
+    provider.keyVerifiedAt = verdict === "ok" ? new Date(this.adapters.now()).toISOString() : null;
+    // Legacy at-rest mirror, kept one release for rollback safety.
+    if (id === "openrouter") this.state.openRouterKeyVerifiedAt = provider.keyVerifiedAt;
+    await this.afterRouterMutation(needsRestart);
+    return { ok: true, affectedSessions: force ? live : 0 };
+  }
+
+  /** Whether a key is currently stored for `id` (unknown while secrets are unloaded). */
+  private hasRouterKey(id: string): boolean {
+    return Boolean(this.secrets?.routerKeys[id]);
+  }
+
+  /** Remove a provider's key from the secrets store, reporting a corrupt store as
+   *  a mutation error instead of throwing out of the transition. */
+  private async clearStoredRouterKey(id: string): Promise<RouterMutationResult> {
+    try {
+      this.secrets = await clearRouterKeySecrets(this.daemonDir, id);
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  /** Router providers that can actually serve a launch right now (key stored). */
+  private keyedProviders(): readonly RouterProvider[] {
+    if (!this.secrets) return [];
+    return this.state.routerProviders.filter((p) => Boolean(this.secrets?.routerKeys[p.id]));
+  }
+
+  /**
+   * Reset model picks that no longer resolve (spec §4): a pick is valid when it is
+   * curated or served by a current keyed router provider. Deleting the provider
+   * behind `defaultModel` would otherwise leave every launch failing validation.
+   * When secrets are not loaded (proxy off) key state is unknown, so every
+   * remaining provider counts — an unknown state must not churn the user's pick.
+   */
+  private resetDanglingModelPicks(): void {
+    const sources = this.secrets ? this.keyedProviders() : this.state.routerProviders;
+    const valid = (model: string): boolean =>
+      CURATED_PROXY_MODEL_IDS.includes(model) || resolveRouterModel(sources, model) !== null;
+    if (!valid(this.state.defaultModel)) this.state.defaultModel = FALLBACK_DEFAULT_MODEL;
+    if (!valid(this.state.backgroundModel)) this.state.backgroundModel = FALLBACK_BACKGROUND_MODEL;
+  }
+
+  /**
+   * The shared tail of every router mutation: converge the managed homes, re-project
+   * config.yaml, restart the proxy when the projection actually changed, recouple
+   * the launchers, broadcast and persist. Mirrors {@link setConfig}'s cycle so disk
+   * and in-memory state stay in lockstep.
+   */
+  private async afterRouterMutation(needsRestart: boolean): Promise<void> {
+    await this.seedHomes();
+    if (this.state.enabled && this.secrets) {
+      await writeProjections(this.daemonDir, this.secrets, this.state);
+      await this.reresolveDependents();
+      if (needsRestart) {
+        this.setState("starting", []);
+        await this.spawn(true);
+        const probed = await this.probeUntilReady();
+        if (probed.ok) this.becomeHealthy(probed.models);
+        else this.fail("proxy down");
+      }
+    }
+    this.applyRegistryCoupling();
+    this.broadcaster.publish("cliproxy", "cliproxy.changed", this.status());
+    await this.persist();
   }
 
   /**

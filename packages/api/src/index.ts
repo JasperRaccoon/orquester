@@ -859,6 +859,20 @@ export interface CliProxyRouterProviderStatus {
   keyVerifiedAt: string | null;
 }
 
+/**
+ * Body for `PUT /api/cliproxy/providers/:id` — the router-provider upsert. The id
+ * travels in the path (it is the record's identity), never in the body. `preset`
+ * is provenance of the create-form prefill only; behavior always comes from
+ * `baseUrl`/`models`. The provider's API key is set separately (`…/key`) so a
+ * plain edit never has to re-send it.
+ */
+export interface CliProxyRouterProviderRequest {
+  label: string;
+  baseUrl: string;
+  preset?: "openrouter" | "tokenrouter" | null;
+  models: CliProxyRouterModel[];
+}
+
 export interface CliProxyStatus {
   state: "off" | "downloading" | "building" | "starting" | "healthy" | "degraded" | "error";
   reasons: string[];
@@ -1284,14 +1298,58 @@ export class HttpOrquesterApiClient implements OrquesterApi {
     return this.post("/api/cliproxy/accounts/unseed", req);
   }
 
-  setCliProxyOpenRouterKey(
+  // Router providers (OpenRouter/TokenRouter/custom OpenAI-compatible gateways).
+  // Every mutation is restart-gated the same way as setCliProxyConfig: a 409
+  // refusal comes back as { ok:false, affectedSessions } for a force re-attempt.
+  // API keys only ever travel INTO the daemon; nothing here returns key material.
+
+  putCliProxyRouterProvider(
+    id: string,
+    cfg: CliProxyRouterProviderRequest,
+    force?: boolean
+  ): Promise<CliProxyStatus | CliProxyMutationRefusal> {
+    return this.mutateAllowingRefusal("PUT", `/api/cliproxy/providers/${encodeURIComponent(id)}`, {
+      ...cfg,
+      force: Boolean(force)
+    });
+  }
+
+  deleteCliProxyRouterProvider(
+    id: string,
+    force?: boolean
+  ): Promise<CliProxyStatus | CliProxyMutationRefusal> {
+    // DELETE carries no body — `force` rides the query string.
+    return this.mutateAllowingRefusal(
+      "DELETE",
+      `/api/cliproxy/providers/${encodeURIComponent(id)}${force ? "?force=true" : ""}`
+    );
+  }
+
+  setCliProxyRouterKey(
+    id: string,
     key: string,
     force?: boolean
   ): Promise<{ ok: boolean; affectedSessions?: number }> {
-    return this.mutateAllowingRefusal("POST", "/api/cliproxy/openrouter/key", {
-      key,
-      force: Boolean(force)
-    });
+    return this.mutateAllowingRefusal(
+      "POST",
+      `/api/cliproxy/providers/${encodeURIComponent(id)}/key`,
+      { key, force: Boolean(force) }
+    );
+  }
+
+  clearCliProxyRouterKey(
+    id: string,
+    force?: boolean
+  ): Promise<{ ok: boolean; affectedSessions?: number }> {
+    return this.mutateAllowingRefusal(
+      "DELETE",
+      `/api/cliproxy/providers/${encodeURIComponent(id)}/key${force ? "?force=true" : ""}`
+    );
+  }
+
+  /** Browse the models a keyed router provider advertises upstream (read-only). */
+  getCliProxyRouterCatalog(id: string): Promise<{ models: string[] }> {
+    return this.get(`/api/cliproxy/providers/${encodeURIComponent(id)}/catalog`);
   }
 
   deleteFsEntry(path: string): Promise<{ ok: true }> {
@@ -1378,11 +1436,12 @@ export class HttpOrquesterApiClient implements OrquesterApi {
     return response.json() as Promise<T>;
   }
 
-  // POST/PUT for the restart-gated cliproxy mutations: a 409 refusal is a
+  // POST/PUT/DELETE for the restart-gated cliproxy mutations: a 409 refusal is a
   // first-class value ({ ok:false, affectedSessions }), not an exception, so the
   // caller can offer a force-confirm flow; every other non-2xx still throws.
+  // (DELETE carries no body — those routes take `force` as a query param.)
   private async mutateAllowingRefusal<T>(
-    method: "POST" | "PUT",
+    method: "POST" | "PUT" | "DELETE",
     path: string,
     body?: unknown
   ): Promise<T> {
