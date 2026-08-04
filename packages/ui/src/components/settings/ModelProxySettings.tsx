@@ -8,8 +8,7 @@ import { useAppStore } from "../../store/app";
 
 const PROVIDER_LABEL: Record<CliProxyProviderId, string> = {
   codex: "Codex",
-  claude: "Claude",
-  openrouter: "OpenRouter"
+  claude: "Claude"
 };
 
 // Manager states, ordered off → healthy, with copy for the header pill.
@@ -207,9 +206,7 @@ export const ModelProxySettings: React.FC = () => {
             <ProviderRow
               key={p.provider}
               provider={p}
-              accounts={(agentAccounts?.accounts ?? []).filter(
-                (a) => p.provider !== "openrouter" && a.agent === p.provider
-              )}
+              accounts={(agentAccounts?.accounts ?? []).filter((a) => a.agent === p.provider)}
               seeded={status.accounts.filter((a) => a.provider === p.provider)}
               busy={busy}
               onSeed={(accountId) =>
@@ -356,7 +353,10 @@ const ProviderRow: React.FC<{
   const [keyEntry, setKeyEntry] = useState(false);
   const [key, setKey] = useState("");
   const ok = provider.state === "ok";
-  const isOpenRouter = provider.provider === "openrouter";
+  // `status.providers` is now the OAuth pair only — routers moved to their own
+  // list. Kept as a widened compare (always false today) so the key-entry branch
+  // below stays intact until the Routers section replaces it.
+  const isOpenRouter = (provider.provider as string) === "openrouter";
 
   const stateText = ok
     ? isOpenRouter && !provider.lastVerifiedAt

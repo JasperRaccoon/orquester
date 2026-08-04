@@ -126,7 +126,7 @@ import {
   compactEnvForModel,
   parseCliProxyState,
   MODEL_NAME_RE,
-  isOpenRouterModel,
+  resolveRouterModel,
   createDefaultClientConfig,
   createDefaultDaemonConfig,
   createDefaultRemotesConfig,
@@ -838,8 +838,8 @@ function needsAccountPrefix(state: CliProxyState | null, accountId: string): boo
  * with that account's deterministic routing prefix (`<accountPrefix>/<model>`) so
  * the proxy routes it to exactly that seeded credential. The prefix is computed
  * identically at seed time ({@link accountPrefix}), so no stored map is needed. A
- * keyless pick (e.g. claudex → OpenRouter/Kimi) carries no account and stays
- * unprefixed.
+ * router-provider pick (any model served by a configured router provider) carries
+ * no account and stays unprefixed.
  */
 export function cliproxyContributor(
   entryId: string,
@@ -859,12 +859,16 @@ export function cliproxyContributor(
   let accountId: string | undefined;
   let launchedModel: string | undefined;
   if (ctx.model) {
-    // An OpenRouter/Kimi model is served by the shared keyless OpenRouter provider,
-    // never a seeded per-account credential — emit it BARE regardless of accountId
-    // (a per-account prefix would misroute it). The daemon enforces this at the
-    // wire so a stale account pick can't reattach a prefix (spec §2).
+    // A router-provider model (OpenRouter/TokenRouter/custom) is served by that
+    // provider's own API key, never a seeded per-account credential — emit it BARE
+    // regardless of accountId (a per-account prefix would misroute it). Routing is
+    // decided by the persisted provider index, not by the model's name shape. The
+    // daemon enforces this at the wire so a stale account pick can't reattach a
+    // prefix (spec §2).
     const routesToAccount =
-      Boolean(ctx.accountId) && ctx.accountId !== SYSTEM_ACCOUNT_ID && !isOpenRouterModel(ctx.model);
+      Boolean(ctx.accountId) &&
+      ctx.accountId !== SYSTEM_ACCOUNT_ID &&
+      !resolveRouterModel(state?.routerProviders ?? [], ctx.model);
     // The acc<hex>/ prefix exists to pin ONE of several same-provider credentials;
     // with a single seeded account it adds nothing but leaks into every visible
     // model string inside the session (banner, /model). Emit bare when the pick
@@ -901,7 +905,7 @@ export function cliproxyContributor(
   // configured default.
   const compactModel = launchedModel ?? (entryId === "claudemix" ? "claude" : state?.defaultModel);
   if (compactModel) {
-    const compact = compactEnvForModel(compactModel, state?.modelOverrides);
+    const compact = compactEnvForModel(compactModel, state?.modelOverrides, state?.routerProviders);
     if (compact) {
       if (compact.maxContextTokens !== undefined) {
         env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(compact.maxContextTokens);
@@ -2972,15 +2976,19 @@ export function createServer(
     // A proxy launch pinning a managed account requires that account to be
     // SEEDED: the acc<hex>/ routing prefix resolves against the proxy's auth
     // files, so an unseeded pin can only 502 at runtime ("unknown provider for
-    // model acc…"). Keyless OpenRouter models carry no account and are exempt.
-    if (
+    // model acc…"). Router-provider models carry no account and are exempt —
+    // decided by the persisted provider index, same source of truth the launch
+    // contributor uses (read once here and reused for the seeded check).
+    const pinsManagedAccount =
       (body.refId === "claudex" || body.refId === "claudemix") &&
-      body.accountId &&
-      body.accountId !== SYSTEM_ACCOUNT_ID &&
-      !(effectiveModel && isOpenRouterModel(effectiveModel))
+      Boolean(body.accountId) &&
+      body.accountId !== SYSTEM_ACCOUNT_ID;
+    const launchState = pinsManagedAccount ? readCliProxyState(resolved.daemonDir) : null;
+    if (
+      pinsManagedAccount &&
+      !(effectiveModel && resolveRouterModel(launchState?.routerProviders ?? [], effectiveModel))
     ) {
-      const st = readCliProxyState(resolved.daemonDir);
-      const seeded = st?.seededAccounts.some((a) => a.accountId === body.accountId) ?? false;
+      const seeded = launchState?.seededAccounts.some((a) => a.accountId === body.accountId) ?? false;
       if (!seeded) {
         return reply.code(400).send({
           code: "SESSION_UNAVAILABLE",

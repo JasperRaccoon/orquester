@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cliproxyStateFile } from "@orquester/config";
+import { cliproxyStateFile, type RouterProvider } from "@orquester/config";
 import { writeAddonEnvLaunchScript } from "./sessions.ts";
 import { cliproxyContributor, composeExtraEnv } from "./index.ts";
 
@@ -11,9 +11,40 @@ const DIR = "/nonexistent/daemon";
 const ACCOUNT = "abcdef12-3456-7890-abcd-ef1234567890";
 const OTHER = "11112222-3456-7890-abcd-ef1234567890";
 
-/** Temp daemonDir with a state.json seeding the given accounts. */
+const NOW = "2026-08-04T00:00:00.000Z";
+
+/** A TokenRouter-style provider: no alias, and a model name the retired
+ *  `isOpenRouterModel` regex happened to match (moonshotai/…). */
+const TOKENROUTER: RouterProvider = {
+  id: "tokenrouter",
+  label: "TokenRouter",
+  baseUrl: "https://api.tokenrouter.com/v1",
+  preset: "tokenrouter",
+  models: [
+    { name: "moonshotai/kimi-k3-free", contextWindow: 1_048_576, compactWindow: 450_000 },
+    // Deliberately a name NO regex would have classified as router-served.
+    { name: "zai/glm-5", alias: "glm-5", contextWindow: 200_000, compactWindow: 150_000 }
+  ],
+  keyVerifiedAt: null,
+  createdAt: NOW
+};
+
+const OPENROUTER: RouterProvider = {
+  id: "openrouter",
+  label: "OpenRouter",
+  baseUrl: "https://openrouter.ai/api/v1",
+  preset: "openrouter",
+  models: [
+    { name: "moonshotai/kimi-k3", alias: "kimi-k3", contextWindow: 1_048_576, compactWindow: 450_000 }
+  ],
+  keyVerifiedAt: null,
+  createdAt: NOW
+};
+
+/** Temp daemonDir with a state.json seeding the given accounts (and router providers). */
 async function daemonDirWithSeeded(
-  accounts: Array<{ provider: "codex" | "claude"; accountId: string }>
+  accounts: Array<{ provider: "codex" | "claude"; accountId: string }>,
+  routerProviders: RouterProvider[] = []
 ): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "orq-launchenv-"));
   const stateFile = cliproxyStateFile(dir);
@@ -26,7 +57,8 @@ async function daemonDirWithSeeded(
         accountId: a.accountId,
         label: "x",
         prefix: `acc${a.accountId.slice(0, 8)}`
-      }))
+      })),
+      routerProviders
     })
   );
   return dir;
@@ -69,11 +101,68 @@ test("cliproxyContributor records no account for the System pick (round-robin)",
   assert.equal(res.env.ANTHROPIC_MODEL, "gpt-5.6-sol");
 });
 
-test("cliproxyContributor records no account for an OpenRouter/Kimi model", () => {
-  const res = cliproxyContributor("claudex", { accountId: ACCOUNT, model: "kimi-k3" }, DIR);
+test("cliproxyContributor records no account for a router model (by alias)", async () => {
+  const dir = await daemonDirWithSeeded(
+    [
+      { provider: "codex", accountId: ACCOUNT },
+      { provider: "codex", accountId: OTHER } // ambiguous → a non-router pick WOULD be prefixed
+    ],
+    [OPENROUTER]
+  );
+  const res = cliproxyContributor("claudex", { accountId: ACCOUNT, model: "kimi-k3" }, dir);
   assert.ok(res);
   assert.equal(res.accountId, undefined);
   assert.equal(res.env.ANTHROPIC_MODEL, "kimi-k3");
+});
+
+test("cliproxyContributor: a router model launches BARE with the provider's compact env", async () => {
+  const dir = await daemonDirWithSeeded(
+    [
+      { provider: "codex", accountId: ACCOUNT },
+      { provider: "codex", accountId: OTHER }
+    ],
+    [TOKENROUTER]
+  );
+  const res = cliproxyContributor(
+    "claudex",
+    { accountId: ACCOUNT, model: "moonshotai/kimi-k3-free" },
+    dir
+  );
+  assert.ok(res);
+  assert.equal(res.accountId, undefined, "router models are served by the provider key, not an account");
+  assert.equal(res.env.ANTHROPIC_MODEL, "moonshotai/kimi-k3-free", "no acc<hex>/ prefix");
+  assert.equal(res.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, "1048576");
+  assert.equal(res.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, "450000");
+});
+
+test("cliproxyContributor: routing is data-driven, not name-shaped (zai/glm-5 via alias)", async () => {
+  const dir = await daemonDirWithSeeded(
+    [
+      { provider: "codex", accountId: ACCOUNT },
+      { provider: "codex", accountId: OTHER }
+    ],
+    [TOKENROUTER]
+  );
+  const res = cliproxyContributor("claudex", { accountId: ACCOUNT, model: "glm-5" }, dir);
+  assert.ok(res);
+  assert.equal(res.accountId, undefined);
+  assert.equal(res.env.ANTHROPIC_MODEL, "glm-5");
+  assert.equal(res.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, "200000");
+  assert.equal(res.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, "150000");
+});
+
+test("cliproxyContributor: a non-router model still carries the acc prefix when ambiguous", async () => {
+  const dir = await daemonDirWithSeeded(
+    [
+      { provider: "codex", accountId: ACCOUNT },
+      { provider: "codex", accountId: OTHER }
+    ],
+    [TOKENROUTER]
+  );
+  const res = cliproxyContributor("claudex", { accountId: ACCOUNT, model: "gpt-5.6-sol" }, dir);
+  assert.ok(res);
+  assert.equal(res.accountId, ACCOUNT);
+  assert.equal(res.env.ANTHROPIC_MODEL, "accabcdef12/gpt-5.6-sol");
 });
 
 test("cliproxyContributor pins the account for claudemix", () => {

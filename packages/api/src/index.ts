@@ -814,13 +814,17 @@ export type AgentAccountsEventType = "agent-accounts.changed";
 // CliProxy — the managed CLIProxyAPI process backing the claudex/claudemix
 // launchers. Status is read-only over both transports; mutations are HTTP-only.
 
-/** Upstream identity providers the managed proxy brokers. */
-export type CliProxyProviderId = "codex" | "claude" | "openrouter";
+/**
+ * OAuth identity providers the managed proxy brokers via seeded managed-account
+ * credentials. Key-based OpenAI-compatible routers are NOT here — they live in
+ * their own user-defined {@link CliProxyRouterProviderStatus} list.
+ */
+export type CliProxyProviderId = "codex" | "claude";
 
 /**
- * A restart-gated cliproxy mutation (config/openrouter-key/disable) refused
- * because dependent sessions are live — the parsed 409 body. Callers re-attempt
- * with `force` after confirming with the user.
+ * A restart-gated cliproxy mutation (config/router-provider/router-key/disable)
+ * refused because dependent sessions are live — the parsed 409 body. Callers
+ * re-attempt with `force` after confirming with the user.
  */
 export type CliProxyMutationRefusal = { ok: false; affectedSessions: number };
 
@@ -828,6 +832,31 @@ export interface CliProxyProviderStatus {
   provider: CliProxyProviderId;
   state: "ok" | "missing" | "expired";
   lastVerifiedAt: string | null;
+}
+
+/** One model a router provider serves (wire mirror of config's `RouterModel`). */
+export interface CliProxyRouterModel {
+  name: string;
+  alias?: string;
+  contextWindow?: number;
+  compactWindow?: number;
+  compactPct?: number;
+}
+
+/**
+ * A user-defined OpenAI-compatible router provider as reported by the daemon.
+ * `keyState` is the only key signal that crosses the wire — the key itself never
+ * does. "set" = a key is stored but unverified (inconclusive network check),
+ * "verified" = the provider accepted it at `keyVerifiedAt`.
+ */
+export interface CliProxyRouterProviderStatus {
+  id: string;
+  label: string;
+  preset: "openrouter" | "tokenrouter" | null;
+  baseUrl: string;
+  models: CliProxyRouterModel[];
+  keyState: "none" | "set" | "verified";
+  keyVerifiedAt: string | null;
 }
 
 export interface CliProxyStatus {
@@ -840,6 +869,8 @@ export interface CliProxyStatus {
   /** Per-model compact-window overrides (empty record when none set). */
   modelOverrides: Record<string, { contextWindow?: number; compactWindow?: number; compactPct?: number }>;
   providers: CliProxyProviderStatus[];
+  /** User-defined OpenAI-compatible routers (spec 2026-08-04 §1). */
+  routerProviders: CliProxyRouterProviderStatus[];
   accounts: { id: string; provider: CliProxyProviderId; label: string; email?: string }[];
   activeSessionCount: number;
   testedClaudeCliVersion: string | null;

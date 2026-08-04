@@ -6,10 +6,13 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   type CliProxyModelOverrides,
+  type CliProxyState,
+  type RouterProvider,
   cliproxyDir,
   cliproxySecretsFile,
   cliproxyStateFile,
   createDefaultCliProxyState,
+  migrateLegacyOpenRouter,
   parseCliProxyState
 } from "@orquester/config";
 import Fastify from "fastify";
@@ -75,8 +78,10 @@ function setup() {
   };
   let rollbackCount = 0;
   let rollbackImpl: () => Promise<boolean> = async () => false;
-  let verifyOpenRouterImpl: (key: string) => Promise<"ok" | "rejected" | "unknown"> = async () =>
-    "unknown";
+  let verifyRouterImpl: (
+    provider: RouterProvider,
+    key: string
+  ) => Promise<"ok" | "rejected" | "unknown"> = async () => "unknown";
   const sysDir = join(root, "sysclaude");
 
   const mgr = new CliProxyManager({
@@ -91,7 +96,7 @@ function setup() {
       liveDependentSessionCount: () => liveCount,
       now: () => clock,
       sleep: async () => {},
-      verifyOpenRouterKey: (key: string) => verifyOpenRouterImpl(key),
+      verifyRouterKey: (provider: RouterProvider, key: string) => verifyRouterImpl(provider, key),
       install: () => installImpl(),
       rollback: () => {
         rollbackCount++;
@@ -135,17 +140,43 @@ function setup() {
     setRollback: (f: () => Promise<boolean>) => {
       rollbackImpl = f;
     },
-    setVerifyOpenRouter: (f: (key: string) => Promise<"ok" | "rejected" | "unknown">) => {
-      verifyOpenRouterImpl = f;
+    setVerifyRouter: (
+      f: (provider: RouterProvider, key: string) => Promise<"ok" | "rejected" | "unknown">
+    ) => {
+      verifyRouterImpl = f;
     },
     sysDir
   };
 }
 
-async function writeEnabledState(daemonDir: string): Promise<void> {
-  const state = { ...createDefaultCliProxyState(), enabled: true };
+async function writeEnabledState(daemonDir: string, patch: Partial<CliProxyState> = {}): Promise<void> {
+  const state = { ...createDefaultCliProxyState(), enabled: true, ...patch };
   await mkdir(cliproxyDir(daemonDir), { recursive: true });
   await writeFile(cliproxyStateFile(daemonDir), JSON.stringify(state), "utf8");
+}
+
+/** Seed a secrets.json so init() adopts a pre-existing key set (legacy or routerKeys). */
+async function writeSecretsFile(daemonDir: string, patch: Record<string, unknown>): Promise<void> {
+  await mkdir(cliproxyDir(daemonDir), { recursive: true });
+  await writeFile(
+    cliproxySecretsFile(daemonDir),
+    JSON.stringify({ apiKey: "test-api-key", managementSecret: "test-mgmt", ...patch }),
+    { mode: 0o600 }
+  );
+}
+
+/** A minimal valid RouterProvider record for state fixtures. */
+function routerProvider(id: string, patch: Partial<RouterProvider> = {}): RouterProvider {
+  return {
+    id,
+    label: id,
+    baseUrl: `https://${id}.example/v1`,
+    preset: null,
+    models: [{ name: `vendor/${id}-model` }],
+    keyVerifiedAt: null,
+    createdAt: "2026-08-04T00:00:00.000Z",
+    ...patch
+  };
 }
 
 async function writeBin(daemonDir: string): Promise<void> {
@@ -754,26 +785,27 @@ test("setOpenRouterKey (manager): refuses without force while sessions live; wit
   const secrets1 = JSON.parse(await readFile(cliproxySecretsFile(h.daemonDir), "utf8"));
   assert.equal(secrets1.openRouterKey, null, "nothing stored while gated");
   assert.equal(
-    h.mgr.status().providers.find((p) => p.provider === "openrouter")?.state,
-    "missing",
-    "openrouter still missing while gated"
+    h.mgr.status().routerProviders.find((p) => p.id === "openrouter")?.keyState,
+    undefined,
+    "no openrouter router provider seeded while gated"
   );
 
   // Forced through: persists the key, updates in-memory secrets + provider state.
   const forced = await h.mgr.setOpenRouterKey("sk-or-abc", true);
   assert.equal(forced.ok, true);
   const secrets2 = JSON.parse(await readFile(cliproxySecretsFile(h.daemonDir), "utf8"));
-  assert.equal(secrets2.openRouterKey, "sk-or-abc", "key persisted to secrets.json");
+  assert.equal(secrets2.openRouterKey, "sk-or-abc", "legacy mirror kept at rest");
+  assert.equal(secrets2.routerKeys.openrouter, "sk-or-abc", "key persisted under routerKeys");
   assert.equal(
-    h.mgr.status().providers.find((p) => p.provider === "openrouter")?.state,
-    "ok",
-    "openrouter provider flips ok in-memory after the forced set"
+    h.mgr.status().routerProviders.find((p) => p.id === "openrouter")?.keyState,
+    "set",
+    "the seeded openrouter router provider carries the key"
   );
 });
 
 test("setOpenRouterKey: an openrouter-rejected key is refused with an error and never stored", async () => {
   const h = setup();
-  h.setVerifyOpenRouter(async () => "rejected");
+  h.setVerifyRouter(async () => "rejected");
   const res = await h.mgr.setOpenRouterKey("sk-or-bad", false);
   assert.equal(res.ok, false);
   assert.equal(res.error, "OpenRouter rejected this key");
@@ -781,19 +813,19 @@ test("setOpenRouterKey: an openrouter-rejected key is refused with an error and 
   const raw = await readFile(cliproxySecretsFile(h.daemonDir), "utf8").catch(() => null);
   const storedKey = raw === null ? null : JSON.parse(raw).openRouterKey;
   assert.equal(storedKey, null, "a rejected key must not be stored");
-  assert.equal(h.mgr.status().providers.find((p) => p.provider === "openrouter")?.state, "missing");
+  assert.deepEqual(h.mgr.status().routerProviders, [], "no router provider seeded on refusal");
 });
 
-test("setOpenRouterKey: a verified key stamps lastVerifiedAt and the catalog gains the kimi alias", async () => {
+test("setOpenRouterKey: a verified key stamps keyVerifiedAt and the catalog gains the kimi alias", async () => {
   const h = setup();
-  h.setVerifyOpenRouter(async () => "ok");
+  h.setVerifyRouter(async () => "ok");
   // Key set while off (no restart needed), then enable: CLIProxyAPI never lists
   // openai-compat aliases in /v1/models, so the manager must union them in.
   const set = await h.mgr.setOpenRouterKey("sk-or-good", false);
   assert.equal(set.ok, true);
-  const openrouter = h.mgr.status().providers.find((p) => p.provider === "openrouter");
-  assert.equal(openrouter?.state, "ok");
-  assert.ok(openrouter?.lastVerifiedAt, "verification stamps lastVerifiedAt");
+  const openrouter = h.mgr.status().routerProviders.find((p) => p.id === "openrouter");
+  assert.equal(openrouter?.keyState, "verified");
+  assert.ok(openrouter?.keyVerifiedAt, "verification stamps keyVerifiedAt");
 
   h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
   await h.mgr.enable();
@@ -801,9 +833,147 @@ test("setOpenRouterKey: a verified key stamps lastVerifiedAt and the catalog gai
   const persisted = parseCliProxyState(
     JSON.parse(await readFile(cliproxyStateFile(h.daemonDir), "utf8"))
   );
-  assert.deepEqual(persisted.modelCatalog?.models.sort(), ["gpt-5.6-sol", "kimi-k3"]);
+  assert.deepEqual(persisted.modelCatalog?.models.sort(), [
+    "gpt-5.6-sol",
+    "kimi-k3",
+    "moonshotai/kimi-k3"
+  ]);
   const validated = await h.mgr.validateModel("claudex", "kimi-k3");
   assert.equal(validated.ok, true, "kimi launches must pass catalog validation");
+});
+
+// --- Task 4: data-driven router providers on the manager ----------------------
+
+test("status().routerProviders reports keyState none/set/verified from routerKeys + keyVerifiedAt", async () => {
+  const h = setup();
+  await writeEnabledState(h.daemonDir, {
+    routerProviders: [
+      routerProvider("keyless"),
+      routerProvider("stored"),
+      routerProvider("checked", { keyVerifiedAt: "2026-07-01T00:00:00.000Z" })
+    ]
+  });
+  await writeSecretsFile(h.daemonDir, { routerKeys: { stored: "sk-1", checked: "sk-2" } });
+  h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
+
+  await h.mgr.init();
+
+  const rows = h.mgr.status().routerProviders;
+  assert.deepEqual(
+    rows.map((p) => [p.id, p.keyState]),
+    [
+      ["keyless", "none"],
+      ["stored", "set"],
+      ["checked", "verified"]
+    ]
+  );
+  // The key itself never crosses the status boundary — only its state.
+  assert.equal(JSON.stringify(rows).includes("sk-1"), false, "no key material on the wire");
+  assert.equal(rows[2]?.keyVerifiedAt, "2026-07-01T00:00:00.000Z");
+  assert.equal(rows[0]?.baseUrl, "https://keyless.example/v1");
+});
+
+test("init(): a legacy openRouterKey migrates into an openrouter router provider, mirror kept", async () => {
+  const h = setup();
+  await writeEnabledState(h.daemonDir, { openRouterKeyVerifiedAt: "2026-07-01T00:00:00.000Z" });
+  await writeSecretsFile(h.daemonDir, { openRouterKey: "sk-or-legacy" });
+  h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
+
+  await h.mgr.init();
+
+  const migrated = h.mgr.status().routerProviders.find((p) => p.id === "openrouter");
+  assert.ok(migrated, "the openrouter provider is seeded from the legacy key");
+  assert.equal(migrated.keyState, "verified");
+  assert.equal(migrated.keyVerifiedAt, "2026-07-01T00:00:00.000Z");
+  assert.deepEqual(migrated.models[0], {
+    name: "moonshotai/kimi-k3",
+    alias: "kimi-k3",
+    contextWindow: 1_048_576,
+    compactWindow: 450_000
+  });
+
+  const secrets = JSON.parse(await readFile(cliproxySecretsFile(h.daemonDir), "utf8"));
+  assert.equal(secrets.routerKeys.openrouter, "sk-or-legacy", "key moved under routerKeys");
+  assert.equal(secrets.openRouterKey, "sk-or-legacy", "legacy field stays mirrored at rest");
+
+  const persisted = parseCliProxyState(
+    JSON.parse(await readFile(cliproxyStateFile(h.daemonDir), "utf8"))
+  );
+  assert.equal(persisted.routerProviders.length, 1, "migration persisted to state.json");
+});
+
+test("probe unions every keyed provider's model names AND aliases into the catalog", async () => {
+  const h = setup();
+  await writeEnabledState(h.daemonDir, {
+    routerProviders: [
+      routerProvider("openrouter", {
+        models: [{ name: "moonshotai/kimi-k3", alias: "kimi-k3" }]
+      }),
+      // Keyless → its models must NOT enter the catalog (they aren't in config.yaml).
+      routerProvider("keyless", { models: [{ name: "vendor/ghost" }] })
+    ]
+  });
+  await writeSecretsFile(h.daemonDir, { routerKeys: { openrouter: "sk-or-1" } });
+  h.setHasService(true); // adopt under tmux → healthy, so the catalog is stored
+  h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
+
+  await h.mgr.init();
+  assert.equal(h.mgr.status().state, "healthy");
+
+  const persisted = parseCliProxyState(
+    JSON.parse(await readFile(cliproxyStateFile(h.daemonDir), "utf8"))
+  );
+  assert.deepEqual(persisted.modelCatalog?.models.sort(), [
+    "gpt-5.6-sol",
+    "kimi-k3",
+    "moonshotai/kimi-k3"
+  ]);
+  assert.equal(
+    (await h.mgr.validateModel("claudex", "moonshotai/kimi-k3")).ok,
+    true,
+    "the full router model name passes catalog validation"
+  );
+});
+
+test("claudex coupling: a keyed router provider satisfies the codex-or-router gate", async () => {
+  const h = setup();
+  await writeEnabledState(h.daemonDir, {
+    routerProviders: [routerProvider("tokenrouter", { models: [{ name: "moonshotai/kimi-k3-free" }] })]
+  });
+  await writeSecretsFile(h.daemonDir, { routerKeys: { tokenrouter: "sk-tr-1" } });
+  h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
+
+  await h.mgr.init();
+
+  const lastClaudex = [...h.registryCalls].reverse().find((c) => c.id === "claudex");
+  assert.equal(lastClaudex?.enabled, true, "claudex enabled by the router credential alone");
+  assert.equal(lastClaudex?.disabledReason, undefined);
+});
+
+test("claudex coupling: a KEYLESS router provider + a claude account → disabled 'no codex or router credential'", async () => {
+  const h = setup();
+  await writeEnabledState(h.daemonDir, {
+    // A seeded claude account makes provider info known, so the gate applies.
+    seededAccounts: [
+      {
+        provider: "claude",
+        accountId: "65eebd90-01d1-4063-b743-c4a5713f5519",
+        label: "claude a",
+        prefix: "acc65eebd90"
+      }
+    ],
+    routerProviders: [routerProvider("tokenrouter")]
+  });
+  await writeSecretsFile(h.daemonDir, {});
+  h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
+
+  await h.mgr.init();
+
+  const lastClaudex = [...h.registryCalls].reverse().find((c) => c.id === "claudex");
+  assert.equal(lastClaudex?.enabled, false);
+  assert.equal(lastClaudex?.disabledReason, "no codex or router credential");
+  const lastClaudemix = [...h.registryCalls].reverse().find((c) => c.id === "claudemix");
+  assert.equal(lastClaudemix?.enabled, true, "claudemix still satisfied by the claude account");
 });
 
 const SYNC_ACCOUNT = "14137047-98b2-4cf1-9b54-b18a22a85a62";
@@ -1077,6 +1247,7 @@ function fakeRouteManager(daemonDir?: string) {
     backgroundModel: "gpt-5.6-sol",
     modelOverrides: {},
     providers: [],
+    routerProviders: [],
     accounts: [],
     activeSessionCount: 0,
     testedClaudeCliVersion: null
@@ -1113,14 +1284,17 @@ function fakeRouteManager(daemonDir?: string) {
       calls.openRouter.push({ key, force });
       const live = status.activeSessionCount;
       if (live > 0 && !force) return { ok: false, affectedSessions: live };
-      const secrets = await realSetOpenRouterKey(daemonDir!, key);
+      const stored = await realSetOpenRouterKey(daemonDir!, key);
       let st = createDefaultCliProxyState();
       try {
         st = parseCliProxyState(JSON.parse(await readFile(cliproxyStateFile(daemonDir!), "utf8")));
       } catch {
         // no persisted state — defaults stand
       }
-      await writeProjections(daemonDir!, secrets, st);
+      // The real manager materializes the `openrouter` router provider from the
+      // legacy key before projecting; without it config.yaml has no provider block.
+      const migrated = migrateLegacyOpenRouter(st, stored, "2026-08-04T00:00:00.000Z");
+      await writeProjections(daemonDir!, migrated.secrets, migrated.state);
       return { ok: true, affectedSessions: force ? live : 0 };
     },
     seedProvider: async (
@@ -1499,18 +1673,27 @@ test("cliproxyContributor: a real account prefixes the effective model; System/u
   assert.equal(cliproxyContributor("claude", { accountId: "abc-1", model: "x" }, daemonDir), null);
 });
 
-test("cliproxyContributor: an OpenRouter/Kimi model is emitted bare even with an account; other models are prefixed", () => {
+test("cliproxyContributor: a router-provider model is emitted bare even with an account; other models are prefixed", async () => {
   const daemonDir = join(mkdtempSync(join(tmpdir(), "orq-cliproxy-kimi-")), "daemon");
   const accountId = "14137047-1111-2222-3333-444455556666";
+  // Routing is decided by the persisted router-provider index, not the name shape.
+  await writeEnabledState(daemonDir, {
+    routerProviders: [
+      routerProvider("openrouter", {
+        preset: "openrouter",
+        models: [{ name: "moonshotai/kimi-k3", alias: "kimi-k3" }]
+      })
+    ]
+  });
 
-  // Kimi routes through the keyless OpenRouter provider → NO account prefix, even
-  // when a real managed account was picked (a stale pick must not misroute it).
+  // Kimi is served by the router's own key → NO account prefix, even when a real
+  // managed account was picked (a stale pick must not misroute it).
   const kimi = cliproxyContributor("claudex", { accountId, model: "kimi-k3" }, daemonDir);
   assert.ok(kimi);
   assert.equal(kimi.env.ANTHROPIC_MODEL, "kimi-k3");
   assert.equal(kimi.env.CLAUDE_CODE_SUBAGENT_MODEL, undefined, "no subagent pin");
 
-  // A non-OpenRouter model with the same account IS prefixed (the routing default).
+  // A non-router model with the same account IS prefixed (the routing default).
   const gpt = cliproxyContributor("claudex", { accountId, model: "gpt-5.6-sol" }, daemonDir);
   assert.ok(gpt);
   assert.equal(gpt.env.ANTHROPIC_MODEL, "acc14137047/gpt-5.6-sol");

@@ -2,21 +2,28 @@ import { existsSync } from "node:fs";
 import { readFile, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { CliProxyProviderId, CliProxyProviderStatus, CliProxyStatus } from "@orquester/api";
+import type {
+  CliProxyProviderId,
+  CliProxyProviderStatus,
+  CliProxyRouterProviderStatus,
+  CliProxyStatus
+} from "@orquester/api";
 import {
   type CliProxyModelOverrides,
   type CliProxySecrets,
   type CliProxyState,
   MODEL_NAME_RE,
-  OPENROUTER_ALIAS_MODELS,
+  ROUTER_PRESETS,
+  type RouterProvider,
   cliproxyDir,
   cliproxyStateFile,
   createDefaultCliProxyState,
+  migrateLegacyOpenRouter,
   parseCliProxyState
 } from "@orquester/config";
 import type { Broadcaster } from "./broadcaster.ts";
-import { seedHome, writeHardened, writeProjections } from "./cliproxy-files.ts";
-import { loadOrInitSecrets, setOpenRouterKey } from "./cliproxy-secrets.ts";
+import { routerKimiAvailable, seedHome, writeHardened, writeProjections } from "./cliproxy-files.ts";
+import { loadOrInitSecrets, setOpenRouterKey, writeSecrets } from "./cliproxy-secrets.ts";
 import {
   accessTokenFreshMs,
   accountPrefix,
@@ -77,9 +84,26 @@ export interface CliProxyAdapters {
   /** Delay between spawn-probe retries (production: real setTimeout; tests: instant). */
   sleep?(ms: number): Promise<void>;
   /**
-   * Verify an OpenRouter key against openrouter.ai (production: GET /api/v1/key).
-   * "rejected" = the service explicitly refused the key (401/403); "unknown" =
-   * network failure/timeout — the key is stored but left unverified.
+   * Verify a router provider's key against that provider. openrouter-preset
+   * providers use the precise `GET /key` endpoint; everything else GETs
+   * `${baseUrl}/models`. "rejected" = the service explicitly refused the key
+   * (401/403); "unknown" = network failure/timeout — the key is stored but left
+   * unverified rather than blocking on the provider's uptime.
+   */
+  verifyRouterKey?(provider: RouterProvider, key: string): Promise<"ok" | "rejected" | "unknown">;
+  /**
+   * Fetch a router provider's `/models` catalog with its stored key (backs the
+   * catalog route Task 5/7 expose). Absent → the catalog surface reports
+   * "unavailable" rather than erroring.
+   */
+  fetchRouterModels?(
+    provider: RouterProvider,
+    key: string
+  ): Promise<{ ok: true; models: string[] } | { ok: false; error: string }>;
+  /**
+   * LEGACY, unused by the manager — declared only so the still-wired
+   * `verifyOpenRouterKey` adapter in index.ts keeps type-checking until Task 7
+   * rewires it to {@link verifyRouterKey}. Delete with that wiring.
    */
   verifyOpenRouterKey?(key: string): Promise<"ok" | "rejected" | "unknown">;
   /**
@@ -171,6 +195,7 @@ export class CliProxyManager {
       backgroundModel: this.state.backgroundModel,
       modelOverrides: this.state.modelOverrides,
       providers: this.providerStatuses(),
+      routerProviders: this.routerProviderStatuses(),
       accounts: [...this.seededAccounts.values()].map((a) => ({
         id: a.id,
         provider: a.provider,
@@ -205,6 +230,7 @@ export class CliProxyManager {
         return;
       }
       this.secrets = loaded.secrets;
+      await this.migrateLegacy();
       await this.refreshSeededFreshness();
       await this.bootAdopt();
     });
@@ -229,6 +255,7 @@ export class CliProxyManager {
           return;
         }
         this.secrets = loaded.secrets;
+        await this.migrateLegacy();
         this.state.enabled = true;
 
         // Install the pinned binary (injected). Pre-wiring fallback: require one.
@@ -275,7 +302,7 @@ export class CliProxyManager {
         }
         if (probed.ok) {
           this.becomeHealthy(probed.models);
-          await this.refreshOpenRouterVerification();
+          await this.refreshRouterVerification();
         } else {
           // Fail closed: don't persist enabled:true, or next boot's init() re-runs
           // bootAdopt() against a proxy that never came up. Mirrors the reset above.
@@ -313,9 +340,31 @@ export class CliProxyManager {
   private async seedHomes(): Promise<void> {
     const sysDir = this.resolveSystemClaudeDir();
     const sysConfig = this.resolveSystemClaudeConfigFile();
-    const kimi = this.secrets ? Boolean(this.secrets.openRouterKey) : undefined;
+    // `undefined` = key state unknown (secrets not loaded) → don't churn the
+    // managed memory files; a boolean converges them on the current gate.
+    const kimi = this.secrets ? routerKimiAvailable(this.state, this.secrets) : undefined;
     await seedHome(this.daemonDir, "claudex", sysDir, sysConfig, kimi);
     await seedHome(this.daemonDir, "claudemix", sysDir, sysConfig, kimi);
+  }
+
+  /**
+   * One-time legacy `openRouterKey` → router-provider migration (spec §1). Runs
+   * right after secrets load in both entry points (init/enable) so every later
+   * read — projection, probe union, status, coupling — sees only the new shape.
+   * Idempotent; persists both files only when something actually changed.
+   */
+  private async migrateLegacy(): Promise<void> {
+    if (!this.secrets) return;
+    const out = migrateLegacyOpenRouter(
+      this.state,
+      this.secrets,
+      new Date(this.adapters.now()).toISOString()
+    );
+    if (!out.changed) return;
+    this.state = out.state;
+    this.secrets = out.secrets;
+    await writeSecrets(this.daemonDir, this.secrets);
+    await this.persist();
   }
 
   /** Force-gated stop. Refuses while daemon-managed sessions are live unless forced. */
@@ -403,6 +452,12 @@ export class CliProxyManager {
    * via the secrets store, updates the in-memory secrets, re-projects config.yaml,
    * restarts the proxy (kill + spawn + probe), recouples the launchers to the
    * now-available openrouter provider, and broadcasts + persists.
+   *
+   * LEGACY (spec §1): superseded by the generic router-provider mutations. It now
+   * routes through the `openrouter` router provider — seeding it via the legacy
+   * migration when it doesn't exist yet — so the whole data-driven pipeline
+   * (config.yaml projection, probe union, coupling) sees a normal provider.
+   * Deleted once the routes move to `setRouterKey`.
    */
   setOpenRouterKey(
     key: string,
@@ -418,15 +473,18 @@ export class CliProxyManager {
       // is refused outright; a network-inconclusive check stores it unverified
       // (verifiedAt stays null) rather than blocking on openrouter's uptime.
       let verifiedAt: string | null = null;
-      if (this.adapters.verifyOpenRouterKey) {
-        const verdict = await this.adapters.verifyOpenRouterKey(key);
-        if (verdict === "rejected") {
-          return { ok: false, error: "OpenRouter rejected this key" };
-        }
-        if (verdict === "ok") verifiedAt = new Date(this.adapters.now()).toISOString();
+      const verdict = await this.verifyKey(this.openRouterProviderRecord(), key);
+      if (verdict === "rejected") {
+        return { ok: false, error: "OpenRouter rejected this key" };
       }
+      if (verdict === "ok") verifiedAt = new Date(this.adapters.now()).toISOString();
       this.state.openRouterKeyVerifiedAt = verifiedAt;
       this.secrets = await setOpenRouterKey(this.daemonDir, key);
+      // Materialize the `openrouter` router provider from the just-stored key so
+      // the projection/probe/coupling pipeline treats it like any other router.
+      await this.migrateLegacy();
+      const seeded = this.state.routerProviders.find((p) => p.id === "openrouter");
+      if (seeded) seeded.keyVerifiedAt = verifiedAt;
       // Converge the managed kimi subagent with the new key state immediately
       // (enable/boot are the only other seed points).
       await this.seedHomes();
@@ -745,7 +803,7 @@ export class CliProxyManager {
         const probed = await this.probe();
         if (probed.ok) {
           this.becomeHealthy(probed.models);
-          await this.refreshOpenRouterVerification();
+          await this.refreshRouterVerification();
           await this.persist();
           return;
         }
@@ -814,12 +872,20 @@ export class CliProxyManager {
   private async probe(): Promise<ProbeResult> {
     if (!this.secrets) return { ok: false, reachable: false };
     const result = await this.adapters.probe(this.state.port, this.secrets.apiKey);
-    // CLIProxyAPI routes openai-compatibility aliases (config.yaml, written by
-    // us) but never lists them in /v1/models — union them in here so the stored
-    // catalog, validateModel and preflight all see kimi while a key is set.
-    if (result.ok && this.secrets.openRouterKey) {
+    if (result.ok && this.secrets) {
       const models = new Set(result.models ?? []);
-      for (const alias of OPENROUTER_ALIAS_MODELS) models.add(alias);
+      for (const p of this.state.routerProviders) {
+        // Only a KEYED provider reaches config.yaml, so only its models are
+        // actually routable — a keyless provider must not pollute the catalog.
+        if (!this.secrets.routerKeys[p.id]) continue;
+        // CLIProxyAPI routes the openai-compatibility names/aliases we configure
+        // but never lists them in /v1/models — union BOTH forms in so the stored
+        // catalog, validateModel and preflight all see them.
+        for (const m of p.models) {
+          models.add(m.name);
+          if (m.alias) models.add(m.alias);
+        }
+      }
       return { ...result, models: [...models] };
     }
     return result;
@@ -844,15 +910,21 @@ export class CliProxyManager {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  /** Backfill a missing OpenRouter verification (keys stored before the
-   *  verification flow existed, or a previously-inconclusive check). Best-effort:
-   *  "unknown"/"rejected" here leaves the stamp null rather than erroring. */
-  private async refreshOpenRouterVerification(): Promise<void> {
-    if (!this.secrets?.openRouterKey || this.state.openRouterKeyVerifiedAt) return;
-    if (!this.adapters.verifyOpenRouterKey) return;
-    const verdict = await this.adapters.verifyOpenRouterKey(this.secrets.openRouterKey);
-    if (verdict === "ok") {
-      this.state.openRouterKeyVerifiedAt = new Date(this.adapters.now()).toISOString();
+  /** Backfill a missing verification for every keyed router provider (keys stored
+   *  before the verification flow existed, or a previously-inconclusive check).
+   *  Best-effort: "unknown"/"rejected" here leaves the stamp null rather than
+   *  erroring — an already-stored key is never revoked by a flaky check. */
+  private async refreshRouterVerification(): Promise<void> {
+    if (!this.secrets) return;
+    for (const p of this.state.routerProviders) {
+      const key = this.secrets.routerKeys[p.id];
+      if (!key || p.keyVerifiedAt) continue;
+      const verdict = await this.verifyKey(p, key);
+      if (verdict === "ok") {
+        p.keyVerifiedAt = new Date(this.adapters.now()).toISOString();
+        // Legacy at-rest mirror, kept one release for rollback safety.
+        if (p.id === "openrouter") this.state.openRouterKeyVerifiedAt = p.keyVerifiedAt;
+      }
     }
   }
 
@@ -895,7 +967,8 @@ export class CliProxyManager {
    * Reason→consequence coupling (spec §1 + §4). A down proxy disables both
    * entries ("proxy down"). A launchable proxy with no seeded providers yet stays
    * optimistic (both enabled — nothing to gate on). Once credentials exist, each
-   * entry is gated on its required provider: `claudex` needs codex OR openrouter,
+   * entry is gated on its required provider: `claudex` needs codex OR any keyed
+   * router provider (spec 2026-08-04 §1),
    * `claudemix` needs claude; a missing/expired required provider leaves the entry
    * visible-but-disabled with an explanatory reason.
    */
@@ -913,13 +986,13 @@ export class CliProxyManager {
     }
     const codexOk = this.providerState("codex") === "ok";
     const claudeOk = this.providerState("claude") === "ok";
-    const openrouterOk = this.providerState("openrouter") === "ok";
-    if (codexOk || openrouterOk) {
+    const routerOk = this.keyedRouterCount() > 0;
+    if (codexOk || routerOk) {
       this.registry.setRuntimeState("claudex", { enabled: true });
     } else {
       this.registry.setRuntimeState("claudex", {
         enabled: false,
-        disabledReason: "no codex or openrouter credential"
+        disabledReason: "no codex or router credential"
       });
     }
     if (claudeOk) {
@@ -1018,7 +1091,6 @@ export class CliProxyManager {
   private async syncSeededCredentials(): Promise<void> {
     if (!this.adapters.managedCredentialPath) return;
     for (const account of this.seededAccounts.values()) {
-      if (account.provider === "openrouter") continue; // key-based, no credential copies
       try {
         await this.syncSeededCredential(account.provider, account.id);
       } catch {
@@ -1112,38 +1184,87 @@ export class CliProxyManager {
     // refresh on either side to break the tie.
   }
 
-  /** Whether any provider knowledge exists yet (seeded account or OpenRouter key). */
+  /** Whether any provider knowledge exists yet (seeded account or keyed router). */
   private hasProviderInfo(): boolean {
-    return this.seededAccounts.size > 0 || Boolean(this.secrets?.openRouterKey);
+    return this.seededAccounts.size > 0 || this.keyedRouterCount() > 0;
+  }
+
+  /** Router providers that can actually serve a launch: a key AND ≥1 model — the
+   *  same pair `renderConfigYaml` requires before emitting the provider block. */
+  private keyedRouterCount(): number {
+    if (!this.secrets) return 0;
+    return this.state.routerProviders.filter(
+      (p) => Boolean(this.secrets?.routerKeys[p.id]) && p.models.length > 0
+    ).length;
+  }
+
+  /** Wire projection of the router providers — key state only, never the key. */
+  private routerProviderStatuses(): CliProxyRouterProviderStatus[] {
+    return this.state.routerProviders.map((p) => ({
+      id: p.id,
+      label: p.label,
+      preset: p.preset,
+      baseUrl: p.baseUrl,
+      models: p.models,
+      // Parity note: with the proxy disabled, secrets are not loaded and keyState
+      // reads "none" — the same off-state behavior the legacy openrouter row had.
+      keyState: this.secrets?.routerKeys[p.id] ? (p.keyVerifiedAt ? "verified" : "set") : "none",
+      keyVerifiedAt: p.keyVerifiedAt
+    }));
   }
 
   /**
-   * Aggregate per-provider state: openrouter is `ok` when a key is configured;
-   * codex/claude are `missing` with no seeded account, `expired` if any seeded
-   * credential is stale (probes are per-credential, so one bad account degrades
-   * the whole provider — spec §4), else `ok`.
+   * Verify a provider key through the injected adapter. Prefers the generic
+   * `verifyRouterKey`; while index.ts still injects only the legacy
+   * `verifyOpenRouterKey` (rewired in Task 7) that one covers the `openrouter`
+   * provider so the shipped verification doesn't silently lapse mid-migration.
+   * "unknown" when no adapter applies — store, but leave unverified.
+   */
+  private async verifyKey(
+    provider: RouterProvider,
+    key: string
+  ): Promise<"ok" | "rejected" | "unknown"> {
+    if (this.adapters.verifyRouterKey) return this.adapters.verifyRouterKey(provider, key);
+    if (provider.id === "openrouter" && this.adapters.verifyOpenRouterKey) {
+      return this.adapters.verifyOpenRouterKey(key);
+    }
+    return "unknown";
+  }
+
+  /** The `openrouter` provider record used for a legacy key verification —
+   *  the persisted one when it exists, else the shipped preset's shape. */
+  private openRouterProviderRecord(): RouterProvider {
+    const existing = this.state.routerProviders.find((p) => p.id === "openrouter");
+    if (existing) return existing;
+    const preset = ROUTER_PRESETS.find((p) => p.preset === "openrouter");
+    return {
+      id: "openrouter",
+      label: preset?.label ?? "OpenRouter",
+      baseUrl: preset?.baseUrl ?? "https://openrouter.ai/api/v1",
+      preset: "openrouter",
+      models: preset ? [...preset.models] : [],
+      keyVerifiedAt: null,
+      createdAt: new Date(this.adapters.now()).toISOString()
+    };
+  }
+
+  /**
+   * Aggregate per-provider state for the OAuth pair: `missing` with no seeded
+   * account, `expired` if any seeded credential is stale (probes are
+   * per-credential, so one bad account degrades the whole provider — spec §4),
+   * else `ok`. Router providers have their own status list.
    */
   private providerState(provider: CliProxyProviderId): "ok" | "missing" | "expired" {
-    if (provider === "openrouter") return this.secrets?.openRouterKey ? "ok" : "missing";
     const accts = [...this.seededAccounts.values()].filter((a) => a.provider === provider);
     if (accts.length === 0) return "missing";
     if (accts.some((a) => a.state === "expired")) return "expired";
     return "ok";
   }
 
-  /** The three brokered providers with their aggregate state + last-verified time. */
+  /** The two OAuth providers with their aggregate state + last-verified time. */
   private providerStatuses(): CliProxyProviderStatus[] {
-    const providers: CliProxyProviderId[] = ["codex", "claude", "openrouter"];
+    const providers: CliProxyProviderId[] = ["codex", "claude"];
     return providers.map((provider) => {
-      // openrouter has no seeded accounts — its verification signal is the
-      // key-check timestamp, not credential freshness.
-      if (provider === "openrouter") {
-        return {
-          provider,
-          state: this.providerState(provider),
-          lastVerifiedAt: this.state.openRouterKeyVerifiedAt
-        };
-      }
       const verified = [...this.seededAccounts.values()]
         .filter((a) => a.provider === provider)
         .map((a) => a.lastVerifiedAt)
