@@ -18,6 +18,8 @@ export function classifyAgentEvent(
       return classifyCodex(event);
     case "opencode":
       return classifyOpenCode(event);
+    case "grok":
+      return classifyGrok(event, payload);
   }
 }
 
@@ -66,6 +68,26 @@ function classifyCodex(event: string): HookEventClass | null {
       return "waiting";
     case "Stop":
       return "done";
+    default:
+      return null;
+  }
+}
+
+/**
+ * Grok fires `Stop` twice over a session's life: once per completed turn
+ * (`reason:"end_turn"`) and once observe-only at teardown
+ * (`channel_closed`/`shutdown`) — only the former is a finished turn.
+ */
+function classifyGrok(event: string, payload: unknown): HookEventClass | null {
+  switch (event) {
+    case "UserPromptSubmit":
+    case "PreToolUse":
+      return "working";
+    case "Notification":
+    case "PermissionDenied":
+      return "waiting";
+    case "Stop":
+      return (payload as { reason?: unknown })?.reason === "end_turn" ? "done" : null;
     default:
       return null;
   }

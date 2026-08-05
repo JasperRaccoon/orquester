@@ -52,6 +52,11 @@ function assertModel(name: string, label: string): void {
 /** The model id the Fable `/model` slot and the managed `kimi` subagent pin. */
 const KIMI_PICK = "kimi-k3";
 
+/** The model id the managed `grok` subagent pins — the coding-trained half of the
+ *  curated xAI pair (`grok-4.5` forces reasoning, which stalls Claude Code's
+ *  non-streaming classifier call). The Fable `/model` slot stays kimi's. */
+const GROK_PICK = "grok-build-0.1";
+
 /** The router provider (if any) that is keyed AND serves the `kimi-k3` pick,
  *  by full name or alias. Drives the Fable slot's label. */
 function kimiProvider(state: CliProxyState, secrets: CliProxySecrets): { label: string } | undefined {
@@ -387,20 +392,22 @@ async function mergeManagedSettings(home: string): Promise<void> {
  *  subagent on the pinned proxy model. Agent frontmatter `model:` is the only
  *  per-subagent model mechanism Claude Code supports, and it accepts arbitrary
  *  ids (verified 2026-07-25 through the proxy on all three routes: main on
- *  fable, subagents on luna/kimi). Kimi is gated like its /model picker slot —
- *  only while some keyed router provider serves `kimi-k3`; unknown key state
- *  leaves the file as-is. User agents under other filenames are never touched. */
+ *  fable, subagents on luna/kimi). Gated entries follow the credential that can
+ *  actually serve them — `kimi` a keyed router serving `kimi-k3`, `grok` a linked
+ *  xAI OAuth account; an unknown gate state leaves the file as-is. User agents
+ *  under other filenames are never touched. */
 const MANAGED_AGENTS: Array<{
   file: string;
   name: string;
   model: string;
   blurb: string;
-  kimiGated?: boolean;
+  gate?: "kimi" | "xai";
 }> = [
   { file: "gpt-sol.md", name: "gpt-sol", model: "gpt-5.6-sol", blurb: "GPT-5.6 Sol (OpenAI flagship — deepest reasoning)" },
   { file: "gpt-terra.md", name: "gpt-terra", model: "gpt-5.6-terra", blurb: "GPT-5.6 Terra (balanced everyday coding)" },
   { file: "gpt-luna.md", name: "gpt-luna", model: "gpt-5.6-luna", blurb: "GPT-5.6 Luna (fast, low cost)" },
-  { file: "kimi.md", name: "kimi", model: KIMI_PICK, blurb: "Kimi K3 via the configured router (1M-token context)", kimiGated: true }
+  { file: "kimi.md", name: "kimi", model: KIMI_PICK, blurb: "Kimi K3 via the configured router (1M-token context)", gate: "kimi" },
+  { file: "grok.md", name: "grok", model: GROK_PICK, blurb: "Grok Build via the linked xAI account (256k context, coding-trained)", gate: "xai" }
 ];
 
 function renderManagedAgent(agent: (typeof MANAGED_AGENTS)[number]): string {
@@ -424,24 +431,27 @@ function renderManagedAgent(agent: (typeof MANAGED_AGENTS)[number]): string {
  *  pkill) instead of using the seeded subagent types. Claudex needs no note:
  *  its main loop already IS the GPT set. Skipped while the router key
  *  state is unknown so kimi mentions can't flap on a secrets-less boot. */
-function renderManagedMemory(kimiAvailable: boolean): string {
+function renderManagedMemory(kimiAvailable: boolean, xaiLinked: boolean): string {
   const kimiAgent = kimiAvailable ? ', "kimi" (Kimi K3 — 1M-token context via the router)' : "";
   const kimiModel = kimiAvailable ? `, ${KIMI_PICK}` : "";
+  const grokAgent = xaiLinked ? ', "grok" (Grok Build — xAI, 256k context)' : "";
+  const grokModel = xaiLinked ? `, ${GROK_PICK}` : "";
+  const extra = [kimiAvailable ? "Kimi" : null, xaiLinked ? "Grok" : null].filter((p) => p !== null);
   return [
     "<!-- orq-managed: rewritten on every daemon seed pass; edits will be lost. -->",
     "",
-    "# Model proxy: delegating to GPT" + (kimiAvailable ? " / Kimi" : ""),
+    ["# Model proxy: delegating to GPT", ...extra].join(" / "),
     "",
     "This session runs through the Orquester model proxy, which also serves",
     "non-Claude models:",
     "",
     "- To run a SUBAGENT on another model, call the Task tool with one of these",
     `  subagent_type values: "gpt-sol" (GPT-5.6 Sol — deepest reasoning),`,
-    `  "gpt-terra" (balanced), "gpt-luna" (fast, low cost)${kimiAgent}.`,
+    `  "gpt-terra" (balanced), "gpt-luna" (fast, low cost)${kimiAgent}${grokAgent}.`,
     "  Subagents spawned with any other type inherit the session's current main",
     "  model.",
     `- To switch the MAIN loop, /model accepts: gpt-5.6-sol, gpt-5.6-terra,`,
-    `  gpt-5.6-luna${kimiModel}.`,
+    `  gpt-5.6-luna${kimiModel}${grokModel}.`,
     "- Never try to reach these models through codex/opencode CLIs or raw APIs —",
     "  the subagent types and /model ids above are the only supported path.",
     ""
@@ -451,11 +461,15 @@ function renderManagedMemory(kimiAvailable: boolean): string {
 async function seedManagedMemory(
   home: string,
   entryId: "claudex" | "claudemix",
-  kimiAvailable: boolean | undefined
+  kimiAvailable: boolean | undefined,
+  xaiLinked: boolean | undefined
 ): Promise<void> {
   if (entryId !== "claudemix" || kimiAvailable === undefined) return;
   const file = join(home, "CLAUDE.md");
-  const content = renderManagedMemory(kimiAvailable);
+  // The xai gate is derived from the auth dir (no secrets needed), so the manager
+  // always knows it; an `undefined` from another caller just omits the grok lines
+  // rather than blocking the whole file on it.
+  const content = renderManagedMemory(kimiAvailable, xaiLinked === true);
   try {
     if ((await readFile(file, "utf8")) === content) return; // no write churn
   } catch {
@@ -464,14 +478,19 @@ async function seedManagedMemory(
   await writeFile(file, content, { mode: 0o600 });
 }
 
-async function seedManagedAgents(home: string, kimiAvailable: boolean | undefined): Promise<void> {
+async function seedManagedAgents(
+  home: string,
+  kimiAvailable: boolean | undefined,
+  xaiLinked: boolean | undefined
+): Promise<void> {
   const dir = join(home, "agents");
   await mkdir(dir, { recursive: true });
   for (const agent of MANAGED_AGENTS) {
     const file = join(dir, agent.file);
-    if (agent.kimiGated) {
-      if (kimiAvailable === undefined) continue; // key state unknown — don't churn
-      if (!kimiAvailable) {
+    if (agent.gate) {
+      const available = agent.gate === "kimi" ? kimiAvailable : xaiLinked;
+      if (available === undefined) continue; // gate state unknown — don't churn
+      if (!available) {
         await rm(file, { force: true });
         continue;
       }
@@ -507,7 +526,11 @@ export async function seedHome(
   // Whether some keyed router provider serves `kimi-k3` (gates the managed kimi
   // subagent); undefined = secrets not loaded, leave the kimi file untouched.
   // See routerKimiAvailable().
-  kimiAvailable?: boolean
+  kimiAvailable?: boolean,
+  // Whether an xAI OAuth account is linked (gates the managed grok subagent);
+  // undefined = state unknown, leave the grok file untouched. Derived from the
+  // proxy's auth dir — see scanXaiAuthFiles()/deriveXaiAccount().
+  xaiLinked?: boolean
 ): Promise<void> {
   const home = cliproxyHomeDir(daemonDir, entryId);
   const markerPath = join(home, CLIPROXY_HOME_MARKER);
@@ -542,6 +565,6 @@ export async function seedHome(
   await ensureSymlink(join(systemClaudeDir, "plugins"), join(home, "plugins"));
   await copyIfMissing(join(systemClaudeDir, "settings.json"), join(home, "settings.json"));
   await mergeManagedSettings(home);
-  await seedManagedAgents(home, kimiAvailable);
-  await seedManagedMemory(home, entryId, kimiAvailable);
+  await seedManagedAgents(home, kimiAvailable, xaiLinked);
+  await seedManagedMemory(home, entryId, kimiAvailable, xaiLinked);
 }

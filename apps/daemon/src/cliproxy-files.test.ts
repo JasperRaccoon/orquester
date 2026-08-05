@@ -451,3 +451,44 @@ test("seedHome: settings merge is idempotent and survives a malformed file", asy
   const settings = JSON.parse(await readFile(file, "utf8"));
   assert.equal(settings.autoCompactEnabled, true, "malformed file replaced with managed keys");
 });
+
+test("seedHome: the managed grok subagent rides the xai link gate, independent of kimi", async () => {
+  const dir = await makeDir();
+  const sysDir = await mkdtemp(join(tmpdir(), "orq-sysclaude-"));
+  await writeFile(join(sysDir, ".claude.json"), "{}");
+  const agents = join(cliproxyHomeDir(dir, "claudemix"), "agents");
+
+  // Link state unknown (5-arg legacy call): grok untouched, kimi still gated on its own flag.
+  await seedHome(dir, "claudemix", sysDir, join(sysDir, ".claude.json"), true);
+  assert.ok(existsSync(join(agents, "kimi.md")), "kimi seeded by its own gate");
+  assert.ok(!existsSync(join(agents, "grok.md")), "grok absent while the link state is unknown");
+
+  // Linked: grok appears pinned to the coding-trained default, with no key at all.
+  await seedHome(dir, "claudemix", sysDir, join(sysDir, ".claude.json"), false, true);
+  const grok = await readFile(join(agents, "grok.md"), "utf8");
+  assert.ok(grok.includes("name: grok"), "grok named");
+  assert.ok(grok.includes("model: grok-build-0.1"), "grok pinned to the default of the curated pair");
+  assert.ok(!existsSync(join(agents, "kimi.md")), "the two gates are independent");
+
+  // Unlinked: the managed grok.md is removed again.
+  await seedHome(dir, "claudemix", sysDir, join(sysDir, ".claude.json"), false, false);
+  assert.ok(!existsSync(join(agents, "grok.md")), "grok removed with the account");
+});
+
+test("seedHome: the delegation CLAUDE.md names grok only while the xai account is linked", async () => {
+  const dir = await makeDir();
+  const sysDir = await mkdtemp(join(tmpdir(), "orq-sysclaude-"));
+  await writeFile(join(sysDir, ".claude.json"), "{}");
+  const memFile = join(cliproxyHomeDir(dir, "claudemix"), "CLAUDE.md");
+
+  await seedHome(dir, "claudemix", sysDir, join(sysDir, ".claude.json"), false, true);
+  const withGrok = await readFile(memFile, "utf8");
+  assert.ok(withGrok.includes('"grok"') && withGrok.includes("grok-build-0.1"), "grok listed while linked");
+  assert.ok(withGrok.includes("# Model proxy: delegating to GPT / Grok"), "title tracks the gates");
+  assert.ok(!withGrok.includes("kimi"), "kimi stays on its own gate");
+
+  await seedHome(dir, "claudemix", sysDir, join(sysDir, ".claude.json"), true, false);
+  const withoutGrok = await readFile(memFile, "utf8");
+  assert.ok(!withoutGrok.includes("grok"), "grok absent once unlinked");
+  assert.ok(withoutGrok.includes("# Model proxy: delegating to GPT / Kimi"));
+});

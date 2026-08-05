@@ -15,6 +15,7 @@ import ClaudeX from "./agents/claudex.svg?react";
 import Codex from "./agents/codex.svg?react";
 import DeepSeek from "./agents/deepseek.svg?react";
 import Gemini from "./agents/gemini.svg?react";
+import Grok from "./agents/grok.svg?react";
 import OpenCode from "./agents/opencode.svg?react";
 
 // IDEs - bare ids, matching daemon where possible; filename variants mapped to id
@@ -70,6 +71,7 @@ const specific: Record<string, React.ComponentType<React.SVGProps<SVGSVGElement>
   codex: Codex,
   deepseek: DeepSeek,
   gemini: Gemini,
+  grok: Grok,
   opencode: OpenCode,
 
   // ides (bare ids from daemon + jetbrains from user SVGs)

@@ -11,6 +11,7 @@ import type {
   CliProxySeedRequest,
   CliProxyStatus,
   CliProxyUnseedRequest,
+  CliProxyXaiLink,
   CreateAccountRequest,
   CreateBrowserRequest,
   CreateProjectRequest,
@@ -131,6 +132,7 @@ import {
   MODEL_NAME_RE,
   ROUTER_PROVIDER_ID_RE,
   resolveRouterModel,
+  resolveXaiModel,
   routerKeyCheckUrl,
   createDefaultClientConfig,
   createDefaultDaemonConfig,
@@ -649,6 +651,19 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
         sessions
           .list()
           .filter((s) => (s.refId === "claudex" || s.refId === "claudemix") && s.status === "running").length,
+      // The unlink gate: only sessions actually running on a Grok model lose their
+      // credential when the xAI account is unlinked. `SessionSummary.model` carries
+      // the resolved launch model, so this is the same string the launcher pinned.
+      liveXaiSessionCount: () =>
+        sessions
+          .list()
+          .filter(
+            (s) =>
+              (s.refId === "claudex" || s.refId === "claudemix") &&
+              s.status === "running" &&
+              s.model !== undefined &&
+              resolveXaiModel(s.model) !== null
+          ).length,
       now: () => Date.now(),
       // Pull + verify + atomically install the pinned binary. When committed
       // patches exist (deploy/cliproxy-patches/*.patch), builds from the pinned
@@ -881,11 +896,14 @@ export function cliproxyContributor(
     // regardless of accountId (a per-account prefix would misroute it). Routing is
     // decided by the persisted provider index, not by the model's name shape. The
     // daemon enforces this at the wire so a stale account pick can't reattach a
-    // prefix (spec §2).
+    // prefix (spec §2). An xAI OAuth (Grok) model is the same case for the same
+    // reason: CLIProxyAPI routes it to the linked xai credential internally, so a
+    // prefix could only misroute it (spec 2026-08-05 §B.3).
     const routesToAccount =
       Boolean(ctx.accountId) &&
       ctx.accountId !== SYSTEM_ACCOUNT_ID &&
-      !resolveRouterModel(state?.routerProviders ?? [], ctx.model);
+      !resolveRouterModel(state?.routerProviders ?? [], ctx.model) &&
+      !resolveXaiModel(ctx.model);
     // The acc<hex>/ prefix exists to pin ONE of several same-provider credentials;
     // with a single seeded account it adds nothing but leaks into every visible
     // model string inside the session (banner, /model). Emit bare when the pick
@@ -1104,6 +1122,10 @@ interface CliProxyRouteManager {
   fetchRouterCatalog(
     id: string
   ): Promise<{ ok: true; models: string[] } | { ok: false; code: "unknown" | "no-key" | "upstream"; error: string }>;
+  linkXai(): Promise<
+    { ok: true; link: CliProxyXaiLink } | { ok: false; code: "conflict" | "upstream"; error: string; status?: number }
+  >;
+  cancelOrUnlinkXai(opts: { force?: boolean }): Promise<{ ok: boolean; affectedSessions?: number; error?: string }>;
   seedProvider(
     req: { provider: "codex" | "claude"; accountId: string; label?: string },
     read: (provider: "codex" | "claude", accountId: string) => Promise<unknown>
@@ -1417,6 +1439,43 @@ export function registerCliProxyRoutes(
     }
     return { models: res.models };
   });
+
+  // xAI OAuth (Grok) account (spec 2026-08-05 §B.2). The device-code flow is
+  // driven entirely through the proxy's loopback management API — the proxy owns
+  // the tokens and writes/refreshes `auth/xai-*.json` itself — so neither link nor
+  // unlink touches config.yaml or restarts the proxy (it hot-discovers the auth
+  // dir). Both are mutations, hence HTTP-transport-only like the rest of the
+  // surface. No token material crosses this boundary: link returns only the
+  // user-facing verification prompt.
+  app.post("/api/cliproxy/xai/link", async (_request, reply): Promise<CliProxyXaiLink | undefined> => {
+    if (refusedOnSocket(reply)) return;
+    const res = await manager.linkXai();
+    if (!res.ok) {
+      // "already linking/linked" and "proxy not running" are caller-resolvable
+      // preconditions (409); a management-API fault is upstream (502, carrying
+      // its status when there was one) — same contract as the catalog route.
+      if (res.code === "conflict") return reply.code(409).send({ error: res.error });
+      return reply.code(502).send({ error: res.error, ...(res.status !== undefined ? { status: res.status } : {}) });
+    }
+    return res.link;
+  });
+
+  // Cancel an in-flight device-code session, or unlink the account. Unlink pulls
+  // the credential out from under live Grok sessions, so it rides the same 409
+  // force-gate as every other cliproxy mutation; cancelling a pending link never
+  // gates (nothing is running on it yet).
+  app.delete<{ Querystring: { force?: string } }>(
+    "/api/cliproxy/xai/link",
+    async (request, reply): Promise<CliProxyStatus | undefined> => {
+      if (refusedOnSocket(reply)) return;
+      const res = await manager.cancelOrUnlinkXai({ force: request.query.force === "true" });
+      if (!res.ok) {
+        if (res.error) return reply.code(400).send({ error: res.error });
+        return reply.code(409).send({ ok: false, affectedSessions: res.affectedSessions });
+      }
+      return manager.status();
+    }
+  );
 }
 
 interface Services {
@@ -3120,18 +3179,21 @@ export function createServer(
     // A proxy launch pinning a managed account requires that account to be
     // SEEDED: the acc<hex>/ routing prefix resolves against the proxy's auth
     // files, so an unseeded pin can only 502 at runtime ("unknown provider for
-    // model acc…"). Router-provider models carry no account and are exempt —
-    // decided by the persisted provider index, same source of truth the launch
-    // contributor uses (read once here and reused for the seeded check).
+    // model acc…"). Router-provider and xAI OAuth models carry no account and are
+    // exempt — decided by the persisted provider index / the curated xai list, the
+    // same sources of truth the launch contributor uses (read once here and reused
+    // for the seeded check).
     const pinsManagedAccount =
       (body.refId === "claudex" || body.refId === "claudemix") &&
       Boolean(body.accountId) &&
       body.accountId !== SYSTEM_ACCOUNT_ID;
     const launchState = pinsManagedAccount ? readCliProxyState(resolved.daemonDir) : null;
-    if (
-      pinsManagedAccount &&
-      !(effectiveModel && resolveRouterModel(launchState?.routerProviders ?? [], effectiveModel))
-    ) {
+    const accountlessModel = Boolean(
+      effectiveModel &&
+        (resolveRouterModel(launchState?.routerProviders ?? [], effectiveModel) ||
+          resolveXaiModel(effectiveModel))
+    );
+    if (pinsManagedAccount && !accountlessModel) {
       const seeded = launchState?.seededAccounts.some((a) => a.accountId === body.accountId) ?? false;
       if (!seeded) {
         return reply.code(400).send({
@@ -3320,7 +3382,10 @@ export function createServer(
       async (request, reply): Promise<void> => {
         const body = request.body ?? ({} as AgentEventRequest);
         if (
-          (body.source !== "claude" && body.source !== "codex" && body.source !== "opencode") ||
+          (body.source !== "claude" &&
+            body.source !== "codex" &&
+            body.source !== "opencode" &&
+            body.source !== "grok") ||
           typeof body.event !== "string"
         ) {
           return reply.code(204).send();

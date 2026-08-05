@@ -102,11 +102,25 @@ export const REGISTRY = {
       updateCmd: "npm update -g opencode-ai"
     },
     {
+      id: "grok",
+      name: "Grok Build",
+      kind: "agent",
+      bin: ["grok"] as const,
+      args: ["--yolo"] as const,
+      // A managed install must never self-update: the daemon owns the binary's
+      // lifecycle through installCmd/updateCmd.
+      env: { GROK_DISABLE_AUTOUPDATER: "1" },
+      versionFlag: "--version",
+      installCmd: "npm install -g @xai-official/grok",
+      installCmdWin32: "npm install -g @xai-official/grok",
+      updateCmd: "npm update -g @xai-official/grok"
+    },
+    {
       // Claude Code driven through the managed CLIProxyAPI against a GPT/Kimi
       // catalog. Reuses the `claude` binary; the CliProxyManager enables it at
       // runtime once the proxy is healthy (disabled at rest).
       id: "claudex",
-      name: "Claude Code × GPT/Kimi",
+      name: "Claude Code × GPT/Kimi/Grok",
       kind: "agent",
       bin: ["claude"] as const,
       // "high", not the plain-claude "max": Sol is already the slow deep tier,

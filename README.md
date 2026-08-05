@@ -48,6 +48,7 @@ Coding agents are long-running, chatty processes that want your attention at unp
 - Usage widget: rolling 5-hour and weekly quota gauges, reset countdowns, token counts and cost per day/model for Claude Code & Codex.
 - **Model proxy**: run GPT and any OpenAI-compatible router model through the Claude Code harness via a daemon-supervised [CLIProxyAPI], with health states and a curated model catalog.
 - **Router providers**: add OpenRouter, TokenRouter (one-click presets) or any custom OpenAI-compatible gateway — paste the key, pick models from the fetched catalog (or type them), set per-model aliases and context/compact windows. Keys are verified before storing, stay on the host, and never cross the wire.
+- **Grok**: install xAI's **Grok Build** agent in one click, and link your Grok account with a device-code flow to run **Grok models** inside the Claude Code harness through the same model proxy — no API key, tokens stay with the proxy on disk.
 
 ### 🌐 Browser tabs (Design Mode)
 - Per-project headless Chromium, screencast into a tab with full keyboard/mouse/touch forwarding and desktop ⇄ mobile viewport toggle.
@@ -81,7 +82,7 @@ The daemon exposes a Streamable-HTTP **MCP endpoint** (`POST /mcp`) so *other* a
 
 | Category | Entries |
 |---|---|
-| **Agents** | Claude Code · Codex · Gemini CLI · DeepSeek · OpenCode · Claude Code × GPT/router models (via managed proxy) |
+| **Agents** | Claude Code · Codex · Gemini CLI · DeepSeek · OpenCode · Grok Build · Claude Code × GPT/Kimi/Grok (via managed proxy) |
 | **Shells** | Bash · Zsh · Fish · Nushell · PowerShell · cmd · sh |
 | **File explorers** | Nautilus · Dolphin · Thunar · Nemo · PCManFM · Caja · Explorer · system fallback |
 | **Browsers** | Chrome · Chromium · Brave · Edge · Vivaldi · Firefox · system fallback |

@@ -4,7 +4,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Fastify from "fastify";
-import type { CliProxyStatus } from "@orquester/api";
+import type { CliProxyStatus, CliProxyXaiLink } from "@orquester/api";
 import { registerCliProxyRoutes } from "./index";
 import {
   parseCliProxyState, createDefaultCliProxyState,
@@ -121,6 +121,9 @@ type RouterMutationResult = { ok: boolean; affectedSessions?: number; error?: st
 type RouterCatalogResult =
   | { ok: true; models: string[] }
   | { ok: false; code: "unknown" | "no-key" | "upstream"; error: string };
+type XaiLinkRouteResult =
+  | { ok: true; link: CliProxyXaiLink }
+  | { ok: false; code: "conflict" | "upstream"; error: string; status?: number };
 
 function fakeRouterRouteManager() {
   const calls = {
@@ -128,14 +131,21 @@ function fakeRouterRouteManager() {
     deleteProvider: [] as Array<{ id: string; force: boolean }>,
     setKey: [] as Array<{ id: string; key: string; force: boolean }>,
     clearKey: [] as Array<{ id: string; force: boolean }>,
-    catalog: [] as string[]
+    catalog: [] as string[],
+    linkXai: 0,
+    unlinkXai: [] as Array<{ force: boolean }>
   };
   const results = {
     upsert: { ok: true } as RouterMutationResult,
     deleteProvider: { ok: true } as RouterMutationResult,
     setKey: { ok: true, affectedSessions: 0 } as RouterMutationResult,
     clearKey: { ok: true, affectedSessions: 0 } as RouterMutationResult,
-    catalog: { ok: true, models: ["a/b"] } as RouterCatalogResult
+    catalog: { ok: true, models: ["a/b"] } as RouterCatalogResult,
+    linkXai: {
+      ok: true,
+      link: { url: "https://x.ai/device", userCode: "ABCD-EFGH", expiresAt: "2026-08-05T00:30:00Z" }
+    } as XaiLinkRouteResult,
+    unlinkXai: { ok: true, affectedSessions: 0 } as RouterMutationResult
   };
   const status: CliProxyStatus = {
     state: "off",
@@ -147,6 +157,7 @@ function fakeRouterRouteManager() {
     modelOverrides: {},
     providers: [],
     routerProviders: [],
+    xai: { state: "none", email: null, expiredAt: null, lastQuotaError: null, lastLinkError: null, link: null },
     accounts: [],
     activeSessionCount: 0,
     testedClaudeCliVersion: null
@@ -185,6 +196,14 @@ function fakeRouterRouteManager() {
     fetchRouterCatalog: async (id: string) => {
       calls.catalog.push(id);
       return results.catalog;
+    },
+    linkXai: async () => {
+      calls.linkXai += 1;
+      return results.linkXai;
+    },
+    cancelOrUnlinkXai: async (opts: { force?: boolean }) => {
+      calls.unlinkXai.push({ force: Boolean(opts.force) });
+      return results.unlinkXai;
     }
   };
   return { manager, calls, results, status };
@@ -405,4 +424,70 @@ test("every router mutation is refused (403) over the unix socket, and the legac
   });
   assert.equal(legacy.statusCode, 404);
   await remote.close();
+});
+
+// --- xAI (Grok) link routes (spec 2026-08-05 §B.2) ---------------------------
+
+test("POST /api/cliproxy/xai/link returns the device prompt, maps conflict → 409 and upstream → 502", async () => {
+  const { manager, results, calls } = fakeRouterRouteManager();
+  const local = routerRouteApp("local", manager);
+  await local.ready();
+  const refused = await local.inject({ method: "POST", url: "/api/cliproxy/xai/link" });
+  assert.equal(refused.statusCode, 403);
+  assert.match(refused.json().error, /HTTP transport/);
+  assert.equal(calls.linkXai, 0, "a socket mutation must not reach the manager");
+  await local.close();
+
+  const app = routerRouteApp("remote", manager);
+  await app.ready();
+
+  const ok = await app.inject({ method: "POST", url: "/api/cliproxy/xai/link" });
+  assert.equal(ok.statusCode, 200);
+  // The user-facing verification prompt, verbatim — no token material.
+  assert.deepEqual(ok.json(), {
+    url: "https://x.ai/device",
+    userCode: "ABCD-EFGH",
+    expiresAt: "2026-08-05T00:30:00Z"
+  });
+  assert.equal(calls.linkXai, 1);
+
+  results.linkXai = { ok: false, code: "conflict", error: "model proxy must be running" };
+  const conflict = await app.inject({ method: "POST", url: "/api/cliproxy/xai/link" });
+  assert.equal(conflict.statusCode, 409);
+  assert.match(conflict.json().error, /must be running/);
+
+  results.linkXai = { ok: false, code: "upstream", error: "management API responded 500", status: 500 };
+  const upstream = await app.inject({ method: "POST", url: "/api/cliproxy/xai/link" });
+  assert.equal(upstream.statusCode, 502);
+  assert.equal(upstream.json().status, 500);
+  await app.close();
+});
+
+test("DELETE /api/cliproxy/xai/link passes force through and maps the live-session refusal to 409", async () => {
+  const { manager, results, calls } = fakeRouterRouteManager();
+  const local = routerRouteApp("local", manager);
+  await local.ready();
+  assert.equal((await local.inject({ method: "DELETE", url: "/api/cliproxy/xai/link" })).statusCode, 403);
+  assert.equal(calls.unlinkXai.length, 0);
+  await local.close();
+
+  const app = routerRouteApp("remote", manager);
+  await app.ready();
+
+  const ok = await app.inject({ method: "DELETE", url: "/api/cliproxy/xai/link" });
+  assert.equal(ok.statusCode, 200);
+  // Success resolves the full status the wire contract promises, not the gate result.
+  assert.equal(ok.json().xai.state, "none");
+  assert.deepEqual(calls.unlinkXai, [{ force: false }]);
+
+  results.unlinkXai = { ok: false, affectedSessions: 2 };
+  const refusal = await app.inject({ method: "DELETE", url: "/api/cliproxy/xai/link" });
+  assert.equal(refusal.statusCode, 409);
+  assert.deepEqual(refusal.json(), { ok: false, affectedSessions: 2 });
+
+  results.unlinkXai = { ok: true, affectedSessions: 2 };
+  const forced = await app.inject({ method: "DELETE", url: "/api/cliproxy/xai/link?force=true" });
+  assert.equal(forced.statusCode, 200);
+  assert.deepEqual(calls.unlinkXai.at(-1), { force: true });
+  await app.close();
 });

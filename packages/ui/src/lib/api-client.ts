@@ -17,6 +17,7 @@ import type {
   CliProxySeedRequest,
   CliProxyStatus,
   CliProxyUnseedRequest,
+  CliProxyXaiLink,
   CreateTodoRequest,
   CreateWorkspaceRequest,
   EventMessage,
@@ -725,6 +726,33 @@ export class ApiClient {
   /** Browse the models a keyed router provider advertises upstream (read-only). */
   getCliProxyRouterCatalog(id: string, signal?: AbortSignal): Promise<{ models: string[] }> {
     return this.send("GET", `/api/cliproxy/providers/${encodeURIComponent(id)}/catalog`, { signal });
+  }
+
+  // xAI OAuth (Grok) account. No key and no seeded credential: the proxy owns
+  // the tokens, so linking is just an RFC 8628 device-code prompt the daemon
+  // starts and then polls, broadcasting `cliproxy.changed` as it advances.
+
+  /**
+   * Start the device-code flow. The returned prompt is also carried on
+   * `CliProxyStatus.xai.link` (so a reload mid-flow still shows it) — callers
+   * may render either. Requires a running proxy (409 otherwise).
+   */
+  linkCliProxyXai(): Promise<CliProxyXaiLink> {
+    return this.send("POST", "/api/cliproxy/xai/link");
+  }
+
+  /**
+   * Cancel an in-flight link, or unlink the account. Unlink is session-gated
+   * like the router mutations (409 → { ok:false, affectedSessions }), though
+   * nothing restarts: the proxy hot-discovers the auth-dir change.
+   */
+  unlinkCliProxyXai(force?: boolean): Promise<CliProxyStatus | CliProxyMutationRefusal> {
+    return this.mutateAllowingRefusal<CliProxyStatus>(
+      "DELETE",
+      "/api/cliproxy/xai/link",
+      undefined,
+      { force: force ? "true" : undefined }
+    );
   }
 
   installRegistryEntry(id: string): Promise<RegistryActionResult> {

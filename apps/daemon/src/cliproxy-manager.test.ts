@@ -18,11 +18,12 @@ import {
 import Fastify from "fastify";
 import { writeProjections } from "./cliproxy-files.ts";
 import { setRouterKey as realSetRouterKey } from "./cliproxy-secrets.ts";
-import type { CliProxyProviderStatus, CliProxyStatus } from "@orquester/api";
+import type { CliProxyProviderStatus, CliProxyStatus, CliProxyXaiLink } from "@orquester/api";
 import { SYSTEM_ACCOUNT_ID } from "@orquester/api";
 import type { RegistryService } from "./registry.ts";
 import { Broadcaster } from "./broadcaster.ts";
 import { CliProxyManager } from "./cliproxy.ts";
+import type { XaiManagementApi } from "./cliproxy-xai.ts";
 import {
   cliproxyContributor,
   composeExtraEnv,
@@ -91,6 +92,25 @@ function setup() {
   });
   const sysDir = join(root, "sysclaude");
 
+  // xAI device flow: the management API is faked wholesale (no network, no proxy).
+  let xaiLive: number | null = null;
+  const xaiCalls = { authUrl: 0, poll: 0, cancel: [] as string[] };
+  let authUrlImpl: XaiManagementApi["requestAuthUrl"] = async () => ({ ok: false, error: "not stubbed" });
+  let pollImpl: XaiManagementApi["pollAuthStatus"] = async () => ({ ok: true, value: { status: "wait" } });
+  const xaiManagement: XaiManagementApi = {
+    requestAuthUrl: (port, secret) => {
+      xaiCalls.authUrl++;
+      return authUrlImpl(port, secret);
+    },
+    pollAuthStatus: (port, secret, state) => {
+      xaiCalls.poll++;
+      return pollImpl(port, secret, state);
+    },
+    cancelSession: async (_port, _secret, state) => {
+      xaiCalls.cancel.push(state);
+    }
+  };
+
   const mgr = new CliProxyManager({
     daemonDir,
     appdir: root,
@@ -101,6 +121,8 @@ function setup() {
       tmux,
       spawnDirect: () => null,
       liveDependentSessionCount: () => liveCount,
+      liveXaiSessionCount: () => (xaiLive === null ? liveCount : xaiLive),
+      xaiManagement,
       now: () => clock,
       sleep: async () => {},
       verifyRouterKey: (provider: RouterProvider, key: string) => verifyRouterImpl(provider, key),
@@ -140,6 +162,16 @@ function setup() {
     setLive: (n: number) => {
       liveCount = n;
     },
+    setXaiLive: (n: number) => {
+      xaiLive = n;
+    },
+    setXaiAuthUrl: (f: XaiManagementApi["requestAuthUrl"]) => {
+      authUrlImpl = f;
+    },
+    setXaiPoll: (f: XaiManagementApi["pollAuthStatus"]) => {
+      pollImpl = f;
+    },
+    xaiCalls,
     installCount: () => installCount,
     setInstall: (f: () => Promise<{ version: string }>) => {
       installImpl = f;
@@ -896,7 +928,7 @@ test("claudex coupling: a keyed router provider satisfies the codex-or-router ga
   assert.equal(lastClaudex?.disabledReason, undefined);
 });
 
-test("claudex coupling: a KEYLESS router provider + a claude account → disabled 'no codex or router credential'", async () => {
+test("claudex coupling: a KEYLESS router provider + a claude account → disabled 'no codex, router or Grok credential'", async () => {
   const h = setup();
   await writeEnabledState(h.daemonDir, {
     // A seeded claude account makes provider info known, so the gate applies.
@@ -917,7 +949,7 @@ test("claudex coupling: a KEYLESS router provider + a claude account → disable
 
   const lastClaudex = [...h.registryCalls].reverse().find((c) => c.id === "claudex");
   assert.equal(lastClaudex?.enabled, false);
-  assert.equal(lastClaudex?.disabledReason, "no codex or router credential");
+  assert.equal(lastClaudex?.disabledReason, "no codex, router or Grok credential");
   const lastClaudemix = [...h.registryCalls].reverse().find((c) => c.id === "claudemix");
   assert.equal(lastClaudemix?.enabled, true, "claudemix still satisfied by the claude account");
 });
@@ -1110,7 +1142,7 @@ test("clearRouterKey: keeps the provider row, drops the key, and un-satisfies th
   assert.equal(secrets.routerKeys.tokenrouter, undefined);
   const lastClaudex = [...h.registryCalls].reverse().find((c) => c.id === "claudex");
   assert.equal(lastClaudex?.enabled, false);
-  assert.equal(lastClaudex?.disabledReason, "no codex or router credential");
+  assert.equal(lastClaudex?.disabledReason, "no codex, router or Grok credential");
 });
 
 test("deleteRouterProvider: removes provider + key and resets a model pick that pointed at it", async () => {
@@ -1448,6 +1480,7 @@ function fakeRouteManager(daemonDir?: string) {
     modelOverrides: {},
     providers: [],
     routerProviders: [],
+    xai: { state: "none", email: null, expiredAt: null, lastQuotaError: null, lastLinkError: null, link: null },
     accounts: [],
     activeSessionCount: 0,
     testedClaudeCliVersion: null
@@ -1515,6 +1548,16 @@ function fakeRouteManager(daemonDir?: string) {
     }),
     fetchRouterCatalog: async (_id: string) =>
       ({ ok: true, models: [] }) as { ok: true; models: string[] },
+    // Same story for the xAI link routes: exercised against their own fake in
+    // cliproxy-config.test.ts, present here only for the structural type.
+    linkXai: async () =>
+      ({ ok: true, link: { url: "https://x.ai/device", userCode: "ABCD-EFGH", expiresAt: "2026-08-05T00:30:00Z" } }) as
+        | { ok: true; link: CliProxyXaiLink }
+        | { ok: false; code: "conflict" | "upstream"; error: string; status?: number },
+    cancelOrUnlinkXai: async (opts: { force?: boolean }) => ({
+      ok: true,
+      affectedSessions: opts.force ? status.activeSessionCount : 0
+    }),
     seedProvider: async (
       req: { provider: "codex" | "claude"; accountId: string },
       read: (provider: "codex" | "claude", accountId: string) => Promise<unknown>
@@ -1992,4 +2035,278 @@ test("seedProvider: second claude account seeds ALONGSIDE the first (multi-accou
   assert.equal(claude.length, 2, "both claude accounts seeded");
   assert.ok(existsSync(join(cliproxyDir(h.daemonDir), "auth", "claude-acc14137047.json")));
   assert.ok(existsSync(join(cliproxyDir(h.daemonDir), "auth", "claude-acc7f46e45d.json")));
+});
+
+// --- xAI (Grok) OAuth account: spec 2026-08-05 §B ----------------------------
+
+/** Write a CLIProxyAPI-shaped xai auth file (the proxy owns these; the daemon
+ *  only ever reads them). */
+async function writeXaiAuth(
+  daemonDir: string,
+  opts: { email?: string; expired?: string; file?: string; raw?: string } = {}
+): Promise<void> {
+  const dir = join(cliproxyDir(daemonDir), "auth");
+  await mkdir(dir, { recursive: true });
+  const file = join(dir, opts.file ?? `xai-${opts.email ?? "grok"}.json`);
+  if (opts.raw !== undefined) {
+    await writeFile(file, opts.raw, "utf8");
+    return;
+  }
+  await writeFile(
+    file,
+    JSON.stringify({
+      type: "xai",
+      auth_kind: "oauth",
+      access_token: "at",
+      refresh_token: "rt",
+      email: opts.email ?? "grok@example.com",
+      expired: opts.expired ?? new Date(Date.now() + 3600_000).toISOString()
+    }),
+    { mode: 0o600 }
+  );
+}
+
+/** The link poll runs OUTSIDE the transition queue, so tests wait on its effect. */
+async function waitFor(check: () => boolean, label: string): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    if (check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.fail(`timed out waiting for ${label}`);
+}
+
+test("xai status: derived from the auth dir — none, linked (email/expiry), corrupt files ignored", async () => {
+  const h = setup();
+  await writeEnabledState(h.daemonDir);
+  await writeSecretsFile(h.daemonDir, {});
+  h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
+
+  await h.mgr.init();
+  assert.deepEqual(h.mgr.status().xai, {
+    state: "none",
+    email: null,
+    expiredAt: null,
+    lastQuotaError: null,
+    lastLinkError: null,
+    link: null
+  });
+
+  const expiredAt = new Date(Date.now() + 3600_000).toISOString();
+  await writeXaiAuth(h.daemonDir, { email: "pilot@example.com", expired: expiredAt });
+  await writeXaiAuth(h.daemonDir, { file: "xai-broken.json", raw: "{not json" });
+
+  const h2 = setup();
+  // Same appdir contents, fresh manager: state must come from the files alone.
+  await writeEnabledState(h2.daemonDir);
+  await writeSecretsFile(h2.daemonDir, {});
+  await writeXaiAuth(h2.daemonDir, { email: "pilot@example.com", expired: expiredAt });
+  await writeXaiAuth(h2.daemonDir, { file: "xai-broken.json", raw: "{not json" });
+  h2.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
+  await h2.mgr.init();
+  const xai = h2.mgr.status().xai;
+  assert.equal(xai.state, "linked", "a corrupt sibling must not hide the good account");
+  assert.equal(xai.email, "pilot@example.com");
+  assert.equal(xai.expiredAt, expiredAt);
+});
+
+test("xai status: every auth file past its stamp reads expired, even with the proxy off", async () => {
+  const h = setup();
+  await writeXaiAuth(h.daemonDir, {
+    email: "stale@example.com",
+    expired: new Date(Date.now() - 60_000).toISOString()
+  });
+
+  // No enabled state on disk → init() short-circuits before adoption; the xai
+  // view is still derived (the Settings card must show it while the proxy is off).
+  await h.mgr.init();
+  assert.equal(h.mgr.status().state, "off");
+  assert.equal(h.mgr.status().xai.state, "expired");
+  assert.equal(h.mgr.status().xai.email, "stale@example.com");
+});
+
+test("claudex coupling: a linked Grok account alone satisfies the gate", async () => {
+  const h = setup();
+  await writeEnabledState(h.daemonDir, {
+    // A seeded claude account makes provider info known, so the gate applies.
+    seededAccounts: [
+      {
+        provider: "claude",
+        accountId: "65eebd90-01d1-4063-b743-c4a5713f5519",
+        label: "claude a",
+        prefix: "acc65eebd90"
+      }
+    ]
+  });
+  await writeSecretsFile(h.daemonDir, {});
+  await writeXaiAuth(h.daemonDir, { email: "pilot@example.com" });
+  h.setProbe({ ok: true, reachable: true, models: ["claude-fable-5"] });
+
+  await h.mgr.init();
+
+  const lastClaudex = [...h.registryCalls].reverse().find((c) => c.id === "claudex");
+  assert.equal(lastClaudex?.enabled, true, "the linked Grok account satisfies claudex");
+  assert.equal(lastClaudex?.disabledReason, undefined);
+  // xai says nothing about the claude credential claudemix needs.
+  const lastClaudemix = [...h.registryCalls].reverse().find((c) => c.id === "claudemix");
+  assert.equal(lastClaudemix?.enabled, true);
+});
+
+test("probe union: grok ids validate while linked (no catalog dependency)", async () => {
+  const h = setup();
+  await writeEnabledState(h.daemonDir);
+  await writeSecretsFile(h.daemonDir, {});
+  h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
+  await h.mgr.init();
+
+  const before = await h.mgr.validateModel("claudex", "grok-build-0.1");
+  assert.equal(before.ok, false, "not offered while nothing is linked");
+
+  await writeXaiAuth(h.daemonDir, { email: "pilot@example.com" });
+  await h.mgr.checkHealth(); // the health poll re-derives the xai view
+  const after = await h.mgr.validateModel("claudex", "grok-build-0.1");
+  assert.equal(after.ok, true, "unioned into the live catalog while linked");
+  assert.ok(after.ok && after.catalog.includes("grok-4.5"), "both curated ids join");
+});
+
+test("linkXai: refuses while the proxy is off, and 409-shapes an already-linked account", async () => {
+  const h = setup();
+  await h.mgr.init(); // disabled → state "off"
+  const off = await h.mgr.linkXai();
+  assert.equal(off.ok, false);
+  assert.equal(off.ok === false && off.code, "conflict");
+  assert.match(off.ok === false ? off.error : "", /must be running/);
+  assert.equal(h.xaiCalls.authUrl, 0, "no management call while the proxy is down");
+
+  const h2 = setup();
+  await writeXaiAuth(h2.daemonDir, { email: "pilot@example.com" });
+  h2.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
+  await h2.mgr.enable();
+  const already = await h2.mgr.linkXai();
+  assert.equal(already.ok, false);
+  assert.equal(already.ok === false && already.code, "conflict");
+  assert.match(already.ok === false ? already.error : "", /already linked/);
+});
+
+test("linkXai: management-API failure surfaces as an upstream result carrying the status", async () => {
+  const h = setup();
+  h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
+  await h.mgr.enable();
+  h.setXaiAuthUrl(async () => ({ ok: false, error: "management API responded 500", status: 500 }));
+
+  const res = await h.mgr.linkXai();
+  assert.equal(res.ok, false);
+  assert.equal(res.ok === false && res.code, "upstream");
+  assert.equal(res.ok === false ? res.status : undefined, 500);
+  assert.equal(h.mgr.status().xai.state, "none", "a failed start leaves no linking session");
+});
+
+test("linkXai: device flow → linking status, then the proxy's auth file completes it", async () => {
+  const h = setup();
+  h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
+  await h.mgr.enable();
+  h.setXaiAuthUrl(async () => ({
+    ok: true,
+    value: { url: "https://x.ai/device", userCode: "ABCD-EFGH", state: "sess-1", expiresIn: 1800 }
+  }));
+  let polls = 0;
+  h.setXaiPoll(async () => {
+    polls++;
+    if (polls < 2) return { ok: true, value: { status: "wait" } };
+    // The proxy's own goroutine writes the auth file on success.
+    await writeXaiAuth(h.daemonDir, { email: "pilot@example.com" });
+    return { ok: true, value: { status: "ok" } };
+  });
+
+  const started = await h.mgr.linkXai();
+  assert.equal(started.ok, true);
+  assert.equal(started.ok && started.link.url, "https://x.ai/device");
+  assert.equal(started.ok && started.link.userCode, "ABCD-EFGH");
+  const linking = h.mgr.status().xai;
+  assert.equal(linking.state, "linking");
+  assert.equal(linking.link?.url, "https://x.ai/device");
+
+  await waitFor(() => h.mgr.status().xai.state === "linked", "the link to complete");
+  const linked = h.mgr.status().xai;
+  assert.equal(linked.email, "pilot@example.com");
+  assert.equal(linked.link, null, "the in-flight prompt is cleared");
+  // Second link attempt while one is in flight is a 409-shaped conflict.
+  const duplicate = await h.mgr.linkXai();
+  assert.equal(duplicate.ok, false);
+  assert.equal(duplicate.ok === false && duplicate.code, "conflict");
+});
+
+test("linkXai: an in-flight session is cancelled through the management API", async () => {
+  const h = setup();
+  h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
+  await h.mgr.enable();
+  h.setXaiAuthUrl(async () => ({
+    ok: true,
+    value: { url: "https://x.ai/device", userCode: "ABCD-EFGH", state: "sess-9", expiresIn: 1800 }
+  }));
+  h.setXaiPoll(async () => ({ ok: true, value: { status: "wait" } }));
+
+  assert.equal((await h.mgr.linkXai()).ok, true);
+  const cancelled = await h.mgr.cancelOrUnlinkXai({});
+  assert.equal(cancelled.ok, true);
+  assert.ok(h.xaiCalls.cancel.includes("sess-9"), "the proxy-side session is dropped");
+  assert.equal(h.mgr.status().xai.state, "none");
+});
+
+test("linkXai: a failed verdict lands on xai.lastLinkError and a fresh attempt clears it", async () => {
+  const h = setup();
+  h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
+  await h.mgr.enable();
+  h.setXaiAuthUrl(async () => ({
+    ok: true,
+    value: { url: "https://x.ai/device", userCode: "ABCD-EFGH", state: "sess-2", expiresIn: 1800 }
+  }));
+  h.setXaiPoll(async () => ({ ok: true, value: { status: "error", error: "authorization denied" } }));
+
+  assert.equal((await h.mgr.linkXai()).ok, true);
+  await waitFor(() => h.mgr.status().xai.state === "none", "the failed flow to settle");
+  // The verdict lives on the xai block, NOT the proxy-health `detail` (which
+  // every setState — incl. the periodic becomeHealthy — wipes within a poll).
+  assert.equal(h.mgr.status().xai.lastLinkError, "authorization denied");
+  assert.equal(h.mgr.status().detail, null, "proxy health detail is not abused for the verdict");
+  assert.ok(h.xaiCalls.cancel.includes("sess-2"), "the proxy-side session is dropped");
+
+  assert.equal((await h.mgr.linkXai()).ok, true);
+  assert.equal(h.mgr.status().xai.lastLinkError, null, "a fresh attempt supersedes the verdict");
+});
+
+test("cancelOrUnlinkXai: live Grok sessions refuse the unlink; force deletes the auth files", async () => {
+  const h = setup();
+  await writeEnabledState(h.daemonDir, { defaultModel: "grok-build-0.1" });
+  await writeSecretsFile(h.daemonDir, {});
+  await writeXaiAuth(h.daemonDir, { email: "pilot@example.com" });
+  h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
+  await h.mgr.init();
+  assert.equal(h.mgr.status().xai.state, "linked");
+
+  const configBefore = await readFile(join(cliproxyDir(h.daemonDir), "config.yaml"), "utf8");
+
+  h.setXaiLive(2);
+  const refused = await h.mgr.cancelOrUnlinkXai({});
+  assert.equal(refused.ok, false);
+  assert.equal(refused.affectedSessions, 2);
+  assert.equal(h.mgr.status().xai.state, "linked", "nothing removed on a refusal");
+
+  const forced = await h.mgr.cancelOrUnlinkXai({ force: true });
+  assert.equal(forced.ok, true);
+  assert.equal(forced.affectedSessions, 2);
+  assert.equal(h.mgr.status().xai.state, "none");
+  assert.ok(!existsSync(join(cliproxyDir(h.daemonDir), "auth", "xai-pilot@example.com.json")));
+  assert.equal(h.mgr.status().defaultModel, "gpt-5.6-sol", "a dangling grok pick resets");
+  // …and the reset must reach the env projection: claudex.env pins
+  // ANTHROPIC_MODEL, so a stale grok id there launches every new modelless
+  // session against a credential that no longer exists.
+  const claudexEnv = await readFile(join(h.daemonDir, "env", "claudex.env"), "utf8");
+  assert.ok(claudexEnv.includes("ANTHROPIC_MODEL=gpt-5.6-sol\n"), "claudex.env follows the reset pick");
+  assert.ok(!claudexEnv.includes("grok-build-0.1"), "no stale grok id survives in the launch env");
+  // No config.yaml change and no restart in either direction (spec §B.2): xai
+  // contributes nothing to it, so the re-render is byte-identical.
+  assert.equal(await readFile(join(cliproxyDir(h.daemonDir), "config.yaml"), "utf8"), configBefore);
+  assert.equal(h.tmuxCalls.newService, 0);
+  // Idempotent: unlinking again is a no-op ok.
+  assert.equal((await h.mgr.cancelOrUnlinkXai({ force: true })).ok, true);
 });

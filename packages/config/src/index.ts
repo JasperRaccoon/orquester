@@ -815,12 +815,13 @@ export function validateRouterProviders(providers: RouterProvider[]): string | n
     ids.add(p.id);
     for (const m of p.models) {
       for (const key of m.alias ? [m.name, m.alias] : [m.name]) {
-        // A router model may not shadow a curated (OAuth-account) model id:
-        // resolveRouterModel is the single routing source of truth, so a router
-        // model called `gpt-5.6-sol` would silently steal that pick — dropping
-        // the acc<hex>/ account prefix, skipping the seeded-account launch gate,
-        // and emitting a second config.yaml provider for the same model id.
-        if (CURATED_PROXY_MODEL_IDS.includes(key)) {
+        // A router model may not shadow a built-in (OAuth-account) model id —
+        // curated or xAI: resolveRouterModel is consulted before resolveXaiModel
+        // and the curated lookup, so a router model called `gpt-5.6-sol` or
+        // `grok-4.5` would silently steal that pick — dropping the acc<hex>/
+        // account prefix, skipping the seeded-account launch gate, and emitting
+        // a second config.yaml provider for the same model id.
+        if (CURATED_PROXY_MODEL_IDS.includes(key) || XAI_OAUTH_MODEL_IDS.includes(key)) {
           return `model "${key}" is a built-in model id and cannot be served by a router`;
         }
         if (modelKeys.has(key)) return `model "${key}" is served by more than one provider`;
@@ -847,6 +848,15 @@ export function resolveRouterModel(
     }
   }
   return null;
+}
+
+/** Resolve a launch model (bare or acc<hex>/-prefixed) to the xAI OAuth model it
+ *  names. Null = not an xAI model. The companion to resolveRouterModel: the
+ *  single source of truth for "this launch rides the linked Grok account", so it
+ *  is never routed to a seeded account and never acc-prefixed on the wire. */
+export function resolveXaiModel(model: string): XaiOAuthModel | null {
+  const bare = model.replace(/^acc[0-9a-fA-F]+\//, "");
+  return XAI_OAUTH_MODELS.find((m) => m.id === bare) ?? null;
 }
 
 /** The id a router model is shown/keyed under (picker chips, overrides). */
@@ -917,6 +927,27 @@ export const CURATED_PROXY_MODELS: readonly CuratedProxyModel[] = [
 export const CURATED_PROXY_MODEL_IDS: readonly string[] = CURATED_PROXY_MODELS.map((m) => m.id);
 
 /**
+ * The models the linked xAI OAuth account serves through CLIProxyAPI's
+ * subscription-backed Grok backend (spec 2026-08-05 §B.3). No key, no seeded
+ * account, no router record — availability is purely "is a Grok account linked".
+ *
+ * `compactWindow` is 190k for both: xAI doubles the price of the WHOLE request
+ * once input passes 200k tokens, so compaction must land before that cliff
+ * regardless of the (much larger) context ceiling. `grok-4.5` additionally
+ * cannot disable reasoning (`zero_allowed:false`), which stalls Claude Code's
+ * non-streaming approval classifier — hence `grok-build-0.1` is the default pick
+ * and the caveat lives in the UI copy.
+ */
+export const XAI_OAUTH_MODELS = [
+  { id: "grok-build-0.1", label: "Grok Build", contextWindow: 256_000, compactWindow: 190_000 },
+  { id: "grok-4.5", label: "Grok 4.5", contextWindow: 500_000, compactWindow: 190_000 }
+] as const;
+
+export type XaiOAuthModel = (typeof XAI_OAUTH_MODELS)[number];
+
+export const XAI_OAUTH_MODEL_IDS: readonly string[] = XAI_OAUTH_MODELS.map((m) => m.id);
+
+/**
  * Arming value for Claude-family ids: proactive auto-compaction is gated OFF on
  * non-first-party base URLs (claude-code #65585) unless AUTO_COMPACT_WINDOW is
  * set; Claude Code clamps the value to the model's believed window, so this
@@ -943,8 +974,8 @@ export interface CompactEnv {
  * Resolve the compact env for a launch model (spec §3.2): strip the acc<hex>/
  * routing prefix; `claude*` ids get the arming value only (native window
  * detection + native trigger formula do the rest); other ids resolve
- * override → router provider → curated → null (unknown ids stay reactive-only,
- * same as today).
+ * override → router provider → xAI OAuth → curated → null (unknown ids stay
+ * reactive-only, same as today).
  */
 export function compactEnvForModel(
   model: string,
@@ -984,6 +1015,18 @@ export function compactEnvForModel(
     if (contextWindow !== undefined) env.maxContextTokens = contextWindow;
     const pct = override?.compactPct ?? routed.model.compactPct;
     if (pct !== undefined) env.autoCompactPct = pct;
+    return env;
+  }
+  // xAI OAuth models carry both windows unconditionally (the 200k pricing cliff
+  // is the point), so they need no "both blank" escape like the router branch.
+  const xai = resolveXaiModel(bare);
+  if (xai) {
+    const xaiOverride = overrides?.[xai.id];
+    const env: CompactEnv = {
+      maxContextTokens: xaiOverride?.contextWindow ?? xai.contextWindow,
+      autoCompactWindow: xaiOverride?.compactWindow ?? xai.compactWindow
+    };
+    if (xaiOverride?.compactPct !== undefined) env.autoCompactPct = xaiOverride.compactPct;
     return env;
   }
   const curated = CURATED_PROXY_MODELS.find((m) => m.id === bare);

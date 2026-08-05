@@ -13,7 +13,7 @@ interface Logger {
  * managed CLIProxyAPI, so they must receive claude-shaped hooks + config, not
  * fall through to the opencode installer. Unknown ids get no managed hooks.
  */
-export function agentFamily(entryId: string): "claude" | "codex" | "opencode" | null {
+export function agentFamily(entryId: string): "claude" | "codex" | "opencode" | "grok" | null {
   switch (entryId) {
     case "claude":
     case "claudex":
@@ -23,6 +23,8 @@ export function agentFamily(entryId: string): "claude" | "codex" | "opencode" | 
       return "codex";
     case "opencode":
       return "opencode";
+    case "grok":
+      return "grok";
     default:
       return null;
   }
@@ -212,6 +214,8 @@ export class AgentHooks {
         return launchEnv.CODEX_HOME || join(this.homeDir, ".codex");
       case "opencode":
         return launchEnv.OPENCODE_CONFIG_DIR || join(this.homeDir, ".config", "opencode");
+      case "grok":
+        return launchEnv.GROK_HOME || join(this.homeDir, ".grok");
       default:
         return null;
     }
@@ -228,6 +232,9 @@ export class AgentHooks {
         break;
       case "opencode":
         await this.installOpenCode(targetDir);
+        break;
+      case "grok":
+        await this.installGrok(targetDir);
         break;
     }
   }
@@ -443,6 +450,52 @@ export class AgentHooks {
       await writeFileAtomic(pluginPath, source, 0o644);
     }
   }
+
+  // --- grok: solely-owned hook file in <grokHome>/hooks -------------------
+  //
+  // Grok discovers every JSON file under <GROK_HOME>/hooks; orquester.json is
+  // ours alone, so it is rewritten wholesale (no merge) like the OpenCode
+  // plugin. Grok can also read ~/.claude/settings.json — deliberately NOT
+  // used: those events would arrive labelled `claude` and corrupt per-family
+  // classification.
+
+  private async installGrok(grokHome: string): Promise<void> {
+    const hookPath = join(grokHome, "hooks", "orquester.json");
+    const content = grokHookDocument(this.scriptPath);
+    let current = "";
+    try {
+      current = await readFile(hookPath, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw error;
+      }
+    }
+    if (current !== content) {
+      await writeFileAtomic(hookPath, content, 0o644);
+    }
+  }
+}
+
+/** Events Grok emits that map onto an activity class (see classifyGrok). */
+const GROK_EVENTS = ["Stop", "Notification", "PermissionDenied", "UserPromptSubmit", "PreToolUse"];
+
+/**
+ * Grok's native hook file: the same event-keyed group shape as Claude's
+ * settings.hooks. Handlers are pure notifiers — agent-hook.sh prints nothing
+ * and always exits 0, so the `Stop` handler can never return a block decision.
+ */
+function grokHookDocument(scriptPath: string): string {
+  const hooks: Record<string, unknown[]> = {};
+  for (const event of GROK_EVENTS) {
+    hooks[event] = [
+      {
+        hooks: [
+          { type: "command", command: `${shellQuotePosix(scriptPath)} grok ${event}`, timeout: 10 }
+        ]
+      }
+    ];
+  }
+  return `${JSON.stringify({ hooks }, null, 2)}\n`;
 }
 
 /** Recursively sort object keys (Codex's canonical_json); arrays keep order. */

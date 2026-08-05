@@ -41,7 +41,7 @@ sessions survive client disconnects, page reloads, and **daemon restarts**.
 
 **Features:** workspaces → projects → tabs (workspaces/projects are just directories); many
 concurrent persistent terminal/agent sessions per project; an installable agent registry
-(`claude`, `codex`, `gemini`, `deepseek`, `opencode` via `npm install -g`) with live version
+(`claude`, `codex`, `gemini`, `deepseek`, `opencode`, `grok` via `npm install -g`) with live version
 detection; detection + "Open on…" for shells/IDEs/explorers/browsers; xterm.js terminals with
 WebSocket-multiplexed PTY streaming, scrollback replay and resize; a CodeMirror file editor;
 tab drag-reorder + inline rename (server-authoritative); a per-project grid view; archivable
@@ -323,9 +323,10 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
   into the same file.
 - **Model proxy (cliproxy) & router providers.** The "Model proxy" is a daemon-supervised
   CLIProxyAPI process (`apps/daemon/src/cliproxy*.ts`) that lets the `claudex`/`claudemix`
-  launchers drive GPT (Codex OAuth), Claude OAuth and **router** models through the Claude Code
-  harness. Its state lives in `<appdir>/daemon/cliproxy/`: `state.json` (enabled, port, model
-  picks, `modelOverrides`, seeded accounts, **`routerProviders[]`**) and `secrets.json` (0600 —
+  launchers drive GPT (Codex OAuth), Claude OAuth, **router** and **Grok** (xAI OAuth) models
+  through the Claude Code harness. Its state lives in `<appdir>/daemon/cliproxy/`: `state.json`
+  (enabled, port, model picks, `modelOverrides`, seeded accounts, **`routerProviders[]`**) and
+  `secrets.json` (0600 —
   proxy api key, management secret, **`routerKeys` = providerId → API key**). Keys never cross the
   wire; `CliProxyStatus.routerProviders[].keyState` is `"none" | "set" | "verified"` only.
   - **Router providers are data, not code.** A provider is
@@ -355,6 +356,24 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
     rest** one release for rollback safety (precedent 914ec27) — new code writes the mirror and
     never reads it. The `claudex.env` Fable slot and the managed kimi agent are gated on
     `routerKimiAvailable()` (some keyed provider serving name/alias `kimi-k3`), not on OpenRouter.
+  - **xAI OAuth account (Grok) is a third provider kind — no key, no secrets at rest.** Linking
+    is an RFC 8628 device flow driven entirely through the proxy's management API on loopback
+    (`GET /v0/management/xai-auth-url` → poll `get-auth-status` → `DELETE /oauth-session` on
+    abandon), bearer = `secrets.managementSecret` — part B is that field's **first reader**.
+    CLIProxyAPI writes and refreshes `<appdir>/daemon/cliproxy/auth/xai-*.json` itself; Orquester
+    only *derives* `CliProxyStatus.xai` (`state`/`email`/`expiredAt`) from that dir and never
+    stores or returns tokens. **Link/unlink changes no `config.yaml` and needs no restart** (the
+    proxy hot-discovers the auth dir) — deliberately lighter than router-provider mutations.
+    Routes `POST/DELETE /api/cliproxy/xai/link` are HTTP-only (`refusedOnSocket`); unlink answers
+    409 `{ok:false, affectedSessions}` while dependent sessions are live unless `force`.
+    `XAI_OAUTH_MODELS` + `resolveXaiModel()` (exact id after stripping one `acc<hex>/` prefix) are
+    the single source of truth for chips, **bare** launch model (never account-prefixed — the
+    proxy routes to the xai auth internally), `compactEnvForModel` and the probe catalog union;
+    claudex is coupled on `codexOk || routerOk || xaiLinked`. Accepted risks (brainstorm
+    2026-08-05): the proxy **impersonates the first-party Grok CLI** against an undocumented
+    endpoint, so an xAI version-gate breaks Grok-via-proxy until CLIProxyAPI ships a fix and we
+    redeploy; **no quota readout exists** upstream (best-effort `lastQuotaError` only); and on a
+    `…-usage-exhausted` 429 the proxy silently **cools the account for 24 h**.
 - **Security boundary asymmetry.** `PUT /api/config/daemon` is **Unix-socket-only** (403 over
   remote HTTP) — **except the single-field `PUT /api/config/daemon/protect-archived`, which is
   allowed on both transports** (normal bearer auth) because it toggles a client-side UI curtain
@@ -381,8 +400,9 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
   `index.html` for any missing GET, so a missing `sw.js` silently serves HTML and breaks the
   service worker. Run `pnpm build` after touching either. Web Push state lives in
   `<appdir>/daemon/push.json` (chmod 0600 — it holds the VAPID **private** key, never returned by
-  any API); pushes fire from agent-session status: hook-reporting agents (claude/codex/opencode
-  via managed hooks → `POST /api/sessions/:id/agent-event`, unix-socket-only) send distinct
+  any API); pushes fire from agent-session status: hook-reporting agents
+  (claude/codex/opencode/grok via managed hooks → `POST /api/sessions/:id/agent-event`,
+  unix-socket-only) send distinct
   "needs your input" / "finished" pushes; agents without hook coverage keep the bell fallback.
   Debounced 30 s per session per type. Session activity (working/waiting/idle + attention) lives
   on `SessionSummary.activity` and streams as `session.activity` events — the UI never re-derives
@@ -573,5 +593,5 @@ password secrecy + patching remain the real mitigations. It costs two loosened u
 | Electron embedding | `apps/desktop/src/main.ts` |
 | Browser tabs (Design Mode) | `apps/daemon/src/browsers.ts`, `apps/daemon/src/browser-pick.ts`, `packages/ui/src/components/browser/` |
 | Git hosting accounts (GitHub/Bitbucket) | `apps/daemon/src/accounts.ts`, `apps/daemon/src/providers/`, `packages/ui/src/components/settings/SettingsModal.tsx` |
-| Model proxy + router providers | `apps/daemon/src/cliproxy.ts`, `apps/daemon/src/cliproxy-files.ts`, `apps/daemon/src/cliproxy-secrets.ts`, router schemas in `packages/config/src/index.ts`, `packages/ui/src/components/settings/ModelProxySettings.tsx` |
+| Model proxy + router providers + xAI (Grok) account | `apps/daemon/src/cliproxy.ts`, `apps/daemon/src/cliproxy-files.ts`, `apps/daemon/src/cliproxy-secrets.ts`, `apps/daemon/src/cliproxy-xai.ts`, router/xai schemas in `packages/config/src/index.ts`, `packages/ui/src/components/settings/ModelProxySettings.tsx` |
 | Deployment | `deploy/` + `docs/superpowers/specs|plans/2026-06-19-remote-*.md` |

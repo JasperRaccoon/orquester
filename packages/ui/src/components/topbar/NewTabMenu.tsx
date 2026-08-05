@@ -1,7 +1,7 @@
 import React from "react";
 import { FolderTree, GitBranch, Globe, ListTodo, Plus } from "lucide-react";
 import { SYSTEM_ACCOUNT_ID, type RegistryEntry } from "@orquester/api";
-import { CURATED_PROXY_MODEL_IDS } from "@orquester/config";
+import { CURATED_PROXY_MODEL_IDS, XAI_OAUTH_MODELS, resolveXaiModel } from "@orquester/config";
 import { CHROMIUM_FAMILY_IDS } from "@orquester/registry";
 import {
   AdaptiveMenu,
@@ -32,6 +32,9 @@ const PROXY_ACCOUNT_FAMILY: Record<string, "claude" | "codex"> = {
 
 /** Model chips for `claudex`: the curated picks, not the raw catalog dump. */
 const DEFAULT_PROXY_MODELS: string[] = [...CURATED_PROXY_MODEL_IDS];
+
+/** Provider label for the xAI OAuth models — the linked account IS the "key". */
+const XAI_PROVIDER_LABEL = "Grok account";
 
 const isProxyLauncher = (id: string): boolean => id in PROXY_ACCOUNT_FAMILY;
 
@@ -95,10 +98,11 @@ const AgentRow: React.FC<{ agent: RegistryEntry }> = ({ agent }) => {
   // Model chips are a `claudex`-only affordance (claudemix's model is fixed to
   // the Claude main loop; its choice is the account instead).
   const showModels = agent.id === "claudex";
-  // Models served by a KEYED router provider are keyless — the account chip has
-  // no effect on them. Derived from live status (both the full name and the alias
-  // route), replacing the old hardcoded kimi/OpenRouter regex.
-  const routerInfo = React.useMemo(() => {
+  // Models served by a KEYED router provider — or by the linked xAI account —
+  // are keyless: the account chip has no effect on them. Derived from live status
+  // (both the full name and the alias route), replacing the old hardcoded
+  // kimi/OpenRouter regex.
+  const keylessInfo = React.useMemo(() => {
     const labelByModel = new Map<string, string>(); // model id (name or alias) → provider label
     const displayIds: string[] = []; // what the chips offer: alias when there is one
     // `?? []` — a stale bundle's persisted status may predate routerProviders.
@@ -112,6 +116,17 @@ const AgentRow: React.FC<{ agent: RegistryEntry }> = ({ agent }) => {
         displayIds.push(m.alias ?? m.name);
       }
     }
+    // The Grok models exist while an xAI credential exists — `expired` included,
+    // matching the daemon's files-present gate (the expiry stamp is
+    // informational; the proxy refreshes on next use, and the launcher stays
+    // coupled). `?.` guards a daemon/bundle pairing that predates the field
+    // (persisted-shape rule).
+    if (cliproxy?.xai?.state === "linked" || cliproxy?.xai?.state === "expired") {
+      for (const m of XAI_OAUTH_MODELS) {
+        labelByModel.set(m.id, XAI_PROVIDER_LABEL);
+        displayIds.push(m.id);
+      }
+    }
     return { labelByModel, displayIds };
   }, [cliproxy]);
 
@@ -122,8 +137,8 @@ const AgentRow: React.FC<{ agent: RegistryEntry }> = ({ agent }) => {
   // vanish entirely.
   const catalogModels = cliproxyModels?.models ?? [];
   const pickIds = React.useMemo(
-    () => [...new Set([...DEFAULT_PROXY_MODELS, ...routerInfo.displayIds])],
-    [routerInfo]
+    () => [...new Set([...DEFAULT_PROXY_MODELS, ...keylessInfo.displayIds])],
+    [keylessInfo]
   );
   const available = catalogModels.length ? pickIds.filter((m) => catalogModels.includes(m)) : pickIds;
   const baseModels = available.length ? available : pickIds;
@@ -136,12 +151,18 @@ const AgentRow: React.FC<{ agent: RegistryEntry }> = ({ agent }) => {
     return [...set];
   }, [baseModels, selectedModel]);
 
-  // A router-served model is keyless → its account chip has no effect; dim the
-  // row AND drop the account on launch so a stale pick can't reattach a prefix.
-  const routerLabel = selectedModel
-    ? routerInfo.labelByModel.get(stripAccountPrefix(selectedModel))
+  // A router- or Grok-served model is keyless → its account chip has no effect;
+  // dim the row AND drop the account on launch so a stale pick can't reattach a
+  // prefix.
+  const keylessLabel = selectedModel
+    ? keylessInfo.labelByModel.get(stripAccountPrefix(selectedModel))
     : undefined;
-  const accountDimmed = showModels && Boolean(routerLabel);
+  const accountDimmed = showModels && Boolean(keylessLabel);
+  const dimReason = !accountDimmed
+    ? undefined
+    : selectedModel && resolveXaiModel(selectedModel)
+      ? `${selectedModel} uses Grok account — account is ignored`
+      : `${selectedModel} routes through ${keylessLabel} (keyless) — account is ignored`;
 
   // A deliberately-off proxy (user disabled it, or status not loaded yet) hides
   // its launchers entirely — advertising an escape hatch the user turned off is
@@ -218,11 +239,7 @@ const AgentRow: React.FC<{ agent: RegistryEntry }> = ({ agent }) => {
             "mb-1.5 ml-8 mr-2 flex flex-wrap gap-1 transition-opacity",
             accountDimmed && "pointer-events-none opacity-40"
           )}
-          title={
-            accountDimmed
-              ? `${selectedModel} routes through ${routerLabel} (keyless) — account is ignored`
-              : undefined
-          }
+          title={dimReason}
           onClick={(event) => event.stopPropagation()}
         >
           {options.map((o) => (

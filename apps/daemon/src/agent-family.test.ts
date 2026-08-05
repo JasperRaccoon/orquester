@@ -5,6 +5,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentHooks, agentFamily } from "./agent-hooks.ts";
+import { claudeTimeoutEnv } from "./agent-timeout-env.ts";
 
 const silent = { error: () => {} };
 
@@ -18,8 +19,13 @@ test("agentFamily maps the claudex/claudemix ids onto the claude family", () => 
   assert.equal(agentFamily("claudemix"), "claude");
   assert.equal(agentFamily("codex"), "codex");
   assert.equal(agentFamily("opencode"), "opencode");
+  assert.equal(agentFamily("grok"), "grok");
   assert.equal(agentFamily("gemini"), null);
   assert.equal(agentFamily("deepseek"), null);
+});
+
+test("grok is its own family and gets no claude timeout env", () => {
+  assert.equal(claudeTimeoutEnv("grok", 30), null);
 });
 
 test("claudex/claudemix map to claude family for BOTH target and installer dispatch", async () => {

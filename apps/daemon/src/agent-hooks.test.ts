@@ -204,6 +204,70 @@ test("installs are idempotent: a second run is byte-identical (claude + codex)",
   }
 });
 
+test("grok install writes a solely-owned orquester.json with grok-labelled notifier hooks", async () => {
+  const s = await scratch();
+  try {
+    await new AgentHooks(join(s, "d"), join(s, "h"), silent).ensureForEntry("grok", {});
+
+    const hookPath = join(s, "h", ".grok", "hooks", "orquester.json");
+    const doc = JSON.parse(await readFile(hookPath, "utf8"));
+    assert.deepEqual(Object.keys(doc.hooks).sort(), [
+      "Notification",
+      "PermissionDenied",
+      "PreToolUse",
+      "Stop",
+      "UserPromptSubmit"
+    ]);
+    type Group = { hooks: Array<{ type: string; command: string }> };
+    for (const [event, groups] of Object.entries(doc.hooks as Record<string, Group[]>)) {
+      assert.equal(groups.length, 1, `${event} has exactly the managed group`);
+      const handler = groups[0].hooks[0];
+      assert.equal(handler.type, "command");
+      assert.ok(handler.command.startsWith("'"), "script path is POSIX single-quoted");
+      assert.ok(handler.command.endsWith(` grok ${event}`), "events are labelled grok, not claude");
+    }
+    // Grok can read ~/.claude/settings.json; we must never rely on it.
+    await assert.rejects(stat(join(s, "h", ".claude", "settings.json")), "no claude settings written");
+  } finally {
+    await rm(s, { recursive: true, force: true });
+  }
+});
+
+test("grok install honors GROK_HOME and is idempotent", async () => {
+  const s = await scratch();
+  try {
+    const grokHome = join(s, "acc", ".grok");
+    const hookPath = join(grokHome, "hooks", "orquester.json");
+    await new AgentHooks(join(s, "d"), join(s, "h"), silent).ensureForEntry("grok", { GROK_HOME: grokHome });
+    const first = await readFile(hookPath, "utf8");
+
+    // Fresh instance: no in-flight state, exercises the reinstall path.
+    await new AgentHooks(join(s, "d"), join(s, "h"), silent).ensureForEntry("grok", { GROK_HOME: grokHome });
+
+    assert.equal(await readFile(hookPath, "utf8"), first);
+    await assert.rejects(stat(join(s, "h", ".grok")), "default home untouched");
+  } finally {
+    await rm(s, { recursive: true, force: true });
+  }
+});
+
+test("grok install overwrites an edited orquester.json (solely owned)", async () => {
+  const s = await scratch();
+  try {
+    const hookPath = join(s, "h", ".grok", "hooks", "orquester.json");
+    await mkdir(join(s, "h", ".grok", "hooks"), { recursive: true });
+    await writeFile(hookPath, JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "/usr/bin/stale" }] }] } }));
+
+    await new AgentHooks(join(s, "d"), join(s, "h"), silent).ensureForEntry("grok", {});
+
+    const doc = JSON.parse(await readFile(hookPath, "utf8"));
+    assert.ok(!JSON.stringify(doc).includes("/usr/bin/stale"), "stale content replaced wholesale");
+    assert.ok(JSON.stringify(doc.hooks.Stop).includes("agent-hook.sh"));
+  } finally {
+    await rm(s, { recursive: true, force: true });
+  }
+});
+
 test("per-account env overrides route installs to the account config home", async () => {
   const s = await scratch();
   try {

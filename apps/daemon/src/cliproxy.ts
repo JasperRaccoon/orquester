@@ -6,7 +6,9 @@ import type {
   CliProxyProviderId,
   CliProxyProviderStatus,
   CliProxyRouterProviderStatus,
-  CliProxyStatus
+  CliProxyStatus,
+  CliProxyXaiLink,
+  CliProxyXaiStatus
 } from "@orquester/api";
 import {
   CURATED_PROXY_MODEL_IDS,
@@ -16,6 +18,7 @@ import {
   MODEL_NAME_RE,
   type RouterModel,
   type RouterProvider,
+  XAI_OAUTH_MODEL_IDS,
   cliproxyDir,
   cliproxyStateFile,
   createDefaultCliProxyState,
@@ -23,6 +26,7 @@ import {
   migrateLegacyOpenRouter,
   parseCliProxyState,
   resolveRouterModel,
+  resolveXaiModel,
   routerProviderSchema,
   validateRouterProviders
 } from "@orquester/config";
@@ -41,6 +45,15 @@ import {
   codexStorageFromAuthJson,
   jwtClaims
 } from "./cliproxy-seed.ts";
+import {
+  type XaiAuthFile,
+  type XaiManagementApi,
+  deriveXaiAccount,
+  httpXaiManagementApi,
+  removeXaiAuthFiles,
+  scanXaiAuthFiles,
+  scanXaiQuotaError
+} from "./cliproxy-xai.ts";
 import type { RegistryService } from "./registry.ts";
 import { SERVICE_SESSION_PREFIX, type Tmux } from "./tmux.ts";
 
@@ -70,12 +83,28 @@ const SEED_FRESH_THRESHOLD_MS = 5 * 60 * 1000;
  *  the router provider that served it is deleted or loses its key (spec §4). */
 const FALLBACK_DEFAULT_MODEL = "gpt-5.6-sol";
 const FALLBACK_BACKGROUND_MODEL = "gpt-5.6-luna";
+/** Device-code poll cadence (spec §B.2 — the proxy's own goroutine does the
+ *  token exchange; we only watch for the verdict). */
+const XAI_POLL_INTERVAL_MS = 3000;
 
 type ProbeResult = { ok: boolean; reachable?: boolean; models?: string[] };
 
 /** Uniform result of a router mutation: `error` = client mistake (400-ish),
  *  `affectedSessions` without `error` = the restart refusal (409). */
 type RouterMutationResult = { ok: boolean; affectedSessions?: number; error?: string };
+
+/**
+ * Result of starting an xAI device-code link. `conflict` = a client mistake the
+ * route answers 409 (already linking/linked, proxy not running); `upstream` = the
+ * proxy's management API misbehaved → 502, carrying its status when there was one.
+ */
+export type XaiLinkResult =
+  | { ok: true; link: CliProxyXaiLink }
+  | { ok: false; code: "conflict" | "upstream"; error: string; status?: number };
+
+/** Result of cancelling a link or unlinking: `affectedSessions` without `error`
+ *  is the live-session refusal (409), same shape as a router mutation. */
+export type XaiUnlinkResult = { ok: boolean; affectedSessions?: number; error?: string };
 
 /** A managed account seeded into the proxy's `auth/` dir (proxy-owned mapping). */
 interface SeededAccount {
@@ -98,6 +127,14 @@ export interface CliProxyAdapters {
   tmux: Pick<Tmux, "newServiceSession" | "hasServiceSession" | "killServiceSession"> | null;
   spawnDirect(bin: string, args: string[]): { kill(): void } | null; // no-tmux fallback
   liveDependentSessionCount(): number; // daemon-managed claudex/claudemix sessions
+  /**
+   * Live claudex/claudemix sessions whose launch model resolves to an
+   * `XAI_OAUTH_MODELS` id (`resolveXaiModel`) — the unlink gate. Absent → the
+   * gate falls back to {@link liveDependentSessionCount}, which over-counts
+   * (every dependent session), refusing an unlink more often rather than
+   * silently pulling the credential out from under a live Grok session.
+   */
+  liveXaiSessionCount?(): number;
   now(): number;
   /** Delay between spawn-probe retries (production: real setTimeout; tests: instant). */
   sleep?(ms: number): Promise<void>;
@@ -140,6 +177,9 @@ export interface CliProxyAdapters {
   /** Path of a managed account's on-disk credential (claude `.credentials.json` /
    *  codex `auth.json`) — the write-back target for two-way credential sync. */
   managedCredentialPath?(provider: "codex" | "claude", accountId: string): string;
+  /** The proxy's loopback management API, which drives the xAI device-code login.
+   *  Defaults to the real HTTP client; tests inject a fake. */
+  xaiManagement?: XaiManagementApi;
 }
 
 type ValidateResult =
@@ -181,6 +221,18 @@ export class CliProxyManager {
    */
   private readonly seededAccounts = new Map<string, SeededAccount>();
 
+  /**
+   * The xAI (Grok) account view. Everything here is DERIVED, never persisted:
+   * CLIProxyAPI owns the tokens in `auth/xai-*.json` and their refresh, so
+   * `xaiFiles` is just the last scan of that dir. The in-flight device-code
+   * session (`xaiLink`) is in-memory by design — it dies with the daemon, and the
+   * proxy-side session expires after 30 min anyway (spec §B.1).
+   */
+  private xaiFiles: XaiAuthFile[] = [];
+  private xaiLink: { link: CliProxyXaiLink; sessionState: string; expiresAtMs: number } | null = null;
+  private xaiLastQuotaError: string | null = null;
+  private xaiLastLinkError: string | null = null;
+
   /** Serializes every transition — the tail of the in-flight chain. */
   private queue: Promise<unknown> = Promise.resolve();
 
@@ -208,6 +260,7 @@ export class CliProxyManager {
       modelOverrides: this.state.modelOverrides,
       providers: this.providerStatuses(),
       routerProviders: this.routerProviderStatuses(),
+      xai: this.xaiStatus(),
       accounts: [...this.seededAccounts.values()].map((a) => ({
         id: a.id,
         provider: a.provider,
@@ -229,6 +282,10 @@ export class CliProxyManager {
       // "ok"; refreshSeededFreshness() below re-derives real freshness from the
       // on-disk auth files at boot and again on every health poll.
       this.rebuildSeededAccounts();
+      // The xAI view needs no secrets (it is a read of the proxy's auth dir), so
+      // derive it before the disabled short-circuit — the Settings card must show
+      // a linked account even while the proxy is off.
+      await this.refreshXai();
       if (!this.state.enabled) {
         this.setState("off", []);
         this.applyRegistryCoupling();
@@ -355,8 +412,13 @@ export class CliProxyManager {
     // `undefined` = key state unknown (secrets not loaded) → don't churn the
     // managed memory files; a boolean converges them on the current gate.
     const kimi = this.secrets ? routerKimiAvailable(this.state, this.secrets) : undefined;
-    await seedHome(this.daemonDir, "claudex", sysDir, sysConfig, kimi);
-    await seedHome(this.daemonDir, "claudemix", sysDir, sysConfig, kimi);
+    // The xai gate reads the auth dir, so it is always knowable — re-derive it
+    // here so every seed pass (enable, boot, mutation tails) converges grok.md on
+    // the real link state without each caller remembering to refresh.
+    await this.refreshXai();
+    const xai = this.xaiLinked();
+    await seedHome(this.daemonDir, "claudex", sysDir, sysConfig, kimi, xai);
+    await seedHome(this.daemonDir, "claudemix", sysDir, sysConfig, kimi, xai);
   }
 
   /**
@@ -618,6 +680,83 @@ export class CliProxyManager {
     return res.ok ? res : { ok: false, code: "upstream", error: res.error };
   }
 
+  /**
+   * Start the xAI (Grok) device-code link (spec §B.2). Requires a running proxy —
+   * the flow is driven entirely through ITS management API, and the proxy's own
+   * goroutine performs the token exchange and writes `auth/xai-<email>.json`. The
+   * returned `url`/`userCode` are user-facing (they must be typed into a browser),
+   * never secrets. A background poll watches for the verdict; nothing here waits
+   * on the user, so the transition queue is released immediately.
+   */
+  linkXai(): Promise<XaiLinkResult> {
+    return this.transition(async () => {
+      if (this.xaiLink) {
+        return { ok: false, code: "conflict", error: "a Grok link is already in progress" };
+      }
+      await this.refreshXai();
+      if (this.xaiLinked()) {
+        return { ok: false, code: "conflict", error: "a Grok account is already linked" };
+      }
+      // Same precondition as account seeding: no proxy, no management API.
+      if ((this.st !== "healthy" && this.st !== "degraded") || !this.secrets) {
+        return { ok: false, code: "conflict", error: "model proxy must be running" };
+      }
+      const res = await this.xaiApi().requestAuthUrl(this.state.port, this.secrets.managementSecret);
+      if (!res.ok) {
+        return { ok: false, code: "upstream", error: res.error, ...(res.status ? { status: res.status } : {}) };
+      }
+      const expiresAtMs = this.adapters.now() + res.value.expiresIn * 1000;
+      const link: CliProxyXaiLink = {
+        url: res.value.url,
+        userCode: res.value.userCode,
+        expiresAt: new Date(expiresAtMs).toISOString()
+      };
+      this.xaiLink = { link, sessionState: res.value.state, expiresAtMs };
+      // A fresh attempt supersedes the previous verdict.
+      this.xaiLastLinkError = null;
+      this.broadcaster.publish("cliproxy", "cliproxy.changed", this.status());
+      void this.pollXaiLink(res.value.state, res.value.expiresIn);
+      return { ok: true, link };
+    });
+  }
+
+  /**
+   * Cancel an in-flight device-code session, or — when an account is linked —
+   * unlink it (spec §B.2). Unlinking deletes every `auth/xai-*.json`; the proxy
+   * hot-discovers the removal, so there is **no config.yaml change and no proxy
+   * restart** in either direction. The unlink is force-gated on live Grok
+   * sessions, whose credential it would pull away mid-turn. Idempotent: nothing
+   * linking and nothing linked is a no-op `ok`.
+   */
+  cancelOrUnlinkXai(opts: { force?: boolean } = {}): Promise<XaiUnlinkResult> {
+    return this.transition(async () => {
+      const pending = this.xaiLink;
+      if (pending) {
+        this.xaiLink = null;
+        // Always tell the proxy to drop the abandoned session (spec §B.6).
+        if (this.secrets) {
+          await this.xaiApi()
+            .cancelSession(this.state.port, this.secrets.managementSecret, pending.sessionState)
+            .catch(() => undefined);
+        }
+        this.broadcaster.publish("cliproxy", "cliproxy.changed", this.status());
+        return { ok: true, affectedSessions: 0 };
+      }
+      await this.refreshXai();
+      if (!this.xaiLinked()) return { ok: true, affectedSessions: 0 };
+      const live = this.xaiSessionCount();
+      if (live > 0 && !opts.force) return { ok: false, affectedSessions: live };
+      await removeXaiAuthFiles(join(cliproxyDir(this.daemonDir), "auth"));
+      await this.refreshXai();
+      this.xaiLastQuotaError = null;
+      this.xaiLastLinkError = null;
+      // A grok default/background pick no longer resolves once the account is gone.
+      this.resetDanglingModelPicks();
+      await this.afterXaiMutation();
+      return { ok: true, affectedSessions: opts.force ? live : 0 };
+    });
+  }
+
   /** Whether a key is currently stored for `id` (unknown while secrets are unloaded). */
   private hasRouterKey(id: string): boolean {
     return this.secrets !== null && getRouterKey(this.secrets.routerKeys, id) !== undefined;
@@ -650,10 +789,164 @@ export class CliProxyManager {
    */
   private resetDanglingModelPicks(): void {
     const sources = this.secrets ? this.keyedProviders() : this.state.routerProviders;
+    const xaiLinked = this.xaiLinked();
     const valid = (model: string): boolean =>
-      CURATED_PROXY_MODEL_IDS.includes(model) || resolveRouterModel(sources, model) !== null;
+      CURATED_PROXY_MODEL_IDS.includes(model) ||
+      resolveRouterModel(sources, model) !== null ||
+      (xaiLinked && resolveXaiModel(model) !== null);
     if (!valid(this.state.defaultModel)) this.state.defaultModel = FALLBACK_DEFAULT_MODEL;
     if (!valid(this.state.backgroundModel)) this.state.backgroundModel = FALLBACK_BACKGROUND_MODEL;
+  }
+
+  private xaiApi(): XaiManagementApi {
+    return this.adapters.xaiManagement ?? httpXaiManagementApi;
+  }
+
+  /** Wire projection of the xAI account: derived auth-dir view, with the
+   *  in-memory linking session layered on top. No token material, ever. */
+  private xaiStatus(): CliProxyXaiStatus {
+    const derived = deriveXaiAccount(this.xaiFiles, this.adapters.now());
+    return {
+      state: this.xaiLink ? "linking" : derived.state,
+      email: derived.email,
+      expiredAt: derived.expiredAt,
+      lastQuotaError: this.xaiLastQuotaError,
+      lastLinkError: this.xaiLastLinkError,
+      link: this.xaiLink?.link ?? null
+    };
+  }
+
+  /**
+   * Whether a Grok credential exists at all — the launcher-coupling, catalog-union
+   * and managed-subagent gate. Deliberately includes the `expired` case: the
+   * expiry stamp is informational (the proxy refreshes with a 5-minute lead), so a
+   * momentarily stale one must not make the claudex launcher disappear.
+   */
+  private xaiLinked(): boolean {
+    return this.xaiFiles.length > 0;
+  }
+
+  /** Re-derive the account view from the proxy-owned auth dir. Returns whether the
+   *  wire-visible status changed (so callers can skip a needless broadcast). */
+  private async refreshXai(): Promise<boolean> {
+    const before = JSON.stringify(this.xaiStatus());
+    this.xaiFiles = await scanXaiAuthFiles(join(cliproxyDir(this.daemonDir), "auth"));
+    return JSON.stringify(this.xaiStatus()) !== before;
+  }
+
+  /** Best-effort quota signal (spec §B.6): upstream exposes no quota readout, so
+   *  the proxy's logged `…-usage-exhausted` body is the only evidence the account
+   *  was cooled for 24 h. Sticky until the account is unlinked. */
+  private async refreshXaiQuotaError(): Promise<boolean> {
+    if (!this.xaiLinked()) return false;
+    const found = await scanXaiQuotaError(join(cliproxyDir(this.daemonDir), "logs"));
+    if (!found || found === this.xaiLastQuotaError) return false;
+    this.xaiLastQuotaError = found;
+    return true;
+  }
+
+  /** Live sessions the unlink would strand (see the adapter's fallback note). */
+  private xaiSessionCount(): number {
+    return this.adapters.liveXaiSessionCount
+      ? this.adapters.liveXaiSessionCount()
+      : this.adapters.liveDependentSessionCount();
+  }
+
+  /**
+   * Watch a device-code session to its verdict. Runs OUTSIDE the transition queue
+   * (it can last the full 30-minute code lifetime) and re-enters it only to apply
+   * the outcome. Bounded by both the code's expiry and an attempt cap, so neither
+   * a frozen clock (tests) nor a management API stuck on `wait` can spin forever.
+   */
+  private async pollXaiLink(sessionState: string, expiresIn: number): Promise<void> {
+    const maxAttempts = Math.ceil((expiresIn * 1000) / XAI_POLL_INTERVAL_MS) + 1;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      await this.sleep(XAI_POLL_INTERVAL_MS);
+      const current = this.xaiLink;
+      // Cancelled, superseded, or the daemon moved on — this poll is stale.
+      if (!current || current.sessionState !== sessionState) return;
+      if (this.adapters.now() >= current.expiresAtMs) break;
+      if (!this.secrets) break;
+      const res = await this.xaiApi().pollAuthStatus(
+        this.state.port,
+        this.secrets.managementSecret,
+        sessionState
+      );
+      // A transient management error is not a verdict — keep waiting.
+      if (!res.ok) continue;
+      if (res.value.status === "wait") continue;
+      if (res.value.status === "ok") {
+        await this.completeXaiLink(sessionState);
+        return;
+      }
+      await this.endXaiLink(sessionState, res.value.error ?? "authorization failed");
+      return;
+    }
+    await this.endXaiLink(sessionState, "device authorization expired");
+  }
+
+  /** Device flow succeeded: the proxy wrote the auth file itself, so all that is
+   *  left is to re-derive, converge and announce. */
+  private completeXaiLink(sessionState: string): Promise<void> {
+    return this.transition(async () => {
+      if (this.xaiLink?.sessionState !== sessionState) return;
+      this.xaiLink = null;
+      this.xaiLastLinkError = null;
+      try {
+        await this.refreshXai();
+        await this.afterXaiMutation();
+      } catch (error) {
+        // Never let a background poll throw out of the queue.
+        console.error("cliproxy xai link finalization failed", error);
+        this.broadcaster.publish("cliproxy", "cliproxy.changed", this.status());
+      }
+    });
+  }
+
+  /** Device flow failed or expired: drop the session (status falls back to the
+   *  derived state) and tell the proxy to forget it too. */
+  private endXaiLink(sessionState: string, reason: string): Promise<void> {
+    return this.transition(async () => {
+      if (this.xaiLink?.sessionState !== sessionState) return;
+      this.xaiLink = null;
+      // Surfaced on the xai block itself: the shared proxy-health `detail` is
+      // wiped by every setState (incl. the ~15 s becomeHealthy), so a verdict
+      // parked there would vanish before the user ever saw it.
+      this.xaiLastLinkError = reason;
+      if (this.secrets) {
+        await this.xaiApi()
+          .cancelSession(this.state.port, this.secrets.managementSecret, sessionState)
+          .catch(() => undefined);
+      }
+      this.broadcaster.publish("cliproxy", "cliproxy.changed", this.status());
+    });
+  }
+
+  /**
+   * The tail of an xAI link/unlink. Deliberately lighter than
+   * {@link afterRouterMutation}: xai contributes nothing to `config.yaml`, so
+   * the re-rendered projection is byte-identical there and there is no restart
+   * to gate. The env projections still MUST be rewritten: an unlink resets a
+   * dangling grok `defaultModel`/`backgroundModel` pick, which claudex.env
+   * exports as ANTHROPIC_MODEL / ANTHROPIC_DEFAULT_HAIKU_MODEL (and the registry
+   * caches until reresolve), so skipping it would leave new sessions launching
+   * on a model whose credential was just deleted.
+   */
+  private async afterXaiMutation(): Promise<void> {
+    await this.seedHomes();
+    if (this.state.enabled) {
+      if (this.secrets) {
+        await writeProjections(this.daemonDir, this.secrets, this.state);
+        await this.reresolveDependents();
+      }
+      const probed = await this.probe();
+      if (probed.ok && probed.models) {
+        this.state.modelCatalog = { models: probed.models, asOf: new Date(this.adapters.now()).toISOString() };
+      }
+    }
+    this.applyRegistryCoupling();
+    this.broadcaster.publish("cliproxy", "cliproxy.changed", this.status());
+    await this.persist();
   }
 
   /**
@@ -922,7 +1215,11 @@ export class CliProxyManager {
         // than relabeling it healthy in place. Until then it stays degraded.
         if (this.external) await this.reparentIfDrained();
         else this.becomeHealthy(probed.models);
-        if (await this.refreshSeededFreshness()) {
+        // Evaluate every refresh (no short-circuit): each has its own side effects.
+        const seededChanged = await this.refreshSeededFreshness();
+        const xaiChanged = await this.refreshXai();
+        const quotaChanged = await this.refreshXaiQuotaError();
+        if (seededChanged || xaiChanged || quotaChanged) {
           this.applyRegistryCoupling();
           this.broadcaster.publish("cliproxy", "cliproxy.changed", this.status());
         }
@@ -1060,6 +1357,10 @@ export class CliProxyManager {
           if (m.alias) models.add(m.alias);
         }
       }
+      // Same reasoning for the linked xAI account: the embedded catalog should
+      // already list the Grok ids, but unioning them keeps chips/validateModel
+      // independent of upstream catalog drift (spec §B.3.5).
+      if (this.xaiLinked()) for (const id of XAI_OAUTH_MODEL_IDS) models.add(id);
       return { ...result, models: [...models] };
     }
     return result;
@@ -1161,12 +1462,16 @@ export class CliProxyManager {
     const codexOk = this.providerState("codex") === "ok";
     const claudeOk = this.providerState("claude") === "ok";
     const routerOk = this.keyedRouterCount() > 0;
-    if (codexOk || routerOk) {
+    // A linked xAI account serves claudex on its own (spec §B.4). It is
+    // deliberately absent from hasProviderInfo(): xai says nothing about the
+    // claude credential claudemix needs, so it must not flip the whole gate on.
+    const xaiOk = this.xaiLinked();
+    if (codexOk || routerOk || xaiOk) {
       this.registry.setRuntimeState("claudex", { enabled: true });
     } else {
       this.registry.setRuntimeState("claudex", {
         enabled: false,
-        disabledReason: "no codex or router credential"
+        disabledReason: "no codex, router or Grok credential"
       });
     }
     if (claudeOk) {

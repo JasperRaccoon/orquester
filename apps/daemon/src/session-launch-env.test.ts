@@ -292,3 +292,21 @@ test("composeExtraEnv prefers a's accountId when both set", () => {
   const merged = composeExtraEnv({ env: {}, accountId: "a" }, { env: {}, accountId: "b" });
   assert.equal(merged?.accountId, "a");
 });
+
+test("cliproxyContributor: an xAI OAuth model launches BARE with its curated compact env", async () => {
+  // Same rule as router models, different reason: CLIProxyAPI routes grok ids to
+  // the linked xai credential internally, so an acc<hex>/ prefix could only
+  // misroute them (spec 2026-08-05 §B.3). Two seeded codex accounts make the pick
+  // ambiguous, so a NON-exempt model here WOULD carry a prefix.
+  const dir = await daemonDirWithSeeded([
+    { provider: "codex", accountId: ACCOUNT },
+    { provider: "codex", accountId: OTHER }
+  ]);
+  const res = cliproxyContributor("claudex", { accountId: ACCOUNT, model: "grok-build-0.1" }, dir);
+  assert.ok(res);
+  assert.equal(res.accountId, undefined, "grok models are served by the linked xAI account, not a seeded one");
+  assert.equal(res.env.ANTHROPIC_MODEL, "grok-build-0.1", "no acc<hex>/ prefix");
+  assert.equal(res.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, "256000");
+  // 190k, not the 256k ceiling: xAI doubles the whole request's price past 200k input.
+  assert.equal(res.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, "190000");
+});

@@ -771,7 +771,7 @@ export interface SessionActivityEvent {
 }
 
 /** Agents whose managed hooks report structural status to the daemon. */
-export type AgentEventSource = "claude" | "codex" | "opencode";
+export type AgentEventSource = "claude" | "codex" | "opencode" | "grok";
 
 /** Body of POST /api/sessions/:id/agent-event (unix-socket transport only). */
 export interface AgentEventRequest {
@@ -873,6 +873,38 @@ export interface CliProxyRouterProviderRequest {
   models: CliProxyRouterModel[];
 }
 
+/**
+ * The in-flight RFC 8628 device-code prompt of an xAI link. `url`/`userCode` are
+ * user-facing by design (the user must visit and type them) — not secrets. The
+ * whole thing is in-memory on the daemon: it dies with a restart, and the
+ * proxy-side session expires after 30 min anyway.
+ */
+export interface CliProxyXaiLink {
+  url: string;
+  userCode: string;
+  expiresAt: string;
+}
+
+/**
+ * The linked xAI (Grok) OAuth account, derived from CLIProxyAPI's `auth/xai-*`
+ * files rather than persisted by Orquester — the proxy owns the tokens and their
+ * refresh, so nothing here is stored at rest and no token ever crosses the wire.
+ * `expired` = every auth file's expiry is in the past (the refresh token is dead;
+ * relinking is the recovery). `lastQuotaError` is best-effort: upstream exposes
+ * no quota readout, it only 429s and cools the account for 24 h.
+ * `lastLinkError` is the verdict of the most recent failed/expired device flow;
+ * cleared when a new link starts or one succeeds (the proxy-health `detail`
+ * field must not carry it — every health-state change wipes that within ~15 s).
+ */
+export interface CliProxyXaiStatus {
+  state: "none" | "linking" | "linked" | "expired";
+  email: string | null;
+  expiredAt: string | null;
+  lastQuotaError: string | null;
+  lastLinkError: string | null;
+  link: CliProxyXaiLink | null;
+}
+
 export interface CliProxyStatus {
   state: "off" | "downloading" | "building" | "starting" | "healthy" | "degraded" | "error";
   reasons: string[];
@@ -885,6 +917,8 @@ export interface CliProxyStatus {
   providers: CliProxyProviderStatus[];
   /** User-defined OpenAI-compatible routers (spec 2026-08-04 §1). */
   routerProviders: CliProxyRouterProviderStatus[];
+  /** The linked xAI OAuth (Grok) account, if any (spec 2026-08-05 §B.1). */
+  xai: CliProxyXaiStatus;
   accounts: { id: string; provider: CliProxyProviderId; label: string; email?: string }[];
   activeSessionCount: number;
   testedClaudeCliVersion: string | null;
@@ -1350,6 +1384,23 @@ export class HttpOrquesterApiClient implements OrquesterApi {
   /** Browse the models a keyed router provider advertises upstream (read-only). */
   getCliProxyRouterCatalog(id: string): Promise<{ models: string[] }> {
     return this.get(`/api/cliproxy/providers/${encodeURIComponent(id)}/catalog`);
+  }
+
+  // xAI OAuth (Grok) account. Link starts the device-code flow and returns the
+  // prompt to show the user; the daemon polls the proxy and broadcasts
+  // cliproxy.changed as the state advances. Unlink (or cancelling an in-flight
+  // link) rides the same 409 force-gate as every other cliproxy mutation.
+
+  linkCliProxyXai(): Promise<CliProxyXaiLink> {
+    return this.post("/api/cliproxy/xai/link");
+  }
+
+  unlinkCliProxyXai(force?: boolean): Promise<CliProxyStatus | CliProxyMutationRefusal> {
+    // DELETE carries no body — `force` rides the query string.
+    return this.mutateAllowingRefusal(
+      "DELETE",
+      `/api/cliproxy/xai/link${force ? "?force=true" : ""}`
+    );
   }
 
   deleteFsEntry(path: string): Promise<{ ok: true }> {
