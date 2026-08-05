@@ -37,7 +37,7 @@ type Section = "app" | "agents" | "modelproxy" | "accounts" | "usage" | "git-hos
 
 const SECTIONS: { id: Section; label: string; icon: React.ReactNode; desc: string }[] = [
   { id: "app", label: "App", icon: <AppWindow size={16} />, desc: "Titlebar, runtime, active server" },
-  { id: "usage", label: "Usage", icon: <Gauge size={16} />, desc: "Top-bar usage widget for Claude Code & Codex" },
+  { id: "usage", label: "Usage", icon: <Gauge size={16} />, desc: "Top-bar usage widget for Claude Code, Codex & Grok" },
   { id: "agents", label: "Agents", icon: <Boxes size={16} />, desc: "Install, update and view harness versions" },
   { id: "modelproxy", label: "Model proxy", icon: <Zap size={16} />, desc: "Run GPT & Kimi in the Claude Code harness" },
   { id: "accounts", label: "Accounts", icon: <Users size={16} />, desc: "Managed Claude & Codex accounts for launching agents" },
@@ -852,11 +852,15 @@ const UsageSettings: React.FC = () => {
 
   const setUsage = (patch: Partial<typeof prefs>) => void updateAppConfig({ usage: { ...prefs, ...patch } });
 
-  const agentHint = (id: "claude" | "codex") => {
-    const installed = registry.agents.some((a) => a.id === id && a.enabled);
-    if (!installed) return "Not installed";
+  const agentHint = (id: "claude" | "codex" | "grok") => {
+    // Grok's credential can come from the model proxy's xai link alone — the
+    // grok CLI need not be installed for usage to report.
+    if (id !== "grok") {
+      const installed = registry.agents.some((a) => a.id === id && a.enabled);
+      if (!installed) return "Not installed";
+    }
     const found = usage?.agents.find((a) => a.id === id);
-    if (!found) return "Not logged in";
+    if (!found) return id === "grok" ? "Not linked" : "Not logged in";
     if (found.stale) return found.plan ? `Logged in · ${found.plan} — updating…` : "Logged in — updating…";
     return found.plan ? `Logged in · ${found.plan}` : "Logged in";
   };
@@ -864,7 +868,8 @@ const UsageSettings: React.FC = () => {
   const CHIP_OPTIONS: { value: typeof prefs.chip; label: string }[] = [
     { value: "busiest", label: "Busiest" },
     { value: "claude", label: "Claude" },
-    { value: "codex", label: "Codex" }
+    { value: "codex", label: "Codex" },
+    { value: "grok", label: "Grok" }
   ];
 
   return (
@@ -882,6 +887,12 @@ const UsageSettings: React.FC = () => {
         <Switch
           checked={prefs.agents.codex ?? true}
           onChange={(v) => setUsage({ agents: { ...prefs.agents, codex: v } })}
+        />
+      </Field>
+      <Field label="Grok Build" hint={agentHint("grok")}>
+        <Switch
+          checked={prefs.agents.grok ?? true}
+          onChange={(v) => setUsage({ agents: { ...prefs.agents, grok: v } })}
         />
       </Field>
       <Field label="Chip shows" hint="Which agent drives the collapsed chip.">

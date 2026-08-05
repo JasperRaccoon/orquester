@@ -48,10 +48,10 @@ assert.equal(formatAgo(undefined, t0), "");
 // missingUsageAgents: default-enabled (absent from prefs.agents) but logged-out
 // agents still surface a hint; present or explicitly-disabled ones don't.
 const freshPrefs = usagePrefsSchema.parse({}); // enabled, agents: {}
-assert.deepEqual(missingUsageAgents(freshPrefs, []), ["claude", "codex"]);
-assert.deepEqual(missingUsageAgents(freshPrefs, ["claude"]), ["codex"]);
+assert.deepEqual(missingUsageAgents(freshPrefs, []), ["claude", "codex", "grok"]);
+assert.deepEqual(missingUsageAgents(freshPrefs, ["claude"]), ["codex", "grok"]);
 const codexOff = usagePrefsSchema.parse({ agents: { codex: false } });
-assert.deepEqual(missingUsageAgents(codexOff, []), ["claude"]);
+assert.deepEqual(missingUsageAgents(codexOff, []), ["claude", "grok"]);
 // Master switch off → nothing is enabled, so nothing is "missing".
 const allOff = usagePrefsSchema.parse({ enabled: false });
 assert.deepEqual(missingUsageAgents(allOff, []), []);

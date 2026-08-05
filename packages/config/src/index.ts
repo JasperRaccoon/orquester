@@ -307,7 +307,7 @@ export const usagePrefsSchema = z
     codex: z.boolean().optional(),
     agents: z.record(z.string(), z.boolean()).default({}),
     /** Which agent drives the collapsed chip. */
-    chip: z.enum(["busiest", "claude", "codex"]).default("busiest")
+    chip: z.enum(["busiest", "claude", "codex", "grok"]).default("busiest")
   })
   .transform((p) => {
     const agents = { ...p.agents };

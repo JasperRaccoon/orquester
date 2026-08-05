@@ -91,7 +91,7 @@ import { PushService, isValidPushEndpoint } from "./push";
 import { GitError, GitService } from "./git";
 import { UsageService } from "./usage";
 import { UsageTokensScanner } from "./usage-tokens";
-import { createClaudeSource, createCodexSource, readUsagePrefs, shouldHideSystemUsage } from "./usage-sources";
+import { createClaudeSource, createCodexSource, createGrokSource, readUsagePrefs, shouldHideSystemUsage } from "./usage-sources";
 import { currentWindow } from "./usage-parse";
 import { listArchiveEntries } from "./archive";
 import { ParquetRequestError, readParquetWindow } from "./parquet";
@@ -463,9 +463,19 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     return aggregateWorstAccountUsage(agent, base, accounts, Date.now());
   }
 
+  // Grok has no managed-account family (spec 2026-08-05 §Decisions) and its
+  // credential is proxy-owned, so it bypasses agentWithAccounts entirely: one
+  // source, no System row, no ensureFreshForUsage.
+  const grokUsageSource = createGrokSource({
+    authDir: join(cliproxyDir(resolved.daemonDir), "auth"),
+    grokHome: process.env.GROK_HOME || join(resolved.vars.userhome, ".grok"),
+    now: () => Date.now(),
+    logger: console
+  });
   const usage = new UsageService({
     fetchClaude: () => agentWithAccounts("claude", claudeAccountSource),
     readCodex: () => agentWithAccounts("codex", codexAccountSource),
+    readGrok: () => grokUsageSource(),
     getPrefs: () => readUsagePrefs(resolved.appConfigFile),
     now: () => Date.now()
   });

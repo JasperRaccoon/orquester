@@ -72,7 +72,7 @@ export const READ_FILE_DESC =
   "Read a text file inside the workspace sandbox. Path may be absolute or relative to the sandbox root. Supports byte-offset paging with offset/maxBytes; default window is 64KB (65536 bytes), max 256KB. truncated:true means advance offset and read again. Binary files are refused.";
 
 export const GET_USAGE_DESC =
-  "Report Claude/Codex subscription quota. Percent values are USED from 0-100; session is rolling 5h and weekly is 7d, and either window may be null. Cache is fresh for about 5min. An absent agent means not logged in. A present agent with null windows and stale:true means logged in but no reading yet. Freshness is per-agent asOf/ageMinutes. refresh:true may still return last-known data due to backoff. NEVER call in a loop with refresh:true.";
+  "Report Claude/Codex/Grok subscription quota. Percent values are USED from 0-100; session is rolling 5h and weekly is 7d (Grok reports only a weekly credit pool), and either window may be null. Cache is fresh for about 5min. An absent agent means not logged in. A present agent with null windows and stale:true means logged in but no reading yet. Freshness is per-agent asOf/ageMinutes. refresh:true may still return last-known data due to backoff. NEVER call in a loop with refresh:true.";
 
 export function projectUsage(res: UsageResponse, now: number) {
   return {

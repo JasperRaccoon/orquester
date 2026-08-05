@@ -128,6 +128,36 @@ export function parseCodexWhamUsage(json: unknown, now: number): AgentUsage {
   };
 }
 
+/**
+ * Grok Build subscription usage from `GET {cli-chat-proxy}/billing?format=credits`
+ * (the endpoint behind the grok CLI's own /usage command). Paid SuperGrok tiers
+ * expose exactly ONE window — a shared credit pool over `currentPeriod`
+ * (weekly today) — so it lands in the `weekly` slot and `session` stays null.
+ * Proto3 gotcha: an omitted `creditUsagePercent` on a live period means 0%,
+ * not "unknown" — never render it as unavailable.
+ */
+export function parseGrokBilling(json: unknown, now: number): AgentUsage {
+  const root = typeof json === "object" && json !== null ? (json as Record<string, unknown>) : {};
+  const cfg = typeof root.config === "object" && root.config !== null ? (root.config as Record<string, any>) : null;
+  let weekly: UsageWindow | null = null;
+  if (cfg) {
+    const percent = clampPercent(cfg.creditUsagePercent ?? 0);
+    if (percent != null) {
+      weekly = { percent, resetsAt: isoOrUndefined(cfg.currentPeriod?.end ?? cfg.billingPeriodEnd) };
+    }
+  }
+  weekly = currentWindow(weekly, now);
+  return {
+    id: "grok",
+    available: weekly != null,
+    stale: false,
+    plan: typeof root.subscriptionTier === "string" && root.subscriptionTier ? root.subscriptionTier : undefined,
+    session: null,
+    weekly,
+    asOf: weekly != null ? new Date(now).toISOString() : undefined
+  };
+}
+
 /** Scan rollout JSONL lines from the end for the last token_count event's rate_limits. */
 export function findLastCodexTokenCount(lines: string[]): unknown | null {
   for (let i = lines.length - 1; i >= 0; i--) {

@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { createDefaultAppConfig, parseAppConfig, usagePrefsSchema } from "./index";
 
-// Defaults make the feature zero-config.
+// Defaults make the feature zero-config (the schema transform folds the legacy
+// per-agent booleans into `agents`, so the canonical shape carries none).
 const def = createDefaultAppConfig();
-assert.deepEqual(def.usage, { enabled: true, claude: true, codex: true, chip: "busiest" });
+assert.deepEqual(def.usage, { enabled: true, agents: {}, chip: "busiest" });
 
 // The schema fills partial input.
 assert.equal(usagePrefsSchema.parse({ enabled: false }).chip, "busiest");
@@ -12,7 +13,8 @@ assert.equal(usagePrefsSchema.parse({ enabled: false }).chip, "busiest");
 const migrated = parseAppConfig({ version: 1 });
 assert.equal(migrated.usage.enabled, true);
 
-// Invalid chip value is rejected.
+// Invalid chip value is rejected; grok is a valid chip pin.
 assert.throws(() => usagePrefsSchema.parse({ chip: "nope" }));
+assert.equal(usagePrefsSchema.parse({ chip: "grok" }).chip, "grok");
 
 console.log("usage-prefs.check OK");

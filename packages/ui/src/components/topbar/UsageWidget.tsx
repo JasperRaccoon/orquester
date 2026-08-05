@@ -6,7 +6,7 @@ import { usageAgentEnabled } from "@orquester/config";
 import { AdaptiveMenu } from "../ui";
 import { getRegistryIcon } from "../../icons";
 import { useAppStore } from "../../store/app";
-import { barClass, formatAgo, formatClock, formatCountdown, gaugeClass, minutesSince, missingUsageAgents, pickDriver, windowMax } from "./usage-format";
+import { barClass, formatAgo, formatClock, formatCountdown, gaugeClass, minutesSince, missingUsageAgents, pickDriver, usageLoginHint, windowMax } from "./usage-format";
 import { REGISTRY } from "@orquester/registry";
 
 function labelForAgent(id: string): string {
@@ -361,7 +361,7 @@ export const UsageWidget: React.FC = () => {
           ))}
           {missing.map((id) => (
             <div key={id} className="px-3 py-2 text-xs text-neutral-500">
-              {labelForAgent(id)} — not logged in <span className="text-neutral-600">(run {id} login)</span>
+              {labelForAgent(id)} — not logged in <span className="text-neutral-600">({usageLoginHint(id)})</span>
             </div>
           ))}
         </>

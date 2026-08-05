@@ -7,6 +7,8 @@ export interface UsageServiceDeps {
   fetchClaude: () => Promise<AgentUsage | null>;
   /** Returns the Codex agent or null when not logged in / API-key mode. */
   readCodex: () => Promise<AgentUsage | null>;
+  /** Returns the Grok agent or null when no xai/grok credential exists. */
+  readGrok?: () => Promise<AgentUsage | null>;
   getPrefs: () => Promise<UsagePrefs>;
   now: () => number;
   /**
@@ -43,6 +45,10 @@ export class UsageService {
     if (usageAgentEnabled(prefs, "codex")) {
       const x = await this.deps.readCodex().catch(() => null);
       if (x) agents.push(x);
+    }
+    if (this.deps.readGrok && usageAgentEnabled(prefs, "grok")) {
+      const g = await this.deps.readGrok().catch(() => null);
+      if (g) agents.push(g);
     }
     this.cache = { agents };
     const h = JSON.stringify(agents); // dedupe on the agents payload

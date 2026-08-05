@@ -372,8 +372,18 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
     claudex is coupled on `codexOk || routerOk || xaiLinked`. Accepted risks (brainstorm
     2026-08-05): the proxy **impersonates the first-party Grok CLI** against an undocumented
     endpoint, so an xAI version-gate breaks Grok-via-proxy until CLIProxyAPI ships a fix and we
-    redeploy; **no quota readout exists** upstream (best-effort `lastQuotaError` only); and on a
-    `…-usage-exhausted` 429 the proxy silently **cools the account for 24 h**.
+    redeploy; **no per-request quota readout exists** upstream (best-effort `lastQuotaError`
+    only); and on a `…-usage-exhausted` 429 the proxy silently **cools the account for 24 h**.
+  - **Grok usage bar.** `createGrokSource` (`apps/daemon/src/usage-sources.ts`) reads the
+    subscription's weekly credit pool from the first-party
+    `cli-chat-proxy.grok.com/v1/billing?format=credits` (the endpoint behind the grok CLI's own
+    `/usage` command; spoofed client headers required or it 426s, pinned `GROK_CLIENT_VERSION`).
+    One `weekly` window only — SuperGrok has no 5h window; omitted `creditUsagePercent` on a
+    live period means **0%**, not unknown (proto3). Credential precedence: proxy-owned
+    `cliproxy/auth/xai-*.json` (this is the ONE sanctioned reader of xai token material outside
+    the proxy subsystem — the token never leaves the source closure) → the grok CLI's
+    `~/.grok/auth.json`. Expired stamp ⇒ stale/no-fetch (the proxy/CLI refreshes, never us).
+    `usage-parse.ts:parseGrokBilling`; chip enum + `USAGE_AGENT_IDS` include `grok`.
 - **Security boundary asymmetry.** `PUT /api/config/daemon` is **Unix-socket-only** (403 over
   remote HTTP) — **except the single-field `PUT /api/config/daemon/protect-archived`, which is
   allowed on both transports** (normal bearer auth) because it toggles a client-side UI curtain

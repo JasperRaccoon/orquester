@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { parseClaudeUsage, parseCodexUsage, findLastCodexTokenCount } from "./usage-parse";
+import { parseClaudeUsage, parseCodexUsage, parseGrokBilling, findLastCodexTokenCount } from "./usage-parse";
 
 const NOW = Date.parse("2026-07-07T08:00:00Z");
 const future = "2026-07-07T10:00:00Z";
@@ -64,5 +64,30 @@ const lines = [
 const rl = findLastCodexTokenCount(lines) as any;
 assert.equal(rl.primary.used_percent, 9);
 assert.equal(findLastCodexTokenCount(["", "not json"]), null);
+
+// Grok billing: one weekly credit-pool window; session always null.
+const grok = parseGrokBilling(
+  {
+    config: { creditUsagePercent: 22.4, currentPeriod: { type: "USAGE_PERIOD_TYPE_WEEKLY", start: "2026-07-01T00:00:00Z", end: future } },
+    subscriptionTier: "SuperGrok Heavy"
+  },
+  NOW
+);
+assert.equal(grok.id, "grok");
+assert.equal(grok.available, true);
+assert.equal(grok.session, null);
+assert.equal(grok.weekly?.percent, 22.4);
+assert.equal(grok.weekly?.resetsAt, future);
+assert.equal(grok.plan, "SuperGrok Heavy");
+
+// Proto3: omitted creditUsagePercent on a live period means 0%, not unavailable.
+const grokZero = parseGrokBilling({ config: { currentPeriod: { end: future } } }, NOW);
+assert.equal(grokZero.available, true);
+assert.equal(grokZero.weekly?.percent, 0);
+
+// A period that already ended is not current usage; garbage bodies are unavailable.
+assert.equal(parseGrokBilling({ config: { creditUsagePercent: 80, currentPeriod: { end: "2026-07-01T00:00:00Z" } } }, NOW).available, false);
+assert.equal(parseGrokBilling({ nope: true }, NOW).available, false);
+assert.equal(parseGrokBilling(null, NOW).available, false);
 
 console.log("usage-parse.check OK");

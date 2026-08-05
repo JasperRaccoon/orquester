@@ -4,7 +4,16 @@ import { usageAgentEnabled, type UsagePrefs as _Prefs } from "@orquester/config"
 type Chip = _Prefs["chip"];
 
 /** The agents the daemon can report usage for (source of truth for defaults). */
-export const USAGE_AGENT_IDS = ["claude", "codex"] as const;
+export const USAGE_AGENT_IDS = ["claude", "codex", "grok"] as const;
+
+/**
+ * The actionable hint for an enabled-but-absent usage agent. Claude/Codex are
+ * CLI logins; Grok's credential is the xai link (or a grok CLI login) — "run
+ * grok login" alone would send the user to the wrong place on a proxy-only box.
+ */
+export function usageLoginHint(id: string): string {
+  return id === "grok" ? "link the Grok account in Settings → Model proxy, or run grok login" : `run ${id} login`;
+}
 
 /**
  * Enabled usage agents that aren't in the live snapshot (not logged in), so the

@@ -2,11 +2,16 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { AgentUsage } from "@orquester/api";
 import { type UsagePrefs, parseAppConfig } from "@orquester/config";
-import { claudePlanLabel, currentWindow, findLastCodexTokenCount, parseClaudeUsage, parseCodexUsage, parseCodexWhamUsage } from "./usage-parse";
+import { claudePlanLabel, currentWindow, findLastCodexTokenCount, parseClaudeUsage, parseCodexUsage, parseCodexWhamUsage, parseGrokBilling } from "./usage-parse";
 import { decodeJwtPayload, parseCodexIdentity } from "./agent-account-identity";
 
 const CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+const GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
+const GROK_USER_URL = "https://cli-chat-proxy.grok.com/v1/user";
+// cli-chat-proxy enforces the first-party client headers (426 without them);
+// pinned like CLIProxyAPI pins its own copy — bump alongside grok releases.
+const GROK_CLIENT_VERSION = "0.2.118";
 
 export async function readUsagePrefs(appConfigFile: string): Promise<UsagePrefs> {
   try {
@@ -93,6 +98,162 @@ export function createClaudeSource(opts: {
       return signedIn(); // 200 but unparseable → still signed in, no number yet
     } catch (err) {
       opts.logger?.warn?.(`usage: claude fetch failed: ${String(err)}`);
+      backoffUntil = now + 60_000;
+      return signedIn();
+    }
+  };
+}
+
+interface GrokCredential {
+  token: string;
+  userId: string | null;
+  /** ms epoch, or null when the file carries no parseable expiry. */
+  expiresAtMs: number | null;
+}
+
+/**
+ * The Grok OAuth bearer, read-only, from either credential store on this host:
+ *  1. the proxy-owned `<cliproxy>/auth/xai-*.json` (CLIProxyAPI refreshes it
+ *     with a 5-min lead — freshest file by `expired` wins), else
+ *  2. the grok CLI's own `<grokHome>/auth.json` (refreshed whenever the CLI runs).
+ * This is the ONE sanctioned reader of xai token material outside the proxy
+ * subsystem (see the cliproxy-xai.ts invariant note): the token stays inside
+ * this closure and never reaches an AgentUsage payload.
+ */
+async function readGrokCredential(authDir: string, grokHome: string): Promise<GrokCredential | null> {
+  let best: { cred: GrokCredential; expired: number } | null = null;
+  try {
+    for (const name of await readdir(authDir)) {
+      if (!name.startsWith("xai-") || !name.endsWith(".json")) continue;
+      try {
+        const rec = JSON.parse(await readFile(join(authDir, name), "utf8"));
+        if (rec?.type !== "xai" || typeof rec.access_token !== "string" || !rec.access_token) continue;
+        const expired = typeof rec.expired === "string" ? Date.parse(rec.expired) : NaN;
+        const cred: GrokCredential = {
+          token: rec.access_token,
+          userId: typeof rec.sub === "string" && rec.sub ? rec.sub : null,
+          expiresAtMs: Number.isFinite(expired) ? expired : null
+        };
+        if (!best || (Number.isFinite(expired) && expired > best.expired)) {
+          best = { cred, expired: Number.isFinite(expired) ? expired : 0 };
+        }
+      } catch {
+        /* corrupt/foreign file → skip */
+      }
+    }
+  } catch {
+    /* no cliproxy auth dir → fall through to the CLI login */
+  }
+  if (best) return best.cred;
+
+  try {
+    const auth = JSON.parse(await readFile(join(grokHome, "auth.json"), "utf8"));
+    if (typeof auth === "object" && auth !== null) {
+      // Keyed by issuer::client-id; prefer the auth.x.ai (SuperGrok) entry.
+      const entries = Object.entries(auth as Record<string, any>).filter(
+        ([, v]) => typeof v === "object" && v !== null && typeof v.key === "string" && v.key
+      );
+      const [, acct] = entries.find(([k]) => k.includes("auth.x.ai")) ?? entries[0] ?? [];
+      if (acct) {
+        const exp = typeof acct.expires_at === "string" ? Date.parse(acct.expires_at) : NaN;
+        return {
+          token: acct.key,
+          userId: typeof acct.user_id === "string" && acct.user_id ? acct.user_id : null,
+          expiresAtMs: Number.isFinite(exp) ? exp : null
+        };
+      }
+    }
+  } catch {
+    /* no CLI login either */
+  }
+  return null;
+}
+
+/**
+ * Grok Build subscription usage via the first-party billing endpoint (the one
+ * behind the grok CLI's /usage command). Undocumented and reverse-engineered —
+ * same accepted-risk posture as routing Grok through the proxy — so every
+ * failure path degrades to signed-in/stale rather than breaking the widget.
+ */
+export function createGrokSource(opts: {
+  /** `<appdir>/daemon/cliproxy/auth` — the proxy-owned xai credential dir. */
+  authDir: string;
+  /** The grok CLI home (`GROK_HOME` || `~/.grok`). */
+  grokHome: string;
+  now: () => number;
+  fetchImpl?: typeof fetch;
+  logger?: Pick<Console, "warn">;
+}): () => Promise<AgentUsage | null> {
+  const doFetch = opts.fetchImpl ?? fetch;
+  let lastGood: AgentUsage | null = null;
+  let backoffUntil = 0;
+  // userId resolved from GET /user when the credential file lacks one; keyed by
+  // token prefix so a rotated credential re-resolves.
+  let resolvedUser: { tokenKey: string; userId: string } | null = null;
+
+  const grokHeaders = (cred: GrokCredential, userId: string | null): Record<string, string> => {
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${cred.token}`,
+      "X-XAI-Token-Auth": "xai-grok-cli",
+      "x-grok-client-version": GROK_CLIENT_VERSION,
+      "x-grok-client-identifier": "grok-shell",
+      "User-Agent": "xai-grok-cli",
+      Accept: "application/json"
+    };
+    if (userId) headers["x-userid"] = userId;
+    return headers;
+  };
+
+  return async () => {
+    const cred = await readGrokCredential(opts.authDir, opts.grokHome);
+    if (!cred) return null; // genuinely not linked/logged in
+
+    const signedIn = (): AgentUsage =>
+      lastGood
+        ? { ...lastGood, stale: true, session: null, weekly: currentWindow(lastGood.weekly, opts.now()) }
+        : { id: "grok", available: true, stale: true, session: null, weekly: null };
+
+    const now = opts.now();
+    if (now < backoffUntil) return signedIn();
+    // Expired token: the proxy (or the CLI) refreshes it, never us — skip the
+    // fetch, a 401 with a stale bearer would just churn.
+    if (cred.expiresAtMs !== null && cred.expiresAtMs <= now) return signedIn();
+
+    try {
+      let userId = cred.userId;
+      const tokenKey = cred.token.slice(0, 24);
+      if (!userId) {
+        if (resolvedUser?.tokenKey === tokenKey) {
+          userId = resolvedUser.userId;
+        } else {
+          const ures = await doFetch(GROK_USER_URL, { headers: grokHeaders(cred, null) });
+          if (ures.ok) {
+            const u = (await ures.json()) as { userId?: unknown };
+            if (typeof u?.userId === "string" && u.userId) {
+              userId = u.userId;
+              resolvedUser = { tokenKey, userId };
+            }
+          }
+        }
+      }
+      const res = await doFetch(GROK_BILLING_URL, { headers: grokHeaders(cred, userId) });
+      if (res.status === 429) {
+        backoffUntil = now + retryAfterMs(res, 5 * 60_000);
+        opts.logger?.warn?.("usage: grok billing endpoint rate-limited (429); backing off");
+        return signedIn();
+      }
+      if (!res.ok) {
+        backoffUntil = now + 60_000;
+        return signedIn();
+      }
+      const agent = parseGrokBilling(await res.json(), now);
+      if (agent.available) {
+        lastGood = agent;
+        return lastGood;
+      }
+      return signedIn(); // 200 but unparseable → still linked, no number yet
+    } catch (err) {
+      opts.logger?.warn?.(`usage: grok fetch failed: ${String(err)}`);
       backoffUntil = now + 60_000;
       return signedIn();
     }

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createClaudeSource, createCodexSource } from "./usage-sources";
+import { createClaudeSource, createCodexSource, createGrokSource } from "./usage-sources";
 
 const NOW = Date.parse("2026-07-07T08:00:00Z");
 const now = () => NOW;
@@ -133,6 +133,113 @@ async function codexTests() {
   assert.equal(scraped2.session?.percent, 3);
 }
 
+async function grokTests() {
+  const base = await mkdtemp(join(tmpdir(), "usage-grok-"));
+  const authDir = join(base, "auth");
+  const grokHome = join(base, ".grok");
+  const billing = (pct: number) =>
+    jsonRes(200, {
+      config: { creditUsagePercent: pct, currentPeriod: { type: "USAGE_PERIOD_TYPE_WEEKLY", end: "2026-07-12T00:00:00Z" } }
+    });
+
+  // No credential anywhere → null (renders "not linked").
+  assert.equal(await createGrokSource({ authDir, grokHome, now, fetchImpl: async () => billing(1) })(), null);
+
+  // cliproxy xai auth file → weekly window; token/sub must never leak into the payload.
+  await mkdir(authDir, { recursive: true });
+  await writeFile(
+    join(authDir, "xai-user@example.com.json"),
+    JSON.stringify({ type: "xai", auth_kind: "oauth", access_token: "SECRET-TOK", sub: "uid-1", email: "user@example.com", expired: "2026-07-07T09:00:00Z" })
+  );
+  const seen: { url: string; headers: Record<string, string> }[] = [];
+  const src = createGrokSource({
+    authDir,
+    grokHome,
+    now,
+    fetchImpl: async (url, init) => {
+      seen.push({ url: String(url), headers: (init?.headers ?? {}) as Record<string, string> });
+      return billing(22.4);
+    }
+  });
+  const g1 = await src();
+  assert.ok(g1);
+  assert.equal(g1.id, "grok");
+  assert.equal(g1.weekly?.percent, 22.4);
+  assert.equal(g1.session, null);
+  assert.ok(seen[0].url.includes("/billing"), "goes straight to billing when the file carries a user id");
+  assert.equal(seen[0].headers["x-userid"], "uid-1");
+  assert.equal(seen[0].headers["x-grok-client-identifier"], "grok-shell");
+  assert.ok(!JSON.stringify(g1).includes("SECRET-TOK"), "token must never reach the usage payload");
+
+  // Expired stamp → signed-in/stale, NO fetch (the proxy refreshes, never us).
+  await writeFile(
+    join(authDir, "xai-user@example.com.json"),
+    JSON.stringify({ type: "xai", access_token: "SECRET-TOK", sub: "uid-1", expired: "2026-07-07T07:00:00Z" })
+  );
+  let fetches = 0;
+  const expired = await createGrokSource({
+    authDir,
+    grokHome,
+    now,
+    fetchImpl: async () => {
+      fetches++;
+      return billing(1);
+    }
+  })();
+  assert.ok(expired, "expired credential is still linked, not null");
+  assert.equal(expired.stale, true);
+  assert.equal(fetches, 0, "expired token must not be sent upstream");
+
+  // 429 → backoff with last-good served stale; no second fetch.
+  await writeFile(
+    join(authDir, "xai-user@example.com.json"),
+    JSON.stringify({ type: "xai", access_token: "SECRET-TOK", sub: "uid-1", expired: "2026-07-07T09:00:00Z" })
+  );
+  let calls = 0;
+  const src429 = createGrokSource({
+    authDir,
+    grokHome,
+    now,
+    fetchImpl: async () => {
+      calls++;
+      return calls === 1 ? billing(50) : jsonRes(429, {}, { "retry-after": "600" });
+    }
+  });
+  const ok1 = await src429();
+  assert.equal(ok1?.weekly?.percent, 50);
+  const stale1 = await src429();
+  assert.equal(stale1?.stale, true);
+  assert.equal(stale1?.weekly?.percent, 50, "last-good carried through the 429");
+  const stale2 = await src429();
+  assert.equal(calls, 2, "backed off after the 429");
+  assert.ok(stale2?.stale);
+
+  // grok CLI auth.json fallback (no cliproxy file): userId resolved via /user once.
+  const cliOnly = await mkdtemp(join(tmpdir(), "usage-grok-cli-"));
+  const cliHome = join(cliOnly, ".grok");
+  await mkdir(cliHome, { recursive: true });
+  await writeFile(
+    join(cliHome, "auth.json"),
+    JSON.stringify({ "https://auth.x.ai::client-1": { key: "CLI-TOK", auth_mode: "oidc", expires_at: "2026-07-07T09:00:00Z" } })
+  );
+  const cliSeen: string[] = [];
+  const cliSrc = createGrokSource({
+    authDir: join(cliOnly, "auth"),
+    grokHome: cliHome,
+    now,
+    fetchImpl: async (url) => {
+      cliSeen.push(String(url));
+      return String(url).includes("/user") ? jsonRes(200, { userId: "uid-9" }) : billing(3);
+    }
+  });
+  const cli1 = await cliSrc();
+  assert.equal(cli1?.weekly?.percent, 3);
+  assert.ok(cliSeen[0].includes("/user"), "missing user id is resolved via /user first");
+  await cliSrc();
+  assert.equal(cliSeen.filter((u) => u.includes("/user")).length, 1, "resolved user id is cached");
+}
+
 await claudeTests();
 await codexTests();
+await grokTests();
 console.log("usage-sources.check OK");
