@@ -90,7 +90,7 @@ import { PushService, isValidPushEndpoint } from "./push";
 import { GitError, GitService } from "./git";
 import { UsageService } from "./usage";
 import { UsageTokensScanner } from "./usage-tokens";
-import { createClaudeSource, createCodexSource, readUsagePrefs } from "./usage-sources";
+import { createClaudeSource, createCodexSource, readUsagePrefs, shouldHideSystemUsage } from "./usage-sources";
 import { currentWindow } from "./usage-parse";
 import { listArchiveEntries } from "./archive";
 import { ParquetRequestError, readParquetWindow } from "./parquet";
@@ -425,8 +425,19 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     agent: "claude" | "codex",
     makeSource: (home?: string) => () => Promise<AgentUsage | null>
   ): Promise<AgentUsage | null> {
-    const base = await usageSource(agent, makeSource)(); // System account
     const managed = agentAccounts.list().accounts.filter((a) => a.agent === agent);
+    // With managed accounts present, drop the System row when its credentials
+    // are expired (nothing refreshes them → a permanent "—") or it is the same
+    // login as a managed account (a duplicate row). Skipping the fetch also
+    // avoids double-polling one account's usage endpoint.
+    const hideSystem =
+      managed.length > 0 &&
+      (await shouldHideSystemUsage(agent, {
+        userhome: resolved.vars.userhome,
+        now: Date.now(),
+        managedHomes: managed.map((a) => agentAccounts.homePath(agent, a.id))
+      }).catch(() => false));
+    const base = hideSystem ? null : await usageSource(agent, makeSource)(); // System account
     // No managed accounts → the System reading is the whole story.
     if (managed.length === 0) return base;
     // Otherwise always surface every managed account so the panel can show them all.

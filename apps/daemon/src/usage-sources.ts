@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { AgentUsage } from "@orquester/api";
 import { type UsagePrefs, parseAppConfig } from "@orquester/config";
 import { claudePlanLabel, currentWindow, findLastCodexTokenCount, parseClaudeUsage, parseCodexUsage, parseCodexWhamUsage } from "./usage-parse";
+import { decodeJwtPayload, parseCodexIdentity } from "./agent-account-identity";
 
 const CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
@@ -154,6 +155,57 @@ function createCodexLogScrapeSource(opts: {
     // Signed in but no usable reading yet → present + updating (not "not logged in").
     return signedIn ? { id: "codex", available: true, stale: true, session: null, weekly: null } : null;
   };
+}
+
+/**
+ * Should the System (daemon-HOME) reading be hidden from the usage panel when
+ * managed accounts exist? Two cases make the row pure noise:
+ *  - expired system credentials: nothing in the daemon refreshes the system
+ *    login (only the user's own CLI does), so the row is a permanent "—";
+ *  - the system login IS one of the managed accounts (typical after importing
+ *    the system auth.json), so the row duplicates that account's numbers.
+ * Identity comparison is Codex-only (account_id / id_token email); Claude
+ * credentials carry no identity, so Claude only gets the expiry rule.
+ * Missing/unreadable credentials never hide — the source already reports null.
+ */
+export async function shouldHideSystemUsage(
+  agent: "claude" | "codex",
+  opts: { userhome: string; now: number; claudeHome?: string; codexHome?: string; managedHomes?: string[] }
+): Promise<boolean> {
+  if (agent === "claude") {
+    const home = opts.claudeHome || process.env.CLAUDE_CONFIG_DIR || join(opts.userhome, ".claude");
+    let oauth: { expiresAt?: unknown } | undefined;
+    try {
+      oauth = JSON.parse(await readFile(join(home, ".credentials.json"), "utf8"))?.claudeAiOauth;
+    } catch {
+      return false;
+    }
+    return typeof oauth?.expiresAt === "number" && oauth.expiresAt <= opts.now;
+  }
+
+  const home = opts.codexHome || process.env.CODEX_HOME || join(opts.userhome, ".codex");
+  let auth: { tokens?: { access_token?: unknown } } | undefined;
+  try {
+    auth = JSON.parse(await readFile(join(home, "auth.json"), "utf8"));
+  } catch {
+    return false;
+  }
+  const exp = typeof auth?.tokens?.access_token === "string" ? decodeJwtPayload(auth.tokens.access_token)?.exp : undefined;
+  if (typeof exp === "number" && exp * 1000 <= opts.now) return true;
+
+  const sys = parseCodexIdentity(auth);
+  if (!sys.accountId && !sys.email) return false;
+  for (const managedHome of opts.managedHomes ?? []) {
+    let managed: unknown;
+    try {
+      managed = JSON.parse(await readFile(join(managedHome, "auth.json"), "utf8"));
+    } catch {
+      continue;
+    }
+    const idn = parseCodexIdentity(managed);
+    if ((sys.accountId && idn.accountId === sys.accountId) || (sys.email && idn.email === sys.email)) return true;
+  }
+  return false;
 }
 
 export function createCodexSource(opts: {
