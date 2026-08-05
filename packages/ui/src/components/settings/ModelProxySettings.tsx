@@ -20,6 +20,7 @@ import {
 import { cn } from "../../lib/cn";
 import { Button, Input } from "../ui";
 import { useAppStore } from "../../store/app";
+import { XaiProviderRow } from "./XaiAccountCard";
 
 const PROVIDER_LABEL: Record<CliProxyProviderId, string> = {
   codex: "Codex",
@@ -288,22 +289,10 @@ export const ModelProxySettings: React.FC = () => {
               }
             />
           ))}
+          {/* xAI OAuth (Grok): same card anatomy as the rows above, but there is
+              no seed step — the proxy owns the single device-linked account. */}
+          <XaiProviderRow />
         </div>
-        {/* xAI OAuth (Grok) is CONNECTED in Settings → Accounts (XaiAccountCard);
-            like the Claude/Codex rows above, this section only consumes it. */}
-        <p className="px-1 text-[11px] text-neutral-500">
-          Grok account:{" "}
-          {status.xai?.state === "linked" ? (
-            <span className="text-emerald-400/80">{status.xai.email ?? "linked"}</span>
-          ) : status.xai?.state === "linking" ? (
-            "linking…"
-          ) : status.xai?.state === "expired" ? (
-            "expired"
-          ) : (
-            "not linked"
-          )}{" "}
-          — manage it in Settings → Accounts.
-        </p>
       </section>
 
       {/* Key-based OpenAI-compatible routers (spec 2026-08-04 §3) */}
