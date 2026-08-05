@@ -4,6 +4,7 @@ import type { AgentAccount, AgentAccountAgent } from "@orquester/api";
 import { Button, Input } from "../ui";
 import { useApi } from "../../context/orquester-context";
 import { useAppStore } from "../../store/app";
+import { XaiAccountCard } from "./XaiAccountCard";
 
 export function AgentAccountsSettings() {
   const api = useApi();
@@ -86,6 +87,12 @@ export function AgentAccountsSettings() {
           </div>
         </section>
       ))}
+      <section className="space-y-2">
+        <h3 className="text-sm font-medium">Grok account</h3>
+        {/* No importable credential file: linked via a device-code flow driven
+            through the model proxy (which also owns/refreshes the tokens). */}
+        <XaiAccountCard />
+      </section>
       <div className="space-y-2">
         <p className="text-xs font-medium text-neutral-300">Import an account</p>
         <p className="text-[11px] text-neutral-600">

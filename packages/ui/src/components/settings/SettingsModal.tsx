@@ -40,7 +40,7 @@ const SECTIONS: { id: Section; label: string; icon: React.ReactNode; desc: strin
   { id: "usage", label: "Usage", icon: <Gauge size={16} />, desc: "Top-bar usage widget for Claude Code, Codex & Grok" },
   { id: "agents", label: "Agents", icon: <Boxes size={16} />, desc: "Install, update and view harness versions" },
   { id: "modelproxy", label: "Model proxy", icon: <Zap size={16} />, desc: "Run GPT & Kimi in the Claude Code harness" },
-  { id: "accounts", label: "Accounts", icon: <Users size={16} />, desc: "Managed Claude & Codex accounts for launching agents" },
+  { id: "accounts", label: "Accounts", icon: <Users size={16} />, desc: "Managed Claude, Codex & Grok accounts for launching agents" },
   {
     id: "git-hosting",
     label: "Git hosting",
