@@ -10,7 +10,14 @@ import {
   type AgentAccountsIndex
 } from "@orquester/config";
 import { assertOwnedAccountHome, AgentAccountError, ACCOUNT_MARKER } from "./agent-account-paths.ts";
-import { detectAgentFromBlob, claudePlanFromBlob, parseCodexIdentity, decodeJwtPayload } from "./agent-account-identity.ts";
+import {
+  detectAgentFromBlob,
+  claudePlanFromBlob,
+  parseCodexIdentity,
+  parseGrokIdentity,
+  grokAuthEntry,
+  decodeJwtPayload
+} from "./agent-account-identity.ts";
 import {
   REFRESH_INTERVAL_MS,
   REFRESH_MARGIN_MS,
@@ -18,15 +25,23 @@ import {
   mergeClaudeRefreshedCreds,
   refreshClaudeToken,
   mergeCodexRefreshedTokens,
-  refreshCodexToken
+  refreshCodexToken,
+  mergeGrokRefreshedAuth,
+  refreshGrokToken
 } from "./agent-account-refresh.ts";
 
 export const CLAUDE_AUTH_ENV_UNSET = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"];
 // A stray host OPENAI_API_KEY makes codex bill the API instead of the managed
 // ChatGPT account; strip it so file-based (auth.json) sign-in wins.
 export const CODEX_AUTH_ENV_UNSET = ["OPENAI_API_KEY"];
+// Same rule for grok: XAI_API_KEY switches the CLI to API billing, beating the
+// OAuth login in GROK_HOME/auth.json.
+export const GROK_AUTH_ENV_UNSET = ["XAI_API_KEY"];
 
-const CRED_FILENAME = { claude: ".credentials.json", codex: "auth.json" } as const;
+/** The agent families with managed (per-account HOME) credentials. */
+export type ManagedAgent = "claude" | "codex" | "grok";
+
+const CRED_FILENAME = { claude: ".credentials.json", codex: "auth.json", grok: "auth.json" } as const;
 
 export interface AgentAccountsOptions {
   indexFile: string;
@@ -93,6 +108,10 @@ export class AgentAccountsService {
       const idn = parseCodexIdentity(parsed);
       email = idn.email;
       label = input.label?.trim() || idn.email || "Codex account";
+    } else if (agent === "grok") {
+      const idn = parseGrokIdentity(parsed);
+      email = idn.email;
+      label = input.label?.trim() || idn.email || "Grok account";
     } else {
       if (!input.label?.trim()) {
         throw new AgentAccountError("A label is required for Claude accounts (the credentials file has no email).");
@@ -142,8 +161,10 @@ export class AgentAccountsService {
     this.emitChanged();
   }
 
-  async setDefaults(patch: { claude?: string | null; codex?: string | null }): Promise<AgentAccountsResponse> {
-    for (const agent of ["claude", "codex"] as const) {
+  async setDefaults(
+    patch: { claude?: string | null; codex?: string | null; grok?: string | null }
+  ): Promise<AgentAccountsResponse> {
+    for (const agent of ["claude", "codex", "grok"] as const) {
       if (!(agent in patch)) continue;
       const value = patch[agent] ?? null;
       if (value !== null && !this.index.accounts.some((a) => a.id === value && a.agent === agent)) {
@@ -169,7 +190,7 @@ export class AgentAccountsService {
     agent: string,
     accountId?: string
   ): Promise<{ env: Record<string, string>; unset?: string[]; accountId: string } | null> {
-    if (agent !== "claude" && agent !== "codex") return null;
+    if (agent !== "claude" && agent !== "codex" && agent !== "grok") return null;
     if (accountId === SYSTEM_ACCOUNT_ID) return null;
     const id = accountId ?? this.index.defaults[agent] ?? null;
     if (!id) return null;
@@ -187,6 +208,9 @@ export class AgentAccountsService {
     if (agent === "claude") {
       return { env: { CLAUDE_CONFIG_DIR: home }, unset: [...CLAUDE_AUTH_ENV_UNSET], accountId: id };
     }
+    if (agent === "grok") {
+      return { env: { GROK_HOME: home }, unset: [...GROK_AUTH_ENV_UNSET], accountId: id };
+    }
     return { env: { CODEX_HOME: home }, unset: [...CODEX_AUTH_ENV_UNSET], accountId: id };
   }
 
@@ -202,8 +226,31 @@ export class AgentAccountsService {
   private systemCodexHome(): string {
     return process.env.CODEX_HOME || join(this.opts.userhome, ".codex");
   }
+  private systemGrokHome(): string {
+    return process.env.GROK_HOME || join(this.opts.userhome, ".grok");
+  }
 
-  private async syncAccountHome(agent: "claude" | "codex", home: string): Promise<void> {
+  private async syncAccountHome(agent: ManagedAgent, home: string): Promise<void> {
+    if (agent === "grok") {
+      // config.toml carries the critical `[compat.claude] hooks = false` (grok
+      // reads Claude-compat surfaces via $HOME, and double-reporting hooks would
+      // corrupt session status) plus the enabled-plugins list; trusted_folders
+      // keeps the workspace pre-trusted. Both are user/daemon-written and
+      // identity-free — share them, like codex's config.toml.
+      await this.ensureSharedFileSymlink(join(this.systemGrokHome(), "config.toml"), join(home, "config.toml"));
+      await this.ensureSharedFileSymlink(
+        join(this.systemGrokHome(), "trusted_folders.toml"),
+        join(home, "trusted_folders.toml")
+      );
+      // Hook script, plugins and skills are account-agnostic; the daemon's hook
+      // installer writes through the symlink, keeping the share intact.
+      await this.ensureSymlink(join(this.systemGrokHome(), "hooks"), join(home, "hooks"));
+      await this.ensureSymlink(join(this.systemGrokHome(), "plugins"), join(home, "plugins"));
+      await this.ensureSymlink(join(this.systemGrokHome(), "skills"), join(home, "skills"));
+      // Conversation history — every account sees the same resume list.
+      await this.ensureSharedDirSymlink(join(this.systemGrokHome(), "sessions"), join(home, "sessions"));
+      return;
+    }
     if (agent === "claude") {
       await this.seedClaudeConfig(home);
       await this.ensureSymlink(join(this.systemClaudeDir(), "skills"), join(home, "skills"));
@@ -405,13 +452,18 @@ export class AgentAccountsService {
 
   /** Access-token expiry in unix ms, or null if unknown. Claude stores it in
    *  `.credentials.json`; Codex embeds it in the access-token JWT `exp` (seconds). */
-  private async readExpiry(agent: "claude" | "codex", id: string): Promise<number | null> {
+  private async readExpiry(agent: ManagedAgent, id: string): Promise<number | null> {
     try {
       const home = this.homePath(agent, id);
       if (agent === "claude") {
         const creds = JSON.parse(await fsReadFile(join(home, ".credentials.json"), "utf8"));
         const exp = creds?.claudeAiOauth?.expiresAt;
         return typeof exp === "number" ? exp : null;
+      }
+      if (agent === "grok") {
+        const entry = grokAuthEntry(JSON.parse(await fsReadFile(join(home, "auth.json"), "utf8")));
+        const at = typeof entry?.expires_at === "string" ? Date.parse(entry.expires_at) : NaN;
+        return Number.isFinite(at) ? at : null;
       }
       const auth = JSON.parse(await fsReadFile(join(home, "auth.json"), "utf8"));
       const claims = typeof auth?.tokens?.access_token === "string" ? decodeJwtPayload(auth.tokens.access_token) : null;
@@ -424,7 +476,7 @@ export class AgentAccountsService {
 
   /** Refresh one managed account's OAuth token and persist it in place. De-duped
    *  per account so two callers can't spend the same single-use refresh token. */
-  private async refreshAccount(agent: "claude" | "codex", id: string): Promise<void> {
+  private async refreshAccount(agent: ManagedAgent, id: string): Promise<void> {
     if (this.refreshing.has(id)) return;
     this.refreshing.add(id);
     try {
@@ -452,6 +504,16 @@ export class AgentAccountsService {
         } else if (out.invalidGrant) {
           await this.markNeedsReauth(id, true);
         }
+      } else if (agent === "grok") {
+        const refreshToken = grokAuthEntry(creds)?.refresh_token;
+        if (typeof refreshToken !== "string" || !refreshToken) return;
+        const out = await refreshGrokToken(refreshToken, this.opts.fetchImpl);
+        if (out.ok) {
+          await writeFile(credsPath, JSON.stringify(mergeGrokRefreshedAuth(creds, out, this.opts.now())), { mode: 0o600 });
+          if (record.needsReauth) await this.markNeedsReauth(id, false);
+        } else if (out.invalidGrant) {
+          await this.markNeedsReauth(id, true);
+        }
       } else {
         const refreshToken = creds?.tokens?.refresh_token;
         if (typeof refreshToken !== "string") return;
@@ -471,7 +533,7 @@ export class AgentAccountsService {
   /** Refresh-and-persist before displaying an idle account's usage, so viewing a
    *  rarely-used account never strands an expiring token. Accounts with a live
    *  session are left to their own CLI (that's the single-use-token race gate). */
-  async ensureFreshForUsage(agent: "claude" | "codex", id: string, live: Set<string>): Promise<void> {
+  async ensureFreshForUsage(agent: ManagedAgent, id: string, live: Set<string>): Promise<void> {
     // `live` is a snapshot: a session could start for this account during the
     // refresh below and its CLI could rotate the same single-use refresh token.
     // The window is sub-second; worst case one side gets invalid_grant and the

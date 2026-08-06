@@ -4,7 +4,7 @@ import type { AgentAccount, AgentAccountAgent } from "@orquester/api";
 import { Button, Input } from "../ui";
 import { useApi } from "../../context/orquester-context";
 import { useAppStore } from "../../store/app";
-import { XaiAccountsList } from "./XaiAccountCard";
+import { GrokDeviceLink } from "./XaiAccountCard";
 
 export function AgentAccountsSettings() {
   const api = useApi();
@@ -47,12 +47,16 @@ export function AgentAccountsSettings() {
   return (
     <div className="space-y-6">
       {err ? <p className="text-xs text-red-400">{err}</p> : null}
-      {(["claude", "codex"] as const).map((agent) => (
+      {(["claude", "codex", "grok"] as const).map((agent) => (
         <section key={agent} className="space-y-2">
           <h3 className="text-sm font-medium capitalize">{agent} accounts</h3>
           <div className="divide-y divide-neutral-800 rounded-md border border-neutral-800">
             {byAgent(agent).length === 0 ? (
-              <p className="px-2 py-2 text-xs text-neutral-600">No accounts. Import a credentials file below.</p>
+              <p className="px-2 py-2 text-xs text-neutral-600">
+                {agent === "grok"
+                  ? "No accounts. Link below with a device code, or import a grok auth.json."
+                  : "No accounts. Import a credentials file below."}
+              </p>
             ) : (
               byAgent(agent).map((a) => (
                 <div key={a.id} className="flex items-center gap-2 px-2 py-2">
@@ -85,19 +89,16 @@ export function AgentAccountsSettings() {
               ))
             )}
           </div>
+          {/* Grok's second acquisition path: a device-code login through the
+              model proxy (no equivalent exists for Claude/Codex). */}
+          {agent === "grok" ? <GrokDeviceLink /> : null}
         </section>
       ))}
-      <section className="space-y-2">
-        <h3 className="text-sm font-medium capitalize">grok account</h3>
-        {/* No importable credential file: linked via a device-code flow driven
-            through the model proxy (which also owns/refreshes the tokens). */}
-        <XaiAccountsList />
-      </section>
       <div className="space-y-2">
         <p className="text-xs font-medium text-neutral-300">Import an account</p>
         <p className="text-[11px] text-neutral-600">
-          Upload a Claude <code>.credentials.json</code> or Codex <code>auth.json</code>. Agent is auto-detected. Claude
-          needs a label.
+          Upload a Claude <code>.credentials.json</code>, Codex <code>auth.json</code> or Grok{" "}
+          <code>~/.grok/auth.json</code>. Agent is auto-detected. Claude needs a label.
         </p>
         <Input
           placeholder="Label (required for Claude)"

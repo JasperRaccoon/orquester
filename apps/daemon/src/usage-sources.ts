@@ -112,15 +112,21 @@ interface GrokCredential {
 }
 
 /**
- * The Grok OAuth bearer, read-only, from either credential store on this host:
+ * The Grok OAuth bearer, read-only, from any credential store on this host:
  *  1. the proxy-owned `<cliproxy>/auth/xai-*.json` (CLIProxyAPI refreshes it
  *     with a 5-min lead — freshest file by `expired` wins), else
- *  2. the grok CLI's own `<grokHome>/auth.json` (refreshed whenever the CLI runs).
+ *  2. managed grok account homes (`agent-accounts/grok/<id>/home/auth.json`,
+ *     freshest by `expires_at` — kept alive by the accounts refresher), else
+ *  3. the grok CLI's own `<grokHome>/auth.json` (refreshed whenever the CLI runs).
  * This is the ONE sanctioned reader of xai token material outside the proxy
  * subsystem (see the cliproxy-xai.ts invariant note): the token stays inside
  * this closure and never reaches an AgentUsage payload.
  */
-async function readGrokCredential(authDir: string, grokHome: string): Promise<GrokCredential | null> {
+async function readGrokCredential(
+  authDir: string,
+  grokHome: string,
+  managedAuthFiles: readonly string[] = []
+): Promise<GrokCredential | null> {
   let best: { cred: GrokCredential; expired: number } | null = null;
   try {
     for (const name of await readdir(authDir)) {
@@ -146,27 +152,41 @@ async function readGrokCredential(authDir: string, grokHome: string): Promise<Gr
   }
   if (best) return best.cred;
 
-  try {
-    const auth = JSON.parse(await readFile(join(grokHome, "auth.json"), "utf8"));
-    if (typeof auth === "object" && auth !== null) {
-      // Keyed by issuer::client-id; prefer the auth.x.ai (SuperGrok) entry.
-      const entries = Object.entries(auth as Record<string, any>).filter(
-        ([, v]) => typeof v === "object" && v !== null && typeof v.key === "string" && v.key
-      );
-      const [, acct] = entries.find(([k]) => k.includes("auth.x.ai")) ?? entries[0] ?? [];
-      if (acct) {
-        const exp = typeof acct.expires_at === "string" ? Date.parse(acct.expires_at) : NaN;
-        return {
-          token: acct.key,
-          userId: typeof acct.user_id === "string" && acct.user_id ? acct.user_id : null,
-          expiresAtMs: Number.isFinite(exp) ? exp : null
-        };
+  const fromAuthJson = async (file: string): Promise<GrokCredential | null> => {
+    try {
+      const auth = JSON.parse(await readFile(file, "utf8"));
+      if (typeof auth === "object" && auth !== null) {
+        // Keyed by issuer::client-id; prefer the auth.x.ai (SuperGrok) entry.
+        const entries = Object.entries(auth as Record<string, any>).filter(
+          ([, v]) => typeof v === "object" && v !== null && typeof v.key === "string" && v.key
+        );
+        const [, acct] = entries.find(([k]) => k.includes("auth.x.ai")) ?? entries[0] ?? [];
+        if (acct) {
+          const exp = typeof acct.expires_at === "string" ? Date.parse(acct.expires_at) : NaN;
+          return {
+            token: acct.key,
+            userId: typeof acct.user_id === "string" && acct.user_id ? acct.user_id : null,
+            expiresAtMs: Number.isFinite(exp) ? exp : null
+          };
+        }
       }
+    } catch {
+      /* missing/corrupt → try the next store */
     }
-  } catch {
-    /* no CLI login either */
+    return null;
+  };
+
+  // Managed account homes: freshest credential wins (mirrors the proxy-dir rule).
+  let bestManaged: GrokCredential | null = null;
+  for (const file of managedAuthFiles) {
+    const cred = await fromAuthJson(file);
+    if (cred && (!bestManaged || (cred.expiresAtMs ?? 0) > (bestManaged.expiresAtMs ?? 0))) {
+      bestManaged = cred;
+    }
   }
-  return null;
+  if (bestManaged) return bestManaged;
+
+  return fromAuthJson(join(grokHome, "auth.json"));
 }
 
 /**
@@ -180,6 +200,9 @@ export function createGrokSource(opts: {
   authDir: string;
   /** The grok CLI home (`GROK_HOME` || `~/.grok`). */
   grokHome: string;
+  /** Managed grok account `auth.json` paths (re-evaluated per poll — accounts
+   *  come and go without a daemon restart). */
+  managedGrokAuthFiles?: () => string[];
   now: () => number;
   fetchImpl?: typeof fetch;
   logger?: Pick<Console, "warn">;
@@ -205,7 +228,7 @@ export function createGrokSource(opts: {
   };
 
   return async () => {
-    const cred = await readGrokCredential(opts.authDir, opts.grokHome);
+    const cred = await readGrokCredential(opts.authDir, opts.grokHome, opts.managedGrokAuthFiles?.() ?? []);
     if (!cred) return null; // genuinely not linked/logged in
 
     const signedIn = (): AgentUsage =>

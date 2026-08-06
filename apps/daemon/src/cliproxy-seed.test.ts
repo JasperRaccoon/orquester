@@ -5,6 +5,8 @@ import {
   accountPrefix,
   claudeStorageFromCredentials,
   codexStorageFromAuthJson,
+  grokAuthJsonFromStorage,
+  grokStorageFromAuthJson,
   jwtClaims
 } from "./cliproxy-seed.ts";
 
@@ -64,4 +66,62 @@ test("accessTokenFreshMs measures against the injected clock, not wall time", ()
   assert.equal(accessTokenFreshMs({ expired: "2026-07-23T00:00:00Z" }, now - 60_000), 60_000);
   assert.equal(accessTokenFreshMs({ expired: "2026-07-23T00:00:00Z" }, now + 60_000), -60_000);
   assert.equal(accessTokenFreshMs({ expired: "not-a-date" }, now), Number.NEGATIVE_INFINITY);
+});
+
+const GROK_ENTRY_KEY = "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828";
+
+test("grok conversion maps the auth.x.ai entry into an xai storage, no prefix", () => {
+  const { file, storage } = grokStorageFromAuthJson(
+    {
+      [GROK_ENTRY_KEY]: {
+        key: "at",
+        refresh_token: "rt",
+        email: "me@example.com",
+        user_id: "u-1",
+        create_time: "2026-08-05T21:29:17.115387353Z",
+        expires_at: "2026-08-06T03:29:17.115387353Z"
+      }
+    },
+    "11112222-3333-4444-5555-666677778888"
+  );
+  assert.equal(file, `xai-${accountPrefix("11112222-3333-4444-5555-666677778888")}.json`);
+  assert.equal(storage.type, "xai");
+  assert.equal(storage.access_token, "at");
+  assert.equal(storage.refresh_token, "rt");
+  assert.equal(storage.email, "me@example.com");
+  assert.equal(storage.sub, "u-1");
+  assert.equal(storage.expired, "2026-08-06T03:29:17Z");
+  assert.equal(storage.expires_in, 21600);
+  // xAI launch models are always bare — a routing prefix would misroute them.
+  assert.equal("prefix" in storage, false);
+});
+
+test("grok conversion throws without a usable token pair", () => {
+  assert.throws(() => grokStorageFromAuthJson({ [GROK_ENTRY_KEY]: { key: "at" } }));
+  assert.throws(() => grokStorageFromAuthJson({ nope: true }));
+});
+
+test("grok reverse conversion produces a CLI-shaped auth.json (adoption)", () => {
+  const native = grokAuthJsonFromStorage({
+    type: "xai",
+    access_token: "at",
+    refresh_token: "rt",
+    email: "me@example.com",
+    sub: "u-1",
+    expired: "2026-08-06T03:30:57Z",
+    last_refresh: "2026-08-05T21:30:57Z"
+  });
+  const entry = native[GROK_ENTRY_KEY] as Record<string, unknown>;
+  assert.ok(entry);
+  assert.equal(entry.key, "at");
+  assert.equal(entry.refresh_token, "rt");
+  assert.equal(entry.email, "me@example.com");
+  assert.equal(entry.user_id, "u-1");
+  assert.equal(entry.expires_at, "2026-08-06T03:30:57Z");
+  assert.equal(entry.auth_mode, "oidc");
+  // Round-trips: the adopted account can be re-seeded losslessly.
+  const back = grokStorageFromAuthJson(native, "acc").storage;
+  assert.equal(back.access_token, "at");
+  assert.equal(back.refresh_token, "rt");
+  assert.throws(() => grokAuthJsonFromStorage({ access_token: "at" }));
 });

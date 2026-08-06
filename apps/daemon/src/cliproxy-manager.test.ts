@@ -95,6 +95,10 @@ function setup() {
   // xAI device flow: the management API is faked wholesale (no network, no proxy).
   let xaiLive: number | null = null;
   const xaiCalls = { authUrl: 0, poll: 0, cancel: [] as string[] };
+  // Device-link adoption fakes: null importer = adoption no-ops (like production
+  // before an account can be created), so tests opt in explicitly.
+  let importGrokImpl: ((content: string) => Promise<{ id: string; label: string } | null>) | null = null;
+  const proxyOwnedCalls: [string, boolean][] = [];
   let authUrlImpl: XaiManagementApi["requestAuthUrl"] = async () => ({ ok: false, error: "not stubbed" });
   let pollImpl: XaiManagementApi["pollAuthStatus"] = async () => ({ ok: true, value: { status: "wait" } });
   const xaiManagement: XaiManagementApi = {
@@ -134,8 +138,12 @@ function setup() {
       },
       systemClaudeDir: () => sysDir,
       systemClaudeConfigFile: () => join(sysDir, ".claude.json"),
-      managedCredentialPath: (provider: "codex" | "claude", accountId: string) =>
-        join(root, "managed-creds", `${provider}-${accountId}.json`)
+      managedCredentialPath: (provider: "codex" | "claude" | "grok", accountId: string) =>
+        join(root, "managed-creds", `${provider}-${accountId}.json`),
+      importGrokAccount: (content: string) => (importGrokImpl ? importGrokImpl(content) : Promise.resolve(null)),
+      markAccountProxyOwned: async (id: string, owned: boolean) => {
+        proxyOwnedCalls.push([id, owned]);
+      }
     }
   });
 
@@ -171,6 +179,10 @@ function setup() {
     setXaiPoll: (f: XaiManagementApi["pollAuthStatus"]) => {
       pollImpl = f;
     },
+    setImportGrok: (f: (content: string) => Promise<{ id: string; label: string } | null>) => {
+      importGrokImpl = f;
+    },
+    proxyOwnedCalls,
     xaiCalls,
     installCount: () => installCount,
     setInstall: (f: () => Promise<{ version: string }>) => {
@@ -2309,4 +2321,49 @@ test("cancelOrUnlinkXai: live Grok sessions refuse the unlink; force deletes the
   assert.equal(h.tmuxCalls.newService, 0);
   // Idempotent: unlinking again is a no-op ok.
   assert.equal((await h.mgr.cancelOrUnlinkXai({ force: true })).ok, true);
+});
+
+test("boot adoption: an orphan xai auth file becomes a managed + seeded grok account", async () => {
+  const h = setup();
+  await writeXaiAuth(h.daemonDir, { email: "g@x.com" });
+  const imported: string[] = [];
+  h.setImportGrok(async (content) => {
+    imported.push(content);
+    // The importer receives the grok-CLI-shaped auth.json (issuer::client keyed).
+    const native = JSON.parse(content) as Record<string, Record<string, unknown>>;
+    const entry = native["https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828"];
+    assert.equal(entry?.key, "at");
+    assert.equal(entry?.refresh_token, "rt");
+    return { id: "acct-grok-1", label: "g@x.com" };
+  });
+  await h.mgr.init();
+
+  assert.equal(imported.length, 1);
+  const status = h.mgr.status();
+  assert.ok(status.accounts.some((a) => a.provider === "grok" && a.id === "acct-grok-1"));
+  assert.equal(status.providers.find((p) => p.provider === "grok")?.state, "ok");
+  // Still "linked" — the adopted file stays in auth/ under its seeded name.
+  assert.equal(status.xai.state, "linked");
+  const { readdir } = await import("node:fs/promises");
+  const names = await readdir(join(cliproxyDir(h.daemonDir), "auth"));
+  assert.ok(!names.includes("xai-g@x.com.json"));
+  assert.equal(names.filter((n) => n.startsWith("xai-")).length, 1);
+  assert.deepEqual(h.proxyOwnedCalls, [["acct-grok-1", true]]);
+
+  // Idempotent: a second init adopts nothing new (the file carries the seeded name).
+  await h.mgr.init();
+  assert.equal(imported.length, 1);
+});
+
+test("boot adoption: a failed import leaves the auth file untouched (still linked)", async () => {
+  const h = setup();
+  await writeXaiAuth(h.daemonDir, { email: "g@x.com" });
+  // Default importer returns null (no account created).
+  await h.mgr.init();
+  const status = h.mgr.status();
+  assert.equal(status.xai.state, "linked");
+  assert.equal(status.accounts.length, 0);
+  const { readdir } = await import("node:fs/promises");
+  const names = await readdir(join(cliproxyDir(h.daemonDir), "auth"));
+  assert.ok(names.includes("xai-g@x.com.json"));
 });

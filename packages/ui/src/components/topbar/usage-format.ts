@@ -12,7 +12,7 @@ export const USAGE_AGENT_IDS = ["claude", "codex", "grok"] as const;
  * grok login" alone would send the user to the wrong place on a proxy-only box.
  */
 export function usageLoginHint(id: string): string {
-  return id === "grok" ? "link the Grok account in Settings → Model proxy, or run grok login" : `run ${id} login`;
+  return id === "grok" ? "link or import a Grok account in Settings → Accounts, or run grok login" : `run ${id} login`;
 }
 
 /**

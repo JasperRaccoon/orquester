@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { readFile, rm } from "node:fs/promises";
+import { readFile, rename, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -43,8 +43,11 @@ import {
   accountPrefix,
   claudeStorageFromCredentials,
   codexStorageFromAuthJson,
+  grokAuthJsonFromStorage,
+  grokStorageFromAuthJson,
   jwtClaims
 } from "./cliproxy-seed.ts";
+import { grokAuthEntry } from "./agent-account-identity.ts";
 import {
   type XaiAuthFile,
   type XaiManagementApi,
@@ -175,11 +178,22 @@ export interface CliProxyAdapters {
    *  CLAUDE_CONFIG_DIR relocates it into the config dir (agent-accounts rule). */
   systemClaudeConfigFile?(): string;
   /** Path of a managed account's on-disk credential (claude `.credentials.json` /
-   *  codex `auth.json`) — the write-back target for two-way credential sync. */
-  managedCredentialPath?(provider: "codex" | "claude", accountId: string): string;
+   *  codex/grok `auth.json`) — the write-back target for two-way credential sync. */
+  managedCredentialPath?(provider: CliProxyProviderId, accountId: string): string;
   /** The proxy's loopback management API, which drives the xAI device-code login.
    *  Defaults to the real HTTP client; tests inject a fake. */
   xaiManagement?: XaiManagementApi;
+  /**
+   * Import a grok-CLI-shaped `auth.json` blob as a managed grok account
+   * (production: `AgentAccountsService.importAccount`). Backs device-link
+   * adoption: a proxy-completed xAI login becomes a managed account so it shows
+   * in Settings → Accounts and can serve Grok Build sessions. Absent → adoption
+   * is skipped and the auth file stays proxy-only (pre-wiring behavior).
+   */
+  importGrokAccount?(content: string): Promise<{ id: string; label: string } | null>;
+  /** Flip a managed account's proxy-owned flag (single-refresher rule) from
+   *  inside the manager — adoption seeds without going through the seed route. */
+  markAccountProxyOwned?(id: string, owned: boolean): Promise<void>;
 }
 
 type ValidateResult =
@@ -286,6 +300,9 @@ export class CliProxyManager {
       // derive it before the disabled short-circuit — the Settings card must show
       // a linked account even while the proxy is off.
       await this.refreshXai();
+      // Migrate pre-managed-accounts grok credentials (and recover any link that
+      // completed while the daemon was down) into managed + seeded accounts.
+      await this.adoptOrphanXaiFiles();
       if (!this.state.enabled) {
         this.setState("off", []);
         this.applyRegistryCoupling();
@@ -747,6 +764,17 @@ export class CliProxyManager {
       const live = this.xaiSessionCount();
       if (live > 0 && !opts.force) return { ok: false, affectedSessions: live };
       await removeXaiAuthFiles(join(cliproxyDir(this.daemonDir), "auth"));
+      // The removed files may have been seeded managed-account credentials:
+      // drop their seeded registrations and hand token refresh back to the
+      // accounts service (the managed home copy survives the unlink).
+      for (const account of [...this.seededAccounts.values()].filter((a) => a.provider === "grok")) {
+        this.seededAccounts.delete(account.id);
+        const idx = this.state.seededAccounts.findIndex((a) => a.accountId === account.id);
+        if (idx >= 0) this.state.seededAccounts.splice(idx, 1);
+        if (this.adapters.markAccountProxyOwned) {
+          await this.adapters.markAccountProxyOwned(account.id, false).catch(() => undefined);
+        }
+      }
       await this.refreshXai();
       this.xaiLastQuotaError = null;
       this.xaiLastLinkError = null;
@@ -834,6 +862,75 @@ export class CliProxyManager {
     return JSON.stringify(this.xaiStatus()) !== before;
   }
 
+  /**
+   * Adopt proxy-written xai auth files that no managed account backs yet: a
+   * completed device-code login (and the pre-managed-accounts deployed state)
+   * leaves `xai-<email>.json` in `auth/`. Each orphan is converted to the grok
+   * CLI's native shape, imported as a managed grok account (so it appears in
+   * Settings → Accounts and can serve Grok Build sessions), then renamed to the
+   * deterministic seeded filename and registered as a seeded, proxy-owned
+   * account — the exact state an explicit import + seed would have produced.
+   * Idempotent: adopted files carry the seeded name and are skipped. Best-effort
+   * per file; must run inside the transition queue.
+   */
+  private async adoptOrphanXaiFiles(): Promise<void> {
+    if (!this.adapters.importGrokAccount) return;
+    const authDir = join(cliproxyDir(this.daemonDir), "auth");
+    const seededNames = new Set(
+      [...this.seededAccounts.values()]
+        .filter((a) => a.provider === "grok")
+        .map((a) => this.seededAuthFileName("grok", a.id))
+    );
+    let changed = false;
+    for (const f of this.xaiFiles) {
+      if (seededNames.has(f.file)) continue;
+      const path = join(authDir, f.file);
+      let native: Record<string, unknown>;
+      try {
+        native = grokAuthJsonFromStorage(JSON.parse(await readFile(path, "utf8")));
+      } catch {
+        continue; // unreadable or token-less — leave the file alone
+      }
+      let imported: { id: string; label: string } | null = null;
+      try {
+        imported = await this.adapters.importGrokAccount(JSON.stringify(native));
+      } catch {
+        imported = null;
+      }
+      if (!imported) continue;
+      try {
+        await rename(path, join(authDir, this.seededAuthFileName("grok", imported.id)));
+      } catch {
+        continue; // rename failed — next boot retries (the import stays, unbacked)
+      }
+      const lastVerifiedAt = new Date(this.adapters.now()).toISOString();
+      this.seededAccounts.set(imported.id, {
+        id: imported.id,
+        provider: "grok",
+        label: imported.label,
+        ...(f.email ? { email: f.email } : {}),
+        state: "ok",
+        lastVerifiedAt
+      });
+      this.state.seededAccounts.push({
+        provider: "grok",
+        accountId: imported.id,
+        label: imported.label,
+        prefix: accountPrefix(imported.id)
+      });
+      if (this.adapters.markAccountProxyOwned) {
+        await this.adapters.markAccountProxyOwned(imported.id, true).catch(() => undefined);
+      }
+      changed = true;
+    }
+    if (changed) {
+      await this.refreshXai();
+      this.applyRegistryCoupling();
+      this.broadcaster.publish("cliproxy", "cliproxy.changed", this.status());
+      await this.persist();
+    }
+  }
+
   /** Best-effort quota signal (spec §B.6): upstream exposes no quota readout, so
    *  the proxy's logged `…-usage-exhausted` body is the only evidence the account
    *  was cooled for 24 h. Sticky until the account is unlinked. */
@@ -894,6 +991,10 @@ export class CliProxyManager {
       this.xaiLastLinkError = null;
       try {
         await this.refreshXai();
+        // The fresh login becomes a managed grok account + a seeded credential —
+        // one link, both surfaces (Accounts tab AND the proxy), like the
+        // pre-managed-accounts behavior plus the account row.
+        await this.adoptOrphanXaiFiles();
         await this.afterXaiMutation();
       } catch (error) {
         // Never let a background poll throw out of the queue.
@@ -986,15 +1087,17 @@ export class CliProxyManager {
    * proxy-owned via the accounts service (Task 3).
    */
   seedProvider(
-    req: { provider: "codex" | "claude"; accountId: string; label?: string },
-    read: (provider: "codex" | "claude", accountId: string) => Promise<unknown>
+    req: { provider: CliProxyProviderId; accountId: string; label?: string },
+    read: (provider: CliProxyProviderId, accountId: string) => Promise<unknown>
   ): Promise<CliProxyProviderStatus> {
     return this.transition(async () => {
       const cred = await read(req.provider, req.accountId);
       const { file, storage } =
         req.provider === "codex"
           ? codexStorageFromAuthJson(cred, req.accountId)
-          : claudeStorageFromCredentials(cred, req.accountId);
+          : req.provider === "grok"
+            ? grokStorageFromAuthJson(cred, req.accountId)
+            : claudeStorageFromCredentials(cred, req.accountId);
 
       // Freshness guard — refuse a near-expired token to avoid a proxy refresh.
       if (accessTokenFreshMs(storage as { expired: string }, this.adapters.now()) <= SEED_FRESH_THRESHOLD_MS) {
@@ -1003,6 +1106,9 @@ export class CliProxyManager {
 
       const authDir = join(cliproxyDir(this.daemonDir), "auth");
       await writeHardened(join(authDir, file), JSON.stringify(storage, null, 2), 0o600);
+      // A grok seed lands as an `xai-*.json`, which the xAI account view and the
+      // xai-model launch gate are derived from — re-scan so both flip together.
+      if (req.provider === "grok") await this.refreshXai();
 
       const email =
         typeof (storage as Record<string, unknown>).email === "string" &&
@@ -1051,19 +1157,21 @@ export class CliProxyManager {
    * an unknown accountId performs no file/state mutation, no broadcast, no persist,
    * and just returns the current provider status. Never throws.
    */
-  unseedProvider(req: { provider: "codex" | "claude"; accountId: string }): Promise<CliProxyProviderStatus> {
+  unseedProvider(req: { provider: CliProxyProviderId; accountId: string }): Promise<CliProxyProviderStatus> {
     return this.transition(async () => {
       const existing = this.seededAccounts.get(req.accountId);
       if (existing) {
-        const file = join(
-          cliproxyDir(this.daemonDir),
-          "auth",
-          `${existing.provider}-${accountPrefix(existing.id)}.json`
-        );
+        const file = join(cliproxyDir(this.daemonDir), "auth", this.seededAuthFileName(existing.provider, existing.id));
         await rm(file, { force: true }).catch(() => undefined);
         this.seededAccounts.delete(req.accountId);
         const idx = this.state.seededAccounts.findIndex((a) => a.accountId === req.accountId);
         if (idx >= 0) this.state.seededAccounts.splice(idx, 1);
+        if (existing.provider === "grok") {
+          // The removed file was an `xai-*.json`: re-derive the xAI view and drop
+          // any grok default/background pick that no longer resolves.
+          await this.refreshXai();
+          this.resetDanglingModelPicks();
+        }
         // Hot-discovered removal: re-probe so a shrunk provider set refreshes the
         // catalog, then recouple launchers and rebroadcast the reduced status.
         const probed = await this.probe();
@@ -1498,6 +1606,18 @@ export class CliProxyManager {
     for (const id of DEPENDENT_ENTRY_IDS) await this.registry.reresolve(id);
   }
 
+  /**
+   * Deterministic per-account auth filename inside the proxy's `auth/` dir.
+   * Grok deviates from `<provider>-<prefix>.json`: CLIProxyAPI's xai support —
+   * and every Orquester scanner (`scanXaiAuthFiles`, the usage credential
+   * reader) — key on the `xai-` filename prefix.
+   */
+  private seededAuthFileName(provider: CliProxyProviderId, accountId: string): string {
+    return provider === "grok"
+      ? `xai-${accountPrefix(accountId)}.json`
+      : `${provider}-${accountPrefix(accountId)}.json`;
+  }
+
   /** Rehydrate the in-memory account map from persisted `state.seededAccounts`. */
   private rebuildSeededAccounts(): void {
     this.seededAccounts.clear();
@@ -1528,11 +1648,7 @@ export class CliProxyManager {
     await this.syncSeededCredentials();
     let changed = false;
     for (const account of this.seededAccounts.values()) {
-      const file = join(
-        cliproxyDir(this.daemonDir),
-        "auth",
-        `${account.provider}-${accountPrefix(account.id)}.json`
-      );
+      const file = join(cliproxyDir(this.daemonDir), "auth", this.seededAuthFileName(account.provider, account.id));
       let expired: string;
       try {
         const parsed = JSON.parse(await readFile(file, "utf8"));
@@ -1578,8 +1694,8 @@ export class CliProxyManager {
     }
   }
 
-  private async syncSeededCredential(provider: "codex" | "claude", accountId: string): Promise<void> {
-    const authFile = join(cliproxyDir(this.daemonDir), "auth", `${provider}-${accountPrefix(accountId)}.json`);
+  private async syncSeededCredential(provider: CliProxyProviderId, accountId: string): Promise<void> {
+    const authFile = join(cliproxyDir(this.daemonDir), "auth", this.seededAuthFileName(provider, accountId));
     const credPath = this.adapters.managedCredentialPath!(provider, accountId);
     let proxy: Record<string, unknown>;
     let managed: Record<string, unknown>;
@@ -1602,6 +1718,11 @@ export class CliProxyManager {
       const o = oauth as Record<string, unknown>;
       managedAccess = typeof o.accessToken === "string" ? o.accessToken : "";
       managedExpiry = typeof o.expiresAt === "number" ? o.expiresAt : NaN;
+    } else if (provider === "grok") {
+      const entry = grokAuthEntry(managed);
+      if (!entry) return; // unknown shape — hands off
+      managedAccess = typeof entry.key === "string" ? entry.key : "";
+      managedExpiry = typeof entry.expires_at === "string" ? Date.parse(entry.expires_at) : NaN;
     } else {
       const tokens = managed.tokens;
       if (!tokens || typeof tokens !== "object") return;
@@ -1624,7 +1745,21 @@ export class CliProxyManager {
     if (proxyNewer) {
       // proxy → managed home: merge the fresh token pair, preserve everything else
       // (scopes, subscriptionType, …) — this also repairs a wiped-on-401 file.
-      if (provider === "claude") {
+      if (provider === "grok") {
+        const entries = Object.entries(managed).filter(([k, v]) => k.includes("::") && v && typeof v === "object");
+        const target = entries.find(([k]) => k.includes("auth.x.ai")) ?? entries[0];
+        if (!target) return;
+        const entry = { ...(target[1] as Record<string, unknown>) };
+        entry.key = proxyAccess;
+        if (typeof proxy.refresh_token === "string" && proxy.refresh_token) {
+          entry.refresh_token = proxy.refresh_token;
+        }
+        entry.expires_at = new Date(proxyExpiry).toISOString();
+        if (typeof proxy.last_refresh === "string" && proxy.last_refresh) {
+          entry.create_time = proxy.last_refresh;
+        }
+        await writeHardened(credPath, JSON.stringify({ ...managed, [target[0]]: entry }), 0o600);
+      } else if (provider === "claude") {
         const oauth = { ...(managed.claudeAiOauth as Record<string, unknown>) };
         oauth.accessToken = proxyAccess;
         if (typeof proxy.refresh_token === "string" && proxy.refresh_token) {
@@ -1651,7 +1786,9 @@ export class CliProxyManager {
       const conv =
         provider === "claude"
           ? claudeStorageFromCredentials(managed, accountId)
-          : codexStorageFromAuthJson(managed, accountId);
+          : provider === "grok"
+            ? grokStorageFromAuthJson(managed, accountId)
+            : codexStorageFromAuthJson(managed, accountId);
       const next = { ...proxy };
       for (const key of ["access_token", "refresh_token", "id_token", "expired", "last_refresh"]) {
         const value = conv.storage[key];
@@ -1725,9 +1862,9 @@ export class CliProxyManager {
     return "ok";
   }
 
-  /** The two OAuth providers with their aggregate state + last-verified time. */
+  /** The OAuth providers with their aggregate state + last-verified time. */
   private providerStatuses(): CliProxyProviderStatus[] {
-    const providers: CliProxyProviderId[] = ["codex", "claude"];
+    const providers: CliProxyProviderId[] = ["codex", "claude", "grok"];
     return providers.map((provider) => {
       const verified = [...this.seededAccounts.values()]
         .filter((a) => a.provider === provider)

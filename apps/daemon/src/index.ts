@@ -463,12 +463,18 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     return aggregateWorstAccountUsage(agent, base, accounts, Date.now());
   }
 
-  // Grok has no managed-account family (spec 2026-08-05 §Decisions) and its
-  // credential is proxy-owned, so it bypasses agentWithAccounts entirely: one
-  // source, no System row, no ensureFreshForUsage.
+  // Grok renders as one usage row (SuperGrok has a single weekly pool per
+  // account and typically one account), so it bypasses agentWithAccounts.
+  // Credential precedence: proxy-seeded copy → managed grok account homes →
+  // the host's own grok CLI login.
   const grokUsageSource = createGrokSource({
     authDir: join(cliproxyDir(resolved.daemonDir), "auth"),
     grokHome: process.env.GROK_HOME || join(resolved.vars.userhome, ".grok"),
+    managedGrokAuthFiles: () =>
+      agentAccounts
+        .list()
+        .accounts.filter((a) => a.agent === "grok")
+        .map((a) => join(agentAccounts.homePath("grok", a.id), "auth.json")),
     now: () => Date.now(),
     logger: console
   });
@@ -486,7 +492,12 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     cacheFile: usageTokensCacheFile(paths.baseDir),
     now: () => Date.now(),
     accountHomes: () => [
-      ...agentAccounts.list().accounts.map((a) => ({ agent: a.agent, home: agentAccounts.homePath(a.agent, a.id) })),
+      // Token-transcript scanning knows the Claude/Codex session formats only;
+      // grok homes are skipped (Grok Build has no scanner support yet).
+      ...agentAccounts
+        .list()
+        .accounts.filter((a): a is typeof a & { agent: "claude" | "codex" } => a.agent !== "grok")
+        .map((a) => ({ agent: a.agent, home: agentAccounts.homePath(a.agent, a.id) })),
       // The proxy homes are Claude-format config dirs, but their GPT/Kimi
       // transcripts must be attributed to the launcher id, NOT the Claude
       // aggregate (else they inflate the "Anthropic quota left" signal).
@@ -703,7 +714,15 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
       // home): refresh-token rotation means the two copies MUST converge or
       // whichever side refreshes second gets logged out.
       managedCredentialPath: (provider, accountId) =>
-        join(agentAccounts.homePath(provider, accountId), MANAGED_CRED_FILENAME[provider])
+        join(agentAccounts.homePath(provider, accountId), MANAGED_CRED_FILENAME[provider]),
+      // Device-link adoption: a proxy-completed xAI login is imported as a
+      // managed grok account (mirrors an explicit auth.json upload) and marked
+      // proxy-owned, since the manager registers the credential as seeded.
+      importGrokAccount: async (content) => {
+        const account = await agentAccounts.importAccount({ content });
+        return { id: account.id, label: account.label };
+      },
+      markAccountProxyOwned: (id, owned) => agentAccounts.markProxyOwned(id, owned)
     }
   });
 
@@ -1137,10 +1156,10 @@ interface CliProxyRouteManager {
   >;
   cancelOrUnlinkXai(opts: { force?: boolean }): Promise<{ ok: boolean; affectedSessions?: number; error?: string }>;
   seedProvider(
-    req: { provider: "codex" | "claude"; accountId: string; label?: string },
-    read: (provider: "codex" | "claude", accountId: string) => Promise<unknown>
+    req: { provider: "codex" | "claude" | "grok"; accountId: string; label?: string },
+    read: (provider: "codex" | "claude" | "grok", accountId: string) => Promise<unknown>
   ): Promise<CliProxyProviderStatus>;
-  unseedProvider(req: { provider: "codex" | "claude"; accountId: string }): Promise<CliProxyProviderStatus>;
+  unseedProvider(req: { provider: "codex" | "claude" | "grok"; accountId: string }): Promise<CliProxyProviderStatus>;
 }
 
 /** The subset of {@link AgentAccountsService} the seed route drives — structural
@@ -1154,7 +1173,7 @@ interface CliProxyRouteAccounts {
 }
 
 /** On-disk credential filename per managed agent (the seed route's read source). */
-const MANAGED_CRED_FILENAME = { claude: ".credentials.json", codex: "auth.json" } as const;
+const MANAGED_CRED_FILENAME = { claude: ".credentials.json", codex: "auth.json", grok: "auth.json" } as const;
 
 /** Account ids are server-minted UUIDs; this charset rejects any path separator
  *  or dot before the id reaches homePath() / accountPrefix() (traversal guard). */
@@ -1274,8 +1293,8 @@ export function registerCliProxyRoutes(
   app.post("/api/cliproxy/accounts/seed", async (request, reply) => {
     if (refusedOnSocket(reply)) return;
     const body = (request.body ?? {}) as Partial<CliProxySeedRequest>;
-    if (body.provider !== "codex" && body.provider !== "claude") {
-      return reply.code(400).send({ error: "provider must be 'codex' or 'claude'" });
+    if (body.provider !== "codex" && body.provider !== "claude" && body.provider !== "grok") {
+      return reply.code(400).send({ error: "provider must be 'codex', 'claude' or 'grok'" });
     }
     if (typeof body.accountId !== "string" || !body.accountId || !ACCOUNT_ID_RE.test(body.accountId)) {
       return reply.code(400).send({ error: "accountId is required" });
@@ -1292,7 +1311,7 @@ export function registerCliProxyRoutes(
     if (proxyState !== "healthy" && proxyState !== "degraded") {
       return reply.code(409).send({ error: "cliproxy must be running to seed an account", state: proxyState });
     }
-    const read = async (p: "codex" | "claude", id: string): Promise<unknown> => {
+    const read = async (p: "codex" | "claude" | "grok", id: string): Promise<unknown> => {
       const file = join(agentAccounts.homePath(p, id), MANAGED_CRED_FILENAME[p]);
       try {
         return JSON.parse(await readFile(file, "utf8"));
@@ -1338,8 +1357,8 @@ export function registerCliProxyRoutes(
   app.post("/api/cliproxy/accounts/unseed", async (request, reply) => {
     if (refusedOnSocket(reply)) return;
     const body = (request.body ?? {}) as Partial<CliProxyUnseedRequest>;
-    if (body.provider !== "codex" && body.provider !== "claude") {
-      return reply.code(400).send({ error: "provider must be 'codex' or 'claude'" });
+    if (body.provider !== "codex" && body.provider !== "claude" && body.provider !== "grok") {
+      return reply.code(400).send({ error: "provider must be 'codex', 'claude' or 'grok'" });
     }
     if (typeof body.accountId !== "string" || !body.accountId || !ACCOUNT_ID_RE.test(body.accountId)) {
       return reply.code(400).send({ error: "accountId is required" });
@@ -3116,6 +3135,14 @@ export function createServer(
   app.delete("/api/agent-accounts/:id", async (request, reply) => {
     const { id } = request.params as { id: string };
     try {
+      // A seeded account leaves a live credential copy in the proxy's auth/ dir;
+      // deleting only the managed home would strand it there (refreshed by the
+      // proxy, invisible in Accounts). Un-seed first — idempotent when not seeded.
+      const record = agentAccounts.getRecord(id);
+      if (record) {
+        await services.cliproxy.unseedProvider({ provider: record.agent, accountId: id }).catch(() => undefined);
+        await agentAccounts.markProxyOwned(id, false);
+      }
       await agentAccounts.removeAccount(id);
       return { ok: true };
     } catch (error) {

@@ -356,24 +356,31 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
     rest** one release for rollback safety (precedent 914ec27) — new code writes the mirror and
     never reads it. The `claudex.env` Fable slot and the managed kimi agent are gated on
     `routerKimiAvailable()` (some keyed provider serving name/alias `kimi-k3`), not on OpenRouter.
-  - **xAI OAuth account (Grok) is a third provider kind — no key, no secrets at rest.** Linking
-    is an RFC 8628 device flow driven entirely through the proxy's management API on loopback
-    (`GET /v0/management/xai-auth-url` → poll `get-auth-status` → `DELETE /oauth-session` on
-    abandon), bearer = `secrets.managementSecret` — part B is that field's **first reader**.
-    CLIProxyAPI writes and refreshes `<appdir>/daemon/cliproxy/auth/xai-*.json` itself; Orquester
-    only *derives* `CliProxyStatus.xai` (`state`/`email`/`expiredAt`) from that dir and never
-    stores or returns tokens. **Link/unlink changes no `config.yaml` and needs no restart** (the
-    proxy hot-discovers the auth dir) — deliberately lighter than router-provider mutations.
-    Routes `POST/DELETE /api/cliproxy/xai/link` are HTTP-only (`refusedOnSocket`); unlink answers
-    409 `{ok:false, affectedSessions}` while dependent sessions are live unless `force`.
-    `XAI_OAUTH_MODELS` + `resolveXaiModel()` (exact id after stripping one `acc<hex>/` prefix) are
-    the single source of truth for chips, **bare** launch model (never account-prefixed — the
-    proxy routes to the xai auth internally), `compactEnvForModel` and the probe catalog union;
-    claudex is coupled on `codexOk || routerOk || xaiLinked`. Accepted risks (brainstorm
-    2026-08-05): the proxy **impersonates the first-party Grok CLI** against an undocumented
-    endpoint, so an xAI version-gate breaks Grok-via-proxy until CLIProxyAPI ships a fix and we
-    redeploy; **no per-request quota readout exists** upstream (best-effort `lastQuotaError`
-    only); and on a `…-usage-exhausted` 429 the proxy silently **cools the account for 24 h**.
+  - **Grok is a third MANAGED ACCOUNT family (`agent: "grok"`) — same pipeline as
+    claude/codex.** Accounts live in the agent-accounts store (`agent-accounts/grok/<id>/home`,
+    credential = the grok CLI's native `auth.json`, the `"<issuer>::<client>"` keyed map);
+    acquired by **import** (upload `~/.grok/auth.json`, auto-detected) or by the **device-code
+    link** in Settings → Accounts — an RFC 8628 flow the daemon drives through the proxy's
+    management API (`GET /v0/management/xai-auth-url` → poll `get-auth-status` → `DELETE
+    /oauth-session`; bearer = `secrets.managementSecret`). On approval the proxy-written
+    `auth/xai-<email>.json` is **adopted** (`adoptOrphanXaiFiles`, also the boot migration for
+    pre-managed deployments): converted to native shape via `grokAuthJsonFromStorage`, imported
+    as a managed account, renamed to the seeded filename `xai-acc<hex>.json` and marked
+    `proxyOwned`. Grok Build sessions get account chips → `GROK_HOME=<home>` (unset
+    `XAI_API_KEY`); idle managed accounts are refreshed by `refreshGrokToken` (standard OIDC
+    refresh against `auth.x.ai/oauth2/token`, client id shared with seed conversion). **Seeding
+    to the proxy is `provider:"grok"`** on the normal seed/unseed routes:
+    `grokStorageFromAuthJson` (NO `prefix` field — xai launch models are always bare; the proxy
+    routes internally) writes `xai-acc<hex>.json`, two-way credential sync + freshness use
+    `seededAuthFileName()` for the xai- naming exception. `CliProxyStatus.providers` includes
+    grok; `status.xai` (linked/expired = seeded files present, + linking progress) still gates
+    xai model chips, `resetDanglingModelPicks` and claudex coupling
+    (`codexOk || routerOk || xaiLinked`). `DELETE /api/agent-accounts/:id` un-seeds first for
+    every family. Accepted risks unchanged (brainstorm 2026-08-05): the proxy **impersonates the
+    first-party Grok CLI**; **no per-request quota readout exists** (best-effort
+    `lastQuotaError`); a `…-usage-exhausted` 429 **cools the account 24 h**; and the synthesized
+    native `auth.json` from adoption omits profile-only fields (team/names) the CLI treats as
+    optional.
   - **Grok usage bar.** `createGrokSource` (`apps/daemon/src/usage-sources.ts`) reads the
     subscription's weekly credit pool from the first-party
     `cli-chat-proxy.grok.com/v1/billing?format=credits` (the endpoint behind the grok CLI's own
@@ -381,8 +388,9 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
     One `weekly` window only — SuperGrok has no 5h window; omitted `creditUsagePercent` on a
     live period means **0%**, not unknown (proto3). Credential precedence: proxy-owned
     `cliproxy/auth/xai-*.json` (this is the ONE sanctioned reader of xai token material outside
-    the proxy subsystem — the token never leaves the source closure) → the grok CLI's
-    `~/.grok/auth.json`. Expired stamp ⇒ stale/no-fetch (the proxy/CLI refreshes, never us).
+    the proxy subsystem — the token never leaves the source closure) → managed grok account
+    homes (freshest `expires_at`) → the grok CLI's `~/.grok/auth.json`. Expired stamp ⇒
+    stale/no-fetch (the proxy/CLI/accounts-refresher refreshes, never this source).
     `usage-parse.ts:parseGrokBilling`; chip enum + `USAGE_AGENT_IDS` include `grok`.
 - **Security boundary asymmetry.** `PUT /api/config/daemon` is **Unix-socket-only** (403 over
   remote HTTP) — **except the single-field `PUT /api/config/daemon/protect-archived`, which is

@@ -20,11 +20,11 @@ import {
 import { cn } from "../../lib/cn";
 import { Button, Input } from "../ui";
 import { useAppStore } from "../../store/app";
-import { XaiProviderRow } from "./XaiAccountCard";
 
 const PROVIDER_LABEL: Record<CliProxyProviderId, string> = {
   codex: "Codex",
-  claude: "Claude"
+  claude: "Claude",
+  grok: "Grok"
 };
 
 // Manager states, ordered off → healthy, with copy for the header pill.
@@ -289,10 +289,13 @@ export const ModelProxySettings: React.FC = () => {
               }
             />
           ))}
-          {/* xAI OAuth (Grok): same card anatomy as the rows above, but there is
-              no seed step — the proxy owns the single device-linked account. */}
-          <XaiProviderRow />
         </div>
+        {status.xai?.lastQuotaError && (
+          <p className="px-1 text-[11px] text-amber-400/80">
+            Last Grok quota error: {status.xai.lastQuotaError} — xAI cools the account for 24 h
+            after this.
+          </p>
+        )}
       </section>
 
       {/* Key-based OpenAI-compatible routers (spec 2026-08-04 §3) */}
@@ -467,7 +470,8 @@ const ProviderRow: React.FC<{
         <div className="ml-8 mt-2 space-y-1 rounded-md border border-neutral-800 bg-neutral-950 p-2">
           {accounts.length === 0 ? (
             <p className="text-xs text-neutral-500">
-              No managed {PROVIDER_LABEL[provider.provider]} accounts. Import one in Settings → Accounts.
+              No managed {PROVIDER_LABEL[provider.provider]} accounts.{" "}
+              {provider.provider === "grok" ? "Link or import" : "Import"} one in Settings → Accounts.
             </p>
           ) : (
             accounts.map((a) => (

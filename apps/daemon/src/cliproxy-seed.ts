@@ -1,3 +1,8 @@
+// The grok CLI's public OIDC client — shared with the refresh path so seed-time
+// conversion and the daemon refresher can never disagree on identity constants.
+import { GROK_OIDC_ISSUER, GROK_OIDC_CLIENT_ID } from "./agent-account-refresh.ts";
+import { grokAuthEntry } from "./agent-account-identity.ts";
+
 /**
  * Managed-credential → CLIProxyAPI auth-file converters (seed-by-conversion, spec §4).
  *
@@ -115,6 +120,80 @@ export function claudeStorageFromCredentials(
     prefix
   };
   return { file: `claude-${prefix}.json`, storage };
+}
+
+const XAI_TOKEN_ENDPOINT = `${GROK_OIDC_ISSUER}/oauth2/token`;
+const XAI_BASE_URL = "https://api.x.ai/v1";
+
+/**
+ * Convert a managed grok `auth.json` (the `"<issuer>::<client>"` keyed map the
+ * grok CLI writes) into a CLIProxyAPI `XaiTokenStorage` object plus a filename.
+ * Deliberately NO `prefix` field: xAI launch models are always emitted bare —
+ * CLIProxyAPI routes them to its xai credentials internally (spec 2026-08-05
+ * §B.3), so a routing prefix could only misroute. Throws on invalid shape.
+ */
+export function grokStorageFromAuthJson(
+  authJson: unknown,
+  accountId?: string
+): { file: string; storage: Record<string, unknown> } {
+  const entry = grokAuthEntry(authJson);
+  const accessToken = typeof entry?.key === "string" ? entry.key : "";
+  const refreshToken = typeof entry?.refresh_token === "string" ? entry.refresh_token : "";
+  if (!accessToken || !refreshToken) {
+    throw new Error("grok auth.json missing tokens");
+  }
+  const expiresAt = typeof entry?.expires_at === "string" ? Date.parse(entry.expires_at) : NaN;
+  const createdAt = typeof entry?.create_time === "string" ? Date.parse(entry.create_time) : NaN;
+  const storage: Record<string, unknown> = {
+    type: "xai",
+    auth_kind: "oauth",
+    base_url: XAI_BASE_URL,
+    token_endpoint: XAI_TOKEN_ENDPOINT,
+    token_type: "Bearer",
+    disabled: false,
+    access_token: accessToken,
+    refresh_token: refreshToken,
+    id_token: "",
+    email: typeof entry?.email === "string" ? entry.email : "",
+    sub: typeof entry?.user_id === "string" ? entry.user_id : "",
+    expired: Number.isFinite(expiresAt) ? rfc3339FromMs(expiresAt) : "",
+    last_refresh: Number.isFinite(createdAt) ? rfc3339FromMs(createdAt) : "",
+    // Access-token lifetime derived from the credential's own stamps (no wall
+    // clock — deterministic); xai issues 6 h tokens when neither stamp parses.
+    expires_in:
+      Number.isFinite(expiresAt) && Number.isFinite(createdAt) && expiresAt > createdAt
+        ? Math.round((expiresAt - createdAt) / 1000)
+        : 21600
+  };
+  return { file: `xai-${accountPrefix(accountId)}.json`, storage };
+}
+
+/**
+ * The reverse conversion, for device-link adoption: a proxy-written
+ * `XaiTokenStorage` becomes a grok-CLI-shaped `auth.json` object, so the linked
+ * account can also serve managed Grok Build sessions (GROK_HOME). Identity
+ * fields the storage lacks (team, names) are omitted — the CLI treats them as
+ * optional profile data. Throws when the storage carries no usable token pair.
+ */
+export function grokAuthJsonFromStorage(storage: unknown): Record<string, unknown> {
+  const root = asRecord(storage);
+  const accessToken = typeof root.access_token === "string" ? root.access_token : "";
+  const refreshToken = typeof root.refresh_token === "string" ? root.refresh_token : "";
+  if (!accessToken || !refreshToken) {
+    throw new Error("xai storage missing tokens");
+  }
+  const entry: Record<string, unknown> = {
+    key: accessToken,
+    auth_mode: "oidc",
+    refresh_token: refreshToken,
+    oidc_issuer: GROK_OIDC_ISSUER,
+    oidc_client_id: GROK_OIDC_CLIENT_ID
+  };
+  if (typeof root.email === "string" && root.email) entry.email = root.email;
+  if (typeof root.sub === "string" && root.sub) entry.user_id = root.sub;
+  if (typeof root.expired === "string" && root.expired) entry.expires_at = root.expired;
+  if (typeof root.last_refresh === "string" && root.last_refresh) entry.create_time = root.last_refresh;
+  return { [`${GROK_OIDC_ISSUER}::${GROK_OIDC_CLIENT_ID}`]: entry };
 }
 
 /**

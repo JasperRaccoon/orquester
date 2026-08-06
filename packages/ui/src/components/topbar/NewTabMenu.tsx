@@ -91,7 +91,7 @@ const AgentRow: React.FC<{ agent: RegistryEntry }> = ({ agent }) => {
     { id: SYSTEM_ACCOUNT_ID, label: "System" },
     ...managed.map((a) => ({ id: a.id, label: shortAccountLabel(a.label) }))
   ];
-  const fallback = agentAccounts?.defaults[accountKey as "claude" | "codex"] ?? SYSTEM_ACCOUNT_ID;
+  const fallback = agentAccounts?.defaults[accountKey as "claude" | "codex" | "grok"] ?? SYSTEM_ACCOUNT_ID;
   const wanted = preferred ?? fallback;
   const selectedAccount = options.some((o) => o.id === wanted) ? wanted : SYSTEM_ACCOUNT_ID;
 

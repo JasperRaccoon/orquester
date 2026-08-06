@@ -780,7 +780,7 @@ export interface AgentEventRequest {
   payload?: unknown;
 }
 
-export type AgentAccountAgent = "claude" | "codex";
+export type AgentAccountAgent = "claude" | "codex" | "grok";
 
 export interface AgentAccount {
   id: string;
@@ -795,7 +795,7 @@ export interface AgentAccount {
 
 export interface AgentAccountsResponse {
   accounts: AgentAccount[];
-  defaults: { claude: string | null; codex: string | null };
+  defaults: { claude: string | null; codex: string | null; grok: string | null };
 }
 
 export interface ImportAgentAccountRequest {
@@ -807,6 +807,7 @@ export interface ImportAgentAccountRequest {
 export interface SetAgentAccountDefaultsRequest {
   claude?: string | null;
   codex?: string | null;
+  grok?: string | null;
 }
 
 export type AgentAccountsEventType = "agent-accounts.changed";
@@ -819,7 +820,7 @@ export type AgentAccountsEventType = "agent-accounts.changed";
  * credentials. Key-based OpenAI-compatible routers are NOT here — they live in
  * their own user-defined {@link CliProxyRouterProviderStatus} list.
  */
-export type CliProxyProviderId = "codex" | "claude";
+export type CliProxyProviderId = "codex" | "claude" | "grok";
 
 /**
  * A restart-gated cliproxy mutation (config/router-provider/router-key/disable)
@@ -931,7 +932,7 @@ export interface CliProxyStatus {
  * `auth/` (spec §4). No secret material crosses this request.
  */
 export interface CliProxySeedRequest {
-  provider: "codex" | "claude";
+  provider: CliProxyProviderId;
   accountId: string;
 }
 

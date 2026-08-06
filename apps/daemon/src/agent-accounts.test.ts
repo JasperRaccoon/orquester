@@ -346,3 +346,28 @@ test("shared history recursively merges a COLLIDING project dir, then symlinks",
   assert.equal(await readFile(join(base, ".claude", "projects", "P", "s1.jsonl"), "utf8"), "sys"); // system's kept
   assert.equal(await readFile(join(base, ".claude", "projects", "P", "s2.jsonl"), "utf8"), "acct"); // account's merged in
 });
+
+const GROK_BLOB = JSON.stringify({
+  "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828": {
+    key: "at",
+    refresh_token: "rt",
+    email: "g@x.com",
+    user_id: "u-9",
+    expires_at: "2026-08-06T03:29:17Z"
+  }
+});
+
+test("import a grok auth.json derives identity and resolves GROK_HOME at launch", async () => {
+  const { svc } = await makeService();
+  const acct = await svc.importAccount({ content: GROK_BLOB });
+  assert.equal(acct.agent, "grok");
+  assert.equal(acct.email, "g@x.com");
+  assert.equal(acct.label, "g@x.com");
+  assert.equal(svc.list().defaults.grok, acct.id);
+  const auth = JSON.parse(await readFile(join(svc.homePath("grok", acct.id), "auth.json"), "utf8"));
+  assert.equal(Object.keys(auth).length, 1);
+  const env = await svc.resolveLaunchEnv("grok", acct.id);
+  assert.equal(env?.env.GROK_HOME, svc.homePath("grok", acct.id));
+  assert.deepEqual(env?.unset, ["XAI_API_KEY"]);
+  assert.equal(env?.accountId, acct.id);
+});

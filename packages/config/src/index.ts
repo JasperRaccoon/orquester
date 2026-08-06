@@ -343,7 +343,7 @@ export type AgentPrefs = z.infer<typeof agentPrefsSchema>;
 
 export const agentAccountSchema = z.object({
   id: z.string(),
-  agent: z.enum(["claude", "codex"]),
+  agent: z.enum(["claude", "codex", "grok"]),
   label: z.string(),
   email: z.string().nullable().default(null),
   plan: z.string().nullable().default(null),
@@ -360,9 +360,10 @@ export const agentAccountsSchema = z.object({
   defaults: z
     .object({
       claude: z.string().nullable().default(null),
-      codex: z.string().nullable().default(null)
+      codex: z.string().nullable().default(null),
+      grok: z.string().nullable().default(null)
     })
-    .default({ claude: null, codex: null })
+    .default({ claude: null, codex: null, grok: null })
 });
 export type AgentAccountRecord = z.infer<typeof agentAccountSchema>;
 export type AgentAccountsIndex = z.infer<typeof agentAccountsSchema>;
@@ -371,7 +372,7 @@ export function parseAgentAccounts(raw: unknown): AgentAccountsIndex {
   return agentAccountsSchema.parse(raw);
 }
 export function createDefaultAgentAccounts(): AgentAccountsIndex {
-  return { accounts: [], defaults: { claude: null, codex: null } };
+  return { accounts: [], defaults: { claude: null, codex: null, grok: null } };
 }
 export function agentAccountsFile(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "agent-accounts.json");
@@ -1074,7 +1075,7 @@ export const cliProxyStateSchema = z.object({
   seededAccounts: z
     .array(
       z.object({
-        provider: z.enum(["codex", "claude"]),
+        provider: z.enum(["codex", "claude", "grok"]),
         accountId: z.string(),
         label: z.string(),
         prefix: z.string()
