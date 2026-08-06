@@ -24,6 +24,22 @@ test("maps plan_type and primary/secondary windows", () => {
   assert.equal(a.session?.resetsAt, new Date(resetSec * 1000).toISOString());
 });
 
+test("week-only primary_window (7d limit, no secondary) → weekly slot", () => {
+  const weekReset = Math.floor(Date.parse("2026-07-08T18:00:00Z") / 1000);
+  const a = parseCodexWhamUsage(
+    {
+      plan_type: "pro",
+      rate_limit: {
+        primary_window: { used_percent: 33, reset_at: weekReset, limit_window_seconds: 604800 }
+      }
+    },
+    NOW
+  );
+  assert.equal(a.session, null);
+  assert.equal(a.weekly?.percent, 33);
+  assert.equal(a.weekly?.resetsAt, new Date(weekReset * 1000).toISOString());
+});
+
 test("unparseable payload → available:false", () => {
   const a = parseCodexWhamUsage({ nope: true }, NOW);
   assert.equal(a.available, false);

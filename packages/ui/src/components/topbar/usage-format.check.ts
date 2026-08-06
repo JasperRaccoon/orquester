@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import type { AgentUsage } from "@orquester/api";
 import { usagePrefsSchema } from "@orquester/config";
-import { barClass, formatAgo, formatCountdown, gaugeClass, minutesSince, missingUsageAgents, pickDriver, usageLevel, windowMax } from "./usage-format";
+import { barClass, formatAgo, formatChipWindows, formatCountdown, gaugeClass, minutesSince, missingUsageAgents, pickDriver, usageLevel, windowMax } from "./usage-format";
 
 const claude: AgentUsage = { id: "claude", available: true, stale: false, session: { percent: 10 }, weekly: { percent: 20 } };
 const codex: AgentUsage = { id: "codex", available: true, stale: false, session: { percent: 80 }, weekly: { percent: 5 } };
+const weekOnly: AgentUsage = { id: "grok", available: true, stale: false, session: null, weekly: { percent: 24 } };
 
 // "busiest" = highest single window (codex's 80 beats claude's 20).
 assert.equal(pickDriver([claude, codex], "busiest")?.id, "codex");
@@ -35,6 +36,11 @@ assert.match(gaugeClass(10), /emerald/);
 assert.match(gaugeClass(95), /red/);
 // windowMax = the worse of session/weekly (codex: max(80, 5)).
 assert.equal(windowMax(codex), 80);
+
+// Chip shows only present windows (no "— • 24%" or "33% • —" for week-only).
+assert.equal(formatChipWindows(claude), "10% • 20%");
+assert.equal(formatChipWindows(weekOnly), "24%");
+assert.equal(formatChipWindows({ session: null, weekly: null }), "—");
 
 // "as of" age helpers.
 const t0 = Date.parse("2026-07-07T08:00:00Z");

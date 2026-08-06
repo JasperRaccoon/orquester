@@ -46,6 +46,26 @@ assert.equal(codex.session?.percent, 3);
 assert.equal(codex.weekly?.percent, 37);
 assert.equal(codex.plan, "Pro");
 
+// Week-only plan: sole pool lives under primary with a 7d limit → weekly slot,
+// not the 5h session bar (the bug in the usage panel for current Pro/Plus).
+const weekOnly = parseCodexUsage(
+  {
+    plan_type: "pro",
+    primary: { used_percent: 33, window_minutes: 10080, resets_at: Math.floor(Date.parse("2026-07-08T18:00:00Z") / 1000) }
+  },
+  NOW
+);
+assert.equal(weekOnly.session, null);
+assert.equal(weekOnly.weekly?.percent, 33);
+
+// No duration metadata but reset is >6h away → treat as weekly (can't be a 5h window).
+const weekByReset = parseCodexUsage(
+  { primary: { used_percent: 40, resets_at: Math.floor(Date.parse("2026-07-08T18:00:00Z") / 1000) } },
+  NOW
+);
+assert.equal(weekByReset.session, null);
+assert.equal(weekByReset.weekly?.percent, 40);
+
 // Codex stale window (resets_at already past) → nulled.
 const codexStale = parseCodexUsage(
   { primary: { used_percent: 3, resets_at: futureSec }, secondary: { used_percent: 37, resets_at: pastSec } },

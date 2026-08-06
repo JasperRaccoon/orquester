@@ -6,7 +6,7 @@ import { usageAgentEnabled } from "@orquester/config";
 import { AdaptiveMenu } from "../ui";
 import { getRegistryIcon } from "../../icons";
 import { useAppStore } from "../../store/app";
-import { barClass, formatAgo, formatClock, formatCountdown, gaugeClass, minutesSince, missingUsageAgents, pickDriver, usageLoginHint, windowMax } from "./usage-format";
+import { barClass, formatAgo, formatChipWindows, formatClock, formatCountdown, gaugeClass, minutesSince, missingUsageAgents, pickDriver, usageLoginHint, windowMax } from "./usage-format";
 import { REGISTRY } from "@orquester/registry";
 
 function labelForAgent(id: string): string {
@@ -194,13 +194,13 @@ const CostTab: React.FC<{ rows: UsageTokenRow[] }> = ({ rows }) => {
   );
 };
 
-const Bar: React.FC<{ label: string; window: UsageWindow | null; muted: boolean }> = ({ label, window, muted }) => {
-  const pct = window?.percent ?? 0;
+const Bar: React.FC<{ label: string; window: UsageWindow; muted: boolean }> = ({ label, window, muted }) => {
+  const pct = window.percent;
   return (
     <div className="py-1.5">
       <div className="flex items-center justify-between text-xs">
         <span className="text-neutral-300">{label}</span>
-        <span className={muted ? "text-neutral-500" : "text-neutral-200"}>{window ? `${Math.round(pct)}%` : "—"}</span>
+        <span className={muted ? "text-neutral-500" : "text-neutral-200"}>{`${Math.round(pct)}%`}</span>
       </div>
       <div className="mt-1 h-1.5 w-full rounded-full bg-neutral-800">
         <div
@@ -208,10 +208,27 @@ const Bar: React.FC<{ label: string; window: UsageWindow | null; muted: boolean 
           style={{ width: `${Math.max(0, Math.min(100, pct))}%` }}
         />
       </div>
-      <p className="mt-1 text-[11px] text-neutral-500">{formatCountdown(window?.resetsAt, Date.now())}</p>
+      <p className="mt-1 text-[11px] text-neutral-500">{formatCountdown(window.resetsAt, Date.now())}</p>
     </div>
   );
 };
+
+/**
+ * Render only the windows that have a reading. Claude (5h+week) shows both;
+ * week-only Codex/Grok show a single Week bar — no empty "5h —" row.
+ */
+const WindowBars: React.FC<{
+  session: UsageWindow | null;
+  weekly: UsageWindow | null;
+  muted: boolean;
+  /** Compact multi-account labels ("5h"/"Week") vs single-agent long form. */
+  compact?: boolean;
+}> = ({ session, weekly, muted, compact }) => (
+  <>
+    {session ? <Bar label={compact ? "5h" : "Current session (5 hours)"} window={session} muted={muted} /> : null}
+    {weekly ? <Bar label={compact ? "Week" : "Current week"} window={weekly} muted={muted} /> : null}
+  </>
+);
 
 /** A reading older than this reads as stale in the panel. */
 const STALE_MIN = 10;
@@ -224,8 +241,7 @@ const AccountRow: React.FC<{ account: UsageAccount }> = ({ account }) => {
         <p className="truncate text-xs font-medium text-neutral-300">{shortAccountLabel(account.label) || account.id}</p>
         {account.plan && <span className="shrink-0 text-[10px] text-neutral-500">{account.plan}</span>}
       </div>
-      <Bar label="5h" window={account.session} muted={muted} />
-      <Bar label="Week" window={account.weekly} muted={muted} />
+      <WindowBars session={account.session} weekly={account.weekly} muted={muted} compact />
     </div>
   );
 };
@@ -263,10 +279,7 @@ const AgentSection: React.FC<{ agent: AgentUsage }> = ({ agent }) => {
           {agent.system && <AccountRow key={agent.system.id} account={agent.system} />}
         </>
       ) : (
-        <>
-          <Bar label="Current session (5 hours)" window={agent.session} muted={muted} />
-          <Bar label="Current week" window={agent.weekly} muted={muted} />
-        </>
+        <WindowBars session={agent.session} weekly={agent.weekly} muted={muted} />
       )}
     </div>
   );
@@ -302,8 +315,7 @@ export const UsageWidget: React.FC = () => {
     .sort()
     .at(-1);
 
-  const cell = (w: AgentUsage["session"]) => (w ? `${Math.round(w.percent)}%` : "—");
-  const chipText = `${cell(driver.session)} • ${cell(driver.weekly)}`;
+  const chipText = formatChipWindows(driver);
   // Color by usage level whenever we have a number (even if stale — the value is
   // still real); grey only when there's no reading yet.
   const gauge = driver.session || driver.weekly ? gaugeClass(windowMax(driver)) : "text-neutral-600";

@@ -31,6 +31,18 @@ export function windowMax(a: AgentUsage): number {
   return Math.max(a.session?.percent ?? 0, a.weekly?.percent ?? 0);
 }
 
+/**
+ * Collapsed chip text: only the windows that actually have a reading.
+ * Claude (5h+week) → "13% • 38%"; week-only Codex/Grok → "33%". Avoids a
+ * misleading "33% • —" when the sole pool was historically slotted as session.
+ */
+export function formatChipWindows(a: Pick<AgentUsage, "session" | "weekly">): string {
+  const parts: string[] = [];
+  if (a.session) parts.push(`${Math.round(a.session.percent)}%`);
+  if (a.weekly) parts.push(`${Math.round(a.weekly.percent)}%`);
+  return parts.length > 0 ? parts.join(" • ") : "—";
+}
+
 /** The agent whose numbers drive the collapsed chip. */
 export function pickDriver(agents: AgentUsage[], chip: Chip): AgentUsage | null {
   if (agents.length === 0) return null;

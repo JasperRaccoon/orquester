@@ -81,10 +81,68 @@ function codexWindow(w: any, now: number): UsageWindow | null {
   return percent == null ? null : { percent, resetsAt };
 }
 
+/**
+ * Codex historically mapped primary→session (5h) and secondary→weekly (7d).
+ * Some plans (and current Pro/Plus) expose only a weekly pool, still under
+ * `primary` / `primary_window`. Classify each raw window by its advertised
+ * duration so a week-only plan lands in `weekly` instead of the 5h slot:
+ *  - WHAM HTTP: `limit_window_seconds`
+ *  - rollout token_count: `window_minutes`
+ * When duration is missing, fall back to remaining time until reset: a real
+ * 5h window never has >6h left.
+ */
+const SESSION_WINDOW_MAX_SECONDS = 12 * 60 * 60;
+const SESSION_REMAINING_MAX_MS = 6 * 60 * 60 * 1000;
+
+function codexLimitSeconds(w: unknown): number | null {
+  if (typeof w !== "object" || w === null) return null;
+  const o = w as Record<string, unknown>;
+  if (typeof o.limit_window_seconds === "number" && Number.isFinite(o.limit_window_seconds) && o.limit_window_seconds > 0) {
+    return o.limit_window_seconds;
+  }
+  // Rollout JSONL token_count events use window_minutes (5h=300, week=10080).
+  const minutes = o.window_minutes ?? o.limit_minutes;
+  if (typeof minutes === "number" && Number.isFinite(minutes) && minutes > 0) {
+    return minutes * 60;
+  }
+  return null;
+}
+
+function codexSlotFor(win: UsageWindow, limitSeconds: number | null, now: number): "session" | "weekly" {
+  if (limitSeconds != null) {
+    return limitSeconds <= SESSION_WINDOW_MAX_SECONDS ? "session" : "weekly";
+  }
+  if (win.resetsAt) {
+    const remaining = Date.parse(win.resetsAt) - now;
+    if (Number.isFinite(remaining) && remaining > SESSION_REMAINING_MAX_MS) return "weekly";
+  }
+  return "session";
+}
+
+/** Slot raw Codex windows into session/weekly by duration, not primary/secondary. */
+export function assignCodexWindows(
+  windows: Array<{ win: UsageWindow | null; limitSeconds: number | null }>,
+  now: number
+): { session: UsageWindow | null; weekly: UsageWindow | null } {
+  let session: UsageWindow | null = null;
+  let weekly: UsageWindow | null = null;
+  for (const { win, limitSeconds } of windows) {
+    if (!win) continue;
+    if (codexSlotFor(win, limitSeconds, now) === "session") session = win;
+    else weekly = win;
+  }
+  return { session, weekly };
+}
+
 export function parseCodexUsage(rateLimits: unknown, now: number): AgentUsage {
   const rl = (rateLimits ?? {}) as Record<string, any>;
-  const session = codexWindow(rl.primary, now);
-  const weekly = codexWindow(rl.secondary, now);
+  const { session, weekly } = assignCodexWindows(
+    [
+      { win: codexWindow(rl.primary, now), limitSeconds: codexLimitSeconds(rl.primary) },
+      { win: codexWindow(rl.secondary, now), limitSeconds: codexLimitSeconds(rl.secondary) }
+    ],
+    now
+  );
   return {
     id: "codex",
     available: session != null || weekly != null,
@@ -114,8 +172,13 @@ function titleCasePlan(plan: unknown): string | undefined {
 export function parseCodexWhamUsage(json: unknown, now: number): AgentUsage {
   const root = typeof json === "object" && json !== null ? (json as Record<string, unknown>) : {};
   const rl = typeof root.rate_limit === "object" && root.rate_limit !== null ? (root.rate_limit as Record<string, unknown>) : {};
-  const session = whamWindow(rl.primary_window, now);
-  const weekly = whamWindow(rl.secondary_window, now);
+  const { session, weekly } = assignCodexWindows(
+    [
+      { win: whamWindow(rl.primary_window, now), limitSeconds: codexLimitSeconds(rl.primary_window) },
+      { win: whamWindow(rl.secondary_window, now), limitSeconds: codexLimitSeconds(rl.secondary_window) }
+    ],
+    now
+  );
   const available = session !== null || weekly !== null;
   return {
     id: "codex",
