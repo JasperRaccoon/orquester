@@ -23,7 +23,7 @@ import { SYSTEM_ACCOUNT_ID } from "@orquester/api";
 import type { RegistryService } from "./registry.ts";
 import { Broadcaster } from "./broadcaster.ts";
 import { CliProxyManager } from "./cliproxy.ts";
-import type { XaiManagementApi } from "./cliproxy-xai.ts";
+import type { GrokDeviceAuth } from "./grok-device-auth.ts";
 import {
   cliproxyContributor,
   composeExtraEnv,
@@ -94,24 +94,21 @@ function setup() {
 
   // xAI device flow: the management API is faked wholesale (no network, no proxy).
   let xaiLive: number | null = null;
-  const xaiCalls = { authUrl: 0, poll: 0, cancel: [] as string[] };
+  const xaiCalls = { authUrl: 0, poll: 0 };
   // Device-link adoption fakes: null importer = adoption no-ops (like production
   // before an account can be created), so tests opt in explicitly.
   let importGrokImpl: ((content: string) => Promise<{ id: string; label: string } | null>) | null = null;
   const proxyOwnedCalls: [string, boolean][] = [];
-  let authUrlImpl: XaiManagementApi["requestAuthUrl"] = async () => ({ ok: false, error: "not stubbed" });
-  let pollImpl: XaiManagementApi["pollAuthStatus"] = async () => ({ ok: true, value: { status: "wait" } });
-  const xaiManagement: XaiManagementApi = {
-    requestAuthUrl: (port, secret) => {
+  let deviceStartImpl: GrokDeviceAuth["start"] = async () => ({ ok: false, error: "not stubbed" });
+  let devicePollImpl: GrokDeviceAuth["poll"] = async () => ({ status: "wait" });
+  const grokDeviceAuth: GrokDeviceAuth = {
+    start: () => {
       xaiCalls.authUrl++;
-      return authUrlImpl(port, secret);
+      return deviceStartImpl();
     },
-    pollAuthStatus: (port, secret, state) => {
+    poll: (deviceCode) => {
       xaiCalls.poll++;
-      return pollImpl(port, secret, state);
-    },
-    cancelSession: async (_port, _secret, state) => {
-      xaiCalls.cancel.push(state);
+      return devicePollImpl(deviceCode);
     }
   };
 
@@ -126,7 +123,7 @@ function setup() {
       spawnDirect: () => null,
       liveDependentSessionCount: () => liveCount,
       liveXaiSessionCount: () => (xaiLive === null ? liveCount : xaiLive),
-      xaiManagement,
+      grokDeviceAuth,
       now: () => clock,
       sleep: async () => {},
       verifyRouterKey: (provider: RouterProvider, key: string) => verifyRouterImpl(provider, key),
@@ -173,11 +170,11 @@ function setup() {
     setXaiLive: (n: number) => {
       xaiLive = n;
     },
-    setXaiAuthUrl: (f: XaiManagementApi["requestAuthUrl"]) => {
-      authUrlImpl = f;
+    setXaiAuthUrl: (f: GrokDeviceAuth["start"]) => {
+      deviceStartImpl = f;
     },
-    setXaiPoll: (f: XaiManagementApi["pollAuthStatus"]) => {
-      pollImpl = f;
+    setXaiPoll: (f: GrokDeviceAuth["poll"]) => {
+      devicePollImpl = f;
     },
     setImportGrok: (f: (content: string) => Promise<{ id: string; label: string } | null>) => {
       importGrokImpl = f;
@@ -2180,30 +2177,51 @@ test("probe union: grok ids validate while linked (no catalog dependency)", asyn
   assert.ok(after.ok && after.catalog.includes("grok-4.5"), "both curated ids join");
 });
 
-test("linkXai: refuses while the proxy is off, and 409-shapes an already-linked account", async () => {
-  const h = setup();
-  await h.mgr.init(); // disabled → state "off"
-  const off = await h.mgr.linkXai();
-  assert.equal(off.ok, false);
-  assert.equal(off.ok === false && off.code, "conflict");
-  assert.match(off.ok === false ? off.error : "", /must be running/);
-  assert.equal(h.xaiCalls.authUrl, 0, "no management call while the proxy is down");
+const DEVICE_PROMPT = {
+  url: "https://accounts.x.ai/oauth2/device?user_code=ABCD-EFGH",
+  userCode: "ABCD-EFGH",
+  deviceCode: "dev-1",
+  intervalSec: 0,
+  expiresIn: 1800
+};
 
-  const h2 = setup();
-  await writeXaiAuth(h2.daemonDir, { email: "pilot@example.com" });
-  h2.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
-  await h2.mgr.enable();
-  const already = await h2.mgr.linkXai();
-  assert.equal(already.ok, false);
-  assert.equal(already.ok === false && already.code, "conflict");
-  assert.match(already.ok === false ? already.error : "", /already linked/);
+test("linkXai: works with the proxy OFF and imports a managed account (no seeding)", async () => {
+  const h = setup();
+  await h.mgr.init(); // disabled → state "off" — the direct device flow does not care
+  h.setXaiAuthUrl(async () => ({ ok: true, value: { ...DEVICE_PROMPT } }));
+  h.setXaiPoll(async () => ({
+    status: "ok",
+    tokens: { access_token: "at-dev", refresh_token: "rt-dev", expires_in: 21600 }
+  }));
+  const imported: string[] = [];
+  h.setImportGrok(async (content) => {
+    imported.push(content);
+    return { id: "acct-dev-1", label: "Grok account" };
+  });
+
+  const started = await h.mgr.linkXai();
+  assert.equal(started.ok, true);
+  assert.equal(started.ok && started.link.url, DEVICE_PROMPT.url);
+  assert.equal(started.ok && started.link.userCode, "ABCD-EFGH");
+  assert.equal(h.mgr.status().xai.state, "linking");
+
+  await waitFor(() => h.mgr.status().xai.state !== "linking", "the link to complete");
+  assert.equal(imported.length, 1, "the granted tokens became a managed account");
+  const native = JSON.parse(imported[0]) as Record<string, Record<string, unknown>>;
+  const entry = native["https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828"];
+  assert.equal(entry?.key, "at-dev");
+  assert.equal(entry?.refresh_token, "rt-dev");
+  assert.equal(typeof entry?.expires_at, "string");
+  // NOT auto-seeded: no auth file, no seeded account — seeding stays explicit.
+  assert.equal(h.mgr.status().xai.state, "none");
+  assert.equal(h.mgr.status().accounts.length, 0);
+  assert.equal(h.mgr.status().xai.lastLinkError, null);
 });
 
-test("linkXai: management-API failure surfaces as an upstream result carrying the status", async () => {
+test("linkXai: a start failure surfaces as an upstream result carrying the status", async () => {
   const h = setup();
-  h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
-  await h.mgr.enable();
-  h.setXaiAuthUrl(async () => ({ ok: false, error: "management API responded 500", status: 500 }));
+  await h.mgr.init();
+  h.setXaiAuthUrl(async () => ({ ok: false, error: "xAI device authorization failed: HTTP 500", status: 500 }));
 
   const res = await h.mgr.linkXai();
   assert.equal(res.ok, false);
@@ -2212,67 +2230,27 @@ test("linkXai: management-API failure surfaces as an upstream result carrying th
   assert.equal(h.mgr.status().xai.state, "none", "a failed start leaves no linking session");
 });
 
-test("linkXai: device flow → linking status, then the proxy's auth file completes it", async () => {
+test("linkXai: duplicate attempt while in flight is a conflict; cancel is local-only", async () => {
   const h = setup();
-  h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
-  await h.mgr.enable();
-  h.setXaiAuthUrl(async () => ({
-    ok: true,
-    value: { url: "https://x.ai/device", userCode: "ABCD-EFGH", state: "sess-1", expiresIn: 1800 }
-  }));
-  let polls = 0;
-  h.setXaiPoll(async () => {
-    polls++;
-    if (polls < 2) return { ok: true, value: { status: "wait" } };
-    // The proxy's own goroutine writes the auth file on success.
-    await writeXaiAuth(h.daemonDir, { email: "pilot@example.com" });
-    return { ok: true, value: { status: "ok" } };
-  });
+  await h.mgr.init();
+  h.setXaiAuthUrl(async () => ({ ok: true, value: { ...DEVICE_PROMPT, deviceCode: "dev-9" } }));
+  h.setXaiPoll(async () => ({ status: "wait" }));
 
-  const started = await h.mgr.linkXai();
-  assert.equal(started.ok, true);
-  assert.equal(started.ok && started.link.url, "https://x.ai/device");
-  assert.equal(started.ok && started.link.userCode, "ABCD-EFGH");
-  const linking = h.mgr.status().xai;
-  assert.equal(linking.state, "linking");
-  assert.equal(linking.link?.url, "https://x.ai/device");
-
-  await waitFor(() => h.mgr.status().xai.state === "linked", "the link to complete");
-  const linked = h.mgr.status().xai;
-  assert.equal(linked.email, "pilot@example.com");
-  assert.equal(linked.link, null, "the in-flight prompt is cleared");
-  // Second link attempt while one is in flight is a 409-shaped conflict.
+  assert.equal((await h.mgr.linkXai()).ok, true);
   const duplicate = await h.mgr.linkXai();
   assert.equal(duplicate.ok, false);
   assert.equal(duplicate.ok === false && duplicate.code, "conflict");
-});
 
-test("linkXai: an in-flight session is cancelled through the management API", async () => {
-  const h = setup();
-  h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
-  await h.mgr.enable();
-  h.setXaiAuthUrl(async () => ({
-    ok: true,
-    value: { url: "https://x.ai/device", userCode: "ABCD-EFGH", state: "sess-9", expiresIn: 1800 }
-  }));
-  h.setXaiPoll(async () => ({ ok: true, value: { status: "wait" } }));
-
-  assert.equal((await h.mgr.linkXai()).ok, true);
   const cancelled = await h.mgr.cancelOrUnlinkXai({});
   assert.equal(cancelled.ok, true);
-  assert.ok(h.xaiCalls.cancel.includes("sess-9"), "the proxy-side session is dropped");
   assert.equal(h.mgr.status().xai.state, "none");
 });
 
 test("linkXai: a failed verdict lands on xai.lastLinkError and a fresh attempt clears it", async () => {
   const h = setup();
-  h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
-  await h.mgr.enable();
-  h.setXaiAuthUrl(async () => ({
-    ok: true,
-    value: { url: "https://x.ai/device", userCode: "ABCD-EFGH", state: "sess-2", expiresIn: 1800 }
-  }));
-  h.setXaiPoll(async () => ({ ok: true, value: { status: "error", error: "authorization denied" } }));
+  await h.mgr.init();
+  h.setXaiAuthUrl(async () => ({ ok: true, value: { ...DEVICE_PROMPT, deviceCode: "dev-2" } }));
+  h.setXaiPoll(async () => ({ status: "error", error: "authorization denied" }));
 
   assert.equal((await h.mgr.linkXai()).ok, true);
   await waitFor(() => h.mgr.status().xai.state === "none", "the failed flow to settle");
@@ -2280,7 +2258,6 @@ test("linkXai: a failed verdict lands on xai.lastLinkError and a fresh attempt c
   // every setState — incl. the periodic becomeHealthy — wipes within a poll).
   assert.equal(h.mgr.status().xai.lastLinkError, "authorization denied");
   assert.equal(h.mgr.status().detail, null, "proxy health detail is not abused for the verdict");
-  assert.ok(h.xaiCalls.cancel.includes("sess-2"), "the proxy-side session is dropped");
 
   assert.equal((await h.mgr.linkXai()).ok, true);
   assert.equal(h.mgr.status().xai.lastLinkError, null, "a fresh attempt supersedes the verdict");

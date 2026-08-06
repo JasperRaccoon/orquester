@@ -3,15 +3,11 @@ import { join } from "node:path";
 
 /**
  * xAI (Grok) support for the managed proxy: the auth-dir view Orquester DERIVES
- * (CLIProxyAPI owns the tokens and their refresh — nothing here is persisted by
- * us) plus a thin client for the proxy's loopback management API, which drives
- * the RFC 8628 device-code login end to end (no callback, no browser on the box).
- * Kept out of `cliproxy.ts` so the manager only carries wiring.
+ * (CLIProxyAPI owns the seeded tokens and their refresh — nothing here is
+ * persisted by us). Kept out of `cliproxy.ts` so the manager only carries
+ * wiring. The device-code login lives in grok-device-auth.ts (direct against
+ * auth.x.ai, proxy-independent).
  */
-
-/** Per-request bound on every management call — the proxy is on loopback, so a
- *  slow answer means it is wedged, not far away. */
-const MANAGEMENT_TIMEOUT_MS = 5000;
 
 /** Upstream 429 marker for a spent SuperGrok subscription. CLIProxyAPI then
  *  silently cools that account for 24 h; there is no quota readout to poll. */
@@ -165,83 +161,5 @@ export async function scanXaiQuotaError(logsDir: string): Promise<string | null>
   return found ? found.slice(0, 100) : null;
 }
 
-/** `GET /v0/management/xai-auth-url` — the device-code prompt to show the user. */
-export interface XaiAuthUrl {
-  url: string;
-  userCode: string;
-  /** Opaque proxy-side session id; every later call keys on it. */
-  state: string;
-  /** Seconds the device code stays valid (proxy default: 1800). */
-  expiresIn: number;
-}
-
-export type XaiAuthPollStatus = { status: "wait" | "ok" | "error"; error?: string };
-
-/** `ok:false` carries the upstream HTTP status when there was one, so the route
- *  can surface a 502 with the real cause (mirrors the router-catalog contract). */
-export type XaiManagementResult<T> = { ok: true; value: T } | { ok: false; error: string; status?: number };
-
-/**
- * The proxy's loopback management API. Injected into the manager so tests never
- * touch the network; production uses {@link httpXaiManagementApi}.
- */
-export interface XaiManagementApi {
-  requestAuthUrl(port: number, secret: string): Promise<XaiManagementResult<XaiAuthUrl>>;
-  pollAuthStatus(port: number, secret: string, state: string): Promise<XaiManagementResult<XaiAuthPollStatus>>;
-  /** Best-effort abandonment of a device-code session; never throws. */
-  cancelSession(port: number, secret: string, state: string): Promise<void>;
-}
-
-async function managementFetch(
-  port: number,
-  secret: string,
-  path: string,
-  method: "GET" | "DELETE"
-): Promise<XaiManagementResult<unknown>> {
-  try {
-    const res = await fetch(`http://127.0.0.1:${port}/v0/management${path}`, {
-      method,
-      headers: { Authorization: `Bearer ${secret}` },
-      signal: AbortSignal.timeout(MANAGEMENT_TIMEOUT_MS)
-    });
-    if (res.status < 200 || res.status >= 300) {
-      return { ok: false, error: `management API responded ${res.status}`, status: res.status };
-    }
-    return { ok: true, value: await res.json().catch(() => null) };
-  } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) };
-  }
-}
-
-/** Production management client. Loopback + bearer management secret only. */
-export const httpXaiManagementApi: XaiManagementApi = {
-  async requestAuthUrl(port, secret) {
-    const res = await managementFetch(port, secret, "/xai-auth-url", "GET");
-    if (!res.ok) return res;
-    const body = (res.value ?? {}) as Record<string, unknown>;
-    const url = typeof body.url === "string" ? body.url : "";
-    const userCode = typeof body.user_code === "string" ? body.user_code : "";
-    const state = typeof body.state === "string" ? body.state : "";
-    if (!url || !state) return { ok: false, error: "management API returned no device-code prompt" };
-    const expiresIn = typeof body.expires_in === "number" && body.expires_in > 0 ? body.expires_in : 1800;
-    return { ok: true, value: { url, userCode, state, expiresIn } };
-  },
-  async pollAuthStatus(port, secret, state) {
-    const res = await managementFetch(
-      port,
-      secret,
-      `/get-auth-status?state=${encodeURIComponent(state)}`,
-      "GET"
-    );
-    if (!res.ok) return res;
-    const body = (res.value ?? {}) as Record<string, unknown>;
-    const status = typeof body.status === "string" ? body.status : "";
-    const error = typeof body.error === "string" && body.error ? body.error : undefined;
-    if (status === "ok" || status === "error") return { ok: true, value: { status, ...(error ? { error } : {}) } };
-    // Anything unrecognized keeps the flow waiting; the expiry bound ends it.
-    return { ok: true, value: { status: "wait" } };
-  },
-  async cancelSession(port, secret, state) {
-    await managementFetch(port, secret, `/oauth-session?state=${encodeURIComponent(state)}`, "DELETE");
-  }
-};
+// (The device-code login used to ride the proxy's management API from here;
+// it now goes DIRECTLY to auth.x.ai — see grok-device-auth.ts.)

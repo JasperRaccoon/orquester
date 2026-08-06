@@ -50,13 +50,17 @@ import {
 import { grokAuthEntry } from "./agent-account-identity.ts";
 import {
   type XaiAuthFile,
-  type XaiManagementApi,
   deriveXaiAccount,
-  httpXaiManagementApi,
   removeXaiAuthFiles,
   scanXaiAuthFiles,
   scanXaiQuotaError
 } from "./cliproxy-xai.ts";
+import {
+  type GrokDeviceAuth,
+  type GrokDeviceTokens,
+  grokAuthJsonFromDeviceTokens,
+  httpGrokDeviceAuth
+} from "./grok-device-auth.ts";
 import type { RegistryService } from "./registry.ts";
 import { SERVICE_SESSION_PREFIX, type Tmux } from "./tmux.ts";
 
@@ -180,9 +184,9 @@ export interface CliProxyAdapters {
   /** Path of a managed account's on-disk credential (claude `.credentials.json` /
    *  codex/grok `auth.json`) — the write-back target for two-way credential sync. */
   managedCredentialPath?(provider: CliProxyProviderId, accountId: string): string;
-  /** The proxy's loopback management API, which drives the xAI device-code login.
-   *  Defaults to the real HTTP client; tests inject a fake. */
-  xaiManagement?: XaiManagementApi;
+  /** The direct auth.x.ai device-code client backing the Grok account link
+   *  (proxy-independent). Defaults to the real HTTP client; tests inject a fake. */
+  grokDeviceAuth?: GrokDeviceAuth;
   /**
    * Import a grok-CLI-shaped `auth.json` blob as a managed grok account
    * (production: `AgentAccountsService.importAccount`). Backs device-link
@@ -243,7 +247,13 @@ export class CliProxyManager {
    * proxy-side session expires after 30 min anyway (spec §B.1).
    */
   private xaiFiles: XaiAuthFile[] = [];
-  private xaiLink: { link: CliProxyXaiLink; sessionState: string; expiresAtMs: number } | null = null;
+  private xaiLink: {
+    link: CliProxyXaiLink;
+    /** The RFC 8628 device_code — the polling handle (kept off the wire). */
+    sessionState: string;
+    expiresAtMs: number;
+    intervalMs: number;
+  } | null = null;
   private xaiLastQuotaError: string | null = null;
   private xaiLastLinkError: string | null = null;
 
@@ -698,27 +708,21 @@ export class CliProxyManager {
   }
 
   /**
-   * Start the xAI (Grok) device-code link (spec §B.2). Requires a running proxy —
-   * the flow is driven entirely through ITS management API, and the proxy's own
-   * goroutine performs the token exchange and writes `auth/xai-<email>.json`. The
-   * returned `url`/`userCode` are user-facing (they must be typed into a browser),
-   * never secrets. A background poll watches for the verdict; nothing here waits
-   * on the user, so the transition queue is released immediately.
+   * Start the xAI (Grok) device-code link. The daemon drives the RFC 8628 flow
+   * DIRECTLY against auth.x.ai (same endpoints/client as `grok login
+   * --device-auth`), so it works with the model proxy off — the proxy was only
+   * ever a middleman here. On approval the tokens become a managed grok
+   * account; seeding to the proxy stays a separate, explicit step. The returned
+   * `url`/`userCode` are user-facing (they must be typed into a browser), never
+   * secrets. A background poll watches for the verdict; nothing here waits on
+   * the user, so the transition queue is released immediately.
    */
   linkXai(): Promise<XaiLinkResult> {
     return this.transition(async () => {
       if (this.xaiLink) {
         return { ok: false, code: "conflict", error: "a Grok link is already in progress" };
       }
-      await this.refreshXai();
-      if (this.xaiLinked()) {
-        return { ok: false, code: "conflict", error: "a Grok account is already linked" };
-      }
-      // Same precondition as account seeding: no proxy, no management API.
-      if ((this.st !== "healthy" && this.st !== "degraded") || !this.secrets) {
-        return { ok: false, code: "conflict", error: "model proxy must be running" };
-      }
-      const res = await this.xaiApi().requestAuthUrl(this.state.port, this.secrets.managementSecret);
+      const res = await this.deviceAuth().start();
       if (!res.ok) {
         return { ok: false, code: "upstream", error: res.error, ...(res.status ? { status: res.status } : {}) };
       }
@@ -728,11 +732,16 @@ export class CliProxyManager {
         userCode: res.value.userCode,
         expiresAt: new Date(expiresAtMs).toISOString()
       };
-      this.xaiLink = { link, sessionState: res.value.state, expiresAtMs };
+      this.xaiLink = {
+        link,
+        sessionState: res.value.deviceCode,
+        expiresAtMs,
+        intervalMs: Math.max(res.value.intervalSec * 1000, XAI_POLL_INTERVAL_MS)
+      };
       // A fresh attempt supersedes the previous verdict.
       this.xaiLastLinkError = null;
       this.broadcaster.publish("cliproxy", "cliproxy.changed", this.status());
-      void this.pollXaiLink(res.value.state, res.value.expiresIn);
+      void this.pollXaiLink(res.value.deviceCode, res.value.expiresIn);
       return { ok: true, link };
     });
   }
@@ -749,13 +758,9 @@ export class CliProxyManager {
     return this.transition(async () => {
       const pending = this.xaiLink;
       if (pending) {
+        // Abandoning is purely local: the device code simply expires on the
+        // authorization server (there is no proxy-side session anymore).
         this.xaiLink = null;
-        // Always tell the proxy to drop the abandoned session (spec §B.6).
-        if (this.secrets) {
-          await this.xaiApi()
-            .cancelSession(this.state.port, this.secrets.managementSecret, pending.sessionState)
-            .catch(() => undefined);
-        }
         this.broadcaster.publish("cliproxy", "cliproxy.changed", this.status());
         return { ok: true, affectedSessions: 0 };
       }
@@ -826,8 +831,8 @@ export class CliProxyManager {
     if (!valid(this.state.backgroundModel)) this.state.backgroundModel = FALLBACK_BACKGROUND_MODEL;
   }
 
-  private xaiApi(): XaiManagementApi {
-    return this.adapters.xaiManagement ?? httpXaiManagementApi;
+  private deviceAuth(): GrokDeviceAuth {
+    return this.adapters.grokDeviceAuth ?? httpGrokDeviceAuth;
   }
 
   /** Wire projection of the xAI account: derived auth-dir view, with the
@@ -950,75 +955,73 @@ export class CliProxyManager {
   }
 
   /**
-   * Watch a device-code session to its verdict. Runs OUTSIDE the transition queue
-   * (it can last the full 30-minute code lifetime) and re-enters it only to apply
-   * the outcome. Bounded by both the code's expiry and an attempt cap, so neither
-   * a frozen clock (tests) nor a management API stuck on `wait` can spin forever.
+   * Watch a device-code grant to its verdict, polling auth.x.ai's token
+   * endpoint directly. Runs OUTSIDE the transition queue (it can last the full
+   * 30-minute code lifetime) and re-enters it only to apply the outcome.
+   * Bounded by both the code's expiry and an attempt cap, so neither a frozen
+   * clock (tests) nor an endpoint stuck on `authorization_pending` can spin
+   * forever. Honors RFC 8628 `slow_down` by widening the poll interval.
    */
-  private async pollXaiLink(sessionState: string, expiresIn: number): Promise<void> {
-    const maxAttempts = Math.ceil((expiresIn * 1000) / XAI_POLL_INTERVAL_MS) + 1;
+  private async pollXaiLink(deviceCode: string, expiresIn: number): Promise<void> {
+    let intervalMs = this.xaiLink?.intervalMs ?? XAI_POLL_INTERVAL_MS;
+    const maxAttempts = Math.ceil((expiresIn * 1000) / intervalMs) + 1;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      await this.sleep(XAI_POLL_INTERVAL_MS);
+      await this.sleep(intervalMs);
       const current = this.xaiLink;
       // Cancelled, superseded, or the daemon moved on — this poll is stale.
-      if (!current || current.sessionState !== sessionState) return;
+      if (!current || current.sessionState !== deviceCode) return;
       if (this.adapters.now() >= current.expiresAtMs) break;
-      if (!this.secrets) break;
-      const res = await this.xaiApi().pollAuthStatus(
-        this.state.port,
-        this.secrets.managementSecret,
-        sessionState
-      );
-      // A transient management error is not a verdict — keep waiting.
-      if (!res.ok) continue;
-      if (res.value.status === "wait") continue;
-      if (res.value.status === "ok") {
-        await this.completeXaiLink(sessionState);
+      const res = await this.deviceAuth().poll(deviceCode);
+      if (res.status === "wait") {
+        if (res.slowDown) intervalMs += 5000; // RFC 8628 §3.5
+        continue;
+      }
+      if (res.status === "ok") {
+        await this.completeXaiLink(deviceCode, res.tokens);
         return;
       }
-      await this.endXaiLink(sessionState, res.value.error ?? "authorization failed");
+      await this.endXaiLink(deviceCode, res.error || "authorization failed");
       return;
     }
-    await this.endXaiLink(sessionState, "device authorization expired");
+    await this.endXaiLink(deviceCode, "device authorization expired");
   }
 
-  /** Device flow succeeded: the proxy wrote the auth file itself, so all that is
-   *  left is to re-derive, converge and announce. */
-  private completeXaiLink(sessionState: string): Promise<void> {
+  /** Device flow succeeded: the granted tokens become a managed grok account
+   *  (native auth.json shape). Deliberately NOT auto-seeded — the proxy may be
+   *  off entirely; seeding stays the explicit Model-proxy step, like
+   *  claude/codex. */
+  private completeXaiLink(deviceCode: string, tokens: GrokDeviceTokens): Promise<void> {
     return this.transition(async () => {
-      if (this.xaiLink?.sessionState !== sessionState) return;
+      if (this.xaiLink?.sessionState !== deviceCode) return;
       this.xaiLink = null;
-      this.xaiLastLinkError = null;
       try {
-        await this.refreshXai();
-        // The fresh login becomes a managed grok account + a seeded credential —
-        // one link, both surfaces (Accounts tab AND the proxy), like the
-        // pre-managed-accounts behavior plus the account row.
-        await this.adoptOrphanXaiFiles();
-        await this.afterXaiMutation();
+        if (!this.adapters.importGrokAccount) {
+          this.xaiLastLinkError = "account import is not available on this daemon";
+          return;
+        }
+        const native = grokAuthJsonFromDeviceTokens(tokens, this.adapters.now());
+        const imported = await this.adapters.importGrokAccount(JSON.stringify(native));
+        this.xaiLastLinkError = imported ? null : "importing the linked account failed";
       } catch (error) {
         // Never let a background poll throw out of the queue.
         console.error("cliproxy xai link finalization failed", error);
+        this.xaiLastLinkError = error instanceof Error ? error.message : String(error);
+      } finally {
         this.broadcaster.publish("cliproxy", "cliproxy.changed", this.status());
       }
     });
   }
 
   /** Device flow failed or expired: drop the session (status falls back to the
-   *  derived state) and tell the proxy to forget it too. */
-  private endXaiLink(sessionState: string, reason: string): Promise<void> {
+   *  derived state). The device code needs no server-side cleanup — it expires. */
+  private endXaiLink(deviceCode: string, reason: string): Promise<void> {
     return this.transition(async () => {
-      if (this.xaiLink?.sessionState !== sessionState) return;
+      if (this.xaiLink?.sessionState !== deviceCode) return;
       this.xaiLink = null;
       // Surfaced on the xai block itself: the shared proxy-health `detail` is
       // wiped by every setState (incl. the ~15 s becomeHealthy), so a verdict
       // parked there would vanish before the user ever saw it.
       this.xaiLastLinkError = reason;
-      if (this.secrets) {
-        await this.xaiApi()
-          .cancelSession(this.state.port, this.secrets.managementSecret, sessionState)
-          .catch(() => undefined);
-      }
       this.broadcaster.publish("cliproxy", "cliproxy.changed", this.status());
     });
   }

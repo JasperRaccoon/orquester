@@ -359,14 +359,18 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
   - **Grok is a third MANAGED ACCOUNT family (`agent: "grok"`) — same pipeline as
     claude/codex.** Accounts live in the agent-accounts store (`agent-accounts/grok/<id>/home`,
     credential = the grok CLI's native `auth.json`, the `"<issuer>::<client>"` keyed map);
-    acquired by **import** (upload `~/.grok/auth.json`, auto-detected) or by the **device-code
-    link** in Settings → Accounts — an RFC 8628 flow the daemon drives through the proxy's
-    management API (`GET /v0/management/xai-auth-url` → poll `get-auth-status` → `DELETE
-    /oauth-session`; bearer = `secrets.managementSecret`). On approval the proxy-written
-    `auth/xai-<email>.json` is **adopted** (`adoptOrphanXaiFiles`, also the boot migration for
-    pre-managed deployments): converted to native shape via `grokAuthJsonFromStorage`, imported
-    as a managed account, renamed to the seeded filename `xai-acc<hex>.json` and marked
-    `proxyOwned`. Grok Build sessions get account chips → `GROK_HOME=<home>` (unset
+    acquired three ways, all in Settings → Accounts: **import** (upload `~/.grok/auth.json`,
+    auto-detected), **import the server's own login** (`fromSystem:"grok"` on the import route —
+    reads the FIXED `$GROK_HOME/auth.json` path server-side, so it is remote-transport-safe
+    unlike arbitrary `from` paths), or the **device-code link** — an RFC 8628 flow the daemon
+    drives DIRECTLY against `auth.x.ai` (`/oauth2/device/code` → poll `/oauth2/token`,
+    grok-CLI client id, scope incl. `grok-cli:access`; `grok-device-auth.ts`), so it is
+    **proxy-independent** and on approval the tokens become a managed account
+    (`grokAuthJsonFromDeviceTokens`) — deliberately NOT auto-seeded. Separately,
+    `adoptOrphanXaiFiles` remains the boot migration for pre-managed deployments: an unbacked
+    proxy-written `auth/xai-<email>.json` is converted to native shape
+    (`grokAuthJsonFromStorage`), imported, renamed to the seeded filename `xai-acc<hex>.json`
+    and marked `proxyOwned`. Grok Build sessions get account chips → `GROK_HOME=<home>` (unset
     `XAI_API_KEY`); idle managed accounts are refreshed by `refreshGrokToken` (standard OIDC
     refresh against `auth.x.ai/oauth2/token`, client id shared with seed conversion). **Seeding
     to the proxy is `provider:"grok"`** on the normal seed/unseed routes:

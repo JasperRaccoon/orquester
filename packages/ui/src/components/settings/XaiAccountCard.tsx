@@ -12,11 +12,12 @@ const formatStamp = (iso: string | null): string => {
 /**
  * The grok-specific account acquisition path: unlike Claude/Codex there is a
  * device-code login as an alternative to importing `~/.grok/auth.json`. The
- * daemon drives the RFC 8628 flow through the model proxy's management API; on
- * approval the credential is adopted as a managed grok account (it appears in
- * the list above via `agent-accounts.changed`) AND seeded into the proxy.
- * Nothing shown here is a secret — the verification URL and user code are meant
- * to be read out loud.
+ * daemon drives the RFC 8628 flow directly against auth.x.ai (no model proxy
+ * involved); on approval the tokens become a managed grok account (it appears
+ * in the list above via `agent-accounts.changed`) — seeding it to the proxy
+ * stays an explicit step in Settings → Model proxy, like Claude/Codex. Nothing
+ * shown here is a secret — the verification URL and user code are meant to be
+ * read out loud.
  */
 export const GrokDeviceLink: React.FC = () => {
   const api = useAppStore((s) => s.api);
@@ -50,59 +51,42 @@ export const GrokDeviceLink: React.FC = () => {
   const xai = status?.xai;
   const linking = xai?.state === "linking";
   const link = xai?.link ?? null;
-  // degraded still has a reachable management API — the daemon accepts links there too.
-  const proxyRunning = status?.state === "healthy" || status?.state === "degraded";
-  // The proxy holds one xai credential slot: while a seeded grok credential
-  // exists (linked/expired), a second device flow is refused by the daemon.
-  const alreadyLinked = xai?.state === "linked" || xai?.state === "expired";
-
-  const disabledReason = !proxyRunning
-    ? "Device-code linking runs through the model proxy — enable it in Settings → Model proxy, or use one of the import paths instead."
-    : alreadyLinked
-      ? "A Grok credential is already seeded in the model proxy."
-      : undefined;
 
   return (
     <div className="space-y-2">
       {!linking && (
-        <>
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={busy || !proxyRunning || alreadyLinked}
-              title={disabledReason}
-              onClick={() => {
-                void run(async () => {
-                  if (!api) throw new Error("not connected");
-                  await api.linkCliProxyXai();
-                });
-              }}
-            >
-              <Link2 size={13} /> Link with device code…
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={busy}
-              title="Adopt the login a terminal `grok login` wrote to ~/.grok/auth.json on the server"
-              onClick={() => {
-                void run(async () => {
-                  if (!api) throw new Error("not connected");
-                  await api.importAgentAccount({ fromSystem: "grok" });
-                  await loadAgentAccounts();
-                });
-              }}
-            >
-              <Download size={13} /> Import the server's grok login
-            </Button>
-            <p className="text-[11px] text-neutral-600">or upload an auth.json below.</p>
-          </div>
-          {/* A disabled button's tooltip is easy to miss — say it out loud. */}
-          {disabledReason && !alreadyLinked && (
-            <p className="text-[11px] text-neutral-500">{disabledReason}</p>
-          )}
-        </>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={busy}
+            title="Sign in on accounts.x.ai with a one-time code — works without the model proxy"
+            onClick={() => {
+              void run(async () => {
+                if (!api) throw new Error("not connected");
+                await api.linkCliProxyXai();
+              });
+            }}
+          >
+            <Link2 size={13} /> Link with device code…
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={busy}
+            title="Adopt the login a terminal `grok login` wrote to ~/.grok/auth.json on the server"
+            onClick={() => {
+              void run(async () => {
+                if (!api) throw new Error("not connected");
+                await api.importAgentAccount({ fromSystem: "grok" });
+                await loadAgentAccounts();
+              });
+            }}
+          >
+            <Download size={13} /> Import the server's grok login
+          </Button>
+          <p className="text-[11px] text-neutral-600">or upload an auth.json below.</p>
+        </div>
       )}
 
       {linking && (
