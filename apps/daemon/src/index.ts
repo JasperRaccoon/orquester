@@ -3125,6 +3125,22 @@ export function createServer(
       });
     }
     try {
+      // `fromSystem: "grok"` adopts the host's own terminal `grok login` — a
+      // FIXED server-side path (no traversal surface), so it stays allowed on
+      // the remote transport where arbitrary `from` paths are refused above.
+      if (body.fromSystem === "grok") {
+        const from = join(process.env.GROK_HOME || join(resolved.vars.userhome, ".grok"), "auth.json");
+        try {
+          return await agentAccounts.importAccount({ from, label: body.label });
+        } catch (error) {
+          if ((error as { code?: string }).code === "ENOENT") {
+            return reply.code(400).send({
+              error: "No grok login found on the server — run `grok login` in a terminal first."
+            });
+          }
+          throw error;
+        }
+      }
       return await agentAccounts.importAccount(body);
     } catch (error) {
       if (error instanceof AgentAccountError) return reply.code(400).send({ error: error.message });

@@ -801,6 +801,14 @@ export interface AgentAccountsResponse {
 export interface ImportAgentAccountRequest {
   content?: string;
   from?: string;
+  /**
+   * Import from a well-known credential file on the daemon host instead of an
+   * upload: `"grok"` reads `$GROK_HOME/auth.json` (else `~/.grok/auth.json`) —
+   * the file a terminal `grok login` writes. Unlike `from` (arbitrary path,
+   * unix-socket-only) this is a fixed server-side path, so it is allowed on the
+   * remote transport; no credential material crosses the wire either way.
+   */
+  fromSystem?: "grok";
   label?: string;
 }
 

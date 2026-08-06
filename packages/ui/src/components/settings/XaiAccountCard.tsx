@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { ExternalLink, Link2 } from "lucide-react";
+import { Download, ExternalLink, Link2 } from "lucide-react";
 import { Button } from "../ui";
 import { useAppStore } from "../../store/app";
 
@@ -22,6 +22,7 @@ export const GrokDeviceLink: React.FC = () => {
   const api = useAppStore((s) => s.api);
   const status = useAppStore((s) => s.cliproxy);
   const loadCliProxy = useAppStore((s) => s.loadCliProxy);
+  const loadAgentAccounts = useAppStore((s) => s.loadAgentAccounts);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -56,31 +57,52 @@ export const GrokDeviceLink: React.FC = () => {
   const alreadyLinked = xai?.state === "linked" || xai?.state === "expired";
 
   const disabledReason = !proxyRunning
-    ? "Start the model proxy first — the device-code login runs through it"
+    ? "Device-code linking runs through the model proxy — enable it in Settings → Model proxy, or use one of the import paths instead."
     : alreadyLinked
-      ? "A Grok credential is already seeded in the model proxy"
+      ? "A Grok credential is already seeded in the model proxy."
       : undefined;
 
   return (
     <div className="space-y-2">
       {!linking && (
-        <div className="flex items-center gap-2">
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={busy || !proxyRunning || alreadyLinked}
-            title={disabledReason}
-            onClick={() => {
-              void run(async () => {
-                if (!api) throw new Error("not connected");
-                await api.linkCliProxyXai();
-              });
-            }}
-          >
-            <Link2 size={13} /> Link with device code…
-          </Button>
-          <p className="text-[11px] text-neutral-600">or import ~/.grok/auth.json below.</p>
-        </div>
+        <>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={busy || !proxyRunning || alreadyLinked}
+              title={disabledReason}
+              onClick={() => {
+                void run(async () => {
+                  if (!api) throw new Error("not connected");
+                  await api.linkCliProxyXai();
+                });
+              }}
+            >
+              <Link2 size={13} /> Link with device code…
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={busy}
+              title="Adopt the login a terminal `grok login` wrote to ~/.grok/auth.json on the server"
+              onClick={() => {
+                void run(async () => {
+                  if (!api) throw new Error("not connected");
+                  await api.importAgentAccount({ fromSystem: "grok" });
+                  await loadAgentAccounts();
+                });
+              }}
+            >
+              <Download size={13} /> Import the server's grok login
+            </Button>
+            <p className="text-[11px] text-neutral-600">or upload an auth.json below.</p>
+          </div>
+          {/* A disabled button's tooltip is easy to miss — say it out loud. */}
+          {disabledReason && !alreadyLinked && (
+            <p className="text-[11px] text-neutral-500">{disabledReason}</p>
+          )}
+        </>
       )}
 
       {linking && (
