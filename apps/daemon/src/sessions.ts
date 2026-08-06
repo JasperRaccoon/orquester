@@ -525,7 +525,11 @@ export class SessionManager implements ISessionManager {
   input(id: string, data: string): void {
     const session = this.sessions.get(id);
     session?.tracker.noteInput();
-    session?.pty?.write(data);
+    try {
+      session?.pty?.write(data);
+    } catch {
+      // Best-effort: the PTY can be freshly dead (exit in flight) — see resize().
+    }
   }
 
   resize(id: string, cols: number, rows: number): void {
@@ -533,7 +537,14 @@ export class SessionManager implements ISessionManager {
     if (session?.pty && cols > 0 && rows > 0) {
       // Resizing the attach PTY drives tmux (window-size latest); tmux then
       // resizes the pane the command sees.
-      session.pty.resize(cols, rows);
+      try {
+        session.pty.resize(cols, rows);
+      } catch {
+        // ioctl ENOTTY: the attach PTY died (command exited) but onExit hasn't
+        // cleared session.pty yet. The raw /ws message handler has no Fastify
+        // error net, so letting this throw would kill the whole daemon.
+        return;
+      }
       if (session.summary.cols !== cols || session.summary.rows !== rows) {
         session.summary.cols = cols;
         session.summary.rows = rows;
@@ -1022,13 +1033,22 @@ export class LocalSessionManager implements ISessionManager {
   input(id: string, data: string): void {
     const session = this.sessions.get(id);
     session?.tracker.noteInput();
-    session?.pty?.write(data);
+    try {
+      session?.pty?.write(data);
+    } catch {
+      // Best-effort: the PTY can be freshly dead (exit in flight) — see resize().
+    }
   }
 
   resize(id: string, cols: number, rows: number): void {
     const session = this.sessions.get(id);
     if (session?.pty && cols > 0 && rows > 0) {
-      session.pty.resize(cols, rows);
+      try {
+        session.pty.resize(cols, rows);
+      } catch {
+        // ioctl ENOTTY on a just-exited PTY — never fatal (see SessionManager.resize).
+        return;
+      }
       session.summary.cols = cols;
       session.summary.rows = rows;
     }
