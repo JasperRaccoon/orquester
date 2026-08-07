@@ -216,17 +216,17 @@ const Bar: React.FC<{ label: string; window: UsageWindow; muted: boolean }> = ({
 /**
  * Render only the windows that have a reading. Claude (5h+week) shows both;
  * week-only Codex/Grok show a single Week bar — no empty "5h —" row.
+ * Labels are always compact ("5h"/"Week") so single-agent and multi-account
+ * rows share the same alignment as the Claude/Codex account cards.
  */
 const WindowBars: React.FC<{
   session: UsageWindow | null;
   weekly: UsageWindow | null;
   muted: boolean;
-  /** Compact multi-account labels ("5h"/"Week") vs single-agent long form. */
-  compact?: boolean;
-}> = ({ session, weekly, muted, compact }) => (
+}> = ({ session, weekly, muted }) => (
   <>
-    {session ? <Bar label={compact ? "5h" : "Current session (5 hours)"} window={session} muted={muted} /> : null}
-    {weekly ? <Bar label={compact ? "Week" : "Current week"} window={weekly} muted={muted} /> : null}
+    {session ? <Bar label="5h" window={session} muted={muted} /> : null}
+    {weekly ? <Bar label="Week" window={weekly} muted={muted} /> : null}
   </>
 );
 
@@ -241,7 +241,7 @@ const AccountRow: React.FC<{ account: UsageAccount }> = ({ account }) => {
         <p className="truncate text-xs font-medium text-neutral-300">{shortAccountLabel(account.label) || account.id}</p>
         {account.plan && <span className="shrink-0 text-[10px] text-neutral-500">{account.plan}</span>}
       </div>
-      <WindowBars session={account.session} weekly={account.weekly} muted={muted} compact />
+      <WindowBars session={account.session} weekly={account.weekly} muted={muted} />
     </div>
   );
 };
@@ -279,7 +279,10 @@ const AgentSection: React.FC<{ agent: AgentUsage }> = ({ agent }) => {
           {agent.system && <AccountRow key={agent.system.id} account={agent.system} />}
         </>
       ) : (
-        <WindowBars session={agent.session} weekly={agent.weekly} muted={muted} />
+        /* Same card chrome as AccountRow so week-only agents align with Claude/Codex. */
+        <div className="mt-1.5 rounded-md bg-neutral-900/60 px-2 py-1.5">
+          <WindowBars session={agent.session} weekly={agent.weekly} muted={muted} />
+        </div>
       )}
     </div>
   );

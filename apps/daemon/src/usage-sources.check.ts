@@ -166,6 +166,10 @@ async function grokTests() {
   assert.equal(g1.id, "grok");
   assert.equal(g1.weekly?.percent, 22.4);
   assert.equal(g1.session, null);
+  // Email from the proxy file becomes a labeled account row (matches Claude/Codex panel).
+  assert.equal(g1.accounts?.length, 1);
+  assert.equal(g1.accounts?.[0].label, "user@example.com");
+  assert.equal(g1.accounts?.[0].weekly?.percent, 22.4);
   assert.ok(seen[0].url.includes("/billing"), "goes straight to billing when the file carries a user id");
   assert.equal(seen[0].headers["x-userid"], "uid-1");
   assert.equal(seen[0].headers["x-grok-client-identifier"], "grok-shell");
@@ -237,7 +241,34 @@ async function grokTests() {
   assert.ok(cliSeen[0].includes("/user"), "missing user id is resolved via /user first");
   await cliSrc();
   assert.equal(cliSeen.filter((u) => u.includes("/user")).length, 1, "resolved user id is cached");
+
+  // Per-account poll: authFile pins a managed home and surfaces its email label.
+  const managedHome = await mkdtemp(join(tmpdir(), "usage-grok-acct-"));
+  const managedAuth = join(managedHome, "auth.json");
+  await writeFile(
+    managedAuth,
+    JSON.stringify({
+      "https://auth.x.ai::client-1": {
+        key: "MGMT-TOK",
+        auth_mode: "oidc",
+        email: "managed@example.com",
+        user_id: "uid-m",
+        expires_at: "2026-07-07T09:00:00Z"
+      }
+    })
+  );
+  const mSrc = createGrokSource({
+    authDir: join(managedHome, "no-proxy"),
+    grokHome: join(managedHome, "no-cli"),
+    authFile: managedAuth,
+    now,
+    fetchImpl: async () => billing(41)
+  });
+  const m1 = await mSrc();
+  assert.equal(m1?.weekly?.percent, 41);
+  assert.equal(m1?.accounts?.[0].label, "managed@example.com");
 }
+
 
 await claudeTests();
 await codexTests();

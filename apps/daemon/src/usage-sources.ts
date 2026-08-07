@@ -3,7 +3,7 @@ import { join } from "node:path";
 import type { AgentUsage } from "@orquester/api";
 import { type UsagePrefs, parseAppConfig } from "@orquester/config";
 import { claudePlanLabel, currentWindow, findLastCodexTokenCount, parseClaudeUsage, parseCodexUsage, parseCodexWhamUsage, parseGrokBilling } from "./usage-parse";
-import { decodeJwtPayload, parseCodexIdentity } from "./agent-account-identity";
+import { decodeJwtPayload, parseCodexIdentity, parseGrokIdentity } from "./agent-account-identity";
 
 const CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
@@ -107,8 +107,33 @@ export function createClaudeSource(opts: {
 interface GrokCredential {
   token: string;
   userId: string | null;
+  /** Display label (email) when the credential file carries one. */
+  email: string | null;
   /** ms epoch, or null when the file carries no parseable expiry. */
   expiresAtMs: number | null;
+}
+
+async function fromGrokAuthJson(file: string): Promise<GrokCredential | null> {
+  try {
+    const auth = JSON.parse(await readFile(file, "utf8"));
+    if (typeof auth !== "object" || auth === null) return null;
+    // Keyed by issuer::client-id; prefer the auth.x.ai (SuperGrok) entry.
+    const entries = Object.entries(auth as Record<string, any>).filter(
+      ([, v]) => typeof v === "object" && v !== null && typeof v.key === "string" && v.key
+    );
+    const [, acct] = entries.find(([k]) => k.includes("auth.x.ai")) ?? entries[0] ?? [];
+    if (!acct) return null;
+    const exp = typeof acct.expires_at === "string" ? Date.parse(acct.expires_at) : NaN;
+    const idn = parseGrokIdentity(auth);
+    return {
+      token: acct.key,
+      userId: idn.userId ?? (typeof acct.user_id === "string" && acct.user_id ? acct.user_id : null),
+      email: idn.email,
+      expiresAtMs: Number.isFinite(exp) ? exp : null
+    };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -118,15 +143,19 @@ interface GrokCredential {
  *  2. managed grok account homes (`agent-accounts/grok/<id>/home/auth.json`,
  *     freshest by `expires_at` — kept alive by the accounts refresher), else
  *  3. the grok CLI's own `<grokHome>/auth.json` (refreshed whenever the CLI runs).
- * This is the ONE sanctioned reader of xai token material outside the proxy
- * subsystem (see the cliproxy-xai.ts invariant note): the token stays inside
- * this closure and never reaches an AgentUsage payload.
+ * When `authFile` is set, only that managed-home auth.json is read (per-account
+ * poll). This is the ONE sanctioned reader of xai token material outside the
+ * proxy subsystem: the token stays inside this closure and never reaches an
+ * AgentUsage payload.
  */
 async function readGrokCredential(
   authDir: string,
   grokHome: string,
-  managedAuthFiles: readonly string[] = []
+  managedAuthFiles: readonly string[] = [],
+  authFile?: string
 ): Promise<GrokCredential | null> {
+  if (authFile) return fromGrokAuthJson(authFile);
+
   let best: { cred: GrokCredential; expired: number } | null = null;
   try {
     for (const name of await readdir(authDir)) {
@@ -135,9 +164,18 @@ async function readGrokCredential(
         const rec = JSON.parse(await readFile(join(authDir, name), "utf8"));
         if (rec?.type !== "xai" || typeof rec.access_token !== "string" || !rec.access_token) continue;
         const expired = typeof rec.expired === "string" ? Date.parse(rec.expired) : NaN;
+        // Prefer the file's email field; fall back to the xai-<email>.json stem.
+        const stem = name.slice("xai-".length, -".json".length);
+        const email =
+          typeof rec.email === "string" && rec.email
+            ? rec.email
+            : stem.includes("@")
+              ? stem
+              : null;
         const cred: GrokCredential = {
           token: rec.access_token,
           userId: typeof rec.sub === "string" && rec.sub ? rec.sub : null,
+          email,
           expiresAtMs: Number.isFinite(expired) ? expired : null
         };
         if (!best || (Number.isFinite(expired) && expired > best.expired)) {
@@ -152,41 +190,39 @@ async function readGrokCredential(
   }
   if (best) return best.cred;
 
-  const fromAuthJson = async (file: string): Promise<GrokCredential | null> => {
-    try {
-      const auth = JSON.parse(await readFile(file, "utf8"));
-      if (typeof auth === "object" && auth !== null) {
-        // Keyed by issuer::client-id; prefer the auth.x.ai (SuperGrok) entry.
-        const entries = Object.entries(auth as Record<string, any>).filter(
-          ([, v]) => typeof v === "object" && v !== null && typeof v.key === "string" && v.key
-        );
-        const [, acct] = entries.find(([k]) => k.includes("auth.x.ai")) ?? entries[0] ?? [];
-        if (acct) {
-          const exp = typeof acct.expires_at === "string" ? Date.parse(acct.expires_at) : NaN;
-          return {
-            token: acct.key,
-            userId: typeof acct.user_id === "string" && acct.user_id ? acct.user_id : null,
-            expiresAtMs: Number.isFinite(exp) ? exp : null
-          };
-        }
-      }
-    } catch {
-      /* missing/corrupt → try the next store */
-    }
-    return null;
-  };
-
   // Managed account homes: freshest credential wins (mirrors the proxy-dir rule).
+  // Used only for the System aggregate when managed files are still in the chain
+  // (no per-account poll); multi-account wiring passes authFile instead.
   let bestManaged: GrokCredential | null = null;
   for (const file of managedAuthFiles) {
-    const cred = await fromAuthJson(file);
+    const cred = await fromGrokAuthJson(file);
     if (cred && (!bestManaged || (cred.expiresAtMs ?? 0) > (bestManaged.expiresAtMs ?? 0))) {
       bestManaged = cred;
     }
   }
   if (bestManaged) return bestManaged;
 
-  return fromAuthJson(join(grokHome, "auth.json"));
+  return fromGrokAuthJson(join(grokHome, "auth.json"));
+}
+
+/** Attach a single labeled account row so the usage panel matches Claude/Codex. */
+function withGrokAccountLabel(agent: AgentUsage, email: string | null): AgentUsage {
+  if (!email) return agent;
+  return {
+    ...agent,
+    accounts: [
+      {
+        id: "grok",
+        label: email,
+        available: agent.available,
+        stale: agent.stale,
+        plan: agent.plan,
+        session: agent.session,
+        weekly: agent.weekly,
+        asOf: agent.asOf
+      }
+    ]
+  };
 }
 
 /**
@@ -200,8 +236,11 @@ export function createGrokSource(opts: {
   authDir: string;
   /** The grok CLI home (`GROK_HOME` || `~/.grok`). */
   grokHome: string;
-  /** Managed grok account `auth.json` paths (re-evaluated per poll — accounts
-   *  come and go without a daemon restart). */
+  /** When set, ONLY this managed-home `auth.json` is used (per-account poll). */
+  authFile?: string;
+  /** Managed grok account `auth.json` paths for the System (no-authFile) chain.
+   *  Re-evaluated per poll — accounts come and go without a daemon restart.
+   *  Pass `() => []` when multi-account wiring polls managed homes separately. */
   managedGrokAuthFiles?: () => string[];
   now: () => number;
   fetchImpl?: typeof fetch;
@@ -228,13 +267,18 @@ export function createGrokSource(opts: {
   };
 
   return async () => {
-    const cred = await readGrokCredential(opts.authDir, opts.grokHome, opts.managedGrokAuthFiles?.() ?? []);
+    const cred = await readGrokCredential(
+      opts.authDir,
+      opts.grokHome,
+      opts.managedGrokAuthFiles?.() ?? [],
+      opts.authFile
+    );
     if (!cred) return null; // genuinely not linked/logged in
 
     const signedIn = (): AgentUsage =>
       lastGood
         ? { ...lastGood, stale: true, session: null, weekly: currentWindow(lastGood.weekly, opts.now()) }
-        : { id: "grok", available: true, stale: true, session: null, weekly: null };
+        : withGrokAccountLabel({ id: "grok", available: true, stale: true, session: null, weekly: null }, cred.email);
 
     const now = opts.now();
     if (now < backoffUntil) return signedIn();
@@ -271,7 +315,7 @@ export function createGrokSource(opts: {
       }
       const agent = parseGrokBilling(await res.json(), now);
       if (agent.available) {
-        lastGood = agent;
+        lastGood = withGrokAccountLabel(agent, cred.email);
         return lastGood;
       }
       return signedIn(); // 200 but unparseable → still linked, no number yet
@@ -348,13 +392,22 @@ function createCodexLogScrapeSource(opts: {
  *    login (only the user's own CLI does), so the row is a permanent "—";
  *  - the system login IS one of the managed accounts (typical after importing
  *    the system auth.json), so the row duplicates that account's numbers.
- * Identity comparison is Codex-only (account_id / id_token email); Claude
- * credentials carry no identity, so Claude only gets the expiry rule.
- * Missing/unreadable credentials never hide — the source already reports null.
+ * Identity comparison is Codex/Grok (email / account_id); Claude credentials
+ * carry no identity, so Claude only gets the expiry rule. Missing/unreadable
+ * credentials never hide — the source already reports null.
  */
 export async function shouldHideSystemUsage(
-  agent: "claude" | "codex",
-  opts: { userhome: string; now: number; claudeHome?: string; codexHome?: string; managedHomes?: string[] }
+  agent: "claude" | "codex" | "grok",
+  opts: {
+    userhome: string;
+    now: number;
+    claudeHome?: string;
+    codexHome?: string;
+    grokHome?: string;
+    /** Proxy-owned xai auth dir; only consulted for grok. */
+    authDir?: string;
+    managedHomes?: string[];
+  }
 ): Promise<boolean> {
   if (agent === "claude") {
     const home = opts.claudeHome || process.env.CLAUDE_CONFIG_DIR || join(opts.userhome, ".claude");
@@ -365,6 +418,26 @@ export async function shouldHideSystemUsage(
       return false;
     }
     return typeof oauth?.expiresAt === "number" && oauth.expiresAt <= opts.now;
+  }
+
+  if (agent === "grok") {
+    // System for Grok is cliproxy/CLI only (managed homes are polled separately).
+    const sys = await readGrokCredential(
+      opts.authDir || join(opts.userhome, ".orquester", "daemon", "cliproxy", "auth"),
+      opts.grokHome || process.env.GROK_HOME || join(opts.userhome, ".grok"),
+      []
+    );
+    if (!sys) return true; // nothing to show on System
+    if (sys.expiresAtMs !== null && sys.expiresAtMs <= opts.now) return true;
+    if (!sys.email && !sys.userId) return false;
+    for (const managedHome of opts.managedHomes ?? []) {
+      const managed = await fromGrokAuthJson(join(managedHome, "auth.json"));
+      if (!managed) continue;
+      if ((sys.email && managed.email && sys.email === managed.email) || (sys.userId && managed.userId && sys.userId === managed.userId)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   const home = opts.codexHome || process.env.CODEX_HOME || join(opts.userhome, ".codex");

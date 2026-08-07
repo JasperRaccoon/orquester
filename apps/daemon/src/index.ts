@@ -402,6 +402,19 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     createClaudeSource({ userhome: resolved.vars.userhome, now: () => Date.now(), claudeHome: home, logger: console });
   const codexAccountSource = (home?: string) =>
     createCodexSource({ userhome: resolved.vars.userhome, now: () => Date.now(), codexHome: home, logger: console });
+  const grokAuthDir = join(cliproxyDir(resolved.daemonDir), "auth");
+  const grokCliHome = process.env.GROK_HOME || join(resolved.vars.userhome, ".grok");
+  // Grok System = proxy-owned xai auth + CLI login only. Managed homes are polled
+  // per-account below (authFile), so they are NOT on the System chain.
+  const grokAccountSource = (home?: string) =>
+    createGrokSource({
+      authDir: grokAuthDir,
+      grokHome: grokCliHome,
+      authFile: home ? join(home, "auth.json") : undefined,
+      managedGrokAuthFiles: () => [],
+      now: () => Date.now(),
+      logger: console
+    });
   // Each usage source keeps its rate-limit backoff (429/Retry-After) and last-good
   // reading in closure state, so it MUST outlive a single recompute — the fs
   // watcher can fire recompute() every 500ms. Build each source once (keyed by
@@ -410,7 +423,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // hammer the usage endpoints and drop the last-known values).
   const usageSources = new Map<string, () => Promise<AgentUsage | null>>();
   const usageSource = (
-    agent: "claude" | "codex",
+    agent: "claude" | "codex" | "grok",
     make: (home?: string) => () => Promise<AgentUsage | null>,
     home?: string
   ): (() => Promise<AgentUsage | null>) => {
@@ -424,7 +437,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   };
 
   async function agentWithAccounts(
-    agent: "claude" | "codex",
+    agent: "claude" | "codex" | "grok",
     makeSource: (home?: string) => () => Promise<AgentUsage | null>
   ): Promise<AgentUsage | null> {
     const managed = agentAccounts.list().accounts.filter((a) => a.agent === agent);
@@ -437,10 +450,13 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
       (await shouldHideSystemUsage(agent, {
         userhome: resolved.vars.userhome,
         now: Date.now(),
+        authDir: agent === "grok" ? grokAuthDir : undefined,
+        grokHome: agent === "grok" ? grokCliHome : undefined,
         managedHomes: managed.map((a) => agentAccounts.homePath(agent, a.id))
       }).catch(() => false));
     const base = hideSystem ? null : await usageSource(agent, makeSource)(); // System account
-    // No managed accounts → the System reading is the whole story.
+    // No managed accounts → the System reading is the whole story (Grok already
+    // attaches a labeled account row from the credential email when known).
     if (managed.length === 0) return base;
     // Otherwise always surface every managed account so the panel can show them all.
     const accounts: UsageAccount[] = [];
@@ -460,28 +476,16 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
         asOf: u?.asOf
       });
     }
-    return aggregateWorstAccountUsage(agent, base, accounts, Date.now());
+    // Strip any single-cred accounts[] the Grok source may have attached — the
+    // aggregate rebuilds the labeled list from managed accounts (+ System).
+    const baseHead = base ? { ...base, accounts: undefined } : null;
+    return aggregateWorstAccountUsage(agent, baseHead, accounts, Date.now());
   }
 
-  // Grok renders as one usage row (SuperGrok has a single weekly pool per
-  // account and typically one account), so it bypasses agentWithAccounts.
-  // Credential precedence: proxy-seeded copy → managed grok account homes →
-  // the host's own grok CLI login.
-  const grokUsageSource = createGrokSource({
-    authDir: join(cliproxyDir(resolved.daemonDir), "auth"),
-    grokHome: process.env.GROK_HOME || join(resolved.vars.userhome, ".grok"),
-    managedGrokAuthFiles: () =>
-      agentAccounts
-        .list()
-        .accounts.filter((a) => a.agent === "grok")
-        .map((a) => join(agentAccounts.homePath("grok", a.id), "auth.json")),
-    now: () => Date.now(),
-    logger: console
-  });
   const usage = new UsageService({
     fetchClaude: () => agentWithAccounts("claude", claudeAccountSource),
     readCodex: () => agentWithAccounts("codex", codexAccountSource),
-    readGrok: () => grokUsageSource(),
+    readGrok: () => agentWithAccounts("grok", grokAccountSource),
     getPrefs: () => readUsagePrefs(resolved.appConfigFile),
     now: () => Date.now()
   });
