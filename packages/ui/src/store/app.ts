@@ -1159,7 +1159,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       // restart leaves `accounts` stale (it was only filled by the one-time
       // initConnections path), so the workspace/project pickers go empty until
       // Settings → GitHub refills it. (project-repo-linking bug fix.)
-      get().loadAccounts()
+      get().loadAccounts(),
+      // App config + remotes moved here from initConnections' unauthenticated
+      // path (each pre-auth 401 burst counted against the login throttle);
+      // both are fail-soft and cheap, so per-connect is fine.
+      get().loadAppConfig(),
+      get().loadRemotes()
     ]);
     // Preempted during the fan-out. A newer establish() tears our stream down
     // via closeEvents(), but stopReconnect()/scheduleLockedReconnect() bump
@@ -1332,8 +1337,15 @@ export const useAppStore = create<AppState>((set, get) => ({
       api: homeApi
     });
     await get().connect();
-    // App config + remote servers are shared (persisted on the home daemon).
-    await Promise.all([get().loadAppConfig(), get().loadRemotes(), get().loadAccounts()]);
+    // App config + remote servers are shared (persisted on the home daemon) —
+    // but only fetch them once actually authenticated. Before sign-in these
+    // requests 401 and every 401 burst feeds the daemon's per-IP login
+    // throttle: enough unauthenticated page loads (e.g. the deploy smoke
+    // test's fixture sweep) lock the IP out for 15 minutes. The connect
+    // fan-out re-runs these loads after a successful sign-in.
+    if (get().connectionStatus === "connected") {
+      await Promise.all([get().loadAppConfig(), get().loadRemotes(), get().loadAccounts()]);
+    }
   },
 
   loadAppConfig: async () => {
