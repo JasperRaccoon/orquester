@@ -10,6 +10,12 @@ export interface RegistryEntryDef {
   bin: readonly string[];
   /** Extra args passed to the resolved bin when a session is launched (not used for resolution/version/install). */
   args?: readonly string[];
+  /**
+   * CLI args that resume a past conversation, `{id}` standing in for the
+   * conversation id. Absent when the agent has no known resume flag (or its
+   * history format isn't readable, so nothing can be offered to resume).
+   */
+  resumeArgs?: readonly string[];
   /** Launch the resolved bin as a child of a real shell instead of execing it directly. */
   launchViaShell?: boolean;
   /** Extra environment variables set on the process when a session is launched. */
@@ -61,7 +67,8 @@ export const REGISTRY = {
       // races Claude Code's own "binary changed -> self-restart" and dies with EACCES/ENOENT.
       installCmd: "curl -fsSL https://claude.ai/install.sh | bash",
       installCmdWin32: 'powershell -NoProfile -Command "irm https://claude.ai/install.ps1 | iex"',
-      updateCmd: "claude update"
+      updateCmd: "claude update",
+      resumeArgs: ["--resume", "{id}"] as const
     },
     {
       id: "codex",
@@ -71,16 +78,48 @@ export const REGISTRY = {
       args: ["--yolo"] as const,
       versionFlag: "--version",
       installCmd: "npm install -g @openai/codex",
-      updateCmd: "npm update -g @openai/codex"
+      updateCmd: "npm update -g @openai/codex",
+      // A subcommand, not a flag: codex's argument-free launch is a distinct mode.
+      resumeArgs: ["resume", "{id}"] as const
     },
     {
+      id: "cline",
+      name: "Cline",
+      kind: "agent",
+      bin: ["cline"] as const,
+      versionFlag: "--version",
+      installCmd: "npm install -g cline",
+      updateCmd: "npm update -g cline",
+      resumeArgs: ["--id", "{id}"] as const
+    },
+    {
+      // DETECT-ONLY on purpose — no installCmd/updateCmd, so Settings → Agents
+      // shows it only once a `deepseek` binary is already on PATH and the
+      // Install button stays disabled.
+      //
+      // The command this used to carry (`npm i -g @deepseek-ai/deepseek-cli`)
+      // 404s: DeepSeek publishes no such package, and no official DeepSeek
+      // coding-agent CLI exists on npm. The unscoped `deepseek-cli` name IS
+      // taken (1.0.2, Jan 2025) but by an unaffiliated single-maintainer
+      // OpenAI-SDK wrapper, not an agent harness — pointing an in-app Install
+      // button at a stranger's package is worse than offering no install at
+      // all. Restore an installCmd only if DeepSeek ships a first-party CLI.
       id: "deepseek",
       name: "DeepSeek",
       kind: "agent",
       bin: ["deepseek"] as const,
+      versionFlag: "--version"
+    },
+    {
+      // Not a rename of `deepseek` above — a different vendor's CLI (vegamo's
+      // deepcode-cli, binary `deepcode`) that happens to drive DeepSeek models.
+      id: "deepcode",
+      name: "Deep Code",
+      kind: "agent",
+      bin: ["deepcode"] as const,
       versionFlag: "--version",
-      installCmd: "npm install -g @deepseek-ai/deepseek-cli",
-      updateCmd: "npm update -g @deepseek-ai/deepseek-cli"
+      installCmd: "npm install -g @vegamo/deepcode-cli",
+      updateCmd: "npm update -g @vegamo/deepcode-cli"
     },
     {
       id: "gemini",
@@ -92,6 +131,19 @@ export const REGISTRY = {
       updateCmd: "npm update -g @google/gemini-cli"
     },
     {
+      id: "kimi",
+      name: "Kimi Code",
+      kind: "agent",
+      bin: ["kimi"] as const,
+      versionFlag: "--version",
+      // Single-binary installer (no npm package); the documented POSIX and
+      // PowerShell one-liners from code.kimi.com.
+      installCmd: "curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash",
+      installCmdWin32: 'powershell -NoProfile -Command "irm https://code.kimi.com/kimi-code/install.ps1 | iex"',
+      updateCmd: "kimi upgrade",
+      resumeArgs: ["--session", "{id}"] as const
+    },
+    {
       id: "opencode",
       name: "OpenCode",
       kind: "agent",
@@ -99,7 +151,8 @@ export const REGISTRY = {
       launchViaShell: true,
       versionFlag: "--version",
       installCmd: "npm install -g opencode-ai",
-      updateCmd: "npm update -g opencode-ai"
+      updateCmd: "npm update -g opencode-ai",
+      resumeArgs: ["--session", "{id}"] as const
     },
     {
       id: "grok",
@@ -113,7 +166,21 @@ export const REGISTRY = {
       versionFlag: "--version",
       installCmd: "npm install -g @xai-official/grok",
       installCmdWin32: "npm install -g @xai-official/grok",
-      updateCmd: "npm update -g @xai-official/grok"
+      updateCmd: "npm update -g @xai-official/grok",
+      resumeArgs: ["--resume", "{id}"] as const
+    },
+    {
+      // Google's Antigravity CLI. The id is `agy` (its binary name) because the
+      // IDE entry already owns `antigravity` and registry ids are one namespace.
+      id: "agy",
+      name: "Antigravity CLI",
+      kind: "agent",
+      bin: ["agy"] as const,
+      versionFlag: "--version",
+      installCmd: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+      installCmdWin32: 'powershell -NoProfile -Command "irm https://antigravity.google/cli/install.ps1 | iex"',
+      updateCmd: "agy update",
+      resumeArgs: ["--conversation", "{id}"] as const
     },
     {
       // Claude Code driven through the managed CLIProxyAPI against a GPT/Kimi
@@ -295,6 +362,37 @@ export const REGISTRY = {
 } as const;
 
 /**
+ * The agent's own CLI flags for resuming `conversationId`, or `[]` when the
+ * agent (or a non-agent id) has no known resume flag. Pure lookup over the
+ * static catalog above — the daemon appends the result at spawn.
+ */
+export function resumeArgsFor(agentId: string, conversationId: string): string[] {
+  const entry = (REGISTRY.agents as readonly RegistryEntryDef[]).find((a) => a.id === agentId);
+  // Function replacer: an id containing `$&`/`$1` must be substituted
+  // literally, not re-expanded by String.replace's pattern syntax.
+  return entry?.resumeArgs?.map((arg) => arg.replace(/\{id\}/g, () => conversationId)) ?? [];
+}
+
+/**
+ * Whether `agentId` has a known resume flag at all — i.e. whether
+ * {@link resumeArgsFor} can ever return a non-empty result for it. The UI gates
+ * its "resume a past conversation" affordances on this so it never offers a
+ * resume the daemon would refuse with `RESUME_UNAVAILABLE`.
+ *
+ * Read from the same static catalog `resumeArgsFor` uses (not the runtime
+ * registry entry), so the answer matches the daemon exactly — including for a
+ * user-defined `agents.json` override, whose id the catalog does not know and
+ * which therefore genuinely cannot resume. Shared UI/daemon gate in the spirit
+ * of {@link CHROMIUM_FAMILY_IDS}.
+ */
+export function canResumeAgent(agentId: string): boolean {
+  // Answered by running the real resolver rather than re-reading the catalog:
+  // the two can never drift (the placeholder id is irrelevant — only the arity
+  // of the result matters).
+  return resumeArgsFor(agentId, "x").length > 0;
+}
+
+/**
  * Registry browser ids that speak CDP and can be driven by the daemon's
  * server-side browser tabs (Design Mode). Firefox and the empty-bin
  * "system-browser" fallback are deliberately excluded: they may be `enabled`
@@ -309,3 +407,181 @@ export const CHROMIUM_FAMILY_IDS: ReadonlySet<string> = new Set([
   "edge",
   "vivaldi"
 ]);
+
+/** One boolean toggle on a template variant; flipping it swaps which flag is appended. */
+export interface ProjectTemplateOptionDef {
+  id: string;
+  label: string;
+  /** Appended when the option is on. Empty string = append nothing (the CLI's default). */
+  flagOn: string;
+  /** Appended when the option is off. Empty string = append nothing. */
+  flagOff: string;
+  defaultOn: boolean;
+}
+
+export interface ProjectTemplateVariantDef {
+  id: string;
+  /** e.g. "React + TS" for the Vite template. */
+  name: string;
+  /** Opaque icon id — the client owns the id → mark mapping. */
+  icon: string;
+  /** The base command, before any option flags are appended. */
+  command: string;
+  options: readonly ProjectTemplateOptionDef[];
+}
+
+export interface ProjectTemplateDef {
+  id: string;
+  name: string;
+  category: string;
+  icon: string;
+  /** Bin names that must resolve on PATH before the template can be offered. */
+  requires: readonly string[];
+  variants: readonly ProjectTemplateVariantDef[];
+}
+
+const NO_TEMPLATE_OPTIONS: readonly ProjectTemplateOptionDef[] = [];
+
+const VITE_INSTALL: ProjectTemplateOptionDef = {
+  id: "install",
+  label: "Install dependencies and start dev server",
+  flagOn: "--immediate",
+  flagOff: "--no-immediate",
+  defaultOn: true
+};
+const VITE_ESLINT: ProjectTemplateOptionDef = {
+  id: "eslint",
+  label: "Use ESLint instead of Oxlint",
+  flagOn: "--eslint",
+  flagOff: "--no-eslint",
+  defaultOn: false
+};
+const VITE_REACT_OPTIONS: readonly ProjectTemplateOptionDef[] = [VITE_INSTALL, VITE_ESLINT];
+const VITE_OPTIONS: readonly ProjectTemplateOptionDef[] = [VITE_INSTALL];
+
+const NEXT_OPTIONS: readonly ProjectTemplateOptionDef[] = [
+  { id: "install", label: "Install dependencies", flagOn: "", flagOff: "--skip-install", defaultOn: true }
+];
+
+const ASTRO_OPTIONS: readonly ProjectTemplateOptionDef[] = [
+  { id: "install", label: "Install dependencies", flagOn: "--install", flagOff: "--no-install", defaultOn: true }
+];
+
+const SVELTEKIT_OPTIONS: readonly ProjectTemplateOptionDef[] = [
+  { id: "install", label: "Install dependencies", flagOn: "--install npm", flagOff: "--no-install", defaultOn: true }
+];
+
+/**
+ * Static catalog of project scaffold commands. Unlike {@link REGISTRY} these are
+ * not installable tools — each variant's command is TYPED INTO a fresh terminal
+ * tab once the project directory exists, so the user watches it run and answers
+ * any interactive prompts themselves instead of the daemon trying to capture
+ * headless output from a command that wants a TTY.
+ *
+ * `requires` names bins the daemon probes against PATH to mark a template
+ * available; `icon` is an opaque id the client maps to a mark.
+ *
+ * Flags were taken from each CLI's own `--help` (create-vite@7, create-next-app@15,
+ * create-astro@5, sv@0.9). Scaffolders change flags across majors; a stale one
+ * just fails live in the terminal in front of the user, same as any other error.
+ */
+export const TEMPLATES: readonly ProjectTemplateDef[] = [
+  {
+    id: "vite",
+    name: "Vite",
+    category: "Frontend",
+    icon: "vite",
+    requires: ["npm"],
+    variants: [
+      { id: "react", name: "React", icon: "react", command: "npm create vite@latest . -- --template react", options: VITE_REACT_OPTIONS },
+      { id: "react-ts", name: "React + TS", icon: "typescript", command: "npm create vite@latest . -- --template react-ts", options: VITE_REACT_OPTIONS },
+      { id: "vue", name: "Vue", icon: "vuejs", command: "npm create vite@latest . -- --template vue", options: VITE_OPTIONS },
+      { id: "vue-ts", name: "Vue + TS", icon: "typescript", command: "npm create vite@latest . -- --template vue-ts", options: VITE_OPTIONS },
+      { id: "svelte", name: "Svelte", icon: "svelte", command: "npm create vite@latest . -- --template svelte", options: VITE_OPTIONS },
+      { id: "svelte-ts", name: "Svelte + TS", icon: "typescript", command: "npm create vite@latest . -- --template svelte-ts", options: VITE_OPTIONS },
+      { id: "vanilla", name: "Vanilla", icon: "javascript", command: "npm create vite@latest . -- --template vanilla", options: VITE_OPTIONS },
+      { id: "vanilla-ts", name: "Vanilla + TS", icon: "typescript", command: "npm create vite@latest . -- --template vanilla-ts", options: VITE_OPTIONS }
+    ]
+  },
+  {
+    id: "next",
+    name: "Next.js",
+    category: "Frontend",
+    icon: "nextdotjs",
+    requires: ["npx"],
+    variants: [
+      {
+        id: "ts",
+        name: "TypeScript",
+        icon: "typescript",
+        command:
+          'npx create-next-app@latest . --typescript --eslint --tailwind --app --src-dir --import-alias "@/*" --use-npm',
+        options: NEXT_OPTIONS
+      },
+      {
+        id: "js",
+        name: "JavaScript",
+        icon: "javascript",
+        command:
+          'npx create-next-app@latest . --javascript --eslint --tailwind --app --src-dir --import-alias "@/*" --use-npm',
+        options: NEXT_OPTIONS
+      }
+    ]
+  },
+  {
+    id: "astro",
+    name: "Astro",
+    category: "Frontend",
+    icon: "astro",
+    requires: ["npm"],
+    variants: [
+      { id: "minimal", name: "Minimal", icon: "astro", command: "npm create astro@latest . -- --template minimal --yes", options: ASTRO_OPTIONS },
+      { id: "blog", name: "Blog", icon: "astro", command: "npm create astro@latest . -- --template blog --yes", options: ASTRO_OPTIONS }
+    ]
+  },
+  {
+    id: "svelte",
+    name: "SvelteKit",
+    category: "Frontend",
+    icon: "svelte",
+    requires: ["npx"],
+    variants: [
+      { id: "ts", name: "TypeScript", icon: "typescript", command: "npx sv create . --template minimal --types ts --no-add-ons", options: SVELTEKIT_OPTIONS },
+      { id: "js", name: "JavaScript", icon: "javascript", command: "npx sv create . --template minimal --no-types --no-add-ons", options: SVELTEKIT_OPTIONS }
+    ]
+  },
+  {
+    id: "node",
+    name: "Node.js",
+    category: "Backend",
+    icon: "nodedotjs",
+    requires: ["npm"],
+    variants: [{ id: "default", name: "Default", icon: "nodedotjs", command: "npm init -y", options: NO_TEMPLATE_OPTIONS }]
+  },
+  {
+    id: "python-uv",
+    name: "Python (uv)",
+    category: "Backend",
+    icon: "python",
+    requires: ["uv"],
+    variants: [{ id: "default", name: "Default", icon: "python", command: "uv init .", options: NO_TEMPLATE_OPTIONS }]
+  },
+  {
+    id: "cargo",
+    name: "Rust",
+    category: "Systems",
+    icon: "rust",
+    requires: ["cargo"],
+    variants: [{ id: "default", name: "Default", icon: "rust", command: "cargo init .", options: NO_TEMPLATE_OPTIONS }]
+  },
+  {
+    id: "go",
+    name: "Go",
+    category: "Systems",
+    icon: "go",
+    requires: ["go"],
+    // `go mod init` needs a module path; a fixed literal keeps the command
+    // assembled from catalog data only (no free-text interpolation).
+    variants: [{ id: "default", name: "Default", icon: "go", command: "go mod init project", options: NO_TEMPLATE_OPTIONS }]
+  }
+];

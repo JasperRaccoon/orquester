@@ -7,6 +7,7 @@ import { EmptyState } from "../main/EmptyState";
 import { ChangesPanel } from "./ChangesPanel";
 import { GitHeader } from "./GitHeader";
 import { HistoryPanel } from "./HistoryPanel";
+import { subscribeProjectGit, type GitWatchState } from "./git-watch";
 import { useApi } from "../../context/orquester-context";
 import { usePollWhileActive } from "../../hooks";
 
@@ -27,6 +28,18 @@ const SUB_TABS: { tab: SubTab; label: string }[] = [
  * mostly the backstop for sitting on the tab watching.
  */
 const AUTO_FETCH_INTERVAL_MS = 60_000;
+
+/**
+ * Status poll cadence. Once the daemon has actually pushed a
+ * `project.git.changed` for this project there is nothing left for a fast poll
+ * to discover, so it drops to a slow backstop (which still covers the window
+ * between a dropped subscription and its reconnect). Note the trigger is a
+ * RECEIVED push, not an open stream: a daemon too old to know `?project=`
+ * accepts the stream and silently never pushes, and downgrading the poll on
+ * that would leave the Git tab frozen for 30s at a time.
+ */
+const STATUS_POLL_MS = 3000;
+const WATCHED_POLL_MS = 30_000;
 
 const repoNameOf = (path: string) => path.replace(/\/+$/, "").split("/").pop() || path;
 
@@ -159,6 +172,29 @@ export const GitView: React.FC<{ projectPath: string; active?: boolean }> = ({
     setError(null);
   }, [projectPath]);
 
+  // Server-pushed status. While this tab is active we hold a subscription to
+  // one `/events?project=<path>` stream: that subscription is what makes the
+  // daemon poll this project at all, and it only pushes when the status actually
+  // changed — so an external commit / file save shows up in ~2s without this
+  // client polling every 3s. The stream itself is SHARED (and its reconnect
+  // backoff / give-up owned) by `subscribeProjectGit`, so a grid full of cells
+  // costs one connection, not one per cell.
+  //
+  // A push means "something changed on disk", which includes the stash list and
+  // the commit log, so it drives `reconcile` (not `refresh`) — otherwise a stash
+  // taken in another client or a terminal never reaches this one's stash strip.
+  const [watch, setWatch] = useState<GitWatchState>({ pushed: false, notice: null });
+  const reconcileRef = useRef(reconcile);
+  reconcileRef.current = reconcile;
+  useEffect(() => {
+    if (!active) return;
+    setWatch({ pushed: false, notice: null });
+    return subscribeProjectGit(api, projectPath, {
+      onChange: () => reconcileRef.current(),
+      onState: setWatch
+    });
+  }, [api, projectPath, active]);
+
   // Fetch whenever the user ENTERS the Git tab: on first load once we know the
   // branch has an upstream, and on every re-activation — the tab stays mounted
   // and just toggles `active`, so active going true IS the "opened the tab"
@@ -174,7 +210,7 @@ export const GitView: React.FC<{ projectPath: string; active?: boolean }> = ({
   // manual refresh. Polls `refresh` (not `reconcile`) on purpose: history stays
   // event-driven via the focus/activate/mutation reconcile calls, so we don't
   // re-run git log every 3s.
-  usePollWhileActive(active, refresh, 3000);
+  usePollWhileActive(active, refresh, watch.pushed ? WATCHED_POLL_MS : STATUS_POLL_MS);
 
   // …and a slower background `git fetch` on its own cadence so the REMOTE side of
   // ahead/behind stays current too. This is the actual fix for "the Git tab goes
@@ -249,6 +285,15 @@ export const GitView: React.FC<{ projectPath: string; active?: boolean }> = ({
         </div>
       )}
 
+      {/* Live-update notice: the push subscription gave up (a 4xx, or repeated
+          failures). Muted on purpose — the periodic refresh still works, so this
+          is information, not an error. */}
+      {watch.notice && (
+        <div className="shrink-0 border-b border-neutral-800 bg-neutral-900/40 px-3 py-1.5 text-xs text-neutral-500">
+          {watch.notice}
+        </div>
+      )}
+
       {/* Changes | History segmented control */}
       <div className="flex h-9 shrink-0 items-center gap-2 border-b border-neutral-800 px-2">
         <div className="inline-flex items-center gap-0.5 rounded-md bg-neutral-900/60 p-0.5 ring-1 ring-neutral-800">
@@ -274,7 +319,13 @@ export const GitView: React.FC<{ projectPath: string; active?: boolean }> = ({
       </div>
 
       {tab === "changes" ? (
-        <ChangesPanel projectPath={projectPath} status={status} onChanged={reconcile} />
+        <ChangesPanel
+          projectPath={projectPath}
+          status={status}
+          onChanged={reconcile}
+          reloadToken={historyVersion}
+          onError={(err) => setError(opErrorMessage(err))}
+        />
       ) : (
         <HistoryPanel projectPath={projectPath} reloadToken={historyVersion} />
       )}

@@ -6,6 +6,7 @@ import { homedir, tmpdir } from "node:os";
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
 import { spawn, type IPty } from "node-pty";
+import { resumeArgsFor } from "@orquester/registry";
 import type { RegistryService } from "./registry";
 import {
   Tmux,
@@ -40,6 +41,27 @@ interface Session {
 export class SessionError extends Error {}
 
 /**
+ * `programmatic: true` marks a write the daemon made on the user's behalf (the
+ * MCP terminal-control tools). It skips the input-echo grace, so a tool that
+ * writes and then waits for a bell isn't blinded by its own write. Real client
+ * keystrokes must never set it.
+ */
+export type SessionInputOptions = { programmatic?: boolean };
+
+/**
+ * `CreateSessionRequest.initialCommand` as keystrokes, or undefined for nothing
+ * to type. The command is TYPED into the fresh PTY (newline appended) exactly
+ * like a client keystroke — the shell decides what to run with it; the daemon
+ * never executes it out-of-band and never quotes or rewrites it. The route
+ * bounds/validates the string (length + no control bytes); this only appends
+ * the newline and drops a blank one.
+ */
+function initialCommandKeys(raw: string | undefined): string | undefined {
+  const trimmed = raw?.trim();
+  return trimmed ? `${trimmed}\n` : undefined;
+}
+
+/**
  * The session backend contract the daemon (index.ts) talks to. Two
  * implementations exist: {@link SessionManager} (tmux-backed, survives a daemon
  * restart) and {@link LocalSessionManager} (direct node-pty, used where tmux is
@@ -62,7 +84,7 @@ export interface ISessionManager {
   activity(id: string): SessionActivity | undefined;
   /** Apply a managed-hook event to a session's tracker. False = unknown session. */
   agentEvent(id: string, req: AgentEventRequest): boolean;
-  input(id: string, data: string): void;
+  input(id: string, data: string, options?: SessionInputOptions): void;
   resize(id: string, cols: number, rows: number): void;
   rename(id: string, title: string): SessionSummary | undefined;
   reorder(projectPath: string, ids: string[]): void;
@@ -134,16 +156,23 @@ export function createSessionManager(
   return new LocalSessionManager(registry, options);
 }
 
-export function buildLaunchCommand(entry: RegistryEntry, opts: { tmux: boolean }): { bin: string; args: string[] } {
+export function buildLaunchCommand(
+  entry: RegistryEntry,
+  opts: { tmux: boolean; resumeArgs?: readonly string[] }
+): { bin: string; args: string[] } {
   const bin = entry.resolvedBin ?? "";
-  const baseArgs = entry.args ?? [];
+  const entryArgs = entry.args ?? [];
 
   if (entry.kind === "shell") {
     return {
       bin,
-      args: opts.tmux && !baseArgs.includes("-l") && !baseArgs.includes("--login") ? [...baseArgs, "-l"] : baseArgs
+      args: opts.tmux && !entryArgs.includes("-l") && !entryArgs.includes("--login") ? [...entryArgs, "-l"] : entryArgs
     };
   }
+
+  // Resume args go LAST, after the entry's own flags: codex resumes through a
+  // `resume <id>` subcommand, and a subcommand has to follow the global options.
+  const baseArgs = opts.resumeArgs?.length ? [...entryArgs, ...opts.resumeArgs] : entryArgs;
 
   if (entry.launchViaShell) {
     const shell = sessionCommandShell();
@@ -164,6 +193,28 @@ export function buildLaunchCommand(entry: RegistryEntry, opts: { tmux: boolean }
   }
 
   return { bin, args: baseArgs };
+}
+
+/**
+ * Ids come from the agents' own history dirs (uuids, or a filename stem), so
+ * anything outside that shape is a client bug or an attack and is dropped
+ * rather than launched. Every backend passes argv as an array — tmux `run()`
+ * uses execFile, node-pty spawns directly, and the addon-env wrapper script
+ * shell-quotes — but a launch command is the wrong place to trust input. The
+ * leading char excludes `-` so an id can never arrive at the agent as a flag.
+ */
+const CONVERSATION_ID = /^[\w.][\w.\-/]*$/;
+
+export function resumeLaunchArgs(entry: RegistryEntry, conversationId: unknown): string[] {
+  // `unknown`, not `string | undefined`: the value arrives straight off the
+  // wire, so a number/object must be treated as absent rather than throw.
+  const id = typeof conversationId === "string" ? conversationId.trim() : "";
+  // A `..` segment can never name a real conversation, and an agent that
+  // resolves the id inside its own history dir would walk out of it.
+  if (!id || !CONVERSATION_ID.test(id) || id.split("/").includes("..")) {
+    return [];
+  }
+  return resumeArgsFor(entry.id, id);
 }
 
 function shellQuote(s: string): string {
@@ -343,7 +394,10 @@ export class SessionManager implements ISessionManager {
     // persist. Some agents (OpenCode on locked service users) also need to be
     // spawned as a child of a real shell, matching the path that works from a
     // Bash tab while preserving direct binary resolution/version checks.
-    const baseLaunch = buildLaunchCommand(entry, { tmux: true });
+    const baseLaunch = buildLaunchCommand(entry, {
+      tmux: true,
+      resumeArgs: resumeLaunchArgs(entry, req.resumeConversationId)
+    });
     const wrapped = await writeAddonEnvLaunchScript(baseLaunch, extraEnv, unsetEnv);
     try {
       await this.tmux.newSession({ id, cols, rows, cwd, env, bin: wrapped.bin, args: wrapped.args });
@@ -362,6 +416,16 @@ export class SessionManager implements ISessionManager {
       throw new SessionError("Session was closed before launch completed.");
     }
     this.attach(session);
+
+    // Type the launch command as soon as the attach PTY exists. Ordering is
+    // safe without any delay: the bytes queue in the attach client's stdin (and
+    // then in the pane's tty) until the shell's first read, so unlike a
+    // client-side "sleep then send an input frame" it cannot be dropped by a
+    // reconnecting socket or land before the tab is streaming.
+    const initialKeys = initialCommandKeys(req.initialCommand);
+    if (initialKeys) {
+      this.input(id, initialKeys);
+    }
 
     this.lifecycle.emit("created", this.withActivity(session));
     void this.persistIndex();
@@ -424,9 +488,14 @@ export class SessionManager implements ISessionManager {
         session.summary.status = "exited";
         session.summary.exitCode = exitCode;
         session.pty = null;
-        session.tracker.dispose();
         session.emitter.emit("exit", exitCode);
         this.lifecycle.emit("exited", this.withActivity(session));
+        // A finished process needs the user's eyes: raise "finished" attention.
+        // AFTER the "exited" broadcast, because that summary carries no activity
+        // (withActivity drops it for a non-running session) and a client that
+        // resets its activity on exit must see the stamp arrive last.
+        session.tracker.noteExit();
+        session.tracker.dispose();
         void this.persistIndex();
       });
     });
@@ -522,9 +591,9 @@ export class SessionManager implements ISessionManager {
       : { ...session.summary };
   }
 
-  input(id: string, data: string): void {
+  input(id: string, data: string, options: SessionInputOptions = {}): void {
     const session = this.sessions.get(id);
-    session?.tracker.noteInput();
+    session?.tracker.noteInput(Date.now(), options);
     try {
       session?.pty?.write(data);
     } catch {
@@ -871,7 +940,10 @@ export class LocalSessionManager implements ISessionManager {
       .filter((s) => s.summary.projectPath === projectPath)
       .reduce((max, s) => Math.max(max, s.summary.order), -1);
 
-    const launch = buildLaunchCommand(entry, { tmux: false });
+    const launch = buildLaunchCommand(entry, {
+      tmux: false,
+      resumeArgs: resumeLaunchArgs(entry, req.resumeConversationId)
+    });
     const env = {
       ...sessionEnvBase(),
       TERM: "xterm-256color",
@@ -956,10 +1028,19 @@ export class LocalSessionManager implements ISessionManager {
       session.summary.status = "exited";
       session.summary.exitCode = exitCode;
       session.pty = null;
-      session.tracker.dispose();
       session.emitter.emit("exit", exitCode);
       this.lifecycle.emit("exited", this.withActivity(session));
+      // See the tmux backend: attention stamped after the "exited" broadcast.
+      session.tracker.noteExit();
+      session.tracker.dispose();
     });
+
+    // See SessionManager.create: typed, not executed, and queued in the child's
+    // tty until it reads — no delay needed.
+    const initialKeys = initialCommandKeys(req.initialCommand);
+    if (initialKeys) {
+      this.input(id, initialKeys);
+    }
 
     this.lifecycle.emit("created", this.withActivity(session));
     return this.withActivity(session);
@@ -1030,9 +1111,9 @@ export class LocalSessionManager implements ISessionManager {
       : { ...session.summary };
   }
 
-  input(id: string, data: string): void {
+  input(id: string, data: string, options: SessionInputOptions = {}): void {
     const session = this.sessions.get(id);
-    session?.tracker.noteInput();
+    session?.tracker.noteInput(Date.now(), options);
     try {
       session?.pty?.write(data);
     } catch {

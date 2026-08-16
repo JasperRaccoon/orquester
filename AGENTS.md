@@ -41,15 +41,28 @@ sessions survive client disconnects, page reloads, and **daemon restarts**.
 
 **Features:** workspaces → projects → tabs (workspaces/projects are just directories); many
 concurrent persistent terminal/agent sessions per project; an installable agent registry
-(`claude`, `codex`, `gemini`, `deepseek`, `opencode`, `grok` via `npm install -g`) with live version
-detection; detection + "Open on…" for shells/IDEs/explorers/browsers; xterm.js terminals with
+(`claude`, `codex`, `gemini`, `opencode`, `grok`, `cline`, `deepcode`, `kimi`, Antigravity's `agy`
+— npm or vendor installers; `deepseek` is detect-only, its npm package no longer exists) with live
+version detection; detection + "Open on…" for shells/IDEs/explorers/browsers; xterm.js terminals with
 WebSocket-multiplexed PTY streaming, scrollback replay and resize; a CodeMirror file editor;
-tab drag-reorder + inline rename (server-authoritative); a per-project grid view; archivable
+tab drag-reorder + inline rename (server-authoritative); a per-project grid view; a **command
+palette** (`Ctrl/Cmd+K`) over open tabs and projects and an **Attention Center** in the top bar
+(`Ctrl+Shift+A` cycles the agents waiting on you); **cross-agent conversation history** — a
+per-project scan of every agent CLI's own on-disk transcripts, one click to resume; a
+daemon-owned **recent-projects** landing list every client shares; archivable
 workspaces/projects (a metadata-only `isArchived` flag — the directory is never touched —
 hidden from the sidebar and restorable from a muted "Archived" footer panel, optionally
 password-gated by the "Protect archived data" daemon toggle); remote access
 with TLS, username+password auth, per-IP login throttling, and tmux persistence; per-workspace
-git identities (GitHub, Bitbucket Cloud, Bitbucket Server/DC); **browser tabs (Design Mode)** — a server-side headless Chromium per
+git identities (GitHub, Bitbucket Cloud, Bitbucket Server/DC); a **git tab** (status/diff/history
+plus stashes, a gitk-style commit graph, and live status pushed only to the clients looking at
+that project); **system status** — host CPU/memory/disk, this daemon's own process tree and the
+TCP ports it listens on (a top-bar CPU/mem chip + Settings → System panel with a confirm-gated
+process kill and a copyable ports table); **project templates**
+in the New Project dialog (scaffolders typed into a fresh terminal tab, never run daemon-side);
+seven **colour schemes** × light/dark/system/dynamic; a Settings **usage overview** with
+per-window quota bars and a per-device reset-time format (countdown / clock / both);
+**browser tabs (Design Mode)** — a server-side headless Chromium per
 project streamed as an interactive tab over a `/ws-browser` channel, with an element picker that
 delivers HTML/CSS/screenshot payloads into agent PTYs, and embedded Chrome DevTools (the browser's own version-matched frontend proxied by the daemon — right-dock split on desktop, full-screen on mobile); and an installable **PWA** web client
 (service worker + Web Push notifications on agent-session bells).
@@ -126,13 +139,36 @@ conditionally starts the **HTTP** transport.
 
 **Key routes.** `GET /health` (bare `{ok:true}`); `GET /api/auth/info` (public: `{authRequired,
 salt, requiresUsername}` — never the username/hash); `/api/config/{daemon,client,app,remotes}`;
-`/api/workspaces` + `/projects` (CRUD; deletes are realpath-guarded and cascade-close sessions);
-`/api/accounts` (git-hosting SSH identities — GitHub/Bitbucket; **never returns private keys or
-tokens**);
+`/api/workspaces` + `/projects` (CRUD; deletes are realpath-guarded and cascade-close sessions;
+creating a project into a non-empty existing dir is a 409 `DIRECTORY_NOT_EMPTY`);
+`/api/projects/recent` (GET the daemon-owned list — newest first, capped at 30, each row joined
+against `workspaces.json` so `isArchived` is true exactly when the sidebar would hide it and the
+UI can keep the archive curtain closed; POST marks one interaction — silently ignored for
+anything that isn't a `<workspacesDir>/<ws>/<project>` dir inside the sandbox, because the
+caller's real action already succeeded, and the daemon marks on session create itself rather
+than trusting clients to report it); `/api/accounts` (git-hosting SSH
+identities — GitHub/Bitbucket; **never returns private keys or tokens**);
 `/api/fs/*` (file browser, sandboxed to `fsRoot`, 1 MB read cap); `/api/registry` +
-`/:id/{version,install,update}`; `/api/sessions` CRUD + `/input` + `/resize` + `/reorder` +
-chunked `GET /:id/output`; `GET /events` (NDJSON event bus + heartbeat); `GET /ws`
-(multiplexed WebSocket for all terminals).
+`/:id/{version,install,update}`; `/api/templates` (scaffold catalog + this host's availability);
+`GET /api/agents/conversations?path=` (per-project resume picker; fail-soft — a bad path or an
+unreadable history answers `{conversations:[]}`, never an error); `/api/git/stashes` +
+`/api/git/stash{,/apply,/pop,/drop}` (a client only ever names a **position** — the daemon builds
+`stash@{n}` itself, so no raw revision crosses the wire — and must send the `sha` it saw there:
+the list shifts under a client whenever another client or a terminal stashes, and an index-only
+Drop would destroy a different, unrecoverable stash, so a re-resolve mismatch is a 409);
+`/api/system/{resources,processes,ports}` +
+`POST /api/system/processes/kill`; `/api/sessions` CRUD + `/input` + `/resize` + `/reorder` +
+chunked `GET /:id/output`; `GET /events` (NDJSON event bus + heartbeat; an optional
+`?project=<path>` additionally subscribes that stream to `project.git.changed` — see the git
+watcher below); `GET /ws` (multiplexed WebSocket for all terminals).
+
+**The scoped git watcher.** `GitWatcher` (`git.ts`) polls a project's `git status` **only**
+while ≥1 `/events?project=<path>` stream is open on it (refcounted, so several clients or a
+reconnect share one loop) and publishes `project.git.changed` on a real change. Two filters
+keep it honest: the change key excludes `lastFetched` (the Git tab's own 60 s auto-fetch bumps
+`.git/FETCH_HEAD` and would otherwise fake a change on that cadence), and `passesGitEventFilter`
+drops a status blob for any stream that didn't ask for that project — matched on the parsed
+event `type`, not on a substring of the line.
 
 **PTY streaming has two paths:** chunked HTTP `GET /api/sessions/:id/output` (used by the
 desktop over the socket) and the multiplexed `/ws` (used by the web client — one socket for all
@@ -155,6 +191,7 @@ in production (`--appdir`). The daemon persists **JSON, not a database**:
   daemon/   daemon.json (bcrypt passwordHash, protectArchivedData)  daemon.sock (control socket)
             tmux.sock (dedicated tmux server)         sessions.json (reattach index)
             workspaces.json (side-table: gitAccountId, createdAt, isArchived, archivedProjects)
+            recent-projects.json (shared recents, capped at 30; entry-wise tolerant parse)
             accounts.json  keys/ (0700 per-account SSH keys)  logs/
             env/ (per-launcher env files: opencode.env, and the generated claudex.env/claudemix.env)
             hooks/ (managed agent hook script)
@@ -278,6 +315,55 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
 - **tmux is version-gated.** Persistence needs tmux ≥ 3.2; otherwise the daemon silently uses the
   no-persistence `LocalSessionManager`. Never assume sessions survive a restart on Windows/stock
   macOS.
+- **`CreateSessionRequest.initialCommand` is TYPED, never executed.** Both backends write it into
+  the fresh PTY as keystrokes (newline appended) the moment the pane exists — the shell decides
+  what to run, the daemon never spawns it out-of-band and never quotes or rewrites it. Ordering
+  needs no delay: the bytes queue in the pane's tty until the shell's first read, which is the
+  whole point (a client-side "sleep, then send an input frame" is droppable by a reconnecting
+  socket). Because it rides `/input`'s trust it gets two bounds `/input` can't have — ≤
+  `MAX_INITIAL_COMMAND` (4096) chars and **no control bytes** — so nobody can smuggle an escape
+  sequence into a tab the user never saw. A 400 `INVALID_INITIAL_COMMAND` otherwise.
+- **Resume refuses; it never silently degrades.** `resumeConversationId` is checked twice before
+  launch: `resumeLaunchArgs` (`sessions.ts`) drops anything outside `/^[\w.][\w.\-/]*$/` or
+  containing a `..` segment (the leading char excludes `-`, so an id can never arrive as a flag),
+  and the route 400s `RESUME_UNAVAILABLE` when the id is unusable **or** the agent has no
+  `resumeArgs` in the static catalog — rather than opening an empty session the user believes is
+  their old one. Resume args go **last**, after the entry's own flags (codex resumes via a
+  `resume <id>` subcommand, which must follow the global options). Client side, the store surfaces
+  it as a toast offering a fresh launch with the same agent/account/model.
+- **A conversation only exists inside the HOME that wrote it.** `agent-conversations.ts` scans the
+  union of the daemon's own HOME, every managed account home
+  (`agent-accounts/<family>/<id>/home`) and the proxy homes (`cliproxy/claude-home-<entryId>`),
+  deduping roots by dir and then collapsing symlink aliases per history dir by `realpath` — a
+  managed account home *symlinks* `projects`/`sessions` back at the daemon's own agent home, so
+  without that the same transcripts get scanned once per account and burn the per-agent file cap
+  on duplicates. First spelling wins and the system home is listed first, so a merely-symlinked
+  transcript is correctly reported as resumable under the system home. Every remaining row is
+  stamped `home` + `accountId`/`proxyRefId`, and the
+  UI's `resumeAccountId` honours it over any preference: `account` → that id, `system` → the
+  explicit `SYSTEM_ACCOUNT_ID` sentinel (an *omitted* value would resolve to the per-agent default
+  instead). `cliproxy` rows have no expressible identity — claudex/claudemix carry no `resumeArgs`,
+  and plain `claude` in the wrong HOME cannot find the transcript — so the UI filters them out of
+  both resume surfaces (`isResumableConversation` in `packages/ui/src/lib/resume-account.ts`); the
+  full fix (resumeArgs on the launchers + routing on `proxyRefId`) is a known follow-up.
+  Every lister is independently try/caught to `[]` and file-capped: this reads other tools' private
+  formats, so a failure may only shrink the list.
+- **Template availability is probed against the SESSION PATH, not the daemon's.** `/api/templates`
+  gates each entry's `requires` with `isBinOnPath(bin, sessionPath())`. The daemon's own PATH is
+  deliberately narrow under systemd and omits the per-user bin dirs (`~/.local/bin`,
+  `~/.cargo/bin`, `~/go/bin`, …) that sessions get — probing it would grey out templates the
+  terminal runs fine. Probed per request (not cached) so a tool installed from a tab lights its
+  card up on the next modal open.
+- **`/api/system/processes/kill` protects the daemon, the tmux server, and the managed cliproxy
+  process** (the route passes the proxy's live child pid via the service's `protectedPids` hook —
+  on a no-tmux host cliproxy is a daemon child and would otherwise be a legal target).
+  Everything else must descend from a daemon-tree root (its own children plus every `orq-*` tmux
+  pane pid) or it's `PROCESS_NOT_MANAGED`. The guard is two-pass on `/proc` starttime, never on the shared 2 s
+  snapshot cache: once the first SIGTERM lands, children reparent and `ppid` stops being an
+  identity, so pass one records starttimes while the tree is intact and pass two re-checks each one
+  immediately before signalling (a recycled pid must never get the signal). Everything under
+  `/api/system/*` is Linux-only by construction (all `/proc`); off Linux each route answers
+  `supported: false` with zeroed data, the same host-gating shape `/api/fs/capabilities` uses.
 - **Adapter/localStorage loads must go through a schema (or field-wise validation) with
   fallback — old bundles' payloads outlive deploys.** Raw `JSON.parse` output must never reach
   typed code: a `usage` blob persisted by a pre-migration bundle once crashed the whole web
@@ -426,13 +512,55 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
   (claude/codex/opencode/grok via managed hooks → `POST /api/sessions/:id/agent-event`,
   unix-socket-only) send distinct
   "needs your input" / "finished" pushes; agents without hook coverage keep the bell fallback.
-  Debounced 30 s per session per type. Session activity (working/waiting/idle + attention) lives
-  on `SessionSummary.activity` and streams as `session.activity` events — the UI never re-derives
-  it. The SW never intercepts `/api`, `/events`, `/ws`, `/health`, `/mcp`,
+  Debounced 30 s per session per type. Session activity (working/waiting/idle + attention, plus
+  `needsAttentionAt` — the stamp the Attention Center orders and cycles by) lives on
+  `SessionSummary.activity` and streams as `session.activity` events — the UI never re-derives it.
+  A process exiting also raises "finished" attention, stamped **after** the `session.exited`
+  broadcast (that summary carries no activity, so a client resetting on exit must see the stamp
+  land last). The SW never intercepts `/api`, `/events`, `/ws`, `/health`, `/mcp`,
   `/devtools-frontend`, `/ws-devtools` or non-GET requests (caching the proxied DevTools bundle or
   falling its navigations back to `index.html` corrupts it → "Failed to convert value to
   'Response'"; bump the SW `VERSION` when changing this list). Registration is web-host-only
-  (`apps/web/src/pwa.ts`, PROD-gated) — Electron never touches it.
+  (`apps/web/src/pwa.ts`, PROD-gated) — Electron never touches it. `/theme-boot.js` is an
+  **unhashed root static** that the SW **precaches with the shell** (`SHELL_PRECACHE` next to
+  `/index.html`) and serves network-first with the cached fallback, so first paint stays themed
+  offline; it must genuinely exist in `apps/web/dist` — `pnpm build` after touching it, same trap
+  as `sw.js`, and changing the precache list means bumping the SW `VERSION` (now v5).
+- **Theming is data, not component logic — and the boot script must stay external.** Every surface
+  already paints with Tailwind's `neutral` scale, so `packages/ui/tailwind-preset.ts` remaps that
+  scale to `rgb(var(--n-<step>) / <alpha-value>)` and a colour scheme becomes eleven RGB triples
+  per mode in `styles/globals.css` under `[data-scheme][data-mode]`. No component branches on the
+  scheme; keep the `<alpha-value>` placeholder or every opacity modifier (`bg-neutral-900/40`)
+  silently stops compiling. The bare `:root` block is Tailwind's own neutral triples, so an
+  unstamped document renders pixel-identically to the pre-theme app. `data-mode` is always a
+  *resolved* `light`/`dark`; `system`/`dynamic` (19:00–07:00) are decided in `lib/theme.ts` and
+  never reach the CSS. `apps/{web,desktop}/public/theme-boot.js` stamps the persisted choice on
+  `<html>` before the module bundle loads (anti-FOUC) and is a **separate file on purpose**: the
+  production Caddy CSP is `script-src 'self'`, and `/etc/caddy/Caddyfile` is reconciled by hand, so
+  a hash-pinned inline script would silently stop running after a deploy. Two surfaces stay dark in
+  every scheme by design — xterm keeps its own static palette, and the CodeMirror editor swaps only
+  on the resolved *mode* (`oneDark` ↔ CodeMirror's own light chrome), never on the scheme.
+- **One global shortcut listener, capture phase.** `GlobalShortcutListener` is the single
+  `window` keydown handler, so the surfaces that own their keys are excluded once via
+  `insideShortcutBailZone`. Capture phase + `stopPropagation` are load-bearing: xterm reads
+  `Ctrl+Shift+A` as plain `Ctrl+A` and would encode `\x01` into the focused PTY. `Ctrl+Shift+A`
+  walks a *cursor* through the Needs-Attention group rather than always taking the top row —
+  focusing a tab clears the bell/hook `attention` but not the structural `waiting` state, so a
+  session parked on a permission prompt would otherwise trap every press. **Caveat: Chrome
+  reserves `Ctrl+Shift+A`** for its own tab search, so an installed PWA may never receive it —
+  the Attention Center menu is the reliable path. `Ctrl/Cmd+K` matches the physical `code`
+  (`KeyK`), survives layouts that rewrite `key`, and only swallows the event when a mounted
+  palette actually took it.
+- **Mobile safe-area insets: one layer owns insets *and* vertical sizing.** The app shell
+  (`AppWrapper`, `#root`'s only child) is what `useViewportHeight` sizes from
+  `visualViewport.height` so it fits above the soft keyboard, so `apps/web/src/styles.css` pads the
+  `env(safe-area-inset-*)` onto **`#root > *`** with `box-sizing: border-box` — keeping the insets
+  *inside* that measured height. Padding `#root` itself (as it used to) stacks top+bottom inset on
+  top of the shell's height and pushes its last row, the mobile key bar, below the fold by exactly
+  `inset-top`. Because the shell owns the bottom inset for every layout, **no in-flow component may
+  pad for it again**; the one exception is by construction — `position: fixed` overlays escape the
+  box and pad their own (see `ui/sheet.tsx`, `browser/PickComposeSheet`). Web-only: the Electron
+  host never loads this stylesheet.
 - **Browser-tab Chromium exposes a loopback debug port.** The per-project headless
   Chromium launches with `--remote-debugging-port=0` (not the stdio pipe) so the
   embedded DevTools can attach; the daemon proxies its frontend at
@@ -612,6 +740,13 @@ password secrecy + patching remain the real mitigations. It costs two loosened u
 | Appdir layout, paths, schemas, defaults | `packages/config/src/index.ts` |
 | Wire contracts / message types | `packages/api/src/index.ts` |
 | Client store + transport + WS channel | `packages/ui/src/store/app.ts`, `packages/ui/src/lib/api-client.ts`, `packages/ui/src/lib/transporters/ws-session-channel.ts` |
+| Agent conversation history + resume | `apps/daemon/src/agent-conversations.ts`, `resumeLaunchArgs` in `apps/daemon/src/sessions.ts`, `resumeArgs`/`canResumeAgent` in `packages/registry/src/index.ts`, `packages/ui/src/components/main/ProjectOverview.tsx` |
+| Recent projects (daemon-owned) | `apps/daemon/src/recent-projects.ts`, `packages/ui/src/components/main/RecentProjects.tsx` |
+| System status (`/proc`, process tree, kill guard) | `apps/daemon/src/system-status.ts`, `panePids`/`serverPid` in `apps/daemon/src/tmux.ts` |
+| Git watcher, stashes, commit graph | `GitWatcher` + `passesGitEventFilter` in `apps/daemon/src/git.ts`, `packages/ui/src/components/git/git-watch.ts`, `packages/ui/src/components/git/graph.ts` |
+| Project templates + create dialog | `TEMPLATES` in `packages/registry/src/index.ts`, `packages/ui/src/components/sidebar/NewProjectModal.tsx` |
+| Attention Center, command palette, shortcuts | `packages/ui/src/components/attention/`, `packages/ui/src/components/command-palette/`, `packages/ui/src/lib/session-nav.ts` |
+| Themes (schemes + light/dark) | `packages/ui/src/lib/theme.ts`, `packages/ui/tailwind-preset.ts`, `packages/ui/src/styles/globals.css`, `apps/{web,desktop}/public/theme-boot.js` |
 | Electron embedding | `apps/desktop/src/main.ts` |
 | Browser tabs (Design Mode) | `apps/daemon/src/browsers.ts`, `apps/daemon/src/browser-pick.ts`, `packages/ui/src/components/browser/` |
 | Git hosting accounts (GitHub/Bitbucket) | `apps/daemon/src/accounts.ts`, `apps/daemon/src/providers/`, `packages/ui/src/components/settings/SettingsModal.tsx` |

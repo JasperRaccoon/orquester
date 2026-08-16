@@ -5,6 +5,7 @@ import { cn } from "../../lib/cn";
 import { Button, ContextMenu, Input, ResizeHandle, type ContextMenuItem } from "../ui";
 import { DiffView } from "./DiffView";
 import { FileStatusList } from "./FileStatusList";
+import { StashSection } from "./StashSection";
 import { useApi } from "../../context/orquester-context";
 import { useIsDesktop } from "../../hooks";
 import { useAppStore, usePaneSizes } from "../../store/app";
@@ -20,6 +21,10 @@ interface ChangesPanelProps {
   projectPath: string;
   status: GitStatusResponse | null;
   onChanged: () => void;
+  /** Bumped by GitView after every mutation — re-reads the stash list. */
+  reloadToken: number;
+  /** Surface a failed op (stash) in GitView's error banner. */
+  onError: (error: unknown) => void;
 }
 
 /**
@@ -45,7 +50,13 @@ function suggestedCommitSummary(file: GitFileChange): string {
  * the staged-for-commit selection — toggling stages/unstages via the daemon and
  * triggers a status refresh. Discard lives behind a right-click confirm.
  */
-export const ChangesPanel: React.FC<ChangesPanelProps> = ({ projectPath, status, onChanged }) => {
+export const ChangesPanel: React.FC<ChangesPanelProps> = ({
+  projectPath,
+  status,
+  onChanged,
+  reloadToken,
+  onError
+}) => {
   const api = useApi();
   const isDesktop = useIsDesktop();
   const setPaneSize = useAppStore((s) => s.setPaneSize);
@@ -167,7 +178,13 @@ export const ChangesPanel: React.FC<ChangesPanelProps> = ({ projectPath, status,
   };
 
   const discard = async (file: GitFileChange) => {
-    if (!window.confirm(`Discard changes to ${file.path}? This cannot be undone.`)) {
+    // Discard reverts the file to HEAD — index AND worktree — so say so: a
+    // staged change is thrown away too, and an untracked file is deleted.
+    const consequence =
+      file.status === "untracked"
+        ? "It will be deleted."
+        : "Staged and unstaged changes are both discarded.";
+    if (!window.confirm(`Discard changes to ${file.path}? ${consequence} This cannot be undone.`)) {
       return;
     }
     try {
@@ -203,13 +220,28 @@ export const ChangesPanel: React.FC<ChangesPanelProps> = ({ projectPath, status,
     }
   };
 
+  const stashSection = (
+    <StashSection
+      projectPath={projectPath}
+      hasChanges={files.length > 0}
+      reloadToken={reloadToken}
+      onChanged={onChanged}
+      onError={onError}
+    />
+  );
+
+  // No working changes: the stash strip stays mounted below the empty state —
+  // an empty tree is exactly when you want to restore one.
   if (files.length === 0) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-1 px-6 text-center">
-        <p className="text-sm text-neutral-300">No local changes</p>
-        <p className="text-xs text-neutral-600">
-          There are no uncommitted changes in this repository.
-        </p>
+      <div className="flex min-h-0 flex-1 flex-col bg-neutral-950">
+        <div className="flex flex-1 flex-col items-center justify-center gap-1 px-6 text-center">
+          <p className="text-sm text-neutral-300">No local changes</p>
+          <p className="text-xs text-neutral-600">
+            There are no uncommitted changes in this repository.
+          </p>
+        </div>
+        {stashSection}
       </div>
     );
   }
@@ -270,6 +302,8 @@ export const ChangesPanel: React.FC<ChangesPanelProps> = ({ projectPath, status,
             )}
           />
         </div>
+
+        {stashSection}
 
         <div className="shrink-0 space-y-2 border-t border-neutral-800 p-2.5">
           <Input

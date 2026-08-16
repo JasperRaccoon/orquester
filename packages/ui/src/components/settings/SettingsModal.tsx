@@ -1,11 +1,13 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
+  Activity,
   AppWindow,
   Bell,
   Boxes,
   Check,
   ChevronLeft,
   ChevronRight,
+  Clock,
   Copy,
   Download,
   ExternalLink,
@@ -13,9 +15,13 @@ import {
   Github,
   KeyRound,
   Loader2,
+  Monitor,
+  Moon,
+  Palette,
   Plus,
   RefreshCw,
   Server,
+  Sun,
   Trash2,
   Users,
   X,
@@ -25,6 +31,13 @@ import type { AccountSummary, CreateAccountRequest, GitProviderId } from "@orque
 import type { DaemonConfig } from "@orquester/config";
 import { cn } from "../../lib/cn";
 import { disablePush, enablePush, getSubscription, pushSupported } from "../../lib/push";
+import {
+  COLOR_SCHEMES,
+  THEME_MODES,
+  type ColorScheme,
+  type ResolvedMode,
+  type ThemeMode
+} from "../../lib/theme";
 import { Button, Input, Modal, ModalCloseButton, PasswordVerify, Switch } from "../ui";
 import { BitbucketIcon, getRegistryIcon } from "../../icons";
 import { useIsDesktop, useRegistry } from "../../hooks";
@@ -32,11 +45,28 @@ import { useApi, useOrquester } from "../../context/orquester-context";
 import { useAppStore } from "../../store/app";
 import { AgentAccountsSettings } from "./AgentAccountsSettings";
 import { ModelProxySettings } from "./ModelProxySettings";
+import { UsageOverview } from "./UsageOverview";
+import { SystemSettings } from "../system";
 
-type Section = "app" | "agents" | "modelproxy" | "accounts" | "usage" | "git-hosting" | "daemon";
+type Section =
+  | "app"
+  | "appearance"
+  | "agents"
+  | "modelproxy"
+  | "accounts"
+  | "usage"
+  | "git-hosting"
+  | "system"
+  | "daemon";
 
 const SECTIONS: { id: Section; label: string; icon: React.ReactNode; desc: string }[] = [
   { id: "app", label: "App", icon: <AppWindow size={16} />, desc: "Titlebar, runtime, active server" },
+  {
+    id: "appearance",
+    label: "Appearance",
+    icon: <Palette size={16} />,
+    desc: "Colour scheme and light/dark mode"
+  },
   { id: "usage", label: "Usage", icon: <Gauge size={16} />, desc: "Top-bar usage widget for Claude Code, Codex & Grok" },
   { id: "agents", label: "Agents", icon: <Boxes size={16} />, desc: "Install, update and view harness versions" },
   { id: "modelproxy", label: "Model proxy", icon: <Zap size={16} />, desc: "Run GPT & Kimi in the Claude Code harness" },
@@ -47,12 +77,20 @@ const SECTIONS: { id: Section; label: string; icon: React.ReactNode; desc: strin
     icon: <Github size={16} />,
     desc: "Connect GitHub/Bitbucket accounts and per-workspace git identities"
   },
+  {
+    id: "system",
+    label: "System",
+    icon: <Activity size={16} />,
+    desc: "Host CPU/memory/disk, running processes and listening ports"
+  },
   { id: "daemon", label: "Daemon", icon: <Server size={16} />, desc: "Workspaces dir, external HTTP access" }
 ];
 
 const renderSection = (id: Section) =>
   id === "app" ? (
     <AppSettings />
+  ) : id === "appearance" ? (
+    <AppearanceSettings />
   ) : id === "agents" ? (
     <AgentsSettings />
   ) : id === "modelproxy" ? (
@@ -63,6 +101,8 @@ const renderSection = (id: Section) =>
     <UsageSettings />
   ) : id === "git-hosting" ? (
     <GitHostingSettings />
+  ) : id === "system" ? (
+    <SystemSettings />
   ) : (
     <DaemonSettings />
   );
@@ -873,47 +913,50 @@ const UsageSettings: React.FC = () => {
   ];
 
   return (
-    <div className="divide-y divide-neutral-800">
-      <Field label="Show usage in the top bar" hint="A compact quota chip that opens a details panel.">
-        <Switch checked={prefs.enabled} onChange={(v) => setUsage({ enabled: v })} />
-      </Field>
-      <Field label="Claude Code" hint={agentHint("claude")}>
-        <Switch
-          checked={prefs.agents.claude ?? true}
-          onChange={(v) => setUsage({ agents: { ...prefs.agents, claude: v } })}
-        />
-      </Field>
-      <Field label="Codex" hint={agentHint("codex")}>
-        <Switch
-          checked={prefs.agents.codex ?? true}
-          onChange={(v) => setUsage({ agents: { ...prefs.agents, codex: v } })}
-        />
-      </Field>
-      <Field label="Grok Build" hint={agentHint("grok")}>
-        <Switch
-          checked={prefs.agents.grok ?? true}
-          onChange={(v) => setUsage({ agents: { ...prefs.agents, grok: v } })}
-        />
-      </Field>
-      <Field label="Chip shows" hint="Which agent drives the collapsed chip.">
-        <div className="flex gap-1">
-          {CHIP_OPTIONS.map((o) => (
-            <button
-              key={o.value}
-              type="button"
-              onClick={() => setUsage({ chip: o.value })}
-              className={cn(
-                "rounded-md px-2 py-1 text-xs",
-                prefs.chip === o.value
-                  ? "bg-neutral-700 text-neutral-100"
-                  : "text-neutral-400 hover:bg-neutral-800"
-              )}
-            >
-              {o.label}
-            </button>
-          ))}
-        </div>
-      </Field>
+    <div className="space-y-4">
+      <UsageOverview />
+      <div className="divide-y divide-neutral-800 border-t border-neutral-800">
+        <Field label="Show usage in the top bar" hint="A compact quota chip that opens a details panel.">
+          <Switch checked={prefs.enabled} onChange={(v) => setUsage({ enabled: v })} />
+        </Field>
+        <Field label="Claude Code" hint={agentHint("claude")}>
+          <Switch
+            checked={prefs.agents.claude ?? true}
+            onChange={(v) => setUsage({ agents: { ...prefs.agents, claude: v } })}
+          />
+        </Field>
+        <Field label="Codex" hint={agentHint("codex")}>
+          <Switch
+            checked={prefs.agents.codex ?? true}
+            onChange={(v) => setUsage({ agents: { ...prefs.agents, codex: v } })}
+          />
+        </Field>
+        <Field label="Grok Build" hint={agentHint("grok")}>
+          <Switch
+            checked={prefs.agents.grok ?? true}
+            onChange={(v) => setUsage({ agents: { ...prefs.agents, grok: v } })}
+          />
+        </Field>
+        <Field label="Chip shows" hint="Which agent drives the collapsed chip.">
+          <div className="flex gap-1">
+            {CHIP_OPTIONS.map((o) => (
+              <button
+                key={o.value}
+                type="button"
+                onClick={() => setUsage({ chip: o.value })}
+                className={cn(
+                  "rounded-md px-2 py-1 text-xs",
+                  prefs.chip === o.value
+                    ? "bg-neutral-700 text-neutral-100"
+                    : "text-neutral-400 hover:bg-neutral-800"
+                )}
+              >
+                {o.label}
+              </button>
+            ))}
+          </div>
+        </Field>
+      </div>
     </div>
   );
 };
@@ -988,6 +1031,149 @@ const AppSettings: React.FC = () => {
       <Field label="Active server">
         <span className="text-sm text-neutral-400">{active?.name ?? "—"}</span>
       </Field>
+    </div>
+  );
+};
+
+const MODE_ICON: Record<ThemeMode, React.ReactNode> = {
+  system: <Monitor size={12} />,
+  light: <Sun size={12} />,
+  dark: <Moon size={12} />,
+  dynamic: <Clock size={12} />
+};
+
+/**
+ * A miniature of the app painted with a theme's own variables — the same
+ * `[data-scheme][data-mode]` selectors the real chrome uses, so a preview can
+ * never drift from the theme it advertises.
+ */
+const ThemePreview: React.FC<{ scheme: ColorScheme; mode: ResolvedMode }> = ({ scheme, mode }) => (
+  <span data-scheme={scheme} data-mode={mode} className="flex h-14 w-full bg-neutral-950">
+    <span className="flex h-full w-1/3 flex-col gap-1 bg-neutral-900 p-1.5">
+      <span className="h-1 w-full rounded-full bg-neutral-700" />
+      <span className="h-1 w-3/4 rounded-full bg-neutral-800" />
+      <span className="h-1 w-2/3 rounded-full bg-neutral-800" />
+    </span>
+    <span className="flex h-full flex-1 flex-col gap-1 p-1.5">
+      <span className="h-1.5 w-1/2 rounded-full bg-neutral-300" />
+      <span className="h-1 w-full rounded-full bg-neutral-700" />
+      <span className="h-1 w-4/5 rounded-full bg-neutral-800" />
+    </span>
+  </span>
+);
+
+/** Same trick as {@link ThemePreview}: a gradient across the scheme's own steps. */
+const ThemeSwatch: React.FC<{ scheme: ColorScheme; mode: ResolvedMode }> = ({ scheme, mode }) => (
+  <span
+    data-scheme={scheme}
+    data-mode={mode}
+    className="relative flex h-12 w-12 overflow-hidden rounded-full ring-1 ring-inset ring-neutral-400/40"
+    style={{
+      background:
+        "linear-gradient(135deg, rgb(var(--n-200)) 0%, rgb(var(--n-400)) 30%, rgb(var(--n-700)) 62%, rgb(var(--n-950)) 100%)"
+    }}
+  />
+);
+
+const AppearanceSettings: React.FC = () => {
+  const scheme = useAppStore((s) => s.colorScheme);
+  const themeMode = useAppStore((s) => s.themeMode);
+  const resolvedMode = useAppStore((s) => s.resolvedMode);
+  const setColorScheme = useAppStore((s) => s.setColorScheme);
+  const setThemeMode = useAppStore((s) => s.setThemeMode);
+
+  return (
+    <div className="space-y-6">
+      <section className="space-y-3">
+        <div>
+          <p className="text-sm text-neutral-200">Colour scheme</p>
+          <p className="text-xs text-neutral-500">
+            Repaints the whole app; the code editor follows light/dark. Only the
+            terminal keeps its own dark palette.
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {COLOR_SCHEMES.map((s) => {
+            const selected = s.id === scheme;
+            return (
+              <button
+                key={s.id}
+                type="button"
+                aria-pressed={selected}
+                onClick={() => setColorScheme(s.id)}
+                className="group relative flex w-[4.5rem] flex-col items-center gap-1.5 rounded-lg py-1.5 hover:bg-neutral-800/60"
+              >
+                <ThemeSwatch scheme={s.id} mode={resolvedMode} />
+                <span
+                  className={cn(
+                    "absolute right-1 top-0.5 flex h-4 w-4 items-center justify-center rounded-md border transition-colors",
+                    selected
+                      ? "border-neutral-100 bg-neutral-100 text-neutral-900"
+                      : "border-neutral-600 bg-neutral-900/70 text-transparent"
+                  )}
+                >
+                  <Check size={10} strokeWidth={3} />
+                </span>
+                <span
+                  className={cn(
+                    "text-[11px]",
+                    selected ? "text-neutral-100" : "text-neutral-400 group-hover:text-neutral-200"
+                  )}
+                >
+                  {s.label}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </section>
+
+      <section className="space-y-3">
+        <div>
+          <p className="text-sm text-neutral-200">Colour mode</p>
+          <p className="text-xs text-neutral-500">
+            System follows the OS · Dynamic follows the time of day.
+          </p>
+        </div>
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          {THEME_MODES.map((m) => {
+            const selected = m.id === themeMode;
+            // System/dynamic preview whatever they currently resolve to.
+            const previewMode: ResolvedMode =
+              m.id === "light" ? "light" : m.id === "dark" ? "dark" : resolvedMode;
+            return (
+              <button
+                key={m.id}
+                type="button"
+                aria-pressed={selected}
+                onClick={() => setThemeMode(m.id)}
+                className={cn(
+                  "overflow-hidden rounded-lg border text-left transition-colors",
+                  selected
+                    ? "border-neutral-300"
+                    : "border-neutral-800 hover:border-neutral-600"
+                )}
+              >
+                <span className="relative block">
+                  <ThemePreview scheme={scheme} mode={previewMode} />
+                  <span className="absolute left-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-neutral-900/80 text-neutral-300">
+                    {MODE_ICON[m.id]}
+                  </span>
+                </span>
+                <span
+                  className={cn(
+                    "flex items-center justify-between gap-1 px-2 py-1.5 text-xs",
+                    selected ? "text-neutral-100" : "text-neutral-400"
+                  )}
+                >
+                  {m.label}
+                  {selected && <Check size={12} strokeWidth={3} />}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </section>
     </div>
   );
 };

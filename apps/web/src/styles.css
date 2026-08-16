@@ -20,8 +20,22 @@ body {
 
 /* Standalone (installed PWA) safe-area padding so the iOS status bar / home
    indicator don't overlap the app chrome. env() insets are 0 in a normal
-   browser tab, so this is inert outside standalone mode. */
-#root {
+   browser tab, so this is inert outside standalone mode; the Electron host
+   never loads this stylesheet at all.
+
+   Inset + vertical-sizing ownership (one layer owns both, deliberately):
+   the app shell — `#root`'s only child, `AppWrapper` — is the layer whose
+   height is driven by `useViewportHeight` (`visualViewport.height`, so it fits
+   above the soft keyboard). The insets are padded onto THAT element with
+   `box-sizing: border-box`, which keeps them *inside* the measured height.
+   Padding `#root` instead (as this rule used to) adds top+bottom inset on top
+   of the shell's own height, pushing its last row — the mobile key bar — below
+   the fold by exactly `inset-top`. Because the shell owns the bottom inset for
+   every layout, no in-flow component pads for it itself (the key bar, the main
+   view and the sidebar footer would each have had to, conditionally).
+   Exception, by construction: `position: fixed` overlays escape this box and
+   pad their own bottom inset (see `ui/sheet.tsx`, `browser/PickComposeSheet`). */
+#root > * {
   padding-top: env(safe-area-inset-top);
   padding-bottom: env(safe-area-inset-bottom);
   padding-left: env(safe-area-inset-left);

@@ -1,6 +1,7 @@
 import type {
   AccountSummary,
   AccountTestResult,
+  AgentConversationsResponse,
   AgentEventRequest,
   AgentUsage,
   BrowserClientMessage,
@@ -35,17 +36,27 @@ import type {
   GitDiffResponse,
   GitLogEntry,
   GitOpResult,
+  GitStashActionRequest,
+  GitStashCreateRequest,
+  GitStashEntry,
+  GitStatusChangedPayload,
   GitStatusResponse,
   HealthResponse,
   ImportAgentAccountRequest,
+  KillProcessErrorResponse,
+  KillProcessRequest,
+  KillProcessResponse,
+  MarkRecentProjectRequest,
   OpenRequest,
   OpenResult,
   OwnerSummary,
   ProjectSummary,
+  ProjectTemplatesResponse,
   PushInfoResponse,
   PushSubscribeRequest,
   PushTestResponse,
   PushUnsubscribeRequest,
+  RecentProjectSummary,
   RegistryKind,
   RegistryResponse,
   RenameSessionRequest,
@@ -61,6 +72,9 @@ import type {
   SessionSummary,
   SessionUploadRequest,
   SessionUploadResponse,
+  SystemPortsResponse,
+  SystemProcessesResponse,
+  SystemResourcesResponse,
   UpdateProjectRequest,
   UpdateTodoRequest,
   UpdateWorkspaceRequest,
@@ -69,17 +83,20 @@ import type {
   UsageWindow,
   WorkspaceSummary
 } from "@orquester/api";
-import { BROWSER_FRAME_TYPE_JPEG, SYSTEM_ACCOUNT_ID } from "@orquester/api";
-import { RegistryService } from "./registry";
+import { BROWSER_FRAME_TYPE_JPEG, MAX_INITIAL_COMMAND, SYSTEM_ACCOUNT_ID } from "@orquester/api";
+import { isBinOnPath, RegistryService } from "./registry";
 import { BrowserError, BrowserManager } from "./browsers";
 import { redactUrlTokens, sanitizeDevtoolsPath } from "./devtools.js";
 import { UrlWatcher } from "./url-watcher";
 import { AgentHooks } from "./agent-hooks";
+import { listAgentConversations } from "./agent-conversations.ts";
 import { claudeTimeoutEnv } from "./agent-timeout-env.ts";
-import { type ISessionManager, SessionError, createSessionManager } from "./sessions";
+import { type ISessionManager, SessionError, createSessionManager, resumeLaunchArgs } from "./sessions";
 import type { ActivityCause } from "./ansi-activity";
 import { TodoError, TodoListManager } from "./todos";
-import { Tmux, tmuxAvailable, tmuxVersionOk } from "./tmux";
+import { RecentProjectsService } from "./recent-projects";
+import { Tmux, sessionPath, tmuxAvailable, tmuxVersionOk } from "./tmux";
+import { SystemStatusService } from "./system-status";
 import { CliProxyManager } from "./cliproxy";
 import { CLIPROXY_RELEASE, defaultFetchTarball, installBinary, listPatches, rollbackBinary } from "./cliproxy-install.ts";
 import { accountPrefix } from "./cliproxy-seed.ts";
@@ -88,7 +105,7 @@ import { AccountError, AccountsService } from "./accounts";
 import { AgentAccountsService } from "./agent-accounts.ts";
 import { AgentAccountError } from "./agent-account-paths.ts";
 import { PushService, isValidPushEndpoint } from "./push";
-import { GitError, GitService } from "./git";
+import { GitError, GitService, GitWatcher, passesGitEventFilter } from "./git";
 import { UsageService } from "./usage";
 import { UsageTokensScanner } from "./usage-tokens";
 import { createClaudeSource, createCodexSource, createGrokSource, readUsagePrefs, shouldHideSystemUsage } from "./usage-sources";
@@ -146,6 +163,7 @@ import {
   parseRemotesConfig,
   parseWorkspacesConfig,
   pushConfigPath,
+  recentProjectsPath,
   remotesConfigPath,
   resolveDaemonPaths,
   sessionsIndexPath,
@@ -155,7 +173,7 @@ import {
   workspacesMetaPath,
   isValidName
 } from "@orquester/config";
-import { CHROMIUM_FAMILY_IDS } from "@orquester/registry";
+import { CHROMIUM_FAMILY_IDS, TEMPLATES } from "@orquester/registry";
 import { assertInsideFsRoot, FsSandboxError } from "@orquester/config/fs";
 import fastifyStatic from "@fastify/static";
 import websocketPlugin from "@fastify/websocket";
@@ -207,6 +225,8 @@ interface ResolvedPaths {
   browserProfilesDir: string;
   /** <appdir>/daemon/todos.json — the managed to-do list index. */
   todosIndexFile: string;
+  /** <appdir>/daemon/recent-projects.json — the shared recent-projects list. */
+  recentProjectsFile: string;
   /** <appdir>/daemon/push.json — Web Push VAPID keypair + subscriptions (0600). */
   pushConfigFile: string;
   workspacesDir: string;
@@ -334,6 +354,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     browsersIndexFile: browsersIndexPath(paths.baseDir),
     browserProfilesDir: browserProfilesDir(paths.baseDir),
     todosIndexFile: todosIndexPath(paths.baseDir),
+    recentProjectsFile: recentProjectsPath(paths.baseDir),
     pushConfigFile: pushConfigPath(paths.baseDir),
     workspacesDir: expandVars(config.workspacesDir, paths.vars),
     keysDir: keysDir(paths.baseDir),
@@ -393,8 +414,23 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   const git = new GitService();
   const todos = new TodoListManager(resolved.todosIndexFile, console);
   await todos.load();
+  const recentProjects = new RecentProjectsService(
+    resolved.recentProjectsFile,
+    resolved.workspacesDir,
+    console,
+    // Same tolerant side-table read the workspace/project listings use, so a
+    // recents row is behind the archive curtain exactly when the sidebar's is.
+    () => readWorkspacesMeta(resolved.workspacesMetaFile)
+  );
+  await recentProjects.load();
   const push = new PushService(resolved.pushConfigFile, console);
   const broadcaster = new Broadcaster();
+  // Push a project's git status to whoever is looking at it. The watcher polls
+  // ONLY projects with a live `/events?project=…` subscriber and only emits on a
+  // real change, so an unwatched (or idle) repo costs nothing.
+  const gitWatcher = new GitWatcher(git, (path, status) =>
+    broadcaster.publish("projects", "project.git.changed", { path, status } satisfies GitStatusChangedPayload)
+  );
   // Stream registry changes (install/update status, detected versions) to clients.
   registry.events.on("changed", (entry) => broadcaster.publish("registry", "registry.changed", entry));
   agentAccounts.events.on("changed", (payload) => broadcaster.publish("agent-accounts", "agent-accounts.changed", payload));
@@ -626,6 +662,12 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   todos.lifecycle.on("updated", (r) => broadcaster.publish("todos", "todo.updated", r));
   todos.lifecycle.on("deleted", (r) => broadcaster.publish("todos", "todo.deleted", r));
 
+  // Recent projects → event bus (channel "projects"). The payload is the whole
+  // list (short, capped at 30) so a client just replaces its copy.
+  recentProjects.lifecycle.on("changed", (list) =>
+    broadcaster.publish("projects", "recentProjects.changed", list)
+  );
+
   // Server-side browser tabs (Design Mode). Chromium resolves through the
   // registry's probed browser entries; no bundled download. Only CDP-speaking
   // (Chromium-family) browsers can drive puppeteer-core — see CHROMIUM_FAMILY_IDS.
@@ -670,7 +712,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
       spawnDirect: (bin, args) => {
         const child = spawn(bin, args, { cwd: cliproxyRunDir, detached: false, stdio: "ignore" });
         child.on("error", (error) => console.error("cliproxy spawnDirect failed", error));
-        return { kill: () => child.kill() };
+        // `pid` so the system-status kill guard can protect it: without tmux
+        // this IS a child of the daemon and would otherwise be killable.
+        return { kill: () => child.kill(), pid: child.pid };
       },
       liveDependentSessionCount: () =>
         sessions
@@ -735,7 +779,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // fresh, bounded live-catalog probe.
   const validateModel: ValidateModel = (entryId, model) => cliproxy.validateModel(entryId, model);
   const services: Services = {
-    registry, sessions, validateModel, cliproxy, accounts, git, todos, usage, usageTokens, push, broadcaster, agentAccounts, browsers, urlWatcher
+    registry, sessions, validateModel, cliproxy, accounts, git, gitWatcher, todos, recentProjects, usage, usageTokens, push, broadcaster, agentAccounts, browsers, urlWatcher
   };
 
   // Boot the managed proxy AFTER reattach (adoption must see the final session
@@ -815,6 +859,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     usage.stop();
     clearInterval(cliproxyHealthTimer);
     agentAccounts.stopRefresher();
+    gitWatcher.stop();
     // Detach (don't kill) sessions: the tmux backend leaves its server running so
     // the next boot reattaches; the local backend has no server, so its shutdown()
     // terminates the child PTYs (they'd die with the daemon regardless).
@@ -1520,7 +1565,11 @@ interface Services {
   cliproxy: CliProxyManager;
   accounts: AccountsService;
   git: GitService;
+  /** Refcounted per-project git status poller behind `project.git.changed`. */
+  gitWatcher: GitWatcher;
   todos: TodoListManager;
+  /** Daemon-owned recent-projects list, shared by every connected client. */
+  recentProjects: RecentProjectsService;
   usage: UsageService;
   usageTokens: UsageTokensScanner;
   push: PushService;
@@ -1540,7 +1589,7 @@ export function createServer(
   services: Services,
   options: { authRequired: boolean; mode: "local" | "remote"; serveWeb?: string }
 ): FastifyInstance {
-  const { registry, sessions, validateModel, cliproxy, accounts, git, todos, usage, usageTokens, push, agentAccounts } = services;
+  const { registry, sessions, validateModel, cliproxy, accounts, git, gitWatcher, todos, recentProjects, usage, usageTokens, push, agentAccounts } = services;
 
   const app = Fastify({
     // Remote requests arrive via Caddy on loopback (reverse_proxy 127.0.0.1:47831),
@@ -1923,6 +1972,46 @@ export function createServer(
     }
   );
 
+  /**
+   * Record one interaction with a project path. Best-effort and SILENT: a path
+   * outside the fs sandbox, or one that isn't a `<workspace>/<project>` dir, is
+   * simply not recorded — never an error, because the caller (a session launch)
+   * already succeeded. The sandbox check runs on the realpath, but the entry stores the
+   * caller's path so it keeps matching `ProjectSummary.path` (which is the raw
+   * `<workspacesDir>/<ws>/<project>` join, symlinks unresolved).
+   */
+  const markRecentProject = async (path: unknown): Promise<void> => {
+    if (typeof path !== "string" || path.length === 0) {
+      return;
+    }
+    try {
+      await assertInsideFsRoot(resolved.fsRoot, path);
+      await recentProjects.markInteracted(resolve(path));
+    } catch {
+      // Outside the sandbox, or unreadable — nothing to record.
+    }
+  };
+
+  // Recent projects. Daemon-owned (not per-browser localStorage) so every
+  // device sees the same list. The daemon also marks automatically on session
+  // create; this POST is for the pure-navigation interactions only a client
+  // knows about.
+  app.get(
+    "/api/projects/recent",
+    async (): Promise<RecentProjectSummary[]> => recentProjects.list()
+  );
+
+  app.post<{ Body: MarkRecentProjectRequest }>(
+    "/api/projects/recent",
+    async (request): Promise<RecentProjectSummary[]> => {
+      await markRecentProject(request.body?.path);
+      // snapshot(), not list(): the mark already broadcast the new list, and a
+      // liveness sweep here would make one POST emit "recentProjects.changed"
+      // twice. The sweep belongs to GET.
+      return recentProjects.snapshot();
+    }
+  );
+
   app.put<{ Params: { workspace: string; project: string }; Body: UpdateProjectRequest }>(
     "/api/workspaces/:workspace/projects/:project",
     async (request, reply): Promise<ProjectSummary | void> => {
@@ -1982,6 +2071,31 @@ export function createServer(
           return reply.code(400).send({ code: "INVALID_NAME", message: "Invalid name." });
         }
         const path = join(workspaceDir, name);
+        // `mkdir -p` succeeds on an existing dir, so a name that collides with a
+        // populated project would silently "create" it — and the client's next
+        // step is to type a scaffolder into a terminal there, which either
+        // refuses or scribbles over someone's work. Refuse first, with a code the
+        // UI can turn into "that name is taken". An existing EMPTY dir is still
+        // fine (re-creating an abandoned shell of a project is the legit case).
+        const occupants = await readdir(path).catch((error: unknown) =>
+          isNodeError(error) && error.code === "ENOENT" ? [] : null
+        );
+        if (occupants === null || occupants.length > 0) {
+          // "That name is taken" is unhelpable advice when the taker is
+          // invisible: an archived project is hidden from the sidebar, so the
+          // user sees an empty slot and a refusal. Name the real situation and
+          // the one action that resolves it (restoring is the only path back —
+          // re-creating the name deliberately does not un-archive).
+          const archived = (await readWorkspacesMeta(resolved.workspacesMetaFile)).workspaces
+            .find((w) => w.name === workspace)
+            ?.archivedProjects.includes(name);
+          return reply.code(409).send({
+            code: "DIRECTORY_NOT_EMPTY",
+            message: archived
+              ? `"${name}" is an archived project — restore it from the Archived panel.`
+              : `"${name}" already exists and is not empty.`
+          });
+        }
         await mkdir(path, { recursive: true });
         // `mkdir -p` also succeeds on an existing dir, so this can land on a
         // project whose name is still in `archivedProjects` (archived, hence
@@ -3104,8 +3218,174 @@ export function createServer(
     }
   );
 
+  // Stashes. Mutations address a stash by its POSITION in `git stash list`; the
+  // daemon builds the `stash@{n}` ref itself so no client can name a raw
+  // revision through these routes.
+  app.get<{ Querystring: { path?: string } }>(
+    "/api/git/stashes",
+    async (request, reply): Promise<GitStashEntry[] | void> => {
+      const path = request.query.path;
+      if (!path) {
+        return reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
+      }
+      try {
+        const safe = await assertInsideFsRoot(resolved.fsRoot, path);
+        return await git.stashList(safe);
+      } catch (error) {
+        return gitError(reply, error);
+      }
+    }
+  );
+
+  // Stash the working tree (optionally including untracked files).
+  app.post<{ Body: Partial<GitStashCreateRequest> }>(
+    "/api/git/stash",
+    async (request, reply): Promise<GitOpResult | void> => {
+      const { path, message, includeUntracked } = request.body ?? {};
+      if (!path) {
+        return reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
+      }
+      try {
+        const safe = await assertInsideFsRoot(resolved.fsRoot, path);
+        return await git.stashCreate(safe, { message, includeUntracked });
+      } catch (error) {
+        return gitError(reply, error);
+      }
+    }
+  );
+
+  // Apply / pop / drop one stash. Same body shape for all three: the POSITION in
+  // the list plus the SHA the client saw there. The index alone is a racy handle
+  // (another client can push/drop a stash and shift the list under this one, so a
+  // Drop would destroy an unrelated, unrecoverable stash) — the service re-checks
+  // that `stash@{index}` still resolves to `sha` and answers 409 otherwise.
+  for (const [suffix, run] of [
+    ["apply", (cwd: string, index: number, sha: string) => git.stashApply(cwd, index, sha)],
+    ["pop", (cwd: string, index: number, sha: string) => git.stashPop(cwd, index, sha)],
+    ["drop", (cwd: string, index: number, sha: string) => git.stashDrop(cwd, index, sha)]
+  ] as const) {
+    app.post<{ Body: Partial<GitStashActionRequest> }>(
+      `/api/git/stash/${suffix}`,
+      async (request, reply): Promise<GitOpResult | void> => {
+        const { path, index, sha } = request.body ?? {};
+        if (!path || typeof index !== "number" || !sha) {
+          return reply
+            .code(400)
+            .send({ code: "INVALID_REQUEST", message: "path, index and sha required." });
+        }
+        try {
+          const safe = await assertInsideFsRoot(resolved.fsRoot, path);
+          return await run(safe, index, sha);
+        } catch (error) {
+          return gitError(reply, error);
+        }
+      }
+    );
+  }
+
+  // System status — host resources, this daemon's own process tree, and the TCP
+  // ports those processes listen on. Linux-only (all three read /proc); off Linux
+  // each route answers `supported: false`, mirroring /api/fs/capabilities' host
+  // gating. Everything is best-effort: a /proc entry that vanished mid-scan is
+  // skipped, never a 500. No background poller — resources are computed on demand
+  // behind a short cache (the Broadcaster exposes no client-count signal to gate
+  // one on, and an always-on poller on a VPS is not worth the wakeups).
+  const systemStatus = new SystemStatusService({
+    fsRoot: resolved.fsRoot,
+    tmuxSocket: resolved.tmuxSocket,
+    listSessionIds: () => new Set(sessions.list().map((session) => session.id)),
+    // On a tmux-less host the model proxy is a direct child of the daemon, so
+    // it sits in the very tree this route walks. It is infrastructure, not a
+    // user process: refuse it the way the tmux server is refused.
+    protectedPids: () => {
+      const pid = services.cliproxy?.directChildPid();
+      return typeof pid === "number" ? [pid] : [];
+    }
+  });
+
+  app.get("/api/system/resources", async (): Promise<SystemResourcesResponse> => systemStatus.resources());
+
+  app.get("/api/system/processes", async (): Promise<SystemProcessesResponse> => systemStatus.processes());
+
+  // Guarded kill: refused for any pid outside this daemon's tree, and for the
+  // daemon and the tmux server themselves (see SystemStatusService.kill). The
+  // service's own code is passed through verbatim so a client can distinguish a
+  // bad request from a protected target from an unsupported host.
+  app.post<{ Body: Partial<KillProcessRequest> }>(
+    "/api/system/processes/kill",
+    async (request, reply): Promise<KillProcessResponse | KillProcessErrorResponse> => {
+      const result = await systemStatus.kill(Number(request.body?.pid));
+      if (!result.ok) {
+        return reply.code(400).send({ code: result.code, message: result.error });
+      }
+      return { ok: true, killed: result.killed };
+    }
+  );
+
+  app.get("/api/system/ports", async (): Promise<SystemPortsResponse> => systemStatus.ports());
+
+  // Past conversations of every installed agent for one project, merged and
+  // newest-first, read out of each CLI's own history dir. Fail-soft on purpose:
+  // a missing/invalid/out-of-sandbox path or an unreadable history answers with
+  // an empty list rather than an error — this only feeds a "resume" picker.
+  app.get<{ Querystring: { path?: string } }>(
+    "/api/agents/conversations",
+    async (request): Promise<AgentConversationsResponse> => {
+      const path = request.query.path;
+      if (!path) {
+        return { conversations: [] };
+      }
+      try {
+        // Sandbox gate only. The LOOKUP uses the lexical path, not the realpath
+        // this returns: agents key their history by the path a session was
+        // launched with, which is the workspaces path as listed to the client.
+        await assertInsideFsRoot(resolved.fsRoot, path);
+        // daemonDir lets the scan reach the MANAGED agent homes
+        // (agent-accounts/<family>/<id>/home, cliproxy/claude-home-*), not just
+        // the daemon's own HOME — most sessions here run under one of those.
+        return {
+          conversations: await listAgentConversations(resolve(path), { daemonDir: resolved.daemonDir })
+        };
+      } catch {
+        return { conversations: [] };
+      }
+    }
+  );
+
   // Registry (shells & agents)
   app.get("/api/registry", async (): Promise<RegistryResponse> => registry.list());
+
+  // Project scaffold templates: the static catalog plus this host's availability.
+  // Probed per request rather than cached, so a tool installed from a terminal
+  // session (npm/uv/cargo) lights its template up on the next modal open. The
+  // command itself is never run here — the client types it into a terminal tab,
+  // so availability is probed against the SESSION PATH (which prepends
+  // ~/.local/bin, ~/.cargo/bin, ~/go/bin, … to the daemon's narrow systemd PATH)
+  // rather than the daemon's own: the card must match what that shell can run.
+  app.get("/api/templates", async (): Promise<ProjectTemplatesResponse> => {
+    const path = sessionPath();
+    return {
+      templates: TEMPLATES.map((t) => {
+        const missing = t.requires.filter((bin) => !isBinOnPath(bin, path));
+        return {
+          id: t.id,
+          name: t.name,
+          category: t.category,
+          icon: t.icon,
+          requires: [...t.requires],
+          variants: t.variants.map((v) => ({
+            id: v.id,
+            name: v.name,
+            icon: v.icon,
+            command: v.command,
+            options: v.options.map((o) => ({ ...o }))
+          })),
+          available: missing.length === 0,
+          missing
+        };
+      })
+    };
+  });
 
   app.get<{ Querystring: { refresh?: string } }>("/api/usage", async (request): Promise<UsageResponse> =>
     usage.snapshot(request.query.refresh === "1")
@@ -3223,6 +3503,25 @@ export function createServer(
 
   app.post("/api/sessions", async (request, reply): Promise<SessionSummary | void> => {
     const body = (request.body ?? {}) as CreateSessionRequest;
+    // `initialCommand` is TYPED into the fresh PTY (see sessions.ts), so it gets
+    // /input's trust — with two bounds /input can't have: one line, and no
+    // control bytes. A raw keystroke stream legitimately carries ESC; a launch
+    // command must not, or a client could smuggle a terminal control sequence
+    // into a tab it never showed the user.
+    if (body.initialCommand !== undefined) {
+      const command = body.initialCommand;
+      if (
+        typeof command !== "string" ||
+        command.length > MAX_INITIAL_COMMAND ||
+        // (control bytes are exactly what this class rejects)
+        /[\u0000-\u001f\u007f]/.test(command)
+      ) {
+        return reply.code(400).send({
+          code: "INVALID_INITIAL_COMMAND",
+          message: `initialCommand must be a single line of at most ${MAX_INITIAL_COMMAND} characters.`
+        });
+      }
+    }
     // Per-launch `model` is valid ONLY for the claudex/claudemix launchers; for
     // every other refId it is a client error. For the two managed launchers the
     // pick (or an omitted default) is resolved/validated by the injected seam,
@@ -3230,6 +3529,19 @@ export function createServer(
     const resolvedModel = await resolveLaunchModel(body.refId, body.model, validateModel);
     if (!resolvedModel.ok) {
       return reply.code(400).send(resolvedModel.body);
+    }
+    // "Resume this conversation" must never degrade into "start a fresh one":
+    // if the id is unusable (rejected shape, or an agent with no resume flags)
+    // the launch is refused so the client can say so, instead of silently
+    // opening an empty session the user believes is their old one.
+    if (typeof body.resumeConversationId === "string" && body.resumeConversationId.trim()) {
+      const resumeEntry = registry.get(body.refId);
+      if (!resumeEntry || resumeLaunchArgs(resumeEntry, body.resumeConversationId).length === 0) {
+        return reply.code(400).send({
+          code: "RESUME_UNAVAILABLE",
+          message: "That conversation cannot be resumed with this agent."
+        });
+      }
     }
     const effectiveModel = resolvedModel.effectiveModel;
     const modelCatalog = resolvedModel.catalog;
@@ -3267,6 +3579,10 @@ export function createServer(
       const message = error instanceof SessionError ? error.message : "Failed to create session.";
       return reply.code(400).send({ code: "SESSION_UNAVAILABLE", message });
     }
+    // Launching a tab in a project is the strongest "I'm working here" signal
+    // the daemon sees, so it feeds the shared recent-projects list itself
+    // rather than trusting each client to report it.
+    await markRecentProject(summary.projectPath);
     // Launch-time model pre-flight (spec §8.4): warn — never block — when a model
     // this managed session references is absent from the live catalog. The MAIN
     // model was already hard-validated by resolveLaunchModel; this snapshots the
@@ -3638,7 +3954,33 @@ export function createServer(
   app.post("/api/push/test", async (): Promise<PushTestResponse> => ({ sent: await push.sendTest() }));
 
   // Daemon event bus (newline-delimited JSON): lifecycle broadcasts + heartbeat.
-  app.get("/events", (request, reply) => {
+  app.get<{ Querystring: { project?: string } }>("/events", async (request, reply) => {
+    // Optional per-project git subscription. While this stream is open the
+    // daemon polls that project's status and pushes `project.git.changed` — and
+    // ONLY to the clients that asked for that project, since a status blob is
+    // useless noise to everyone else. Refcounted in the watcher, so several
+    // clients (or reconnects) on one project share one poll loop, and the
+    // stream's close hook below is what stops it.
+    let watchedProject: string | null = null;
+    if (request.query.project) {
+      try {
+        watchedProject = await assertInsideFsRoot(resolved.fsRoot, request.query.project);
+      } catch (error) {
+        return gitError(reply, error);
+      }
+    }
+
+    // The client can hang up BEFORE this handler registers anything — during the
+    // sandbox check above, or during an auth hook. Its "close" then fires while
+    // no listener exists, and the sink + heartbeat + watcher refcount below would
+    // leak for the lifetime of the daemon. Nothing is registered yet at this
+    // point, so bailing out IS the whole cleanup; hijack first so Fastify doesn't
+    // try to serialize a reply onto the dead socket.
+    if (request.raw.destroyed) {
+      reply.hijack();
+      return;
+    }
+
     reply.hijack();
     reply.raw.writeHead(200, {
       "content-type": "application/x-ndjson",
@@ -3646,8 +3988,19 @@ export function createServer(
       "x-accel-buffering": "no"
     });
 
-    const sink = { send: (data: string) => reply.raw.write(`${data}\n`) };
+    const sink = {
+      send: (data: string) => {
+        // Status blobs go only to the streams watching that project; everything
+        // else passes through. Decided by the event's real `type` — see
+        // passesGitEventFilter (and its tests) for why the substring alone isn't.
+        if (!passesGitEventFilter(data, watchedProject)) return;
+        reply.raw.write(`${data}\n`);
+      }
+    };
     services.broadcaster.add(sink);
+    if (watchedProject) {
+      services.gitWatcher.subscribe(watchedProject);
+    }
 
     const timer = setInterval(() => {
       const event: EventMessage = {
@@ -3663,6 +4016,9 @@ export function createServer(
     request.raw.on("close", () => {
       clearInterval(timer);
       services.broadcaster.remove(sink);
+      if (watchedProject) {
+        services.gitWatcher.unsubscribe(watchedProject);
+      }
     });
   });
 

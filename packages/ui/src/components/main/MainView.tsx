@@ -1,7 +1,9 @@
 import React from "react";
-import { FolderTree, GitBranch, Globe, LayoutGrid, ListTodo, MousePointerClick, X } from "lucide-react";
+import { FolderTree, GitBranch, Globe, ListTodo, X } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { EmptyState } from "./EmptyState";
+import { ProjectOverview } from "./ProjectOverview";
+import { RecentProjects } from "./RecentProjects";
 import { TerminalView } from "../terminal";
 import { FileBrowser } from "../files";
 import { GitView } from "../git";
@@ -90,13 +92,11 @@ export const MainView: React.FC = () => {
   const grid = isDesktop && viewMode === "grid";
 
   if (!ctx) {
+    // The natural landing surface: nothing is open, so offer the daemon's
+    // recent projects (it falls back to the old placeholder when empty).
     return (
       <main className="min-h-0 flex-1 overflow-hidden bg-neutral-950">
-        <EmptyState
-          icon={<LayoutGrid size={40} strokeWidth={1.25} />}
-          title="No workspace selected"
-          description="Pick a workspace from the sidebar."
-        />
+        <RecentProjects />
       </main>
     );
   }
@@ -105,11 +105,7 @@ export const MainView: React.FC = () => {
     return (
       <main className="min-h-0 flex-1 overflow-hidden bg-neutral-950">
         {ctx.kind === "project" ? (
-          <EmptyState
-            icon={<MousePointerClick size={40} strokeWidth={1.25} />}
-            title="No tabs open"
-            description='Use the "+" button in the top bar to open a terminal, agent or file browser.'
-          />
+          <ProjectOverview projectPath={ctx.project.path} />
         ) : (
           <EmptyState
             icon={<ListTodo size={40} strokeWidth={1.25} />}

@@ -13,9 +13,9 @@ import {
 } from "lucide-react";
 import { cn } from "../../lib/cn";
 import {
+  AdaptiveMenu,
   ConfirmDialog,
   ContextMenu,
-  Dropdown,
   DropdownItem,
   IconButton,
   type ContextMenuItem
@@ -103,12 +103,13 @@ export const ProjectList: React.FC = () => {
         <span className="flex-1 truncate text-sm font-medium text-neutral-100">
           {currentWorkspace}
         </span>
-        <Dropdown
+        <AdaptiveMenu
           trigger={
-            // A non-button element: Dropdown wraps the trigger in its OWN
-            // <button>, so an IconButton here would nest <button> in <button>
-            // (invalid HTML + a React warning). Mirror IconButton's styling on
-            // a span instead — same pattern as FileBrowser's upload menu.
+            // A non-button element: AdaptiveMenu/Dropdown wraps the trigger in
+            // its OWN <button>, so an IconButton here would nest <button> in
+            // <button> (invalid HTML + a React warning). Mirror IconButton's
+            // styling on a span instead — same pattern as FileBrowser's upload
+            // menu.
             <span
               aria-label="New"
               title="New"
@@ -119,6 +120,7 @@ export const ProjectList: React.FC = () => {
           }
           align="right"
           width="w-44"
+          title="New"
         >
           <DropdownItem icon={<Box size={14} />} onClick={() => setModalOpen(true)}>
             New Project
@@ -129,7 +131,7 @@ export const ProjectList: React.FC = () => {
           <DropdownItem icon={<ListTodo size={14} />} onClick={() => setCreatingTodo(true)}>
             New to-do list
           </DropdownItem>
-        </Dropdown>
+        </AdaptiveMenu>
       </div>
 
       <nav className="flex-1 space-y-px overflow-y-auto px-2 pb-2">

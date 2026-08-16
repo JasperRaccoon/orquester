@@ -132,7 +132,13 @@ interface SeededAccount {
 export interface CliProxyAdapters {
   probe(port: number, apiKey: string): Promise<ProbeResult>;
   tmux: Pick<Tmux, "newServiceSession" | "hasServiceSession" | "killServiceSession"> | null;
-  spawnDirect(bin: string, args: string[]): { kill(): void } | null; // no-tmux fallback
+  /**
+   * No-tmux fallback. `pid` is optional but should be supplied: without tmux the
+   * proxy is a plain child of the daemon, so it shows up in the process tree the
+   * system-status kill route walks and would otherwise be a killable target
+   * (see {@link CliProxyManager.directChildPid}).
+   */
+  spawnDirect(bin: string, args: string[]): { kill(): void; pid?: number } | null;
   liveDependentSessionCount(): number; // daemon-managed claudex/claudemix sessions
   /**
    * Live claudex/claudemix sessions whose launch model resolves to an
@@ -229,7 +235,7 @@ export class CliProxyManager {
   private external = false;
   private respawnAttempts = 0;
   private nextRespawnAt = 0;
-  private directHandle: { kill(): void } | null = null;
+  private directHandle: { kill(): void; pid?: number } | null = null;
 
   /**
    * Accounts seeded into `auth/`, keyed by accountId — the in-memory proxy-owned
@@ -1423,6 +1429,21 @@ export class CliProxyManager {
       this.fail(error instanceof Error ? error.message : String(error));
       await this.persist();
     }
+  }
+
+  /**
+   * Pid of the directly-spawned proxy child, or null when there is none (the
+   * tmux path parents it to the tmux server, out of the daemon's tree, and an
+   * adopted external proxy was never ours).
+   *
+   * Exposed for the system-status kill guard: with tmux the proxy is invisible
+   * to a walk of the daemon's own descendants, but without it the proxy is a
+   * plain child — and stopping it there is not "stopping a process", it is
+   * silently breaking every claudex/claudemix session until the supervisor
+   * respawns it.
+   */
+  directChildPid(): number | null {
+    return this.directHandle?.pid ?? null;
   }
 
   private async spawn(killFirst: boolean): Promise<void> {

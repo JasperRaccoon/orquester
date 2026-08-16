@@ -53,6 +53,7 @@ test("LocalSessionManager tracks bell activity and clears attention on input", a
     assert.equal(activity.attention, "bell");
     assert.equal(activity.state, "working");
     assert.equal(typeof activity.lastOutputAt, "string");
+    assert.equal(typeof activity.needsAttentionAt, "string");
     const bellEvent = activityEvents.find((e) => e.cause === "bell");
     assert.ok(bellEvent, "expected a bell-cause activity event");
     assert.equal(bellEvent.id, session.id);
@@ -60,7 +61,53 @@ test("LocalSessionManager tracks bell activity and clears attention on input", a
 
     mgr.input(session.id, " ");
     assert.equal(mgr.activity(session.id)?.attention, null);
+    assert.equal(mgr.activity(session.id)?.needsAttentionAt, null);
     assert.equal(mgr.activity("missing"), undefined);
+  } finally {
+    mgr.closeAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("LocalSessionManager raises finished attention when the command exits", async () => {
+  const root = await mkdtemp(join(tmpdir(), "orquester-session-exit-"));
+  const sh: RegistryEntry = {
+    id: "sh",
+    name: "sh",
+    kind: "shell",
+    bin: ["/bin/sh"],
+    args: ["-c", "printf 'bye\\n'; exit 3"],
+    enabled: true,
+    resolvedBin: "/bin/sh",
+    installState: "idle",
+  };
+  const registry = {
+    get(id: string) {
+      return id === sh.id ? sh : undefined;
+    },
+  } as Pick<RegistryService, "get"> as RegistryService;
+  const mgr = new LocalSessionManager(registry);
+  const order: string[] = [];
+
+  mgr.lifecycle.on("exited", () => order.push("exited"));
+  mgr.lifecycle.on("activity", (e: { cause: ActivityCause }) => order.push(`activity:${e.cause}`));
+
+  try {
+    const session = await mgr.create({ kind: "shell", refId: "sh", projectPath: root, cwd: root });
+
+    const activity = await waitFor(() => {
+      const snapshot = mgr.activity(session.id);
+      return snapshot?.attention === "finished" ? snapshot : false;
+    });
+    assert.equal(activity.state, "idle");
+    assert.equal(typeof activity.needsAttentionAt, "string");
+    assert.equal(mgr.get(session.id)?.status, "exited");
+    // The stamp has to land AFTER the "exited" broadcast: that summary carries
+    // no activity, so a client resetting on exit would otherwise drop it.
+    assert.ok(
+      order.indexOf("exited") < order.indexOf("activity:exit"),
+      `expected exit attention after the exited event, got ${order.join(",")}`
+    );
   } finally {
     mgr.closeAll();
     await rm(root, { recursive: true, force: true });

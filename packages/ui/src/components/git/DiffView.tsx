@@ -51,8 +51,11 @@ const DiffLine: React.FC<{ row: DiffRow }> = ({ row }) => {
     <div
       className={cn(
         "flex",
-        row.type === "add" && "bg-green-950/40 text-green-300",
-        row.type === "del" && "bg-red-950/40 text-red-300",
+        // Per-mode tints (globals.css): the dark values are the exact colours
+        // this view had before it was themed; the light ones keep the bands
+        // legible on a near-white surface.
+        row.type === "add" && "bg-[color:var(--diff-add-bg)] text-[color:var(--diff-add-fg)]",
+        row.type === "del" && "bg-[color:var(--diff-del-bg)] text-[color:var(--diff-del-fg)]",
         row.type === "context" && "text-neutral-300"
       )}
     >

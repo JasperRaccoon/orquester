@@ -55,8 +55,8 @@ function isExecutable(p: string): boolean {
   }
 }
 
-function resolveBin(cands: string[]): string | undefined {
-  const dirs = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
+function resolveBin(cands: string[], path?: string): string | undefined {
+  const dirs = (path ?? process.env.PATH ?? "").split(delimiter).filter(Boolean);
   const exts = process.platform === "win32" ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT").split(";").filter(Boolean) : [""];
   for (const c of cands) {
     if (isAbsolute(c) && isExecutable(c)) return c;
@@ -68,6 +68,21 @@ function resolveBin(cands: string[]): string | undefined {
     }
   }
   return undefined;
+}
+
+/**
+ * True when `name` resolves to an executable on PATH (PATHEXT-aware on Windows).
+ * Exported so availability-only callers — the project-template catalog's
+ * `requires` gate — reuse this one probe instead of shelling out to `which`.
+ *
+ * `path` overrides which PATH is searched. Availability answers that describe
+ * what a TERMINAL TAB can run must pass `sessionPath()`: the daemon's own PATH
+ * is deliberately narrow under systemd and excludes the per-user bin dirs
+ * (~/.local/bin, ~/.cargo/bin, ~/go/bin, …) that sessions get — probing the
+ * daemon's PATH would grey out templates the shell runs fine.
+ */
+export function isBinOnPath(name: string, path?: string): boolean {
+  return resolveBin([name], path) !== undefined;
 }
 
 /**

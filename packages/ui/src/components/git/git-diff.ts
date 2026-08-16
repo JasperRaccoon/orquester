@@ -37,9 +37,17 @@ const META_PREFIXES = [
 
 const HUNK_HEADER = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
 
+/**
+ * git's two binary markers, matched as WHOLE LINES (the same anchoring the
+ * daemon's `isBinaryDiff` uses). An unanchored substring test renders any text
+ * file that merely CONTAINS the phrase — this very file, a spec documenting the
+ * check, a test fixture — as an unviewable "binary file".
+ */
+const BINARY_MARKER = /^(?:Binary files .* differ|GIT binary patch)$/m;
+
 /** Parse raw unified-diff text into hunks of rows. */
 export function parseUnifiedDiff(diff: string): ParsedDiff {
-  if (diff.includes("Binary files") || diff.includes("GIT binary patch")) {
+  if (BINARY_MARKER.test(diff)) {
     return { hunks: [], binary: true };
   }
 

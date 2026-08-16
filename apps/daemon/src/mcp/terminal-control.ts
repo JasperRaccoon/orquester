@@ -17,6 +17,14 @@ const MAX_TIMEOUT_MS = 600_000;     // 10 min ceiling
 // submits. Harmless for shells (they submit on CR regardless of pacing).
 const SUBMIT_ENTER_DELAY_MS = 150;
 
+/**
+ * Every write these tools make is the daemon typing, not a human at a keyboard,
+ * so it must not open the activity tracker's input-echo window: sendAndWait /
+ * wait_for_attention would otherwise suppress the very bell they are waiting
+ * for and block until their timeout.
+ */
+const PROGRAMMATIC = { programmatic: true } as const;
+
 export type WaitResult = {
   text: string;
   settled: boolean;
@@ -141,12 +149,12 @@ export class TerminalControl {
 
   async writeInput(sel: TabSelector, data: string, opts?: { submit?: boolean }) {
     const t = this.resolveTab(sel);
-    this.deps.sessions.input(t.id, data);
+    this.deps.sessions.input(t.id, data, PROGRAMMATIC);
     if (opts?.submit) {
       // Enter as a SEPARATE, delayed keystroke — NOT `${data}\r` in one write — so a
       // coding-agent TUI doesn't paste-eat the newline (see SUBMIT_ENTER_DELAY_MS).
       await new Promise((r) => setTimeout(r, SUBMIT_ENTER_DELAY_MS));
-      this.deps.sessions.input(t.id, "\r");
+      this.deps.sessions.input(t.id, "\r", PROGRAMMATIC);
     }
     return { ok: true as const };
   }
@@ -159,7 +167,7 @@ export class TerminalControl {
     } catch (e) {
       throw new ToolError(e instanceof Error ? e.message : "Unknown key.");
     }
-    this.deps.sessions.input(t.id, encoded);
+    this.deps.sessions.input(t.id, encoded, PROGRAMMATIC);
     return { ok: true as const };
   }
 
@@ -350,11 +358,11 @@ export class TerminalControl {
       // Subscribe is in place — type the text, then on submit send Enter as a SEPARATE
       // delayed keystroke (so a TUI doesn't paste-eat the newline; see
       // SUBMIT_ENTER_DELAY_MS) before starting the idle countdown.
-      sessions.input(t.id, data);
+      sessions.input(t.id, data, PROGRAMMATIC);
       if (opts?.submit) {
         submitTimer = setTimeout(() => {
           if (resolved) return; // wait already ended (abort/cap) — don't write into a dead flow
-          sessions.input(t.id, "\r");
+          sessions.input(t.id, "\r", PROGRAMMATIC);
           arm();
         }, SUBMIT_ENTER_DELAY_MS);
       } else {

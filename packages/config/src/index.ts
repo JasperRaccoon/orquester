@@ -135,6 +135,11 @@ export function todosIndexPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "todos.json");
 }
 
+/** Daemon-owned "recently interacted with" project list (shared by all clients). */
+export function recentProjectsPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "recent-projects.json");
+}
+
 /** Web Push state (VAPID keypair + browser subscriptions); 0600 — holds the private key. */
 export function pushConfigPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "push.json");
@@ -682,6 +687,60 @@ export function createDefaultTodosConfig(): TodosConfig {
 
 export function parseTodosConfig(raw: unknown): TodosConfig {
   return todosConfigSchema.parse(raw);
+}
+
+// recent-projects.json — the daemon-owned "recently interacted with" list, so
+// every client/device sees the same ordering instead of a per-browser one. The
+// filesystem stays the source of truth for which projects exist; a stale entry
+// (deleted/archived project) is dropped when the list is read.
+
+export const recentProjectSchema = z.object({
+  /** Project directory name. */
+  name: z.string().min(1),
+  /** Owning workspace directory name. */
+  workspace: z.string().min(1),
+  /** Absolute project path — the identity of the entry. */
+  path: z.string().min(1),
+  /** ISO-8601 instant; a malformed stamp drops just this entry (see below). */
+  lastInteractedAt: z.string().datetime({ offset: true }),
+  interactionCount: z.number().int().nonnegative().default(1)
+});
+
+export const recentProjectsConfigSchema = z.object({
+  version: z.literal(1).default(1),
+  projects: z.array(recentProjectSchema).default([])
+});
+
+export type RecentProject = z.infer<typeof recentProjectSchema>;
+export type RecentProjectsConfig = z.infer<typeof recentProjectsConfigSchema>;
+
+/** Newest first, capped — the list only ever grows by re-marking a project. */
+export const MAX_RECENT_PROJECTS = 30;
+
+export function createDefaultRecentProjectsConfig(): RecentProjectsConfig {
+  return { version: 1, projects: [] };
+}
+
+/**
+ * Tolerant read: a whole-file failure falls back to an empty list, and any
+ * individual entry a pre-migration (or hand-edited) file got wrong is dropped
+ * rather than taking the list — and the daemon boot — down with it.
+ */
+export function parseRecentProjectsConfig(raw: unknown): RecentProjectsConfig {
+  const outer = z
+    .object({ version: z.literal(1).default(1), projects: z.array(z.unknown()).default([]) })
+    .safeParse(raw);
+  if (!outer.success) {
+    return createDefaultRecentProjectsConfig();
+  }
+  const projects: RecentProject[] = [];
+  for (const entry of outer.data.projects) {
+    const parsed = recentProjectSchema.safeParse(entry);
+    if (parsed.success) {
+      projects.push(parsed.data);
+    }
+  }
+  return { version: 1, projects };
 }
 
 // push.json — Web Push state for the PWA: the daemon's VAPID keypair (lazily

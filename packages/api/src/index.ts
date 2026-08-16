@@ -66,6 +66,29 @@ export interface ProjectSummary {
   isArchived?: boolean;
 }
 
+/**
+ * One entry of the daemon-owned recent-projects list (GET /api/projects/recent),
+ * newest first. Server-side so every device sees the same list.
+ */
+export interface RecentProjectSummary {
+  name: string;
+  workspace: string;
+  path: string;
+  /** ISO timestamp of the most recent interaction. */
+  lastInteractedAt: string;
+  interactionCount: number;
+  /**
+   * Behind the archive curtain (the project is in its workspace's
+   * `archivedProjects`, or the whole workspace is archived). Absent = false.
+   */
+  isArchived?: boolean;
+}
+
+/** Body of POST /api/projects/recent — marks one interaction with `path`. */
+export interface MarkRecentProjectRequest {
+  path: string;
+}
+
 export interface CreateWorkspaceRequest {
   name: string;
   /** Optional git account to bind (Phase 4 wires the picker; undefined here). */
@@ -443,6 +466,8 @@ export interface GitDiffResponse {
 export interface GitLogEntry {
   sha: string;
   shortSha: string;
+  /** Parent SHAs (empty for a root commit, >1 for a merge). Drives the commit graph. */
+  parents: string[];
   subject: string;
   body: string;
   authorName: string;
@@ -477,6 +502,10 @@ export interface GitBranch {
   name: string;
   current: boolean;
   upstream?: string;
+  /** Commits this branch has that its upstream doesn't (0 when no upstream). */
+  ahead: number;
+  /** Commits its upstream has that this branch doesn't (0 when no upstream). */
+  behind: number;
 }
 
 export interface GitBranchesResponse {
@@ -497,6 +526,56 @@ export interface GitOpResult {
   ok: true;
   /** Combined stdout/stderr of the op (shown for fetch/pull/push), trimmed. */
   output?: string;
+}
+
+/**
+ * One entry of `git stash list`. `index` is the position in that list, which is
+ * also the only handle the API accepts: every stash mutation takes an index and
+ * the daemon builds the `stash@{n}` ref itself (a client never names a raw ref).
+ */
+export interface GitStashEntry {
+  index: number;
+  /** Full SHA of the stash commit. */
+  sha: string;
+  /** Branch the stash was taken on ("" when git's subject didn't name one). */
+  branch: string;
+  /** The stash message ("WIP on …" reduced to its tail, or the custom -m text). */
+  message: string;
+  /** ISO author date of the stash commit. */
+  date: string;
+}
+
+export interface GitStashCreateRequest {
+  path: string;
+  /** Custom stash message; omitted/blank → git's own "WIP on <branch>: …". */
+  message?: string;
+  /** Also stash untracked files (`git stash push -u`). */
+  includeUntracked?: boolean;
+}
+
+export interface GitStashActionRequest {
+  path: string;
+  /** Position in `git stash list` — resolved to `stash@{index}` server-side. */
+  index: number;
+  /**
+   * The `sha` this client saw at that position. Required: the list can shift
+   * under a client (another client or a terminal stashing/dropping), and an
+   * index-only Drop would then destroy a different, unrecoverable stash. The
+   * daemon re-resolves `stash@{index}` and answers 409 unless it still is `sha`.
+   */
+  sha: string;
+}
+
+/**
+ * Payload of the "project.git.changed" event (channel "projects"), pushed by the
+ * daemon's scoped git watcher while at least one `/events?project=<path>` client
+ * is subscribed to that project. Carries the fresh status so a subscriber can
+ * apply it without a follow-up read.
+ */
+export interface GitStatusChangedPayload {
+  /** The watched project directory (the daemon's resolved path). */
+  path: string;
+  status: GitStatusResponse;
 }
 
 // To-do lists — daemon-owned, synced checklists. One record per list; the checklist
@@ -731,6 +810,85 @@ export interface RegistryActionResult {
   output: string;
 }
 
+// Project scaffold templates — a static catalog whose commands the CLIENT types
+// into a fresh terminal tab (never executed daemon-side), plus per-host
+// availability the daemon computes by probing `requires` against PATH.
+
+export interface ProjectTemplateOptionSummary {
+  id: string;
+  label: string;
+  /** Appended when on. Empty string = append nothing (the CLI's own default). */
+  flagOn: string;
+  /** Appended when off. Empty string = append nothing. */
+  flagOff: string;
+  defaultOn: boolean;
+}
+
+export interface ProjectTemplateVariantSummary {
+  id: string;
+  name: string;
+  /** Opaque icon id; the client owns the id → mark mapping. */
+  icon: string;
+  /** Base command, before the option flags are appended. */
+  command: string;
+  options: ProjectTemplateOptionSummary[];
+}
+
+export interface ProjectTemplateSummary {
+  id: string;
+  name: string;
+  category: string;
+  icon: string;
+  /** Bins this template needs on the daemon host's PATH. */
+  requires: string[];
+  variants: ProjectTemplateVariantSummary[];
+  /** True when every `requires` bin resolved on the daemon host. */
+  available: boolean;
+  /** The subset of `requires` that did not resolve (named in the UI's disabled hint). */
+  missing: string[];
+}
+
+export interface ProjectTemplatesResponse {
+  templates: ProjectTemplateSummary[];
+}
+
+/**
+ * One past conversation of one agent, scoped to a project. Read out of each
+ * CLI's own on-disk history (formats differ wildly), normalized to this shape
+ * so the UI can offer "resume" uniformly. `id` is what the agent's resume flag
+ * takes.
+ */
+export interface AgentConversationSummary {
+  id: string;
+  /** Registry entry id of the agent that owns this conversation (e.g. "claude"). */
+  agentRefId: string;
+  /** One-line label: the agent's own title where it has one, else the first user message. */
+  title: string;
+  /** Optional longer blurb, when the agent stores one separately from the title. */
+  preview?: string;
+  /** ISO-8601; the agent's own last-activity field, or the transcript's mtime. */
+  updatedAt: string;
+  /**
+   * Which home dir the transcript was read out of. "system" is the daemon's own
+   * HOME, "account" a managed agent-account home, "cliproxy" one of the
+   * claudex/claudemix proxy homes. Resuming a row under a DIFFERENT home just
+   * gives the agent an id it has never seen, so this is what a client needs to
+   * relaunch under the home that owns the conversation.
+   */
+  home?: AgentConversationHome;
+  /** Managed agent-account id — set only when `home` is "account". */
+  accountId?: string;
+  /** Launcher registry id owning the proxy home (claudex/claudemix) — only when `home` is "cliproxy". */
+  proxyRefId?: string;
+}
+
+export type AgentConversationHome = "system" | "account" | "cliproxy";
+
+export interface AgentConversationsResponse {
+  /** Newest first, across every agent. */
+  conversations: AgentConversationSummary[];
+}
+
 export interface OpenRequest {
   /** Registry entry id of an ide/file-explorer/browser target. */
   targetId: string;
@@ -762,6 +920,12 @@ export interface SessionActivity {
   attention: SessionAttention | null;
   /** ISO timestamp of the last PTY output, null before first output. */
   lastOutputAt: string | null;
+  /**
+   * ISO timestamp `attention` was raised, null while it is clear. Optional so
+   * pre-field payloads (and hand-built fixtures) still typecheck; the daemon
+   * always emits it.
+   */
+  needsAttentionAt?: string | null;
 }
 
 /** Payload of the "session.activity" event (channel "sessions"). */
@@ -1010,7 +1174,26 @@ export interface CreateSessionRequest {
    * default model. Validated against the proxy's live catalog before launch.
    */
   model?: string;
+  /**
+   * Resume this past conversation (an id from GET /api/agents/conversations)
+   * instead of starting a fresh one. Ignored when the agent has no known
+   * resume flag; the daemon substitutes it into the entry's `resumeArgs`.
+   */
+  resumeConversationId?: string;
+  /**
+   * A first line to TYPE into the fresh PTY (the daemon appends the newline).
+   * It is delivered exactly like keystrokes on `/input` — the shell, not the
+   * daemon, decides what to do with it — so it is never executed out-of-band
+   * and needs no quoting beyond what the user would type themselves. Capped at
+   * MAX_INITIAL_COMMAND chars; longer is a 400. Exists so a client-side
+   * "scaffold this project" flow doesn't have to race the shell's first prompt
+   * with a sleep + a droppable WS frame.
+   */
+  initialCommand?: string;
 }
+
+/** Longest `CreateSessionRequest.initialCommand` the daemon will type. */
+export const MAX_INITIAL_COMMAND = 4096;
 
 export interface RenameSessionRequest {
   /** New label; empty/whitespace reverts to the registry entry's default name. */
@@ -1220,6 +1403,94 @@ export interface SubscriptionRequest {
   channels: string[];
 }
 
+// System status — host observability for a headless VPS. Linux-only (everything
+// is read from /proc); off Linux each response is `supported: false` with zeroed
+// or empty data, the same host-gating shape FsCapabilitiesResponse uses.
+
+export interface SystemResourcesResponse {
+  /** False when the host has no /proc (non-Linux); the values below are then zeroed. */
+  supported: boolean;
+  /** Whole-host CPU load, averaged over the interval between the last two reads. */
+  cpu: { percent: number; cores: number };
+  /** `availableBytes` is MemAvailable, not MemFree: reclaimable page cache is not "used". */
+  memory: { totalBytes: number; availableBytes: number; usedPercent: number };
+  /**
+   * Filesystem holding the file-browser sandbox root (where projects live). The
+   * three numbers are `null` when the volume could not be measured (statfs
+   * failed, or the host is not Linux) — "unknown", which a client must render
+   * differently from a genuine 0 bytes / 0% full.
+   */
+  workspacesDisk: {
+    totalBytes: number | null;
+    freeBytes: number | null;
+    usedPercent: number | null;
+    path: string;
+  };
+}
+
+/** One process in the daemon's own tree (GET /api/system/processes). */
+export interface SystemProcessInfo {
+  pid: number;
+  ppid: number;
+  /** Kernel comm name (truncated to 15 chars by Linux). */
+  name: string;
+  /** Full argv, space-joined; falls back to `name` when argv is empty. */
+  cmdline: string;
+  rssBytes: number;
+  /** Session whose tmux pane is the nearest ancestor, when the pid belongs to one. */
+  sessionId?: string;
+}
+
+export interface SystemProcessesResponse {
+  supported: boolean;
+  /** The daemon's own pid — a tree root, and never a valid kill target. */
+  daemonPid: number;
+  /** Flat list (parent before child is not guaranteed); ascending by pid. */
+  processes: SystemProcessInfo[];
+}
+
+export interface KillProcessRequest {
+  pid: number;
+}
+
+export interface KillProcessResponse {
+  ok: boolean;
+  /** How many pids (the target plus its descendants) were signalled. */
+  killed: number;
+}
+
+/**
+ * Why a kill was refused. Discriminated so a client can tell "you cannot touch
+ * that one" (protected/unmanaged) from "this host cannot do it at all"
+ * (unsupported) without matching on the human-readable message.
+ */
+export type KillProcessErrorCode =
+  | "INVALID_PID"
+  | "PROCESS_NOT_MANAGED"
+  | "PROCESS_PROTECTED"
+  | "UNSUPPORTED_PLATFORM";
+
+export interface KillProcessErrorResponse {
+  code: KillProcessErrorCode;
+  message: string;
+}
+
+/** A listening TCP socket owned by a process in the daemon's tree. */
+export interface SystemPortInfo {
+  port: number;
+  /** Decoded bind address, e.g. "127.0.0.1", "0.0.0.0", "::". */
+  address: string;
+  pid: number;
+  processName: string;
+  sessionId?: string;
+}
+
+export interface SystemPortsResponse {
+  supported: boolean;
+  /** Ascending by port, then pid, then address. */
+  ports: SystemPortInfo[];
+}
+
 export interface OrquesterApi {
   health(): Promise<HealthResponse>;
   info(): Promise<ServerInfoResponse>;
@@ -1273,6 +1544,10 @@ export class HttpOrquesterApiClient implements OrquesterApi {
 
   createProject(workspace: string, req: CreateProjectRequest): Promise<ProjectSummary> {
     return this.post(`/api/workspaces/${encodeURIComponent(workspace)}/projects`, req);
+  }
+
+  listProjectTemplates(): Promise<ProjectTemplatesResponse> {
+    return this.get("/api/templates");
   }
 
   listRepos(accountId: string): Promise<RepoSummary[]> {

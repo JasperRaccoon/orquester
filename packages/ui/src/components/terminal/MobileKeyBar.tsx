@@ -87,6 +87,12 @@ export const MobileKeyBar: React.FC = () => {
   };
 
   return (
+    // No bottom safe-area padding here on purpose: the app shell owns every
+    // inset for the whole in-flow tree (see the `#root > *` rule in
+    // apps/web/src/styles.css). This bar is only *sometimes* the bottom-most
+    // element — hide it and the main view or the sidebar footer is — so making
+    // it an inset owner would leave the other cases uncovered and double-pad
+    // this one.
     <div className="flex shrink-0 flex-col border-t border-neutral-800 bg-neutral-900">
       {status && (
         <div

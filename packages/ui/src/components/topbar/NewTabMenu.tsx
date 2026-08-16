@@ -1,8 +1,18 @@
 import React from "react";
-import { FolderTree, GitBranch, Globe, ListTodo, Plus } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  FolderTree,
+  GitBranch,
+  Globe,
+  History,
+  ListTodo,
+  LoaderCircle,
+  Plus
+} from "lucide-react";
 import { SYSTEM_ACCOUNT_ID, type RegistryEntry } from "@orquester/api";
 import { CURATED_PROXY_MODEL_IDS, XAI_OAUTH_MODELS, resolveXaiModel } from "@orquester/config";
-import { CHROMIUM_FAMILY_IDS } from "@orquester/registry";
+import { CHROMIUM_FAMILY_IDS, canResumeAgent } from "@orquester/registry";
 import {
   AdaptiveMenu,
   DropdownEmpty,
@@ -16,6 +26,12 @@ import { useRegistry } from "../../hooks";
 import { useAppStore, useCurrentContext } from "../../store/app";
 import { cn } from "../../lib/cn";
 import { shortAccountLabel } from "../../lib/account-label";
+import { relativeTime } from "../../lib/relative-time";
+import { launchWithNotice } from "../../lib/launch-notice";
+import { isResumableConversation, resumeAccountId } from "../../lib/resume-account";
+
+/** Past conversations listed inline per agent before the "…and N more" cutoff. */
+const MAX_INLINE_CONVERSATIONS = 10;
 
 /**
  * The proxy launchers pin *which provider family* their account chips come from:
@@ -51,6 +67,110 @@ const shortModelLabel = (model: string): string => {
 };
 
 /**
+ * Inline "resume a past conversation" section for one agent row.
+ *
+ * Deliberately an inline expand rather than a hover flyout: the "+" menu renders
+ * as a bottom sheet on mobile, where a nested submenu has nowhere to go, and the
+ * row already expands inline for its account/model chips — so one pattern serves
+ * both viewports. The (slow-ish) scan is only kicked off when the section is
+ * actually opened, and the store caches it per project for the other agents'
+ * sections.
+ */
+const ResumeSection: React.FC<{
+  agent: RegistryEntry;
+  projectPath: string;
+  /** The exact account/model the row's own click would launch with — a resume
+   *  must run under the same identity, or the agent looks for the conversation
+   *  in the wrong home and finds nothing. */
+  accountId?: string;
+  model?: string;
+}> = ({ agent, projectPath, accountId, model }) => {
+  const loadAgentConversations = useAppStore((s) => s.loadAgentConversations);
+  const cached = useAppStore((s) => s.agentConversationsByProject[projectPath]);
+  const openTab = useAppStore((s) => s.openTab);
+  const [expanded, setExpanded] = React.useState(false);
+
+  React.useEffect(() => {
+    if (expanded) {
+      void loadAgentConversations(projectPath);
+    }
+  }, [expanded, projectPath, loadAgentConversations]);
+
+  // `undefined` (key absent) is "not fetched yet"; `[]` is "fetched, none".
+  // `isResumableConversation` drops the claudex/claudemix proxy-home rows, which
+  // this row could only launch as plain `claude` in the wrong HOME (see there).
+  const mine = cached?.filter((c) => c.agentRefId === agent.id && isResumableConversation(c));
+  const shown = mine?.slice(0, MAX_INLINE_CONVERSATIONS) ?? [];
+  const hidden = (mine?.length ?? 0) - shown.length;
+
+  return (
+    <>
+      <div className="mb-1 ml-8 mr-2">
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            setExpanded((v) => !v);
+          }}
+          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-neutral-400 transition-colors hover:bg-neutral-800 hover:text-neutral-200"
+          aria-expanded={expanded}
+        >
+          {expanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+          <History size={11} />
+          Resume a conversation
+        </button>
+      </div>
+      {expanded && (
+        <div className="mb-1.5 ml-6 mr-1">
+          {cached === undefined && (
+            <div className="flex items-center gap-2 px-2 py-1.5 text-xs text-neutral-600">
+              <LoaderCircle size={12} className="animate-spin" /> Loading…
+            </div>
+          )}
+          {cached !== undefined && shown.length === 0 && (
+            <DropdownEmpty>No past conversations</DropdownEmpty>
+          )}
+          {shown.map((conversation) => (
+            <DropdownItem
+              key={conversation.id}
+              className="text-[12px]"
+              title={`${conversation.title}${
+                conversation.preview ? `\n${conversation.preview}` : ""
+              }`}
+              onClick={() =>
+                launchWithNotice(
+                  openTab(
+                    "agent",
+                    agent.id,
+                    agent.name,
+                    // The home the daemon read this row out of wins over the
+                    // row's chip: the transcript only exists in that one HOME.
+                    resumeAccountId(conversation, accountId),
+                    model,
+                    conversation.id
+                  ),
+                  agent.name
+                )
+              }
+            >
+              <span className="flex min-w-0 items-baseline gap-2">
+                <span className="min-w-0 flex-1 truncate">{conversation.title}</span>
+                <span className="shrink-0 text-[10px] text-neutral-600">
+                  {relativeTime(conversation.updatedAt)}
+                </span>
+              </span>
+            </DropdownItem>
+          ))}
+          {hidden > 0 && (
+            <div className="px-2 py-1 text-[11px] text-neutral-600">…and {hidden} more</div>
+          )}
+        </div>
+      )}
+    </>
+  );
+};
+
+/**
  * One installed-agent row in the "+" menu. Clicking the row launches the agent
  * under the account (and, for `claudex`, the model) selected below. When the
  * agent has ≥1 managed account for its family it renders a row of account chips
@@ -65,7 +185,10 @@ const shortModelLabel = (model: string): string => {
  * off (user-disabled) they are hidden entirely. Non-proxy disabled agents are
  * filtered out upstream as before.
  */
-const AgentRow: React.FC<{ agent: RegistryEntry }> = ({ agent }) => {
+const AgentRow: React.FC<{ agent: RegistryEntry; projectPath?: string }> = ({
+  agent,
+  projectPath
+}) => {
   const openTab = useAppStore((s) => s.openTab);
   const agentAccounts = useAppStore((s) => s.agentAccounts);
   const preferred = useAppStore((s) => s.preferredAccountByAgent[agent.id]);
@@ -197,14 +320,17 @@ const AgentRow: React.FC<{ agent: RegistryEntry }> = ({ agent }) => {
           </span>
         }
         onClick={() =>
-          void openTab(
-            "agent",
-            agent.id,
-            agent.name,
-            // A keyless router pick carries the System sentinel (no account) so
-            // the daemon never stamps a per-account routing prefix on it.
-            accountDimmed ? SYSTEM_ACCOUNT_ID : selectedAccount,
-            showModels ? selectedModel : undefined
+          launchWithNotice(
+            openTab(
+              "agent",
+              agent.id,
+              agent.name,
+              // A keyless router pick carries the System sentinel (no account)
+              // so the daemon never stamps a per-account routing prefix on it.
+              accountDimmed ? SYSTEM_ACCOUNT_ID : selectedAccount,
+              showModels ? selectedModel : undefined
+            ),
+            agent.name
           )
         }
       >
@@ -259,6 +385,19 @@ const AgentRow: React.FC<{ agent: RegistryEntry }> = ({ agent }) => {
             </button>
           ))}
         </div>
+      ) : null}
+      {/* Last, below the chips it inherits: resume is a second action on the row,
+          not something that changes how the row itself launches. Offered only
+          where the daemon can honour it — an agent with a known resume flag,
+          inside a project (conversations are scoped to one). Anything else could
+          only earn a RESUME_UNAVAILABLE. */}
+      {projectPath && canResumeAgent(agent.id) ? (
+        <ResumeSection
+          agent={agent}
+          projectPath={projectPath}
+          accountId={accountDimmed ? SYSTEM_ACCOUNT_ID : selectedAccount}
+          model={showModels ? selectedModel : undefined}
+        />
       ) : null}
     </>
   );
@@ -328,7 +467,7 @@ export const NewTabMenu: React.FC = () => {
         <DropdownItem
           key={shell.id}
           icon={getRegistryIcon("shell", shell.id, 14)}
-          onClick={() => void openTab("shell", shell.id, shell.name)}
+          onClick={() => launchWithNotice(openTab("shell", shell.id, shell.name), shell.name)}
         >
           {shell.name}
         </DropdownItem>
@@ -369,7 +508,11 @@ export const NewTabMenu: React.FC = () => {
       <DropdownLabel>Agents</DropdownLabel>
       {agents.length === 0 && <DropdownEmpty>No agents installed</DropdownEmpty>}
       {agents.map((agent) => (
-        <AgentRow key={agent.id} agent={agent} />
+        <AgentRow
+          key={agent.id}
+          agent={agent}
+          projectPath={ctx?.kind === "project" ? ctx.project.path : undefined}
+        />
       ))}
     </AdaptiveMenu>
   );

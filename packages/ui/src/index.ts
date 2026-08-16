@@ -70,6 +70,10 @@ export * from "./components/files";
 export * from "./components/settings";
 export * from "./components/auth";
 export * from "./components/status";
+// Narrow (not `export *`): the system module also exports generic helper names
+// like formatBytes/formatPercent that would collide in this barrel.
+export { SystemStatusChip, SystemSettings } from "./components/system";
+export * from "./components/command-palette";
 
 // Icons
 export { getRegistryIcon, RegistryIcon } from "./icons";

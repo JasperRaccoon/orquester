@@ -1,16 +1,31 @@
 import React from "react";
-import { Menu, Settings } from "lucide-react";
+import { Menu, Search, Settings } from "lucide-react";
 import { ProjectSwitcher } from "./ProjectSwitcher";
 import { TabStrip } from "./TabStrip";
 import { TabSwitcher } from "./TabSwitcher";
 import { NewTabMenu } from "./NewTabMenu";
 import { ViewModeToggle } from "./ViewModeToggle";
 import { UsageWidget } from "./UsageWidget";
+import { AttentionCenter } from "../attention";
+import { SystemStatusChip } from "../system";
+import { openCommandPalette } from "../command-palette";
 import { WindowControls } from "../layout/WindowControls";
 import { IconButton } from "../ui";
 import { useIsDesktop } from "../../hooks";
 import { useOrquester } from "../../context/orquester-context";
 import { useAppStore, useCurrentContext } from "../../store/app";
+
+/**
+ * Mobile-only opener for the command palette: a phone has no Ctrl+K, and the
+ * palette is the reliable way to reach a session in another project from there.
+ */
+const CommandPaletteButton: React.FC = () => (
+  <div className="app-no-drag">
+    <IconButton label="Go to session or project" onClick={() => openCommandPalette()}>
+      <Search size={15} />
+    </IconButton>
+  </div>
+);
 
 const SettingsButton: React.FC = () => {
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
@@ -47,6 +62,13 @@ export const TopBar: React.FC = () => {
             <span className="px-1 text-sm text-neutral-500">Select a project</span>
           )}
           <div className="flex-1" />
+          <CommandPaletteButton />
+          <div className="app-no-drag">
+            <SystemStatusChip />
+          </div>
+          <div className="app-no-drag">
+            <AttentionCenter />
+          </div>
           <div className="app-no-drag">
             <UsageWidget />
           </div>
@@ -90,6 +112,12 @@ export const TopBar: React.FC = () => {
             <ViewModeToggle />
           </div>
         )}
+        <div className="app-no-drag">
+          <SystemStatusChip />
+        </div>
+        <div className="app-no-drag">
+          <AttentionCenter />
+        </div>
         <div className="app-no-drag">
           <UsageWidget />
         </div>

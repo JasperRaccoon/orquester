@@ -1,10 +1,21 @@
-import type { AgentUsage } from "@orquester/api";
+import type { AgentUsage, UsageWindow } from "@orquester/api";
 import { usageAgentEnabled, type UsagePrefs as _Prefs } from "@orquester/config";
+import { REGISTRY } from "@orquester/registry";
+import type { UsageResetFormat } from "../../lib/usage-display";
 
 type Chip = _Prefs["chip"];
 
 /** The agents the daemon can report usage for (source of truth for defaults). */
 export const USAGE_AGENT_IDS = ["claude", "codex", "grok"] as const;
+
+/** A reading older than this reads as stale on every usage surface. */
+export const STALE_MIN = 10;
+
+/** Registry display name for a usage agent id ("claude" → "Claude Code"). */
+export function labelForAgent(id: string): string {
+  const entry = REGISTRY.agents?.find((a) => a.id === id);
+  return entry ? entry.name : id.charAt(0).toUpperCase() + id.slice(1);
+}
 
 /**
  * The actionable hint for an enabled-but-absent usage agent. Claude/Codex are
@@ -124,4 +135,142 @@ export function formatClock(iso: string): string {
   return Number.isNaN(d.getTime())
     ? "—"
     : d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+/* ── Reset-time rendering (honours the persisted display format) ────────── */
+
+/**
+ * The wall-clock a window resets at, without a "Resets" prefix: bare time when
+ * that lands today ("14:32"), date + time otherwise ("Jul 21, 14:32"). "" when
+ * the timestamp is absent or unparseable, so callers can fall back.
+ */
+export function resetClock(resetsAt: string | undefined, now: number): string {
+  if (!resetsAt) return "";
+  const d = new Date(resetsAt);
+  if (Number.isNaN(d.getTime())) return "";
+  const time = d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  if (d.toDateString() === new Date(now).toDateString()) return time;
+  return `${d.toLocaleDateString(undefined, { month: "short", day: "numeric" })}, ${time}`;
+}
+
+/**
+ * One reset line honouring the user's display preference: a countdown, the
+ * wall clock, or both ("Resets in 2h 14m · 14:32"). Falls back to whichever
+ * half is renderable; "" when the window carries no reset time at all.
+ */
+export function formatReset(
+  resetsAt: string | undefined,
+  format: UsageResetFormat,
+  now: number
+): string {
+  if (!resetsAt) return "";
+  const clock = resetClock(resetsAt, now);
+  const countdown = formatCountdown(resetsAt, now);
+  if (format === "absolute") return clock ? `Resets ${clock}` : countdown;
+  if (format === "relative" || !clock) return countdown;
+  // "Resets now." keeps its period only when it ends the line.
+  return `${countdown.replace(/\.$/, "")} · ${clock}`;
+}
+
+/* ── Normalized windows (presentation shape) ────────────────────────────── */
+
+/** What a window's absolute numbers count, when a source reports any. */
+export type UsageUnit = "credits" | "requests" | "tokens" | "unknown";
+
+/** A window ready to render: labels, unit, and whichever numbers exist. */
+export interface NormalizedUsageWindow {
+  id: "session" | "weekly";
+  /** Compact bar label, as the top-bar panel uses ("5h" / "Week"). */
+  label: string;
+  /** Spelled-out label for the wider cards. */
+  longLabel: string;
+  period: "rolling" | "weekly";
+  unit: UsageUnit;
+  percent: number;
+  used?: number;
+  limit?: number;
+  remaining?: number;
+  resetsAt?: string;
+}
+
+/**
+ * The unit an agent's pool is denominated in. No daemon source declares one on
+ * the wire, so it is inferred per agent: Grok's weekly pool is a credit pool,
+ * the Claude/Codex windows are percent-only.
+ */
+export function usageUnitFor(agentId: string): UsageUnit {
+  return agentId === "grok" ? "credits" : "unknown";
+}
+
+/**
+ * The windows that actually have a reading, in display order — the same rule
+ * the chip uses, so a week-only agent never renders an empty "5h —" row.
+ */
+export function normalizeUsageWindows(
+  agentId: string,
+  src: { session: UsageWindow | null; weekly: UsageWindow | null }
+): NormalizedUsageWindow[] {
+  const unit = usageUnitFor(agentId);
+  const out: NormalizedUsageWindow[] = [];
+  // `...src.*` FIRST: the wire window only carries numbers today, but spreading
+  // it last would let a future field silently clobber the presentation ones.
+  if (src.session) {
+    out.push({ ...src.session, id: "session", label: "5h", longLabel: "Session (5h)", period: "rolling", unit });
+  }
+  if (src.weekly) {
+    // "Current period", not "This week": Grok's pool is a billing period and
+    // Codex's weekly window is longer than 7 days for some plans.
+    out.push({ ...src.weekly, id: "weekly", label: "Week", longLabel: "Current period", period: "weekly", unit });
+  }
+  return out;
+}
+
+/** 84_812_345 → "84.8M", 137_333 → "137k", 616 → "616". */
+export function compactCount(n: number): string {
+  const fmt = (v: number) => (v >= 100 ? String(Math.round(v)) : v.toFixed(1).replace(/\.0$/, ""));
+  if (!Number.isFinite(n)) return "—";
+  if (n >= 1_000_000_000) return `${fmt(n / 1_000_000_000)}B`;
+  if (n >= 1_000_000) return `${fmt(n / 1_000_000)}M`;
+  if (n >= 1_000) return `${fmt(n / 1_000)}k`;
+  return String(n);
+}
+
+/** Exact, locale-grouped count for capacity readouts ("1,000"). */
+export function exactCount(n: number): string {
+  return new Intl.NumberFormat().format(n);
+}
+
+/** An absolute amount with its unit ("1,000 credits"); "—" when absent. */
+export function formatUsageAmount(value: number | undefined, unit: UsageUnit): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  const n = exactCount(value);
+  return unit === "unknown" ? n : `${n} ${unit}`;
+}
+
+/** A finite number, or undefined — so the capacity line can skip missing halves. */
+function finite(value: number | undefined): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/**
+ * The absolute-numbers line for a window ("700 / 1,000 credits · 300 left").
+ * "" when the source reported percentages only — most windows today — so the
+ * card simply omits the row instead of printing placeholders.
+ */
+export function formatUsageCapacity(w: NormalizedUsageWindow): string {
+  const used = finite(w.used);
+  const limit = finite(w.limit);
+  const remaining = finite(w.remaining);
+  const parts: string[] = [];
+  if (used !== undefined && limit !== undefined) {
+    parts.push(`${exactCount(used)} / ${formatUsageAmount(limit, w.unit)}`);
+  } else if (used !== undefined) {
+    parts.push(`${formatUsageAmount(used, w.unit)} used`);
+  } else if (limit !== undefined) {
+    parts.push(`${formatUsageAmount(limit, w.unit)} limit`);
+  }
+  if (remaining !== undefined) {
+    parts.push(`${exactCount(remaining)} left`);
+  }
+  return parts.join(" · ");
 }

@@ -5,7 +5,9 @@ import { MainView } from "../main";
 import { SettingsModal } from "../settings";
 import { AuthModal } from "../auth";
 import { MobileKeyBar } from "../terminal";
-import { ConnectionStatusToast, ModelWarningToast } from "../status";
+import { ToastStack } from "../status";
+import { CommandPalette } from "../command-palette";
+import { GlobalShortcutListener } from "../attention";
 import { CloseSessionConfirm } from "./CloseSessionConfirm";
 
 /**
@@ -23,7 +25,8 @@ export const AppShell: React.FC = () => (
     <SettingsModal />
     <AuthModal />
     <CloseSessionConfirm />
-    <ConnectionStatusToast />
-    <ModelWarningToast />
+    <ToastStack />
+    <CommandPalette />
+    <GlobalShortcutListener />
   </div>
 );

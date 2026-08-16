@@ -3,6 +3,7 @@ import type {
   AccountTestResult,
   AgentAccount,
   AgentAccountsResponse,
+  AgentConversationsResponse,
   AgentSummary,
   AuthInfoResponse,
   BrowserSummary,
@@ -37,17 +38,24 @@ import type {
   GitDiffResponse,
   GitLogEntry,
   GitOpResult,
+  GitStashActionRequest,
+  GitStashCreateRequest,
+  GitStashEntry,
   GitStatusResponse,
   HealthResponse,
   ImportAgentAccountRequest,
+  KillProcessResponse,
+  MarkRecentProjectRequest,
   OpenResult,
   OpenTargetSummary,
   OwnerSummary,
   ProjectSummary,
+  ProjectTemplatesResponse,
   PushInfoResponse,
   PushSubscribeRequest,
   PushTestResponse,
   PushUnsubscribeRequest,
+  RecentProjectSummary,
   RegistryActionResult,
   RegistryResponse,
   RepoSummary,
@@ -56,6 +64,9 @@ import type {
   SessionUploadRequest,
   SessionUploadResponse,
   SetAgentAccountDefaultsRequest,
+  SystemPortsResponse,
+  SystemProcessesResponse,
+  SystemResourcesResponse,
   TodoListRecord,
   TodoScope,
   UpdateProjectRequest,
@@ -175,9 +186,18 @@ export class ApiClient {
    * closes (e.g. the transport restarted) — used to detect disconnects.
    * Returns an unsubscribe fn.
    */
-  openEvents(onEvent: (event: EventMessage) => void, onEnd?: () => void): () => void {
+  openEvents(
+    onEvent: (event: EventMessage) => void,
+    onEnd?: () => void,
+    opts?: { project?: string }
+  ): () => void {
     let buffer = "";
-    const handle = this.transporter.openStream("/events", {
+    // `?project=` additionally subscribes this stream to that project's git
+    // status: the daemon polls it only while such a stream is open, and sends
+    // `project.git.changed` to these subscribers alone. Refcounted server-side
+    // and released when the stream closes, so it is reconnect-safe.
+    const query = opts?.project ? `?project=${encodeURIComponent(opts.project)}` : "";
+    const handle = this.transporter.openStream(`/events${query}`, {
       onData: (chunk) => {
         buffer += chunk;
         let newline = buffer.indexOf("\n");
@@ -305,6 +325,37 @@ export class ApiClient {
 
   updateWorkspace(name: string, req: UpdateWorkspaceRequest): Promise<WorkspaceSummary> {
     return this.send("PUT", `/api/workspaces/${encodeURIComponent(name)}`, { body: req });
+  }
+
+  /** Daemon-owned recent-projects list (shared across devices), newest first. */
+  listRecentProjects(signal?: AbortSignal): Promise<RecentProjectSummary[]> {
+    return this.send("GET", "/api/projects/recent", { signal });
+  }
+
+  /**
+   * Record one interaction with `path`. Returns the daemon's updated list; the
+   * daemon also broadcasts `recentProjects.changed`, so this response is just a
+   * fast local path for the client that made the mark.
+   */
+  markProjectInteracted(path: string): Promise<RecentProjectSummary[]> {
+    return this.send("POST", "/api/projects/recent", {
+      body: { path } satisfies MarkRecentProjectRequest
+    });
+  }
+
+  /**
+   * Past agent conversations for one project, merged across agents and newest
+   * first. Scans each CLI's own history dir server-side, so it can take ~1s on a
+   * busy project — callers cache it (see the store's agentConversationsByProject).
+   */
+  listAgentConversations(
+    projectPath: string,
+    signal?: AbortSignal
+  ): Promise<AgentConversationsResponse> {
+    return this.send("GET", "/api/agents/conversations", {
+      query: { path: projectPath },
+      signal
+    });
   }
 
   updateProject(
@@ -562,6 +613,32 @@ export class ApiClient {
     return this.send("POST", "/api/git/checkout", { body: { path, branch } });
   }
 
+  gitStashes(path: string, signal?: AbortSignal): Promise<GitStashEntry[]> {
+    return this.send("GET", "/api/git/stashes", { query: { path }, signal });
+  }
+
+  gitStashCreate(req: GitStashCreateRequest): Promise<GitOpResult> {
+    return this.send("POST", "/api/git/stash", { body: req });
+  }
+
+  /**
+   * Apply a stash by its position in the list, keeping it. `sha` is the one the
+   * caller saw at that position: the daemon 409s if the list shifted since, so a
+   * stale row can never act on someone else's stash.
+   */
+  gitStashApply(req: GitStashActionRequest): Promise<GitOpResult> {
+    return this.send("POST", "/api/git/stash/apply", { body: req });
+  }
+
+  /** Apply a stash by its position in the list and drop it. */
+  gitStashPop(req: GitStashActionRequest): Promise<GitOpResult> {
+    return this.send("POST", "/api/git/stash/pop", { body: req });
+  }
+
+  gitStashDrop(req: GitStashActionRequest): Promise<GitOpResult> {
+    return this.send("POST", "/api/git/stash/drop", { body: req });
+  }
+
   createProject(
     workspace: string,
     req: CreateProjectRequest,
@@ -598,6 +675,11 @@ export class ApiClient {
 
   listRegistry(signal?: AbortSignal): Promise<RegistryResponse> {
     return this.send("GET", "/api/registry", { signal });
+  }
+
+  /** Project scaffold catalog + this daemon host's per-template availability. */
+  listProjectTemplates(signal?: AbortSignal): Promise<ProjectTemplatesResponse> {
+    return this.send("GET", "/api/templates", { signal });
   }
 
   getUsage(force?: boolean, signal?: AbortSignal): Promise<UsageResponse> {
@@ -876,6 +958,30 @@ export class ApiClient {
   /** Undefined on transports without browser streaming (desktop unix socket). */
   browserChannel(): WsBrowserChannel | undefined {
     return this.transporter.browserChannel?.();
+  }
+
+  // System status (host observability). No push events exist for any of these —
+  // callers poll them, and only while their surface is on screen.
+
+  systemResources(signal?: AbortSignal): Promise<SystemResourcesResponse> {
+    return this.send("GET", "/api/system/resources", { signal });
+  }
+
+  systemProcesses(signal?: AbortSignal): Promise<SystemProcessesResponse> {
+    return this.send("GET", "/api/system/processes", { signal });
+  }
+
+  systemPorts(signal?: AbortSignal): Promise<SystemPortsResponse> {
+    return this.send("GET", "/api/system/ports", { signal });
+  }
+
+  /**
+   * SIGTERM a pid and its descendants. Refusals come back as a 400 whose body
+   * carries a {@link KillProcessErrorCode} — thrown as an ApiError, so callers
+   * read `error.body.code` to tell "protected" from "not managed".
+   */
+  killSystemProcess(pid: number): Promise<KillProcessResponse> {
+    return this.send("POST", "/api/system/processes/kill", { body: { pid } });
   }
 }
 

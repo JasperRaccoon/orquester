@@ -3,6 +3,7 @@ import { AppWrapper, AppShell } from "./components/layout";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { OrquesterProvider, type WindowControls } from "./context/orquester-context";
 import { ApiClient } from "./lib/api-client";
+import { useTheme } from "./hooks";
 import { createTransporter } from "./lib/transporters";
 import type { AppConfigAdapter } from "./lib/app-config";
 import { useAppStore } from "./store/app";
@@ -50,6 +51,9 @@ export const OrquesterApp: React.FC<OrquesterAppProps> = ({
   );
   const storeApi = useAppStore((s) => s.api);
   const api = storeApi ?? bootApi;
+
+  // Stamps data-scheme/data-mode on <html>; every surface follows from there.
+  useTheme();
 
   const defaultTitlebar = useTitlebar ?? runtime === "desktop";
   // Live value from app config (settings can toggle it).

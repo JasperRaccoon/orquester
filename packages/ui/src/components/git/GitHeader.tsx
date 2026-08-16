@@ -115,7 +115,30 @@ export const GitHeader: React.FC<GitHeaderProps> = ({
             onClick={() => onCheckout(branch.name)}
             disabled={branch.current || isBusy}
           >
-            {branch.name}
+            {/* Per-branch divergence from its own upstream (%(upstream:track)),
+                so you can see which branch needs a push before switching. */}
+            <span className="flex items-center gap-1.5">
+              <span className="min-w-0 flex-1 truncate">{branch.name}</span>
+              {(branch.ahead > 0 || branch.behind > 0) && (
+                <span
+                  className="flex shrink-0 items-center gap-1 font-mono text-[10px] text-neutral-500"
+                  title={`${branch.ahead} ahead, ${branch.behind} behind ${branch.upstream ?? "upstream"}`}
+                >
+                  {branch.ahead > 0 && (
+                    <span className="flex items-center">
+                      <ArrowUp size={10} />
+                      {branch.ahead}
+                    </span>
+                  )}
+                  {branch.behind > 0 && (
+                    <span className="flex items-center">
+                      <ArrowDown size={10} />
+                      {branch.behind}
+                    </span>
+                  )}
+                </span>
+              )}
+            </span>
           </DropdownItem>
         ))}
       </AdaptiveMenu>

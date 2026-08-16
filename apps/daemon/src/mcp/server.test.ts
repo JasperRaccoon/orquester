@@ -148,8 +148,7 @@ test("SERVER_INSTRUCTIONS stays under the ~2KB truncation budget", () => {
 
 test("wait_for_attention tool is registered and delegates to TerminalControl", async () => {
   const calls: { selection: unknown; timeoutMs: unknown; signal: unknown }[] = [];
-  const app = Fastify();
-  registerMcp(app, {
+  const app = mcpApp({
     control: {
       waitForAttention: async (selection: unknown, options: { timeoutMs?: number; signal?: AbortSignal }) => {
         calls.push({ selection, timeoutMs: options.timeoutMs, signal: options.signal });
@@ -157,7 +156,7 @@ test("wait_for_attention tool is registered and delegates to TerminalControl", a
       },
     },
     todos: {},
-  } as any);
+  });
 
   try {
     const list = await postMcp(app, { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
@@ -188,8 +187,7 @@ test("wait_for_attention tool is registered and delegates to TerminalControl", a
 
 test("file tools are registered and delegate to FsTools", async () => {
   const calls: { listPath?: string; readPath?: string; readOpts?: unknown } = {};
-  const app = Fastify();
-  registerMcp(app, {
+  const app = mcpApp({
     control: {},
     todos: {},
     files: {
@@ -203,7 +201,7 @@ test("file tools are registered and delegate to FsTools", async () => {
         return { path: "/sandbox/src/a.ts", text: "hello", size: 99, offset: opts.offset ?? 0, truncated: true };
       },
     },
-  } as any);
+  });
 
   try {
     const list = await postMcp(app, { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
@@ -250,8 +248,7 @@ test("file tools are registered and delegate to FsTools", async () => {
 
 test("get_usage is registered and projects UsageResponse", async () => {
   const calls: boolean[] = [];
-  const app = Fastify();
-  registerMcp(app, {
+  const app = mcpApp({
     control: {},
     todos: {},
     files: {},
@@ -270,7 +267,7 @@ test("get_usage is registered and projects UsageResponse", async () => {
         ],
       };
     },
-  } as any);
+  });
 
   try {
     const list = await postMcp(app, { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
@@ -295,6 +292,32 @@ test("get_usage is registered and projects UsageResponse", async () => {
     await app.close();
   }
 });
+
+/**
+ * Fastify instance with /mcp mounted, hardened against a light-my-request quirk.
+ *
+ * The MCP transport reaches Node through @hono/node-server, which for non-GET requests
+ * auto-drains the request stream: on the response's "finish" it arms a 500 ms timer that
+ * force-closes the connection with `incoming.socket.destroySoon()`. It skips that entirely
+ * when the stream reports `destroyed` — and a real IncomingMessage whose body Fastify has
+ * already read IS destroyed by then (verified against a real server: the timer never arms and
+ * keep-alive connections survive). light-my-request's mock request is not: its `destroy()` is
+ * a no-op once the payload has been consumed, so `destroyed` stays false forever, and its
+ * socket is a bare EventEmitter with no `destroySoon`. The result is a stray 500 ms timer per
+ * injected request that throws `TypeError: socket.destroySoon is not a function` — attributed
+ * by node:test to whichever test armed it, but only when the process outlives the timer (i.e.
+ * under full-suite CPU contention, not when this file runs alone).
+ *
+ * Marking the consumed stream destroyed makes the mock behave like the real object.
+ */
+function mcpApp(deps: unknown) {
+  const app = Fastify();
+  registerMcp(app, deps as any);
+  app.addHook("preHandler", async (request) => {
+    (request.raw as unknown as { destroyed: boolean }).destroyed = true;
+  });
+  return app;
+}
 
 async function postMcp(app: ReturnType<typeof Fastify>, payload: unknown) {
   const response = await app.inject({

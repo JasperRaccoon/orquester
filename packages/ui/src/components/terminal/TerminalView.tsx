@@ -228,6 +228,13 @@ export const TerminalView: React.FC<{
     // resize (e.g. toggling the grid/tab layout) or when revealed from a hidden
     // tab; the DOM renderer repaints reliably across those transitions.
 
+    // Last geometry actually pushed to the daemon. The keyboard animation and
+    // the visual-viewport resize fire applyFit repeatedly while the cell grid
+    // often doesn't change at all, and every call was a POST + a PTY SIGWINCH
+    // (which makes a full-screen agent redraw). Only send real changes.
+    let sentCols = 0;
+    let sentRows = 0;
+
     const applyFit = () => {
       // Skip while hidden (display:none) — see hasLayoutBox. The PTY keeps its
       // real size until the tab is shown again, when the ResizeObserver re-fires
@@ -250,6 +257,11 @@ export const TerminalView: React.FC<{
       } catch {
         /* container not measurable yet */
       }
+      if (term.cols === sentCols && term.rows === sentRows) {
+        return;
+      }
+      sentCols = term.cols;
+      sentRows = term.rows;
       void api.resizeSession(session.id, term.cols, term.rows);
     };
     applyFit();

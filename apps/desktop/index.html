@@ -4,6 +4,10 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Orquester Desktop</title>
+    <!-- Blocking classic script: stamps data-scheme/data-mode from localStorage
+         before the module bundle loads, so a non-default theme never flashes the
+         stock dark palette. Kept in public/ to mirror the web host. -->
+    <script src="./theme-boot.js"></script>
   </head>
   <body>
     <div id="root"></div>

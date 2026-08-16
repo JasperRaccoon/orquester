@@ -410,6 +410,49 @@ export class Tmux {
     return sizes;
   }
 
+  /**
+   * Pane pid of every live orquester session, by id (a session with split panes
+   * yields several). Read-only introspection for the system-status process tree:
+   * a tmux-backed session's command is a child of the tmux SERVER, not of the
+   * daemon, so these pids are the only roots a /proc walk can start from to reach
+   * it. Service sessions (`orqsvc-`) are filtered out, like listSessions().
+   */
+  async panePids(): Promise<Map<string, number[]>> {
+    const panes = new Map<string, number[]>();
+    const result = await this.run(["list-panes", "-a", "-F", "#{session_name} #{pane_pid}"]);
+    if (result.code !== 0) {
+      // No server running (nothing to walk) → empty map.
+      return panes;
+    }
+    for (const line of result.stdout.split("\n")) {
+      const [name, rawPid] = line.trim().split(" ");
+      const pid = Number(rawPid);
+      // pid > 1, not > 0: a garbled line that parsed as 1 would make init the
+      // root of the "our processes" tree — i.e. the whole box killable.
+      if (!name?.startsWith(TMUX_SESSION_PREFIX) || !Number.isInteger(pid) || pid <= 1) {
+        continue;
+      }
+      const id = name.slice(TMUX_SESSION_PREFIX.length);
+      const existing = panes.get(id);
+      if (existing) {
+        existing.push(pid);
+      } else {
+        panes.set(id, [pid]);
+      }
+    }
+    return panes;
+  }
+
+  /** Pid of the tmux server on this socket, or null when none is running. */
+  async serverPid(): Promise<number | null> {
+    const result = await this.run(["display-message", "-p", "#{pid}"]);
+    if (result.code !== 0) {
+      return null;
+    }
+    const pid = Number(result.stdout.trim());
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  }
+
   /** Make every session follow the most-recent attached client's size. */
   async setWindowSizeLatest(): Promise<void> {
     await this.run(["set-option", "-g", "window-size", "latest"]);

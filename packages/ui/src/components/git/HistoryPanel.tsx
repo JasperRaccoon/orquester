@@ -5,12 +5,25 @@ import { cn } from "../../lib/cn";
 import { copyText } from "../../lib/clipboard";
 import { Button, ResizeHandle } from "../ui";
 import { DiffView } from "./DiffView";
+import { layoutGraph, laneColor, type GraphRow, type GraphSegment } from "./graph";
 import { useApi } from "../../context/orquester-context";
 import { useIsDesktop } from "../../hooks";
 import { useAppStore, usePaneSizes } from "../../store/app";
 import { PANE_DEFAULTS, PANE_FLEX_RESERVE, clampPaneWidth } from "../../lib/panel-sizes";
 
 const PAGE = 50;
+
+/** Graph gutter geometry: lane pitch, dot radius, and the row-local SVG's Y space. */
+const LANE_W = 14;
+const DOT_R = 3.5;
+const ROW_UNITS = 40;
+/**
+ * Lane cap. The log is HEAD-only, so real repos sit at one to three lanes; the
+ * cap just stops a pathological merge fan from squeezing the commit text out of
+ * a narrow pane. Overflowing lanes collapse onto the last column rather than
+ * vanishing, so no line is left dangling.
+ */
+const MAX_LANES = 6;
 
 /** Single-letter badge for a status, matching git's porcelain letters. */
 const STATUS_LETTER: Record<GitFileStatus, string> = {
@@ -101,6 +114,12 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({ projectPath, reloadT
   const [loadingLog, setLoadingLog] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [done, setDone] = useState(false);
+
+  // Lane layout for the graph gutter. `parents` is what makes it a DAG rather
+  // than a list; a daemon too old to send it yields no graph at all (rather
+  // than a column of disconnected dots), so the list looks exactly as before.
+  const graph = useMemo(() => layoutGraph(commits), [commits]);
+  const showGraph = useMemo(() => commits.some((c) => (c.parents?.length ?? 0) > 0), [commits]);
 
   const [selectedSha, setSelectedSha] = useState<string | null>(null);
   const [detail, setDetail] = useState<GitCommitDetail | null>(null);
@@ -256,12 +275,13 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({ projectPath, reloadT
             <p className="px-3 py-2 text-xs text-neutral-600">No commits yet.</p>
           ) : (
             <>
-              {commits.map((commit) => (
+              {graph.rows.map((row) => (
                 <CommitRow
-                  key={commit.sha}
-                  commit={commit}
-                  active={commit.sha === selectedSha}
-                  onSelect={() => selectCommit(commit.sha)}
+                  key={row.commit.sha}
+                  row={row}
+                  graph={showGraph ? graph.maxLanes : 0}
+                  active={row.commit.sha === selectedSha}
+                  onSelect={() => selectCommit(row.commit.sha)}
                 />
               ))}
               {!done && (
@@ -452,49 +472,143 @@ const CopyHashButton: React.FC<{ sha: string }> = ({ sha }) => {
   );
 };
 
-const CommitRow: React.FC<{ commit: GitLogEntry; active: boolean; onSelect: () => void }> = ({
-  commit,
-  active,
-  onSelect
-}) => (
-  <div
-    role="button"
-    tabIndex={0}
-    onClick={onSelect}
-    onKeyDown={(e) => {
-      if (e.key === "Enter" || e.key === " ") {
-        e.preventDefault();
-        onSelect();
-      }
-    }}
-    className={cn(
-      "flex w-full cursor-pointer flex-col gap-0.5 px-3 py-2 text-left md:py-1.5",
-      active ? "bg-neutral-800" : "hover:bg-neutral-900"
-    )}
-  >
-    <span className={cn("truncate text-sm", active ? "text-neutral-100" : "text-neutral-300")} title={commit.subject}>
-      {commit.subject}
-    </span>
-    <span className="flex items-center gap-1.5 text-xs text-neutral-500">
-      <span className="min-w-0 truncate">{commit.authorName}</span>
-      <span className="shrink-0">·</span>
-      <span className="shrink-0">{relativeDate(commit.date)}</span>
-      <span className="ml-auto shrink-0 font-mono text-neutral-600">{commit.shortSha}</span>
-    </span>
-    {commit.refs.length > 0 && (
-      <span className="flex flex-wrap gap-1 pt-0.5">
-        {commit.refs.map((ref) => (
-          <span
-            key={ref}
-            className="rounded border border-neutral-700 bg-neutral-900 px-1 text-[10px] text-neutral-400"
-          >
-            {ref}
-          </span>
+/**
+ * One row's graph gutter: the lanes passing through it, this commit's in/out
+ * edges, and its dot.
+ *
+ * Rows here are text-sized (a commit with ref badges is taller than one
+ * without), so the lane art is authored in a fixed {@link ROW_UNITS}-tall space
+ * and stretched vertically to whatever the row turned out to be — the viewBox
+ * keeps X at 1:1, and `vector-effect` keeps the stroke weight even. Dots ride a
+ * second, unstretched overlay so that scaling can't turn them into ellipses.
+ */
+const GraphCell: React.FC<{ row: GraphRow<GitLogEntry>; lanes: number }> = ({ row, lanes }) => {
+  const laneCount = Math.min(Math.max(1, lanes), MAX_LANES);
+  const width = laneCount * LANE_W;
+  const cx = (col: number) => Math.min(col, laneCount - 1) * LANE_W + LANE_W / 2;
+  const mid = ROW_UNITS / 2;
+  const dots = row.segments.filter(
+    (segment): segment is Extract<GraphSegment, { kind: "dot" }> => segment.kind === "dot"
+  );
+
+  return (
+    <span className="relative shrink-0 self-stretch" style={{ width }} aria-hidden="true">
+      <svg
+        width={width}
+        height="100%"
+        viewBox={`0 0 ${width} ${ROW_UNITS}`}
+        preserveAspectRatio="none"
+        className="absolute inset-0"
+      >
+        {row.segments.map((segment, index) => {
+          if (segment.kind === "line") {
+            const y1 = segment.half === "bottom" ? mid : 0;
+            const y2 = segment.half === "top" ? mid : ROW_UNITS;
+            const x = cx(segment.col);
+            return (
+              <line
+                key={index}
+                x1={x}
+                y1={y1}
+                x2={x}
+                y2={y2}
+                stroke={laneColor(segment.colorIndex)}
+                strokeWidth={1.5}
+                vectorEffect="non-scaling-stroke"
+              />
+            );
+          }
+          if (segment.kind === "curve") {
+            const x1 = cx(segment.fromCol);
+            const x2 = cx(segment.toCol);
+            return (
+              <path
+                key={index}
+                d={`M ${x1} ${mid} C ${x1} ${mid + mid * 0.65}, ${x2} ${ROW_UNITS - mid * 0.65}, ${x2} ${ROW_UNITS}`}
+                fill="none"
+                stroke={laneColor(segment.colorIndex)}
+                strokeWidth={1.5}
+                vectorEffect="non-scaling-stroke"
+              />
+            );
+          }
+          return null;
+        })}
+      </svg>
+      <svg width={width} height="100%" className="absolute inset-0">
+        {dots.map((dot, index) => (
+          <circle
+            key={index}
+            cx={cx(dot.col)}
+            cy="50%"
+            r={dot.isMerge ? DOT_R + 1 : DOT_R}
+            // A merge is drawn hollow so it reads differently from a plain
+            // commit: it is filled with the page surface, which follows the
+            // theme (a literal #0a0a0a was a black blob in light mode). Set via
+            // `style`, not the `fill` attribute — var() in an SVG presentation
+            // attribute is SVG2-era and not safe on older WebKit.
+            style={{ fill: dot.isMerge ? "rgb(var(--n-950))" : laneColor(dot.colorIndex) }}
+            stroke={laneColor(dot.colorIndex)}
+            strokeWidth={1.5}
+          />
         ))}
+      </svg>
+    </span>
+  );
+};
+
+const CommitRow: React.FC<{
+  row: GraphRow<GitLogEntry>;
+  /** Lane count for the gutter; 0 renders the plain, graph-less list. */
+  graph: number;
+  active: boolean;
+  onSelect: () => void;
+}> = ({ row, graph, active, onSelect }) => {
+  const commit = row.commit;
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={onSelect}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onSelect();
+        }
+      }}
+      className={cn(
+        "flex w-full cursor-pointer items-stretch py-2 pr-3 text-left md:py-1.5",
+        graph > 0 ? "pl-1" : "pl-3",
+        active ? "bg-neutral-800" : "hover:bg-neutral-900"
+      )}
+    >
+      {graph > 0 && <GraphCell row={row} lanes={graph} />}
+      <span className={cn("flex min-w-0 flex-1 flex-col gap-0.5", graph > 0 && "pl-1.5")}>
+        <span className={cn("truncate text-sm", active ? "text-neutral-100" : "text-neutral-300")} title={commit.subject}>
+          {commit.subject}
+        </span>
+        <span className="flex items-center gap-1.5 text-xs text-neutral-500">
+          <span className="min-w-0 truncate">{commit.authorName}</span>
+          <span className="shrink-0">·</span>
+          <span className="shrink-0">{relativeDate(commit.date)}</span>
+          <span className="ml-auto shrink-0 font-mono text-neutral-600">{commit.shortSha}</span>
+        </span>
+        {commit.refs.length > 0 && (
+          <span className="flex flex-wrap gap-1 pt-0.5">
+            {commit.refs.map((ref) => (
+              <span
+                key={ref}
+                className="rounded border border-neutral-700 bg-neutral-900 px-1 text-[10px] text-neutral-400"
+              >
+                {ref}
+              </span>
+            ))}
+          </span>
+        )}
       </span>
-    )}
-  </div>
-);
+    </div>
+  );
+};
 
 const CommitFileRow: React.FC<{ file: GitCommitFile; active: boolean; onSelect: () => void }> = ({
   file,

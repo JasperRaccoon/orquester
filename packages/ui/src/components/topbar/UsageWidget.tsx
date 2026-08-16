@@ -5,15 +5,9 @@ import { shortAccountLabel } from "../../lib/account-label";
 import { usageAgentEnabled } from "@orquester/config";
 import { AdaptiveMenu } from "../ui";
 import { getRegistryIcon } from "../../icons";
+import { useUsageNow, useUsageResetFormat } from "../../hooks";
 import { useAppStore } from "../../store/app";
-import { barClass, formatAgo, formatChipWindows, formatClock, formatCountdown, gaugeClass, minutesSince, missingUsageAgents, pickDriver, usageLoginHint, windowMax } from "./usage-format";
-import { REGISTRY } from "@orquester/registry";
-
-function labelForAgent(id: string): string {
-  const entry = REGISTRY.agents?.find((a) => a.id === id);
-  if (entry) return entry.name;
-  return id.charAt(0).toUpperCase() + id.slice(1);
-}
+import { STALE_MIN, barClass, compactCount, formatAgo, formatChipWindows, formatClock, formatReset, formatUsageCapacity, gaugeClass, labelForAgent, minutesSince, missingUsageAgents, normalizeUsageWindows, pickDriver, usageLoginHint, windowMax, type NormalizedUsageWindow } from "./usage-format";
 
 /** "claude-opus-4-8-20260115" → "Opus 4.8", "gpt-5.6-sol" → "GPT-5.6 Sol". */
 function labelForModel(model: string): string {
@@ -24,15 +18,6 @@ function labelForModel(model: string): string {
   const gpt = bare.match(/^gpt-([\d.]+)(?:-([a-z-]+))?$/);
   if (gpt) return `GPT-${gpt[1]}${gpt[2] ? ` ${gpt[2].split("-").map(cap).join(" ")}` : ""}`;
   return bare;
-}
-
-/** 84_812_345 → "84.8M", 137_333 → "137k", 616 → "616". */
-function compactTokens(n: number): string {
-  const fmt = (v: number) => (v >= 100 ? String(Math.round(v)) : v.toFixed(1).replace(/\.0$/, ""));
-  if (n >= 1_000_000_000) return `${fmt(n / 1_000_000_000)}B`;
-  if (n >= 1_000_000) return `${fmt(n / 1_000_000)}M`;
-  if (n >= 1_000) return `${fmt(n / 1_000)}k`;
-  return String(n);
 }
 
 /** Adaptive precision: tiny costs keep 4 decimals so they don't read as $0.00. */
@@ -174,11 +159,11 @@ const CostTab: React.FC<{ rows: UsageTokenRow[] }> = ({ rows }) => {
                     </div>
                   )}
                   <p className="mt-1 truncate text-[10px] tabular-nums text-neutral-500">
-                    <span className="mr-0.5 inline-block h-1.5 w-1.5 rounded-full bg-emerald-700 align-middle" /> {compactTokens(r.inputTokens)} in
+                    <span className="mr-0.5 inline-block h-1.5 w-1.5 rounded-full bg-emerald-700 align-middle" /> {compactCount(r.inputTokens)} in
                     <span className="mx-1 text-neutral-700">·</span>
-                    <span className="mr-0.5 inline-block h-1.5 w-1.5 rounded-full bg-fuchsia-500 align-middle" /> {compactTokens(r.outputTokens)} out
+                    <span className="mr-0.5 inline-block h-1.5 w-1.5 rounded-full bg-fuchsia-500 align-middle" /> {compactCount(r.outputTokens)} out
                     <span className="mx-1 text-neutral-700">·</span>
-                    <span className="mr-0.5 inline-block h-1.5 w-1.5 rounded-full bg-sky-600 align-middle" /> {compactTokens(cache)} cache
+                    <span className="mr-0.5 inline-block h-1.5 w-1.5 rounded-full bg-sky-600 align-middle" /> {compactCount(cache)} cache
                   </p>
                 </div>
               );
@@ -194,12 +179,16 @@ const CostTab: React.FC<{ rows: UsageTokenRow[] }> = ({ rows }) => {
   );
 };
 
-const Bar: React.FC<{ label: string; window: UsageWindow; muted: boolean }> = ({ label, window, muted }) => {
+const Bar: React.FC<{ window: NormalizedUsageWindow; muted: boolean }> = ({ window, muted }) => {
+  const [resetFormat] = useUsageResetFormat();
+  const now = useUsageNow();
   const pct = window.percent;
+  const capacity = formatUsageCapacity(window);
+  const reset = formatReset(window.resetsAt, resetFormat, now);
   return (
     <div className="py-1.5">
-      <div className="flex items-center justify-between text-xs">
-        <span className="text-neutral-300">{label}</span>
+      <div className="flex items-center justify-between gap-2 text-xs">
+        <span className="text-neutral-300">{window.label}</span>
         <span className={muted ? "text-neutral-500" : "text-neutral-200"}>{`${Math.round(pct)}%`}</span>
       </div>
       <div className="mt-1 h-1.5 w-full rounded-full bg-neutral-800">
@@ -208,7 +197,10 @@ const Bar: React.FC<{ label: string; window: UsageWindow; muted: boolean }> = ({
           style={{ width: `${Math.max(0, Math.min(100, pct))}%` }}
         />
       </div>
-      <p className="mt-1 text-[11px] text-neutral-500">{formatCountdown(window.resetsAt, Date.now())}</p>
+      {capacity && <p className="mt-1 text-[11px] tabular-nums text-neutral-400">{capacity}</p>}
+      {/* Both lines are omitted rather than rendered empty — a window with no
+          absolute numbers and no reset time must not leave a gap under its bar. */}
+      {reset && <p className="mt-1 text-[11px] text-neutral-500">{reset}</p>}
     </div>
   );
 };
@@ -220,20 +212,19 @@ const Bar: React.FC<{ label: string; window: UsageWindow; muted: boolean }> = ({
  * rows share the same alignment as the Claude/Codex account cards.
  */
 const WindowBars: React.FC<{
+  agentId: string;
   session: UsageWindow | null;
   weekly: UsageWindow | null;
   muted: boolean;
-}> = ({ session, weekly, muted }) => (
+}> = ({ agentId, session, weekly, muted }) => (
   <>
-    {session ? <Bar label="5h" window={session} muted={muted} /> : null}
-    {weekly ? <Bar label="Week" window={weekly} muted={muted} /> : null}
+    {normalizeUsageWindows(agentId, { session, weekly }).map((w) => (
+      <Bar key={w.id} window={w} muted={muted} />
+    ))}
   </>
 );
 
-/** A reading older than this reads as stale in the panel. */
-const STALE_MIN = 10;
-
-const AccountRow: React.FC<{ account: UsageAccount }> = ({ account }) => {
+const AccountRow: React.FC<{ agentId: string; account: UsageAccount }> = ({ agentId, account }) => {
   const muted = account.stale || !(account.session || account.weekly);
   return (
     <div className="mt-1.5 rounded-md bg-neutral-900/60 px-2 py-1.5">
@@ -241,16 +232,19 @@ const AccountRow: React.FC<{ account: UsageAccount }> = ({ account }) => {
         <p className="truncate text-xs font-medium text-neutral-300">{shortAccountLabel(account.label) || account.id}</p>
         {account.plan && <span className="shrink-0 text-[10px] text-neutral-500">{account.plan}</span>}
       </div>
-      <WindowBars session={account.session} weekly={account.weekly} muted={muted} />
+      <WindowBars agentId={agentId} session={account.session} weekly={account.weekly} muted={muted} />
     </div>
   );
 };
 
 const AgentSection: React.FC<{ agent: AgentUsage }> = ({ agent }) => {
+  // Ticks with the shared minute timer so "Updated 12m ago" ages while the
+  // panel stays open, in step with the countdowns below it.
+  const now = useUsageNow();
   const hasTimestamp = Boolean(agent.asOf);
   const accounts = agent.accounts ?? [];
   const hasData = hasTimestamp && (agent.session || agent.weekly || accounts.length > 0);
-  const isOld = hasTimestamp && minutesSince(agent.asOf, Date.now()) > STALE_MIN;
+  const isOld = hasTimestamp && minutesSince(agent.asOf, now) > STALE_MIN;
   const muted = !hasData || isOld;
 
   return (
@@ -266,22 +260,22 @@ const AgentSection: React.FC<{ agent: AgentUsage }> = ({ agent }) => {
       {!hasData ? (
         <p className="text-[11px] text-amber-400">Signed in — usage updating…</p>
       ) : isOld ? (
-        <p className="text-[11px] text-amber-400">Updated {formatAgo(agent.asOf, Date.now())}</p>
+        <p className="text-[11px] text-amber-400">Updated {formatAgo(agent.asOf, now)}</p>
       ) : null}
       {accounts.length > 0 ? (
         <>
           {accounts.map((a) => (
-            <AccountRow key={a.id} account={a} />
+            <AccountRow key={a.id} agentId={agent.id} account={a} />
           ))}
           {/* The System (daemon-home) login pools into the worst-account head
               numbers, so it must be visible — hidden, it can drive the chip
               above every listed account. */}
-          {agent.system && <AccountRow key={agent.system.id} account={agent.system} />}
+          {agent.system && <AccountRow key={agent.system.id} agentId={agent.id} account={agent.system} />}
         </>
       ) : (
         /* Same card chrome as AccountRow so week-only agents align with Claude/Codex. */
         <div className="mt-1.5 rounded-md bg-neutral-900/60 px-2 py-1.5">
-          <WindowBars session={agent.session} weekly={agent.weekly} muted={muted} />
+          <WindowBars agentId={agent.id} session={agent.session} weekly={agent.weekly} muted={muted} />
         </div>
       )}
     </div>

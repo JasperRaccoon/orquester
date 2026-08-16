@@ -2,8 +2,9 @@ import React, { useEffect, useState } from "react";
 import CodeMirror, { EditorView } from "@uiw/react-codemirror";
 import { oneDark } from "@codemirror/theme-one-dark";
 import { languages } from "@codemirror/language-data";
-import { LanguageDescription } from "@codemirror/language";
+import { LanguageDescription, defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import type { Extension } from "@codemirror/state";
+import { useAppStore } from "../../store/app";
 
 export interface EditorProps {
   filename: string;
@@ -25,6 +26,12 @@ export interface EditorProps {
 export const Editor: React.FC<EditorProps> = ({ filename, value, readOnly, jumpToLine, jumpToColumn, jumpLength, jumpNonce, onChange, onSave }) => {
   const [langExtension, setLangExtension] = useState<Extension[]>([]);
   const [view, setView] = useState<EditorView | null>(null);
+  // The editor is the one surface with its own colour system, so it follows the
+  // resolved mode rather than the scheme: oneDark on dark, CodeMirror's default
+  // light chrome + highlight style on light (a dark editor pane inside a light
+  // app is the seam users notice first).
+  const resolvedMode = useAppStore((s) => s.resolvedMode);
+  const light = resolvedMode === "light";
 
   // Scroll to + select the requested line once the view exists and the document
   // has content. Keyed on (view, jumpToLine, jumpNonce, content-ready) so it fires
@@ -82,12 +89,16 @@ export const Editor: React.FC<EditorProps> = ({ filename, value, readOnly, jumpT
         value={value}
         height="100%"
         style={{ height: "100%" }}
-        theme={oneDark}
+        theme={light ? "light" : oneDark}
         readOnly={readOnly}
         editable={!readOnly}
         // Soft-wrap long lines so text never runs off-screen (mobile or desktop);
         // the editor then only scrolls vertically. Matches the Git diff view.
-        extensions={[EditorView.lineWrapping, ...langExtension]}
+        extensions={
+          light
+            ? [EditorView.lineWrapping, syntaxHighlighting(defaultHighlightStyle), ...langExtension]
+            : [EditorView.lineWrapping, ...langExtension]
+        }
         onChange={onChange}
         onCreateEditor={(v) => setView(v)}
         basicSetup={{ highlightActiveLine: !readOnly, foldGutter: true }}

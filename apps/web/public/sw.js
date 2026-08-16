@@ -13,7 +13,7 @@
  * "Failed to convert value to 'Response'").
  */
 
-var VERSION = "v4";
+var VERSION = "v5";
 var SHELL_CACHE = "orq-shell-" + VERSION;
 var ASSET_CACHE = "orq-assets-" + VERSION;
 var CURRENT_CACHES = [SHELL_CACHE, ASSET_CACHE];
@@ -24,6 +24,12 @@ var ASSET_CACHE_LIMIT = 60;
 // never be cached or fall back to index.html; /ws-devtools is its CDP socket.
 var BYPASS_PREFIXES = ["/api", "/events", "/ws", "/health", "/mcp", "/devtools-frontend", "/ws-devtools"];
 
+// Precached with the shell: /index.html loads /theme-boot.js synchronously in
+// <head> to paint the stored theme before first paint, so an offline start that
+// served index.html from cache but had to fetch the script would flash the
+// wrong colours (or block on a failing request).
+var SHELL_PRECACHE = ["/index.html", "/theme-boot.js"];
+
 self.addEventListener("install", function (event) {
   // Precache the app shell so the offline navigation fallback (which reads
   // SHELL_CACHE's "/index.html") has something to serve from the first load on.
@@ -31,7 +37,16 @@ self.addEventListener("install", function (event) {
     caches
       .open(SHELL_CACHE)
       .then(function (cache) {
-        return cache.add("/index.html");
+        // Not addAll: it is atomic, so one missing file (an older deploy with
+        // no theme-boot.js) would leave the shell — and the offline navigation
+        // fallback — uncached entirely.
+        return Promise.all(
+          SHELL_PRECACHE.map(function (path) {
+            return cache.add(path).catch(function () {
+              return undefined;
+            });
+          })
+        );
       })
       .then(function () {
         return self.skipWaiting();
@@ -142,7 +157,12 @@ function networkFirstStatic(event) {
     })
     .catch(function () {
       return caches.open(SHELL_CACHE).then(function (cache) {
-        return cache.match(event.request);
+        return cache.match(event.request).then(function (cached) {
+          // An offline miss must still resolve to a Response: returning the
+          // `undefined` from cache.match rejects respondWith with "Failed to
+          // convert value to 'Response'" instead of a plain network error.
+          return cached || Response.error();
+        });
       });
     });
 }

@@ -332,7 +332,10 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
     );
 
   return (
-    <div className="flex h-full w-full flex-col bg-neutral-950">
+    // `data-browser-view` marks this subtree as owning its own keystrokes: the
+    // app's global shortcuts (see `SHORTCUT_BAIL_SELECTOR`) stand down inside
+    // it so keys reach the remote page instead.
+    <div data-browser-view className="flex h-full w-full flex-col bg-neutral-950">
       <div className="flex h-9 shrink-0 items-center gap-1 border-b border-neutral-800 bg-neutral-900/40 px-2">
         <button type="button" aria-label="Back" disabled={!state?.canGoBack} onClick={() => navigate("back")}
           className="rounded p-1 text-neutral-400 enabled:hover:bg-neutral-800 disabled:opacity-40">

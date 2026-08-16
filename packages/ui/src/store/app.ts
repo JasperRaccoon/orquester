@@ -24,6 +24,14 @@ import {
   saveTerminalFontSize
 } from "../lib/terminal-font";
 import {
+  loadThemePrefs,
+  resolveMode,
+  saveThemePrefs,
+  type ColorScheme,
+  type ResolvedMode,
+  type ThemeMode
+} from "../lib/theme";
+import {
   clampPaneSize,
   clampSidebarWidth,
   loadGridTracks,
@@ -43,6 +51,8 @@ import {
   type PaneSizes
 } from "../lib/panel-sizes";
 import { normalizeAgentPrefs, normalizeUsagePrefs, type AppConfigAdapter } from "../lib/app-config";
+import { ProjectSetupError } from "../lib/project-setup-error";
+import { invalidateProjectIndex } from "../lib/project-index";
 import type { HttpClient } from "../lib/http-client";
 import type { Transporter } from "../lib/transporter";
 import { workspaceService } from "../services";
@@ -65,6 +75,7 @@ import type {
 } from "../types";
 import type {
   AgentAccountsResponse,
+  AgentConversationSummary,
   BrowserSummary,
   CliProxyMutationRefusal,
   CliProxyProviderStatus,
@@ -72,6 +83,7 @@ import type {
   CliProxySeedRequest,
   CliProxyStatus,
   CliProxyUnseedRequest,
+  RecentProjectSummary,
   SessionActivity,
   SessionActivityEvent,
   TodoListRecord,
@@ -150,6 +162,40 @@ const DEFAULT_AGENT_PREFS: AgentPrefs = { claudeTimeoutMinutes: 30 };
  * stored sizes.
  */
 const EMPTY_PANE_SIZES: PaneSizes = Object.freeze({});
+
+/**
+ * Forget the cached conversation list for one project. Deleting the key (rather
+ * than writing `[]`) restores the "never fetched" state, so the next consumer
+ * shows a loading state and re-scans instead of rendering a stale empty list.
+ */
+function dropConversationCache(
+  cache: Record<string, AgentConversationSummary[]>,
+  projectPath: string
+): Record<string, AgentConversationSummary[]> {
+  if (!projectPath || !(projectPath in cache)) {
+    return cache;
+  }
+  const next = { ...cache };
+  delete next[projectPath];
+  return next;
+}
+
+/**
+ * In-flight `loadAgentConversations` scans, keyed by project path. The scan is
+ * ~1s of daemon work and several surfaces ask for the same project in the same
+ * frame (the overview plus one section per agent in the "+" menu), so they share
+ * one promise instead of stampeding the daemon.
+ */
+const conversationScans = new Map<string, Promise<AgentConversationSummary[]>>();
+
+/**
+ * Is this recents row behind the archive curtain? `isArchived` is absent on
+ * daemons predating the field, which means "not archived" (the daemon-side
+ * default), so the fallback is deliberately permissive.
+ */
+export function isArchivedRecent(recent: RecentProjectSummary): boolean {
+  return recent.isArchived === true;
+}
 
 /** Replace a registry entry (matched by id within its kind) with a fresh copy. */
 function applyRegistryEntry(registry: RegistryResponse, entry: RegistryEntry): RegistryResponse {
@@ -557,6 +603,15 @@ export interface AppState {
   workspacesLoading: boolean;
   projects: ProjectSummary[];
   projectsLoading: boolean;
+  /** Daemon-owned recent-projects list (newest first); live via `recentProjects.changed`. */
+  recentProjects: RecentProjectSummary[];
+  /**
+   * Past agent conversations per project path. A missing key means "never
+   * fetched" (the scan is ~1s, so consumers render a loading state for it); an
+   * empty array means "fetched, none". Invalidated when a session is opened or
+   * closed in that project.
+   */
+  agentConversationsByProject: Record<string, AgentConversationSummary[]>;
 
   /** All daemon sessions; a project's sessions are its tabs. */
   sessions: SessionSummary[];
@@ -571,6 +626,32 @@ export interface AppState {
    * dismissible, never persisted; cleared on dismiss or the next launch.
    */
   modelWarning: { title: string; models: string[] } | null;
+  /**
+   * Transient notice for a refused resume: the daemon answered
+   * `RESUME_UNAVAILABLE` (the conversation id is unusable, or this agent has no
+   * resume flag), so NO session was created. Carries what's needed to offer a
+   * fresh session instead. Advisory, dismissible, never persisted.
+   */
+  resumeError: {
+    agentId: string;
+    agentName: string;
+    message: string;
+    /**
+     * The exact launch parameters of the refused attempt. "Start fresh" replays
+     * them (same identity, same project) instead of inheriting whatever happens
+     * to be current when the user clicks — a resume refused in project A must
+     * not silently open a session in project B.
+     */
+    accountId?: string;
+    model?: string;
+    projectPath: string;
+  } | null;
+  /**
+   * Transient after-the-fact notice with no action of its own (e.g. "the
+   * project was created, but its setup command could not be started"). Rendered
+   * by the shared toast stack; advisory, dismissible, never persisted.
+   */
+  notice: { title?: string; message: string } | null;
   /** Client-local tool tabs (file browser) per project path. */
   fileTabsByProject: Record<string, FileTab[]>;
   /** Client-local Git tabs (GitHub-Desktop-style) per project path. */
@@ -592,6 +673,12 @@ export interface AppState {
   preferredModelByAgent: Record<string, string>;
   /** Global terminal font size (px); persisted client-side, per device. */
   terminalFontSize: number;
+  /** Colour scheme; persisted client-side, per device. See lib/theme.ts. */
+  colorScheme: ColorScheme;
+  /** Light/dark preference (may be "system"/"dynamic"); persisted client-side. */
+  themeMode: ThemeMode;
+  /** {@link themeMode} collapsed to the two values the CSS knows. Not persisted. */
+  resolvedMode: ResolvedMode;
   /** Global sidebar width (px); persisted client-side, per device. */
   sidebarWidth: number;
   /** Per-project pane-split widths (px); persisted client-side, per device. */
@@ -660,8 +747,29 @@ export interface AppState {
 
   loadProjects: () => Promise<void>;
   createProject: (req: CreateProjectRequest) => Promise<void>;
+  /**
+   * Create the project, open it, then TYPE `command` into a fresh shell tab in
+   * its directory. The scaffolder/clone runs in front of the user (interactive
+   * prompts included) — the daemon never executes it.
+   */
+  createProjectWithCommand: (req: CreateProjectRequest, command: string) => Promise<void>;
   deleteProject: (project: ProjectSummary) => Promise<void>;
   openProject: (project: ProjectSummary) => void;
+  /** Fetch the daemon-owned recent-projects list into the store. */
+  loadRecentProjects: () => Promise<void>;
+  /**
+   * Record an interaction with `project` (defaults to the current one). The
+   * single choke point every navigation path funnels through — fire-and-forget,
+   * never blocks or fails a navigation.
+   */
+  markProjectInteracted: (project?: ProjectSummary | { path: string }) => void;
+  /** Navigate to a recent entry: select its workspace, then open the project. */
+  openRecentProject: (recent: RecentProjectSummary) => Promise<void>;
+  /** Cached per project; pass `force` to bypass the cache (e.g. a manual refresh). */
+  loadAgentConversations: (
+    projectPath: string,
+    force?: boolean
+  ) => Promise<AgentConversationSummary[]>;
   setWorkspaceArchived: (name: string, isArchived: boolean) => Promise<void>;
   setProjectArchived: (project: ProjectSummary, isArchived: boolean) => Promise<void>;
   loadProtectArchived: () => Promise<void>;
@@ -713,15 +821,41 @@ export interface AppState {
   ) => Promise<CliProxyStatus | CliProxyMutationRefusal>;
   installAgent: (id: string) => Promise<void>;
   updateAgent: (id: string) => Promise<void>;
+  /**
+   * Launch a tab in the current project.
+   *
+   * `resumeConversationId` resumes a past conversation instead of starting a
+   * fresh one; the daemon refuses (400 `RESUME_UNAVAILABLE`) rather than
+   * silently starting a fresh one when the id is unusable — surfaced as
+   * `resumeError`. `initialCommand` is typed into the new session's PTY by the
+   * **daemon** right after spawn (see `createProjectWithCommand`).
+   *
+   * Resolves to the created session, or `undefined` when nothing launched (no
+   * api, or a refused resume).
+   */
   openTab: (
     kind: RegistryKind,
     refId: string,
     title?: string,
     accountId?: string,
-    model?: string
-  ) => Promise<void>;
+    model?: string,
+    resumeConversationId?: string,
+    initialCommand?: string
+  ) => Promise<SessionSummary | undefined>;
   /** Dismiss the transient missing-models launch notice. */
   dismissModelWarning: () => void;
+  /** Dismiss the transient refused-resume notice. */
+  dismissResumeError: () => void;
+  /**
+   * Act on `resumeError`: start a FRESH session with the same agent, account and
+   * model, in the project the refused resume targeted (navigating there first
+   * when the user has moved on since).
+   */
+  startFreshFromResumeError: () => Promise<void>;
+  /** Raise the transient after-the-fact notice (replaces any current one). */
+  setNotice: (notice: { title?: string; message: string }) => void;
+  /** Dismiss the transient after-the-fact notice. */
+  dismissNotice: () => void;
   openFileBrowser: () => void;
   openGit: () => void;
   openBrowser: (url?: string) => Promise<void>;
@@ -736,6 +870,10 @@ export interface AppState {
   setPreferredModel: (agent: string, model: string) => void;
   setTerminalFontSize: (size: number) => void;
   nudgeTerminalFontSize: (delta: number) => void;
+  setColorScheme: (scheme: ColorScheme) => void;
+  setThemeMode: (mode: ThemeMode) => void;
+  /** Called by useTheme() once the settable mode has been resolved. */
+  setResolvedMode: (mode: ResolvedMode) => void;
   /**
    * Set the sidebar width (clamped). Pass `persist=false` for live drag frames
    * (store-only, no localStorage write); the default `true` commits + persists.
@@ -774,6 +912,10 @@ export interface AppState {
   applyEvent: (event: EventMessage) => void;
 }
 
+// Read once at module load so the initial render already has the right scheme
+// (useTheme only stamps the attributes; it never picks a different value).
+const initialThemePrefs = loadThemePrefs();
+
 export const useAppStore = create<AppState>((set, get) => ({
   api: null,
   connectionStatus: "connecting",
@@ -810,10 +952,14 @@ export const useAppStore = create<AppState>((set, get) => ({
   workspacesLoading: false,
   projects: [],
   projectsLoading: false,
+  recentProjects: [],
+  agentConversationsByProject: {},
   sessions: [],
   browsers: [],
   activityById: {},
   modelWarning: null,
+  resumeError: null,
+  notice: null,
   fileTabsByProject: {},
   gitTabsByProject: {},
   todoTabsByContext: {},
@@ -823,6 +969,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   preferredAccountByAgent: loadPreferredAccounts(),
   preferredModelByAgent: loadPreferredModels(),
   terminalFontSize: loadTerminalFontSize(),
+  colorScheme: initialThemePrefs.scheme,
+  themeMode: initialThemePrefs.mode,
+  resolvedMode: resolveMode(initialThemePrefs.mode),
   sidebarWidth: loadSidebarWidth(),
   paneSizesByProject: loadPaneSizes(),
   gridTracksByProject: loadGridTracks(),
@@ -958,7 +1107,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     // Successful connect resets the consecutive-lockout counter.
     lockedCycles = 0;
-    set({ connectionStatus: "connected", reconnectAttempt: 0, connectionError: null, lockedUntil: null, authPrompt: null });
+    // agentConversationsByProject: a (re)connect may be a restarted or upgraded
+    // daemon, and the cache is the only place a failed scan settles as "none" —
+    // dropping it here is what makes that recoverable.
+    set({ connectionStatus: "connected", reconnectAttempt: 0, connectionError: null, lockedUntil: null, authPrompt: null, agentConversationsByProject: {} });
 
     // Live event sync — opened BEFORE the snapshot fan-out, buffering into a
     // queue until the snapshots are installed. The broadcaster has no replay,
@@ -990,6 +1142,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     await Promise.all([
       get().loadWorkspaces(),
+      get().loadRecentProjects(),
       get().loadProtectArchived(),
       get().loadSessions(),
       // Browser tabs are optional (older daemons return 404) — tolerate absence.
@@ -1308,6 +1461,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       closeEvents();
       clearStoredHash(api.connection.endpoint);
       clearStoredUsername(api.connection.endpoint);
+      invalidateProjectIndex();
       set({
         api: apiWithCredential(api, ""),
         connectionStatus: "error",
@@ -1322,6 +1476,13 @@ export const useAppStore = create<AppState>((set, get) => ({
         currentProject: null,
         workspaces: [],
         projects: [],
+        recentProjects: [],
+        agentConversationsByProject: {},
+        // Transient per-daemon notices: they name a session/project of the
+        // daemon we just left, and their actions would launch into it.
+        resumeError: null,
+        modelWarning: null,
+        notice: null,
         protectArchived: false,
         protectArchivedLoaded: false,
         authPrompt: { connectionId: api.connection.id }
@@ -1336,6 +1497,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     stopReconnect();
     closeEvents();
+    // The verified project index is daemon-scoped too, and it lives outside the
+    // store (module cache) — reset it by hand with the rest.
+    invalidateProjectIndex();
     // Reset all daemon-scoped state: a different server has its own data.
     set({
       api: new ApiClient(connection, buildTransporter(connection)),
@@ -1344,6 +1508,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       currentProject: null,
       workspaces: [],
       projects: [],
+      recentProjects: [],
+      agentConversationsByProject: {},
+      // Transient per-daemon notices (see signOut): they reference the previous
+      // daemon's session/project, so they must not survive the switch.
+      resumeError: null,
+      modelWarning: null,
+      notice: null,
       // Per-daemon flag: never let one server's curtain setting apply to the
       // next one. connect() reloads it from the newly selected daemon.
       protectArchived: false,
@@ -1564,6 +1735,57 @@ export const useAppStore = create<AppState>((set, get) => ({
     await get().loadProjects();
   },
 
+  createProjectWithCommand: async (req, command) => {
+    const api = get().api;
+    const workspace = get().currentWorkspace;
+    if (!api || !workspace) {
+      return;
+    }
+    // Phase 1 — the directory. A failure here is a plain create failure and
+    // propagates as-is (nothing exists yet, so the caller may retry).
+    const project = await workspaceService.createProject(api, workspace, req);
+    await get().loadProjects();
+    get().openProject(project);
+
+    // Phase 2 — the setup tab. From here the project EXISTS: every failure is
+    // wrapped so the caller can say so instead of "could not create the
+    // project", and must never be retried as a create.
+    try {
+      // Scaffold/clone commands are POSIX shell syntax, so prefer a POSIX shell
+      // over whatever happens to be first in `registry.shells`: nushell/fish/pwsh
+      // parse `--`, quoting and `&&` differently and would mangle them.
+      const enabled = get().registry.shells.filter((s) => s.enabled);
+      const shellId =
+        ["bash", "zsh", "sh"].find((id) => enabled.some((s) => s.id === id)) ?? enabled[0]?.id;
+      if (!shellId) {
+        throw new Error("no shell is available on the server");
+      }
+      // The command is TYPED, not executed: the user watches the scaffolder and
+      // answers its prompts. The daemon does the typing (`initialCommand`) right
+      // after the spawn — that removes the old client-side race entirely (a
+      // fixed sleep guessing when the shell has drawn its prompt, then an input
+      // frame the WS channel could drop on a reconnect).
+      const session = await get().openTab(
+        "shell",
+        shellId,
+        "Setup",
+        undefined,
+        undefined,
+        undefined,
+        command
+      );
+      if (!session) {
+        throw new Error("the setup terminal could not be opened");
+      }
+    } catch (error) {
+      const reason =
+        (error instanceof ApiError ? error.serverMessage : null) ??
+        (error instanceof Error ? error.message : null) ??
+        "the setup command could not be started";
+      throw new ProjectSetupError(reason, project);
+    }
+  },
+
   deleteProject: async (project) => {
     const api = get().api;
     if (!api) {
@@ -1601,7 +1823,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         set({ currentProject: null });
       }
     }
-    await get().loadWorkspaces();
+    invalidateProjectIndex();
+    await Promise.all([get().loadWorkspaces(), get().loadRecentProjects()]);
   },
 
   setProjectArchived: async (project, isArchived) => {
@@ -1613,7 +1836,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (isArchived && get().currentProject?.path === project.path) {
       set({ currentProject: null });
     }
-    await get().loadProjects();
+    // The curtain moved: drop the verified project index (attention center,
+    // command palette) and re-pull recents, which the daemon does not touch on
+    // an archive and so would keep showing the row until something else did.
+    invalidateProjectIndex();
+    await Promise.all([get().loadProjects(), get().loadRecentProjects()]);
   },
 
   loadProtectArchived: async () => {
@@ -1652,6 +1879,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   openProject: (project) => {
+    // Re-selecting the project that is already open is not a new interaction:
+    // marking it again would POST (and reshuffle the shared recents list) on
+    // every stray click of the row that is already active.
+    const alreadyOpen = get().currentProject?.path === project.path;
     set((state) => {
       const active = state.activeTabByProject[project.path];
       const fallback = firstTabId(
@@ -1674,6 +1905,135 @@ export const useAppStore = create<AppState>((set, get) => ({
     });
     // Fire-and-forget (keeps openProject synchronous): project-scoped to-do lists.
     void get().loadTodos("project", project.path);
+    // Every client navigation path into a project funnels through here (sidebar,
+    // recents, command palette, project switcher), so this is the one place the
+    // daemon needs told about a pure-navigation interaction. Session create is
+    // marked daemon-side already.
+    if (!alreadyOpen) {
+      get().markProjectInteracted(project);
+    }
+  },
+
+  loadRecentProjects: async () => {
+    const api = get().api;
+    if (!api) {
+      return;
+    }
+    // Generation guard (see establish): a list fetched from daemon A must never
+    // land in daemon B's state after a selectConnection/signOut in flight.
+    const gen = reconnectGen;
+    try {
+      const list = await api.listRecentProjects();
+      if (gen === reconnectGen) {
+        set({ recentProjects: list });
+      }
+    } catch {
+      // Best-effort surface: an older daemon 404s here, and a blip must not
+      // block the connect fan-out. Leave whatever we had.
+    }
+  },
+
+  markProjectInteracted: (project) => {
+    const api = get().api;
+    const target = project ?? get().currentProject;
+    if (!api || !target?.path) {
+      return;
+    }
+    // The daemon broadcasts `recentProjects.changed` too; applying the response
+    // just makes our own click feel instant. Generation-guarded like every other
+    // post-await write (this one can land seconds after a connection switch).
+    const gen = reconnectGen;
+    void api
+      .markProjectInteracted(target.path)
+      .then((list) => {
+        if (gen === reconnectGen) {
+          set({ recentProjects: list });
+        }
+      })
+      .catch(() => undefined);
+  },
+
+  openRecentProject: async (recent) => {
+    // An archived project is hidden from every navigable surface (the sidebar
+    // reveals it only behind the archived curtain), so a stale recents row must
+    // not be a way around that.
+    if (isArchivedRecent(recent)) {
+      return;
+    }
+    // Re-verify with the daemon BEFORE anything navigational: the row may have
+    // been archived since it was painted, and `openWorkspace` would then strand
+    // the user in a switched-to workspace with nothing to open — a dead end the
+    // archived curtain is supposed to prevent, not create. An older daemon
+    // (no such route) leaves the list untouched and stays permissive.
+    await get().loadRecentProjects();
+    const fresh = get().recentProjects.find((r) => r.path === recent.path);
+    if (!fresh || isArchivedRecent(fresh)) {
+      return;
+    }
+    // Switching workspaces reloads `projects`; the entry we want is only in the
+    // store after that await. Also load when the workspace is already current
+    // but the list doesn't hold the path yet (first paint, or a stale list).
+    const find = () => get().projects.find((p) => p.path === recent.path);
+    if (get().currentWorkspace !== recent.workspace || !find()) {
+      await get().openWorkspace(recent.workspace);
+    }
+    // A path that no longer resolves to a listed project (deleted, or archived
+    // out from under the list) just leaves its workspace open — no error state
+    // to invent, the sidebar now shows what actually exists.
+    const project = find();
+    if (project && !project.isArchived) {
+      get().openProject(project);
+    }
+  },
+
+  loadAgentConversations: async (projectPath, force) => {
+    const cached = get().agentConversationsByProject[projectPath];
+    if (cached && !force) {
+      return cached;
+    }
+    const api = get().api;
+    if (!api || !projectPath) {
+      return cached ?? [];
+    }
+    // Dedup: the overview and every open "+"-menu resume section ask for the
+    // same project at once, and the scan is ~1s of daemon work per call.
+    const inFlight = conversationScans.get(projectPath);
+    if (inFlight && !force) {
+      return inFlight;
+    }
+    const gen = reconnectGen;
+    const scan = (async () => {
+      let conversations: AgentConversationSummary[] = [];
+      try {
+        conversations = (await api.listAgentConversations(projectPath)).conversations;
+      } catch {
+        // Best-effort (the daemon already swallows per-agent scan failures), and a
+        // daemon predating the route 404s outright. Cache the empty result anyway
+        // so consumers settle into their quiet empty state instead of showing a
+        // loading skeleton forever; connect() drops the whole map, and any session
+        // open/close in the project drops this key, so a retry is never far off.
+      }
+      // Same generation guard as the other loaders: one daemon's conversations
+      // must never be cached under another's project path.
+      if (gen === reconnectGen) {
+        set((state) => ({
+          agentConversationsByProject: {
+            ...state.agentConversationsByProject,
+            [projectPath]: conversations
+          }
+        }));
+      }
+      return conversations;
+    })();
+    conversationScans.set(projectPath, scan);
+    try {
+      return await scan;
+    } finally {
+      // Only clear our own entry: a `force` scan started later owns the slot.
+      if (conversationScans.get(projectPath) === scan) {
+        conversationScans.delete(projectPath);
+      }
+    }
   },
 
   loadSessions: async () => {
@@ -1898,21 +2258,59 @@ export const useAppStore = create<AppState>((set, get) => ({
     await get().api?.updateRegistryEntry(id).catch(() => undefined);
   },
 
-  openTab: async (kind, refId, title, accountId, model) => {
+  openTab: async (kind, refId, title, accountId, model, resumeConversationId, initialCommand) => {
     const api = get().api;
     if (!api) {
       return;
     }
     const project = get().currentProject;
-    const session = await api.createSession({
-      kind,
-      refId,
-      title,
-      projectPath: project?.path ?? "",
-      cwd: project?.path,
-      accountId,
-      model
-    });
+    let session: SessionSummary;
+    try {
+      session = await api.createSession({
+        kind,
+        refId,
+        title,
+        projectPath: project?.path ?? "",
+        cwd: project?.path,
+        accountId,
+        model,
+        resumeConversationId,
+        initialCommand
+      });
+    } catch (error) {
+      // A refused RESUME is the one create failure with a useful recovery ("open
+      // a fresh one instead"), and the daemon guarantees no session was created,
+      // so it becomes a toast rather than an unhandled rejection in the
+      // fire-and-forget callers. Every other failure keeps the old behaviour.
+      const code =
+        error instanceof ApiError && error.body && typeof error.body === "object"
+          ? (error.body as { code?: unknown }).code
+          : undefined;
+      if (code === "RESUME_UNAVAILABLE") {
+        set({
+          resumeError: {
+            agentId: refId,
+            agentName: title ?? refId,
+            message:
+              (error as ApiError).serverMessage ??
+              "That conversation cannot be resumed with this agent.",
+            // Replay material for "Start fresh": the identity and the project
+            // this attempt targeted, not whatever is current when it is clicked.
+            accountId,
+            model,
+            projectPath: project?.path ?? ""
+          }
+        });
+        // The refusal means our cached list offered an id the daemon rejects —
+        // the transcript is gone or moved. Re-scan so the stale row disappears
+        // instead of inviting the same failure again.
+        if (project?.path) {
+          void get().loadAgentConversations(project.path, true);
+        }
+        return;
+      }
+      throw error;
+    }
     set((state) => ({
       sessions: upsertSession(state.sessions, session),
       activeTabByProject: project
@@ -1924,11 +2322,57 @@ export const useAppStore = create<AppState>((set, get) => ({
       modelWarning:
         session.missingModels && session.missingModels.length > 0
           ? { title: session.title, models: session.missingModels }
-          : state.modelWarning
+          : state.modelWarning,
+      resumeError: null,
+      // The agent this just launched is about to write a new conversation (or
+      // extend the resumed one), so the cached list for its project is stale.
+      agentConversationsByProject: dropConversationCache(
+        state.agentConversationsByProject,
+        session.projectPath
+      )
     }));
+    return session;
   },
 
   dismissModelWarning: () => set({ modelWarning: null }),
+
+  dismissResumeError: () => set({ resumeError: null }),
+
+  startFreshFromResumeError: async () => {
+    const error = get().resumeError;
+    if (!error) {
+      return;
+    }
+    // Clear first: openTab clears it on success anyway, but a second failure
+    // must be able to install a fresh one.
+    set({ resumeError: null });
+    const { projectPath } = error;
+    if (projectPath && get().currentProject?.path !== projectPath) {
+      // The user navigated away between the refusal and the click. Go back to
+      // the project the conversation belongs to — a fresh session anywhere else
+      // is not what the button offered.
+      let project = get().projects.find((p) => p.path === projectPath);
+      if (!project) {
+        const workspace = get().workspaces.find(
+          (w) => projectPath === w.path || projectPath.startsWith(`${w.path}/`)
+        );
+        if (!workspace) {
+          return;
+        }
+        await get().openWorkspace(workspace.name);
+        project = get().projects.find((p) => p.path === projectPath);
+      }
+      if (!project) {
+        return;
+      }
+      get().openProject(project);
+    }
+    await get().openTab("agent", error.agentId, error.agentName, error.accountId, error.model);
+  },
+
+  setNotice: (notice) => set({ notice }),
+
+  dismissNotice: () => set({ notice: null }),
 
   openFileBrowser: () =>
     set((state) => {
@@ -1991,15 +2435,29 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   closeTab: async (id) => {
     const api = get().api;
-    const isSession = get().sessions.some((s) => s.id === id);
+    const session = get().sessions.find((s) => s.id === id);
+    const isSession = Boolean(session);
     const isBrowser = !isSession && get().browsers.some((b) => b.id === id);
-    set((state) =>
-      isSession
+    set((state) => {
+      const next = isSession
         ? removeSession(state, id)
         : isBrowser
           ? removeBrowser(state, id)
-          : removeLocalTab(state, id)
-    );
+          : removeLocalTab(state, id);
+      // The agent it just ran most likely wrote/extended a conversation on disk
+      // — drop the cache so the next overview/menu open re-scans. Same `set` as
+      // the removal so the tab and its stale cache never disagree mid-render.
+      if (session?.kind === "agent") {
+        return {
+          ...next,
+          agentConversationsByProject: dropConversationCache(
+            next.agentConversationsByProject ?? state.agentConversationsByProject,
+            session.projectPath
+          )
+        };
+      }
+      return next;
+    });
     if (isSession) {
       await api?.closeSession(id).catch(() => undefined);
     } else if (isBrowser) {
@@ -2077,6 +2535,21 @@ export const useAppStore = create<AppState>((set, get) => ({
       saveTerminalFontSize(next);
       return { terminalFontSize: next };
     }),
+
+  setColorScheme: (scheme) =>
+    set((state) => {
+      saveThemePrefs({ scheme, mode: state.themeMode });
+      return { colorScheme: scheme };
+    }),
+
+  setThemeMode: (mode) =>
+    set((state) => {
+      saveThemePrefs({ scheme: state.colorScheme, mode });
+      return { themeMode: mode };
+    }),
+
+  setResolvedMode: (mode) =>
+    set((state) => (state.resolvedMode === mode ? {} : { resolvedMode: mode })),
 
   setSidebarWidth: (px, persist = true) =>
     set(() => {
@@ -2343,6 +2816,19 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
       return;
     }
+    if (event.channel === "projects" && event.type === "recentProjects.changed") {
+      // The daemon marks interactions itself (session create) as well as on our
+      // POST, so this event — not the POST response — is the authoritative feed.
+      // Guard the shape: an older/newer daemon must not put a non-array here.
+      // A malformed payload is IGNORED rather than applied as an empty list —
+      // clearing a good list because one event was garbage is strictly worse
+      // than keeping the last known-good one until the next event/refetch.
+      const list = event.payload;
+      if (Array.isArray(list)) {
+        set({ recentProjects: list as RecentProjectSummary[] });
+      }
+      return;
+    }
     if (event.channel === "browser") {
       if (event.type === "browser.created" || event.type === "browser.updated") {
         const summary = event.payload as BrowserSummary;
@@ -2370,9 +2856,14 @@ export const useAppStore = create<AppState>((set, get) => ({
       event.type === "session.updated"
     ) {
       const summary = event.payload as SessionSummary;
-      // A real process exit makes activity meaningless (the gray "exited" dot
-      // wins): drop tracking so a stale working/idle dot can't linger on a dead
-      // session.
+      // Reset activity on exit: the `session.exited` summary deliberately
+      // carries none (the daemon drops it for a non-running session), so a
+      // working/waiting entry left behind would keep a live-looking dot on a
+      // dead session. This is NOT the end of the story — the daemon re-stamps
+      // `attention: "finished"` immediately after this broadcast, and that
+      // `session.activity` event lands here next and puts the session in the
+      // Attention Center's Finished group. Dropping first is what makes the
+      // re-stamp's `needsAttentionAt` the moment of the exit.
       if (event.type === "session.exited") {
         set((state) => ({
           sessions: upsertSession(state.sessions, summary),

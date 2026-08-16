@@ -13,10 +13,10 @@ import {
 import { cn } from "../../lib/cn";
 import { BitbucketIcon } from "../../icons";
 import {
+  AdaptiveMenu,
   Button,
   ConfirmDialog,
   ContextMenu,
-  Dropdown,
   DropdownItem,
   DropdownLabel,
   DropdownSeparator,
@@ -218,8 +218,9 @@ export const WorkspaceList: React.FC = () => {
             </div>
             <div className="space-y-1.5">
               <label className="text-xs text-neutral-400">Git account</label>
-              <Dropdown
+              <AdaptiveMenu
                 width="w-72"
+                title="Identity"
                 trigger={
                   <span className="flex h-8 w-72 items-center justify-between rounded-md border border-neutral-700 bg-neutral-900 px-2.5 text-sm text-neutral-200">
                     <span className="truncate">{pickedLabel}</span>
@@ -260,7 +261,7 @@ export const WorkspaceList: React.FC = () => {
                 >
                   Add account…
                 </DropdownItem>
-              </Dropdown>
+              </AdaptiveMenu>
               <p className="text-[11px] text-neutral-500">
                 The git identity is bound to this workspace permanently. To change it, delete and recreate the workspace.
               </p>

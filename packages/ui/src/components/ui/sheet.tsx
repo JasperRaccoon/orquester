@@ -30,14 +30,25 @@ export const BottomSheet: React.FC<BottomSheetProps> = ({ open, onClose, title, 
   }
 
   return createPortal(
-    <div className="fixed inset-0 z-[110] flex flex-col justify-end" onMouseDown={onClose}>
+    // NB: the wrapper is `overflow-hidden` (it clips the extra vw `w-screen`
+    // adds when a scrollbar is present), so anything that must escape the sheet
+    // box — a dropdown panel, tooltip, confirm dialog — has to portal to
+    // document.body rather than render inline here.
+    <div
+      className="fixed inset-0 z-[110] flex flex-col justify-end overflow-hidden"
+      onMouseDown={onClose}
+    >
       <div className="absolute inset-0 bg-black/60" />
       <div
         role="dialog"
         aria-modal="true"
         onMouseDown={(e) => e.stopPropagation()}
         className={cn(
-          "relative max-h-[75vh] overflow-y-auto rounded-t-2xl border-t border-neutral-800 bg-neutral-900",
+          // Full-bleed: `w-screen max-w-none` pins the sheet to the viewport
+          // edges even when a caller's tree constrains widths (the wrapper
+          // clips the extra vw a desktop scrollbar would add).
+          "relative w-screen max-w-none max-h-[75vh] overflow-y-auto",
+          "rounded-t-2xl border-t border-neutral-800 bg-neutral-900",
           "pb-[max(0.5rem,env(safe-area-inset-bottom))] shadow-2xl"
         )}
       >

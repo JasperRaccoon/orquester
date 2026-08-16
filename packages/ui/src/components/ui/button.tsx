@@ -10,7 +10,10 @@ export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElemen
 }
 
 const VARIANTS: Record<ButtonVariant, string> = {
-  default: "bg-neutral-200 text-neutral-900 hover:bg-white",
+  // Hover must stay inside the themed scale: a literal `bg-white` reads as
+  // "brighter" only on the dark palette — on a light one it inverts into a
+  // near-invisible white-on-white button.
+  default: "bg-neutral-200 text-neutral-900 hover:bg-neutral-50",
   ghost: "text-neutral-300 hover:bg-neutral-800 hover:text-neutral-100",
   outline: "border border-neutral-700 text-neutral-200 hover:bg-neutral-800"
 };
