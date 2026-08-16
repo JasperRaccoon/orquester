@@ -143,8 +143,9 @@ const ResumeSection: React.FC<{
                     "agent",
                     agent.id,
                     agent.name,
-                    // The home the daemon read this row out of wins over the
-                    // row's chip: the transcript only exists in that one HOME.
+                    // account-attributed rows force their home (only it sees
+                    // the transcript); system rows honor the selected chip —
+                    // every managed home symlinks back to the system history.
                     resumeAccountId(conversation, accountId),
                     model,
                     conversation.id
