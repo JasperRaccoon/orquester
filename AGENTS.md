@@ -340,9 +340,11 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
   on duplicates. First spelling wins and the system home is listed first, so a merely-symlinked
   transcript is correctly reported as resumable under the system home. Every remaining row is
   stamped `home` + `accountId`/`proxyRefId`, and the
-  UI's `resumeAccountId` honours it over any preference: `account` → that id, `system` → the
-  explicit `SYSTEM_ACCOUNT_ID` sentinel (an *omitted* value would resolve to the per-agent default
-  instead). `cliproxy` rows have no expressible identity — claudex/claudemix carry no `resumeArgs`,
+  UI's `resumeAccountId` maps it: `account` → that id, forced (only that home sees the transcript);
+  `system` → the user's selected/preferred account, because every managed home symlinks its history
+  dir back to the system one by construction so any identity can resume it — forcing the host
+  identity here once broke resume with "session expired, run /login" whenever the system home's own
+  login was stale (the sentinel is used only when there is no fallback at all). `cliproxy` rows have no expressible identity — claudex/claudemix carry no `resumeArgs`,
   and plain `claude` in the wrong HOME cannot find the transcript — so the UI filters them out of
   both resume surfaces (`isResumableConversation` in `packages/ui/src/lib/resume-account.ts`); the
   full fix (resumeArgs on the launchers + routing on `proxyRefId`) is a known follow-up.
