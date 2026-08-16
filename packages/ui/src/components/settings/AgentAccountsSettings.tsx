@@ -46,7 +46,7 @@ export function AgentAccountsSettings() {
 
   return (
     <div className="space-y-6">
-      {err ? <p className="text-xs text-red-400">{err}</p> : null}
+      {err ? <p className="text-xs text-danger">{err}</p> : null}
       {(["claude", "codex", "grok"] as const).map((agent) => (
         <section key={agent} className="space-y-2">
           <h3 className="text-sm font-medium capitalize">{agent} accounts</h3>

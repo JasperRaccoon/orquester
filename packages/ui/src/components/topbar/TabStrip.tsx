@@ -208,7 +208,7 @@ export const TabStrip: React.FC = () => {
             )}
             {modelLabel ? (
               <span
-                className="ml-1 rounded bg-amber-500/15 px-1 text-[10px] text-amber-300"
+                className="ml-1 rounded bg-warn-500/15 px-1 text-[10px] text-warn-300"
                 title={tab.type === "session" ? tab.session.model : undefined}
               >
                 {modelLabel}

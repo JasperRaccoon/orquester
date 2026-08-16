@@ -15,10 +15,10 @@ import { useAppStore } from "../../store/app";
 import type { ConnectionStatus } from "../../types";
 
 const STATUS_COLOR: Record<ConnectionStatus, string> = {
-  connected: "bg-emerald-400",
+  connected: "bg-ok",
   connecting: "bg-neutral-500 animate-pulse",
   disconnected: "bg-neutral-700",
-  error: "bg-red-500"
+  error: "bg-danger-500"
 };
 
 /**
@@ -37,7 +37,7 @@ const RemoveServerButton: React.FC<{ onRequest: () => void }> = ({ onRequest }) 
       // adjacent "switch server" item. Always visible on the mobile sheet —
       // touch has no hover, so the reveal-on-hover affordance only works from
       // md up.
-      className="mx-1 flex h-8 w-8 shrink-0 items-center justify-center rounded text-neutral-500 hover:bg-neutral-800 hover:text-red-400 md:hidden md:group-hover:flex"
+      className="mx-1 flex h-8 w-8 shrink-0 items-center justify-center rounded text-neutral-500 hover:bg-neutral-800 hover:text-danger md:hidden md:group-hover:flex"
       onClick={() => {
         close();
         onRequest();

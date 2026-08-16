@@ -149,7 +149,7 @@ export const ParquetViewer: React.FC<{
     }
   }, [meta, rowCount, first, last, chunks, loadChunk]);
 
-  if (failed) return <p className="p-3 text-xs text-red-400">Could not read parquet file.</p>;
+  if (failed) return <p className="p-3 text-xs text-danger">Could not read parquet file.</p>;
   if (!meta) return <p className="p-3 text-xs text-neutral-600">Reading parquet…</p>;
   if (!meta.supported) {
     return (

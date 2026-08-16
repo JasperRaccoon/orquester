@@ -208,7 +208,7 @@ const StashRow: React.FC<{
         onClick={onDrop}
         aria-label={`Drop stash ${stash.message}`}
         title="Drop the stash"
-        className="text-neutral-500 hover:text-red-400"
+        className="text-neutral-500 hover:text-danger"
       >
         <Trash2 size={13} />
       </Button>

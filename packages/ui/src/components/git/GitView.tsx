@@ -269,7 +269,7 @@ export const GitView: React.FC<{ projectPath: string; active?: boolean }> = ({
       />
 
       {error && (
-        <div className="flex shrink-0 items-start gap-2 border-b border-red-900/50 bg-red-950/40 px-3 py-2 text-xs text-red-300">
+        <div className="flex shrink-0 items-start gap-2 border-b border-danger-900/50 bg-danger-soft/40 px-3 py-2 text-xs text-danger-300">
           <AlertCircle size={14} className="mt-px shrink-0" />
           <span className="min-w-0 flex-1 whitespace-pre-wrap break-words font-mono leading-relaxed">
             {error}
@@ -278,7 +278,7 @@ export const GitView: React.FC<{ projectPath: string; active?: boolean }> = ({
             type="button"
             aria-label="Dismiss error"
             onClick={() => setError(null)}
-            className="shrink-0 rounded p-0.5 text-red-400/80 transition-colors hover:bg-red-900/40 hover:text-red-200"
+            className="shrink-0 rounded p-0.5 text-danger/80 transition-colors hover:bg-danger-900/40 hover:text-danger-200"
           >
             <X size={13} />
           </button>

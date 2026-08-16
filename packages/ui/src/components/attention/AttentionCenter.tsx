@@ -187,13 +187,13 @@ export const AttentionCenter: React.FC = () => {
       aria-label={label}
       className={cn(
         "flex h-7 items-center gap-1.5 rounded-md px-2 text-xs font-medium hover:bg-neutral-800",
-        unseenCount > 0 ? "text-amber-400" : "text-neutral-300"
+        unseenCount > 0 ? "text-warn" : "text-neutral-300"
       )}
     >
-      <Bot size={13} className={unseenCount > 0 ? "text-amber-400" : "text-neutral-500"} />
+      <Bot size={13} className={unseenCount > 0 ? "text-warn" : "text-neutral-500"} />
       <span>{total}</span>
       {flaggedCount > 0 && (
-        <span className={unseenCount > 0 ? "text-amber-400" : "text-neutral-500"}>
+        <span className={unseenCount > 0 ? "text-warn" : "text-neutral-500"}>
           · {flaggedCount}
         </span>
       )}

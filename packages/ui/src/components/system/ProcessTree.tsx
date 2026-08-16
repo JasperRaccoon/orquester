@@ -81,7 +81,7 @@ const ProcessRow: React.FC<{
               onClick={() => onAskKill(node)}
               aria-label={`Stop ${processLabel(proc)}`}
               title={`Stop ${processLabel(proc)}`}
-              className="rounded p-0.5 text-neutral-600 hover:bg-neutral-800 hover:text-red-400 disabled:opacity-40 md:opacity-0 md:group-hover:opacity-100"
+              className="rounded p-0.5 text-neutral-600 hover:bg-neutral-800 hover:text-danger disabled:opacity-40 md:opacity-0 md:group-hover:opacity-100"
             >
               {busyPid === proc.pid ? <Loader2 size={12} className="animate-spin" /> : <X size={12} />}
             </button>
@@ -159,7 +159,7 @@ export const ProcessTreeView: React.FC<{
   return (
     <div className="space-y-2">
       {error && (
-        <p className="rounded-md border border-red-900/60 bg-red-950/30 px-2.5 py-2 text-[11px] text-red-300">{error}</p>
+        <p className="rounded-md border border-danger-900/60 bg-danger-soft/30 px-2.5 py-2 text-[11px] text-danger-300">{error}</p>
       )}
       <div className="overflow-x-auto rounded-lg border border-neutral-800">
         <div className="min-w-[32rem]">
@@ -200,7 +200,7 @@ export const ProcessTreeView: React.FC<{
               </p>
               <p className="mt-2 break-all text-xs text-neutral-500">{pending.proc.cmdline}</p>
               {pending.proc.sessionId && (
-                <p className="mt-2 text-xs text-amber-400/90">
+                <p className="mt-2 text-xs text-warn/90">
                   This process belongs to a session tab — stopping it ends what that tab is running.
                 </p>
               )}

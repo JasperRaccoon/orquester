@@ -393,7 +393,7 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
         )}
         {state && !state.sandboxed && (
           <span title="Chromium is running without its sandbox on this host">
-            <ShieldAlert size={14} className="text-amber-500" />
+            <ShieldAlert size={14} className="text-warn-500" />
           </span>
         )}
       </div>

@@ -35,6 +35,11 @@ declare global {
       socketPath?: string;
       defaultConnection: UiConnection;
       windowControls: WindowControls;
+      /** Optional host hook the shared theme lib calls (lib/theme.ts) so the
+       *  main process can paint the native window in the current scheme.
+       *  Optional because a packaged app can run a new renderer bundle against
+       *  the preload it shipped with — an older one has no such hook. */
+      setWindowBackground?: (payload: { background: string; resolvedMode: "light" | "dark" }) => void;
     };
   }
 }

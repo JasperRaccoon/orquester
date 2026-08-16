@@ -82,23 +82,66 @@ export function applyTheme(scheme: ColorScheme, mode: ResolvedMode): void {
   // be kept in step here or a runtime mode switch would leave native widgets and
   // scrollbars painted for the old mode.
   root.style.colorScheme = mode;
-  syncThemeColorMeta(root);
+
+  // One read of the scheme's base surface feeds both host-chrome consumers
+  // below, so neither can drift from what the stylesheet actually paints.
+  const triple = baseSurfaceTriple(root);
+  if (triple) {
+    syncThemeColorMeta(triple);
+    notifyHostBackground(tripleToHex(triple), mode);
+  }
+}
+
+/**
+ * The scheme's base surface (`--n-950`, what `bg-neutral-950` paints) as an
+ * `"r g b"` triple, or null if it can't be read. Taken back off the DOM rather
+ * than duplicating the palette in JS so it cannot drift from globals.css.
+ */
+function baseSurfaceTriple(root: HTMLElement): string | null {
+  const triple = getComputedStyle(root).getPropertyValue("--n-950").trim();
+  return /^\d{1,3} \d{1,3} \d{1,3}$/.test(triple) ? triple : null;
+}
+
+function tripleToHex(triple: string): string {
+  const hex = triple
+    .split(" ")
+    .map((part) => Math.min(255, Number(part)).toString(16).padStart(2, "0"))
+    .join("");
+  return `#${hex}`;
 }
 
 /**
  * Keep the PWA's `theme-color` (Android's address bar / task-switcher tint, and
  * the installed shell's chrome) on the scheme's own base surface. The static
- * `#111111` in index.html would leave a black bar above a light theme. Read
- * back from the DOM rather than duplicating the palette so it can't drift.
+ * `#111111` in index.html would leave a black bar above a light theme.
  */
-function syncThemeColorMeta(root: HTMLElement): void {
+function syncThemeColorMeta(triple: string): void {
   const meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
-  if (!meta) {
+  if (meta) {
+    meta.content = `rgb(${triple})`;
+  }
+}
+
+/**
+ * Optional desktop host bridge (apps/desktop/src/preload.cjs). The Electron
+ * window's NATIVE background is chosen in the main process, before any renderer
+ * code can run, so main can only paint the right colour at launch if the
+ * renderer reports the resolved one for it to persist. Optional by design: the
+ * web host injects no bridge and this is a silent no-op there.
+ */
+interface DesktopThemeHost {
+  setWindowBackground?: (payload: { background: string; resolvedMode: ResolvedMode }) => void;
+}
+
+function notifyHostBackground(background: string, mode: ResolvedMode): void {
+  if (typeof window === "undefined") {
     return;
   }
-  const triple = getComputedStyle(root).getPropertyValue("--n-950").trim();
-  if (/^\d{1,3} \d{1,3} \d{1,3}$/.test(triple)) {
-    meta.content = `rgb(${triple})`;
+  const host = (window as unknown as { orquesterDesktop?: DesktopThemeHost }).orquesterDesktop;
+  try {
+    host?.setWindowBackground?.({ background, resolvedMode: mode });
+  } catch {
+    /* host chrome is cosmetic — a bridge failure must never break theming */
   }
 }
 

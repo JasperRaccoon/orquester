@@ -35,7 +35,7 @@ export class ErrorBoundary extends React.Component<React.PropsWithChildren, Erro
     return (
       <div className="flex h-screen w-screen flex-col items-center justify-center gap-4 bg-neutral-950 p-8 text-neutral-200">
         <div className="text-lg font-semibold">Something broke</div>
-        <div className="max-w-xl overflow-auto rounded border border-neutral-800 bg-neutral-900 p-3 font-mono text-xs text-red-400">
+        <div className="max-w-xl overflow-auto rounded border border-neutral-800 bg-neutral-900 p-3 font-mono text-xs text-danger">
           {this.state.error.message || String(this.state.error)}
         </div>
         <div className="flex gap-3">
@@ -49,7 +49,7 @@ export class ErrorBoundary extends React.Component<React.PropsWithChildren, Erro
           <button
             type="button"
             onClick={this.resetAndReload}
-            className="rounded border border-red-800 px-3 py-1.5 text-sm text-red-300 hover:bg-red-950"
+            className="rounded border border-danger-800 px-3 py-1.5 text-sm text-danger-300 hover:bg-danger-soft"
           >
             Reset local data &amp; reload
           </button>

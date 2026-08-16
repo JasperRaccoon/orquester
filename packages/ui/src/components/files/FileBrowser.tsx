@@ -557,7 +557,7 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ 
           <p
             className={cn(
               "border-b border-neutral-800 px-3 py-1 text-[11px]",
-              upload.status.error ? "text-red-400" : "text-neutral-400"
+              upload.status.error ? "text-danger" : "text-neutral-400"
             )}
           >
             {upload.status.text}
@@ -622,7 +622,7 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ 
               <p className="px-1 pt-1 text-[10px] text-neutral-600">in {baseName(activeDir)}/</p>
             </div>
           )}
-          {error && <p className="px-3 py-1 text-xs text-red-400">{error}</p>}
+          {error && <p className="px-3 py-1 text-xs text-danger">{error}</p>}
           <TreeLevel
             dir={rootPath}
             depth={0}
@@ -798,7 +798,7 @@ const TreeLevel: React.FC<TreeLevelProps> = (props) => {
                   />
                 </div>
                 {props.renameError && (
-                  <p className="pl-[27px] text-[11px] text-red-400">{props.renameError}</p>
+                  <p className="pl-[27px] text-[11px] text-danger">{props.renameError}</p>
                 )}
               </div>
               {isDir && isOpen && <TreeLevel {...props} dir={entry.path} depth={props.depth + 1} />}

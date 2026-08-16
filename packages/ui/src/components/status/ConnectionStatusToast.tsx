@@ -38,7 +38,7 @@ export const ConnectionStatusToast: React.FC = () => {
         </>
       ) : (
         <>
-          <WifiOff size={15} className="text-red-400" />
+          <WifiOff size={15} className="text-danger" />
           <span className="text-neutral-200">{connectionError ?? "Disconnected"}</span>
           <button
             type="button"

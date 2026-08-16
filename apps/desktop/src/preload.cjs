@@ -52,6 +52,11 @@ contextBridge.exposeInMainWorld("orquesterDesktop", {
     ipcRenderer.on("orquester:http-stream:end", listener);
     return () => ipcRenderer.removeListener("orquester:http-stream:end", listener);
   },
+  // Optional theme hook: the renderer reports the resolved colour scheme's base
+  // surface so the main process can persist it and paint the NEXT launch's
+  // window with it (the native background is chosen before any renderer code
+  // runs). Fire-and-forget; the payload is validated in the main process.
+  setWindowBackground: (payload) => ipcRenderer.send("orquester:window-background", payload),
   // Frameless window caption controls.
   windowControls: {
     minimize: () => ipcRenderer.send("orquester:window", "minimize"),

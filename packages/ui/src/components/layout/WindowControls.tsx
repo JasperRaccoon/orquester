@@ -34,7 +34,7 @@ export const WindowControls: React.FC = () => {
       <button
         type="button"
         aria-label="Close"
-        className={`${buttonClass} hover:bg-red-600 hover:text-white`}
+        className={`${buttonClass} hover:bg-danger-600 hover:text-white`}
         onClick={() => windowControls?.close()}
       >
         <X size={16} />

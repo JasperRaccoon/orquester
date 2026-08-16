@@ -30,7 +30,7 @@ export const UploadConflictModal: React.FC<{ prompt: ConflictPrompt | null }> = 
     <Modal open onClose={() => prompt.resolve("skip", false)} className="max-w-md">
       <div className="w-full p-5">
         <div className="mb-3 flex items-center gap-2">
-          <span className="flex h-8 w-8 items-center justify-center rounded-md bg-amber-500/10 text-amber-400">
+          <span className="flex h-8 w-8 items-center justify-center rounded-md bg-warn-500/10 text-warn">
             <FileWarning size={16} />
           </span>
           <p className="text-sm font-medium text-neutral-100">
@@ -61,7 +61,7 @@ export const UploadConflictModal: React.FC<{ prompt: ConflictPrompt | null }> = 
             <Button
               size="sm"
               onClick={() => choose("replace")}
-              className="bg-red-600 text-white hover:bg-red-500"
+              className="bg-danger-600 text-white hover:bg-danger-500"
             >
               Replace
             </Button>

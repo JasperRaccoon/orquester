@@ -74,7 +74,7 @@ export const PortsTable: React.FC<{ snapshot: SystemPortsResponse }> = ({ snapsh
                     title={`Copy ${target}`}
                     className="rounded p-1 text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200"
                   >
-                    {copied === key ? <Check size={12} className="text-emerald-400" /> : <Copy size={12} />}
+                    {copied === key ? <Check size={12} className="text-ok" /> : <Copy size={12} />}
                   </button>
                 </td>
               </tr>

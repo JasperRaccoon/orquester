@@ -4,16 +4,25 @@
  * graph gutter in the History panel.
  */
 
-/** Stable per-lane color cycle (blue, emerald, amber, pink, violet, cyan, orange, lime). */
+/**
+ * Stable per-lane color cycle (blue, emerald, amber, pink, violet, cyan,
+ * orange, lime).
+ *
+ * The eight hues live as per-mode CSS variables (`--lane-1…8` in
+ * `styles/globals.css`) rather than as literals: the original values are
+ * dark-background pastels that wash out on a near-white gutter, and the light
+ * mode needs each hue darkened. Resolving through `var()` keeps the palette a
+ * pure-data lookup here and lets a mode flip repaint without re-rendering.
+ */
 export const LANE_COLORS = [
-  "#60a5fa",
-  "#34d399",
-  "#fbbf24",
-  "#f472b6",
-  "#a78bfa",
-  "#22d3ee",
-  "#fb923c",
-  "#a3e635"
+  "rgb(var(--lane-1))",
+  "rgb(var(--lane-2))",
+  "rgb(var(--lane-3))",
+  "rgb(var(--lane-4))",
+  "rgb(var(--lane-5))",
+  "rgb(var(--lane-6))",
+  "rgb(var(--lane-7))",
+  "rgb(var(--lane-8))"
 ];
 
 export const laneColor = (index: number): string => LANE_COLORS[index % LANE_COLORS.length];

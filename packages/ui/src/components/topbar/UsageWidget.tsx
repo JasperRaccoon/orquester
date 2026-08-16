@@ -258,9 +258,9 @@ const AgentSection: React.FC<{ agent: AgentUsage }> = ({ agent }) => {
         {accounts.length === 0 && agent.plan && <span className="text-xs text-neutral-500">{agent.plan}</span>}
       </div>
       {!hasData ? (
-        <p className="text-[11px] text-amber-400">Signed in — usage updating…</p>
+        <p className="text-[11px] text-warn">Signed in — usage updating…</p>
       ) : isOld ? (
-        <p className="text-[11px] text-amber-400">Updated {formatAgo(agent.asOf, now)}</p>
+        <p className="text-[11px] text-warn">Updated {formatAgo(agent.asOf, now)}</p>
       ) : null}
       {accounts.length > 0 ? (
         <>

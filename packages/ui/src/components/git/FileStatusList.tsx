@@ -14,16 +14,22 @@ const STATUS_LETTER: Record<GitFileStatus, string> = {
   conflicted: "U"
 };
 
-/** Status letter colors (see the git-tab spec). */
+/**
+ * Status letter colors (see the git-tab spec). Five CATEGORIES, not five
+ * severities — collapsing them onto danger/warn/ok/info would make "modified"
+ * and "conflicted" the same colour — so they live as their own per-mode
+ * variables (`--git-*` in styles/globals.css, the `--diff-*` precedent).
+ * Dark keeps the original Tailwind shades; light darkens each hue for white.
+ */
 const STATUS_COLOR: Record<GitFileStatus, string> = {
-  modified: "text-yellow-500",
-  added: "text-green-500",
-  deleted: "text-red-500",
-  renamed: "text-blue-400",
-  copied: "text-blue-400",
-  typechange: "text-yellow-500",
-  untracked: "text-green-500",
-  conflicted: "text-orange-500"
+  modified: "text-[color:var(--git-modified)]",
+  added: "text-[color:var(--git-added)]",
+  deleted: "text-[color:var(--git-deleted)]",
+  renamed: "text-[color:var(--git-renamed)]",
+  copied: "text-[color:var(--git-renamed)]",
+  typechange: "text-[color:var(--git-modified)]",
+  untracked: "text-[color:var(--git-added)]",
+  conflicted: "text-[color:var(--git-conflict)]"
 };
 
 const dirOf = (p: string) => {

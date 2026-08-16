@@ -580,7 +580,7 @@ const GitHostingSettings: React.FC = () => {
                   <p className="truncate text-xs text-neutral-500">{account.gitEmail}</p>
                   <p className="truncate text-xs">
                     {account.repoAccess ? (
-                      <span className="text-emerald-400">
+                      <span className="text-ok">
                         <Check size={11} className="mr-1 inline" />
                         Repo access enabled
                       </span>
@@ -588,13 +588,13 @@ const GitHostingSettings: React.FC = () => {
                       <span className="text-neutral-500">Repo access off</span>
                     )}
                     {days !== null && (
-                      <span className={cn("ml-2", days <= 30 ? "text-amber-500" : "text-neutral-500")}>
+                      <span className={cn("ml-2", days <= 30 ? "text-warn-500" : "text-neutral-500")}>
                         {days <= 0 ? "token expired" : `token expires in ${days}d`}
                       </span>
                     )}
                   </p>
                   {test && test !== "busy" && (
-                    <p className={cn("truncate text-xs", test.ok ? "text-emerald-400" : "text-red-400")}>
+                    <p className={cn("truncate text-xs", test.ok ? "text-ok" : "text-danger")}>
                       {test.ok ? <Check size={11} className="mr-1 inline" /> : <X size={11} className="mr-1 inline" />}
                       {test.text}
                     </p>
@@ -611,7 +611,7 @@ const GitHostingSettings: React.FC = () => {
                 <button
                   type="button"
                   aria-label="Disconnect account"
-                  className="flex h-7 w-7 items-center justify-center rounded text-neutral-500 hover:bg-neutral-800 hover:text-red-400"
+                  className="flex h-7 w-7 items-center justify-center rounded text-neutral-500 hover:bg-neutral-800 hover:text-danger"
                   onClick={() => void disconnect(account.id)}
                 >
                   <Trash2 size={13} />
@@ -619,8 +619,8 @@ const GitHostingSettings: React.FC = () => {
               </div>
 
               {account.keyPending && (
-                <div className="ml-11 mt-2 flex items-center gap-2 rounded-md border border-amber-900/60 bg-amber-950/20 px-3 py-2">
-                  <p className="min-w-0 flex-1 text-xs text-amber-400">
+                <div className="ml-11 mt-2 flex items-center gap-2 rounded-md border border-warn-900/60 bg-warn-soft/20 px-3 py-2">
+                  <p className="min-w-0 flex-1 text-xs text-warn">
                     SSH key not installed yet — the instance would not accept it from the token.
                   </p>
                   <Button size="sm" variant="outline" onClick={() => setKeyModalFor(account)}>
@@ -654,7 +654,7 @@ const GitHostingSettings: React.FC = () => {
                     Stored securely on the daemon to list and create repositories. It is never
                     displayed again and never used on a clone command line.
                   </p>
-                  {repoError && <p className="text-xs text-red-400">{repoError}</p>}
+                  {repoError && <p className="text-xs text-danger">{repoError}</p>}
                   <div className="flex gap-2">
                     <Button size="sm" disabled={repoBusy || !repoToken.trim()} onClick={() => void saveRepoToken(account.id)}>
                       {repoBusy ? <Loader2 size={13} className="animate-spin" /> : null} Save token
@@ -670,7 +670,7 @@ const GitHostingSettings: React.FC = () => {
         })}
       </div>
 
-      {error && <p className="text-xs text-red-400">{error}</p>}
+      {error && <p className="text-xs text-danger">{error}</p>}
 
       {adding ? (
         <div className="space-y-2 rounded-lg border border-neutral-800 p-3">
@@ -870,7 +870,7 @@ const ManualKeyModal: React.FC<{ account: AccountSummary; onClose: () => void }>
             </a>
           )}
         </div>
-        {error && <p className="text-xs text-red-400">{error}</p>}
+        {error && <p className="text-xs text-danger">{error}</p>}
         <div className="flex gap-2">
           <Button size="sm" disabled={busy} onClick={() => void confirm()}>
             {busy ? <Loader2 size={13} className="animate-spin" /> : null} I&apos;ve added it

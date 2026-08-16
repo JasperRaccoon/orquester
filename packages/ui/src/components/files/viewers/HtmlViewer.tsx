@@ -71,7 +71,7 @@ export const HtmlViewer: React.FC<{ path: string; onBack: () => void }> = ({ pat
       </div>
       <div className="min-h-0 flex-1 overflow-hidden">
         {state === "loading" && <p className="p-3 text-xs text-neutral-600">Loading…</p>}
-        {state === "error" && <p className="p-3 text-xs text-red-400">Could not read file.</p>}
+        {state === "error" && <p className="p-3 text-xs text-danger">Could not read file.</p>}
         {state === "idle" && view === "preview" && blobUrl && (
           <iframe
             // Empty sandbox: no scripts, forms, popups, plugins, or same-origin

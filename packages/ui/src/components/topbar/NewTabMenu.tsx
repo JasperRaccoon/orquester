@@ -349,7 +349,7 @@ const AgentRow: React.FC<{ agent: RegistryEntry; projectPath?: string }> = ({
               className={cn(
                 "max-w-full truncate rounded px-1.5 py-0.5 text-[11px] transition-colors",
                 m === selectedModel
-                  ? "bg-amber-500/15 text-amber-300 ring-1 ring-amber-500/40"
+                  ? "bg-warn-500/15 text-warn-300 ring-1 ring-warn-500/40"
                   : "bg-neutral-800 text-neutral-400 ring-1 ring-transparent hover:bg-neutral-700 hover:text-neutral-200"
               )}
               title={m}
@@ -376,7 +376,7 @@ const AgentRow: React.FC<{ agent: RegistryEntry; projectPath?: string }> = ({
               className={cn(
                 "max-w-full truncate rounded px-1.5 py-0.5 text-[11px] transition-colors",
                 o.id === selectedAccount
-                  ? "bg-sky-500/15 text-sky-300 ring-1 ring-sky-500/40"
+                  ? "bg-info-500/15 text-info-300 ring-1 ring-info-500/40"
                   : "bg-neutral-800 text-neutral-400 ring-1 ring-transparent hover:bg-neutral-700 hover:text-neutral-200"
               )}
               title={o.label}

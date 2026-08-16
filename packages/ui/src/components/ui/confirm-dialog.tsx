@@ -56,7 +56,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
           <span
             className={cn(
               "flex h-8 w-8 items-center justify-center rounded-md",
-              danger ? "bg-red-500/10 text-red-400" : "bg-neutral-800 text-neutral-300"
+              danger ? "bg-danger-500/10 text-danger" : "bg-neutral-800 text-neutral-300"
             )}
           >
             <AlertTriangle size={16} />
@@ -90,8 +90,8 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
             disabled={!gateOk}
             onClick={confirm}
             className={cn(
-              danger && "bg-red-600 text-white hover:bg-red-500",
-              danger && "disabled:bg-red-600/40 disabled:text-white/70"
+              danger && "bg-danger-600 text-white hover:bg-danger-500",
+              danger && "disabled:bg-danger-600/40 disabled:text-white/70"
             )}
           >
             {confirmLabel}

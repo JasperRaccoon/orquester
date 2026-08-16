@@ -69,7 +69,7 @@ function renderFuzzy(text: string, offset: number, matched: Set<number>): React.
     if (!run) return;
     out.push(
       runMatched ? (
-        <span key={key} className="font-medium text-amber-300">
+        <span key={key} className="font-medium text-warn-300">
           {run}
         </span>
       ) : (
@@ -565,7 +565,7 @@ export const SearchPanel: React.FC<{
 
       {active && (
         <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden pb-2" aria-busy={contentBusy}>
-          {filesError && <p className="px-3 py-1 text-xs text-red-400">{filesError}</p>}
+          {filesError && <p className="px-3 py-1 text-xs text-danger">{filesError}</p>}
 
           {fileResults.length > 0 && (
             <div className="mb-1">
@@ -638,7 +638,7 @@ export const SearchPanel: React.FC<{
                 </IconButton>
               </div>
 
-              {contentError && <p className="px-3 py-1 text-xs text-red-400">{contentError}</p>}
+              {contentError && <p className="px-3 py-1 text-xs text-danger">{contentError}</p>}
 
               {content &&
                 !contentError &&
@@ -694,7 +694,7 @@ export const SearchPanel: React.FC<{
                               <span className="w-9 shrink-0 text-right tabular-nums text-neutral-600">{m.line}</span>
                               <span className="min-w-0 flex-1 truncate font-mono text-neutral-400">
                                 {m.text.slice(0, m.start)}
-                                <span className="rounded-sm bg-amber-500/30 text-amber-50">
+                                <span className="rounded-sm bg-warn-500/30 text-warn-50">
                                   {m.text.slice(m.start, m.end)}
                                 </span>
                                 {m.text.slice(m.end)}
@@ -758,9 +758,9 @@ const GlobField: React.FC<{
       autoCorrect="off"
       autoCapitalize="off"
       spellCheck={false}
-      className={cn("h-7 text-base md:text-xs", error && "border-red-500/60 ring-1 ring-red-500/60")}
+      className={cn("h-7 text-base md:text-xs", error && "border-danger-500/60 ring-1 ring-danger-500/60")}
     />
-    {error && <p className="px-1 pt-0.5 text-[10px] text-red-400">{error}</p>}
+    {error && <p className="px-1 pt-0.5 text-[10px] text-danger">{error}</p>}
   </div>
 );
 

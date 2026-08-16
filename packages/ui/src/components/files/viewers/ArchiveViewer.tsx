@@ -33,7 +33,7 @@ export const ArchiveViewer: React.FC<{
   }, [api, path]);
 
   if (state.loading) return <p className="p-3 text-xs text-neutral-600">Reading archive…</p>;
-  if (state.error || !state.data) return <p className="p-3 text-xs text-red-400">Could not read archive.</p>;
+  if (state.error || !state.data) return <p className="p-3 text-xs text-danger">Could not read archive.</p>;
   if (!state.data.supported) {
     return (
       <BinaryCard path={path} name={name} size={size} mime={mime} downloadable={size <= 50 * 1024 * 1024} title="Archive (no preview tool)" fetchBytes={fetchBytes} />
@@ -43,7 +43,7 @@ export const ArchiveViewer: React.FC<{
   return (
     <div className="h-full min-h-0 overflow-auto p-2 text-sm">
       {state.data.truncated && (
-        <p className="px-2 py-1 text-[11px] text-amber-500/80">
+        <p className="px-2 py-1 text-[11px] text-warn-muted-500/80">
           Listing truncated to {state.data.entries.length.toLocaleString()} entries.
         </p>
       )}

@@ -86,17 +86,25 @@ export function usageLevel(pct: number): UsageLevel {
   return "ok";
 }
 
-/** Progress-bar fill color, green → yellow → orange → red by usage level. */
+/**
+ * Progress-bar fill color, green → yellow → orange → red by usage level.
+ *
+ * A four-step ramp, not four semantic colours: the middle two have no
+ * danger/warn/ok/info meaning of their own, so the ramp lives as its own
+ * per-mode variable set (`--usage-*` in styles/globals.css) rather than being
+ * folded into the semantic scale. Dark keeps the original literals exactly;
+ * light darkens each step so a label at that colour still reads on white.
+ */
 export function barClass(pct: number): string {
   switch (usageLevel(pct)) {
     case "critical":
-      return "bg-red-500";
+      return "bg-[color:var(--usage-crit)]";
     case "high":
-      return "bg-orange-400";
+      return "bg-[color:var(--usage-high)]";
     case "moderate":
-      return "bg-yellow-400";
+      return "bg-[color:var(--usage-med)]";
     default:
-      return "bg-emerald-400";
+      return "bg-[color:var(--usage-ok)]";
   }
 }
 
@@ -104,13 +112,13 @@ export function barClass(pct: number): string {
 export function gaugeClass(pct: number): string {
   switch (usageLevel(pct)) {
     case "critical":
-      return "text-red-500";
+      return "text-[color:var(--usage-crit)]";
     case "high":
-      return "text-orange-400";
+      return "text-[color:var(--usage-high)]";
     case "moderate":
-      return "text-yellow-400";
+      return "text-[color:var(--usage-med)]";
     default:
-      return "text-emerald-400";
+      return "text-[color:var(--usage-ok)]";
   }
 }
 

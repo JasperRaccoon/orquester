@@ -60,7 +60,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({ x, y, items, onClose }
             "flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm transition-colors",
             "disabled:pointer-events-none disabled:opacity-40",
             item.danger
-              ? "text-red-400 hover:bg-red-500/10"
+              ? "text-danger hover:bg-danger-500/10"
               : "text-neutral-300 hover:bg-neutral-800 hover:text-neutral-100"
           )}
         >

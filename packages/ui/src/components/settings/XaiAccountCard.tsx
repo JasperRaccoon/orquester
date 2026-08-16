@@ -97,7 +97,7 @@ export const GrokDeviceLink: React.FC = () => {
                 href={link.url}
                 target="_blank"
                 rel="noreferrer"
-                className="inline-flex items-center gap-1 text-xs text-sky-400 hover:underline"
+                className="inline-flex items-center gap-1 text-xs text-info hover:underline"
               >
                 <ExternalLink size={12} /> {link.url}
               </a>
@@ -123,9 +123,9 @@ export const GrokDeviceLink: React.FC = () => {
         </div>
       )}
 
-      {error && <p className="text-[11px] text-red-400/80">{error}</p>}
+      {error && <p className="text-[11px] text-danger-muted/80">{error}</p>}
       {!linking && xai?.lastLinkError && (
-        <p className="text-[11px] text-red-400/80">Last link attempt failed: {xai.lastLinkError}</p>
+        <p className="text-[11px] text-danger-muted/80">Last link attempt failed: {xai.lastLinkError}</p>
       )}
       <p className="text-[11px] text-neutral-600">
         Grok runs through a reverse-engineered first-party-client contract: it can break or be

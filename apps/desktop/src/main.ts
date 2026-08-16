@@ -101,6 +101,98 @@ function readAppConfig(): Record<string, unknown> {
 }
 const runInBackground = () => readAppConfig().runInBackground === true;
 
+// --- Window background (follows the renderer's colour scheme) ---
+//
+// A BrowserWindow's native backgroundColor is fixed in THIS process, before any
+// renderer code runs (public/theme-boot.js included), so the only way the window
+// can launch in the user's colour scheme is for the renderer to have persisted
+// the resolved colour on a previous paint. Sole owner of window-theme.json is
+// the main process — app.json is deliberately not extended for this: the daemon
+// read-modify-writes it (PUT /api/config/app) and it is daemon-shared config,
+// while this is a device-local bit of window chrome.
+
+interface WindowTheme {
+  /** `#rrggbb` — the scheme's base surface (`--n-950`, what the app paints). */
+  background: string;
+  /** Which palette the colour came from. Informational: it makes the file
+   *  self-describing and lets native chrome couple to it later without
+   *  re-deriving the mode from the colour. */
+  resolvedMode: "light" | "dark";
+}
+
+// The stock dark scheme's `--n-950`. (Was #111111, which matched no palette:
+// the app root paints bg-neutral-950 = #0a0a0a in the default scheme.)
+const DEFAULT_WINDOW_THEME: WindowTheme = { background: "#0a0a0a", resolvedMode: "dark" };
+const HEX_COLOR = /^#[0-9a-f]{6}$/i;
+
+const windowThemePath = () => path.join(appDir(), "window-theme.json");
+
+/** Read the persisted window background. Field-validated: a blob written by an
+ *  older/newer bundle must degrade to the stock look, never reach setBackgroundColor. */
+function readWindowTheme(): WindowTheme {
+  try {
+    const parsed: unknown = JSON.parse(fs.readFileSync(windowThemePath(), "utf8"));
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return DEFAULT_WINDOW_THEME;
+    }
+    const record = parsed as Record<string, unknown>;
+    return {
+      background:
+        typeof record.background === "string" && HEX_COLOR.test(record.background)
+          ? record.background.toLowerCase()
+          : DEFAULT_WINDOW_THEME.background,
+      resolvedMode:
+        record.resolvedMode === "light" || record.resolvedMode === "dark"
+          ? record.resolvedMode
+          : DEFAULT_WINDOW_THEME.resolvedMode
+    };
+  } catch {
+    return DEFAULT_WINDOW_THEME;
+  }
+}
+
+/** Renderer -> main (preload `setWindowBackground`). The payload crosses the
+ *  context bridge, so it is untrusted: validate before persisting or painting. */
+function applyWindowBackground(payload: unknown): void {
+  if (typeof payload !== "object" || payload === null) {
+    return;
+  }
+  const record = payload as Record<string, unknown>;
+  if (typeof record.background !== "string" || !HEX_COLOR.test(record.background)) {
+    return;
+  }
+  // A mode we don't recognise means the sender is not the shape we expect, so
+  // reject the whole payload rather than persisting a colour under a guessed
+  // "dark" — a light hex filed as dark would mislead any later native-chrome
+  // coupling that trusts this field.
+  if (record.resolvedMode !== "light" && record.resolvedMode !== "dark") {
+    return;
+  }
+  const next: WindowTheme = {
+    background: record.background.toLowerCase(),
+    resolvedMode: record.resolvedMode
+  };
+
+  const current = readWindowTheme();
+  if (current.background !== next.background || current.resolvedMode !== next.resolvedMode) {
+    try {
+      fs.mkdirSync(appDir(), { recursive: true });
+      fs.writeFileSync(windowThemePath(), `${JSON.stringify(next, null, 2)}\n`);
+    } catch (error) {
+      console.error("Failed to persist window theme", error);
+    }
+  }
+
+  // Also repaint the live window(s): the native colour shows through during a
+  // resize and around a frameless window's corners, so a mid-session scheme
+  // switch would otherwise leave the old one behind until the next launch.
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) {
+      win.setBackgroundColor(next.background);
+    }
+  }
+}
+
 function ensureAppFiles(): void {
   const dir = appDir();
   const logsDir = path.join(dir, "logs");
@@ -419,6 +511,7 @@ function registerIpc(): void {
     (event, payload: { streamId: string; url: string; headers?: http.OutgoingHttpHeaders }) => openHttpStream(event, payload)
   );
   ipcMain.on("orquester:http-stream:close", (_event, streamId: string) => closeStream(streamId));
+  ipcMain.on("orquester:window-background", (_event, payload: unknown) => applyWindowBackground(payload));
   ipcMain.on("orquester:window", (_event, action: string) => {
     if (!mainWindow) {
       return;
@@ -518,7 +611,9 @@ function createWindow(): void {
     titleBarStyle: "hidden",
     trafficLightPosition: { x: 12, y: 12 },
     show: false,
-    backgroundColor: "#111111",
+    // Read synchronously here (not from the renderer) so the window's first
+    // paint is already in the user's colour scheme instead of flashing dark.
+    backgroundColor: readWindowTheme().background,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,

@@ -97,7 +97,7 @@ export const MobileKeyBar: React.FC = () => {
       {status && (
         <div
           className={`px-3 py-1 text-xs ${
-            status.kind === "uploading" ? "text-neutral-400" : "text-red-400"
+            status.kind === "uploading" ? "text-neutral-400" : "text-danger"
           }`}
         >
           {status.text}

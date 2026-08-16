@@ -160,7 +160,7 @@ export const TabSwitcher: React.FC = () => {
                     close();
                     setConfirmDelete({ todoId: tab.todoId, name: tab.title });
                   }}
-                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded text-red-400 hover:bg-neutral-800 hover:text-red-300"
+                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded text-danger hover:bg-neutral-800 hover:text-danger-300"
                 >
                   <Trash2 size={16} />
                 </button>
@@ -173,7 +173,7 @@ export const TabSwitcher: React.FC = () => {
                   // drop the sheet when a confirm opens to surface it.
                   if (requestCloseTab(tab.id)) close();
                 }}
-                className="flex h-9 w-9 shrink-0 items-center justify-center rounded text-neutral-400 hover:bg-neutral-800 hover:text-red-300"
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded text-neutral-400 hover:bg-neutral-800 hover:text-danger-300"
               >
                 <X size={16} />
               </button>

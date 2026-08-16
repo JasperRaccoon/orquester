@@ -57,7 +57,7 @@ export const PdfViewer: React.FC<{
   return (
     <div className="relative h-full min-h-0 overflow-auto bg-neutral-900 p-4">
       {state === "loading" && <p className="p-3 text-xs text-neutral-600">Rendering PDF…</p>}
-      {state === "error" && <p className="p-3 text-xs text-red-400">Could not render PDF.</p>}
+      {state === "error" && <p className="p-3 text-xs text-danger">Could not render PDF.</p>}
       <div ref={containerRef} />
     </div>
   );

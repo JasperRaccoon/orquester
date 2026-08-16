@@ -37,16 +37,22 @@ const STATUS_LETTER: Record<GitFileStatus, string> = {
   conflicted: "U"
 };
 
-/** Status letter colors (see the git-tab spec). */
+/**
+ * Status letter colors (see the git-tab spec). Five CATEGORIES, not five
+ * severities — collapsing them onto danger/warn/ok/info would make "modified"
+ * and "conflicted" the same colour — so they live as their own per-mode
+ * variables (`--git-*` in styles/globals.css, the `--diff-*` precedent).
+ * Dark keeps the original Tailwind shades; light darkens each hue for white.
+ */
 const STATUS_COLOR: Record<GitFileStatus, string> = {
-  modified: "text-yellow-500",
-  added: "text-green-500",
-  deleted: "text-red-500",
-  renamed: "text-blue-400",
-  copied: "text-blue-400",
-  typechange: "text-yellow-500",
-  untracked: "text-green-500",
-  conflicted: "text-orange-500"
+  modified: "text-[color:var(--git-modified)]",
+  added: "text-[color:var(--git-added)]",
+  deleted: "text-[color:var(--git-deleted)]",
+  renamed: "text-[color:var(--git-renamed)]",
+  copied: "text-[color:var(--git-renamed)]",
+  typechange: "text-[color:var(--git-modified)]",
+  untracked: "text-[color:var(--git-added)]",
+  conflicted: "text-[color:var(--git-conflict)]"
 };
 
 const dirOf = (p: string) => {
@@ -349,8 +355,8 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({ projectPath, reloadT
               <span className="shrink-0 font-mono text-neutral-600">{detail.shortSha}</span>
               <CopyHashButton key={detail.sha} sha={detail.sha} />
               <span className="shrink-0 font-mono tabular-nums">
-                <span className="text-green-500">+{totals.additions}</span>{" "}
-                <span className="text-red-500">-{totals.deletions}</span>
+                <span className="text-[color:var(--git-added)]">+{totals.additions}</span>{" "}
+                <span className="text-[color:var(--git-deleted)]">-{totals.deletions}</span>
               </span>
             </div>
           </div>
@@ -467,7 +473,7 @@ const CopyHashButton: React.FC<{ sha: string }> = ({ sha }) => {
         "focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
       )}
     >
-      {copied ? <Check size={12} className="text-green-500" /> : <Copy size={12} />}
+      {copied ? <Check size={12} className="text-ok-500" /> : <Copy size={12} />}
     </button>
   );
 };
@@ -512,7 +518,7 @@ const GraphCell: React.FC<{ row: GraphRow<GitLogEntry>; lanes: number }> = ({ ro
                 y1={y1}
                 x2={x}
                 y2={y2}
-                stroke={laneColor(segment.colorIndex)}
+                style={{ stroke: laneColor(segment.colorIndex) }}
                 strokeWidth={1.5}
                 vectorEffect="non-scaling-stroke"
               />
@@ -526,7 +532,7 @@ const GraphCell: React.FC<{ row: GraphRow<GitLogEntry>; lanes: number }> = ({ ro
                 key={index}
                 d={`M ${x1} ${mid} C ${x1} ${mid + mid * 0.65}, ${x2} ${ROW_UNITS - mid * 0.65}, ${x2} ${ROW_UNITS}`}
                 fill="none"
-                stroke={laneColor(segment.colorIndex)}
+                style={{ stroke: laneColor(segment.colorIndex) }}
                 strokeWidth={1.5}
                 vectorEffect="non-scaling-stroke"
               />
@@ -545,10 +551,13 @@ const GraphCell: React.FC<{ row: GraphRow<GitLogEntry>; lanes: number }> = ({ ro
             // A merge is drawn hollow so it reads differently from a plain
             // commit: it is filled with the page surface, which follows the
             // theme (a literal #0a0a0a was a black blob in light mode). Set via
-            // `style`, not the `fill` attribute — var() in an SVG presentation
-            // attribute is SVG2-era and not safe on older WebKit.
-            style={{ fill: dot.isMerge ? "rgb(var(--n-950))" : laneColor(dot.colorIndex) }}
-            stroke={laneColor(dot.colorIndex)}
+            // `style`, not the `fill`/`stroke` attributes — the lane colours are
+            // var()-based too now, and var() in an SVG presentation attribute is
+            // SVG2-era and not safe on older WebKit.
+            style={{
+              fill: dot.isMerge ? "rgb(var(--n-950))" : laneColor(dot.colorIndex),
+              stroke: laneColor(dot.colorIndex)
+            }}
             strokeWidth={1.5}
           />
         ))}
@@ -643,8 +652,8 @@ const CommitFileRow: React.FC<{ file: GitCommitFile; active: boolean; onSelect: 
         <span className="shrink-0 font-mono text-xs text-neutral-600">bin</span>
       ) : (
         <span className="shrink-0 font-mono text-xs tabular-nums">
-          <span className="text-green-500">+{file.additions}</span>{" "}
-          <span className="text-red-500">-{file.deletions}</span>
+          <span className="text-[color:var(--git-added)]">+{file.additions}</span>{" "}
+          <span className="text-[color:var(--git-deleted)]">-{file.deletions}</span>
         </span>
       )}
     </div>

@@ -176,7 +176,7 @@ export const PickComposeSheet: React.FC<{
           <Send size={12} /> {sending ? "Sending…" : payloads.length > 1 ? `Send ${payloads.length}` : "Send"}
         </Button>
       </div>
-      {error && <div className="px-3 pb-2 text-xs text-red-400">{error}</div>}
+      {error && <div className="px-3 pb-2 text-xs text-danger">{error}</div>}
     </div>
   );
 };

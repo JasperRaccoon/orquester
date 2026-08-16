@@ -52,10 +52,10 @@ export const SessionStatusDot: React.FC<{
       className={cn(
         "shrink-0",
         state === "working"
-          ? "fill-amber-400 text-amber-400"
+          ? "fill-warn text-warn"
           : state === "waiting"
-            ? "fill-amber-400 text-amber-400"
-            : "fill-green-400 text-green-400",
+            ? "fill-warn text-warn"
+            : "fill-ok-vivid text-ok-vivid",
         (attention !== null || state === "waiting") && "animate-pulse",
         className
       )}

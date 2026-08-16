@@ -94,20 +94,25 @@ function withProjectName(command: string, projectName: string): string {
  * Monogram stand-in for a template's brand mark. The catalog ships opaque icon
  * ids (`vite`, `rust`, …) and this package has no brand SVGs for them, so each
  * id gets a tinted two-letter tile instead of twelve invented marks.
+ *
+ * The tints are brand identity, not status, so they get their own `--brand-*`
+ * ramp (styles/globals.css) rather than a semantic token — but they are still
+ * text, and the shipped -300 shades measure ~1.3:1 on a light surface, so the
+ * ramp is per-mode. `nextdotjs` is greyscale and already themed by `neutral`.
  */
 const TEMPLATE_MARKS: Record<string, { text: string; className: string }> = {
-  vite: { text: "Vt", className: "text-violet-300" },
-  react: { text: "Re", className: "text-sky-300" },
-  typescript: { text: "TS", className: "text-blue-300" },
-  javascript: { text: "JS", className: "text-yellow-300" },
-  vuejs: { text: "Vu", className: "text-emerald-300" },
-  svelte: { text: "Sv", className: "text-orange-300" },
-  astro: { text: "As", className: "text-fuchsia-300" },
+  vite: { text: "Vt", className: "text-[color:var(--brand-vite)]" },
+  react: { text: "Re", className: "text-[color:var(--brand-react)]" },
+  typescript: { text: "TS", className: "text-[color:var(--brand-typescript)]" },
+  javascript: { text: "JS", className: "text-[color:var(--brand-javascript)]" },
+  vuejs: { text: "Vu", className: "text-[color:var(--brand-vuejs)]" },
+  svelte: { text: "Sv", className: "text-[color:var(--brand-svelte)]" },
+  astro: { text: "As", className: "text-[color:var(--brand-astro)]" },
   nextdotjs: { text: "Nx", className: "text-neutral-100" },
-  nodedotjs: { text: "Nd", className: "text-green-300" },
-  python: { text: "Py", className: "text-amber-300" },
-  rust: { text: "Rs", className: "text-orange-400" },
-  go: { text: "Go", className: "text-cyan-300" }
+  nodedotjs: { text: "Nd", className: "text-[color:var(--brand-nodedotjs)]" },
+  python: { text: "Py", className: "text-[color:var(--brand-python)]" },
+  rust: { text: "Rs", className: "text-[color:var(--brand-rust)]" },
+  go: { text: "Go", className: "text-[color:var(--brand-go)]" }
 };
 
 const TemplateMark: React.FC<{ icon: string; size?: "sm" | "md" }> = ({ icon, size = "md" }) => {
@@ -488,9 +493,9 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose 
    */
   const nameCollision = Boolean(intendedName) && projects.some((p) => p.name === intendedName);
   const collisionNote = nameCollision ? (
-    <p className="text-[11px] text-amber-400">
+    <p className="text-[11px] text-warn">
       This workspace already has a project called{" "}
-      <span className="text-amber-300">{intendedName}</span>. Pick another name.
+      <span className="text-warn-300">{intendedName}</span>. Pick another name.
     </p>
   ) : null;
 
@@ -999,7 +1004,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose 
               <div className="min-h-0 flex-1 overflow-y-auto">
                 {templatesError && (
                   <div className="flex items-center gap-3 px-1 py-3">
-                    <p className="text-xs text-red-400">{templatesError}</p>
+                    <p className="text-xs text-danger">{templatesError}</p>
                     <Button
                       size="sm"
                       variant="outline"
@@ -1131,7 +1136,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose 
             </div>
           )}
 
-          {error && <p className="text-xs text-red-400">{error}</p>}
+          {error && <p className="text-xs text-danger">{error}</p>}
         </div>
 
         <div className="flex shrink-0 justify-end gap-2 border-t border-neutral-800 px-4 py-3">

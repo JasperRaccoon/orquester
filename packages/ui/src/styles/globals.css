@@ -43,6 +43,113 @@
   --diff-add-fg: rgb(134 239 172);
   --diff-del-bg: rgb(69 10 10 / 0.4);
   --diff-del-fg: rgb(252 165 165);
+
+  /*
+   * Semantic status colours — the second variable scale, alongside `neutral`.
+   *
+   * These are RGB TRIPLES (no `rgb()`), because the preset wraps them as
+   * `rgb(var(--sem-…) / <alpha-value>)` so `bg-danger-soft/40` keeps working.
+   * The dark values below are byte-for-byte the Tailwind literals the
+   * components used before the sweep, so dark renders identically; only the
+   * `[data-mode="light"]` block re-picks each hue at a weight that survives a
+   * near-white surface (every foreground step ≥ 4.7:1 on light `--n-950`).
+   *
+   * Step numbers follow the dark source shade (danger-400 = red-400), which is
+   * why the light column is not monotonic in the Tailwind sense: the lower the
+   * step, the MORE contrast it carries in either mode ("-300" is the emphatic
+   * on-a-wash foreground, "-soft"/-900/-950 are the wash and border bases).
+   */
+  --sem-danger-200: 254 202 202;  /* red-200  */
+  --sem-danger-300: 252 165 165;  /* red-300  */
+  --sem-danger-400: 248 113 113;  /* red-400  → text-danger */
+  --sem-danger-500: 239 68 68;    /* red-500  */
+  --sem-danger-600: 220 38 38;    /* red-600  */
+  --sem-danger-800: 153 27 27;    /* red-800  */
+  --sem-danger-900: 127 29 29;    /* red-900  */
+  --sem-danger-950: 69 10 10;     /* red-950  → bg-danger-soft */
+
+  --sem-warn-50: 255 251 235;     /* amber-50  */
+  --sem-warn-300: 252 211 77;     /* amber-300 */
+  --sem-warn-400: 251 191 36;     /* amber-400 → text-warn */
+  --sem-warn-500: 245 158 11;     /* amber-500 */
+  --sem-warn-700: 180 83 9;       /* amber-700 */
+  --sem-warn-900: 120 53 15;      /* amber-900 */
+  --sem-warn-950: 69 26 3;        /* amber-950 → bg-warn-soft */
+
+  --sem-ok-300: 110 231 183;      /* emerald-300 */
+  --sem-ok-400: 52 211 153;       /* emerald-400 → text-ok */
+  --sem-ok-500: 34 197 94;        /* green-500 — the "added"/confirmed green */
+  --sem-ok-900: 6 78 59;          /* emerald-900 → bg-ok-soft */
+  --sem-ok-vivid: 74 222 128;     /* green-400 — the idle session dot only */
+
+  --sem-info-300: 125 211 252;    /* sky-300 */
+  --sem-info-400: 56 189 248;     /* sky-400 → text-info */
+  --sem-info-500: 14 165 233;     /* sky-500 */
+  --sem-info-900: 12 74 110;      /* sky-900 → bg-info-soft */
+
+  /*
+   * Pre-dimmed variants for the handful of secondary-text sites that render
+   * with a /70–/80 opacity modifier. On dark, alpha composites TOWARD black and
+   * costs nothing legible, so these are byte-identical to their base step; on
+   * light the same alpha composites toward white, so the light column goes a
+   * step or two deeper to keep the composite ≥ 4.95:1 on `--n-900`. The alpha
+   * modifier stays in the component (it is the visual intent); only the base
+   * colour it dilutes changes. Suffix names the site's alpha where the two
+   * differ (`-muted70` is the /70 site).
+   */
+  --sem-danger-muted: 248 113 113;     /* = danger-400 */
+  --sem-warn-muted: 251 191 36;        /* = warn-400   */
+  --sem-warn-500-muted: 245 158 11;    /* = warn-500   */
+  --sem-ok-muted: 52 211 153;          /* = ok-400     */
+  --sem-ok-70-muted: 52 211 153;       /* = ok-400     */
+
+  /*
+   * Two CATEGORICAL ramps that are not danger/warn/ok/info: collapsing them
+   * into the semantic four would merge distinct categories into one colour.
+   * Consumed as `text-[color:var(--git-modified)]` (the `--diff-*` precedent),
+   * not through the preset, so they stay visibly separate from the semantics —
+   * and, like `--diff-*`, they hold a whole colour rather than a triple, since
+   * nothing composites them with an alpha modifier.
+   */
+  --git-modified: rgb(234 179 8);      /* yellow-500 */
+  --git-added: rgb(34 197 94);         /* green-500  */
+  --git-deleted: rgb(239 68 68);       /* red-500    */
+  --git-renamed: rgb(96 165 250);      /* blue-400   */
+  --git-conflict: rgb(249 115 22);     /* orange-500 */
+
+  --usage-ok: rgb(52 211 153);         /* emerald-400 */
+  --usage-med: rgb(250 204 21);        /* yellow-400  */
+  --usage-high: rgb(251 146 60);       /* orange-400  */
+  --usage-crit: rgb(239 68 68);        /* red-500     */
+
+  /* Project-template monogram tints (sidebar/NewProjectModal.tsx). Brand
+     identity, not status — hence their own ramp — but they are TEXT, so they
+     still need a per-mode weight: the dark -300 shades measure ~1.3:1 on a
+     near-white surface. Dark keeps the shipped literals; light takes the -700
+     weight of the same hue. */
+  --brand-vite: rgb(196 181 253);      /* violet-300  → violet-700  */
+  --brand-react: rgb(125 211 252);     /* sky-300     → sky-700     */
+  --brand-typescript: rgb(147 197 253);/* blue-300    → blue-700    */
+  --brand-javascript: rgb(253 224 71); /* yellow-300  → yellow-700  */
+  --brand-vuejs: rgb(110 231 183);     /* emerald-300 → emerald-700 */
+  --brand-svelte: rgb(253 186 116);    /* orange-300  → orange-700  */
+  --brand-astro: rgb(240 171 252);     /* fuchsia-300 → fuchsia-700 */
+  --brand-nodedotjs: rgb(134 239 172); /* green-300   → green-700   */
+  --brand-python: rgb(252 211 77);     /* amber-300   → amber-700   */
+  --brand-rust: rgb(251 146 60);       /* orange-400  → orange-700  */
+  --brand-go: rgb(103 232 249);        /* cyan-300    → cyan-700    */
+
+  /* Commit-graph lanes (see components/git/graph.ts). Dark = the eight hex
+     lane colours the graph shipped with; light darkens each hue to ≥ 4.4:1 so
+     a 1.5px stroke stays readable on a near-white gutter. */
+  --lane-1: 96 165 250;
+  --lane-2: 52 211 153;
+  --lane-3: 251 191 36;
+  --lane-4: 244 114 182;
+  --lane-5: 167 139 250;
+  --lane-6: 34 211 238;
+  --lane-7: 251 146 60;
+  --lane-8: 163 230 53;
 }
 
 [data-mode="light"] {
@@ -52,6 +159,77 @@
   --diff-add-fg: rgb(22 101 52);
   --diff-del-bg: rgb(254 226 226);
   --diff-del-fg: rgb(153 27 27);
+
+  --sem-danger-200: 127 29 29;    /* red-900 */
+  --sem-danger-300: 153 27 27;    /* red-800 */
+  --sem-danger-400: 185 28 28;    /* red-700 */
+  --sem-danger-500: 220 38 38;    /* red-600 — the danger button's lighter hover */
+  --sem-danger-600: 185 28 28;    /* red-700 — the danger button's base */
+  /* -800 and -900 deliberately share red-300: on dark they are two border/wash
+     bases one step apart, but on light both invert onto the same pale band —
+     red-200 is already taken by -950 (the wash) and anything deeper reads as a
+     foreground, not a hairline. Keeping them distinct would buy an invisible
+     difference; the pair is a duplicate on purpose, not a copy-paste slip. */
+  --sem-danger-800: 252 165 165;  /* red-300 */
+  --sem-danger-900: 252 165 165;  /* red-300 */
+  --sem-danger-950: 254 202 202;  /* red-200 */
+
+  --sem-warn-50: 69 26 3;         /* amber-950 */
+  --sem-warn-300: 120 53 15;      /* amber-900 */
+  --sem-warn-400: 146 64 14;      /* amber-800 */
+  --sem-warn-500: 180 83 9;       /* amber-700 */
+  --sem-warn-700: 217 119 6;      /* amber-600 — a visible border on a pale wash */
+  --sem-warn-900: 251 191 36;     /* amber-400 */
+  --sem-warn-950: 252 211 77;     /* amber-300 */
+
+  --sem-ok-300: 6 78 59;          /* emerald-900 */
+  --sem-ok-400: 6 95 70;          /* emerald-800 */
+  --sem-ok-500: 21 128 61;        /* green-700   */
+  --sem-ok-900: 167 243 208;      /* emerald-200 */
+  --sem-ok-vivid: 22 163 74;      /* green-600   */
+
+  --sem-info-300: 7 89 133;       /* sky-800 */
+  --sem-info-400: 3 105 161;      /* sky-700 */
+  --sem-info-500: 2 132 199;      /* sky-600 */
+  --sem-info-900: 186 230 253;    /* sky-200 */
+
+  --sem-danger-muted: 153 27 27;       /* red-800     */
+  --sem-warn-muted: 120 53 15;         /* amber-900   */
+  --sem-warn-500-muted: 120 53 15;     /* amber-900   */
+  --sem-ok-muted: 6 78 59;             /* emerald-900 */
+  --sem-ok-70-muted: 2 44 34;          /* emerald-950 — the thinner /70 alpha needs one more step */
+
+  --git-modified: rgb(161 98 7);       /* yellow-700 */
+  --git-added: rgb(21 128 61);         /* green-700  */
+  --git-deleted: rgb(220 38 38);       /* red-600    */
+  --git-renamed: rgb(29 78 216);       /* blue-700   */
+  --git-conflict: rgb(124 45 18);      /* orange-900 — orange-700 sat too close to red-600 "deleted" */
+
+  --usage-ok: rgb(4 120 87);           /* emerald-700 */
+  --usage-med: rgb(161 98 7);          /* yellow-700  */
+  --usage-high: rgb(194 65 12);        /* orange-700  */
+  --usage-crit: rgb(220 38 38);        /* red-600     */
+
+  --brand-vite: rgb(109 40 217);       /* violet-700  */
+  --brand-react: rgb(3 105 161);       /* sky-700     */
+  --brand-typescript: rgb(29 78 216);  /* blue-700    */
+  --brand-javascript: rgb(161 98 7);   /* yellow-700  */
+  --brand-vuejs: rgb(4 120 87);        /* emerald-700 */
+  --brand-svelte: rgb(194 65 12);      /* orange-700  */
+  --brand-astro: rgb(162 28 175);      /* fuchsia-700 */
+  --brand-nodedotjs: rgb(21 128 61);   /* green-700   */
+  --brand-python: rgb(180 83 9);       /* amber-700   */
+  --brand-rust: rgb(194 65 12);        /* orange-700  */
+  --brand-go: rgb(14 116 144);         /* cyan-700    */
+
+  --lane-1: 37 99 235;            /* blue-600    */
+  --lane-2: 4 120 87;             /* emerald-700 */
+  --lane-3: 133 77 14;            /* yellow-800 — amber-700 was ΔE 6.9 from lane-7 */
+  --lane-4: 219 39 119;           /* pink-600    */
+  --lane-5: 124 58 237;           /* violet-600  */
+  --lane-6: 14 116 144;           /* cyan-700    */
+  --lane-7: 194 65 12;            /* orange-700  */
+  --lane-8: 77 124 15;            /* lime-700    */
 
   --n-50: 9 9 11;
   --n-100: 24 24 27;

@@ -40,12 +40,12 @@ const STATE_LABEL: Record<CliProxyStatus["state"], string> = {
 
 const STATE_TONE: Record<CliProxyStatus["state"], string> = {
   off: "bg-neutral-800 text-neutral-300",
-  downloading: "bg-sky-900/40 text-sky-300",
-  building: "bg-sky-900/40 text-sky-300",
-  starting: "bg-sky-900/40 text-sky-300",
-  healthy: "bg-emerald-900/40 text-emerald-300",
-  degraded: "bg-amber-900/40 text-amber-300",
-  error: "bg-red-900/40 text-red-300"
+  downloading: "bg-info-soft/40 text-info-300",
+  building: "bg-info-soft/40 text-info-300",
+  starting: "bg-info-soft/40 text-info-300",
+  healthy: "bg-ok-soft/40 text-ok-300",
+  degraded: "bg-warn-900/40 text-warn-300",
+  error: "bg-danger-900/40 text-danger-300"
 };
 
 const isBusyState = (s: CliProxyStatus["state"]) =>
@@ -257,7 +257,7 @@ export const ModelProxySettings: React.FC = () => {
           {status.reasons.length > 0 && (
             <ul className="mt-0.5 space-y-0.5">
               {status.reasons.map((r, i) => (
-                <li key={i} className="truncate text-[11px] text-amber-400/80">
+                <li key={i} className="truncate text-[11px] text-warn-muted/80">
                   {r}
                 </li>
               ))}
@@ -270,7 +270,7 @@ export const ModelProxySettings: React.FC = () => {
         </Button>
       </div>
 
-      {error && <p className="text-xs text-red-400">{error}</p>}
+      {error && <p className="text-xs text-danger">{error}</p>}
 
       {/* OAuth accounts (codex/claude) — credential-seeded, no keys involved */}
       <section className="space-y-2">
@@ -291,7 +291,7 @@ export const ModelProxySettings: React.FC = () => {
           ))}
         </div>
         {status.xai?.lastQuotaError && (
-          <p className="px-1 text-[11px] text-amber-400/80">
+          <p className="px-1 text-[11px] text-warn-muted/80">
             Last Grok quota error: {status.xai.lastQuotaError} — xAI cools the account for 24 h
             after this.
           </p>
@@ -332,7 +332,7 @@ export const ModelProxySettings: React.FC = () => {
           }
         />
         {!models && (
-          <p className="text-[11px] text-amber-400/80">
+          <p className="text-[11px] text-warn-muted/80">
             Proxy offline — the model list may be stale. Your saved selections are kept.
           </p>
         )}
@@ -444,14 +444,14 @@ const ProviderRow: React.FC<{
         <span
           className={cn(
             "flex h-5 w-5 shrink-0 items-center justify-center rounded-full",
-            ok ? "bg-emerald-900/50 text-emerald-300" : "bg-neutral-800 text-neutral-500"
+            ok ? "bg-ok-soft/50 text-ok-300" : "bg-neutral-800 text-neutral-500"
           )}
         >
           {ok ? <Check size={12} /> : <X size={12} />}
         </span>
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm text-neutral-100">{PROVIDER_LABEL[provider.provider]}</p>
-          <p className={cn("truncate text-xs", ok ? "text-emerald-400/80" : "text-neutral-500")}>
+          <p className={cn("truncate text-xs", ok ? "text-ok-muted/80" : "text-neutral-500")}>
             {stateText}
           </p>
         </div>
@@ -488,7 +488,7 @@ const ProviderRow: React.FC<{
                 <span className="min-w-0 flex-1 truncate">{a.label}</span>
                 {a.email ? <span className="shrink-0 text-xs text-neutral-500">{a.email}</span> : null}
                 {seeded.some((s) => s.id === a.id) ? (
-                  <span className="shrink-0 text-[10px] text-emerald-400/70">seeded · click to refresh</span>
+                  <span className="shrink-0 text-[10px] text-ok-muted70/70">seeded · click to refresh</span>
                 ) : (
                   <span className="shrink-0 text-[10px] text-neutral-500">not seeded · click to add</span>
                 )}
@@ -703,7 +703,7 @@ const AddRouterForm: React.FC<{
         <label className="space-y-1 text-xs text-neutral-400">
           <span>Id</span>
           <Input value={id} placeholder="my-router" disabled={busy} onChange={(e) => setId(e.target.value)} />
-          {idError && <span className="block text-[11px] text-red-400">{idError}</span>}
+          {idError && <span className="block text-[11px] text-danger">{idError}</span>}
         </label>
       </div>
 
@@ -715,7 +715,7 @@ const AddRouterForm: React.FC<{
           disabled={busy}
           onChange={(e) => setBaseUrl(e.target.value)}
         />
-        {urlError && <span className="block text-[11px] text-red-400">{urlError}</span>}
+        {urlError && <span className="block text-[11px] text-danger">{urlError}</span>}
       </label>
 
       <p className="text-[11px] text-neutral-600">
@@ -777,7 +777,7 @@ const RouterRow: React.FC<{
         <span
           className={cn(
             "flex h-5 w-5 shrink-0 items-center justify-center rounded-full",
-            hasKey ? "bg-emerald-900/50 text-emerald-300" : "bg-neutral-800 text-neutral-500"
+            hasKey ? "bg-ok-soft/50 text-ok-300" : "bg-neutral-800 text-neutral-500"
           )}
         >
           {hasKey ? <Check size={12} /> : <X size={12} />}
@@ -785,7 +785,7 @@ const RouterRow: React.FC<{
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm text-neutral-100">{router.label}</p>
           <p className="truncate text-[11px] text-neutral-500">{router.baseUrl}</p>
-          <p className={cn("truncate text-xs", hasKey ? "text-emerald-400/80" : "text-neutral-500")}>
+          <p className={cn("truncate text-xs", hasKey ? "text-ok-muted/80" : "text-neutral-500")}>
             {stateText} · {router.models.length} model{router.models.length === 1 ? "" : "s"}
           </p>
         </div>
@@ -954,7 +954,7 @@ const RouterModelsEditor: React.FC<{
           {loading && <Loader2 size={13} className="animate-spin text-neutral-500" />}
         </div>
         {catalogError && (
-          <p className="text-[11px] text-amber-400/80">
+          <p className="text-[11px] text-warn-muted/80">
             Catalog unavailable ({catalogError}) — add model ids manually below.
           </p>
         )}
@@ -1057,7 +1057,7 @@ const RouterModelsEditor: React.FC<{
             <Plus size={12} /> Add
           </Button>
         </div>
-        {manualError && <p className="text-[11px] text-red-400">{manualError}</p>}
+        {manualError && <p className="text-[11px] text-danger">{manualError}</p>}
       </div>
 
       <div className="flex gap-2">

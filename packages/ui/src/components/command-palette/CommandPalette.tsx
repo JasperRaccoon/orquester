@@ -93,7 +93,7 @@ const Highlighted: React.FC<{ text: string; query: string }> = ({ text, query })
   return (
     <>
       {parts[0]}
-      <span className="font-medium text-amber-300">{parts[1]}</span>
+      <span className="font-medium text-warn-300">{parts[1]}</span>
       {parts[2]}
     </>
   );

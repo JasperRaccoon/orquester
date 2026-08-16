@@ -169,7 +169,7 @@ const TextPreview: React.FC<{ path: string; mime: string; size: number; onBack: 
       </div>
       <div className="min-h-0 flex-1 overflow-hidden">
         {state === "loading" && <p className="p-3 text-xs text-neutral-600">Loading…</p>}
-        {state === "error" && <p className="p-3 text-xs text-red-400">Could not read file.</p>}
+        {state === "error" && <p className="p-3 text-xs text-danger">Could not read file.</p>}
         {state === "idle" && isBinary && (
           <BinaryCard path={path} name={name} size={size} mime={mime} downloadable title="Binary file" fetchBytes={fetchBytes} />
         )}
