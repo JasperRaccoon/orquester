@@ -1,4 +1,4 @@
-import type { AgentUsage, UsageWindow } from "@orquester/api";
+import type { AgentUsage, ScopedUsageWindow, UsageWindow } from "@orquester/api";
 
 export type ClaudeCreds = { subscriptionType?: string; rateLimitTier?: string };
 
@@ -41,10 +41,34 @@ export function currentWindow(w: UsageWindow | null, now: number): UsageWindow |
   return Number.isFinite(t) && t <= now ? null : w;
 }
 
+/** Still-current scoped windows, or undefined when none survive (so a stale
+ *  reading never keeps e.g. a pre-reset Fable 100% alive past its window). */
+export function currentScopedWindows(
+  windows: ScopedUsageWindow[] | undefined,
+  now: number
+): ScopedUsageWindow[] | undefined {
+  const kept = (windows ?? []).filter((w) => currentWindow(w, now) != null);
+  return kept.length > 0 ? kept : undefined;
+}
+
 export function parseClaudeUsage(body: unknown, creds: ClaudeCreds, now: number): AgentUsage {
   const b = (body ?? {}) as Record<string, any>;
   let session: UsageWindow | null = null;
   let weekly: UsageWindow | null = null;
+
+  // Model-scoped weekly caps (e.g. Fable on Max plans) exist ONLY as limits[]
+  // entries, so scan for them regardless of which branch fills session/weekly.
+  const scoped: ScopedUsageWindow[] = [];
+  if (Array.isArray(b.limits)) {
+    for (const lim of b.limits) {
+      if (lim?.kind !== "weekly_scoped") continue;
+      const label = lim?.scope?.model?.display_name;
+      if (typeof label !== "string" || !label) continue;
+      const p = clampPercent(lim?.percent);
+      if (p == null) continue;
+      scoped.push({ percent: p, resetsAt: isoOrUndefined(lim?.resets_at), label });
+    }
+  }
 
   if (b.five_hour || b.seven_day) {
     const s = clampPercent(b.five_hour?.utilization);
@@ -63,13 +87,15 @@ export function parseClaudeUsage(body: unknown, creds: ClaudeCreds, now: number)
 
   session = currentWindow(session, now);
   weekly = currentWindow(weekly, now);
+  const scopedWindows = currentScopedWindows(scoped, now);
   return {
     id: "claude",
-    available: session != null || weekly != null,
+    available: session != null || weekly != null || scopedWindows != null,
     stale: false,
     plan: claudePlanLabel(creds),
     session,
-    weekly
+    weekly,
+    scopedWindows
   };
 }
 

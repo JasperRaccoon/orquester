@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { ChevronDown, Gauge, RefreshCw } from "lucide-react";
-import type { AgentUsage, UsageAccount, UsageTokenRow, UsageWindow } from "@orquester/api";
+import type { AgentUsage, ScopedUsageWindow, UsageAccount, UsageTokenRow, UsageWindow } from "@orquester/api";
 import { shortAccountLabel } from "../../lib/account-label";
 import { usageAgentEnabled } from "@orquester/config";
 import { AdaptiveMenu } from "../ui";
@@ -215,24 +215,31 @@ const WindowBars: React.FC<{
   agentId: string;
   session: UsageWindow | null;
   weekly: UsageWindow | null;
+  scopedWindows?: ScopedUsageWindow[];
   muted: boolean;
-}> = ({ agentId, session, weekly, muted }) => (
+}> = ({ agentId, session, weekly, scopedWindows, muted }) => (
   <>
-    {normalizeUsageWindows(agentId, { session, weekly }).map((w) => (
+    {normalizeUsageWindows(agentId, { session, weekly, scopedWindows }).map((w) => (
       <Bar key={w.id} window={w} muted={muted} />
     ))}
   </>
 );
 
 const AccountRow: React.FC<{ agentId: string; account: UsageAccount }> = ({ agentId, account }) => {
-  const muted = account.stale || !(account.session || account.weekly);
+  const muted = account.stale || !(account.session || account.weekly || account.scopedWindows?.length);
   return (
     <div className="mt-1.5 rounded-md bg-neutral-900/60 px-2 py-1.5">
       <div className="flex items-center justify-between gap-2">
         <p className="truncate text-xs font-medium text-neutral-300">{shortAccountLabel(account.label) || account.id}</p>
         {account.plan && <span className="shrink-0 text-[10px] text-neutral-500">{account.plan}</span>}
       </div>
-      <WindowBars agentId={agentId} session={account.session} weekly={account.weekly} muted={muted} />
+      <WindowBars
+        agentId={agentId}
+        session={account.session}
+        weekly={account.weekly}
+        scopedWindows={account.scopedWindows}
+        muted={muted}
+      />
     </div>
   );
 };
@@ -243,7 +250,7 @@ const AgentSection: React.FC<{ agent: AgentUsage }> = ({ agent }) => {
   const now = useUsageNow();
   const hasTimestamp = Boolean(agent.asOf);
   const accounts = agent.accounts ?? [];
-  const hasData = hasTimestamp && (agent.session || agent.weekly || accounts.length > 0);
+  const hasData = hasTimestamp && (agent.session || agent.weekly || agent.scopedWindows?.length || accounts.length > 0);
   const isOld = hasTimestamp && minutesSince(agent.asOf, now) > STALE_MIN;
   const muted = !hasData || isOld;
 
@@ -275,7 +282,13 @@ const AgentSection: React.FC<{ agent: AgentUsage }> = ({ agent }) => {
       ) : (
         /* Same card chrome as AccountRow so week-only agents align with Claude/Codex. */
         <div className="mt-1.5 rounded-md bg-neutral-900/60 px-2 py-1.5">
-          <WindowBars agentId={agent.id} session={agent.session} weekly={agent.weekly} muted={muted} />
+          <WindowBars
+            agentId={agent.id}
+            session={agent.session}
+            weekly={agent.weekly}
+            scopedWindows={agent.scopedWindows}
+            muted={muted}
+          />
         </div>
       )}
     </div>
@@ -325,8 +338,17 @@ export const UsageWidget: React.FC = () => {
     </span>
   );
 
+  // One column per agent on the Windows tab so three agents with several
+  // accounts each read side by side instead of one screen-height stack. The
+  // desktop dropdown widens with the column count (the mobile bottom sheet
+  // stays stacked — AdaptiveMenu switches at md, the same breakpoint as the
+  // `md:` column classes below); the Cost tab keeps the original width.
+  const cols = Math.min(agents.length, 3);
+  const windowsWidth =
+    cols <= 1 ? "w-80" : cols === 2 ? "w-[39rem] max-w-[calc(100vw-1rem)]" : "w-[58rem] max-w-[calc(100vw-1rem)]";
+
   return (
-    <AdaptiveMenu title="Usage" trigger={trigger} align="right" width="w-80">
+    <AdaptiveMenu title="Usage" trigger={trigger} align="right" width={tab === "cost" ? "w-80" : windowsWidth}>
       <div className="flex items-center justify-between px-3 pt-2 text-[11px] text-neutral-500">
         <span>{freshestAsOf ? `Updated ${formatClock(freshestAsOf)}` : "Updating…"}</span>
         <button
@@ -365,9 +387,13 @@ export const UsageWidget: React.FC = () => {
       </div>
       {tab === "windows" ? (
         <>
-          {agents.map((a) => (
-            <AgentSection key={a.id} agent={a} />
-          ))}
+          <div className="flex flex-col md:flex-row md:items-start md:divide-x md:divide-neutral-800/70">
+            {agents.map((a) => (
+              <div key={a.id} className="min-w-0 md:min-w-[17rem] md:flex-1 md:basis-0">
+                <AgentSection agent={a} />
+              </div>
+            ))}
+          </div>
           {missing.map((id) => (
             <div key={id} className="px-3 py-2 text-xs text-neutral-500">
               {labelForAgent(id)} — not logged in <span className="text-neutral-600">({usageLoginHint(id)})</span>

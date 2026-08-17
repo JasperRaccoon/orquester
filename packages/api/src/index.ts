@@ -620,6 +620,12 @@ export interface UsageWindow {
   remaining?: number;
 }
 
+/** A model-scoped quota window (e.g. the Fable weekly cap on Max plans),
+ *  labeled with the provider's own display name for that scope. */
+export interface ScopedUsageWindow extends UsageWindow {
+  label: string;
+}
+
 /** Per sub-account quota for agents that pool multiple logins. */
 export interface UsageAccount {
   id: string;
@@ -629,6 +635,8 @@ export interface UsageAccount {
   plan?: string;
   session: UsageWindow | null;
   weekly: UsageWindow | null;
+  /** Model-scoped weekly caps, when the source reports any (Claude: Fable). */
+  scopedWindows?: ScopedUsageWindow[];
   asOf?: string;
 }
 
@@ -643,6 +651,8 @@ export interface AgentUsage {
   /** rolling 5-hour window (aggregate when multi-account). */
   session: UsageWindow | null;
   weekly: UsageWindow | null;
+  /** Model-scoped weekly caps, when the source reports any (Claude: Fable). */
+  scopedWindows?: ScopedUsageWindow[];
   /** ISO time the reading was actually obtained (for an honest "as of"). */
   asOf?: string;
   /** Per-account breakdown when the agent pools multiple accounts. */

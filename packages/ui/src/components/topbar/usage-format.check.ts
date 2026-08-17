@@ -28,12 +28,12 @@ assert.equal(usageLevel(10), "ok");
 assert.equal(usageLevel(60), "moderate");
 assert.equal(usageLevel(80), "high");
 assert.equal(usageLevel(95), "critical");
-assert.match(barClass(10), /emerald/);
-assert.match(barClass(60), /yellow/);
-assert.match(barClass(80), /orange/);
-assert.match(barClass(95), /red/);
-assert.match(gaugeClass(10), /emerald/);
-assert.match(gaugeClass(95), /red/);
+assert.match(barClass(10), /usage-ok/);
+assert.match(barClass(60), /usage-med/);
+assert.match(barClass(80), /usage-high/);
+assert.match(barClass(95), /usage-crit/);
+assert.match(gaugeClass(10), /usage-ok/);
+assert.match(gaugeClass(95), /usage-crit/);
 // windowMax = the worse of session/weekly (codex: max(80, 5)).
 assert.equal(windowMax(codex), 80);
 
@@ -96,6 +96,28 @@ const intruder = { percent: 42, id: "wire", label: "wire", longLabel: "wire", pe
 assert.deepEqual(normalizeUsageWindows("grok", { session: null, weekly: intruder }), [
   { id: "weekly", label: "Week", longLabel: "Current period", period: "weekly", unit: "credits", percent: 42 }
 ]);
+// Model-scoped weekly caps (Claude's Fable bar) append after session/weekly,
+// labeled with the provider's model name and keyed uniquely per label.
+assert.deepEqual(
+  normalizeUsageWindows("claude", {
+    session: { percent: 10 },
+    weekly: { percent: 96, resetsAt: "2026-08-17T03:00:00Z" },
+    scopedWindows: [{ label: "Fable", percent: 100, resetsAt: "2026-08-17T03:00:00Z" }]
+  }).map((w) => [w.id, w.label, w.longLabel, w.period, w.percent, w.resetsAt]),
+  [
+    ["session", "5h", "Session (5h)", "rolling", 10, undefined],
+    ["weekly", "Week", "Current period", "weekly", 96, "2026-08-17T03:00:00Z"],
+    ["scoped:Fable", "Fable", "Fable (week)", "weekly", 100, "2026-08-17T03:00:00Z"]
+  ]
+);
+// A scoped window still renders when the main windows are absent.
+assert.deepEqual(
+  normalizeUsageWindows("claude", { session: null, weekly: null, scopedWindows: [{ label: "Fable", percent: 40 }] }).map(
+    (w) => [w.id, w.percent]
+  ),
+  [["scoped:Fable", 40]]
+);
+
 // Capacity fields survive normalization.
 const capped = normalizeUsageWindows("grok", {
   session: null,

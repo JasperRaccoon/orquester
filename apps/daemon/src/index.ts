@@ -109,7 +109,7 @@ import { GitError, GitService, GitWatcher, passesGitEventFilter } from "./git";
 import { UsageService } from "./usage";
 import { UsageTokensScanner } from "./usage-tokens";
 import { createClaudeSource, createCodexSource, createGrokSource, readUsagePrefs, shouldHideSystemUsage } from "./usage-sources";
-import { currentWindow } from "./usage-parse";
+import { currentScopedWindows, currentWindow } from "./usage-parse";
 import { listArchiveEntries } from "./archive";
 import { ParquetRequestError, readParquetWindow } from "./parquet";
 import { resolveZipTool, spawnDirZip } from "./zip";
@@ -300,6 +300,7 @@ export function aggregateWorstAccountUsage(
   const session = worst((s) => s.session);
   const weekly = worst((s) => s.weekly);
   const staleAccountCount = accounts.filter((a) => a.stale).length;
+  const baseScoped = base ? currentScopedWindows(base.scopedWindows, now) : undefined;
 
   return {
     id: base?.id ?? agent,
@@ -320,6 +321,7 @@ export function aggregateWorstAccountUsage(
           plan: base.plan,
           session: currentWindow(base.session, now),
           weekly: currentWindow(base.weekly, now),
+          ...(baseScoped ? { scopedWindows: baseScoped } : {}),
           asOf: base.asOf
         }
       : undefined,
@@ -509,6 +511,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
         plan: u?.plan,
         session: u?.session ?? null,
         weekly: u?.weekly ?? null,
+        ...(u?.scopedWindows ? { scopedWindows: u.scopedWindows } : {}),
         asOf: u?.asOf
       });
     }

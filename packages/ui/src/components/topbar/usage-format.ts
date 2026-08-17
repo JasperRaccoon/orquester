@@ -1,4 +1,4 @@
-import type { AgentUsage, UsageWindow } from "@orquester/api";
+import type { AgentUsage, ScopedUsageWindow, UsageWindow } from "@orquester/api";
 import { usageAgentEnabled, type UsagePrefs as _Prefs } from "@orquester/config";
 import { REGISTRY } from "@orquester/registry";
 import type { UsageResetFormat } from "../../lib/usage-display";
@@ -187,7 +187,8 @@ export type UsageUnit = "credits" | "requests" | "tokens" | "unknown";
 
 /** A window ready to render: labels, unit, and whichever numbers exist. */
 export interface NormalizedUsageWindow {
-  id: "session" | "weekly";
+  /** "session" | "weekly" | "scoped:<label>" — unique within one source. */
+  id: string;
   /** Compact bar label, as the top-bar panel uses ("5h" / "Week"). */
   label: string;
   /** Spelled-out label for the wider cards. */
@@ -216,7 +217,7 @@ export function usageUnitFor(agentId: string): UsageUnit {
  */
 export function normalizeUsageWindows(
   agentId: string,
-  src: { session: UsageWindow | null; weekly: UsageWindow | null }
+  src: { session: UsageWindow | null; weekly: UsageWindow | null; scopedWindows?: ScopedUsageWindow[] | null }
 ): NormalizedUsageWindow[] {
   const unit = usageUnitFor(agentId);
   const out: NormalizedUsageWindow[] = [];
@@ -229,6 +230,11 @@ export function normalizeUsageWindows(
     // "Current period", not "This week": Grok's pool is a billing period and
     // Codex's weekly window is longer than 7 days for some plans.
     out.push({ ...src.weekly, id: "weekly", label: "Week", longLabel: "Current period", period: "weekly", unit });
+  }
+  // Model-scoped weekly caps (Claude's Fable bar) render after the shared pool,
+  // labeled with the provider's own model name.
+  for (const w of src.scopedWindows ?? []) {
+    out.push({ ...w, id: `scoped:${w.label}`, label: w.label, longLabel: `${w.label} (week)`, period: "weekly", unit });
   }
   return out;
 }

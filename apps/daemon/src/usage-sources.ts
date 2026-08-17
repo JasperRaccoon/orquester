@@ -2,7 +2,7 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { AgentUsage } from "@orquester/api";
 import { type UsagePrefs, parseAppConfig } from "@orquester/config";
-import { claudePlanLabel, currentWindow, findLastCodexTokenCount, parseClaudeUsage, parseCodexUsage, parseCodexWhamUsage, parseGrokBilling } from "./usage-parse";
+import { claudePlanLabel, currentScopedWindows, currentWindow, findLastCodexTokenCount, parseClaudeUsage, parseCodexUsage, parseCodexWhamUsage, parseGrokBilling } from "./usage-parse";
 import { decodeJwtPayload, parseCodexIdentity, parseGrokIdentity } from "./agent-account-identity";
 
 const CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
@@ -61,7 +61,8 @@ export function createClaudeSource(opts: {
             ...lastGood,
             stale: true,
             session: currentWindow(lastGood.session, opts.now()),
-            weekly: currentWindow(lastGood.weekly, opts.now())
+            weekly: currentWindow(lastGood.weekly, opts.now()),
+            scopedWindows: currentScopedWindows(lastGood.scopedWindows, opts.now())
           }
         : { id: "claude", available: true, stale: true, plan: claudePlanLabel(creds), session: null, weekly: null };
 
