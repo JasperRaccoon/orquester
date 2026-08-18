@@ -88,6 +88,8 @@ export const OpenedAgents: React.FC = () => {
   const api = useApi();
   const isDesktop = useIsDesktop();
   const drawerOpen = useAppStore((s) => s.sidebarDrawerOpen);
+  const workspaces = useAppStore((s) => s.workspaces);
+  const workspacesLoading = useAppStore((s) => s.workspacesLoading);
   const derived = useAgentSessions();
   const index = useProjectIndex();
 
@@ -107,16 +109,25 @@ export const OpenedAgents: React.FC = () => {
     [summarized, seenKeys]
   );
 
-  // Re-verify the archived curtain whenever the session list changes shape or
+  // Re-verify the archived curtain whenever the session list changes shape,
+  // the *workspace list* changes (`wsKey` — membership or archive flags), or
   // the section is toggled (the moral successor of the old popover's
-  // refresh-on-open). A cold cache goes through `ensure` so this dedupes with
-  // the command palette / cycle shortcut instead of racing them.
+  // refresh-on-open). The workspaces key is load-bearing at boot: the mount
+  // fetch runs against a still-empty workspace list and publishes an empty
+  // index, and without this dep nothing would ever re-verify it — the section
+  // sat on "No agent sessions" until a toggle forced a refresh. A cold cache
+  // goes through `ensure` so this dedupes with the command palette / cycle
+  // shortcut instead of racing them.
   const pathsKey = useMemo(
     () =>
       Array.from(new Set(derived.map((entry) => entry.session.projectPath)))
         .sort()
         .join("|"),
     [derived]
+  );
+  const wsKey = useMemo(
+    () => workspaces.map((w) => `${w.name}:${w.isArchived ? 1 : 0}`).join("|"),
+    [workspaces]
   );
   useEffect(() => {
     if (cachedProjectIndex() === null) {
@@ -126,7 +137,7 @@ export const OpenedAgents: React.FC = () => {
     const controller = new AbortController();
     void refreshProjectIndex(api, useAppStore.getState().workspaces, controller.signal);
     return () => controller.abort();
-  }, [api, pathsKey, expanded]);
+  }, [api, pathsKey, wsKey, expanded]);
 
   // Invalidation (archive/restore, disconnect) nulls the cache out-of-band;
   // refetch so the section doesn't sit on "Loading…" until something changes.
@@ -192,7 +203,9 @@ export const OpenedAgents: React.FC = () => {
         // Bounded so a long agent list can't crowd the workspace/project list
         // out of the sidebar; it scrolls on its own past that.
         <div className="max-h-[40vh] overflow-y-auto px-2 pb-2">
-          {index === null ? (
+          {/* An index built before the workspace list loaded is empty-but-
+              resolved — that's "still loading", not "no sessions". */}
+          {index === null || (entries.length === 0 && workspacesLoading) ? (
             <div className="px-2 py-1.5 text-sm italic text-neutral-600">Loading…</div>
           ) : entries.length === 0 ? (
             <div className="px-2 py-1.5 text-sm italic text-neutral-600">
