@@ -11,6 +11,7 @@ import {
   DropdownSeparator,
   Input
 } from "../ui";
+import { SystemStatusChip } from "../system";
 import { useAppStore } from "../../store/app";
 import type { ConnectionStatus } from "../../types";
 
@@ -48,7 +49,10 @@ const RemoveServerButton: React.FC<{ onRequest: () => void }> = ({ onRequest }) 
   );
 };
 
-/** Sidebar footer: shows the active daemon and switches/manages servers. */
+/**
+ * Sidebar footer: shows the active daemon and switches/manages servers, with
+ * the host CPU/memory chip on the right.
+ */
 export const ServerSwitcher: React.FC = () => {
   const connections = useAppStore((s) => s.connections);
   const activeId = useAppStore((s) => s.activeConnectionId);
@@ -87,57 +91,61 @@ export const ServerSwitcher: React.FC = () => {
   );
 
   return (
-    <div className="border-t border-neutral-800 p-2">
-      <AdaptiveMenu trigger={trigger} width="w-64" title="Servers">
-        <DropdownLabel>Servers</DropdownLabel>
-        {connections.map((connection) => (
-          <div key={connection.id} className="group flex items-center">
-            <DropdownItem
-              className="flex-1"
-              icon={
-                connection.id === activeId ? (
-                  <Check size={14} />
-                ) : (
-                  <span className={cn("h-2 w-2 rounded-full", STATUS_COLOR[connection.status])} />
-                )
-              }
-              onClick={() => void select(connection.id)}
-            >
-              <span className="truncate">{connection.name}</span>
-            </DropdownItem>
-            {connection.kind === "remote" && (
-              <RemoveServerButton
-                onRequest={() => setPendingRemove({ id: connection.id, name: connection.name })}
-              />
-            )}
-          </div>
-        ))}
-
-        <DropdownSeparator />
-
-        {adding ? (
-          <div className="space-y-1.5 p-1.5" onClick={(e) => e.stopPropagation()}>
-            <Input placeholder="Name" value={name} onChange={(e) => setName(e.target.value)} />
-            <Input
-              placeholder="https://host:47831"
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-            />
-            <div className="flex gap-1.5">
-              <Button size="sm" className="flex-1" onClick={() => void submit()}>
-                Add
-              </Button>
-              <Button size="sm" variant="outline" onClick={() => setAdding(false)}>
-                Cancel
-              </Button>
+    <div className="flex items-center gap-1 border-t border-neutral-800 p-2">
+      <div className="min-w-0 flex-1">
+        <AdaptiveMenu trigger={trigger} width="w-64" title="Servers">
+          <DropdownLabel>Servers</DropdownLabel>
+          {connections.map((connection) => (
+            <div key={connection.id} className="group flex items-center">
+              <DropdownItem
+                className="flex-1"
+                icon={
+                  connection.id === activeId ? (
+                    <Check size={14} />
+                  ) : (
+                    <span className={cn("h-2 w-2 rounded-full", STATUS_COLOR[connection.status])} />
+                  )
+                }
+                onClick={() => void select(connection.id)}
+              >
+                <span className="truncate">{connection.name}</span>
+              </DropdownItem>
+              {connection.kind === "remote" && (
+                <RemoveServerButton
+                  onRequest={() => setPendingRemove({ id: connection.id, name: connection.name })}
+                />
+              )}
             </div>
-          </div>
-        ) : (
-          <DropdownItem icon={<Plus size={14} />} keepOpen onClick={() => setAdding(true)}>
-            Add server…
-          </DropdownItem>
-        )}
-      </AdaptiveMenu>
+          ))}
+
+          <DropdownSeparator />
+
+          {adding ? (
+            <div className="space-y-1.5 p-1.5" onClick={(e) => e.stopPropagation()}>
+              <Input placeholder="Name" value={name} onChange={(e) => setName(e.target.value)} />
+              <Input
+                placeholder="https://host:47831"
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+              />
+              <div className="flex gap-1.5">
+                <Button size="sm" className="flex-1" onClick={() => void submit()}>
+                  Add
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => setAdding(false)}>
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <DropdownItem icon={<Plus size={14} />} keepOpen onClick={() => setAdding(true)}>
+              Add server…
+            </DropdownItem>
+          )}
+        </AdaptiveMenu>
+      </div>
+
+      <SystemStatusChip />
 
       <ConfirmDialog
         open={pendingRemove !== null}

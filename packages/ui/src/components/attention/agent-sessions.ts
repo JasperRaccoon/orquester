@@ -7,7 +7,7 @@ import type { ProjectSummary, SessionSummary, WorkspaceSummary } from "../../typ
 
 export { resolveProjectRef } from "../../lib/session-nav";
 
-/** Which Attention Center group a session lands in. */
+/** Which Opened Agents group a session lands in. */
 export type AttentionBucket = "attention" | "finished" | "active" | "idle";
 
 /** Group order in the panel — loudest first. */
@@ -61,7 +61,7 @@ export function bucketOf(
 
 /**
  * Every agent-kind session across every *visible* workspace/project, bucketed —
- * the Attention Center's data source. Pure so the global shortcut can derive
+ * the Opened Agents section's data source. Pure so the global shortcut can derive
  * the same list from `useAppStore.getState()` outside of React.
  *
  * Sessions with no `projectPath` are dropped: there is nowhere to navigate to,
@@ -182,14 +182,14 @@ function isUnseeable(entry: AgentSessionEntry): boolean {
 export interface AttentionSummary {
   /** Live agent sessions — exited ones live in Finished and don't count. */
   total: number;
-  /** Needs-Attention + Finished: always shown on the trigger, seen or not. */
+  /** Needs-Attention + Finished: always shown on the header, seen or not. */
   flaggedCount: number;
   /** Flagged sessions still calling and not yet looked at — drives the amber. */
   unseenCount: number;
   label: string;
 }
 
-/** Everything the topbar trigger needs, as a pure function of the two inputs. */
+/** Everything the section header needs, as a pure function of the two inputs. */
 export function summarizeAgentSessions(
   entries: AgentSessionEntry[],
   seenKeys: ReadonlySet<string>

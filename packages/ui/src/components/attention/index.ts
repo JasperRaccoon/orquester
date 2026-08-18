@@ -1,10 +1,10 @@
-export { AttentionCenter } from "./AttentionCenter";
 export { GlobalShortcutListener } from "./GlobalShortcutListener";
 export {
   useAgentSessions,
   deriveAgentSessions,
   agentSessionsSnapshot,
   focusAgentSession,
+  verifiedAgentSessions,
   bucketOf,
   isFlaggedBucket,
   resolveProjectRef,

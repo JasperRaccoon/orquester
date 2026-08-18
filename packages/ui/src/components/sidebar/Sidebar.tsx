@@ -2,6 +2,7 @@ import React from "react";
 import { cn } from "../../lib/cn";
 import { WorkspaceList } from "./WorkspaceList";
 import { ProjectList } from "./ProjectList";
+import { OpenedAgents } from "./OpenedAgents";
 import { ArchivedFooter } from "./ArchivedFooter";
 import { ServerSwitcher } from "../servers";
 import { ResizeHandle } from "../ui";
@@ -34,6 +35,7 @@ export const Sidebar: React.FC = () => {
           className="flex shrink-0 flex-col border-r border-neutral-800 bg-neutral-900/40"
           style={{ width: sidebarWidth, maxWidth: `calc(100% - ${PANE_FLEX_RESERVE}px)` }}
         >
+          <OpenedAgents />
           {currentWorkspace ? <ProjectList /> : <WorkspaceList />}
           <ArchivedFooter />
           <ServerSwitcher />
@@ -64,6 +66,7 @@ export const Sidebar: React.FC = () => {
           drawerOpen ? "translate-x-0" : "-translate-x-full"
         )}
       >
+        <OpenedAgents />
         {currentWorkspace ? <ProjectList /> : <WorkspaceList />}
         <ArchivedFooter />
         <ServerSwitcher />

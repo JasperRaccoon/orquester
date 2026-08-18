@@ -6,8 +6,6 @@ import { TabSwitcher } from "./TabSwitcher";
 import { NewTabMenu } from "./NewTabMenu";
 import { ViewModeToggle } from "./ViewModeToggle";
 import { UsageWidget } from "./UsageWidget";
-import { AttentionCenter } from "../attention";
-import { SystemStatusChip } from "../system";
 import { openCommandPalette } from "../command-palette";
 import { WindowControls } from "../layout/WindowControls";
 import { IconButton } from "../ui";
@@ -64,12 +62,6 @@ export const TopBar: React.FC = () => {
           <div className="flex-1" />
           <CommandPaletteButton />
           <div className="app-no-drag">
-            <SystemStatusChip />
-          </div>
-          <div className="app-no-drag">
-            <AttentionCenter />
-          </div>
-          <div className="app-no-drag">
             <UsageWidget />
           </div>
           <SettingsButton />
@@ -112,12 +104,6 @@ export const TopBar: React.FC = () => {
             <ViewModeToggle />
           </div>
         )}
-        <div className="app-no-drag">
-          <SystemStatusChip />
-        </div>
-        <div className="app-no-drag">
-          <AttentionCenter />
-        </div>
         <div className="app-no-drag">
           <UsageWidget />
         </div>
