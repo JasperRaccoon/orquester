@@ -6,6 +6,7 @@ import { useApi } from "../../context/orquester-context";
 import { useIsDesktop } from "../../hooks";
 import { useAppStore, useTerminalFontSize } from "../../store/app";
 import { uploadFilesToSession, type UploadStatus } from "../../lib/session-upload";
+import { bracketPaste } from "../../lib/paste";
 import type { SessionSummary } from "../../types";
 import type { ViewMode } from "../../lib/view-mode";
 
@@ -55,21 +56,6 @@ async function writeClipboard(text: string): Promise<void> {
   } catch {
     /* clipboard API unavailable (insecure context or permission denied) */
   }
-}
-
-/**
- * Wrap pasted text in the bracketed-paste escapes (`\x1b[200~`…`\x1b[201~`) a
- * native terminal sends, normalizing every newline to CR exactly as xterm's own
- * `prepareTextForTerminal` does. We send this explicitly for agent sessions
- * because xterm only brackets a paste once it has SEEN the app enable
- * bracketed-paste mode (`\x1b[?2004h`) — but the daemon replays scrollback via
- * `tmux capture-pane`, which omits DEC private modes, so a reattached / reloaded
- * / reconnected client never learns the agent turned it on. Without the wrapper
- * xterm sends a bare CR between lines and the agent submits at the first one.
- */
-function bracketPaste(text: string): string {
-  const normalized = text.replace(/\r\n/g, "\r").replace(/\n/g, "\r");
-  return `\x1b[200~${normalized}\x1b[201~`;
 }
 
 /**

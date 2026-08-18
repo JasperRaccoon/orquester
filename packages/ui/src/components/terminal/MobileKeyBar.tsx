@@ -1,9 +1,10 @@
 import React, { useEffect, useState, useRef } from "react";
-import { Loader2, Paperclip } from "lucide-react";
+import { ClipboardPaste, Loader2, Paperclip } from "lucide-react";
 import { useApi } from "../../context/orquester-context";
 import { useIsDesktop } from "../../hooks";
 import { useActiveTabId, useAppStore, useProjectTabs, useTerminalFontSize } from "../../store/app";
 import { uploadFilesToSession, type UploadStatus } from "../../lib/session-upload";
+import { pasteTextForSession } from "../../lib/paste";
 import { TERMINAL_FONT_MIN, TERMINAL_FONT_MAX, TERMINAL_FONT_STEP } from "../../lib/terminal-font";
 
 // Control keys Android/iOS soft keyboards usually lack. Values are the bytes a
@@ -28,6 +29,46 @@ const STATUS_CLEAR_MS: Record<UploadStatus["kind"], number | null> = {
   skipped: 4000,
   error: 10000
 };
+
+/**
+ * Read the clipboard via the async Clipboard API. This exists for iOS: its soft
+ * keyboard has no paste key and the long-press "Paste" callout needs an editable
+ * target under the finger, which xterm's hidden textarea isn't — so the OS-level
+ * paste that Android keyboards provide simply cannot be triggered there. Must be
+ * called from a user gesture (iOS shows its native paste-permission callout).
+ *
+ * `read()` gives text AND raw image blobs (a copied screenshot); where only
+ * `readText()` exists we degrade to text. Image blobs have no filename, so
+ * synthesize `pasted-<id>.<ext>` the same way TerminalView's desktop paste
+ * handler does.
+ */
+async function readClipboard(): Promise<{ text: string; images: File[] }> {
+  const clip = navigator.clipboard;
+  const images: File[] = [];
+  let text = "";
+  if (clip?.read) {
+    for (const item of await clip.read()) {
+      const imageType = item.types.find((t) => t.startsWith("image/"));
+      if (imageType) {
+        const blob = await item.getType(imageType);
+        // Strip MIME parameters before taking the subtype (mirrors the daemon's
+        // split(";") handling); crypto id mirrors its randomUUID().slice(0, 8).
+        const subtype = (imageType.split(";")[0] || "").split("/")[1] || "bin";
+        const ext = subtype.replace(/[^a-z0-9]/gi, "") || "bin";
+        const id = crypto.randomUUID().slice(0, 8);
+        images.push(new File([blob], `pasted-${id}.${ext}`, { type: blob.type || imageType }));
+      } else if (item.types.includes("text/plain")) {
+        text += await (await item.getType("text/plain")).text();
+      }
+    }
+  } else if (clip?.readText) {
+    text = await clip.readText();
+  } else {
+    // Insecure context or ancient browser — the button reports it inline.
+    throw new Error("clipboard API unavailable");
+  }
+  return { text, images };
+}
 
 /**
  * Mobile-only toolbar of terminal control keys for the active session. It lives
@@ -86,6 +127,29 @@ export const MobileKeyBar: React.FC = () => {
     }
   };
 
+  const handlePaste = async () => {
+    let content: { text: string; images: File[] };
+    try {
+      content = await readClipboard();
+    } catch {
+      setStatus({ kind: "error", text: "Clipboard unavailable — allow paste access and try again." });
+      return;
+    }
+    if (content.images.length > 0) {
+      if (isAgent) {
+        // Same upload + path-injection flow as the attach button.
+        await handlePick(content.images);
+      } else {
+        setStatus({ kind: "skipped", text: "Image paste works in agent sessions only." });
+      }
+    }
+    if (content.text) {
+      void api.sendSessionInput(sessionId, pasteTextForSession(isAgent, content.text));
+    } else if (content.images.length === 0) {
+      setStatus({ kind: "skipped", text: "Clipboard is empty." });
+    }
+  };
+
   return (
     // No bottom safe-area padding here on purpose: the app shell owns every
     // inset for the whole in-flow tree (see the `#root > *` rule in
@@ -104,6 +168,19 @@ export const MobileKeyBar: React.FC = () => {
         </div>
       )}
       <div className="flex items-stretch gap-1 overflow-x-auto px-2 py-1.5">
+        <button
+          type="button"
+          aria-label="Paste from clipboard"
+          disabled={busy}
+          // preventDefault on pointerdown = no focus steal (keyboard stays up);
+          // the clipboard read itself runs on click, still inside the gesture's
+          // user activation. On iOS the native paste callout appears over the tap.
+          onPointerDown={(e) => e.preventDefault()}
+          onClick={() => void handlePaste()}
+          className="flex h-9 shrink-0 items-center justify-center rounded-md bg-neutral-800 px-3 text-neutral-200 active:bg-neutral-700 disabled:opacity-50"
+        >
+          <ClipboardPaste size={16} />
+        </button>
         {isAgent && (
           <>
             <input
