@@ -1,4 +1,4 @@
-import { isFlaggedBucket, type AgentSessionEntry } from "../components/attention/agent-sessions";
+import type { AgentSessionEntry } from "../components/attention/agent-sessions";
 import type { ProjectIndex } from "./project-index";
 
 /**
@@ -30,9 +30,14 @@ export function saveOpenedAgentsCollapsed(collapsed: boolean): void {
 /** One "Opened Agents" group: every agent session in one git repo, across all its checkouts. */
 export interface RepoGroup {
   key: string;
-  /** Header label — `workspace/<repo name>`. */
+  /** Header label — the remote's `owner/repo` (or the local repo's dir name). */
   title: string;
   items: AgentSessionEntry[];
+  /**
+   * The group's checkouts live in more than one workspace, so rows need their
+   * workspace prefix to stay distinguishable.
+   */
+  multiWorkspace: boolean;
 }
 
 /**
@@ -42,48 +47,61 @@ export interface RepoGroup {
  * The repo identity is the index's `ProjectSummary.repoId` — the verified
  * list is a subset of the index by construction, so the lookup always hits; the
  * `projectPath` fallback covers a non-git project or an older daemon, which
- * then simply group per-project. The workspace joins the key because two
- * workspaces can hold distinct checkouts of one repo, and each workspace keeps
- * its own group.
+ * then simply group per-project. The key is the repo identity ALONE:
+ * checkouts of one remote merge into one group even across workspaces (rows
+ * then carry their workspace prefix via `multiWorkspace`).
  *
- * Entries arrive in {@link deriveAgentSessions} order (loudest bucket first),
- * so each group's rows are already attention-first; groups with a flagged row
- * bubble to the top (most recent call first), the calm remainder alphabetical.
+ * Ordering is deliberately STABLE — alphabetical groups, and within a group
+ * alphabetical by workspace then project folder (naturally, so `-2` < `-10`),
+ * then tab order. Activity never reorders anything (an earlier
+ * bubbling-by-attention version scrambled the list every time an agent
+ * called); status lives on the row dot.
  */
 export function groupAgentSessionsByRepo(
   entries: AgentSessionEntry[],
   index: ProjectIndex
 ): RepoGroup[] {
-  const groups = new Map<string, { group: RepoGroup; flaggedAt: string }>();
+  const groups = new Map<string, RepoGroup>();
   for (const entry of entries) {
     const repoId =
       index.visible.get(entry.session.projectPath)?.repoId ?? entry.session.projectPath;
-    // `/` can't appear in a workspace name (a single directory), so the key is
-    // unambiguous.
-    const key = `${entry.project.workspace}/${repoId}`;
-    let slot = groups.get(key);
-    if (!slot) {
-      const repoName = repoId.split(/[\\/]/).filter(Boolean).pop() ?? repoId;
-      slot = {
-        group: {
-          key,
-          title: `${entry.project.workspace ? `${entry.project.workspace}/` : ""}${repoName}`,
-          items: []
-        },
-        flaggedAt: ""
-      };
-      groups.set(key, slot);
+    let group = groups.get(repoId);
+    if (!group) {
+      group = { key: repoId, title: repoTitle(repoId), items: [], multiWorkspace: false };
+      groups.set(repoId, group);
     }
-    slot.group.items.push(entry);
-    if (isFlaggedBucket(entry.bucket) && entry.flaggedAt > slot.flaggedAt) {
-      slot.flaggedAt = entry.flaggedAt;
+    group.items.push(entry);
+    if (entry.project.workspace !== group.items[0].project.workspace) {
+      group.multiWorkspace = true;
     }
   }
-  return Array.from(groups.values())
-    .sort(
+  for (const group of groups.values()) {
+    group.items.sort(
       (a, b) =>
-        // A non-empty flaggedAt sorts before "" and newer before older.
-        b.flaggedAt.localeCompare(a.flaggedAt) || a.group.title.localeCompare(b.group.title)
-    )
-    .map((slot) => slot.group);
+        compareNatural(a.project.workspace, b.project.workspace) ||
+        compareNatural(a.project.name, b.project.name) ||
+        a.session.order - b.session.order ||
+        a.session.createdAt.localeCompare(b.session.createdAt)
+    );
+  }
+  return Array.from(groups.values()).sort(
+    (a, b) => compareNatural(a.title, b.title) || a.key.localeCompare(b.key)
+  );
+}
+
+/**
+ * `github.com/AppsStats/Apps-Stats` → `AppsStats/Apps-Stats`; a path id keeps
+ * only its dir name (the parent segment of a local repo path is just where it
+ * happens to live, not an owner).
+ */
+function repoTitle(repoId: string): string {
+  const segments = repoId.split(/[\\/]/).filter(Boolean);
+  const isPath = /^([\\/]|[a-zA-Z]:)/.test(repoId);
+  const kept = isPath ? segments.slice(-1) : segments.slice(1);
+  return kept.join("/") || repoId;
+}
+
+/** Alphabetical with numeric runs compared as numbers (`-2` before `-10`). */
+function compareNatural(a: string, b: string): number {
+  return a.localeCompare(b, undefined, { numeric: true });
 }

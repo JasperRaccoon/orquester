@@ -28,7 +28,10 @@ import {
   type AgentSessionEntry
 } from "../attention";
 
-const AgentRow: React.FC<{ entry: AgentSessionEntry }> = ({ entry }) => (
+const AgentRow: React.FC<{ entry: AgentSessionEntry; showWorkspace: boolean }> = ({
+  entry,
+  showWorkspace
+}) => (
   <button
     type="button"
     onClick={() => focusAgentSession(entry)}
@@ -41,17 +44,24 @@ const AgentRow: React.FC<{ entry: AgentSessionEntry }> = ({ entry }) => (
       {getRegistryIcon(entry.session.kind, entry.session.refId, 14)}
     </span>
     <span className="min-w-0 flex-1 truncate">{entry.session.title}</span>
-    {/* Just the project dir (the worktree) — the group header already carries
-        workspace/repo. `shrink` (not `shrink-0`) so a long name yields to the
-        title instead of crushing it; `min-w-0` is what lets it truncate. */}
+    {/* Just the checkout dir — the group header already names the repo. The
+        workspace prefix appears only when the group spans several workspaces
+        (`showWorkspace`), where the bare dir would be ambiguous. `shrink` (not
+        `shrink-0`) so a long name yields to the title instead of crushing it;
+        `min-w-0` is what lets it truncate. */}
     <span className="min-w-0 shrink truncate text-[10px] text-neutral-500">
+      {showWorkspace && entry.project.workspace ? `${entry.project.workspace}/` : ""}
       {entry.project.name}
     </span>
     <SessionStatusDot sessionId={entry.session.id} status={entry.session.status} />
   </button>
 );
 
-const AgentGroup: React.FC<{ title: string; items: AgentSessionEntry[] }> = ({ title, items }) => {
+const AgentGroup: React.FC<{
+  title: string;
+  items: AgentSessionEntry[];
+  showWorkspace: boolean;
+}> = ({ title, items, showWorkspace }) => {
   if (items.length === 0) {
     return null;
   }
@@ -61,7 +71,7 @@ const AgentGroup: React.FC<{ title: string; items: AgentSessionEntry[] }> = ({ t
         {title}
       </div>
       {items.map((entry) => (
-        <AgentRow key={entry.session.id} entry={entry} />
+        <AgentRow key={entry.session.id} entry={entry} showWorkspace={showWorkspace} />
       ))}
     </div>
   );
@@ -69,10 +79,11 @@ const AgentGroup: React.FC<{ title: string; items: AgentSessionEntry[] }> = ({ t
 
 /**
  * Sidebar "Opened Agents" section: every agent session across every workspace,
- * grouped by the git repo its project belongs to — worktrees of one repo share
- * a group — above the workspace/project lists, collapsible, with the counts
- * always on the header. Status stays on the per-row dot; rows calling for the
- * user sort first in their group and lift the group to the top.
+ * grouped by the git repo its project belongs to — every checkout of one
+ * remote shares a group, even across workspaces — above the
+ * workspace/project lists, collapsible, with the counts
+ * always on the header. Status stays on the per-row dot; groups and rows keep
+ * a stable alphabetical order (never reshuffled by activity).
  * `Ctrl+Shift+A` still walks the bucket-derived Needs-Attention list (see
  * GlobalShortcutListener) — display grouping doesn't change it.
  *
@@ -213,7 +224,12 @@ export const OpenedAgents: React.FC = () => {
             </div>
           ) : (
             groupAgentSessionsByRepo(entries, index).map((group) => (
-              <AgentGroup key={group.key} title={group.title} items={group.items} />
+              <AgentGroup
+                key={group.key}
+                title={group.title}
+                items={group.items}
+                showWorkspace={group.multiWorkspace}
+              />
             ))
           )}
         </div>
