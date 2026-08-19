@@ -11,7 +11,11 @@ import {
   refreshProjectIndex,
   useProjectIndex
 } from "../../lib/project-index";
-import { loadOpenedAgentsCollapsed, saveOpenedAgentsCollapsed } from "../../lib/opened-agents";
+import {
+  groupAgentSessionsByRepo,
+  loadOpenedAgentsCollapsed,
+  saveOpenedAgentsCollapsed
+} from "../../lib/opened-agents";
 import { useAppStore } from "../../store/app";
 import {
   attentionKey,
@@ -21,16 +25,8 @@ import {
   summarizeAgentSessions,
   useAgentSessions,
   verifiedAgentSessions,
-  type AgentSessionEntry,
-  type AttentionBucket
+  type AgentSessionEntry
 } from "../attention";
-
-const GROUPS: Array<{ bucket: AttentionBucket; title: string }> = [
-  { bucket: "attention", title: "Needs Attention" },
-  { bucket: "finished", title: "Finished" },
-  { bucket: "active", title: "Active" },
-  { bucket: "idle", title: "Idle" }
-];
 
 const AgentRow: React.FC<{ entry: AgentSessionEntry }> = ({ entry }) => (
   <button
@@ -45,10 +41,10 @@ const AgentRow: React.FC<{ entry: AgentSessionEntry }> = ({ entry }) => (
       {getRegistryIcon(entry.session.kind, entry.session.refId, 14)}
     </span>
     <span className="min-w-0 flex-1 truncate">{entry.session.title}</span>
-    {/* `shrink` (not `shrink-0`) so a long workspace/project yields to the
+    {/* Just the project dir (the worktree) — the group header already carries
+        workspace/repo. `shrink` (not `shrink-0`) so a long name yields to the
         title instead of crushing it; `min-w-0` is what lets it truncate. */}
     <span className="min-w-0 shrink truncate text-[10px] text-neutral-500">
-      {entry.project.workspace ? `${entry.project.workspace}/` : ""}
       {entry.project.name}
     </span>
     <SessionStatusDot sessionId={entry.session.id} status={entry.session.status} />
@@ -73,10 +69,12 @@ const AgentGroup: React.FC<{ title: string; items: AgentSessionEntry[] }> = ({ t
 
 /**
  * Sidebar "Opened Agents" section: every agent session across every workspace,
- * grouped by whether it is blocked on the user, finished, busy, or quiet —
- * above the workspace/project lists, collapsible, with the counts always on
- * the header. `Ctrl+Shift+A` walks the same Needs-Attention list (see
- * GlobalShortcutListener).
+ * grouped by the git repo its project belongs to — worktrees of one repo share
+ * a group — above the workspace/project lists, collapsible, with the counts
+ * always on the header. Status stays on the per-row dot; rows calling for the
+ * user sort first in their group and lift the group to the top.
+ * `Ctrl+Shift+A` still walks the bucket-derived Needs-Attention list (see
+ * GlobalShortcutListener) — display grouping doesn't change it.
  *
  * "Seen" semantics survive the move from the top-bar popover: an attention
  * episode counts as looked-at only while the rows are actually on screen —
@@ -214,12 +212,8 @@ export const OpenedAgents: React.FC = () => {
                 : "No agent sessions"}
             </div>
           ) : (
-            GROUPS.map(({ bucket, title }) => (
-              <AgentGroup
-                key={bucket}
-                title={title}
-                items={entries.filter((entry) => entry.bucket === bucket)}
-              />
+            groupAgentSessionsByRepo(entries, index).map((group) => (
+              <AgentGroup key={group.key} title={group.title} items={group.items} />
             ))
           )}
         </div>

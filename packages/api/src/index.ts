@@ -64,6 +64,15 @@ export interface ProjectSummary {
   path: string;
   /** Hidden from the sidebar lists (workspaces.json flag). Absent = false. */
   isArchived?: boolean;
+  /**
+   * Opaque identity of the git repository the project is a checkout of: the
+   * normalized `origin` URL when the repo has one, else the realpathed main
+   * checkout root (a linked worktree resolves to its main repo) — so sibling
+   * clones and worktrees of one repo share the value. Its last path segment is
+   * the repo's display name. Absent when the project is not a git checkout,
+   * detection failed, or the daemon predates the field.
+   */
+  repoId?: string;
 }
 
 /**

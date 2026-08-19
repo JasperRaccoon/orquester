@@ -95,6 +95,7 @@ import { type ISessionManager, SessionError, createSessionManager, resumeLaunchA
 import type { ActivityCause } from "./ansi-activity";
 import { TodoError, TodoListManager } from "./todos";
 import { RecentProjectsService } from "./recent-projects";
+import { detectRepoId } from "./repo-id";
 import { Tmux, sessionPath, tmuxAvailable, tmuxVersionOk } from "./tmux";
 import { SystemStatusService } from "./system-status";
 import { CliProxyManager } from "./cliproxy";
@@ -4595,12 +4596,19 @@ async function listProjects(
   const archived = new Set(
     meta.workspaces.find((w) => w.name === workspace)?.archivedProjects ?? []
   );
-  return names.map((name) => ({
-    name,
-    workspace,
-    path: join(workspacesDir, workspace, name),
-    isArchived: archived.has(name)
-  }));
+  return Promise.all(
+    names.map(async (name) => {
+      const path = join(workspacesDir, workspace, name);
+      const repoId = await detectRepoId(path);
+      return {
+        name,
+        workspace,
+        path,
+        isArchived: archived.has(name),
+        ...(repoId === null ? {} : { repoId })
+      };
+    })
+  );
 }
 
 /**
