@@ -14,8 +14,16 @@ import { decodeJwtPayload } from "./agent-account-identity.ts";
 const DEVICE_CODE_URL = `${GROK_OIDC_ISSUER}/oauth2/device/code`;
 const TOKEN_URL = `${GROK_OIDC_ISSUER}/oauth2/token`;
 /** offline_access → refresh token; openid/profile/email → id_token identity;
- *  grok-cli:access → the scope the Grok CLI's API calls ride on. */
-const DEVICE_SCOPE = "openid profile email offline_access grok-cli:access";
+ *  api:access → the scope grok CLI ≥ 1.0 API calls ride on (0.x used
+ *  grok-cli:access, kept for old binaries; a token without api:access gets
+ *  "403 permission-denied: OAuth2 token missing required scope: api:access");
+ *  conversations/workspaces read+write → CLI feature gates ("no OAuth credentials
+ *  for conversations:read"). Mirrors what the CLI's own browser login is
+ *  granted. Refresh grants can never WIDEN scope, so an account linked with a
+ *  narrower list stays narrow until re-linked. */
+const DEVICE_SCOPE =
+  "openid profile email offline_access grok-cli:access api:access " +
+  "conversations:read conversations:write workspaces:read workspaces:write";
 const REQUEST_TIMEOUT_MS = 10_000;
 
 export interface GrokDevicePrompt {

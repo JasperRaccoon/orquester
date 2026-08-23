@@ -452,7 +452,8 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
     reads the FIXED `$GROK_HOME/auth.json` path server-side, so it is remote-transport-safe
     unlike arbitrary `from` paths), or the **device-code link** — an RFC 8628 flow the daemon
     drives DIRECTLY against `auth.x.ai` (`/oauth2/device/code` → poll `/oauth2/token`,
-    grok-CLI client id, scope incl. `grok-cli:access`; `grok-device-auth.ts`), so it is
+    grok-CLI client id, scope incl. `api:access` — required by grok CLI ≥ 1.0, whose 403
+    names the missing scope — plus legacy `grok-cli:access`; `grok-device-auth.ts`), so it is
     **proxy-independent** and on approval the tokens become a managed account
     (`grokAuthJsonFromDeviceTokens`) — deliberately NOT auto-seeded. Separately,
     `adoptOrphanXaiFiles` remains the boot migration for pre-managed deployments: an unbacked
