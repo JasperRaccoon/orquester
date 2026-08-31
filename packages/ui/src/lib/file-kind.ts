@@ -4,7 +4,7 @@
  * magic-byte sniffing; predictable and synchronous.
  */
 
-export type FileKind = "text" | "html" | "image" | "pdf" | "audio" | "video" | "archive" | "binary" | "parquet";
+export type FileKind = "text" | "html" | "markdown" | "image" | "pdf" | "audio" | "video" | "archive" | "binary" | "parquet";
 
 export interface FileKindInfo {
   kind: FileKind;
@@ -28,7 +28,8 @@ export const PREVIEW_CAP_BY_KIND: Record<FileKind, number> = {
   parquet: Number.POSITIVE_INFINITY, // windowed server-side, bytes never fetched
   archive: DOWNLOAD_MAX_BYTES, // listed server-side, not byte-fetched
   text: DOWNLOAD_MAX_BYTES, // text uses the separate 1 MB /api/fs/read route
-  html: DOWNLOAD_MAX_BYTES // html also uses the text route (rendered in a sandboxed iframe)
+  html: DOWNLOAD_MAX_BYTES, // html also uses the text route (rendered in a sandboxed iframe)
+  markdown: DOWNLOAD_MAX_BYTES // markdown also uses the text route (rendered in a sandboxed iframe)
 };
 
 // extension (no dot, lowercased) -> [kind, mime]
@@ -45,6 +46,8 @@ const BY_EXT: Record<string, [FileKind, string]> = {
   pdf: ["pdf", "application/pdf"],
   html: ["html", "text/html"],
   htm: ["html", "text/html"],
+  md: ["markdown", "text/markdown"],
+  markdown: ["markdown", "text/markdown"],
   mp3: ["audio", "audio/mpeg"],
   wav: ["audio", "audio/wav"],
   ogg: ["audio", "audio/ogg"],

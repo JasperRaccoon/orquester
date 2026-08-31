@@ -9,6 +9,7 @@ import { ArchiveViewer } from "./viewers/ArchiveViewer";
 import { ParquetViewer } from "./viewers/ParquetViewer";
 import { PdfViewer } from "./viewers/PdfViewer";
 import { HtmlViewer } from "./viewers/HtmlViewer";
+import { MarkdownViewer } from "./viewers/MarkdownViewer";
 import { useApi } from "../../context/orquester-context";
 import { useFileText } from "../../hooks";
 import { detectFileKind, PREVIEW_CAP_BY_KIND, DOWNLOAD_MAX_BYTES } from "../../lib/file-kind";
@@ -56,6 +57,12 @@ export const FilePreview: React.FC<{
   // HTML renders in a sandboxed iframe with a Preview | Source toggle (text route).
   if (kind === "html") {
     return <HtmlViewer path={path} onBack={onBack} />;
+  }
+
+  // Markdown gets the same Preview | Source toggle, rendered via marked (text
+  // route); search jumps pass through so a hit still lands on its source line.
+  if (kind === "markdown") {
+    return <MarkdownViewer path={path} onBack={onBack} jumpToLine={jumpToLine} jumpToColumn={jumpToColumn} jumpLength={jumpLength} jumpNonce={jumpNonce} />;
   }
 
   // Parquet is windowed from the daemon (no byte fetch) — size caps don't apply.
