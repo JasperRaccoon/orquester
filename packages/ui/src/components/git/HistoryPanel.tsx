@@ -586,13 +586,16 @@ const CommitRow: React.FC<{
         }
       }}
       className={cn(
-        "flex w-full cursor-pointer items-stretch py-2 pr-3 text-left md:py-1.5",
+        // Vertical padding lives on the text column, not here: the graph gutter
+        // is `self-stretch`, which only fills the content box, so row padding
+        // would leave a gap between consecutive rows' lane lines.
+        "flex w-full cursor-pointer items-stretch pr-3 text-left",
         graph > 0 ? "pl-1" : "pl-3",
         active ? "bg-neutral-800" : "hover:bg-neutral-900"
       )}
     >
       {graph > 0 && <GraphCell row={row} lanes={graph} />}
-      <span className={cn("flex min-w-0 flex-1 flex-col gap-0.5", graph > 0 && "pl-1.5")}>
+      <span className={cn("flex min-w-0 flex-1 flex-col gap-0.5 py-2 md:py-1.5", graph > 0 && "pl-1.5")}>
         <span className={cn("truncate text-sm", active ? "text-neutral-100" : "text-neutral-300")} title={commit.subject}>
           {commit.subject}
         </span>
