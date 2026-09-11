@@ -1,9 +1,10 @@
+import { MAX_UPLOAD_BYTES } from "@orquester/api";
 import type { ApiClient } from "./api-client";
 import { fileToBase64 } from "./files";
 
-// Largest file we'll upload from the client. Mirrors the daemon's decoded cap
-// (see the upload route's MAX_UPLOAD_BYTES) so we fail fast before encoding.
-export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+// Largest file we'll upload from the client: the daemon's own decoded cap, so we
+// fail fast before encoding instead of round-tripping a 413.
+export { MAX_UPLOAD_BYTES };
 
 /**
  * Transient status for a session file upload. A discriminated union (rather than

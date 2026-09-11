@@ -83,7 +83,7 @@ import type {
   UsageWindow,
   WorkspaceSummary
 } from "@orquester/api";
-import { BROWSER_FRAME_TYPE_JPEG, MAX_INITIAL_COMMAND, SYSTEM_ACCOUNT_ID } from "@orquester/api";
+import { BROWSER_FRAME_TYPE_JPEG, MAX_INITIAL_COMMAND, MAX_UPLOAD_BYTES, SYSTEM_ACCOUNT_ID } from "@orquester/api";
 import { isBinOnPath, RegistryService } from "./registry";
 import { BrowserError, BrowserManager } from "./browsers";
 import { redactUrlTokens, sanitizeDevtoolsPath } from "./devtools.js";
@@ -194,12 +194,15 @@ const daemonId = randomUUID();
 const packageVersion = "0.0.0";
 
 /**
- * Hard cap on a single terminal file upload (decoded bytes). The upload route's
- * Fastify `bodyLimit` is set higher (~40 MB) to leave room for base64 inflation
- * (+~33%) and JSON overhead; this is the post-decode ceiling enforced in the
- * handler. See docs/superpowers/specs/2026-06-22-terminal-file-drop-design.md.
+ * Fastify `bodyLimit` for the two file-upload routes. The decoded cap is the
+ * shared `MAX_UPLOAD_BYTES` (@orquester/api, enforced post-decode in each
+ * handler); the wire body is that file as base64 (+33%) inside a small JSON
+ * envelope, so the limit is the exact base64 length of the cap plus 1 MiB of
+ * headroom for the envelope — a payload over it is rejected by Fastify with 413
+ * before we ever decode it.
+ * See docs/superpowers/specs/2026-06-22-terminal-file-drop-design.md.
  */
-const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+const UPLOAD_BODY_LIMIT = Math.ceil(MAX_UPLOAD_BYTES / 3) * 4 + 1024 * 1024;
 
 /**
  * Hard ceiling on a single /api/fs/raw read: the in-memory + in-app download
@@ -2864,7 +2867,7 @@ export function createServer(
   // re-sanitized and assertInsideFsRoot'd, so nothing escapes fsRoot.
   app.post<{ Body: FsUploadRequest }>(
     "/api/fs/upload",
-    { bodyLimit: 40 * 1024 * 1024 },
+    { bodyLimit: UPLOAD_BODY_LIMIT },
     async (request, reply): Promise<FsUploadResponse | void> => {
       const body = (request.body ?? {}) as Partial<FsUploadRequest>;
       if (!body.destDir || !body.relativePath || typeof body.dataBase64 !== "string") {
@@ -3780,10 +3783,10 @@ export function createServer(
   // directory and final name (random-prefixed, sanitized), so there is no
   // path-traversal surface. Inherits the bearer-auth hook (it lives under /api).
   // The route-level bodyLimit overrides the 256 KB global default so a base64
-  // 25 MB file fits; MAX_UPLOAD_BYTES is the post-decode ceiling.
+  // MAX_UPLOAD_BYTES file fits; MAX_UPLOAD_BYTES is the post-decode ceiling.
   app.post<{ Params: { id: string }; Body: SessionUploadRequest }>(
     "/api/sessions/:id/upload",
-    { bodyLimit: 40 * 1024 * 1024 },
+    { bodyLimit: UPLOAD_BODY_LIMIT },
     async (request, reply): Promise<SessionUploadResponse | void> => {
       const { id } = request.params;
       if (!sessions.get(id)) {

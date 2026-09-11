@@ -1,10 +1,13 @@
 import { useCallback, useRef, useState } from "react";
+import { MAX_UPLOAD_BYTES } from "@orquester/api";
 import type { ApiClient } from "../../lib/api-client";
 import { fileToBase64, type UploadItem } from "../../lib/files";
 
-const MAX_UPLOAD_BYTES = 25 * 1024 * 1024; // mirror the daemon cap
+const MAX_UPLOAD_MB = Math.round(MAX_UPLOAD_BYTES / (1024 * 1024));
 const MAX_UPLOAD_FILES = 500; // big-folder confirm threshold
-const MAX_UPLOAD_TOTAL_BYTES = 200 * 1024 * 1024; // big-folder confirm threshold
+// Big-folder confirm threshold. Kept above the single-file cap so one large
+// (but allowed) file never trips the "large folder?" prompt on its own.
+const MAX_UPLOAD_TOTAL_BYTES = 2 * MAX_UPLOAD_BYTES;
 
 export type ConflictChoice = "replace" | "skip" | "keepBoth";
 
@@ -86,7 +89,9 @@ export function useFileUpload(api: ApiClient, onUploaded: (destDir: string) => v
         const toUpload = usable.filter((it) => it.file.size <= MAX_UPLOAD_BYTES);
         if (toUpload.length === 0) {
           setStatus(
-            oversized.length > 0 ? { text: `Skipped ${oversized.length} file(s) over 25 MB`, error: true } : null
+            oversized.length > 0
+              ? { text: `Skipped ${oversized.length} file(s) over ${MAX_UPLOAD_MB} MB`, error: true }
+              : null
           );
           return;
         }
@@ -200,7 +205,7 @@ export function useFileUpload(api: ApiClient, onUploaded: (destDir: string) => v
         if (replaced) parts.push(`Replaced ${replaced}`);
         if (kept) parts.push(`Kept both ${kept}`);
         if (skipped) parts.push(`Skipped ${skipped}`);
-        if (oversized.length) parts.push(`Skipped ${oversized.length} over 25 MB`);
+        if (oversized.length) parts.push(`Skipped ${oversized.length} over ${MAX_UPLOAD_MB} MB`);
         if (failed) parts.push(`${failed} failed`);
         setStatus(parts.length ? { text: parts.join(" · "), error: oversized.length > 0 || failed > 0 } : null);
       } finally {

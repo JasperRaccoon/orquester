@@ -389,6 +389,17 @@ export interface FsWriteRequest {
   content: string;
 }
 
+/**
+ * Largest single file (decoded bytes) accepted by `POST /api/fs/upload` and
+ * `POST /api/sessions/:id/upload`. Shared so the clients' pre-flight skip and the
+ * daemon's 413 agree. Both routes carry the file as base64 inside a JSON body,
+ * so the daemon sizes its route `bodyLimit` from this (+33% inflation + JSON
+ * overhead). NOTE: a JSON body is buffered into ONE V8 string before parsing,
+ * and Node's max string length is ~512 MiB — so this cap cannot exceed ~380 MiB
+ * without moving the routes off base64/JSON.
+ */
+export const MAX_UPLOAD_BYTES = 250 * 1024 * 1024;
+
 export interface FsUploadRequest {
   /** Absolute directory under fsRoot the upload lands in. */
   destDir: string;
