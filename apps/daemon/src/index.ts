@@ -531,7 +531,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     now: () => Date.now()
   });
   usage.events.on("changed", (u) => broadcaster.publish("usage", "usage.changed", u));
-  usage.start();
+  // NOT started here: the first recompute needs the managed-accounts index
+  // (loaded by agentAccounts.init() below). Started before it, the boot reading
+  // saw zero managed accounts, fell back to the System login — expired on a host
+  // that only uses managed accounts — and cached "Claude: not logged in" for a
+  // full 5-minute tick after every daemon restart.
   const usageTokens = new UsageTokensScanner({
     userhome: resolved.vars.userhome,
     cacheFile: usageTokensCacheFile(paths.baseDir),
@@ -604,6 +608,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   await sessions.reattach().catch((error) => console.error("Session reattach failed", error));
   await agentAccounts.init();
   agentAccounts.startRefresher(() => sessions.liveAccountIds());
+  // First usage reading only now: managed accounts are loaded and reattached
+  // sessions are known (its token-freshness pass consults liveAccountIds()).
+  usage.start();
   // Sweep terminal-upload dirs for sessions that didn't survive (orphans from a
   // crash): keep only dirs whose id matches a now-live session. Best-effort.
   await sweepOrphanUploads(
@@ -4047,10 +4054,18 @@ export function createServer(
   // socket for ALL its terminals (output + input + resize) instead of one
   // streaming HTTP connection each, so it no longer hits the browser's
   // ~6-connections-per-origin cap (which otherwise froze input/resize once more
-  // than ~4 terminals were open). Registered in an encapsulated context so the
-  // plugin is loaded before the route is declared.
+  // than ~4 terminals were open).
+  //
+  // @fastify/websocket is registered ONCE, here at the root, for all three WS
+  // routes. Each registration hooks its own listener on the Node server's
+  // `upgrade` event, so registering it per route scope (as this once did) made
+  // every WebSocket handshake fire N listeners: the first assigned the socket
+  // and routed, the other N-1 threw ERR_HTTP_SOCKET_ASSIGNED — two spurious
+  // "websocket upgrade failed" warnings per connection, burying real ones. The
+  // routes stay in encapsulated child contexts only so they are declared after
+  // the plugin has loaded (avvio loads plugins in registration order).
+  void app.register(websocketPlugin);
   void app.register(async (instance) => {
-    await instance.register(websocketPlugin);
     instance.get("/ws", { websocket: true }, (socket, request) => {
       if (options.authRequired) {
         const token = (request.query as { token?: string }).token;
@@ -4173,7 +4188,6 @@ export function createServer(
   // Browser-tab streaming: binary JPEG frames out, JSON control in. Kept off
   // /ws so the terminal channel's text-only fast path is untouched.
   void app.register(async (instance) => {
-    await instance.register(websocketPlugin);
     instance.get("/ws-browser", { websocket: true }, (socket, request) => {
       if (options.authRequired) {
         const token = (request.query as { token?: string }).token;
@@ -4280,7 +4294,6 @@ export function createServer(
   // disturb the screencast/picker session.
   if (options.mode === "remote") {
     void app.register(async (instance) => {
-      await instance.register(websocketPlugin);
       instance.get<{ Params: { browserId: string } }>(
         "/ws-devtools/:browserId",
         { websocket: true },
