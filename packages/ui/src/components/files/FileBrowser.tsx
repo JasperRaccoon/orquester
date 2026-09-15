@@ -28,6 +28,7 @@ import {
   ResizeHandle,
   type ContextMenuItem
 } from "../ui";
+import { UploadProgressBar } from "../ui/upload-progress";
 import { FilePreview } from "./FilePreview";
 import { SearchPanel } from "./SearchPanel";
 import { useApi } from "../../context/orquester-context";
@@ -553,7 +554,11 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ 
           </IconButton>
         </div>
 
-        {upload.status && (
+        {upload.status?.progress ? (
+          <div className="border-b border-neutral-800 px-3 py-2">
+            <UploadProgressBar progress={upload.status.progress} />
+          </div>
+        ) : upload.status ? (
           <p
             className={cn(
               "border-b border-neutral-800 px-3 py-1 text-[11px]",
@@ -562,7 +567,7 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ 
           >
             {upload.status.text}
           </p>
-        )}
+        ) : null}
 
         {/* Search / quick-open above the tree. When a query is active it grows to
             fill the pane (its results scroll) and the tree below is hidden. */}

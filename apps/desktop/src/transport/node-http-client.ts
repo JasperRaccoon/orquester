@@ -6,7 +6,7 @@ import type {
   HttpClientStreamHandle,
   HttpClientStreamHandlers
 } from "@orquester/ui";
-import type { DesktopBridge } from "./unix-socket-transporter";
+import { binaryBodyToArrayBuffer, type DesktopBridge } from "./unix-socket-transporter";
 
 /**
  * HttpClient for the desktop runtime's remote (HTTP) transporter. The renderer
@@ -31,11 +31,13 @@ export class NodeHttpClient implements HttpClient {
     if (req.signal && onAbort) req.signal.addEventListener("abort", onAbort, { once: true });
 
     try {
+      // An upload's Blob can't cross IPC — hand main one ArrayBuffer instead.
+      const body = req.body === undefined || typeof req.body === "string" ? req.body : await binaryBodyToArrayBuffer(req.body);
       const response = await this.bridge.httpRequest({
         url: req.url,
         method: req.method,
         headers: req.headers,
-        body: req.body,
+        body,
         requestId
       });
 

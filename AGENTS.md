@@ -323,6 +323,23 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
   socket). Because it rides `/input`'s trust it gets two bounds `/input` can't have — ≤
   `MAX_INITIAL_COMMAND` (4096) chars and **no control bytes** — so nobody can smuggle an escape
   sequence into a tab the user never saw. A 400 `INVALID_INITIAL_COMMAND` otherwise.
+- **Uploads are raw binary streams, never base64 JSON.** `POST /api/fs/upload` and
+  `POST /api/sessions/:id/upload` take the file bytes as an `application/octet-stream` body with
+  the metadata (`destDir`/`relativePath`/`onConflict`, `name`/`type`) in the query string. The daemon
+  (`apps/daemon/src/upload-stream.ts`) pipes the body to a temp file beside the destination and
+  renames it into place, so memory stays flat and the shared `MAX_UPLOAD_BYTES` (500 MiB, in
+  `@orquester/api` — the clients skip bigger files before sending) is a disk/UX guard that can be
+  raised freely. Don't go back to base64-in-JSON: Fastify buffers a JSON body into one V8 string,
+  capped at ~512 MiB, and the browser hits the same wall building the data URL — that path topped out
+  near 380 MB. Fastify's `bodyLimit` does not apply to a stream parser, so the cap is enforced twice
+  (a declared `Content-Length` above it is refused before a byte is read; `receiveUpload` counts what
+  arrives) and every refusal that leaves the body unread answers with `Connection: close` so Node
+  shuts the socket instead of draining a 500 MB body. The octet-stream parser is registered on an
+  encapsulated scope per route — every other route still answers 415 to a binary body. Conflicts are
+  decided after the body is received, so `{conflict:true}` is always a reply to a completed request.
+  Clients hand a `File`/`Blob` straight to `uploadFsEntry`/`uploadSessionFile` (the browser streams
+  it from disk); the desktop bridge is the one place a file is read into memory, because Electron's
+  IPC clones ArrayBuffers but not Blobs.
 - **Resume refuses; it never silently degrades.** `resumeConversationId` is checked twice before
   launch: `resumeLaunchArgs` (`sessions.ts`) drops anything outside `/^[\w.][\w.\-/]*$/` or
   containing a `..` segment (the leading char excludes `-`, so an id can never arrive as a flag),

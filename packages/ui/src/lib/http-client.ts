@@ -6,11 +6,16 @@
  *  - desktop: a custom Node/Electron HTTP client can implement the same shape.
  */
 
+import type { BinaryBody } from "./transporter";
+
 export interface HttpClientRequest {
   url: string;
   method: string;
   headers?: Record<string, string>;
-  body?: string;
+  /** A string is JSON; a {@link BinaryBody} is an upload's raw bytes (Content-Type already set by the transporter). */
+  body?: string | BinaryBody;
+  /** See TransportRequest.onUploadProgress — only meaningful with a binary body. */
+  onUploadProgress?: (sent: number, total: number) => void;
   signal?: AbortSignal;
 }
 
@@ -60,6 +65,60 @@ export interface HttpClient {
   stream?(req: HttpClientRequest, handlers: HttpClientStreamHandlers): HttpClientStreamHandle;
 }
 
+/**
+ * Binary upload via XMLHttpRequest — the only browser API that reports upload
+ * progress. Mirrors the fetch path's contract: resolves with the response for
+ * any HTTP status (the caller maps non-2xx), rejects on a network failure, and
+ * honours `signal` by aborting the request (rejecting with its reason).
+ */
+function sendWithUploadProgress(
+  req: HttpClientRequest,
+  body: BinaryBody,
+  onProgress: (sent: number, total: number) => void
+): Promise<HttpClientResponse> {
+  return new Promise((resolve, reject) => {
+    if (req.signal?.aborted) {
+      reject(req.signal.reason ?? new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const xhr = new XMLHttpRequest();
+    xhr.open(req.method, req.url);
+    for (const [key, value] of Object.entries(req.headers ?? {})) {
+      xhr.setRequestHeader(key, value);
+    }
+    xhr.responseType = "text";
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) {
+        onProgress(event.loaded, event.total);
+      }
+    };
+    const onAbort = () => xhr.abort();
+    req.signal?.addEventListener("abort", onAbort, { once: true });
+    const settle = () => req.signal?.removeEventListener("abort", onAbort);
+    xhr.onload = () => {
+      settle();
+      const headers: Record<string, string> = {};
+      for (const line of xhr.getAllResponseHeaders().split("\r\n")) {
+        const colon = line.indexOf(":");
+        if (colon > 0) {
+          headers[line.slice(0, colon).trim().toLowerCase()] = line.slice(colon + 1).trim();
+        }
+      }
+      const text = xhr.responseText;
+      resolve({ status: xhr.status, ok: xhr.status >= 200 && xhr.status < 300, headers, text: () => Promise.resolve(text) });
+    };
+    xhr.onerror = () => {
+      settle();
+      reject(new TypeError("Failed to fetch"));
+    };
+    xhr.onabort = () => {
+      settle();
+      reject(req.signal?.reason ?? new DOMException("Aborted", "AbortError"));
+    };
+    xhr.send(body);
+  });
+}
+
 /** HttpClient backed by the platform `fetch`. Used by the web runtime. */
 export class FetchHttpClient implements HttpClient {
   private readonly fetchImpl: typeof fetch;
@@ -71,6 +130,12 @@ export class FetchHttpClient implements HttpClient {
   }
 
   async send(req: HttpClientRequest): Promise<HttpClientResponse> {
+    // `fetch` cannot observe upload progress, so a binary body whose caller
+    // wants it goes through XMLHttpRequest instead (same headers, same result
+    // shape). Everything else keeps the fetch path untouched.
+    if (req.onUploadProgress && req.body !== undefined && typeof req.body !== "string") {
+      return sendWithUploadProgress(req, req.body, req.onUploadProgress);
+    }
     const doFetch = this.fetchImpl;
     const response = await doFetch(req.url, {
       method: req.method,

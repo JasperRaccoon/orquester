@@ -390,23 +390,28 @@ export interface FsWriteRequest {
 }
 
 /**
- * Largest single file (decoded bytes) accepted by `POST /api/fs/upload` and
+ * Largest single file accepted by `POST /api/fs/upload` and
  * `POST /api/sessions/:id/upload`. Shared so the clients' pre-flight skip and the
- * daemon's 413 agree. Both routes carry the file as base64 inside a JSON body,
- * so the daemon sizes its route `bodyLimit` from this (+33% inflation + JSON
- * overhead). NOTE: a JSON body is buffered into ONE V8 string before parsing,
- * and Node's max string length is ~512 MiB — so this cap cannot exceed ~380 MiB
- * without moving the routes off base64/JSON.
+ * daemon's 413 agree. Both routes take the file as a RAW
+ * `application/octet-stream` body (metadata in the query string) that the daemon
+ * streams to disk, so this is a disk-space/UX guard, not a runtime limit — it
+ * can be raised freely. (It must NOT go back to base64-in-JSON: that buffers
+ * the body into one V8 string, capped at ~512 MiB, on both ends.)
  */
-export const MAX_UPLOAD_BYTES = 250 * 1024 * 1024;
+export const MAX_UPLOAD_BYTES = 500 * 1024 * 1024;
 
+/** What a client may hand an upload method as the file bytes. */
+export type UploadData = Blob | ArrayBuffer | Uint8Array<ArrayBuffer>;
+
+/**
+ * Query parameters of `POST /api/fs/upload`. The request body is the raw file
+ * bytes (`Content-Type: application/octet-stream`).
+ */
 export interface FsUploadRequest {
   /** Absolute directory under fsRoot the upload lands in. */
   destDir: string;
   /** Path within the upload, POSIX-separated, e.g. "folder 1/folder 2/file_c.txt". */
   relativePath: string;
-  /** base64-encoded file bytes. */
-  dataBase64: string;
   /** Conflict policy when the target already exists. Default "error". */
   onConflict?: "error" | "overwrite" | "rename";
 }
@@ -1246,14 +1251,16 @@ export interface SessionResizeRequest {
   rows: number;
 }
 
-/** Body for `POST /api/sessions/:id/upload` — a file dropped/pasted onto a terminal. */
+/**
+ * Query parameters of `POST /api/sessions/:id/upload` — a file dropped/pasted
+ * onto a terminal. The request body is the raw file bytes
+ * (`Content-Type: application/octet-stream`).
+ */
 export interface SessionUploadRequest {
   /** Original filename (may be empty for clipboard images). */
   name: string;
   /** MIME type if known (e.g. "image/png"). */
   type?: string;
-  /** Base64-encoded file bytes. */
-  dataBase64: string;
 }
 
 export interface SessionUploadResponse {
@@ -1595,12 +1602,16 @@ export class HttpOrquesterApiClient implements OrquesterApi {
     });
   }
 
-  uploadSessionFile(id: string, body: SessionUploadRequest): Promise<SessionUploadResponse> {
-    return this.post(`/api/sessions/${encodeURIComponent(id)}/upload`, body);
+  uploadSessionFile(id: string, meta: SessionUploadRequest, data: UploadData): Promise<SessionUploadResponse> {
+    return this.postBytes(`/api/sessions/${encodeURIComponent(id)}/upload`, { name: meta.name, type: meta.type }, data);
   }
 
-  uploadFsEntry(body: FsUploadRequest): Promise<FsUploadResponse> {
-    return this.post("/api/fs/upload", body);
+  uploadFsEntry(meta: FsUploadRequest, data: UploadData): Promise<FsUploadResponse> {
+    return this.postBytes(
+      "/api/fs/upload",
+      { destDir: meta.destDir, relativePath: meta.relativePath, onConflict: meta.onConflict },
+      data
+    );
   }
 
   getFsCapabilities(): Promise<FsCapabilitiesResponse> {
@@ -1775,6 +1786,32 @@ export class HttpOrquesterApiClient implements OrquesterApi {
     // response.json() would throw. Void-returning callers get undefined.
     if (response.status === 204) {
       return undefined as T;
+    }
+
+    return response.json() as Promise<T>;
+  }
+
+  /**
+   * Raw-body POST for the upload routes: `data` goes on the wire as-is (a Blob
+   * streams from disk in a browser; nothing is base64'd) with the metadata as
+   * query parameters.
+   */
+  private async postBytes<T>(path: string, query: Record<string, string | undefined>, data: UploadData): Promise<T> {
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(query)) {
+      if (value !== undefined) {
+        params.set(key, value);
+      }
+    }
+    const qs = params.toString();
+    const response = await this.fetchImpl(`${this.baseUrl}${path}${qs ? `?${qs}` : ""}`, {
+      method: "POST",
+      headers: { ...this.authHeaders(), "Content-Type": "application/octet-stream" },
+      body: data
+    });
+
+    if (!response.ok) {
+      throw new Error(`Orquester API request failed: ${response.status} ${response.statusText}`);
     }
 
     return response.json() as Promise<T>;

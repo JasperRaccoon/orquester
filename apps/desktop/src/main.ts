@@ -5,11 +5,18 @@ import http from "node:http";
 import https from "node:https";
 import path from "node:path";
 
+/**
+ * A bridged request body: JSON as a string, or an upload's raw bytes as the
+ * ArrayBuffer the renderer cloned over IPC (Electron may deliver it as a
+ * Uint8Array on the main side — both are accepted).
+ */
+type BridgeBody = string | ArrayBuffer | Uint8Array;
+
 interface DaemonRequest {
   method?: string;
   path?: string;
   headers?: http.OutgoingHttpHeaders;
-  body?: string | Buffer;
+  body?: BridgeBody;
   // Present when the renderer wants the request to be cancellable (see unaryRequests).
   requestId?: string;
 }
@@ -271,6 +278,32 @@ function abortUnaryRequest(event: IpcMainEvent, requestId: string): void {
   }
 }
 
+/** Wire form of a bridged body — a binary body is wrapped without copying. */
+function bodyToWire(body: BridgeBody): string | Buffer {
+  if (typeof body === "string") return body;
+  return ArrayBuffer.isView(body) ? Buffer.from(body.buffer, body.byteOffset, body.byteLength) : Buffer.from(body);
+}
+
+/**
+ * A binary body is sent with an explicit Content-Length (JSON keeps chunked
+ * encoding as before): the daemon refuses an over-cap upload from the header
+ * alone, before reading a single byte of it.
+ */
+function headersForBody(headers: http.OutgoingHttpHeaders | undefined, body: BridgeBody | undefined): http.OutgoingHttpHeaders {
+  const base = headers || {};
+  if (body === undefined || typeof body === "string") return base;
+  return { ...base, "content-length": String(body.byteLength) };
+}
+
+/** Write a bridged body (if any) and finish the request. */
+function endWithBody(req: http.ClientRequest, body: BridgeBody | undefined): void {
+  if (body !== undefined) {
+    const wire = bodyToWire(body);
+    if (wire.length > 0) req.write(wire);
+  }
+  req.end();
+}
+
 /** HTTP request to the daemon over its unix socket (the renderer's transport). */
 function requestOverSocket({ method, path: requestPath, headers, body, requestId }: DaemonRequest, senderId?: number): Promise<DaemonResponse> {
   return new Promise((resolve, reject) => {
@@ -280,7 +313,7 @@ function requestOverSocket({ method, path: requestPath, headers, body, requestId
     }
 
     const req = http.request(
-      { socketPath: daemonSocketPath, path: requestPath || "/", method: method || "GET", headers: headers || {} },
+      { socketPath: daemonSocketPath, path: requestPath || "/", method: method || "GET", headers: headersForBody(headers, body) },
       (res) => {
         const chunks: Buffer[] = [];
         res.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -292,10 +325,7 @@ function requestOverSocket({ method, path: requestPath, headers, body, requestId
     );
     trackUnaryRequest(req, requestId, senderId);
     req.on("error", reject);
-    if (body) {
-      req.write(body);
-    }
-    req.end();
+    endWithBody(req, body);
   });
 }
 
@@ -318,7 +348,7 @@ function requestBytesOverSocket({ method, path: requestPath, headers, body, requ
       return;
     }
     const req = http.request(
-      { socketPath: daemonSocketPath, path: requestPath || "/", method: method || "GET", headers: headers || {} },
+      { socketPath: daemonSocketPath, path: requestPath || "/", method: method || "GET", headers: headersForBody(headers, body) },
       (res) => {
         const chunks: Buffer[] = [];
         res.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -330,8 +360,7 @@ function requestBytesOverSocket({ method, path: requestPath, headers, body, requ
     );
     trackUnaryRequest(req, requestId, senderId);
     req.on("error", reject);
-    if (body) req.write(body);
-    req.end();
+    endWithBody(req, body);
   });
 }
 
@@ -382,7 +411,7 @@ interface RemoteHttpRequest {
   url: string;
   method?: string;
   headers?: http.OutgoingHttpHeaders;
-  body?: string;
+  body?: BridgeBody;
   // See DaemonRequest.requestId.
   requestId?: string;
 }
@@ -404,7 +433,7 @@ function requestOverHttp({ url, method, headers, body, requestId }: RemoteHttpRe
 
     const req = httpModuleFor(target).request(
       target,
-      { method: method || "GET", headers: headers || {} },
+      { method: method || "GET", headers: headersForBody(headers, body) },
       (res) => {
         const chunks: Buffer[] = [];
         res.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -416,10 +445,7 @@ function requestOverHttp({ url, method, headers, body, requestId }: RemoteHttpRe
     );
     trackUnaryRequest(req, requestId, senderId);
     req.on("error", reject);
-    if (body) {
-      req.write(body);
-    }
-    req.end();
+    endWithBody(req, body);
   });
 }
 
@@ -433,7 +459,7 @@ function requestBytesOverHttp({ url, method, headers, body, requestId }: RemoteH
       reject(error instanceof Error ? error : new Error(String(error)));
       return;
     }
-    const req = httpModuleFor(target).request(target, { method: method || "GET", headers: headers || {} }, (res) => {
+    const req = httpModuleFor(target).request(target, { method: method || "GET", headers: headersForBody(headers, body) }, (res) => {
       const chunks: Buffer[] = [];
       res.on("data", (chunk: Buffer) => chunks.push(chunk));
       res.on("end", () => {
@@ -443,8 +469,7 @@ function requestBytesOverHttp({ url, method, headers, body, requestId }: RemoteH
     });
     trackUnaryRequest(req, requestId, senderId);
     req.on("error", reject);
-    if (body) req.write(body);
-    req.end();
+    endWithBody(req, body);
   });
 }
 

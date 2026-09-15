@@ -83,7 +83,7 @@ import type {
   UsageWindow,
   WorkspaceSummary
 } from "@orquester/api";
-import { BROWSER_FRAME_TYPE_JPEG, MAX_INITIAL_COMMAND, MAX_UPLOAD_BYTES, SYSTEM_ACCOUNT_ID } from "@orquester/api";
+import { BROWSER_FRAME_TYPE_JPEG, MAX_INITIAL_COMMAND, SYSTEM_ACCOUNT_ID } from "@orquester/api";
 import { isBinOnPath, RegistryService } from "./registry";
 import { BrowserError, BrowserManager } from "./browsers";
 import { redactUrlTokens, sanitizeDevtoolsPath } from "./devtools.js";
@@ -119,6 +119,15 @@ import { TerminalControl } from "./mcp/terminal-control.ts";
 import { TodoTools } from "./mcp/todo-tools.ts";
 import { FsTools } from "./mcp/fs-tools.ts";
 import { registerMcp } from "./mcp/server.ts";
+import {
+  UploadTooLargeError,
+  acceptRawBody,
+  declaredLengthExceedsCap,
+  discardUpload,
+  receiveUpload,
+  refuseUpload,
+  uploadTempPath
+} from "./upload-stream.ts";
 import {
   type AppConfig,
   type ClientConfig,
@@ -192,17 +201,6 @@ import bcrypt from "bcryptjs";
 
 const daemonId = randomUUID();
 const packageVersion = "0.0.0";
-
-/**
- * Fastify `bodyLimit` for the two file-upload routes. The decoded cap is the
- * shared `MAX_UPLOAD_BYTES` (@orquester/api, enforced post-decode in each
- * handler); the wire body is that file as base64 (+33%) inside a small JSON
- * envelope, so the limit is the exact base64 length of the cap plus 1 MiB of
- * headroom for the envelope — a payload over it is rejected by Fastify with 413
- * before we ever decode it.
- * See docs/superpowers/specs/2026-06-22-terminal-file-drop-design.md.
- */
-const UPLOAD_BODY_LIMIT = Math.ceil(MAX_UPLOAD_BYTES / 3) * 4 + 1024 * 1024;
 
 /**
  * Hard ceiling on a single /api/fs/raw read: the in-memory + in-app download
@@ -2858,104 +2856,117 @@ export function createServer(
   });
 
   // Upload one file into the project tree (a folder is many requests from the
-  // client). Sibling of /api/fs/create: same fsRoot sandbox + error mapping,
-  // plus the session-upload route's base64/bodyLimit/ENOSPC handling. Writes
-  // with `wx` by default so an upload never silently clobbers — a pre-existing
-  // target comes back as { conflict:true } (200, NOT an error) so the client
-  // can prompt; "overwrite"/"rename" act only on an explicit user choice. The
-  // client supplies destDir + relativePath, but the joined final path is
-  // re-sanitized and assertInsideFsRoot'd, so nothing escapes fsRoot.
-  app.post<{ Body: FsUploadRequest }>(
-    "/api/fs/upload",
-    { bodyLimit: UPLOAD_BODY_LIMIT },
-    async (request, reply): Promise<FsUploadResponse | void> => {
-      const body = (request.body ?? {}) as Partial<FsUploadRequest>;
-      if (!body.destDir || !body.relativePath || typeof body.dataBase64 !== "string") {
-        return reply
-          .code(400)
-          .send({ code: "INVALID_REQUEST", message: "destDir, relativePath and dataBase64 required." });
-      }
-      // Sanitize the relative path: split on either separator, drop empties,
-      // reject any "."/".." segment. assertInsideFsRoot below is authoritative;
-      // this is defense in depth + a clean 400 for obvious garbage.
-      const segments = body.relativePath.split(/[\\/]+/).filter((s) => s.length > 0);
-      if (segments.length === 0 || segments.some((s) => s === "." || s === "..")) {
-        return reply.code(400).send({ code: "INVALID_REQUEST", message: "relativePath is invalid." });
-      }
-      const onConflict = body.onConflict ?? "error";
-
-      const buffer = Buffer.from(body.dataBase64, "base64");
-      if (buffer.length > MAX_UPLOAD_BYTES) {
-        return reply.code(413).send({
-          code: "UPLOAD_TOO_LARGE",
-          message: `File exceeds the ${Math.floor(MAX_UPLOAD_BYTES / (1024 * 1024))} MB upload limit.`
-        });
-      }
-      // Buffer.from(…, "base64") silently drops invalid chars → empty buffer.
-      if (buffer.length === 0) {
-        return reply.code(400).send({ code: "INVALID_REQUEST", message: "dataBase64 is not valid base64." });
-      }
-
-      const leaf = segments[segments.length - 1];
-      try {
-        const safeDir = await assertInsideFsRoot(resolved.fsRoot, body.destDir);
-        const target = await assertInsideFsRoot(resolved.fsRoot, join(safeDir, ...segments));
-
-        // Create the parent chain. If a path segment is already a FILE, mkdir
-        // fails ENOTDIR/EEXIST — a file/dir type clash, surfaced as a conflict
-        // the client resolves (Skip / Keep both), not a 500. Other mkdir errors
-        // (ENOSPC, EACCES) rethrow to the outer catch.
-        try {
-          await mkdir(dirname(target), { recursive: true });
-        } catch (error) {
-          const code = (error as NodeJS.ErrnoException)?.code;
-          if (code === "ENOTDIR" || code === "EEXIST") {
-            return { path: "", name: leaf, size: 0, conflict: true, conflictKind: "file" };
-          }
-          throw error;
+  // client). Sibling of /api/fs/create: same fsRoot sandbox + error mapping.
+  // The file arrives as a RAW application/octet-stream body with the metadata
+  // in the query string; it is streamed to a temp file beside its destination
+  // and renamed into place, so memory stays flat whatever the size and the
+  // shared MAX_UPLOAD_BYTES cap is enforced by receiveUpload rather than a
+  // bodyLimit (see upload-stream.ts). Conflicts are decided AFTER the body has
+  // been received: a pre-existing target comes back as { conflict:true } (200,
+  // NOT an error) in reply to a completed request, so the client can prompt;
+  // "overwrite"/"rename" act only on an explicit user choice. The client
+  // supplies destDir + relativePath, but the joined final path is re-sanitized
+  // and assertInsideFsRoot'd, so nothing escapes fsRoot.
+  app.register(async (scope) => {
+    acceptRawBody(scope);
+    scope.post<{ Querystring: Partial<FsUploadRequest> }>(
+      "/api/fs/upload",
+      async (request, reply): Promise<FsUploadResponse | void> => {
+        const { destDir, relativePath, onConflict = "error" } = request.query;
+        if (!destDir || !relativePath) {
+          return refuseUpload(reply, 400, "INVALID_REQUEST", "destDir and relativePath required.");
         }
+        if (onConflict !== "error" && onConflict !== "overwrite" && onConflict !== "rename") {
+          return refuseUpload(reply, 400, "INVALID_REQUEST", "onConflict must be error, overwrite or rename.");
+        }
+        // Sanitize the relative path: split on either separator, drop empties,
+        // reject any "."/".." segment. assertInsideFsRoot below is authoritative;
+        // this is defense in depth + a clean 400 for obvious garbage.
+        const segments = relativePath.split(/[\\/]+/).filter((s) => s.length > 0);
+        if (segments.length === 0 || segments.some((s) => s === "." || s === "..")) {
+          return refuseUpload(reply, 400, "INVALID_REQUEST", "relativePath is invalid.");
+        }
+        if (declaredLengthExceedsCap(request.headers)) {
+          return refuseUpload(reply, 413, "UPLOAD_TOO_LARGE", new UploadTooLargeError().message);
+        }
+        const leaf = segments[segments.length - 1];
+        const fileConflict: FsUploadResponse = { path: "", name: leaf, size: 0, conflict: true, conflictKind: "file" };
 
-        if (onConflict === "error") {
+        let tmp: string | undefined;
+        try {
+          const safeDir = await assertInsideFsRoot(resolved.fsRoot, destDir);
+          const target = await assertInsideFsRoot(resolved.fsRoot, join(safeDir, ...segments));
+
+          // The temp file lives in the destination dir (same filesystem as the
+          // target, so the final rename is atomic). Creating it here — and the
+          // relativePath's parent chain below — can hit a path segment that is
+          // already a FILE: mkdir fails ENOTDIR/EEXIST, a file/dir type clash
+          // surfaced as a conflict the client resolves (Skip / Keep both), not a
+          // 500. Other mkdir errors (ENOSPC, EACCES) rethrow to the outer catch.
           try {
-            await writeFile(target, buffer, { flag: "wx" });
+            await mkdir(safeDir, { recursive: true });
           } catch (error) {
-            if ((error as NodeJS.ErrnoException)?.code === "EEXIST") {
-              const existing = await stat(target).catch(() => null);
-              return {
-                path: "",
-                name: leaf,
-                size: 0,
-                conflict: true,
-                conflictKind: existing?.isDirectory() ? "dir" : "file"
-              };
+            const code = (error as NodeJS.ErrnoException)?.code;
+            if (code === "ENOTDIR" || code === "EEXIST") {
+              reply.header("connection", "close"); // body unread — see refuseUpload
+              return fileConflict;
             }
             throw error;
           }
-          return { path: target, name: leaf, size: buffer.length };
-        }
+          tmp = uploadTempPath(safeDir);
+          const size = await receiveUpload(request.raw, tmp);
 
-        if (onConflict === "rename") {
-          const renamed = await nextAvailableName(target);
-          await writeFile(renamed, buffer, { flag: "wx" });
-          return { path: renamed, name: basename(renamed), size: buffer.length };
-        }
+          try {
+            await mkdir(dirname(target), { recursive: true });
+          } catch (error) {
+            const code = (error as NodeJS.ErrnoException)?.code;
+            if (code === "ENOTDIR" || code === "EEXIST") {
+              await discardUpload(tmp);
+              return fileConflict;
+            }
+            throw error;
+          }
 
-        // "overwrite" — replace. EISDIR if a directory is there (the client
-        // never offers Replace for a dir clash) → mapped to FS_ERROR below.
-        await writeFile(target, buffer);
-        return { path: target, name: leaf, size: buffer.length };
-      } catch (error) {
-        if (error instanceof FsSandboxError) {
-          return reply.code(403).send({ code: "FS_FORBIDDEN", message: error.message });
+          if (onConflict === "error") {
+            const existing = await stat(target).catch(() => null);
+            if (existing) {
+              await discardUpload(tmp);
+              return { ...fileConflict, conflictKind: existing.isDirectory() ? "dir" : "file" };
+            }
+            await rename(tmp, target);
+            return { path: target, name: leaf, size };
+          }
+
+          if (onConflict === "rename") {
+            const renamed = await nextAvailableName(target);
+            await rename(tmp, renamed);
+            return { path: renamed, name: basename(renamed), size };
+          }
+
+          // "overwrite" — rename replaces an existing file atomically. EISDIR if
+          // a directory is there (the client never offers Replace for a dir
+          // clash) → mapped to FS_ERROR below.
+          await rename(tmp, target);
+          return { path: target, name: leaf, size };
+        } catch (error) {
+          if (tmp) {
+            await discardUpload(tmp);
+          }
+          if (error instanceof FsSandboxError) {
+            return refuseUpload(reply, 403, "FS_FORBIDDEN", error.message);
+          }
+          if (error instanceof UploadTooLargeError) {
+            return refuseUpload(reply, 413, "UPLOAD_TOO_LARGE", error.message);
+          }
+          const code = (error as NodeJS.ErrnoException)?.code === "ENOSPC" ? 507 : 400;
+          return reply.code(code).send({
+            code: "FS_ERROR",
+            message: error instanceof Error ? error.message : "Cannot store the uploaded file."
+          });
         }
-        const code = (error as NodeJS.ErrnoException)?.code === "ENOSPC" ? 507 : 400;
-        return reply.code(code).send({
-          code: "FS_ERROR",
-          message: error instanceof Error ? error.message : "Cannot store the uploaded file."
-        });
       }
-    }
-  );
+    );
+  });
 
   // Delete a file or directory from the project tree. Sibling of /api/fs/create:
   // same fsRoot sandbox + error mapping. `recursive` removes a non-empty dir;
@@ -3782,54 +3793,57 @@ export function createServer(
   // The client supplies only bytes + a name hint; the daemon fully controls the
   // directory and final name (random-prefixed, sanitized), so there is no
   // path-traversal surface. Inherits the bearer-auth hook (it lives under /api).
-  // The route-level bodyLimit overrides the 256 KB global default so a base64
-  // MAX_UPLOAD_BYTES file fits; MAX_UPLOAD_BYTES is the post-decode ceiling.
-  app.post<{ Params: { id: string }; Body: SessionUploadRequest }>(
-    "/api/sessions/:id/upload",
-    { bodyLimit: UPLOAD_BODY_LIMIT },
-    async (request, reply): Promise<SessionUploadResponse | void> => {
-      const { id } = request.params;
-      if (!sessions.get(id)) {
-        return reply.code(404).send({ code: "SESSION_NOT_FOUND", message: "Session does not exist." });
-      }
-      const body = (request.body ?? {}) as Partial<SessionUploadRequest>;
-      if (typeof body.dataBase64 !== "string" || body.dataBase64.length === 0) {
-        return reply.code(400).send({ code: "INVALID_REQUEST", message: "dataBase64 required." });
-      }
-      const buffer = Buffer.from(body.dataBase64, "base64");
-      if (buffer.length > MAX_UPLOAD_BYTES) {
-        return reply.code(413).send({
-          code: "UPLOAD_TOO_LARGE",
-          message: `File exceeds the ${Math.floor(MAX_UPLOAD_BYTES / (1024 * 1024))} MB upload limit.`
-        });
-      }
-      // Buffer.from(…, "base64") silently drops invalid chars, so garbage input
-      // decodes to an empty buffer. A non-empty payload that yields zero bytes is
-      // malformed — reject it rather than writing an empty file.
-      if (buffer.length === 0) {
-        return reply.code(400).send({ code: "INVALID_REQUEST", message: "dataBase64 is not valid base64." });
-      }
+  // The bytes arrive as a RAW application/octet-stream body (name/type in the
+  // query string) streamed to a temp file and renamed into place; the shared
+  // MAX_UPLOAD_BYTES cap is enforced by receiveUpload (see upload-stream.ts).
+  app.register(async (scope) => {
+    acceptRawBody(scope);
+    scope.post<{ Params: { id: string }; Querystring: Partial<SessionUploadRequest> }>(
+      "/api/sessions/:id/upload",
+      async (request, reply): Promise<SessionUploadResponse | void> => {
+        const { id } = request.params;
+        if (!sessions.get(id)) {
+          return refuseUpload(reply, 404, "SESSION_NOT_FOUND", "Session does not exist.");
+        }
+        if (declaredLengthExceedsCap(request.headers)) {
+          return refuseUpload(reply, 413, "UPLOAD_TOO_LARGE", new UploadTooLargeError().message);
+        }
 
-      const name = uploadFileName(body.name ?? "", body.type);
-      const dir = sessionUploadsDir(resolved.daemonDir, id);
-      const path = join(dir, name);
-      // Mirror the accounts.json / keys conventions: 0700 dir, 0600 file. A
-      // filesystem failure (disk full, permission denied, …) must surface as a
-      // clean error, not an unhandled rejection: map ENOSPC to 507, else 500.
-      try {
-        await mkdir(dir, { recursive: true, mode: 0o700 });
-        await writeFile(path, buffer, { mode: 0o600 });
-      } catch (error) {
-        const code = (error as NodeJS.ErrnoException)?.code === "ENOSPC" ? 507 : 500;
-        return reply.code(code).send({
-          code: "UPLOAD_FAILED",
-          message: error instanceof Error ? error.message : "Cannot store the uploaded file."
-        });
+        const name = uploadFileName(request.query.name ?? "", request.query.type);
+        const dir = sessionUploadsDir(resolved.daemonDir, id);
+        const path = join(dir, name);
+        // Mirror the accounts.json / keys conventions: 0700 dir, 0600 file. A
+        // filesystem failure (disk full, permission denied, …) must surface as a
+        // clean error, not an unhandled rejection: map ENOSPC to 507, else 500.
+        let tmp: string | undefined;
+        try {
+          await mkdir(dir, { recursive: true, mode: 0o700 });
+          tmp = uploadTempPath(dir);
+          const size = await receiveUpload(request.raw, tmp, 0o600);
+          // The clients skip 0-byte files; an empty body here is malformed —
+          // reject it rather than handing the agent an empty file.
+          if (size === 0) {
+            await discardUpload(tmp);
+            return reply.code(400).send({ code: "INVALID_REQUEST", message: "Empty upload." });
+          }
+          await rename(tmp, path);
+          return { path, name, size };
+        } catch (error) {
+          if (tmp) {
+            await discardUpload(tmp);
+          }
+          if (error instanceof UploadTooLargeError) {
+            return refuseUpload(reply, 413, "UPLOAD_TOO_LARGE", error.message);
+          }
+          const code = (error as NodeJS.ErrnoException)?.code === "ENOSPC" ? 507 : 500;
+          return reply.code(code).send({
+            code: "UPLOAD_FAILED",
+            message: error instanceof Error ? error.message : "Cannot store the uploaded file."
+          });
+        }
       }
-
-      return { path, name, size: buffer.length };
-    }
-  );
+    );
+  });
 
   app.post<{ Params: { id: string }; Body: SessionResizeRequest }>(
     "/api/sessions/:id/resize",

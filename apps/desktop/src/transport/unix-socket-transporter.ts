@@ -1,5 +1,6 @@
 import {
   buildQueryString,
+  type BinaryBody,
   type StreamHandle,
   type StreamHandlers,
   type Transporter,
@@ -7,12 +8,31 @@ import {
   type TransportResponse
 } from "@orquester/ui";
 
+/**
+ * Bytes for a request body crossing the IPC bridge. JSON rides as a string; an
+ * upload is handed over as one ArrayBuffer — Electron's structured clone carries
+ * ArrayBuffers but not Blobs, so a File is read into memory first (the desktop
+ * pays ~2× the file size across the two processes; the web client streams it).
+ */
+export type DesktopBridgeBody = string | ArrayBuffer;
+
+/** Materialize a transport-level binary body into the one shape the bridge can clone. */
+export async function binaryBodyToArrayBuffer(body: BinaryBody): Promise<ArrayBuffer> {
+  if (body instanceof Blob) {
+    return body.arrayBuffer();
+  }
+  if (ArrayBuffer.isView(body)) {
+    return body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength) as ArrayBuffer;
+  }
+  return body;
+}
+
 /** Shape exchanged with the Electron main process over IPC for unary requests. */
 export interface DesktopBridgeRequest {
   method: string;
   path: string;
   headers?: Record<string, string>;
-  body?: string;
+  body?: DesktopBridgeBody;
   // Present only when the request is cancellable; the main process keys the
   // in-flight ClientRequest by this id so requestAbort can destroy it.
   requestId?: string;
@@ -38,7 +58,7 @@ export interface DesktopBridgeHttpRequest {
   url: string;
   method?: string;
   headers?: Record<string, string>;
-  body?: string;
+  body?: DesktopBridgeBody;
   // See DesktopBridgeRequest.requestId.
   requestId?: string;
 }
@@ -81,9 +101,12 @@ export class UnixSocketTransporter implements Transporter {
     req.signal?.throwIfAborted();
 
     const headers: Record<string, string> = { ...req.headers };
-    let body: string | undefined;
+    let body: DesktopBridgeBody | undefined;
 
-    if (req.body !== undefined) {
+    if (req.binaryBody !== undefined) {
+      headers["Content-Type"] = "application/octet-stream";
+      body = await binaryBodyToArrayBuffer(req.binaryBody);
+    } else if (req.body !== undefined) {
       headers["Content-Type"] = "application/json";
       body = JSON.stringify(req.body);
     }

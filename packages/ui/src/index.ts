@@ -19,6 +19,7 @@ export {
   type TransportRequest,
   type TransportResponse,
   type TransportMethod,
+  type BinaryBody,
   type EventHandler,
   type StreamHandle,
   type StreamHandlers,

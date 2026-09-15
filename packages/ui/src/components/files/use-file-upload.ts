@@ -1,7 +1,8 @@
 import { useCallback, useRef, useState } from "react";
 import { MAX_UPLOAD_BYTES } from "@orquester/api";
 import type { ApiClient } from "../../lib/api-client";
-import { fileToBase64, type UploadItem } from "../../lib/files";
+import type { UploadItem } from "../../lib/files";
+import { BatchProgress, type UploadProgress } from "../../lib/upload-progress";
 
 const MAX_UPLOAD_MB = Math.round(MAX_UPLOAD_BYTES / (1024 * 1024));
 const MAX_UPLOAD_FILES = 500; // big-folder confirm threshold
@@ -25,6 +26,8 @@ export interface ConflictPrompt {
 export interface UploadStatus {
   text: string;
   error?: boolean;
+  /** Present while bytes are moving — the surface renders a bar instead of text. */
+  progress?: UploadProgress;
 }
 
 export interface UseFileUpload {
@@ -127,12 +130,19 @@ export function useFileUpload(api: ApiClient, onUploaded: (destDir: string) => v
         // Pass 1 — exclusive write; collect conflicts and failures.
         const conflicts: { item: UploadItem; kind: "file" | "dir" }[] = [];
         let failed = 0;
-        let done = 0;
-        for (const item of toUpload) {
-          setStatus({ text: `Uploading ${++done}/${toUpload.length}…` });
+        const batch = new BatchProgress(
+          toUpload.map((it) => it.file.size),
+          (progress) => setStatus({ text: `Uploading ${progress.fileIndex}/${progress.fileCount}…`, progress })
+        );
+        for (const [i, item] of toUpload.entries()) {
+          batch.begin(i, item.file.name);
           try {
-            const dataBase64 = await fileToBase64(item.file);
-            const res = await api.uploadFsEntry({ destDir, relativePath: item.relativePath, dataBase64, onConflict: "error" });
+            const res = await api.uploadFsEntry(
+              { destDir, relativePath: item.relativePath, onConflict: "error" },
+              item.file,
+              batch.onBytes
+            );
+            batch.finish();
             if (res.conflict) {
               conflicts.push({ item, kind: res.conflictKind ?? "file" });
             } else {
@@ -176,9 +186,17 @@ export function useFileUpload(api: ApiClient, onUploaded: (destDir: string) => v
           }
           // A dir clash can't be replaced — coerce defensively to rename.
           const policy = choice === "replace" && c.kind !== "dir" ? "overwrite" : "rename";
+          // Pass 2 re-sends the file, so it gets its own bar (one file at a time).
+          const again = new BatchProgress([c.item.file.size], (progress) =>
+            setStatus({ text: `Resolving ${conflicts.length} conflict(s)…`, progress })
+          );
+          again.begin(0, c.item.file.name);
           try {
-            const dataBase64 = await fileToBase64(c.item.file);
-            const res = await api.uploadFsEntry({ destDir, relativePath: c.item.relativePath, dataBase64, onConflict: policy });
+            const res = await api.uploadFsEntry(
+              { destDir, relativePath: c.item.relativePath, onConflict: policy },
+              c.item.file,
+              again.onBytes
+            );
             // An intermediate path segment that is itself a FILE makes mkdir fail
             // (ENOTDIR/EEXIST) regardless of onConflict, so the daemon re-reports a
             // conflict and writes nothing. Re-sending the same path can't resolve

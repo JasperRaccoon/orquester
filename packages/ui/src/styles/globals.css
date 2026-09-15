@@ -447,3 +447,21 @@ body {
     border-radius: 9999px;
   }
 }
+
+/* Upload progress bar: a soft highlight sweeping the fill while bytes move. */
+@keyframes upload-sheen {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(400%);
+  }
+}
+.upload-sheen {
+  animation: upload-sheen 1.6s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .upload-sheen {
+    animation: none;
+  }
+}

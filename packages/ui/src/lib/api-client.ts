@@ -79,6 +79,7 @@ import type {
 import type { AppConfig, DaemonConfig, RemoteConnectionConfig } from "@orquester/config";
 import type { UiConnection } from "../types";
 import type {
+  BinaryBody,
   SessionChannel,
   StreamHandle,
   StreamHandlers,
@@ -91,6 +92,10 @@ import type { WsBrowserChannel } from "./transporters/ws-browser-channel";
 export interface ApiRequestOptions {
   query?: TransportRequest["query"];
   body?: unknown;
+  /** Raw upload bytes (see {@link TransportRequest.binaryBody}); exclusive with `body`. */
+  binaryBody?: TransportRequest["binaryBody"];
+  /** Upload progress sink for a `binaryBody` request (see {@link TransportRequest.onUploadProgress}). */
+  onUploadProgress?: TransportRequest["onUploadProgress"];
   signal?: AbortSignal;
 }
 
@@ -147,6 +152,8 @@ export class ApiClient {
       path,
       query: options.query,
       body: options.body,
+      binaryBody: options.binaryBody,
+      onUploadProgress: options.onUploadProgress,
       signal: options.signal
     });
 
@@ -514,8 +521,21 @@ export class ApiClient {
     return this.send("PUT", "/api/fs/write", { body: { path, content } });
   }
 
-  uploadFsEntry(body: FsUploadRequest): Promise<FsUploadResponse> {
-    return this.send("POST", "/api/fs/upload", { body });
+  /**
+   * Upload one file into the project tree. `data` (a dropped/picked `File`)
+   * goes on the wire as a raw octet-stream body — nothing is base64'd, so the
+   * only size limit is the daemon's MAX_UPLOAD_BYTES; `meta` rides the query.
+   */
+  uploadFsEntry(
+    meta: FsUploadRequest,
+    data: BinaryBody,
+    onProgress?: (sent: number, total: number) => void
+  ): Promise<FsUploadResponse> {
+    return this.send("POST", "/api/fs/upload", {
+      query: { destDir: meta.destDir, relativePath: meta.relativePath, onConflict: meta.onConflict },
+      binaryBody: data,
+      onUploadProgress: onProgress
+    });
   }
 
   deleteFsEntry(path: string): Promise<{ ok: true }> {
@@ -902,11 +922,20 @@ export class ApiClient {
   /**
    * Upload a dropped/pasted file to the session's daemon and get back the
    * absolute daemon-side path. Rides the normal request path (HTTP/socket
-   * bridge) with a JSON body — NOT the multiplexed `/ws` channel, which only
-   * carries sub/unsub/input/resize.
+   * bridge) as a raw octet-stream body — NOT the multiplexed `/ws` channel,
+   * which only carries sub/unsub/input/resize.
    */
-  uploadSessionFile(id: string, body: SessionUploadRequest): Promise<SessionUploadResponse> {
-    return this.send("POST", `/api/sessions/${encodeURIComponent(id)}/upload`, { body });
+  uploadSessionFile(
+    id: string,
+    meta: SessionUploadRequest,
+    data: BinaryBody,
+    onProgress?: (sent: number, total: number) => void
+  ): Promise<SessionUploadResponse> {
+    return this.send("POST", `/api/sessions/${encodeURIComponent(id)}/upload`, {
+      query: { name: meta.name, type: meta.type },
+      binaryBody: data,
+      onUploadProgress: onProgress
+    });
   }
 
   resizeSession(id: string, cols: number, rows: number): Promise<void> {

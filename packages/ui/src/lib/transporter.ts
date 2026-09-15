@@ -13,11 +13,29 @@
 
 export type TransportMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
+/**
+ * Raw bytes for an upload request. A `File`/`Blob` is preferred: the browser
+ * streams it from disk, so a 500 MB upload never sits in renderer memory.
+ */
+export type BinaryBody = Blob | ArrayBuffer | Uint8Array<ArrayBuffer>;
+
 export interface TransportRequest {
   method: TransportMethod;
   path: string;
   query?: Record<string, string | number | boolean | undefined>;
+  /** JSON payload — serialized and sent as `application/json`. */
   body?: unknown;
+  /**
+   * Raw payload — sent as `application/octet-stream`, never JSON-encoded (the
+   * upload routes; see MAX_UPLOAD_BYTES). Mutually exclusive with `body`.
+   */
+  binaryBody?: BinaryBody;
+  /**
+   * Upload progress for a `binaryBody` request, (bytesSent, bytesTotal). Web
+   * transports report it byte by byte (XMLHttpRequest); transports without
+   * upload feedback never call it, and callers must not depend on it firing.
+   */
+  onUploadProgress?: (sent: number, total: number) => void;
   headers?: Record<string, string>;
   signal?: AbortSignal;
 }

@@ -3,7 +3,9 @@ import { Crosshair, Send, X } from "lucide-react";
 import type { BrowserPickPayload } from "@orquester/api";
 import { useAppStore } from "../../store/app";
 import { formatDesignFeedback, type PickIntent } from "../../lib/design-feedback";
-import { Button, IconButton } from "../ui";
+import { base64ToBlob } from "../../lib/files";
+import { BatchProgress, type UploadProgress } from "../../lib/upload-progress";
+import { Button, IconButton, UploadProgressBar } from "../ui";
 import { cn } from "../../lib/cn";
 
 /**
@@ -38,6 +40,7 @@ export const PickComposeSheet: React.FC<{
   const [comment, setComment] = useState("");
   const [intent, setIntent] = useState<PickIntent>("fix");
   const [sending, setSending] = useState(false);
+  const [progress, setProgress] = useState<UploadProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Uploads that already succeeded for this batch, keyed by payload identity —
   // a retry after a partial failure reuses them instead of re-uploading and
@@ -52,6 +55,15 @@ export const PickComposeSheet: React.FC<{
     setError(null);
     try {
       const picks: Array<{ payload: BrowserPickPayload; screenshotPath?: string }> = [];
+      // Only the screenshots not already uploaded to this session go up.
+      const pending = payloads
+        .map((payload, i) => ({ payload, i, blob: payload.screenshotBase64 ? base64ToBlob(payload.screenshotBase64, "image/png") : null }))
+        .filter((p) => p.blob && !(uploadedRef.current.get(p.payload)?.targetId === targetId));
+      const batch = new BatchProgress(
+        pending.map((p) => p.blob!.size),
+        (next) => setProgress(next)
+      );
+      let slot = 0;
       // Sequential uploads so path numbering matches pick order.
       for (let i = 0; i < payloads.length; i++) {
         const payload = payloads[i];
@@ -60,20 +72,23 @@ export const PickComposeSheet: React.FC<{
         if (cached && cached.targetId === targetId) {
           screenshotPath = cached.path;
         } else if (payload.screenshotBase64) {
-          const uploaded = await api.uploadSessionFile(targetId, {
-            name: payloads.length === 1 ? "design-pick.png" : `design-pick-${i + 1}.png`,
-            type: "image/png",
-            dataBase64: payload.screenshotBase64
-          });
+          const name = payloads.length === 1 ? "design-pick.png" : `design-pick-${i + 1}.png`;
+          const blob = pending[slot].blob!;
+          batch.begin(slot, name);
+          const uploaded = await api.uploadSessionFile(targetId, { name, type: "image/png" }, blob, batch.onBytes);
+          batch.finish();
+          slot++;
           screenshotPath = uploaded.path;
           uploadedRef.current.set(payload, { targetId, path: uploaded.path });
         }
         picks.push({ payload, screenshotPath });
       }
+      setProgress(null);
       const markdown = formatDesignFeedback(picks, { comment, intent });
       await api.sendSessionInput(targetId, `\x1b[200~${markdown}\x1b[201~\r`);
       onClose();
     } catch {
+      setProgress(null);
       setError("Failed to send to agent");
       setSending(false);
     }
@@ -176,6 +191,11 @@ export const PickComposeSheet: React.FC<{
           <Send size={12} /> {sending ? "Sending…" : payloads.length > 1 ? `Send ${payloads.length}` : "Send"}
         </Button>
       </div>
+      {progress && (
+        <div className="px-3 pb-2">
+          <UploadProgressBar progress={progress} label="Attaching screenshots" />
+        </div>
+      )}
       {error && <div className="px-3 pb-2 text-xs text-danger">{error}</div>}
     </div>
   );

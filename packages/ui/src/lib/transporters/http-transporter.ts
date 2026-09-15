@@ -1,5 +1,6 @@
 import {
   buildQueryString,
+  type BinaryBody,
   type SessionChannel,
   type StreamHandle,
   type StreamHandlers,
@@ -46,8 +47,13 @@ export class HttpTransporter implements Transporter {
       headers.Authorization = `Bearer ${this.credential}`;
     }
 
-    let body: string | undefined;
-    if (req.body !== undefined) {
+    let body: string | BinaryBody | undefined;
+    if (req.binaryBody !== undefined) {
+      // Uploads: the bytes go as-is (fetch streams a Blob from disk); the daemon
+      // reads the metadata from the query string.
+      headers["Content-Type"] = "application/octet-stream";
+      body = req.binaryBody;
+    } else if (req.body !== undefined) {
       headers["Content-Type"] = "application/json";
       body = JSON.stringify(req.body);
     }
@@ -57,6 +63,7 @@ export class HttpTransporter implements Transporter {
       method: req.method,
       headers,
       body,
+      onUploadProgress: req.onUploadProgress,
       signal: req.signal
     });
 

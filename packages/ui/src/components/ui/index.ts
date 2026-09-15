@@ -20,3 +20,4 @@ export { BottomSheet, type BottomSheetProps } from "./sheet";
 export { AdaptiveMenu, type AdaptiveMenuProps } from "./adaptive-menu";
 export { ResizeHandle, type ResizeHandleProps } from "./resize-handle";
 export { PasswordVerify, type PasswordVerifyProps } from "./password-verify";
+export { UploadProgressBar, type UploadProgressBarProps } from "./upload-progress";

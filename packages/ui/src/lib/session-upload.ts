@@ -1,6 +1,6 @@
 import { MAX_UPLOAD_BYTES } from "@orquester/api";
 import type { ApiClient } from "./api-client";
-import { fileToBase64 } from "./files";
+import { BatchProgress, type UploadProgress } from "./upload-progress";
 
 // Largest file we'll upload from the client: the daemon's own decoded cap, so we
 // fail fast before encoding instead of round-tripping a 413.
@@ -13,7 +13,7 @@ export { MAX_UPLOAD_BYTES };
  * timers, while the desktop terminal colors both the same.
  */
 export type UploadStatus =
-  | { kind: "uploading"; text: string }
+  | { kind: "uploading"; text: string; progress: UploadProgress }
   | { kind: "skipped"; text: string } // some files were over the size cap
   | { kind: "error"; text: string }; // an upload threw
 
@@ -67,17 +67,25 @@ export async function uploadFilesToSession(
     return;
   }
 
-  onStatus({ kind: "uploading", text: `Uploading ${toUpload.length} file(s)…` });
+  const text = `Uploading ${toUpload.length} file(s)…`;
+  const batch = new BatchProgress(
+    toUpload.map((file) => file.size),
+    (progress) => onStatus({ kind: "uploading", text, progress })
+  );
   try {
     const paths: string[] = [];
     // Preserve order: upload sequentially so paths line up with the files.
-    for (const file of toUpload) {
-      const dataBase64 = await fileToBase64(file);
-      const result = await api.uploadSessionFile(sessionId, {
-        name: file.name,
-        type: file.type || undefined,
-        dataBase64
-      });
+    for (const [i, file] of toUpload.entries()) {
+      batch.begin(i, file.name);
+      // The File goes as a raw body — the browser streams it from disk, nothing
+      // is encoded or held in memory.
+      const result = await api.uploadSessionFile(
+        sessionId,
+        { name: file.name, type: file.type || undefined },
+        file,
+        batch.onBytes
+      );
+      batch.finish();
       paths.push(result.path);
     }
     // Inject every path in a single input write (no Enter — see helper).

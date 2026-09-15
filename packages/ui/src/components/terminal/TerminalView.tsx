@@ -6,6 +6,7 @@ import { useApi } from "../../context/orquester-context";
 import { useIsDesktop } from "../../hooks";
 import { useAppStore, useTerminalFontSize } from "../../store/app";
 import { uploadFilesToSession, type UploadStatus } from "../../lib/session-upload";
+import { UploadProgressBar } from "../ui/upload-progress";
 import { bracketPaste } from "../../lib/paste";
 import type { SessionSummary } from "../../types";
 import type { ViewMode } from "../../lib/view-mode";
@@ -692,12 +693,14 @@ export const TerminalView: React.FC<{
     void api.resizeSession(session.id, term.cols, term.rows);
   }, [fontSize, api, session.id]);
 
-  // Auto-clear a transient status line so it doesn't linger.
+  // Auto-clear a transient status line so it doesn't linger. An in-flight
+  // upload is never timed out: its bar is superseded by the success (null) or
+  // error the helper reports when it finishes.
   useEffect(() => {
-    if (!status) {
+    if (!status || status.kind === "uploading") {
       return;
     }
-    const timer = window.setTimeout(() => setStatus(null), status.kind === "uploading" ? 2000 : 4000);
+    const timer = window.setTimeout(() => setStatus(null), 4000);
     return () => window.clearTimeout(timer);
   }, [status]);
 
@@ -726,15 +729,15 @@ export const TerminalView: React.FC<{
           </span>
         </div>
       )}
-      {status && (
-        <div
-          className={`pointer-events-none absolute bottom-2 left-2 rounded px-2 py-1 text-xs ${
-            status.kind === "uploading" ? "bg-zinc-800/90 text-zinc-100" : "bg-red-500/90 text-white"
-          }`}
-        >
+      {status && status.kind === "uploading" ? (
+        <div className="pointer-events-none absolute bottom-2 left-2 w-80 max-w-[calc(100%-1rem)] rounded-md border border-neutral-700/80 bg-neutral-900/95 px-3 py-2 shadow-lg shadow-black/30 backdrop-blur">
+          <UploadProgressBar progress={status.progress} label="Attaching" />
+        </div>
+      ) : status ? (
+        <div className="pointer-events-none absolute bottom-2 left-2 rounded bg-red-500/90 px-2 py-1 text-xs text-white">
           {status.text}
         </div>
-      )}
+      ) : null}
     </div>
   );
 };

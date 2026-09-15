@@ -1,20 +1,16 @@
-/** Strip the `data:<mime>;base64,` prefix from a FileReader data URL. */
-export function stripDataUrlPrefix(dataUrl: string): string {
-  const comma = dataUrl.indexOf(",");
-  return comma === -1 ? dataUrl : dataUrl.slice(comma + 1);
-}
-
 /**
- * Base64-encode a file via FileReader. readAsDataURL is safe for large files;
- * btoa(String.fromCharCode(...)) overflows the call stack on big buffers.
+ * Decode a bare base64 string (no data-URL prefix) into a Blob for a raw-body
+ * upload. Uploads are never base64'd on the way UP (a `File` streams as-is);
+ * this only serves payloads the daemon already handed us encoded, e.g. the
+ * browser tab's element-pick screenshot (≤ 2 MB).
  */
-export function fileToBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(stripDataUrlPrefix(reader.result as string));
-    reader.onerror = () => reject(reader.error ?? new Error("read failed"));
-    reader.readAsDataURL(file);
-  });
+export function base64ToBlob(base64: string, type: string): Blob {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return new Blob([bytes], { type });
 }
 
 /** One file to upload, tagged with its path relative to the dropped/picked root. */

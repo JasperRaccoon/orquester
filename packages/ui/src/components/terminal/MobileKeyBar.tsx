@@ -4,6 +4,7 @@ import { useApi } from "../../context/orquester-context";
 import { useIsDesktop } from "../../hooks";
 import { useActiveTabId, useAppStore, useProjectTabs, useTerminalFontSize } from "../../store/app";
 import { uploadFilesToSession, type UploadStatus } from "../../lib/session-upload";
+import { UploadProgressBar } from "../ui/upload-progress";
 import { pasteTextForSession } from "../../lib/paste";
 import { TERMINAL_FONT_MIN, TERMINAL_FONT_MAX, TERMINAL_FONT_STEP } from "../../lib/terminal-font";
 
@@ -158,15 +159,13 @@ export const MobileKeyBar: React.FC = () => {
     // it an inset owner would leave the other cases uncovered and double-pad
     // this one.
     <div className="flex shrink-0 flex-col border-t border-neutral-800 bg-neutral-900">
-      {status && (
-        <div
-          className={`px-3 py-1 text-xs ${
-            status.kind === "uploading" ? "text-neutral-400" : "text-danger"
-          }`}
-        >
-          {status.text}
+      {status && status.kind === "uploading" ? (
+        <div className="border-b border-neutral-800 px-3 py-2">
+          <UploadProgressBar progress={status.progress} label="Attaching" />
         </div>
-      )}
+      ) : status ? (
+        <div className="px-3 py-1 text-xs text-danger">{status.text}</div>
+      ) : null}
       <div className="flex items-stretch gap-1 overflow-x-auto px-2 py-1.5">
         <button
           type="button"
