@@ -194,6 +194,7 @@ import { createReadStream, createWriteStream, existsSync, readFileSync, type Wri
 import { chmod, lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, platform as osPlatform } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { fsPathFromQuery } from "./fs-path-query.js";
 import { stat } from "node:fs/promises";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { request as httpRequest, type IncomingMessage } from "node:http";
@@ -2420,10 +2421,10 @@ export function createServer(
   );
 
   // File browser: list a directory.
-  app.get<{ Querystring: { path?: string } }>(
+  app.get<{ Querystring: { path?: string; p?: string } }>(
     "/api/fs",
     async (request, reply): Promise<FsListResponse | void> => {
-      const path = request.query.path;
+      const path = fsPathFromQuery(request.query);
       if (!path) {
         return reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
       }
@@ -2443,10 +2444,10 @@ export function createServer(
   );
 
   // File browser: recursive file listing for search / quick-open.
-  app.get<{ Querystring: { path?: string } }>(
+  app.get<{ Querystring: { path?: string; p?: string } }>(
     "/api/fs/files",
     async (request, reply): Promise<FsFilesResponse | void> => {
-      const path = request.query.path;
+      const path = fsPathFromQuery(request.query);
       if (!path) {
         return reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
       }
@@ -2477,7 +2478,7 @@ export function createServer(
   // File browser: content search across a project subtree.
   app.get<{
     Querystring: {
-      path?: string;
+      path?: string; p?: string;
       q?: string;
       caseSensitive?: string;
       wholeWord?: string;
@@ -2489,7 +2490,8 @@ export function createServer(
   }>(
     "/api/fs/search",
     async (request, reply): Promise<FsSearchResponse | void> => {
-      const { path, q } = request.query;
+      const { q } = request.query;
+      const path = fsPathFromQuery(request.query);
       if (!path || !q) {
         return reply.code(400).send({ code: "INVALID_REQUEST", message: "path and q required." });
       }
@@ -2531,10 +2533,10 @@ export function createServer(
   );
 
   // Read a file's text content (capped at 1 MB).
-  app.get<{ Querystring: { path?: string } }>(
+  app.get<{ Querystring: { path?: string; p?: string } }>(
     "/api/fs/read",
     async (request, reply): Promise<FsReadResponse | void> => {
-      const path = request.query.path;
+      const path = fsPathFromQuery(request.query);
       if (!path) {
         return reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
       }
@@ -2563,8 +2565,8 @@ export function createServer(
   // Read a file's RAW bytes (binary-safe, no decode) for the preview viewers.
   // Capped at RAW_MAX_BYTES; the client picks the real MIME and rewraps the
   // bytes in a typed Blob, so octet-stream here is both safe and sufficient.
-  app.get<{ Querystring: { path?: string } }>("/api/fs/raw", async (request, reply) => {
-    const path = request.query.path;
+  app.get<{ Querystring: { path?: string; p?: string } }>("/api/fs/raw", async (request, reply) => {
+    const path = fsPathFromQuery(request.query);
     if (!path) {
       void reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
       return;
@@ -2598,8 +2600,8 @@ export function createServer(
   });
 
   // List an archive's contents (no extraction) for the preview viewer.
-  app.get<{ Querystring: { path?: string } }>("/api/fs/archive", async (request, reply) => {
-    const path = request.query.path;
+  app.get<{ Querystring: { path?: string; p?: string } }>("/api/fs/archive", async (request, reply) => {
+    const path = fsPathFromQuery(request.query);
     if (!path) {
       void reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
       return;
@@ -2623,9 +2625,10 @@ export function createServer(
   // Windowed server-side (hyparquet random-access) — no file-size cap; sort
   // (orderBy/desc) is served from a cached row order after the first scan.
   app.get<{
-    Querystring: { path?: string; offset?: string; limit?: string; orderBy?: string; desc?: string };
+    Querystring: { path?: string; p?: string; offset?: string; limit?: string; orderBy?: string; desc?: string };
   }>("/api/fs/parquet", async (request, reply) => {
-    const { path, offset, limit, orderBy, desc } = request.query;
+    const { offset, limit, orderBy, desc } = request.query;
+    const path = fsPathFromQuery(request.query);
     if (!path) {
       void reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
       return;
@@ -2672,8 +2675,8 @@ export function createServer(
   // host tool, streamed). Distinct from /api/fs/raw, which is the 50 MB-capped,
   // in-memory inline-preview route. Auth: this route also accepts ?token= (see
   // the onRequest hook) so a native <a download> works without a header.
-  app.get<{ Querystring: { path?: string } }>("/api/fs/download", async (request, reply) => {
-    const path = request.query.path;
+  app.get<{ Querystring: { path?: string; p?: string } }>("/api/fs/download", async (request, reply) => {
+    const path = fsPathFromQuery(request.query);
     if (!path) {
       void reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
       return;

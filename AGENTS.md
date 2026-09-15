@@ -520,6 +520,18 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
   This is the **only** route that accepts the credential as `?token=` (besides `/ws`), so a
   native browser `<a download>` can authenticate; it's redacted from logs. Distinct from
   `/api/fs/raw`, the 50 MB-capped in-memory inline-preview route.
+- **fs GET routes take the path as base64url `?p=`, and the plain `?path=` still works.**
+  Browser ad blockers (uBlock, ABP, Brave Shields) filter on the raw request URL, query
+  included, so a preview/download of anything under a `banners/` dir or named `*_300x250.jpg`
+  matched EasyList and died in the browser as `ERR_BLOCKED_BY_CLIENT` (DevTools shows
+  `(blocked:other)`, 0 bytes) before reaching the daemon. Every `/api/fs/*` GET that names a
+  path (`fs`, `files`, `search`, `read`, `raw`, `archive`, `parquet`, `download`) now goes
+  through `fsPathFromQuery` (`apps/daemon/src/fs-path-query.ts`): `p` wins when present and a
+  malformed `p` is a 400 (never a fallback to `path`, never a partial decode); `path` is kept for
+  curl/scripts/older bundles. The client mirror is `fsPathQuery` in
+  `packages/ui/src/lib/fs-path-query.ts` — use it for any new fs GET rather than `{ path }`.
+  Not a security measure: the decoded path hits the same `assertInsideFsRoot`. The `DELETE
+  /api/fs` and `/api/git/*?path=` routes still send the plain form.
 - **Default endpoint is `127.0.0.1:47831`.** On the VPS it stays on loopback; Caddy (443) is the
   only public face. CORS is intentionally absent (single-origin server; desktop dodges CORS via
   Node HTTP).

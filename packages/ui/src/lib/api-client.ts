@@ -88,6 +88,7 @@ import type {
   TransportRequest
 } from "./transporter";
 import type { WsBrowserChannel } from "./transporters/ws-browser-channel";
+import { fsPathQuery } from "./fs-path-query";
 
 export interface ApiRequestOptions {
   query?: TransportRequest["query"];
@@ -380,11 +381,11 @@ export class ApiClient {
   // --- File browser --------------------------------------------------------
 
   listFiles(path: string, signal?: AbortSignal): Promise<FsListResponse> {
-    return this.send("GET", "/api/fs", { query: { path }, signal });
+    return this.send("GET", "/api/fs", { query: fsPathQuery(path), signal });
   }
 
   readFile(path: string, signal?: AbortSignal): Promise<FsReadResponse> {
-    return this.send("GET", "/api/fs/read", { query: { path }, signal });
+    return this.send("GET", "/api/fs/read", { query: fsPathQuery(path), signal });
   }
 
   /** Raw bytes of a file (binary-safe) for the preview viewers. */
@@ -395,7 +396,7 @@ export class ApiClient {
     const response = await this.transporter.requestBytes({
       method: "GET",
       path: "/api/fs/raw",
-      query: { path },
+      query: fsPathQuery(path),
       signal
     });
     if (!response.ok) {
@@ -405,7 +406,7 @@ export class ApiClient {
   }
 
   listArchive(path: string, signal?: AbortSignal): Promise<FsArchiveResponse> {
-    return this.send("GET", "/api/fs/archive", { query: { path }, signal });
+    return this.send("GET", "/api/fs/archive", { query: fsPathQuery(path), signal });
   }
 
   readParquet(
@@ -415,7 +416,7 @@ export class ApiClient {
   ): Promise<FsParquetResponse> {
     return this.send("GET", "/api/fs/parquet", {
       query: {
-        path,
+        ...fsPathQuery(path),
         offset: opts.offset,
         limit: opts.limit,
         orderBy: opts.orderBy,
@@ -426,13 +427,13 @@ export class ApiClient {
   }
 
   listProjectFiles(path: string, signal?: AbortSignal): Promise<FsFilesResponse> {
-    return this.send("GET", "/api/fs/files", { query: { path }, signal });
+    return this.send("GET", "/api/fs/files", { query: fsPathQuery(path), signal });
   }
 
   searchFs(params: FsSearchRequest, signal?: AbortSignal): Promise<FsSearchResponse> {
     return this.send("GET", "/api/fs/search", {
       query: {
-        path: params.path,
+        ...fsPathQuery(params.path),
         q: params.q,
         caseSensitive: params.caseSensitive ? "1" : undefined,
         wholeWord: params.wholeWord ? "1" : undefined,
@@ -463,7 +464,7 @@ export class ApiClient {
       return null;
     }
     const base = this.connection.endpoint.replace(/\/$/, "");
-    const params = new URLSearchParams({ path });
+    const params = new URLSearchParams(fsPathQuery(path));
     if (this.connection.password) {
       params.set("token", this.connection.password);
     }
@@ -504,7 +505,7 @@ export class ApiClient {
     const response = await this.transporter.requestBytes({
       method: "GET",
       path: "/api/fs/download",
-      query: { path },
+      query: fsPathQuery(path),
       signal
     });
     if (!response.ok) {
