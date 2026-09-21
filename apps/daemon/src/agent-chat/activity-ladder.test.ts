@@ -1,17 +1,12 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import type { AgentChatSessionSummaryFields } from "@orquester/api";
+import type { AgentChatSessionSummaryFields, LatestTurnSummary, TurnState } from "@orquester/api";
 import { pushTypeForFields, pushTypeForRung, resolveChatActivity } from "./activity-ladder.ts";
 
 // The ONE ladder of §6.4. Every rung, in priority order, plus the two race
 // fallbacks the spec calls non-optional — each of these encodes a bug T3 hit.
 
-const turn = (
-  state: AgentChatSessionSummaryFields["latestTurn"] extends infer T
-    ? NonNullable<T>["state"]
-    : never,
-  completedAt: string | null = null
-): NonNullable<AgentChatSessionSummaryFields["latestTurn"]> => ({
+const turn = (state: TurnState, completedAt: string | null = null): LatestTurnSummary => ({
   turnId: "t1",
   state,
   startedAt: "2026-09-21T00:00:00.000Z",

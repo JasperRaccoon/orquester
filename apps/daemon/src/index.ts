@@ -148,6 +148,7 @@ import {
   type WorkspacesConfig,
   accountsConfigPath,
   agentAccountsDir,
+  agentChatThreadAttachmentsDir,
   agentAccountsFile,
   appConfigPath,
   browserProfilesDir,
@@ -215,6 +216,8 @@ const RAW_MAX_BYTES = 50 * 1024 * 1024;
 
 /** Filesystem locations resolved (variables expanded) for this run. */
 interface ResolvedPaths {
+  /** `<appdir>` itself — every `@orquester/config` path helper takes this. */
+  baseDir: string;
   daemonDir: string;
   configPath: string;
   /** app.json + remotes.json live under <appdir>/app and are shared by clients. */
@@ -353,6 +356,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   validateTransportConfig(config);
 
   const resolved: ResolvedPaths = {
+    baseDir: paths.baseDir,
     daemonDir: paths.daemonDir,
     configPath: paths.configPath,
     appConfigFile: appConfigPath(paths.baseDir),
@@ -3965,7 +3969,14 @@ export function createServer(
         }
 
         const name = uploadFileName(request.query.name ?? "", request.query.type);
-        const dir = sessionUploadsDir(resolved.daemonDir, id);
+        // Chat spec §6.3: a chat upload reuses this exact raw-binary path, but
+        // lands in the THREAD's attachments dir — so the returned path is a
+        // usable attachment reference, `GET /api/fs/download` can read it back,
+        // and the host's thread-delete cascade cleans it up with everything
+        // else the thread owns. A terminal upload keeps its own dir.
+        const dir = sessions.get(id)?.kind === "agent-chat"
+          ? agentChatThreadAttachmentsDir(resolved.baseDir, id)
+          : sessionUploadsDir(resolved.daemonDir, id);
         const path = join(dir, name);
         // Mirror the accounts.json / keys conventions: 0700 dir, 0600 file. A
         // filesystem failure (disk full, permission denied, …) must surface as a
