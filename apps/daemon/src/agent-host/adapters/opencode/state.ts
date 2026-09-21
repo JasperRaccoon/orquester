@@ -278,6 +278,12 @@ export interface OpenCodeSessionState {
    * observation 13) — consecutive duplicates are collapsed.
    */
   lastSessionErrorMessage?: string;
+  /**
+   * The last title mirrored onto the thread. `session.updated` re-states it on
+   * every recompute, so only a genuine change becomes
+   * `thread.metadata.updated`.
+   */
+  lastEmittedTitle?: string;
   stopped: boolean;
 }
 
@@ -322,6 +328,7 @@ export function repointSession(state: OpenCodeSessionState, sessionId: string): 
   state.awaitingBusyAfterInterruption = false;
   state.pendingIdleReconciliation = undefined;
   state.lastSessionErrorMessage = undefined;
+  state.lastEmittedTitle = undefined;
 }
 
 /**

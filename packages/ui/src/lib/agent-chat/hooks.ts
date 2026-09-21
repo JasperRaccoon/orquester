@@ -1,154 +1,220 @@
 /**
- * Agent chat — **inert stub hooks** so components compile today.
+ * Agent chat — the view-model hooks (spec §7.2, §7.5, §7.6).
  *
- * Package **W11** replaces every body here with the real zustand slice and the
- * `Transporter.agentChat` transport (§7.2, §6.3 client side). The signatures
- * are the contract and must not change; `contracts.ts` is additive-only.
+ * The **only** React file in `lib/agent-chat/`: everything these hooks return
+ * is computed by the `*.logic.ts` modules beside them, so the logic is testable
+ * without a renderer and the components have one seam.
  *
- * Every action rejects rather than resolving: a silent no-op would let a
- * component ship looking wired up.
+ * Each hook reads the per-thread zustand slice `store.ts` owns. The slice is
+ * created on tab open and dropped on tab close (§7.2); the registry is
+ * refcounted so one `AgentChatView` instance serving every chat tab in a
+ * project (§7.1) never re-opens a stream on a tab switch.
  */
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useSyncExternalStore } from "react";
 
-import { DEFAULT_INTERACTION_MODE } from "@orquester/api/agent-chat";
+import type { AgentPanelModel, ProviderSnapshot } from "@orquester/api/agent-chat";
+import { deriveAgentPanelModel, emptyAgentPanelModel } from "@orquester/api/agent-chat";
 
+import { useApi } from "../../context/orquester-context";
 import type {
-  AgentChatActions,
   AgentChatPendingView,
   AgentChatRosterView,
   AgentChatStatusView,
-  AgentChatThreadSlice,
   AgentChatThreadView,
-  DisclosureState,
   UseAgentChatPending,
   UseAgentChatRoster,
   UseAgentChatStatus,
   UseAgentChatThread,
   UseProviderSnapshot
 } from "./contracts";
+import { loadProviders, providerForRefId, providersStore } from "./providers";
+import { resolveActivityLabel } from "./status.logic";
+import {
+  ensureThreadStore,
+  releaseThreadStore,
+  retainThreadStore,
+  type AgentChatThreadState,
+  type ThreadStore
+} from "./store";
 
-const NOT_WIRED = "agent-chat: client state not implemented (package W11)";
+// ---------------------------------------------------------------------------
+// Subscription plumbing
+// ---------------------------------------------------------------------------
 
-const EMPTY_DISCLOSURES: DisclosureState = {
-  expandedTurnIds: [],
-  expandedGroupIds: [],
-  expandedAgentIds: [],
-  expandedReasoningIds: [],
-  toolOutputOffsets: {}
-};
+function useThreadStore(sessionId: string): ThreadStore {
+  const api = useApi();
+  const transport = api.agentChat;
 
-function emptySlice(sessionId: string): AgentChatThreadSlice {
-  return {
-    sessionId,
-    head: null,
-    entries: [],
-    turns: [],
-    checkpoints: [],
-    pending: { approvals: [], userInputs: [] },
-    roster: [],
-    turnStatus: null,
-    sessionStatus: null,
-    backgroundLiveness: null,
-    contextWindow: null,
-    seq: 0,
-    connection: "idle",
-    follow: true,
-    scroll: null,
-    disclosures: EMPTY_DISCLOSURES,
-    interactionMode: DEFAULT_INTERACTION_MODE,
-    queue: [],
-    respondingRequestIds: [],
-    errorBanner: null
-  };
+  // The slice must exist during the FIRST render — `useSyncExternalStore`
+  // needs a snapshot before any effect runs — so render only *ensures* it and
+  // never counts a reference; the effect is the one that takes it. An entry
+  // nobody holds is disposed after the grace period, so a render that never
+  // commits cannot leak a stream.
+  const store = useMemo(
+    () => ensureThreadStore(sessionId, { transport }),
+    [sessionId, transport]
+  );
+
+  useEffect(() => {
+    retainThreadStore(sessionId, { transport });
+    return () => {
+      releaseThreadStore(sessionId);
+    };
+  }, [sessionId, transport]);
+
+  return store;
 }
 
-const reject = (): Promise<never> => Promise.reject(new Error(NOT_WIRED));
-const ignore = (): void => {};
+function useThreadState<T>(store: ThreadStore, select: (state: AgentChatThreadState) => T): T {
+  return useSyncExternalStore(
+    store.subscribe,
+    () => select(store.getState()),
+    () => select(store.getState())
+  );
+}
 
-const STUB_ACTIONS: AgentChatActions = {
-  sendTurn: reject,
-  steer: reject,
-  interrupt: reject,
-  respondApproval: reject,
-  answerQuestion: reject,
-  dismissQuestion: reject,
-  revert: reject,
-  compact: reject,
-  setMode: reject,
-  stopSession: reject,
-  uploadAttachment: reject,
-  queueMessage: ignore,
-  sendQueuedNow: reject,
-  returnQueuedToComposer: ignore,
-  drainQueueToComposer: ignore,
-  setInteractionMode: ignore,
-  setFollow: ignore,
-  setDisclosure: ignore,
-  dismissErrorBanner: ignore,
-  refresh: reject
-};
+// ---------------------------------------------------------------------------
+// The four thread hooks
+// ---------------------------------------------------------------------------
 
 export const useAgentChatThread: UseAgentChatThread = (sessionId) => {
+  const store = useThreadStore(sessionId);
+  const slice = useThreadState(store, (state) => state.slice);
+  const rows = useThreadState(store, (state) => state.rows);
+  const activePlan = useThreadState(store, (state) => state.activePlan);
+  const actions = useThreadState(store, (state) => state.actions);
+
   return useMemo<AgentChatThreadView>(
-    () => ({
-      slice: emptySlice(sessionId),
-      actions: STUB_ACTIONS,
-      rows: [],
-      activePlan: null
-    }),
-    [sessionId]
+    () => ({ slice, actions, rows, activePlan }),
+    [slice, actions, rows, activePlan]
   );
 };
 
 export const useAgentChatRoster: UseAgentChatRoster = (sessionId) => {
-  void sessionId;
+  const store = useThreadStore(sessionId);
+  const agents = useThreadState(store, (state) => state.slice.roster);
+  const backgroundLiveness = useThreadState(store, (state) => state.slice.backgroundLiveness);
+  const stopping = useThreadState(store, (state) => state.stopping);
+
+  const panel = useMemo<AgentPanelModel>(
+    () => (agents.length === 0 ? emptyAgentPanelModel() : deriveAgentPanelModel({ agents })),
+    [agents]
+  );
+
   return useMemo<AgentChatRosterView>(
-    () => ({
-      agents: [],
-      panel: {
-        workflows: [],
-        directAgents: [],
-        runningCount: 0,
-        waitingCount: 0,
-        idleCount: 0,
-        settledCount: 0,
-        totalTokens: 0,
-        hasAgents: false,
-        liveCount: 0
-      },
-      backgroundLiveness: null,
-      stopping: false
-    }),
-    []
+    () => ({ agents, panel, backgroundLiveness, stopping }),
+    [agents, panel, backgroundLiveness, stopping]
   );
 };
 
 export const useAgentChatPending: UseAgentChatPending = (sessionId) => {
-  void sessionId;
+  const store = useThreadStore(sessionId);
+  const pending = useThreadState(store, (state) => state.slice.pending);
+  const respondingRequestIds = useThreadState(
+    store,
+    (state) => state.slice.respondingRequestIds
+  );
+
   return useMemo<AgentChatPendingView>(
-    () => ({ approvals: [], userInputs: [], respondingRequestIds: [], totalCount: 0 }),
-    []
+    () => ({
+      approvals: pending.approvals,
+      userInputs: pending.userInputs,
+      respondingRequestIds,
+      totalCount: pending.approvals.length + pending.userInputs.length
+    }),
+    [pending, respondingRequestIds]
   );
 };
 
 export const useAgentChatStatus: UseAgentChatStatus = (sessionId) => {
-  void sessionId;
-  return useMemo<AgentChatStatusView>(
-    () => ({
-      sessionStatus: null,
-      turnStatus: null,
-      connection: "idle",
-      contextWindow: null,
-      reportsContextWindow: false,
-      activityLabel: null,
-      turnStartedAt: null
-    }),
-    []
+  const store = useThreadStore(sessionId);
+  const slice = useThreadState(store, (state) => state.slice);
+  const rows = useThreadState(store, (state) => state.rows);
+  const snapshot = useProviderSnapshot(slice.head?.refId ?? "");
+
+  return useMemo<AgentChatStatusView>(() => {
+    const latestTurn = slice.turns.at(-1) ?? null;
+    // The live tool label, when there is one: the working row's label is a
+    // self-ticking leaf, but the *text* comes from the row model (§7.6).
+    const liveRow = rows.find((row) => row.kind === "work-live");
+    const liveToolLabel = liveRow && liveRow.kind === "work-live" ? liveRow.entry.label : null;
+    return {
+      sessionStatus: slice.sessionStatus,
+      turnStatus: slice.turnStatus,
+      connection: slice.connection,
+      contextWindow: slice.contextWindow,
+      // Degrade, never zeros: without a snapshot we do not claim a meter.
+      reportsContextWindow: snapshot?.capabilities.reportsContextWindow ?? false,
+      activityLabel: resolveActivityLabel({
+        connection: slice.connection,
+        sessionStatus: slice.sessionStatus,
+        turnStatus: slice.turnStatus,
+        backgroundLiveness: slice.backgroundLiveness,
+        liveToolLabel,
+        pendingApprovals: slice.pending.approvals.length,
+        pendingQuestions: slice.pending.userInputs.length
+      }),
+      turnStartedAt: latestTurn?.startedAt ?? null
+    };
+  }, [slice, rows, snapshot]);
+};
+
+// ---------------------------------------------------------------------------
+// Provider snapshots
+// ---------------------------------------------------------------------------
+
+export const useProviderSnapshot: UseProviderSnapshot = (refId) => {
+  const api = useApi();
+  const transport = api.agentChat;
+
+  useEffect(() => {
+    void loadProviders(transport);
+  }, [transport]);
+
+  const providers = useSyncExternalStore(
+    providersStore.subscribe,
+    () => providersStore.getState().providers,
+    () => providersStore.getState().providers
+  );
+
+  return useMemo<ProviderSnapshot | null>(
+    () => (refId ? providerForRefId(providers, refId) : null),
+    [providers, refId]
   );
 };
 
-export const useProviderSnapshot: UseProviderSnapshot = (refId) => {
-  void refId;
-  return null;
-};
+/** Every adapter's snapshot, for surfaces that list providers rather than one. */
+export function useProviderSnapshots(): ProviderSnapshot[] {
+  const api = useApi();
+  const transport = api.agentChat;
+
+  useEffect(() => {
+    void loadProviders(transport);
+  }, [transport]);
+
+  return useSyncExternalStore(
+    providersStore.subscribe,
+    () => providersStore.getState().providers,
+    () => providersStore.getState().providers
+  );
+}
+
+/**
+ * The store's **fallback** draft for a thread.
+ *
+ * The composer owns the live draft (W13's `ChatComposer` plus its
+ * `composer-bridge` handle); this one only holds what was returned to a thread
+ * whose composer is not mounted — a queued message drained by an interrupt
+ * while the user is on another tab — plus any attachments that came back with
+ * it. A mounted composer should drain it once on mount.
+ */
+export function useAgentChatDraft(sessionId: string): {
+  draft: AgentChatThreadState["draft"];
+  actions: AgentChatThreadState["actions"];
+} {
+  const store = useThreadStore(sessionId);
+  const draft = useThreadState(store, (state) => state.draft);
+  const actions = useThreadState(store, (state) => state.actions);
+  return useMemo(() => ({ draft, actions }), [draft, actions]);
+}
