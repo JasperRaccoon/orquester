@@ -147,10 +147,23 @@ export class AgentChatCommandError extends Error {
     this.detail = detail;
   }
 
-  /** 503 only: the host is restarting and the same command id may be re-posted. */
+  /**
+   * The host is restarting, or the response never arrived. Either way the same
+   * `commandId` may be re-posted: the receipt makes a retry free, and a
+   * reconnect must never replay a *different* mutation (§6.2, §6.6).
+   *
+   * `status: 0` is our marker for "the transport threw before a response" —
+   * a dropped socket mid-post, which is exactly the case §6.6 names.
+   */
   get retryable(): boolean {
-    return this.code === "HOST_UNAVAILABLE";
+    return this.code === "HOST_UNAVAILABLE" || this.status === 0;
   }
+}
+
+/** Wrap a transport-level throw so a lost response is retryable by command id. */
+function transportError(error: unknown, path: string): AgentChatCommandError {
+  const message = error instanceof Error ? error.message : `${path} failed`;
+  return new AgentChatCommandError(0, "HOST_UNAVAILABLE", message, error);
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -191,13 +204,21 @@ export function createAgentChatTransport(transporter: Transporter): AgentChatTra
       signal?: AbortSignal;
     }
   ): Promise<T> => {
-    const response = await transporter.request<T>({
-      method,
-      path,
-      ...(init?.body === undefined ? {} : { body: init.body }),
-      ...(init?.query === undefined ? {} : { query: init.query }),
-      ...(init?.signal === undefined ? {} : { signal: init.signal })
-    });
+    let response: { ok: boolean; status: number; data: T };
+    try {
+      response = await transporter.request<T>({
+        method,
+        path,
+        ...(init?.body === undefined ? {} : { body: init.body }),
+        ...(init?.query === undefined ? {} : { query: init.query }),
+        ...(init?.signal === undefined ? {} : { signal: init.signal })
+      });
+    } catch (error) {
+      // The response never arrived. §6.6: the client retries the SAME
+      // `commandId`, which the receipt makes free — so this is retryable, not
+      // a failure to surface.
+      throw transportError(error, path);
+    }
     if (!response.ok) {
       throw commandErrorFrom(response.status, response.data, `${method} ${path} failed`);
     }

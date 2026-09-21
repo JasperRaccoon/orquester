@@ -13,7 +13,7 @@
  * without a server.
  */
 
-import type { RuntimeMode, TurnTokenUsage } from "@orquester/api/agent-chat";
+import type { RuntimeMode, RuntimeTaskStatus, TurnTokenUsage } from "@orquester/api/agent-chat";
 
 import type {
   OpenCodeMessageRole,
@@ -222,6 +222,41 @@ export interface OpenCodeIdleReconciliation {
   cancelled: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// Subagents (§7.6 roster)
+// ---------------------------------------------------------------------------
+
+/**
+ * One OpenCode child session, folded into the roster as a task.
+ *
+ * T3 drops every child frame that is not a permission or a question, which is
+ * why its OpenCode roster is thin. The captures show the child is fully
+ * observable — 38 frames across eight types in fixture 12 — so the adapter
+ * routes them instead (see `normalize.ts`, `demuxChild`). The task id and the
+ * agent id are both the **child session id**: it is the only identifier every
+ * one of those frames carries.
+ */
+export interface OpenCodeChildAgent {
+  sessionId: string;
+  parentSessionId: string;
+  /** `"list files (@explore subagent)"` — the child's own session title. */
+  title?: string;
+  /** The `task` tool's `description`, falling back to the title. */
+  description: string;
+  /** The `subagent_type` the parent asked for (`explore`, `general`, …). */
+  role?: string;
+  /** `"<providerID>/<modelID>"`, from the parent tool part's metadata. */
+  model?: string;
+  /** The parent `task` tool call this child belongs to. */
+  toolUseId?: string;
+  /** Set when this child was itself launched from another child. */
+  parentAgentId?: string;
+  lastToolName?: string;
+  lastStatus?: RuntimeTaskStatus;
+  started: boolean;
+  completed: boolean;
+}
+
 export interface OpenCodeCancellation {
   /** `undefined` = a session-wide stop rather than one turn's interrupt. */
   turnId?: string;
@@ -248,6 +283,8 @@ export interface OpenCodeSessionState {
 
   /** The parent plus every descendant session id seen so far. */
   relatedSessionIds: Set<string>;
+  /** Every child session folded into the roster, keyed by its session id. */
+  childAgents: Map<string, OpenCodeChildAgent>;
 
   activeTurnId?: string;
   activeAgent?: string;
@@ -299,6 +336,7 @@ export function createSessionState(input: {
     directory: input.directory,
     runtimeMode: input.runtimeMode,
     relatedSessionIds: new Set([input.openCodeSessionId]),
+    childAgents: new Map(),
     reconcileIdleStatus: false,
     awaitingBusyAfterInterruption: false,
     promptGeneration: 0,
@@ -319,6 +357,7 @@ export function repointSession(state: OpenCodeSessionState, sessionId: string): 
   state.openCodeSessionId = sessionId;
   state.relatedSessionIds.clear();
   state.relatedSessionIds.add(sessionId);
+  state.childAgents.clear();
   state.messageRoleById.clear();
   state.textPartsByMessageId.clear();
   state.turnTokenUsage = undefined;

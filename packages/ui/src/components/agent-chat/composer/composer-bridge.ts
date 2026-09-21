@@ -13,11 +13,23 @@
  * request was in flight.
  */
 
+import type { AttachmentRef } from "@orquester/api/agent-chat";
+
 import type { ComposerShortcutCommand } from "./composer-shortcuts";
 
 export interface ComposerHandle {
   /** Append or insert text into the draft, focusing the composer. */
   insertText: (text: string, mode?: "cursor" | "append") => void;
+  /**
+   * Stage an **already-uploaded** attachment as a real chip.
+   *
+   * Everything a picked file gets — a place in the eight, a removable chip,
+   * the upload-complete gate — minus the upload, which already happened.
+   * Returns `false` when the turn bounds refuse it, so the caller can fall
+   * back to writing the path into the draft rather than losing the file.
+   * Re-staging the same ref is idempotent and returns `true`.
+   */
+  stageAttachment: (ref: AttachmentRef) => boolean;
   /** Focus the textarea with the caret at the end. */
   focusAtEnd: () => void;
   /**
@@ -50,6 +62,19 @@ export function insertComposerText(
   mode: "cursor" | "append" = "cursor"
 ): void {
   composerHandle(sessionId)?.insertText(text, mode);
+}
+
+/**
+ * Stage an already-uploaded attachment into a session's draft as a chip.
+ *
+ * `false` means it did not land — either no composer is mounted for that
+ * session, or the turn bounds refused it. **The caller is expected to fall
+ * back** to writing the attachment's path into the draft text; a file that
+ * silently disappears between the picker and the message is worse than a path
+ * the user can see.
+ */
+export function stageComposerAttachment(sessionId: string, ref: AttachmentRef): boolean {
+  return composerHandle(sessionId)?.stageAttachment(ref) ?? false;
 }
 
 /** Open a composer control by its `data-composer-shortcut` token. */

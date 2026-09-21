@@ -948,15 +948,12 @@ export class ApiClient {
     turnCount: number,
     query?: TurnDiffQuery
   ): Promise<TurnDiffResponse> {
-    return this.send("GET", agentChatRoutes.turnDiff(id, turnCount), {
-      query:
-        query?.ignoreWhitespace === false ? { ignoreWhitespace: "false" } : undefined
-    });
+    return this.agentChat.turnDiff(id, turnCount, query);
   }
 
   /** One activity item's full, unslimmed payload (§5.6's "load full output"). */
   agentChatItem(id: string, itemId: string): Promise<ThreadItemResponse> {
-    return this.send("GET", agentChatRoutes.item(id, itemId));
+    return this.agentChat.readItem(id, itemId);
   }
 
   sendSessionInput(id: string, data: string): Promise<void> {

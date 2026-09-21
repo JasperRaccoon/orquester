@@ -55,6 +55,7 @@ export {
   ensureThreadStore,
   peekThreadStore,
   releaseThreadStore,
+  resetDismissedErrorBanners,
   resetThreadStores,
   retainThreadStore,
   THREAD_STORE_DISPOSE_GRACE_MS,
@@ -70,8 +71,10 @@ export {
   providersStore,
   refreshProvider,
   resetProvidersStore,
+  setProviderSideEffects,
   type ProvidersState,
-  type ProvidersStore
+  type ProvidersStore,
+  type ProviderSideEffects
 } from "./providers";
 
 export * from "./entries.logic";

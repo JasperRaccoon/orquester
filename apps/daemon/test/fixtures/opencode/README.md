@@ -465,9 +465,44 @@ and the child emitted **38 frames across eight types** on the shared stream:
 **Not one of them is a permission or question event**, so T3's child filter drops all 38.
 That is the whole mechanism behind the spec's "this is the reason the OpenCode roster is
 thinner than Claude's" — the subagent's text, tool calls and status are on the wire and
-are being deliberately discarded. If the roster (§7.6) should ever show OpenCode subagents,
-the change is in that filter, not in the transport, and the child's title
-(`"list files (@explore subagent)"`) already carries the agent name.
+T3 discards them.
+
+**Orquester routes them instead** (the `demuxChild` branch of the adapter's normaliser), so
+the roster shows whatever the provider reports. The mapping this capture supports:
+
+| Frame | Becomes |
+|---|---|
+| child `session.created` | `task.started` — `taskId` = `agentId` = the **child session id**, the only identifier every one of these frames carries |
+| child `session.updated` | `task.progress` on a real title change (an unchanged title is re-stated on every recompute — observation 25) |
+| child `session.status` | `task.updated {status: running \| idle}` |
+| child `session.idle` | `task.completed {status:"completed"}` — the child's terminal signal |
+| child `session.error` | `task.completed {status:"failed"}` |
+| child `message.part.updated` (tool) | `task.progress {lastToolName}` **and** an `item.*` row stamped `agentId` |
+| child text / reasoning parts | `content.delta` stamped `agentId` |
+| child `todo.updated` | `task.progress` with an `n/m steps done` summary — a child's plan is its own, and must not overwrite the thread's `turn.plan` |
+
+The identity comes from two places, and both are needed. The child's own
+`session.created` carries `parentID`, `title` (`"list files (@explore subagent)"`) and
+`agent` (`"explore"`); the **parent's** `task` tool part carries the rest, and only from
+its `running` frame onwards — the `pending` one has an empty `input`:
+
+```jsonc
+{"type":"tool","tool":"task","callID":"call_107260",
+ "state":{"title":"list files",
+          "metadata":{"parentSessionId":"ses_f3dfd4e5…","sessionId":"ses_f3dfd3d8…",
+                      "model":{"modelID":"google/gemini-3.1-flash-lite","providerID":"openrouter"}},
+          "status":"running",
+          "input":{"subagent_type":"explore","prompt":"List the files…","description":"list files"}}}
+```
+
+so `toolUseId` = `callID`, `role` = `subagent_type`, `model` = `providerID/modelID` and
+`description` = `input.description`. Linkage is repeated on **every** task row (§4.2);
+`agentKind` is left for the host to stamp at ingestion.
+
+Two invariants worth restating: a child's `step-finish` tokens are a *different session's*
+spend and never join the parent turn's accumulator (only `hasSubagents` is set), and a
+child's permission/question frames keep the original routing — an approval belongs on the
+parent thread whichever session raised it.
 
 ### 20. Auth: T3's Basic scheme is exact, and the username is checked
 

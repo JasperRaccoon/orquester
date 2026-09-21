@@ -89,7 +89,9 @@ export function message(
     updatedAt: overrides.updatedAt ?? at,
     ...(overrides.agentId !== undefined ? { agentId: overrides.agentId } : {}),
     ...(overrides.attachments !== undefined ? { attachments: overrides.attachments } : {}),
-    ...(overrides.context !== undefined ? { context: overrides.context } : {})
+    ...(overrides.context !== undefined ? { context: overrides.context } : {}),
+    ...(overrides.messageKind !== undefined ? { messageKind: overrides.messageKind } : {}),
+    ...(overrides.reasoningKind !== undefined ? { reasoningKind: overrides.reasoningKind } : {})
   };
 }
 

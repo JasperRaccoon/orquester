@@ -22,7 +22,11 @@ import test from "node:test";
 
 import type { RuntimeEvent } from "@orquester/api/agent-chat";
 
-import { normalizeOpenCodeEvent, type NormalizerSignal } from "./normalize.ts";
+import {
+  closeLiveChildAgents,
+  normalizeOpenCodeEvent,
+  type NormalizerSignal
+} from "./normalize.ts";
 import {
   KNOWN_IGNORED_EVENT_TYPES,
   asRawEvent,
@@ -557,20 +561,213 @@ test("12: a co-tenant session's frames are dropped, not mixed into this thread",
   }
 });
 
-test("12: a child session's request events are probed for ancestry, its output is dropped", () => {
-  const records = readFixture("12-two-sessions-one-server-and-a-child-session.ndjson");
-  const parent = sessionIds(records)[2];
-  assert.ok(parent !== undefined);
-  const { events } = replay("12-two-sessions-one-server-and-a-child-session.ndjson", {
-    ...(parent !== undefined ? { sessionId: parent } : {})
-  });
-  // Every emitted event belongs to this thread; nothing carries a foreign id.
+const CHILD_FIXTURE = "12-two-sessions-one-server-and-a-child-session.ndjson";
+const CHILD_SESSION_ID = "ses_f3dfd3d8fffeHrM6kT1FcC9I6q";
+
+function replayChildParent(): Replay {
+  const parent = sessionIds(readFixture(CHILD_FIXTURE))[2];
+  assert.ok(parent !== undefined, "fixture 12's third session is the one with a child");
+  return replay(CHILD_FIXTURE, { sessionId: parent });
+}
+
+test("12: every emitted event belongs to this thread", () => {
+  const { events } = replayChildParent();
   for (const event of events) {
     assert.equal(event.threadId, "thread-1");
   }
-  // The child's 38 frames across 8 types produce no timeline rows of their own
-  // beyond what the parent's `task` tool already shows.
   assert.ok(events.length > 0);
+});
+
+test("12: a child session becomes a roster task, started once and completed once", () => {
+  const { events } = replayChildParent();
+  const started = eventsOfType(events, "task.started");
+  const completed = eventsOfType(events, "task.completed");
+  assert.equal(started.length, 1, "exactly one subagent ran in this capture");
+  assert.equal(completed.length, 1);
+
+  const start = started[0];
+  assert.equal(start?.payload.taskId, CHILD_SESSION_ID, "the task id IS the child session id");
+  assert.equal(start?.payload.agentId, CHILD_SESSION_ID);
+  assert.equal(start?.agentId, CHILD_SESSION_ID, "and it is stamped on the envelope too");
+  assert.equal(start?.payload.taskType, "subagent");
+  assert.equal(completed[0]?.payload.status, "completed");
+  assert.equal(completed[0]?.payload.taskId, CHILD_SESSION_ID);
+});
+
+test("12: every task row repeats the whole linkage, and never stamps agentKind", () => {
+  const { events } = replayChildParent();
+  const rows = [
+    ...eventsOfType(events, "task.started"),
+    ...eventsOfType(events, "task.progress"),
+    ...eventsOfType(events, "task.updated"),
+    ...eventsOfType(events, "task.completed")
+  ];
+  assert.ok(rows.length >= 4, `expected a full task lifecycle, saw ${rows.length} rows`);
+  for (const row of rows) {
+    // §4.2: linkage on EVERY row, so a fold can rebuild an agent whose start
+    // row aged out of activity retention.
+    assert.equal(row.payload.taskId, CHILD_SESSION_ID, row.type);
+    assert.equal(row.payload.agentId, CHILD_SESSION_ID, row.type);
+    assert.equal(row.payload.taskType, "subagent", row.type);
+    assert.ok(typeof row.payload.title === "string" && row.payload.title.length > 0, row.type);
+    // The host stamps `agentKind` at ingestion and does not trust the provider.
+    assert.equal(row.payload.agentKind, undefined, row.type);
+  }
+});
+
+test("12: the parent's `task` tool part supplies the role, the model and the tool call", () => {
+  const { events } = replayChildParent();
+  const rows = [
+    ...eventsOfType(events, "task.progress"),
+    ...eventsOfType(events, "task.completed")
+  ];
+  const enriched = rows.find((row) => row.payload.role !== undefined);
+  assert.ok(enriched !== undefined, "the running task part carries metadata.sessionId");
+  assert.equal(enriched.payload.role, "explore");
+  assert.equal(enriched.payload.model, "openrouter/google/gemini-3.1-flash-lite");
+  assert.equal(enriched.payload.toolUseId, "call_107260");
+  assert.match(String(enriched.payload.title), /@explore subagent/);
+});
+
+test("12: the child's own tool work reaches the roster as progress", () => {
+  const { events } = replayChildParent();
+  const withTool = eventsOfType(events, "task.progress").filter(
+    (event) => event.payload.lastToolName !== undefined
+  );
+  assert.ok(withTool.length >= 1, "the child ran `bash`; the roster must say so");
+  assert.equal(withTool[0]?.payload.lastToolName, "bash");
+  assert.equal(withTool[0]?.payload.status, "running");
+
+  // Its status transitions land as non-terminal patches.
+  const statuses = eventsOfType(events, "task.updated").map((event) => event.payload.status);
+  assert.ok(statuses.includes("running"), `saw ${JSON.stringify(statuses)}`);
+});
+
+test("12: a child's items and text are stamped with agentId; the parent's are not", () => {
+  const { events } = replayChildParent();
+  const items = [
+    ...eventsOfType(events, "item.started"),
+    ...eventsOfType(events, "item.updated"),
+    ...eventsOfType(events, "item.completed")
+  ];
+  const childItems = items.filter((event) => event.agentId === CHILD_SESSION_ID);
+  const parentItems = items.filter((event) => event.agentId === undefined);
+  assert.ok(childItems.length >= 1, "the child's `ls -F` must be attributable");
+  assert.ok(parentItems.length >= 1, "the parent's own `task` row stays on the timeline");
+  for (const event of childItems) {
+    // Both places: the envelope for §7.2's re-homing, the payload for the fold.
+    assert.equal(event.payload.agentId, CHILD_SESSION_ID);
+  }
+
+  const childText = eventsOfType(events, "content.delta").filter(
+    (event) => event.agentId === CHILD_SESSION_ID
+  );
+  assert.ok(childText.length >= 1, "the child's answer must not land in the parent timeline");
+  assert.ok(
+    childText.some((event) => event.payload.delta.includes("README.md")),
+    "the subagent's reply is what it found"
+  );
+});
+
+test("12: the parent's own `task` row still renders as a collab-agent call", () => {
+  const { events } = replayChildParent();
+  const taskRows = [
+    ...eventsOfType(events, "item.started"),
+    ...eventsOfType(events, "item.updated"),
+    ...eventsOfType(events, "item.completed")
+  ].filter(
+    (event) =>
+      event.payload.itemType === "collab_agent_tool_call" && event.agentId === undefined
+  );
+  assert.ok(taskRows.length >= 1);
+});
+
+test("12: a child seen during a live turn marks the turn as having subagents", () => {
+  const records = readFixture(CHILD_FIXTURE);
+  const parent = sessionIds(records)[2];
+  assert.ok(parent !== undefined);
+  const state = createSessionState({
+    threadId: "thread-1",
+    openCodeSessionId: parent,
+    directory: "/repo",
+    runtimeMode: "approval-required"
+  });
+  state.activeTurnId = "turn-1";
+  state.turnTokenUsage = makeTurnTokenUsageAccumulator();
+  let counter = 0;
+  const ctx = { eventId: () => `evt-${(counter += 1)}`, nowIso: () => "now" };
+  for (const record of records) {
+    if (record.kind !== "sse") {
+      continue;
+    }
+    const raw = asRawEvent(record.data);
+    if (raw !== null) {
+      normalizeOpenCodeEvent(state, raw, ctx);
+    }
+  }
+  assert.equal(state.turnTokenUsage?.hasSubagents, true);
+  assert.ok(state.childAgents.has(CHILD_SESSION_ID));
+  // The child's own `step-finish` tokens are a different session's spend and
+  // must never be added to the parent turn's total.
+  assert.equal(state.childAgents.get(CHILD_SESSION_ID)?.completed, true);
+});
+
+test("a live child is closed `stopped` when the session goes down (§3.1)", () => {
+  const state = createSessionState({
+    threadId: "thread-1",
+    openCodeSessionId: "ses_parent",
+    directory: "/repo",
+    runtimeMode: "approval-required"
+  });
+  state.activeTurnId = "turn-1";
+  let counter = 0;
+  const ctx = { eventId: () => `evt-${(counter += 1)}`, nowIso: () => "now" };
+  normalizeOpenCodeEvent(
+    state,
+    {
+      type: "session.created",
+      properties: {
+        sessionID: "ses_child",
+        info: { id: "ses_child", parentID: "ses_parent", title: "digging (@explore subagent)" }
+      }
+    },
+    ctx
+  );
+  assert.equal(state.childAgents.get("ses_child")?.completed, false);
+
+  const closing = closeLiveChildAgents(state, ctx, "host is shutting down");
+  assert.equal(closing.length, 1);
+  const [event] = closing;
+  assert.equal(event?.type, "task.completed");
+  assert.equal(event?.payload.status, "stopped");
+  assert.equal(event?.payload.taskId, "ses_child");
+  // Idempotent: a second sweep has nothing left to close.
+  assert.deepEqual(closeLiveChildAgents(state, ctx), []);
+});
+
+test("a co-tenant session that is NOT a child of this thread is still dropped", () => {
+  const state = createSessionState({
+    threadId: "thread-1",
+    openCodeSessionId: "ses_parent",
+    directory: "/repo",
+    runtimeMode: "approval-required"
+  });
+  state.activeTurnId = "turn-1";
+  let counter = 0;
+  const ctx = { eventId: () => `evt-${(counter += 1)}`, nowIso: () => "now" };
+  const result = normalizeOpenCodeEvent(
+    state,
+    {
+      type: "session.created",
+      properties: {
+        sessionID: "ses_other",
+        info: { id: "ses_other", title: "somebody else's tab" }
+      }
+    },
+    ctx
+  );
+  assert.deepEqual(result.events, []);
+  assert.equal(state.childAgents.size, 0);
 });
 
 test("13: three session.error frames for one bad model collapse to one runtime.error", () => {
