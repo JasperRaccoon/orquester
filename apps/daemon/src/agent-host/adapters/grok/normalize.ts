@@ -49,6 +49,7 @@ import {
   type PlanPathHost
 } from "./plan.ts";
 import {
+  acpKindFromVendorKind,
   boundRawOutput,
   boundToolContent,
   decideToolEmission,
@@ -166,6 +167,13 @@ export class GrokNormalizer {
   /** Set when a `pending_interaction` was resolved with no request of ours. */
   private selfResolvedInteractions = 0;
   private openedRequests = 0;
+  /**
+   * The CLI fires a `permission_denied` hook when the user declines a tool.
+   * It is the fallback discriminant for README 12's ambiguous
+   * `stopReason:"cancelled"` when no `prompt_complete` carried a
+   * `cancellationCategory` (R4 #9).
+   */
+  private permissionDenied = false;
 
   constructor(deps: GrokNormalizerDeps, sessionId: string) {
     this.deps = deps;
@@ -216,9 +224,15 @@ export class GrokNormalizer {
     this.lastResponseUsage = undefined;
   }
 
+  /** True when this turn saw the CLI's `permission_denied` hook. */
+  get sawPermissionDenied(): boolean {
+    return this.permissionDenied;
+  }
+
   /** A new turn begins: open the assistant stream and drop the plan fallback. */
   beginTurn(): void {
     this.assistantUpdatesOpen = true;
+    this.permissionDenied = false;
     this.resetTurnUsage();
   }
 
@@ -236,13 +250,14 @@ export class GrokNormalizer {
   /**
    * One ACP `session/update` notification.
    *
-   * A REPLAY frame (`_meta.isReplay`) produces no events: our own
-   * `events.ndjson` already holds that history, and emitting it again would
-   * duplicate the timeline. The frames are still returned to the caller
-   * through {@link replayItem} so `readThread` can rebuild the provider-side
-   * snapshot from them — which is the one thing replay is genuinely needed
-   * for, since `session/load` replays only a fraction of the transcript
-   * (39 events produced, 5 replayed).
+   * A REPLAY frame (`_meta.isReplay`) produces **no events at all**, and that
+   * is a deliberate, declared deviation from README 27's "the replay path must
+   * keep `user_message_chunk`": the HOST owns the thread history
+   * (`events.ndjson`), so re-emitting five replayed rows would duplicate the
+   * timeline rather than restore it — and `session/load` replays only a
+   * fraction anyway (39 events produced, 5 replayed), so it could never be a
+   * reconstruction. A replayed `turn_completed` is still read for its usage
+   * block (see {@link handleXaiNotification}); nothing else is.
    */
   handleSessionUpdate(params: SessionNotification): RuntimeEvent[] {
     if (isReplayFrame(params._meta)) {
@@ -460,9 +475,10 @@ export class GrokNormalizer {
       toolCallId,
       kind: kind ?? undefined,
       rawInput,
-      // `_meta["x.ai/tool"].kind` is Grok's own authoritative discriminant and
-      // is finer-grained than ACP's (a plain `write` arrives as `edit`).
-      itemType: vendor?.kind === "execute" ? "command_execution" : itemTypeFromToolKind(kind ?? undefined),
+      // `_meta["x.ai/tool"].kind` is Grok's own authoritative discriminant, it
+      // is finer-grained than ACP's, and it is present on the FIRST frame of a
+      // call where ACP's `kind` is still absent — so it leads.
+      itemType: itemTypeFromToolKind(acpKindFromVendorKind(vendor?.kind) ?? kind ?? undefined),
       started: previous?.started === true,
       title: title ?? undefined,
       status: status ?? undefined,
@@ -650,6 +666,9 @@ export class GrokNormalizer {
       }
       case "hook_run_started": {
         const event = (update as { event_name?: string }).event_name ?? "hook";
+        if (event === "permission_denied") {
+          this.permissionDenied = true;
+        }
         const tool = (update as { tool_name?: string }).tool_name;
         const hookId = this.deps.uuid();
         this.hooks.set(`${event}:${tool ?? ""}`, hookId);

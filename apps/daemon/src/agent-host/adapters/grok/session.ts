@@ -72,6 +72,35 @@ import { answersToXaiResponse } from "./questions.ts";
 import { parsePromptResultUsage } from "./usage.ts";
 import { agentVersionOf, contextWindowFromModelState, modelStateOf, promptIdOf } from "./xai-meta.ts";
 
+/**
+ * Every method this adapter registers a handler for, in the spelling it
+ * registers. Exported so `acp/_generated/catalog.test.ts` can assert that each
+ * one exists in the generated catalog: a typo would otherwise register a
+ * handler that can never fire, silently (R4 #19).
+ *
+ * Extension names are listed in their BARE spelling —
+ * `AcpPeer.registerExtension*` registers both.
+ */
+export const GROK_REGISTERED_METHODS: readonly string[] = [
+  "session/update",
+  "session/request_permission",
+  XAI_EXTENSION_NOTIFICATIONS.session_notification,
+  XAI_EXTENSION_NOTIFICATIONS.session_update,
+  XAI_EXTENSION_NOTIFICATIONS.task_backgrounded,
+  XAI_EXTENSION_NOTIFICATIONS.prompt_complete,
+  XAI_EXTENSION_NOTIFICATIONS.queue_changed,
+  XAI_EXTENSION_NOTIFICATIONS.settings_update,
+  XAI_EXTENSION_NOTIFICATIONS.announcements_update,
+  XAI_EXTENSION_NOTIFICATIONS.sessions_changed,
+  XAI_EXTENSION_NOTIFICATIONS.mcp_init_progress,
+  XAI_EXTENSION_NOTIFICATIONS.mcp_initialized,
+  XAI_EXTENSION_NOTIFICATIONS.mcp_servers_updated,
+  XAI_EXTENSION_NOTIFICATIONS.models_update,
+  XAI_EXTENSION_NOTIFICATIONS.mcp_server_status,
+  XAI_EXTENSION_REQUESTS.ask_user_question,
+  XAI_EXTENSION_REQUESTS.exit_plan_mode
+];
+
 /** How many settled turns `readThread` remembers. */
 const MAX_RECORDED_TURNS = 200;
 
@@ -120,6 +149,12 @@ export interface GrokSessionOptions {
   homeDirs?: readonly string[];
   /** A host-owned directory for this thread's config overlay. */
   overlayDir: string;
+  /**
+   * The child is gone and this session is finished. Without it a crashed child
+   * leaves a dead session in the adapter's map, so `hasSession` stays true and
+   * `listSessions()` keeps reporting it to the §3.3 reconcile (Q1 #30).
+   */
+  onClosed?(threadId: string): void;
 }
 
 interface PendingApproval {
@@ -709,6 +744,13 @@ export class GrokSession {
           const fromResult = parsePromptResultUsage(response._meta);
           this.settleTurn(turnId, epoch, {
             stopReason: response.stopReason ?? null,
+            // No `prompt_complete` arrived (a locally handled slash command
+            // produces none, README 18), so the hook the CLI fires on a
+            // decline is the only discriminant left (R4 #9).
+            ...(this.activeTurn?.outcome?.cancellationCategory === undefined &&
+            this.normalizer.sawPermissionDenied
+              ? { cancellationCategory: "PermissionRejected" }
+              : {}),
             usage: fromResult.usage ?? this.normalizer.turnUsage(),
             ...(fromResult.contextTokens === undefined
               ? {}
@@ -907,6 +949,16 @@ export class GrokSession {
   async interrupt(turnId?: string): Promise<void> {
     const turn = this.activeTurn;
     if (turn === null || turn.settled) {
+      // §6.2: Stop is SESSION-scoped when the client names no turn. A thread
+      // whose turn already settled can still be showing a live background
+      // shell or subagent — that is precisely when §7.6 keeps the Stop button
+      // up — so an early return here leaves the work running and the client's
+      // `stopping` flag stuck, because `backgroundLiveness` never drops to
+      // null (R6 #1). Only a turn-scoped Stop naming a turn that is not the
+      // active one is a genuine no-op.
+      if (turnId === undefined) {
+        await this.stopSessionScopedWork();
+      }
       return;
     }
     if (turnId !== undefined && turn.turnId !== turnId) {
@@ -927,6 +979,33 @@ export class GrokSession {
         cancellationCategory: "MidTurnAbort",
         usage: this.normalizer.turnUsage()
       });
+    });
+  }
+
+  /**
+   * The §6.2 session-scoped stop, with no turn to settle: release anything the
+   * user could still be waiting on, tell the agent to stop whatever it is
+   * running, and close every live background task so the roster empties and
+   * `backgroundLiveness` clears.
+   *
+   * `session/cancel` is the only lever that reaches Grok's background work —
+   * the tasks are children of the CLI process and it exposes no per-task kill
+   * to the client (the model kills its own through `KillTask`). The session
+   * itself stays up: the user pressed Stop, not Close.
+   */
+  private async stopSessionScopedWork(): Promise<void> {
+    if (this.stopped) {
+      return;
+    }
+    await this.serialize(async () => {
+      await this.settlePendingAsCancelled();
+      try {
+        this.peer().notify("session/cancel", { sessionId: this.acpSessionId });
+      } catch {
+        // Nothing to cancel on a dead transport.
+      }
+      this.emitAll(this.normalizer.stopBackgroundTasks());
+      this.emitAll(this.normalizer.failOpenTools("Stopped."));
     });
   }
 
@@ -1048,11 +1127,13 @@ export class GrokSession {
     if (this.stopped && this.hostInitiatedStop) {
       // Already settled by `stop()`.
       this.emitExited(reason, stderrTail, true);
+      this.options.onClosed?.(this.threadId);
       return;
     }
     this.stopped = true;
     this.settleEverythingForExit(reason, stderrTail);
     this.emitExited(reason, stderrTail, false);
+    this.options.onClosed?.(this.threadId);
   }
 
   /**

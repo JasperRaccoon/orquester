@@ -119,7 +119,16 @@ class GrokAdapter implements AgentAdapter {
     context.signal.addEventListener(
       "abort",
       () => {
-        void this.stopAll().finally(() => this.closeStream());
+        // `stopAll` awaits every `session.stop()`, any of which can reject;
+        // `main.ts` wraps its own call for exactly this reason and the signal
+        // handler must too (Q1 #26). `.finally` would re-throw.
+        void this.stopAll()
+          .catch((error: unknown) => {
+            this.context.logger.warn("grok: stopAll failed during shutdown", error);
+          })
+          .then(() => {
+            this.closeStream();
+          });
       },
       { once: true }
     );
@@ -193,7 +202,7 @@ class GrokAdapter implements AgentAdapter {
       extraEnv: GROK_EXTRA_ENV
     });
 
-    const session = new GrokSession({
+    const session: GrokSession = new GrokSession({
       threadId: input.threadId,
       cwd: input.cwd,
       home: input.home,
@@ -212,6 +221,14 @@ class GrokAdapter implements AgentAdapter {
       // Under the host's own tmp dir: the overlay is ours, and `/tmp` is
       // unavailable under `ProtectSystem=strict`.
       overlayDir: join(this.context.tmpDir(), "grok-config", input.threadId),
+      // A crashed child would otherwise leave a dead session in the map, so
+      // `hasSession` stays true and `listSessions()` keeps reporting it to the
+      // §3.3 reconcile and the drain-restart (Q1 #30).
+      onClosed: (threadId) => {
+        if (this.sessions.get(threadId) === session) {
+          this.sessions.delete(threadId);
+        }
+      },
       homeDirs: [input.home.path, env["HOME"]].filter(
         (value): value is string => typeof value === "string" && value.length > 1
       )
@@ -241,10 +258,8 @@ class GrokAdapter implements AgentAdapter {
     // §4.6.5: a provider-side permission change would desynchronise the host's
     // runtime mode — and `/always-approve off` is additionally a no-op on this
     // CLI, so the user would believe they had changed something.
-    if (/^\/always-approve(?:\s|$)/i.test(text)) {
-      throw new Error(
-        "Change permissions with Orquester's permission selector instead of /always-approve."
-      );
+    if (isBlockedGrokCommand(text)) {
+      throw grokBlockedCommandError();
     }
     if (text.length === 0 && input.attachments.length === 0) {
       // Grok does not declare `promptlessTurnContinuation`, so an empty
@@ -403,6 +418,14 @@ class GrokAdapter implements AgentAdapter {
       logger: this.context.logger
     });
 
+    // §4.5: "typed probe errors so a failure never caches an empty catalogue".
+    // One timed-out `grok inspect --json` must not blank the Settings card and
+    // the composer's skill menu (R4 #5); the per-cwd overlay already had this
+    // rule, the machine-level snapshot did not.
+    const previous = this.lastSnapshot;
+    const keep = <T>(next: T[], stale: boolean, before: T[] | undefined): T[] =>
+      stale && before !== undefined && before.length > 0 ? before : next;
+
     const snapshot: ProviderSnapshot = {
       id: ADAPTER_ID,
       refIds: [...GROK_REF_IDS],
@@ -412,9 +435,13 @@ class GrokAdapter implements AgentAdapter {
       ...(probe.message === undefined ? {} : { message: probe.message }),
       auth: probe.auth,
       checkedAt: this.context.clock.nowIso(),
-      models: probe.models,
-      slashCommands: probe.slashCommands.length > 0 ? probe.slashCommands : [COMPACT_SLASH_COMMAND],
-      skills: probe.skills,
+      models: keep(probe.models, probe.unavailable.models, previous?.models),
+      slashCommands: keep(
+        probe.slashCommands.length > 0 ? probe.slashCommands : [COMPACT_SLASH_COMMAND],
+        probe.unavailable.slashCommands,
+        previous?.slashCommands
+      ),
+      skills: keep(probe.skills, probe.unavailable.skills, previous?.skills),
       capabilities: GROK_CAPABILITIES
     };
     this.lastSnapshot = snapshot;
@@ -452,6 +479,10 @@ class GrokAdapter implements AgentAdapter {
     });
     const skills = await probeSkills(command, env, cwd);
     const previous = this.workspaceSnapshots.get(cwd);
+    // `null` is "could not read"; an empty array is a real, empty directory.
+    if (skills === null) {
+      return;
+    }
     if (skills.length === 0 && previous !== undefined && previous.skills.length > 0) {
       return;
     }
@@ -496,6 +527,36 @@ function mergeCommands(
     byName.set(command.name, command);
   }
   return [...byName.values()];
+}
+
+/**
+ * §4.6.5(c) / §4.6.6: Grok's `/always-approve` is **refused**, because a
+ * provider-side permission change would desynchronise the host's runtime mode
+ * — and on this CLI it is additionally a no-op, so the user would believe they
+ * had changed something (README 6).
+ *
+ * Exported so the refusal can happen where it can still be a 400: the composer
+ * pre-check and the host's `decide("turn")` both need the same predicate, and
+ * by the time `sendTurn` throws, the user message has already been committed
+ * (R2 #7). The adapter keeps the check as the backstop.
+ */
+export function isBlockedGrokCommand(text: string): boolean {
+  return /^\/always-approve(?:\s|$)/i.test(text.trim());
+}
+
+/** The message the refusal carries, pointing at the control that does work. */
+export const GROK_BLOCKED_COMMAND_MESSAGE =
+  "Change permissions with the permission selector on the composer instead of /always-approve.";
+
+/**
+ * A refusal shaped so the host answers `400 INVALID_COMMAND` rather than
+ * letting it surface as a failed-turn activity.
+ */
+export function grokBlockedCommandError(): Error & { code: string; status: number } {
+  return Object.assign(new Error(GROK_BLOCKED_COMMAND_MESSAGE), {
+    code: "INVALID_COMMAND",
+    status: 400
+  });
 }
 
 export const createGrokAdapter: AdapterFactory = async (

@@ -46,6 +46,12 @@ export class AcpRpcError extends Error {
   readonly data: unknown;
   /** The method we called, which the agent's message never names. */
   readonly method: string;
+  /**
+   * The peer's own `message`, undecorated. `Error.message` additionally
+   * carries the method and the data for a human; re-sending THAT over the wire
+   * produced `"boom: Invalid params (bad)"` plus a duplicated `data` (R4 #15).
+   */
+  readonly wireMessage: string;
 
   constructor(method: string, payload: AcpErrorPayload) {
     super(`${method}: ${payload.message}${describeData(payload.data)}`);
@@ -53,13 +59,14 @@ export class AcpRpcError extends Error {
     this.code = payload.code;
     this.data = payload.data;
     this.method = method;
+    this.wireMessage = payload.message;
   }
 
   /** The payload, for re-sending an error the other way. */
   toPayload(): AcpErrorPayload {
     return this.data === undefined
-      ? { code: this.code, message: this.message }
-      : { code: this.code, message: this.message, data: this.data };
+      ? { code: this.code, message: this.wireMessage }
+      : { code: this.code, message: this.wireMessage, data: this.data };
   }
 }
 
