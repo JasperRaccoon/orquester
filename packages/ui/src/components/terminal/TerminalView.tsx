@@ -6,6 +6,11 @@ import { useApi } from "../../context/orquester-context";
 import { useIsDesktop } from "../../hooks";
 import { useAppStore, useTerminalFontSize } from "../../store/app";
 import { uploadFilesToSession, type UploadStatus } from "../../lib/session-upload";
+// This view only ever renders the `"session"` tab arm, so its "is this an
+// agent?" branches are asking about a LEGACY agent terminal (§5.2) — the TUI
+// quirks below (bracketed paste, Shift+Enter → ESC+CR) are its quirks, and a
+// chat tab has no PTY to apply them to.
+import { isLegacyAgentTerminal } from "../../lib/session-kind";
 import { UploadProgressBar } from "../ui/upload-progress";
 import { bracketPaste } from "../../lib/paste";
 import type { SessionSummary } from "../../types";
@@ -292,7 +297,7 @@ export const TerminalView: React.FC<{
       // binds Shift+Enter to. Scoped to agents so a shell's Shift+Enter still
       // behaves as a normal Enter. (Plain Shift only — Ctrl/Cmd/Alt fall through.)
       if (
-        session.kind === "agent" &&
+        isLegacyAgentTerminal(session) &&
         event.key === "Enter" &&
         event.shiftKey &&
         !event.ctrlKey &&
@@ -530,7 +535,7 @@ export const TerminalView: React.FC<{
       }
       // Plain text. Agents get an explicitly-bracketed paste (robust against the
       // mode desync above); every other session kind falls through to xterm.
-      if (session.kind === "agent") {
+      if (isLegacyAgentTerminal(session)) {
         const text = clip.getData("text/plain");
         if (!text) {
           return;
@@ -559,7 +564,7 @@ export const TerminalView: React.FC<{
       // Shells keep Enter = run, and desktop is unaffected.
       if (
         !isDesktopRef.current &&
-        session.kind === "agent" &&
+        isLegacyAgentTerminal(session) &&
         (data === "\r" || data === "\n")
       ) {
         void api.sendSessionInput(session.id, "\x1b\r");
