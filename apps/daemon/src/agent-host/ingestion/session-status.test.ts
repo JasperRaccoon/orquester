@@ -1,14 +1,21 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import type { ThreadSessionState } from "@orquester/api/agent-chat";
+import {
+  settledTurnStateForSessionStatus,
+  type RuntimeTurnState,
+  type ThreadSessionState,
+  type ThreadSessionStatus,
+  type TurnState
+} from "@orquester/api/agent-chat";
 
 import {
   initialSessionState,
   isSessionLifecycleEvent,
   nextSessionState,
   sameSessionState,
-  threadStatusFromRuntimeState
+  threadStatusFromRuntimeState,
+  turnStatusFromTurnState
 } from "./session-status.ts";
 import { runtimeEvent } from "./test-harness.ts";
 
@@ -59,6 +66,39 @@ describe("nextSessionState (§5.1 turn model)", () => {
     });
     assert.equal(next.status, "error");
     assert.equal(next.lastError, "context overflow");
+  });
+
+  // R5 #2: only `failed` used to be distinguished, so `interrupted`/`cancelled`
+  // fell through to `ready` and `settledTurnStateForSessionStatus` settled the
+  // turn COMPLETED — every user Stop on Claude, Codex and Grok (the three that
+  // end an interrupt through `turn.completed`, not `turn.aborted`) was recorded
+  // as a finished turn.
+  const settlementCases: [RuntimeTurnState, ThreadSessionStatus, TurnState][] = [
+    ["completed", "ready", "completed"],
+    ["failed", "error", "failed"],
+    ["interrupted", "stopped", "interrupted"],
+    ["cancelled", "stopped", "interrupted"]
+  ];
+  for (const [turnState, status, settled] of settlementCases) {
+    it(`turn.completed {state:"${turnState}"} -> session ${status} -> turn ${settled}`, () => {
+      const next = nextSessionState({
+        event: runtimeEvent("turn.completed", { state: turnState }, { turnId: "turn-1" }),
+        previous: running
+      });
+      assert.equal(next.status, status);
+      assert.equal(next.activeTurnId, null);
+      // The status is only a hop: §5.1 settles the turn FROM it.
+      assert.equal(settledTurnStateForSessionStatus(next.status), settled);
+      assert.equal(turnStatusFromTurnState(turnState), status);
+    });
+  }
+
+  it("an interrupted turn leaves no lastError on the head", () => {
+    const next = nextSessionState({
+      event: runtimeEvent("turn.completed", { state: "interrupted" }, { turnId: "turn-1" }),
+      previous: { ...running, lastError: "stale" }
+    });
+    assert.equal(next.lastError, undefined);
   });
 
   it("turn.aborted folds T3's `interrupted` into `stopped` (§5.1)", () => {

@@ -707,9 +707,48 @@ test("12: a child seen during a live turn marks the turn as having subagents", (
   }
   assert.equal(state.turnTokenUsage?.hasSubagents, true);
   assert.ok(state.childAgents.has(CHILD_SESSION_ID));
-  // The child's own `step-finish` tokens are a different session's spend and
-  // must never be added to the parent turn's total.
   assert.equal(state.childAgents.get(CHILD_SESSION_ID)?.completed, true);
+});
+
+test("12: a child's step-finish tokens never reach the PARENT turn's accumulator", () => {
+  // R4 #25(b): the old test asserted this in a comment and then checked
+  // something else. Snapshot the accumulator around the child's frames.
+  const records = readFixture(CHILD_FIXTURE);
+  const parent = sessionIds(records)[2];
+  assert.ok(parent !== undefined);
+  const state = createSessionState({
+    threadId: "thread-1",
+    openCodeSessionId: parent,
+    directory: "/repo",
+    runtimeMode: "approval-required"
+  });
+  state.activeTurnId = "turn-1";
+  state.turnTokenUsage = makeTurnTokenUsageAccumulator();
+  let counter = 0;
+  const ctx = { eventId: () => `evt-${(counter += 1)}`, nowIso: () => "now" };
+
+  let childStepFrames = 0;
+  for (const record of records) {
+    if (record.kind !== "sse") {
+      continue;
+    }
+    const raw = asRawEvent(record.data);
+    if (raw === null) {
+      continue;
+    }
+    const isChildStep =
+      raw.type === "message.part.updated" &&
+      JSON.stringify(raw).includes(CHILD_SESSION_ID) &&
+      JSON.stringify(raw).includes('"step-finish"');
+    const before: number = state.turnTokenUsage?.partIds.size ?? 0;
+    normalizeOpenCodeEvent(state, raw, ctx);
+    const after: number = state.turnTokenUsage?.partIds.size ?? 0;
+    if (isChildStep) {
+      childStepFrames += 1;
+      assert.equal(after, before, "a child's step-finish must not be accumulated");
+    }
+  }
+  assert.ok(childStepFrames >= 1, "the capture really does contain a child step-finish");
 });
 
 test("a live child is closed `stopped` when the session goes down (§3.1)", () => {

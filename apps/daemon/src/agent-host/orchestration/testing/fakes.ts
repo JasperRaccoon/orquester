@@ -172,6 +172,8 @@ export interface FakeIngestion extends Ingestion {
   readonly ingested: RuntimeEvent[];
   readonly flushedTurns: Array<{ threadId: string; turnId: string | undefined }>;
   readonly flushedThreads: string[];
+  /** Threads released through `Ingestion.forget` (Q1 #9). */
+  readonly forgottenThreads: string[];
   /** What to append for a given runtime event, if anything. */
   translate?: (event: RuntimeEvent) => AppendableDomainEvent[];
 }
@@ -182,10 +184,12 @@ export function createFakeIngestion(input: {
   const ingested: RuntimeEvent[] = [];
   const flushedTurns: Array<{ threadId: string; turnId: string | undefined }> = [];
   const flushedThreads: string[] = [];
+  const forgottenThreads: string[] = [];
   const fake: FakeIngestion = {
     ingested,
     flushedTurns,
     flushedThreads,
+    forgottenThreads,
     async ingest(event: RuntimeEvent): Promise<void> {
       ingested.push(event);
       const events = fake.translate?.(event) ?? [];
@@ -199,6 +203,9 @@ export function createFakeIngestion(input: {
     async finalizeReasoning(): Promise<void> {},
     async flushThread(threadId: string): Promise<void> {
       flushedThreads.push(threadId);
+    },
+    async forget(threadId: string): Promise<void> {
+      forgottenThreads.push(threadId);
     },
     async drain(): Promise<void> {}
   };

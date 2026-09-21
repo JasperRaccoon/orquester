@@ -610,8 +610,34 @@ function reduceSessionSet(
 ): Mutation {
   const session = event.payload.session;
   const head = state.head === null ? null : { ...state.head, session };
+  // The provider's final numbers for the turn this event settles (E10). They
+  // are stamped BEFORE settlement so `applySessionStatusToTurn`'s
+  // already-settled short-circuit cannot drop them, and only onto the named
+  // turn while it is still unsettled — a replayed terminal event never
+  // rewrites a closed turn's cost.
+  const turnResult = event.payload.turn;
 
   let turns = state.turns;
+  if (turnResult !== undefined) {
+    const index = turns.findIndex((turn) => turn.turnId === turnResult.turnId);
+    const turn = index === -1 ? undefined : turns[index];
+    if (
+      turn !== undefined &&
+      !isSettledTurnState(turn.state) &&
+      (turnResult.tokenUsage !== undefined || turnResult.totalCostUsd !== undefined)
+    ) {
+      const next = turns.slice();
+      next[index] = {
+        ...turn,
+        ...(turnResult.tokenUsage !== undefined ? { tokenUsage: turnResult.tokenUsage } : {}),
+        ...(turnResult.totalCostUsd !== undefined
+          ? { totalCostUsd: turnResult.totalCostUsd }
+          : {})
+      };
+      turns = next;
+    }
+  }
+
   if (session.status === "running" && session.activeTurnId !== null) {
     turns = adoptActiveTurn(turns, session.activeTurnId, event.occurredAt);
   } else {

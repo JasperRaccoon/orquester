@@ -176,6 +176,19 @@ export interface Ingestion {
   /** Flush every buffer for a thread (turn settled, session exited). */
   flushThread(threadId: string): Promise<void>;
 
+  /**
+   * Release every in-memory structure ingestion holds for a thread, without
+   * flushing: the thread is gone (`deleteThread`) or its tab was closed.
+   *
+   * Ingestion keeps per-thread segment, buffer, phase and dedupe state, some
+   * of which grows once per activity, and the host is designed to run for
+   * weeks across deploys — so a thread whose record is gone must not stay
+   * resident. Idempotent, and safe to call for a thread ingestion never saw.
+   *
+   * *Added additively for Q1 #9 (W3 implements, W1 calls it).*
+   */
+  forget(threadId: string): Promise<void>;
+
   /** Flush everything. The drain seam every test waits on instead of sleeping (§9). */
   drain(): Promise<void>;
 }
