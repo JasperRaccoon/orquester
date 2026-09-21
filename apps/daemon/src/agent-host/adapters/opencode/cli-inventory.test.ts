@@ -148,6 +148,37 @@ test("debug skill yields name/description/location and drops the huge body", () 
   assert.equal(skills[1]?.name, "no-location");
 });
 
+test("a TRUNCATED skill array still yields every skill that arrived whole", () => {
+  // Measured on this host: `opencode debug skill` answers 265 625 bytes to a
+  // file and 218 171 through a pipe, for the identical command — the
+  // Bun-compiled binary truncates non-TTY stdout (§4.5's reason for
+  // preferring the SDK `GET /skill` on the live path). A plain `JSON.parse`
+  // of that loses ALL 24 skills; this recovers the complete ones.
+  const whole = JSON.stringify([
+    { name: "first", description: "one", location: "/a", content: "x".repeat(200) },
+    { name: "second", description: "two", location: "/b", content: "y".repeat(200) },
+    { name: "third", description: "three", location: "/c", content: "z".repeat(200) }
+  ]);
+  const cut = whole.slice(0, whole.length - 180);
+  assert.throws(() => JSON.parse(cut), "the fixture really is truncated");
+
+  const skills = parseSkillsCliOutput(cut);
+  assert.deepEqual(
+    skills.map((skill) => skill.name),
+    ["first", "second"],
+    "the two complete objects survive; the severed third is dropped"
+  );
+  assert.equal(skills[0]?.location, "/a");
+});
+
+test("a skill object severed mid-string does not corrupt the ones before it", () => {
+  const cut = '[{"name":"kept","location":"/k"},{"name":"hal';
+  assert.deepEqual(
+    parseSkillsCliOutput(cut).map((skill) => skill.name),
+    ["kept"]
+  );
+});
+
 test("malformed skill output degrades to an empty list", () => {
   assert.deepEqual(parseSkillsCliOutput("not json"), []);
   assert.deepEqual(parseSkillsCliOutput("{}"), []);

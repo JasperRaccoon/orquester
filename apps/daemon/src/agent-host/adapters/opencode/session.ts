@@ -1677,6 +1677,14 @@ export class OpenCodeThreadSession {
       cancellation.acknowledged = true;
       cancellation.acknowledge();
       await this.abortDescendants();
+      // §6.2: "`/interrupt` is also the only way to stop background work, and
+      // it stops all of it. It is addressed to the SESSION, not to a turn, so
+      // it is valid with no turn running." The descendant abort above already
+      // killed the children provider-side; closing their roster rows is what
+      // lets `backgroundLiveness` drop to null — without it the client's Stop
+      // button stays on "Stopping…" forever. Runs on EVERY interrupt, with or
+      // without an active turn, and is idempotent.
+      this.closeChildAgents("interrupted");
       const tokenUsage = takeTurnTokenUsage(this.state, false);
       if (target !== undefined && this.state.activeTurnId === target) {
         this.state.activeTurnId = undefined;
@@ -1684,7 +1692,6 @@ export class OpenCodeThreadSession {
         this.state.activeVariant = undefined;
         this.state.promptAdmission = undefined;
         this.updateRecord({ status: "ready" }, { activeTurnId: true });
-        this.closeChildAgents("interrupted");
         this.emit({
           ...this.base({ turnId: target }),
           type: "turn.aborted",

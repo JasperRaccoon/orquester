@@ -252,6 +252,61 @@ export function parseAgentListCliOutput(stdout: string): OpenCodeAgentRow[] {
   return agents;
 }
 
+/**
+ * Scan a possibly-truncated JSON array for its **complete** top-level objects.
+ *
+ * `opencode debug skill` inlines every skill's whole body, and the
+ * Bun-compiled binary truncates its stdout when it is a pipe rather than a
+ * TTY: measured on this host at 218 171 bytes through a pipe against 265 625
+ * to a file, for the identical command. A plain `JSON.parse` of that loses
+ * **all** 24 skills. This recovers the ones that arrived whole.
+ */
+function salvageJsonObjects(text: string): unknown[] {
+  const out: unknown[] = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = inString;
+      continue;
+    }
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) {
+      continue;
+    }
+    if (char === "{") {
+      if (depth === 0) {
+        start = index;
+      }
+      depth += 1;
+    } else if (char === "}") {
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        try {
+          out.push(JSON.parse(text.slice(start, index + 1)));
+        } catch {
+          // A malformed object costs that object, never the scan.
+        }
+        start = -1;
+      } else if (depth < 0) {
+        // Unbalanced: give up rather than guess.
+        return out;
+      }
+    }
+  }
+  return out;
+}
+
 /** `opencode debug skill` — one JSON array of `{name, description, location}`. */
 export function parseSkillsCliOutput(stdout: string): OpenCodeSkillRow[] {
   const text = stdout.trim();
@@ -262,7 +317,8 @@ export function parseSkillsCliOutput(stdout: string): OpenCodeSkillRow[] {
   try {
     parsed = JSON.parse(text);
   } catch {
-    return [];
+    // Truncated mid-array — recover every object that arrived whole.
+    parsed = salvageJsonObjects(text);
   }
   if (!Array.isArray(parsed)) {
     return [];
