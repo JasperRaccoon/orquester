@@ -78,8 +78,9 @@ export function withDeadline<T>(
         reject(new DeadlineExceededError(label, timeoutMs));
       });
     }, timeoutMs);
-    // Never hold the process open on a deadline timer.
-    timer.unref?.();
+    // Deliberately NOT unref'd: `onTimeout` is what kills a wedged child, and
+    // a timer the loop is free to skip would let the host exit with the child
+    // still running. Callers that need an early exit pass `signal`.
 
     const onAbort = (): void => {
       finish(() => reject(abortReason(signal!)));

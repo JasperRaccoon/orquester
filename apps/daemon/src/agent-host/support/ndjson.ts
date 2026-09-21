@@ -7,8 +7,6 @@
  * writes.
  */
 
-import type { Writable } from "node:stream";
-
 const BOM = "﻿";
 
 /**
@@ -101,6 +99,16 @@ export interface NdjsonWriterOptions {
   onDrop?: (bytes: number) => void;
 }
 
+/**
+ * The minimum a sink must offer. A Node `Writable` satisfies it structurally;
+ * so does a test double, which is the point — the writer's backpressure rule
+ * is the thing under test, not a stream implementation.
+ */
+export interface NdjsonSink {
+  write(chunk: string): boolean;
+  once(event: "drain", listener: () => void): unknown;
+}
+
 export class NdjsonWriter {
   private queue: string[] = [];
   private queuedBytes = 0;
@@ -113,7 +121,7 @@ export class NdjsonWriter {
   droppedCount = 0;
 
   constructor(
-    private readonly sink: Pick<Writable, "write" | "once">,
+    private readonly sink: NdjsonSink,
     options: NdjsonWriterOptions = {}
   ) {
     this.maxQueuedBytes = options.maxQueuedBytes ?? 4 * 1024 * 1024;

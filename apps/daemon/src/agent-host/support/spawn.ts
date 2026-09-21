@@ -113,8 +113,11 @@ export function spawnProviderChild(options: SpawnProviderChildOptions): Provider
       finish({ kind: "exit", code: code ?? 0, signal: null });
     }
   });
-  // A dead provider must never be the reason the host cannot exit.
-  child.unref?.();
+  // Deliberately NOT unref'd: the exit watcher above is what settles the
+  // in-flight turn and closes every live task (§3.1), so the host must stay
+  // awake long enough to observe the exit. Every child is owned by a session
+  // scope, and stopping the host closes every scope — there is no path by
+  // which a forgotten child keeps the process alive.
 
   let killing: Promise<ChildExitReason> | null = null;
 

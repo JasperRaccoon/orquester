@@ -29,10 +29,13 @@ export interface ClassifiedStderrLine {
 // ANSI
 // ---------------------------------------------------------------------------
 
-// CSI / OSC / single-character escapes. Deliberately written out rather than
-// pulled from a dependency: this runs on every stderr line of every child.
-// eslint-disable-next-line no-control-regex
-const ANSI_RE = /[\u001B\u009B][[\]()#;?]*(?:\d{1,4}(?:;\d{0,4})*)?[0-9A-PR-TZcf-nqry=><]|\u001B\][^\u0007\u001B]*(?:\u0007|\u001B\\)/g;
+// OSC first, then CSI. The order is load-bearing: the CSI alternative's
+// parameter class contains `]`, so it would otherwise swallow the `\u001b]`
+// of an OSC sequence and leave its payload (`;title\u0007…`) in the output.
+// Written out rather than pulled from a dependency: this runs on every stderr
+// line of every child.
+const ANSI_RE =
+  /\u001B\][^\u0007\u001B]*(?:\u0007|\u001B\\)|[\u001B\u009B][[\]()#;?]*(?:\d{1,4}(?:;\d{0,4})*)?[0-9A-PR-TZcf-nqry=><]/g;
 
 /** Strip ANSI escape sequences (colour, cursor moves, OSC titles). */
 export function stripAnsi(value: string): string {
@@ -43,7 +46,12 @@ export function stripAnsi(value: string): string {
 // Redaction (§3.1)
 // ---------------------------------------------------------------------------
 
-const AUTH_HEADER_RE = /\b(authorization|x-api-key|proxy-authorization)\b(\s*[:=]\s*)(\S+)/gi;
+/**
+ * A credential header's value is the REST OF THE LINE, not one token: masking
+ * only the first word left `Authorization: [redacted] <the actual token>`.
+ * `m` keeps it from eating the next line of a multi-line tail.
+ */
+const AUTH_HEADER_RE = /\b(authorization|x-api-key|proxy-authorization)\b(\s*[:=]\s*)\S.*$/gim;
 const BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi;
 /**
  * `sk-`, `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`, and Slack's `xox?-` shapes. The
