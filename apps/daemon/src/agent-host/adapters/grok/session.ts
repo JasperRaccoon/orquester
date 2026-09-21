@@ -22,7 +22,7 @@ import type {
   RuntimeMode
 } from "@orquester/api/agent-chat";
 
-import { AGENT_HOST_DEADLINES, TURN_LIVENESS_WINDOWS } from "../../support/deadline.ts";
+import { AGENT_HOST_DEADLINES } from "../../support/deadline.ts";
 import type { ChildExitReason } from "../../support/spawn.ts";
 import { exitOutcome } from "../../support/spawn.ts";
 import type { ClassifiedStderrLine } from "../../support/stderr.ts";
@@ -116,10 +116,6 @@ export interface GrokSessionOptions {
     error(message: string, detail?: unknown): void;
   };
   homeDirs?: readonly string[];
-  /** Overridable for tests; production uses the real windows of §3.1. */
-  liveness?: { idleMs: number; activeToolMs: number };
-  setTimer?: (fn: () => void, ms: number) => unknown;
-  clearTimer?: (handle: unknown) => void;
 }
 
 interface PendingApproval {
@@ -178,11 +174,6 @@ export class GrokSession {
   private epoch = 0;
   /** The provider prompt ids we have not yet matched to a turn. */
   private readonly unclaimedPromptIds: Array<{ id: string; text: string }> = [];
-
-  /** Liveness watchdog state (§3.1 "Turn liveness watchdogs pause on the user"). */
-  private lastActivityAt: number | undefined;
-  private readonly openToolCalls = new Set<string>();
-  private watchdogHandle: unknown;
 
   /** A serial queue: one mutating command at a time per thread (§3.1). */
   private lock: Promise<unknown> = Promise.resolve();
@@ -352,7 +343,6 @@ export class GrokSession {
         })
       );
     }
-    this.startWatchdog();
   }
 
   private async openNewSession(): Promise<NewSessionResponse> {
@@ -403,7 +393,6 @@ export class GrokSession {
     const peer = connection.peer;
 
     peer.onNotification("session/update", (params) => {
-      this.onActivity(params as SessionNotification);
       this.emitAll(this.normalizer.handleSessionUpdate(params as SessionNotification));
     });
 
@@ -503,7 +492,6 @@ export class GrokSession {
     const requestId = this.options.uuid();
     const decision = deferred<ApprovalDecision>();
     this.pendingApprovals.set(requestId, { requestType, resolve: decision.resolve });
-    this.pokeWatchdog();
 
     this.emitEvent(
       this.normalizer.requestOpened({
@@ -517,10 +505,6 @@ export class GrokSession {
 
     const resolved = await decision.promise;
     this.pendingApprovals.delete(requestId);
-    // An approval wait can last longer than the watchdog window; its
-    // resolution gives the provider a fresh one.
-    this.lastActivityAt = Date.now();
-    this.pokeWatchdog();
 
     this.emitEvent(this.normalizer.requestResolved({ requestId, requestType, decision: resolved }));
 
@@ -547,7 +531,6 @@ export class GrokSession {
     const requestId = this.options.uuid();
     const pending = deferred<Record<string, unknown> | null>();
     this.pendingUserInputs.set(requestId, { params, resolve: pending.resolve });
-    this.pokeWatchdog();
 
     this.emitEvent(
       this.normalizer.userInputRequested({
@@ -563,8 +546,6 @@ export class GrokSession {
 
     const answers = await pending.promise;
     this.pendingUserInputs.delete(requestId);
-    this.lastActivityAt = Date.now();
-    this.pokeWatchdog();
     this.emitEvent(this.normalizer.userInputResolved(requestId, answers ?? {}));
 
     return answers === null ? { outcome: "cancelled" } : answersToXaiResponse(params, answers);
@@ -669,14 +650,6 @@ export class GrokSession {
         await this.applyModelSelection(input.modelSelection);
       }
       await this.applyInteractionMode(input.interactionMode);
-
-      // The deadline must NOT start until the protocol has produced observable
-      // progress: ACP hides Grok's private `streaming_reasoning` phase, and a
-      // 116-second silent gap on a trivial prompt was recorded (observation
-      // 17). `undefined` means "no deadline yet".
-      this.lastActivityAt = undefined;
-      this.openToolCalls.clear();
-      this.pokeWatchdog();
 
       // Attachments reach the agent as PATHS, not bytes:
       // `agentCapabilities.promptCapabilities.image` is **false** on this CLI,
@@ -862,9 +835,6 @@ export class GrokSession {
     }
 
     this.activeTurn = null;
-    this.lastActivityAt = undefined;
-    this.openToolCalls.clear();
-    this.pokeWatchdog();
     if (!this.stopped) {
       this.status = "ready";
       this.touch();
@@ -1019,93 +989,17 @@ export class GrokSession {
   }
 
   // ------------------------------------------------------------- liveness
-
-  private onActivity(params: SessionNotification): void {
-    const update = params.update as { sessionUpdate?: string; toolCallId?: unknown; status?: unknown };
-    if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
-      const id = typeof update.toolCallId === "string" ? update.toolCallId : undefined;
-      if (id !== undefined) {
-        if (update.status === "completed" || update.status === "failed") {
-          this.openToolCalls.delete(id);
-        } else {
-          this.openToolCalls.add(id);
-        }
-      }
-    }
-    this.lastActivityAt = Date.now();
-    this.pokeWatchdog();
-  }
-
-  /**
-   * Pending approvals and questions **pause the deadline entirely**: a turn
-   * waiting on a human is not a stalled turn, and a watchdog that ignored that
-   * would cancel every request the user left open over lunch.
-   */
-  private livenessPaused(): boolean {
-    return this.pendingApprovals.size > 0 || this.pendingUserInputs.size > 0;
-  }
-
-  private livenessWindow(): number {
-    const windows = this.options.liveness ?? TURN_LIVENESS_WINDOWS;
-    return this.openToolCalls.size > 0 ? windows.activeToolMs : windows.idleMs;
-  }
-
-  private startWatchdog(): void {
-    this.pokeWatchdog();
-  }
-
-  private pokeWatchdog(): void {
-    const setTimer = this.options.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
-    const clearTimer = this.options.clearTimer ?? ((handle) => clearTimeout(handle as NodeJS.Timeout));
-    if (this.watchdogHandle !== undefined) {
-      clearTimer(this.watchdogHandle);
-      this.watchdogHandle = undefined;
-    }
-    if (this.stopped || this.activeTurn === null || this.activeTurn.settled) {
-      return;
-    }
-    if (this.lastActivityAt === undefined || this.livenessPaused()) {
-      return;
-    }
-    const remaining = this.livenessWindow() - (Date.now() - this.lastActivityAt);
-    this.watchdogHandle = setTimer(() => {
-      this.watchdogHandle = undefined;
-      void this.onWatchdogFired();
-    }, Math.max(0, remaining));
-  }
-
-  private async onWatchdogFired(): Promise<void> {
-    const turn = this.activeTurn;
-    if (turn === null || turn.settled || this.stopped) {
-      return;
-    }
-    // Re-check immediately before cancelling: an approval may have opened
-    // while the timer was pending.
-    if (this.livenessPaused() || this.lastActivityAt === undefined) {
-      this.pokeWatchdog();
-      return;
-    }
-    const window = this.livenessWindow();
-    if (Date.now() - this.lastActivityAt < window) {
-      this.pokeWatchdog();
-      return;
-    }
-    turn.interrupted = true;
-    await this.serialize(async () => {
-      await this.settlePendingAsCancelled();
-      try {
-        this.peer().notify("session/cancel", { sessionId: this.acpSessionId });
-      } catch {
-        // ignored — the settlement below is what the user sees.
-      }
-      this.settleTurn(
-        turn.turnId,
-        turn.epoch,
-        { stopReason: "cancelled" },
-        `Grok produced no ACP progress for ${window}ms; the turn was stopped.`
-      );
-    });
-  }
+  //
+  // **The turn liveness watchdog is the HOST's, not the adapter's.** T3 runs
+  // it inside its Grok adapter, and an earlier revision of this file did the
+  // same; `orchestration/turn-watchdog.ts` now runs it for every adapter off
+  // the same runtime event stream, and calls `interruptTurn` on a stall. Two
+  // watchdogs on identical windows race: both fire, the turn is settled twice
+  // and the user sees two terminal rows. So there is none here — the adapter's
+  // duty is only to emit the events the host's watchdog reads (`turn.started`,
+  // `content.delta`, the `item.*` tool lifecycle, `request.opened` /
+  // `request.resolved` for the pause) and to honour the `interruptTurn` that
+  // follows, which {@link interrupt} does.
 
   // ---------------------------------------------------------------- stderr
 
@@ -1170,7 +1064,6 @@ export class GrokSession {
       );
       this.activeTurn = null;
     }
-    this.pokeWatchdog();
   }
 
   private emitExited(reason: ChildExitReason, stderrTail: string, hostInitiated: boolean): void {
@@ -1219,7 +1112,6 @@ export class GrokSession {
       );
       this.activeTurn = null;
     }
-    this.pokeWatchdog();
     await this.connection?.stop();
   }
 
