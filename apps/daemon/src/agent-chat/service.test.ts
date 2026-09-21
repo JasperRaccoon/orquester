@@ -132,6 +132,7 @@ async function makeFixture(
       const resolvedPath = resolve(projectPath);
       return resolvedPath === root || resolvedPath.startsWith(root + sep) ? resolvedPath : null;
     },
+    sendAttachment: async (reply) => reply,
     nodeBin: "/usr/bin/node",
     sleep: async () => undefined,
     // A test must never start an agent host process.

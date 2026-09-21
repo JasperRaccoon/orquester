@@ -19,7 +19,7 @@ import type {
   RegistryEntry,
   SessionSummary
 } from "@orquester/api";
-import type { AgentChatHome, RuntimePlatform, SessionRecord } from "@orquester/config";
+import type { AgentChatHome, RuntimePlatform } from "@orquester/config";
 import { agentHostSocketPath, agentHostTokenPath } from "@orquester/config";
 import {
   AGENT_HOST_HEALTH_INTERVAL_MS,
@@ -33,9 +33,11 @@ import { UploadTooLargeError } from "../upload-stream.ts";
 import { isAgentAdapterId } from "../agent-host/adapters/index.ts";
 import { agentHostExtraRoutes } from "../agent-host/server/extra-routes.ts";
 import { ACCOUNT_HOME_ENV_VAR } from "../agent-host/support/env.ts";
+import type { SessionIndexContributor } from "../sessions.ts";
 import { ChatSessionManager, ChatSessionError } from "./chat-sessions.ts";
 import { AgentHostClient, HostUnavailableError } from "./host-client.ts";
 import { markClaudeProjectTrusted } from "./home-prep.ts";
+import type { FastifyReply } from "fastify";
 import type { AgentChatRouteDeps } from "./proxy-routes.ts";
 import { AgentChatSummaryService, type SummaryBroadcaster, type SummaryPush } from "./summary.ts";
 import {
@@ -94,6 +96,12 @@ export interface AgentChatServiceOptions {
    * grant Claude project trust for — see `prepareHome`.
    */
   resolveTrustedProjectDir(projectPath: string): Promise<string | null>;
+  /**
+   * Stream a host-resolved attachment to the client. `index.ts` owns it
+   * because the `Content-Disposition` / streaming conventions live there with
+   * the other download routes.
+   */
+  sendAttachment(reply: FastifyReply, path: string): Promise<unknown>;
   logger?: {
     log?: (...a: unknown[]) => void;
     warn?: (...a: unknown[]) => void;
@@ -184,6 +192,9 @@ export class AgentChatService {
         },
         now: opts.now ?? Date.now,
         sleep: opts.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
+        // The host's OWN refresh (§4.6.4) reaches the bus through here; the
+        // explicit refresh route publishes separately.
+        onProvidersRevision: () => this.summary.publishProvidersChanged(),
         logger: opts.logger
       }
     });
@@ -223,21 +234,27 @@ export class AgentChatService {
    * through. `owns` is what keeps a chat record out of the tmux reattach and
    * out of the orphan reap.
    */
-  indexContributor(): {
-    records(): SessionRecord[];
-    adopt(records: readonly SessionRecord[]): void;
-    owns(record: SessionRecord): boolean;
-  } {
+  indexContributor(): SessionIndexContributor {
     return {
       records: () => this.chat.records(),
       adopt: (records) => this.chat.adopt(records),
-      owns: (record) => record.kind === "agent-chat"
+      owns: (record) => record.kind === "agent-chat",
+      pendingThreadDeletes: () => this.chat.pendingThreadDeletes(),
+      adoptPendingThreadDeletes: (ids) => this.chat.adoptPendingDeletes(ids)
     };
   }
 
   /** Boot: adopt or spawn the host, then start the coarse subscription. */
   async init(): Promise<void> {
     await this.supervisor.init();
+    // Clear the durable delete queue as soon as a host is adopted, and again on
+    // every later adoption (a respawn or the drain-restart).
+    await this.replayPendingThreadDeletes();
+    this.supervisor.onChange((status) => {
+      if (status.state === "healthy") {
+        void this.replayPendingThreadDeletes();
+      }
+    });
     this.summary.start();
     // `.catch`, never a bare `void`: a rejection here would be unhandled, and
     // Node ≥15 exits the process on one — taking every live terminal, `/events`
@@ -280,6 +297,8 @@ export class AgentChatService {
         this.summary.publishProvidersChanged(
           isAgentAdapterId(adapterId) ? { adapterId } : {}
         ),
+      attachmentPath: (sessionId, attachmentId) => this.attachmentPath(sessionId, attachmentId),
+      sendAttachment: (reply, path) => this.opts.sendAttachment(reply, path),
       logger: this.opts.logger
     };
   }
@@ -415,14 +434,51 @@ export class AgentChatService {
   /**
    * `DELETE` cascade (§6.1): the host settles pending requests, stops the
    * provider child, prunes every checkpoint ref under the thread's prefix and
-   * removes the thread directory. Fire-and-forget — the tab is already gone,
-   * and a host that is down reconciles the orphan on its next start (§3.3).
+   * removes the thread directory.
+   *
+   * **Durable, not fire-and-forget.** `ChatSessionManager.close` has already
+   * queued the id into the persisted `pendingThreadDeletes`; this attempt only
+   * clears it on a definitive answer. A host that is down at close time would
+   * otherwise never write `thread.deleted`, and §3.3's reconcile would then
+   * find an orphan with a cursor and a continuation marker and RESUME it —
+   * spending tokens on a tab nobody is looking at. The queue is replayed the
+   * moment a host is adopted, and survives the daemon restart in between.
    */
   deleteThread(id: string): void {
     this.summary.forget(id);
-    void this.client
-      .json("DELETE", agentHostRoutes.deleteThread(id))
-      .catch((error) => this.opts.logger?.warn?.(`agent host thread delete failed for ${id}`, error));
+    void this.attemptThreadDelete(id);
+  }
+
+  /** One delete attempt. Clears the retry only on a definitive host answer. */
+  private async attemptThreadDelete(id: string): Promise<void> {
+    try {
+      const response = await this.client.json("DELETE", agentHostRoutes.deleteThread(id));
+      // 404 is definitive too: the host has no such thread, so there is nothing
+      // left to reconcile. Anything 5xx stays queued.
+      if (response.status < 500) {
+        this.chat.resolveThreadDelete(id);
+        return;
+      }
+      this.opts.logger?.warn?.(
+        `agent host refused the thread delete for ${id} (${response.status}); will retry`
+      );
+    } catch (error) {
+      this.opts.logger?.warn?.(`agent host thread delete failed for ${id}; will retry`, error);
+    }
+  }
+
+  /**
+   * Replay every queued delete. Called whenever a host becomes healthy —
+   * boot adoption, a respawn, or the drain-restart.
+   */
+  async replayPendingThreadDeletes(): Promise<void> {
+    if (!this.supervisor.isHealthy()) return;
+    const pending = this.chat.pendingThreadDeletes();
+    if (pending.length === 0) return;
+    this.opts.logger?.log?.(`agent chat: replaying ${pending.length} pending thread delete(s)`);
+    for (const id of pending) {
+      await this.attemptThreadDelete(id);
+    }
   }
 
   /**
@@ -467,6 +523,25 @@ export class AgentChatService {
       value = null;
     }
     return { status: stream.status, value };
+  }
+
+  /**
+   * Resolve an attachment id to its absolute host path (§6.3 read-back).
+   *
+   * The daemon cannot serve it through `/api/fs/download`: that route is
+   * confined to `fsRoot` (`<appdir>/workspaces`) and the thread's attachments
+   * live under `<appdir>/daemon/agent/threads/<id>/attachments`. So the host
+   * resolves the id — it owns the namespace and the traversal guard — and the
+   * daemon streams what it names.
+   */
+  async attachmentPath(sessionId: string, attachmentId: string): Promise<string | null> {
+    const response = await this.client.json<{ path?: unknown }>(
+      "GET",
+      agentHostExtraRoutes.attachment(sessionId, attachmentId)
+    );
+    if (response.status !== 200) return null;
+    const path = response.value?.path;
+    return typeof path === "string" && path ? path : null;
   }
 
   /** `PUT` rename (§6.1) — the host appends `thread.meta-updated`. */

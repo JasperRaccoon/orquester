@@ -120,6 +120,37 @@ test("a chat record without a chat block is skipped, not resurrected as a half-t
   assert.equal(chat.get("x"), undefined);
 });
 
+test("closing a tab queues a DURABLE host-side delete", () => {
+  // Regression: the cascade was fire-and-forget over the host socket. With the
+  // host down at close time no `thread.deleted` is ever written, and §3.3's
+  // reconcile then finds an orphan with a cursor and a continuation marker and
+  // RESUMES it — a provider child and tokens spent for a tab nobody has.
+  let persists = 0;
+  const chat = chatManager(() => {
+    persists++;
+  });
+  seed(chat, "t1", 0);
+  chat.close("t1");
+  assert.deepEqual(chat.pendingThreadDeletes(), ["t1"]);
+  // It rides the index, so it survives the daemon restart in between.
+  const reloaded = chatManager();
+  reloaded.adoptPendingDeletes(chat.pendingThreadDeletes());
+  assert.deepEqual(reloaded.pendingThreadDeletes(), ["t1"]);
+  // …and is cleared only once the host answers.
+  const before = persists;
+  chat.resolveThreadDelete("t1");
+  assert.deepEqual(chat.pendingThreadDeletes(), []);
+  assert.equal(persists, before + 1, "the cleared queue is made durable too");
+  chat.resolveThreadDelete("t1");
+  assert.equal(persists, before + 1, "resolving twice does not churn the index");
+});
+
+test("a malformed queued id is dropped, never the whole queue", () => {
+  const chat = chatManager();
+  chat.adoptPendingDeletes(["good", "", "also-good"] as string[]);
+  assert.deepEqual(chat.pendingThreadDeletes(), ["good", "also-good"]);
+});
+
 test("lastSeq is monotonic — a stale frame cannot rewind a tab's cursor", () => {
   let persists = 0;
   const chat = chatManager(() => {

@@ -57,6 +57,14 @@ export const agentChatRoutes = {
     `${sessionBase(sessionId)}/turns/${turnCount}/diff`,
   item: (sessionId: string, itemId: string): string =>
     `${sessionBase(sessionId)}/items/${encodeURIComponent(itemId)}`,
+  /**
+   * §6.3 attachment read-back. NOT `/api/fs/download`: that route is confined
+   * to `fsRoot`, and a thread's attachments live under the appdir's
+   * `daemon/agent/threads/<id>/attachments`. Carries the same `?token=`
+   * carve-out a native `<a download>` needs.
+   */
+  attachment: (sessionId: string, attachmentId: string): string =>
+    `${sessionBase(sessionId)}/attachments/${encodeURIComponent(attachmentId)}`,
 
   // §6.3 host-level reads (not per session)
   providers: "/api/agent/providers",

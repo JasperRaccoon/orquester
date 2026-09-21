@@ -456,6 +456,20 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // scoped passwordless sudo) — and, for a system-home thread, for every
     // future terminal `claude` tab on that path too. Same confinement the fs
     // routes use: realpath, must be inside `fsRoot`.
+    // §6.3 attachment read-back. The host resolved and guarded the path (it
+    // owns that namespace); the daemon only streams it, with the same
+    // attachment headers the other download routes use.
+    sendAttachment: async (reply, path) => {
+      const info = await stat(path).catch(() => null);
+      if (!info?.isFile()) {
+        return reply.code(404).send({ code: "NOT_FOUND", message: "Attachment is gone." });
+      }
+      return reply
+        .header("Content-Type", "application/octet-stream")
+        .header("Content-Length", String(info.size))
+        .header("Content-Disposition", contentDisposition(basename(path)))
+        .send(createReadStream(path));
+    },
     resolveTrustedProjectDir: async (projectPath) => {
       if (!projectPath) return null;
       try {

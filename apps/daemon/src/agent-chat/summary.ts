@@ -257,7 +257,20 @@ export class AgentChatSummaryService {
 
     this.publishTurnTransition(threadId, previous?.fields.latestTurn ?? null, fields.latestTurn ?? null);
 
-    // Push only on a NEW attention, never on every tick that keeps it raised.
+    // Push only on a NEW attention, never on every tick that keeps it raised —
+    // and never on the FIRST observation of a thread.
+    //
+    // `previous === undefined` means the daemon is *discovering* this thread's
+    // state, not watching it change: after a restart (every deploy) the first
+    // poll reads a long-settled turn as a brand-new "finished" attention and
+    // would push one notification per open chat tab for work the user saw hours
+    // ago. The in-memory 30 s debounce resets with the process, so it is no
+    // backstop. Seed the baseline silently; push only on a transition we
+    // actually observed. Same guard covers re-adoption after `forget()` or a
+    // host handover.
+    if (previous === undefined) {
+      return;
+    }
     if (!attentionChanged || resolution.attention === null) {
       return;
     }
