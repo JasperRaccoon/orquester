@@ -52,6 +52,16 @@ export interface ChatBannerDockExtraProps {
 const DISMISS_TRANSITION_MS = 220;
 
 /**
+ * Every card sits on the page background rather than straight on the timeline.
+ *
+ * `BannerCard`'s tone wash is a translucent tint by design (a `warn` card is
+ * `bg-warn-soft/30`), and the timeline scrolls **behind** this dock — without
+ * an opaque layer under it, rows would visibly slide through the approval the
+ * user is reading.
+ */
+const CARD_BACKDROP = "min-w-0 rounded-t-xl bg-neutral-950";
+
+/**
  * The docked banner — everything that needs the user *now*, between the status
  * line and the composer.
  *
@@ -239,14 +249,14 @@ export function ChatBannerDock({
       data-chat-composer-collapsed-controls="true"
       className="pointer-events-auto flex w-full min-w-0 flex-col gap-px px-[1.375rem]"
     >
-      {frontItem ? <div className="min-w-0">{frontItem.render}</div> : null}
+      {frontItem ? <div className={CARD_BACKDROP}>{frontItem.render}</div> : null}
       {restItems.length > 0 ? (
         <>
           <div className="ac-stack" data-open={stackExpanded ? "true" : "false"}>
             <div className="ac-stack-panel">
               <div className="ac-stack-items flex flex-col gap-px">
                 {restItems.map((item) => (
-                  <div key={item.id} className="min-w-0">
+                  <div key={item.id} className={CARD_BACKDROP}>
                     {item.render}
                   </div>
                 ))}
@@ -268,6 +278,7 @@ export function ChatBannerDock({
         </>
       ) : null}
 
+      <div className={card === null ? "hidden" : CARD_BACKDROP}>
       {card === "approval" && approval ? (
         <ApprovalCard
           key={approval.requestId}
@@ -303,6 +314,7 @@ export function ChatBannerDock({
       ) : null}
 
       {card === "plan-ready" ? <PlanReadyBanner planTitle={null} /> : null}
+      </div>
     </div>
   );
 }

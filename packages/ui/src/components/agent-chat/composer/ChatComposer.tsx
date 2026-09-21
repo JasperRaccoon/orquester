@@ -887,7 +887,9 @@ export function ChatComposer({
             submit("foreground");
           }}
           className={cn(
-            "rounded-[1.375rem] border border-neutral-800 bg-neutral-900/80",
+            // Opaque on purpose: the timeline scrolls BEHIND this overlay, and
+            // a translucent surface would show rows sliding through the draft.
+            "rounded-[1.375rem] border border-neutral-800 bg-neutral-900",
             "px-3 pb-2 pt-3 shadow-[0_12px_28px_-18px_rgb(0_0_0/40%)] sm:px-4 sm:pt-3.5",
             focused && "border-neutral-700",
             collapsed && "py-1.5"

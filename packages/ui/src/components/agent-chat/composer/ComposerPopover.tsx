@@ -66,7 +66,7 @@ export function ComposerPopover({
   const [open, setOpen] = React.useState(false);
   const [position, setPosition] = React.useState<PanelPosition | null>(null);
   const triggerRef = React.useRef<HTMLButtonElement>(null);
-  const panelRef = React.useRef<HTMLDivElement>(null);
+  const panelRef = React.useRef<HTMLDivElement | null>(null);
 
   const setOpenState = React.useCallback(
     (next: boolean) => {
@@ -111,6 +111,17 @@ export function ComposerPopover({
     if (open) updatePosition();
   }, [open, updatePosition]);
 
+  // The first pass has no panel to measure, so an `end` alignment is a guess
+  // from a default width. Re-measure the moment the panel exists, before the
+  // browser paints it, so the menu never visibly jumps into place.
+  const attachPanel = React.useCallback(
+    (node: HTMLDivElement | null) => {
+      panelRef.current = node;
+      if (node) updatePosition();
+    },
+    [updatePosition]
+  );
+
   React.useEffect(() => {
     if (!open) return;
     const onPointerDown = (event: MouseEvent) => {
@@ -150,7 +161,7 @@ export function ComposerPopover({
       {open && position
         ? createPortal(
             <div
-              ref={panelRef}
+              ref={attachPanel}
               role="menu"
               aria-label={label}
               data-chat-composer-floating-layer="true"
