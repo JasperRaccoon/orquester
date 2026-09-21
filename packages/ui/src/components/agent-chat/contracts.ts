@@ -169,6 +169,38 @@ export interface ChatBannerDockProps {
   onCarryTextToDraft: (text: string) => void;
 }
 
+/**
+ * The roster's own first row: the thread itself (§7.6, "a `main` row, then one
+ * row per subagent").
+ *
+ * The parent is not in `agents` — it is not a task — so the shell passes its
+ * state here, in the same three-line shape a subagent row uses. `turnActive`
+ * is also what drives the fade: finished rows disappear when the turn ends.
+ *
+ * **Added by W14** (additively; every field optional at the call site through
+ * `main` itself being optional). Without it the roster simply renders no main
+ * row and settled rows never fade.
+ */
+export interface AgentRosterMainRow {
+  /** Defaults to "main". The thread title is the tab's job, not the roster's. */
+  title?: string;
+  /** A turn is running: the row is in-motion and finished rows stay visible. */
+  turnActive: boolean;
+  /** A request is waiting on the user — act-now, not in-motion. */
+  awaitingUser?: boolean;
+  /** The last turn failed; the row reads broken until the next turn starts. */
+  failed?: boolean;
+  /** Mirrors `ChatStatusLineProps.activityLabel`. */
+  activityLabel: string | null;
+  turnStartedAt: string | null;
+  /** Freezes the elapsed readout once the turn settles. */
+  turnEndedAt?: string | null;
+  /** Thread tokens so far, for the metrics line. */
+  tokensUsed: number | null;
+  model?: string | null;
+  effort?: string | null;
+}
+
 export interface AgentRosterProps {
   sessionId: string;
   agents: RuntimeSubagent[];
@@ -177,6 +209,10 @@ export interface AgentRosterProps {
   expanded: boolean;
   onExpandedChange: (expanded: boolean) => void;
   onOpenAgent: (agentId: string) => void;
+  /** The parent thread's own row. Omit it and no main row renders. */
+  main?: AgentRosterMainRow | null;
+  /** The drilled-in agent, so its row reads as the open one. */
+  activeAgentId?: string | null;
 }
 
 export interface AgentDrillInProps {
