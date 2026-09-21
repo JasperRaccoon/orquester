@@ -93,6 +93,8 @@ import {
   type AgentChatTransport
 } from "./agent-chat/transport";
 import { fsPathQuery } from "./fs-path-query";
+import { agentChatRoutes } from "@orquester/api/agent-chat";
+import type { ThreadItemResponse, TurnDiffQuery, TurnDiffResponse } from "@orquester/api/agent-chat";
 
 export interface ApiRequestOptions {
   query?: TransportRequest["query"];
@@ -932,6 +934,29 @@ export class ApiClient {
 
   closeSession(id: string): Promise<void> {
     return this.send("DELETE", `/api/sessions/${encodeURIComponent(id)}`);
+  }
+
+  /**
+   * A chat turn's unified diff (agent chat spec §6.3), for the changed-files
+   * card's "view diff". Whitespace-insensitive by default, as §5.4 specifies.
+   *
+   * An ordinary request on both transports — nothing about a chat read needs
+   * the multiplexed channel, which carries terminal bytes only.
+   */
+  agentChatTurnDiff(
+    id: string,
+    turnCount: number,
+    query?: TurnDiffQuery
+  ): Promise<TurnDiffResponse> {
+    return this.send("GET", agentChatRoutes.turnDiff(id, turnCount), {
+      query:
+        query?.ignoreWhitespace === false ? { ignoreWhitespace: "false" } : undefined
+    });
+  }
+
+  /** One activity item's full, unslimmed payload (§5.6's "load full output"). */
+  agentChatItem(id: string, itemId: string): Promise<ThreadItemResponse> {
+    return this.send("GET", agentChatRoutes.item(id, itemId));
   }
 
   sendSessionInput(id: string, data: string): Promise<void> {

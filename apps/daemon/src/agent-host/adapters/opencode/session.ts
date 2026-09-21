@@ -23,6 +23,7 @@ import type {
   ModelSelection,
   ProviderSession,
   RuntimeEvent,
+  RuntimeEventBase,
   RuntimeMode,
   ThreadSnapshot
 } from "@orquester/api/agent-chat";
@@ -395,21 +396,28 @@ export class OpenCodeThreadSession {
     turnId?: string | undefined;
     itemId?: string | undefined;
     requestId?: string | undefined;
-  }): {
-    eventId: string;
-    threadId: string;
-    createdAt: string;
-    turnId?: string;
-    itemId?: string;
-    requestId?: string;
-  } {
+    /** The frame that triggered this, kept for §4.2 correlation. */
+    raw?: unknown;
+  }): RuntimeEventBase {
     return {
       eventId: this.deps.ctx.ids.eventId(),
       threadId: this.state.threadId,
       createdAt: this.deps.ctx.clock.nowIso(),
       ...(input.turnId !== undefined ? { turnId: input.turnId } : {}),
       ...(input.itemId !== undefined ? { itemId: input.itemId } : {}),
-      ...(input.requestId !== undefined ? { requestId: input.requestId } : {})
+      ...(input.requestId !== undefined ? { requestId: input.requestId } : {}),
+      providerRefs: { providerTurnId: this.state.openCodeSessionId },
+      ...(input.raw === undefined
+        ? {}
+        : {
+            raw: {
+              source: "opencode.sdk.event" as const,
+              ...(isRecord(input.raw) && typeof input.raw.type === "string"
+                ? { messageType: input.raw.type }
+                : {}),
+              payload: input.raw
+            }
+          })
     };
   }
 
@@ -917,9 +925,8 @@ export class OpenCodeThreadSession {
     this.cancelIdleReconciliation();
     this.updateRecord({ status: "ready" }, { activeTurnId: true });
     void this.recoverPendingRequests();
-    void raw;
     this.emit({
-      ...this.base({ turnId }),
+      ...this.base({ turnId, raw }),
       type: "turn.completed",
       payload: {
         state: "completed",
@@ -978,23 +985,22 @@ export class OpenCodeThreadSession {
       // this ask cannot reopen after the user answers.
       this.state.autoRepliedRequestIds.delete(request.id);
       this.state.resolvedRequestIds.delete(request.id);
-      const out = new NormalizerEmitter(this.state, this.normalizeContext());
       const previousMode = this.state.runtimeMode;
+      // Re-run the ask through the normaliser with the supervised branch, so
+      // the card is built by exactly the code the supervised path uses.
       this.state.runtimeMode = "approval-required";
       try {
-        const result = normalizeOpenCodeEvent(
-          this.state,
-          { type: "permission.asked", properties: request } as OpenCodeRawEvent,
-          this.normalizeContext()
-        );
+        const frame: OpenCodeRawEvent = asRawEvent(raw) ?? {
+          type: "permission.asked",
+          properties: request
+        };
+        const result = normalizeOpenCodeEvent(this.state, frame, this.normalizeContext());
         for (const event of result.events) {
           this.emit(event);
         }
       } finally {
         this.state.runtimeMode = previousMode;
       }
-      void out;
-      void raw;
     }
   }
 

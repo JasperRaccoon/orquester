@@ -588,6 +588,29 @@ per-turn figure without a price table. Assistant `message.updated` carries the s
   (`fetch failed`) and the SSE stream ends with `terminated`. A client learns only from the
   transport, so the supervision in spec §3.1 cannot wait for an orderly signal.
 
+### 25. `session.updated` re-states an unchanged title on every recompute
+
+Added by the **adapter** package (W8) from a live one-turn run against
+`opencode/big-pickle` on 1.18.5, not from a committed capture. A session created
+with `title: "orquester smoke"` produced four `session.updated` frames carrying
+that same title — three during the turn and one after `session.idle`:
+
+```jsonc
+{"type":"session.updated","properties":{"sessionID":"ses_…","info":{"id":"ses_…","title":"orquester smoke",…}}}
+```
+
+T3 guards only against OpenCode's own *placeholder* titles
+(`isOpenCodeDefaultTitle`), so a real title mirrors to
+`thread.metadata.updated` once per frame. The adapter additionally remembers the
+last title it mirrored and emits only on a genuine change; the guard is reset
+when a fork re-points the session (`repointSession`), because the fork is a
+different upstream session.
+
+The same run confirms two things the captures already implied: a real model
+emits `reasoning` parts whose deltas arrive as `field: "text"` (observation 4),
+and `step-finish` usage accumulates to a `complete` turn total
+(`input + cache.read + cache.write`, `output + reasoning`).
+
 ---
 
 ## Reproducing

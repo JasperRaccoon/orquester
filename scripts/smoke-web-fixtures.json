@@ -13,5 +13,17 @@
   },
   "garbage-theme-prefs": {
     "orquester:theme": "[]"
+  },
+  "corrupt-chat-prefs": {
+    "orquester.chat-prefs": "{\"followUpBehavior\":\"yolo\",\"showSkillsInSlashMenu\":\"yes\",\"runtimeModeByAgent\":{\"claude\":\"no-such-mode\"}}"
+  },
+  "garbage-chat-prefs": {
+    "orquester.chat-prefs": "[1,2,3]"
+  },
+  "corrupt-thread-visits": {
+    "orquester.thread-visits": "{\"a\":\"yesterday\",\"b\":17}"
+  },
+  "garbage-thread-visits": {
+    "orquester.thread-visits": "still not json"
   }
 }

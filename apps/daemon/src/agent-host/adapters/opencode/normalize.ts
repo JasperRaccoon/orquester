@@ -426,7 +426,15 @@ function demux(
 
     case "session.updated": {
       const title = sessionTitle(event.properties.info);
-      if (title !== undefined && event.properties.info.id === state.openCodeSessionId) {
+      // `session.updated` re-states the title on EVERY recompute — a real turn
+      // against `opencode/big-pickle` produced four identical frames — so only
+      // a genuine change is mirrored onto the thread.
+      if (
+        title !== undefined &&
+        title !== state.lastEmittedTitle &&
+        event.properties.info.id === state.openCodeSessionId
+      ) {
+        state.lastEmittedTitle = title;
         out.push({
           ...out.base({ raw }),
           type: "thread.metadata.updated",
@@ -463,7 +471,7 @@ function demux(
       if (info.role === "assistant") {
         resolveAssistantOwnership(state, info.id, info.parentID);
         for (const part of state.textPartsByMessageId.get(info.id)?.values() ?? []) {
-          emitTextDelta(state, part, turnId, raw, out);
+          emitTextDelta(part, turnId, raw, out);
         }
       }
       return;
@@ -533,7 +541,7 @@ function demux(
         const textPart = part as Extract<OpenCodePart, { type: "text" | "reasoning" }>;
         const stored = retainTextPart(state, textPart);
         if (role === "assistant") {
-          emitTextDelta(state, stored, turnId, raw, out);
+          emitTextDelta(stored, turnId, raw, out);
         }
       } else {
         const previous = state.textPartsByMessageId.get(part.messageID)?.get(part.id);
@@ -545,7 +553,7 @@ function demux(
       }
 
       if (part.type === "tool") {
-        emitToolItem(state, part as Extract<OpenCodePart, { type: "tool" }>, turnId, raw, out);
+        emitToolItem(part as Extract<OpenCodePart, { type: "tool" }>, turnId, raw, out);
       }
       return;
     }
@@ -732,7 +740,6 @@ function retainTextPart(
 }
 
 function emitTextDelta(
-  state: OpenCodeSessionState,
   part: OpenCodeTextPartState,
   turnId: string | undefined,
   raw: unknown,
@@ -778,7 +785,6 @@ function emitTextDelta(
       }
     });
   }
-  void state;
 }
 
 function resolveAssistantOwnership(
@@ -839,7 +845,6 @@ function accumulateStepPart(
 }
 
 function emitToolItem(
-  state: OpenCodeSessionState,
   part: Extract<OpenCodePart, { type: "tool" }>,
   turnId: string | undefined,
   raw: unknown,
@@ -885,7 +890,6 @@ function emitToolItem(
       }
     }
   });
-  void state;
 }
 
 function openPermission(
