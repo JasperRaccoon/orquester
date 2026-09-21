@@ -1,10 +1,11 @@
 import { strict as assert } from "node:assert";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { RegistryEntry } from "@orquester/api";
+import { agentHostSocketPath, agentHostTokenPath } from "@orquester/config";
 import type { CreateHostThreadRequest } from "../agent-host/host-protocol.ts";
 import { AgentChatService, isUsableConversationId, resolveHomeKind } from "./service.ts";
 import { ChatSessionError } from "./chat-sessions.ts";
@@ -56,7 +57,12 @@ async function makeFixture(
   launch: { env: Record<string, string>; unset?: string[]; accountId?: string } | null
 ): Promise<Fixture> {
   const appdir = await mkdtemp(join(tmpdir(), "orq-chat-service-"));
-  const socketPath = join(appdir, "agent-host.sock");
+  // The REAL paths, so boot adoption probes the fake host rather than deciding
+  // nothing is listening and spawning one. No host process is ever started
+  // here: `spawnDirect` is stubbed below as a second guard.
+  const socketPath = agentHostSocketPath(appdir, "linux");
+  await mkdir(join(appdir, "daemon"), { recursive: true });
+  await writeFile(agentHostTokenPath(appdir), "test-token\n", { mode: 0o600 });
   const state: Fixture = {
     created: [],
     refuse: null,
@@ -116,9 +122,14 @@ async function makeFixture(
     resolveLaunchEnv: async () => launch,
     systemClaudeConfigFile: () => join(appdir, ".claude.json"),
     nodeBin: "/usr/bin/node",
-    sleep: async () => undefined
+    sleep: async () => undefined,
+    // A test must never start an agent host process.
+    spawnDirect: () => {
+      throw new Error("the fixture must adopt the fake host, never spawn one");
+    }
   });
   await state.service.supervisor.init();
+  assert.equal(state.service.supervisor.isHealthy(), true, "the fake host was adopted");
   return state;
 }
 
@@ -261,6 +272,77 @@ test("a resume id the adapter cannot use is refused at creation, never degraded"
     );
   }
   assert.equal(f.created.length, 0, "an unusable resume never reaches the host");
+  await f.cleanup();
+});
+
+test("§6.1's fields ride the nested `chat` block the client sends", async () => {
+  const f = await makeFixture(OPENCODE, null);
+  await f.service.createSession(
+    {
+      kind: "agent-chat",
+      refId: "opencode",
+      projectPath: "/w/p",
+      cwd: "/w/p",
+      chat: {
+        // An empty `model` means "the provider's own default" — the launcher
+        // had no catalog to pick from. It is never a refusal.
+        modelSelection: { model: "" },
+        runtimeMode: "plan",
+        resume: { home: "cliproxy", conversationId: "0199-abc" }
+      }
+    },
+    0
+  );
+  const body = f.created[0];
+  assert.deepEqual(body.modelSelection, { model: "" });
+  assert.equal(body.runtimeMode, "plan");
+  assert.deepEqual(body.resume, { home: "cliproxy", conversationId: "0199-abc" });
+  await f.cleanup();
+});
+
+test("a bad resume in the nested block is refused just as the flat one is", async () => {
+  const f = await makeFixture(OPENCODE, null);
+  await assert.rejects(
+    () =>
+      f.service.createSession(
+        {
+          kind: "agent-chat",
+          refId: "opencode",
+          projectPath: "/w/p",
+          cwd: "/w/p",
+          chat: { modelSelection: { model: "" }, resume: { home: "system", conversationId: "../x" } }
+        },
+        0
+      ),
+    (error: unknown) => error instanceof ChatSessionError && error.code === "RESUME_UNAVAILABLE"
+  );
+  assert.equal(f.created.length, 0);
+  await f.cleanup();
+});
+
+test("a Grok thread gets permission requests on and auto-update off", async () => {
+  const grokHome = await mkdtemp(join(tmpdir(), "orq-grok-home-"));
+  const f = await makeFixture(
+    {
+      ...OPENCODE,
+      id: "grok",
+      name: "Grok",
+      env: {},
+      chat: { adapter: "grok" }
+    },
+    { env: { GROK_HOME: grokHome }, accountId: "acc-1" }
+  );
+  await f.service.createSession(
+    { kind: "agent-chat", refId: "grok", projectPath: "/w/p", cwd: "/w/p" },
+    0
+  );
+  const config = await readFile(join(grokHome, "config.toml"), "utf8");
+  // Without support_permission no approval ever reaches the protocol, and
+  // auto_update let the CLI swap its own binary mid-session.
+  assert.ok(config.includes("support_permission = true"));
+  assert.ok(config.includes("auto_update = false"));
+  assert.equal(f.created[0].homePath, grokHome);
+  await rm(grokHome, { recursive: true, force: true });
   await f.cleanup();
 });
 

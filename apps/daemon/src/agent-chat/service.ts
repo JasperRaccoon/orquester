@@ -91,12 +91,33 @@ export interface AgentChatServiceOptions {
   /** Test seam: overrides `process.execPath`. */
   nodeBin?: string;
   mainPath?: string;
+  /**
+   * Test seam for the no-tmux spawn. Production leaves it unset and gets the
+   * real child; a test that supplies it can never start a host process.
+   */
+  spawnDirect?: (bin: string, args: string[], env: Record<string, string>) => DirectHostHandle;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
 }
 
-/** `POST /api/sessions` with `kind: "agent-chat"` — §6.1's extra fields. */
+/**
+ * `POST /api/sessions` with `kind: "agent-chat"`.
+ *
+ * The §6.1 extras ride the nested `chat` block the client sends; the flattened
+ * spelling is still accepted so a socket/curl caller (and an older bundle) is
+ * not a 400.
+ */
 export type CreateAgentChatRequest = CreateSessionRequest & Partial<CreateAgentChatSessionFields>;
+
+/** Read §6.1's fields from either spelling, nested first. */
+function chatFields(req: CreateAgentChatRequest): Partial<CreateAgentChatSessionFields> {
+  return {
+    ...(req.modelSelection !== undefined ? { modelSelection: req.modelSelection } : {}),
+    ...(req.runtimeMode !== undefined ? { runtimeMode: req.runtimeMode } : {}),
+    ...(req.resume !== undefined ? { resume: req.resume } : {}),
+    ...(req.chat ?? {})
+  };
+}
 
 export class AgentChatService {
   readonly chat: ChatSessionManager;
@@ -133,6 +154,10 @@ export class AgentChatService {
         requestStop: () => this.requestHostStop(),
         tmux: opts.tmux,
         spawnDirect: (bin, args, env) => {
+          if (opts.spawnDirect) {
+            this.directHandle = opts.spawnDirect(bin, args, env);
+            return this.directHandle;
+          }
           const child = spawn(bin, args, { cwd: opts.cwd, detached: false, stdio: "ignore", env });
           child.on("error", (error) => opts.logger?.error?.("agent host spawnDirect failed", error));
           this.directHandle = { kill: () => child.kill(), pid: child.pid };
@@ -247,7 +272,8 @@ export class AgentChatService {
       // §5.3: an agent row without `chat` cannot open a chat tab.
       throw new ChatSessionError(`"${entry.name}" has no chat adapter.`);
     }
-    if (req.resume && !isUsableConversationId(req.resume.conversationId)) {
+    const fields = chatFields(req);
+    if (fields.resume && !isUsableConversationId(fields.resume.conversationId)) {
       throw new ChatSessionError(
         "That conversation cannot be resumed with this agent.",
         "RESUME_UNAVAILABLE"
@@ -259,7 +285,12 @@ export class AgentChatService {
 
     let launch: ChatLaunchEnv | null = null;
     try {
-      launch = await this.opts.resolveLaunchEnv(entry, { accountId: req.accountId, model: req.model });
+      // The account rides the top level, shared with the terminal path;
+      // `chat.accountId` is the host-side spelling and is only a fallback.
+      launch = await this.opts.resolveLaunchEnv(entry, {
+        accountId: req.accountId ?? fields.accountId,
+        model: req.model
+      });
     } catch (error) {
       throw error instanceof ChatSessionError
         ? error
@@ -306,8 +337,12 @@ export class AgentChatService {
       refId: entry.id,
       accountId,
       home,
-      modelSelection: req.modelSelection,
-      runtimeMode: req.runtimeMode,
+      // Passed through as the client sent it. An empty `modelSelection.model`
+      // means "the provider's own default" — the launcher had no catalog to
+      // pick from — and is never a refusal here (the daemon's model gate above
+      // is the claudex/claudemix catalog check, which is a different thing).
+      modelSelection: fields.modelSelection,
+      runtimeMode: fields.runtimeMode,
       // EXACTLY the env a terminal launch of this entry gets today (§3.1): the
       // registry entry's own env — which is where the per-launcher env file
       // `<appdir>/daemon/env/<id>.env` (opencode.env, the generated
@@ -318,7 +353,7 @@ export class AgentChatService {
       ...(launch?.unset?.length ? { unsetEnv: launch.unset } : {}),
       ...(homePath ? { homePath } : {}),
       ...(home === "cliproxy" ? { proxyRefId: entry.id } : {}),
-      ...(req.resume ? { resume: req.resume } : {})
+      ...(fields.resume ? { resume: fields.resume } : {})
     };
     try {
       const response = await this.client.json<{ error?: { code: string; message: string } }>(
