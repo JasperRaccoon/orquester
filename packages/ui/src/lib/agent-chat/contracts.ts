@@ -121,13 +121,6 @@ export interface AgentChatThreadSlice {
   respondingRequestIds: string[];
   /** Thread-level error banner text, overlaid — never a timeline row (§7.3). */
   errorBanner: string | null;
-  /**
-   * True while a `/revert` command is in flight. §7.5: "The composer goes
-   * `inert` for exactly one reason — while a revert is running."
-   *
-   * *Added by W11 in the fix wave (R8-M2); `contracts.ts` stays additive-only.*
-   */
-  reverting: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -432,16 +425,23 @@ export interface AgentChatThreadView {
   rows: AgentChatTimelineRow[];
   activePlan: ActivePlanState | null;
   /**
-   * The latest plan proposal that has **not** been implemented, or null.
+   * The un-implemented proposal the composer's primary action acts on (§7.3):
+   * `null` turns the split button back into a plain send. Derived from the
+   * timeline projection's `proposedPlans`, which never leaves the store.
+   * `id`/`turnId` ride along so a consumer can tell one proposal from the next
+   * without diffing markdown.
    *
-   * §7.3's implement/refine split button needs the plan markdown, and the
-   * proposal is folded out of the activity stream by the projection — nothing
-   * else can reach it. `session.hasActionableProposedPlan` stays the dock's
-   * gate; both are the same fact.
-   *
-   * *Added by W11 in the fix wave (R8-B1 / R7-2); additive-only.*
+   * *Added by W15, widened by W11 in the fix wave (R8-B1 / R7-2);
+   * `contracts.ts` stays additive-only.*
    */
   actionableProposedPlan: { id: string; planMarkdown: string; turnId: string | null } | null;
+  /**
+   * True while a `/revert` is in flight — §7.5's one reason the composer goes
+   * `inert`, so a turn cannot race history the host is rewriting.
+   *
+   * *Added by W15; `contracts.ts` stays additive-only.*
+   */
+  reverting: boolean;
 }
 
 export interface AgentChatRosterView {

@@ -91,7 +91,8 @@ import {
 } from "./queue.logic";
 import {
   composerHandle,
-  insertComposerText
+  insertComposerText,
+  stageComposerAttachment
 } from "../../components/agent-chat/composer/composer-bridge";
 import { nudgeProjectGit } from "../../components/git/git-watch";
 import {
@@ -151,8 +152,18 @@ export interface AgentChatThreadState {
   /** The three memoised projection layers, kept so each can take its fast path. */
   rows: AgentChatTimelineRow[];
   activePlan: ActivePlanState | null;
-  /** The latest un-implemented plan proposal, for §7.3's split button. */
+  /**
+   * The proposal the composer's primary action acts on (§7.3): the latest
+   * un-implemented plan, preferring the current turn. `null` when there is
+   * none, which is what turns the split button back into a plain send.
+   *
+   * On the state rather than derived in the view because the plans live in the
+   * timeline projection, which only this module holds. `id`/`turnId` ride along
+   * so a consumer can tell one proposal from the next without diffing markdown.
+   */
   actionableProposedPlan: { id: string; planMarkdown: string; turnId: string | null } | null;
+  /** True while a `/revert` is in flight; §7.5's one reason the composer goes inert. */
+  reverting: boolean;
   /** The composer's persisted draft for this thread. */
   draft: ComposerDraft;
   /** True while an interrupt is in flight; the Stop button reads "Stopping…". */
@@ -301,29 +312,25 @@ function project(state: InternalState): InternalState {
   const stableRows = computeStableRows(rowsProjection.rows, state.stableRows);
   const activities = timeline.activities;
   const activePlan = deriveActivePlanState(activities, latestTurn?.turnId ?? null);
-  // The proposal the composer's split button acts on (§7.3). Only the
-  // projection can reach it — it is folded out of the activity stream.
-  const latestProposal = findLatestProposedPlan(timeline.proposedPlans, latestTurn?.turnId ?? null);
-  const nextProposal = hasActionableProposedPlan(latestProposal)
-    ? {
-        id: latestProposal!.id,
-        planMarkdown: latestProposal!.planMarkdown,
-        turnId: latestProposal!.turnId
-      }
+  // The proposal the composer acts on. Recomputed here rather than in the view
+  // because `timeline.proposedPlans` never leaves this module.
+  const latestPlan = findLatestProposedPlan(timeline.proposedPlans, latestTurn?.turnId ?? null);
+  const nextPlan = hasActionableProposedPlan(latestPlan)
+    ? { id: latestPlan!.id, planMarkdown: latestPlan!.planMarkdown, turnId: latestPlan!.turnId }
     : null;
-  const actionableProposedPlan =
-    state.actionableProposedPlan?.id === nextProposal?.id &&
-    state.actionableProposedPlan?.planMarkdown === nextProposal?.planMarkdown
+  const keptPlan =
+    state.actionableProposedPlan?.id === nextPlan?.id &&
+    state.actionableProposedPlan?.planMarkdown === nextPlan?.planMarkdown
       ? state.actionableProposedPlan
-      : nextProposal;
+      : nextPlan;
 
   if (
-    actionableProposedPlan === state.actionableProposedPlan &&
     timeline === state.timeline &&
     rowsProjection === state.rowsProjection &&
     stableRows === state.stableRows &&
     activePlan === state.activePlan &&
-    cachedSets === state.derivedSets
+    cachedSets === state.derivedSets &&
+    keptPlan === state.actionableProposedPlan
   ) {
     return state;
   }
@@ -337,7 +344,7 @@ function project(state: InternalState): InternalState {
     // one when nothing about it moved, so the composer's checklist does not
     // re-render on every streamed token.
     activePlan: samePlan(state.activePlan, activePlan) ? state.activePlan : activePlan,
-    actionableProposedPlan
+    actionableProposedPlan: keptPlan
   };
 }
 
@@ -519,17 +526,16 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       const handle = composerHandle(sessionId);
       if (handle) {
         insertComposerText(sessionId, message.text, "append");
-        // The attachments go through the SAME handle as the text (fix-wave
-        // R7-5). Writing them to the fallback draft instead stranded them:
-        // the composer drains that draft once per mount, and a mounted tab
-        // never re-runs that effect, so the files only reappeared after a
-        // close-and-reopen.
-        // `stageAttachment` is idempotent and answers false at the cap; a
-        // refused one falls back to the store draft so it is not simply lost.
+        // Attachments go back as CHIPS, not into the store's fallback draft
+        // (fix-wave R7-5). The fallback is drained exactly once, on composer
+        // mount, so anything parked here while a composer is already mounted is
+        // never picked up: the file the user queued vanishes between Stop and
+        // the next send. Only what the composer refuses (the attachment budget,
+        // the turn's size bounds) falls back, where the next mount finds it.
         const refused = message.attachments.filter(
-          (attachment) => !handle.stageAttachment(attachment)
+          (attachment) => !stageComposerAttachment(sessionId, attachment)
         );
-        if (message.context.length > 0 || refused.length > 0) {
+        if (refused.length > 0 || message.context.length > 0) {
           const draft = get().draft;
           setDraft({
             text: draft.text,
@@ -614,14 +620,15 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       },
 
       async revert(input) {
-        // §7.5: the composer goes `inert` for exactly one reason — while a
-        // revert is running. Cleared in a `finally` so a rejected revert can
-        // never strand the composer (fix-wave R8-M2).
-        setSlice({ reverting: true });
+        // §7.5's ONE reason the composer goes inert: while this is in flight
+        // the host is rewriting the thread, and a turn sent into that race
+        // lands against history that is about to stop existing. Cleared in a
+        // `finally`, so a rejected revert never strands the composer (R8-M2).
+        update((state) => ({ ...state, reverting: true }));
         try {
           await command("revert", { targetTurnCount: input.targetTurnCount });
         } finally {
-          setSlice({ reverting: false });
+          update((state) => ({ ...state, reverting: false }));
         }
       },
 
@@ -984,6 +991,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       rows: [],
       activePlan: null,
       actionableProposedPlan: null,
+      reverting: false,
       draft: readPersistedDrafts()[sessionId] ?? EMPTY_DRAFT,
       stopping: false,
       actions

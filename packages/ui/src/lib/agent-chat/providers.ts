@@ -70,26 +70,6 @@ export function setProviderSideEffects(next: ProviderSideEffects): void {
 }
 
 /**
- * Auth messages already raised, keyed `<adapterId>\0<message>`.
- *
- * Every coarse `agent.providers.changed` forces a reload and every reload
- * re-publishes, so without this the toast came back the moment the user
- * dismissed it and the provider was still signed out (fix-wave Q2-11). The
- * same shape the thread error banner uses: a **different** message re-raises,
- * the same one does not.
- */
-const raisedAuthMessages = new Set<string>();
-
-/**
- * Forget a raised auth message so a later occurrence re-raises. The app
- * store calls this from `dismissAgentAuthError`; a provider that signs back
- * in clears its own entry below.
- */
-export function forgetRaisedAuthError(adapterId: string, message: string): void {
-  raisedAuthMessages.delete(`${adapterId}\u0000${message}`);
-}
-
-/**
  * The auth message for a snapshot, or null when the provider is fine.
  *
  * §7.7: "`auth.status` with an error surfaces a toast pointing at Settings →
@@ -122,19 +102,11 @@ function publishAmbientFacts(providers: readonly ProviderSnapshot[]): void {
       }
       const message = authErrorMessage(provider);
       if (message === null) {
-        // Signed back in: the next failure is news again.
-        for (const key of [...raisedAuthMessages]) {
-          if (key.startsWith(`${provider.id}\u0000`)) {
-            raisedAuthMessages.delete(key);
-          }
-        }
         continue;
       }
-      const key = `${provider.id}\u0000${message}`;
-      if (raisedAuthMessages.has(key)) {
-        continue;
-      }
-      raisedAuthMessages.add(key);
+      // Raised on every read; the app store remembers dismissals per
+      // `(provider, message)` and drops a repeat, so this stays a plain
+      // publish with one memory rather than two that can disagree (Q2-11).
       sideEffects.onAuthError?.({
         adapterId: provider.id,
         agentName: provider.refIds[0] ?? provider.id,
@@ -240,5 +212,4 @@ export function resetProvidersStore(): void {
   inFlight = null;
   boundTransport = null;
   sideEffects = {};
-  raisedAuthMessages.clear();
 }

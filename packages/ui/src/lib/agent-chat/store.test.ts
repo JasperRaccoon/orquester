@@ -221,6 +221,23 @@ describe("commands", () => {
     void state;
   });
 
+  it("holds `reverting` for the length of the revert and clears it even on failure", async () => {
+    // §7.5's ONE reason the composer goes inert. It used to be hard-coded
+    // `false` in the view with nothing to set it, so a turn could be typed and
+    // sent into the middle of the host rewriting the thread.
+    const { api, state } = await store();
+    assert.equal(state().reverting, false);
+    const inFlight = api.getState().actions.revert({ targetTurnCount: 1 });
+    assert.equal(state().reverting, true, "inert while the command is out");
+    await inFlight;
+    assert.equal(state().reverting, false);
+
+    const failing = await store();
+    failing.fake.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "no"), 99);
+    await assert.rejects(() => failing.api.getState().actions.revert({ targetTurnCount: 1 }));
+    assert.equal(failing.state().reverting, false, "a refusal must not leave it inert forever");
+  });
+
   it("locks the row while a decision is in flight and clears it in a finally", async () => {
     const { api, fake, state } = await store();
     fake.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "stale"), 99);

@@ -5,11 +5,7 @@ import { createTransporter } from "../lib/transporters";
 import { wakeSessionChannels } from "../lib/transporters/ws-session-channel";
 import { wakeBrowserChannels } from "../lib/transporters/ws-browser-channel";
 import { toRemoteConfig, toUiConnection } from "../lib/connections";
-import {
-  forgetRaisedAuthError,
-  notifyProvidersChanged,
-  setProviderSideEffects
-} from "../lib/agent-chat/providers";
+import { notifyProvidersChanged, setProviderSideEffects } from "../lib/agent-chat/providers";
 import type { AgentAdapterId } from "@orquester/api/agent-chat";
 import {
   buildCredential,
@@ -68,6 +64,10 @@ import {
 import { normalizeAgentPrefs, normalizeUsagePrefs, type AppConfigAdapter } from "../lib/app-config";
 import { mergeProviderUsageWindows } from "../components/topbar/usage-format";
 import { isAgentLikeSession } from "../lib/session-kind";
+import {
+  rememberAgentAuthDismissal,
+  shouldRaiseAgentAuthNotice
+} from "../lib/agent-auth-notice";
 import { ProjectSetupError } from "../lib/project-setup-error";
 import { invalidateProjectIndex } from "../lib/project-index";
 import type { HttpClient } from "../lib/http-client";
@@ -742,6 +742,12 @@ export interface AppState {
    * → Accounts" — rather than being folded into the plain `notice`, which has
    * none. Advisory, dismissible, never persisted.
    */
+  /**
+   * Auth-error toasts the user has closed, as `sessionId\u0000message`. The
+   * publisher re-fires on every coarse `agent.providers.changed` while a
+   * provider stays signed out, so without this a dismissal never sticks.
+   */
+  dismissedAgentAuthErrors: string[];
   agentAuthError: {
     sessionId: string;
     /** The registry entry's display name, e.g. "Claude Code". */
@@ -1029,7 +1035,15 @@ export interface AppState {
   setGridTracks: (projectPath: string, tracks: GridTracks, persist?: boolean) => void;
   /** Clear a project's grid tracks (falls back to uniform) and persist. */
   resetGridTracks: (projectPath: string) => void;
-  renameTab: (id: string, title: string) => Promise<void>;
+  /**
+   * Rename a session tab.
+   *
+   * `opts.seed` says the title is the chat shell's auto-seed from the thread's
+   * first message (§7.7), not something the user typed — the host keeps such a
+   * title replaceable by a provider retitle. Every other caller omits it and
+   * gets the manual-rename semantics.
+   */
+  renameTab: (id: string, title: string, opts?: { seed?: boolean }) => Promise<void>;
   reorderTabs: (orderedSessionIds: string[]) => Promise<void>;
 
   // to-do lists (daemon-owned, synced; scoped to a workspace name or project path)
@@ -1094,6 +1108,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   modelWarning: null,
   resumeError: null,
   agentAuthError: null,
+  dismissedAgentAuthErrors: [],
   providerRateLimits: {},
   settingsSection: null,
   notice: null,
@@ -1634,6 +1649,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         resumeError: null,
         modelWarning: null,
         agentAuthError: null,
+        dismissedAgentAuthErrors: [],
         providerRateLimits: {},
         notice: null,
         protectArchived: false,
@@ -1668,6 +1684,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       resumeError: null,
       modelWarning: null,
       agentAuthError: null,
+      dismissedAgentAuthErrors: [],
       providerRateLimits: {},
       notice: null,
       // Per-daemon flag: never let one server's curtain setting apply to the
@@ -2536,18 +2553,30 @@ export const useAppStore = create<AppState>((set, get) => ({
     });
   },
 
-  reportAgentAuthError: (error) => set({ agentAuthError: error }),
+  reportAgentAuthError: (error) =>
+    set((state) =>
+      // A dismissal sticks until something CHANGES: the publisher re-fires on
+      // every `agent.providers.changed` while the provider stays signed out,
+      // so a plain overwrite made the toast un-dismissable.
+      shouldRaiseAgentAuthNotice(error, state.dismissedAgentAuthErrors)
+        ? { agentAuthError: error }
+        : state
+    ),
 
-  dismissAgentAuthError: () => {
-    // The snapshot cache remembers which auth messages it has already raised,
-    // so a dismissal sticks while the provider stays signed out; forget this
-    // one so a LATER occurrence of the same message can re-raise (Q2-11).
-    const current = get().agentAuthError;
-    if (current) {
-      forgetRaisedAuthError(current.sessionId.replace(/^provider:/, ""), current.message);
-    }
-    set({ agentAuthError: null });
-  },
+  dismissAgentAuthError: () =>
+    set((state) => {
+      const current = state.agentAuthError;
+      if (!current) {
+        return state;
+      }
+      return {
+        agentAuthError: null,
+        dismissedAgentAuthErrors: rememberAgentAuthDismissal(
+          current,
+          state.dismissedAgentAuthErrors
+        )
+      };
+    }),
 
   applyProviderRateLimits: (agentRefId, update) =>
     set((state) => ({
@@ -2855,7 +2884,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       return { gridTracksByProject };
     }),
 
-  renameTab: async (id, title) => {
+  renameTab: async (id, title, opts) => {
     const trimmed = title.trim();
     // Optimistic only when non-empty; an empty title is resolved to the default
     // name on the daemon and arrives back via the session.updated broadcast.
@@ -2865,7 +2894,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       }));
     }
     try {
-      const updated = await get().api?.renameSession(id, trimmed);
+      const updated = await get().api?.renameSession(id, trimmed, opts);
       if (updated) {
         set((state) => ({ sessions: upsertSession(state.sessions, updated) }));
       }

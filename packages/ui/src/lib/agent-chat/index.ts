@@ -65,6 +65,7 @@ export {
 } from "./store";
 
 export {
+  authErrorMessage,
   loadProviders,
   notifyProvidersChanged,
   providerForRefId,

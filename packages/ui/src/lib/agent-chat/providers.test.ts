@@ -10,7 +10,6 @@ import type { AdapterCapabilities, ProviderSnapshot } from "@orquester/api/agent
 
 import {
   authErrorMessage,
-  forgetRaisedAuthError,
   loadProviders,
   providerForRefId,
   providersStore,
@@ -79,8 +78,8 @@ describe("authErrorMessage", () => {
   });
 });
 
-describe("Q2-11 — a dismissed auth toast stays dismissed", () => {
-  it("raises once, not on every reload, and re-raises a DIFFERENT message", async () => {
+describe("Q2-11 — auth errors are published for the sink to de-duplicate", () => {
+  it("publishes on every read, leaving dismissal memory to the app store", async () => {
     const raised: string[] = [];
     setProviderSideEffects({ onAuthError: ({ message }) => raised.push(message) });
 
@@ -88,34 +87,27 @@ describe("Q2-11 — a dismissed auth toast stays dismissed", () => {
     const transport = transportServing([signedOut]);
     await loadProviders(transport, { force: true });
     await loadProviders(transport, { force: true });
-    assert.equal(raised.length, 1, "the same message is raised once");
+    assert.equal(raised.length, 2, "one memory, and it is the app store's");
+    assert.match(raised[0]!, /not signed in/);
+  });
 
-    // The user dismisses it; the provider is still signed out.
-    forgetRaisedAuthError("claude", raised[0]!);
-    await loadProviders(transport, { force: true });
-    assert.equal(raised.length, 2, "a dismissal makes the next occurrence news again");
+  it("says nothing at all for a healthy catalog", async () => {
+    const raised: string[] = [];
+    setProviderSideEffects({ onAuthError: ({ message }) => raised.push(message) });
+    await loadProviders(transportServing([provider()]), { force: true });
+    assert.deepEqual(raised, []);
+  });
 
-    // A different failure always gets through.
+  it("publishes an `auth.status {error}` snapshot as the same toast", async () => {
+    const raised: string[] = [];
+    setProviderSideEffects({ onAuthError: ({ message }) => raised.push(message) });
     await loadProviders(
       transportServing([
         provider({ status: "error", auth: { status: "unknown" }, message: "token expired" })
       ]),
       { force: true }
     );
-    assert.equal(raised.at(-1), "token expired");
-  });
-
-  it("forgets the raised message when the provider signs back in", async () => {
-    const raised: string[] = [];
-    setProviderSideEffects({ onAuthError: ({ message }) => raised.push(message) });
-
-    const signedOut = provider({ auth: { status: "unauthenticated" } });
-    await loadProviders(transportServing([signedOut]), { force: true });
-    assert.equal(raised.length, 1);
-
-    await loadProviders(transportServing([provider()]), { force: true });
-    await loadProviders(transportServing([signedOut]), { force: true });
-    assert.equal(raised.length, 2, "signing back in resets the memory");
+    assert.deepEqual(raised, ["token expired"]);
   });
 });
 

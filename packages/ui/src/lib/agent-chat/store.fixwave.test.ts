@@ -231,18 +231,18 @@ describe("Q2-4 — the layer-2 row memo is reachable", () => {
 describe("R8-M2 — the composer goes inert while a revert runs", () => {
   it("sets and clears `reverting` around the command", async () => {
     const { api, state } = await store();
-    assert.equal(state().slice.reverting, false);
+    assert.equal(state().reverting, false);
     const pending = api.getState().actions.revert({ targetTurnCount: 1 });
-    assert.equal(state().slice.reverting, true);
+    assert.equal(state().reverting, true);
     await pending;
-    assert.equal(state().slice.reverting, false);
+    assert.equal(state().reverting, false);
   });
 
   it("clears it when the revert is rejected", async () => {
     const { api, fake, state } = await store();
     fake.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "past turnCount"), 99);
     await assert.rejects(() => api.getState().actions.revert({ targetTurnCount: 99 }));
-    assert.equal(state().slice.reverting, false);
+    assert.equal(state().reverting, false);
   });
 });
 
