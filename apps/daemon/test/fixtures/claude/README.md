@@ -335,6 +335,16 @@ Two consequences:
 - **Hooks run before `canUseTool`.** A slow `PreToolUse` hook delays the approval card, not the
   tool. The "waiting for you" state of §7.6 must not be derived from "a tool_use block arrived".
 
+> **Correction, found while implementing the adapter (W6).** The first bullet is wrong, and the
+> cause is the capture's own deviation: these fixtures were taken with
+> `settingSources: ["project","local"]`, dropping `"user"`. The adapter sets
+> `["user","project","local"]` as §4.5 requires, and driving the real CLI that way
+> (`smoke.ts`, claude **2.1.278**) produced `system/hook_started` and `system/hook_response`
+> for the host's own user-level `SessionStart` hooks — four of each, with `hook_id`,
+> `hook_name` (`SessionStart:startup`), `hook_event`, `outcome`, `exit_code` and `stdout`.
+> So the `hook.*` group **does** have a producer, the Claude adapter emits it, and a re-capture
+> with the user source enabled should record it.
+
 Related trap discovered while setting this up: **project-level `.claude/settings.json` is silently
 ignored in an untrusted directory.** Until the sandbox's `hasTrustDialogAccepted` was set, the
 hooks did not run and no message said so. Orquester creates project directories, so every new chat
@@ -555,6 +565,20 @@ two different encodings of the same reset. The frame has **no percentage**: it c
 *trigger* to re-read `usage_EXPERIMENTAL…`, or at best a source for the reset time and a
 "limited" flag. This is also the only rate-limit signal that arrives on the stream during a turn —
 `15-rate-limits-and-usage.ndjson` shows a second one landing mid-turn after a later request.
+
+> **Correction, found while implementing the adapter (W6).** "No percentage" holds for the
+> unprompted `status: "allowed"` frames only. The **warning-level** frame in the same capture
+> does carry one:
+>
+> ```json
+> {"status":"allowed_warning","resetsAt":1789969200,"rateLimitType":"five_hour","utilization":0.98,"isUsingOverage":false,"surpassedThreshold":0.9}
+> ```
+>
+> `utilization` is a **0–1 fraction** there, while the usage API's `limits[].percent` is 0–100.
+> So `account.rate-limits.updated` *can* be filled from a streamed event — but only when one is
+> present. The adapter maps the frame when it carries `utilization` and otherwise marks the cached
+> snapshot stale for the next probe (`rateLimitEventToUpdate` in
+> `apps/daemon/src/agent-host/adapters/claude/usage.ts`).
 
 ### 17. Miscellaneous, smaller
 

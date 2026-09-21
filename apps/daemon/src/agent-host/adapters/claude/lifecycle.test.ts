@@ -1,0 +1,1057 @@
+/**
+ * Runtime-level tests: the real adapter, the real normaliser and the real
+ * supervision, driven against a **scripted peer** that speaks the Agent SDK's
+ * `Query` surface (§9). Nothing here waits on a timer: every deadline is
+ * injected through `ClaudeAdapterDeps`, and every wait is on an event.
+ *
+ * Covered: spawn failure, a missing binary, a CLI below the version gate, a
+ * handshake timeout, an exit mid-turn, interrupt ordering with a pending
+ * approval, settle-as-cancel, lazy recovery after death, steering, resume,
+ * rollback and compaction.
+ */
+
+import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import { describe, it } from "node:test";
+
+import type {
+  Options as ClaudeQueryOptions,
+  CanUseTool,
+  Query,
+  SDKMessage,
+  SDKUserMessage
+} from "@anthropic-ai/claude-agent-sdk";
+import type { RuntimeEvent } from "@orquester/api/agent-chat";
+
+import type { AdapterContext, AgentAdapter } from "../../adapter.ts";
+import type { ChildExitReason, ProviderChild } from "../../support/spawn.ts";
+import { AsyncEventQueue, createDeferred } from "./async-queue.ts";
+import type { ClaudeAdapterDeps } from "./deps.ts";
+import { countingIds } from "./fixtures.ts";
+import { createClaudeAdapterWith } from "./index.ts";
+
+// ---------------------------------------------------------------------------
+// The scripted peer
+// ---------------------------------------------------------------------------
+
+class ScriptedQuery {
+  readonly messages = new AsyncEventQueue<SDKMessage>();
+  readonly received: SDKUserMessage[] = [];
+  readonly calls: Array<{ op: string; arg?: unknown }> = [];
+  readonly options: ClaudeQueryOptions | undefined;
+  readonly canUseTool: CanUseTool | undefined;
+  readonly initialized = createDeferred<void>();
+
+  /** Resolves once the peer has been handed a turn. */
+  private turnWaiters: Array<() => void> = [];
+  private initResolves: boolean;
+  interruptReceipt: { still_queued: string[] } = { still_queued: [] };
+  closed = false;
+
+  constructor(params: {
+    prompt: string | AsyncIterable<SDKUserMessage>;
+    options?: ClaudeQueryOptions;
+    initResolves?: boolean;
+  }) {
+    this.options = params.options;
+    this.canUseTool = params.options?.canUseTool;
+    this.initResolves = params.initResolves !== false;
+    if (typeof params.prompt !== "string") {
+      void this.readPrompt(params.prompt);
+    }
+  }
+
+  private async readPrompt(prompt: AsyncIterable<SDKUserMessage>): Promise<void> {
+    for await (const message of prompt) {
+      this.received.push(message);
+      const waiters = this.turnWaiters;
+      this.turnWaiters = [];
+      for (const waiter of waiters) {
+        waiter();
+      }
+    }
+  }
+
+  nextTurn(): Promise<void> {
+    return new Promise((resolve) => {
+      this.turnWaiters.push(resolve);
+    });
+  }
+
+  emit(message: SDKMessage): void {
+    this.messages.push(message);
+  }
+
+  endStream(): void {
+    this.messages.close();
+  }
+
+  asQuery(): Query {
+    const self = this;
+    const iterator = this.messages[Symbol.asyncIterator]();
+    return {
+      [Symbol.asyncIterator]: () => iterator,
+      next: () => iterator.next(),
+      async initializationResult() {
+        self.calls.push({ op: "initializationResult" });
+        if (!self.initResolves) {
+          // Never resolves: the handshake deadline is the only thing that ends
+          // this wait.
+          return new Promise(() => {});
+        }
+        self.initialized.resolve();
+        return { commands: [], models: [], account: {} };
+      },
+      async interrupt() {
+        self.calls.push({ op: "interrupt" });
+        return self.interruptReceipt;
+      },
+      async setModel(model?: string) {
+        self.calls.push({ op: "setModel", arg: model });
+      },
+      async setPermissionMode(mode: string) {
+        self.calls.push({ op: "setPermissionMode", arg: mode });
+      },
+      async applyFlagSettings(settings: unknown) {
+        self.calls.push({ op: "applyFlagSettings", arg: settings });
+      },
+      close() {
+        self.calls.push({ op: "close" });
+        self.closed = true;
+        self.messages.close();
+      }
+    } as unknown as Query;
+  }
+}
+
+function probeQuery(): Query {
+  return {
+    [Symbol.asyncIterator]: () => ({ next: async () => ({ value: undefined, done: true }) }),
+    async initializationResult() {
+      return {
+        commands: [{ name: "review", description: "Review", argumentHint: "" }],
+        models: [
+          {
+            value: "sonnet",
+            resolvedModel: "claude-sonnet-5",
+            displayName: "Sonnet",
+            supportsEffort: true,
+            supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"]
+          }
+        ],
+        account: { email: "user@example.invalid", subscriptionType: "Claude Max", apiProvider: "firstParty" }
+      };
+    },
+    async supportedModels() {
+      return [];
+    },
+    async usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET() {
+      return { rate_limits_available: false, rate_limits: null };
+    },
+    close() {}
+  } as unknown as Query;
+}
+
+// ---------------------------------------------------------------------------
+// Fake child processes
+// ---------------------------------------------------------------------------
+
+function fakeChild(input: { stdout?: string; stderr?: string; code?: number }): ProviderChild {
+  const stdout = new EventEmitter() as unknown as ProviderChild["stdout"];
+  const stderr = new EventEmitter() as unknown as ProviderChild["stderr"];
+  (stdout as unknown as { setEncoding: (e: string) => void }).setEncoding = () => {};
+  (stderr as unknown as { setEncoding: (e: string) => void }).setEncoding = () => {};
+  const reason: ChildExitReason = { kind: "exit", code: input.code ?? 0, signal: null };
+  const exited = new Promise<ChildExitReason>((resolve) => {
+    setImmediate(() => {
+      if (input.stdout !== undefined) {
+        (stdout as unknown as EventEmitter).emit("data", input.stdout);
+      }
+      (stdout as unknown as EventEmitter).emit("end");
+      if (input.stderr !== undefined) {
+        (stderr as unknown as EventEmitter).emit("data", input.stderr);
+      }
+      (stderr as unknown as EventEmitter).emit("end");
+      resolve(reason);
+    });
+  });
+  return {
+    pid: 4242,
+    stdin: new EventEmitter() as unknown as ProviderChild["stdin"],
+    stdout,
+    stderr,
+    process: new EventEmitter() as unknown as ProviderChild["process"],
+    exited,
+    hasExited: () => false,
+    exitReason: () => null,
+    kill: async () => reason
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Harness
+// ---------------------------------------------------------------------------
+
+type EventOf<T extends RuntimeEvent["type"]> = Extract<RuntimeEvent, { type: T }>;
+
+function findEvent<T extends RuntimeEvent["type"]>(
+  events: readonly RuntimeEvent[],
+  type: T,
+  from = 0
+): EventOf<T> | undefined {
+  return events.slice(from).find((event): event is EventOf<T> => event.type === type);
+}
+
+interface Harness {
+  adapter: AgentAdapter;
+  events: RuntimeEvent[];
+  peers: ScriptedQuery[];
+  queryOptions: ClaudeQueryOptions[];
+  waitFor: <T extends RuntimeEvent["type"]>(type: T, after?: number) => Promise<EventOf<T>>;
+  timers: Array<{ fn: () => void; ms: number }>;
+  drain: () => Promise<void>;
+  /** Moves the injected clock, so a window expires without a real wait (§9). */
+  advance: (ms: number) => void;
+}
+
+interface HarnessOptions {
+  binaryPath?: string | null;
+  version?: string;
+  queryThrows?: boolean;
+  initResolves?: boolean;
+  historyStdout?: (method: string) => string;
+  deadlineMs?: number;
+}
+
+async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
+  const events: RuntimeEvent[] = [];
+  const peers: ScriptedQuery[] = [];
+  const queryOptions: ClaudeQueryOptions[] = [];
+  const timers: Array<{ fn: () => void; ms: number }> = [];
+  const listeners: Array<() => void> = [];
+
+  let nowMs = Date.parse("2026-09-21T00:00:00.000Z");
+  const advance = (ms: number): void => {
+    nowMs += ms;
+  };
+
+  const context: AdapterContext = {
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+    clock: { now: () => new Date(nowMs), nowIso: () => new Date(nowMs).toISOString() },
+    ids: countingIds(),
+    resolveAttachmentPath: async (_threadId, id) => `/attachments/${id}`,
+    attachmentsDir: (threadId) => `/appdir/threads/${threadId}/attachments`,
+    logRawFrame: () => {},
+    buildEnv: ({ home }) => ({
+      PATH: "/usr/bin",
+      HOME: "/home/orq",
+      TMPDIR: "/tmp",
+      ...(home.path.length > 0 ? { CLAUDE_CONFIG_DIR: home.path } : {})
+    }),
+    resolveBin: async () =>
+      options.binaryPath === undefined ? "/usr/local/bin/claude" : options.binaryPath,
+    sessionPath: () => "/usr/bin",
+    tmpDir: () => "/tmp",
+    signal: new AbortController().signal
+  };
+
+  const deps: ClaudeAdapterDeps = {
+    query: (params) => {
+      queryOptions.push(params.options ?? {});
+      if (params.options?.persistSession === false) {
+        return probeQuery();
+      }
+      if (options.queryThrows === true) {
+        throw new Error("spawn EACCES: the claude binary is not executable");
+      }
+      const peer = new ScriptedQuery({
+        ...params,
+        ...(options.initResolves !== undefined ? { initResolves: options.initResolves } : {})
+      });
+      peers.push(peer);
+      return peer.asQuery();
+    },
+    spawn: (spawnOptions) => {
+      if (spawnOptions.args.includes("--version")) {
+        return fakeChild({ stdout: `${options.version ?? "2.1.210"} (Claude Code)` });
+      }
+      const method = spawnOptions.args.find(
+        (arg) => arg === "getSessionMessages" || arg === "forkSession"
+      );
+      return fakeChild({ stdout: options.historyStdout?.(method ?? "") ?? "[]" });
+    },
+    setTimer: (fn, ms) => {
+      const entry = { fn, ms };
+      timers.push(entry);
+      return timers.length as unknown as NodeJS.Timeout;
+    },
+    clearTimer: () => {},
+    hostConfigDir: "/host/.claude",
+    nodePath: process.execPath,
+    deadlines: { handshakeMs: options.deadlineMs ?? 50, cancelMs: options.deadlineMs ?? 50 }
+  };
+
+  const adapter = await createClaudeAdapterWith(context, deps);
+
+  void (async () => {
+    for await (const event of adapter.events) {
+      events.push(event);
+      for (const listener of [...listeners]) {
+        listener();
+      }
+    }
+  })();
+
+  const waitFor = <T extends RuntimeEvent["type"]>(type: T, after = 0): Promise<EventOf<T>> =>
+    new Promise<EventOf<T>>((resolve, reject) => {
+      // A missing event must FAIL the test rather than hang it, so the guard
+      // is a real (ref'd) timer that is cleared the moment the event lands.
+      let guard: NodeJS.Timeout | undefined;
+      const finish = (found: EventOf<T>): void => {
+        if (guard !== undefined) {
+          clearTimeout(guard);
+        }
+        const index = listeners.indexOf(listener);
+        if (index >= 0) {
+          listeners.splice(index, 1);
+        }
+        resolve(found);
+      };
+      const listener = (): void => {
+        const found = findEvent(events, type, after);
+        if (found) {
+          finish(found);
+        }
+      };
+      const immediate = findEvent(events, type, after);
+      if (immediate) {
+        resolve(immediate);
+        return;
+      }
+      listeners.push(listener);
+      guard = setTimeout(() => {
+        const index = listeners.indexOf(listener);
+        if (index >= 0) {
+          listeners.splice(index, 1);
+        }
+        reject(
+          new Error(`timed out waiting for ${type}; saw ${events.map((e) => e.type).join(", ")}`)
+        );
+      }, 5_000);
+    });
+
+  const drain = async (): Promise<void> => {
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+  };
+
+  return { adapter, events, peers, queryOptions, waitFor, timers, drain, advance };
+}
+
+const START = {
+  threadId: "thread-1",
+  cwd: "/work/project",
+  home: { kind: "account" as const, accountId: "acc-1", path: "/homes/acc-1/home" },
+  modelSelection: { model: "sonnet" },
+  runtimeMode: "approval-required" as const
+};
+
+function systemInit(sessionId = "sess-1"): SDKMessage {
+  return {
+    type: "system",
+    subtype: "init",
+    model: "claude-sonnet-5",
+    permissionMode: "default",
+    cwd: "/work/project",
+    session_id: sessionId,
+    tools: [],
+    mcp_servers: [],
+    slash_commands: [],
+    skills: [],
+    plugins: [],
+    apiKeySource: "none",
+    claude_code_version: "2.1.210",
+    output_style: "default",
+    uuid: "u-init"
+  } as unknown as SDKMessage;
+}
+
+function successResult(sessionId = "sess-1"): SDKMessage {
+  return {
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    api_error_status: null,
+    duration_ms: 10,
+    duration_api_ms: 10,
+    num_turns: 1,
+    result: "done",
+    stop_reason: "end_turn",
+    session_id: sessionId,
+    total_cost_usd: 0.01,
+    usage: { input_tokens: 10, output_tokens: 5 },
+    modelUsage: { "claude-sonnet-5": { contextWindow: 200000 } },
+    permission_denials: [],
+    terminal_reason: "completed",
+    uuid: "u-result"
+  } as unknown as SDKMessage;
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+describe("claude adapter — start failures", () => {
+  it("refuses when the binary cannot be resolved", async () => {
+    const harness = await makeHarness({ binaryPath: null });
+    await assert.rejects(() => harness.adapter.startSession(START), /not installed/);
+    assert.equal(harness.adapter.hasSession(START.threadId), false);
+  });
+
+  it("refuses a CLI below the minimum version, naming the version needed", async () => {
+    const harness = await makeHarness({ version: "2.0.9" });
+    await assert.rejects(() => harness.adapter.startSession(START), /2\.1\.121 or newer/);
+    assert.equal(harness.adapter.listSessions().length, 0);
+  });
+
+  it("a spawn failure settles as an errored exit, not a hang", async () => {
+    const harness = await makeHarness({ queryThrows: true });
+    await assert.rejects(() => harness.adapter.startSession(START), /EACCES/);
+    const exited = await harness.waitFor("session.exited");
+    assert.equal(exited.payload.exitKind, "error");
+    assert.equal(exited.payload.recoverable, false);
+    assert.ok(harness.events.some((event) => event.type === "runtime.error"));
+    assert.equal(harness.adapter.hasSession(START.threadId), false);
+  });
+
+  it("an expired handshake deadline kills the child instead of staying 'starting'", async () => {
+    const harness = await makeHarness({ initResolves: false, deadlineMs: 20 });
+    await assert.rejects(() => harness.adapter.startSession(START), /timed out/);
+    const exited = await harness.waitFor("session.exited");
+    assert.equal(exited.payload.exitKind, "error");
+    assert.equal(harness.peers[0]?.closed, true, "the query must be closed on an expired deadline");
+    assert.equal(harness.adapter.hasSession(START.threadId), false);
+  });
+});
+
+describe("claude adapter — turns", () => {
+  it("starts, runs a turn and settles it", async () => {
+    const harness = await makeHarness();
+    const record = await harness.adapter.startSession(START);
+    assert.equal(record.status, "ready");
+    const peer = harness.peers[0]!;
+
+    const turn = await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "hello",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await peer.nextTurn();
+
+    // The turn id is stamped on the SDKUserMessage, so the native transcript
+    // id equals our turn id (§4.5) — the whole basis of rollback.
+    assert.equal(peer.received[0]?.uuid, turn.turnId);
+    // The final content block is text, so a typed `/command` still expands.
+    const content = peer.received[0]?.message.content as Array<{ type: string }>;
+    assert.equal(content.at(-1)?.type, "text");
+
+    peer.emit(systemInit());
+    peer.emit(successResult());
+    const completed = await harness.waitFor("turn.completed");
+    assert.equal(completed.payload.state, "completed");
+    assert.equal(completed.turnId, turn.turnId);
+    assert.ok(turn.resumeCursor);
+  });
+
+  it("steering reuses the active turn rather than opening a second one", async () => {
+    const harness = await makeHarness();
+    await harness.adapter.startSession(START);
+    const peer = harness.peers[0]!;
+
+    const first = await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "do the thing",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await peer.nextTurn();
+    const second = await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "actually, wait",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await peer.nextTurn();
+
+    assert.equal(second.turnId, first.turnId, "a steer is not a second turn");
+    assert.equal(
+      harness.events.filter((event) => event.type === "turn.started").length,
+      1
+    );
+    // The steer rides the same prompt queue, with no uuid of its own.
+    assert.equal(peer.received.length, 2);
+    assert.equal(peer.received[1]?.uuid, undefined);
+  });
+
+  it("plan mode is per turn and restores the session's base mode", async () => {
+    const harness = await makeHarness();
+    await harness.adapter.startSession(START);
+    const peer = harness.peers[0]!;
+
+    await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "plan it",
+      attachments: [],
+      interactionMode: "plan"
+    });
+    await peer.nextTurn();
+    peer.emit(successResult());
+    await harness.waitFor("turn.completed");
+
+    await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "now do it",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await peer.nextTurn();
+
+    const modes = peer.calls.filter((call) => call.op === "setPermissionMode").map((c) => c.arg);
+    assert.deepEqual(modes, ["plan", "default"]);
+  });
+
+  it("refuses a promptless continuation — Claude does not declare the capability", async () => {
+    const harness = await makeHarness();
+    await harness.adapter.startSession(START);
+    await assert.rejects(
+      () =>
+        harness.adapter.sendTurn({
+          threadId: START.threadId,
+          input: "   ",
+          attachments: [],
+          interactionMode: "default",
+          continuation: true
+        }),
+      /without a prompt/
+    );
+    assert.equal(harness.adapter.capabilities.promptlessTurnContinuation, undefined);
+  });
+
+  it("compaction is the /compact turn and resolves when it settles", async () => {
+    const harness = await makeHarness();
+    await harness.adapter.startSession(START);
+    const peer = harness.peers[0]!;
+
+    const compaction = harness.adapter.compact(START.threadId);
+    await peer.nextTurn();
+    const content = peer.received[0]?.message.content as Array<{ type: string; text: string }>;
+    assert.equal(content.at(-1)?.text, "/compact");
+
+    peer.emit({
+      type: "system",
+      subtype: "compact_boundary",
+      compact_metadata: { trigger: "manual", pre_tokens: 34995, post_tokens: 873 },
+      session_id: "sess-1",
+      uuid: "u-compact"
+    } as unknown as SDKMessage);
+    peer.emit(successResult());
+    await compaction;
+
+    const compacted = findEvent(harness.events, "thread.state.changed");
+    assert.ok(compacted);
+    assert.equal(harness.adapter.capabilities.compaction.type, "slash-command");
+  });
+});
+
+describe("claude adapter — approvals", () => {
+  async function openApproval(): Promise<{
+    harness: Harness;
+    peer: ScriptedQuery;
+    decision: Promise<unknown>;
+    requestId: string;
+  }> {
+    const harness = await makeHarness();
+    await harness.adapter.startSession(START);
+    const peer = harness.peers[0]!;
+    await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "remove the file",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await peer.nextTurn();
+
+    const abort = new AbortController();
+    const decision = peer.canUseTool!("Bash", { command: "rm -f x" }, {
+      signal: abort.signal,
+      toolUseID: "toolu_1",
+      requestId: "req-abc",
+      description: "Remove x",
+      suggestions: [
+        {
+          type: "addRules",
+          rules: [{ toolName: "Bash", ruleContent: "rm -f x" }],
+          behavior: "allow",
+          destination: "localSettings"
+        }
+      ]
+    } as unknown as Parameters<CanUseTool>[2]);
+    const opened = await harness.waitFor("request.opened");
+    return { harness, peer, decision, requestId: opened.requestId! };
+  }
+
+  it("keys the card on the SDK's own request id and uses its description", async () => {
+    const { harness, decision, requestId } = await openApproval();
+    assert.equal(requestId, "req-abc");
+    const opened = findEvent(harness.events, "request.opened");
+    assert.equal(opened?.payload.detail, "Remove x");
+    assert.equal(opened?.payload.dismissible, false);
+    harness.adapter.respondToApproval(START.threadId, requestId, "accept");
+    assert.deepEqual(await decision, { behavior: "allow", updatedInput: { command: "rm -f x" } });
+  });
+
+  it("acceptForSession rescopes the CLI's suggestion to the session", async () => {
+    const { harness, decision, requestId } = await openApproval();
+    await harness.adapter.respondToApproval(START.threadId, requestId, "acceptForSession");
+    const result = (await decision) as {
+      behavior: string;
+      updatedPermissions?: Array<{ destination: string }>;
+    };
+    assert.equal(result.behavior, "allow");
+    assert.deepEqual(result.updatedPermissions?.map((u) => u.destination), ["session"]);
+  });
+
+  it("a redelivered request does not open a second card", async () => {
+    const { harness, peer, decision, requestId } = await openApproval();
+    const abort = new AbortController();
+    const second = peer.canUseTool!("Bash", { command: "rm -f x" }, {
+      signal: abort.signal,
+      toolUseID: "toolu_1",
+      requestId: "req-abc"
+    } as unknown as Parameters<CanUseTool>[2]);
+    await harness.drain();
+    assert.equal(harness.events.filter((event) => event.type === "request.opened").length, 1);
+    await harness.adapter.respondToApproval(START.threadId, requestId, "decline");
+    assert.equal(((await decision) as { behavior: string }).behavior, "deny");
+    assert.equal(((await second) as { behavior: string }).behavior, "deny");
+  });
+
+  it("a stop settles the open request as cancel BEFORE it closes the query", async () => {
+    const { harness, peer, decision } = await openApproval();
+    const before = harness.events.length;
+    await harness.adapter.stopSession(START.threadId);
+
+    const tail = harness.events.slice(before).map((event) => event.type);
+    const resolvedAt = tail.indexOf("request.resolved");
+    const exitedAt = tail.indexOf("session.exited");
+    assert.ok(resolvedAt >= 0, `no request.resolved in ${tail.join(", ")}`);
+    assert.ok(exitedAt > resolvedAt, "session.exited must be the last word");
+    const resolved = findEvent(harness.events, "request.resolved", before);
+    assert.equal(resolved?.payload.decision, "cancel");
+    // The provider's callback is unparked rather than left awaiting forever.
+    assert.equal(((await decision) as { behavior: string }).behavior, "deny");
+    assert.equal(peer.closed, true);
+    // And the turn never outlives its process.
+    const tailTypes = harness.events.slice(before).map((event) => event.type);
+    assert.ok(tailTypes.indexOf("turn.completed") < tailTypes.indexOf("session.exited"));
+  });
+
+  it("an interrupt settles the pending request before the interrupt RPC", async () => {
+    const { harness, peer } = await openApproval();
+    const callsBefore = peer.calls.length;
+    const before = harness.events.length;
+    const interrupt = harness.adapter.interruptTurn(START.threadId);
+    await harness.drain();
+
+    const resolved = findEvent(harness.events, "request.resolved", before);
+    assert.ok(resolved, "the card is cancelled first — an open prompt would deadlock Stop");
+    const interruptCall = peer.calls.slice(callsBefore).find((call) => call.op === "interrupt");
+    assert.ok(interruptCall);
+
+    // The receipt was empty, so the session survives once the turn settles.
+    peer.emit(successResult());
+    await interrupt;
+    assert.equal(harness.adapter.hasSession(START.threadId), true);
+  });
+
+  it("a non-empty interrupt receipt escalates to closing the query", async () => {
+    const { harness, peer } = await openApproval();
+    peer.interruptReceipt = { still_queued: ["queued-uuid"] };
+    await harness.adapter.interruptTurn(START.threadId);
+    assert.equal(peer.closed, true, "Stop means stop: queued work escalates to a process kill");
+    assert.equal(harness.adapter.hasSession(START.threadId), false);
+  });
+
+  it("an interrupt for a turn that is no longer active is a no-op", async () => {
+    const harness = await makeHarness();
+    await harness.adapter.startSession(START);
+    const peer = harness.peers[0]!;
+    await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "go",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await peer.nextTurn();
+    const callsBefore = peer.calls.length;
+    await harness.adapter.interruptTurn(START.threadId, "some-other-turn");
+    assert.equal(peer.calls.slice(callsBefore).some((call) => call.op === "interrupt"), false);
+    assert.equal(harness.adapter.hasSession(START.threadId), true);
+  });
+});
+
+describe("claude adapter — questions", () => {
+  it("AskUserQuestion becomes a question and its answer rides back by text", async () => {
+    const harness = await makeHarness();
+    await harness.adapter.startSession(START);
+    const peer = harness.peers[0]!;
+    await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "ask me",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await peer.nextTurn();
+
+    const abort = new AbortController();
+    const reply = peer.canUseTool!(
+      "AskUserQuestion",
+      {
+        questions: [
+          {
+            question: "Which file?",
+            header: "Choice",
+            options: [{ label: "a.txt", description: "" }],
+            multiSelect: false
+          }
+        ]
+      },
+      {
+        signal: abort.signal,
+        toolUseID: "toolu_q",
+        requestId: "req-q"
+      } as unknown as Parameters<CanUseTool>[2]
+    );
+    const requested = await harness.waitFor("user-input.requested");
+    assert.equal(requested.payload.questions[0]!.id, "Which file?");
+
+    harness.adapter.respondToUserInput(START.threadId, "req-q", { "Which file?": "a.txt" });
+    const result = (await reply) as { behavior: string; updatedInput: { answers: unknown } };
+    assert.equal(result.behavior, "allow");
+    assert.deepEqual(result.updatedInput.answers, { "Which file?": "a.txt" });
+    await harness.waitFor("user-input.resolved");
+  });
+});
+
+describe("claude adapter — death and recovery", () => {
+  it("a stream that ends mid-turn settles the turn and closes live tasks first", async () => {
+    const harness = await makeHarness();
+    await harness.adapter.startSession(START);
+    const peer = harness.peers[0]!;
+    await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "run a subagent",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await peer.nextTurn();
+    peer.emit({
+      type: "system",
+      subtype: "task_started",
+      task_id: "task-1",
+      description: "Explore",
+      task_type: "local_agent",
+      session_id: "sess-1",
+      uuid: "u-task"
+    } as unknown as SDKMessage);
+    await harness.waitFor("task.started");
+
+    const before = harness.events.length;
+    peer.endStream();
+    await harness.waitFor("session.exited", before);
+
+    const tail = harness.events.slice(before);
+    const types = tail.map((event) => event.type);
+    assert.ok(types.includes("task.completed"), types.join(", "));
+    const stopped = findEvent(tail, "task.completed");
+    assert.equal(stopped?.payload.status, "stopped");
+    assert.ok(types.indexOf("task.completed") < types.indexOf("session.exited"));
+    assert.ok(types.indexOf("turn.completed") < types.indexOf("session.exited"));
+    const completed = findEvent(tail, "turn.completed");
+    assert.equal(completed?.payload.state, "interrupted");
+    assert.equal(harness.adapter.hasSession(START.threadId), false);
+  });
+
+  it("lazy recovery restarts from the persisted cursor", async () => {
+    const harness = await makeHarness();
+    await harness.adapter.startSession(START);
+    const peer = harness.peers[0]!;
+    await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "one",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await peer.nextTurn();
+    peer.emit(systemInit("7f1c9b02-5d4a-4a2e-9f77-2b1d0c8e4a10"));
+    peer.emit(successResult("7f1c9b02-5d4a-4a2e-9f77-2b1d0c8e4a10"));
+    await harness.waitFor("turn.completed");
+
+    peer.endStream();
+    await harness.waitFor("session.exited");
+    assert.equal(harness.adapter.hasSession(START.threadId), false);
+
+    // A crashed session is indistinguishable from a fresh one (§4.1).
+    const optionsBefore = harness.queryOptions.length;
+    await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "two",
+      attachments: [],
+      interactionMode: "default"
+    });
+    assert.equal(harness.adapter.hasSession(START.threadId), true);
+    const resumed = harness.queryOptions.slice(optionsBefore).at(-1)!;
+    assert.equal(resumed.resume, "7f1c9b02-5d4a-4a2e-9f77-2b1d0c8e4a10", "the new query must resume the native session");
+    assert.equal(resumed.sessionId, undefined);
+  });
+
+  it("a session started from a cursor resumes instead of minting a session id", async () => {
+    const harness = await makeHarness();
+    await harness.adapter.startSession({
+      ...START,
+      resumeCursor: {
+        threadId: START.threadId,
+        resume: "b46b654b-57bb-40e4-8c82-d3536bd06a28",
+        turnCount: 1,
+        turnStartMessageIds: ["turn-a"]
+      }
+    });
+    const options = harness.queryOptions.at(-1)!;
+    assert.equal(options.resume, "b46b654b-57bb-40e4-8c82-d3536bd06a28");
+    assert.equal(options.sessionId, undefined);
+  });
+
+  it("a cursor that fails its shape check means no resume, never an error", async () => {
+    const harness = await makeHarness();
+    await harness.adapter.startSession({ ...START, resumeCursor: { resume: "nonsense" } });
+    const options = harness.queryOptions.at(-1)!;
+    assert.equal(options.resume, undefined);
+    assert.equal(typeof options.sessionId, "string");
+  });
+
+  it("the liveness watchdog cancels a silent turn and pauses on a pending request", async () => {
+    const harness = await makeHarness();
+    await harness.adapter.startSession(START);
+    const peer = harness.peers[0]!;
+    await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "go",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await peer.nextTurn();
+
+    // A pending approval pauses the watchdog: a turn waiting on a human is not
+    // a stalled turn (§3.1).
+    const abort = new AbortController();
+    void peer.canUseTool!("Bash", { command: "ls" }, {
+      signal: abort.signal,
+      toolUseID: "t",
+      requestId: "req-w"
+    } as unknown as Parameters<CanUseTool>[2]);
+    await harness.waitFor("request.opened");
+
+    // The window really has elapsed, and the turn really is silent...
+    harness.advance(11 * 60_000);
+    harness.timers.at(-1)!.fn();
+    await harness.drain();
+    // ...but a turn waiting on a human is not a stalled turn.
+    assert.equal(harness.adapter.hasSession(START.threadId), true, "paused, not cancelled");
+    assert.equal(
+      harness.events.some(
+        (event) => event.type === "runtime.error" && event.payload.message.includes("no activity")
+      ),
+      false
+    );
+
+    harness.adapter.respondToApproval(START.threadId, "req-w", "decline");
+    await harness.drain();
+    harness.advance(11 * 60_000);
+    harness.timers.at(-1)!.fn();
+    await harness.drain();
+    const error = harness.events.filter((event): event is EventOf<"runtime.error"> => event.type === "runtime.error").find((event) => event.payload.message.includes("no activity"));
+    assert.ok(error, "a silent turn is cancelled rather than left 'working'");
+    assert.equal(harness.adapter.hasSession(START.threadId), false);
+  });
+});
+
+describe("claude adapter — rollback", () => {
+  const history = [
+    {
+      type: "user",
+      uuid: "turn-a",
+      parent_tool_use_id: null,
+      message: { role: "user", content: [{ type: "text", text: "one" }] }
+    },
+    {
+      type: "assistant",
+      uuid: "asst-a",
+      parent_tool_use_id: null,
+      message: { role: "assistant", content: [{ type: "text", text: "ok" }] }
+    },
+    {
+      type: "user",
+      uuid: "turn-b",
+      parent_tool_use_id: null,
+      message: { role: "user", content: [{ type: "text", text: "two" }] }
+    },
+    {
+      type: "assistant",
+      uuid: "asst-b",
+      parent_tool_use_id: null,
+      message: { role: "assistant", content: [{ type: "text", text: "ok" }] }
+    }
+  ];
+  const fork = [
+    { ...history[0], uuid: "fork-a" },
+    { ...history[1], uuid: "fork-asst-a" }
+  ];
+
+  async function twoTurns(harness: Harness): Promise<ScriptedQuery> {
+    await harness.adapter.startSession(START);
+    const peer = harness.peers[0]!;
+    for (const text of ["one", "two"]) {
+      await harness.adapter.sendTurn({
+        threadId: START.threadId,
+        input: text,
+        attachments: [],
+        interactionMode: "default"
+      });
+      await peer.nextTurn();
+      peer.emit(systemInit("b46b654b-57bb-40e4-8c82-d3536bd06a28"));
+      peer.emit(successResult("b46b654b-57bb-40e4-8c82-d3536bd06a28"));
+      await harness.waitFor("turn.completed", harness.events.length - 1);
+    }
+    return peer;
+  }
+
+  it("forks the native session and restarts on the fork's id", async () => {
+    let forkCalls = 0;
+    const harness = await makeHarness({
+      historyStdout: (method) => {
+        if (method === "forkSession") {
+          forkCalls += 1;
+          return JSON.stringify({ sessionId: "d908c283-1c9a-45ee-9506-3ca4a69c8579" });
+        }
+        return JSON.stringify(forkCalls === 0 ? history : fork);
+      }
+    });
+    const peer = await twoTurns(harness);
+    // The turn ids the adapter minted ARE the native anchors; rewrite the
+    // fixture's uuids to match them so the alignment is exercised for real.
+    const boundaries = harness.events
+      .filter((event) => event.type === "turn.started")
+      .map((event) => event.turnId!);
+    history[0]!.uuid = boundaries[0]!;
+    history[2]!.uuid = boundaries[1]!;
+    fork[0]!.uuid = "fork-a";
+
+    const optionsBefore = harness.queryOptions.length;
+    const snapshot = await harness.adapter.rollbackThread(START.threadId, 1);
+    assert.equal(snapshot.threadId, START.threadId);
+    assert.equal(snapshot.turns.length, 1, "one turn is kept");
+    const resumed = harness.queryOptions.slice(optionsBefore).at(-1)!;
+    assert.equal(resumed.resume, "d908c283-1c9a-45ee-9506-3ca4a69c8579");
+    assert.equal(peer.closed, true);
+  });
+
+  it("rolling back every turn starts a fresh session rather than forking", async () => {
+    const harness = await makeHarness({ historyStdout: () => JSON.stringify(history) });
+    await twoTurns(harness);
+    const optionsBefore = harness.queryOptions.length;
+    const snapshot = await harness.adapter.rollbackThread(START.threadId, 2);
+    assert.deepEqual(snapshot.turns, []);
+    const restarted = harness.queryOptions.slice(optionsBefore).at(-1)!;
+    assert.equal(restarted.resume, undefined);
+    assert.equal(typeof restarted.sessionId, "string");
+  });
+
+  it("refuses a misaligned fork rather than guessing", async () => {
+    const harness = await makeHarness({
+      historyStdout: (method) => {
+        if (method === "forkSession") {
+          return JSON.stringify({ sessionId: "d908c283-1c9a-45ee-9506-3ca4a69c8579" });
+        }
+        // The fork's retained body differs: role matching alone must not pass.
+        return JSON.stringify(history);
+      }
+    });
+    await twoTurns(harness);
+    const boundaries = harness.events
+      .filter((event) => event.type === "turn.started")
+      .map((event) => event.turnId!);
+    history[0]!.uuid = boundaries[0]!;
+    history[2]!.uuid = boundaries[1]!;
+    await assert.rejects(
+      () => harness.adapter.rollbackThread(START.threadId, 1),
+      /did not preserve the retained turn boundaries/
+    );
+    // Phase 1 refused, so the live session is untouched.
+    assert.equal(harness.adapter.hasSession(START.threadId), true);
+  });
+
+  it("rejects a non-integer rewind", async () => {
+    const harness = await makeHarness();
+    await harness.adapter.startSession(START);
+    await assert.rejects(() => harness.adapter.rollbackThread(START.threadId, 0), /integer >= 1/);
+  });
+});
+
+describe("claude adapter — snapshot", () => {
+  it("probes without authenticating and publishes the §4.1 shape", async () => {
+    const harness = await makeHarness();
+    const snapshot = await harness.adapter.refreshSnapshot({ cwd: "/work/project" });
+    assert.equal(snapshot.id, "claude");
+    assert.deepEqual(snapshot.refIds, ["claude", "claudex", "claudemix"]);
+    assert.equal(snapshot.installed, true);
+    assert.equal(snapshot.version, "2.1.210");
+    assert.equal(snapshot.status, "ready");
+    assert.equal(snapshot.auth.status, "authenticated");
+    assert.equal(snapshot.auth.email, "user@example.invalid");
+    assert.equal(snapshot.auth.label, "Claude Max");
+    assert.ok(snapshot.models.some((model) => model.slug === "sonnet"));
+    // `/compact` is synthesised for every provider that can serve it (§4.6.3).
+    assert.ok(snapshot.slashCommands.some((command) => command.name === "compact"));
+    assert.ok(snapshot.slashCommands.some((command) => command.name === "review"));
+    assert.equal(snapshot.capabilities.showPlanModeToggle, true);
+    assert.equal(snapshot.capabilities.reportsContextWindow, true);
+    assert.equal(snapshot.capabilities.sessionModelSwitch, "in-session");
+    // An API-key login has no windows: the bars clear rather than lie.
+    assert.equal(snapshot.usageLimits?.unavailable?.reason, "unsupported");
+    const probeOptions = harness.queryOptions.find((options) => options.persistSession === false);
+    assert.ok(probeOptions, "the probe must use the never-yielding query");
+    assert.equal(probeOptions.canUseTool, undefined);
+  });
+
+  it("degrades rather than throwing when the CLI is missing", async () => {
+    const harness = await makeHarness({ binaryPath: null });
+    const snapshot = await harness.adapter.refreshSnapshot();
+    assert.equal(snapshot.installed, false);
+    assert.equal(snapshot.status, "error");
+    assert.ok(snapshot.message?.includes("not installed"));
+    assert.ok(snapshot.models.length > 0, "a fallback catalogue keeps the picker usable");
+  });
+
+  it("marks a below-minimum CLI degraded and does not probe it", async () => {
+    const harness = await makeHarness({ version: "2.0.1" });
+    const snapshot = await harness.adapter.refreshSnapshot();
+    assert.equal(snapshot.status, "degraded");
+    assert.equal(snapshot.versionAdvisory?.status, "behind_latest");
+    assert.equal(
+      harness.queryOptions.some((options) => options.persistSession === false),
+      false
+    );
+  });
+});
