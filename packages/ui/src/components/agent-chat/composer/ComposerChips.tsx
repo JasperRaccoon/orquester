@@ -21,7 +21,7 @@ import {
   optionDescriptors,
   REASONING_OPTION_IDS
 } from "./composer-model";
-import { shortcutComboFor, type ComposerShortcutCommand } from "./composer-shortcuts";
+import { shortcutLabelFor, type ComposerShortcutCommand } from "./composer-shortcuts";
 
 /**
  * The composer's control chips (spec §7.4): model, its option descriptors,
@@ -91,7 +91,7 @@ export function ModelChip({
   const booleans = optionDescriptors(selectedModel).filter(
     (descriptor) => descriptor.type === "boolean"
   );
-  const combo = shortcutComboFor("model");
+  const combo = shortcutLabelFor("model");
   return (
     <ComposerPopover
       label="Model"
@@ -119,7 +119,7 @@ export function ModelChip({
         <>
           <div className="flex items-center justify-between px-2 py-1 text-[11px] text-neutral-500">
             <span>Model</span>
-            {combo ? <Kbd combo={combo} /> : null}
+            {combo ? <Kbd>{combo}</Kbd> : null}
           </div>
           {models.length === 0 ? (
             <p className="px-2 py-2 text-xs text-neutral-500">No models reported yet.</p>
@@ -199,7 +199,7 @@ export function OptionChip({
   // the other descriptors (service tier, agent) are pointer-only by design —
   // a token on a control nobody asked for would swallow the chord.
   const isReasoning = REASONING_OPTION_IDS.includes(descriptor.id);
-  const combo = isReasoning ? shortcutComboFor("effort") : null;
+  const combo = isReasoning ? shortcutLabelFor("effort") : null;
 
   return (
     <ComposerPopover
@@ -229,7 +229,7 @@ export function OptionChip({
         <>
           <div className="flex items-center justify-between px-2 py-1 text-[11px] text-neutral-500">
             <span>{descriptor.label}</span>
-            {combo ? <Kbd combo={combo} /> : null}
+            {combo ? <Kbd>{combo}</Kbd> : null}
           </div>
           {descriptor.options.map((choice) => (
             <ComposerMenuRow
@@ -293,7 +293,7 @@ export function RuntimeModeChip({
   onChange,
   returnFocusTo
 }: RuntimeModeChipProps): React.ReactElement {
-  const combo = shortcutComboFor("mode");
+  const combo = shortcutLabelFor("mode");
   return (
     <ComposerPopover
       label="Permissions"
@@ -320,7 +320,7 @@ export function RuntimeModeChip({
         <>
           <div className="flex items-center justify-between px-2 py-1 text-[11px] text-neutral-500">
             <span>Permissions</span>
-            {combo ? <Kbd combo={combo} /> : null}
+            {combo ? <Kbd>{combo}</Kbd> : null}
           </div>
           {RUNTIME_MODES.map((candidate) => (
             <ComposerMenuRow

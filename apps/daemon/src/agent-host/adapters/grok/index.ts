@@ -117,7 +117,7 @@ class GrokAdapter implements AgentAdapter {
     context.signal.addEventListener(
       "abort",
       () => {
-        void this.stopAll();
+        void this.stopAll().finally(() => this.closeStream());
       },
       { once: true }
     );
@@ -148,12 +148,26 @@ class GrokAdapter implements AgentAdapter {
 
   private emit = (event: RuntimeEvent): void => {
     this.queue.push(event);
+    this.wake();
+  };
+
+  private wake(): void {
     const waiter = this.waiter;
     if (waiter !== null) {
       this.waiter = null;
       waiter();
     }
-  };
+  }
+
+  /**
+   * End the event stream. Only the host shutting down does this: `stopAll()`
+   * alone must NOT, or a host that stops every session and then starts a new
+   * one would find its consumer already finished.
+   */
+  private closeStream(): void {
+    this.closed = true;
+    this.wake();
+  }
 
   // ----------------------------------------------------------- lifecycle
 
@@ -234,8 +248,19 @@ class GrokAdapter implements AgentAdapter {
     }
 
     const session = this.requireSession(input.threadId);
+    // References only (§4.1): the host owns the bytes, the adapter only ever
+    // hands the agent a path it can read for itself.
+    const attachments = await Promise.all(
+      input.attachments.map(async (attachment) => ({
+        id: attachment.id,
+        name: attachment.name,
+        path: await this.context.resolveAttachmentPath(input.threadId, attachment.id),
+        ...(attachment.mimeType === undefined ? {} : { mimeType: attachment.mimeType })
+      }))
+    );
     const result = await session.sendTurn({
       text,
+      attachments,
       ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
       interactionMode: input.interactionMode
     });
@@ -286,15 +311,15 @@ class GrokAdapter implements AgentAdapter {
   /**
    * The provider-side snapshot used to reconcile after a restart.
    *
-   * Grok exposes no transcript RPC, and `session/load` replays only a
-   * fraction of the history (39 events produced, 5 replayed), so there is
-   * nothing honest to return but the session identity. §4.1 calls these items
-   * opaque; an empty list is the truthful answer and is what keeps
-   * `rollbackThread` from pretending.
+   * Grok exposes no transcript RPC, and `session/load` replays only a fraction
+   * of the history (39 events produced, 5 replayed), so the only honest source
+   * is what this adapter itself observed: one opaque item per settled turn,
+   * carrying the provider's own prompt id and stop reason. §4.1 calls the
+   * items opaque, and that is exactly what they are here.
    */
   async readThread(threadId: string): Promise<ThreadSnapshot> {
     const session = this.requireSession(threadId);
-    return await Promise.resolve({ threadId: session.threadId, turns: [] });
+    return await Promise.resolve({ threadId: session.threadId, turns: session.turns });
   }
 
   /**
@@ -335,12 +360,6 @@ class GrokAdapter implements AgentAdapter {
     const sessions = [...this.sessions.values()];
     this.sessions.clear();
     await Promise.all(sessions.map(async (session) => await session.stop()));
-    this.closed = true;
-    const waiter = this.waiter;
-    if (waiter !== null) {
-      this.waiter = null;
-      waiter();
-    }
   }
 
   // ------------------------------------------------------------- snapshot

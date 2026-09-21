@@ -27,6 +27,30 @@ export function messageStreamRoleOf(messageId: string): MessageStreamRole {
   return messageId.startsWith(REASONING_MESSAGE_ID_PREFIX) ? "reasoning" : "assistant";
 }
 
+/**
+ * `ThreadMessageItem.reasoningKind` (§7.3): whether the provider sent raw
+ * reasoning or a summary of it. The stream key is already baked into the base
+ * key by {@link reasoningSegmentBaseKeyFromEvent}, so the id is the record —
+ * there is nothing extra to carry. A whole-block snapshot
+ * (`reasoning:snapshot:…`) arrived without a stream kind, so it answers
+ * `undefined` and the row renders without a badge rather than guessing.
+ */
+export function reasoningKindOfMessageId(
+  messageId: string
+): "text" | "summary" | undefined {
+  if (!messageId.startsWith(REASONING_MESSAGE_ID_PREFIX)) {
+    return undefined;
+  }
+  const rest = messageId.slice(REASONING_MESSAGE_ID_PREFIX.length);
+  if (rest.startsWith("summary:")) {
+    return "summary";
+  }
+  if (rest.startsWith("raw:")) {
+    return "text";
+  }
+  return undefined;
+}
+
 /** `assistant:<baseKey>` / `assistant:<baseKey>:segment:<n>` (and `reasoning:` ditto). */
 export function segmentMessageId(
   baseKey: string,

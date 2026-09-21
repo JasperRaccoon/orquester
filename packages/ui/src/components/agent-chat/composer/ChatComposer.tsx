@@ -14,6 +14,7 @@ import { MAX_TURN_ATTACHMENTS } from "@orquester/api/agent-chat";
 import { cn } from "../../../lib/cn";
 import { useMediaQuery } from "../../../hooks/use-media-query";
 import { useAppStore } from "../../../store/app";
+import { useAgentChatDraft } from "../../../lib/agent-chat/hooks";
 import type { ChatComposerProps } from "../contracts";
 import { AccountChip, ModelChip, OptionChip, PlanChip, RuntimeModeChip } from "./ComposerChips";
 import { ComposerAttachments, type StagedAttachment } from "./ComposerAttachments";
@@ -34,10 +35,9 @@ import {
   resolveSelectedModel
 } from "./composer-model";
 import { isComposerCollapsedMobile, resolveComposerTimelineInset } from "./composer-inset";
-import { loadComposerPreferences, type ComposerPreferences } from "./composer-prefs";
 import {
   findComposerShortcutTarget,
-  matchComposerKeybinding,
+  resolveChatShortcut,
   type ComposerShortcutCommand
 } from "./composer-shortcuts";
 import {
@@ -91,6 +91,13 @@ const EFFORT_ARGUMENT = /^\/effort\s+(\S+)$/i;
 function effortArgumentFromDraft(text: string): string | null {
   return EFFORT_ARGUMENT.exec(text.trim())?.[1] ?? null;
 }
+
+/**
+ * Which chord sends. T3 makes this a setting; Orquester has no UI for it yet,
+ * so it is pinned to the default rather than persisted behind a toggle nobody
+ * can reach. `composerSubmissionIntentForEnter` already takes the other two.
+ */
+const SEND_SHORTCUT = "enter" as const;
 
 function isApplePlatform(): boolean {
   if (typeof navigator === "undefined") return false;
@@ -154,6 +161,17 @@ export function ChatComposer({
     (state) => state.sessions.find((session) => session.id === sessionId)?.cwd ?? null
   );
   const root = searchRoot ?? sessionCwd;
+  // The store's fallback draft, drained once on mount (see the effect below).
+  const { actions: storeDraftActions } = useAgentChatDraft(sessionId);
+  /**
+   * The per-device composer preferences, read live from the app store.
+   *
+   * Deliberately NOT a local copy: Settings writes these (`setChatPrefs`), and
+   * a snapshot taken once at mount would leave the two toggles apparently
+   * broken until the tab was reopened. `lib/chat-prefs.ts` owns the persisted
+   * shape and its default.
+   */
+  const chatPrefs = useAppStore((state) => state.chatPrefs);
 
   const shellRef = React.useRef<HTMLDivElement>(null);
   const textareaRef = React.useRef<HTMLTextAreaElement>(null);
@@ -174,7 +192,6 @@ export function ChatComposer({
   const [menuDismissed, setMenuDismissed] = React.useState(false);
   const [notice, setNotice] = React.useState<string | null>(null);
   const [sending, setSending] = React.useState(false);
-  const [preferences] = React.useState<ComposerPreferences>(() => loadComposerPreferences());
 
   draftRef.current = draft;
 
@@ -351,6 +368,33 @@ export function ChatComposer({
     [focusAtEnd, insertText, openControl, sessionId, stageAttachment]
   );
 
+  /**
+   * Drain the store's **fallback** draft once per thread (§7.4).
+   *
+   * That draft is where a queued message returned by an interrupt lands while
+   * this tab's composer was not mounted — and, because the bridge only carries
+   * text, it is also where the *attachments* of a returned message land even
+   * when a composer **is** mounted. Without this drain those files are held by
+   * the store and never become chips, so the user sees the text come back
+   * without its attachments.
+   *
+   * `takeDraft` is take-and-clear: the store draft is persisted, so a read that
+   * left it behind would re-apply the same text on the next open. It runs
+   * after the handle is registered, so anything the drain itself routes back
+   * through the bridge finds a live composer.
+   */
+  React.useEffect(() => {
+    const drained = storeDraftActions.takeDraft();
+    if (drained.text.trim().length > 0) {
+      insertText(drained.text, "append");
+    }
+    for (const attachment of drained.attachments) {
+      stageAttachment(attachment);
+    }
+    // Keyed on the thread only: one drain per tab, not one per action identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
   // ---------------------------------------------------------------------
   // Provider catalog, scoped to this thread's cwd (§4.6.4)
   // ---------------------------------------------------------------------
@@ -436,7 +480,7 @@ export function ChatComposer({
         attachmentCount: draft.attachments.length,
         contextCount: 0
       }),
-      showSkillsInSlashMenu: preferences.showSkillsInSlashMenu,
+      showSkillsInSlashMenu: chatPrefs.showSkillsInSlashMenu,
       isAtPromptStart: isTriggerAtPromptStart(trigger),
       query: trigger.query
     });
@@ -445,7 +489,7 @@ export function ChatComposer({
     draft.text,
     effortArgument,
     pathSearch.entries,
-    preferences.showSkillsInSlashMenu,
+    chatPrefs.showSkillsInSlashMenu,
     reasoningDescriptor,
     showPlanModeToggle,
     skills,
@@ -705,7 +749,7 @@ export function ChatComposer({
         .map((entry) => entry.ref)
         .filter((ref): ref is AttachmentRef => ref !== undefined);
       const disposition = resolveFollowUpDisposition({
-        followUpBehavior: preferences.followUpBehavior,
+        followUpBehavior: chatPrefs.followUpBehavior,
         intent,
         // A plan follow-up is the answer to a settled turn: never queued.
         isRunning: isTurnActive && plan === null
@@ -743,7 +787,7 @@ export function ChatComposer({
       draft.text,
       interactionMode,
       isTurnActive,
-      preferences.followUpBehavior,
+      chatPrefs.followUpBehavior,
       reverting,
       runSend,
       sendDisabledReason,
@@ -779,9 +823,9 @@ export function ChatComposer({
   // ---------------------------------------------------------------------
   React.useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      const command = matchComposerKeybinding(event);
-      if (!command) return;
-      if (command === "steerQueued") {
+      const shortcut = resolveChatShortcut(event);
+      if (!shortcut) return;
+      if (shortcut.kind === "steer-queued") {
         const head = queue[0];
         if (!head) return;
         event.preventDefault();
@@ -790,12 +834,17 @@ export function ChatComposer({
         });
         return;
       }
+      // `interrupt` and `scroll-to-end` are in the shared table but are not
+      // this listener's: Escape is handled on the textarea, where the open
+      // token menu gets first refusal, and the scroll pill belongs to the
+      // timeline. Taking either here would fire it twice.
+      if (shortcut.kind !== "control") return;
       // Only swallow the chord when a control actually answers to it, so a
       // composer without a plan toggle leaves its key to whoever wants it.
-      if (!findComposerShortcutTarget(shellRef.current, command)) return;
+      if (!findComposerShortcutTarget(shellRef.current, shortcut.command)) return;
       event.preventDefault();
       event.stopPropagation();
-      openControl(command);
+      openControl(shortcut.command);
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
@@ -845,7 +894,7 @@ export function ChatComposer({
       shiftKey: event.shiftKey,
       modifierKey: event.metaKey || event.ctrlKey,
       isRunning: isTurnActive,
-      sendShortcut: preferences.sendShortcut,
+      sendShortcut: SEND_SHORTCUT,
       prompt: draft.text
     });
     if (intent === null) return;
@@ -890,7 +939,7 @@ export function ChatComposer({
     : null;
   const willQueue =
     resolveFollowUpDisposition({
-      followUpBehavior: preferences.followUpBehavior,
+      followUpBehavior: chatPrefs.followUpBehavior,
       intent: "foreground",
       isRunning: isTurnActive
     }) === "queue";
