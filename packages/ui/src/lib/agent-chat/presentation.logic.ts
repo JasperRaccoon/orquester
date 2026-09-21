@@ -229,7 +229,11 @@ export function toolGroupAction(entry: WorkLogEntry): ToolGroupAction {
   if (
     entry.sourceActivityKind === "approval.requested" ||
     entry.sourceActivityKind === "approval.resolved" ||
-    entry.sourceActivityKind === "provider.approval.respond.failed"
+    entry.sourceActivityKind === "provider.approval.respond.failed" ||
+    // An answered question is not a tool call either. Absorbed from W12's
+    // copy during the fix wave — the union of the two arms is what T3 has.
+    entry.sourceActivityKind === "user-input.requested" ||
+    entry.sourceActivityKind === "user-input.resolved"
   ) {
     return "update";
   }
@@ -607,6 +611,66 @@ export function resolveWorkEntryPresentation(
     isDenial: workEntryIsProviderDenial(entry),
     live
   };
+}
+
+/**
+ * A row that reads as *still happening* in the active run — what the activity
+ * group picks its live row with.
+ *
+ * *T3: `MessagesTimeline.logic.ts:614-621`. It lives here rather than in
+ * `rows.logic.ts` so the timeline components import it from the one
+ * presentation resolver (fix-wave R7-6).*
+ */
+export function workEntryIsActiveTurnActivity(entry: WorkLogEntry): boolean {
+  return (
+    entry.toolLifecycleStatus === "inProgress" ||
+    (entry.toolLifecycleStatus === undefined &&
+      (entry.sourceActivityKind === "task.progress" || workLogEntryIsToolLike(entry)))
+  );
+}
+
+/**
+ * The destructive (red) row treatment, as distinct from the muted failure
+ * mark: a failure that is either **severe** or not tool-like at all. A
+ * non-zero command exit is a failure but never destructive (§7.3).
+ *
+ * *T3: `MessagesTimeline.tsx:4837-4847`. Absorbed from W12's copy during the
+ * fix wave so there is one definition (R7-6).*
+ */
+export function showDestructiveRowStyle(entry: WorkLogEntry): boolean {
+  if (!workEntryIndicatesToolFailure(entry)) {
+    return false;
+  }
+  return workEntrySignalsSevereFailure(entry) || !workLogEntryIsToolLike(entry);
+}
+
+/**
+ * Group a collapsed run's rows under the tool call each one happened inside.
+ *
+ * A hook run and a CLI-side denial carry `parentToolUseId` (§5.1) and read as
+ * consequences of a call, not as siblings of it; a row without one, or whose
+ * parent is not in this run, stays at the top level in its original position.
+ *
+ * *Added in the fix wave (R7-10) so the promoted field has a reader.*
+ */
+export function nestRowsUnderParentCall<T extends Pick<WorkLogEntry, "toolCallId" | "parentToolUseId">>(
+  entries: readonly T[]
+): Array<{ entry: T; children: T[] }> {
+  const byCallId = new Map<string, { entry: T; children: T[] }>();
+  const top: Array<{ entry: T; children: T[] }> = [];
+  for (const entry of entries) {
+    const node = { entry, children: [] as T[] };
+    const parent = entry.parentToolUseId ? byCallId.get(entry.parentToolUseId) : undefined;
+    if (parent) {
+      parent.children.push(entry);
+      continue;
+    }
+    top.push(node);
+    if (entry.toolCallId) {
+      byCallId.set(entry.toolCallId, node);
+    }
+  }
+  return top;
 }
 
 /** Rows hidden from a collapsed group. *T3: `MessagesTimeline.logic.ts:101-113`.* */

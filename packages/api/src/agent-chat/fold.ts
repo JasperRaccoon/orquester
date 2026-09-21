@@ -343,10 +343,17 @@ function commit(
   let activities = mutation.activities ?? state.activities;
   let itemIndex = mutation.itemIndex ?? state.itemIndex;
 
+  // Retention can drop an open approval or a live roster row on an append that
+  // has nothing to do with either, so a drop is its own re-derive trigger —
+  // gating only on the INCOMING row's kind left `pending`/`roster` pointing at
+  // rows the fold no longer holds until some later event happened to touch
+  // them (R5 #18).
+  let retentionDropped = false;
   if (mutation.items !== undefined || mutation.activities !== undefined) {
     const retained = applyRetention(items, activities);
     if (retained.itemIndex !== null) {
       items = retained.items;
+      retentionDropped = retained.activities !== activities;
       activities = retained.activities;
       itemIndex = retained.itemIndex;
     }
@@ -357,17 +364,22 @@ function commit(
     mutation.head !== undefined &&
     isSessionLive(state.head?.session.status) !== isSessionLive(nextSessionStatus);
 
-  const pending =
-    mutation.rederivePending === true ? derivePendingRequests(activities) : state.pending;
-  const roster =
-    mutation.rederiveRoster === true || sessionLiveChanged
-      ? foldSubagentActivities(activities, { sessionLive: isSessionLive(nextSessionStatus) })
-      : state.roster;
-
+  // The tombstone set is updated BEFORE pending is derived from it: a
+  // `*.resolved` row must close its request in the same step it arrives, and
+  // it must keep closing it after retention drops it (§5.1).
   const closedRequestIds =
     mutation.rederivePending === true
-      ? closedIdsFrom(activities, state.closedRequestIds)
+      ? closedIdsFrom(mutation.activities ?? state.activities, state.closedRequestIds)
       : state.closedRequestIds;
+
+  const pending =
+    mutation.rederivePending === true || retentionDropped
+      ? derivePendingRequests(activities, { closed: closedRequestIds })
+      : state.pending;
+  const roster =
+    mutation.rederiveRoster === true || sessionLiveChanged || retentionDropped
+      ? foldSubagentActivities(activities, { sessionLive: isSessionLive(nextSessionStatus) })
+      : state.roster;
 
   const head = mutation.head !== undefined ? mutation.head : state.head;
   const nextHead =
@@ -391,11 +403,14 @@ function commit(
 }
 
 /**
- * The tombstone set (§5.1). Ids only ever accumulate within a fold, so a
- * `*.requested` row arriving out of order can never reopen a closed request;
- * a revert that truncates the closing row is the one thing that clears one,
- * which is why the set is rebuilt from the retained activities and unioned
- * with what was already closed.
+ * The tombstone set (§5.1). Ids only ever accumulate within a fold: a
+ * `*.requested` row arriving out of order can never reopen a closed request,
+ * and neither can one arriving after the closing row has aged out of the
+ * retention window — which is exactly why the set exists beside the activity
+ * list rather than being re-derived from it. It is unioned with what was
+ * already closed and never shrinks, including across a revert: a truncated
+ * request is gone from the timeline anyway, and resurrecting its card would
+ * be the one failure this set is named for.
  */
 function closedIdsFrom(
   activities: readonly ThreadActivityItem[],

@@ -108,7 +108,8 @@ export async function resolveGitCommonDir(runner: GitRunner, cwd: string): Promi
 export async function hasHeadCommit(
   runner: GitRunner,
   cwd: string,
-  env?: Record<string, string | undefined>
+  env?: Record<string, string | undefined>,
+  bounds?: { signal?: AbortSignal; timeoutMs?: number }
 ): Promise<boolean> {
   const result = await runner.run({
     operation: CHECKPOINT_CAPTURE_OPERATION,
@@ -116,7 +117,12 @@ export async function hasHeadCommit(
     args: ["rev-parse", "--verify", "HEAD"],
     allowNonZeroExit: true,
     maxOutputBytes: 4_096,
-    ...(env === undefined ? {} : { env })
+    ...(env === undefined ? {} : { env }),
+    // A probe inside the recovery budget must die with it: without the signal
+    // an unresponsive nested mount would run to the runner's 30 s default and
+    // turn "5 s total" into ~35 s.
+    ...(bounds?.signal === undefined ? {} : { signal: bounds.signal }),
+    ...(bounds?.timeoutMs === undefined ? {} : { timeoutMs: bounds.timeoutMs })
   });
   return result.exitCode === 0;
 }
@@ -519,10 +525,12 @@ async function findUnstageableNestedRepos(
       continue;
     }
     // Discover the child's own repository instead of inheriting ours.
-    const nestedHasCommit = await hasHeadCommit(runner, nestedCwd, {
-      ...captureEnv,
-      ...NESTED_REPO_ENV
-    });
+    const nestedHasCommit = await hasHeadCommit(
+      runner,
+      nestedCwd,
+      { ...captureEnv, ...NESTED_REPO_ENV },
+      { signal, timeoutMs: CHECKPOINT_RECOVERY_TIMEOUT_MS }
+    );
     if (!nestedHasCommit) {
       exclusions.push(`:(exclude,literal)${entry}`);
     }

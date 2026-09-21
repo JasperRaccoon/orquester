@@ -16,9 +16,15 @@ import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import type {
   AgentPanelModel,
   ProviderSnapshot,
-  RuntimeSubagent
+  RuntimeSubagent,
+  ThreadSessionStatus,
+  Turn
 } from "@orquester/api/agent-chat";
-import { deriveAgentPanelModel, emptyAgentPanelModel } from "@orquester/api/agent-chat";
+import {
+  deriveAgentPanelModel,
+  emptyAgentPanelModel,
+  isSettledTurnState
+} from "@orquester/api/agent-chat";
 
 import { useApi } from "../../context/orquester-context";
 import type {
@@ -101,11 +107,13 @@ export const useAgentChatThread: UseAgentChatThread = (sessionId) => {
   const slice = useThreadState(store, (state) => state.slice);
   const rows = useThreadState(store, (state) => state.rows);
   const activePlan = useThreadState(store, (state) => state.activePlan);
+  const actionableProposedPlan = useThreadState(store, (state) => state.actionableProposedPlan);
+  const reverting = useThreadState(store, (state) => state.reverting);
   const actions = useThreadState(store, (state) => state.actions);
 
   return useMemo<AgentChatThreadView>(
-    () => ({ slice, actions, rows, activePlan }),
-    [slice, actions, rows, activePlan]
+    () => ({ slice, actions, rows, activePlan, actionableProposedPlan, reverting }),
+    [slice, actions, rows, activePlan, actionableProposedPlan, reverting]
   );
 };
 
@@ -173,10 +181,42 @@ export const useAgentChatStatus: UseAgentChatStatus = (sessionId) => {
         pendingApprovals: slice.pending.approvals.length,
         pendingQuestions: slice.pending.userInputs.length
       }),
-      turnStartedAt: latestTurn?.startedAt ?? null
+      // Only an UNSETTLED turn has a start time the status line may tick from.
+      // Handing it the last turn's `startedAt` regardless of state left the
+      // line showing "● Working 1m 19s" climbing forever against a server that
+      // had reported `ready`/`completed` — and it survived a reload, because
+      // the settled turn is in the snapshot (fix-wave E1). The status line
+      // reads any non-null value as "a turn is running", so `null` is the
+      // whole signal that it stopped.
+      turnStartedAt: turnStartedAt(latestTurn, slice.sessionStatus)
     };
   }, [slice, rows, snapshot]);
 };
+
+/**
+ * The start stamp the status line's live timer ticks from, or `null`.
+ *
+ * A turn is settled **by session status** (§5.1), so a session that is no
+ * longer `running`/`starting` settles the row even when a late
+ * `turn.completed` has not landed — which is exactly the race that left the
+ * timer running.
+ */
+export function turnStartedAt(
+  latestTurn: Turn | null | undefined,
+  sessionStatus: ThreadSessionStatus | null
+): string | null {
+  if (!latestTurn || latestTurn.startedAt === null) {
+    return null;
+  }
+  if (isSettledTurnState(latestTurn.state)) {
+    return null;
+  }
+  // `pending`/`running` only count while the session is actually live.
+  if (sessionStatus !== "running" && sessionStatus !== "starting") {
+    return null;
+  }
+  return latestTurn.startedAt;
+}
 
 /**
  * The drill-in view: **one subagent's own timeline** (§7.6).

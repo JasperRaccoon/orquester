@@ -563,10 +563,18 @@ export function foldSubagentActivities(
     // row is never evicted ahead of a settled agent row (§7.6).
     const rank = (agent: MutableAgent): number =>
       isActive(agent.status) ? 0 : agent.status === "idle" ? 1 : 2;
-    roster = roster
-      .slice()
-      .sort((a, b) => rank(a) - rank(b) || b.updatedAt.localeCompare(a.updatedAt))
-      .slice(0, ROSTER_LIMIT);
+    const keep = new Set(
+      roster
+        .slice()
+        .sort((a, b) => rank(a) - rank(b) || b.updatedAt.localeCompare(a.updatedAt))
+        .slice(0, ROSTER_LIMIT)
+    );
+    // The rank decides WHICH rows survive; the original insertion order decides
+    // the order they come back in. Returning the ranked array reordered every
+    // surviving row the moment a thread crossed 100 agents — settled rows came
+    // back newest-first — which is exactly the "never reshuffle rows that stay
+    // visible" rule (§7.6).
+    roster = roster.filter((agent) => keep.has(agent));
   }
 
   return roster.map((agent) => ({ ...agent }));

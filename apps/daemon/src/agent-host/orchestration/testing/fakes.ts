@@ -220,6 +220,8 @@ export interface FakeCheckpointService extends CheckpointService {
   rollbackUnsupported: Set<AgentAdapterId>;
   diff: string;
   turnCount: number;
+  /** Override what `captureBaseline` answers; `null` models a non-git project. */
+  baseline?: CaptureResult | null;
 }
 
 export function createFakeCheckpointService(): FakeCheckpointService {
@@ -235,18 +237,22 @@ export function createFakeCheckpointService(): FakeCheckpointService {
     diff: "",
     turnCount: 0,
     /**
-     * A git project by default: `null` means "not a git repo" and makes the
-     * host stop offering §5.4 placeholders for the thread, which is a
-     * behaviour a test should have to opt into rather than get by accident.
+     * A git-backed project by default. `null` is reserved for "this project
+     * has no checkpoints at all"; an already-published baseline answers
+     * `ready`, which is what the real service does from a thread's second turn
+     * onwards. Set `fake.baseline = null` to model a non-git project.
      */
     async captureBaseline(input: { threadId: string }): Promise<CaptureResult | null> {
-      fake.baselines.push(input.threadId);
-      if (fake.nonGit) return null;
-      return {
-        turnCount: fake.turnCount,
-        ref: `refs/orquester/checkpoints/${input.threadId}/turn/${fake.turnCount}`,
-        status: "ready"
-      };
+      // Recorded so a test can assert WHEN the baseline was taken, not just
+      // what it answered — the §5.4 ordering is the thing under test.
+      baselines.push(input.threadId);
+      return fake.baseline === undefined
+        ? {
+            turnCount: fake.turnCount,
+            ref: `refs/orquester/checkpoints/${input.threadId}/turn/${fake.turnCount}`,
+            status: "ready"
+          }
+        : fake.baseline;
     },
     async captureTurnEnd(input: {
       threadId: string;

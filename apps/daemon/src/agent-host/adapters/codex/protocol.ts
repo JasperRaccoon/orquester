@@ -319,7 +319,7 @@ export class CodexPeer {
     if (frame === undefined) {
       return;
     }
-    this.options.onFrame?.("recv", frame);
+    this.logFrame("recv", frame);
     if (typeof frame !== "object" || frame === null || Array.isArray(frame)) {
       this.options.handlers.onUnknownFrame(frame, "not a JSON object");
       return;
@@ -441,9 +441,10 @@ export class CodexPeer {
     } catch {
       return false;
     }
-    this.options.onFrame?.("send", frame);
     const stdin = this.options.stdin;
     if (stdin.destroyed || stdin.writableEnded) {
+      // Logged AFTER the writability check, so an unwritten frame is never
+      // recorded as sent (Q1 finding 33).
       return false;
     }
     try {
@@ -451,7 +452,22 @@ export class CodexPeer {
     } catch {
       return false;
     }
+    this.logFrame("send", frame);
     return true;
+  }
+
+  /**
+   * `AdapterContext.logRawFrame` is documented "best-effort and never
+   * blocking", but it runs on a stream event and inside the request-handler
+   * IIFE's `finally`. A throw there would be an uncaught exception that kills
+   * the host, so it is contained here (Q1 finding 33).
+   */
+  private logFrame(direction: "send" | "recv", frame: unknown): void {
+    try {
+      this.options.onFrame?.(direction, frame);
+    } catch {
+      // Diagnostics must never take the transport down.
+    }
   }
 }
 

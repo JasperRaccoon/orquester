@@ -37,6 +37,7 @@ import {
   toolGroupSummaryKind,
   workEntryDisplayIndicatesToolFailure,
   workEntryIndicatesToolSuccess,
+  workEntryIsActiveTurnActivity,
   workEntryIsVisibleInGroup,
   workLogEntryIsToolLike
 } from "./presentation.logic";
@@ -160,6 +161,26 @@ function isGroupMessage(message: ThreadMessageItem): boolean {
 }
 
 /**
+ * The `/compact` the host persisted verbatim as a user message (§4.6.5(b)).
+ *
+ * "The user message is still persisted verbatim as `/compact` and **rendered
+ * as a compaction marker rather than a bubble**" — so it is dropped from the
+ * message rows here and the marker that the compaction activity produces is
+ * the only thing the user sees. Re-recognised by string comparison at render
+ * time, and the orchestrator stores the raw input, so it trims and lowercases
+ * (fix-wave R2-4).
+ *
+ * *T3: `apps/web/src/components/ChatView.tsx:735-738` (`isCompactCommandMessage`).*
+ */
+export function isCompactCommandMessage(message: ThreadMessageItem): boolean {
+  return (
+    message.role === "user" &&
+    (message.attachments?.length ?? 0) === 0 &&
+    message.text.trim().toLowerCase() === "/compact"
+  );
+}
+
+/**
  * A group qualifies only when a message in it is reasoning or demoted
  * commentary; a work row is excluded when it carries `agentSpawn` or
  * `questionAnswer`, is a compaction, or has `tone === "error"` (§7.3).
@@ -278,13 +299,7 @@ function deriveActiveVisualResponseTurnIds(input: {
 }
 
 /** *T3: `MessagesTimeline.logic.ts:614-620`.* */
-export function workEntryIsActiveTurnActivity(entry: WorkLogEntry): boolean {
-  return (
-    entry.toolLifecycleStatus === "inProgress" ||
-    (entry.toolLifecycleStatus === undefined &&
-      (entry.sourceActivityKind === "task.progress" || workLogEntryIsToolLike(entry)))
-  );
-}
+export { workEntryIsActiveTurnActivity };
 
 // ---------------------------------------------------------------------------
 // Turn folds
@@ -879,6 +894,11 @@ export function deriveTimelineRows(input: TimelineRowsInput): AgentChatTimelineR
 
     // ── Message ───────────────────────────────────────────────────────────
     const message = timelineEntry.message;
+    // §4.6.5(b): the `/compact` the host persisted verbatim is rendered as the
+    // compaction marker, never as a bubble (fix-wave R2-4).
+    if (isCompactCommandMessage(message)) {
+      continue;
+    }
     const stillInProgress =
       message.role === "assistant" &&
       message.turnId !== null &&
@@ -1192,7 +1212,12 @@ export function computeStableRows(
   previous: StableRowsState
 ): StableRowsState {
   const next = new Map<string, AgentChatTimelineRow>();
-  let anyChanged = rows.length !== previous.byId.size;
+  // Compare LENGTHS, not length-against-map-size: two rows sharing an id make
+  // the map smaller than the array, which pinned `anyChanged` true forever and
+  // silently disabled the reuse path (fix-wave R7-12). `LIVE_ACTIVITY_ROW_ID`
+  // is used by three row kinds under conditions that are meant to be mutually
+  // exclusive but are not enforced, so this must degrade, not break.
+  let anyChanged = rows.length !== previous.result.length;
 
   const result = rows.map((row, index) => {
     const previousRow = previous.byId.get(row.id);

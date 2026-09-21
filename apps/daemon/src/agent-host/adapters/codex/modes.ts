@@ -93,16 +93,6 @@ export function runtimeModeToTurnSandboxPolicy(
 }
 
 /**
- * Plan mode on Codex 0.154.0 is **sticky thread state**, not a per-turn flag
- * (fixtures README observation 9): sending `collaborationMode` on turn A and
- * omitting it on turn B leaves the thread in plan mode forever. So the value
- * is sent on **every** turn, `{mode:"default"}` included.
- *
- * `developer_instructions: null` means "use the built-in instructions for the
- * selected mode". T3 builds and sends its own ~9 KB prompt; on this CLI that
- * would *replace* a maintained upstream one, so we send `null`.
- */
-/**
  * Normalise a skill mention to the `$name` Codex parses natively (§4.6.8).
  *
  * Invocation is `$name` on the wire for every provider and the adapter
@@ -121,6 +111,16 @@ export function normaliseSkillMentions(text: string): string {
   return text.replace(SKILL_MENTION_PATTERN, "$1$$$2");
 }
 
+/**
+ * Plan mode on Codex 0.154.0 is **sticky thread state**, not a per-turn flag
+ * (fixtures README observation 9): sending `collaborationMode` on turn A and
+ * omitting it on turn B leaves the thread in plan mode forever. So the value
+ * is sent on **every** turn, `{mode:"default"}` included.
+ *
+ * `developer_instructions: null` means "use the built-in instructions for the
+ * selected mode". T3 builds and sends its own ~9 KB prompt; on this CLI that
+ * would *replace* a maintained upstream one, so we send `null`.
+ */
 export function interactionModeToCollaborationMode(
   interactionMode: InteractionMode,
   settings: { model: string; effort?: string }
