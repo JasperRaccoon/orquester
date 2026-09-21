@@ -394,6 +394,32 @@ describe("orchestrator — interrupt (§4.1, §6.2)", () => {
     await host.stop();
   });
 
+  it("drops a stale interrupt so it cannot kill the next turn", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "one" });
+    await host.settle();
+    // The client is still looking at the previous turn.
+    await host.orchestrator.command(threadId, "interrupt", {
+      commandId: cmd(),
+      turnId: "turn-0"
+    });
+    await host.settle();
+    assert.equal(
+      host.adapter.calls.filter((call) => call.kind === "interruptTurn").length,
+      0,
+      "a Stop aimed at a settled turn is a no-op"
+    );
+    // The current turn is still live and interruptible.
+    await host.orchestrator.command(threadId, "interrupt", {
+      commandId: cmd(),
+      turnId: "turn-1"
+    });
+    await host.settle();
+    assert.equal(host.adapter.calls.filter((call) => call.kind === "interruptTurn").length, 1);
+    await host.stop();
+  });
+
   it("appends provider.turn.interrupt.failed when no session is bound", async () => {
     const host = createTestHost();
     const threadId = await host.createThread();

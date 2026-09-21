@@ -934,6 +934,21 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     const head = headOf(runtime);
     const adapter = head ? options.adapters.get(head.adapter) : undefined;
     const session = currentSession(runtime);
+    // Interrupt is turn-scoped (§4.1): a Stop the client aimed at a turn that
+    // is no longer the active one must not kill the next turn. Enforced here so
+    // no adapter can forget it.
+    if (
+      turnId !== undefined &&
+      session.activeTurnId !== null &&
+      session.activeTurnId !== turnId
+    ) {
+      logger.debug("agent-host: dropping a stale interrupt", {
+        threadId: runtime.id,
+        turnId,
+        activeTurnId: session.activeTurnId
+      });
+      return;
+    }
     if (!adapter || !adapter.hasSession(runtime.id) || session.status === "stopped") {
       // Against a thread with no bound session, or one already stopped, the
       // host appends an activity rather than answering an HTTP error (§6.2).
