@@ -8,6 +8,7 @@ import type { AgentChatTimelineRow, WorkLogEntry } from "../../../../lib/agent-c
 import { DisclosureChevron, ShimmerText, TONE_BAND, TONE_BAND_TEXT } from "../../primitives";
 import { useTimelineRowContext, type TimelineRowContextValue } from "../context";
 import {
+  joinLifecycleDetails,
   liveWorkEntryLabel,
   omitSupersededLifecycleMarkers,
   showDestructiveRowStyle,
@@ -355,7 +356,7 @@ export const ToolEntryRow = React.memo(function ToolEntryRow({
 
 export const WorkRow = React.memo(function WorkRow({ row }: { row: Row<"work"> }): React.ReactElement {
   const entries = React.useMemo(
-    () => omitSupersededLifecycleMarkers(row.groupedEntries, (entry) => entry),
+    () => joinLifecycleDetails(omitSupersededLifecycleMarkers(row.groupedEntries, (entry) => entry)),
     [row.groupedEntries]
   );
   return (
@@ -453,16 +454,20 @@ export const ActivityGroupRow = React.memo(function ActivityGroupRow({
 }): React.ReactElement {
   const ctx = useTimelineRowContext();
 
+  // One tool call's rows are joined before anything reads them, so an approval
+  // that arrived without a diff shows the change its `item.started` described.
+  const joined = React.useMemo(() => joinLifecycleDetails(row.entries), [row.entries]);
+
   const visible = React.useMemo(
     () =>
       omitSupersededLifecycleMarkers(
-        row.entries.filter((entry) => workEntryIsVisibleInGroup(entry, row.active)),
+        joined.filter((entry) => workEntryIsVisibleInGroup(entry, row.active)),
         (entry) => entry
       ),
-    [row.entries, row.active]
+    [joined, row.active]
   );
 
-  const reasoningCount = row.entries.filter((entry) => entry.tone === "thinking").length;
+  const reasoningCount = joined.filter((entry) => entry.tone === "thinking").length;
   const tools = visible.filter((entry) => entry.tone !== "thinking");
   const liveWork = [...tools].reverse().find(workEntryIsActiveTurnActivity) ?? tools.at(-1);
   const thinking = row.active && liveWork === undefined;
@@ -495,7 +500,7 @@ export const ActivityGroupRow = React.memo(function ActivityGroupRow({
       </button>
       {row.expanded ? (
         <div className="ms-7 mt-2 flex flex-col">
-          {row.entries.map((entry) =>
+          {joined.map((entry) =>
             entry.tone === "thinking" ? (
               <ReasoningTraceBlock key={entry.id} entry={entry} />
             ) : (

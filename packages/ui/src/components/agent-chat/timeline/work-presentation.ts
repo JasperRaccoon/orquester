@@ -563,3 +563,53 @@ export function workEntryIconName(entry: WorkPresentationEntry): WorkEntryIconNa
   if (entry.taskId !== undefined) return "bot";
   return workToneIconName(entry.tone);
 }
+
+// ---------------------------------------------------------------------------
+// Joining one tool call's lifecycle rows
+// ---------------------------------------------------------------------------
+
+/**
+ * Fills a lifecycle row's empty presentation fields from its siblings.
+ *
+ * REALITY (W7's Codex capture): a `fileChange` **approval** carries no diff and
+ * no file list — only the `itemId` of the `item.started` that preceded it. A
+ * row that says "Apply patch?" and nothing else is unanswerable, so within one
+ * group a row borrows `command`, `detail` and `changedFiles` from another row
+ * of the **same tool call** (`toolCallId`) that has them.
+ *
+ * Three properties keep this from being a re-derivation of state:
+ *
+ *  - it is scoped to the rows already in one group, never to the thread;
+ *  - it is keyed on `toolCallId`, which §5.6 guarantees is stable across the
+ *    in-progress and completed updates of one call — not on a label match;
+ *  - it only ever **adds** a missing field. A row that already has a value
+ *    keeps it, and the returned entry is the same reference when nothing was
+ *    filled, so the row's `memo` is untouched in the common case.
+ */
+export function joinLifecycleDetails<T extends WorkPresentationEntry>(entries: readonly T[]): T[] {
+  const byCall = new Map<string, { command?: string; detail?: string; changedFiles?: readonly string[] }>();
+  for (const entry of entries) {
+    if (entry.toolCallId === undefined) continue;
+    const slot = byCall.get(entry.toolCallId) ?? {};
+    if (slot.command === undefined && nonEmpty(entry.command) !== null) slot.command = entry.command;
+    if (slot.detail === undefined && nonEmpty(entry.detail) !== null) slot.detail = entry.detail;
+    if (slot.changedFiles === undefined && (entry.changedFiles?.length ?? 0) > 0) {
+      slot.changedFiles = entry.changedFiles;
+    }
+    byCall.set(entry.toolCallId, slot);
+  }
+  if (byCall.size === 0) return [...entries];
+
+  return entries.map((entry) => {
+    if (entry.toolCallId === undefined) return entry;
+    const slot = byCall.get(entry.toolCallId);
+    if (slot === undefined) return entry;
+    const patch: Partial<WorkPresentationEntry> = {};
+    if (nonEmpty(entry.command) === null && slot.command !== undefined) patch.command = slot.command;
+    if (nonEmpty(entry.detail) === null && slot.detail !== undefined) patch.detail = slot.detail;
+    if ((entry.changedFiles?.length ?? 0) === 0 && slot.changedFiles !== undefined) {
+      patch.changedFiles = slot.changedFiles;
+    }
+    return Object.keys(patch).length === 0 ? entry : { ...entry, ...patch };
+  });
+}

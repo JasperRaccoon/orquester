@@ -184,30 +184,51 @@ export const ReasoningRow = React.memo(function ReasoningRow({
 }): React.ReactElement {
   const ctx = useTimelineRowContext();
   const id = row.message.id;
-  const expanded = ctx.isReasoningExpanded(id);
-  const summary = firstLine(row.message.text);
+  const text = row.message.text;
   const live = row.message.streaming;
+  const summary = firstLine(text);
+  // REALITY: the Codex CLI emits a `reasoning` item whose summary AND content
+  // are always empty (W7's capture). A reasoning row must therefore survive
+  // having no text at all — it stays a one-liner, it does not offer a
+  // disclosure, and it never opens an empty card.
+  const body = text.slice(summary.length).trim();
+  const canExpand = body.length > 0;
+  const expanded = canExpand && ctx.isReasoningExpanded(id);
+  const label = summary || (live ? "Thinking" : "Thought");
+
+  const header = (
+    <>
+      {row.message.reasoningKind === "summary" ? (
+        <span className="shrink-0 text-[10px] font-medium uppercase tracking-wider text-neutral-500">
+          summary
+        </span>
+      ) : null}
+      <ShimmerText live={live} className="min-w-0 flex-1 truncate">
+        {label}
+      </ShimmerText>
+    </>
+  );
+
   return (
     <div className="px-0.5">
-      <button
-        type="button"
-        aria-expanded={expanded}
-        onClick={() => ctx.setReasoningExpanded(id, !expanded)}
-        className="flex min-h-6 w-fit max-w-full min-w-0 cursor-pointer select-none items-center gap-1.5 rounded-md px-0.5 py-0.5 text-left text-sm leading-relaxed transition-colors hover:bg-neutral-800/40 focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500"
-      >
-        {row.message.reasoningKind === "summary" ? (
-          <span className="shrink-0 text-[10px] font-medium uppercase tracking-wider text-neutral-500">
-            summary
-          </span>
-        ) : null}
-        <ShimmerText live={live} className="min-w-0 flex-1 truncate">
-          {summary || (live ? "Thinking" : "Thought")}
-        </ShimmerText>
-        <DisclosureChevron open={expanded} />
-      </button>
+      {canExpand ? (
+        <button
+          type="button"
+          aria-expanded={expanded}
+          onClick={() => ctx.setReasoningExpanded(id, !expanded)}
+          className="flex min-h-6 w-fit max-w-full min-w-0 cursor-pointer select-none items-center gap-1.5 rounded-md px-0.5 py-0.5 text-left text-sm leading-relaxed transition-colors hover:bg-neutral-800/40 focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500"
+        >
+          {header}
+          <DisclosureChevron open={expanded} />
+        </button>
+      ) : (
+        <div className="flex min-h-6 w-fit max-w-full min-w-0 items-center gap-1.5 px-0.5 py-0.5 text-sm leading-relaxed">
+          {header}
+        </div>
+      )}
       {expanded ? (
         <div className="ms-7 mt-1 whitespace-pre-wrap select-text text-sm leading-relaxed text-neutral-400">
-          {row.message.text}
+          {text}
         </div>
       ) : null}
     </div>

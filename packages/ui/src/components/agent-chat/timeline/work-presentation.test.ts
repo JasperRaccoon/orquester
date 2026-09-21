@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
   commandProgramName,
   formatWorkspaceRelativePath,
+  joinLifecycleDetails,
   liveWorkEntryLabel,
   normalizeCompactToolLabel,
   omitSupersededLifecycleMarkers,
@@ -202,6 +203,53 @@ test("workEntryIsActiveTurnActivity", () => {
   assert.ok(workEntryIsActiveTurnActivity(entry({ toolLifecycleStatus: "inProgress" })));
   assert.ok(workEntryIsActiveTurnActivity(entry({ sourceActivityKind: "task.progress" })));
   assert.ok(!workEntryIsActiveTurnActivity(entry({ toolLifecycleStatus: "completed" })));
+});
+
+test("a fileChange approval with no diff borrows it from its own item.started", () => {
+  // REALITY (Codex): the approval carries only the item id of the start frame.
+  const started = entry({
+    toolCallId: "call-7",
+    itemType: "file_change",
+    sourceActivityKind: "tool.started",
+    detail: "diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b",
+    changedFiles: ["src/x.ts"]
+  });
+  const approval = entry({
+    toolCallId: "call-7",
+    tone: "info",
+    label: "Apply patch?",
+    sourceActivityKind: "approval.requested",
+    requestKind: "file-change"
+  });
+  const [, joinedApproval] = joinLifecycleDetails([started, approval]);
+  assert.equal(joinedApproval?.detail, started.detail);
+  assert.deepEqual(joinedApproval?.changedFiles, ["src/x.ts"]);
+});
+
+test("the join never overwrites a value the row already has", () => {
+  const a = entry({ toolCallId: "c", detail: "first", command: "ls" });
+  const b = entry({ toolCallId: "c", detail: "second" });
+  const [joinedA, joinedB] = joinLifecycleDetails([a, b]);
+  assert.equal(joinedA?.detail, "first");
+  assert.equal(joinedB?.detail, "second");
+  assert.equal(joinedB?.command, "ls");
+});
+
+test("the join is keyed on toolCallId only — never on a label match", () => {
+  const a = entry({ toolCallId: "c1", detail: "mine" });
+  const b = entry({ toolCallId: "c2", label: "Read file" });
+  const unkeyed = entry({ label: "Read file" });
+  const [, joinedB, joinedUnkeyed] = joinLifecycleDetails([a, b, unkeyed]);
+  assert.equal(joinedB?.detail, undefined);
+  assert.equal(joinedUnkeyed?.detail, undefined);
+});
+
+test("the join returns the same references when nothing is filled", () => {
+  // The row memo must not break on every render of a settled group.
+  const rows = [entry({ toolCallId: "c", detail: "x" }), entry({ label: "plain" })];
+  const joined = joinLifecycleDetails(rows);
+  assert.equal(joined[0], rows[0]);
+  assert.equal(joined[1], rows[1]);
 });
 
 test("workEntryIconName follows the fallback chain", () => {
