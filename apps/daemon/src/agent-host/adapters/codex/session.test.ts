@@ -321,6 +321,46 @@ describe("codex session — approvals", () => {
     );
     r.session.respondToApproval(opened.requestId!, "decline");
     await r.events.waitForType("turn.completed");
+    assert.equal(
+      r.events.types().includes("tool.denied"),
+      false,
+      "the USER declined this one; it is not a policy deny"
+    );
+    await r.stop();
+  });
+
+  it("an item declined with no request behind it is a CLI policy deny (§4.2)", async () => {
+    const r = rig({ turns: [{ kind: "text", text: "a" }] });
+    await r.session.start();
+    await r.session.sendTurn({ input: "x", attachments: [], interactionMode: "default" });
+    await r.events.waitForType("turn.completed");
+    // Feed an item that completes `declined` without any preceding request —
+    // exactly what a CLI-side refusal looks like on the wire.
+    r.session.injectNotificationForTest("item/completed", {
+      item: {
+        type: "commandExecution",
+        id: "policy-denied-1",
+        pluginId: null,
+        scriptPath: null,
+        command: "rm -rf /",
+        cwd: process.cwd(),
+        processId: null,
+        source: "agent",
+        status: "declined",
+        commandActions: [],
+        aggregatedOutput: null,
+        exitCode: null,
+        durationMs: null
+      },
+      threadId: "t",
+      turnId: "turn-x",
+      completedAtMs: 1
+    });
+    const denied = await r.events.waitForType("tool.denied");
+    const payload = denied.payload as { toolName: string; toolUseId?: string; reason?: string };
+    assert.equal(payload.toolName, "rm -rf /");
+    assert.equal(payload.toolUseId, "policy-denied-1");
+    assert.match(String(payload.reason), /you were not asked/);
     await r.stop();
   });
 

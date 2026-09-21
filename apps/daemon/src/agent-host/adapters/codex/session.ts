@@ -153,6 +153,12 @@ export class CodexSession {
   private readonly pendingApprovals = new Map<string, PendingApproval>();
   private readonly pendingUserInputs = new Map<string, PendingUserInput>();
   private readonly liveTasks = new Map<string, LiveTask>();
+  /**
+   * Item ids the user was actually asked about. An item that completes
+   * `declined` WITHOUT one of these was refused by the CLI's own policy, not
+   * by the user, and §4.2 wants that as `tool.denied`.
+   */
+  private readonly askedItemIds = new Set<string>();
 
   private child: ProviderChild | null = null;
   private peer: CodexPeer | null = null;
@@ -209,6 +215,17 @@ export class CodexSession {
 
   get currentTurnId(): string | null {
     return this.activeTurnId;
+  }
+
+  /**
+   * Feed one server notification as if it had arrived on the transport.
+   *
+   * Test-only seam for the frames the scripted peer cannot produce on demand —
+   * a CLI-side policy denial, for instance, has no trigger a client can send.
+   * It goes through the exact same path a real frame does.
+   */
+  injectNotificationForTest(method: ServerNotificationMethod, params: unknown): void {
+    this.handleNotification(method, params);
   }
 
   /**
@@ -653,6 +670,10 @@ export class CodexSession {
       }
       this.trackTask(draft);
       this.emit(draft);
+      const denied = this.toolDeniedFor(draft);
+      if (denied !== null) {
+        this.emit(denied);
+      }
     }
 
     if (method === "turn/started") {
@@ -879,6 +900,11 @@ export class CodexSession {
         },
         fail: reject
       });
+      if (input.itemId !== undefined) {
+        // Remember that the USER was asked about this item, so its `declined`
+        // completion is not mistaken for a CLI-side policy deny.
+        this.askedItemIds.add(input.itemId);
+      }
       this.emit({
         type: "request.opened",
         payload: {
@@ -1182,6 +1208,36 @@ export class CodexSession {
         ...(this.lastError !== undefined && status === "error" ? { reason: this.lastError } : {})
       }
     });
+  }
+
+  /**
+   * A policy/hook deny with no user approval behind it (§4.2 `tool.denied`).
+   *
+   * Codex has no dedicated signal for one: a command or patch the CLI refuses
+   * on its own completes as an ordinary item with `status: "declined"` —
+   * exactly like one the user declined. The only thing that tells them apart
+   * is whether we ever opened a request for that item id, so the timeline can
+   * render a CLI denial AS a denial even though no `request.*` event exists.
+   */
+  private toolDeniedFor(draft: RuntimeEventDraft): RuntimeEventDraft | null {
+    if (draft.type !== "item.completed" || draft.payload.status !== "declined") {
+      return null;
+    }
+    const itemId = draft.itemId;
+    if (itemId === undefined || this.askedItemIds.delete(itemId)) {
+      return null;
+    }
+    return {
+      type: "tool.denied",
+      payload: {
+        toolName: draft.payload.title ?? draft.payload.itemType,
+        toolUseId: itemId,
+        reason: "Denied by Codex's own policy; you were not asked."
+      },
+      ...(draft.turnId !== undefined ? { turnId: draft.turnId } : {}),
+      itemId,
+      ...(draft.providerRefs !== undefined ? { providerRefs: draft.providerRefs } : {})
+    };
   }
 
   /** Keep the live-task registry in step with what the normaliser emitted. */
