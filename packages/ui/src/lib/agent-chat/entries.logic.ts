@@ -219,6 +219,11 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
   if (toolUseId) {
     entry.toolCallId = toolUseId;
   }
+  // Promoted by §5.1 so the presentation layer can nest a hook run or a
+  // CLI-side denial under the call that triggered it (fix-wave R7-10).
+  if (activity.parentToolUseId) {
+    entry.parentToolUseId = activity.parentToolUseId;
+  }
   if (activity.activityKind === "mcp_tool_call" || entry.itemType === "mcp_tool_call") {
     const data = asRecord(payload?.data);
     if (data) {

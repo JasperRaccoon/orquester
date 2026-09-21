@@ -14,8 +14,10 @@
 
 export {
   CHECKPOINT_DIFF_CACHE_LIMIT,
+  CHECKPOINT_DIFF_CACHE_MAX_BYTES,
   CHECKPOINT_DIFF_MAX_OUTPUT_BYTES,
   CHECKPOINT_REF_LIMIT,
+  CheckpointRefDeleteError,
   CheckpointRefUnavailableError,
   CheckpointRollbackUnsupportedError,
   CheckpointTurnRangeError,
@@ -38,6 +40,7 @@ export {
   GIT_DEFAULT_CONCURRENCY,
   GIT_DEFAULT_MAX_OUTPUT_BYTES,
   GIT_DEFAULT_TIMEOUT_MS,
+  GitAbortedError,
   GitError,
   GitExitError,
   GitOutputLimitError,

@@ -25,135 +25,16 @@ import type {
 import { hasUnseenCompletion as threadHasUnseenCompletion } from "../thread-visits";
 
 // ---------------------------------------------------------------------------
-// The §6.4 ladder
+// The §6.4 activity ladder lives on the HOST
 // ---------------------------------------------------------------------------
-
-/** The three states `session.activity` already carries. */
-export type ChatActivityState = "working" | "waiting" | "idle";
-
-export interface ChatActivityResolution {
-  state: ChatActivityState;
-  /** What the user is waiting on, when `state` is `waiting`. */
-  waitingOn: "approval" | "question" | null;
-  /** `error` is resolved before either liveness value (§6.4). */
-  failed: boolean;
-  /** `idle` + a "finished" stamp. A settled turn with live background work is NOT finished. */
-  finished: boolean;
-  /** `"monitoring"` borrows the in-motion colour without its pulse (§6.4, §7.7). */
-  monitoring: boolean;
-}
-
-export interface ChatActivityInput {
-  hasPendingApprovals?: boolean;
-  hasPendingUserInput?: boolean;
-  backgroundLiveness?: BackgroundLiveness | null;
-  latestTurn?: LatestTurnSummary | null;
-  chatSessionStatus?: ThreadSessionStatus;
-}
-
-/**
- * **One strict priority ladder** (§6.4): pending approval → `waiting`/approval;
- * pending question → `waiting`/question; session `error` or latest turn
- * `failed` → error; session starting → working; session or turn running →
- * working; `backgroundLiveness: "working"` → working;
- * `backgroundLiveness: "monitoring"` → idle **without** a finished stamp,
- * because a settled turn whose subagents or watch loops are still running is
- * not finished; turn completed → idle + finished.
- *
- * Two fallbacks are not optional:
- * 1. a turn recorded as `interrupted` that carries a `completedAt` is
- *    idle + finished, because session teardown settles still-running turns by
- *    session status and that write races `turn.completed`;
- * 2. a live session sitting at `ready` with nothing pending and nothing running
- *    is idle + finished, because a turn that changed no files leaves no turn
- *    row to read — without this a thread that finishes and is torn down quickly
- *    shows nothing at all instead of "finished".
- *
- * *T3: `agentAwareness.ts:76-113`.*
- */
-export function resolveChatActivity(input: ChatActivityInput): ChatActivityResolution {
-  const base: ChatActivityResolution = {
-    state: "idle",
-    waitingOn: null,
-    failed: false,
-    finished: false,
-    monitoring: false
-  };
-  if (input.hasPendingApprovals) {
-    return { ...base, state: "waiting", waitingOn: "approval" };
-  }
-  if (input.hasPendingUserInput) {
-    return { ...base, state: "waiting", waitingOn: "question" };
-  }
-  const turn = input.latestTurn ?? null;
-  if (input.chatSessionStatus === "error" || turn?.state === "failed") {
-    return { ...base, state: "idle", failed: true };
-  }
-  if (input.chatSessionStatus === "starting") {
-    return { ...base, state: "working" };
-  }
-  if (
-    input.chatSessionStatus === "running" ||
-    turn?.state === "running" ||
-    turn?.state === "pending"
-  ) {
-    return { ...base, state: "working" };
-  }
-  if (input.backgroundLiveness === "working") {
-    return { ...base, state: "working" };
-  }
-  if (input.backgroundLiveness === "monitoring") {
-    return { ...base, state: "idle", monitoring: true };
-  }
-  // Fallback 1: session teardown settles a still-running turn by session
-  // status, and that write races `turn.completed`.
-  if (turn?.state === "interrupted" && turn.completedAt !== null) {
-    return { ...base, state: "idle", finished: true };
-  }
-  if (turn?.state === "completed" || turn?.state === "cancelled") {
-    return { ...base, state: "idle", finished: true };
-  }
-  // Fallback 2: a turn that changed no files leaves no turn row to read.
-  if (input.chatSessionStatus === "ready") {
-    return { ...base, state: "idle", finished: true };
-  }
-  return base;
-}
-
-/**
- * The three-colour model (§7.7): colour is spent on act-now (approval),
- * in-motion (working) and broken (failed); resting is unlabelled, and
- * `monitoring` borrows the in-motion colour without its pulse.
- *
- * *T3: `Sidebar.logic.ts:805-818, 1010-1099`.*
- */
-export type ChatStatusPill = "approval" | "input" | "working" | "monitoring" | "failed" | "ready";
-
-export function resolveChatStatusPill(input: ChatActivityInput): ChatStatusPill {
-  const activity = resolveChatActivity(input);
-  if (activity.waitingOn === "approval") {
-    return "approval";
-  }
-  if (activity.waitingOn === "question") {
-    return "input";
-  }
-  if (activity.failed) {
-    return "failed";
-  }
-  if (activity.state === "working") {
-    return "working";
-  }
-  if (activity.monitoring) {
-    return "monitoring";
-  }
-  return "ready";
-}
-
-/** Only Working pulses; Monitoring is painted like Working with `pulse: false`. */
-export function statusPillPulses(pill: ChatStatusPill): boolean {
-  return pill === "working";
-}
-
+//
+// It used to be mirrored here as `resolveChatActivity` / `resolveChatStatusPill`
+// / `statusPillPulses`. Nothing consumed them: every ambient surface buckets on
+// the daemon-pushed `SessionActivity` (`components/attention/agent-sessions.ts`),
+// which the host derives once in `apps/daemon/src/agent-chat/activity-ladder.ts`
+// — which is exactly what §7.1 asks for ("ambient surfaces read a shell, never
+// a thread"). A second copy of a ladder whose whole point is that there is one
+// of it is a drift hazard, so the fix wave deleted it (R7-12).
 // ---------------------------------------------------------------------------
 // Unread (§7.7)
 // ---------------------------------------------------------------------------

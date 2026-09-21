@@ -20,6 +20,7 @@ import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 
 import type { Clock, IdGen } from "../../adapter.ts";
 import { classifyRequestType, summarizeToolRequest, trimmedString } from "./classify.ts";
+import { claudeCanUseToolRoute, claudeRequestKey } from "./decisions.ts";
 import { ClaudeNormalizer, extractExitPlanModePlan } from "./normalize.ts";
 import { questionsFromAskUserQuestionInput } from "./questions.ts";
 
@@ -125,13 +126,16 @@ export function replayClaudeFixture(name: string): ReplayResult {
           data.input !== null && typeof data.input === "object"
             ? (data.input as Record<string, unknown>)
             : {};
-        // The SDK's own `requestId` is the key, because the SDK redelivers a
-        // request whose response was lost in a transport gap (fixtures README
-        // observation 11).
-        const requestId =
-          trimmedString(data.options?.requestId) ?? `req-${(requestSeq += 1)}`;
+        // Both the key and the branch come from the SAME functions the live
+        // session uses, so a replay exercises the adapter's own routing rather
+        // than a copy of it in the harness.
+        const requestId = claudeRequestKey(
+          typeof data.options?.requestId === "string" ? data.options.requestId : undefined,
+          () => `req-${(requestSeq += 1)}`
+        );
         const toolUseId = trimmedString(data.options?.toolUseID);
-        if (toolName === "AskUserQuestion") {
+        const route = claudeCanUseToolRoute(toolName);
+        if (route === "user-input") {
           const questions: UserInputQuestion[] = questionsFromAskUserQuestionInput(toolInput);
           events.push(
             normalizer.userInputRequested({
@@ -149,7 +153,7 @@ export function replayClaudeFixture(name: string): ReplayResult {
           };
           break;
         }
-        if (toolName === "ExitPlanMode") {
+        if (route === "proposed-plan") {
           const plan = extractExitPlanModePlan(toolInput);
           if (plan) {
             events.push(
