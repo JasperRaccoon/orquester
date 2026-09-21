@@ -117,6 +117,16 @@ export interface ThreadMessageItem {
   turnId: string | null;
   /** Owning subagent; such an item never renders in the parent timeline (§7.2). */
   agentId?: string;
+  /**
+   * Only on a `reasoning` message: whether the provider sent raw reasoning or a
+   * summary of it (`reasoning_text` vs `reasoning_summary_text`, §4.2). §7.3
+   * asks the collapsed row to be **labelled "summary"** in the second case, and
+   * the distinction is not recoverable from the text — so it is carried here.
+   * Absent means unknown, and the row then shows no badge rather than guessing.
+   *
+   * *Added by W12; additive. Producers: the adapters / ingestion (W3, W6–W9).*
+   */
+  reasoningKind?: "text" | "summary";
   streaming: boolean;
   createdAt: string;
   updatedAt: string;

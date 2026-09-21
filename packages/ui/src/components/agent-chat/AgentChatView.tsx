@@ -10,7 +10,14 @@ import {
   useAgentChatThread,
   useProviderSnapshot
 } from "../../lib/agent-chat/hooks";
-import { clearComposerInbox } from "../../lib/composer-inbox";
+import {
+  clearComposerInbox,
+  composerTextForDelivery,
+  subscribeComposerInbox,
+  takeComposerDeliveries,
+  type ComposerDelivery
+} from "../../lib/composer-inbox";
+import { focusComposer, insertComposerText } from "./composer/composer-bridge";
 import { cn } from "../../lib/cn";
 import { isDefaultThreadTitle, seedThreadTitle } from "../../lib/session-kind";
 import { useAppStore } from "../../store/app";
@@ -53,9 +60,9 @@ const noop = (): void => {};
  * │ │ │  status line                                        │││
  * │ │ │  banner dock                                        │││
  * │ │ │  composer                                           │││
+ * │ │ │  agent roster                                       │││
  * │ │ └─────────────────────────────────────────────────────┘││
  * │ └────────────────────────────────────────────────────────┘│
- * │  agent roster (in flow, below the composer)               │
  * └───────────────────────────────────────────────────────────┘
  * ```
  *
@@ -169,6 +176,25 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
     bumpScroll();
   }, [sessionId]);
 
+  // --- deliveries into the composer draft (§7.4) ---------------------------
+  // A browser element pick and a session upload both end in this thread's
+  // draft, never in a pane. They are queued by session id because the
+  // delivering surface (a sheet over the browser tab, a drop handler on the
+  // shell) cannot hold a handle to a composer it does not render; the shell
+  // drains the queue and hands each one to W13's composer bridge.
+  React.useEffect(() => {
+    const apply = (delivery: ComposerDelivery) => {
+      const text = composerTextForDelivery(delivery);
+      if (text.length > 0) {
+        insertComposerText(sessionId, text, "append");
+      }
+    };
+    for (const delivery of takeComposerDeliveries(sessionId)) {
+      apply(delivery);
+    }
+    return subscribeComposerInbox(sessionId, apply);
+  }, [sessionId]);
+
   // A closed tab keeps nothing (§7.2), and an undelivered element-pick payload
   // for a tab that no longer exists must not linger in the inbox.
   React.useEffect(() => () => clearComposerInbox(sessionId), [sessionId]);
@@ -224,6 +250,26 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
     tokensUsed: slice.contextWindow?.usedTokens ?? null,
     model: slice.head?.modelSelection.model ?? session.model ?? null
   };
+  /**
+   * "Return this queued message to the composer" is two halves: the store drops
+   * it from the queue, and its text goes back into the draft. Dropping it
+   * without the second half loses what the user typed.
+   */
+  const returnQueuedToComposer = React.useCallback(
+    (queuedId: string) => {
+      const queued = slice.queue.find((message) => message.id === queuedId);
+      actions.returnQueuedToComposer(queuedId);
+      if (queued) {
+        insertComposerText(
+          sessionId,
+          composerTextForDelivery({ text: queued.text, attachments: queued.attachments }),
+          "append"
+        );
+      }
+    },
+    [sessionId, slice.queue, actions]
+  );
+
   const openFile = React.useCallback(
     (path: string) => {
       void path;
@@ -281,7 +327,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               onLoadFullOutput={paintOnly ? noop : (itemId) => void itemId}
               onOpenAgent={paintOnly ? noop : setDrillInAgentId}
               onSendQueuedNow={paintOnly ? noop : (id) => void actions.sendQueuedNow(id)}
-              onReturnQueuedToComposer={paintOnly ? noop : actions.returnQueuedToComposer}
+              onReturnQueuedToComposer={paintOnly ? noop : returnQueuedToComposer}
               errorBanner={paintOnly ? null : slice.errorBanner}
               onDismissErrorBanner={paintOnly ? noop : actions.dismissErrorBanner}
               roster={roster.agents}
@@ -335,7 +381,14 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                   paintOnly ? noop : (requestId) => void actions.dismissQuestion({ requestId })
                 }
                 onStopBackgroundWork={paintOnly ? noop : () => void actions.interrupt()}
-                onCarryTextToDraft={paintOnly ? noop : (text) => void text}
+                // Text displaced by an answer goes back into the draft rather
+                // than being silently discarded (§7.5).
+                onCarryTextToDraft={
+                  paintOnly ? noop : (text) => insertComposerText(sessionId, text, "append")
+                }
+                isTurnWorking={!paintOnly && turnActive}
+                uploadAttachment={actions.uploadAttachment}
+                onRequestCustomAnswerFocus={() => focusComposer(sessionId)}
               />
             </div>
             <div className="pointer-events-auto mx-auto w-full min-w-0 max-w-3xl px-3 sm:px-5">
@@ -355,6 +408,9 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 reverting={false}
                 actions={actions}
                 onHeightChange={setComposerHeight}
+                // `/compact` is offered only where there is something to
+                // compact (§4.6.7): an empty thread would earn a refusal.
+                threadHasContent={slice.entries.length > 0}
               />
             </div>
             {/*

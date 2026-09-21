@@ -20,6 +20,14 @@ import { loadPreferredAccounts, savePreferredAccounts } from "../lib/preferred-a
 import { loadPreferredModels, savePreferredModels } from "../lib/preferred-model";
 import { loadChatPrefs, saveChatPrefs, type ChatPrefs } from "../lib/chat-prefs";
 import {
+  hasUnseenCompletion,
+  loadThreadVisits,
+  markThreadUnread,
+  markThreadVisited,
+  saveThreadVisits,
+  type ThreadVisits
+} from "../lib/thread-visits";
+import {
   clampTerminalFontSize,
   loadTerminalFontSize,
   saveTerminalFontSize
@@ -778,6 +786,12 @@ export interface AppState {
    * picked per agent. Persisted client-side through a validating loader.
    */
   chatPrefs: ChatPrefs;
+  /**
+   * Per-device last-visit stamps for chat tabs (§7.7). Unread is derived from
+   * these and `SessionSummary.latestTurn.completedAt`; it is deliberately NOT
+   * the same thing as needs-attention, which the daemon owns.
+   */
+  threadVisits: ThreadVisits;
   /** Global terminal font size (px); persisted client-side, per device. */
   terminalFontSize: number;
   /** Colour scheme; persisted client-side, per device. See lib/theme.ts. */
@@ -973,6 +987,8 @@ export interface AppState {
   confirmCloseTab: () => void;
   cancelCloseTab: () => void;
   activateTab: (id: string) => void;
+  /** Mark a chat tab unread again: a last-visit stamp 1 ms before its latest completion. */
+  markTabUnread: (id: string) => void;
   setViewMode: (mode: ViewMode) => void;
   setPreferredAccount: (agent: string, accountId: string) => void;
   setPreferredModel: (agent: string, model: string) => void;
@@ -1084,6 +1100,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   preferredAccountByAgent: loadPreferredAccounts(),
   preferredModelByAgent: loadPreferredModels(),
   chatPrefs: loadChatPrefs(),
+  threadVisits: loadThreadVisits(),
   terminalFontSize: loadTerminalFontSize(),
   colorScheme: initialThemePrefs.scheme,
   themeMode: initialThemePrefs.mode,
@@ -2651,7 +2668,33 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (!key) {
         return state;
       }
-      return { activeTabByProject: { ...state.activeTabByProject, [key]: id } };
+      // Looking at a chat tab IS the visit that clears its unread mark (§7.7).
+      // Only chat sessions carry one: a terminal has no "latest turn completed"
+      // to be newer than a visit.
+      const session = state.sessions.find((s) => s.id === id);
+      const threadVisits =
+        session && session.kind === "agent-chat"
+          ? markThreadVisited(state.threadVisits, id, new Date().toISOString())
+          : state.threadVisits;
+      if (threadVisits !== state.threadVisits) {
+        saveThreadVisits(threadVisits);
+      }
+      return { activeTabByProject: { ...state.activeTabByProject, [key]: id }, threadVisits };
+    }),
+
+  markTabUnread: (id) =>
+    set((state) => {
+      const session = state.sessions.find((s) => s.id === id);
+      const threadVisits = markThreadUnread(
+        state.threadVisits,
+        id,
+        session?.latestTurn?.completedAt
+      );
+      if (threadVisits === state.threadVisits) {
+        return state;
+      }
+      saveThreadVisits(threadVisits);
+      return { threadVisits };
     }),
 
   setViewMode: (mode) =>
@@ -3387,4 +3430,21 @@ export function useGridTracks(): GridTracks | null {
  */
 export function useSessionActivity(id: string): SessionActivity | undefined {
   return useAppStore((s) => s.activityById[id]);
+}
+
+/**
+ * Whether a chat tab has a completion this client has not looked at (§7.7).
+ *
+ * A boolean selector on purpose: it compares two stamps in the store and hands
+ * back `true`/`false`, so a tab re-renders only when its unread state actually
+ * flips, not on every visit map write.
+ */
+export function useThreadUnread(id: string): boolean {
+  return useAppStore((s) => {
+    const session = s.sessions.find((entry) => entry.id === id);
+    if (!session || session.kind !== "agent-chat") {
+      return false;
+    }
+    return hasUnseenCompletion(session.latestTurn?.completedAt, s.threadVisits[id]);
+  });
 }
