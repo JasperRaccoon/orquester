@@ -556,6 +556,20 @@ two different encodings of the same reset. The frame has **no percentage**: it c
 "limited" flag. This is also the only rate-limit signal that arrives on the stream during a turn —
 `15-rate-limits-and-usage.ndjson` shows a second one landing mid-turn after a later request.
 
+> **Correction, found while implementing the adapter (W6).** "No percentage" holds for the
+> unprompted `status: "allowed"` frames only. The **warning-level** frame in the same capture
+> does carry one:
+>
+> ```json
+> {"status":"allowed_warning","resetsAt":1789969200,"rateLimitType":"five_hour","utilization":0.98,"isUsingOverage":false,"surpassedThreshold":0.9}
+> ```
+>
+> `utilization` is a **0–1 fraction** there, while the usage API's `limits[].percent` is 0–100.
+> So `account.rate-limits.updated` *can* be filled from a streamed event — but only when one is
+> present. The adapter maps the frame when it carries `utilization` and otherwise marks the cached
+> snapshot stale for the next probe (`rateLimitEventToUpdate` in
+> `apps/daemon/src/agent-host/adapters/claude/usage.ts`).
+
 ### 17. Miscellaneous, smaller
 
 - **`assistant` messages carry `request_id`** (`type, message, parent_tool_use_id, session_id,
