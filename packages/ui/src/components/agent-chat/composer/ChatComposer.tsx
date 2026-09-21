@@ -506,7 +506,10 @@ export function ChatComposer({
     (files: readonly File[]) => {
       if (files.length === 0) return;
       const existing = draftRef.current.attachments;
-      let staged = existing.filter((entry) => entry.status === "ready").length;
+      // Staged and in-flight count together against the same budget, and the
+      // running `preparing` tally is what makes a multi-file drop refuse the
+      // ninth file rather than accept all of them against a stale count.
+      const staged = existing.filter((entry) => entry.status === "ready").length;
       let preparing = existing.filter((entry) => entry.status !== "ready").length;
       const accepted: Array<{ entry: StagedAttachment; file: File }> = [];
       let rejection: string | null = null;
@@ -536,7 +539,6 @@ export function ChatComposer({
           }
         });
       }
-      void staged;
 
       setNotice(rejection);
       if (accepted.length === 0) return;
