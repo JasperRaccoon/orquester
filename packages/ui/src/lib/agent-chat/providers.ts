@@ -15,7 +15,11 @@
 
 import { createStore, type StoreApi } from "zustand/vanilla";
 
-import type { AgentAdapterId, ProviderSnapshot } from "@orquester/api/agent-chat";
+import type {
+  AgentAdapterId,
+  ProviderSnapshot,
+  ProviderUsageLimitsUpdate
+} from "@orquester/api/agent-chat";
 
 import type { AgentChatTransport } from "./transport";
 
@@ -44,6 +48,54 @@ let inFlight: Promise<void> | null = null;
 let boundTransport: AgentChatTransport | null = null;
 
 /**
+ * Where a snapshot's ambient facts go (§7.7).
+ *
+ * `auth.status` and `account.rate-limits.updated` are **not thread facts**
+ * (§5.1): they update the provider snapshot and surface outside the chat — the
+ * Settings usage overview merges rate-limit windows by id, and an auth error
+ * becomes a toast pointing at Settings → Accounts. The app store owns both
+ * surfaces, and this module is imported by it, so the sinks are registered
+ * rather than imported: a direct import would be a cycle between the store and
+ * the cache the store feeds.
+ */
+export interface ProviderSideEffects {
+  onRateLimits?(agentRefId: string, update: ProviderUsageLimitsUpdate): void;
+  onAuthError?(error: { agentName: string; message: string; adapterId: AgentAdapterId }): void;
+}
+
+let sideEffects: ProviderSideEffects = {};
+
+export function setProviderSideEffects(next: ProviderSideEffects): void {
+  sideEffects = next;
+}
+
+/** Fan a fresh snapshot out to the ambient surfaces of §7.7. Never throws. */
+function publishAmbientFacts(providers: readonly ProviderSnapshot[]): void {
+  for (const provider of providers) {
+    try {
+      if (provider.usageLimits && provider.usageLimits.windows.length > 0) {
+        // Merged by window id, so a sparse turn-driven update and a full probe
+        // land on the same row (§4.1).
+        for (const refId of provider.refIds) {
+          sideEffects.onRateLimits?.(refId, { windows: provider.usageLimits.windows });
+        }
+      }
+      if (provider.auth.status === "unauthenticated") {
+        sideEffects.onAuthError?.({
+          adapterId: provider.id,
+          agentName: provider.refIds[0] ?? provider.id,
+          message:
+            provider.message ??
+            `${provider.refIds[0] ?? provider.id} is not signed in. Open Settings → Accounts.`
+        });
+      }
+    } catch {
+      // An ambient surface must never be able to blank the provider catalog.
+    }
+  }
+}
+
+/**
  * Read the catalog, coalescing concurrent callers. Safe to call from every
  * mounted composer: the second caller joins the first request.
  */
@@ -70,6 +122,7 @@ export function loadProviders(
         error: null,
         loadedAt: new Date().toISOString()
       });
+      publishAmbientFacts(response.providers);
     })
     .catch((error: unknown) => {
       providersStore.setState({
@@ -114,6 +167,7 @@ export async function refreshProvider(
     ),
     loadedAt: new Date().toISOString()
   }));
+  publishAmbientFacts([response.provider]);
 }
 
 /** Resolve the adapter serving a registry id (claude ← claude/claudex/claudemix). */
@@ -129,4 +183,5 @@ export function resetProvidersStore(): void {
   providersStore.setState(INITIAL, true);
   inFlight = null;
   boundTransport = null;
+  sideEffects = {};
 }

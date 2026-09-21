@@ -5,6 +5,8 @@ import { createTransporter } from "../lib/transporters";
 import { wakeSessionChannels } from "../lib/transporters/ws-session-channel";
 import { wakeBrowserChannels } from "../lib/transporters/ws-browser-channel";
 import { toRemoteConfig, toUiConnection } from "../lib/connections";
+import { notifyProvidersChanged, setProviderSideEffects } from "../lib/agent-chat/providers";
+import type { AgentAdapterId } from "@orquester/api/agent-chat";
 import {
   buildCredential,
   clearStoredHash,
@@ -3014,6 +3016,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       set((state) => ({ registry: applyRegistryEntry(state.registry, entry) }));
       return;
     }
+    if (event.type === "agent.providers.changed") {
+      // Coarse by design (§6.4): the payload names at most the adapter, and the
+      // client re-reads `GET /api/agent/providers`. The snapshot cache is
+      // process-wide, so one re-read serves every open chat tab.
+      notifyProvidersChanged(event.payload as { adapterId?: AgentAdapterId } | undefined);
+      return;
+    }
     if (event.channel === "cliproxy") {
       // "cliproxy.changed" carries the full status; other cliproxy events (e.g.
       // "cliproxy.crashed") also imply the status shifted — refetch to be safe.
@@ -3102,6 +3111,25 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   }
 }));
+
+/**
+ * The provider snapshot's two ambient facts reach this store here (§7.7).
+ *
+ * `auth.status` and `account.rate-limits.updated` are not thread facts (§5.1):
+ * they ride the snapshot and surface in the usage overview and in a toast. The
+ * snapshot cache registers sinks rather than importing this store, because the
+ * store imports the cache. The auth toast is keyed by a synthetic
+ * `provider:<adapterId>` id — a provider error belongs to every session of that
+ * provider, not to one of them.
+ */
+setProviderSideEffects({
+  onRateLimits: (agentRefId, update) =>
+    useAppStore.getState().applyProviderRateLimits(agentRefId, update),
+  onAuthError: ({ adapterId, agentName, message }) =>
+    useAppStore
+      .getState()
+      .reportAgentAuthError({ sessionId: `provider:${adapterId}`, agentName, message })
+});
 
 /** First remaining tab id for a context (session, then browser, then file, then git, then to-do). */
 function firstTabId(

@@ -40,7 +40,8 @@ import type {
   AgentChatThreadSlice,
   AgentChatTimelineRow,
   DisclosureState,
-  QueuedComposerMessage
+  QueuedComposerMessage,
+  RememberedTimelinePosition
 } from "./contracts";
 import {
   EMPTY_DRAFT,
@@ -86,7 +87,12 @@ import {
   composerHandle,
   insertComposerText
 } from "../../components/agent-chat/composer/composer-bridge";
-import { disclosureSets, timelinePositionStore } from "./timeline-position";
+import { nudgeProjectGit } from "../../components/git/git-watch";
+import {
+  disclosureSets,
+  EMPTY_DISCLOSURE_STATE,
+  timelinePositionStore
+} from "./timeline-position";
 import {
   AgentChatCommandError,
   type AgentChatStreamHandle,
@@ -118,6 +124,16 @@ function defaultId(): string {
 
 const defaultDelay = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
+
+/** A thread that has never been scrolled is pinned to the end and follows. */
+const DEFAULT_SCROLL_POSITION: RememberedTimelinePosition = {
+  rowId: null,
+  offsetWithinRow: 0,
+  scrollOffset: 0,
+  atEnd: true,
+  disclosures: EMPTY_DISCLOSURE_STATE,
+  interactionMode: DEFAULT_INTERACTION_MODE
+};
 
 // ---------------------------------------------------------------------------
 // State
@@ -337,16 +353,22 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
           await deps.transport.command(sessionId, name, payload);
           return;
         } catch (error) {
-          if (
-            error instanceof AgentChatCommandError &&
-            error.retryable &&
-            attempt < maxRetries &&
-            !closed
-          ) {
+          // §6.6: an in-flight command whose response was lost is retried with
+          // the SAME `commandId`, which the receipt makes free. That covers a
+          // 503 `HOST_UNAVAILABLE` and any transport-level throw — including
+          // one from a custom `Transporter.agentChat()` that does not wrap its
+          // failures. Only a decoded, non-retryable error envelope stops here.
+          const retryable =
+            error instanceof AgentChatCommandError ? error.retryable : true;
+          if (retryable && attempt < maxRetries && !closed) {
             await delay(Math.min(4_000, 250 * 2 ** attempt));
             continue;
           }
-          setSlice({ errorBanner: errorMessage(error) });
+          const message = errorMessage(error);
+          // A banner the user already closed for this thread stays closed.
+          if (!dismissedErrorBanners.has(`${sessionId}\u0000${message}`)) {
+            setSlice({ errorBanner: message });
+          }
           throw error;
         }
       }
@@ -627,9 +649,39 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
           const reducer = patchSlice(state.reducer, { disclosures });
           return reducer === state.reducer ? state : { ...state, reducer, slice: reducer.slice };
         });
+        // The LRU remembers the shape of the page as well as the position, so
+        // a disclosure change is written straight through (§7.2).
+        const slice = get().slice;
+        positions.remember(sessionId, {
+          ...(slice.scroll ?? DEFAULT_SCROLL_POSITION),
+          disclosures: slice.disclosures,
+          interactionMode: slice.interactionMode
+        });
+      },
+
+      rememberScroll(position) {
+        update((state) => {
+          const next: RememberedTimelinePosition = {
+            ...(state.slice.scroll ?? DEFAULT_SCROLL_POSITION),
+            ...position,
+            // Never let a caller's stale copy overwrite live client state.
+            disclosures: state.slice.disclosures,
+            interactionMode: state.slice.interactionMode
+          };
+          positions.remember(sessionId, next);
+          const reducer = patchSlice(state.reducer, { scroll: next, follow: next.atEnd });
+          return reducer === state.reducer ? state : { ...state, reducer, slice: reducer.slice };
+        });
       },
 
       dismissErrorBanner() {
+        // §7.3: a dismissal is remembered per `(threadId, message)` for the
+        // session, so navigating away and back cannot resurrect a banner the
+        // user closed — while a DIFFERENT error still can.
+        const message = get().slice.errorBanner;
+        if (message !== null) {
+          dismissedErrorBanners.add(`${sessionId}\u0000${message}`);
+        }
         setSlice({ errorBanner: null });
       },
 
@@ -646,6 +698,15 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
     };
 
     const applyStreamFrame: (frame: Parameters<typeof applyFrame>[1]) => void = (frame) => {
+      // §7.7: when an open chat tab's stream delivers `thread.turn-diff-completed`
+      // the client refreshes the git tab for that project. No new bus event is
+      // introduced for it (§6.4) — the thread stream already knows.
+      if (frame.kind === "event" && frame.event.type === "thread.turn-diff-completed") {
+        const projectPath = get().slice.head?.projectPath;
+        if (projectPath) {
+          nudgeProjectGit(projectPath);
+        }
+      }
       update((state) => {
         // §6.3/§8: a different host instance id means re-read, not resume.
         if (needsResync(state.reducer.hostInstanceId, frame)) {
@@ -733,6 +794,19 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
   };
 
   return store;
+}
+
+/**
+ * Thread-level error banners the user closed, keyed `threadId\0message`
+ * (§7.3). Session-scoped and module-level on purpose: it must survive the
+ * slice being dropped and re-created by a tab switch, which is exactly the
+ * navigation that would otherwise resurrect the banner.
+ */
+const dismissedErrorBanners = new Set<string>();
+
+/** Test seam. */
+export function resetDismissedErrorBanners(): void {
+  dismissedErrorBanners.clear();
 }
 
 function errorMessage(error: unknown): string {

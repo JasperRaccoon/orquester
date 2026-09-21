@@ -128,6 +128,71 @@ describe("activity-group boundaries", () => {
     assert.ok(kinds(rows).includes("work-live") || kinds(rows).includes("work-toggle"));
   });
 
+  it("demotes an assistant message marked `commentary` into the group", () => {
+    const rows = deriveTimelineRows(
+      baseInput(
+        entriesFrom([
+          message("user", "go", { createdAt: stamp(1) }),
+          message("assistant", "I'll read the file next", {
+            turnId: "t1",
+            createdAt: stamp(2),
+            messageKind: "commentary"
+          }),
+          activity("tool.completed", { itemType: "command_execution", command: "ls" }, {
+            turnId: "t1",
+            createdAt: stamp(3)
+          }),
+          message("assistant", "Here is the answer", {
+            turnId: "t1",
+            createdAt: stamp(4),
+            messageKind: "answer"
+          })
+        ]),
+        { isWorking: true, runningTurnId: "t1", activeTurnStartedAt: stamp(1) }
+      )
+    );
+    const messageRows = rows.filter((row) => row.kind === "message");
+    const texts = messageRows.map((row) => (row.kind === "message" ? row.message.text : ""));
+    assert.ok(!texts.includes("I'll read the file next"), "commentary never gets its own row");
+    assert.ok(texts.includes("Here is the answer"));
+    assert.ok(texts.includes("go"));
+
+    const group = rows.find((row) => row.kind === "activity-group");
+    assert.ok(group && group.kind === "activity-group");
+    assert.ok(
+      group.entries.some((entry) => entry.detail === "I'll read the file next"),
+      "it folds into the surrounding activity group"
+    );
+  });
+
+  it("never treats commentary as the turn's terminal assistant message", () => {
+    const rows = deriveTimelineRows(
+      baseInput(
+        entriesFrom([
+          message("user", "go", { createdAt: stamp(1) }),
+          message("assistant", "answer", { turnId: "t1", createdAt: stamp(2) }),
+          message("assistant", "narrating", {
+            turnId: "t1",
+            createdAt: stamp(3),
+            messageKind: "commentary"
+          })
+        ]),
+        {
+          latestTurn: { turnId: "t1", state: "completed", startedAt: stamp(1), completedAt: stamp(4) }
+        }
+      )
+    );
+    // The metadata closes the ANSWER, never the narration — either inline on
+    // the message row, or as the `assistant-meta` row that trails the group
+    // when the turn ends with activity after its text.
+    const owners = rows.flatMap((row) =>
+      (row.kind === "message" && row.showAssistantMeta) || row.kind === "assistant-meta"
+        ? [row.message.text]
+        : []
+    );
+    assert.deepEqual(owners, ["answer"]);
+  });
+
   it("breaks a group on a turn-id change", () => {
     const rows = deriveTimelineRows(
       baseInput(

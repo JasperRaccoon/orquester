@@ -26,7 +26,9 @@ import type {
 } from "@orquester/api/agent-chat";
 
 import type { AdapterContext } from "../../adapter.ts";
+import { resumeCursorFor } from "../../orchestration/resume.ts";
 import { createGrokAdapter, GROK_CAPABILITIES } from "./index.ts";
+import { parseGrokResumeCursor } from "./session.ts";
 
 const MOCK = join(dirname(fileURLToPath(import.meta.url)), "testing/mock-grok.mjs");
 
@@ -527,6 +529,133 @@ test("listSessions and the adapter id", async () => {
   assert.equal(r.adapter.id, "grok" satisfies AgentAdapterId);
   await r.dispose();
 });
+
+test("attachments reach the agent as PATHS, because promptCapabilities.image is false", async () => {
+  const r = await rig();
+  await start(r);
+  await r.adapter.sendTurn({
+    threadId: "t1",
+    input: "look at this",
+    attachments: [{ type: "image", id: "a1", name: "shot.png", mimeType: "image/png", sizeBytes: 10 }],
+    interactionMode: "default"
+  });
+  const completed = (await r.waitFor(
+    (event) => event.type === "turn.completed",
+    "turn.completed"
+  )) as Extract<RuntimeEvent, { type: "turn.completed" }>;
+  assert.equal(completed.payload.state, "completed");
+  // The mock echoes the prompt text back, so the path line is observable.
+  const echoed = r.events
+    .filter((event): event is Extract<RuntimeEvent, { type: "content.delta" }> => event.type === "content.delta")
+    .filter((event) => event.payload.streamKind === "assistant_text")
+    .map((event) => event.payload.delta)
+    .join("");
+  assert.match(echoed, /Attached files:/);
+  assert.match(echoed, /shot\.png/);
+  await r.dispose();
+});
+
+test("readThread returns the turns the adapter actually observed", async () => {
+  const r = await rig();
+  await start(r);
+  const first = await r.adapter.sendTurn({
+    threadId: "t1",
+    input: "one",
+    attachments: [],
+    interactionMode: "default"
+  });
+  await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
+
+  const snapshot = await r.adapter.readThread("t1");
+  assert.equal(snapshot.threadId, "t1");
+  assert.equal(snapshot.turns.length, 1);
+  assert.equal(snapshot.turns[0].id, first.turnId);
+  const item = snapshot.turns[0].items[0] as Record<string, unknown>;
+  assert.equal(item["stopReason"], "end_turn");
+  // The provider's OWN prompt id, resolved from `_x.ai/queue/changed`.
+  assert.equal(item["providerPromptId"], "prompt-1");
+  await r.dispose();
+});
+
+test("stopAll stops sessions without ending the event stream", async () => {
+  const r = await rig();
+  await start(r);
+  await r.adapter.stopAll();
+  assert.equal(r.adapter.listSessions().length, 0);
+  // A host that stopped every session and then started a new one must still
+  // have a live consumer.
+  await start(r, { threadId: "t2" });
+  const started = await r.waitFor(
+    (event) => event.type === "thread.started" && event.threadId === "t2",
+    "thread.started for t2"
+  );
+  assert.equal(started.threadId, "t2");
+  await r.dispose();
+});
+
+
+test("the host's create-time cursor is accepted verbatim", () => {
+  // §6.1: a thread created from the resume picker has only a conversation id,
+  // so the HOST builds the minimal cursor. Pinning it against the host's own
+  // builder means a change on either side breaks the build rather than
+  // silently degrading resume to a fresh session.
+  const minimal = resumeCursorFor("grok", "t1", "01a0c19e-de22-78c0-a72a-7e230ccfbec0");
+  assert.deepEqual(minimal, { schemaVersion: 1, sessionId: "01a0c19e-de22-78c0-a72a-7e230ccfbec0" });
+  assert.deepEqual(parseGrokResumeCursor(minimal), {
+    schemaVersion: 1,
+    sessionId: "01a0c19e-de22-78c0-a72a-7e230ccfbec0"
+  });
+});
+
+test("a session starts from the host's minimal cursor, not just our own", async () => {
+  const r = await rig();
+  await start(r, {
+    resumeCursor: resumeCursorFor("grok", "t1", "01a0c19e-de22-78c0-a72a-7e230ccfbec0")
+  });
+  const started = (await r.waitFor(
+    (event) => event.type === "session.started",
+    "session.started"
+  )) as Extract<RuntimeEvent, { type: "session.started" }>;
+  assert.deepEqual(started.payload.resume, {
+    schemaVersion: 1,
+    sessionId: "01a0c19e-de22-78c0-a72a-7e230ccfbec0"
+  });
+  // It really loaded rather than creating: the mock only answers
+  // `session/load` for that id, and the replayed rows stay out of the stream.
+  assert.equal(
+    r.events.some((event) => event.type === "content.delta" && event.payload.delta === "earlier"),
+    false
+  );
+  await r.dispose();
+});
+
+test("the adapter runs no watchdog of its own — the host owns it", async () => {
+  const r = await rig({ scenario: "slow" });
+  await start(r, { runtimeMode: "approval-required" });
+  void r.adapter.sendTurn({ threadId: "t1", input: "long", attachments: [], interactionMode: "default" });
+  await r.waitFor((event) => event.type === "turn.started", "turn.started");
+  await r.drain();
+  // A second watchdog on the same windows would race the host's and settle the
+  // turn twice; the adapter settles only on `interruptTurn`, an exit, or a
+  // provider result.
+  assert.equal(
+    r.events.some((event) => event.type === "turn.completed"),
+    false
+  );
+  await r.adapter.interruptTurn("t1");
+  const completed = (await r.waitFor(
+    (event) => event.type === "turn.completed",
+    "turn.completed"
+  )) as Extract<RuntimeEvent, { type: "turn.completed" }>;
+  assert.equal(completed.payload.state, "interrupted");
+  assert.equal(
+    r.events.filter((event) => event.type === "turn.completed").length,
+    1,
+    "exactly one terminal row"
+  );
+  await r.dispose();
+});
+
 
 test("teardown: no provider child outlives the suite", async () => {
   const leaked = openRigs.filter((entry) => !entry.disposed);

@@ -50,6 +50,18 @@ describe("workLogEntryFromActivity", () => {
     assert.equal(entry.tone, "info");
   });
 
+  it("carries `truncated`, which gates the row's Load full output", () => {
+    assert.equal(
+      workLogEntryFromActivity(activity("tool.completed", { detail: "a", truncated: true }))
+        .truncated,
+      true
+    );
+    assert.equal(
+      workLogEntryFromActivity(activity("tool.completed", { detail: "a" })).truncated,
+      undefined
+    );
+  });
+
   it("carries the compaction token counts for client-side formatting", () => {
     const entry = workLogEntryFromActivity(
       activity("thread.state.changed", { state: "compacted", beforeTokens: 120, afterTokens: 30 })
