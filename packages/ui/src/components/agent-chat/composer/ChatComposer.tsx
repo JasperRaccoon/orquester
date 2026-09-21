@@ -22,6 +22,7 @@ import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { ComposerTokenMenu } from "./ComposerTokenMenu";
 import { registerComposerHandle } from "./composer-bridge";
 import {
+  blockedProviderCommandMessage,
   buildSkillMenuItems,
   buildSlashMenuItems,
   compactCommandAvailable,
@@ -35,6 +36,7 @@ import {
   resolveSelectedModel
 } from "./composer-model";
 import { isComposerCollapsedMobile, resolveComposerTimelineInset } from "./composer-inset";
+import { isChatTabListenerActive } from "./tab-visibility";
 import {
   findComposerShortcutTarget,
   resolveChatShortcut,
@@ -113,6 +115,12 @@ export interface ChatComposerExtraProps {
   threadHasContent?: boolean;
   /** Overrides the root the `@` search walks; defaults to the session's cwd. */
   searchRoot?: string;
+  /**
+   * `false` while this tab is open but not the visible one. **Every global
+   * keyboard listener gates on it** — `MainView` keeps hidden tabs mounted, so
+   * without it one chord acts on every open thread at once (Q2-1).
+   */
+  active?: boolean;
 }
 
 /**
@@ -154,7 +162,8 @@ export function ChatComposer({
   actions,
   onHeightChange,
   threadHasContent = true,
-  searchRoot
+  searchRoot,
+  active
 }: ChatComposerProps & ChatComposerExtraProps): React.ReactElement {
   const isMobile = !useMediaQuery("(min-width: 640px)");
   const sessionCwd = useAppStore(
@@ -299,14 +308,32 @@ export function ChatComposer({
     setCursor(at);
   }, []);
 
+  /**
+   * Insert text into the draft.
+   *
+   * **Batch-safe**, exactly as `stageAttachment` below is and for the same
+   * reason: `draftRef.current` is refreshed in the render body, so several
+   * calls in one synchronous tick would otherwise all read the same pre-batch
+   * text and the last write would win. `drainQueueToComposer` calls this once
+   * per queued message in a loop, so a non-batch-safe version silently drops
+   * every returned message but the last — the exact data loss §7.4 forbids.
+   *
+   * The optimistic `draftRef.current` write is what makes the *next* call in
+   * the same tick see this one's text.
+   */
   const insertText = React.useCallback(
     (text: string, mode: "cursor" | "append" = "cursor") => {
       if (!text) return;
-      const current = draftRef.current.text;
-      const at = mode === "append" ? current.length : Math.min(cursor, current.length);
-      const gap = at > 0 && !/\s$/.test(current.slice(0, at)) && !/^\s/.test(text) ? " " : "";
-      const applied = replaceTextRange(current, at, at, `${gap}${text}`);
-      setDraft((state) => ({ ...state, text: applied.text }));
+      const current = draftRef.current;
+      const at =
+        mode === "append" ? current.text.length : Math.min(cursor, current.text.length);
+      const gap =
+        at > 0 && !/\s$/.test(current.text.slice(0, at)) && !/^\s/.test(text) ? " " : "";
+      const applied = replaceTextRange(current.text, at, at, `${gap}${text}`);
+      draftRef.current = { ...current, text: applied.text };
+      setDraft((state) =>
+        state.text === applied.text ? state : { ...state, text: applied.text }
+      );
       applyCaret(applied.cursor);
     },
     [applyCaret, cursor]
@@ -713,7 +740,12 @@ export function ChatComposer({
 
       // §4.6.5(a): `/plan` and `/default` are re-recognised on submit, but only
       // when the whole trimmed draft is that command and nothing is attached.
-      const standalone = parseStandaloneComposerSlashCommand(text);
+      // §4.6.5(a): swallowed client-side ONLY where the toggle exists. On
+      // OpenCode/Grok the provider may dispatch `/plan` natively, so with the
+      // toggle hidden the draft is ordinary text and goes to the wire.
+      const standalone = showPlanModeToggle
+        ? parseStandaloneComposerSlashCommand(text)
+        : null;
       if (standalone && draft.attachments.length === 0) {
         setPlanMode(standalone);
         setDraft((state) => ({ ...state, text: "" }));
@@ -721,18 +753,31 @@ export function ChatComposer({
         return;
       }
 
-      if (!sendable) return;
-      if (sendDisabledReason) {
-        setNotice(sendDisabledReason);
-        return;
-      }
-
+      // R7-3: the plan is resolved BEFORE the emptiness guard, because an
+      // empty draft is exactly the input "Implement" is defined on — the plan
+      // supplies the text. Guarding first made the enabled Implement button a
+      // silent no-op.
       const plan = actionableProposedPlan
         ? resolvePlanFollowUpSubmission({
             draftText: text,
             planMarkdown: actionableProposedPlan.planMarkdown
           })
         : null;
+
+      if (!sendable && plan === null) return;
+      if (sendDisabledReason) {
+        setNotice(sendDisabledReason);
+        return;
+      }
+
+      // §4.6.5(c): Grok's `/always-approve` would desynchronise the host's
+      // runtime mode. Refuse on the SEND path, not just in the menu — the user
+      // can type it by hand. (Absorbed from W11's slash-commands.logic.ts.)
+      const blocked = blockedProviderCommandMessage(provider?.id, text);
+      if (blocked) {
+        setNotice(blocked);
+        return;
+      }
       const outgoing = plan?.text ?? text.trim();
       const outgoingMode = plan?.interactionMode ?? interactionMode;
 
@@ -803,26 +848,26 @@ export function ChatComposer({
    * queued is indistinguishable from losing it.
    */
   const interrupt = React.useCallback(() => {
-    if (queue.length > 0) {
-      const queued = queue.map((message) => message.text).filter((text) => text.trim().length > 0);
-      if (queued.length > 0) {
-        setDraft((state) => ({
-          ...state,
-          text: [state.text.trimEnd(), ...queued].filter((part) => part.length > 0).join("\n\n")
-        }));
-      }
-      actions.drainQueueToComposer();
-    }
+    // The store's own `interrupt()` drains the queue back into the composer
+    // (§7.4), one `appendToDraft` per message, each routed through the bridge
+    // into `insertText` above. This used to ALSO join the queue locally and
+    // then call `drainQueueToComposer()` itself — two writers for one draft,
+    // where the store's per-message writes landed a microtask later and
+    // clobbered the local join. One path only.
     void actions.interrupt().catch((error: unknown) => {
       setNotice(error instanceof Error ? error.message : "Could not stop the turn.");
     });
-  }, [actions, queue]);
+  }, [actions]);
 
   // ---------------------------------------------------------------------
   // Keyboard
   // ---------------------------------------------------------------------
   React.useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      // Q2-1: every open chat tab keeps this listener alive (MainView hides
+      // inactive tabs with a class, it does not unmount them), so without this
+      // gate one chord fires on every thread at once.
+      if (!isChatTabListenerActive(active, shellRef.current)) return;
       const shortcut = resolveChatShortcut(event);
       if (!shortcut) return;
       if (shortcut.kind === "steer-queued") {
@@ -848,10 +893,15 @@ export function ChatComposer({
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [actions, openControl, queue]);
+  }, [actions, active, openControl, queue]);
 
   const onTextareaKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (isPasteAsTextShortcut(event, isApplePlatform())) bypassPasteRef.current = true;
+    // An IME candidate window is open: Enter COMMITS the candidate and Escape
+    // CANCELS the composition. Acting on either here sends a half-converted
+    // prompt or kills the composition. `keyCode === 229` is the pre-
+    // `isComposing` fallback some engines still report for the same state.
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
     if (showMenu) {
       const count = Math.max(1, menuItems.length);
       if (event.key === "ArrowDown") {

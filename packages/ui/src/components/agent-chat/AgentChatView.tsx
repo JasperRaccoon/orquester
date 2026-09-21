@@ -280,6 +280,24 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
     tokensUsed: slice.contextWindow?.usedTokens ?? null,
     model: slice.head?.modelSelection.model ?? session.model ?? null
   };
+  /**
+   * §7.5's one `inert` reason. The composer goes inert while a revert is in
+   * flight — the host is rewriting the thread under it, so a turn sent now
+   * would race the rewrite. Held here rather than in the store because it is
+   * the lifetime of one command, not thread state.
+   */
+  const [reverting, setReverting] = React.useState(false);
+  React.useEffect(() => setReverting(false), [sessionId]);
+  const runRevert = React.useCallback(
+    (targetTurnCount: number) => {
+      setReverting(true);
+      void actions
+        .revert({ targetTurnCount })
+        .finally(() => setReverting(false));
+    },
+    [actions]
+  );
+
   // --- the read-only viewer for a turn diff / a full tool output -----------
   // Both are §6.3 reads with no store slice behind them: the timeline asks,
   // the shell fetches, and the answer is shown in the existing modal + diff
@@ -399,11 +417,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               canRevert={
                 !paintOnly && provider?.capabilities.supportsConversationRollback !== false
               }
-              onRevert={
-                paintOnly
-                  ? noop
-                  : (targetTurnCount) => void actions.revert({ targetTurnCount })
-              }
+              onRevert={paintOnly ? noop : runRevert}
               onOpenTurnDiff={paintOnly ? noop : openTurnDiff}
               onOpenFile={paintOnly ? noop : openFile}
               onLoadFullOutput={paintOnly ? noop : loadFullOutput}
@@ -473,7 +487,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 }
                 isTurnWorking={!paintOnly && turnActive}
                 uploadAttachment={actions.uploadAttachment}
-                onRequestCustomAnswerFocus={() => focusComposer(sessionId)}
+                active={active}
               />
             </div>
             <div className="pointer-events-auto mx-auto w-full min-w-0 max-w-3xl px-3 sm:px-5">
@@ -490,7 +504,8 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 queue={slice.queue}
                 activePlan={paintOnly ? null : activePlan}
                 actionableProposedPlan={null}
-                reverting={false}
+                reverting={reverting}
+                active={active}
                 actions={actions}
                 onHeightChange={setComposerHeight}
                 // `/compact` is offered only where there is something to
