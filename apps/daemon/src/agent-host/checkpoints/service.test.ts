@@ -8,9 +8,9 @@
  */
 
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
 import type { Checkpoint } from "@orquester/api/agent-chat";
@@ -18,7 +18,11 @@ import type { Checkpoint } from "@orquester/api/agent-chat";
 import type { CheckpointService } from "../services.ts";
 import { checkpointRefForThreadTurn, checkpointRefNamespace } from "./refs.ts";
 import {
+  CHECKPOINT_DIFF_CACHE_LIMIT,
+  CHECKPOINT_DIFF_CACHE_MAX_BYTES,
+  CHECKPOINT_DIFF_MAX_OUTPUT_BYTES,
   CHECKPOINT_REF_LIMIT,
+  CheckpointRefDeleteError,
   CheckpointRefUnavailableError,
   CheckpointRollbackUnsupportedError,
   CheckpointTurnRangeError,
@@ -179,8 +183,15 @@ test("a baseline is idempotent: the second call captures nothing", async (t) => 
   await repo.write("tracked.txt", "changed after the baseline\n");
   const second = await service.captureBaseline({ threadId: THREAD, cwd: repo.dir });
 
-  assert.equal(second, null, "an existing baseline is never recaptured");
-  assert.equal((await repo.gitReadOnly("rev-parse", first.ref)).trim(), firstCommit);
+  // Answers the existing baseline rather than `null`: `null` is reserved for
+  // "this project has no checkpoints", and from turn 2 on the baseline is
+  // always already there.
+  assert.deepEqual(second, { turnCount: 0, ref: first.ref, status: "ready" });
+  assert.equal(
+    (await repo.gitReadOnly("rev-parse", first.ref)).trim(),
+    firstCommit,
+    "an existing baseline is never recaptured"
+  );
 });
 
 test("a placeholder checkpoint is reused at its own turn count", async (t) => {
@@ -338,17 +349,18 @@ test("readTurnDiff caches by (thread, from, to, whitespace)", async (t) => {
   });
   assert.match(first, /tracked\.txt/);
 
-  // Remove the ref: a cache miss would now fail the range check instead.
-  await repo.git("update-ref", "-d", checkpointRefForThreadTurn(THREAD, 0));
+  // Remove the TO ref: a cache miss would now fail the range check instead.
+  await repo.git("update-ref", "-d", checkpointRefForThreadTurn(THREAD, 1));
   const cached = await service.readTurnDiff({
     threadId: THREAD,
     cwd: repo.dir,
     fromTurnCount: 0,
     toTurnCount: 1
   });
-  assert.equal(cached, first);
+  assert.equal(cached, first, "served from the cache, not from the deleted ref");
 
-  // A different whitespace flag is a different key, so it misses and fails.
+  // A different whitespace flag is a different key, so it misses — and the
+  // miss really goes to git, which no longer has the ref.
   await assert.rejects(
     service.readTurnDiff({
       threadId: THREAD,
@@ -357,7 +369,7 @@ test("readTurnDiff caches by (thread, from, to, whitespace)", async (t) => {
       toTurnCount: 1,
       ignoreWhitespace: false
     }),
-    CheckpointRefUnavailableError
+    CheckpointTurnRangeError
   );
 });
 
@@ -465,7 +477,11 @@ test("a non-git directory is a silent no-op on every path", async (t) => {
     gitEnv: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: dir }
   });
 
-  assert.equal(await service.captureBaseline({ threadId: THREAD, cwd: dir }), null);
+  assert.equal(
+    await service.captureBaseline({ threadId: THREAD, cwd: dir }),
+    null,
+    "null is reserved for a project with no checkpoints at all"
+  );
   assert.equal(
     await service.captureTurnEnd({
       threadId: THREAD,
@@ -605,4 +621,298 @@ test("assertRollbackSupported refuses grok and allows every other adapter", () =
   for (const adapter of ["claude", "codex", "opencode"] as const) {
     service.assertRollbackSupported(adapter);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Fix-wave regressions (R5 #10, #11, #14, #20; Q1 #42, #43; S1 #9)
+// ---------------------------------------------------------------------------
+
+test("R5 #10: a turn whose baseline is missing diffs against HEAD, not 404", async (t) => {
+  const repo = await seededRepo();
+  t.after(() => repo.cleanup());
+  const service = serviceFor(repo);
+
+  // No baseline at all — git was "initialised during the turn".
+  await repo.write("tracked.txt", "one\nsecond line\n");
+  const summary = await service.captureTurnEnd({
+    threadId: THREAD,
+    cwd: repo.dir,
+    turnId: "turn-1",
+    assistantMessageId: null
+  });
+  assert.ok(summary);
+  assert.equal(summary.turnCount, 1);
+
+  const diff = await service.readTurnDiff({
+    threadId: THREAD,
+    cwd: repo.dir,
+    fromTurnCount: 0,
+    toTurnCount: 1
+  });
+  assert.match(diff, /tracked\.txt/, "the HEAD fallback produced a real patch");
+  assert.match(diff, /^\+second line$/m);
+
+  // A turn ABOVE the highest checkpoint is still a 404 — that is the one case
+  // the spec reserves it for.
+  await assert.rejects(
+    service.readTurnDiff({ threadId: THREAD, cwd: repo.dir, fromTurnCount: 1, toTurnCount: 2 }),
+    CheckpointTurnRangeError
+  );
+});
+
+test("R5 #10: a baseline pruned by the cap still answers a diff", async (t) => {
+  const repo = await seededRepo();
+  t.after(() => repo.cleanup());
+  const service = serviceFor(repo);
+
+  await service.captureBaseline({ threadId: THREAD, cwd: repo.dir });
+  await repo.write("tracked.txt", "one\ntwo\n");
+  await service.captureTurnEnd({
+    threadId: THREAD,
+    cwd: repo.dir,
+    turnId: "turn-1",
+    assistantMessageId: null
+  });
+  // The cap pruned turn/0 (simulated by deleting it) — the row is still there.
+  await repo.git("update-ref", "-d", checkpointRefForThreadTurn(THREAD, 0));
+
+  const diff = await service.readTurnDiff({
+    threadId: THREAD,
+    cwd: repo.dir,
+    fromTurnCount: 0,
+    toTurnCount: 1
+  });
+  assert.equal(typeof diff, "string");
+  assert.match(diff, /tracked\.txt/);
+});
+
+test("R5 #10: with no HEAD at all the fallback is the empty tree", async (t) => {
+  const repo = await createTempRepo();
+  t.after(() => repo.cleanup());
+  await repo.write("only.txt", "hello\n");
+  const service = serviceFor(repo);
+
+  const summary = await service.captureTurnEnd({
+    threadId: THREAD,
+    cwd: repo.dir,
+    turnId: "turn-1",
+    assistantMessageId: null
+  });
+  assert.ok(summary);
+
+  const diff = await service.readTurnDiff({
+    threadId: THREAD,
+    cwd: repo.dir,
+    fromTurnCount: 0,
+    toTurnCount: 1
+  });
+  assert.match(diff, /^\+\+\+ b\/only\.txt$/m);
+  assert.match(diff, /^\+hello$/m);
+});
+
+test("R5 #11: a stale turn end for a turn that never started is refused", async (t) => {
+  const repo = await seededRepo();
+  t.after(() => repo.cleanup());
+  const service = serviceFor(repo);
+
+  // The host recorded turn-2 as the started turn…
+  await service.captureBaseline({ threadId: THREAD, cwd: repo.dir, turnId: "turn-2" });
+  // …so a late abort for turn-1 must not mint turn/1.
+  const stale = await service.captureTurnEnd({
+    threadId: THREAD,
+    cwd: repo.dir,
+    turnId: "turn-1",
+    assistantMessageId: null
+  });
+  assert.equal(stale, null);
+  assert.deepEqual(await refNames(repo, checkpointRefNamespace(THREAD)), [
+    checkpointRefForThreadTurn(THREAD, 0)
+  ]);
+
+  const live = await service.captureTurnEnd({
+    threadId: THREAD,
+    cwd: repo.dir,
+    turnId: "turn-2",
+    assistantMessageId: null
+  });
+  assert.ok(live);
+  assert.equal(live.turnCount, 1);
+});
+
+test("R5 #11: a replayed turn end is refused even with no fold rows to check", async (t) => {
+  const repo = await seededRepo();
+  t.after(() => repo.cleanup());
+  const service = serviceFor(repo);
+
+  await service.captureBaseline({ threadId: THREAD, cwd: repo.dir, turnId: "turn-1" });
+  const first = await service.captureTurnEnd({
+    threadId: THREAD,
+    cwd: repo.dir,
+    turnId: "turn-1",
+    assistantMessageId: null
+  });
+  assert.ok(first);
+
+  const replay = await service.captureTurnEnd({
+    threadId: THREAD,
+    cwd: repo.dir,
+    turnId: "turn-1",
+    assistantMessageId: null
+  });
+  assert.equal(replay, null, "the second delivery of the same completion captures nothing");
+  assert.deepEqual(await refNames(repo, checkpointRefNamespace(THREAD)), [
+    checkpointRefForThreadTurn(THREAD, 0),
+    checkpointRefForThreadTurn(THREAD, 1)
+  ]);
+});
+
+test("R5 #20: a non-cone sparse checkout that cannot be rebuilt fails the capture", async (t) => {
+  const repo = await createTempRepo();
+  t.after(() => repo.cleanup());
+  await repo.write("kept/a.txt", "a\n");
+  await repo.write("skipped/b.txt", "b\n");
+  await repo.git("add", ".");
+  await repo.git("commit", "-qm", "initial");
+  // Non-cone sparse checkout…
+  await repo.git("sparse-checkout", "init", "--no-cone");
+  await repo.git("sparse-checkout", "set", "/kept/*");
+  // …plus a manual index flag, so the live index cannot be reused and the
+  // rebuild path — the one that would publish false deletions — is reached.
+  await repo.git("update-index", "--assume-unchanged", "kept/a.txt");
+
+  const service = serviceFor(repo);
+  const result = await service.captureBaseline({ threadId: THREAD, cwd: repo.dir });
+
+  assert.ok(result, "a git project reports a result rather than skipping");
+  assert.equal(result.status, "error", "false deletions are refused, not published");
+  assert.match(result.detail ?? "", /non-cone sparse checkout/);
+  assert.deepEqual(await refNames(repo, checkpointRefNamespace(THREAD)), [], "no ref was written");
+});
+
+test("R5 #20: a stale temp-index lock does not poison the next capture", async (t) => {
+  const repo = await seededRepo();
+  t.after(() => repo.cleanup());
+  const gitDir = join(repo.dir, ".git");
+  // A capture killed mid-flight leaves <tempIndex>.lock behind. With a fixed
+  // uuid the next capture reuses that exact path, which is the poisoned case.
+  const service = createCheckpointService({ gitEnv: repo.gitEnv, uuid: () => "fixed" });
+  await writeFile(join(gitDir, "orq-checkpoint-index-fixed"), "stale", "utf8");
+  await writeFile(join(gitDir, "orq-checkpoint-index-fixed.lock"), "stale", "utf8");
+
+  const result = await service.captureBaseline({ threadId: THREAD, cwd: repo.dir });
+
+  assert.ok(result);
+  assert.equal(result.status, "ready", result.detail ?? "");
+  const entries = await repo.gitCommonDirEntries();
+  assert.deepEqual(
+    entries.filter((entry) => entry.startsWith("orq-checkpoint-index")),
+    [],
+    "the temp index and its lock are removed in the finally"
+  );
+});
+
+test("Q1 #42: a ref that survives deletion fails the prune instead of reporting success", async (t) => {
+  const repo = await seededRepo();
+  const gitDir = join(repo.dir, ".git");
+  t.after(async () => {
+    await chmod(gitDir, 0o700);
+    await repo.cleanup();
+  });
+  const service = serviceFor(repo);
+
+  await service.captureBaseline({ threadId: THREAD, cwd: repo.dir });
+  await repo.write("tracked.txt", "second\n");
+  await service.captureTurnEnd({
+    threadId: THREAD,
+    cwd: repo.dir,
+    turnId: "turn-1",
+    assistantMessageId: null
+  });
+
+  const surviving = checkpointRefForThreadTurn(THREAD, 1);
+  // Deletion needs a lock file in the git dir; a read-only git dir is what a
+  // hard lock contention looks like from here. Reads still work, so the
+  // service can see that the ref survived — which is the whole point.
+  await chmod(gitDir, 0o500);
+
+  await assert.rejects(
+    service.pruneAbove({ threadId: THREAD, cwd: repo.dir, targetTurnCount: 0 }),
+    (error: unknown) => {
+      assert.ok(error instanceof CheckpointRefDeleteError, `unexpected error: ${String(error)}`);
+      assert.deepEqual([...error.refs], [surviving]);
+      return true;
+    }
+  );
+
+  await chmod(gitDir, 0o700);
+  assert.deepEqual(
+    await refNames(repo, checkpointRefNamespace(THREAD)),
+    [checkpointRefForThreadTurn(THREAD, 0), surviving],
+    "the refs really are still there — the rejection told the truth"
+  );
+});
+
+test("R5 #14/Q1 #43: the diff cache is bounded by bytes, not only by entries", async (t) => {
+  const repo = await createTempRepo();
+  t.after(() => repo.cleanup());
+  const line = `${"x".repeat(120)}\n`;
+  await repo.write("big.txt", line.repeat(40));
+  await repo.git("add", ".");
+  await repo.git("commit", "-qm", "initial");
+  const service = serviceFor(repo);
+
+  await service.captureBaseline({ threadId: THREAD, cwd: repo.dir });
+  await repo.write("big.txt", line.repeat(80));
+  const summary = await service.captureTurnEnd({
+    threadId: THREAD,
+    cwd: repo.dir,
+    turnId: "turn-1",
+    assistantMessageId: null
+  });
+  assert.ok(summary);
+
+  const first = await service.readTurnDiff({
+    threadId: THREAD,
+    cwd: repo.dir,
+    fromTurnCount: 0,
+    toTurnCount: 1
+  });
+  assert.ok(first.length > 0);
+  // Served from the cache: the ref is gone and the answer is unchanged.
+  await repo.git("update-ref", "-d", checkpointRefForThreadTurn(THREAD, 1));
+  const cached = await service.readTurnDiff({
+    threadId: THREAD,
+    cwd: repo.dir,
+    fromTurnCount: 0,
+    toTurnCount: 1
+  });
+  assert.equal(cached, first);
+  // The budget that makes that safe on a 2 GB box is the byte one: an
+  // entry-count cap alone would admit 32 × 10 MB.
+  assert.ok(
+    CHECKPOINT_DIFF_CACHE_MAX_BYTES <
+      CHECKPOINT_DIFF_CACHE_LIMIT * CHECKPOINT_DIFF_MAX_OUTPUT_BYTES
+  );
+});
+
+test("S1 #9: a failure detail collapses the host's home path to ~", async (t) => {
+  const repo = await seededRepo();
+  const gitDir = join(repo.dir, ".git");
+  t.after(async () => {
+    await chmod(gitDir, 0o700);
+    await repo.cleanup();
+  });
+  // HOME is the repo's parent here, so any path git names sits under it.
+  const home = dirname(repo.dir);
+  const service = createCheckpointService({ gitEnv: { ...repo.gitEnv, HOME: home } });
+  await chmod(gitDir, 0o500);
+
+  const result = await service.captureBaseline({ threadId: THREAD, cwd: repo.dir });
+
+  assert.ok(result);
+  assert.equal(result.status, "error");
+  assert.ok(
+    !(result.detail ?? "").includes(home),
+    `raw host path leaked into a timeline row: ${result.detail ?? ""}`
+  );
 });
