@@ -172,3 +172,34 @@ test("the MCP roster notification carries no environment values", () => {
     }
   }
 });
+
+test("every method the adapter registers exists in a catalog", async () => {
+  // R4 #19: the catalog is checked against the fixtures both ways, but nothing
+  // tied the ADAPTER's registrations to it — a typo'd name would register a
+  // handler that can never fire.
+  const { GROK_REGISTERED_METHODS } = await import("../../session.ts");
+  const known = new Set<string>([
+    ...Object.keys(ACP_METHOD_CATALOG),
+    ...XAI_EXTENSION_CATALOG.flatMap((entry) => xaiMethodSpellings(entry.method))
+  ]);
+  const unknown = GROK_REGISTERED_METHODS.filter((method) => !known.has(method));
+  assert.deepEqual(unknown, [], "a registered handler names a method no catalog knows");
+});
+
+test("every extension the captures observed has a handler", async () => {
+  const { GROK_REGISTERED_METHODS } = await import("../../session.ts");
+  const registered = new Set(GROK_REGISTERED_METHODS);
+  // Product payloads are registered precisely so they do NOT warn; the ones
+  // below are the entries that carry state the adapter must act on.
+  const mustHandle = ["x.ai/session_notification", "x.ai/session/update", "x.ai/session/prompt_complete"];
+  for (const entry of XAI_EXTENSION_CATALOG) {
+    if (!entry.observed || !mustHandle.includes(entry.method)) {
+      continue;
+    }
+    const spellings = xaiMethodSpellings(entry.method);
+    assert.ok(
+      spellings.some((spelling) => registered.has(spelling)),
+      `${entry.method} is observed but has no handler`
+    );
+  }
+});

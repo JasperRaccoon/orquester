@@ -17,10 +17,20 @@ const BOM = "﻿";
  * and a `\r` that ends a chunk is held back so a split CRLF is never reported
  * as a blank line), and a leading BOM (stripped once, at the very start).
  */
+/**
+ * A single line longer than this is abandoned rather than buffered. A child
+ * that writes megabytes with no newline would otherwise grow the buffer
+ * without limit (R4 #17); the reader resyncs at the next newline.
+ */
+export const NDJSON_MAX_LINE_BYTES = 8 * 1024 * 1024;
+
 export class NdjsonLineReader {
   private buffer = "";
   private atStart = true;
   private decoder = new TextDecoder("utf-8");
+  private skipping = false;
+  /** Lines abandoned for exceeding {@link NDJSON_MAX_LINE_BYTES}. */
+  overlongCount = 0;
 
   /** Feed a chunk; returns the complete lines it produced, in order. */
   push(chunk: Uint8Array | string): string[] {
@@ -50,10 +60,23 @@ export class NdjsonLineReader {
       if (end > start && this.buffer.charCodeAt(end - 1) === 13) {
         end -= 1;
       }
-      lines.push(this.buffer.slice(start, end));
+      if (this.skipping) {
+        // The tail of an abandoned line: drop it and resync here.
+        this.skipping = false;
+      } else {
+        lines.push(this.buffer.slice(start, end));
+      }
       start = nl + 1;
     }
     this.buffer = this.buffer.slice(start);
+
+    if (this.buffer.length > NDJSON_MAX_LINE_BYTES) {
+      this.buffer = "";
+      if (!this.skipping) {
+        this.skipping = true;
+        this.overlongCount += 1;
+      }
+    }
 
     // A trailing lone "\r" may be the first half of a CRLF split across
     // chunks. Keeping it in the buffer costs nothing and avoids emitting a
@@ -67,9 +90,11 @@ export class NdjsonLineReader {
    */
   flush(): string[] {
     const tail = this.buffer.replace(/\r$/, "");
+    const skipping = this.skipping;
     this.buffer = "";
     this.atStart = false;
-    return tail.length > 0 ? [tail] : [];
+    this.skipping = false;
+    return tail.length > 0 && !skipping ? [tail] : [];
   }
 }
 

@@ -27,10 +27,14 @@
  *    `_x.ai/foo` are distinct strings to a dispatcher; 1.0.34 only ever used
  *    the underscore form, so registering one is silent loss.
  *    {@link AcpPeer.registerExtension} registers both.
- * 3. **An unknown method is answered, never swallowed** (§10): a request gets
+ * 3. **Tolerant reader, strict writer.** Outbound framing is exactly
+ *    `{jsonrpc, id?, method|result|error, params?}`; inbound, a missing or
+ *    wrong `jsonrpc` is warned about rather than rejected, because a vendor
+ *    extension that omits it must not take the session down.
+ * 4. **An unknown method is answered, never swallowed** (§10): a request gets
  *    `-32601`, a notification gets nothing, and both raise a warning the
  *    adapter turns into `runtime.warning`.
- * 4. **Transport death fails every in-flight request exactly once**, and every
+ * 5. **Transport death fails every in-flight request exactly once**, and every
  *    later send fails fast — `14-sigterm-mid-prompt.ndjson` shows the
  *    in-flight `session/prompt` getting no response and no error at all.
  */
@@ -252,12 +256,26 @@ export class AcpPeer {
 
     this.options.onFrame?.("recv", frame);
 
+    // Tolerant reader, strict writer: a frame without `jsonrpc: "2.0"` is
+    // still dispatched, because a vendor extension that omits it must not take
+    // the session down — but it is surfaced, never silently accepted (R4 #14).
+    if (frame.jsonrpc !== "2.0") {
+      this.warn("acp: frame is not JSON-RPC 2.0", { jsonrpc: frame.jsonrpc });
+    }
+
     if (typeof frame.method === "string") {
       if (frame.id === undefined || frame.id === null) {
         this.dispatchNotification(frame.method, frame.params);
-      } else {
-        void this.dispatchRequest(frame.method, frame.id as string | number, frame.params);
+        return;
       }
+      // The one place an untrusted field would otherwise escape the shape
+      // guards: an `id` that is an object, array or boolean would be echoed
+      // back verbatim and typed wrongly inside the handlers (Q1 #32).
+      if (typeof frame.id !== "string" && typeof frame.id !== "number") {
+        this.warn("acp: request id is neither a string nor a number", { id: frame.id });
+        return;
+      }
+      void this.dispatchRequest(frame.method, frame.id, frame.params);
       return;
     }
 
