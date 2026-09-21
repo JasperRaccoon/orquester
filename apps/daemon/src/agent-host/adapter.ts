@@ -164,8 +164,16 @@ export interface AgentAdapter {
    * and never open a real session; the background refresh that keeps
    * `installed`/`version`/`auth` current must never open a provider session
    * (§6.3). `cwd` scopes the per-directory overlay of §4.6.4.
+   *
+   * `home` names the account the snapshot should describe. Without it the
+   * probe runs under the HOST's identity, so `auth`, the subscription label
+   * and the usage windows report the daemon user's own login rather than the
+   * identity a thread runs under — which is the wrong answer on any host using
+   * managed accounts. It is optional so an adapter that has no per-account
+   * notion can ignore it; §4.5's cache key (`binaryPath\0configDir\0cwd`)
+   * already assumes the config dir varies with it.
    */
-  refreshSnapshot(input?: { cwd?: string }): Promise<ProviderSnapshot>;
+  refreshSnapshot(input?: { cwd?: string; home?: AccountHome }): Promise<ProviderSnapshot>;
 
   /** The adapter's canonical event stream. One consumer: the host's ingestion. */
   readonly events: AsyncIterable<RuntimeEvent>;

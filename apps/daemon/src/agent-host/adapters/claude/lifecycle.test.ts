@@ -222,6 +222,7 @@ interface HarnessOptions {
   initResolves?: boolean;
   historyStdout?: (method: string) => string;
   deadlineMs?: number;
+  compactDeadlineMs?: number;
 }
 
 async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
@@ -289,7 +290,11 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     clearTimer: () => {},
     hostConfigDir: "/host/.claude",
     nodePath: process.execPath,
-    deadlines: { handshakeMs: options.deadlineMs ?? 50, cancelMs: options.deadlineMs ?? 50 }
+    deadlines: {
+      handshakeMs: options.deadlineMs ?? 50,
+      cancelMs: options.deadlineMs ?? 50,
+      compactMs: options.compactDeadlineMs ?? 5_000
+    }
   };
 
   const adapter = await createClaudeAdapterWith(context, deps);

@@ -18,6 +18,7 @@ import * as nodeOs from "node:os";
 import * as nodePath from "node:path";
 
 import type {
+  AccountHome,
   ApprovalDecision,
   ProviderSession,
   ProviderSnapshot,
@@ -84,36 +85,62 @@ export async function createClaudeAdapterWith(
   let snapshot: ProviderSnapshot | undefined;
   let snapshotKey: string | undefined;
   let snapshotAtMs = 0;
-  let inFlight: Promise<ProviderSnapshot> | undefined;
+  /**
+   * Keyed by the probe key, not a single slot: a Settings-wide probe and a
+   * per-project probe issued together must not hand one caller the other's
+   * snapshot, which silently dropped the §4.6.4 per-cwd overlay for that call.
+   */
+  const inFlight = new Map<string, Promise<ProviderSnapshot>>();
   let scopedLimitNames: ClaudeScopedLimitNames = {};
   let workspaceSnapshots: WorkspaceSnapshot[] = [];
   let usageStale = false;
 
-  context.signal.addEventListener(
-    "abort",
-    () => {
-      void stopAll().finally(() => events.close());
-    },
-    { once: true }
-  );
+  const onHostAbort = (): void => {
+    stopAll()
+      .catch((error: unknown) => {
+        context.logger.error("claude: failed to stop sessions on host shutdown", error);
+      })
+      .finally(() => events.close());
+  };
+  if (context.signal.aborted) {
+    // An `abort` listener added to an ALREADY aborted signal never fires, so a
+    // host shutting down during adapter acquisition would leave every session
+    // running and the ingestion iterator hanging on a queue nobody closes.
+    onHostAbort();
+  } else {
+    context.signal.addEventListener("abort", onHostAbort, { once: true });
+  }
 
   const emit = (batch: readonly RuntimeEvent[]): void => {
     events.pushAll(batch);
   };
 
-  const probeEnv = (): Record<string, string> =>
-    // A probe runs under the host's own identity: it must not bind an account
-    // home, because it never authenticates and never opens a session (§4.1).
-    context.buildEnv({ threadId: "agent-chat-probe", home: { kind: "system", path: "" } });
+  /**
+   * The probe's environment. With no `home` it runs under the **host's** own
+   * identity — it never authenticates and never opens a session (§4.1) — but
+   * when the caller names the thread's account home, `auth`, the subscription
+   * label and the usage windows describe the identity the thread actually runs
+   * under rather than the daemon user's login. The 5-minute cache is keyed on
+   * the resulting config dir exactly as §4.5 prescribes.
+   */
+  const probeEnv = (home?: AccountHome): Record<string, string> =>
+    context.buildEnv({
+      threadId: "agent-chat-probe",
+      home: home ?? { kind: "system", path: "" }
+    });
 
   const configDirOf = (env: Record<string, string>): string =>
     env.CLAUDE_CONFIG_DIR ?? nodePath.join(nodeOs.homedir(), ".claude");
 
-  async function refreshSnapshot(input?: { cwd?: string }): Promise<ProviderSnapshot> {
+  async function refreshSnapshot(input?: {
+    cwd?: string;
+    home?: AccountHome;
+  }): Promise<ProviderSnapshot> {
     const cwd = input?.cwd;
     const binaryPath = await context.resolveBin(DEFAULT_REF_ID);
-    const env = probeEnv();
-    const key = `${binaryPath ?? ""}\u0000${configDirOf(env)}\u0000${cwd ?? ""}`;
+    const env = probeEnv(input?.home);
+    const configDir = configDirOf(env);
+    const key = `${binaryPath ?? ""}\u0000${configDir}\u0000${cwd ?? ""}`;
     const fresh =
       snapshot !== undefined &&
       snapshotKey === key &&
@@ -122,12 +149,13 @@ export async function createClaudeAdapterWith(
     if (fresh && snapshot !== undefined) {
       return withWorkspaces(snapshot);
     }
-    // Refreshes are serialised: two clients opening Settings must not run two
-    // probes (§3.2).
-    if (inFlight !== undefined) {
-      return inFlight;
+    // Refreshes are serialised per key: two clients opening Settings must not
+    // run two probes (§3.2).
+    const pending = inFlight.get(key);
+    if (pending !== undefined) {
+      return pending;
     }
-    inFlight = (async () => {
+    const run = (async () => {
       try {
         let version: string | null = null;
         let probe: ClaudeProbeResult | undefined;
@@ -153,7 +181,7 @@ export async function createClaudeAdapterWith(
           version,
           probe,
           ...(cwd !== undefined ? { cwd } : {}),
-          configDir: configDirOf(env)
+          configDir
         });
         scopedLimitNames = built.scopedLimitNames;
         for (const session of sessions.values()) {
@@ -164,8 +192,9 @@ export async function createClaudeAdapterWith(
             workspaceSnapshots,
             await buildClaudeWorkspaceSnapshot({
               cwd,
-              configDir: configDirOf(env),
-              checkedAt: built.snapshot.checkedAt
+              configDir,
+              checkedAt: built.snapshot.checkedAt,
+              slashCommands: built.snapshot.slashCommands
             })
           );
         }
@@ -175,10 +204,11 @@ export async function createClaudeAdapterWith(
         usageStale = false;
         return withWorkspaces(built.snapshot);
       } finally {
-        inFlight = undefined;
+        inFlight.delete(key);
       }
     })();
-    return inFlight;
+    inFlight.set(key, run);
+    return run;
   }
 
   function withWorkspaces(base: ProviderSnapshot): ProviderSnapshot {
@@ -227,12 +257,12 @@ export async function createClaudeAdapterWith(
     // (ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_MODEL, …) the host
     // attaches; the adapter passes it through untouched (§4.5).
     const env = context.buildEnv({ threadId: input.threadId, home: input.home });
-    const cursor = readClaudeResumeCursor(input.resumeCursor);
+    const cursor = readClaudeResumeCursor(input.resumeCursor, input.threadId);
 
     if (snapshot === undefined) {
       // A first session should not wait on a full probe, but it must not run
       // with an empty model catalogue either; the probe is cheap and cached.
-      await refreshSnapshot({ cwd: input.cwd }).catch(() => undefined);
+      await refreshSnapshot({ cwd: input.cwd, home: input.home }).catch(() => undefined);
     }
 
     const session = new ClaudeSession({
@@ -273,8 +303,9 @@ export async function createClaudeAdapterWith(
       const record = await session.start();
       starts.set(input.threadId, { input, cursor: session.currentCursor() ?? cursor });
       // The per-cwd skills overlay is refreshed off the session start, forked
-      // so it never delays the turn (§4.6.4).
-      void refreshWorkspace(input.cwd);
+      // so it never delays the turn (§4.6.4), under the thread's own home so
+      // the user-scope skills are that account's.
+      refreshWorkspace(input.cwd, input.home);
       return record;
     } catch (error) {
       sessions.delete(input.threadId);
@@ -282,16 +313,20 @@ export async function createClaudeAdapterWith(
     }
   }
 
-  function refreshWorkspace(cwd: string): void {
+  function refreshWorkspace(cwd: string, home?: AccountHome): void {
     void (async () => {
       try {
-        const env = probeEnv();
+        const env = probeEnv(home);
         workspaceSnapshots = mergeWorkspaceSnapshot(
           workspaceSnapshots,
           await buildClaudeWorkspaceSnapshot({
             cwd,
             configDir: configDirOf(env),
-            checkedAt: context.clock.nowIso()
+            checkedAt: context.clock.nowIso(),
+            // The machine list rides along, or the client's
+            // `overlay.slashCommands ?? provider.slashCommands` resolves to an
+            // EMPTY array and the tab has no provider commands at all.
+            slashCommands: snapshot?.slashCommands ?? []
           })
         );
       } catch {

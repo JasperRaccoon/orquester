@@ -214,6 +214,13 @@ export class ClaudeNormalizer {
 
   /** The model this adapter last asked for; a diff against `init` is a reroute. */
   expectedModel: string | undefined;
+  /**
+   * The uuids the last compaction preserved, from
+   * `compact_metadata.preserved_messages.all_uuids`. `undefined` means no
+   * compaction has been observed on this session, which is NOT the same as
+   * "nothing survived" — a rollback treats it as "no constraint".
+   */
+  preservedMessageUuids: string[] | undefined;
   /** Scoped usage-window names the last probe saw (§4.1 stable window ids). */
   scopedLimitNames: ClaudeScopedLimitNames = {};
 
@@ -502,15 +509,11 @@ export class ClaudeNormalizer {
         }),
         type: "turn.proposed.completed",
         payload: {
-          planMarkdown:
-            input.planFilePath !== undefined
-              ? // `planFilePath` is the handle for "open the plan the CLI
-                // actually saved" and is the only way to correlate the card
-                // with the file the next turn may edit (fixtures README
-                // observation 10). §4.2's payload has no slot for it, so it
-                // rides as a trailing reference line rather than being lost.
-                `${input.planMarkdown}\n\n<!-- planFilePath: ${input.planFilePath} -->`
-              : input.planMarkdown
+          // The markdown is user-facing content — the plan card offers copy
+          // and download — so it is never edited. `planFilePath` rides in its
+          // own field (fixtures README observation 10).
+          planMarkdown: input.planMarkdown,
+          ...(input.planFilePath !== undefined ? { planFilePath: input.planFilePath } : {})
         }
       }
     ];
@@ -1520,6 +1523,13 @@ export class ClaudeNormalizer {
           turn.latestAssistantUsage = undefined;
           turn.compactedSinceLatestAssistantUsage = true;
         }
+        // `preserved_messages.all_uuids` names exactly the messages that
+        // survived the compaction, which is what lets a rollback say "that
+        // anchor is gone" precisely instead of failing a deep-equal scan later
+        // (§4.5 "or a compaction in between", fixtures README obs. 17).
+        this.preservedMessageUuids = readPreservedUuids(
+          (message as { compact_metadata?: unknown }).compact_metadata
+        );
         const snapshot = compactBoundarySnapshot({
           compactMetadata: (message as { compact_metadata?: unknown }).compact_metadata,
           ...(this.lastKnownContextWindow !== undefined
@@ -2293,6 +2303,28 @@ function readToolUseResult(message: SDKMessage): Record<string, unknown> | undef
   return result !== null && typeof result === "object" && !Array.isArray(result)
     ? (result as Record<string, unknown>)
     : undefined;
+}
+
+/**
+ * `compact_metadata.preserved_messages.all_uuids`, falling back to `uuids` on a
+ * CLI that does not ship the wider list. `undefined` when the frame names
+ * nothing, so a caller can tell "no constraint" from "nothing survived".
+ */
+export function readPreservedUuids(compactMetadata: unknown): string[] | undefined {
+  if (compactMetadata === null || typeof compactMetadata !== "object") {
+    return undefined;
+  }
+  const preserved = (compactMetadata as { preserved_messages?: unknown }).preserved_messages;
+  if (preserved === null || typeof preserved !== "object") {
+    return undefined;
+  }
+  const record = preserved as { all_uuids?: unknown; uuids?: unknown };
+  const all = readStringArray(record.all_uuids);
+  if (all.length > 0) {
+    return all;
+  }
+  const some = readStringArray(record.uuids);
+  return some.length > 0 ? some : undefined;
 }
 
 function readStringArray(value: unknown): string[] {

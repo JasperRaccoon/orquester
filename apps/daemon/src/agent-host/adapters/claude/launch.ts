@@ -46,7 +46,11 @@ export const RUNTIME_MODE_TO_PERMISSION_MODE: Readonly<
   "full-access": "bypassPermissions"
 };
 
-/** Options this adapter must never set (§4.5 "Never set"). */
+/**
+ * §4.5's "Never set" list, **verbatim**. It is the spec's list, not a
+ * description of the code: editing it to match the code is what would let a
+ * regression through the test that reads it.
+ */
 export const CLAUDE_NEVER_SET_OPTIONS = [
   "hooks",
   "allowedTools",
@@ -54,11 +58,27 @@ export const CLAUDE_NEVER_SET_OPTIONS = [
   "maxTurns",
   "fallbackModel",
   "agents",
+  "stderr",
   "abortController",
   "executable",
   "strictMcpConfig",
   "maxThinkingTokens"
 ] as const;
+
+/**
+ * The one entry of that list this adapter **does** set on a session, and why.
+ *
+ * §3.1 requires a provider child's stderr to be "captured, not discarded",
+ * classified and redacted before it reaches the user or `events.ndjson`; the
+ * SDK's `stderr` callback is the only access to the CLI's stderr there is. It
+ * is a passive observer — it changes nothing about how the CLI runs — so the
+ * §3.1 requirement wins over the §4.5 list, and the deviation is recorded in
+ * INTEGRATION-NOTES for the eventual spec amendment.
+ *
+ * `abortController` and `strictMcpConfig` are likewise set on the **probe**
+ * options, which §4.5 explicitly prescribes; the list above governs a session.
+ */
+export const CLAUDE_SESSION_ALLOWED_DESPITE_SPEC = ["stderr"] as const;
 
 /**
  * A user's launch args, tokenised into SDK `extraArgs`. `permission-mode` and
@@ -158,6 +178,11 @@ export function buildClaudeQueryOptions(
   const effort = resolveEffortLevel(input.modelSelection, model);
   const thinking = resolveBooleanOption(input.modelSelection, model, CLAUDE_OPTION_IDS.thinking);
   const fastMode = resolveBooleanOption(input.modelSelection, model, CLAUDE_OPTION_IDS.fastMode);
+  const ultracode = resolveBooleanOption(
+    input.modelSelection,
+    model,
+    CLAUDE_OPTION_IDS.ultracode
+  );
 
   // A permission launch arg is folded into the mode rather than passed
   // through: the CLI resolves both inputs together, so argv order must never
@@ -177,10 +202,14 @@ export function buildClaudeQueryOptions(
     ...(typeof thinking === "boolean" ? { alwaysThinkingEnabled: thinking } : {}),
     ...(wantsThinkingSummaries ? { showThinkingSummaries: true } : {}),
     ...(fastMode === true ? { fastMode: true } : {}),
+    // Ultracode is xhigh effort PLUS the setting, exactly as T3's manifest
+    // paired them; the SDK requires an xhigh-capable model for it.
+    ...(ultracode === true ? { ultracode: true } : {}),
     ...(input.autoCompactWindow !== undefined
       ? { autoCompactWindow: input.autoCompactWindow }
       : {})
   };
+  const effectiveEffort = ultracode === true ? ("xhigh" as const) : effort;
 
   const extraArgs = { ...parsed.extraArgs };
   if (wantsThinkingSummaries && extraArgs["thinking-display"] === undefined) {
@@ -197,16 +226,21 @@ export function buildClaudeQueryOptions(
       append: CLAUDE_RUNTIME_INSTRUCTIONS
     },
     settingSources: ["user", "project", "local"],
-    ...(effort !== undefined ? { effort } : {}),
+    ...(effectiveEffort !== undefined ? { effort: effectiveEffort } : {}),
     ...(wantsThinkingSummaries
       ? { thinking: { type: "adaptive" as const, display: "summarized" as const } }
       : {}),
     ...(permissionMode !== undefined ? { permissionMode } : {}),
     ...(permissionMode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : {}),
     ...(Object.keys(settings).length > 0 ? { settings } : {}),
+    // §4.5: `resume` (cursor uuid) **or** `sessionId` (a fresh v4 uuid), never
+    // both — the CLI's behaviour with both is undefined. Enforced here, in the
+    // pure module the rows are tested against, rather than only in the caller.
     ...(input.resume !== undefined ? { resume: input.resume } : {}),
     ...(input.resumeSessionAt !== undefined ? { resumeSessionAt: input.resumeSessionAt } : {}),
-    ...(input.sessionId !== undefined ? { sessionId: input.sessionId } : {}),
+    ...(input.resume === undefined && input.sessionId !== undefined
+      ? { sessionId: input.sessionId }
+      : {}),
     includePartialMessages: true,
     canUseTool: input.canUseTool,
     ...(input.onUserDialog !== undefined
@@ -228,7 +262,7 @@ export function buildClaudeQueryOptions(
   return {
     options,
     basePermissionMode: permissionMode ?? "default",
-    effort,
+    effort: effectiveEffort,
     model: modelSlug
   };
 }
