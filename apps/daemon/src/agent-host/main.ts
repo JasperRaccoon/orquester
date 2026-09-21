@@ -133,11 +133,18 @@ function consoleLogger(): AdapterLogger {
 }
 
 /** The registry `refId → adapter` map, from the catalog's `chat` block (§5.3). */
-function buildRefIdIndex(): Map<string, { adapter: AgentAdapterId; bins: string[] }> {
-  const index = new Map<string, { adapter: AgentAdapterId; bins: string[] }>();
+function buildRefIdIndex(): Map<
+  string,
+  { adapter: AgentAdapterId; bins: string[]; args: string[] }
+> {
+  const index = new Map<string, { adapter: AgentAdapterId; bins: string[]; args: string[] }>();
   for (const entry of REGISTRY.agents as readonly RegistryEntryDef[]) {
     if (!entry.chat) continue;
-    index.set(entry.id, { adapter: entry.chat.adapter, bins: [...entry.bin] });
+    index.set(entry.id, {
+      adapter: entry.chat.adapter,
+      bins: [...entry.bin],
+      args: [...(entry.args ?? [])]
+    });
   }
   return index;
 }
@@ -306,7 +313,19 @@ export async function startAgentHost(
     },
     liveness,
     clock,
-    idGen: ids
+    idGen: ids,
+    // Without these three the behaviour is silently off: no seeded session
+    // state after a restart, a provider retitle overwriting a manual rename,
+    // no §5.4 placeholder, and nothing routing `account.rate-limits.updated`
+    // onto the provider snapshot.
+    threadContext: (threadId) => orchestrator?.threadContext(threadId) ?? null,
+    placeholderCheckpoint: (input) =>
+      orchestrator?.placeholderCheckpoint({
+        threadId: input.threadId,
+        turnId: input.turnId
+      }) ?? null,
+    onAccountEvent: (event) => orchestrator?.onAccountEvent(event),
+    logger: { warn: (message, detail) => logger.warn(message, detail) }
   });
 
   orchestrator = createOrchestrator({
@@ -338,6 +357,7 @@ export async function startAgentHost(
       return { kind: "system", path: homeDir };
     },
     continuationEnabled: () => continuationDefault(env),
+    launchArgsForRefId: (refId) => refIds.get(refId)?.args ?? [],
     clock,
     ids
   });

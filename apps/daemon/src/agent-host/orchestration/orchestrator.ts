@@ -70,6 +70,7 @@ import {
   CheckpointRefUnavailableError,
   CheckpointTurnRangeError
 } from "../checkpoints/index.ts";
+import { projectSnapshotActivities } from "../ingestion/index.ts";
 import { createEventBuilder, describeFailure, makeActivity, type BuildEvent } from "./events.ts";
 import {
   AgentChatCommandError,
@@ -173,6 +174,12 @@ export interface OrchestratorOptions {
   continuationEnabled?(projectPath: string): boolean | Promise<boolean>;
   /** A tab the user closed: settled on the next boot, never continued (§3.3). */
   isThreadClosed?(threadId: string): boolean | Promise<boolean>;
+  /**
+   * The registry entry's own launch args, handed to `startSession` so an
+   * adapter that folds a flag into its protocol (Claude's `--permission-mode`)
+   * sees what the entry declares.
+   */
+  launchArgsForRefId?(refId: string): readonly string[];
   clock?: Clock;
   ids?: IdGen;
   fold?: FoldOps;
@@ -226,6 +233,17 @@ interface ThreadRuntime {
    * with the parse message; it never affects another thread or host startup.
    */
   parseError: string | null;
+  /**
+   * §5.1: a manual rename is NEVER overwritten by a provider retitle. A client
+   * `PUT` carries a `commandId`; a provider retitle is appended by ingestion
+   * with `commandId: null`, which is the discriminator.
+   */
+  titleManual: boolean;
+  /**
+   * Set once `captureBaseline` answers `null` — a non-git project skips
+   * checkpoints silently (§5.4), and no placeholder may be written for it.
+   */
+  checkpointsUnavailable: boolean;
   deleted: boolean;
 }
 
@@ -296,6 +314,29 @@ export interface Orchestrator {
   /** Flush every queue — the drain seam tests wait on instead of sleeping (§9). */
   drain(): Promise<void>;
   stop(): Promise<void>;
+  /**
+   * `IngestionOptions.threadContext` (§5.1 title rule, §3.3 restart): the
+   * head's session state, plus whether the user renamed the thread.
+   */
+  threadContext(threadId: string): { session?: ThreadSessionState; titleManual?: boolean } | null;
+  /**
+   * `IngestionOptions.placeholderCheckpoint` (§5.4): the turn count a
+   * `turn.diff.updated` placeholder would take, or `null` when there is no git
+   * repo, a real checkpoint already covers the turn, or the turn is not the
+   * running one.
+   */
+  placeholderCheckpoint(input: {
+    threadId: string;
+    turnId: string;
+  }): { turnCount: number } | null;
+  /**
+   * `IngestionOptions.onAccountEvent` (§5.1): `auth.status` and
+   * `account.rate-limits.updated` are not thread facts — they update the
+   * provider snapshot. The adapter is resolved from the thread's head.
+   */
+  onAccountEvent(event: RuntimeEvent): void;
+  /** The adapter serving a thread, or null when it is not loaded. */
+  adapterForThread(threadId: string): AgentAdapterId | null;
   /**
    * Where `createIngestion({sink})` delivers translated domain events (§5.1).
    * They are appended through the store, in order, on the thread's own command
@@ -381,6 +422,13 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       watchdog: null,
       subscribers: new Set(),
       parseError: store.threadError?.(threadId) ?? null,
+      titleManual: tail.events.some(
+        (event) =>
+          event.type === "thread.meta-updated" &&
+          event.payload.title !== undefined &&
+          event.commandId !== null
+      ),
+      checkpointsUnavailable: false,
       deleted: state.deleted
     };
     runtimes.set(threadId, runtime);
@@ -639,6 +687,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       accountId: head.accountId,
       home: head.home
     });
+    const launchArgs = options.launchArgsForRefId?.(head.refId) ?? [];
     const session = await adapter.startSession({
       threadId: runtime.id,
       cwd: head.cwd,
@@ -646,6 +695,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       title: head.title,
       modelSelection: head.modelSelection,
       runtimeMode: head.runtimeMode,
+      ...(launchArgs.length > 0 ? { launchArgs } : {}),
       ...(resumeCursor !== undefined ? { resumeCursor } : {})
     });
     runtime.bound = { ...desired, session };
@@ -1655,8 +1705,16 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           throw invalidCommand("title is too long.");
         }
         const result = await commit(runtime, [
-          buildEvent(threadId, "thread.meta-updated", { title: input.title.trim() })
+          buildEvent(
+            threadId,
+            "thread.meta-updated",
+            { title: input.title.trim() },
+            // A client-minted id marks this as the user's own rename, which a
+            // provider retitle may never overwrite (§5.1).
+            { commandId: `rename:${ids.uuid()}` }
+          )
         ]);
+        runtime.titleManual = true;
         await saveHeadNow(runtime);
         return { seq: result.seq };
       });
@@ -1702,12 +1760,22 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
 
   const snapshotOf = (runtime: ThreadRuntime): ThreadSnapshotPayload => {
     const payload = fold.snapshot(runtime.state);
-    return runtime.continueAfterRestart === undefined
-      ? payload
-      : {
-          ...payload,
-          head: { ...payload.head, continueAfterRestart: runtime.continueAfterRestart }
-        };
+    // §5.6's two snapshot-time drops are not applied on the write path, so the
+    // read applies them: a superseded `tool.updated` and a stale
+    // `context-window.updated` never reach a client that loads the thread cold.
+    const kept = new Set(
+      projectSnapshotActivities(
+        payload.items.filter((item): item is ThreadActivityItem => item.kind === "activity")
+      ).map((activity) => activity.id)
+    );
+    const items = payload.items.filter(
+      (item) => item.kind !== "activity" || kept.has(item.id)
+    );
+    const head =
+      runtime.continueAfterRestart === undefined
+        ? payload.head
+        : { ...payload.head, continueAfterRestart: runtime.continueAfterRestart };
+    return { ...payload, head, items };
   };
 
   const readThread = async (threadId: string, afterSeq?: number): Promise<ThreadReadResponse> =>
@@ -1736,6 +1804,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     afterSeq: number
   ): Promise<DomainEvent[] | null> => {
     if (afterSeq < 0 || afterSeq > runtime.state.seq) {
+      return null;
+    }
+    // `seq` is per thread and increments by one per event, so the head minus
+    // the cursor IS the row count. Checking it before the read keeps an
+    // oversized range from being loaded just to be discarded.
+    if (runtime.state.seq - afterSeq > AGENT_CHAT_REPLAY_MAX_EVENTS) {
       return null;
     }
     const tail = await store.readTail(runtime.id, afterSeq);
@@ -1851,6 +1925,56 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     };
   };
 
+  const threadContext = (
+    threadId: string
+  ): { session?: ThreadSessionState; titleManual?: boolean } | null => {
+    const runtime = runtimes.get(threadId);
+    if (!runtime) return null;
+    const head = headOf(runtime);
+    return {
+      ...(head ? { session: head.session } : {}),
+      titleManual: runtime.titleManual
+    };
+  };
+
+  const placeholderCheckpoint = (input: {
+    threadId: string;
+    turnId: string;
+  }): { turnCount: number } | null => {
+    const runtime = runtimes.get(input.threadId);
+    if (!runtime || runtime.checkpointsUnavailable) {
+      return null;
+    }
+    // Only the session's running turn may open a placeholder.
+    if (currentSession(runtime).activeTurnId !== input.turnId) {
+      return null;
+    }
+    const existing = (runtime.state.checkpoints ?? []).find(
+      (checkpoint) => checkpoint.turnId === input.turnId
+    );
+    if (existing) {
+      // A real checkpoint already covers this turn; §5.4 reuses its own count.
+      return null;
+    }
+    return { turnCount: maxCheckpointTurnCount(runtime) + 1 };
+  };
+
+  const adapterForThread = (threadId: string): AgentAdapterId | null => {
+    const runtime = runtimes.get(threadId);
+    const head = runtime ? headOf(runtime) : null;
+    if (head) return head.adapter;
+    for (const [id, adapter] of options.adapters) {
+      if (adapter.hasSession(threadId)) return id;
+    }
+    return null;
+  };
+
+  const onAccountEvent = (event: RuntimeEvent): void => {
+    const adapterId = adapterForThread(event.threadId);
+    if (!adapterId) return;
+    snapshots.applyUsageLimits(adapterId, event);
+  };
+
   const subscribe = async (
     threadId: string,
     subscription: ThreadSubscription
@@ -1897,8 +2021,13 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           cwd: head.cwd,
           checkpoints: runtime.state.checkpoints ?? []
         });
-        // A non-git project skips silently.
-        if (!result) return;
+        // A non-git project skips silently — and stops the ingestion
+        // placeholder of §5.4 being written for it at all.
+        if (!result) {
+          runtime.checkpointsUnavailable = true;
+          return;
+        }
+        runtime.checkpointsUnavailable = false;
         if (result.status === "error" || result.detail !== undefined) {
           await appendCaptureOutcome(runtime, result, currentSession(runtime).activeTurnId);
         }
@@ -1961,7 +2090,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
             }
             trackSessionCursor(runtime, event);
           }
-          snapshots.applyUsageLimits(adapter.id, event);
+          // `auth.status` and `account.rate-limits.updated` are not thread
+          // facts: ingestion hands them to `onAccountEvent`, which routes them
+          // to the snapshot registry (§5.1). One path, not two.
           await ingestion.ingest(event);
           if (runtime) {
             // After ingestion, so the fold already holds the turn row the
@@ -2214,6 +2345,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     readTurnDiff,
     summary,
     subscribe,
+    threadContext,
+    placeholderCheckpoint,
+    onAccountEvent,
+    adapterForThread,
     providers: () => snapshots.all(),
     refreshProvider: async (adapterId, input) => {
       if (snapshots.refreshDetailed) {

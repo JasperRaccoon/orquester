@@ -907,6 +907,47 @@ describe("orchestrator — reads (§6.3)", () => {
     await host.stop();
   });
 
+  it("forces a snapshot past the row budget without reading the range", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    // Grow the log past the 1 000-row replay budget.
+    await host.orchestrator.ingestionSink(
+      threadId,
+      Array.from({ length: 1_200 }, (_unused, index) => ({
+        eventId: `bulk-${index}`,
+        threadId,
+        type: "thread.activity-appended" as const,
+        payload: {
+          activity: {
+            kind: "activity" as const,
+            id: `bulk-${index}`,
+            tone: "info" as const,
+            activityKind: "runtime.warning",
+            summary: "noise",
+            payload: {},
+            turnId: null,
+            createdAt: host.clock.nowIso(),
+            updatedAt: host.clock.nowIso()
+          }
+        },
+        occurredAt: host.clock.nowIso(),
+        commandId: null,
+        causationEventId: null,
+        metadata: {}
+      }))
+    );
+    let reads = 0;
+    const originalReadTail = host.store.readTail.bind(host.store);
+    host.store.readTail = async (id: string, afterSeq: number) => {
+      reads += 1;
+      return originalReadTail(id, afterSeq);
+    };
+    const read = await host.orchestrator.readThread(threadId, 1);
+    assert.equal(read.kind, "snapshot");
+    assert.equal(reads, 0, "an oversized range is never loaded");
+    await host.stop();
+  });
+
   it("forces a snapshot when `after` is above the head", async () => {
     const host = createTestHost();
     const threadId = await host.createThread();
@@ -1041,6 +1082,85 @@ describe("orchestrator — the §6.4 summary fields", () => {
     const summary = host.orchestrator.summary(threadId);
     assert.equal(summary?.hasPendingApprovals, true);
     assert.equal(summary?.hasPendingUserInput, true);
+    await host.stop();
+  });
+});
+
+describe("orchestrator — the ingestion hooks (§5.1, §5.4)", () => {
+  it("reports the head's session and whether the title was renamed by hand", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    assert.equal(host.orchestrator.threadContext(threadId)?.titleManual, false);
+    assert.equal(host.orchestrator.threadContext(threadId)?.session?.status, "idle");
+
+    await host.orchestrator.updateThread(threadId, { title: "Mine" });
+    await host.settle();
+    // A manual rename is never overwritten by a provider retitle.
+    assert.equal(host.orchestrator.threadContext(threadId)?.titleManual, true);
+    assert.equal(host.orchestrator.threadContext("nope"), null);
+    await host.stop();
+  });
+
+  it("offers a placeholder turn count only for the running turn, and never without git", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    assert.equal(
+      host.orchestrator.placeholderCheckpoint({ threadId, turnId: "turn-1" }),
+      null,
+      "no running turn, no placeholder"
+    );
+
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await host.settle();
+    assert.deepEqual(host.orchestrator.placeholderCheckpoint({ threadId, turnId: "turn-1" }), {
+      turnCount: 1
+    });
+    assert.equal(
+      host.orchestrator.placeholderCheckpoint({ threadId, turnId: "turn-2" }),
+      null,
+      "a stale turn id never opens a placeholder"
+    );
+    await host.stop();
+  });
+
+  it("routes an account event to the adapter's snapshot", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    host.snapshots.set({
+      id: "claude",
+      refIds: ["claude"],
+      installed: true,
+      version: "1.0.0",
+      status: "ready",
+      auth: { status: "authenticated" },
+      checkedAt: host.clock.nowIso(),
+      models: [],
+      slashCommands: [],
+      skills: [],
+      capabilities: host.adapter.capabilities
+    });
+    assert.equal(host.orchestrator.adapterForThread(threadId), "claude");
+    host.orchestrator.onAccountEvent({
+      eventId: "acct",
+      threadId,
+      createdAt: host.clock.nowIso(),
+      type: "account.rate-limits.updated",
+      payload: {
+        limits: { windows: [{ id: "weekly", kind: "weekly", label: "W", usedPercent: 10 }] }
+      }
+    } as unknown as RuntimeEvent);
+    // The stub registry keeps the object it was given; the real one merges.
+    assert.equal(host.orchestrator.adapterForThread("unknown"), null);
+    await host.stop();
+  });
+
+  it("hands the registry entry's launch args to startSession", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await host.settle();
+    // The harness declares none, so the field is absent rather than empty.
+    assert.equal(host.adapter.lastStart?.launchArgs, undefined);
     await host.stop();
   });
 });
