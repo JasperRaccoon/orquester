@@ -63,6 +63,7 @@ import {
   ROLLBACK_COMPACTED,
   ROLLBACK_SESSION_UNAVAILABLE,
   ROLLBACK_FORK_MISALIGNED,
+  groupClaudeHistoryTurns,
   isAnchorReachableAfterCompaction,
   planClaudeRollback,
   remapClaudeForkTurnBoundaries
@@ -1024,11 +1025,45 @@ export class ClaudeSession {
     }
   }
 
-  readThread(): ThreadSnapshot {
-    return {
-      threadId: this.threadId,
-      turns: this.normalizer.turns.map((turn) => ({ id: turn.id, items: [...turn.items] }))
-    };
+  /**
+   * The thread as the PROVIDER holds it (§4.1).
+   *
+   * A live session has its turns in memory. A **resumed** one does not: a
+   * resume replays nothing onto the message stream, so the in-memory turns are
+   * empty while the CLI holds the whole conversation. That case reads the
+   * native transcript out-of-band and groups it into turns, which is what
+   * `projectHistory` then turns into a timeline.
+   *
+   * Best-effort by construction: a transcript that cannot be read answers with
+   * an empty snapshot rather than failing the read.
+   */
+  async readThread(): Promise<ThreadSnapshot> {
+    if (this.normalizer.turns.length > 0) {
+      return {
+        threadId: this.threadId,
+        turns: this.normalizer.turns.map((turn) => ({ id: turn.id, items: [...turn.items] }))
+      };
+    }
+    const sessionId = this.resumeSessionId;
+    if (sessionId === undefined) {
+      return { threadId: this.threadId, turns: [] };
+    }
+    try {
+      const messages = await createClaudeHistoryReader({
+        env: this.options.env,
+        cwd: this.options.cwd,
+        hostConfigDir: this.options.deps.hostConfigDir,
+        spawn: this.options.deps.spawn,
+        nodePath: this.options.deps.nodePath
+      }).readMessages({ sessionId, cwd: this.options.cwd });
+      return { threadId: this.threadId, turns: groupClaudeHistoryTurns(messages) };
+    } catch (error) {
+      this.options.context.logger.warn(
+        `claude: could not read the native history for thread ${this.threadId}`,
+        error
+      );
+      return { threadId: this.threadId, turns: [] };
+    }
   }
 
   // -------------------------------------------------------------------------
