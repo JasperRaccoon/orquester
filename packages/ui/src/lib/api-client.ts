@@ -993,8 +993,19 @@ export class ApiClient {
     });
   }
 
-  renameSession(id: string, title: string): Promise<SessionSummary> {
-    return this.send("PUT", `/api/sessions/${encodeURIComponent(id)}`, { body: { title } });
+  /**
+   * `opts.seed` marks a chat thread's CLIENT-generated first-message title
+   * (agent chat §7.7) rather than a rename the user typed, so a provider
+   * retitle may still replace it. Omitted everywhere else.
+   */
+  renameSession(
+    id: string,
+    title: string,
+    opts?: { seed?: boolean }
+  ): Promise<SessionSummary> {
+    return this.send("PUT", `/api/sessions/${encodeURIComponent(id)}`, {
+      body: opts?.seed ? { title, seed: true } : { title }
+    });
   }
 
   reorderSessions(projectPath: string, ids: string[]): Promise<void> {

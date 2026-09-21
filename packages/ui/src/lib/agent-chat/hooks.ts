@@ -101,11 +101,13 @@ export const useAgentChatThread: UseAgentChatThread = (sessionId) => {
   const slice = useThreadState(store, (state) => state.slice);
   const rows = useThreadState(store, (state) => state.rows);
   const activePlan = useThreadState(store, (state) => state.activePlan);
+  const actionableProposedPlan = useThreadState(store, (state) => state.actionableProposedPlan);
+  const reverting = useThreadState(store, (state) => state.reverting);
   const actions = useThreadState(store, (state) => state.actions);
 
   return useMemo<AgentChatThreadView>(
-    () => ({ slice, actions, rows, activePlan }),
-    [slice, actions, rows, activePlan]
+    () => ({ slice, actions, rows, activePlan, actionableProposedPlan, reverting }),
+    [slice, actions, rows, activePlan, actionableProposedPlan, reverting]
   );
 };
 
