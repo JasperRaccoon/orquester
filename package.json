@@ -15,7 +15,8 @@
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
     "check": "pnpm -r typecheck",
-    "postinstall": "node scripts/fix-node-pty-perms.mjs"
+    "postinstall": "node scripts/fix-node-pty-perms.mjs",
+    "test": "pnpm -r --if-present test"
   },
   "devDependencies": {
     "cross-env": "^7.0.3",
@@ -27,6 +28,11 @@
       "electron",
       "esbuild",
       "node-pty"
-    ]
+    ],
+    "peerDependencyRules": {
+      "allowedVersions": {
+        "@anthropic-ai/claude-agent-sdk>zod": "3"
+      }
+    }
   }
 }
