@@ -27,13 +27,15 @@ import {
   type AgentHostHealthResponse,
   type CreateHostThreadRequest
 } from "../agent-host/host-protocol.ts";
-import type { Readable } from "node:stream";
+import { Transform, type Readable } from "node:stream";
+import { MAX_UPLOAD_BYTES } from "@orquester/api";
+import { UploadTooLargeError } from "../upload-stream.ts";
 import { isAgentAdapterId } from "../agent-host/adapters/index.ts";
 import { agentHostExtraRoutes } from "../agent-host/server/extra-routes.ts";
 import { ACCOUNT_HOME_ENV_VAR } from "../agent-host/support/env.ts";
 import { ChatSessionManager, ChatSessionError } from "./chat-sessions.ts";
 import { AgentHostClient, HostUnavailableError } from "./host-client.ts";
-import { ensureGrokChatConfig, markClaudeProjectTrusted } from "./home-prep.ts";
+import { markClaudeProjectTrusted } from "./home-prep.ts";
 import type { AgentChatRouteDeps } from "./proxy-routes.ts";
 import { AgentChatSummaryService, type SummaryBroadcaster, type SummaryPush } from "./summary.ts";
 import {
@@ -86,6 +88,12 @@ export interface AgentChatServiceOptions {
   ): Promise<ChatLaunchEnv | null>;
   /** The system Claude config file, when no `CLAUDE_CONFIG_DIR` is in play. */
   systemClaudeConfigFile(): string;
+  /**
+   * Confine a client-supplied project path to the workspaces sandbox and
+   * realpath it, or answer null. The ONLY path a chat launch is allowed to
+   * grant Claude project trust for — see `prepareHome`.
+   */
+  resolveTrustedProjectDir(projectPath: string): Promise<string | null>;
   logger?: {
     log?: (...a: unknown[]) => void;
     warn?: (...a: unknown[]) => void;
@@ -163,8 +171,16 @@ export class AgentChatService {
           }
           const child = spawn(bin, args, { cwd: opts.cwd, detached: false, stdio: "ignore", env });
           child.on("error", (error) => opts.logger?.error?.("agent host spawnDirect failed", error));
-          this.directHandle = { kill: () => child.kill(), pid: child.pid };
-          return this.directHandle;
+          const handle: DirectHostHandle = { kill: () => child.kill(), pid: child.pid };
+          // Clear the handle when the child dies, or `protectedPids()` keeps
+          // returning a pid the OS may recycle onto an unrelated process — and
+          // `POST /api/system/processes/kill` would then refuse a legitimate
+          // target for no visible reason.
+          child.on("exit", () => {
+            if (this.directHandle === handle) this.directHandle = null;
+          });
+          this.directHandle = handle;
+          return handle;
         },
         now: opts.now ?? Date.now,
         sleep: opts.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
@@ -223,7 +239,15 @@ export class AgentChatService {
   async init(): Promise<void> {
     await this.supervisor.init();
     this.summary.start();
-    this.healthTimer = setInterval(() => void this.supervisor.checkHealth(), AGENT_HOST_HEALTH_INTERVAL_MS);
+    // `.catch`, never a bare `void`: a rejection here would be unhandled, and
+    // Node ≥15 exits the process on one — taking every live terminal, `/events`
+    // stream and WebSocket with it. Supervision failures are logged and retried
+    // on the next tick, which is the whole point of the interval.
+    this.healthTimer = setInterval(() => {
+      this.supervisor
+        .checkHealth()
+        .catch((error) => this.opts.logger?.error?.("agent host health check failed", error));
+    }, AGENT_HOST_HEALTH_INTERVAL_MS);
     this.healthTimer.unref?.();
   }
 
@@ -324,7 +348,7 @@ export class AgentChatService {
     // Reality findings: a fresh directory is untrusted for Claude, and Grok
     // ships with approvals off and auto-update on. Best-effort and before the
     // thread exists, so the very first turn already sees the prepared home.
-    await this.prepareHome(adapter, launchEnv, cwd);
+    await this.prepareHome(adapter, launchEnv, req.projectPath ?? "");
 
     const summary = this.chat.create({
       id,
@@ -422,8 +446,12 @@ export class AgentChatService {
     if (query.type) params.set("type", query.type);
     const suffix = params.toString();
     const path = `${agentHostExtraRoutes.putAttachment(sessionId)}${suffix ? `?${suffix}` : ""}`;
+    // The cap is enforced TWICE, as AGENTS.md requires: the route already
+    // refused a declared `Content-Length` above it, and this counts what
+    // actually arrives — a chunked upload with no `Content-Length` would
+    // otherwise stream unbounded straight through to the host.
     const stream = await this.client.open("POST", path, {
-      body,
+      body: countingLimit(body, MAX_UPLOAD_BYTES),
       headers: { "content-type": "application/octet-stream" },
       timeoutMs: 0
     });
@@ -450,22 +478,37 @@ export class AgentChatService {
 
   // --- internals -----------------------------------------------------------
 
+  /**
+   * Claude project trust for the home this thread will run under.
+   *
+   * The trusted path is **the daemon's, not the client's**: `projectPath` is
+   * run through `resolveTrustedProjectDir`, which realpaths it and refuses
+   * anything outside `fsRoot`. `cwd` off the create request is never trusted —
+   * accepting it would let a client permanently enable an arbitrary directory's
+   * Claude hooks (arbitrary shell as the daemon user, which holds scoped
+   * passwordless sudo) host-wide, including for every future terminal tab on
+   * that path.
+   *
+   * No other adapter is prepared here: see the module comment in `home-prep.ts`
+   * for why the Grok config write is gone.
+   */
   private async prepareHome(
     adapter: AgentAdapterId,
     env: Record<string, string>,
-    cwd: string
+    projectPath: string
   ): Promise<void> {
+    if (adapter !== "claude") return;
     try {
-      if (adapter === "claude") {
-        const dir = env.CLAUDE_CONFIG_DIR;
-        const file = dir ? join(dir, ".claude.json") : this.opts.systemClaudeConfigFile();
-        await markClaudeProjectTrusted(file, cwd, this.opts.logger);
+      const projectDir = await this.opts.resolveTrustedProjectDir(projectPath);
+      if (!projectDir) {
+        this.opts.logger?.warn?.(
+          `agent chat: not granting Claude project trust for ${projectPath} (outside the workspaces sandbox)`
+        );
         return;
       }
-      if (adapter === "grok") {
-        const home = env.GROK_HOME ?? this.opts.env.GROK_HOME ?? join(homedir(), ".grok");
-        await ensureGrokChatConfig(home, this.opts.logger);
-      }
+      const dir = env.CLAUDE_CONFIG_DIR;
+      const file = dir ? join(dir, ".claude.json") : this.opts.systemClaudeConfigFile();
+      await markClaudeProjectTrusted(file, projectDir, this.opts.logger);
     } catch (error) {
       // Never block a launch on home preparation.
       this.opts.logger?.warn?.("agent chat home preparation failed", error);
@@ -514,6 +557,28 @@ export class AgentChatService {
 export function resolveHomeKind(entryId: string, accountId: string): AgentChatHome {
   if (entryId === "claudex" || entryId === "claudemix") return "cliproxy";
   return accountId ? "account" : "system";
+}
+
+/**
+ * Pass a body through, counting bytes, and destroy it with
+ * {@link UploadTooLargeError} past `limit`. The second half of AGENTS.md's
+ * "the cap is enforced twice": a chunked request carries no `Content-Length`
+ * for the route's declared-length check to refuse.
+ */
+function countingLimit(source: Readable, limit: number): Readable {
+  let seen = 0;
+  return source.pipe(
+    new Transform({
+      transform(chunk: Buffer, _encoding, callback) {
+        seen += chunk.length;
+        if (seen > limit) {
+          callback(new UploadTooLargeError());
+          return;
+        }
+        callback(null, chunk);
+      }
+    })
+  );
 }
 
 /** §6.1: an id the adapter cannot use is refused at creation, never degraded. */

@@ -25,6 +25,8 @@ interface Harness {
   tokenPath: string;
   /** Advance the injected clock past a backoff window. */
   advance(ms: number): void;
+  /** Flip to make the next spawn throw, as a real tmux failure does. */
+  spawnThrows: boolean;
   cleanup(): Promise<void>;
 }
 
@@ -43,7 +45,7 @@ const healthy = (overrides: Partial<{ version: number; active: string[]; instanc
 
 async function makeHarness(
   probes: ProbeOutcome[],
-  opts: { tmux?: boolean; seedToken?: string } = {}
+  opts: { tmux?: boolean; seedToken?: string; spawnThrows?: boolean } = {}
 ): Promise<Harness> {
   const dir = await mkdtemp(join(tmpdir(), "orq-agent-host-"));
   const tokenPath = join(dir, "agent-host.token");
@@ -57,12 +59,16 @@ async function makeHarness(
     stopRequests: 0,
     tokenPath,
     supervisor: null as unknown as AgentHostSupervisor,
+    spawnThrows: opts.spawnThrows === true,
     advance: (ms) => {
       clock += ms;
     },
     cleanup: () => rm(dir, { recursive: true, force: true })
   };
   let sessionExists = opts.tmux === true && opts.seedToken !== undefined;
+  // Record whether the kill-first branch actually ran, rather than hardcoding
+  // `false`: that branch is the one that produces the duplicate-session throw.
+  let killedSinceSpawn = false;
   const tmux: SupervisorTmux | null =
     opts.tmux === false
       ? null
@@ -70,10 +76,13 @@ async function makeHarness(
           hasServiceSession: async (name) => name === AGENT_HOST_SERVICE_SESSION && sessionExists,
           killServiceSession: async () => {
             sessionExists = false;
+            killedSinceSpawn = true;
           },
           newServiceSession: async ({ args }) => {
+            if (harness.spawnThrows) throw new Error("duplicate session: orqsvc-agent-host");
             sessionExists = true;
-            harness.spawns.push({ killFirst: false, args });
+            harness.spawns.push({ killFirst: killedSinceSpawn, args });
+            killedSinceSpawn = false;
           }
         };
   harness.supervisor = new AgentHostSupervisor({
@@ -91,7 +100,9 @@ async function makeHarness(
       },
       tmux,
       spawnDirect: (_bin, args) => {
-        harness.spawns.push({ killFirst: false, args });
+        if (harness.spawnThrows) throw new Error("spawn failed");
+        harness.spawns.push({ killFirst: killedSinceSpawn, args });
+        killedSinceSpawn = false;
         return { kill: () => undefined, pid: 9191 };
       },
       // An injected clock: the readiness deadline and the respawn backoff are
@@ -254,6 +265,103 @@ test("the no-tmux fallback spawns a direct child and protects its pid", async ()
   await h.supervisor.init();
   assert.equal(h.spawns.length, 1);
   assert.ok(h.supervisor.protectedPids().includes(9191));
+  await h.cleanup();
+});
+
+test("a throwing tmux spawn NEVER rejects out of checkHealth (it would kill the daemon)", async () => {
+  // `checkHealth` runs behind a bare `void` on a 15 s interval. `transition()`
+  // catches only its own queue copy, so a rejection here is unhandled — and
+  // Node ≥15 exits the process on one, dropping every live terminal WebSocket
+  // and `/events` stream. "duplicate session: orqsvc-agent-host" is the common
+  // trigger: a kill racing the respawn.
+  const h = await makeHarness([healthy()], { seedToken: "tok", tmux: true });
+  await h.supervisor.init();
+  assert.equal(h.supervisor.status().state, "healthy");
+
+  const rejections: unknown[] = [];
+  const onRejection = (reason: unknown): void => {
+    rejections.push(reason);
+  };
+  process.on("unhandledRejection", onRejection);
+  try {
+    h.probes = [{ ok: false, reachable: false }];
+    h.spawnThrows = true;
+    h.advance(120_000);
+    // Exactly how the interval calls it — the returned promise is discarded.
+    void h.supervisor.checkHealth();
+    // Let the microtask queue and one macrotask turn drain, which is when an
+    // unhandled rejection would be reported.
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(rejections, [], "a spawn failure must never reject out of checkHealth");
+  } finally {
+    process.off("unhandledRejection", onRejection);
+  }
+  // The `void`ed call is still in flight; wait for it to settle rather than
+  // sleeping on a guess.
+  for (let i = 0; i < 200 && h.supervisor.status().state === "starting"; i++) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  // And it stays RETRYABLE — not latched — so the next tick tries again.
+  assert.equal(h.supervisor.status().state, "stopped");
+  assert.match(String(h.supervisor.status().reason), /spawn failed/);
+  h.spawnThrows = false;
+  h.probes = [healthy({ instance: "host-2" })];
+  h.advance(120_000);
+  await h.supervisor.checkHealth();
+  assert.equal(h.supervisor.status().state, "healthy");
+  await h.cleanup();
+});
+
+test("a spawn that throws during boot adoption leaves the supervisor retryable", async () => {
+  const h = await makeHarness([{ ok: false, reachable: false }], { tmux: true, spawnThrows: true });
+  await h.supervisor.init();
+  assert.equal(h.supervisor.status().state, "stopped");
+  assert.equal(h.supervisor.isHealthy(), false);
+  await h.cleanup();
+});
+
+test("handleTurnSettled never rejects either", async () => {
+  const h = await makeHarness(
+    [healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1 })],
+    { seedToken: "tok", tmux: true }
+  );
+  h.spawnThrows = true;
+  await h.supervisor.init();
+  const rejections: unknown[] = [];
+  const onRejection = (reason: unknown): void => {
+    rejections.push(reason);
+  };
+  process.on("unhandledRejection", onRejection);
+  try {
+    h.supervisor.handleTurnSettled();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(rejections, []);
+  } finally {
+    process.off("unhandledRejection", onRejection);
+  }
+  await h.cleanup();
+});
+
+test("a leftover service session is killed before the respawn", async () => {
+  // The branch that produces the duplicate-session throw above; the harness
+  // used to hardcode `killFirst: false`, so it was never exercised.
+  const h = await makeHarness([{ ok: false, reachable: false }, healthy()], {
+    seedToken: "tok",
+    tmux: true
+  });
+  await h.supervisor.init();
+  assert.equal(h.spawns.length, 1);
+  assert.equal(h.spawns[0].killFirst, true, "a wedged host must not hold the socket");
+  await h.cleanup();
+});
+
+test("a fresh spawn with no leftover session does NOT kill first", async () => {
+  const h = await makeHarness([{ ok: false, reachable: false }, healthy()], { tmux: true });
+  await h.supervisor.init();
+  assert.equal(h.spawns.length, 1);
+  assert.equal(h.spawns[0].killFirst, false);
   await h.cleanup();
 });
 

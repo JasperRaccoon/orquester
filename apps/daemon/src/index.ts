@@ -148,7 +148,6 @@ import {
   type WorkspacesConfig,
   accountsConfigPath,
   agentAccountsDir,
-  agentChatThreadAttachmentsDir,
   agentAccountsFile,
   appConfigPath,
   browserProfilesDir,
@@ -451,6 +450,20 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
       env.CLAUDE_CONFIG_DIR
         ? join(env.CLAUDE_CONFIG_DIR, ".claude.json")
         : join(resolved.vars.userhome, ".claude.json"),
+    // The ONE path a chat launch may grant Claude project trust for. Accepting
+    // the request's `cwd` would let a client permanently enable an arbitrary
+    // directory's Claude hooks (arbitrary shell as the daemon user, which holds
+    // scoped passwordless sudo) — and, for a system-home thread, for every
+    // future terminal `claude` tab on that path too. Same confinement the fs
+    // routes use: realpath, must be inside `fsRoot`.
+    resolveTrustedProjectDir: async (projectPath) => {
+      if (!projectPath) return null;
+      try {
+        return await assertInsideFsRoot(resolved.fsRoot, projectPath);
+      } catch {
+        return null;
+      }
+    },
     logger: console
   });
 
@@ -3451,16 +3464,24 @@ export function createServer(
     // it sits in the very tree this route walks. It is infrastructure, not a
     // user process: refuse it the way the tmux server is refused.
     protectedPids: () => {
-      const pids: number[] = [];
+      const pids: Array<{ pid: number; label: string }> = [];
       const pid = services.cliproxy?.directChildPid();
-      if (typeof pid === "number") pids.push(pid);
-      // The agent host is infrastructure too (chat spec §3.1 "Kill guard"). On
-      // a tmux host it lives in the `orqsvc-` service session the tree walk
-      // already excludes; without tmux it is a plain daemon child and would
-      // otherwise be a legal target. Provider CHILDREN stay legal targets.
-      pids.push(...(services.agentChat?.protectedPids() ?? []));
+      if (typeof pid === "number") {
+        pids.push({ pid, label: "the model proxy that backs claudex/claudemix sessions" });
+      }
+      // The agent host is infrastructure too (chat spec §3.1 "Kill guard").
+      // Provider CHILDREN stay legal targets — see `extraRootPids` below, which
+      // is what actually makes them reachable on a tmux host.
+      for (const hostPid of services.agentChat?.protectedPids() ?? []) {
+        pids.push({ pid: hostPid, label: "the agent host that runs your chat threads" });
+      }
       return pids;
-    }
+    },
+    // The agent host runs in the `orqsvc-agent-host` service session, which
+    // `panePids()` excludes from the daemon-tree roots — so without this a
+    // runaway `codex`/`opencode` child of a chat thread answers
+    // PROCESS_NOT_MANAGED, contradicting §3.1.
+    extraRootPids: () => services.agentChat?.protectedPids() ?? []
   });
 
   app.get("/api/system/resources", async (): Promise<SystemResourcesResponse> => systemStatus.resources());
@@ -3974,21 +3995,21 @@ export function createServer(
         // the §4.1 bounds against the file it stat'd, and cleans it up with the
         // rest of the thread on delete. A terminal upload keeps its own dir.
         if (sessions.get(id)?.kind === "agent-chat") {
+          // Every refusal here leaves `request.raw` unread, so it must answer
+          // with `Connection: close` or Node drains the whole body first — the
+          // same rule the terminal branch follows through `refuseUpload`.
           if (!services.agentChat) {
-            return reply.code(503).send({
-              code: "HOST_UNAVAILABLE",
-              message: "The agent host is restarting."
-            });
+            return refuseUpload(reply, 503, "HOST_UNAVAILABLE", "The agent host is restarting.");
           }
           try {
             const uploaded = await services.agentChat.uploadAttachment(id, request.query, request.raw);
             return reply.code(uploaded.status).send(uploaded.value ?? undefined);
           } catch (error) {
+            if (error instanceof UploadTooLargeError) {
+              return refuseUpload(reply, 413, "UPLOAD_TOO_LARGE", error.message);
+            }
             request.log?.warn?.({ err: error }, "agent chat attachment upload failed");
-            return reply.code(503).send({
-              code: "HOST_UNAVAILABLE",
-              message: "The agent host is restarting."
-            });
+            return refuseUpload(reply, 503, "HOST_UNAVAILABLE", "The agent host is restarting.");
           }
         }
 

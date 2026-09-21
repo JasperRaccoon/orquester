@@ -322,7 +322,12 @@ export class AgentHostSupervisor {
    */
   handleTurnSettled(): void {
     if (!this.pendingVersionRestart || this.state !== "healthy") return;
-    void this.transition(() => this.restartIfDrained());
+    // Fire-and-forget: `transition()` only catches its own QUEUE copy, so the
+    // returned promise must be caught here or an unhandled rejection takes the
+    // daemon down (Node ≥15 throws, and nothing installs a handler).
+    this.transition(() => this.restartIfDrained()).catch((error) =>
+      this.log("error", "agent host drain-restart failed", error)
+    );
   }
 
   /**
@@ -389,8 +394,26 @@ export class AgentHostSupervisor {
   private async spawnAndWait(killFirst: boolean): Promise<boolean> {
     this.setState("starting", null);
     this.health = null;
-    this.token = await this.regenerateToken();
-    await this.spawn(killFirst);
+    // Both of these throw on ordinary operational failures — a full disk on the
+    // token write, and `tmux new-session` exiting non-zero because a kill raced
+    // the respawn ("duplicate session: orqsvc-agent-host"), the cwd vanished,
+    // or the tmux socket died. Neither may escape: these run behind a bare
+    // `void` from the 15 s health interval, Node ≥15 throws on an unhandled
+    // rejection, and the daemon registers no handler — so one wedged respawn
+    // would take the whole daemon down with every live terminal on it. The
+    // contract is "latch error and retry", never "exit".
+    try {
+      this.token = await this.regenerateToken();
+      await this.spawn(killFirst);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      // `stopped`, not `error`: a duplicate-session or a transient tmux failure
+      // must stay retryable. `checkHealth` counts the attempt and latches
+      // `error` only at MAX_RESPAWNS, which is the documented cap.
+      this.setState("stopped", `agent host spawn failed: ${reason}`);
+      this.log("error", "agent host spawn failed", error);
+      return false;
+    }
     const probed = await this.probeUntilReady();
     if (probed.ok) {
       this.adopt(probed.health);

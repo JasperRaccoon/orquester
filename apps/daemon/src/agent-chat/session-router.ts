@@ -17,6 +17,7 @@
  */
 
 import { EventEmitter } from "node:events";
+import { sep } from "node:path";
 import type {
   AgentEventRequest,
   CreateSessionRequest,
@@ -91,12 +92,19 @@ export class ChatAwareSessionManager implements ISessionManager {
     return this.pty.close(id);
   }
 
+  /**
+   * `prefix` is the project (exact) or the workspace above it (`prefix + sep`),
+   * matching `SessionManager.closeByProjectPrefix`. The separator is
+   * `path.sep`, never a hardcoded `/`: on Windows — the documented no-tmux /
+   * desktop host — deleting a workspace would otherwise leave every chat tab
+   * under it open and every host thread orphaned.
+   */
   closeByProjectPrefix(prefix: string): void {
     for (const id of this.chat.list().map((s) => s.id)) {
       const summary = this.chat.get(id);
       if (!summary) continue;
       const project = summary.projectPath;
-      if (project === prefix || project.startsWith(`${prefix}/`)) {
+      if (project === prefix || project.startsWith(prefix + sep)) {
         this.close(id);
       }
     }
