@@ -2263,8 +2263,9 @@ Row kinds and behaviour:
 
 - **User message**: text, attachment thumbnails, "rewind to here".
 - **Assistant text**: react-markdown + remark-gfm with an incremental parser that caches the
-  prefix up to the last closed fence; Shiki on the Oniguruma WASM engine, code blocks mounted
-  line by line while streaming, cached HTML once settled.
+  prefix up to the last closed fence; code highlighted by the CodeMirror/Lezer parsers already in
+  the bundle (no WASM, see below), code blocks mounted line by line while streaming, cached HTML
+  once settled.
 - **Reasoning**: collapsed to one line, labelled "summary" when `reasoning_summary_text`.
 - **Activity group**: all activities between two assistant texts collapse into one line showing
   the live tool label while running and `summarizeToolGroup()` output when settled ("Read 3
@@ -2337,13 +2338,19 @@ link or footnote definition, which are document-wide. The whole markdown config 
 once and published on a context so plugin and component arrays never change identity.
 *T3: `apps/web/src/markdown-incremental.ts:32-85` — the prefix cache, the fence-plus-blank-line boundary, and the `\r`/BOM and definition bail-outs; `apps/web/src/components/ChatMarkdown.tsx:3318-3329` — the three-part arming condition; `:2658-2727, 3345, 3366` — the memoised `componentState` on a context and the `memo` wrapper*
 
-Shiki runs on the Oniguruma WASM engine — the JS regex engine can backtrack catastrophically and
-hang tokenisation. While a message streams, a code block renders as individually mounted lines
+Code is highlighted with the Lezer parsers `@codemirror/language-data` already ships — `highlightTree`
+over the parsed block, language resolved by fence name and loaded lazily — not with Shiki. T3 forces
+Shiki onto its Oniguruma **WASM** engine because the JS regex engine can backtrack catastrophically
+and hang tokenisation; here WASM is not an option, because the production SPA's CSP is
+`script-src 'self'` with no `'wasm-unsafe-eval'` and `/etc/caddy/Caddyfile` is reconciled by hand, so
+a WASM highlighter would fail silently after a deploy. Lezer parsers are plain JS, incremental, and
+already in the bundle for the file editor, so this adds no dependency and no CSP change, and an
+unknown fence name simply renders unhighlighted. While a message streams, a code block renders as individually mounted lines
 rather than one `innerHTML` blob, so appending a line never destroys the user's text selection; once
 the message settles, the rendered HTML goes into a size-aware LRU and is served as HTML. A block
 that streamed keeps the line renderer after settling, because swapping to cached HTML would clear a
 live selection.
-*T3: `apps/web/src/lib/syntaxHighlighting.ts:10-16` — `PREFERRED_HIGHLIGHTER = "shiki-wasm"` and the first-caller-wins singleton note; `apps/web/src/components/ChatMarkdown.tsx:1039-1073` — `preserveLines={isStreaming || hasStreamed}` and the selection comment; `:1084-1135` — `codeToHast` + `HighlightedCodeLines`; `:338-357, 1117-1126` — the settled-HTML LRU (500 entries / 50 MB), written only when not streaming*
+*T3: `apps/web/src/lib/syntaxHighlighting.ts:10-16` — `PREFERRED_HIGHLIGHTER = "shiki-wasm"` and the first-caller-wins singleton note; differs: Lezer instead of Shiki, for the CSP reason above — the line-mounted streaming renderer and the settled-HTML LRU below are kept as T3 has them; `apps/web/src/components/ChatMarkdown.tsx:1039-1073` — `preserveLines={isStreaming || hasStreamed}` and the selection comment; `:1084-1135` — `codeToHast` + `HighlightedCodeLines`; `:338-357, 1117-1126` — the settled-HTML LRU (500 entries / 50 MB), written only when not streaming*
 
 Live-follow is a render-visible flag — not a ref — re-armed only inside a 40 px band at the bottom
 of the content, measured as `contentLength - scroll - scrollLength`. A "near end" heuristic that
