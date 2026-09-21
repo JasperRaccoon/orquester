@@ -877,7 +877,7 @@ describe("session status (§5.1)", () => {
     assert.equal(sink.events().length, 0);
   });
 
-  it("the head's session state wins over ingestion's memory after a restart", async () => {
+  it("the head SEEDS the session state, so a restart keeps the active turn", async () => {
     const { ingestion, sink } = harness({
       threadContext: () => ({
         session: { status: "running", activeTurnId: "turn-restored" }
@@ -888,6 +888,19 @@ describe("session status (§5.1)", () => {
     const session = sink.ofType("thread.session-set")[0]!.payload.session;
     assert.equal(session.status, "running");
     assert.equal(session.activeTurnId, "turn-restored");
+  });
+
+  it("after seeding, ingestion's own memory wins over a head W1 has not applied yet", async () => {
+    // The head is written FROM these events. Re-reading a stale one per event
+    // would map the next session frame to `ready` and drop the active turn.
+    const { ingestion, sink } = harness({
+      threadContext: () => ({ session: { status: "idle", activeTurnId: null } })
+    });
+    await ingestion.ingest(runtimeEvent("turn.started", {}, { turnId: "turn-9" }));
+    await ingestion.ingest(runtimeEvent("session.started", {}));
+    await ingestion.drain();
+    const sessions = sink.ofType("thread.session-set").map((e) => e.payload.session);
+    assert.deepEqual(sessions, [{ status: "running", activeTurnId: "turn-9" }]);
   });
 });
 

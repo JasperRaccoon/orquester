@@ -830,8 +830,13 @@ export function createIngestion(options: IngestionOptions): Ingestion {
 
     // --- session lifecycle ------------------------------------------------
     if (isSessionLifecycleEvent(event)) {
-      const context = safeContext(threadId);
-      const previous = context?.session ?? state.session;
+      // Ingestion's own memory is authoritative once it has seen the thread:
+      // the head is written by W1 *from* these events, so re-reading it per
+      // event would race a not-yet-applied `turn.started` and map the next
+      // `session.started` to `ready` instead of `running`. The head is the
+      // SEED only — `stateFor` takes it when the thread is first touched,
+      // which is exactly the §3.3 post-restart case.
+      const previous = state.session;
       const next = nextSessionState({ event, previous });
       if (!sameSessionState(previous, next)) {
         state.session = next;
