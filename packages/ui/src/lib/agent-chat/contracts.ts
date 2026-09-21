@@ -1,0 +1,416 @@
+/**
+ * Agent chat — the client-side seams (spec §7.2, §7.3, §7.4).
+ *
+ * Types only. `hooks.ts` ships inert stubs so components compile today;
+ * package **W11** replaces them with the real store slice and transport.
+ * This file is additive-only afterwards.
+ */
+
+import type {
+  AgentPanelModel,
+  ApprovalDecision,
+  AttachmentRef,
+  BackgroundLiveness,
+  Checkpoint,
+  ComposerContextRecord,
+  InteractionMode,
+  ModelSelection,
+  PendingApproval,
+  PendingUserInput,
+  ProviderRequestKind,
+  ProviderSnapshot,
+  RuntimeMode,
+  RuntimeSubagent,
+  ThreadActivityItem,
+  ThreadHead,
+  ThreadItem,
+  ThreadMessageItem,
+  ThreadSessionStatus,
+  ThreadTokenUsage,
+  ToolLifecycleItemType,
+  Turn,
+  TurnState
+} from "@orquester/api/agent-chat";
+
+// ---------------------------------------------------------------------------
+// §7.2 — the per-thread store slice
+// ---------------------------------------------------------------------------
+
+/** Where the timeline is scrolled, remembered per thread in a 100-entry LRU. */
+export interface RememberedTimelinePosition {
+  rowId: string | null;
+  offsetWithinRow: number;
+  scrollOffset: number;
+  atEnd: boolean;
+  /**
+   * The full set of what was open — expanded turns, expanded activity groups,
+   * expanded subagent rows, expanded reasoning blocks, and the scroll offset
+   * inside each expanded tool output — so returning to a tab restores the
+   * reading position *and* the shape of the page under it.
+   */
+  disclosures: DisclosureState;
+  /** The plan-mode toggle §6.2 keeps out of thread state and re-sends per turn. */
+  interactionMode: InteractionMode;
+}
+
+export interface DisclosureState {
+  expandedTurnIds: string[];
+  expandedGroupIds: string[];
+  expandedAgentIds: string[];
+  expandedReasoningIds: string[];
+  /** Row id → scroll offset inside that row's expanded tool output. */
+  toolOutputOffsets: Record<string, number>;
+}
+
+/** §7.2 LRU capacity. */
+export const TIMELINE_POSITION_LRU_LIMIT = 100;
+
+/** Where the open thread's stream is, for the status line and the banners. */
+export type AgentChatConnectionState =
+  | "idle"
+  | "connecting"
+  | "synchronized"
+  | "reconnecting"
+  | "error";
+
+/**
+ * The client's own queue of messages it has not dispatched yet. A **different
+ * thing** from the host-side queue that holds already-posted `/turn`s behind a
+ * running compaction (§3.4). Held in memory only: a queued message is a live
+ * intent, not a draft worth persisting (§7.4).
+ */
+export interface QueuedComposerMessage {
+  id: string;
+  text: string;
+  attachments: AttachmentRef[];
+  context: ComposerContextRecord[];
+  interactionMode: InteractionMode;
+  /** The tool activity it was queued behind; re-anchored as the queue drains. */
+  queuedAfterToolActivityId: string | null;
+  /** A failed send is re-inserted at the front with this, so nothing overtakes it. */
+  holdUntilUserAction: boolean;
+  queuedAt: string;
+}
+
+/** One open thread's slice. Created on tab open, dropped on tab close (§7.2). */
+export interface AgentChatThreadSlice {
+  sessionId: string;
+  head: ThreadHead | null;
+  /** The snapshot's `items` with every later frame folded in. */
+  entries: ThreadItem[];
+  turns: Turn[];
+  checkpoints: Checkpoint[];
+  pending: { approvals: PendingApproval[]; userInputs: PendingUserInput[] };
+  roster: RuntimeSubagent[];
+  /** The latest turn's state, for the composer's primary action and the status line. */
+  turnStatus: TurnState | null;
+  sessionStatus: ThreadSessionStatus | null;
+  backgroundLiveness: BackgroundLiveness | null;
+  contextWindow: ThreadTokenUsage | null;
+  seq: number;
+  connection: AgentChatConnectionState;
+  /** Live-follow is a render-visible flag, never a ref (§7.3). */
+  follow: boolean;
+  scroll: RememberedTimelinePosition | null;
+  disclosures: DisclosureState;
+  /** Client-local, re-sent on every `/turn`. */
+  interactionMode: InteractionMode;
+  queue: QueuedComposerMessage[];
+  /** Request ids with a decision in flight; every control in that row is disabled. */
+  respondingRequestIds: string[];
+  /** Thread-level error banner text, overlaid — never a timeline row (§7.3). */
+  errorBanner: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// §7.2 — the normalised activity record the presentation resolver reads
+// ---------------------------------------------------------------------------
+
+export type WorkLogTone = "thinking" | "tool" | "info" | "error";
+
+export type WorkLogToolLifecycleStatus = "inProgress" | "completed" | "failed" | "declined";
+
+/**
+ * **One normalised record, not a component taxonomy** (§7.2). Icon, label and
+ * status chrome are all functions of these fields; adding a tool never adds a
+ * component, and nothing branches on the provider.
+ *
+ * *T3: `apps/web/src/session-logic.ts:56-95` (`WorkLogEntry`).*
+ */
+export interface WorkLogEntry {
+  id: string;
+  createdAt: string;
+  turnId: string | null;
+  /** Stable provider identity across the in-progress and completed updates of one call. */
+  toolCallId?: string;
+  label: string;
+  detail?: string;
+  command?: string;
+  changedFiles?: readonly string[];
+  tone: WorkLogTone;
+  toolTitle?: string;
+  toolData?: unknown;
+  itemType?: ToolLifecycleItemType;
+  requestKind?: ProviderRequestKind;
+  /** From the runtime item/task payload `status` when present. */
+  toolLifecycleStatus?: WorkLogToolLifecycleStatus;
+  /** The originating activity kind (e.g. `user-input.requested`), for row chrome. */
+  sourceActivityKind?: string;
+  /** Grouping key for subagent lifecycle rows — one row per agent. */
+  taskId?: string;
+  agentRole?: string;
+  /** Present on an answered-question row; the expansion shows the full history. */
+  questionAnswer?: {
+    requestId: string;
+    answers: Record<string, unknown>;
+    questionTextById?: Record<string, string>;
+  };
+  /**
+   * Present on agent-spawn rows: **ids only**. The label, live flag and member
+   * list resolve from the roster model at render time, because a persisted
+   * count goes stale the moment a member finishes (§7.6).
+   */
+  agentSpawn?: {
+    workflowId: string | null;
+    agentTaskIds: readonly string[];
+  };
+}
+
+// ---------------------------------------------------------------------------
+// §7.3 — the twelve projected row kinds
+// ---------------------------------------------------------------------------
+
+export type ToolGroupSummaryKind = "read" | "edit" | "command" | "search" | "other";
+
+/**
+ * The twelve row kinds the timeline projects, T3's set verbatim
+ * (`apps/web/src/components/chat/MessagesTimeline.logic.ts:329-442`), with
+ * `worktree-setup` dropped (per-thread worktrees are a non-goal, §2) and
+ * `turn-diff` added for the changed-files card §7.3 names.
+ */
+export type AgentChatTimelineRow =
+  | {
+      kind: "activity-group";
+      id: string;
+      createdAt: string;
+      turnId: string;
+      groupId: string;
+      entries: WorkLogEntry[];
+      expanded: boolean;
+      active: boolean;
+    }
+  | {
+      kind: "work";
+      id: string;
+      createdAt: string;
+      groupedEntries: WorkLogEntry[];
+      isExpandedToolGroup: boolean;
+      displayLabel?: string;
+    }
+  | {
+      kind: "work-live";
+      id: string;
+      createdAt: string;
+      entry: WorkLogEntry;
+      groupedEntries: WorkLogEntry[];
+      groupId: string;
+      expanded: boolean;
+      active: boolean;
+    }
+  | {
+      kind: "work-toggle";
+      id: string;
+      createdAt: string;
+      turnId: string | null;
+      groupId: string;
+      hiddenCount: number;
+      expanded: boolean;
+      summary: string;
+      summaryKind: ToolGroupSummaryKind;
+      hasFailure: boolean;
+    }
+  | {
+      kind: "turn-fold";
+      id: string;
+      createdAt: string;
+      turnId: string;
+      label: string;
+      expanded: boolean;
+    }
+  | {
+      kind: "context-compaction";
+      id: string;
+      createdAt: string;
+      label: string;
+      /** Carried on the event and formatted client-side (differs from T3). */
+      beforeTokens?: number;
+      afterTokens?: number;
+    }
+  | {
+      kind: "message";
+      id: string;
+      createdAt: string;
+      message: ThreadMessageItem;
+      durationStart: string;
+      showAssistantMeta: boolean;
+      /** Offered only where `supportsConversationRollback` (§6.3). */
+      revertTurnCount?: number;
+    }
+  | {
+      kind: "assistant-meta";
+      id: string;
+      createdAt: string;
+      message: ThreadMessageItem;
+    }
+  | {
+      kind: "turn-diff";
+      id: string;
+      createdAt: string;
+      turnCount: number;
+      turnId: string | null;
+      files: Checkpoint["files"];
+    }
+  | {
+      kind: "proposed-plan";
+      id: string;
+      createdAt: string;
+      planMarkdown: string;
+      implementedAt: string | null;
+    }
+  | { kind: "working"; id: string; createdAt: string | null }
+  | { kind: "thinking"; id: string; createdAt: string | null }
+  | {
+      kind: "queued-message";
+      id: string;
+      createdAt: string;
+      queuedMessage: QueuedComposerMessage;
+      /** The oldest queued message — the one the next boundary sends. */
+      isNext: boolean;
+    };
+
+export type AgentChatTimelineRowKind = AgentChatTimelineRow["kind"];
+
+/** The plan checklist is a **composer** surface, not a timeline row (§7.3). */
+export interface ActivePlanState {
+  createdAt: string;
+  turnId: string | null;
+  explanation?: string | null;
+  steps: Array<{ step: string; status: "pending" | "inProgress" | "completed" }>;
+}
+
+// ---------------------------------------------------------------------------
+// §7.2 / §7.4 — the actions interface
+// ---------------------------------------------------------------------------
+
+/**
+ * Every mutation a chat surface can perform. Each maps onto one §6.2 command
+ * and mints its own `commandId`; a retry reuses it, which the receipt makes
+ * free (§6.6).
+ *
+ * **No optimistic path** for sends, approvals, answers or interrupts — the
+ * user's message appears when its event arrives (§6.6).
+ */
+export interface AgentChatActions {
+  /** `/turn`. Starts a turn, or steers the active one. */
+  sendTurn(input: {
+    text: string;
+    attachments?: AttachmentRef[];
+    context?: ComposerContextRecord[];
+    interactionMode?: InteractionMode;
+    modelSelection?: ModelSelection;
+  }): Promise<void>;
+  /** `/turn` against a live turn. Same route; named apart for call-site clarity. */
+  steer(input: { text: string; attachments?: AttachmentRef[] }): Promise<void>;
+  /**
+   * `/interrupt`. Omits `turnId` whenever the session is not `running`, which
+   * is also the only way to stop background work — and it stops all of it.
+   */
+  interrupt(input?: { turnId?: string }): Promise<void>;
+  respondApproval(input: { requestId: string; decision: ApprovalDecision }): Promise<void>;
+  answerQuestion(input: {
+    requestId: string;
+    answers: Record<string, unknown>;
+    attachmentsByQuestionId?: Record<string, AttachmentRef[]>;
+  }): Promise<void>;
+  /** `/dismiss`. Offered only when the request carries `dismissible`. */
+  dismissQuestion(input: { requestId: string }): Promise<void>;
+  /** `/revert`. Conversation only — files are never restored (§5.5). */
+  revert(input: { targetTurnCount: number }): Promise<void>;
+  compact(): Promise<void>;
+  setMode(input: { runtimeMode?: RuntimeMode; modelSelection?: ModelSelection }): Promise<void>;
+  stopSession(): Promise<void>;
+  /** The existing `POST /api/sessions/:id/upload`; returns the attachment reference. */
+  uploadAttachment(file: File | Blob, meta: { name: string; type?: string }): Promise<AttachmentRef>;
+
+  // Client-local queue ops (§7.4). None of these touch the host.
+  queueMessage(message: Omit<QueuedComposerMessage, "id" | "queuedAt">): void;
+  /** Send the head of the queue now, leaving the current draft alone. */
+  sendQueuedNow(id: string): Promise<void>;
+  /** Return one queued message to the composer. */
+  returnQueuedToComposer(id: string): void;
+  /** Interrupting returns EVERY queued message to the composer (§7.4). */
+  drainQueueToComposer(): void;
+
+  // Client-local view state.
+  setInteractionMode(mode: InteractionMode): void;
+  setFollow(follow: boolean): void;
+  setDisclosure(patch: Partial<DisclosureState>): void;
+  dismissErrorBanner(): void;
+  /** Re-read the thread (a host instance change, or a user retry). */
+  refresh(): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// View-model hook signatures (implemented by W11 in `hooks.ts`)
+// ---------------------------------------------------------------------------
+
+export interface AgentChatThreadView {
+  slice: AgentChatThreadSlice;
+  actions: AgentChatActions;
+  /** Memoised rows (§7.2: entries → rows → stable rows). */
+  rows: AgentChatTimelineRow[];
+  activePlan: ActivePlanState | null;
+}
+
+export interface AgentChatRosterView {
+  agents: RuntimeSubagent[];
+  panel: AgentPanelModel;
+  backgroundLiveness: BackgroundLiveness | null;
+  /** True while an interrupt is in flight; the Stop button reads "Stopping…". */
+  stopping: boolean;
+}
+
+export interface AgentChatPendingView {
+  approvals: PendingApproval[];
+  userInputs: PendingUserInput[];
+  /** `1/N` counters and the in-flight lock-out come from these. */
+  respondingRequestIds: readonly string[];
+  totalCount: number;
+}
+
+export interface AgentChatStatusView {
+  sessionStatus: ThreadSessionStatus | null;
+  turnStatus: TurnState | null;
+  connection: AgentChatConnectionState;
+  contextWindow: ThreadTokenUsage | null;
+  /** Absent on an adapter with `reportsContextWindow: false`; degrade, never zeros. */
+  reportsContextWindow: boolean;
+  activityLabel: string | null;
+  turnStartedAt: string | null;
+}
+
+export type UseAgentChatThread = (sessionId: string) => AgentChatThreadView;
+export type UseAgentChatRoster = (sessionId: string) => AgentChatRosterView;
+export type UseAgentChatPending = (sessionId: string) => AgentChatPendingView;
+export type UseAgentChatStatus = (sessionId: string) => AgentChatStatusView;
+/** `refId` is the registry id; the hook maps it to its adapter's snapshot. */
+export type UseProviderSnapshot = (refId: string) => ProviderSnapshot | null;
+
+/** Narrowing helpers the row components use instead of re-deriving. */
+export function isActivityEntry(item: ThreadItem): item is ThreadActivityItem {
+  return item.kind === "activity";
+}
+
+export function isMessageEntry(item: ThreadItem): item is ThreadMessageItem {
+  return item.kind === "message";
+}

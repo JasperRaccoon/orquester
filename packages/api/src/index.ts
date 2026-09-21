@@ -1,6 +1,29 @@
 import type { ClientConfig, DaemonConfig } from "@orquester/config";
+import type {
+  BackgroundLiveness as AgentChatBackgroundLiveness,
+  LatestTurnSummary as AgentChatLatestTurnSummary,
+  ThreadSessionStatus as AgentChatThreadSessionStatus
+} from "./agent-chat/index.ts";
 
 export type RuntimeMode = "desktop-local" | "desktop-remote" | "web-remote";
+
+/**
+ * Agent chat contracts (`docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md`).
+ *
+ * One name collides: the chat design uses T3 Code's `RuntimeMode`, which means
+ * the *permission* mode, while this module's `RuntimeMode` above means the
+ * *client platform*. The local declaration wins here, so from `@orquester/api`
+ * the permission mode is **`AgentRuntimeMode`**; importing from
+ * `@orquester/api/agent-chat` gives you T3's spelling of both it and
+ * everything else.
+ */
+export * from "./agent-chat/index.ts";
+
+export type {
+  AgentChatBackgroundLiveness,
+  AgentChatLatestTurnSummary,
+  AgentChatThreadSessionStatus
+};
 
 export interface ApiEnvelope<T> {
   data: T;
@@ -783,10 +806,25 @@ export interface OpenTargetSummary {
 
 // Registry — shells & agents share the same shape.
 
-export type RegistryKind = "shell" | "agent" | "ide" | "file-explorer" | "browser";
+/**
+ * `"agent-chat"` is a SESSION kind, never a catalog kind: no `REGISTRY` entry
+ * carries it. An agent-chat tab still names an agent entry through `refId`,
+ * and that entry's `chat.adapter` (see `@orquester/registry`) picks the
+ * adapter. Agent chat design spec §5.2/§5.3, §7.1.
+ */
+export type RegistryKind =
+  | "shell"
+  | "agent"
+  | "agent-chat"
+  | "ide"
+  | "file-explorer"
+  | "browser";
 
-/** Kinds that launch a persistent PTY session. */
-export type SessionKind = Extract<RegistryKind, "shell" | "agent">;
+/** Kinds that own a persistent session (a PTY, or an agent-host thread). */
+export type SessionKind = Extract<RegistryKind, "shell" | "agent" | "agent-chat">;
+
+/** Kinds whose session is a real PTY the terminal surfaces can attach to. */
+export type PtySessionKind = Extract<SessionKind, "shell" | "agent">;
 
 /** Kinds the "Open in…" menu can launch (fire-and-forget, with a path). */
 export type OpenKind = Extract<RegistryKind, "ide" | "file-explorer" | "browser">;
@@ -1192,6 +1230,30 @@ export interface SessionSummary {
   missingModels?: string[];
   /** Live activity snapshot; absent in persisted indexes and for exited sessions. */
   activity?: SessionActivity;
+
+  // --- agent chat (kind "agent-chat") -------------------------------------
+  // The six derived fields of the chat design spec §6.4 / §7.1, so the tab
+  // strip, Attention Center, command palette and push gate render a chat tab's
+  // status without opening a thread stream. This list is the contract those
+  // surfaces read; no surface may invent a name for one of them. Absent for
+  // every other kind and for persisted records.
+
+  /** A tool/command approval is open and needs a decision. */
+  hasPendingApprovals?: boolean;
+  /** A structured question is open. Separate from approvals: different UI, different push copy. */
+  hasPendingUserInput?: boolean;
+  /** A plan proposal is on screen and not yet implemented. */
+  hasActionableProposedPlan?: boolean;
+  /**
+   * Native background work alive after the turn settled: "working" while any
+   * agent work is live, "monitoring" when watch loops and background shells
+   * are the only live work, null otherwise. Never persisted.
+   */
+  backgroundLiveness?: AgentChatBackgroundLiveness | null;
+  /** The thread's latest turn, for the activity ladder and the unread stamp. */
+  latestTurn?: AgentChatLatestTurnSummary | null;
+  /** The session status from the thread head (§5.1). */
+  chatSessionStatus?: AgentChatThreadSessionStatus;
 }
 
 export interface CreateSessionRequest {
