@@ -30,6 +30,7 @@
  */
 
 import type {
+  AccountHome,
   AdapterCapabilities,
   AgentAdapterId,
   ApprovalDecision,
@@ -82,6 +83,14 @@ export const GROK_CAPABILITIES: AdapterCapabilities = {
 /** At most this many per-cwd overlays are retained (§4.6.4). */
 const MAX_WORKSPACE_SNAPSHOTS = 16;
 
+/**
+ * The home a probe uses before any session has named one. An EMPTY path is
+ * deliberate: `support/env.ts` only sets `GROK_HOME` for a non-empty path, so
+ * this means "the CLI's own identity" rather than "an empty directory that
+ * looks logged out".
+ */
+const PROBE_SYSTEM_HOME: AccountHome = { kind: "system", path: "" };
+
 class GrokAdapter implements AgentAdapter {
   readonly id = ADAPTER_ID;
   readonly capabilities = GROK_CAPABILITIES;
@@ -94,6 +103,14 @@ class GrokAdapter implements AgentAdapter {
   private readonly workspaceSnapshots = new Map<string, WorkspaceSnapshot>();
   private lastSnapshot: ProviderSnapshot | null = null;
   private refreshInFlight: Promise<ProviderSnapshot> | null = null;
+  /**
+   * The last account home a session was started under, so the probe reads the
+   * identity the user actually selected. Without it `grok models` runs against
+   * whatever `~/.grok` the daemon user has — which on a managed deployment is
+   * nothing, and the snapshot then reports `unauthenticated` for an account
+   * that works perfectly (observed on the first smoke run).
+   */
+  private probeHome: AccountHome = PROBE_SYSTEM_HOME;
 
   constructor(context: AdapterContext) {
     this.context = context;
@@ -181,6 +198,7 @@ class GrokAdapter implements AgentAdapter {
       )
     });
 
+    this.probeHome = input.home;
     this.sessions.set(input.threadId, session);
     try {
       await session.start();
@@ -352,10 +370,7 @@ class GrokAdapter implements AgentAdapter {
 
   private async runProbe(cwd?: string): Promise<ProviderSnapshot> {
     const command = await this.context.resolveBin("grok");
-    const env = this.context.buildEnv({
-      threadId: "probe",
-      home: { kind: "system", path: this.context.tmpDir() }
-    });
+    const env = this.context.buildEnv({ threadId: "probe", home: this.probeHome });
     const probe = await probeGrok({
       command,
       env,
@@ -408,7 +423,7 @@ class GrokAdapter implements AgentAdapter {
     }
     const env = this.context.buildEnv({
       threadId: "probe",
-      home: { kind: "system", path: this.context.tmpDir() },
+      home: this.probeHome,
       extraEnv: GROK_EXTRA_ENV
     });
     const skills = await probeSkills(command, env, cwd);

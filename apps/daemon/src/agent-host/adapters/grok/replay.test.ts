@@ -145,10 +145,11 @@ test("02 plain prompt: the RPC result carries the turn's usage and its cost", ()
 
 test("03 allow-once: the write tool is one item lifecycle, ending completed", () => {
   const { events } = replay("03-permission-allow-once.ndjson");
-  const items = only(events, "item.started")
-    .concat(only(events, "item.updated"))
-    .concat(only(events, "item.completed"))
-    .filter((event) => event.itemId?.startsWith("call-") === true);
+  const items = events.filter(
+    (event) =>
+      (event.type === "item.started" || event.type === "item.updated" || event.type === "item.completed") &&
+      event.itemId?.startsWith("call-") === true
+  );
   assert.ok(items.length >= 2, "the tool call produced at least a start and an end");
   const terminal = only(events, "item.completed").filter(
     (event) => event.itemId === "call-486f0cb1-3534-4c3c-a237-e7d938aaa418-0"
