@@ -568,48 +568,109 @@ export function workEntryIconName(entry: WorkPresentationEntry): WorkEntryIconNa
 // Joining one tool call's lifecycle rows
 // ---------------------------------------------------------------------------
 
+/** A streamed output chunk of a tool call, not a tool call of its own. */
+export function isToolOutputRow(entry: WorkPresentationEntry): boolean {
+  return entry.sourceActivityKind === "tool.output";
+}
+
 /**
- * Fills a lifecycle row's empty presentation fields from its siblings.
+ * Folds one tool call's lifecycle rows into the row that renders it.
  *
- * REALITY (W7's Codex capture): a `fileChange` **approval** carries no diff and
- * no file list — only the `itemId` of the `item.started` that preceded it. A
- * row that says "Apply patch?" and nothing else is unanswerable, so within one
- * group a row borrows `command`, `detail` and `changedFiles` from another row
- * of the **same tool call** (`toolCallId`) that has them.
+ * Two realities from the protocol captures make this necessary, and both are
+ * keyed on `toolUseId` (`toolCallId` here), which §5.6 guarantees is stable
+ * across every update of one call:
  *
- * Three properties keep this from being a re-derivation of state:
+ *  - **Streamed command output arrives as its own rows.** W3 turns
+ *    `content.delta {command_output|file_change_output}` into chunked, batched
+ *    `tool.output` activities. They are the *inside* of a tool row, not twenty
+ *    sibling rows: they are concatenated in arrival order and become the owning
+ *    row's expanded output, and they are removed from the group.
+ *  - **A `fileChange` approval carries no diff** (Codex): only the id of the
+ *    `item.started` that preceded it. A row that says "Apply patch?" and
+ *    nothing else is unanswerable, so a row borrows `command`, `detail` and
+ *    `changedFiles` from a sibling of the same call that has them.
+ *
+ * Three properties keep this from being a re-derivation of thread state:
  *
  *  - it is scoped to the rows already in one group, never to the thread;
- *  - it is keyed on `toolCallId`, which §5.6 guarantees is stable across the
- *    in-progress and completed updates of one call — not on a label match;
- *  - it only ever **adds** a missing field. A row that already has a value
- *    keeps it, and the returned entry is the same reference when nothing was
- *    filled, so the row's `memo` is untouched in the common case.
+ *  - it is keyed on the id, never on a label match;
+ *  - it only ever **adds** to a row, except for the streamed output, which is
+ *    the fuller truth and therefore wins over a slimmed summary. An orphan
+ *    output chunk — one whose owner is not in this group — is kept as its own
+ *    row rather than silently dropped. The returned entry is the same reference
+ *    when nothing was filled, so a settled group's row memos are untouched.
  */
 export function joinLifecycleDetails<T extends WorkPresentationEntry>(entries: readonly T[]): T[] {
-  const byCall = new Map<string, { command?: string; detail?: string; changedFiles?: readonly string[] }>();
+  const owners = new Set<string>();
+  const outputs = new Map<string, string[]>();
+  const borrowed = new Map<
+    string,
+    { command?: string; detail?: string; changedFiles?: readonly string[] }
+  >();
+
   for (const entry of entries) {
-    if (entry.toolCallId === undefined) continue;
-    const slot = byCall.get(entry.toolCallId) ?? {};
+    const callId = entry.toolCallId;
+    if (callId === undefined) continue;
+    if (isToolOutputRow(entry)) {
+      // NOT `nonEmpty`: trimming a streamed chunk would eat the newlines that
+      // separate it from the next one, and a command's output is its whitespace.
+      const chunk = entry.detail;
+      if (chunk !== undefined && chunk.length > 0) {
+        const chunks = outputs.get(callId);
+        if (chunks) chunks.push(chunk);
+        else outputs.set(callId, [chunk]);
+      }
+      continue;
+    }
+    owners.add(callId);
+    const slot = borrowed.get(callId) ?? {};
     if (slot.command === undefined && nonEmpty(entry.command) !== null) slot.command = entry.command;
     if (slot.detail === undefined && nonEmpty(entry.detail) !== null) slot.detail = entry.detail;
     if (slot.changedFiles === undefined && (entry.changedFiles?.length ?? 0) > 0) {
       slot.changedFiles = entry.changedFiles;
     }
-    byCall.set(entry.toolCallId, slot);
+    borrowed.set(callId, slot);
   }
-  if (byCall.size === 0) return [...entries];
 
-  return entries.map((entry) => {
-    if (entry.toolCallId === undefined) return entry;
-    const slot = byCall.get(entry.toolCallId);
-    if (slot === undefined) return entry;
-    const patch: Partial<WorkPresentationEntry> = {};
-    if (nonEmpty(entry.command) === null && slot.command !== undefined) patch.command = slot.command;
-    if (nonEmpty(entry.detail) === null && slot.detail !== undefined) patch.detail = slot.detail;
-    if ((entry.changedFiles?.length ?? 0) === 0 && slot.changedFiles !== undefined) {
-      patch.changedFiles = slot.changedFiles;
+  if (borrowed.size === 0 && outputs.size === 0) return [...entries];
+
+  // The streamed output lands on the LAST row that owns the call — the terminal
+  // one — so it is printed once, and so it survives
+  // `omitSupersededLifecycleMarkers` dropping the unkeyed start frame.
+  const outputRow = new Map<string, number>();
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index] as T;
+    const callId = entry.toolCallId;
+    if (callId === undefined || isToolOutputRow(entry)) continue;
+    if (outputs.has(callId)) outputRow.set(callId, index);
+  }
+
+  const result: T[] = [];
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index] as T;
+    const callId = entry.toolCallId;
+    if (callId === undefined) {
+      result.push(entry);
+      continue;
     }
-    return Object.keys(patch).length === 0 ? entry : { ...entry, ...patch };
-  });
+    if (isToolOutputRow(entry)) {
+      // Kept only when nothing in this group owns it, so nothing is lost.
+      if (!owners.has(callId)) result.push(entry);
+      continue;
+    }
+    const slot = borrowed.get(callId);
+    const patch: Partial<WorkPresentationEntry> = {};
+    if (slot !== undefined) {
+      if (nonEmpty(entry.command) === null && slot.command !== undefined) patch.command = slot.command;
+      if (nonEmpty(entry.detail) === null && slot.detail !== undefined) patch.detail = slot.detail;
+      if ((entry.changedFiles?.length ?? 0) === 0 && slot.changedFiles !== undefined) {
+        patch.changedFiles = slot.changedFiles;
+      }
+    }
+    if (outputRow.get(callId) === index) {
+      patch.detail = (outputs.get(callId) ?? []).join("");
+    }
+    result.push(Object.keys(patch).length === 0 ? entry : { ...entry, ...patch });
+  }
+  return result;
 }

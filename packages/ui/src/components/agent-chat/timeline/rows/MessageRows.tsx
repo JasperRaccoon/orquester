@@ -125,18 +125,38 @@ export const UserMessageRow = React.memo(function UserMessageRow({
 // Assistant message
 // ---------------------------------------------------------------------------
 
-/** No bubble, no background, full column width: the agent's output is the page. */
+/**
+ * No bubble, no background, full column width: the agent's output is the page.
+ *
+ * A message the provider marked as **commentary** rather than the turn's answer
+ * (Codex's `phase`) is rendered quietly — muted and indented under the activity
+ * column. The projection is meant to demote it into the activity group before
+ * it ever gets here (§7.3); this is the graceful degradation if one slips
+ * through, because a thread of "I'll do X next" narration rendered as full
+ * answers is unreadable.
+ */
 export const AssistantMessageRow = React.memo(function AssistantMessageRow({
   row
 }: {
   row: Row<"message">;
 }): React.ReactElement {
   const ctx = useTimelineRowContext();
+  const commentary = row.message.messageKind === "commentary";
   const text = row.message.text || (row.message.streaming ? "" : "(empty response)");
   return (
-    <div className="group/assistant relative min-w-0 px-1 py-0.5">
+    <div
+      className={cn(
+        "group/assistant relative min-w-0 px-1 py-0.5",
+        commentary && "ms-7 text-neutral-400"
+      )}
+    >
       <AuthorHeading>Agent</AuthorHeading>
-      <ChatMarkdown text={text} streaming={row.message.streaming} onOpenFile={ctx.onOpenFile} />
+      <ChatMarkdown
+        text={text}
+        streaming={row.message.streaming}
+        onOpenFile={ctx.onOpenFile}
+        {...(commentary ? { className: "text-neutral-500" } : {})}
+      />
     </div>
   );
 });
