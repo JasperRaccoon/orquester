@@ -29,7 +29,11 @@ import {
   agentChatThreadAttachmentsDir,
   agentHostSocketPath,
   agentHostTokenPath,
-  daemonConfigDir
+  appConfigPath,
+  continueThreadsForProject,
+  createDefaultAppConfig,
+  daemonConfigDir,
+  parseAppConfig
 } from "@orquester/config";
 import { REGISTRY, type RegistryEntryDef } from "@orquester/registry";
 import type { AccountHome, AgentAdapterId, ProviderSnapshot } from "@orquester/api/agent-chat";
@@ -356,7 +360,7 @@ export async function startAgentHost(
       }
       return { kind: "system", path: homeDir };
     },
-    continuationEnabled: () => continuationDefault(env),
+    continuationEnabled: (projectPath) => continuationEnabledFor(appdir, projectPath, env),
     launchArgsForRefId: (refId) => refIds.get(refId)?.args ?? [],
     clock,
     ids
@@ -455,12 +459,31 @@ export async function startAgentHost(
 }
 
 /**
- * §3.3: continuation is opt-in per project over a host-wide default that is
- * **off**. The per-project resolution is the daemon's (it owns project
- * settings); until that lands the host honours the host-wide switch only.
+ * §3.3: continuation is opt-in **per project** over a host-wide default that is
+ * **off**, because "pick up where you left off" is wrong for a project where a
+ * turn was halfway through a destructive operation.
+ *
+ * The host reads `app.json` itself through the config seam rather than being
+ * handed the prefs by the daemon: the reconcile runs at boot, before any daemon
+ * has spoken to it, so a pushed value would arrive too late to decide anything.
+ * The file is read per pass (a reconcile is rare) and an unreadable or
+ * unparseable one falls back to the schema's defaults — off.
  */
-function continuationDefault(env: NodeJS.ProcessEnv): boolean {
-  return env.ORQUESTER_AGENT_CONTINUE_AFTER_RESTART === "1";
+async function continuationEnabledFor(
+  appdir: string,
+  projectPath: string,
+  env: NodeJS.ProcessEnv
+): Promise<boolean> {
+  if (env.ORQUESTER_AGENT_CONTINUE_AFTER_RESTART === "1") {
+    return true;
+  }
+  try {
+    const raw = await readFile(appConfigPath(appdir), "utf8");
+    const config = parseAppConfig(JSON.parse(raw) as unknown);
+    return continueThreadsForProject(config.agents, projectPath);
+  } catch {
+    return continueThreadsForProject(createDefaultAppConfig().agents, projectPath);
+  }
 }
 
 // ---------------------------------------------------------------------------
