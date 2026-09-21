@@ -864,6 +864,66 @@ export function parseAgentReceiptsFile(value: unknown): AgentReceiptsFile {
   return { version: 1, receipts: receipts.slice(-AGENT_RECEIPTS_RING_SIZE) };
 }
 
+/**
+ * One line of `events.ndjson`. Mirrors `DomainEvent`'s envelope in
+ * `@orquester/api`; the `payload` stays `unknown` here on purpose.
+ *
+ * ROLLBACK BOUNDARY (§8): a log written by a newer host must still decode in
+ * an older one, so validating fourteen payload shapes at the line level would
+ * turn every new optional field into a truncated thread. The envelope is what
+ * the reader needs to order, filter and replay; the fold in `@orquester/api`
+ * is tolerant about everything inside `payload`.
+ */
+export const agentDomainEventTypeSchema = z.enum([
+  "thread.created",
+  "thread.meta-updated",
+  "thread.runtime-mode-set",
+  "thread.message-sent",
+  "thread.turn-start-requested",
+  "thread.turn-interrupt-requested",
+  "thread.approval-response-requested",
+  "thread.user-input-response-requested",
+  "thread.session-set",
+  "thread.activity-appended",
+  "thread.turn-diff-completed",
+  "thread.checkpoint-revert-requested",
+  "thread.reverted",
+  "thread.deleted"
+]);
+export type AgentDomainEventType = z.infer<typeof agentDomainEventTypeSchema>;
+
+export const agentDomainEventMetadataSchema = z
+  .object({
+    providerTurnId: z.string().optional(),
+    providerItemId: z.string().optional(),
+    adapterKey: z.string().optional(),
+    requestId: z.string().optional(),
+    ingestedAt: z.string().optional()
+  })
+  .passthrough();
+
+export const agentDomainEventEnvelopeSchema = z.object({
+  seq: z.number().int().positive(),
+  eventId: z.string().min(1),
+  threadId: z.string().min(1),
+  type: agentDomainEventTypeSchema,
+  payload: z.unknown(),
+  occurredAt: z.string(),
+  commandId: z.string().nullable().default(null),
+  causationEventId: z.string().nullable().default(null),
+  metadata: agentDomainEventMetadataSchema.default({})
+});
+export type AgentDomainEventEnvelope = z.infer<typeof agentDomainEventEnvelopeSchema>;
+
+/**
+ * Returns null rather than throwing: a malformed line TRUNCATES the fold at
+ * that point (spec §5.1), it never discards the file and never fails the host.
+ */
+export function parseAgentDomainEvent(value: unknown): AgentDomainEventEnvelope | null {
+  const parsed = agentDomainEventEnvelopeSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
 /** One persisted browser tab. The Chromium PROCESS does not survive a daemon
  *  restart (it is a daemon child, unlike tmux) — only the tab record does;
  *  first subscribe after boot relaunches and re-navigates. */
