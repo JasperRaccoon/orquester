@@ -1204,6 +1204,24 @@ describe("orchestrator — the §6.1 launch config (§3.1)", () => {
     await host.stop();
   });
 
+  it("resolves a project's launcher env for OpenCode's shared server", async () => {
+    const opencode = createScriptedAdapter({ id: "opencode" });
+    const host = createTestHost({ adapters: { opencode } });
+    await host.createThread({
+      threadId: "thread-1",
+      refId: "opencode",
+      cwd: "/work/project",
+      launchEnv: { OPENCODE_CONFIG_CONTENT: '{"provider":{}}' }
+    });
+
+    // The server is per PROJECT and belongs to no single thread (§3.2).
+    assert.deepEqual(host.orchestrator.launchConfigForCwd("/work/project")?.launchEnv, {
+      OPENCODE_CONFIG_CONTENT: '{"provider":{}}'
+    });
+    assert.equal(host.orchestrator.launchConfigForCwd("/work/elsewhere"), null);
+    await host.stop();
+  });
+
   it("survives a host restart — the daemon sends it once, at create", async () => {
     const first = createTestHost();
     const threadId = await first.createThread({

@@ -361,6 +361,15 @@ export interface Orchestrator {
    */
   launchConfig(threadId: string): ThreadLaunchConfig | null;
   /**
+   * The launcher env of a loaded thread in this project or working directory.
+   *
+   * OpenCode runs **one server per project**, shared by its threads (§3.2), so
+   * the child that needs the env belongs to no single thread. Every thread of
+   * one project launches from the same registry entry, so any of their configs
+   * is the right one; the newest is used so a re-created tab wins.
+   */
+  launchConfigForCwd(cwd: string): ThreadLaunchConfig | null;
+  /**
    * Where `createIngestion({sink})` delivers translated domain events (§5.1).
    * They are appended through the store, in order, on the thread's own command
    * queue, so an ingestion append can never interleave with a command's.
@@ -2010,6 +2019,19 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   const launchConfig = (threadId: string): ThreadLaunchConfig | null =>
     runtimes.get(threadId)?.launch ?? null;
 
+  const launchConfigForCwd = (cwd: string): ThreadLaunchConfig | null => {
+    let best: { launch: ThreadLaunchConfig; updatedAt: string } | null = null;
+    for (const runtime of runtimes.values()) {
+      const head = headOf(runtime);
+      if (!head || runtime.deleted || !runtime.launch) continue;
+      if (head.cwd !== cwd && head.projectPath !== cwd) continue;
+      if (best === null || head.updatedAt > best.updatedAt) {
+        best = { launch: runtime.launch, updatedAt: head.updatedAt };
+      }
+    }
+    return best?.launch ?? null;
+  };
+
   const adapterForThread = (threadId: string): AgentAdapterId | null => {
     const runtime = runtimes.get(threadId);
     const head = runtime ? headOf(runtime) : null;
@@ -2398,6 +2420,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     subscribe,
     threadContext,
     launchConfig,
+    launchConfigForCwd,
     placeholderCheckpoint,
     onAccountEvent,
     adapterForThread,

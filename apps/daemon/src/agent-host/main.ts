@@ -258,6 +258,20 @@ export async function startAgentHost(
     deleteThreadRefs: (input) => checkpoints.deleteThreadRefs(input)
   });
 
+  /**
+   * OpenCode's shared per-project server is built with a synthetic
+   * `project:<dir>` session id, because it belongs to no single thread (§3.2).
+   * Resolve the project's launcher env for it; anything else, or an unknown
+   * project, degrades to no launcher env.
+   */
+  const PROJECT_PSEUDO_THREAD_PREFIX = "project:";
+  const projectLaunchConfig = (threadId: string) =>
+    threadId.startsWith(PROJECT_PSEUDO_THREAD_PREFIX)
+      ? (orchestrator?.launchConfigForCwd(
+          threadId.slice(PROJECT_PSEUDO_THREAD_PREFIX.length)
+        ) ?? null)
+      : null;
+
   const shutdown = new AbortController();
 
   // ---- adapters (acquired BEFORE the gate opens, §3.1) -------------------
@@ -277,7 +291,7 @@ export async function startAgentHost(
       // under every `resolveExtraEnv` contributor. It layers OVER the adapter's
       // own extras, exactly as the terminal wrapper's `export` wins over
       // `tmux -e`.
-      const launch = orchestrator?.launchConfig(threadId) ?? null;
+      const launch = orchestrator?.launchConfig(threadId) ?? projectLaunchConfig(threadId);
       const accountHomeDir = launch?.homePath ?? (home.kind !== "system" ? home.path : undefined);
       const env = buildProviderEnv({
         adapter,
