@@ -83,7 +83,17 @@ async function harness(
     // a temp file can appear after the rmdir listed the directory.
     cleanup: async () => {
       await drainSessionIndexWrites(indexPath);
-      await rm(dir, { recursive: true, force: true });
+      // `close()`/`closeAll()` can queue one more write behind the drain, so
+      // retry the rmdir rather than failing the test on an ENOTEMPTY that says
+      // nothing about the code under test.
+      for (let attempt = 0; attempt < 10; attempt++) {
+        try {
+          await rm(dir, { recursive: true, force: true });
+          return;
+        } catch {
+          await drainSessionIndexWrites(indexPath);
+        }
+      }
     }
   };
 }
