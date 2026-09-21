@@ -10,6 +10,7 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { randomUUID } from "node:crypto";
 
 /** Rewrite a file atomically: write a sibling temp, fsync, rename over. */
 export async function atomicWriteFile(
@@ -19,7 +20,9 @@ export async function atomicWriteFile(
 ): Promise<void> {
   const dir = path.dirname(filePath);
   await fs.mkdir(dir, { recursive: true });
-  const tmp = path.join(dir, `.${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
+  // `pid + Date.now()` collides for two writes in the same millisecond — the
+  // second `rename` then throws ENOENT out of `saveHead`.
+  const tmp = path.join(dir, `.${path.basename(filePath)}.${process.pid}.${randomUUID()}.tmp`);
   const handle = await fs.open(tmp, "w", mode);
   try {
     await handle.writeFile(contents, "utf8");

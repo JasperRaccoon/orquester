@@ -59,6 +59,13 @@ export function ContextMeter({
       align="right"
       width="w-64"
       className="p-0"
+      // Reading the remaining context is a glance, not a decision — T3 opens
+      // this one on hover and holds it open long enough to reach the Compact
+      // button inside it. Click still works, and touch is click-only.
+      // *T3: `ContextWindowMeter.tsx:39-42`.*
+      openOnHover
+      hoverOpenDelay={150}
+      hoverCloseDelay={150}
       trigger={
         <span
           className={cn(
@@ -70,78 +77,104 @@ export function ContextMeter({
         </span>
       }
     >
-      <div className="flex flex-col gap-2 p-3">
-        <div className="flex items-center justify-between gap-3">
-          <div className="text-xs font-medium text-neutral-400">Context window</div>
-          <div className="ac-tabular text-[11px] leading-4 text-neutral-400">
-            {model.maxTokens !== null && percent !== null ? (
-              <>
-                <span className={cn(overloaded && "text-danger-300")}>{percent}</span>
-                <span className="mx-1 text-neutral-600">·</span>
-                <span>
-                  {formatContextTokens(model.usedTokens)}/{formatContextTokens(model.maxTokens)}
-                </span>
-              </>
-            ) : (
-              <span>{formatContextTokens(model.usedTokens)}</span>
-            )}
-          </div>
-        </div>
-
-        {model.maxTokens !== null && model.usedPercentage !== null ? (
-          <div
-            role="progressbar"
-            aria-label="Context window usage"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={Math.round(model.usedPercentage)}
-            className="h-1.5 w-full overflow-hidden rounded-full bg-neutral-800"
-          >
-            <div
-              className={cn(
-                "h-full rounded-full transition-[width,background-color] duration-500 ease-out",
-                "motion-reduce:transition-none",
-                overloaded ? "bg-danger" : "bg-neutral-400"
-              )}
-              style={{ width: `${Math.max(0, Math.min(100, model.usedPercentage))}%` }}
-            />
-          </div>
-        ) : (
-          // Say why there is no ring. A silent absence reads as a bug.
-          <p className="text-[11px] leading-4 text-neutral-500">
-            This agent does not report a context window, so only the token count is known.
-          </p>
-        )}
-
-        {model.totalProcessedTokens !== null ? (
-          <div className="flex items-center justify-between gap-3 text-[11px] leading-4">
-            <span className="text-neutral-500">Total processed</span>
-            <span className="ac-tabular font-medium text-neutral-400">
-              {formatContextTokens(model.totalProcessedTokens)}
-            </span>
-          </div>
-        ) : null}
-
-        {model.autoCompactAtTokens !== null || model.maxTokens !== null ? (
-          <p className="text-[11px] leading-4 text-neutral-500">
-            {formatAutoCompactionSentence(modelLabel, model.autoCompactAtTokens)}
-          </p>
-        ) : null}
-
-        <Button
-          variant="outline"
-          size="sm"
-          className="mt-1 w-full justify-center"
-          disabled={compactDisabled}
-          onClick={onCompact}
-        >
-          <Minimize2 size={13} aria-hidden />
-          Compact context
-        </Button>
-        {compactDisabled && compactDisabledReason ? (
-          <p className="text-[11px] leading-4 text-neutral-500">{compactDisabledReason}</p>
-        ) : null}
-      </div>
+      <ContextMeterPanel
+        model={model}
+        modelLabel={modelLabel}
+        onCompact={onCompact}
+        compactDisabled={compactDisabled}
+        compactDisabledReason={compactDisabledReason}
+      />
     </Dropdown>
+  );
+}
+
+
+/**
+ * The popover's contents, exported so the readout can be rendered — and
+ * asserted — without driving the popover open. Everything here is a function
+ * of the model; the trigger owns the interaction.
+ */
+export function ContextMeterPanel({
+  model,
+  modelLabel = null,
+  onCompact,
+  compactDisabled = false,
+  compactDisabledReason = null
+}: ContextMeterProps): React.ReactElement {
+  const percent = formatMeterPercent(model.usedPercentage);
+  const overloaded = isMeterOverloaded(model.usedPercentage);
+  return (
+    <div className="flex flex-col gap-2 p-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-xs font-medium text-neutral-400">Context window</div>
+        <div className="ac-tabular text-[11px] leading-4 text-neutral-400">
+          {model.maxTokens !== null && percent !== null ? (
+            <>
+              <span className={cn(overloaded && "text-danger-300")}>{percent}</span>
+              <span className="mx-1 text-neutral-600">·</span>
+              <span>
+                {formatContextTokens(model.usedTokens)}/{formatContextTokens(model.maxTokens)}
+              </span>
+            </>
+          ) : (
+            <span>{formatContextTokens(model.usedTokens)}</span>
+          )}
+        </div>
+      </div>
+
+      {model.maxTokens !== null && model.usedPercentage !== null ? (
+        <div
+          role="progressbar"
+          aria-label="Context window usage"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.round(model.usedPercentage)}
+          className="h-1.5 w-full overflow-hidden rounded-full bg-neutral-800"
+        >
+          <div
+            className={cn(
+              "h-full rounded-full transition-[width,background-color] duration-500 ease-out",
+              "motion-reduce:transition-none",
+              overloaded ? "bg-danger" : "bg-neutral-400"
+            )}
+            style={{ width: `${Math.max(0, Math.min(100, model.usedPercentage))}%` }}
+          />
+        </div>
+      ) : (
+        // Say why there is no ring. A silent absence reads as a bug.
+        <p className="text-[11px] leading-4 text-neutral-500">
+          This agent does not report a context window, so only the token count is known.
+        </p>
+      )}
+
+      {model.totalProcessedTokens !== null ? (
+        <div className="flex items-center justify-between gap-3 text-[11px] leading-4">
+          <span className="text-neutral-500">Total processed</span>
+          <span className="ac-tabular font-medium text-neutral-400">
+            {formatContextTokens(model.totalProcessedTokens)}
+          </span>
+        </div>
+      ) : null}
+
+      {model.autoCompactAtTokens !== null || model.maxTokens !== null ? (
+        <p className="text-[11px] leading-4 text-neutral-500">
+          {formatAutoCompactionSentence(modelLabel, model.autoCompactAtTokens)}
+        </p>
+      ) : null}
+
+      <Button
+        variant="outline"
+        size="sm"
+        className="mt-1 w-full justify-center"
+        disabled={compactDisabled}
+        onClick={onCompact}
+      >
+        <Minimize2 size={13} aria-hidden />
+        Compact context
+      </Button>
+      {compactDisabled && compactDisabledReason ? (
+        <p className="text-[11px] leading-4 text-neutral-500">{compactDisabledReason}</p>
+      ) : null}
+    </div>
   );
 }

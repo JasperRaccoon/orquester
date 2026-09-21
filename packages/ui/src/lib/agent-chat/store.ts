@@ -54,7 +54,11 @@ import {
   EMPTY_TIMELINE_PROJECTION,
   type ThreadTimelineProjection
 } from "./entries.logic";
-import { deriveActivePlanState } from "./plan.logic";
+import {
+  deriveActivePlanState,
+  findLatestProposedPlan,
+  hasActionableProposedPlan
+} from "./plan.logic";
 import {
   applyFrame,
   createReducerState,
@@ -85,7 +89,8 @@ import {
 } from "./queue.logic";
 import {
   composerHandle,
-  insertComposerText
+  insertComposerText,
+  stageComposerAttachment
 } from "../../components/agent-chat/composer/composer-bridge";
 import { nudgeProjectGit } from "../../components/git/git-watch";
 import {
@@ -145,6 +150,17 @@ export interface AgentChatThreadState {
   /** The three memoised projection layers, kept so each can take its fast path. */
   rows: AgentChatTimelineRow[];
   activePlan: ActivePlanState | null;
+  /**
+   * The proposal the composer's primary action acts on (§7.3): the latest
+   * un-implemented plan, preferring the current turn. `null` when there is
+   * none, which is what turns the split button back into a plain send.
+   *
+   * On the state rather than derived in the view because the plans live in the
+   * timeline projection, which only this module holds.
+   */
+  actionableProposedPlan: { planMarkdown: string } | null;
+  /** True while a `/revert` is in flight; §7.5's one reason the composer goes inert. */
+  reverting: boolean;
   /** The composer's persisted draft for this thread. */
   draft: ComposerDraft;
   /** True while an interrupt is in flight; the Stop button reads "Stopping…". */
@@ -249,12 +265,23 @@ function project(state: InternalState): InternalState {
   const stableRows = computeStableRows(rowsProjection.rows, state.stableRows);
   const activities = timeline.activities;
   const activePlan = deriveActivePlanState(activities, latestTurn?.turnId ?? null);
+  // The proposal the composer acts on. Recomputed here rather than in the view
+  // because `timeline.proposedPlans` never leaves this module.
+  const latestPlan = findLatestProposedPlan(timeline.proposedPlans, latestTurn?.turnId ?? null);
+  const actionableProposedPlan = hasActionableProposedPlan(latestPlan)
+    ? { planMarkdown: latestPlan!.planMarkdown }
+    : null;
+  const keptPlan =
+    state.actionableProposedPlan?.planMarkdown === actionableProposedPlan?.planMarkdown
+      ? state.actionableProposedPlan
+      : actionableProposedPlan;
 
   if (
     timeline === state.timeline &&
     rowsProjection === state.rowsProjection &&
     stableRows === state.stableRows &&
-    activePlan === state.activePlan
+    activePlan === state.activePlan &&
+    keptPlan === state.actionableProposedPlan
   ) {
     return state;
   }
@@ -267,7 +294,8 @@ function project(state: InternalState): InternalState {
     // `deriveActivePlanState` rebuilds its object each call; keep the previous
     // one when nothing about it moved, so the composer's checklist does not
     // re-render on every streamed token.
-    activePlan: samePlan(state.activePlan, activePlan) ? state.activePlan : activePlan
+    activePlan: samePlan(state.activePlan, activePlan) ? state.activePlan : activePlan,
+    actionableProposedPlan: keptPlan
   };
 }
 
@@ -429,11 +457,20 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
     const appendToDraft = (message: QueuedComposerMessage): void => {
       if (composerHandle(sessionId)) {
         insertComposerText(sessionId, message.text, "append");
-        if (message.attachments.length > 0 || message.context.length > 0) {
+        // Attachments go back as CHIPS, not into the store's fallback draft.
+        // The fallback is drained exactly once, on composer mount, so anything
+        // parked here while a composer is already mounted is never picked up:
+        // the file the user queued vanishes between Stop and the next send.
+        // Only what the composer refuses (the attachment budget, the turn's
+        // size bounds) falls back, where the next mount will still find it.
+        const refused = message.attachments.filter(
+          (attachment) => !stageComposerAttachment(sessionId, attachment)
+        );
+        if (refused.length > 0 || message.context.length > 0) {
           const draft = get().draft;
           setDraft({
             text: draft.text,
-            attachments: [...draft.attachments, ...message.attachments],
+            attachments: [...draft.attachments, ...refused],
             context: [...draft.context, ...message.context]
           });
         }
@@ -514,7 +551,15 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       },
 
       async revert(input) {
-        await command("revert", { targetTurnCount: input.targetTurnCount });
+        // §7.5's ONE reason the composer goes inert: while this is in flight
+        // the host is rewriting the thread, and a turn sent into that race
+        // lands against history that is about to stop existing.
+        update((state) => ({ ...state, reverting: true }));
+        try {
+          await command("revert", { targetTurnCount: input.targetTurnCount });
+        } finally {
+          update((state) => ({ ...state, reverting: false }));
+        }
       },
 
       async compact() {
@@ -793,6 +838,8 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       stableRows: EMPTY_STABLE_ROWS,
       rows: [],
       activePlan: null,
+      actionableProposedPlan: null,
+      reverting: false,
       draft: readPersistedDrafts()[sessionId] ?? EMPTY_DRAFT,
       stopping: false,
       actions

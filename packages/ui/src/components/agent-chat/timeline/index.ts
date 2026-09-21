@@ -28,7 +28,7 @@ export {
   type MdRoot
 } from "./markdown/incremental";
 
-export * from "./work-presentation";
+export * from "./row-chrome";
 export * from "./diff-tree";
 export * from "./unified-diff";
 export * from "./follow";
