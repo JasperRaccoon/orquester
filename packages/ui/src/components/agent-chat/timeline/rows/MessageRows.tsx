@@ -125,18 +125,38 @@ export const UserMessageRow = React.memo(function UserMessageRow({
 // Assistant message
 // ---------------------------------------------------------------------------
 
-/** No bubble, no background, full column width: the agent's output is the page. */
+/**
+ * No bubble, no background, full column width: the agent's output is the page.
+ *
+ * A message the provider marked as **commentary** rather than the turn's answer
+ * (Codex's `phase`) is rendered quietly — muted and indented under the activity
+ * column. The projection is meant to demote it into the activity group before
+ * it ever gets here (§7.3); this is the graceful degradation if one slips
+ * through, because a thread of "I'll do X next" narration rendered as full
+ * answers is unreadable.
+ */
 export const AssistantMessageRow = React.memo(function AssistantMessageRow({
   row
 }: {
   row: Row<"message">;
 }): React.ReactElement {
   const ctx = useTimelineRowContext();
+  const commentary = row.message.messageKind === "commentary";
   const text = row.message.text || (row.message.streaming ? "" : "(empty response)");
   return (
-    <div className="group/assistant relative min-w-0 px-1 py-0.5">
+    <div
+      className={cn(
+        "group/assistant relative min-w-0 px-1 py-0.5",
+        commentary && "ms-7 text-neutral-400"
+      )}
+    >
       <AuthorHeading>Agent</AuthorHeading>
-      <ChatMarkdown text={text} streaming={row.message.streaming} onOpenFile={ctx.onOpenFile} />
+      <ChatMarkdown
+        text={text}
+        streaming={row.message.streaming}
+        onOpenFile={ctx.onOpenFile}
+        {...(commentary ? { className: "text-neutral-500" } : {})}
+      />
     </div>
   );
 });
@@ -184,30 +204,51 @@ export const ReasoningRow = React.memo(function ReasoningRow({
 }): React.ReactElement {
   const ctx = useTimelineRowContext();
   const id = row.message.id;
-  const expanded = ctx.isReasoningExpanded(id);
-  const summary = firstLine(row.message.text);
+  const text = row.message.text;
   const live = row.message.streaming;
+  const summary = firstLine(text);
+  // REALITY: the Codex CLI emits a `reasoning` item whose summary AND content
+  // are always empty (W7's capture). A reasoning row must therefore survive
+  // having no text at all — it stays a one-liner, it does not offer a
+  // disclosure, and it never opens an empty card.
+  const body = text.slice(summary.length).trim();
+  const canExpand = body.length > 0;
+  const expanded = canExpand && ctx.isReasoningExpanded(id);
+  const label = summary || (live ? "Thinking" : "Thought");
+
+  const header = (
+    <>
+      {row.message.reasoningKind === "summary" ? (
+        <span className="shrink-0 text-[10px] font-medium uppercase tracking-wider text-neutral-500">
+          summary
+        </span>
+      ) : null}
+      <ShimmerText live={live} className="min-w-0 flex-1 truncate">
+        {label}
+      </ShimmerText>
+    </>
+  );
+
   return (
     <div className="px-0.5">
-      <button
-        type="button"
-        aria-expanded={expanded}
-        onClick={() => ctx.setReasoningExpanded(id, !expanded)}
-        className="flex min-h-6 w-fit max-w-full min-w-0 cursor-pointer select-none items-center gap-1.5 rounded-md px-0.5 py-0.5 text-left text-sm leading-relaxed transition-colors hover:bg-neutral-800/40 focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500"
-      >
-        {row.message.reasoningKind === "summary" ? (
-          <span className="shrink-0 text-[10px] font-medium uppercase tracking-wider text-neutral-500">
-            summary
-          </span>
-        ) : null}
-        <ShimmerText live={live} className="min-w-0 flex-1 truncate">
-          {summary || (live ? "Thinking" : "Thought")}
-        </ShimmerText>
-        <DisclosureChevron open={expanded} />
-      </button>
+      {canExpand ? (
+        <button
+          type="button"
+          aria-expanded={expanded}
+          onClick={() => ctx.setReasoningExpanded(id, !expanded)}
+          className="flex min-h-6 w-fit max-w-full min-w-0 cursor-pointer select-none items-center gap-1.5 rounded-md px-0.5 py-0.5 text-left text-sm leading-relaxed transition-colors hover:bg-neutral-800/40 focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500"
+        >
+          {header}
+          <DisclosureChevron open={expanded} />
+        </button>
+      ) : (
+        <div className="flex min-h-6 w-fit max-w-full min-w-0 items-center gap-1.5 px-0.5 py-0.5 text-sm leading-relaxed">
+          {header}
+        </div>
+      )}
       {expanded ? (
         <div className="ms-7 mt-1 whitespace-pre-wrap select-text text-sm leading-relaxed text-neutral-400">
-          {row.message.text}
+          {text}
         </div>
       ) : null}
     </div>

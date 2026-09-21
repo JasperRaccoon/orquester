@@ -323,22 +323,27 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
         {...(agentId === undefined ? {} : { "data-agent-id": agentId })}
         className="ac-scroll-thin ac-fade-top min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 sm:px-5"
       >
-        <div ref={contentRef} className="ac-rows flex flex-col">
-          <div className="h-3 shrink-0 sm:h-4" aria-hidden />
-          {rows.map((row) => (
-            <TimelineRowContext.Provider key={row.id} value={context}>
-              <TimelineRow row={row} enter={enterFlag(row.id)} />
-            </TimelineRowContext.Provider>
-          ))}
-          {rows.length === 0 ? (
-            <div className="mx-auto w-full max-w-3xl py-12 text-center text-sm italic text-neutral-600">
-              {agentId === undefined ? "No messages yet." : "This agent has not reported anything yet."}
-            </div>
-          ) : null}
-          {/* The footer spacer reserves exactly what the composer overlay hides. */}
-          <div aria-hidden style={{ height: bottomInset }} />
-          <div className="h-3 shrink-0 sm:h-4" aria-hidden />
-        </div>
+        {/* One provider for the whole list, not one per row: the value is
+            already memoised, and a provider per row would be N context nodes
+            re-rendering on every change to it. */}
+        <TimelineRowContext.Provider value={context}>
+          <div ref={contentRef} className="ac-rows flex flex-col">
+            <div className="h-3 shrink-0 sm:h-4" aria-hidden />
+            {rows.map((row) => (
+              <TimelineRow key={row.id} row={row} enter={enterFlag(row.id)} />
+            ))}
+            {rows.length === 0 ? (
+              <div className="mx-auto w-full max-w-3xl py-12 text-center text-sm italic text-neutral-600">
+                {agentId === undefined
+                  ? "No messages yet."
+                  : "This agent has not reported anything yet."}
+              </div>
+            ) : null}
+            {/* The footer spacer reserves exactly what the composer overlay hides. */}
+            <div aria-hidden style={{ height: bottomInset }} />
+            <div className="h-3 shrink-0 sm:h-4" aria-hidden />
+          </div>
+        </TimelineRowContext.Provider>
       </div>
 
       {/* The single affordance that re-arms follow. Nothing else scrolls the
