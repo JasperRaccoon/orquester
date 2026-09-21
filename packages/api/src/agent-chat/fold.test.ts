@@ -379,6 +379,122 @@ test("pending is re-derived from the activity fold and tombstoned by a resolutio
   assert.ok(state.closedRequestIds.has("r1"));
 });
 
+test("a tombstoned request stays closed after its resolution ages out of retention", () => {
+  // R5 #4: `closedRequestIds` was computed on both sides and read by neither,
+  // so once the closing row fell outside the 500-activity window a replayed
+  // `*.requested` reopened a dead approval card and the provider rejected the
+  // answer.
+  reset();
+  const events: DomainEvent[] = [
+    created(),
+    ev("thread.activity-appended", {
+      activity: activity("approval.requested", {
+        requestId: "R1",
+        requestType: "command_execution_approval"
+      })
+    }),
+    ev("thread.activity-appended", {
+      activity: activity("approval.resolved", { requestId: "R1", decision: "accept" })
+    })
+  ];
+  for (let i = 0; i < ACTIVITY_RETENTION_LIMIT + 10; i += 1) {
+    events.push(
+      ev("thread.activity-appended", {
+        activity: activity("tool.started", { toolUseId: `t${i}` }, { id: `noise-${i}` })
+      })
+    );
+  }
+  let state = fold(events);
+  assert.ok(state.closedRequestIds.has("R1"));
+  assert.ok(
+    !state.activities.some((entry) => entry.activityKind === "approval.resolved"),
+    "the closing row really has aged out"
+  );
+
+  state = applyDomainEvent(
+    state,
+    ev("thread.activity-appended", {
+      activity: activity("approval.requested", {
+        requestId: "R1",
+        requestType: "command_execution_approval"
+      })
+    })
+  );
+  assert.deepEqual(state.pending.approvals, [], "a tombstoned request can never reopen");
+});
+
+test("an aged-out user-input resolution keeps its question closed too", () => {
+  reset();
+  const question = {
+    requestId: "Q1",
+    // NOT `responseMode: "message"`: a native-callback question is not exempt
+    // from retention, so its closing row can genuinely age out.
+    questions: [{ id: "a", header: "h", question: "q", options: [{ label: "yes" }] }]
+  };
+  const events: DomainEvent[] = [
+    created(),
+    ev("thread.activity-appended", { activity: activity("user-input.requested", question) }),
+    ev("thread.activity-appended", {
+      activity: activity("user-input.resolved", { requestId: "Q1", answers: {} })
+    })
+  ];
+  for (let i = 0; i < ACTIVITY_RETENTION_LIMIT + 10; i += 1) {
+    events.push(
+      ev("thread.activity-appended", {
+        activity: activity("tool.started", { toolUseId: `t${i}` }, { id: `noise-${i}` })
+      })
+    );
+  }
+  let state = fold(events);
+  state = applyDomainEvent(
+    state,
+    ev("thread.activity-appended", { activity: activity("user-input.requested", question) })
+  );
+  assert.deepEqual(state.pending.userInputs, []);
+});
+
+test("retention that drops a request row re-derives pending on that very event", () => {
+  // R5 #18: `rederivePending`/`rederiveRoster` were decided from the INCOMING
+  // row's kind only, so an unrelated append that pushed an open approval out
+  // of the window left `pending` referencing a row no longer in the fold.
+  reset();
+  const events: DomainEvent[] = [
+    created(),
+    ev("thread.activity-appended", {
+      activity: activity("approval.requested", {
+        requestId: "R1",
+        requestType: "command_execution_approval"
+      })
+    })
+  ];
+  for (let i = 0; i < ACTIVITY_RETENTION_LIMIT - 1; i += 1) {
+    events.push(
+      ev("thread.activity-appended", {
+        activity: activity("tool.started", { toolUseId: `t${i}` }, { id: `noise-${i}` })
+      })
+    );
+  }
+  let state = fold(events);
+  assert.equal(state.pending.approvals.length, 1, "still inside the window");
+
+  // One more unrelated row pushes the approval out.
+  state = applyDomainEvent(
+    state,
+    ev("thread.activity-appended", {
+      activity: activity("tool.started", { toolUseId: "last" }, { id: "last" })
+    })
+  );
+  assert.ok(
+    !state.activities.some((entry) => entry.activityKind === "approval.requested"),
+    "the approval row was dropped by retention"
+  );
+  assert.deepEqual(
+    state.pending.approvals,
+    [],
+    "pending must not keep referencing a row the fold no longer holds"
+  );
+});
+
 test("the roster re-derives on task rows and interrupts live rows when the session dies", () => {
   reset();
   let state = fold([
