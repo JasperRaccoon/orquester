@@ -58,6 +58,7 @@ import type {
   PushUnsubscribeRequest,
   RecentProjectSummary,
   RegistryKind,
+  RegistryEntry,
   RegistryResponse,
   RenameSessionRequest,
   RepoSummary,
@@ -92,6 +93,9 @@ import { AgentHooks } from "./agent-hooks";
 import { listAgentConversations } from "./agent-conversations.ts";
 import { claudeTimeoutEnv } from "./agent-timeout-env.ts";
 import { type ISessionManager, SessionError, createSessionManager, resumeLaunchArgs } from "./sessions";
+import { AgentChatService, ChatSessionError, type CreateAgentChatRequest } from "./agent-chat/service.ts";
+import { ChatAwareSessionManager } from "./agent-chat/session-router.ts";
+import { registerAgentChatRoutes } from "./agent-chat/proxy-routes.ts";
 import type { ActivityCause } from "./ansi-activity";
 import { TodoError, TodoListManager } from "./todos";
 import { RecentProjectsService } from "./recent-projects";
@@ -144,6 +148,7 @@ import {
   type WorkspacesConfig,
   accountsConfigPath,
   agentAccountsDir,
+  agentChatThreadAttachmentsDir,
   agentAccountsFile,
   appConfigPath,
   browserProfilesDir,
@@ -211,6 +216,8 @@ const RAW_MAX_BYTES = 50 * 1024 * 1024;
 
 /** Filesystem locations resolved (variables expanded) for this run. */
 interface ResolvedPaths {
+  /** `<appdir>` itself — every `@orquester/config` path helper takes this. */
+  baseDir: string;
   daemonDir: string;
   configPath: string;
   /** app.json + remotes.json live under <appdir>/app and are shared by clients. */
@@ -349,6 +356,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   validateTransportConfig(config);
 
   const resolved: ResolvedPaths = {
+    baseDir: paths.baseDir,
     daemonDir: paths.daemonDir,
     configPath: paths.configPath,
     appConfigFile: appConfigPath(paths.baseDir),
@@ -391,30 +399,93 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     now: () => Date.now(),
     logger: console
   });
-  const sessions = createSessionManager(registry, tmux, resolved.sessionsIndexFile, {
+  /**
+   * The full launch env for one agent — account home, cliproxy env for
+   * claudex/claudemix, the model pin, the Claude timeout. Lifted out of the
+   * session manager's `resolveExtraEnv` seam because a chat thread must get
+   * EXACTLY the env a terminal launch gets today (chat spec §3.1 "Launch
+   * environment"); two copies would drift on the first change.
+   */
+  const resolveAgentLaunchEnv = async (
+    entry: RegistryEntry,
+    ctx: { accountId?: string; model?: string }
+  ) => {
+    // Claude harness stream/API timeout (spec
+    // 2026-07-29-claude-agent-timeout-setting-design.md §3). Read fresh per
+    // launch so a settings change applies to the next session with no daemon
+    // restart; readAppConfigFile already falls back to schema defaults on a
+    // missing or corrupt file, so this cannot throw.
+    const { claudeTimeoutMinutes } = (await readAppConfigFile(resolved.appConfigFile)).agents;
+    return buildAgentLaunchEnv(
+      entry.id,
+      ctx,
+      claudeTimeoutMinutes,
+      await agentAccounts.resolveLaunchEnv(entry.id, ctx.accountId),
+      resolved.daemonDir
+    );
+  };
+
+  // Web push and the event bus are dependency-free and are built here (rather
+  // than below with the rest) because the agent-chat service needs both, and it
+  // in turn has to exist before the session manager, which persists its tab
+  // records (chat spec §5.2).
+  const push = new PushService(resolved.pushConfigFile, console);
+  const broadcaster = new Broadcaster();
+
+  // The supervised agent host (chat spec §3.1). `init()` runs after
+  // `sessions.reattach()`, exactly where cliproxy's adoption does.
+  const agentChatTmux = tmuxAvailable() && tmuxVersionOk() ? tmux : null;
+  const agentChat = new AgentChatService({
+    baseDir: paths.baseDir,
+    daemonDir: resolved.daemonDir,
+    platform: runtimePlatform,
+    cwd,
+    sessionPath: sessionPath(),
+    env,
+    tmux: agentChatTmux,
+    broadcaster,
+    push,
+    registryEntry: (refId) => registry.get(refId),
+    resolveLaunchEnv: (entry, ctx) => resolveAgentLaunchEnv(entry, ctx),
+    systemClaudeConfigFile: () =>
+      env.CLAUDE_CONFIG_DIR
+        ? join(env.CLAUDE_CONFIG_DIR, ".claude.json")
+        : join(resolved.vars.userhome, ".claude.json"),
+    logger: console
+  });
+
+  const ptySessions = createSessionManager(registry, tmux, resolved.sessionsIndexFile, {
     resolveExtraEnv: async (entry, ctx) => {
       if (entry.kind !== "agent") return null;
       try {
-        // Claude harness stream/API timeout (spec
-        // 2026-07-29-claude-agent-timeout-setting-design.md §3). Read fresh per
-        // launch so a settings change applies to the next session with no daemon
-        // restart; readAppConfigFile already falls back to schema defaults on a
-        // missing or corrupt file, so this cannot throw.
-        const { claudeTimeoutMinutes } = (await readAppConfigFile(resolved.appConfigFile)).agents;
-        return buildAgentLaunchEnv(
-          entry.id,
-          ctx,
-          claudeTimeoutMinutes,
-          await agentAccounts.resolveLaunchEnv(entry.id, ctx.accountId),
-          resolved.daemonDir
-        );
+        return await resolveAgentLaunchEnv(entry, ctx);
       } catch (error) {
         throw new SessionError(error instanceof Error ? error.message : String(error));
       }
     },
     daemonSockPath: paths.socketPath,
-    onAgentLaunch: (entry, launchEnv) => agentHooks.ensureForEntry(entry.id, launchEnv)
+    onAgentLaunch: (entry, launchEnv) => agentHooks.ensureForEntry(entry.id, launchEnv),
+    // Chat tabs share `sessions.json`; the PTY manager stays its only writer.
+    indexContributor: agentChat.indexContributor()
   });
+  agentChat.setPersist(() => ptySessions.persistIndexNow());
+
+  // One session list over both backends, so every existing surface (tab strip,
+  // Attention Center, palette, upload sweep, delete cascade, kill guard) treats
+  // `agent-chat` as the agent kind without learning a second service (§7.1).
+  const sessions: ChatAwareSessionManager = new ChatAwareSessionManager(
+    ptySessions,
+    agentChat.chat,
+    {
+      create: (req) =>
+        agentChat.createSession(
+          req as CreateAgentChatRequest,
+          sessions.nextOrder(req.projectPath ?? "")
+        ),
+      onClose: (id) => agentChat.deleteThread(id),
+      onRename: (id, title) => agentChat.renameThread(id, title)
+    }
+  );
   const accounts = new AccountsService(resolved.accountsFile, resolved.keysDir);
   const git = new GitService();
   const todos = new TodoListManager(resolved.todosIndexFile, console);
@@ -428,8 +499,6 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     () => readWorkspacesMeta(resolved.workspacesMetaFile)
   );
   await recentProjects.load();
-  const push = new PushService(resolved.pushConfigFile, console);
-  const broadcaster = new Broadcaster();
   // Push a project's git status to whoever is looking at it. The watcher polls
   // ONLY projects with a live `/events?project=…` subscriber and only emits on a
   // real change, so an unwatched (or idle) repo costs nothing.
@@ -652,7 +721,12 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
         id: event.id,
         activity: event.activity
       } satisfies SessionActivityEvent);
-      if (event.kind !== "agent") {
+      // Chat spec §6.4 widens this gate from "agent" to include "agent-chat".
+      // A chat tab produces no bells and no managed-hook events, so in practice
+      // its pushes come from the protocol path in `agent-chat/summary.ts`; the
+      // gate is widened anyway so a future chat-side `activity` emission is not
+      // silently swallowed here.
+      if (event.kind !== "agent" && event.kind !== "agent-chat") {
         return;
       }
       const summary = sessions.get(event.id);
@@ -792,7 +866,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // fresh, bounded live-catalog probe.
   const validateModel: ValidateModel = (entryId, model) => cliproxy.validateModel(entryId, model);
   const services: Services = {
-    registry, sessions, validateModel, cliproxy, accounts, git, gitWatcher, todos, recentProjects, usage, usageTokens, push, broadcaster, agentAccounts, browsers, urlWatcher
+    registry, sessions, validateModel, cliproxy, accounts, git, gitWatcher, todos, recentProjects, usage, usageTokens, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat
   };
 
   // Boot the managed proxy AFTER reattach (adoption must see the final session
@@ -801,6 +875,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // marks the launchers disabled. Best-effort — a proxy failure must not block
   // the daemon.
   await cliproxy.init().catch((error) => console.error("CliProxy init failed", error));
+  // The agent host (chat spec §3.1), adopted or spawned AFTER reattach so the
+  // chat tab records are already loaded, and before any transport serves.
+  // Best-effort for the same reason cliproxy is: a host failure must not block
+  // the daemon — every chat route then answers 503 HOST_UNAVAILABLE.
+  await agentChat.init().catch((error) => console.error("Agent host init failed", error));
   // Drive crash supervision: an owned-but-dead proxy is respawned with bounded
   // backoff; after the cap it latches error. Unref'd so it never holds exit.
   const cliproxyHealthTimer = setInterval(() => void cliproxy.checkHealth(), 15_000);
@@ -877,6 +956,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // the next boot reattaches; the local backend has no server, so its shutdown()
     // terminates the child PTYs (they'd die with the daemon regardless).
     sessions.shutdown();
+    // Stops supervising only: under tmux the agent host is deliberately left
+    // running so in-flight turns survive the deploy (chat spec §3.1).
+    await agentChat.stop();
     await browsers.shutdown();
     await stopHttp();
     const unixClosed = unixServer.close();
@@ -1072,6 +1154,44 @@ export function buildAgentLaunchEnv(
     composeExtraEnv(accountEnv, claudeTimeoutEnv(entryId, claudeTimeoutMinutes)),
     cliproxyContributor(entryId, ctx, daemonDir)
   );
+}
+
+/**
+ * The seeded-account gate, shared by the terminal and agent-chat create paths.
+ *
+ * A proxy launch pinning a managed account requires that account to be SEEDED:
+ * the `acc<hex>/` routing prefix resolves against the proxy's auth files, so an
+ * unseeded pin can only 502 at runtime ("unknown provider for model acc…").
+ * Router-provider and xAI OAuth models carry no account and are exempt —
+ * decided by the persisted provider index / the curated xai list, the same
+ * sources of truth the launch contributor uses.
+ *
+ * Returns the refusal body, or null when the launch may proceed.
+ */
+export function seededAccountRefusal(
+  req: { refId: string; accountId?: string },
+  effectiveModel: string | undefined,
+  daemonDir: string
+): { code: string; message: string } | null {
+  const pinsManagedAccount =
+    (req.refId === "claudex" || req.refId === "claudemix") &&
+    Boolean(req.accountId) &&
+    req.accountId !== SYSTEM_ACCOUNT_ID;
+  if (!pinsManagedAccount) return null;
+  const launchState = readCliProxyState(daemonDir);
+  const accountlessModel = Boolean(
+    effectiveModel &&
+      (resolveRouterModel(launchState?.routerProviders ?? [], effectiveModel) ||
+        resolveXaiModel(effectiveModel))
+  );
+  if (accountlessModel) return null;
+  const seeded = launchState?.seededAccounts.some((a) => a.accountId === req.accountId) ?? false;
+  if (seeded) return null;
+  return {
+    code: "SESSION_UNAVAILABLE",
+    message:
+      "This account is not seeded into the model proxy. Seed it in Settings → Model proxy, or pick a seeded account."
+  };
 }
 
 /**
@@ -1590,6 +1710,11 @@ interface Services {
   agentAccounts: AgentAccountsService;
   browsers: BrowserManager;
   urlWatcher: UrlWatcher;
+  /**
+   * The agent-chat half: the supervised agent host, the chat tab records and
+   * the §6.2/§6.3 proxy routes (chat design spec §3.1, §5.2, §6).
+   */
+  agentChat: AgentChatService;
   /** Restart the HTTP transport (set in main once the lifecycle exists). */
   reloadHttp?: () => Promise<void>;
 }
@@ -3326,8 +3451,15 @@ export function createServer(
     // it sits in the very tree this route walks. It is infrastructure, not a
     // user process: refuse it the way the tmux server is refused.
     protectedPids: () => {
+      const pids: number[] = [];
       const pid = services.cliproxy?.directChildPid();
-      return typeof pid === "number" ? [pid] : [];
+      if (typeof pid === "number") pids.push(pid);
+      // The agent host is infrastructure too (chat spec §3.1 "Kill guard"). On
+      // a tmux host it lives in the `orqsvc-` service session the tree walk
+      // already excludes; without tmux it is a plain daemon child and would
+      // otherwise be a legal target. Provider CHILDREN stay legal targets.
+      pids.push(...(services.agentChat?.protectedPids() ?? []));
+      return pids;
     }
   });
 
@@ -3523,7 +3655,17 @@ export function createServer(
     }
   });
 
-  // Sessions (PTYs)
+  // Agent chat — every §6.2 command and §6.3 read, proxied to the agent host
+  // over its unix socket. Registered on BOTH transports, inheriting their auth
+  // unchanged (chat spec §6): bearer on HTTP, none on the socket. Declared
+  // before `/api/sessions/:id` so the more specific paths are unambiguous.
+  // (Optional-chained: route-level tests build a partial `services`.)
+  const agentChatDeps = services.agentChat?.routeDeps();
+  if (agentChatDeps) {
+    registerAgentChatRoutes(app, agentChatDeps);
+  }
+
+  // Sessions (PTYs and chat tabs — one list, one per-project order)
   app.get<{ Querystring: { projectPath?: string } }>(
     "/api/sessions",
     async (request): Promise<SessionSummary[]> => sessions.list(request.query.projectPath)
@@ -3531,6 +3673,36 @@ export function createServer(
 
   app.post("/api/sessions", async (request, reply): Promise<SessionSummary | void> => {
     const body = (request.body ?? {}) as CreateSessionRequest;
+    // A chat tab takes the §6.1 path: the same account/model validation as a
+    // terminal, then the tab record, then the host thread. It shares nothing
+    // with the PTY branch below but that validation, which runs first.
+    if (body.kind === "agent-chat") {
+      const chatModel = await resolveLaunchModel(body.refId, body.model, validateModel);
+      if (!chatModel.ok) {
+        return reply.code(400).send(chatModel.body);
+      }
+      const seededRefusal = seededAccountRefusal(
+        body,
+        chatModel.effectiveModel,
+        resolved.daemonDir
+      );
+      if (seededRefusal) {
+        return reply.code(400).send(seededRefusal);
+      }
+      try {
+        const summary = await services.agentChat.createSession(
+          { ...body, model: chatModel.effectiveModel } as CreateAgentChatRequest,
+          sessions.list(body.projectPath ?? "").reduce((max, s) => Math.max(max, s.order), -1) + 1
+        );
+        await markRecentProject(summary.projectPath);
+        return summary;
+      } catch (error) {
+        const code = error instanceof ChatSessionError ? error.code : "SESSION_UNAVAILABLE";
+        const message =
+          error instanceof Error ? error.message : "Failed to create the chat session.";
+        return reply.code(code === "HOST_UNAVAILABLE" ? 503 : 400).send({ code, message });
+      }
+    }
     // `initialCommand` is TYPED into the fresh PTY (see sessions.ts), so it gets
     // /input's trust — with two bounds /input can't have: one line, and no
     // control bytes. A raw keystroke stream legitimately carries ESC; a launch
@@ -3573,32 +3745,9 @@ export function createServer(
     }
     const effectiveModel = resolvedModel.effectiveModel;
     const modelCatalog = resolvedModel.catalog;
-    // A proxy launch pinning a managed account requires that account to be
-    // SEEDED: the acc<hex>/ routing prefix resolves against the proxy's auth
-    // files, so an unseeded pin can only 502 at runtime ("unknown provider for
-    // model acc…"). Router-provider and xAI OAuth models carry no account and are
-    // exempt — decided by the persisted provider index / the curated xai list, the
-    // same sources of truth the launch contributor uses (read once here and reused
-    // for the seeded check).
-    const pinsManagedAccount =
-      (body.refId === "claudex" || body.refId === "claudemix") &&
-      Boolean(body.accountId) &&
-      body.accountId !== SYSTEM_ACCOUNT_ID;
-    const launchState = pinsManagedAccount ? readCliProxyState(resolved.daemonDir) : null;
-    const accountlessModel = Boolean(
-      effectiveModel &&
-        (resolveRouterModel(launchState?.routerProviders ?? [], effectiveModel) ||
-          resolveXaiModel(effectiveModel))
-    );
-    if (pinsManagedAccount && !accountlessModel) {
-      const seeded = launchState?.seededAccounts.some((a) => a.accountId === body.accountId) ?? false;
-      if (!seeded) {
-        return reply.code(400).send({
-          code: "SESSION_UNAVAILABLE",
-          message:
-            "This account is not seeded into the model proxy. Seed it in Settings → Model proxy, or pick a seeded account."
-        });
-      }
+    const seededRefusal = seededAccountRefusal(body, effectiveModel, resolved.daemonDir);
+    if (seededRefusal) {
+      return reply.code(400).send(seededRefusal);
     }
     let summary: SessionSummary;
     try {
@@ -3820,7 +3969,14 @@ export function createServer(
         }
 
         const name = uploadFileName(request.query.name ?? "", request.query.type);
-        const dir = sessionUploadsDir(resolved.daemonDir, id);
+        // Chat spec §6.3: a chat upload reuses this exact raw-binary path, but
+        // lands in the THREAD's attachments dir — so the returned path is a
+        // usable attachment reference, `GET /api/fs/download` can read it back,
+        // and the host's thread-delete cascade cleans it up with everything
+        // else the thread owns. A terminal upload keeps its own dir.
+        const dir = sessions.get(id)?.kind === "agent-chat"
+          ? agentChatThreadAttachmentsDir(resolved.baseDir, id)
+          : sessionUploadsDir(resolved.daemonDir, id);
         const path = join(dir, name);
         // Mirror the accounts.json / keys conventions: 0700 dir, 0600 file. A
         // filesystem failure (disk full, permission denied, …) must surface as a
