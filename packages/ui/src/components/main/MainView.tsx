@@ -15,6 +15,7 @@ import { ResizeHandle } from "../ui";
 import { useIsDesktop } from "../../hooks";
 import { GRID_MIN_COL_PX, GRID_MIN_ROW_PX, type GridTracks } from "../../lib/panel-sizes";
 import { AgentChatView } from "../agent-chat";
+import { setActiveChatTab } from "../../lib/agent-chat-active-tab";
 import {
   isSessionTab,
   tabSession,
@@ -93,6 +94,22 @@ export const MainView: React.FC = () => {
   // narrow viewports (the toggle isn't shown there either). A workspace context
   // never has a project, so useViewMode() returns "tabs" there — grid stays off.
   const grid = isDesktop && viewMode === "grid";
+
+  // Publish which chat tab is on screen. Every tab stays mounted (see the
+  // comment on the render tree below), so each chat tab carries its own
+  // `window`/`document` keyboard listeners; without this they would all act on
+  // one chord and dispatch turns and answers to threads the user cannot see.
+  // This is the one layer that knows, so it is the one layer that says.
+  const activeChatSessionId = React.useMemo(() => {
+    const activeTab = tabs.find((tab) => tab.id === activeId);
+    return activeTab?.type === "agent-chat" ? activeTab.sessionId : null;
+  }, [tabs, activeId]);
+  React.useEffect(() => {
+    setActiveChatTab(activeChatSessionId);
+  }, [activeChatSessionId]);
+  // Unmounting the whole main view (signing out, switching daemon) leaves no
+  // visible chat tab, so nothing should keep the keyboard.
+  React.useEffect(() => () => setActiveChatTab(null), []);
 
   if (!ctx) {
     // The natural landing surface: nothing is open, so offer the daemon's

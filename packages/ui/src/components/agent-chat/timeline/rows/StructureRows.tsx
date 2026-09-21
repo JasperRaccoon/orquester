@@ -28,6 +28,41 @@ export const CompactionRow = React.memo(function CompactionRow({
   );
 });
 
+/**
+ * The user's own `/compact` submission (§4.6.5(b)).
+ *
+ * The host persists the command verbatim as a user message so the thread's
+ * record is exactly what was sent; the timeline re-recognises it by string
+ * comparison and renders **a compaction marker rather than a bubble** — a
+ * literal `/compact` speech bubble reads as the user talking to the agent,
+ * which is the one thing it is not.
+ *
+ * The marker that follows it carries the before/after token counts, so this one
+ * deliberately says only that the compaction was asked for: request, then
+ * result. It is styled as the same hairline so the pair reads as one event.
+ * *T3: `ChatView.tsx:735-738` (`isCompactCommandMessage`) excludes the message
+ * and places the marker in its stead.*
+ */
+export const CompactRequestRow = React.memo(function CompactRequestRow({
+  row
+}: {
+  row: Row<"message">;
+}): React.ReactElement {
+  void row;
+  return (
+    <div
+      role="separator"
+      aria-label="Compaction requested"
+      className="ac-hairline py-1 text-xs text-neutral-500"
+    >
+      <span className="flex shrink-0 items-center gap-1.5">
+        <Minimize2 size={12} strokeWidth={1.8} aria-hidden />
+        Compaction requested
+      </span>
+    </div>
+  );
+});
+
 /** The settled-turn fold: "Worked for 3m 12s". */
 export const TurnFoldRow = React.memo(function TurnFoldRow({
   row
