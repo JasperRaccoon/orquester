@@ -674,6 +674,19 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         });
       },
 
+      /**
+       * Take the fallback draft and reset it in one step (W13 drains this on
+       * composer mount). Take-and-clear rather than read-then-clear: the draft
+       * is persisted, so leaving it behind would re-apply the same text on the
+       * next open.
+       */
+      takeDraft() {
+        const draft = get().draft;
+        if (draft !== EMPTY_DRAFT) {
+          setDraft(EMPTY_DRAFT);
+        }
+        return draft;
+      },
       dismissErrorBanner() {
         // §7.3: a dismissal is remembered per `(threadId, message)` for the
         // session, so navigating away and back cannot resurrect a banner the

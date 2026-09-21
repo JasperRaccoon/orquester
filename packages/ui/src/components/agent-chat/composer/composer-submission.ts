@@ -16,6 +16,7 @@ import {
   SUPPORTED_ATTACHMENT_IMAGE_MIME_TYPES
 } from "@orquester/api/agent-chat";
 import type { AttachmentRef } from "@orquester/api/agent-chat";
+import type { FollowUpBehavior } from "../../../lib/agent-chat/queue.logic";
 
 // ---------------------------------------------------------------------------
 // Enter
@@ -24,8 +25,15 @@ import type { AttachmentRef } from "@orquester/api/agent-chat";
 /** Per-device preference: which chord sends. `enter` is the default. */
 export type SendShortcut = "enter" | "mod-enter" | "mod-enter-multiline";
 
-/** Per-device preference: what a plain send does while a turn is running. */
-export type FollowUpBehavior = "steer" | "queue";
+/**
+ * Per-device preference: what a plain send does while a turn is running.
+ *
+ * Re-exported from `lib/agent-chat/queue.logic.ts` rather than redeclared —
+ * the store, the Settings toggle and this module must be one union or they
+ * drift. (`lib/chat-prefs.ts` holds the third spelling; it is the persisted
+ * shape and structurally identical.)
+ */
+export type { FollowUpBehavior } from "../../../lib/agent-chat/queue.logic";
 
 /**
  * `foreground` = send it; `alternate` = the per-message inversion of the
