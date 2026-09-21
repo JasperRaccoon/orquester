@@ -110,6 +110,18 @@ export interface Transporter {
    * are HTTP-transport-only, which includes desktop-remote).
    */
   browserChannel?(): import("./transporters/ws-browser-channel").WsBrowserChannel;
+  /**
+   * Optional agent-chat surface (spec §7.1): `{stream, command, read, …}` for
+   * the §6.2 commands and the §6.3 chunked-NDJSON thread stream.
+   *
+   * Almost always absent: the default implementation
+   * (`lib/agent-chat/transport.ts` → `resolveAgentChatTransport`) is built
+   * from `request` + `openStream`, which every transport already has, so it
+   * works on the HTTP transporter **and** on the desktop unix-socket
+   * transporter with no per-runtime code. Implement this only to override
+   * that (§6.5: nothing in the chat UI depends on WebSockets).
+   */
+  agentChat?(): import("./agent-chat/transport").AgentChatTransport;
 }
 
 /** Build a querystring (with leading `?`) from a query object, or "" if empty. */
