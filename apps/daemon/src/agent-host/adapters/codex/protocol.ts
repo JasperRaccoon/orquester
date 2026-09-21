@@ -184,6 +184,7 @@ export class CodexPeer {
   private readonly reader = new NdjsonLineReader();
   private readonly pending = new Map<number, PendingRequest>();
   private readonly inFlightServerRequests = new Set<number | string>();
+  private readonly settledWaiters: (() => void)[] = [];
   private readonly maxInFlight: number;
   private nextId = 1;
   private closedReason: string | null = null;
@@ -214,6 +215,25 @@ export class CodexPeer {
   /** Server→client requests whose handler has not answered yet. */
   get openServerRequestCount(): number {
     return this.inFlightServerRequests.size;
+  }
+
+  /**
+   * Resolve once every parked server request has been **answered on the
+   * wire**.
+   *
+   * Settling a request resolves its handler's promise, but the reply is only
+   * written on the microtask that follows, so a caller that settles and then
+   * immediately sends `turn/interrupt` would put the interrupt on the wire
+   * FIRST. §4.1's "settle before interrupt" is an ordering guarantee about the
+   * bytes, not about the local bookkeeping, so the interrupt path awaits this.
+   */
+  whenServerRequestsSettled(): Promise<void> {
+    if (this.inFlightServerRequests.size === 0 || this.closedReason !== null) {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      this.settledWaiters.push(resolve);
+    });
   }
 
   /**
@@ -272,6 +292,16 @@ export class CodexPeer {
       entry.reject(error);
     }
     this.inFlightServerRequests.clear();
+    this.releaseSettledWaiters();
+  }
+
+  private releaseSettledWaiters(): void {
+    if (this.inFlightServerRequests.size > 0 && this.closedReason === null) {
+      return;
+    }
+    while (this.settledWaiters.length > 0) {
+      this.settledWaiters.shift()!();
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -372,6 +402,7 @@ export class CodexPeer {
         this.respondError(id, -32603, describeError(error));
       } finally {
         this.inFlightServerRequests.delete(id);
+        this.releaseSettledWaiters();
       }
     })();
   }

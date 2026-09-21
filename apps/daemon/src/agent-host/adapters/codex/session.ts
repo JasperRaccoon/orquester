@@ -34,7 +34,8 @@ import type {
   ProviderSession,
   ProviderSessionStatus,
   RuntimeMode,
-  ThreadSnapshot
+  ThreadSnapshot,
+  UserInputQuestion
 } from "@orquester/api/agent-chat";
 
 import type { AdapterContext } from "../../adapter.ts";
@@ -111,6 +112,12 @@ export interface CodexSessionOptions {
   runtimeMode: RuntimeMode;
   modelSelection: ModelSelection;
   resumeCursor?: unknown;
+  /**
+   * Overrides for {@link AGENT_HOST_DEADLINES}. Production passes nothing; a
+   * test shortens the handshake window so §3.1's "an expired deadline kills
+   * the child" is exercised in milliseconds rather than half a minute.
+   */
+  deadlines?: Partial<Record<keyof typeof AGENT_HOST_DEADLINES, number>>;
   emit: (draft: RuntimeEventDraft) => void;
   /** Called once the session has settled for good, so the adapter can forget it. */
   onClosed: () => void;
@@ -273,7 +280,7 @@ export class CodexSession {
             requestAttestation: false
           }
         }),
-      AGENT_HOST_DEADLINES.handshakeMs,
+      this.deadline("handshakeMs"),
       "initialize"
     );
     // `initialized` takes no params; the server rejects an explicit null.
@@ -361,7 +368,7 @@ export class CodexSession {
 
     const response = await this.bounded(
       () => peer.request("turn/start", params),
-      AGENT_HOST_DEADLINES.submitMs,
+      this.deadline("submitMs"),
       "turn/start"
     );
 
@@ -395,6 +402,11 @@ export class CodexSession {
     if (peer === null || peer.isClosed) {
       return;
     }
+    // The settle above only RESOLVES the handlers; their replies are written on
+    // the following microtask. Without this the interrupt would reach the wire
+    // first and the server would abandon the requests unanswered — which is
+    // exactly the leak §4.1's ordering exists to prevent.
+    await peer.whenServerRequestsSettled();
     try {
       await this.bounded(
         () =>
@@ -402,7 +414,7 @@ export class CodexSession {
             threadId: this.requireProviderThreadId(),
             turnId: active
           }),
-        AGENT_HOST_DEADLINES.cancelMs,
+        this.deadline("cancelMs"),
         "turn/interrupt"
       );
     } catch (error) {
@@ -447,7 +459,7 @@ export class CodexSession {
     const peer = this.requirePeer();
     await this.bounded(
       () => peer.request("thread/compact/start", { threadId: this.requireProviderThreadId() }),
-      AGENT_HOST_DEADLINES.submitMs,
+      this.deadline("submitMs"),
       "thread/compact/start"
     );
   }
@@ -493,7 +505,7 @@ export class CodexSession {
 
     await this.bounded(
       () => peer.request("thread/revert", { threadId: providerThreadId, beforeTurnId: boundary.id }),
-      AGENT_HOST_DEADLINES.sessionOpenMs,
+      this.deadline("sessionOpenMs"),
       "thread/revert"
     );
     // The response's `turns` is ALWAYS empty by documented design; re-hydrate.
@@ -546,7 +558,7 @@ export class CodexSession {
               // hydration is deprecated (fixtures README observation 17).
               excludeTurns: true
             }),
-          AGENT_HOST_DEADLINES.sessionOpenMs,
+          this.deadline("sessionOpenMs"),
           "thread/resume"
         );
         this.providerThreadId = resumed.thread.id;
@@ -577,7 +589,7 @@ export class CodexSession {
           sandbox: config.sandbox,
           model: this.modelSelection.model
         }),
-      AGENT_HOST_DEADLINES.sessionOpenMs,
+      this.deadline("sessionOpenMs"),
       "thread/start"
     );
     // NOT `{threadId}` — `result.thread.id` (fixtures README observation 1).
@@ -599,7 +611,7 @@ export class CodexSession {
             ...(cursor !== null ? { cursor } : {}),
             itemsView: "full"
           }),
-        AGENT_HOST_DEADLINES.sessionOpenMs,
+        this.deadline("sessionOpenMs"),
         "thread/turns/list"
       );
       turns.push(...response.data);
@@ -783,7 +795,12 @@ export class CodexSession {
           });
           this.emit({
             type: "user-input.requested",
-            payload: { questions, dismissible: !params.isBlocking },
+            payload: {
+              questions,
+              dismissible: !params.isBlocking,
+              // The provider's own signal, beside our derivation of it.
+              isBlocking: params.isBlocking
+            },
             turnId: params.turnId,
             itemId: params.itemId,
             requestId,
@@ -1152,6 +1169,10 @@ export class CodexSession {
    * rather than leaving the thread `starting` forever (§3.1). This is the one
    * place the design does not follow T3.
    */
+  private deadline(name: keyof typeof AGENT_HOST_DEADLINES): number {
+    return this.options.deadlines?.[name] ?? AGENT_HOST_DEADLINES[name];
+  }
+
   private bounded<T>(work: () => Promise<T>, timeoutMs: number, label: string): Promise<T> {
     return withDeadline(work, {
       label: `codex ${label}`,
@@ -1192,8 +1213,8 @@ const HOST_CLIENT_VERSION = "1";
  */
 export function toUserInputQuestions(
   questions: readonly CodexProtocol.v2.ToolRequestUserInputQuestion[]
-): { id: string; header: string; question: string; options: { label: string; description: string }[]; allowCustomAnswer?: boolean; multiSelect: boolean }[] {
-  const out: ReturnType<typeof toUserInputQuestions> = [];
+): UserInputQuestion[] {
+  const out: UserInputQuestion[] = [];
   for (const question of questions) {
     const id = question.id.trim();
     const header = question.header.trim();
@@ -1212,7 +1233,12 @@ export function toUserInputQuestions(
       header,
       question: prompt,
       options,
-      ...(question.isOther ? { allowCustomAnswer: true } : {}),
+      // `isOther` is carried through in the provider's own spelling as well as
+      // the canonical `allowCustomAnswer`, so the composer can render Codex's
+      // free-text affordance exactly (W13's request).
+      ...(question.isOther ? { allowCustomAnswer: true, isOther: true } : {}),
+      // A secret answer is masked by the composer and never reaches a draft.
+      ...(question.isSecret ? { isSecret: true } : {}),
       multiSelect: false
     });
   }
@@ -1225,7 +1251,7 @@ export function toUserInputQuestions(
  * omitted rather than sent empty.
  */
 export function toCodexAnswers(
-  questions: readonly { id: string }[],
+  questions: readonly Pick<UserInputQuestion, "id">[],
   answers: Record<string, unknown>
 ): Record<string, CodexProtocol.v2.ToolRequestUserInputAnswer> {
   const out: Record<string, CodexProtocol.v2.ToolRequestUserInputAnswer> = {};
