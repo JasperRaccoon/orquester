@@ -2288,7 +2288,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
             turnId: latest.turnId,
             state: latest.state,
             startedAt: latest.startedAt,
-            completedAt: latest.completedAt
+            completedAt: latest.completedAt,
+            // Forwarded so the daemon can carry it on `agentChat.turn` (§6.4)
+            // without a second read; absent until the fold stamps it.
+            ...(latest.tokenUsage !== undefined ? { tokenUsage: latest.tokenUsage } : {})
           }
         : null,
       chatSessionStatus: head.session.status

@@ -133,6 +133,14 @@ export interface AgentHostHealthResponse {
   activeTurnThreadIds: string[];
   pid: number;
   startedAt: string;
+  /**
+   * Monotonic count of provider-snapshot changes. The daemon polls `/health`
+   * anyway, so a change the HOST noticed on its own — a CLI upgraded under it,
+   * a login gone stale, an `auth.status` error mid-turn — becomes an
+   * `agent.providers.changed` without a second endpoint. Absent from an older
+   * host, which the daemon reads as "no change".
+   */
+  providersRevision?: number;
 }
 
 /** Body of `POST /threads`. */
