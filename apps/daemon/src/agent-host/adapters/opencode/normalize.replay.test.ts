@@ -241,6 +241,43 @@ test("an unrecognised frame takes the fallback rather than a catch-all drop", ()
   assert.match(String(event?.payload.message), /unknown event 'session\.next\.text\.delta\.v9'/);
 });
 
+test("a re-stated title is mirrored once, not on every session.updated", () => {
+  const state = createSessionState({
+    threadId: "t",
+    openCodeSessionId: "ses_1",
+    directory: "/repo",
+    runtimeMode: "approval-required"
+  });
+  let counter = 0;
+  const ctx = { eventId: () => `evt-${(counter += 1)}`, nowIso: () => "now" };
+  const frame = {
+    type: "session.updated",
+    properties: { sessionID: "ses_1", info: { id: "ses_1", title: "orquester smoke" } }
+  };
+  const first = normalizeOpenCodeEvent(state, frame, ctx);
+  const second = normalizeOpenCodeEvent(state, frame, ctx);
+  const third = normalizeOpenCodeEvent(state, frame, ctx);
+  assert.deepEqual(
+    first.events.map((event) => event.type),
+    ["thread.metadata.updated"]
+  );
+  assert.deepEqual(second.events, []);
+  assert.deepEqual(third.events, []);
+
+  const renamed = normalizeOpenCodeEvent(
+    state,
+    {
+      type: "session.updated",
+      properties: { sessionID: "ses_1", info: { id: "ses_1", title: "renamed" } }
+    },
+    ctx
+  );
+  assert.deepEqual(
+    renamed.events.map((event) => event.type),
+    ["thread.metadata.updated"]
+  );
+});
+
 test("server.heartbeat is known and silent", () => {
   const state = createSessionState({
     threadId: "t",

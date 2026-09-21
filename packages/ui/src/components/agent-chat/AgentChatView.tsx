@@ -1,8 +1,13 @@
 import React from "react";
 
 import { DEFAULT_RUNTIME_MODE, SETTLED_TURN_STATES } from "@orquester/api/agent-chat";
+import type { ThreadItem } from "@orquester/api/agent-chat";
 
 import { shortAccountLabel } from "../../lib/account-label";
+import { ApiError } from "../../lib/api-client";
+import { useApi } from "../../context/orquester-context";
+import { Modal, ModalCloseButton } from "../ui";
+import { DiffView } from "../git/DiffView";
 import {
   useAgentChatPending,
   useAgentChatRoster,
@@ -49,6 +54,40 @@ const NO_REQUEST_IDS: readonly string[] = [];
 /** Every row callback is a no-op while the paint hold is in effect (§7.1). */
 const noop = (): void => {};
 
+/** The read-only overlay for a turn diff or one item's full, unslimmed payload. */
+interface ChatViewerState {
+  kind: "diff" | "output";
+  title: string;
+  loading: boolean;
+  diff?: string;
+  text?: string;
+  error?: string;
+}
+
+/** The daemon's own message where it sent one, else a plain fallback. */
+function errorText(error: unknown, fallback: string): string {
+  return (error instanceof ApiError ? error.serverMessage : null) ?? fallback;
+}
+
+/**
+ * An unslimmed item as text. The §5.6 allow-list is what the *row* renders; the
+ * full payload is by definition whatever the adapter wrote, so it is shown as
+ * pretty JSON rather than re-interpreted — a plain string payload stays plain.
+ */
+function fullOutputText(item: ThreadItem): string {
+  if (item.kind === "message") {
+    return item.text;
+  }
+  if (typeof item.payload === "string") {
+    return item.payload;
+  }
+  try {
+    return JSON.stringify(item.payload, null, 2);
+  } catch {
+    return item.summary;
+  }
+}
+
 /**
  * The chat shell (spec §7.1).
  *
@@ -92,6 +131,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   const status = useAgentChatStatus(sessionId);
   const provider = useProviderSnapshot(session.refId);
   const agentAccounts = useAppStore((s) => s.agentAccounts);
+  const api = useApi();
 
   // --- the §7.1 paint hold -------------------------------------------------
   const heldRef = React.useRef<HeldTimeline<AgentChatTimelineRow> | null>(null);
@@ -270,14 +310,88 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
     [sessionId, slice.queue, actions]
   );
 
+  // --- the read-only viewer for a turn diff / a full tool output -----------
+  // Both are §6.3 reads with no store slice behind them: the timeline asks,
+  // the shell fetches, and the answer is shown in the existing modal + diff
+  // view rather than folded back into the thread. Keeping them out of the
+  // slice is deliberate — a 200 KB unslimmed payload is something the user
+  // asked to look at once, not thread state every later render pays for.
+  const [viewer, setViewer] = React.useState<ChatViewerState | null>(null);
+  const openTurnDiff = React.useCallback(
+    (turnCount: number) => {
+      setViewer({ kind: "diff", title: `Turn ${turnCount}`, loading: true });
+      void api
+        .agentChatTurnDiff(sessionId, turnCount)
+        .then((response) =>
+          setViewer({
+            kind: "diff",
+            title: `Turn ${turnCount}`,
+            loading: false,
+            diff: response.diff
+          })
+        )
+        .catch((error: unknown) =>
+          setViewer({
+            kind: "diff",
+            title: `Turn ${turnCount}`,
+            loading: false,
+            error: errorText(error, "That turn's diff could not be read.")
+          })
+        );
+    },
+    [api, sessionId]
+  );
+  const loadFullOutput = React.useCallback(
+    (itemId: string) => {
+      setViewer({ kind: "output", title: "Full output", loading: true });
+      void api
+        .agentChatItem(sessionId, itemId)
+        .then((response) =>
+          setViewer({
+            kind: "output",
+            title: "Full output",
+            loading: false,
+            text: fullOutputText(response.item)
+          })
+        )
+        .catch((error: unknown) =>
+          setViewer({
+            kind: "output",
+            title: "Full output",
+            loading: false,
+            error: errorText(error, "That output is no longer available.")
+          })
+        );
+    },
+    [api, sessionId]
+  );
+  // A viewer belongs to the thread that opened it.
+  React.useEffect(() => setViewer(null), [sessionId]);
+
+  /**
+   * Click-through from a changed-file row to the file browser.
+   *
+   * Reuses this project's open Files tab where there is one rather than
+   * stacking a new tab per click — clicking six changed files should not leave
+   * six identical tabs behind.
+   *
+   * **Known gap:** the file browser has no "reveal this path" entry point, so
+   * this lands in the browser at the project root rather than on the file.
+   * Wiring a target path through `FileBrowser` is a follow-up; opening the
+   * wrong-looking surface is still better than a dead link.
+   */
   const openFile = React.useCallback(
     (path: string) => {
       void path;
-      // The file browser is a project tab, and a chat tab may be in grid view
-      // beside it; opening one is the store's job, not this view's.
-      useAppStore.getState().openFileBrowser();
+      const state = useAppStore.getState();
+      const existing = state.fileTabsByProject[projectPath]?.[0];
+      if (existing) {
+        state.activateTab(existing.id);
+        return;
+      }
+      state.openFileBrowser();
     },
-    []
+    [projectPath]
   );
 
   return (
@@ -322,9 +436,9 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                   ? noop
                   : (targetTurnCount) => void actions.revert({ targetTurnCount })
               }
-              onOpenTurnDiff={paintOnly ? noop : (turnCount) => void turnCount}
+              onOpenTurnDiff={paintOnly ? noop : openTurnDiff}
               onOpenFile={paintOnly ? noop : openFile}
-              onLoadFullOutput={paintOnly ? noop : (itemId) => void itemId}
+              onLoadFullOutput={paintOnly ? noop : loadFullOutput}
               onOpenAgent={paintOnly ? noop : setDrillInAgentId}
               onSendQueuedNow={paintOnly ? noop : (id) => void actions.sendQueuedNow(id)}
               onReturnQueuedToComposer={paintOnly ? noop : returnQueuedToComposer}
@@ -437,6 +551,32 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
           </div>
         </div>
       </ChatErrorBoundary>
+
+      {/* Read-only §6.3 reads, on the app's own modal layer (z-100) — above the
+          chat overlays by construction, so the ladder needs no new z-index. */}
+      <Modal open={viewer !== null} onClose={() => setViewer(null)} className="max-h-[85vh] max-w-4xl">
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div className="flex h-11 shrink-0 items-center justify-between border-b border-neutral-800 px-3">
+            <span className="truncate text-sm text-neutral-200">{viewer?.title}</span>
+            <ModalCloseButton onClose={() => setViewer(null)} />
+          </div>
+          <div className="min-h-0 flex-1 overflow-auto">
+            {viewer?.error ? (
+              <p className="px-4 py-6 text-sm text-danger">{viewer.error}</p>
+            ) : viewer?.kind === "diff" ? (
+              <DiffView
+                diff={viewer.diff ?? ""}
+                loading={viewer.loading}
+                emptyLabel="This turn changed no files."
+              />
+            ) : (
+              <pre className="whitespace-pre-wrap break-words px-4 py-3 font-mono text-xs text-neutral-300">
+                {viewer?.loading ? "Loading…" : (viewer?.text ?? "")}
+              </pre>
+            )}
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }

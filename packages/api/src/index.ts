@@ -1,5 +1,6 @@
 import type { ClientConfig, DaemonConfig } from "@orquester/config";
 import type {
+  AgentAdapterId,
   BackgroundLiveness as AgentChatBackgroundLiveness,
   CreateAgentChatSessionFields,
   LatestTurnSummary as AgentChatLatestTurnSummary,
@@ -868,6 +869,13 @@ export interface RegistryEntry {
   installState: RegistryInstallState;
   /** Captured output when `installState === "error"`. */
   installError?: string;
+  /**
+   * Agent-chat adapter this entry opens a chat tab with (chat design spec
+   * §5.3), mirrored from the static catalog. `claudex`/`claudemix` map to
+   * `claude` with their launcher env. **An agent row without `chat` cannot
+   * open a chat tab** — that is the whole gate the launch flow reads.
+   */
+  chat?: { adapter: AgentAdapterId };
 }
 
 export interface RegistryResponse {
@@ -1231,6 +1239,13 @@ export interface SessionSummary {
   missingModels?: string[];
   /** Live activity snapshot; absent in persisted indexes and for exited sessions. */
   activity?: SessionActivity;
+  /**
+   * Chat design spec §5.2 migration: a `kind: "agent"` tab reattached from a
+   * record written before agent tabs became chat tabs. It keeps working as a
+   * terminal until the user closes it and the UI tags it "legacy terminal".
+   * Set only by `reattach()`; a fresh agent launch can no longer produce one.
+   */
+  legacyAgentTerminal?: boolean;
 
   // --- agent chat (kind "agent-chat") -------------------------------------
   // The six derived fields of the chat design spec §6.4 / §7.1, so the tab
