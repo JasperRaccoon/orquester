@@ -10,9 +10,14 @@ import {
   LoaderCircle,
   Plus
 } from "lucide-react";
-import { SYSTEM_ACCOUNT_ID, type RegistryEntry } from "@orquester/api";
+import {
+  RUNTIME_MODES,
+  SYSTEM_ACCOUNT_ID,
+  type CreateAgentChatSessionFields,
+  type RegistryEntry
+} from "@orquester/api";
 import { CURATED_PROXY_MODEL_IDS, XAI_OAUTH_MODELS, resolveXaiModel } from "@orquester/config";
-import { CHROMIUM_FAMILY_IDS, canResumeAgent } from "@orquester/registry";
+import { CHROMIUM_FAMILY_IDS } from "@orquester/registry";
 import {
   AdaptiveMenu,
   DropdownEmpty,
@@ -28,7 +33,18 @@ import { cn } from "../../lib/cn";
 import { shortAccountLabel } from "../../lib/account-label";
 import { relativeTime } from "../../lib/relative-time";
 import { launchWithNotice } from "../../lib/launch-notice";
-import { isResumableConversation, resumeAccountId } from "../../lib/resume-account";
+import { resumeAccountId } from "../../lib/resume-account";
+import {
+  canOpenChat,
+  chatLaunchRefId,
+  isChatResumableConversation
+} from "../../lib/session-kind";
+import {
+  RUNTIME_MODE_HINTS,
+  RUNTIME_MODE_LABELS,
+  runtimeModeForAgent
+} from "../../lib/chat-prefs";
+import { useProviderSnapshot } from "../../lib/agent-chat/hooks";
 
 /** Past conversations listed inline per agent before the "…and N more" cutoff. */
 const MAX_INLINE_CONVERSATIONS = 10;
@@ -84,7 +100,9 @@ const ResumeSection: React.FC<{
    *  in the wrong home and finds nothing. */
   accountId?: string;
   model?: string;
-}> = ({ agent, projectPath, accountId, model }) => {
+  /** The row's own launch block; the picked conversation becomes its cursor. */
+  chat: CreateAgentChatSessionFields;
+}> = ({ agent, projectPath, accountId, model, chat }) => {
   const loadAgentConversations = useAppStore((s) => s.loadAgentConversations);
   const cached = useAppStore((s) => s.agentConversationsByProject[projectPath]);
   const openTab = useAppStore((s) => s.openTab);
@@ -97,9 +115,13 @@ const ResumeSection: React.FC<{
   }, [expanded, projectPath, loadAgentConversations]);
 
   // `undefined` (key absent) is "not fetched yet"; `[]` is "fetched, none".
-  // `isResumableConversation` drops the claudex/claudemix proxy-home rows, which
-  // this row could only launch as plain `claude` in the wrong HOME (see there).
-  const mine = cached?.filter((c) => c.agentRefId === agent.id && isResumableConversation(c));
+  // Chat resumes under the conversation's own HOME instead of going through the
+  // launcher's `resumeArgs`, so the claudex/claudemix proxy-home rows the
+  // terminal path had to hide (`isResumableConversation`) are offered here for
+  // the first time (§5.3) — under the launcher that owns that home.
+  const mine = cached?.filter(
+    (c) => chatLaunchRefId(c) === agent.id && isChatResumableConversation(c)
+  );
   const shown = mine?.slice(0, MAX_INLINE_CONVERSATIONS) ?? [];
   const hidden = (mine?.length ?? 0) - shown.length;
 
@@ -139,17 +161,26 @@ const ResumeSection: React.FC<{
               }`}
               onClick={() =>
                 launchWithNotice(
-                  openTab(
-                    "agent",
-                    agent.id,
-                    agent.name,
+                  openTab({
+                    kind: "agent-chat",
+                    refId: agent.id,
+                    // Seeded from the conversation the user picked, so the tab
+                    // reads as the thread it continues rather than "Claude Code".
+                    title: conversation.title || agent.name,
                     // account-attributed rows force their home (only it sees
                     // the transcript); system rows honor the selected chip —
                     // every managed home symlinks back to the system history.
-                    resumeAccountId(conversation, accountId),
+                    accountId: resumeAccountId(conversation, accountId),
                     model,
-                    conversation.id
-                  ),
+                    chat: {
+                      ...chat,
+                      accountId: resumeAccountId(conversation, accountId),
+                      resume: {
+                        home: conversation.home ?? "system",
+                        conversationId: conversation.id
+                      }
+                    }
+                  }),
                   agent.name
                 )
               }
@@ -196,8 +227,14 @@ const AgentRow: React.FC<{ agent: RegistryEntry; projectPath?: string }> = ({
   const setPreferredAccount = useAppStore((s) => s.setPreferredAccount);
   const preferredModel = useAppStore((s) => s.preferredModelByAgent[agent.id]);
   const setPreferredModel = useAppStore((s) => s.setPreferredModel);
+  const chatPrefs = useAppStore((s) => s.chatPrefs);
+  const setPreferredRuntimeMode = useAppStore((s) => s.setPreferredRuntimeMode);
   const cliproxy = useAppStore((s) => s.cliproxy);
   const cliproxyModels = useAppStore((s) => s.cliproxyModels);
+  // The adapter's live catalog, once the host has published one. `null` until
+  // then, which is exactly the state a fresh daemon is in — the row degrades to
+  // "launch with the provider's own default model" rather than blocking.
+  const providerSnapshot = useProviderSnapshot(agent.id);
 
   // A proxy launcher draws its accounts from the mapped provider family; every
   // other agent draws from its own id (the pre-proxy behaviour).
@@ -266,14 +303,29 @@ const AgentRow: React.FC<{ agent: RegistryEntry; projectPath?: string }> = ({
   );
   const available = catalogModels.length ? pickIds.filter((m) => catalogModels.includes(m)) : pickIds;
   const baseModels = available.length ? available : pickIds;
-  const selectedModel = preferredModel ?? cliproxy?.defaultModel ?? baseModels[0];
+  // Every non-proxy agent gets its models from the adapter's own catalog once
+  // the host has published a snapshot; the proxy launchers keep the curated
+  // cliproxy list, which is a different thing entirely (what the proxy serves).
+  const catalogChoices = React.useMemo(
+    () => (providerSnapshot?.models ?? []).filter((m) => !m.isLegacy).map((m) => m.slug),
+    [providerSnapshot]
+  );
+  const catalogDefault =
+    providerSnapshot?.models.find((m) => m.isDefault)?.slug ?? catalogChoices[0];
+  const selectedModel = showModels
+    ? (preferredModel ?? cliproxy?.defaultModel ?? baseModels[0])
+    : (preferredModel ?? catalogDefault);
   const modelOptions = React.useMemo(() => {
-    const set = new Set(baseModels);
+    const set = new Set(showModels ? baseModels : catalogChoices);
     // Never drop a persisted pick even if the catalog no longer lists it — show
     // it (stale) rather than silently falling back to another model (spec §2).
     if (selectedModel) set.add(selectedModel);
     return [...set];
-  }, [baseModels, selectedModel]);
+  }, [showModels, baseModels, catalogChoices, selectedModel]);
+  // Chips are offered wherever there is more than one thing to pick: the
+  // curated proxy list, or an adapter catalog the host has published.
+  const showModelChips = showModels || catalogChoices.length > 1;
+  const runtimeMode = runtimeModeForAgent(chatPrefs, agent.id);
 
   // A router- or Grok-served model is keyless → its account chip has no effect;
   // dim the row AND drop the account on launch so a stale pick can't reattach a
@@ -287,6 +339,19 @@ const AgentRow: React.FC<{ agent: RegistryEntry; projectPath?: string }> = ({
     : selectedModel && resolveXaiModel(selectedModel)
       ? `${selectedModel} uses Grok account — account is ignored`
       : `${selectedModel} routes through ${keylessLabel} (keyless) — account is ignored`;
+
+  // The §6.1 launch block, shared by the row's own click and its resume rows so
+  // a resumed thread starts under exactly the settings the row advertises. A
+  // keyless router pick carries the System sentinel (no account) so the daemon
+  // never stamps a per-account routing prefix on it.
+  const launchAccountId = accountDimmed ? SYSTEM_ACCOUNT_ID : selectedAccount;
+  const chatFields: CreateAgentChatSessionFields = {
+    accountId: launchAccountId,
+    // An empty slug means "whatever the provider defaults to": the launcher
+    // cannot invent a model name, and every adapter has one of its own.
+    modelSelection: { model: selectedModel ?? "" },
+    runtimeMode
+  };
 
   // A deliberately-off proxy (user disabled it, or status not loaded yet) hides
   // its launchers entirely — advertising an escape hatch the user turned off is
@@ -322,22 +387,23 @@ const AgentRow: React.FC<{ agent: RegistryEntry; projectPath?: string }> = ({
         }
         onClick={() =>
           launchWithNotice(
-            openTab(
-              "agent",
-              agent.id,
-              agent.name,
-              // A keyless router pick carries the System sentinel (no account)
-              // so the daemon never stamps a per-account routing prefix on it.
-              accountDimmed ? SYSTEM_ACCOUNT_ID : selectedAccount,
-              showModels ? selectedModel : undefined
-            ),
+            // Agent tabs are chat only (§1): the terminal launch path for agents
+            // is gone, and a row without an adapter is never rendered.
+            openTab({
+              kind: "agent-chat",
+              refId: agent.id,
+              title: agent.name,
+              accountId: launchAccountId,
+              model: showModels ? selectedModel : undefined,
+              chat: chatFields
+            }),
             agent.name
           )
         }
       >
         {agent.name}
       </DropdownItem>
-      {showModels ? (
+      {showModelChips ? (
         <div
           className="mb-1.5 ml-8 mr-2 flex flex-wrap gap-1"
           onClick={(event) => event.stopPropagation()}
@@ -360,6 +426,32 @@ const AgentRow: React.FC<{ agent: RegistryEntry; projectPath?: string }> = ({
           ))}
         </div>
       ) : null}
+      {/* Permission mode (§4.4). Every provider expresses it as launch
+          configuration, so it is picked BEFORE the session exists; changing it
+          later restarts the session, which the composer's own chip owns. */}
+      <div
+        className="mb-1.5 ml-8 mr-2 flex flex-wrap gap-1"
+        onClick={(event) => event.stopPropagation()}
+      >
+        {RUNTIME_MODES.map((mode) => (
+          <button
+            key={mode}
+            type="button"
+            onClick={() => setPreferredRuntimeMode(agent.id, mode)}
+            className={cn(
+              "max-w-full truncate rounded px-1.5 py-0.5 text-[11px] transition-colors",
+              mode === runtimeMode
+                ? mode === "full-access"
+                  ? "bg-danger-500/15 text-danger-300 ring-1 ring-danger-500/40"
+                  : "bg-neutral-700 text-neutral-100 ring-1 ring-neutral-500"
+                : "bg-neutral-800 text-neutral-400 ring-1 ring-transparent hover:bg-neutral-700 hover:text-neutral-200"
+            )}
+            title={RUNTIME_MODE_HINTS[mode]}
+          >
+            {RUNTIME_MODE_LABELS[mode]}
+          </button>
+        ))}
+      </div>
       {managed.length > 0 ? (
         <div
           className={cn(
@@ -388,16 +480,18 @@ const AgentRow: React.FC<{ agent: RegistryEntry; projectPath?: string }> = ({
         </div>
       ) : null}
       {/* Last, below the chips it inherits: resume is a second action on the row,
-          not something that changes how the row itself launches. Offered only
-          where the daemon can honour it — an agent with a known resume flag,
-          inside a project (conversations are scoped to one). Anything else could
-          only earn a RESUME_UNAVAILABLE. */}
-      {projectPath && canResumeAgent(agent.id) ? (
+          not something that changes how the row itself launches. Offered inside
+          a project (conversations are scoped to one); the per-agent gate is now
+          "this entry has an adapter", which the row's own existence already
+          guarantees — chat resumes under the conversation's HOME rather than
+          through the launcher's `resumeArgs` (§5.3). */}
+      {projectPath ? (
         <ResumeSection
           agent={agent}
           projectPath={projectPath}
-          accountId={accountDimmed ? SYSTEM_ACCOUNT_ID : selectedAccount}
+          accountId={launchAccountId}
           model={showModels ? selectedModel : undefined}
+          chat={chatFields}
         />
       ) : null}
     </>
@@ -426,7 +520,12 @@ export const NewTabMenu: React.FC = () => {
   // Enabled agents show normally; a *disabled proxy launcher* stays visible
   // (greyed, with a reason) so the GPT/Kimi escape hatch is discoverable even
   // when its proxy is down (spec §2). Other disabled agents remain hidden.
-  const agents = registry.agents.filter((a) => a.enabled || isProxyLauncher(a.id));
+  // …and only entries an adapter can actually drive: agent tabs are chat only
+  // now (§1), so a catalog row with no `chat` block (the detect-only `deepseek`)
+  // has no launch path left and must not be offered one (§5.3).
+  const agents = registry.agents
+    .filter((a) => canOpenChat(a.id))
+    .filter((a) => a.enabled || isProxyLauncher(a.id));
   // Browser tabs need BOTH chromium detected on the host AND a transport that can
   // stream frames. The desktop unix socket has no browserChannel, so a browser
   // record would open a dead blank tab — gate the entry on the channel too.
@@ -468,7 +567,12 @@ export const NewTabMenu: React.FC = () => {
         <DropdownItem
           key={shell.id}
           icon={getRegistryIcon("shell", shell.id, 14)}
-          onClick={() => launchWithNotice(openTab("shell", shell.id, shell.name), shell.name)}
+          onClick={() =>
+            launchWithNotice(
+              openTab({ kind: "shell", refId: shell.id, title: shell.name }),
+              shell.name
+            )
+          }
         >
           {shell.name}
         </DropdownItem>
