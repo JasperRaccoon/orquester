@@ -122,10 +122,6 @@ describe("Q1-9 / Q1-25: deleting a thread frees what the host held for it", () =
   it("detaches subscribers and tells ingestion to forget the thread", async () => {
     const host = createTestHost();
     const threadId = await host.createThread();
-    const forgotten: string[] = [];
-    host.ingestion.forget = (id: string) => {
-      forgotten.push(id);
-    };
     const seen: DomainEvent[] = [];
     await host.orchestrator.subscribe(threadId, {
       onEvents: (events) => seen.push(...events)
@@ -136,7 +132,7 @@ describe("Q1-9 / Q1-25: deleting a thread frees what the host held for it", () =
       seen.some((event) => event.type === "thread.deleted"),
       "the last frame still reaches the open stream"
     );
-    assert.deepEqual(forgotten, [threadId]);
+    assert.deepEqual(host.ingestion.forgottenThreads, [threadId]);
     await host.stop();
   });
 });

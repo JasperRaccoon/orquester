@@ -13,10 +13,17 @@
 import type { ToolGroupSummaryKind, WorkLogEntry } from "../../../lib/agent-chat/contracts";
 import {
   toolGroupSummaryIconName,
-  workEntryIndicatesToolFailure,
-  workEntrySignalsSevereFailure,
-  workLogEntryIsToolLike,
   type WorkEntryIconName
+} from "../../../lib/agent-chat/presentation.logic";
+
+/**
+ * Absorbed by W11 into the one resolver (fix-wave R7-6) and re-exported here
+ * only so existing imports keep resolving. **These are not second copies** —
+ * there is exactly one implementation, in `presentation.logic.ts`.
+ */
+export {
+  showDestructiveRowStyle,
+  workEntryIsActiveTurnActivity
 } from "../../../lib/agent-chat/presentation.logic";
 
 /**
@@ -31,38 +38,9 @@ export function summaryKindIconName(kind: ToolGroupSummaryKind): WorkEntryIconNa
   return toolGroupSummaryIconName(kind);
 }
 
-/**
- * The destructive row style (§7.3 "failure styling is reserved").
- *
- * Deliberately **not** `workEntrySeverity(entry) === "severe"`: a failure on a
- * row that is not tool-like is destructive too, because it is not a tool that
- * failed — it is the turn or a side effect. A non-zero command exit is neither,
- * and gets the muted mark instead.
- */
-export function showDestructiveRowStyle(entry: WorkLogEntry): boolean {
-  return (
-    workEntryIndicatesToolFailure(entry) &&
-    (workEntrySignalsSevereFailure(entry) || !workLogEntryIsToolLike(entry))
-  );
-}
-
 /** The inline "the model you asked for was not the model that ran" notice (§7.3). */
 export function workEntryIsRerouteNotice(entry: WorkLogEntry): boolean {
   return entry.sourceActivityKind === "model.rerouted";
-}
-
-/**
- * True while the row is the one the turn is currently doing.
- *
- * *T3: `MessagesTimeline.logic.ts:614-621`.* Offered to W11 for the shared
- * resolver; kept here until it lands there, so the group can pick its live row.
- */
-export function workEntryIsActiveTurnActivity(entry: WorkLogEntry): boolean {
-  return (
-    entry.toolLifecycleStatus === "inProgress" ||
-    (entry.toolLifecycleStatus === undefined &&
-      (entry.sourceActivityKind === "task.progress" || workLogEntryIsToolLike(entry)))
-  );
 }
 
 // ---------------------------------------------------------------------------

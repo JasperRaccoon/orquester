@@ -155,7 +155,11 @@ export class DeltaBufferSet {
     this.#lastDeliveredAtMs.delete(key);
   }
 
-  /** Every pending timer, cancelled. Used by `clear()` and on shutdown. */
+  /**
+   * Every pending timer, cancelled, and every key forgotten — including the
+   * pacing stamps, which are otherwise kept for a key that never gets a
+   * `take`/`discard` (Q1 #51).
+   */
   clear(): void {
     for (const [key, entry] of [...this.#entries]) {
       this.#dispose(key, entry);
@@ -186,14 +190,13 @@ export class DeltaBufferSet {
         this.#onTimerFlush({ key, text: ready, openedAt });
         return;
       }
-      if (openFence) {
+      if (openFence || current.text.trim().length === 0) {
         // "a flush never splits a code block": hold the block one more window.
-        // The 8 KB valve in `append` still bounds the buffer.
-        this.#arm(key, current);
-        return;
-      }
-      if (current.text.trim().length === 0) {
-        this.#arm(key, current);
+        // The 8 KB valve in `append` still bounds the buffer, and the timer is
+        // NOT re-armed — a provider that stops mid-fence would otherwise keep
+        // a 250 ms timer alive for the life of the host (Q1 #51). The next
+        // `append` re-arms it, which is the only thing that can change the
+        // buffer anyway.
         return;
       }
       const text = current.text;

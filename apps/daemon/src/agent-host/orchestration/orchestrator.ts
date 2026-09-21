@@ -1993,7 +1993,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       // ever tells ingestion a thread is gone.
       runtime.subscribers.clear();
       runtime.watchdog?.stop();
-      await ingestion.forget?.(threadId);
+      await ingestion.forget(threadId);
       runtimes.delete(threadId);
       loadingRuntimes.delete(threadId);
     });

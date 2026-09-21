@@ -22,10 +22,10 @@ import {
   AGENT_CHAT_HEARTBEAT_LINE,
   AGENT_CHAT_HEARTBEAT_MS,
   AGENT_CHAT_STREAM_BUFFER_LIMIT_BYTES,
-  slimActivityPayload,
   type AgentChatStreamFrame,
   type DomainEvent
 } from "@orquester/api/agent-chat";
+import { slimActivityEvent } from "../ingestion/index.ts";
 
 /**
  * The one non-`AgentChatStreamFrame` line the stream may write: the budget
@@ -55,33 +55,6 @@ export function serializedSize(value: object): number {
   const bytes = Buffer.byteLength(JSON.stringify(value));
   sizeCache.set(value, bytes);
   return bytes;
-}
-
-/**
- * §5.6: the full activity payload is persisted and `slimPayload()` runs before
- * anything goes on the wire. This is one of the two choke points (the other is
- * the §6.3 snapshot); `GET …/items/:itemId` stays unslimmed and is what "load
- * full output" reads.
- *
- * Without it a `tool.completed` carrying a few MB of command output is written
- * into the stream verbatim — charged in full against the per-stream byte
- * budget, so an ordinary tool result cuts a client on a slow link with "The
- * live event buffer is full" — and `truncated` is never stamped, which is what
- * makes the "load full output" affordance appear at all.
- */
-export function slimStreamEvent(event: DomainEvent): DomainEvent {
-  if (event.type !== "thread.activity-appended") {
-    return event;
-  }
-  const activity = event.payload.activity;
-  const slimmed = slimActivityPayload(activity.payload);
-  if (slimmed === activity.payload) {
-    return event;
-  }
-  return {
-    ...event,
-    payload: { ...event.payload, activity: { ...activity, payload: slimmed } }
-  };
 }
 
 function isToolUpdated(event: DomainEvent): boolean {
@@ -294,7 +267,14 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
 
   const emitEvents = (events: readonly DomainEvent[]): void => {
     for (const event of events) {
-      writeFrame({ kind: "event", seq: event.seq, event: slimStreamEvent(event) });
+      // §5.6: the full payload is persisted, and slimming runs before anything
+      // goes on the wire. It happens HERE, before `writeFrame` measures the
+      // line, so the per-stream byte budget is charged the wire size rather
+      // than the multi-MB persisted one — otherwise ordinary tool output cuts
+      // a client on a slow link with "the live event buffer is full", and
+      // `payload.truncated` never reaches the UI so "load full output" can
+      // never appear (R5 #1). `readItem` stays unslimmed: it IS that fetch.
+      writeFrame({ kind: "event", seq: event.seq, event: slimActivityEvent(event) });
     }
   };
 

@@ -1,6 +1,7 @@
 import React from "react";
 import { Info, X } from "lucide-react";
 import { useAppStore } from "../../store/app";
+import { useAutoDismiss } from "./use-auto-dismiss";
 
 /**
  * Toast for a plain after-the-fact notice with no action of its own — today the
@@ -12,6 +13,9 @@ import { useAppStore } from "../../store/app";
 export const NoticeToast: React.FC = () => {
   const notice = useAppStore((s) => s.notice);
   const dismiss = useAppStore((s) => s.dismissNotice);
+  // Advisory and actionless, so it leaves on its own rather than covering the
+  // timeline until someone clicks it.
+  useAutoDismiss(notice ? `${notice.title ?? ""}\u0000${notice.message}` : null, dismiss);
 
   if (!notice) {
     return null;

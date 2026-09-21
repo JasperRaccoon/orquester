@@ -45,6 +45,7 @@ import {
   runtimeModeForAgent
 } from "../../lib/chat-prefs";
 import { useProviderSnapshot } from "../../lib/agent-chat/hooks";
+import { launchModelList, resolveLaunchModel } from "../../lib/launch-models";
 
 /** Past conversations listed inline per agent before the "…and N more" cutoff. */
 const MAX_INLINE_CONVERSATIONS = 10;
@@ -227,6 +228,7 @@ const AgentRow: React.FC<{ agent: RegistryEntry; projectPath?: string }> = ({
   const setPreferredAccount = useAppStore((s) => s.setPreferredAccount);
   const preferredModel = useAppStore((s) => s.preferredModelByAgent[agent.id]);
   const setPreferredModel = useAppStore((s) => s.setPreferredModel);
+  const setNotice = useAppStore((s) => s.setNotice);
   const chatPrefs = useAppStore((s) => s.chatPrefs);
   const setPreferredRuntimeMode = useAppStore((s) => s.setPreferredRuntimeMode);
   const cliproxy = useAppStore((s) => s.cliproxy);
@@ -306,25 +308,41 @@ const AgentRow: React.FC<{ agent: RegistryEntry; projectPath?: string }> = ({
   // Every non-proxy agent gets its models from the adapter's own catalog once
   // the host has published a snapshot; the proxy launchers keep the curated
   // cliproxy list, which is a different thing entirely (what the proxy serves).
-  const catalogChoices = React.useMemo(
-    () => (providerSnapshot?.models ?? []).filter((m) => !m.isLegacy).map((m) => m.slug),
+  const catalogModelsForAgent = React.useMemo(
+    () => (providerSnapshot?.models ?? []).filter((m) => !m.isLegacy),
     [providerSnapshot]
   );
-  const catalogDefault =
-    providerSnapshot?.models.find((m) => m.isDefault)?.slug ?? catalogChoices[0];
+  // The selection. For a proxy launcher the curated list still rules; for every
+  // other agent the catalogue resolves it, and it is NEVER empty when a
+  // catalogue exists — the host rejects a blank model at thread creation.
   const selectedModel = showModels
     ? (preferredModel ?? cliproxy?.defaultModel ?? baseModels[0])
-    : (preferredModel ?? catalogDefault);
-  const modelOptions = React.useMemo(() => {
-    const set = new Set(showModels ? baseModels : catalogChoices);
+    : (resolveLaunchModel({
+        snapshot: catalogModelsForAgent.length ? { models: catalogModelsForAgent } : null,
+        preferred: preferredModel
+      }) ?? undefined);
+  // A catalogue of 378 models is not a picker: show a short, stable subset and
+  // put the rest behind a search rather than rendering the whole wall.
+  const [modelQuery, setModelQuery] = React.useState("");
+  const catalogList = React.useMemo(
+    () =>
+      launchModelList({
+        models: catalogModelsForAgent,
+        selected: selectedModel ?? null,
+        query: modelQuery
+      }),
+    [catalogModelsForAgent, selectedModel, modelQuery]
+  );
+  const proxyModelOptions = React.useMemo(() => {
+    const set = new Set(baseModels);
     // Never drop a persisted pick even if the catalog no longer lists it — show
     // it (stale) rather than silently falling back to another model (spec §2).
     if (selectedModel) set.add(selectedModel);
     return [...set];
-  }, [showModels, baseModels, catalogChoices, selectedModel]);
+  }, [baseModels, selectedModel]);
   // Chips are offered wherever there is more than one thing to pick: the
   // curated proxy list, or an adapter catalog the host has published.
-  const showModelChips = showModels || catalogChoices.length > 1;
+  const showModelChips = showModels || catalogModelsForAgent.length > 1;
   const runtimeMode = runtimeModeForAgent(chatPrefs, agent.id);
 
   // A router- or Grok-served model is keyless → its account chip has no effect;
@@ -345,13 +363,18 @@ const AgentRow: React.FC<{ agent: RegistryEntry; projectPath?: string }> = ({
   // keyless router pick carries the System sentinel (no account) so the daemon
   // never stamps a per-account routing prefix on it.
   const launchAccountId = accountDimmed ? SYSTEM_ACCOUNT_ID : selectedAccount;
-  const chatFields: CreateAgentChatSessionFields = {
-    accountId: launchAccountId,
-    // An empty slug means "whatever the provider defaults to": the launcher
-    // cannot invent a model name, and every adapter has one of its own.
-    modelSelection: { model: selectedModel ?? "" },
-    runtimeMode
-  };
+  //
+  // `modelSelection.model` is REQUIRED by the host — a blank is refused at
+  // thread creation — so a row with no resolvable model does not post a launch
+  // it knows will fail; `launchModel` being null is what disables it.
+  const launchModel = selectedModel ?? null;
+  const chatFields: CreateAgentChatSessionFields | null = launchModel
+    ? {
+        accountId: launchAccountId,
+        modelSelection: { model: launchModel },
+        runtimeMode
+      }
+    : null;
 
   // A deliberately-off proxy (user disabled it, or status not loaded yet) hides
   // its launchers entirely — advertising an escape hatch the user turned off is
@@ -385,7 +408,17 @@ const AgentRow: React.FC<{ agent: RegistryEntry; projectPath?: string }> = ({
             {getRegistryIcon("agent", agent.id, 14)}
           </span>
         }
-        onClick={() =>
+        onClick={() => {
+          if (!chatFields) {
+            // The catalogue has not arrived, so there is no model to name and
+            // the host would refuse the create. Say that instead of firing a
+            // request that comes back as "modelSelection.model is required".
+            setNotice({
+              title: agent.name,
+              message: "Still loading this agent's models — try again in a moment."
+            });
+            return;
+          }
           launchWithNotice(
             // Agent tabs are chat only (§1): the terminal launch path for agents
             // is gone, and a row without an adapter is never rendered.
@@ -398,32 +431,58 @@ const AgentRow: React.FC<{ agent: RegistryEntry; projectPath?: string }> = ({
               chat: chatFields
             }),
             agent.name
-          )
-        }
+          );
+        }}
       >
         {agent.name}
       </DropdownItem>
       {showModelChips ? (
         <div
-          className="mb-1.5 ml-8 mr-2 flex flex-wrap gap-1"
+          className="mb-1.5 ml-8 mr-2 flex flex-col gap-1"
           onClick={(event) => event.stopPropagation()}
         >
-          {modelOptions.map((m) => (
-            <button
-              key={m}
-              type="button"
-              onClick={() => setPreferredModel(agent.id, m)}
-              className={cn(
-                "max-w-full truncate rounded px-1.5 py-0.5 text-[11px] transition-colors",
-                m === selectedModel
-                  ? "bg-warn-500/15 text-warn-300 ring-1 ring-warn-500/40"
-                  : "bg-neutral-800 text-neutral-400 ring-1 ring-transparent hover:bg-neutral-700 hover:text-neutral-200"
-              )}
-              title={m}
-            >
-              {m}
-            </button>
-          ))}
+          {/* A catalogue is not a picker: OpenCode reports 378 models, and
+              rendering them inline made this menu a multi-screen wall that
+              every open paid for. Search appears only once there is more than
+              a screenful to search. */}
+          {!showModels && catalogList.searchable ? (
+            <input
+              type="search"
+              value={modelQuery}
+              onChange={(event) => setModelQuery(event.target.value)}
+              placeholder="Search models…"
+              aria-label={`Search ${agent.name} models`}
+              className="h-6 w-full rounded bg-neutral-900 px-1.5 text-[11px] text-neutral-200 outline-none ring-1 ring-neutral-700 placeholder:text-neutral-600 focus:ring-neutral-500"
+            />
+          ) : null}
+          <div className="flex flex-wrap gap-1">
+            {(showModels
+              ? proxyModelOptions.map((slug) => ({ slug, label: slug, provider: null }))
+              : catalogList.shown
+            ).map((choice) => (
+              <button
+                key={choice.slug}
+                type="button"
+                onClick={() => setPreferredModel(agent.id, choice.slug)}
+                className={cn(
+                  "max-w-full truncate rounded px-1.5 py-0.5 text-[11px] transition-colors",
+                  choice.slug === selectedModel
+                    ? "bg-warn-500/15 text-warn-300 ring-1 ring-warn-500/40"
+                    : "bg-neutral-800 text-neutral-400 ring-1 ring-transparent hover:bg-neutral-700 hover:text-neutral-200"
+                )}
+                // The friendly name reads on the chip; the slug is what the
+                // launch actually sends, so it stays available on hover.
+                title={choice.provider ? `${choice.slug} · ${choice.provider}` : choice.slug}
+              >
+                {choice.label}
+              </button>
+            ))}
+            {!showModels && catalogList.hidden > 0 ? (
+              <span className="px-1 py-0.5 text-[11px] text-neutral-600">
+                …and {catalogList.hidden} more
+              </span>
+            ) : null}
+          </div>
         </div>
       ) : null}
       {/* Permission mode (§4.4). Every provider expresses it as launch
@@ -485,7 +544,9 @@ const AgentRow: React.FC<{ agent: RegistryEntry; projectPath?: string }> = ({
           "this entry has an adapter", which the row's own existence already
           guarantees — chat resumes under the conversation's HOME rather than
           through the launcher's `resumeArgs` (§5.3). */}
-      {projectPath ? (
+      {/* No resolvable model means no launch block, so the resume rows have
+          nothing to start either — hidden rather than offered and refused. */}
+      {projectPath && chatFields ? (
         <ResumeSection
           agent={agent}
           projectPath={projectPath}

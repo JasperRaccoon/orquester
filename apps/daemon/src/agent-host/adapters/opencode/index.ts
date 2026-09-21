@@ -20,7 +20,16 @@
  * | `session.ts` | The three completion machines, turns, interrupt, compaction, rollback |
  * | `server.ts` | The ref-counted per-project server pool |
  * | `snapshot.ts` | `GET /provider` → models + auth + commands + skills |
+ * | `cli-inventory.ts` | The machine-level CLI catalogue, for a cwd-less probe |
  * | `smoke.ts` | A manual one-turn drive against the real CLI (`ORQ_AGENT_SMOKE=1`) |
+ *
+ * **`StartSessionInput.home` is deliberately not honoured.** The server is
+ * shared by a project's threads (§3.2), and `OPENCODE_DATA` is a property of
+ * that one process — so a per-thread account home is not expressible without
+ * giving up the sharing. Every OpenCode server therefore runs under the system
+ * identity, and a non-`system` home is **refused** rather than silently
+ * ignored, so an account selection can never look applied when it is not.
+ * There is no OpenCode account family today, so nothing reaches that refusal.
  *
  * No lazy dynamic `import()` anywhere (§8): every import above is static.
  */
@@ -52,6 +61,7 @@ import { StderrCapture } from "../../support/stderr.ts";
 import { OpenCodeThreadSession } from "./session.ts";
 import { OpenCodeServerPool, type OpenCodeServerHandle } from "./server.ts";
 import { meetsMinimumOpenCodeVersion, parseSemver } from "./semver.ts";
+import { loadInventoryFromCli } from "./cli-inventory.ts";
 import {
   OPENCODE_CAPABILITIES,
   buildSnapshot,
@@ -92,6 +102,16 @@ class OpenCodeAdapterImpl implements AgentAdapter {
   private readonly queue: RuntimeEvent[] = [];
   private queueWaiters: (() => void)[] = [];
   private cachedSnapshot: CachedSnapshot | undefined;
+  /**
+   * `opencode --version` is a Bun cold start (~1–2 s) and the binary does not
+   * change between refreshes, so it is cached for the same window as the
+   * snapshot. Re-spawning it on every probe was a large part of E9's budget.
+   */
+  private cachedVersion:
+    | { value: { installed: boolean; version: string | null }; at: number }
+    | undefined;
+  /** The machine-level CLI catalogue: three Bun spawns and several MB (E9). */
+  private cachedCliInventory: { value: OpenCodeInventory; at: number } | undefined;
   private binPath: string | undefined;
   private stopped = false;
 
@@ -122,7 +142,15 @@ class OpenCodeAdapterImpl implements AgentAdapter {
     ctx.signal.addEventListener(
       "abort",
       () => {
-        void this.stopAll();
+        // `stopAll` awaits every session's `stop()`, and a `stop()` can reject
+        // (an abort RPC, a settle write). Unhandled here it becomes a host-wide
+        // unhandled rejection on the shutdown path — exactly when the host can
+        // least afford one.
+        void this.stopAll().catch((error: unknown) => {
+          ctx.logger.warn("opencode stopAll failed during shutdown", {
+            error: error instanceof Error ? error.message : String(error)
+          });
+        });
       },
       { once: true }
     );
@@ -177,8 +205,18 @@ class OpenCodeAdapterImpl implements AgentAdapter {
     return resolved;
   }
 
-  /** `opencode --version`, bounded, never a shell. */
+  /** `opencode --version`, bounded, never a shell, and cached for the TTL. */
   private async probeVersion(): Promise<{ installed: boolean; version: string | null }> {
+    const cached = this.cachedVersion;
+    if (cached !== undefined && Date.now() - cached.at < SNAPSHOT_TTL_MS) {
+      return cached.value;
+    }
+    const probed = await this.probeVersionUncached();
+    this.cachedVersion = { value: probed, at: Date.now() };
+    return probed;
+  }
+
+  private async probeVersionUncached(): Promise<{ installed: boolean; version: string | null }> {
     let bin: string;
     try {
       bin = await this.resolveBin();
@@ -259,20 +297,31 @@ class OpenCodeAdapterImpl implements AgentAdapter {
       }
 
       if (cwd === undefined) {
-        // Nothing to scope an inventory to. Keep whatever the last real probe
-        // produced rather than blanking it (§4.6.4).
-        const previous = cached?.snapshot;
-        const snapshot: ProviderSnapshot = {
-          ...(previous ??
-            unusableSnapshot({ installed: true, version: probe.version, checkedAt })),
-          installed: true,
+        // §4.5 "Catalogue fallbacks": with no project directory there is no
+        // server to start, so the machine-level catalogue comes from the CLI.
+        // Without this the host's background refresh — which never carries a
+        // cwd — would leave the OpenCode card with no models and unknown auth
+        // until a thread opened.
+        const snapshot = await this.machineSnapshotFromCli({
           version: probe.version,
-          checkedAt
-        };
+          checkedAt,
+          previous: cached?.snapshot
+        });
         this.cachedSnapshot = { snapshot, at: Date.now() };
         return snapshot;
       }
 
+      // E9: the cold probe measured 10 435 ms against the host's 10 s budget,
+      // so the user's FIRST visit to Settings showed no OpenCode at all. The
+      // cost was four SEQUENTIAL catalogue reads on top of the server start;
+      // `loadOpenCodeInventory` now issues them concurrently, which brings a
+      // cold probe comfortably inside the budget and a warm one to ~20 ms.
+      //
+      // The CLI inventory is deliberately NOT used here as a fast path: it and
+      // `opencode serve` open the same SQLite database, and running them
+      // together makes the server fail to start with `database is locked` —
+      // measured, not theorised. It stays where it is needed and safe: the
+      // cwd-less probe, which starts no server at all.
       let server: OpenCodeServerHandle | undefined;
       try {
         server = await this.pool.acquire(cwd);
@@ -315,6 +364,69 @@ class OpenCodeAdapterImpl implements AgentAdapter {
         server?.release();
       }
     });
+  }
+
+  /**
+   * The machine-level snapshot, from the CLI rather than from a server
+   * (§4.5 "Catalogue fallbacks"). The probe runs in the appdir tmp dir on
+   * purpose: `opencode` walks **up** from its cwd for project config, and a
+   * directory with none is what makes this catalogue machine-level.
+   *
+   * A failure never blanks a good snapshot (§4.6.4) — it degrades the status
+   * and keeps the last models, commands and skills.
+   */
+  private async machineSnapshotFromCli(input: {
+    version: string | null;
+    checkedAt: string;
+    previous: ProviderSnapshot | undefined;
+  }): Promise<ProviderSnapshot> {
+    const { version, checkedAt, previous } = input;
+    try {
+      const cachedInventory = this.cachedCliInventory;
+      let inventory: OpenCodeInventory;
+      if (cachedInventory !== undefined && Date.now() - cachedInventory.at < SNAPSHOT_TTL_MS) {
+        inventory = cachedInventory.value;
+      } else {
+        const bin = await this.resolveBin();
+        inventory = await loadInventoryFromCli({
+          bin,
+          cwd: this.ctx.tmpDir(),
+          env: this.ctx.buildEnv({
+            threadId: "probe",
+            home: { kind: "system", path: process.env.HOME ?? "/" }
+          }),
+          logger: this.ctx.logger,
+          signal: this.ctx.signal
+        });
+        this.cachedCliInventory = { value: inventory, at: Date.now() };
+      }
+      const snapshot = buildSnapshot({
+        version: version ?? "0.0.0",
+        checkedAt,
+        inventory,
+        ...(this.workspaceSnapshots.size > 0
+          ? { workspaceSnapshots: retainWorkspaceSnapshots(this.workspaceSnapshots) }
+          : {})
+      });
+      // The CLI has no `command.list` equivalent, so a machine-level probe
+      // keeps whatever commands the last server-backed probe found.
+      snapshot.slashCommands = keepNonEmpty(snapshot.slashCommands, previous?.slashCommands);
+      snapshot.skills = keepNonEmpty(snapshot.skills, previous?.skills);
+      return snapshot;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.ctx.logger.warn("opencode CLI inventory failed", { error: message });
+      if (previous !== undefined) {
+        return { ...previous, installed: true, version, checkedAt, status: "degraded", message };
+      }
+      return unusableSnapshot({
+        installed: true,
+        version,
+        checkedAt,
+        message,
+        status: "error"
+      });
+    }
   }
 
   private mergeInventory(
@@ -364,11 +476,20 @@ class OpenCodeAdapterImpl implements AgentAdapter {
   }
 
   private async doStartSession(input: StartSessionInput): Promise<OpenCodeThreadSession> {
+    if (input.home.kind !== "system") {
+      // Refuse rather than drop: see the module header. A shared server has one
+      // `OPENCODE_DATA`, so honouring a per-thread home is not possible while
+      // the project's threads share a process.
+      throw new Error(
+        `OpenCode runs one server per project under the system identity, so it cannot bind the '${input.home.kind}' account home. Use the system identity for OpenCode threads.`
+      );
+    }
     const cwd = resolvePath(input.cwd);
-    // A directory that does not exist is NOT rejected by the server: it
-    // silently serves a different instance scope (fixtures README observation
-    // 21). Resolve it before it becomes a client-level `directory`.
-    const server = await this.pool.acquire(projectDirFor(cwd));
+    // The SERVER is keyed by the project; the thread's own `cwd` still travels
+    // per request as the client-level `directory` (§4.5 "there is no cwd on
+    // the process"), so a subdirectory thread shares the project's server
+    // while still scoping every call to itself.
+    const server = await this.pool.acquire(projectDirFor(input));
     this.servers.set(input.threadId, server);
     try {
       const session = await OpenCodeThreadSession.start(
@@ -495,12 +616,27 @@ class OpenCodeAdapterImpl implements AgentAdapter {
 }
 
 /**
- * The project a cwd belongs to. Threads in the same project share a server
- * (§3.2); a thread whose cwd is a subdirectory still rides the project's
- * server and carries its own `directory` per request.
+ * The project directory a thread belongs to — the pool's key, and the whole
+ * basis of §3.2's "one `opencode serve` **per project**, shared by its
+ * threads".
+ *
+ * It reads `projectPath` **structurally** rather than off `StartSessionInput`,
+ * because the field is the host's to add: until it lands, a thread at
+ * `/p/packages/ui` would otherwise key its own server and a project would run
+ * as many `opencode serve` children, ports and ~4.3 MB catalogue probes as it
+ * has threads. `cwd` is the fallback, which is exactly the old behaviour, so
+ * this is correct before and after the seam exists.
+ *
+ * The path is resolved, never trusted verbatim: a directory that does not
+ * exist is **not** rejected by the server — it silently serves a different
+ * instance scope (fixtures README observation 21).
  */
-function projectDirFor(cwd: string): string {
-  return cwd;
+export function projectDirFor(input: StartSessionInput): string {
+  const candidate = (input as { projectPath?: unknown }).projectPath;
+  if (typeof candidate === "string" && candidate.trim().length > 0) {
+    return resolvePath(candidate);
+  }
+  return resolvePath(input.cwd);
 }
 
 export const createOpenCodeAdapter: AdapterFactory = async (
