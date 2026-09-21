@@ -497,6 +497,33 @@ describe("mandatory flush points (§5.6)", () => {
     assert.equal(messageTexts(sink).at(-1)?.id, "reasoning:raw:item-2:segment:1");
   });
 
+  it("a NON-tool item.started leaves the thinking block open", async () => {
+    const { ingestion, sink } = harness();
+    const turn = { turnId: "turn-1", itemId: "item-1" };
+    await ingestion.ingest(
+      runtimeEvent("content.delta", { streamKind: "reasoning_text", delta: "pondering" }, turn)
+    );
+    await ingestion.ingest(
+      // `review_entered` is classified and then dropped (§2/§4.2); it produces
+      // no row, so it must not break a thinking block either.
+      runtimeEvent("item.started", { itemType: "review_entered" }, {
+        turnId: "turn-1",
+        itemId: "review-1"
+      })
+    );
+    assert.equal(sink.messages().length, 0);
+    await ingestion.ingest(
+      runtimeEvent("content.delta", { streamKind: "reasoning_text", delta: " more" }, turn)
+    );
+    await ingestion.flushTurn("t1", "turn-1");
+    assert.equal(
+      messageTexts(sink)
+        .map((m) => m.text)
+        .join(""),
+      "pondering more"
+    );
+  });
+
   it("assistant text closes the thinking block that preceded it", async () => {
     const { ingestion, sink } = harness();
     const turn = { turnId: "turn-1", itemId: "item-1" };
@@ -677,6 +704,96 @@ describe("tool.updated is persisted already slimmed (§5.6)", () => {
   });
 });
 
+describe("account events are provider-snapshot facts (§5.1)", () => {
+  it("writes nothing to the thread and hands them to the host instead", async () => {
+    const routed: string[] = [];
+    const { ingestion, sink } = harness({
+      onAccountEvent: (event) => routed.push(event.type)
+    });
+    await ingestion.ingest(runtimeEvent("auth.status", { isAuthenticating: true }));
+    await ingestion.ingest(
+      runtimeEvent("account.rate-limits.updated", {
+        limits: {
+          windows: [
+            { id: "5h", kind: "session", label: "5 hours", usedPercent: 42 }
+          ]
+        }
+      })
+    );
+    await ingestion.drain();
+    assert.equal(sink.events().length, 0, "neither event is a thread fact");
+    assert.deepEqual(routed, ["auth.status", "account.rate-limits.updated"]);
+  });
+
+  it("a throwing host hook never escapes ingest", async () => {
+    const warnings: string[] = [];
+    const { ingestion } = harness({
+      onAccountEvent: () => {
+        throw new Error("registry exploded");
+      },
+      logger: { warn: (m) => warnings.push(m) }
+    });
+    await ingestion.ingest(runtimeEvent("auth.status", {}));
+    await ingestion.drain();
+    assert.ok(warnings.some((message) => message.includes("onAccountEvent")));
+  });
+});
+
+describe("integration with W2's real slimmer (§5.6)", () => {
+  it("a tool.updated row reaches the log slimmed, the completion in full", async () => {
+    const clock = new FakeClock();
+    const timers = new FakeTimers(clock);
+    const sink = new RecordingSink();
+    // No `slim` override: this is the shipped default, `slimActivityPayload`.
+    const ingestion = createIngestion({
+      sink: sink.sink,
+      liveness: new RecordingLiveness(),
+      clock,
+      idGen: counterIdGen(),
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer
+    });
+    const item = { turnId: "turn-1", itemId: "call-1" };
+    const data = {
+      item: {
+        command: "pnpm test",
+        aggregatedOutput: `${"noise line\n".repeat(4000)}`
+      }
+    };
+    await ingestion.ingest(
+      runtimeEvent("item.updated", { itemType: "command_execution", data }, item)
+    );
+    await ingestion.ingest(
+      runtimeEvent(
+        "item.completed",
+        { itemType: "command_execution", status: "completed", data },
+        item
+      )
+    );
+    await ingestion.drain();
+    const [updated, completed] = sink.activities();
+    const updatedJson = JSON.stringify(updated!.payload.activity.payload);
+    const completedJson = JSON.stringify(completed!.payload.activity.payload);
+    assert.ok(
+      updatedJson.length < 2_000,
+      `the streaming update must not persist the whole output (was ${updatedJson.length} bytes)`
+    );
+    assert.ok(
+      completedJson.length > 40_000,
+      "the completion is what a 'load full output' fetch reads, so it keeps everything"
+    );
+    // The fields the roster fold and the presentation resolver read survive.
+    assert.equal(
+      (updated!.payload.activity.payload as { toolUseId?: string }).toolUseId,
+      "call-1"
+    );
+    assert.equal(
+      (updated!.payload.activity.payload as { itemType?: string }).itemType,
+      "command_execution"
+    );
+  });
+});
+
 describe("the provider title rule (§5.1)", () => {
   it("retitles an auto-generated thread", async () => {
     const { ingestion, sink } = harness();
@@ -787,7 +904,7 @@ describe("session status (§5.1)", () => {
     assert.equal(sink.events().length, 0);
   });
 
-  it("the head's session state wins over ingestion's memory after a restart", async () => {
+  it("the head SEEDS the session state, so a restart keeps the active turn", async () => {
     const { ingestion, sink } = harness({
       threadContext: () => ({
         session: { status: "running", activeTurnId: "turn-restored" }
@@ -798,6 +915,19 @@ describe("session status (§5.1)", () => {
     const session = sink.ofType("thread.session-set")[0]!.payload.session;
     assert.equal(session.status, "running");
     assert.equal(session.activeTurnId, "turn-restored");
+  });
+
+  it("after seeding, ingestion's own memory wins over a head W1 has not applied yet", async () => {
+    // The head is written FROM these events. Re-reading a stale one per event
+    // would map the next session frame to `ready` and drop the active turn.
+    const { ingestion, sink } = harness({
+      threadContext: () => ({ session: { status: "idle", activeTurnId: null } })
+    });
+    await ingestion.ingest(runtimeEvent("turn.started", {}, { turnId: "turn-9" }));
+    await ingestion.ingest(runtimeEvent("session.started", {}));
+    await ingestion.drain();
+    const sessions = sink.ofType("thread.session-set").map((e) => e.payload.session);
+    assert.deepEqual(sessions, [{ status: "running", activeTurnId: "turn-9" }]);
   });
 });
 
@@ -821,6 +951,28 @@ describe("proposals (§5.1 plan buffer)", () => {
     assert.equal(
       (last.payload.activity.payload as { planMarkdown: string }).planMarkdown,
       "# Plan\n- step one\n"
+    );
+  });
+
+  it("plan deltas are BATCHED: a token-by-token plan is not one row per token", async () => {
+    const { ingestion, sink, timers } = harness();
+    const turn = { turnId: "turn-1" };
+    for (let i = 0; i < 40; i += 1) {
+      await ingestion.ingest(runtimeEvent("turn.proposed.delta", { delta: `w${i} ` }, turn));
+      timers.advance(5);
+      await settle();
+    }
+    await ingestion.drain();
+    const rows = sink
+      .activities()
+      .filter((event) => event.payload.activity.activityKind.startsWith("turn.proposed"));
+    assert.ok(rows.length <= 4, `40 plan tokens became ${rows.length} rows`);
+    // Every row is the whole accumulation so far, under one stable id.
+    assert.equal(new Set(rows.map((row) => row.payload.activity.id)).size, 1);
+    assert.ok(
+      (rows.at(-1)!.payload.activity.payload as { planMarkdown: string }).planMarkdown.endsWith(
+        "w39 "
+      )
     );
   });
 
