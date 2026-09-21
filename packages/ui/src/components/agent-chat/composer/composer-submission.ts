@@ -239,3 +239,45 @@ export function hasSendableContent(input: {
 }): boolean {
   return input.text.trim().length > 0 || input.attachmentCount > 0;
 }
+
+// ---------------------------------------------------------------------------
+// The plan follow-up (§7.5, §7.4 primary actions)
+// ---------------------------------------------------------------------------
+
+/** Prefix of the message sent when the user approves a plan. *T3: `proposedPlan.ts:74`.* */
+export const PLAN_IMPLEMENTATION_PROMPT_PREFIX = "PLEASE IMPLEMENT THIS PLAN:\n";
+
+export function buildPlanImplementationPrompt(planMarkdown: string): string {
+  return `${PLAN_IMPLEMENTATION_PROMPT_PREFIX}${planMarkdown.trim()}`;
+}
+
+/** The plan's own title — its first markdown heading — or `null`. */
+export function proposedPlanTitle(planMarkdown: string): string | null {
+  const heading = planMarkdown.match(/^\s{0,3}#{1,6}\s+(.+)$/m)?.[1]?.trim();
+  return heading && heading.length > 0 ? heading : null;
+}
+
+/**
+ * The primary action's two meanings while a plan is waiting to be implemented.
+ *
+ * **An empty draft means "Implement"**: the plan goes back as the turn text in
+ * `default` mode, which is what leaves plan mode. **Text in the draft means
+ * "Refine"**: that text is the turn and the thread STAYS in `plan` mode, so a
+ * correction to a plan never accidentally starts the work.
+ *
+ * *T3: `proposedPlan.ts:80-95` (`resolvePlanFollowUpSubmission`).*
+ */
+export function resolvePlanFollowUpSubmission(input: {
+  draftText: string;
+  planMarkdown: string;
+}): { text: string; interactionMode: "default" | "plan"; action: "implement" | "refine" } {
+  const trimmed = input.draftText.trim();
+  if (trimmed.length > 0) {
+    return { text: trimmed, interactionMode: "plan", action: "refine" };
+  }
+  return {
+    text: buildPlanImplementationPrompt(input.planMarkdown),
+    interactionMode: "default",
+    action: "implement"
+  };
+}

@@ -12,7 +12,10 @@ import {
   nextPastedTextFileName,
   pastedTextDisposition,
   PASTED_TEXT_ATTACHMENT_THRESHOLD_BYTES,
+  PLAN_IMPLEMENTATION_PROMPT_PREFIX,
+  proposedPlanTitle,
   resolveFollowUpDisposition,
+  resolvePlanFollowUpSubmission,
   uploadsBlockSend
 } from "./composer-submission.ts";
 
@@ -224,4 +227,31 @@ test("a draft with only whitespace has nothing to send", () => {
   assert.equal(hasSendableContent({ text: "  \n ", attachmentCount: 0 }), false);
   assert.equal(hasSendableContent({ text: "  ", attachmentCount: 1 }), true);
   assert.equal(hasSendableContent({ text: "hi", attachmentCount: 0 }), true);
+});
+
+test("an empty draft implements the plan and leaves plan mode", () => {
+  const resolved = resolvePlanFollowUpSubmission({
+    draftText: "  ",
+    planMarkdown: "# Ship it\n\nstep"
+  });
+  assert.equal(resolved.action, "implement");
+  assert.equal(resolved.interactionMode, "default");
+  assert.ok(resolved.text.startsWith(PLAN_IMPLEMENTATION_PROMPT_PREFIX));
+  assert.ok(resolved.text.includes("# Ship it"));
+});
+
+test("text in the draft refines the plan and STAYS in plan mode", () => {
+  const resolved = resolvePlanFollowUpSubmission({
+    draftText: "  add a rollback step ",
+    planMarkdown: "# Ship it"
+  });
+  assert.equal(resolved.action, "refine");
+  assert.equal(resolved.interactionMode, "plan");
+  assert.equal(resolved.text, "add a rollback step");
+});
+
+test("the plan title is its first heading, at any level, or null", () => {
+  assert.equal(proposedPlanTitle("### Ship it\nbody"), "Ship it");
+  assert.equal(proposedPlanTitle("body only"), null);
+  assert.equal(proposedPlanTitle("#    \nbody"), null);
 });
