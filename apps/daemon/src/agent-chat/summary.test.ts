@@ -1,9 +1,13 @@
 import { strict as assert } from "node:assert";
+import { createServer } from "node:http";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import type { SessionSummary } from "@orquester/api";
 import { ChatSessionManager } from "./chat-sessions.ts";
 import { AgentHostClient } from "./host-client.ts";
-import { AgentChatSummaryService, sanitizeFields } from "./summary.ts";
+import { AgentChatSummaryService, sanitizeFields, sanitizePendingRequests } from "./summary.ts";
 
 // §6.4: the six derived fields, the coarse bus events, and the pushes the
 // protocol now produces instead of bells and hooks.
@@ -199,6 +203,132 @@ test("a settled turn reopens the version drain window", () => {
     latestTurn: { turnId: "a", state: "completed", startedAt: null, completedAt: "x" }
   });
   assert.deepEqual(settled, [1]);
+});
+
+test("agentChat.pending fires once per open and once per close, deduped across polls", () => {
+  const h = harness();
+  seedTab(h.chat, "t1");
+  const approval = { requestId: "r1", kind: "approval" as const, title: "Run tests?" };
+  const pendingEvents = () => h.published.filter((p) => p.type === "agentChat.pending");
+
+  // Three polls with the same open request → exactly one event.
+  h.service.applyFields("t1", { hasPendingApprovals: true }, [approval]);
+  h.service.applyFields("t1", { hasPendingApprovals: true }, [approval]);
+  h.service.applyFields("t1", { hasPendingApprovals: true }, [approval]);
+  assert.equal(pendingEvents().length, 1);
+  assert.deepEqual(pendingEvents()[0].payload, {
+    id: "t1",
+    requestId: "r1",
+    kind: "approval",
+    title: "Run tests?",
+    open: true
+  });
+
+  // It is answered: one close event.
+  h.service.applyFields("t1", {}, []);
+  assert.equal(pendingEvents().length, 2);
+  assert.deepEqual(pendingEvents()[1].payload, {
+    id: "t1",
+    requestId: "r1",
+    kind: "approval",
+    title: "Run tests?",
+    open: false
+  });
+  h.service.applyFields("t1", {}, []);
+  assert.equal(pendingEvents().length, 2, "a closed request is never re-closed");
+});
+
+test("one request closing while another opens is TWO events, not silence", () => {
+  // The booleans stay `true` across such a tick, so a diff on them alone would
+  // never tell the client the first request was answered.
+  const h = harness();
+  seedTab(h.chat, "t1");
+  h.service.applyFields("t1", { hasPendingApprovals: true }, [
+    { requestId: "r1", kind: "approval", title: "first" }
+  ]);
+  h.service.applyFields("t1", { hasPendingApprovals: true }, [
+    { requestId: "r2", kind: "approval", title: "second" }
+  ]);
+  assert.deepEqual(
+    h.published
+      .filter((p) => p.type === "agentChat.pending")
+      .map((p) => {
+        const payload = p.payload as { requestId: string; open: boolean };
+        return [payload.requestId, payload.open];
+      }),
+    [
+      ["r1", true],
+      ["r2", true],
+      ["r1", false]
+    ]
+  );
+});
+
+test("approvals and questions keep their kinds (different UI, different push copy)", () => {
+  const h = harness();
+  seedTab(h.chat, "t1");
+  h.service.applyFields("t1", { hasPendingApprovals: true, hasPendingUserInput: true }, [
+    { requestId: "r1", kind: "approval", title: "Run tests?" },
+    { requestId: "r2", kind: "question", title: "Which branch?" }
+  ]);
+  assert.deepEqual(
+    h.published
+      .filter((p) => p.type === "agentChat.pending")
+      .map((p) => (p.payload as { kind: string }).kind),
+    ["approval", "question"]
+  );
+});
+
+test("a malformed pending row is dropped rather than published", () => {
+  // `requestId` is what a client posts an approval against: a row without a
+  // usable one is worse than no row.
+  assert.deepEqual(sanitizePendingRequests(null), []);
+  assert.deepEqual(sanitizePendingRequests({ pendingRequests: "nope" }), []);
+  assert.deepEqual(
+    sanitizePendingRequests({
+      pendingRequests: [
+        { requestId: "", kind: "approval", title: "x" },
+        { requestId: "r1", kind: "elsewhere", title: "x" },
+        { requestId: "r2", kind: "approval", title: 7 },
+        null,
+        { requestId: "r3", kind: "question", title: "ok" }
+      ]
+    }),
+    [
+      { requestId: "r2", kind: "approval", title: "" },
+      { requestId: "r3", kind: "question", title: "ok" }
+    ]
+  );
+});
+
+test("a thread the host no longer has closes out its open requests", async () => {
+  // The TAB may still exist here, so a card that can never be answered must
+  // not be left on screen.
+  const dir = await mkdtemp(join(tmpdir(), "orq-summary-404-"));
+  const socketPath = join(dir, "host.sock");
+  const server = createServer((_req, res) =>
+    res.writeHead(404, { "content-type": "application/json" }).end("{}")
+  );
+  await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+  const chat = new ChatSessionManager({ requestPersist: () => undefined });
+  const published: Published[] = [];
+  const service = new AgentChatSummaryService({
+    client: new AgentHostClient({ socketPath, token: () => "tok" }),
+    chat,
+    broadcaster: { publish: (channel, type, payload) => published.push({ channel, type, payload }) },
+    push: { notifyStructural: async () => undefined }
+  });
+  seedTab(chat, "t1");
+  service.applyFields("t1", { hasPendingApprovals: true }, [
+    { requestId: "r1", kind: "approval", title: "Run tests?" }
+  ]);
+  published.length = 0;
+  await service.refreshThread("t1");
+  assert.deepEqual(published.filter((p) => p.type === "agentChat.pending").map((p) => p.payload), [
+    { id: "t1", requestId: "r1", kind: "approval", title: "Run tests?", open: false }
+  ]);
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  await rm(dir, { recursive: true, force: true });
 });
 
 test("agent.providers.changed is the one coarse provider event", () => {

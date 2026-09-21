@@ -25,6 +25,7 @@
 
 import type { SessionActivity, SessionActivityEvent, SessionSummary } from "@orquester/api";
 import type {
+  AgentChatPendingEventPayload,
   AgentChatSessionSummaryFields,
   AgentChatTurnEventPayload,
   AgentProvidersChangedPayload,
@@ -34,7 +35,7 @@ import type {
   TurnState
 } from "@orquester/api/agent-chat";
 import { SETTLED_TURN_STATES } from "@orquester/api/agent-chat";
-import { agentHostExtraRoutes } from "../agent-host/server/extra-routes.ts";
+import { agentHostExtraRoutes, type AgentHostPendingRequest } from "../agent-host/server/index.ts";
 import { pushTypeForFields, resolveChatActivity } from "./activity-ladder.ts";
 import type { ChatSessionManager } from "./chat-sessions.ts";
 import { AgentHostClient } from "./host-client.ts";
@@ -82,6 +83,12 @@ export interface AgentChatSummaryOptions {
 interface ThreadState {
   fields: AgentChatSessionSummaryFields;
   activity: SessionActivity;
+  /**
+   * The open requests as of the last poll, keyed by `requestId`. Diffed against
+   * the next poll so `agentChat.pending` fires once per open and once per
+   * close, never once per tick (§6.4: nothing higher-rate rides the bus).
+   */
+  pending: Map<string, AgentHostPendingRequest>;
 }
 
 export class AgentChatSummaryService {
@@ -172,7 +179,15 @@ export class AgentChatSummaryService {
         { timeoutMs: SUMMARY_READ_TIMEOUT_MS }
       );
       if (response.status === 404) {
-        // The host has no such thread (deleted there, or never created).
+        // The host has no such thread (deleted there, or never created). The
+        // TAB may still exist here, so close out every request we told clients
+        // about rather than leaving a card that can never be answered.
+        const state = this.threads.get(threadId);
+        if (state) {
+          for (const request of state.pending.values()) {
+            this.publishPending(threadId, request, false);
+          }
+        }
         this.threads.delete(threadId);
         return;
       }
@@ -181,7 +196,7 @@ export class AgentChatSummaryService {
     } catch {
       return;
     }
-    this.applyFields(threadId, sanitizeFields(raw));
+    this.applyFields(threadId, sanitizeFields(raw), sanitizePendingRequests(raw));
   }
 
   /**
@@ -190,7 +205,11 @@ export class AgentChatSummaryService {
    *
    * Exposed so tests drive the fold directly, without a host.
    */
-  applyFields(threadId: string, fields: AgentChatSessionSummaryFields): void {
+  applyFields(
+    threadId: string,
+    fields: AgentChatSessionSummaryFields,
+    pendingRequests: readonly AgentHostPendingRequest[] = []
+  ): void {
     if (!this.opts.chat.has(threadId)) {
       // A thread the daemon has no tab for (closed here, still live there).
       this.threads.delete(threadId);
@@ -213,7 +232,12 @@ export class AgentChatSummaryService {
             ? nowIso
             : (previous?.activity.needsAttentionAt ?? nowIso)
     };
-    this.threads.set(threadId, { fields, activity });
+    const pending = this.publishPendingTransitions(
+      threadId,
+      previous?.pending ?? new Map(),
+      pendingRequests
+    );
+    this.threads.set(threadId, { fields, activity, pending });
 
     // The tab's own copy of the six fields (the tab strip reads them off the
     // summary), published only when one actually moved.
@@ -244,6 +268,58 @@ export class AgentChatSummaryService {
     void this.opts.push.notifyStructural(summary, pushType);
   }
 
+  /**
+   * `agentChat.pending` — one event per request appearing and one per it
+   * disappearing (§6.4), deduped by `requestId` across polls.
+   *
+   * The diff is against the previous poll's list rather than against the
+   * booleans: a thread can close one approval and open another between two
+   * ticks, and `hasPendingApprovals` would stay `true` through both — the
+   * client would then never learn the first one was answered.
+   *
+   * Returns the new open set for the caller to store.
+   */
+  private publishPendingTransitions(
+    threadId: string,
+    before: ReadonlyMap<string, AgentHostPendingRequest>,
+    after: readonly AgentHostPendingRequest[]
+  ): Map<string, AgentHostPendingRequest> {
+    const next = new Map<string, AgentHostPendingRequest>();
+    for (const request of after) {
+      if (!request || typeof request.requestId !== "string" || !request.requestId) continue;
+      if (request.kind !== "approval" && request.kind !== "question") continue;
+      next.set(request.requestId, {
+        requestId: request.requestId,
+        kind: request.kind,
+        title: typeof request.title === "string" ? request.title : ""
+      });
+    }
+    for (const [requestId, request] of next) {
+      if (before.has(requestId)) continue;
+      this.publishPending(threadId, request, true);
+    }
+    for (const [requestId, request] of before) {
+      if (next.has(requestId)) continue;
+      this.publishPending(threadId, request, false);
+    }
+    return next;
+  }
+
+  private publishPending(
+    threadId: string,
+    request: AgentHostPendingRequest,
+    open: boolean
+  ): void {
+    const payload: AgentChatPendingEventPayload = {
+      id: threadId,
+      requestId: request.requestId,
+      kind: request.kind,
+      title: request.title,
+      open
+    };
+    this.opts.broadcaster.publish("sessions", "agentChat.pending", payload);
+  }
+
   /** `agentChat.turn` — one per turn transition. Nothing higher-rate rides the bus. */
   private publishTurnTransition(
     threadId: string,
@@ -272,6 +348,31 @@ export class AgentChatSummaryService {
  * persisted/adapter load: a field written by a newer host with an unexpected
  * type is dropped rather than trusted, because the ladder branches on it.
  */
+/**
+ * The `pendingRequests` half of the same body, validated row-wise. A malformed
+ * row is dropped rather than published: `agentChat.pending` carries a
+ * `requestId` a client will post an approval against, so a row without a usable
+ * one is worse than no row.
+ */
+export function sanitizePendingRequests(value: unknown): AgentHostPendingRequest[] {
+  if (!value || typeof value !== "object") return [];
+  const rows = (value as Record<string, unknown>).pendingRequests;
+  if (!Array.isArray(rows)) return [];
+  const out: AgentHostPendingRequest[] = [];
+  for (const row of rows) {
+    if (!row || typeof row !== "object") continue;
+    const entry = row as Record<string, unknown>;
+    if (typeof entry.requestId !== "string" || !entry.requestId) continue;
+    if (entry.kind !== "approval" && entry.kind !== "question") continue;
+    out.push({
+      requestId: entry.requestId,
+      kind: entry.kind,
+      title: typeof entry.title === "string" ? entry.title : ""
+    });
+  }
+  return out;
+}
+
 export function sanitizeFields(value: unknown): AgentChatSessionSummaryFields {
   const fields: AgentChatSessionSummaryFields = {};
   if (!value || typeof value !== "object") {
