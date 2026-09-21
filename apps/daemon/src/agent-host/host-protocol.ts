@@ -163,6 +163,30 @@ export interface CreateHostThreadRequest {
   runtimeMode: unknown;
   /** §6.1: refused with `RESUME_UNAVAILABLE` when the adapter cannot use it. */
   resume?: { home: "system" | "account" | "cliproxy"; conversationId: string };
+  /**
+   * The launcher-specific environment §3.1 requires a chat thread to get —
+   * **exactly** what a terminal launch of the same registry entry gets today.
+   *
+   * The daemon composes it, because only the daemon has the sources: the
+   * registry entry's own `env` plus its per-launcher env file
+   * (`<appdir>/daemon/env/<id>.env`, e.g. `opencode.env`), and the
+   * `resolveExtraEnv` contributors — the managed account home, the cliproxy
+   * launcher env for `claudex`/`claudemix` (`ANTHROPIC_BASE_URL`,
+   * `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`, the compaction window and the
+   * Claude timeout), and the resolved per-launch model pin.
+   *
+   * The host layers it **over** what `buildProviderEnv()` produces and keeps
+   * `unsetEnv` as the ambient-credential denylist, so a thread can never
+   * silently bill a different identity. Values are already absolute: nothing
+   * expands `~` or `$VAR` for a spawned child.
+   */
+  launchEnv?: Record<string, string>;
+  /** Ambient vars to remove for this launch (the `unset` half of §3.1). */
+  unsetEnv?: string[];
+  /** Absolute home dir for `home`, resolved daemon-side. Never on a client wire. */
+  homePath?: string;
+  /** The proxy launcher owning the home when `home` is `"cliproxy"`. */
+  proxyRefId?: string;
 }
 
 /**

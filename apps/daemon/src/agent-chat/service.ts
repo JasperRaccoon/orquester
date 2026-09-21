@@ -27,6 +27,7 @@ import {
   type AgentHostHealthResponse,
   type CreateHostThreadRequest
 } from "../agent-host/host-protocol.ts";
+import { ACCOUNT_HOME_ENV_VAR } from "../agent-host/support/env.ts";
 import { ChatSessionManager, ChatSessionError } from "./chat-sessions.ts";
 import { AgentHostClient, HostUnavailableError } from "./host-client.ts";
 import { ensureGrokChatConfig, markClaudeProjectTrusted } from "./home-prep.ts";
@@ -269,11 +270,21 @@ export class AgentChatService {
     const home = resolveHomeKind(entry.id, accountId);
     const cwd = req.cwd || req.projectPath || homedir();
     const id = randomUUID();
+    // EXACTLY the env a terminal launch composes today: the registry entry's
+    // own env (which already carries `<appdir>/daemon/env/<id>.env`, loaded by
+    // RegistryService) under the `resolveExtraEnv` contributors, which win a
+    // collision — the same order the terminal wrapper script's `export` has
+    // over `tmux -e`.
+    const launchEnv: Record<string, string> = { ...entry.env, ...(launch?.env ?? {}) };
+    // The adapter's home variable is the one authority on the home dir, so a
+    // managed account, a cliproxy launcher home and the system home all resolve
+    // through the same rule the child itself will read.
+    const homePath = launchEnv[ACCOUNT_HOME_ENV_VAR[adapter]];
 
     // Reality findings: a fresh directory is untrusted for Claude, and Grok
     // ships with approvals off and auto-update on. Best-effort and before the
     // thread exists, so the very first turn already sees the prepared home.
-    await this.prepareHome(adapter, launch?.env ?? {}, cwd);
+    await this.prepareHome(adapter, launchEnv, cwd);
 
     const summary = this.chat.create({
       id,
@@ -297,6 +308,16 @@ export class AgentChatService {
       home,
       modelSelection: req.modelSelection,
       runtimeMode: req.runtimeMode,
+      // EXACTLY the env a terminal launch of this entry gets today (§3.1): the
+      // registry entry's own env — which is where the per-launcher env file
+      // `<appdir>/daemon/env/<id>.env` (opencode.env, the generated
+      // claudex.env/claudemix.env) has already been merged by RegistryService —
+      // under the `resolveExtraEnv` contributors, which win a collision exactly
+      // as the terminal wrapper script's `export` wins over `tmux -e`.
+      launchEnv,
+      ...(launch?.unset?.length ? { unsetEnv: launch.unset } : {}),
+      ...(homePath ? { homePath } : {}),
+      ...(home === "cliproxy" ? { proxyRefId: entry.id } : {}),
       ...(req.resume ? { resume: req.resume } : {})
     };
     try {
