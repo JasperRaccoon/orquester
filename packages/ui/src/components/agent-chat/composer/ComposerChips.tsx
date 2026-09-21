@@ -16,10 +16,10 @@ import {
   applyModelSelection,
   applyOptionSelection,
   currentOptionValue,
-  findReasoningDescriptor,
   modelChipLabel,
   optionChoiceLabel,
-  optionDescriptors
+  optionDescriptors,
+  REASONING_OPTION_IDS
 } from "./composer-model";
 import { shortcutComboFor, type ComposerShortcutCommand } from "./composer-shortcuts";
 
@@ -195,11 +195,10 @@ export function OptionChip({
   returnFocusTo
 }: OptionChipProps): React.ReactElement {
   const value = currentOptionValue(selection, descriptor);
-  const isReasoning = findReasoningDescriptor({
-    slug: fallbackModelSlug,
-    name: fallbackModelSlug,
-    capabilities: { optionDescriptors: [descriptor] }
-  })?.id === descriptor.id;
+  // Only the reasoning select answers to `/effort` and the effort keybinding;
+  // the other descriptors (service tier, agent) are pointer-only by design —
+  // a token on a control nobody asked for would swallow the chord.
+  const isReasoning = REASONING_OPTION_IDS.includes(descriptor.id);
   const combo = isReasoning ? shortcutComboFor("effort") : null;
 
   return (

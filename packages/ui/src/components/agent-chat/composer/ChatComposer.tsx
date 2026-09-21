@@ -670,6 +670,10 @@ export function ChatComposer({
       setDraft(EMPTY_DRAFT);
       applyCaret(0);
       setNotice(null);
+      // The retry map holds the original `File` objects; a sent draft can no
+      // longer be retried, so let them go rather than pinning every file the
+      // session ever attached in memory.
+      retryFilesRef.current.clear();
 
       if (disposition === "queue") {
         actions.queueMessage({
