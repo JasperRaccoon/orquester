@@ -191,6 +191,17 @@ export class CodexSession {
    * by the user, and §4.2 wants that as `tool.denied`.
    */
   private readonly askedItemIds = new Set<string>();
+  /**
+   * `fileChange` item id → the changes it declared.
+   *
+   * `item/fileChange/requestApproval` is a MUCH thinner shape than the command
+   * one: it carries no `availableDecisions`, no path and **no diff at all**.
+   * The diff lives on the `item/started` `fileChange` item that precedes it,
+   * so "an approval card must be rendered by joining on `itemId`, not from the
+   * request alone" (fixtures README obs. 2). The card cannot do that join —
+   * it never sees the item payload — so the adapter does it here (E2E E7).
+   */
+  private readonly fileChangesByItem = new Map<string, CodexProtocol.v2.FileUpdateChange[]>();
 
   private child: ProviderChild | null = null;
   private peer: CodexPeer | null = null;
@@ -878,6 +889,7 @@ export class CodexSession {
         continue;
       }
       this.trackTask(draft);
+      this.rememberFileChange(draft);
       this.emit(draft);
       const denied = this.toolDeniedFor(draft);
       if (denied !== null) {
@@ -900,6 +912,7 @@ export class CodexSession {
         // is otherwise pruned only when an item completes `declined`, so every
         // APPROVED command left a permanent entry (Q1 finding 19).
         this.askedItemIds.clear();
+        this.fileChangesByItem.clear();
       }
     } else if (method === "error" && isOurs) {
       const p = params as CodexProtocol.v2.ErrorNotification;
@@ -970,16 +983,26 @@ export class CodexSession {
         // on the `item/started` `fileChange` item that precedes it, so a card
         // must be rendered by joining on `itemId` (fixtures README obs. 2).
         const params = request.params as CodexProtocol.v2.FileChangeRequestApprovalParams;
+        // THE JOIN (E2E E7): without it the card renders its own type name and
+        // the user approves a write they cannot see.
+        const changes = this.fileChangesByItem.get(params.itemId) ?? [];
+        this.fileChangesByItem.delete(params.itemId);
         const decision = await this.parkApproval({
           method: request.method,
           turnId: params.turnId,
           itemId: params.itemId,
           providerRequestId: String(request.id),
-          ...(params.reason !== null && params.reason !== undefined
-            ? { detail: params.reason }
-            : {}),
+          detail: fileChangeDetail(changes, params.reason ?? undefined),
           options: [...DEFAULT_APPROVAL_OPTIONS],
-          args: { grantRoot: params.grantRoot },
+          // The card renders the diff from here; `changes` is the same shape
+          // the `file_change` item carries, so one renderer serves both.
+          args: {
+            changes,
+            grantRoot: params.grantRoot,
+            ...(params.reason !== null && params.reason !== undefined
+              ? { reason: params.reason }
+              : {})
+          },
           raw
         });
         return {
@@ -1287,6 +1310,7 @@ export class CodexSession {
       this.normaliser.noteTurnSettled();
     }
     this.askedItemIds.clear();
+    this.fileChangesByItem.clear();
     this.normaliser.forgetAgents();
 
     // 3. Close every live task; the roster folds `stopped` to `interrupted`.
@@ -1419,28 +1443,40 @@ export class CodexSession {
   // Plumbing
   // -------------------------------------------------------------------------
 
-  private watchStderr(child: ProviderChild): void {
-    const surface = (lines: ReturnType<StderrCapture["push"]>): void => {
-      for (const line of lines) {
-        if (line.class === "drop") {
-          continue;
-        }
-        if (line.class === "error") {
-          this.emit({
-            type: "runtime.error",
-            payload: { message: line.text, class: "provider_error" }
-          });
-        } else {
-          this.emit({ type: "runtime.warning", payload: { message: line.text } });
-        }
+  private surfaceStderr(lines: ReturnType<StderrCapture["push"]>): void {
+    for (const line of lines) {
+      if (line.class === "drop") {
+        continue;
       }
-    };
+      if (line.class === "error") {
+        this.emit({
+          type: "runtime.error",
+          payload: { message: line.text, class: "provider_error" }
+        });
+      } else {
+        this.emit({ type: "runtime.warning", payload: { message: line.text } });
+      }
+    }
+  }
+
+  private watchStderr(child: ProviderChild): void {
     child.stderr.on("data", (chunk: Buffer) => {
-      surface(this.stderr.push(chunk));
+      this.surfaceStderr(this.stderr.push(chunk));
     });
     child.stderr.on("end", () => {
-      surface(this.stderr.flush());
+      this.surfaceStderr(this.stderr.flush());
     });
+  }
+
+  /**
+   * Feed one stderr chunk as if the child had written it.
+   *
+   * Test-only seam: the redaction is a property of how `StderrCapture` was
+   * CONSTRUCTED, which `stderr.test.ts` cannot see because it tests the
+   * function rather than its call site (S1 finding 4).
+   */
+  injectStderrForTest(chunk: string): void {
+    this.surfaceStderr(this.stderr.push(chunk));
   }
 
   /**
@@ -1506,6 +1542,26 @@ export class CodexSession {
       itemId,
       ...(draft.providerRefs !== undefined ? { providerRefs: draft.providerRefs } : {})
     };
+  }
+
+  /**
+   * Remember a `fileChange` item's declared changes so the approval that
+   * follows can be joined to them by `itemId` (E2E E7).
+   *
+   * Bounded by construction: an entry is dropped the moment its approval is
+   * answered, and the whole map is cleared when the turn settles.
+   */
+  private rememberFileChange(draft: RuntimeEventDraft): void {
+    if (draft.type !== "item.started" && draft.type !== "item.completed") {
+      return;
+    }
+    if (draft.payload.itemType !== "file_change" || draft.itemId === undefined) {
+      return;
+    }
+    const changes = (draft.payload.data as { changes?: unknown } | undefined)?.changes;
+    if (Array.isArray(changes) && changes.length > 0) {
+      this.fileChangesByItem.set(draft.itemId, changes as CodexProtocol.v2.FileUpdateChange[]);
+    }
   }
 
   /** Keep the live-task registry in step with what the normaliser emitted. */
@@ -1597,6 +1653,52 @@ const HOST_CLIENT_VERSION = "1";
  *
  * (fixtures README observation 11.)
  */
+// ---------------------------------------------------------------------------
+// File-change approvals (E2E E7)
+// ---------------------------------------------------------------------------
+
+/** How many added/removed lines a unified diff hunk declares. */
+export function countDiffLines(diff: string): { added: number; removed: number } {
+  let added = 0;
+  let removed = 0;
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("+++") || line.startsWith("---")) {
+      continue;
+    }
+    if (line.startsWith("+")) {
+      added += 1;
+    } else if (line.startsWith("-")) {
+      removed += 1;
+    }
+  }
+  return { added, removed };
+}
+
+/**
+ * The approval card's body: the path(s) and the size of the change, joined
+ * from the `fileChange` item because the request itself carries neither
+ * (fixtures README obs. 2; E2E E7).
+ *
+ * The full diff rides `args.changes`; this is the one-line summary, so a card
+ * with no room for a diff still names the file rather than its own type.
+ */
+export function fileChangeDetail(
+  changes: readonly CodexProtocol.v2.FileUpdateChange[],
+  reason?: string
+): string {
+  if (changes.length === 0) {
+    // The join found nothing — say so plainly rather than inventing a path.
+    return reason ?? "Apply a file change (the provider sent no file list).";
+  }
+  const parts = changes.map((change) => {
+    const { added, removed } = countDiffLines(change.diff);
+    const counts = added > 0 || removed > 0 ? ` +${added} −${removed}` : "";
+    return `${change.path}${counts}`;
+  });
+  const summary = parts.join("\n");
+  return reason !== undefined && reason.length > 0 ? `${reason}\n${summary}` : summary;
+}
+
 // ---------------------------------------------------------------------------
 // MCP elicitation (§4.5 the five handlers; R3 finding 11)
 // ---------------------------------------------------------------------------

@@ -17,7 +17,7 @@ import type { RuntimeEvent } from "@orquester/api/agent-chat";
 
 import { resumeCursorFor } from "../../orchestration/resume.ts";
 import { AsyncEventQueue } from "./event-queue.ts";
-import { CodexSession, type CodexSessionOptions } from "./session.ts";
+import { CodexSession, fileChangeDetail, type CodexSessionOptions } from "./session.ts";
 import {
   EventCollector,
   createFakeContext,
@@ -306,6 +306,53 @@ describe("codex session — approvals", () => {
       decision: { acceptWithExecpolicyAmendment: { execpolicy_amendment: ["ls", "-1"] } }
     });
     await r.stop();
+  });
+
+  it("the file-change card carries the PATH and the diff, joined on itemId (E2E E7)", async () => {
+    // Fixture `04-…`: the approval request carries no path and no diff at all
+    // — they live on the `item/started` `fileChange` that precedes it. The
+    // card cannot do that join (it never sees the item), so the adapter must,
+    // or the user approves a write they cannot see.
+    const r = rig({
+      turns: [
+        {
+          kind: "file-change-approval",
+          path: "/tmp/repo/fixture.txt",
+          diff: "+banana\n"
+        }
+      ]
+    });
+    await r.session.start();
+    await r.session.sendTurn({ input: "write", attachments: [], interactionMode: "default" });
+    const opened = await r.events.waitForType("request.opened");
+    const payload = opened.payload as {
+      detail?: string;
+      args?: { changes?: { path: string; diff: string }[] };
+    };
+
+    assert.ok(payload.detail !== undefined, "the card body must not be empty");
+    assert.notEqual(payload.detail, "File change approval", "not its own type name");
+    assert.match(payload.detail, /fixture\.txt/, "the PATH is in the body");
+    assert.match(payload.detail, /\+1/, "and the size of the change");
+
+    assert.deepEqual(
+      payload.args?.changes?.map((change) => change.path),
+      ["/tmp/repo/fixture.txt"],
+      "the full diff rides args.changes for the card to render"
+    );
+    assert.match(String(payload.args?.changes?.[0]?.diff), /banana/);
+
+    r.session.respondToApproval(opened.requestId!, "accept");
+    await r.events.waitForType("turn.completed");
+    await r.stop();
+  });
+
+  it("a file-change approval with no joinable item says so rather than inventing a path", async () => {
+    assert.equal(
+      fileChangeDetail([]),
+      "Apply a file change (the provider sent no file list)."
+    );
+    assert.equal(fileChangeDetail([], "needs write access"), "needs write access");
   });
 
   it("a file-change approval falls back to the default four options", async () => {
@@ -1027,6 +1074,61 @@ describe("codex session — rollback", () => {
     );
     assert.ok(snapshot.turns[0]!.items.length > 0, "items come from thread/turns/list");
     await r.stop();
+  });
+});
+
+describe("codex session — stderr is home-path redacted (S1 finding 4)", () => {
+  it("collapses the account home and HOME to ~ before the line leaves the host", async () => {
+    // §3.1: the excerpt is "redacted before it leaves the host — home paths
+    // collapsed to `~`". `redactStderr` only collapses the dirs it is HANDED,
+    // so this is a call-site test: the function's own tests cannot catch a
+    // `new StderrCapture()` built with no options.
+    const accountHome = "/var/lib/orquester/daemon/agent-accounts/codex/acc-secret/home";
+    const server = writeMockCodexServer({ turns: [{ kind: "text", text: "a" }] });
+    cleanups.push(() => rmSync(server.dir, { recursive: true, force: true }));
+
+    const { context } = createFakeContext();
+    const queue = new AsyncEventQueue<RuntimeEvent>();
+    const events = new EventCollector(queue);
+    let seq = 0;
+    const session = new CodexSession({
+      context,
+      threadId: "thread-redact",
+      cwd: process.cwd(),
+      codexHome: accountHome,
+      bin: server.bin,
+      env: { PATH: process.env.PATH ?? "", HOME: "/var/lib/orquester" },
+      runtimeMode: "approval-required",
+      modelSelection: { model: "gpt-5.5" },
+      emit: (draft) => {
+        queue.push({
+          ...draft,
+          eventId: `ev-${++seq}`,
+          threadId: "thread-redact",
+          createdAt: "2026-09-21T00:00:00.000Z"
+        } as RuntimeEvent);
+      },
+      onClosed: () => {}
+    });
+    await session.start();
+
+    // Feed a stderr line naming both homes, the way a real codex error does.
+    session.injectStderrForTest(
+      `ERROR codex: cannot read ${accountHome}/auth.json (HOME=/var/lib/orquester)\n`
+    );
+    const surfaced = await events.waitFor(
+      (event) =>
+        (event.type === "runtime.error" || event.type === "runtime.warning") &&
+        String((event.payload as { message: string }).message).includes("cannot read"),
+      "the stderr row (not the unrelated CODEX_HOME warning)"
+    );
+    const message = String((surfaced.payload as { message: string }).message);
+    assert.ok(!message.includes("/var/lib/orquester"), `absolute host path leaked: ${message}`);
+    assert.ok(!message.includes("acc-secret"), "the account id leaked with the path");
+    assert.match(message, /~/);
+
+    await session.stop();
+    queue.close();
   });
 });
 
