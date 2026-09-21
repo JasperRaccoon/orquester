@@ -14,7 +14,10 @@ import { SessionStatusDot } from "../ui/session-status-dot";
 import { ResizeHandle } from "../ui";
 import { useIsDesktop } from "../../hooks";
 import { GRID_MIN_COL_PX, GRID_MIN_ROW_PX, type GridTracks } from "../../lib/panel-sizes";
+import { AgentChatView } from "../agent-chat";
 import {
+  isSessionTab,
+  tabSession,
   useActiveTabId,
   useAppStore,
   useCurrentContext,
@@ -26,8 +29,9 @@ import {
 
 /** Icon shown in a grid-cell header — mirrors the tab strip. */
 function cellIcon(tab: ProjectTab): React.ReactNode {
-  return tab.type === "session" ? (
-    getRegistryIcon(tab.session.kind, tab.session.refId, 13)
+  const session = tabSession(tab);
+  return session ? (
+    getRegistryIcon(session.kind, session.refId, 13)
   ) : tab.type === "git" ? (
     <GitBranch size={13} />
   ) : tab.type === "todo" ? (
@@ -40,11 +44,10 @@ function cellIcon(tab: ProjectTab): React.ReactNode {
 }
 
 function cellTitle(tab: ProjectTab): string {
-  return tab.type === "session"
-    ? tab.session.title
-    : tab.type === "browser"
-      ? tab.browser.title || "Browser"
-      : tab.title;
+  if (isSessionTab(tab)) {
+    return tab.session.title;
+  }
+  return tab.type === "browser" ? tab.browser.title || "Browser" : tab.title;
 }
 
 /** Grid columns for a tab count: 1→1, 2-4→2, 5-9→3, 10+→4 (capped). */
@@ -285,8 +288,12 @@ export const MainView: React.FC = () => {
               >
                 <span className="text-neutral-500">{cellIcon(tab)}</span>
                 <span className="flex-1 truncate text-xs text-neutral-300">{cellTitle(tab)}</span>
-                {tab.type === "session" ? (
-                  <SessionStatusDot sessionId={tab.id} status={tab.session.status} />
+                {tabSession(tab) ? (
+                  <SessionStatusDot
+                    sessionId={tab.id}
+                    status={tabSession(tab)!.status}
+                    backgroundLiveness={tabSession(tab)!.backgroundLiveness}
+                  />
                 ) : null}
                 <button
                   type="button"
@@ -303,6 +310,16 @@ export const MainView: React.FC = () => {
               <div className="min-h-0 flex-1">
                 {tab.type === "session" ? (
                   <TerminalView session={tab.session} active={active} viewMode={viewMode} />
+                ) : tab.type === "agent-chat" ? (
+                  // `active={show}`, not `active={active}`: in grid view every
+                  // visible cell keeps its thread stream open (§7.1 ties the
+                  // stream to tab VISIBILITY), while a hidden tab drops it and
+                  // repaints from the held snapshot when it comes back.
+                  <AgentChatView
+                    session={tab.session}
+                    projectPath={ctx.kind === "project" ? ctx.project.path : ""}
+                    active={show}
+                  />
                 ) : tab.type === "git" ? (
                   // active={show}: in grid view every VISIBLE cell stays live, not
                   // only the focused one (TerminalView keeps focus-only semantics).

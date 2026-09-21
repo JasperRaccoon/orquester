@@ -1,0 +1,302 @@
+{
+  "grokVersion": "1.0.34",
+  "channel": "unknown",
+  "cwd": "~/tmp/agent-chat-fixtures/grok/sandbox",
+  "projectRoot": "~/tmp/agent-chat-fixtures/grok/sandbox/",
+  "projectTrusted": true,
+  "projectInstructions": [
+    {
+      "path": "~/.claude/CLAUDE.md",
+      "scope": "global",
+      "fileType": "agents_md",
+      "sizeBytes": 1816,
+      "approxTokens": 454,
+      "vendor": "claude",
+      "compatibilityStatus": "enabled"
+    }
+  ],
+  "permissions": {
+    "sources": [],
+    "loaded": 0,
+    "skipped": [],
+    "mcpServerAllowlist": [],
+    "mcpLockdownSources": [],
+    "mcpManagedServersOnly": "off",
+    "marketplaceAllowlist": [],
+    "marketplaceLockdownSources": [],
+    "managedMarketplaces": [],
+    "managedSettingsPath": "/etc/claude-code/managed-settings.json",
+    "managedSettingsExists": false,
+    "managedSettingsActive": false,
+    "claudeBypassLockAdvisory": false
+  },
+  "loginPolicy": {
+    "disableApiKeyAuth": null,
+    "forceLoginTeamUuid": null,
+    "apiKeyAuthDisabled": false
+  },
+  "hooks": [
+    {
+      "event": "session_start",
+      "hookType": "command",
+      "target": "sh -c 'if [ -f \"${CLAUDE_PROJECT_DIR:-~/tmp/agent-chat-fixtures/grok/sandbox}/.serena/project.yml\" ]; then cat ~/.claude/hooks/serena-preference.md; fi'",
+      "source": {
+        "type": "user",
+        "path": "~/.claude"
+      },
+      "matcher": null,
+      "vendor": "claude",
+      "disabled": true,
+      "compatibilityStatus": "disabled"
+    },
+    {
+      "event": "session_start",
+      "hookType": "command",
+      "target": "sh ~/.claude/hooks/reap-orphan-serena.sh",
+      "source": {
+        "type": "user",
+        "path": "~/.claude"
+      },
+      "matcher": null,
+      "vendor": "claude",
+      "disabled": true,
+      "compatibilityStatus": "disabled"
+    },
+    {
+      "event": "session_start",
+      "hookType": "command",
+      "target": "sh -c 'D=\"${CLAUDE_PROJECT_DIR:-~/tmp/agent-chat-fixtures/grok/sandbox}\"; sh ~/.claude/hooks/serena-shared.sh session-start \"$D\"; sh ~/.claude/hooks/serena-shared.sh gc'",
+      "source": {
+        "type": "user",
+        "path": "~/.claude"
+      },
+      "matcher": null,
+      "vendor": "claude",
+      "disabled": true,
+      "compatibilityStatus": "disabled"
+    }
+  ],
+  "skills": [
+    {
+      "name": "chdb-datastore",
+      "description": "Use when the user has tabular data (pandas DataFrame, parquet, csv, Arrow, json) and wants to filter, group, aggregate, join, or speed up slow pandas. Provides chDB DataStore — same pandas API, ClickHouse engine underneath. Also handles reading from S3, MySQL, PostgreSQL, MongoDB, ClickHouse Cloud, Iceberg, Delta Lake as DataFrames and joining across sources. TRIGGER when: user mentions DataFrame, parquet, csv, \"fast pandas\", \"speed up pandas\", or cross-source DataFrame joins; user imports `chdb.datastore` or `from datastore import DataStore`. SKIP this skill for raw SQL syntax (use chdb-sql instead), ClickHouse server administration, or non-Python DataStore API work.",
+      "source": {
+        "type": "user",
+        "path": "~/.claude/skills/chdb-datastore/SKILL.md"
+      },
+      "userInvocable": true,
+      "vendor": "claude",
+      "compatibilityStatus": "enabled"
+    },
+    {
+      "name": "chdb-sql",
+      "description": "Use when the user wants to run SQL — especially analytical SQL — on local files (parquet/csv/json), URLs, S3 paths, or remote databases (Postgres, MySQL, MongoDB, ClickHouse Cloud, Iceberg, Delta Lake) without setting up a server. Provides chDB — embedded ClickHouse SQL in Python with 1000+ functions, Session for stateful multi-step pipelines, parametrized queries, and cross-source joins via `s3()`, `mysql()`, `postgresql()`, `iceberg()`, `deltaLake()`, `remoteSecure()` table functions. TRIGGER when: user wants SQL on parquet/csv/files or across remote analytical sources; uses ClickHouse SQL features (window functions, windowFunnel, geoToH3, JSON path ops, Session, parametrized queries); imports `chdb` or calls `chdb.query()`. SKIP this skill for pandas-style DataFrame method-chaining (use chdb-datastore instead) or ClickHouse server administration.",
+      "source": {
+        "type": "user",
+        "path": "~/.claude/skills/chdb-sql/SKILL.md"
+      },
+      "userInvocable": true,
+      "vendor": "claude",
+      "compatibilityStatus": "enabled"
+    },
+    {
+      "name": "clickhouse-architecture-advisor",
+      "description": "MUST USE when designing ClickHouse architectures, selecting between ingestion or modeling patterns, or translating best practices into workload-specific system designs. Complements clickhouse-best-practices with decision frameworks and explicit provenance labels.",
+      "source": {
+        "type": "user",
+        "path": "~/.claude/skills/clickhouse-architecture-advisor/SKILL.md"
+      },
+      "userInvocable": true,
+      "vendor": "claude",
+      "compatibilityStatus": "enabled"
+    }
+  ],
+  "agents": [
+    {
+      "name": "general-purpose",
+      "description": "General purpose agent for multi-step tasks.",
+      "source": {
+        "type": "builtin"
+      }
+    },
+    {
+      "name": "explore",
+      "description": "Fast, read-only agent specialized for codebase exploration.",
+      "source": {
+        "type": "builtin"
+      }
+    },
+    {
+      "name": "plan",
+      "description": "Software architect for planning implementation strategies.",
+      "source": {
+        "type": "builtin"
+      }
+    }
+  ],
+  "plugins": [
+    {
+      "name": "hookify",
+      "scope": "user",
+      "path": "~/.claude/plugins/marketplaces/claude-plugins-official/plugins/hookify",
+      "enabled": true,
+      "provides": {
+        "skills": 1,
+        "agents": 1,
+        "hooks": true,
+        "mcpServers": 0
+      }
+    },
+    {
+      "name": "feature-dev",
+      "scope": "user",
+      "path": "~/.claude/plugins/marketplaces/claude-plugins-official/plugins/feature-dev",
+      "enabled": true,
+      "provides": {
+        "skills": 0,
+        "agents": 1,
+        "hooks": false,
+        "mcpServers": 0
+      }
+    },
+    {
+      "name": "skill-creator",
+      "scope": "user",
+      "path": "~/.claude/plugins/marketplaces/claude-plugins-official/plugins/skill-creator",
+      "enabled": true,
+      "provides": {
+        "skills": 1,
+        "agents": 0,
+        "hooks": false,
+        "mcpServers": 0
+      }
+    }
+  ],
+  "marketplaces": [],
+  "mcpServers": [
+    {
+      "name": "serena",
+      "transport": "stdio",
+      "target": "~/.local/bin/serena",
+      "source": {
+        "type": "configToml",
+        "path": "~/daemon/agent-accounts/grok/b9682f5c-425a-4c53-be6e-28de477be6c7/home/config.toml"
+      }
+    },
+    {
+      "name": "jira-cloud",
+      "transport": "stdio",
+      "target": "/usr/bin/node",
+      "source": {
+        "type": "claudeJson",
+        "path": "~/.claude.json"
+      },
+      "compatibilityStatus": "enabled",
+      "vendor": "claude"
+    },
+    {
+      "name": "agent-browser",
+      "transport": "stdio",
+      "target": "agent-browser",
+      "source": {
+        "type": "claudeJson",
+        "path": "~/.claude.json"
+      },
+      "compatibilityStatus": "enabled",
+      "vendor": "claude"
+    }
+  ],
+  "lspServers": [],
+  "configSources": {
+    "layers": [
+      {
+        "role": "user",
+        "path": "~/daemon/agent-accounts/grok/b9682f5c-425a-4c53-be6e-28de477be6c7/home/config.toml"
+      }
+    ]
+  },
+  "externalCompat": {
+    "remoteSettingsLoaded": false,
+    "cells": [
+      {
+        "vendor": "cursor",
+        "surface": "skills",
+        "enabled": true,
+        "source": "default"
+      },
+      {
+        "vendor": "cursor",
+        "surface": "rules",
+        "enabled": true,
+        "source": "default"
+      },
+      {
+        "vendor": "cursor",
+        "surface": "agents",
+        "enabled": true,
+        "source": "default"
+      },
+      {
+        "vendor": "cursor",
+        "surface": "mcps",
+        "enabled": true,
+        "source": "default"
+      },
+      {
+        "vendor": "cursor",
+        "surface": "hooks",
+        "enabled": true,
+        "source": "default"
+      },
+      {
+        "vendor": "cursor",
+        "surface": "sessions",
+        "enabled": true,
+        "source": "default"
+      },
+      {
+        "vendor": "claude",
+        "surface": "skills",
+        "enabled": true,
+        "source": "default"
+      },
+      {
+        "vendor": "claude",
+        "surface": "rules",
+        "enabled": true,
+        "source": "default"
+      },
+      {
+        "vendor": "claude",
+        "surface": "agents",
+        "enabled": true,
+        "source": "default"
+      },
+      {
+        "vendor": "claude",
+        "surface": "mcps",
+        "enabled": true,
+        "source": "default"
+      },
+      {
+        "vendor": "claude",
+        "surface": "hooks",
+        "enabled": false,
+        "source": "config"
+      },
+      {
+        "vendor": "claude",
+        "surface": "sessions",
+        "enabled": true,
+        "source": "default"
+      },
+      {
+        "vendor": "codex",
+        "surface": "sessions",
+        "enabled": true,
+        "source": "default"
+      }
+    ]
+  },
+  "_fixtureNote": "Captured from `grok inspect --json` (grok 1.0.34, 2026-09-21) in the fixture sandbox, redacted (home dir -> ~, emails/tokens removed). Long host-specific arrays truncated: hooks: 17 entries, first 3 kept; skills: 60 entries, first 3 kept; agents: 7 entries, first 3 kept; plugins: 6 entries, first 3 kept; mcpServers: 4 entries, first 3 kept. `skills` is the array GrokSkills reads; each entry's shape is intact."
+}

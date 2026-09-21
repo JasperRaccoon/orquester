@@ -412,9 +412,31 @@ export const agentPrefsSchema = z.object({
    * value is silently floored by the harness, so it is rejected here rather
    * than displayed as a number that does nothing.
    */
-  claudeTimeoutMinutes: z.number().int().min(1).max(30).default(30)
+  claudeTimeoutMinutes: z.number().int().min(1).max(30).default(30),
+  /**
+   * Agent chat §3.3: after the host restarts, whether a thread whose turn was
+   * interrupted is continued from its saved provider resume cursor. Host-wide
+   * default, **off** — "pick up where you left off" is wrong for a project
+   * where a turn was halfway through a destructive operation.
+   */
+  continueThreadsAfterRestart: z.boolean().default(false),
+  /**
+   * Per-project override of the flag above, keyed by absolute project path.
+   * Resolved per the thread's project over the host-wide default; an absent
+   * entry means "use the default".
+   */
+  continueThreadsByProject: z.record(z.string(), z.boolean()).default({})
 });
 export type AgentPrefs = z.infer<typeof agentPrefsSchema>;
+
+/**
+ * Whether an interrupted turn in this project is continued after a host
+ * restart (agent chat §3.3). The single resolution point, so the host, the
+ * Settings panel and any future surface cannot disagree.
+ */
+export function continueThreadsForProject(prefs: AgentPrefs, projectPath: string): boolean {
+  return prefs.continueThreadsByProject[projectPath] ?? prefs.continueThreadsAfterRestart;
+}
 
 // agent-accounts.json (managed per-agent accounts; daemon-side)
 
@@ -862,6 +884,66 @@ export function parseAgentReceiptsFile(value: unknown): AgentReceiptsFile {
     }
   }
   return { version: 1, receipts: receipts.slice(-AGENT_RECEIPTS_RING_SIZE) };
+}
+
+/**
+ * One line of `events.ndjson`. Mirrors `DomainEvent`'s envelope in
+ * `@orquester/api`; the `payload` stays `unknown` here on purpose.
+ *
+ * ROLLBACK BOUNDARY (§8): a log written by a newer host must still decode in
+ * an older one, so validating fourteen payload shapes at the line level would
+ * turn every new optional field into a truncated thread. The envelope is what
+ * the reader needs to order, filter and replay; the fold in `@orquester/api`
+ * is tolerant about everything inside `payload`.
+ */
+export const agentDomainEventTypeSchema = z.enum([
+  "thread.created",
+  "thread.meta-updated",
+  "thread.runtime-mode-set",
+  "thread.message-sent",
+  "thread.turn-start-requested",
+  "thread.turn-interrupt-requested",
+  "thread.approval-response-requested",
+  "thread.user-input-response-requested",
+  "thread.session-set",
+  "thread.activity-appended",
+  "thread.turn-diff-completed",
+  "thread.checkpoint-revert-requested",
+  "thread.reverted",
+  "thread.deleted"
+]);
+export type AgentDomainEventType = z.infer<typeof agentDomainEventTypeSchema>;
+
+export const agentDomainEventMetadataSchema = z
+  .object({
+    providerTurnId: z.string().optional(),
+    providerItemId: z.string().optional(),
+    adapterKey: z.string().optional(),
+    requestId: z.string().optional(),
+    ingestedAt: z.string().optional()
+  })
+  .passthrough();
+
+export const agentDomainEventEnvelopeSchema = z.object({
+  seq: z.number().int().positive(),
+  eventId: z.string().min(1),
+  threadId: z.string().min(1),
+  type: agentDomainEventTypeSchema,
+  payload: z.unknown(),
+  occurredAt: z.string(),
+  commandId: z.string().nullable().default(null),
+  causationEventId: z.string().nullable().default(null),
+  metadata: agentDomainEventMetadataSchema.default({})
+});
+export type AgentDomainEventEnvelope = z.infer<typeof agentDomainEventEnvelopeSchema>;
+
+/**
+ * Returns null rather than throwing: a malformed line TRUNCATES the fold at
+ * that point (spec §5.1), it never discards the file and never fails the host.
+ */
+export function parseAgentDomainEvent(value: unknown): AgentDomainEventEnvelope | null {
+  const parsed = agentDomainEventEnvelopeSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
 }
 
 /** One persisted browser tab. The Chromium PROCESS does not survive a daemon

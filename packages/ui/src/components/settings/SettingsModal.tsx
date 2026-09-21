@@ -28,6 +28,7 @@ import {
   Zap
 } from "lucide-react";
 import type { AccountSummary, CreateAccountRequest, GitProviderId } from "@orquester/api";
+import { continueThreadsForProject } from "@orquester/config";
 import type { DaemonConfig } from "@orquester/config";
 import { cn } from "../../lib/cn";
 import { disablePush, enablePush, getSubscription, pushSupported } from "../../lib/push";
@@ -113,17 +114,27 @@ export const SettingsModal: React.FC = () => {
   const setOpen = useAppStore((s) => s.setSettingsOpen);
   const loadAgentAccounts = useAppStore((s) => s.loadAgentAccounts);
   const isDesktop = useIsDesktop();
+  const requestedSection = useAppStore((s) => s.settingsSection);
   const [section, setSection] = useState<Section | null>(null);
 
   // Reset to the category list each time it closes (mobile shows list first);
   // refresh managed accounts on open in case another client changed them.
+  //
+  // A caller may deep-link a section — the agent-auth toast opens Accounts
+  // (§7.7) — so an opening modal honours the request before resetting. The
+  // name is validated against the real list: it arrives as a plain string so
+  // the store stays free of this module's union.
   useEffect(() => {
     if (!open) {
       setSection(null);
-    } else {
-      void loadAgentAccounts();
+      return;
     }
-  }, [open, loadAgentAccounts]);
+    const requested = SECTIONS.find((s) => s.id === requestedSection);
+    if (requested) {
+      setSection(requested.id);
+    }
+    void loadAgentAccounts();
+  }, [open, requestedSection, loadAgentAccounts]);
 
   const close = () => setOpen(false);
 
@@ -231,6 +242,114 @@ const Field: React.FC<{ label: string; hint?: string; children: React.ReactNode 
 
 type AgentFilter = "all" | "installed" | "available";
 
+/**
+ * Agent-chat behaviour (agent chat spec §7.4, §4.6.7, §3.3).
+ *
+ * Three settings with three different homes, which is why they are grouped
+ * rather than scattered: the first two are per-device composer habits and live
+ * in localStorage; the third is daemon state the HOST reads at boot, per
+ * project, so it rides `app.json` like the Claude timeout above it.
+ */
+const AgentChatSettings: React.FC = () => {
+  const chatPrefs = useAppStore((s) => s.chatPrefs);
+  const setChatPrefs = useAppStore((s) => s.setChatPrefs);
+  const agentPrefs = useAppStore((s) => s.appConfig.agents);
+  const updateAgentPrefs = useAppStore((s) => s.updateAgentPrefs);
+  const project = useAppStore((s) => s.currentProject);
+
+  const projectOverride = project
+    ? agentPrefs.continueThreadsByProject[project.path]
+    : undefined;
+  const continuesHere = project
+    ? continueThreadsForProject(agentPrefs, project.path)
+    : agentPrefs.continueThreadsAfterRestart;
+
+  return (
+    <div className="divide-y divide-neutral-800 rounded-lg border border-neutral-800 px-3">
+      <Field
+        label="While the agent is working, Enter"
+        hint="Steering hands the text to the running turn straight away. Queueing parks it until the next tool call finishes or the turn ends. Holding the modifier key with Enter does the other one for that message."
+      >
+        <div className="inline-flex rounded-md bg-neutral-800/60 p-0.5 text-xs">
+          {(["steer", "queue"] as const).map((value) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => setChatPrefs({ followUpBehavior: value })}
+              className={cn(
+                "rounded px-2.5 py-1 transition-colors",
+                chatPrefs.followUpBehavior === value
+                  ? "bg-neutral-700 text-neutral-100"
+                  : "text-neutral-400 hover:text-neutral-200"
+              )}
+            >
+              {value === "steer" ? "Steers" : "Queues"}
+            </button>
+          ))}
+        </div>
+      </Field>
+      <Field
+        label="List skills in the / menu"
+        hint="Off keeps / to commands only. Skills are always listed under $, so nothing becomes unreachable."
+      >
+        <Switch
+          checked={chatPrefs.showSkillsInSlashMenu}
+          onChange={(checked) => setChatPrefs({ showSkillsInSlashMenu: checked })}
+        />
+      </Field>
+      <Field
+        label="Continue interrupted turns after a restart"
+        hint="A crash, a reboot or a manual restart interrupts whatever the agents were doing. With this on, a thread that has a saved resume point picks up where it left off; a thread without one needs a new message either way. Off by default, because resuming is wrong when a turn was halfway through something destructive."
+      >
+        <Switch
+          checked={agentPrefs.continueThreadsAfterRestart}
+          onChange={(checked) =>
+            void updateAgentPrefs({ ...agentPrefs, continueThreadsAfterRestart: checked })
+          }
+        />
+      </Field>
+      {project && (
+        <Field
+          label={`Continue in ${project.name}`}
+          hint={
+            projectOverride === undefined
+              ? `Following the default above (${continuesHere ? "on" : "off"}). Set it here to pin this one project.`
+              : `Pinned ${projectOverride ? "on" : "off"} for this project, whatever the default says.`
+          }
+        >
+          <div className="inline-flex items-center gap-2">
+            <Switch
+              checked={continuesHere}
+              onChange={(checked) =>
+                void updateAgentPrefs({
+                  ...agentPrefs,
+                  continueThreadsByProject: {
+                    ...agentPrefs.continueThreadsByProject,
+                    [project.path]: checked
+                  }
+                })
+              }
+            />
+            {projectOverride !== undefined && (
+              <button
+                type="button"
+                onClick={() => {
+                  const next = { ...agentPrefs.continueThreadsByProject };
+                  delete next[project.path];
+                  void updateAgentPrefs({ ...agentPrefs, continueThreadsByProject: next });
+                }}
+                className="rounded border border-neutral-700 px-1.5 py-0.5 text-[11px] text-neutral-400 transition-colors hover:border-neutral-600 hover:text-neutral-200"
+              >
+                Use default
+              </button>
+            )}
+          </div>
+        </Field>
+      )}
+    </div>
+  );
+};
+
 const AgentsSettings: React.FC = () => {
   const registry = useRegistry();
   const installAgent = useAppStore((s) => s.installAgent);
@@ -288,6 +407,7 @@ const AgentsSettings: React.FC = () => {
 
   return (
     <div className="space-y-3">
+      <AgentChatSettings />
       <div className="rounded-lg border border-neutral-800 px-3">
         <Field
           label="Claude stream timeout"
