@@ -271,12 +271,13 @@ export interface ChatStatusLineProps {
   onCompact: () => void;
   latestCheckpoint: Checkpoint | null;
   /**
-   * The thread's model, for the meter's auto-compaction sentence (§7.6). With
-   * no `autoCompactAtTokens` the sentence can still name what compacts —
-   * without it, it degrades to a generic line although the model is right
-   * there on the thread head.
+   * The thread's model, for the meter's auto-compaction sentence (§7.6): with
+   * no `autoCompactAtTokens` the sentence can still name what compacts, and
+   * without the label it degrades to a generic line although the model is
+   * right there on the thread head.
    *
-   * *Added by W15; additive to the foundation's contract.*
+   * *Added by W14 and W15 for R8 m3; T3 passes `modelDisplayName`,
+   * `ContextWindowMeter.tsx:136-138`.*
    */
   modelLabel?: string | null;
 }
