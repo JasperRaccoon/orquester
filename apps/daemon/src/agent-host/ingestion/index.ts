@@ -109,6 +109,16 @@ export interface IngestionOptions {
     eventId: string;
     createdAt: string;
   }) => { turnCount: number } | null | undefined;
+  /**
+   * §5.1: `auth.status` and `account.rate-limits.updated` are **not thread
+   * facts** — they update the provider snapshot (§6.3) and surface in §7.7.
+   * Ingestion writes nothing for them and hands them here instead, so the
+   * "which runtime event becomes what" decision still lives in exactly one
+   * place. W1 routes them to `ProviderSnapshotRegistry.applyUsageLimits`.
+   */
+  onAccountEvent?: (
+    event: Extract<RuntimeEvent, { type: "auth.status" | "account.rate-limits.updated" }>
+  ) => void;
   /** §5.6 slimming. Defaults to W2's `slimActivityPayload`. */
   slim?: (payload: unknown) => unknown;
   logger?: IngestionLogger;
@@ -869,6 +879,15 @@ export function createIngestion(options: IngestionOptions): Ingestion {
         options.liveness.clear(threadId);
       } catch (error) {
         logger?.warn("agent-chat/ingestion: liveness.clear failed", error);
+      }
+    }
+
+    // --- account events are provider-snapshot facts, not thread facts ------
+    if (event.type === "auth.status" || event.type === "account.rate-limits.updated") {
+      try {
+        options.onAccountEvent?.(event);
+      } catch (error) {
+        logger?.warn("agent-chat/ingestion: onAccountEvent failed", error);
       }
     }
 
