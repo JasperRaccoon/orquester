@@ -2,7 +2,7 @@
 // apps/web/src/components/chat/ComposerPendingApprovalActions.tsx
 import React from "react";
 import { Ellipsis, ShieldIcon, TriangleAlert } from "lucide-react";
-import type { ApprovalDecision, PendingApproval } from "@orquester/api/agent-chat";
+import type { ApprovalDecision, PendingApproval, ThreadItem } from "@orquester/api/agent-chat";
 
 import { cn } from "../../../lib/cn";
 import { BannerCard } from "../primitives";
@@ -13,6 +13,20 @@ import {
   approvalKindLabel,
   splitApprovalOptions
 } from "./banner-model";
+import {
+  APPROVAL_DETAIL_UNAVAILABLE,
+  diffLineTone,
+  resolveApprovalDetail,
+  type DiffLineTone
+} from "./approval-detail";
+
+/** Per-line diff colouring, in the themed scale (never a literal colour). */
+const DIFF_TONE: Record<DiffLineTone, string> = {
+  added: "text-ok-300",
+  removed: "text-danger-300",
+  meta: "text-neutral-500",
+  context: "text-neutral-300"
+};
 
 export interface ApprovalCardProps {
   approval: PendingApproval;
@@ -20,6 +34,12 @@ export interface ApprovalCardProps {
   pendingCount: number;
   /** A decision for this request is in flight: every control is disabled. */
   isResponding: boolean;
+  /**
+   * The thread's items, so a request carrying no `detail` can be joined to the
+   * tool call it gates by `toolUseId` (E2E E7). Optional: without it the card
+   * falls back to the request's own detail, and says so when there is none.
+   */
+  entries?: readonly ThreadItem[];
   onRespond: (decision: ApprovalDecision) => void;
 }
 
@@ -59,10 +79,13 @@ export function ApprovalCard({
   approval,
   pendingCount,
   isResponding,
+  entries,
   onRespond
 }: ApprovalCardProps): React.ReactElement {
   const label = approvalKindLabel(approval.requestKind);
-  const prose = approvalDetailIsProse(approval.requestKind);
+  const detail = resolveApprovalDetail(approval, entries);
+  // An elicitation is prose; a diff must stay monospaced whatever the kind.
+  const prose = approvalDetailIsProse(approval.requestKind) && !detail.isDiff;
   const { primary, overflow } = splitApprovalOptions(approval.options);
 
   return (
@@ -147,16 +170,30 @@ export function ApprovalCard({
     >
       <div
         aria-label={approvalDetailAriaLabel(approval.requestKind)}
-        data-approval-detail="complete"
+        data-approval-detail={detail.text === null ? "unavailable" : detail.source}
         tabIndex={0}
         className={cn(
+          // A file change can be long: the 80px cap and the thin scrollbar are
+          // what let a whole diff be read without leaving the banner.
           "ac-scroll-thin block max-h-20 w-full min-w-0 overflow-auto rounded-md",
           "bg-neutral-900/50 px-2 py-1.5 text-xs text-neutral-200",
           "focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500",
           prose ? "whitespace-pre-wrap break-words font-sans" : "whitespace-pre font-mono"
         )}
       >
-        {approval.detail || label}
+        {detail.text === null ? (
+          <span className="font-sans italic text-warn-300">{APPROVAL_DETAIL_UNAVAILABLE}</span>
+        ) : detail.isDiff ? (
+          // Per-line tone, so an addition and a removal are distinguishable at
+          // a glance — the whole point of showing the diff before approving it.
+          detail.text.split("\n").map((line, index) => (
+            <span key={index} className={cn("block", DIFF_TONE[diffLineTone(line)])}>
+              {line === "" ? "\u00a0" : line}
+            </span>
+          ))
+        ) : (
+          detail.text
+        )}
       </div>
     </BannerCard>
   );

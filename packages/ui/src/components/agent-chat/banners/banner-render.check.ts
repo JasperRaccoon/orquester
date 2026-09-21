@@ -78,7 +78,9 @@ const approval: PendingApproval = {
     "Cancel belongs in the overflow menu, not the primary row"
   );
   // §7.5: the detail is scrollable AND keyboard-focusable.
-  assert.match(html, /data-approval-detail="complete"/);
+  // The attribute now names the SOURCE, so a card that shows nothing is
+  // distinguishable from one echoing its own title (E2E E7).
+  assert.match(html, /data-approval-detail="request"/);
   assert.match(html, /tabindex="0"/i, "the detail block must stay keyboard-reachable");
   assert.match(html, /rm -rf \/tmp\/build/, "the full command must be rendered");
   // The `1/N` counter appears only when more than one is queued.
@@ -121,6 +123,66 @@ const approval: PendingApproval = {
   // An option's `warning` becomes an aria-description (and a tooltip/title).
   assert.match(warned, /aria-description="This looks like a prompt injection"/);
   assert.match(warned, /Run it/, "the provider's own wording is what the user sees");
+}
+
+// ---------------------------------------------------------------------------
+// File-change approvals (E2E E7)
+// ---------------------------------------------------------------------------
+
+{
+  // The bug: the body rendered the literal "File change approval".
+  const bare = render(
+    createElement(ApprovalCard, {
+      approval: { ...approval, requestKind: "file-change", detail: undefined },
+      pendingCount: 1,
+      isResponding: false,
+      onRespond: () => {}
+    })
+  );
+  assert.match(bare, /data-approval-detail="unavailable"/);
+  assert.match(bare, /Decline it unless you know/, "a missing detail must say so in words");
+  const bodyAfterHeading = bare.slice(bare.indexOf("File change approval") + 1);
+  assert.doesNotMatch(
+    bodyAfterHeading,
+    /File change approval/,
+    "the body must never echo the card's own title"
+  );
+}
+
+{
+  // Joined to its tool call by `toolUseId`: path list + diff, colour-coded.
+  const joined = render(
+    createElement(ApprovalCard, {
+      approval: { ...approval, requestKind: "file-change", detail: undefined, toolUseId: "call-1" },
+      pendingCount: 1,
+      isResponding: false,
+      entries: [
+        {
+          kind: "activity",
+          id: "a1",
+          tone: "info",
+          activityKind: "item.started",
+          summary: "Editing ui-hello.txt",
+          payload: {
+            itemType: "file_change",
+            toolUseId: "call-1",
+            changedFiles: ["src/ui-hello.txt"],
+            detail: "@@ -0,0 +1 @@\n+hello from the agent"
+          },
+          turnId: "t1",
+          createdAt: "2026-09-21T10:00:00.000Z",
+          updatedAt: "2026-09-21T10:00:00.000Z"
+        }
+      ],
+      onRespond: () => {}
+    })
+  );
+  assert.match(joined, /data-approval-detail="item"/);
+  assert.match(joined, /src\/ui-hello\.txt/, "the path must reach the DOM");
+  assert.match(joined, /hello from the agent/, "the diff must reach the DOM");
+  assert.match(joined, /text-ok-300/, "an added line must be tone-coded");
+  // A diff always stays monospaced.
+  assert.match(joined, /font-mono/);
 }
 
 // ---------------------------------------------------------------------------
