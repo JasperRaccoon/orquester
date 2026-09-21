@@ -199,7 +199,14 @@ export function nextDueQueuedMessage(
 // Steer versus queue (§7.4)
 // ---------------------------------------------------------------------------
 
-/** The user's standing preference for what a send does during a live turn. */
+/**
+ * The user's standing preference for what a send does during a live turn.
+ *
+ * Structurally identical to the composer's own `FollowUpBehavior`
+ * (`components/agent-chat/composer/composer-submission.ts`, W13) and to
+ * `lib/chat-prefs.ts`'s; declared here so this module stays free of any
+ * component import. The three are one union — do not let them diverge.
+ */
 export type FollowUpBehavior = "steer" | "queue";
 
 /** `alternate` is mod+Enter: it inverts the preference for that one message. */

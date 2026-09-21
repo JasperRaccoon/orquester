@@ -27,7 +27,7 @@ const capabilities = (overrides: Partial<AdapterCapabilities> = {}): AdapterCapa
   sessionModelSwitch: "in-session",
   showPlanModeToggle: true,
   reportsContextWindow: true,
-  compaction: "native",
+  compaction: { type: "native" },
   ...overrides
 });
 

@@ -82,6 +82,10 @@ import {
   type QueuePhase,
   type QueueState
 } from "./queue.logic";
+import {
+  composerHandle,
+  insertComposerText
+} from "../../components/agent-chat/composer/composer-bridge";
 import { disclosureSets, timelinePositionStore } from "./timeline-position";
 import {
   AgentChatCommandError,
@@ -390,7 +394,29 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       writePersistedDrafts(all);
     };
 
+    /**
+     * Return a message's content to the composer.
+     *
+     * **There is one visible draft, and the composer owns it.** When a
+     * composer is mounted for this session (W13's `composer-bridge` handle) the
+     * text goes straight into it at the caret; the store's own draft is the
+     * fallback for the window where the tab is not mounted yet — a queued
+     * message returned by an interrupt while the user is on another tab must
+     * not be lost. Keeping two live drafts would let them disagree.
+     */
     const appendToDraft = (message: QueuedComposerMessage): void => {
+      if (composerHandle(sessionId)) {
+        insertComposerText(sessionId, message.text, "append");
+        if (message.attachments.length > 0 || message.context.length > 0) {
+          const draft = get().draft;
+          setDraft({
+            text: draft.text,
+            attachments: [...draft.attachments, ...message.attachments],
+            context: [...draft.context, ...message.context]
+          });
+        }
+        return;
+      }
       const draft = get().draft;
       const text = draft.text.trim().length === 0 ? message.text : `${draft.text.trimEnd()}\n\n${message.text}`;
       setDraft({

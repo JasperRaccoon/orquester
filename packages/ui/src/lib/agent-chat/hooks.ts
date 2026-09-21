@@ -200,7 +200,15 @@ export function useProviderSnapshots(): ProviderSnapshot[] {
   );
 }
 
-/** The composer's draft for a thread, and its setter. Persisted per device. */
+/**
+ * The store's **fallback** draft for a thread.
+ *
+ * The composer owns the live draft (W13's `ChatComposer` plus its
+ * `composer-bridge` handle); this one only holds what was returned to a thread
+ * whose composer is not mounted — a queued message drained by an interrupt
+ * while the user is on another tab — plus any attachments that came back with
+ * it. A mounted composer should drain it once on mount.
+ */
 export function useAgentChatDraft(sessionId: string): {
   draft: AgentChatThreadState["draft"];
   actions: AgentChatThreadState["actions"];
