@@ -16,6 +16,30 @@
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/**
+ * The same shape rule the host's §6.1 create-time resume
+ * (`orchestration/resume.ts`) and the terminal launch path (`resumeLaunchArgs`
+ * in `apps/daemon/src/sessions.ts`) apply: the leading character excludes `-`,
+ * so an id can never arrive as a flag, and no `..` segment survives.
+ *
+ * It is deliberately **not** a uuid check. Claude's own session ids are uuids
+ * today, but the cursor also arrives in the minimal `{threadId, resume}` form
+ * the resume picker builds, and a uuid-only rule would silently degrade a
+ * perfectly good resume into a fresh session — the one outcome §6.1 exists to
+ * prevent.
+ */
+const RESUME_ID_PATTERN = /^[\w.][\w.\-/]*$/;
+
+export function isResumeId(value: unknown): value is string {
+  if (typeof value !== "string" || value.length === 0 || value.length > 256) {
+    return false;
+  }
+  if (!RESUME_ID_PATTERN.test(value)) {
+    return false;
+  }
+  return !value.split("/").includes("..");
+}
+
 export interface ClaudeResumeCursor {
   /** Our thread id, so a cursor copied onto the wrong thread is rejected. */
   threadId?: string;
@@ -36,6 +60,11 @@ export function isUuid(value: unknown): value is string {
 /**
  * Validate a persisted cursor. Anything that does not check out returns
  * `undefined`, which the caller reads as "start a fresh session".
+ *
+ * Both the **full** cursor this adapter writes and the **minimal**
+ * `{threadId, resume}` form the host builds for a create-time resume (§6.1,
+ * `orchestration/resumeCursorFor`) are accepted: every field beyond `resume`
+ * is optional and the adapter refreshes them itself on the first turn.
  */
 export function readClaudeResumeCursor(value: unknown): ClaudeResumeCursor | undefined {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -43,11 +72,13 @@ export function readClaudeResumeCursor(value: unknown): ClaudeResumeCursor | und
   }
   const record = value as Record<string, unknown>;
   const resume = record.resume;
-  if (!isUuid(resume)) {
+  if (!isResumeId(resume)) {
     return undefined;
   }
   const threadId = typeof record.threadId === "string" ? record.threadId : undefined;
-  const resumeSessionAt = isUuid(record.resumeSessionAt) ? record.resumeSessionAt : undefined;
+  const resumeSessionAt = isResumeId(record.resumeSessionAt)
+    ? record.resumeSessionAt
+    : undefined;
   const turnCount =
     typeof record.turnCount === "number" && Number.isInteger(record.turnCount) && record.turnCount >= 0
       ? record.turnCount

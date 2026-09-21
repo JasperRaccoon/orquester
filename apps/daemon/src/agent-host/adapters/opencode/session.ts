@@ -33,8 +33,10 @@ import { AGENT_HOST_DEADLINES, withDeadline } from "../../support/deadline.ts";
 import { OpenCodeHttpError, isOpenCodeNotFound, type OpenCodeClient } from "./http.ts";
 import {
   NormalizerEmitter,
+  closeLiveChildAgents,
   emitTerminalPermission,
   emitTerminalQuestion,
+  hasLiveChildAgents,
   normalizeOpenCodeEvent,
   type NormalizeContext,
   type NormalizerSignal
@@ -423,6 +425,22 @@ export class OpenCodeThreadSession {
 
   private emit(event: RuntimeEvent): void {
     this.deps.emit(event);
+  }
+
+  /**
+   * §3.1: every live task is closed with `task.completed {status:"stopped"}` —
+   * which the roster folds to `interrupted` (§7.6) — before the turn or the
+   * session settles. A subagent row must never outlive the process that ran it.
+   */
+  private closeChildAgents(reason?: string): void {
+    for (const event of closeLiveChildAgents(this.state, this.normalizeContext(), reason)) {
+      this.emit(event);
+    }
+  }
+
+  /** Whether any subagent is still live — §6.4's `backgroundLiveness` input. */
+  hasLiveSubagents(): boolean {
+    return hasLiveChildAgents(this.state);
   }
 
   private normalizeContext(): NormalizeContext {
@@ -892,6 +910,7 @@ export class OpenCodeThreadSession {
     this.state.awaitingBusyAfterInterruption = false;
     this.state.reconcileIdleStatus = false;
     this.updateRecord({ status: "error", lastError: detail }, { activeTurnId: true });
+    this.closeChildAgents(detail);
     this.emit({
       ...this.base({ turnId: admission.turnId }),
       type: "turn.completed",
@@ -951,6 +970,7 @@ export class OpenCodeThreadSession {
     this.state.activeVariant = undefined;
     this.state.reconcileIdleStatus = false;
     this.updateRecord({ status: "error", lastError: message }, { activeTurnId: true });
+    this.closeChildAgents(message);
     void this.recoverPendingRequests();
     if (turnId !== undefined) {
       this.emit({
@@ -1584,6 +1604,7 @@ export class OpenCodeThreadSession {
         this.state.activeVariant = undefined;
         this.state.promptAdmission = undefined;
         this.updateRecord({ status: "ready" }, { activeTurnId: true });
+        this.closeChildAgents("interrupted");
         this.emit({
           ...this.base({ turnId: target }),
           type: "turn.aborted",
@@ -1672,6 +1693,7 @@ export class OpenCodeThreadSession {
     this.cancelIdleReconciliation();
 
     await this.settlePendingRequests().catch(() => undefined);
+    this.closeChildAgents(input.reason);
 
     const turnId = this.state.activeTurnId;
     if (turnId !== undefined) {

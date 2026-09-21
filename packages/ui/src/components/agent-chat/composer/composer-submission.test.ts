@@ -7,6 +7,7 @@ import {
   composerPromptLengthValidationMessage,
   composerSubmissionIntentForEnter,
   composerSubmissionValidationMessage,
+  decideStagedAttachmentForRef,
   hasSendableContent,
   isPasteAsTextShortcut,
   nextPastedTextFileName,
@@ -16,7 +17,9 @@ import {
   proposedPlanTitle,
   resolveFollowUpDisposition,
   resolvePlanFollowUpSubmission,
-  uploadsBlockSend
+  stagedAttachmentKeyForRef,
+  uploadsBlockSend,
+  type StagedAttachmentLike
 } from "./composer-submission.ts";
 
 const DESKTOP = { isMobileViewport: false, shiftKey: false, modifierKey: false, isRunning: false };
@@ -260,4 +263,113 @@ test("the plan title is its first heading, at any level, or null", () => {
   // pinned here so a future "tidy-up" of the pattern is a visible decision
   // rather than a silent divergence from the reference.
   assert.equal(proposedPlanTitle("#    \nbody"), "body");
+});
+
+// ---------------------------------------------------------------------------
+// Staging an already-uploaded reference (§7.4, §7.7)
+// ---------------------------------------------------------------------------
+
+const READY: StagedAttachmentLike = { key: "k", status: "ready", ref: { id: "/tmp/a.png" } };
+
+test("an uploaded ref is staged with the fields a chip needs", () => {
+  const decision = decideStagedAttachmentForRef({
+    existing: [],
+    ref: { type: "image", id: "/tmp/shot.png", name: "shot.png", mimeType: "image/png", sizeBytes: 12 }
+  });
+  assert.deepEqual(decision, {
+    kind: "staged",
+    key: stagedAttachmentKeyForRef({ id: "/tmp/shot.png" }),
+    name: "shot.png",
+    sizeBytes: 12,
+    mimeType: "image/png"
+  });
+});
+
+test("re-delivering the same ref is a duplicate, not a second chip and not an error", () => {
+  const ref = { type: "file", id: "/tmp/a.png", name: "a.png", sizeBytes: 1 } as const;
+  assert.deepEqual(decideStagedAttachmentForRef({ existing: [READY], ref }), {
+    kind: "duplicate",
+    key: stagedAttachmentKeyForRef(ref)
+  });
+});
+
+test("a ref that arrives under a different key is still matched by its id", () => {
+  const existing: StagedAttachmentLike[] = [
+    { key: "picked-by-hand", status: "ready", ref: { id: "/tmp/b.txt" } }
+  ];
+  const decision = decideStagedAttachmentForRef({
+    existing,
+    ref: { type: "file", id: "/tmp/b.txt", name: "b.txt", sizeBytes: 3 }
+  });
+  assert.equal(decision.kind, "duplicate");
+});
+
+test("staging counts against the same eight as a picked file", () => {
+  const existing: StagedAttachmentLike[] = Array.from({ length: 8 }, (_, index) => ({
+    key: `k${index}`,
+    status: "ready" as const,
+    ref: { id: `/tmp/${index}` }
+  }));
+  const decision = decideStagedAttachmentForRef({
+    existing,
+    ref: { type: "file", id: "/tmp/new", name: "new.txt", sizeBytes: 1 }
+  });
+  assert.equal(decision.kind, "rejected");
+});
+
+test("an in-flight upload occupies a slot against a staged ref too", () => {
+  const existing: StagedAttachmentLike[] = Array.from({ length: 8 }, (_, index) => ({
+    key: `k${index}`,
+    status: index === 0 ? ("uploading" as const) : ("ready" as const)
+  }));
+  assert.equal(
+    decideStagedAttachmentForRef({
+      existing,
+      ref: { type: "file", id: "/tmp/new", name: "new.txt", sizeBytes: 1 }
+    }).kind,
+    "rejected"
+  );
+});
+
+test("a ref with no declared mimeType is measured as a file, never guessed into an image", () => {
+  // 20 MB: over the 10 MiB image bound, under the 50 MiB file bound. Refusing
+  // it would invent a rule the upload route never applied.
+  const decision = decideStagedAttachmentForRef({
+    existing: [],
+    ref: { type: "unknown", id: "/tmp/big", name: "big.bin", sizeBytes: 20 * 1024 * 1024 }
+  });
+  assert.equal(decision.kind, "staged");
+  assert.equal(decision.kind === "staged" && decision.mimeType, "application/octet-stream");
+});
+
+test("a ref with no declared size is staged as zero rather than refused", () => {
+  const decision = decideStagedAttachmentForRef({
+    existing: [],
+    ref: { type: "unknown", id: "/tmp/x", name: "x" }
+  });
+  assert.equal(decision.kind, "staged");
+  assert.equal(decision.kind === "staged" && decision.sizeBytes, 0);
+});
+
+test("a declared image over the image bound is still refused", () => {
+  const decision = decideStagedAttachmentForRef({
+    existing: [],
+    ref: {
+      type: "image",
+      id: "/tmp/huge.png",
+      name: "huge.png",
+      mimeType: "image/png",
+      sizeBytes: 11 * 1024 * 1024
+    }
+  });
+  assert.equal(decision.kind, "rejected");
+});
+
+test("a staged ref does not block send: it is already uploaded", () => {
+  const decision = decideStagedAttachmentForRef({
+    existing: [],
+    ref: { type: "file", id: "/tmp/a", name: "a", sizeBytes: 1 }
+  });
+  assert.equal(decision.kind, "staged");
+  assert.equal(uploadsBlockSend([{ status: "ready" }]), null);
 });
