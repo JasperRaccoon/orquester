@@ -160,6 +160,23 @@ function replay(
   return { events, signals, types: events.map((event) => event.type) };
 }
 
+/** Narrow a fold's output to one arm of the union, so payloads typecheck. */
+function eventsOfType<T extends RuntimeEvent["type"]>(
+  events: readonly RuntimeEvent[],
+  type: T
+): Extract<RuntimeEvent, { type: T }>[] {
+  return events.filter(
+    (event): event is Extract<RuntimeEvent, { type: T }> => event.type === type
+  );
+}
+
+function firstOfType<T extends RuntimeEvent["type"]>(
+  events: readonly RuntimeEvent[],
+  type: T
+): Extract<RuntimeEvent, { type: T }> | undefined {
+  return eventsOfType(events, type)[0];
+}
+
 function sseTypes(name: string): Set<string> {
   const types = new Set<string>();
   for (const record of readFixture(name)) {
@@ -192,11 +209,8 @@ test("every event type in every capture has a defined disposition", () => {
 test("no capture produces a runtime.warning for a known-ignored frame", () => {
   for (const name of fixtureNames()) {
     const { events } = replay(name);
-    const warnings = events.filter(
-      (event) =>
-        event.type === "runtime.warning" &&
-        typeof event.payload.message === "string" &&
-        event.payload.message.includes("unknown event")
+    const warnings = eventsOfType(events, "runtime.warning").filter((event) =>
+      event.payload.message.includes("unknown event")
     );
     assert.deepEqual(
       warnings.map((event) => event.payload.message),
@@ -249,7 +263,7 @@ test("server.heartbeat is known and silent", () => {
 
 test("02: text arrives as deltas and the closing snapshot emits nothing extra", () => {
   const { events } = replay("02-session-create-and-plain-text-turn.ndjson");
-  const deltas = events.filter((event) => event.type === "content.delta");
+  const deltas = eventsOfType(events, "content.delta");
   assert.deepEqual(
     deltas.map((event) => event.payload.delta),
     ["hello", " world"]
@@ -258,8 +272,8 @@ test("02: text arrives as deltas and the closing snapshot emits nothing extra", 
     [...new Set(deltas.map((event) => event.payload.streamKind))],
     ["assistant_text"]
   );
-  const completed = events.filter(
-    (event) => event.type === "item.completed" && event.payload.itemType === "assistant_message"
+  const completed = eventsOfType(events, "item.completed").filter(
+    (event) => event.payload.itemType === "assistant_message"
   );
   assert.equal(completed.length, 1);
   assert.equal(completed[0]?.payload.detail, "hello world");
@@ -276,7 +290,7 @@ test("02: the user's own message never becomes assistant content", () => {
 
 test("03: a permission ask opens a card whose workspace option names the widened pattern", () => {
   const { events } = replay("03-permission-ask-reply-once.ndjson");
-  const opened = events.filter((event) => event.type === "request.opened");
+  const opened = eventsOfType(events, "request.opened");
   assert.equal(opened.length, 1);
   const payload = opened[0]?.payload;
   assert.equal(payload?.requestType, "command_execution_approval");
@@ -290,20 +304,20 @@ test("03: a permission ask opens a card whose workspace option names the widened
     ["accept", "acceptForSession", "decline", "cancel"]
   );
 
-  const resolved = events.filter((event) => event.type === "request.resolved");
+  const resolved = eventsOfType(events, "request.resolved");
   assert.equal(resolved.length, 1);
   assert.equal(resolved[0]?.payload.decision, "accept");
 });
 
 test("03: the bash tool part runs its whole pending -> running -> completed lifecycle", () => {
   const { events } = replay("03-permission-ask-reply-once.ndjson");
-  const toolEvents = events.filter(
-    (event) =>
-      (event.type === "item.started" ||
-        event.type === "item.updated" ||
-        event.type === "item.completed") &&
-      event.payload.itemType === "command_execution"
-  );
+  const toolEvents = [
+    ...eventsOfType(events, "item.started"),
+    ...eventsOfType(events, "item.updated"),
+    ...eventsOfType(events, "item.completed")
+  ]
+    .filter((event) => event.payload.itemType === "command_execution")
+    .sort((left, right) => events.indexOf(left) - events.indexOf(right));
   assert.ok(toolEvents.length >= 3, "expected the full tool lifecycle");
   assert.equal(toolEvents[0]?.type, "item.started");
   assert.equal(toolEvents.at(-1)?.type, "item.completed");
@@ -319,7 +333,7 @@ test("03: full access auto-answers `once` and never opens a card", () => {
     runtimeMode: "full-access"
   });
   assert.deepEqual(
-    events.filter((event) => event.type === "request.opened"),
+    eventsOfType(events, "request.opened"),
     []
   );
   const auto = signals.filter((signal) => signal.kind === "auto-reply-permission");
@@ -327,7 +341,7 @@ test("03: full access auto-answers `once` and never opens a card", () => {
   // The terminal `permission.replied` must not surface a card the user never
   // saw, either.
   assert.deepEqual(
-    events.filter((event) => event.type === "request.resolved"),
+    eventsOfType(events, "request.resolved"),
     []
   );
 });
@@ -347,7 +361,7 @@ test("04: reject maps to decline and always maps to acceptForSession", () => {
 
 test("05: a question opens with normalised ids and resolves with the chosen label", () => {
   const { events } = replay("05-question-asked-reply-and-reject.ndjson");
-  const asked = events.filter((event) => event.type === "user-input.requested");
+  const asked = eventsOfType(events, "user-input.requested");
   assert.ok(asked.length >= 1);
   const questions = asked[0]?.payload.questions ?? [];
   assert.equal(questions.length, 1);
@@ -359,7 +373,7 @@ test("05: a question opens with normalised ids and resolves with the chosen labe
   );
   assert.equal(asked[0]?.payload.dismissible, false);
 
-  const resolved = events.filter((event) => event.type === "user-input.resolved");
+  const resolved = eventsOfType(events, "user-input.resolved");
   assert.ok(resolved.length >= 1);
   assert.deepEqual(resolved[0]?.payload.answers, { "question-0-colour-preference": "red" });
 });
@@ -370,7 +384,7 @@ test("05: a rejected question resolves with no answers", () => {
   const { events } = replay("05-question-asked-reply-and-reject.ndjson", {
     ...(second !== undefined ? { sessionId: second } : {})
   });
-  const resolved = events.filter((event) => event.type === "user-input.resolved");
+  const resolved = eventsOfType(events, "user-input.resolved");
   assert.ok(resolved.length >= 1);
   assert.deepEqual(resolved.at(-1)?.payload.answers, {});
 });
@@ -413,7 +427,7 @@ test("06: an abort arrives as MessageAbortedError and is signalled, not surfaced
   }
   assert.ok(signals.some((signal) => signal.kind === "abort-acknowledged"));
   assert.deepEqual(
-    events.filter((event) => event.type === "runtime.error"),
+    eventsOfType(events, "runtime.error"),
     [],
     "an acknowledged abort must not become a runtime.error"
   );
@@ -423,7 +437,7 @@ test("06: an abort arrives as MessageAbortedError and is signalled, not surfaced
 
 test("07: todos become a plan, and `field:\"text\"` deltas on a reasoning part stream as reasoning", () => {
   const { events } = replay("07-todo-updated.ndjson");
-  const plans = events.filter((event) => event.type === "turn.plan.updated");
+  const plans = eventsOfType(events, "turn.plan.updated");
   assert.ok(plans.length >= 1, "expected turn.plan.updated");
   const steps = plans.at(-1)?.payload.plan ?? [];
   assert.ok(steps.length >= 1);
@@ -452,8 +466,8 @@ test("08: an `agent: \"plan\"` turn emits no proposal event of any kind", () => 
 
 test("09: session.compacted becomes thread.state.changed {compacted}", () => {
   const { events, signals } = replay("09-summarize-idle-and-while-busy.ndjson");
-  const compacted = events.filter(
-    (event) => event.type === "thread.state.changed" && event.payload.state === "compacted"
+  const compacted = eventsOfType(events, "thread.state.changed").filter(
+    (event) => event.payload.state === "compacted"
   );
   assert.ok(compacted.length >= 1);
   // The event carries only `{sessionID}` — no before/after token counts exist.
@@ -472,8 +486,8 @@ test("10: the premature-idle race shows up as an idle signal, never as a complet
 
 test("11: command.executed becomes a completed activity row", () => {
   const { events } = replay("11-slash-command-via-session-command.ndjson");
-  const rows = events.filter(
-    (event) => event.type === "item.completed" && event.payload.title === "/fixture"
+  const rows = eventsOfType(events, "item.completed").filter(
+    (event) => event.payload.title === "/fixture"
   );
   assert.equal(rows.length, 1);
   assert.equal(rows[0]?.payload.detail, "hello there");
@@ -524,7 +538,7 @@ test("12: a child session's request events are probed for ancestry, its output i
 
 test("13: three session.error frames for one bad model collapse to one runtime.error", () => {
   const { events } = replay("13-error-shapes.ndjson");
-  const errors = events.filter((event) => event.type === "runtime.error");
+  const errors = eventsOfType(events, "runtime.error");
   // The capture submits TWO bad models; each one produced three frames.
   assert.equal(errors.length, 2, `saw ${errors.length} runtime.error events`);
   for (const error of errors) {
@@ -546,7 +560,7 @@ test("14: a SIGTERM mid-turn leaves the capture with no farewell frame to decode
   // Nothing in the stream announces the shutdown: a client learns only from
   // the transport, which is why supervision cannot wait for an orderly signal.
   assert.deepEqual(
-    events.filter((event) => event.type === "session.exited"),
+    eventsOfType(events, "session.exited"),
     []
   );
 });
