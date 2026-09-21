@@ -8,8 +8,14 @@
  * half-written JSON line or a permission error can only shrink the result —
  * never fail the request.
  *
- * SQLite-backed agents (opencode, cline, antigravity) are stubbed: Node 20 has
- * no `node:sqlite` and the daemon deliberately ships no native deps.
+ * SQLite-backed agents (opencode) are stubbed: Node 20 has no `node:sqlite` and
+ * the daemon deliberately ships no native deps.
+ *
+ * There is one lister per agent the catalog can still LAUNCH. The chat design
+ * spec §5.3 dropped gemini, kimi, agy, cline and deepcode from the registry, so
+ * their listers went with them: a resume row naming an agent no agent row
+ * serves is a dead offer, and a picked conversation would only be refused at
+ * create time.
  */
 import { createReadStream } from "node:fs";
 import { readdir, readFile, realpath, stat } from "node:fs/promises";
@@ -41,12 +47,6 @@ const CODEX_TITLE_LINES = 400;
 /** Session dirs read per grok project dir, newest first. */
 const GROK_MAX_SESSIONS = 500;
 
-/** Backstop against a pathologically large kimi index. */
-const KIMI_MAX_LINES = 20_000;
-
-/** Matching kimi sessions kept (the newest ones — see `listKimi`). */
-const KIMI_MAX_SESSIONS = 500;
-
 /** Files opened at once while scanning transcripts. */
 const READ_CONCURRENCY = 16;
 
@@ -71,10 +71,7 @@ export async function listAgentConversations(
     () => listClaude(projectPath, roots.claude),
     () => listCodex(projectPath, roots.codex),
     () => listGrok(projectPath, roots.grok),
-    () => listKimi(projectPath),
-    () => listOpencode(projectPath),
-    () => listCline(projectPath),
-    () => listAntigravity(projectPath)
+    () => listOpencode(projectPath)
   ];
   const results = await Promise.all(listers.map((run) => safely(run)));
   const sorted = results
@@ -502,76 +499,12 @@ async function listGrok(projectPath: string, roots: readonly AgentHomeRoot[]): P
 }
 
 // ---------------------------------------------------------------------------
-// kimi — ~/.kimi-code/session_index.jsonl + <sessionDir>/state.json
-// ---------------------------------------------------------------------------
-
-/**
- * A flat `{sessionId, sessionDir, workDir}` index — the cleanest per-project
- * lookup of any agent here, with no path encoding to reverse. The title and
- * timestamps live in each session's own `state.json`.
- *
- * The index is append-ordered, so the matches worth keeping are the LAST ones:
- * the window drops from the front. The line cap is only a backstop against a
- * pathologically large index.
- */
-async function listKimi(projectPath: string): Promise<AgentConversationSummary[]> {
-  const indexPath = join(homedir(), ".kimi-code", "session_index.jsonl");
-  const matches: Array<{ id: string; sessionDir: string }> = [];
-  let scanned = 0;
-  for await (const line of fileLines(indexPath)) {
-    if (++scanned > KIMI_MAX_LINES) {
-      break;
-    }
-    const entry = parseJson(line);
-    if (!entry || entry.workDir !== projectPath) {
-      continue;
-    }
-    const id = asString(entry.sessionId);
-    const sessionDir = asString(entry.sessionDir);
-    if (!id || !sessionDir) {
-      continue;
-    }
-    matches.push({ id, sessionDir });
-    if (matches.length > KIMI_MAX_SESSIONS) {
-      matches.shift();
-    }
-  }
-  const rows = await mapBounded(matches, READ_CONCURRENCY, async (match) => {
-    const raw = await readFile(join(match.sessionDir, "state.json"), "utf8").catch(() => undefined);
-    const state = raw === undefined ? undefined : parseJson(raw);
-    if (!state) {
-      return undefined;
-    }
-    const summary: AgentConversationSummary = {
-      id: match.id,
-      agentRefId: "kimi",
-      title: summarize(asString(state.title) ?? "Untitled session"),
-      updatedAt: isoStamp(asString(state.updatedAt), await mtimeMs(join(match.sessionDir, "state.json"))),
-      // Kimi has no relocatable home here: the index is always the daemon's own.
-      home: "system"
-    };
-    return summary;
-  });
-  return rows.filter(isDefined);
-}
-
-// ---------------------------------------------------------------------------
-// SQLite-backed agents — stubs until the daemon can read SQLite without a
+// SQLite-backed agents — stubbed until the daemon can read SQLite without a
 // native dependency (Node 20 has no `node:sqlite`).
 // ---------------------------------------------------------------------------
 
 /** History lives in `~/.local/share/opencode/opencode.db` (table `session`). */
 async function listOpencode(_projectPath: string): Promise<AgentConversationSummary[]> {
-  return [];
-}
-
-/** History lives in `~/.cline/data/db/sessions.db` (table `sessions`). */
-async function listCline(_projectPath: string): Promise<AgentConversationSummary[]> {
-  return [];
-}
-
-/** History lives in `~/.gemini/antigravity-cli/conversation_summaries.db`. */
-async function listAntigravity(_projectPath: string): Promise<AgentConversationSummary[]> {
   return [];
 }
 

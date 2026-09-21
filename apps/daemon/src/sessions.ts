@@ -100,6 +100,28 @@ export interface ISessionManager {
   reattach(): Promise<void>;
   /** Account ids currently in use by a running session (for the idle-account refresher). */
   liveAccountIds(): Set<string>;
+  /**
+   * Ask for an immediate write of the reattach index. Exists because a second
+   * owner of the same file (the agent-chat tabs of the chat design spec §5.2)
+   * contributes records through {@link SessionManagerOptions.indexContributor}
+   * and must be able to make a change durable without becoming a second writer.
+   */
+  persistIndexNow(): void;
+}
+
+/**
+ * A second source of `sessions.json` records sharing this manager's index file
+ * (agent chat spec §5.2: chat tabs are records in the same file). The manager
+ * stays the ONLY writer — two atomic writers would race each other's rename —
+ * and hands the contributor the records it read on boot.
+ */
+export interface SessionIndexContributor {
+  /** Records to persist alongside the PTY sessions. */
+  records(): SessionRecord[];
+  /** The contributor's own records as read from the index, on boot. */
+  adopt(records: readonly SessionRecord[]): void;
+  /** True when this id belongs to the contributor (so reattach skips it). */
+  owns(record: SessionRecord): boolean;
 }
 
 /**
@@ -123,6 +145,12 @@ export interface SessionManagerOptions {
    * the agent reads its config on startup. Must never reject.
    */
   onAgentLaunch?: (entry: RegistryEntry, launchEnv: Record<string, string>) => void | Promise<void>;
+  /**
+   * Agent-chat tabs sharing `sessions.json` (chat spec §5.2). Their records are
+   * merged into every write and handed back on boot; this manager never
+   * interprets them.
+   */
+  indexContributor?: SessionIndexContributor;
 }
 
 /**
@@ -153,7 +181,7 @@ export function createSessionManager(
     "sessions: usable tmux (>= 3.2) not found on PATH — using direct node-pty backend " +
       "(sessions do NOT survive a daemon restart; install tmux >= 3.2 to enable persistence)"
   );
-  return new LocalSessionManager(registry, options);
+  return new LocalSessionManager(registry, options, indexPath);
 }
 
 export function buildLaunchCommand(
@@ -624,6 +652,11 @@ export class SessionManager implements ISessionManager {
     }
   }
 
+  /** Immediate index write requested by the agent-chat contributor (§5.2). */
+  persistIndexNow(): void {
+    void this.persistIndex();
+  }
+
   /** Persist the index ≤ once/second; coalesces a burst of resizes into one write. */
   private schedulePersist(): void {
     if (this.persistTimer) {
@@ -767,8 +800,18 @@ export class SessionManager implements ISessionManager {
     await this.tmux.scrubGlobalSecrets();
 
     const known = new Set<string>();
+    // Agent-chat tabs (chat spec §5.2) are host-owned, not tmux-owned: hand
+    // them to their contributor and keep their ids in `known` so the orphan
+    // reap below never mistakes one for an unclaimed pane.
+    const contributed = index.sessions.filter((record) => this.options.indexContributor?.owns(record));
+    if (contributed.length > 0) {
+      this.options.indexContributor?.adopt(contributed);
+    }
     for (const record of index.sessions) {
       known.add(record.id);
+      if (this.options.indexContributor?.owns(record)) {
+        continue; // not a PTY session — the contributor holds it.
+      }
       if (!live.has(record.id)) {
         continue; // command exited while the daemon was down → forget it.
       }
@@ -796,7 +839,13 @@ export class SessionManager implements ISessionManager {
         rows: record.rows ?? liveSizes.get(record.id)?.rows ?? 24,
         status: "running",
         order: record.order,
-        createdAt: record.createdAt
+        createdAt: record.createdAt,
+        // Chat spec §5.2 migration: a `kind: "agent"` record with a LIVE tmux
+        // pane is a legacy agent-in-terminal tab. It keeps working as a
+        // terminal until the user closes it, and the flag is what lets the UI
+        // tag it. (A `kind: "agent"` record with no live pane is simply
+        // forgotten by the `!live.has(...)` skip above.)
+        ...(record.kind === "agent" ? { legacyAgentTerminal: true } : {})
       };
       const tracker = new ActivityTracker((activity, cause) => {
         this.lifecycle.emit("activity", {
@@ -872,6 +921,13 @@ export class SessionManager implements ISessionManager {
     const sessions = [...this.sessions.values()]
       .filter((s) => s.summary.status === "running")
       .map((s) => this.recordOf(s));
+    // Agent-chat tabs live in the same file (chat spec §5.2) but are owned by
+    // the chat manager; this stays their only writer.
+    try {
+      sessions.push(...(this.options.indexContributor?.records() ?? []));
+    } catch (error) {
+      console.error("Failed to collect agent-chat session records", error);
+    }
     const tmpPath = `${this.indexPath}.tmp`;
     try {
       await mkdir(dirname(this.indexPath), { recursive: true });
@@ -900,7 +956,15 @@ export class LocalSessionManager implements ISessionManager {
 
   constructor(
     private readonly registry: RegistryService,
-    private readonly options: SessionManagerOptions = {}
+    private readonly options: SessionManagerOptions = {},
+    /**
+     * `<appdir>/daemon/sessions.json`. Direct PTYs cannot survive a restart, so
+     * this backend persists NOTHING of its own — but agent-chat tabs (chat spec
+     * §5.2) are host-owned, not PTY-owned, and their records must still be
+     * written and re-read here or a chat tab would vanish on every restart of a
+     * tmux-less host.
+     */
+    private readonly indexPath?: string
   ) {}
 
   async create(req: CreateSessionRequest): Promise<SessionSummary> {
@@ -1224,8 +1288,47 @@ export class LocalSessionManager implements ISessionManager {
     }
   }
 
-  /** Nothing persists across a restart in this backend → nothing to reattach. */
+  /**
+   * Direct PTYs do not outlive the daemon, so there is nothing of this
+   * backend's to reattach — but the agent-chat tabs in the same index are
+   * host-owned and must be handed back to their contributor (chat spec §5.2).
+   */
   async reattach(): Promise<void> {
-    /* no-op: direct PTYs do not outlive the daemon */
+    const contributor = this.options.indexContributor;
+    if (!contributor || !this.indexPath) {
+      return;
+    }
+    try {
+      const raw = await readFile(this.indexPath, "utf8");
+      const index = parseSessionsConfig(JSON.parse(raw));
+      contributor.adopt(index.sessions.filter((record) => contributor.owns(record)));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        console.error("Failed to read sessions index for agent-chat tabs", error);
+      }
+    }
+  }
+
+  /**
+   * Persist ONLY the contributor's records: a direct PTY cannot survive a
+   * restart, so writing one would make `reattach` resurrect a dead tab.
+   */
+  persistIndexNow(): void {
+    const contributor = this.options.indexContributor;
+    if (!contributor || !this.indexPath) {
+      return;
+    }
+    const indexPath = this.indexPath;
+    void (async () => {
+      const tmpPath = `${indexPath}.tmp`;
+      try {
+        const sessions = contributor.records();
+        await mkdir(dirname(indexPath), { recursive: true });
+        await writeFile(tmpPath, `${JSON.stringify({ version: 1, sessions }, null, 2)}\n`, "utf8");
+        await rename(tmpPath, indexPath);
+      } catch (error) {
+        console.error("Failed to persist sessions index", error);
+      }
+    })();
   }
 }
