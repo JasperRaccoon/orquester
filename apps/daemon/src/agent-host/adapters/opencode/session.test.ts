@@ -1130,6 +1130,70 @@ test("interrupting a turn closes its subagents too", async () => {
   harness.dispose();
 });
 
+test("§6.2: an interrupt with NO active turn still stops all background work", async () => {
+  // R6 #1: Stop is addressed to the SESSION, not to a turn, and the client
+  // omits `turnId` whenever the session is not `running`. Claude and Codex
+  // early-returned here; OpenCode aborted provider-side but never closed the
+  // roster rows, so `backgroundLiveness` never dropped to null and the UI's
+  // Stop stayed on "Stopping…" forever.
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  const sessionId = session.sessionId;
+  const turn = await session.sendTurn({
+    threadId: "thread-1",
+    input: "delegate it",
+    attachments: [],
+    interactionMode: "default"
+  });
+  const messageId = (harness.fake.find("POST", "/prompt_async")?.body as { messageID: string })
+    .messageID;
+  harness.fake.push({
+    type: "session.created",
+    properties: {
+      sessionID: "ses_child",
+      info: { id: "ses_child", parentID: sessionId, title: "watching (@explore subagent)" }
+    }
+  });
+  await waitFor(harness, "task.started");
+
+  // The turn settles on its own; the subagent keeps running.
+  driveTurn(harness.fake, { sessionId, userMessageId: messageId });
+  harness.fake.push({
+    type: "session.status",
+    properties: { sessionID: sessionId, status: { type: "idle" } }
+  });
+  await waitFor(harness, "turn.completed");
+  assert.equal(session.hasLiveSubagents(), true, "the subagent outlived the turn");
+
+  const before = harness.fake.requests.length;
+  // Exactly what the client sends when the session is not running: no turnId.
+  await session.interruptTurn();
+
+  assert.equal(session.hasLiveSubagents(), false, "background work must be stopped");
+  const completed = eventsOfType(harness.events, "task.completed");
+  assert.equal(completed.length, 1);
+  assert.equal(completed[0]?.payload.status, "stopped");
+  assert.equal(completed[0]?.payload.taskId, "ses_child");
+  // It really reached the provider, not just the local roster.
+  const aborts = harness.fake.requests
+    .slice(before)
+    .filter((request) => request.path.endsWith("/abort"));
+  assert.ok(aborts.length >= 1, "the session abort is still issued");
+  assert.equal(turn.turnId.length > 0, true);
+  harness.dispose();
+});
+
+test("§6.2: a session-scoped interrupt with nothing live is a clean no-op", async () => {
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  await session.interruptTurn();
+  assert.equal(session.hasLiveSubagents(), false);
+  assert.deepEqual(eventsOfType(harness.events, "turn.aborted"), []);
+  assert.deepEqual(eventsOfType(harness.events, "task.completed"), []);
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
 test("stop is idempotent and emits exactly one session.exited", async () => {
   const harness = makeHarness();
   const session = await startSession(harness);

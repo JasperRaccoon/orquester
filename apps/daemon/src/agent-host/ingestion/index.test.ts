@@ -1250,6 +1250,165 @@ describe("the placeholder checkpoint (§5.4)", () => {
   });
 });
 
+describe("fix-wave regressions", () => {
+  it("R5 #3: the placeholder checkpoint never synthesises an assistantMessageId", async () => {
+    const { ingestion, sink } = harness({ placeholderCheckpoint: () => ({ turnCount: 4 }) });
+    // The `itemId` on a turn.diff.updated frame names the DIFF item, so
+    // `assistant:<itemId>` used to name a message that never exists — and the
+    // fold's `?? turn.assistantMessageId` then made the phantom permanent,
+    // because `stampAssistantMessage` only ever fills a null.
+    await ingestion.ingest(
+      runtimeEvent("turn.diff.updated", { unifiedDiff: "d" }, {
+        turnId: "turn-1",
+        itemId: "diff-item-1"
+      })
+    );
+    await ingestion.drain();
+    assert.equal(
+      sink.ofType("thread.turn-diff-completed")[0]?.payload.assistantMessageId,
+      null
+    );
+  });
+
+  it("R5 #3: it DOES carry the turn's real anchor when one is open", async () => {
+    const { ingestion, sink } = harness({ placeholderCheckpoint: () => ({ turnCount: 4 }) });
+    await ingestion.ingest(
+      runtimeEvent("content.delta", { streamKind: "assistant_text", delta: "hi" }, {
+        turnId: "turn-1",
+        itemId: "msg-1"
+      })
+    );
+    await ingestion.ingest(
+      runtimeEvent("turn.diff.updated", { unifiedDiff: "d" }, {
+        turnId: "turn-1",
+        itemId: "diff-item-1"
+      })
+    );
+    await ingestion.drain();
+    assert.equal(
+      sink.ofType("thread.turn-diff-completed")[0]?.payload.assistantMessageId,
+      "assistant:msg-1"
+    );
+  });
+
+  it("R5 #7: reasoning with NO turn id is buffered, not silently discarded", async () => {
+    const { ingestion, sink } = harness();
+    // grok streams reasoning before `turn.started`; T3 drops it, §5.1 does not.
+    await ingestion.ingest(
+      runtimeEvent(
+        "content.delta",
+        { streamKind: "reasoning_summary_text", delta: "early thought" },
+        { itemId: "item-1" }
+      )
+    );
+    await ingestion.flushThread("t1");
+    assert.deepEqual(messageTexts(sink), [
+      { id: "reasoning:summary:item-1", text: "early thought", streaming: true },
+      { id: "reasoning:summary:item-1", text: "", streaming: false }
+    ]);
+    assert.equal(sink.messages()[0]?.payload.turnId, null);
+    assert.equal(sink.messages()[0]?.payload.reasoningKind, "summary");
+  });
+
+  it("R5 #8: a proposal streamed by a subagent keeps its agentId", async () => {
+    const { ingestion, sink } = harness();
+    await ingestion.ingest(
+      runtimeEvent("turn.proposed.delta", { delta: "# Plan\n" }, {
+        turnId: "turn-1",
+        agentId: "agent-7"
+      })
+    );
+    // The completion arrives WITHOUT an agentId; the buffer remembers it.
+    await ingestion.ingest(
+      runtimeEvent("turn.proposed.completed", { planMarkdown: "" }, { turnId: "turn-1" })
+    );
+    await ingestion.drain();
+    const rows = sink
+      .activities()
+      .filter((event) => event.payload.activity.activityKind.startsWith("turn.proposed"));
+    assert.ok(rows.length > 0);
+    for (const row of rows) {
+      assert.equal(row.payload.activity.agentId, "agent-7");
+    }
+  });
+
+  it("R5 #9: both output streams of ONE item share one buffer and one row", async () => {
+    const { ingestion, sink, timers } = harness();
+    const item = { turnId: "turn-1", itemId: "call-1" };
+    await ingestion.ingest(
+      runtimeEvent("content.delta", { streamKind: "command_output", delta: "a" }, item)
+    );
+    await ingestion.ingest(
+      runtimeEvent("content.delta", { streamKind: "file_change_output", delta: "b" }, item)
+    );
+    timers.advance(BATCH_INTERVAL_MS);
+    await settle();
+    const rows = activityOfKind(sink, "tool.output");
+    assert.equal(rows.length, 1, "keyed by item id, not by streamKind + item id");
+    assert.equal((rows[0]!.payload.activity.payload as { delta: string }).delta, "ab");
+  });
+
+  it("R5 #17: every event is stamped with the thread's adapterKey", async () => {
+    const { ingestion, sink } = harness({ threadContext: () => ({ adapter: "codex" }) });
+    await ingestion.ingest(runtimeEvent("runtime.warning", { message: "hi" }));
+    await ingestion.drain();
+    assert.equal(sink.events()[0]?.metadata.adapterKey, "codex");
+  });
+
+  it("R5 #17: no adapter in context leaves adapterKey absent", async () => {
+    const { ingestion, sink } = harness();
+    await ingestion.ingest(runtimeEvent("runtime.warning", { message: "hi" }));
+    await ingestion.drain();
+    assert.equal(sink.events()[0]?.metadata.adapterKey, undefined);
+  });
+
+  it("Q1 #9: forget() releases a thread, drops its buffers and clears liveness", async () => {
+    const { ingestion, sink, liveness } = harness();
+    await ingestion.ingest(
+      runtimeEvent("content.delta", { streamKind: "assistant_text", delta: "x" }, {
+        turnId: "turn-1",
+        itemId: "item-1"
+      })
+    );
+    await ingestion.forget("t1");
+    assert.deepEqual(liveness.cleared, ["t1"]);
+    sink.reset();
+    // The buffered text is DROPPED, not flushed: the thread's log is gone.
+    await ingestion.drain();
+    assert.equal(sink.events().length, 0);
+    // Forgetting a thread ingestion never saw is a no-op.
+    await ingestion.forget("never-seen");
+  });
+
+  it("Q1 #9: a settled turn releases `projected`, so a later bare completion is inert", async () => {
+    const { ingestion, sink } = harness();
+    const item = { itemId: "item-1" };
+    await ingestion.ingest(
+      runtimeEvent("content.delta", { streamKind: "assistant_text", delta: "turn one" }, {
+        ...item,
+        turnId: "turn-1"
+      })
+    );
+    await ingestion.ingest(
+      runtimeEvent("turn.completed", { state: "completed" }, { turnId: "turn-1" })
+    );
+    await ingestion.drain();
+    sink.reset();
+    // A provider that re-uses the item id in a LATER turn and completes it
+    // with no text: `projected` used to still hold `assistant:item-1` from
+    // turn one, so `streamed` read true and a ghost empty assistant bubble was
+    // written. It must now be recognised as "nothing to complete".
+    await ingestion.ingest(
+      runtimeEvent("item.completed", { itemType: "assistant_message" }, {
+        ...item,
+        turnId: "turn-2"
+      })
+    );
+    await ingestion.drain();
+    assert.deepEqual(messageTexts(sink), []);
+  });
+});
+
 describe("robustness (§10: never throws on a provider event)", () => {
   it("a malformed payload becomes a runtime.warning activity, not a throw", async () => {
     const { ingestion, sink } = harness();

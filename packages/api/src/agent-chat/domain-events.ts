@@ -25,7 +25,7 @@ import type {
   ModelSelection,
   RuntimeMode
 } from "./adapter-types.ts";
-import type { ApprovalDecision } from "./runtime-events.ts";
+import type { ApprovalDecision, TurnTokenUsage } from "./runtime-events.ts";
 import type {
   CheckpointFile,
   CheckpointStatus,
@@ -160,6 +160,24 @@ export interface ThreadUserInputResponseRequestedPayload {
 
 export interface ThreadSessionSetPayload {
   session: ThreadSessionState;
+  /**
+   * The provider's final numbers for the turn this event settles.
+   *
+   * A turn is settled by the fold FROM the session status (§5.1), so this
+   * event is the turn end — and it is the only place the per-turn
+   * `tokenUsage` / `totalCostUsd` off `turn.completed` can reach {@link Turn}
+   * without inventing a second settlement event that could disagree with this
+   * one. Present only on the event that settles a named turn; the fold matches
+   * it by `turnId` and never lets it resurrect an already-settled turn.
+   *
+   * *Added additively for E2E E10; an older build ignores it, a newer build
+   * tolerates a row without it (§8 rollback boundary).*
+   */
+  turn?: {
+    turnId: string;
+    tokenUsage?: TurnTokenUsage;
+    totalCostUsd?: number;
+  };
 }
 
 export interface ThreadActivityAppendedPayload {
