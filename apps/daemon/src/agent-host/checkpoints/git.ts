@@ -234,9 +234,11 @@ export function createGitRunner(options: GitRunnerOptions): GitRunner {
 }
 
 function delay(ms: number): Promise<void> {
+  // Deliberately NOT unref'd: this is the gap between two attempts of a
+  // command a caller is awaiting. An unref'd timer would let the loop drain
+  // while the retry is still owed, and the caller's promise would never settle.
   return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    timer.unref?.();
+    setTimeout(resolve, ms);
   });
 }
 
