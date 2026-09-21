@@ -28,7 +28,11 @@ import {
   type HeldTimeline
 } from "./thread-switch";
 import type { AgentChatTimelineRow } from "../../lib/agent-chat/contracts";
-import type { AgentChatViewProps } from "./contracts";
+import type {
+  AgentChatViewProps,
+  AgentRosterMainRow,
+  TimelineScrollPosition
+} from "./contracts";
 
 /** Stable empty arrays, so a neutralised render never churns child props. */
 const NO_ROWS: AgentChatTimelineRow[] = [];
@@ -142,6 +146,29 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   const [rosterExpanded, setRosterExpanded] = React.useState(false);
   React.useEffect(() => setRosterExpanded(false), [sessionId]);
 
+  // --- the remembered reading position (§7.2) ------------------------------
+  // The store owns the 100-entry LRU and hands it over as `slice.scroll`, but
+  // `AgentChatActions` has no write for it, so the timeline's publishes are
+  // held here and only *fall back* to the slice. The effect is the same for a
+  // tab hidden and re-shown — which is the case that matters in this shell,
+  // since a tab is never unmounted — and a real store write supersedes it the
+  // moment one exists.
+  const scrollRef = React.useRef(new Map<string, TimelineScrollPosition>());
+  const [, bumpScroll] = React.useReducer((n: number) => n + 1, 0);
+  const rememberScrollPosition = React.useCallback(
+    (position: TimelineScrollPosition) => {
+      scrollRef.current.set(sessionId, position);
+    },
+    [sessionId]
+  );
+  // Read once per render rather than on every publish: a scroll must not
+  // re-render the shell, only feed the next mount.
+  const scrollPosition = scrollRef.current.get(sessionId) ?? slice.scroll ?? null;
+  React.useEffect(() => {
+    // One re-read when the thread changes, so a switch picks the right entry.
+    bumpScroll();
+  }, [sessionId]);
+
   // A closed tab keeps nothing (§7.2), and an undelivered element-pick payload
   // for a tab that no longer exists must not linger in the inbox.
   React.useEffect(() => () => clearComposerInbox(sessionId), [sessionId]);
@@ -183,6 +210,20 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   const latestCheckpoint = slice.checkpoints.length
     ? slice.checkpoints[slice.checkpoints.length - 1]
     : null;
+  const latestTurn = slice.turns.length ? slice.turns[slice.turns.length - 1] : null;
+  // The roster's own first row is the THREAD — it is not a task, so it is not
+  // in `agents` and its state is handed over here. `turnActive` is also the
+  // roster's only turn signal: it drives the fade of finished rows (§7.6).
+  const rosterMain: AgentRosterMainRow = {
+    turnActive: !paintOnly && turnActive,
+    awaitingUser: !paintOnly && pending.totalCount > 0,
+    failed: !paintOnly && slice.turnStatus === "failed",
+    activityLabel: paintOnly ? null : status.activityLabel,
+    turnStartedAt: paintOnly ? null : status.turnStartedAt,
+    turnEndedAt: latestTurn?.completedAt ?? null,
+    tokensUsed: slice.contextWindow?.usedTokens ?? null,
+    model: slice.head?.modelSelection.model ?? session.model ?? null
+  };
   const openFile = React.useCallback(
     (path: string) => {
       void path;
@@ -214,6 +255,8 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               agentId={drillInAgentId}
               agent={drillInAgent}
               rows={drillInRows}
+              roster={roster.agents}
+              projectPath={projectPath}
               onBack={() => setDrillInAgentId(null)}
             />
           ) : (
@@ -241,6 +284,10 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               onReturnQueuedToComposer={paintOnly ? noop : actions.returnQueuedToComposer}
               errorBanner={paintOnly ? null : slice.errorBanner}
               onDismissErrorBanner={paintOnly ? noop : actions.dismissErrorBanner}
+              roster={roster.agents}
+              projectPath={projectPath}
+              scroll={paintOnly ? null : scrollPosition}
+              onScrollPositionChange={paintOnly ? noop : rememberScrollPosition}
             />
           )}
 
@@ -310,28 +357,29 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 onHeightChange={setComposerHeight}
               />
             </div>
+            {/*
+              The roster docks BELOW the composer, inside the same overlay, so
+              its height is part of the published bottom inset and the timeline
+              reserves room for it instead of scrolling behind it. Absent
+              entirely when there is nothing to list, so an ordinary thread
+              gives the timeline every pixel.
+            */}
+            {roster.panel.hasAgents && !paintOnly ? (
+              <div className="pointer-events-auto mx-auto w-full min-w-0 max-w-3xl px-3 sm:px-5">
+                <AgentRoster
+                  sessionId={sessionId}
+                  agents={roster.agents}
+                  panel={roster.panel}
+                  expanded={rosterExpanded}
+                  onExpandedChange={setRosterExpanded}
+                  onOpenAgent={setDrillInAgentId}
+                  main={rosterMain}
+                  activeAgentId={drillInAgentId}
+                />
+              </div>
+            ) : null}
           </div>
         </div>
-
-        {/*
-          The roster docks BELOW the composer, in flow: it must push the shell,
-          not float over the timeline, because a live background row outlives
-          the turn that started it and has to stay readable (§7.6). Absent
-          entirely when there is nothing to list, so an ordinary thread gives
-          the timeline every pixel.
-        */}
-        {roster.panel.hasAgents && !paintOnly ? (
-          <div className="shrink-0 border-t border-neutral-800 bg-neutral-950">
-            <AgentRoster
-              sessionId={sessionId}
-              agents={roster.agents}
-              panel={roster.panel}
-              expanded={rosterExpanded}
-              onExpandedChange={setRosterExpanded}
-              onOpenAgent={setDrillInAgentId}
-            />
-          </div>
-        ) : null}
       </ChatErrorBoundary>
     </div>
   );
