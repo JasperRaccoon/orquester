@@ -11,6 +11,7 @@
 import type {
   AttachmentRef,
   BackgroundLiveness,
+  Checkpoint,
   CheckpointFile,
   CheckpointStatus,
   CommandReceipt,
@@ -187,6 +188,14 @@ export interface CaptureResult {
   turnCount: number;
   ref: string;
   status: CheckpointStatus;
+  /**
+   * Why the capture or the diff was not clean, for the
+   * `checkpoint.capture.failed` activity's payload (§5.4). Present with
+   * `status: "error"` (the capture itself failed) and also with
+   * `status: "ready"` when only the diff summary was unavailable. Absent on a
+   * clean capture, which is the `checkpoint.captured` case.
+   */
+  detail?: string;
 }
 
 export interface TurnDiffSummary extends CaptureResult {
@@ -210,7 +219,16 @@ export interface CheckpointService {
    * has — derived from the checkpoints, never stored independently, so a lost
    * `meta.json` cannot desynchronise it.
    */
-  captureBaseline(input: { threadId: string; cwd: string }): Promise<CaptureResult | null>;
+  captureBaseline(input: {
+    threadId: string;
+    cwd: string;
+    /**
+     * The fold's checkpoint rows, when the caller has them. A `missing`
+     * placeholder carries a turn count but no ref, so the derived counter must
+     * see it; without this the counter falls back to the refs on disk alone.
+     */
+    checkpoints?: readonly Checkpoint[];
+  }): Promise<CaptureResult | null>;
 
   /**
    * On `turn.completed` / `turn.aborted`: capture `turn/<turnCount + 1>` and
@@ -225,6 +243,10 @@ export interface CheckpointService {
     cwd: string;
     turnId: string | null;
     assistantMessageId: string | null;
+    /** As above: placeholders and already-captured turns live in the fold. */
+    checkpoints?: readonly Checkpoint[];
+    /** The session's active turn, when known — the guard above needs it. */
+    activeTurnId?: string | null;
   }): Promise<TurnDiffSummary | null>;
 
   /**
