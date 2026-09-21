@@ -22,6 +22,7 @@ import {
   isInsideWorkTree,
   resolveCheckpointCommit
 } from "./capture.ts";
+import { redactStderr } from "../support/stderr.ts";
 import { createGitRunner, type GitRunner, type GitRunnerOptions } from "./git.ts";
 import { parseTurnDiffFilesFromNumstat } from "./numstat.ts";
 import {
@@ -36,8 +37,15 @@ export const CHECKPOINT_REF_LIMIT = 200;
 /** §5.4: diff output is capped at 10 MB. */
 export const CHECKPOINT_DIFF_MAX_OUTPUT_BYTES = 10_000_000;
 
-/** Derived state, dropped freely — this only bounds the memory it may hold. */
+/** Derived state, dropped freely. Entry bound; the byte bound below is the real one. */
 export const CHECKPOINT_DIFF_CACHE_LIMIT = 32;
+
+/**
+ * The cache's total footprint. A patch may be up to
+ * {@link CHECKPOINT_DIFF_MAX_OUTPUT_BYTES}, so entries alone bound nothing: 32
+ * of them would be ~320 MB of retained V8 strings on a 2 GB VPS.
+ */
+export const CHECKPOINT_DIFF_CACHE_MAX_BYTES = 32 * 1024 * 1024;
 
 /**
  * The one adapter without conversation rollback (§4.5 Grok, §5.5 step 2).
@@ -88,6 +96,21 @@ export class CheckpointRefUnavailableError extends Error {
   }
 }
 
+/**
+ * Refs that are still on disk after both delete attempts. Raised rather than
+ * swallowed: a revert that leaves `turn/<target+1…N>` behind would report
+ * success and then anchor the next turn on the branch the user discarded.
+ */
+export class CheckpointRefDeleteError extends Error {
+  readonly refs: readonly string[];
+
+  constructor(refs: readonly string[], detail: string) {
+    super(`could not delete ${refs.length} checkpoint ref(s): ${detail}`);
+    this.name = "CheckpointRefDeleteError";
+    this.refs = refs;
+  }
+}
+
 export interface CheckpointServiceOptions extends Omit<GitRunnerOptions, "maxConcurrentGit"> {
   clock?: Clock;
   /** Host-wide permit count for concurrent git work (§5.4). */
@@ -108,6 +131,12 @@ export interface CaptureBaselineInput {
   cwd: string;
   /** The fold's checkpoint rows, so a placeholder counts toward the turn count. */
   checkpoints?: readonly Checkpoint[];
+  /**
+   * The turn this baseline precedes, when the caller knows it. Recorded as the
+   * thread's started turn (T3's `startedTurns`), which is what lets a stale
+   * `turn.aborted` for some *other* turn be refused at turn end.
+   */
+  turnId?: string | null;
 }
 
 export interface CaptureTurnEndInput {
@@ -118,7 +147,15 @@ export interface CaptureTurnEndInput {
   checkpoints?: readonly Checkpoint[];
   /** When set, only this turn may produce a completion checkpoint (§5.4). */
   activeTurnId?: string | null;
+  /**
+   * The turn the host recorded as started, when it tracks one itself. Overrides
+   * what `captureBaseline` recorded for this thread.
+   */
+  startedTurnId?: string | null;
 }
+
+/** How many completed turn ids are remembered per thread, for replay refusal. */
+const COMPLETED_TURN_MEMORY = 64;
 
 const defaultClock: Clock = {
   now: () => new Date(),
@@ -139,15 +176,79 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
       : { resolveGitBinary: options.resolveGitBinary })
   });
 
+  /**
+   * Collapsed to `~` in any detail that reaches a timeline row. The git env is
+   * the only home this service knows, and it is the one git's own messages
+   * name.
+   */
+  const homeDirs = [options.gitEnv.HOME, options.gitEnv.USERPROFILE].filter(
+    (dir): dir is string => typeof dir === "string" && dir.length > 1
+  );
+  const describeError = (error: unknown): string => errorDetail(error, homeDirs);
+
   const diffCache = new Map<string, string>();
+  let diffCacheBytes = 0;
+  /** Per thread: the turn `captureBaseline` was last called for. */
+  const startedTurns = new Map<string, string>();
+  /** Per thread: the turns that already produced a completion checkpoint. */
+  const completedTurns = new Map<string, Set<string>>();
+
+  const rememberCompletedTurn = (threadId: string, turnId: string): void => {
+    let seen = completedTurns.get(threadId);
+    if (seen === undefined) {
+      seen = new Set<string>();
+      completedTurns.set(threadId, seen);
+    }
+    seen.add(turnId);
+    // Insertion-ordered: drop the oldest ids once the window is full.
+    while (seen.size > COMPLETED_TURN_MEMORY) {
+      const oldest = seen.values().next();
+      if (oldest.done) {
+        break;
+      }
+      seen.delete(oldest.value);
+    }
+  };
 
   const dropCache = (threadId: string): void => {
     const prefix = `${threadId}\u0000`;
-    for (const key of diffCache.keys()) {
+    for (const [key, value] of diffCache) {
       if (key.startsWith(prefix)) {
         diffCache.delete(key);
+        diffCacheBytes -= cachedSize(value);
       }
     }
+  };
+
+  /**
+   * Insertion-ordered eviction against BOTH bounds. The byte budget is the one
+   * that matters: a single patch may be 10 MB, so an entry-count-only cap would
+   * hold ~320 MB resident on a box documented to run with 2 GB.
+   */
+  const cacheDiff = (key: string, diff: string): void => {
+    const size = cachedSize(diff);
+    if (size > CHECKPOINT_DIFF_CACHE_MAX_BYTES) {
+      return;
+    }
+    const existing = diffCache.get(key);
+    if (existing !== undefined) {
+      diffCache.delete(key);
+      diffCacheBytes -= cachedSize(existing);
+    }
+    while (
+      diffCache.size >= CHECKPOINT_DIFF_CACHE_LIMIT ||
+      diffCacheBytes + size > CHECKPOINT_DIFF_CACHE_MAX_BYTES
+    ) {
+      const oldest = diffCache.keys().next();
+      if (oldest.done) {
+        break;
+      }
+      const evicted = diffCache.get(oldest.value);
+      diffCache.delete(oldest.value);
+      diffCacheBytes -= cachedSize(evicted ?? "");
+    }
+    diffCache.set(key, diff);
+    diffCacheBytes += size;
   };
 
   /** Every turn count this thread has a ref for, ascending. */
@@ -157,7 +258,10 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
       operation: "checkpoints.listRefs",
       cwd,
       args: ["for-each-ref", "--format=%(refname)", namespace],
-      maxOutputBytes: 1_000_000
+      maxOutputBytes: 1_000_000,
+      // A truncated listing is indistinguishable from a complete one, and every
+      // caller (prune, cap, delete) would then silently leave refs behind.
+      outputMode: "error"
     });
     const counts: number[] = [];
     for (const line of result.stdout.split("\n")) {
@@ -179,7 +283,8 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
       operation: "checkpoints.listRefs",
       cwd,
       args: ["for-each-ref", "--format=%(refname)", checkpointRefNamespace(threadId)],
-      maxOutputBytes: 1_000_000
+      maxOutputBytes: 1_000_000,
+      outputMode: "error"
     });
     return result.stdout
       .split("\n")
@@ -187,33 +292,60 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
       .filter((line) => line.length > 0);
   };
 
-  const deleteRefs = async (cwd: string, refs: readonly string[]): Promise<void> => {
+  /**
+   * Delete refs and **prove it**. A swallowed failure here is not cosmetic:
+   * §5.5 would report a completed revert while `turn/<target+1…N>` still exist,
+   * and the next `captureTurnEnd` would then derive its turn count — and its
+   * baseline — from the branch the user just discarded.
+   *
+   * Ref deletion is also the operation most exposed to `packed-refs.lock`
+   * contention with a user's own git, which is exactly what the runner's
+   * transient retry exists for.
+   */
+  const deleteRefs = async (
+    threadId: string,
+    cwd: string,
+    refs: readonly string[]
+  ): Promise<void> => {
     if (refs.length === 0) {
       return;
     }
     const stdin = refs.map((ref) => `delete ${ref}\0\0`).join("");
+    let batchError: unknown;
     try {
       await runner.run({
         operation: "checkpoints.deleteRefs",
         cwd,
         args: ["update-ref", "-z", "--stdin"],
-        stdin
+        stdin,
+        retryTransient: true
       });
-      return;
     } catch (error) {
+      batchError = error;
       log("checkpoint batch ref delete failed; falling back to one at a time", {
-        detail: errorDetail(error)
+        detail: describeError(error)
       });
+      for (const ref of refs) {
+        await runner
+          .run({
+            operation: "checkpoints.deleteRefs",
+            cwd,
+            args: ["update-ref", "-d", ref],
+            allowNonZeroExit: true,
+            retryTransient: true
+          })
+          .catch(() => undefined);
+      }
     }
-    for (const ref of refs) {
-      await runner
-        .run({
-          operation: "checkpoints.deleteRefs",
-          cwd,
-          args: ["update-ref", "-d", ref],
-          allowNonZeroExit: true
-        })
-        .catch(() => undefined);
+    if (batchError === undefined) {
+      return;
+    }
+    // Only the fallback path pays for a re-listing: it is the only one whose
+    // per-ref failures were deliberately tolerated.
+    const remaining = new Set(await listRefNames(threadId, cwd));
+    const survivors = refs.filter((ref) => remaining.has(ref));
+    if (survivors.length > 0) {
+      throw new CheckpointRefDeleteError(survivors, describeError(batchError));
     }
   };
 
@@ -245,11 +377,16 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
     const doomed = turnCounts
       .slice(0, turnCounts.length - CHECKPOINT_REF_LIMIT)
       .map((turnCount) => checkpointRefForThreadTurn(threadId, turnCount));
-    await deleteRefs(cwd, doomed);
+    await deleteRefs(threadId, cwd, doomed);
     dropCache(threadId);
   };
 
   const captureBaseline = async (input: CaptureBaselineInput): Promise<CaptureResult | null> => {
+    // Recorded before the early returns: knowing which turn started is useful
+    // even when the ref is already there (the second, idempotent call).
+    if (typeof input.turnId === "string" && input.turnId.length > 0) {
+      startedTurns.set(input.threadId, input.turnId);
+    }
     if (!(await isInsideWorkTree(runner, input.cwd))) {
       return null;
     }
@@ -269,9 +406,9 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
       log("checkpoint baseline capture failed", {
         threadId: input.threadId,
         turnCount,
-        detail: errorDetail(error)
+        detail: describeError(error)
       });
-      return { turnCount, ref, status: "error", detail: errorDetail(error) };
+      return { turnCount, ref, status: "error", detail: describeError(error) };
     }
     dropCache(input.threadId);
     await pruneToCap(input.threadId, input.cwd).catch(() => undefined);
@@ -286,6 +423,27 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
       input.activeTurnId !== undefined &&
       input.activeTurnId !== null &&
       turnId !== null &&
+      input.activeTurnId !== turnId
+    ) {
+      return null;
+    }
+    // A late or replayed `turn.completed`/`turn.aborted` for a turn this
+    // service already captured must not mint a second checkpoint: it would
+    // consume a slot in the 200-ref cap and shift every later turn count. The
+    // fold's rows below say the same thing when the caller passes them; this
+    // memory holds even when it does not.
+    if (turnId !== null && completedTurns.get(threadId)?.has(turnId) === true) {
+      return null;
+    }
+    // A turn the host never recorded as started is not the session's turn
+    // either (T3: `CheckpointReactor.ts:981-987`). Only positive knowledge
+    // skips — with no record at all the capture proceeds, as before.
+    const startedTurnId = input.startedTurnId ?? startedTurns.get(threadId);
+    if (
+      turnId !== null &&
+      startedTurnId !== undefined &&
+      startedTurnId !== null &&
+      startedTurnId !== turnId &&
       input.activeTurnId !== turnId
     ) {
       return null;
@@ -329,15 +487,16 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
     // Git may have been initialised during this turn, leaving no baseline.
     const baselineCommit = await resolveCheckpointCommit(runner, cwd, fromRef).catch(() => null);
 
-    // The stamp is the time the diff finished; §5.4 is explicit that a late
-    // diff never extends the turn's recorded duration — the turn is settled by
-    // the fold from session status, and this event carries no turn timing.
+    // Stamped when the turn end was OBSERVED, deliberately not when the diff
+    // finished: §5.4 is explicit that a late diff never extends the turn's
+    // recorded duration. (The turn itself is settled by the fold from session
+    // status; this event carries no turn timing at all.)
     const completedAt = clock.nowIso();
 
     try {
       await captureCheckpoint(runner, { cwd, ref, uuid: uuid() });
     } catch (error) {
-      log("checkpoint capture failed", { threadId, turnCount, detail: errorDetail(error) });
+      log("checkpoint capture failed", { threadId, turnCount, detail: describeError(error) });
       return {
         turnCount,
         ref,
@@ -346,10 +505,13 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
         files: [],
         assistantMessageId,
         completedAt,
-        detail: errorDetail(error)
+        detail: describeError(error)
       };
     }
     dropCache(threadId);
+    if (turnId !== null) {
+      rememberCompletedTurn(threadId, turnId);
+    }
 
     let files: CheckpointFile[] = [];
     let detail: string | undefined;
@@ -375,7 +537,7 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
         });
         files = parseTurnDiffFilesFromNumstat(numstat.stdout);
       } catch (error) {
-        detail = `Checkpoint captured, but the turn diff summary is unavailable: ${errorDetail(error)}`;
+        detail = `Checkpoint captured, but the turn diff summary is unavailable: ${describeError(error)}`;
         log("checkpoint diff summary failed", { threadId, turnCount, detail });
       }
     } else {
@@ -396,6 +558,33 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
       completedAt,
       ...(detail === undefined ? {} : { detail })
     };
+  };
+
+  /**
+   * What a diff uses when the `from` checkpoint has no ref: the current HEAD
+   * commit, or the empty tree when the repository has no commit at all (the
+   * oid is computed, never hard-coded — it differs between sha1 and sha256
+   * repositories, and `hash-object` without `-w` writes nothing).
+   */
+  const baselineFallbackRevision = async (cwd: string): Promise<string> => {
+    const head = await runner.run({
+      operation: "checkpoints.resolveHeadCommit",
+      cwd,
+      args: ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+      allowNonZeroExit: true,
+      maxOutputBytes: 4_096
+    });
+    const commit = head.stdout.trim();
+    if (head.exitCode === 0 && commit.length > 0) {
+      return commit;
+    }
+    const emptyTree = await runner.run({
+      operation: "checkpoints.emptyTree",
+      cwd,
+      args: ["hash-object", "-t", "tree", "/dev/null"],
+      maxOutputBytes: 4_096
+    });
+    return emptyTree.stdout.trim();
   };
 
   const readTurnDiff = async (input: {
@@ -423,15 +612,19 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
     if (input.toTurnCount > availableTurnCount) {
       throw new CheckpointTurnRangeError(input.toTurnCount, availableTurnCount);
     }
-    if (!refTurnCounts.includes(input.fromTurnCount)) {
-      throw new CheckpointRefUnavailableError(input.fromTurnCount, "from");
-    }
     if (!refTurnCounts.includes(input.toTurnCount)) {
       throw new CheckpointRefUnavailableError(input.toTurnCount, "to");
     }
 
-    const fromRef = checkpointRefForThreadTurn(input.threadId, input.fromTurnCount);
     const toRef = checkpointRefForThreadTurn(input.threadId, input.toTurnCount);
+    // 404 is reserved for a turn ABOVE the highest checkpoint. A turn at or
+    // below it whose baseline is simply gone — git was initialised during the
+    // turn, or the 200-ref cap pruned it — still has a real answer: diff it
+    // against HEAD, and against the empty tree when there is not even a HEAD.
+    // (T3 does the same through `diffCheckpoints({fallbackFromToHead})`.)
+    const fromRevision = refTurnCounts.includes(input.fromTurnCount)
+      ? `${checkpointRefForThreadTurn(input.threadId, input.fromTurnCount)}^{commit}`
+      : await baselineFallbackRevision(input.cwd);
     const result = await runner.run({
       operation: "checkpoints.diff",
       cwd: input.cwd,
@@ -444,7 +637,7 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
         "--src-prefix=a/",
         "--dst-prefix=b/",
         ...(ignoreWhitespace ? ["--ignore-all-space"] : []),
-        `${fromRef}^{commit}`,
+        fromRevision,
         `${toRef}^{commit}`
       ],
       maxOutputBytes: CHECKPOINT_DIFF_MAX_OUTPUT_BYTES,
@@ -452,14 +645,7 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
       appendTruncationMarker: true
     });
 
-    if (diffCache.size >= CHECKPOINT_DIFF_CACHE_LIMIT) {
-      // Derived state: the oldest insertion goes, no bookkeeping needed.
-      const oldest = diffCache.keys().next();
-      if (!oldest.done) {
-        diffCache.delete(oldest.value);
-      }
-    }
-    diffCache.set(cacheKey, result.stdout);
+    cacheDiff(cacheKey, result.stdout);
     return result.stdout;
   };
 
@@ -475,16 +661,20 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
     const doomed = turnCounts
       .filter((turnCount) => turnCount > input.targetTurnCount)
       .map((turnCount) => checkpointRefForThreadTurn(input.threadId, turnCount));
-    await deleteRefs(input.cwd, doomed);
+    await deleteRefs(input.threadId, input.cwd, doomed);
     dropCache(input.threadId);
   };
 
   const deleteThreadRefs = async (input: { threadId: string; cwd: string }): Promise<void> => {
+    // Per-thread memory goes whatever git says: the thread is being deleted,
+    // so nothing may keep growing on its behalf.
+    startedTurns.delete(input.threadId);
+    completedTurns.delete(input.threadId);
     if (!(await isInsideWorkTree(runner, input.cwd))) {
       return;
     }
     const refs = await listRefNames(input.threadId, input.cwd);
-    await deleteRefs(input.cwd, refs);
+    await deleteRefs(input.threadId, input.cwd, refs);
     dropCache(input.threadId);
   };
 
@@ -504,11 +694,20 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
   };
 }
 
-function errorDetail(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message;
-  }
-  return String(error);
+/**
+ * What a checkpoint row's `detail` may say. It is rendered in the timeline, so
+ * it goes through the same redaction the stderr path uses: git messages name
+ * absolute paths (`/var/lib/orquester/workspaces/...`, a home dir) and this is
+ * the one place a raw host path could otherwise reach the browser.
+ */
+function errorDetail(error: unknown, homeDirs: readonly string[] = []): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return redactStderr(message, { homeDirs });
+}
+
+/** UTF-8 bytes, which is what the cached string actually costs on the wire. */
+function cachedSize(value: string): number {
+  return Buffer.byteLength(value, "utf8");
 }
 
 export { CHECKPOINT_CAPTURE_OPERATION };

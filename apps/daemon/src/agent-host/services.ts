@@ -228,6 +228,12 @@ export interface CheckpointService {
      * see it; without this the counter falls back to the refs on disk alone.
      */
     checkpoints?: readonly Checkpoint[];
+    /**
+     * The turn this baseline precedes. Recorded as the thread's started turn,
+     * which is what lets a stale `turn.aborted` for a DIFFERENT turn be
+     * refused at turn end rather than minting a checkpoint nobody expects.
+     */
+    turnId?: string | null;
   }): Promise<CaptureResult | null>;
 
   /**
@@ -247,6 +253,11 @@ export interface CheckpointService {
     checkpoints?: readonly Checkpoint[];
     /** The session's active turn, when known — the guard above needs it. */
     activeTurnId?: string | null;
+    /**
+     * The turn the host recorded as started, when it tracks one itself;
+     * otherwise the service uses what `captureBaseline` told it.
+     */
+    startedTurnId?: string | null;
   }): Promise<TurnDiffSummary | null>;
 
   /**
