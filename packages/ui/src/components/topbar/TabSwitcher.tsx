@@ -4,7 +4,14 @@ import { BottomSheet, ConfirmDialog, DropdownEmpty } from "../ui";
 import { SessionStatusDot } from "../ui/session-status-dot";
 import { cn } from "../../lib/cn";
 import { getRegistryIcon } from "../../icons";
-import { isSessionTab, tabSession, useActiveTabId, useAppStore, useProjectTabs } from "../../store/app";
+import {
+  isSessionTab,
+  tabSession,
+  useActiveTabId,
+  useAppStore,
+  useProjectTabs,
+  useThreadUnread
+} from "../../store/app";
 import type { ProjectTab } from "../../store/app";
 
 const tabLabel = (tab: ProjectTab): string => {
@@ -26,6 +33,17 @@ const tabIcon = (tab: ProjectTab, size = 16) => {
   ) : (
     <FolderTree size={size} />
   );
+};
+
+/** The per-device "finished since you last looked" mark (§7.7). */
+const TabUnreadMark: React.FC<{ sessionId: string }> = ({ sessionId }) => {
+  const unread = useThreadUnread(sessionId);
+  return unread ? (
+    <span
+      aria-label="Unread"
+      className="h-1.5 w-1.5 shrink-0 rounded-full bg-neutral-300"
+    />
+  ) : null;
 };
 
 /** Inline editor shown in place of a tab row while renaming (touch-sized). */
@@ -136,6 +154,7 @@ export const TabSwitcher: React.FC = () => {
                 className="flex min-w-0 flex-1 items-center gap-2 rounded px-2 py-2.5 text-left text-[15px] text-neutral-200 hover:bg-neutral-800"
               >
                 <span className="text-neutral-500">{tabIcon(tab)}</span>
+                {tab.type === "agent-chat" ? <TabUnreadMark sessionId={tab.id} /> : null}
                 {tabSession(tab) ? (
                   <SessionStatusDot
                     sessionId={tab.id}
