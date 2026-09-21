@@ -35,6 +35,7 @@ export {
   insertComposerText,
   openComposerControl,
   registerComposerHandle,
+  stageComposerAttachment,
   type ComposerHandle
 } from "./composer-bridge";
 
@@ -74,6 +75,7 @@ export {
   composerPromptLengthValidationMessage,
   composerSubmissionIntentForEnter,
   composerSubmissionValidationMessage,
+  decideStagedAttachmentForRef,
   hasSendableContent,
   isPasteAsTextShortcut,
   isSupportedAttachmentImage,
@@ -84,11 +86,14 @@ export {
   proposedPlanTitle,
   resolveFollowUpDisposition,
   resolvePlanFollowUpSubmission,
+  stagedAttachmentKeyForRef,
   uploadsBlockSend,
   type ComposerSubmissionIntent,
   type FollowUpBehavior,
   type PastedTextDisposition,
-  type SendShortcut
+  type SendShortcut,
+  type StagedAttachmentLike,
+  type StageRefDecision
 } from "./composer-submission";
 
 export {
