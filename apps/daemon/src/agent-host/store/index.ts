@@ -46,7 +46,8 @@ import type {
   AttachmentRef,
   CommandReceipt,
   DomainEvent,
-  ThreadHead
+  ThreadHead,
+  ThreadItem
 } from "@orquester/api/agent-chat";
 import {
   MAX_TURN_FILE_BYTES,
@@ -155,6 +156,16 @@ export interface AgentThreadStore extends ThreadStore {
   threadError(threadId: string): string | null;
   /** Where an upload made before its thread exists is written. */
   pendingAttachmentsDir(): string;
+  /**
+   * `GET /api/sessions/:id/items/:itemId` (§6.3): one item with its FULL,
+   * unslimmed payload, or null.
+   *
+   * Reads the log backwards rather than folding it, for two reasons: the
+   * newest write for an id is the authoritative one, and an item that aged
+   * out of the fold's 500-row activity window (§5.1) is exactly the kind of
+   * row a "load full output" click asks for — it must still be servable.
+   */
+  readItem(threadId: string, itemId: string): Promise<ThreadItem | null>;
 }
 
 export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore {
@@ -721,6 +732,27 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
 
     pendingAttachmentsDir(): string {
       return pendingDir;
+    },
+
+    async readItem(threadId: string, itemId: string): Promise<ThreadItem | null> {
+      const tail = await readLog(threadId);
+      for (let index = tail.events.length - 1; index >= 0; index -= 1) {
+        const event = tail.events[index]!;
+        if (event.type === "thread.activity-appended") {
+          if (event.payload.activity.id === itemId) {
+            return event.payload.activity;
+          }
+          continue;
+        }
+        if (event.type !== "thread.message-sent" || event.payload.messageId !== itemId) {
+          continue;
+        }
+        // A message id is written once per delta, so the newest row alone is
+        // a fragment: rebuild the accumulated body the same way the fold does.
+        const state = foldThread(tail.events);
+        return state.items.find((item) => item.id === itemId) ?? null;
+      }
+      return null;
     }
   };
 

@@ -552,6 +552,78 @@ test("a revert's truncation is what the attachment sweep recomputes against", as
   );
 });
 
+test("readItem serves the FULL payload, even for a row past the fold's window", async () => {
+  const rootDir = await tempRoot();
+  const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  const bigOutput = "y".repeat(40_000);
+  const activity = {
+    kind: "activity" as const,
+    id: "a-old",
+    tone: "tool" as const,
+    activityKind: "tool.completed",
+    summary: "pnpm test",
+    payload: { itemType: "command_execution", data: { rawOutput: { stdout: bigOutput } } },
+    turnId: null,
+    createdAt: "2026-01-01T00:00:01.000Z",
+    updatedAt: "2026-01-01T00:00:01.000Z"
+  };
+  const appendActivity = (id: string, payload: unknown): AppendableDomainEvent =>
+    ({
+      eventId: `e-${id}`,
+      threadId: "t1",
+      type: "thread.activity-appended",
+      payload: { activity: { ...activity, id, payload } },
+      occurredAt: "2026-01-01T00:00:01.000Z",
+      commandId: null,
+      causationEventId: null,
+      metadata: {}
+    }) as AppendableDomainEvent;
+
+  await store.append({ threadId: "t1", events: [created(), appendActivity("a-old", activity.payload)] });
+  // Push it well past the 500-row retention window the fold keeps.
+  for (let i = 0; i < 600; i += 1) {
+    await store.append({ threadId: "t1", events: [appendActivity(`noise-${i}`, { i })] });
+  }
+  await store.drain();
+
+  const item = await store.readItem("t1", "a-old");
+  assert.ok(item && item.kind === "activity");
+  const payload = item.payload as { data: { rawOutput: { stdout: string } } };
+  assert.equal(payload.data.rawOutput.stdout.length, bigOutput.length);
+  assert.equal(await store.readItem("t1", "never-written"), null);
+});
+
+test("readItem rebuilds a streamed message's accumulated body", async () => {
+  const rootDir = await tempRoot();
+  const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  const delta = (text: string, streaming: boolean): AppendableDomainEvent =>
+    ({
+      eventId: `e-${text}`,
+      threadId: "t1",
+      type: "thread.message-sent",
+      payload: {
+        messageId: "assistant:1",
+        role: "assistant",
+        text,
+        streaming,
+        turnId: null
+      },
+      occurredAt: "2026-01-01T00:00:01.000Z",
+      commandId: null,
+      causationEventId: null,
+      metadata: {}
+    }) as AppendableDomainEvent;
+
+  await store.append({
+    threadId: "t1",
+    events: [created(), delta("Hel", true), delta("lo", true), delta("", false)]
+  });
+  await store.drain();
+  const item = await store.readItem("t1", "assistant:1");
+  assert.ok(item && item.kind === "message");
+  assert.equal(item.text, "Hello");
+});
+
 test("drain settles every queued write", async () => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
