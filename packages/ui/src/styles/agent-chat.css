@@ -1,0 +1,744 @@
+/*
+ * Agent chat — the motion and surface layer.
+ * Ported from T3 Code (MIT): apps/web/src/index.css
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS FILE EXISTS
+ * ---------------------------------------------------------------------------
+ * The agent chat GUI is meant to *move* like T3 Code. T3's motion is not a pile
+ * of ad-hoc `transition-` classes: it is a small, deliberate inventory of
+ * keyframes with two rules behind every one of them (T3 AGENTS.md "Taste":
+ * "No continuously repainting animations; they peg the GPU on high-refresh
+ * displays"):
+ *
+ *   1. DUTY CYCLE, NOT A SINE WAVE. Every looping indicator holds a value for
+ *      most of its period and ramps with `steps(n)`, so the compositor draws a
+ *      handful of discrete frames per cycle instead of one per vsync. On a
+ *      120 Hz display that is the difference between ~14 and ~288 updates per
+ *      cycle per element — and a chat view can hold dozens of live dots.
+ *      *T3: apps/web/src/index.css:149-150, 213-217*
+ *   2. OFF-SCREEN MEANS OFF. Every looping animation is play-state gated on
+ *      `--ac-anim-state`, which `useVisibleAnimation()` flips from an
+ *      IntersectionObserver + `visibilitychange` + `prefers-reduced-motion`.
+ *      A live row scrolled out of view costs nothing.
+ *      *T3: apps/web/src/lib/visibleAnimation.ts:10-18*
+ *
+ * DELIBERATE DIFFERENCE FROM T3: T3 defaults `--visible-animation-state` to
+ * `paused`, so an element whose observer was never attached simply never
+ * animates. We default to `running`: this codebase has several authors
+ * building chat surfaces in parallel, and a silently dead shimmer is a much
+ * worse failure than a shimmer that keeps running off-screen. Attaching
+ * `useVisibleAnimation()` is the optimisation, not the enabling step.
+ *
+ * ---------------------------------------------------------------------------
+ * HOW TO USE IT
+ * ---------------------------------------------------------------------------
+ * Every class is prefixed `ac-` and every one of them carries its own
+ * `@media (prefers-reduced-motion: reduce)` fallback that lands the element on
+ * a legible *static* state — never merely `animation: none` on something whose
+ * resting frame is invisible.
+ *
+ * Colours are expressed only through Orquester's theme variables
+ * (`--n-50`…`--n-950`, `--sem-*` from `styles/globals.css`), never as literals,
+ * so all seven schemes × light/dark keep working. Remember the scale is
+ * *perceptual, not lexical*: `--n-50` is the strongest foreground and `--n-950`
+ * the page background in BOTH modes.
+ *
+ * LAYERING NOTE: this file is inlined at the top of `globals.css`, i.e. before
+ * `@tailwind utilities`, so a conflicting Tailwind utility on the same element
+ * wins at equal specificity. That is almost always what you want. The one rule
+ * that must not lose — `.ac-shimmer`'s `color: transparent` — repeats its own
+ * class to reach specificity (0,2,0). Do not "fix" that by adding `!important`.
+ */
+
+/* ===========================================================================
+ * 1. Tokens
+ * ======================================================================== */
+
+:root {
+  /* Flipped to `paused` by useVisibleAnimation() when the element is off
+     screen, the tab is hidden, or the user asked for reduced motion. */
+  --ac-anim-state: running;
+  --ac-anim-will-change: auto;
+
+  /* One shared tempo for every looping live indicator, so a shimmering label,
+     a pulsing dot and a sweeping rail beat together instead of drifting. */
+  --ac-live-period: 2.2s;
+  --ac-pulse-period: 2s;
+
+  /* Transition speeds, taken from what T3's chat chrome actually uses:
+     `duration-150` for colour changes and `duration-200` for the transform and
+     opacity reveals (chevron rotation, hover-revealed meta strips). Nothing a
+     click produced is allowed to run longer than that.
+     *T3: apps/web/src/components/chat/MessagesTimeline.tsx:1469, 2205, 2779, 3329* */
+  --ac-dur-instant: 90ms;
+  --ac-dur-fast: 150ms;
+  --ac-dur-base: 200ms;
+  --ac-dur-slow: 260ms;
+  --ac-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ac-ease-in: cubic-bezier(0.4, 0, 1, 1);
+  --ac-ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* Width of the travelling highlight in the shimmer and the rail sweep. */
+  --ac-sweep-width: 4.5rem;
+}
+
+/* ===========================================================================
+ * 2. Keyframes
+ * ======================================================================== */
+
+/* The live-label text shine. The bright band travels across a text-clipped
+   gradient, so the label itself glows rather than a box behind it.
+   *T3: apps/web/src/index.css:432-443* */
+@keyframes ac-shimmer {
+  from {
+    background-position:
+      calc(-1 * var(--ac-sweep-width)) 0,
+      0 0;
+  }
+  to {
+    background-position:
+      calc(100% + var(--ac-sweep-width)) 0,
+      0 0;
+  }
+}
+
+/* Duty-cycled opacity breath for status dots: hold bright 0-40%, hold dim
+   50-90%, ramp in six steps. *T3: apps/web/src/index.css:232-246* */
+@keyframes ac-status-pulse {
+  0%,
+  40% {
+    opacity: 1;
+    animation-timing-function: steps(6);
+  }
+  50%,
+  90% {
+    opacity: 0.5;
+    animation-timing-function: steps(6);
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+/* Halo burst for an act-now dot: fire immediately, then stay invisible for the
+   rest of the period. *T3: apps/web/src/index.css:247-261* */
+@keyframes ac-status-ping {
+  0% {
+    opacity: 0.9;
+    transform: scale(0.75);
+    animation-timing-function: steps(8);
+  }
+  40%,
+  100% {
+    opacity: 0;
+    transform: scale(2);
+  }
+}
+
+/* One opacity breath per skeleton CONTAINER (put the class on the wrapper, not
+   on each bar). *T3: apps/web/src/index.css:213-231* */
+@keyframes ac-skeleton {
+  0%,
+  42% {
+    opacity: 1;
+    animation-timing-function: steps(4);
+  }
+  50%,
+  92% {
+    opacity: 0.55;
+    animation-timing-function: steps(4);
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+/* The travelling focus band behind a live activity row, and the counter-motion
+   that holds the row's content still while its backdrop moves.
+   *T3: apps/web/src/index.css:467-483* */
+@keyframes ac-sweep {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes ac-sweep-counter {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-100%);
+  }
+}
+
+/* One-shot row entry. Opacity plus a 2px rise — never a scale, never a slide
+   wide enough to read as motion across the page.
+   *T3: apps/web/src/index.css:1959-1968 (prompt-stash-count-enter)* */
+@keyframes ac-row-enter {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Banner enter/exit. The dock sits directly above the composer, so a banner
+   rises into place and falls back out of it. */
+@keyframes ac-banner-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes ac-banner-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+
+/* Attention ring: two beats, then gone. Used to point at a row the user was
+   navigated to. *T3: apps/web/src/index.css:798-812* */
+@keyframes ac-attention-ring {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+  50% {
+    box-shadow: 0 0 0 2px rgb(var(--sem-info-400) / 0.7);
+  }
+}
+
+/* Deterministic countdown bar (question auto-advance, toast dwell).
+   *T3: apps/web/src/index.css:1981-1988* */
+@keyframes ac-countdown {
+  from {
+    transform: scaleX(1);
+  }
+  to {
+    transform: scaleX(0);
+  }
+}
+
+/* Plain rotation for spinners. Kept here so the play-state gate applies. */
+@keyframes ac-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ===========================================================================
+ * 3. Live indicators
+ * ======================================================================== */
+
+/*
+ * `.ac-shimmer` — the live label.
+ *
+ * Put it on a BARE span that carries no `text-*` class: the class owns the
+ * element's colour in both states (the second gradient layer is the resting
+ * colour; the first is the travelling highlight). Combining it with a text
+ * colour utility is the single most common way to end up with an invisible
+ * label. The repeated class raises specificity so a stray `text-neutral-400`
+ * cannot win; the settled/reduced-motion branches restore a real colour.
+ * *T3: apps/web/src/index.css:445-459*
+ */
+.ac-shimmer.ac-shimmer {
+  color: transparent;
+  background-image:
+    linear-gradient(to right, transparent, rgb(var(--n-50)), transparent),
+    linear-gradient(rgb(var(--n-400)), rgb(var(--n-400)));
+  background-size:
+    var(--ac-sweep-width) 100%,
+    100% 100%;
+  background-repeat: no-repeat;
+  background-clip: text;
+  -webkit-background-clip: text;
+  animation: ac-shimmer var(--ac-live-period) steps(30) infinite;
+  animation-play-state: var(--ac-anim-state, running);
+}
+
+/* The settled twin: identical metrics, no motion, plain muted text. Swap the
+   class rather than unmounting the span, so the label change is a text swap
+   and the row never reflows. */
+.ac-shimmer-settled {
+  color: rgb(var(--n-400));
+}
+
+@media (prefers-reduced-motion: reduce), (forced-colors: active) {
+  .ac-shimmer.ac-shimmer {
+    animation: none;
+    background-image: none;
+    background-clip: border-box;
+    -webkit-background-clip: border-box;
+    color: rgb(var(--n-300));
+  }
+}
+
+/*
+ * `.ac-dot` — the status dot. Tone comes from a `text-*` utility on the
+ * element (`text-warn`, `text-ok`, `text-danger`, `text-neutral-500`), size
+ * from `h-* w-*`; this class only owns shape and motion.
+ * Pair with `.ac-dot-pulse` for in-motion, `.ac-dot-ping` for act-now.
+ * An idle-but-resumable agent must stay STATIC and muted — a live-coloured
+ * idle dot reads as stuck.
+ * *T3: apps/web/src/components/AgentsPanel.tsx:38-49*
+ */
+.ac-dot {
+  display: inline-block;
+  flex: none;
+  border-radius: 9999px;
+  background-color: currentcolor;
+}
+
+.ac-dot-pulse {
+  animation: ac-status-pulse var(--ac-pulse-period) infinite;
+  animation-play-state: var(--ac-anim-state, running);
+}
+
+/* The halo. Render as an absolutely-positioned sibling inset over the dot. */
+.ac-dot-ping {
+  animation: ac-status-ping var(--ac-pulse-period) infinite;
+  animation-play-state: var(--ac-anim-state, running);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ac-dot-pulse {
+    animation: none;
+    opacity: 1;
+  }
+  .ac-dot-ping {
+    animation: none;
+    /* The resting frame of a ping is invisible, so hide it outright rather
+       than freezing a 2x-scaled ghost over the dot. */
+    display: none;
+  }
+}
+
+/*
+ * `.ac-sweep` — the travelling focus band behind a live row.
+ *
+ * Anatomy: a `relative` row, an `absolute inset-y-0` band carrying `.ac-sweep`
+ * (it deliberately over-hangs the row on both sides), and — when the band must
+ * not drag the text with it — an inner element with `.ac-sweep-counter`.
+ * *T3: apps/web/src/index.css:485-541*
+ */
+.ac-sweep {
+  right: auto;
+  left: calc(-1 * var(--ac-sweep-width));
+  width: calc(100% + var(--ac-sweep-width) * 2);
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    rgb(0 0 0 / 12%) 0.675rem,
+    rgb(0 0 0 / 55%) 1.575rem,
+    black 2.25rem,
+    rgb(0 0 0 / 55%) 2.925rem,
+    rgb(0 0 0 / 12%) 3.825rem,
+    transparent var(--ac-sweep-width),
+    transparent 100%
+  );
+  -webkit-mask-repeat: no-repeat;
+  mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    rgb(0 0 0 / 12%) 0.675rem,
+    rgb(0 0 0 / 55%) 1.575rem,
+    black 2.25rem,
+    rgb(0 0 0 / 55%) 2.925rem,
+    rgb(0 0 0 / 12%) 3.825rem,
+    transparent var(--ac-sweep-width),
+    transparent 100%
+  );
+  mask-repeat: no-repeat;
+  animation: ac-sweep var(--ac-live-period) linear infinite;
+  animation-play-state: var(--ac-anim-state, running);
+  will-change: var(--ac-anim-will-change, auto);
+}
+
+.ac-sweep-counter {
+  width: 100%;
+  animation: ac-sweep-counter var(--ac-live-period) linear infinite;
+  animation-play-state: var(--ac-anim-state, running);
+  will-change: var(--ac-anim-will-change, auto);
+}
+
+.ac-sweep-aligned {
+  width: calc(100% - var(--ac-sweep-width) * 2);
+  margin-left: var(--ac-sweep-width);
+}
+
+@media (prefers-reduced-motion: reduce), (forced-colors: active) {
+  .ac-sweep {
+    animation: none;
+    /* The band IS the motion; frozen it is just a smudge. */
+    opacity: 0;
+    will-change: auto;
+  }
+  .ac-sweep-counter {
+    animation: none;
+    will-change: auto;
+  }
+}
+
+/*
+ * `.ac-working-bar` — the indeterminate progress hairline under the status
+ * line while a turn runs. A 40% -wide fill sliding inside its track: cheap,
+ * and unlike a spinner it reads as "the turn is alive" from the corner of the
+ * eye. Put it on the inner fill; the parent supplies `overflow-hidden`.
+ */
+.ac-working-bar {
+  width: 40%;
+  animation: ac-sweep calc(var(--ac-live-period) * 0.8) var(--ac-ease-standard) infinite alternate;
+  animation-play-state: var(--ac-anim-state, running);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ac-working-bar {
+    animation: none;
+    width: 100%;
+    opacity: 0.4;
+  }
+}
+
+/* `.ac-spin` — a gated spinner. Prefer `.ac-working-bar` or a shimmering label
+   for "the agent is working"; keep the spinner for a control whose own action
+   is in flight (a decision posting, an upload finishing). */
+.ac-spin {
+  animation: ac-spin 1s linear infinite;
+  animation-play-state: var(--ac-anim-state, running);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ac-spin {
+    animation-duration: 2.4s;
+  }
+}
+
+/* `.ac-skeleton` — put it on the CONTAINER so however many bars sit under it,
+   the compositor animates one element. */
+.ac-skeleton {
+  animation: ac-skeleton 2.4s infinite;
+  animation-play-state: var(--ac-anim-state, running);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ac-skeleton {
+    animation: none;
+    opacity: 0.75;
+  }
+}
+
+/* ===========================================================================
+ * 4. One-shot entries and exits
+ * ======================================================================== */
+
+/* A row that just arrived. One shot, `both` so the pre-animation frame is the
+   `from` state and the row cannot flash at full opacity first. */
+.ac-enter {
+  animation: ac-row-enter var(--ac-dur-base) var(--ac-ease-out) both;
+}
+
+.ac-banner-enter {
+  animation: ac-banner-in var(--ac-dur-fast) var(--ac-ease-out) both;
+}
+
+.ac-banner-exit {
+  animation: ac-banner-out var(--ac-dur-instant) var(--ac-ease-in) both;
+}
+
+/*
+ * Streaming text fade. `@starting-style` fires only on first insertion and the
+ * rule is gated on the container's `data-streaming` attribute, so re-opening a
+ * settled thread never replays a page of fades. Opacity only — a transform
+ * here would fight the follow-scroll.
+ * *T3: apps/web/src/index.css:1894-1908*
+ */
+@media (prefers-reduced-motion: no-preference) {
+  .ac-stream[data-streaming] > * {
+    transition: opacity 600ms ease-out;
+
+    @starting-style {
+      opacity: 0;
+    }
+  }
+}
+
+/* The attention ring for a row the user was navigated to. Two beats, then the
+   focus outline takes over — so exactly one indicator shows at a time.
+   *T3: apps/web/src/index.css:808-818* */
+.ac-attention {
+  animation: ac-attention-ring 650ms ease-in-out 2;
+  border-radius: 0.5rem;
+}
+
+.ac-attention:focus {
+  outline: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ac-enter,
+  .ac-banner-enter,
+  .ac-banner-exit,
+  .ac-attention {
+    animation: none;
+  }
+  /* Without the pulse the ring must still mark the destination. */
+  .ac-attention {
+    box-shadow: 0 0 0 2px rgb(var(--sem-info-400) / 0.7);
+  }
+}
+
+/* A deterministic countdown fill. Drive the duration inline
+   (`style={{ animationDuration: "200ms" }}`); a countdown that lies about its
+   own length is worse than none. */
+.ac-countdown {
+  transform-origin: left center;
+  animation: ac-countdown var(--ac-dur-base) linear both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ac-countdown {
+    animation: none;
+    transform: scaleX(0);
+  }
+}
+
+/* ===========================================================================
+ * 5. Disclosure
+ * ======================================================================== */
+
+/*
+ * The expand/collapse used by every activity group, tool row and reasoning
+ * block.
+ *
+ * DELIBERATE DIFFERENCE FROM T3: T3 measures the panel in JS and animates a
+ * pixel height (`apps/web/src/components/AnimatedHeight.tsx`), and then has to
+ * defuse nested collapsibles because each inner frame restarts the outer
+ * transition (`apps/web/src/index.css:615-626`). We animate
+ * `grid-template-rows: 0fr → 1fr` instead. It is CSS-only, it nests without a
+ * special case, and — the reason it matters here — it is *height-safe for
+ * streaming content*: a tool whose output grows while the panel is open simply
+ * keeps sizing to `auto`, where a measured pixel height would clip the new
+ * lines until the next measurement.
+ *
+ * Anatomy (all three elements are required):
+ *   <div class="ac-disclosure" data-open={open}>   grid wrapper
+ *     <div class="ac-disclosure-panel">            min-height:0 clipper
+ *       …content…
+ *
+ * `overflow: hidden` while closed is what makes 0fr actually hide; it is lifted
+ * once open so a focus ring or a popover inside the panel is not clipped.
+ */
+.ac-disclosure {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--ac-dur-base) var(--ac-ease-standard);
+}
+
+.ac-disclosure[data-open="true"] {
+  grid-template-rows: 1fr;
+}
+
+.ac-disclosure-panel {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.ac-disclosure[data-open="true"] > .ac-disclosure-panel {
+  overflow: visible;
+}
+
+/* The chevron. 90° clockwise on open — never 180°, which reads as a different
+   control rather than the same one opened.
+   *T3: apps/web/src/components/chat/MessagesTimeline.tsx:2777-2782, 4984-4990 —
+   `transition-transform duration-200` + `rotate-90`, on every disclosure in the
+   timeline* */
+.ac-chevron {
+  transition: transform var(--ac-dur-base) var(--ac-ease-standard);
+}
+
+.ac-chevron[data-open="true"] {
+  transform: rotate(90deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ac-disclosure,
+  .ac-chevron {
+    transition: none;
+  }
+}
+
+/* ===========================================================================
+ * 6. Interaction
+ * ======================================================================== */
+
+/*
+ * `.ac-press` — the tactile press. T3's chat controls are small and dense, so
+ * the feedback is a 2% squeeze rather than a colour change, which would fight
+ * the hover state. Pair with the usual `hover:bg-*` utility.
+ */
+.ac-press {
+  transition:
+    transform var(--ac-dur-instant) var(--ac-ease-standard),
+    background-color var(--ac-dur-fast) var(--ac-ease-standard),
+    color var(--ac-dur-fast) var(--ac-ease-standard),
+    opacity var(--ac-dur-fast) var(--ac-ease-standard);
+}
+
+.ac-press:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ac-press {
+    transition-property: background-color, color, opacity;
+  }
+  .ac-press:active:not(:disabled) {
+    transform: none;
+  }
+}
+
+/*
+ * `.ac-reveal` — a control that only appears on row hover or keyboard focus
+ * (copy buttons, per-row actions). Always reachable by keyboard, and always
+ * visible on a coarse pointer, where there is no hover to reveal it.
+ */
+.ac-reveal {
+  opacity: 0;
+  transition: opacity var(--ac-dur-fast) var(--ac-ease-standard);
+}
+
+.ac-reveal:focus-visible,
+.ac-reveal[data-visible="true"],
+.group:hover .ac-reveal,
+.group:focus-within .ac-reveal {
+  opacity: 1;
+}
+
+@media (pointer: coarse) {
+  .ac-reveal {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ac-reveal {
+    transition: none;
+  }
+}
+
+/* ===========================================================================
+ * 7. Surfaces and text metrics
+ * ======================================================================== */
+
+/*
+ * `.ac-tabular` — tabular figures. Mandatory on every number that changes in
+ * place: elapsed timers, token counts, the `1/N` counter, percentages. Without
+ * it a ticking "1:09 → 1:10" changes width and the whole row twitches once a
+ * second, which is the loudest possible way to look unfinished.
+ */
+.ac-tabular {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+/*
+ * `.ac-rows` — the timeline scroll container's row hint. `content-visibility`
+ * lets the browser skip layout and paint for off-screen rows; the intrinsic
+ * size keeps the scrollbar honest while they are skipped. Apply to the row
+ * elements, not to the scroller.
+ */
+.ac-rows > * {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 2.5rem;
+}
+
+/*
+ * `.ac-scroll-thin` — the scrollbar for the small scrollers inside chat rows
+ * (the approval detail block, a tool's streamed output, the roster). The app's
+ * global rule only styles `.overflow-y-auto`/`.overflow-x-auto`; these panes
+ * are often `overflow-auto`, and they want a thinner, quieter bar than the
+ * page.
+ * *T3: apps/web/src/index.css:1845-1862*
+ */
+.ac-scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(var(--n-700) / 0.78) transparent;
+}
+
+.ac-scroll-thin::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+.ac-scroll-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.ac-scroll-thin::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgb(var(--n-700) / 0.78);
+}
+
+.ac-scroll-thin::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--n-600) / 0.9);
+}
+
+/*
+ * `.ac-fade-top` — the hairline fade under the status line, so rows dissolve
+ * into the chrome instead of being guillotined by it. Mask, not a gradient
+ * overlay: an overlay would have to re-blend every frame a streaming row
+ * produces.
+ * *T3: apps/web/src/index.css:1566-1572 (why the grain is not an overlay)*
+ */
+.ac-fade-top {
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, black 1.5rem);
+  mask-image: linear-gradient(to bottom, transparent 0, black 1.5rem);
+}
+
+/*
+ * `.ac-hairline` — the compaction / "load earlier" separator: a rule that
+ * carries a centred label. The label sits in the flow with its own background;
+ * the rule is drawn by the pseudo-elements so it never crosses the text.
+ */
+.ac-hairline {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+}
+
+.ac-hairline::before,
+.ac-hairline::after {
+  content: "";
+  flex: 1 1 0;
+  height: 1px;
+  background: rgb(var(--n-800));
+}
+
+/* ===========================================================================
+ * 8. Escape hatch
+ * ======================================================================== */
+
+/* Suppress every chat animation at once — used while a theme swap is in
+   flight, and available to tests. *T3: apps/web/src/index.css:962-968* */
+.ac-no-motion,
+.ac-no-motion * {
+  animation-duration: 0s !important;
+  transition-duration: 0s !important;
+}
