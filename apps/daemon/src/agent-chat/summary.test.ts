@@ -184,6 +184,22 @@ test("NEVER a 'finished' push while background liveness is non-null", () => {
   assert.deepEqual(h.pushes, [{ id: "t1", type: "finished" }]);
 });
 
+test("an errored thread keeps status 'running' — the TAB is live — and shows the error via activity", () => {
+  // E2E E18: `SessionSummary.status` is the tab's liveness, not the thread's.
+  // `exited` would make every client drop a tab the user can still recover
+  // with `/session/stop` or a new turn; the error reaches the tab strip and the
+  // Attention Center through `activity` + `chatSessionStatus`.
+  const h = harness();
+  seedTab(h.chat, "t1");
+  h.service.applyFields("t1", { chatSessionStatus: "running" });
+  h.service.applyFields("t1", { chatSessionStatus: "error" });
+  const summary = h.chat.get("t1");
+  assert.equal(summary?.status, "running");
+  assert.equal(summary?.chatSessionStatus, "error");
+  assert.equal(summary?.activity?.state, "idle");
+  assert.equal(summary?.activity?.attention, "finished");
+});
+
 test("an errored thread whose watch loop is still live does not push 'finished'", () => {
   // The error rung outranks liveness for the ACTIVITY, but the push is still
   // suppressed — work is live in the thread.

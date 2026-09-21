@@ -112,6 +112,13 @@ export class ChatSessionManager {
       // every surface reading a SessionSummary keeps its shape.
       cols: 0,
       rows: 0,
+      // `status` is the TAB's liveness, not the thread's. It stays `running`
+      // for as long as the tab exists — including while the thread's session is
+      // in `error`, which is a recoverable state the user retries into with
+      // `/session/stop` or a new turn. `exited` would make every client drop
+      // the tab. The thread's own state is `chatSessionStatus` (§6.4), and the
+      // ladder already surfaces an error as `activity` — which is what the tab
+      // strip and the Attention Center colour a chat row from.
       status: "running",
       order: input.order,
       createdAt: input.createdAt ?? new Date().toISOString()

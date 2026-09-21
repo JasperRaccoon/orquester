@@ -45,12 +45,24 @@
  *
  * *Deliberately NOT done either:* nothing strips the MCP servers a home already
  * configures. Grok's Claude-compat path boots every server it finds in
- * `~/.claude.json` on `session/new` (~3 s, ~157 tools observed), which is slow
- * — but it is exactly what a terminal launch of the same agent under the same
- * home does today, and a chat thread that silently had fewer tools than the
- * terminal tab beside it would be a worse surprise than three seconds. Parity
- * wins; §4.5's `mcpServers: {}` is the *Claude SDK adapter's* own choice and
- * belongs there, not in the home.
+ * `~/.claude.json` on `session/new` (~3 s, ~157 tools observed) and Codex boots
+ * whatever `~/.codex/config.toml` names, which is slow — but it is exactly what
+ * a terminal launch of the same agent under the same home does today, and a
+ * chat thread that silently had fewer tools than the terminal tab beside it
+ * would be a worse surprise. Parity wins; §4.5's `mcpServers: {}` is the
+ * *Claude SDK adapter's* own choice and belongs there, not in the home.
+ *
+ * **The recorded cost of that decision (E2E E20).** A provider CLI spawns its
+ * MCP servers itself, so they are children of the provider child, not of the
+ * daemon. One observed `serena start-mcp-server` survived both the agent host
+ * and the daemon, reparented to init, held a fixed loopback port for five
+ * hours, and was reaped by neither `session/stop`, thread deletion nor host
+ * shutdown — and being outside the daemon's process tree it is not a legal
+ * `POST /api/system/processes/kill` target either. On a long-lived VPS that is
+ * one leak per configured MCP server per thread. The decision to inherit
+ * stands; the reaping belongs to the host's teardown (a process-group kill of
+ * each provider child), which is where the parent relationship actually
+ * exists. Tracked as an open issue against the host, not worked around here.
  */
 
 import { readFile } from "node:fs/promises";
