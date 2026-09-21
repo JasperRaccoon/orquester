@@ -27,6 +27,7 @@ import {
   type AgentHostHealthResponse,
   type CreateHostThreadRequest
 } from "../agent-host/host-protocol.ts";
+import { isAgentAdapterId } from "../agent-host/adapters/index.ts";
 import { ACCOUNT_HOME_ENV_VAR } from "../agent-host/support/env.ts";
 import { ChatSessionManager, ChatSessionError } from "./chat-sessions.ts";
 import { AgentHostClient, HostUnavailableError } from "./host-client.ts";
@@ -174,8 +175,10 @@ export class AgentChatService {
       broadcaster: opts.broadcaster,
       push: opts.push,
       now: opts.now,
-      sleep: opts.sleep,
       logger: opts.logger,
+      // The poll idles while the host is restarting or foreign: every chat
+      // route answers 503 then anyway, and a read would only log noise.
+      isHostHealthy: () => this.supervisor.isHealthy(),
       // A settled turn reopens the §3.1 drain window, so a deploy's version
       // handover happens the moment the host goes quiet.
       onTurnSettled: () => this.supervisor.handleTurnSettled()
@@ -247,6 +250,10 @@ export class AgentChatService {
         const hostInstanceId = await this.supervisor.restartNow();
         return { hostInstanceId, markedThreadIds: this.lastMarkedThreadIds };
       },
+      onProvidersChanged: (adapterId) =>
+        this.summary.publishProvidersChanged(
+          isAgentAdapterId(adapterId) ? { adapterId } : {}
+        ),
       logger: this.opts.logger
     };
   }

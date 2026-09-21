@@ -112,20 +112,6 @@ export const agentHostRoutes = {
   providerRefresh: (adapterId: string): string =>
     `/providers/${encodeURIComponent(adapterId)}/refresh`,
 
-  /**
-   * The daemon's coarse signal subscription (§6.4) — one long-lived NDJSON
-   * stream for the WHOLE host, not per thread. It carries only the six
-   * `SessionSummary` fields, turn transitions, request open/close and
-   * `agent.providers.changed`; nothing higher-rate rides it.
-   *
-   * It is a separate channel from `events(threadId)` on purpose:
-   * `backgroundLiveness` lives in an in-memory registry (§3.1) and is not in
-   * `events.ndjson`, so no fold over the persisted log can produce it.
-   *
-   * Frames and the tolerant parser: `apps/daemon/src/agent-chat/host-signals.ts`
-   * (owner: W10). The first frame on every connect is `hello`.
-   */
-  signals: "/signals",
 
   /**
    * The intentional stop of §3.3: write every continuation marker for a

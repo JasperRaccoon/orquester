@@ -287,7 +287,7 @@ test("§6.1's fields ride the nested `chat` block the client sends", async () =>
         // An empty `model` means "the provider's own default" — the launcher
         // had no catalog to pick from. It is never a refusal.
         modelSelection: { model: "" },
-        runtimeMode: "plan",
+        runtimeMode: "auto-accept-edits",
         resume: { home: "cliproxy", conversationId: "0199-abc" }
       }
     },
@@ -295,7 +295,7 @@ test("§6.1's fields ride the nested `chat` block the client sends", async () =>
   );
   const body = f.created[0];
   assert.deepEqual(body.modelSelection, { model: "" });
-  assert.equal(body.runtimeMode, "plan");
+  assert.equal(body.runtimeMode, "auto-accept-edits");
   assert.deepEqual(body.resume, { home: "cliproxy", conversationId: "0199-abc" });
   await f.cleanup();
 });

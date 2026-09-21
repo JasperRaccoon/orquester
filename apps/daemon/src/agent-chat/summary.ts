@@ -1,39 +1,53 @@
 /**
  * The daemon's coarse view of every chat thread (spec §6.4).
  *
- * One long-lived subscription to the host's `/signals` stream feeds three
- * things and nothing else:
+ * It reads `GET /threads/:id/summary` on the agent-host socket — the host's
+ * own projection of the six derived fields — and from that one read produces
+ * everything the daemon owes the rest of the app:
  *
- * 1. the six derived `SessionSummary` fields, so every surface that already
- *    reads only a `SessionSummary` — tab strip, Attention Center, command
- *    palette, push gate — keeps working with no thread subscription;
+ * 1. the six `SessionSummary` fields, so every surface that already reads only
+ *    a `SessionSummary` — tab strip, Attention Center, command palette, push
+ *    gate — keeps working with no thread subscription;
  * 2. `session.activity`, resolved by the ONE ladder of `activity-ladder.ts`
- *    (never re-derived per surface), plus the three new bus events
- *    `agentChat.turn`, `agentChat.pending` and `agent.providers.changed`;
+ *    (never re-derived per surface), plus the coarse bus events;
  * 3. the "needs your input" / "finished" pushes, now produced from protocol
- *    events instead of bells and hooks, behind the existing 30 s per-session
+ *    state instead of bells and hooks, behind the existing 30 s per-session
  *    per-type debounce and §6.4's liveness suppression.
  *
- * Nothing higher-rate than this rides the daemon's bus.
+ * **Why a poll rather than a subscription.** `backgroundLiveness` lives in an
+ * in-memory registry inside the host (§3.1: "deliberately not persisted"), so
+ * no fold over `events.ndjson` can produce it and the host's per-thread event
+ * stream does not carry it — `…/summary` is its only source. The poll is
+ * scoped to threads that have an open tab, runs only while at least one
+ * exists, and is skipped entirely while the host is not healthy, so an idle
+ * daemon costs nothing. Nothing higher-rate than this ever rides the bus.
  */
 
 import type { SessionActivity, SessionActivityEvent, SessionSummary } from "@orquester/api";
 import type {
-  AgentChatPendingEventPayload,
   AgentChatSessionSummaryFields,
   AgentChatTurnEventPayload,
-  AgentProvidersChangedPayload
+  AgentProvidersChangedPayload,
+  BackgroundLiveness,
+  LatestTurnSummary,
+  ThreadSessionStatus,
+  TurnState
 } from "@orquester/api/agent-chat";
 import { SETTLED_TURN_STATES } from "@orquester/api/agent-chat";
-import { agentHostRoutes } from "../agent-host/host-protocol.ts";
+import { agentHostExtraRoutes } from "../agent-host/server/extra-routes.ts";
 import { pushTypeForFields, resolveChatActivity } from "./activity-ladder.ts";
 import type { ChatSessionManager } from "./chat-sessions.ts";
 import { AgentHostClient } from "./host-client.ts";
-import { parseAgentHostSignalFrame, type AgentHostSignalFrame } from "./host-signals.ts";
 
-/** Reconnect backoff for the signal subscription. */
-export const SIGNALS_RECONNECT_MIN_MS = 500;
-export const SIGNALS_RECONNECT_MAX_MS = 15_000;
+/**
+ * How often the open tabs' summaries are re-read. Fast enough that a tab's dot
+ * and a "needs your input" push feel immediate, slow enough to be free: each
+ * tick is one small JSON read per OPEN chat tab over a local unix socket.
+ */
+export const SUMMARY_POLL_INTERVAL_MS = 1_500;
+
+/** A read that hangs must never stall the next tick. */
+export const SUMMARY_READ_TIMEOUT_MS = 5_000;
 
 export interface SummaryBroadcaster {
   publish(channel: string, type: string, payload: unknown): void;
@@ -48,8 +62,9 @@ export interface AgentChatSummaryOptions {
   chat: ChatSessionManager;
   broadcaster: SummaryBroadcaster;
   push: SummaryPush;
+  /** False while the host is restarting or foreign — the poll then idles. */
+  isHostHealthy?: () => boolean;
   now?: () => number;
-  sleep?: (ms: number) => Promise<void>;
   logger?: { warn?: (...a: unknown[]) => void; error?: (...a: unknown[]) => void };
   /**
    * A turn reached a settled state. The supervisor's version drain-restart
@@ -58,59 +73,52 @@ export interface AgentChatSummaryOptions {
    * next 15 s health tick.
    */
   onTurnSettled?: () => void;
+  /** Test seam: replaces the interval so a test never waits on a clock. */
+  setInterval?: (fn: () => void, ms: number) => { unref?: () => void };
+  clearInterval?: (handle: unknown) => void;
 }
 
 /** What the service remembers per thread, beyond the summary itself. */
 interface ThreadState {
   fields: AgentChatSessionSummaryFields;
   activity: SessionActivity;
-  /** Open requests, so a close frame can publish the right `open: false`. */
-  pending: Map<string, { kind: "approval" | "question"; title: string }>;
 }
 
 export class AgentChatSummaryService {
   private readonly threads = new Map<string, ThreadState>();
-  private hostInstanceId: string | null = null;
-  private running = false;
-  private stream: { abort(): void } | null = null;
-  private loop: Promise<void> | null = null;
+  private timer: unknown = null;
+  private polling = false;
   private readonly now: () => number;
-  private readonly sleep: (ms: number) => Promise<void>;
-  /** Fires whenever the instance id changes (§8: clients must re-read). */
-  private readonly instanceListeners = new Set<(id: string) => void>();
 
   constructor(private readonly opts: AgentChatSummaryOptions) {
     this.now = opts.now ?? Date.now;
-    this.sleep = opts.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 
-  currentHostInstanceId(): string | null {
-    return this.hostInstanceId;
-  }
-
-  onHostInstanceChanged(listener: (id: string) => void): () => void {
-    this.instanceListeners.add(listener);
-    return () => this.instanceListeners.delete(listener);
-  }
-
-  /** Start (or restart) the subscription. Idempotent. */
+  /** Start the poll. Idempotent. */
   start(): void {
-    if (this.running) return;
-    this.running = true;
-    this.loop = this.run();
+    if (this.timer !== null) return;
+    const set = this.opts.setInterval ?? ((fn, ms) => setInterval(fn, ms));
+    const handle = set(() => void this.refreshAll(), SUMMARY_POLL_INTERVAL_MS);
+    // Unref'd: a poll must never hold the process open on shutdown.
+    handle.unref?.();
+    this.timer = handle;
   }
 
   stop(): void {
-    this.running = false;
-    this.stream?.abort();
-    this.stream = null;
-    this.instanceListeners.clear();
+    if (this.timer === null) return;
+    const clear = this.opts.clearInterval ?? ((handle: unknown) => clearInterval(handle as never));
+    clear(this.timer);
+    this.timer = null;
   }
 
-  /** Awaits the read loop's exit. Test/teardown helper. */
+  /** Awaits an in-flight tick. Test/teardown helper. */
   async stopAndWait(): Promise<void> {
     this.stop();
-    await this.loop?.catch(() => undefined);
+    // `refreshAll` is re-entrancy guarded, so once `polling` clears nothing is
+    // in flight.
+    while (this.polling) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
   }
 
   /**
@@ -126,100 +134,65 @@ export class AgentChatSummaryService {
     return this.threads.get(threadId)?.activity;
   }
 
-  /** Apply one already-parsed frame. Exposed so tests drive the fold directly. */
-  applyFrame(frame: AgentHostSignalFrame): void {
-    switch (frame.kind) {
-      case "hello": {
-        const previous = this.hostInstanceId;
-        this.hostInstanceId = frame.hostInstanceId;
-        // A restarted host is not a reconnect (§8). Its liveness registry is
-        // empty by construction, so replace rather than merge: a thread absent
-        // from `hello` has no live background work, which is correct.
-        const seen = new Set<string>();
-        for (const row of frame.threads) {
-          seen.add(row.threadId);
-          this.applyFields(row.threadId, row.fields);
-        }
-        for (const threadId of [...this.threads.keys()]) {
-          if (!seen.has(threadId)) {
-            this.applyFields(threadId, {});
-          }
-        }
-        if (previous && previous !== frame.hostInstanceId) {
-          for (const listener of [...this.instanceListeners]) {
-            try {
-              listener(frame.hostInstanceId);
-            } catch {
-              /* a listener must never break the read loop */
-            }
-          }
-        }
-        return;
-      }
-      case "thread": {
-        if (frame.gone) {
-          this.threads.delete(frame.threadId);
-          return;
-        }
-        this.applyFields(frame.threadId, frame.fields);
-        return;
-      }
-      case "turn": {
-        const payload: AgentChatTurnEventPayload = {
-          id: frame.threadId,
-          turnId: frame.turnId,
-          state: frame.state
-        };
-        if (frame.tokenUsage) payload.tokenUsage = frame.tokenUsage;
-        this.opts.broadcaster.publish("sessions", "agentChat.turn", payload);
-        if (SETTLED_TURN_STATES.has(frame.state)) {
-          this.opts.onTurnSettled?.();
-        }
-        return;
-      }
-      case "pending": {
-        const state = this.threads.get(frame.threadId);
-        if (state) {
-          if (frame.open) {
-            state.pending.set(frame.requestId, { kind: frame.requestKind, title: frame.title });
-          } else {
-            state.pending.delete(frame.requestId);
-          }
-        }
-        const payload: AgentChatPendingEventPayload = {
-          id: frame.threadId,
-          requestId: frame.requestId,
-          kind: frame.requestKind,
-          title: frame.title,
-          open: frame.open
-        };
-        this.opts.broadcaster.publish("sessions", "agentChat.pending", payload);
-        return;
-      }
-      case "providers": {
-        const payload: AgentProvidersChangedPayload = {};
-        if (frame.adapterId) payload.adapterId = frame.adapterId;
-        this.opts.broadcaster.publish("registry", "agent.providers.changed", payload);
-        return;
-      }
-      default: {
-        // Exhaustive by construction; an unknown kind never reaches here
-        // because the parser drops it.
-        const never: never = frame;
-        void never;
-      }
+  /** The coarse `agent.providers.changed` of §6.4; the client re-reads §6.3. */
+  publishProvidersChanged(payload: AgentProvidersChangedPayload = {}): void {
+    this.opts.broadcaster.publish("registry", "agent.providers.changed", payload);
+  }
+
+  /** One tick: re-read every open chat tab's summary. Never throws. */
+  async refreshAll(): Promise<void> {
+    if (this.polling) return;
+    if (this.opts.isHostHealthy && !this.opts.isHostHealthy()) return;
+    const ids = this.opts.chat.list().map((s) => s.id);
+    if (ids.length === 0) {
+      // Nothing open: drop any stale state and do no I/O at all.
+      this.threads.clear();
+      return;
+    }
+    this.polling = true;
+    try {
+      await Promise.all(ids.map((id) => this.refreshThread(id)));
+    } finally {
+      this.polling = false;
     }
   }
 
-  // --- internals -----------------------------------------------------------
+  /**
+   * Read one thread's summary and fold it in. A read that fails leaves the last
+   * known state alone rather than blanking the tab: a host restarting mid-poll
+   * must not make every tab flicker to "unknown".
+   */
+  async refreshThread(threadId: string): Promise<void> {
+    let raw: unknown;
+    try {
+      const response = await this.opts.client.json<unknown>(
+        "GET",
+        agentHostExtraRoutes.summary(threadId),
+        undefined,
+        { timeoutMs: SUMMARY_READ_TIMEOUT_MS }
+      );
+      if (response.status === 404) {
+        // The host has no such thread (deleted there, or never created).
+        this.threads.delete(threadId);
+        return;
+      }
+      if (response.status !== 200) return;
+      raw = response.value;
+    } catch {
+      return;
+    }
+    this.applyFields(threadId, sanitizeFields(raw));
+  }
 
   /**
-   * Merge the six fields onto the tab, resolve the ladder, broadcast the
-   * activity when it changed, and push.
+   * Merge the six fields onto the tab, resolve the ladder, broadcast what
+   * changed, and push.
+   *
+   * Exposed so tests drive the fold directly, without a host.
    */
-  private applyFields(threadId: string, fields: AgentChatSessionSummaryFields): void {
+  applyFields(threadId: string, fields: AgentChatSessionSummaryFields): void {
     if (!this.opts.chat.has(threadId)) {
-      // A thread the daemon has no tab for (deleted here, still live there).
+      // A thread the daemon has no tab for (closed here, still live there).
       this.threads.delete(threadId);
       return;
     }
@@ -240,14 +213,9 @@ export class AgentChatSummaryService {
             ? nowIso
             : (previous?.activity.needsAttentionAt ?? nowIso)
     };
-    const state: ThreadState = {
-      fields,
-      activity,
-      pending: previous?.pending ?? new Map()
-    };
-    this.threads.set(threadId, state);
+    this.threads.set(threadId, { fields, activity });
 
-    // The tab's own copy of the six fields (the tab strip reads it off the
+    // The tab's own copy of the six fields (the tab strip reads them off the
     // summary), published only when one actually moved.
     this.opts.chat.applyFields(threadId, fields);
     this.opts.chat.setActivity(threadId, activity);
@@ -263,7 +231,9 @@ export class AgentChatSummaryService {
       } satisfies SessionActivityEvent);
     }
 
-    // Push only on a NEW attention, never on every frame that keeps it raised.
+    this.publishTurnTransition(threadId, previous?.fields.latestTurn ?? null, fields.latestTurn ?? null);
+
+    // Push only on a NEW attention, never on every tick that keeps it raised.
     if (!attentionChanged || resolution.attention === null) {
       return;
     }
@@ -274,63 +244,65 @@ export class AgentChatSummaryService {
     void this.opts.push.notifyStructural(summary, pushType);
   }
 
-  private async run(): Promise<void> {
-    let backoff = SIGNALS_RECONNECT_MIN_MS;
-    while (this.running) {
-      try {
-        const opened = await this.opts.client.open("GET", agentHostRoutes.signals, {
-          headers: { accept: "application/x-ndjson" },
-          // The headers must arrive promptly; the BODY is deliberately endless.
-          timeoutMs: 10_000
-        });
-        this.stream = opened;
-        if (opened.status !== 200) {
-          opened.abort();
-          this.stream = null;
-          if (opened.status === 404) {
-            // A host build that does not serve `/signals` yet: back off to the
-            // ceiling rather than hammering it, and say so once.
-            this.opts.logger?.warn?.(
-              "agent host does not serve /signals; chat tabs will have no derived activity"
-            );
-            backoff = SIGNALS_RECONNECT_MAX_MS;
-          }
-          throw new Error(`agent host /signals answered ${opened.status}`);
-        }
-        backoff = SIGNALS_RECONNECT_MIN_MS;
-        await this.consume(opened.body);
-      } catch (error) {
-        if (!this.running) return;
-        this.opts.logger?.warn?.("agent host signal stream ended", error);
-      } finally {
-        this.stream = null;
-      }
-      if (!this.running) return;
-      await this.sleep(backoff);
-      backoff = Math.min(SIGNALS_RECONNECT_MAX_MS, backoff * 2);
+  /** `agentChat.turn` — one per turn transition. Nothing higher-rate rides the bus. */
+  private publishTurnTransition(
+    threadId: string,
+    before: LatestTurnSummary | null,
+    after: LatestTurnSummary | null
+  ): void {
+    if (!after) return;
+    if (before && before.turnId === after.turnId && before.state === after.state) return;
+    const payload: AgentChatTurnEventPayload = {
+      id: threadId,
+      turnId: after.turnId,
+      state: after.state
+    };
+    this.opts.broadcaster.publish("sessions", "agentChat.turn", payload);
+    if (SETTLED_TURN_STATES.has(after.state)) {
+      this.opts.onTurnSettled?.();
     }
   }
+}
 
-  private async consume(body: AsyncIterable<unknown>): Promise<void> {
-    let remainder = "";
-    for await (const chunk of body) {
-      if (!this.running) return;
-      remainder += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
-      let newline = remainder.indexOf("\n");
-      while (newline >= 0) {
-        const line = remainder.slice(0, newline);
-        remainder = remainder.slice(newline + 1);
-        const frame = parseAgentHostSignalFrame(line);
-        if (frame) {
-          try {
-            this.applyFrame(frame);
-          } catch (error) {
-            // A bad frame may only lose that frame — never the subscription.
-            this.opts.logger?.error?.("agent chat signal frame failed", error);
-          }
-        }
-        newline = remainder.indexOf("\n");
-      }
+/**
+ * Keep only the six §6.4 fields, each only when it has the right shape.
+ *
+ * This is another process's JSON reaching typed code, so it goes through
+ * field-wise validation with a fallback exactly as AGENTS.md requires of every
+ * persisted/adapter load: a field written by a newer host with an unexpected
+ * type is dropped rather than trusted, because the ladder branches on it.
+ */
+export function sanitizeFields(value: unknown): AgentChatSessionSummaryFields {
+  const fields: AgentChatSessionSummaryFields = {};
+  if (!value || typeof value !== "object") {
+    return fields;
+  }
+  const row = value as Record<string, unknown>;
+  if (typeof row.hasPendingApprovals === "boolean") fields.hasPendingApprovals = row.hasPendingApprovals;
+  if (typeof row.hasPendingUserInput === "boolean") fields.hasPendingUserInput = row.hasPendingUserInput;
+  if (typeof row.hasActionableProposedPlan === "boolean") {
+    fields.hasActionableProposedPlan = row.hasActionableProposedPlan;
+  }
+  if (row.backgroundLiveness === "working" || row.backgroundLiveness === "monitoring") {
+    fields.backgroundLiveness = row.backgroundLiveness as BackgroundLiveness;
+  } else if (row.backgroundLiveness === null) {
+    fields.backgroundLiveness = null;
+  }
+  if (row.latestTurn === null) {
+    fields.latestTurn = null;
+  } else if (row.latestTurn && typeof row.latestTurn === "object") {
+    const turn = row.latestTurn as Record<string, unknown>;
+    if (typeof turn.state === "string") {
+      fields.latestTurn = {
+        turnId: typeof turn.turnId === "string" ? turn.turnId : null,
+        state: turn.state as TurnState,
+        startedAt: typeof turn.startedAt === "string" ? turn.startedAt : null,
+        completedAt: typeof turn.completedAt === "string" ? turn.completedAt : null
+      };
     }
   }
+  if (typeof row.chatSessionStatus === "string") {
+    fields.chatSessionStatus = row.chatSessionStatus as ThreadSessionStatus;
+  }
+  return fields;
 }
