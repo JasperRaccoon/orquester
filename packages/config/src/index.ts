@@ -735,7 +735,20 @@ export const sessionRecordSchema = z.object({
 
 export const sessionsConfigSchema = z.object({
   version: z.literal(1).default(1),
-  sessions: z.array(sessionRecordSchema).default([])
+  sessions: z.array(sessionRecordSchema).default([]),
+  /**
+   * Agent-chat threads whose tab is gone but whose host-side delete has not
+   * been acknowledged (chat spec §6.1's cascade).
+   *
+   * The delete is one hop over the host socket, and the host can be down at the
+   * moment the user closes a tab. Without this the `thread.deleted` event is
+   * never written, and §3.3's reconcile then finds an orphan with a cursor and
+   * a continuation marker and RESUMES it — a provider child and tokens spent
+   * for a tab nobody is looking at. Queued here so the retry survives the
+   * daemon restart that is most likely to happen in between, and replayed the
+   * moment a host is adopted.
+   */
+  pendingThreadDeletes: z.array(z.string().min(1)).default([])
 });
 
 export type SessionRecord = z.infer<typeof sessionRecordSchema>;
@@ -989,7 +1002,11 @@ export function createDefaultSessionsConfig(): SessionsConfig {
  */
 export function parseSessionsConfig(value: unknown): SessionsConfig {
   const outer = z
-    .object({ version: z.literal(1).default(1), sessions: z.array(z.unknown()).default([]) })
+    .object({
+      version: z.literal(1).default(1),
+      sessions: z.array(z.unknown()).default([]),
+      pendingThreadDeletes: z.array(z.unknown()).default([])
+    })
     .parse(value);
   const sessions: SessionRecord[] = [];
   for (const entry of outer.sessions) {
@@ -998,7 +1015,12 @@ export function parseSessionsConfig(value: unknown): SessionsConfig {
       sessions.push(parsed.data);
     }
   }
-  return { version: 1, sessions };
+  // Entry-wise tolerant too: a malformed id drops that one retry, never the
+  // whole queue (and never the index).
+  const pendingThreadDeletes = outer.pendingThreadDeletes.filter(
+    (id): id is string => typeof id === "string" && id.length > 0
+  );
+  return { version: 1, sessions, pendingThreadDeletes };
 }
 
 // todos.json — the daemon's index of synced to-do lists. One record per list;

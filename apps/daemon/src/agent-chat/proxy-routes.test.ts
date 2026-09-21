@@ -72,7 +72,10 @@ interface Harness {
   close(): Promise<void>;
 }
 
-async function makeHarness(sessions: Record<string, SessionSummary | undefined> = {}): Promise<Harness> {
+async function makeHarness(
+  sessions: Record<string, SessionSummary | undefined> = {},
+  attachments: Record<string, string> = {}
+): Promise<Harness> {
   const host = await makeFakeHost();
   const app = Fastify({ logger: false });
   const harness: Partial<Harness> = { host, healthy: true, seqs: [], restarts: 0, providerBroadcasts: [] };
@@ -85,7 +88,10 @@ async function makeHarness(sessions: Record<string, SessionSummary | undefined> 
       harness.restarts = (harness.restarts ?? 0) + 1;
       return { hostInstanceId: "host-2", markedThreadIds: ["t1"] };
     },
-    onProvidersChanged: (adapterId) => harness.providerBroadcasts?.push(adapterId)
+    onProvidersChanged: (adapterId) => harness.providerBroadcasts?.push(adapterId),
+    attachmentPath: async (_sessionId, attachmentId) =>
+      attachments[attachmentId] === undefined ? null : attachments[attachmentId],
+    sendAttachment: async (reply, path) => reply.code(200).send({ streamed: path })
   });
   await app.ready();
   harness.app = app;
@@ -275,6 +281,33 @@ test("a refresh broadcasts agent.providers.changed ONLY when it changed somethin
       .end(JSON.stringify({ provider: { id: "codex" }, changed: true }));
   await h.app.inject({ method: "POST", url: agentChatRoutes.providerRefresh("codex"), payload: {} });
   assert.deepEqual(h.providerBroadcasts, ["codex"]);
+  await h.close();
+});
+
+test("§6.3 attachment read-back resolves through the host and streams the file", async () => {
+  // `/api/fs/download` cannot serve these: it is confined to `fsRoot` and the
+  // thread's attachments live under the appdir. The host owns the namespace.
+  const h = await makeHarness({ t1: tab("t1") }, { "att-1": "/appdir/threads/t1/attachments/a.png" });
+  const ok = await h.app.inject({ method: "GET", url: agentChatRoutes.attachment("t1", "att-1") });
+  assert.equal(ok.statusCode, 200);
+  assert.deepEqual(ok.json(), { streamed: "/appdir/threads/t1/attachments/a.png" });
+
+  const missing = await h.app.inject({
+    method: "GET",
+    url: agentChatRoutes.attachment("t1", "nope")
+  });
+  assert.equal(missing.statusCode, 404);
+
+  const ghost = await h.app.inject({
+    method: "GET",
+    url: agentChatRoutes.attachment("ghost", "att-1")
+  });
+  assert.equal(ghost.statusCode, 404);
+  assert.equal(ghost.json().error.code, "THREAD_NOT_FOUND");
+
+  h.healthy = false;
+  const down = await h.app.inject({ method: "GET", url: agentChatRoutes.attachment("t1", "att-1") });
+  assert.equal(down.statusCode, 503);
   await h.close();
 });
 
