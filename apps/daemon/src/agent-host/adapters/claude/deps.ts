@@ -36,8 +36,17 @@ export interface ClaudeAdapterDeps {
    * The §3.1 windows, so a test asserts an expired deadline's behaviour
    * without waiting one out — §9's "nothing waits on a timer".
    */
-  deadlines: { handshakeMs: number; cancelMs: number };
+  deadlines: { handshakeMs: number; cancelMs: number; compactMs: number };
 }
+
+/**
+ * A `/compact` turn is an ordinary turn that can legitimately take minutes on a
+ * long thread (the capture measured 10.3 s on a small one), so it gets its own
+ * window rather than the cancel one — but it is still bounded, because an
+ * unbounded wait latches the host's `compacting` flag and silently queues every
+ * later message (§3.1 "every step that waits on a child has a deadline").
+ */
+export const CLAUDE_COMPACT_DEADLINE_MS = 10 * 60_000;
 
 export function defaultClaudeAdapterDeps(): ClaudeAdapterDeps {
   return {
@@ -45,7 +54,8 @@ export function defaultClaudeAdapterDeps(): ClaudeAdapterDeps {
     spawn: spawnProviderChild,
     deadlines: {
       handshakeMs: AGENT_HOST_DEADLINES.handshakeMs,
-      cancelMs: AGENT_HOST_DEADLINES.cancelMs
+      cancelMs: AGENT_HOST_DEADLINES.cancelMs,
+      compactMs: CLAUDE_COMPACT_DEADLINE_MS
     },
     setTimer: (fn, ms) => setTimeout(fn, ms),
     clearTimer: (handle) => {

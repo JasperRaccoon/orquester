@@ -12,7 +12,7 @@ import {
   type AgentChatThreadState
 } from "./store";
 import { AgentChatCommandError, type AgentChatTransport } from "./transport";
-import { activity, ev, message, resetBuilders, snapshot, stamp } from "./test-helpers";
+import { activity, ev, head, message, resetBuilders, snapshot, stamp } from "./test-helpers";
 
 interface Posted {
   name: AgentChatCommandName;
@@ -35,7 +35,7 @@ function fakeTransport(): {
     stream(_sessionId, _options, handlers) {
       streams += 1;
       onFrame = handlers.onFrame;
-      return { lastSeq: 0, hostInstanceId: null, close: () => {} };
+      return { lastSeq: 0, hostInstanceId: null, resetCursor: () => {}, close: () => {} };
     },
     async command(_sessionId, name, body) {
       if (failures && failures.times > 0) {
@@ -221,6 +221,23 @@ describe("commands", () => {
     void state;
   });
 
+  it("holds `reverting` for the length of the revert and clears it even on failure", async () => {
+    // §7.5's ONE reason the composer goes inert. It used to be hard-coded
+    // `false` in the view with nothing to set it, so a turn could be typed and
+    // sent into the middle of the host rewriting the thread.
+    const { api, state } = await store();
+    assert.equal(state().reverting, false);
+    const inFlight = api.getState().actions.revert({ targetTurnCount: 1 });
+    assert.equal(state().reverting, true, "inert while the command is out");
+    await inFlight;
+    assert.equal(state().reverting, false);
+
+    const failing = await store();
+    failing.fake.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "no"), 99);
+    await assert.rejects(() => failing.api.getState().actions.revert({ targetTurnCount: 1 }));
+    assert.equal(failing.state().reverting, false, "a refusal must not leave it inert forever");
+  });
+
   it("locks the row while a decision is in flight and clears it in a finally", async () => {
     const { api, fake, state } = await store();
     fake.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "stale"), 99);
@@ -250,7 +267,16 @@ describe("the queued-message model", () => {
   it("stamps the anchor from the latest completed tool activity", async () => {
     const { api, fake, state } = await store();
     const completed = activity("tool.completed", { itemType: "command_execution", command: "ls" });
-    fake.push({ kind: "snapshot", thread: snapshot({ items: [completed], seq: 1 }) });
+    // A RUNNING turn, so the message waits on the next boundary and its anchor
+    // is observable — on an idle thread the drive loop sends it at once (R7-1).
+    fake.push({
+      kind: "snapshot",
+      thread: snapshot({
+        items: [completed],
+        seq: 1,
+        head: head({ session: { status: "running", activeTurnId: "t1" } })
+      })
+    });
 
     api.getState().actions.queueMessage(draft("later"));
     assert.equal(
@@ -285,7 +311,14 @@ describe("the queued-message model", () => {
   it("re-anchors the remainder when one message leaves", async () => {
     const { api, fake, state } = await store();
     const completed = activity("tool.completed", { itemType: "command_execution", command: "ls" });
-    fake.push({ kind: "snapshot", thread: snapshot({ items: [completed], seq: 1 }) });
+    fake.push({
+      kind: "snapshot",
+      thread: snapshot({
+        items: [completed],
+        seq: 1,
+        head: head({ session: { status: "running", activeTurnId: "t1" } })
+      })
+    });
     api.getState().actions.queueMessage(draft("one"));
     api.getState().actions.queueMessage(draft("two"));
     const headId = state().slice.queue[0]!.id;

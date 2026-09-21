@@ -109,6 +109,16 @@ test("an expanded group header has NO bottom padding, its members have 4px", () 
   );
 });
 
+test("a `/compact` submission takes the marker's spacing, not a bubble's", () => {
+  // R2-4: it renders as a compaction marker (§4.6.5(b)), so a 16px
+  // conversation gap around a hairline would read as a turn boundary.
+  const row = messageRow("user");
+  row.message.text = "/compact";
+  assert.equal(rowBottomPadding(row), "pb-2");
+  row.message.text = "/compact the thread";
+  assert.equal(rowBottomPadding(row), "pb-4");
+});
+
 test("the turn fold and the working row sit at 6px", () => {
   assert.equal(
     rowBottomPadding({ kind: "turn-fold", id: "f", createdAt: "", turnId: "t", label: "Worked for 3s", expanded: false }),

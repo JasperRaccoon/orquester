@@ -10,8 +10,9 @@
  * Every wait on that child has a deadline (§3.1); an expired one kills it.
  */
 
+import { createRequire } from "node:module";
 import * as nodePath from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { forkSession, getSessionMessages } from "@anthropic-ai/claude-agent-sdk";
 
@@ -23,6 +24,21 @@ export const HISTORY_WORKER_PATH = nodePath.resolve(
   nodePath.dirname(fileURLToPath(import.meta.url)),
   "history-worker.ts"
 );
+
+/**
+ * `--import tsx` is resolved by node against the child's **cwd**, and the
+ * worker's cwd is the thread's project directory — which has no
+ * `node_modules` of its own. A bare specifier therefore failed with
+ * `ERR_MODULE_NOT_FOUND: Cannot find package 'tsx'` and the worker never
+ * started, so this is resolved from THIS module's own location instead.
+ */
+export const TSX_IMPORT_SPECIFIER = ((): string => {
+  try {
+    return pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
+  } catch {
+    return "tsx";
+  }
+})();
 
 /** A bounded window for one history read or fork. */
 export const HISTORY_DEADLINE_MS = 30_000;
@@ -49,6 +65,8 @@ export interface ClaudeHistoryReaderOptions {
   /** Overridden in tests. */
   spawn?: typeof spawnProviderChild;
   nodePath?: string;
+  /** Overridden in tests, so a real child can be driven through this path. */
+  workerPath?: string;
 }
 
 function collect(stream: NodeJS.ReadableStream): Promise<string> {
@@ -63,6 +81,25 @@ function collect(stream: NodeJS.ReadableStream): Promise<string> {
   });
 }
 
+/**
+ * A worker payload that does not parse is a **named** refusal, never a raw
+ * `SyntaxError`: a truncated or empty stdout is exactly what a crashed or
+ * killed worker produces, and "Unexpected end of JSON input" tells the user
+ * nothing about their rewind.
+ */
+function parseWorkerPayload(raw: string, what: string): unknown {
+  if (raw.trim().length === 0) {
+    throw new Error(`Could not ${what}: the history worker produced no output.`);
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new Error(
+      `Could not ${what}: the history worker's output was incomplete (${raw.length} bytes).`
+    );
+  }
+}
+
 export function createClaudeHistoryReader(
   options: ClaudeHistoryReaderOptions
 ): ClaudeHistoryReader {
@@ -72,7 +109,14 @@ export function createClaudeHistoryReader(
   const runWorker = async (method: string, sessionId: string, args: object): Promise<string> => {
     const child = spawn({
       command: options.nodePath ?? process.execPath,
-      args: ["--import", "tsx", HISTORY_WORKER_PATH, method, sessionId, JSON.stringify(args)],
+      args: [
+        "--import",
+        TSX_IMPORT_SPECIFIER,
+        options.workerPath ?? HISTORY_WORKER_PATH,
+        method,
+        sessionId,
+        JSON.stringify(args)
+      ],
       env: { ...options.env, ELECTRON_RUN_AS_NODE: "1" },
       cwd: options.cwd
     });
@@ -107,7 +151,7 @@ export function createClaudeHistoryReader(
         return messages as unknown as ClaudeHistoryMessage[];
       }
       const raw = await runWorker("getSessionMessages", sessionId, readOptions);
-      const parsed: unknown = JSON.parse(raw);
+      const parsed = parseWorkerPayload(raw, "read the Claude conversation history");
       return Array.isArray(parsed) ? (parsed as ClaudeHistoryMessage[]) : [];
     },
 
@@ -124,7 +168,7 @@ export function createClaudeHistoryReader(
         return { sessionId: result.sessionId };
       }
       const raw = await runWorker("forkSession", sessionId, forkOptions);
-      const parsed: unknown = JSON.parse(raw);
+      const parsed = parseWorkerPayload(raw, "fork the Claude conversation");
       const forked =
         parsed !== null && typeof parsed === "object"
           ? (parsed as { sessionId?: unknown }).sessionId

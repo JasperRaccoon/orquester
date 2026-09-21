@@ -1208,11 +1208,14 @@ function demuxChild(
       // A child's todo list is its own plan, not the thread's. It rides the
       // roster as a progress summary rather than overwriting `turn.plan`.
       const agent = ensureChildAgent(state, childSessionId);
-      const open = event.properties.todos.filter(
-        (todo) => todo.status !== "completed" && todo.status !== "cancelled"
-      ).length;
+      // A cancelled step counts in NEITHER the numerator nor the denominator —
+      // it is not done, and it is no longer planned. The parent path drops
+      // cancelled rows from `turn.plan.updated` for the same reason; counting
+      // them as done read "2/3" for one completed, one cancelled, one pending.
+      const planned = event.properties.todos.filter((todo) => todo.status !== "cancelled");
+      const done = planned.filter((todo) => todo.status === "completed").length;
       emitTaskProgress(state, agent, raw, out, {
-        summary: `${event.properties.todos.length - open}/${event.properties.todos.length} steps done`
+        summary: `${done}/${planned.length} steps done`
       });
       return;
     }

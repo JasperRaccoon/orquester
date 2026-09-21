@@ -4,9 +4,14 @@
  * `spawnProviderChild` path the real `opencode serve` uses. It prints the real
  * readiness line, serves `/global/health`, and can be told to misbehave.
  *
- * That means the spawn, the stdout scrape, the 30 s handshake deadline, the
- * auth header, the version gate and the process-group kill are all exercised
+ * That means the spawn, the stdout scrape, the handshake deadline, the auth
+ * header, the version gate and the refcounted lifecycle are all exercised
  * without an account, a network call or the real CLI.
+ *
+ * **Not covered here**, and deliberately said out loud rather than implied:
+ * the peer spawns no grandchild, so nothing asserts `process.kill(-pid)`
+ * reaches a whole process group — the reason `detached: true` is set. The
+ * `OPENCODE_CONFIG_CONTENT` precedence is likewise unverified.
  *
  * Nothing here waits on a timer: every assertion waits on a readiness line, a
  * health response or a child exit.
@@ -19,7 +24,12 @@ import { join } from "node:path";
 import test from "node:test";
 
 import type { AdapterLogger } from "../../adapter.ts";
-import { OpenCodeServerPool, parseServerUrl, probeFreePort } from "./server.ts";
+import {
+  OpenCodeServerPool,
+  parseServerUrl,
+  probeFreePort,
+  trimToLastLines
+} from "./server.ts";
 import { basicAuthHeader } from "./http.ts";
 import { MINIMUM_OPENCODE_VERSION } from "./semver.ts";
 
@@ -417,6 +427,77 @@ test("concurrent acquires for one project collapse onto a single start", async (
     controller.abort();
     peer.cleanup();
   }
+});
+
+test("a dead server is not reported as live by pool.list()", async () => {
+  // R4 #22: `list()` read `entry.started` unconditionally, so between the
+  // child's exit and the next `acquire` host diagnostics showed a dead pid.
+  const peer = makePeer();
+  const controller = new AbortController();
+  const pool = new OpenCodeServerPool({
+    logger: silentLogger,
+    resolveBin: async () => peer.bin,
+    buildEnv: () => ({
+      PATH: process.env.PATH ?? "",
+      HOME: peer.dir,
+      TMPDIR: peer.dir,
+      MOCK_MODE: "ok"
+    }),
+    signal: controller.signal,
+    // Long idle window: the reference is still held, so only the child's death
+    // can clear the entry.
+    idleCloseMs: 60_000
+  });
+  try {
+    const handle = await pool.acquire(peer.dir);
+    assert.equal(pool.list().length, 1);
+    // Kill it out from under the pool, as a crash would. The whole group,
+    // because the shim's `sh` is the direct child.
+    process.kill(-handle.pid!, "SIGKILL");
+    await handle.exited;
+    assert.deepEqual(pool.list(), [], "a dead child must not be listed as live");
+    handle.release();
+  } finally {
+    await pool.stopAll();
+    controller.abort();
+    peer.cleanup();
+  }
+});
+
+test("the startup buffer is trimmed on a LINE boundary", () => {
+  // R4 #23: front-truncating mid-line makes the line-oriented scrape skip a
+  // real readiness line, and a healthy server is then killed at the deadline.
+  const noiseLine = "x".repeat(50);
+  const noise = `${noiseLine}\n`.repeat(10);
+  const ready = "opencode server listening on http://127.0.0.1:12345\n";
+  const full = noise + ready;
+  const trimmed = trimToLastLines(full, 120);
+  assert.ok(trimmed.length < full.length, "it really did trim");
+  assert.equal(
+    parseServerUrl(trimmed),
+    "http://127.0.0.1:12345",
+    "the readiness line survives intact"
+  );
+  // The invariant: the head is never a PARTIAL line. Every retained line is a
+  // whole one, so the first is either a complete noise line or the ready line.
+  for (const line of trimmed.split("\n").slice(0, -1)) {
+    assert.ok(
+      line === noiseLine || line === ready.trimEnd(),
+      `retained a partial line: ${JSON.stringify(line)}`
+    );
+  }
+
+  // With the old front-slice the scrape would have missed it entirely.
+  const naive = full.slice(-120);
+  assert.equal(parseServerUrl(naive), "http://127.0.0.1:12345");
+  // …and one character further in, the naive slice severs the ready line.
+  assert.equal(parseServerUrl(full.slice(-30)), null, "the bug this guards against");
+});
+
+test("trimToLastLines keeps short text untouched and never returns a partial head", () => {
+  assert.equal(trimToLastLines("short\n", 100), "short\n");
+  const trimmed = trimToLastLines("aaaa\nbbbb\ncccc\n", 6);
+  assert.ok(["cccc\n", "bbbb\ncccc\n"].includes(trimmed), `got ${JSON.stringify(trimmed)}`);
 });
 
 test("stopAll kills every server, refcount notwithstanding", async () => {

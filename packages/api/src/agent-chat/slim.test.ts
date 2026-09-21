@@ -154,8 +154,38 @@ test("the status re-stamp still runs when there is no data record to rebuild", (
 test("every string is capped at 16 KiB and the row flagged truncated", () => {
   const huge = "a".repeat(SLIM_MAX_STRING_BYTES + 1_000);
   const slim = record(slimActivityPayload({ itemType: "error", detail: huge, data: {} }));
-  assert.equal((slim.detail as string).length, SLIM_MAX_STRING_BYTES + 1);
+  const detail = slim.detail as string;
+  assert.equal(byteLength(detail), SLIM_MAX_STRING_BYTES + byteLength("\u2026"));
   assert.equal(slim.truncated, true);
+});
+
+/** The cap is stated in BYTES, so the test measures bytes. */
+function byteLength(value: string): number {
+  return new TextEncoder().encode(value).length;
+}
+
+test("the cap counts UTF-8 bytes, not UTF-16 code units", () => {
+  // R5 #16: `value.length` let a CJK string reach ~3x the stated cap, and an
+  // emoji string ~2x (a surrogate pair is 2 units but 4 bytes).
+  for (const unit of ["世", "🙂"]) {
+    const huge = unit.repeat(SLIM_MAX_STRING_BYTES);
+    const slim = record(slimActivityPayload({ itemType: "error", detail: huge, data: {} }));
+    const detail = slim.detail as string;
+    assert.ok(
+      byteLength(detail) <= SLIM_MAX_STRING_BYTES + byteLength("\u2026"),
+      `${unit}: ${byteLength(detail)} bytes exceeds the cap`
+    );
+    assert.equal(slim.truncated, true);
+    // Never split a surrogate pair: the result must round-trip through UTF-8.
+    assert.ok(!/[\uD800-\uDBFF]$/.test(detail.slice(0, -1)), `${unit}: lone high surrogate`);
+  }
+});
+
+test("a multi-byte string that fits is returned by identity", () => {
+  const payload = { itemType: "error", detail: "世".repeat(100), data: {} };
+  const slim = record(slimActivityPayload(payload));
+  assert.equal(slim.detail, payload.detail);
+  assert.equal(slim.truncated, undefined);
 });
 
 test("the task linkage bundle survives slimming so the roster still folds", () => {

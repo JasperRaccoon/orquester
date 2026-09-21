@@ -36,8 +36,14 @@ export interface ChatSessionLifecycle {
   create(req: CreateSessionRequest): Promise<SessionSummary>;
   /** Cascade the host-side thread delete (§6.1). Best-effort; never throws. */
   onClose(id: string): void;
-  /** Append the host's `thread.meta-updated` for a rename (§6.1). */
-  onRename(id: string, title: string): void;
+  /**
+   * Append the host's `thread.meta-updated` for a rename (§6.1).
+   *
+   * `opts.seed` says this is the client's auto-seed from the first message,
+   * not a rename the user typed — the host must leave such a title
+   * replaceable by a provider retitle (§5.1, §7.7).
+   */
+  onRename(id: string, title: string, opts?: { seed?: boolean }): void;
 }
 
 export class ChatAwareSessionManager implements ISessionManager {
@@ -111,11 +117,11 @@ export class ChatAwareSessionManager implements ISessionManager {
     this.pty.closeByProjectPrefix(prefix);
   }
 
-  rename(id: string, title: string): SessionSummary | undefined {
+  rename(id: string, title: string, opts?: { seed?: boolean }): SessionSummary | undefined {
     if (this.chat.has(id)) {
       const current = this.chat.get(id);
       const renamed = this.chat.rename(id, title, current?.refId ?? id);
-      if (renamed) this.hooks.onRename(id, renamed.title);
+      if (renamed) this.hooks.onRename(id, renamed.title, opts);
       return renamed;
     }
     return this.pty.rename(id, title);

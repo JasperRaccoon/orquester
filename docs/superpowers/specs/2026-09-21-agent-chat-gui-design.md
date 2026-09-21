@@ -2219,11 +2219,23 @@ The terminal key bar does not mount for chat tabs. `Transporter` gains
 `agentChat: {stream(sessionId, after), command(sessionId, name, body), read(sessionId, …)}` on
 both HTTP and desktop-local transports.
 
-One `AgentChatView` instance serves every chat tab in a project: switching tabs changes props,
-never the component identity, and the outgoing thread's rows keep painting until the next
-thread's snapshot lands, so a tab switch never flashes an empty timeline. While that hold is in
-effect every row callback is a no-op, so a click lands on the thread the user is actually looking
-at.
+The outgoing thread's rows keep painting until the next thread's snapshot lands, so a tab switch
+never flashes an empty timeline. While that hold is in effect every row callback is a no-op, so a
+click lands on the thread the user is actually looking at.
+
+**One instance per chat tab, not one per project (amended).** The design first said a single
+`AgentChatView` instance serves every chat tab, the way T3 reuses one unkeyed `ChatView` across
+thread navigation. That does not fit this shell: `MainView` keeps *every* tab mounted and toggles
+visibility, which is what makes grid view work and what stops a terminal being torn down, so a
+chat tab is mounted per tab and a switch is show/hide. This is strictly stronger for the property
+the original rule protected — the outgoing tab is never unmounted, so a switch *cannot* flash —
+and the paint hold is implemented anyway, engaging on a reconnect re-snapshot and on any change of
+the `session.id` prop.
+
+It has one consequence the rest of this section depends on: **several chat tabs are live at once**,
+each with its own `window`/`document` keyboard listeners. Every such listener must therefore act
+only for the visible tab (`isActiveChatTab(sessionId)`, published by the shell), or one chord
+sends a queued message, answers a question or stops a turn in a thread the user cannot see.
 *T3: `apps/web/src/components/ThreadRouteView.tsx:197-206` — server threads render unkeyed so one `ChatView` instance is reused across thread navigation; `apps/web/src/components/ChatView.logic.ts:374-405` — `isPaintOnlyThreadTimeline` / `resolveThreadSwitchTimeline` keep painting the previous snapshot while the next loads; `apps/web/src/components/ChatView.tsx:3542-3552, 9879-9889` — callbacks and `isWorking` neutralised during the hold*
 
 **The tab strip and every ambient surface read a shell, never a thread.** `SessionSummary` for a

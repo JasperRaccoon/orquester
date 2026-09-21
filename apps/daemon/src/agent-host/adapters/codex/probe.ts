@@ -36,8 +36,8 @@ import { usageWindowsFromRateLimits } from "./usage.ts";
  * `command.list` has no Codex equivalent (§4.6.2).
  *
  * `/compact` is the host-synthesised entry of §4.6.3 (compaction is a host
- * route), `/feedback` is Codex's own. `/effort` is added by the caller only
- * when the selected model exposes a reasoning descriptor.
+ * route), `/feedback` is Codex's own. `/effort` is NOT here — it is
+ * client-only (see {@link codexSlashCommands}).
  *
  * *T3: `apps/server/src/provider/Layers/CodexProvider.ts:680-687` — the whole
  * Codex command catalog is these two hard-coded rows.*
@@ -48,31 +48,28 @@ export const CODEX_SLASH_COMMANDS: readonly SlashCommand[] = [
 ] as const;
 
 /**
- * `/effort`, synthesised per §4.6.3 **only** when a model actually exposes a
- * reasoning descriptor. T3 has no such command; Orquester adds it because
- * effort is the single most-changed knob in an agent session, and it writes
- * the `effort` option of the current `ModelSelection` and nothing else.
+ * The catalogue this adapter publishes (§4.6.3).
+ *
+ * **`/effort` is deliberately NOT here.** It is a CLIENT-ONLY affordance
+ * (§4.6.5(a)): selecting it writes the `effort` option of the current
+ * `ModelSelection` and inserts nothing into the draft. Synthesising a
+ * *provider* `/effort` row put two entries in the menu, and picking the
+ * provider one inserted the literal text `/effort ` and forwarded it to a CLI
+ * that does not implement the command (R2 finding 2; fix-wave arbitration).
+ * `/compact` is the only host entry that belongs in a provider catalog.
  */
-export const CODEX_EFFORT_COMMAND: SlashCommand = {
-  name: "effort",
-  description: "Set the reasoning effort for this thread",
-  input: { hint: "low | medium | high | xhigh | max" }
-};
-
-/** The catalogue as one provider's models allow it (§4.6.3). */
 export function codexSlashCommands(models: readonly ProviderModel[]): SlashCommand[] {
-  const hasEffort = models.some((model) =>
-    model.capabilities?.optionDescriptors?.some((descriptor) => descriptor.id === "effort")
-  );
-  return hasEffort
-    ? [...CODEX_SLASH_COMMANDS, CODEX_EFFORT_COMMAND]
-    : [...CODEX_SLASH_COMMANDS];
+  void models;
+  return [...CODEX_SLASH_COMMANDS];
 }
 
 /**
  * The menu's empty state when the catalogue is what it is. Orquester treats
  * Codex's missing command catalog as a **known gap** and says so, rather than
  * letting an empty list read as a failed probe (§4.6.2 "differs").
+ *
+ * Carried on the snapshot as `commandCatalogNote` so the composer can render
+ * it; a constant nothing reads never reaches a user (R2 finding 9).
  */
 export const CODEX_COMMAND_CATALOG_NOTE = "Codex reports no commands";
 
@@ -167,6 +164,7 @@ export async function probeCodex(input: CodexProbeInput): Promise<ProviderSnapsh
       checkedAt: nowIso,
       models: [],
       slashCommands: [...CODEX_SLASH_COMMANDS],
+      commandCatalogNote: CODEX_COMMAND_CATALOG_NOTE,
       skills: [],
       capabilities: CODEX_ADAPTER_CAPABILITIES
     };
@@ -196,6 +194,7 @@ export async function probeCodex(input: CodexProbeInput): Promise<ProviderSnapsh
     checkedAt: nowIso,
     models,
     slashCommands,
+    commandCatalogNote: CODEX_COMMAND_CATALOG_NOTE,
     skills,
     // Only SKILLS are re-scoped per cwd for Codex; the command list is
     // machine-level (§4.6.4).
@@ -348,22 +347,33 @@ async function readSkills(
   if (response === undefined) {
     return [];
   }
+  // Prefer the entry for the cwd we ASKED about; only fall back to flattening
+  // every entry. With `cwds:[cwd]` there is normally exactly one, so this is
+  // latent — but a server that answers for more than it was asked would
+  // otherwise let another directory's skills win the dedupe (R2 finding 10).
+  const entries =
+    cwd !== undefined
+      ? (response.data.filter((entry) => entry.cwd === cwd) ?? [])
+      : [];
+  const source = entries.length > 0 ? entries : response.data;
+
   const skills: Skill[] = [];
   const seen = new Set<string>();
-  for (const entry of response.data) {
+  for (const entry of source) {
     for (const skill of entry.skills) {
       if (seen.has(skill.name)) {
         continue;
       }
       seen.add(skill.name);
+      // `shortDescription` is the legacy SKILL.md field; SKILL.json puts it
+      // under `interface`. T3 reads both, in that order.
+      const shortDescription = skill.shortDescription ?? skill.interface?.shortDescription;
       skills.push({
         name: skill.name,
         path: skill.path,
         enabled: skill.enabled,
         description: skill.description,
-        ...(skill.shortDescription !== undefined
-          ? { shortDescription: skill.shortDescription }
-          : {}),
+        ...(shortDescription !== undefined ? { shortDescription } : {}),
         ...(skill.interface?.displayName !== undefined
           ? { displayName: skill.interface.displayName }
           : {}),

@@ -8,7 +8,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { DomainEvent } from "@orquester/api/agent-chat";
-import { applyDomainEvent, createEmptyThreadState } from "@orquester/api/agent-chat";
+import {
+  DOMAIN_EVENT_TYPES,
+  applyDomainEvent,
+  createEmptyThreadState
+} from "@orquester/api/agent-chat";
 
 import { applyEventToHead } from "./head.ts";
 
@@ -96,9 +100,22 @@ function representativeLog(): DomainEvent[] {
       completedAt: "2026-01-01T00:00:09.000Z"
     }),
     ev("thread.reverted", { turnCount: 1 }),
-    ev("thread.session-set", { session: { status: "stopped", activeTurnId: null } })
+    ev("thread.session-set", { session: { status: "stopped", activeTurnId: null } }),
+    // The five head no-ops are included deliberately: they project nothing
+    // today, so only covering them here can catch a future arm that starts to.
+    ev("thread.turn-interrupt-requested", { turnId: "T-1" }),
+    ev("thread.approval-response-requested", { requestId: "R1", decision: "accept" }),
+    ev("thread.user-input-response-requested", { requestId: "Q1", answers: { a: "yes" } }),
+    ev("thread.checkpoint-revert-requested", { targetTurnCount: 1 }),
+    ev("thread.deleted", { deletedAt: "2026-01-01T00:00:20.000Z" })
   ];
 }
+
+test("representativeLog covers every domain event type", () => {
+  const seen = new Set(representativeLog().map((event) => event.type));
+  const missing = DOMAIN_EVENT_TYPES.filter((type) => !seen.has(type));
+  assert.deepEqual(missing, [], "every arm must be exercised by the parity guard");
+});
 
 test("the store's head projection matches the shared fold's head", () => {
   const events = representativeLog();

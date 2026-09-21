@@ -510,7 +510,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
           sessions.nextOrder(req.projectPath ?? "")
         ),
       onClose: (id) => agentChat.deleteThread(id),
-      onRename: (id, title) => agentChat.renameThread(id, title)
+      onRename: (id, title, opts) => agentChat.renameThread(id, title, opts)
     }
   );
   const accounts = new AccountsService(resolved.accountsFile, resolved.keysDir);
@@ -3830,7 +3830,9 @@ export function createServer(
   app.put<{ Params: { id: string }; Body: RenameSessionRequest }>(
     "/api/sessions/:id",
     async (request, reply): Promise<SessionSummary | void> => {
-      const summary = sessions.rename(request.params.id, request.body?.title ?? "");
+      const summary = sessions.rename(request.params.id, request.body?.title ?? "", {
+        seed: request.body?.seed === true
+      });
       if (!summary) {
         return reply.code(404).send();
       }

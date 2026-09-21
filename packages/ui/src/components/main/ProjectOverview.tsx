@@ -9,6 +9,8 @@ import { relativeTime } from "../../lib/relative-time";
 import { resumeAccountId } from "../../lib/resume-account";
 import { canOpenChat, chatLaunchRefId, isChatResumableConversation } from "../../lib/session-kind";
 import { runtimeModeForAgent } from "../../lib/chat-prefs";
+import { resolveLaunchModel } from "../../lib/launch-models";
+import { useProviderSnapshot } from "../../lib/agent-chat/hooks";
 
 const SkeletonRow: React.FC = () => (
   <div className="flex items-center gap-3 rounded-lg px-3 py-2.5">
@@ -19,6 +21,131 @@ const SkeletonRow: React.FC = () => (
     </div>
   </div>
 );
+
+/**
+ * The model a launch from this surface uses.
+ *
+ * **A launch must always name a model**: the host validates
+ * `modelSelection.model` as a non-empty string at thread creation, so the
+ * placeholder this surface used to send (`{ model: "" }`, "let the provider
+ * decide") was refused and every one-click launcher here was dead. The
+ * catalogue is on the client, so the client resolves the default.
+ *
+ * Its own hook per row because `useProviderSnapshot` is keyed by registry id
+ * and a row knows only its own.
+ */
+function useLaunchModel(refId: string): string | null {
+  const snapshot = useProviderSnapshot(refId);
+  const preferred = useAppStore((s) => s.preferredModelByAgent[refId]);
+  return resolveLaunchModel({ snapshot, preferred });
+}
+
+/** Quick start: one click, this agent's default model, nothing else pinned. */
+const QuickStartButton: React.FC<{ agent: RegistryEntry }> = ({ agent }) => {
+  const openTab = useAppStore((s) => s.openTab);
+  const setNotice = useAppStore((s) => s.setNotice);
+  const chatPrefs = useAppStore((s) => s.chatPrefs);
+  const model = useLaunchModel(agent.id);
+
+  return (
+    <button
+      type="button"
+      // No account pin: that is the "+" menu's chip. The model is not a pin
+      // either — it is this agent's own default, which the host requires us to
+      // name.
+      onClick={() => {
+        if (!model) {
+          setNotice({
+            title: agent.name,
+            message: "Still loading this agent's models — try again in a moment."
+          });
+          return;
+        }
+        launchWithNotice(
+          openTab({
+            kind: "agent-chat",
+            refId: agent.id,
+            title: agent.name,
+            chat: {
+              modelSelection: { model },
+              runtimeMode: runtimeModeForAgent(chatPrefs, agent.id)
+            }
+          }),
+          agent.name
+        );
+      }}
+      className="flex items-center gap-1.5 rounded-md border border-neutral-800 px-2.5 py-1.5 text-[12px] text-neutral-400 transition-colors hover:border-neutral-700 hover:bg-neutral-900 hover:text-neutral-200"
+    >
+      <Plus size={12} />
+      {getRegistryIcon("agent", agent.id, 13)}
+      {agent.name}
+    </button>
+  );
+};
+
+/** One past conversation, one click from being picked up again. */
+const ResumeRow: React.FC<{
+  conversation: AgentConversationSummary;
+  agentName: string;
+}> = ({ conversation, agentName }) => {
+  const openTab = useAppStore((s) => s.openTab);
+  const setNotice = useAppStore((s) => s.setNotice);
+  const chatPrefs = useAppStore((s) => s.chatPrefs);
+  const preferredAccountByAgent = useAppStore((s) => s.preferredAccountByAgent);
+  const refId = chatLaunchRefId(conversation);
+  const model = useLaunchModel(refId);
+
+  const resume = () => {
+    if (!model) {
+      setNotice({
+        title: agentName,
+        message: "Still loading this agent's models — try again in a moment."
+      });
+      return;
+    }
+    // Identity matters on a resume: the transcript only exists inside one HOME.
+    // Prefer the home the daemon read the row out of; otherwise fall back to the
+    // same per-agent account the "+" menu would launch with (a bare launch would
+    // take the daemon default instead, which may be a different home).
+    const accountId = resumeAccountId(conversation, preferredAccountByAgent[refId]);
+    launchWithNotice(
+      openTab({
+        kind: "agent-chat",
+        refId,
+        // The tab reads as the thread it continues, not as the agent.
+        title: conversation.title || agentName,
+        accountId,
+        chat: {
+          accountId,
+          modelSelection: { model },
+          runtimeMode: runtimeModeForAgent(chatPrefs, refId),
+          resume: { home: conversation.home ?? "system", conversationId: conversation.id }
+        }
+      }),
+      agentName
+    );
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={resume}
+      title={conversation.preview || conversation.title}
+      className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors hover:bg-neutral-900"
+    >
+      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-neutral-900 text-neutral-400">
+        {getRegistryIcon("agent", conversation.agentRefId, 15)}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-[13px] text-neutral-200">{conversation.title}</span>
+        <span className="block truncate text-[11px] text-neutral-600">{agentName}</span>
+      </span>
+      <span className="shrink-0 text-[11px] text-neutral-600">
+        {relativeTime(conversation.updatedAt)}
+      </span>
+    </button>
+  );
+};
 
 /**
  * Shown instead of a bare "no tabs open" message when a project has none: the
@@ -33,9 +160,6 @@ export const ProjectOverview: React.FC<{ projectPath: string }> = ({ projectPath
   const registry = useRegistry();
   const loadAgentConversations = useAppStore((s) => s.loadAgentConversations);
   const cached = useAppStore((s) => s.agentConversationsByProject[projectPath]);
-  const openTab = useAppStore((s) => s.openTab);
-  const preferredAccountByAgent = useAppStore((s) => s.preferredAccountByAgent);
-  const chatPrefs = useAppStore((s) => s.chatPrefs);
 
   React.useEffect(() => {
     void loadAgentConversations(projectPath);
@@ -63,33 +187,6 @@ export const ProjectOverview: React.FC<{ projectPath: string }> = ({ projectPath
 
   const agentName = (refId: string) => agents.find((a) => a.id === refId)?.name ?? refId;
 
-  const resume = (conversation: AgentConversationSummary) => {
-    // Identity matters on a resume: the transcript only exists inside one HOME.
-    // Prefer the home the daemon read the row out of; otherwise fall back to the
-    // same per-agent account the "+" menu would launch with (a bare launch would
-    // take the daemon default instead, which may be a different home).
-    const refId = chatLaunchRefId(conversation);
-    const accountId = resumeAccountId(conversation, preferredAccountByAgent[refId]);
-    launchWithNotice(
-      openTab({
-        kind: "agent-chat",
-        refId,
-        // The tab reads as the thread it continues, not as the agent.
-        title: conversation.title || agentName(refId),
-        accountId,
-        chat: {
-          accountId,
-          // No model pin here, as for a quick start: the overview offers
-          // "pick up where you left off", not a re-configuration.
-          modelSelection: { model: "" },
-          runtimeMode: runtimeModeForAgent(chatPrefs, refId),
-          resume: { home: conversation.home ?? "system", conversationId: conversation.id }
-        }
-      }),
-      agentName(refId)
-    );
-  };
-
   return (
     <div className="mx-auto flex h-full min-h-0 w-full max-w-2xl flex-col px-6 py-8">
       <div className="mb-3 shrink-0">
@@ -115,62 +212,18 @@ export const ProjectOverview: React.FC<{ projectPath: string }> = ({ projectPath
         )}
 
         {resumable.map((conversation) => (
-          <button
+          <ResumeRow
             key={`${conversation.agentRefId}:${conversation.id}`}
-            type="button"
-            onClick={() => resume(conversation)}
-            title={conversation.preview || conversation.title}
-            className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors hover:bg-neutral-900"
-          >
-            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-neutral-900 text-neutral-400">
-              {getRegistryIcon("agent", conversation.agentRefId, 15)}
-            </span>
-            <span className="min-w-0 flex-1">
-              <span className="block truncate text-[13px] text-neutral-200">
-                {conversation.title}
-              </span>
-              <span className="block truncate text-[11px] text-neutral-600">
-                {agentName(conversation.agentRefId)}
-              </span>
-            </span>
-            <span className="shrink-0 text-[11px] text-neutral-600">
-              {relativeTime(conversation.updatedAt)}
-            </span>
-          </button>
+            conversation={conversation}
+            agentName={agentName(chatLaunchRefId(conversation))}
+          />
         ))}
       </div>
 
       {quickStart.length > 0 && (
         <div className="mt-4 flex shrink-0 flex-wrap gap-1.5 border-t border-neutral-800 pt-4">
           {quickStart.map((agent) => (
-            <button
-              key={agent.id}
-              type="button"
-              // No account/model pin: those are the "+" menu's chips. A bare
-              // launch takes the daemon's configured defaults, which is exactly
-              // what "quick start" should mean.
-              onClick={() =>
-                launchWithNotice(
-                  openTab({
-                    kind: "agent-chat",
-                    refId: agent.id,
-                    title: agent.name,
-                    chat: {
-                      // No account/model pin — see above; the daemon's own
-                      // defaults are exactly what "quick start" should mean.
-                      modelSelection: { model: "" },
-                      runtimeMode: runtimeModeForAgent(chatPrefs, agent.id)
-                    }
-                  }),
-                  agent.name
-                )
-              }
-              className="flex items-center gap-1.5 rounded-md border border-neutral-800 px-2.5 py-1.5 text-[12px] text-neutral-400 transition-colors hover:border-neutral-700 hover:bg-neutral-900 hover:text-neutral-200"
-            >
-              <Plus size={12} />
-              {getRegistryIcon("agent", agent.id, 13)}
-              {agent.name}
-            </button>
+            <QuickStartButton key={agent.id} agent={agent} />
           ))}
         </div>
       )}

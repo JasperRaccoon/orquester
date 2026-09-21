@@ -68,12 +68,22 @@ export function useFinishedRowsPhase(turnActive: boolean, fadeMs = ROSTER_FADE_M
 function mainRowVisuals(main: AgentRosterMainRow): {
   tone: "muted" | "info" | "warn" | "danger";
   pulse: boolean;
+  ping: boolean;
   statusLabel: string;
 } {
-  if (main.awaitingUser) return { tone: "warn", pulse: false, statusLabel: "Waiting for you" };
-  if (main.turnActive) return { tone: "info", pulse: true, statusLabel: "Working" };
-  if (main.failed) return { tone: "danger", pulse: false, statusLabel: "Failed" };
-  return { tone: "muted", pulse: false, statusLabel: "Idle" };
+  // Act-now pings, in-motion breathes, broken and resting are static — the
+  // three meanings colour is spent on, and the one dot in this surface allowed
+  // to ping.
+  if (main.awaitingUser) {
+    return { tone: "warn", pulse: false, ping: true, statusLabel: "Waiting for you" };
+  }
+  if (main.turnActive) {
+    return { tone: "info", pulse: true, ping: false, statusLabel: "Working" };
+  }
+  if (main.failed) {
+    return { tone: "danger", pulse: false, ping: false, statusLabel: "Failed" };
+  }
+  return { tone: "muted", pulse: false, ping: false, statusLabel: "Idle" };
 }
 
 function mainRowMetrics(main: AgentRosterMainRow): string[] {
@@ -146,6 +156,7 @@ export function AgentRoster({
             title={main.title ?? "main"}
             tone={visuals.tone}
             pulse={visuals.pulse}
+            ping={visuals.ping}
             statusLabel={visuals.statusLabel}
             activityLabel={main.activityLabel}
             startedAt={main.turnStartedAt}

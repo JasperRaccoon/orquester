@@ -9,91 +9,12 @@ import {
   latestContextWindowActivity,
   markUnreadVisitStamp,
   nextVisitStamp,
-  resolveActivityLabel,
-  resolveChatActivity,
-  resolveChatStatusPill,
-  statusPillPulses
+  resolveActivityLabel
 } from "./status.logic";
 import { activity, resetBuilders, stamp } from "./test-helpers";
 
 beforeEach(() => {
   resetBuilders();
-});
-
-describe("the §6.4 activity ladder", () => {
-  it("puts a pending approval above everything else", () => {
-    const resolved = resolveChatActivity({
-      hasPendingApprovals: true,
-      hasPendingUserInput: true,
-      chatSessionStatus: "running",
-      backgroundLiveness: "working"
-    });
-    assert.equal(resolved.state, "waiting");
-    assert.equal(resolved.waitingOn, "approval");
-  });
-
-  it("then a pending question", () => {
-    const resolved = resolveChatActivity({ hasPendingUserInput: true, chatSessionStatus: "running" });
-    assert.equal(resolved.waitingOn, "question");
-  });
-
-  it("resolves a failure BEFORE either liveness value", () => {
-    const resolved = resolveChatActivity({
-      chatSessionStatus: "error",
-      backgroundLiveness: "working"
-    });
-    assert.equal(resolved.failed, true);
-    assert.equal(resolved.state, "idle");
-    assert.equal(resolveChatStatusPill({ chatSessionStatus: "error" }), "failed");
-  });
-
-  it("treats a failed latest turn as a failure too", () => {
-    assert.equal(
-      resolveChatActivity({
-        latestTurn: { turnId: "t", state: "failed", startedAt: null, completedAt: stamp(2) }
-      }).failed,
-      true
-    );
-  });
-
-  it("never stamps 'finished' while background work is live", () => {
-    const working = resolveChatActivity({ backgroundLiveness: "working" });
-    assert.equal(working.state, "working");
-    assert.equal(working.finished, false);
-
-    const monitoring = resolveChatActivity({ backgroundLiveness: "monitoring" });
-    assert.equal(monitoring.state, "idle");
-    assert.equal(monitoring.finished, false);
-    assert.equal(monitoring.monitoring, true);
-  });
-
-  it("fallback 1: an interrupted turn with a completedAt is idle+finished", () => {
-    const resolved = resolveChatActivity({
-      latestTurn: { turnId: "t", state: "interrupted", startedAt: stamp(1), completedAt: stamp(2) }
-    });
-    assert.equal(resolved.state, "idle");
-    assert.equal(resolved.finished, true);
-  });
-
-  it("fallback 1 does NOT fire for an interrupted turn with no completedAt", () => {
-    assert.equal(
-      resolveChatActivity({
-        latestTurn: { turnId: "t", state: "interrupted", startedAt: stamp(1), completedAt: null }
-      }).finished,
-      false
-    );
-  });
-
-  it("fallback 2: a live 'ready' session with nothing running is idle+finished", () => {
-    const resolved = resolveChatActivity({ chatSessionStatus: "ready" });
-    assert.equal(resolved.finished, true, "a turn that changed no files leaves no turn row");
-  });
-
-  it("only Working pulses; Monitoring borrows its colour without the pulse", () => {
-    assert.equal(resolveChatStatusPill({ backgroundLiveness: "monitoring" }), "monitoring");
-    assert.equal(statusPillPulses("monitoring"), false);
-    assert.equal(statusPillPulses("working"), true);
-  });
 });
 
 describe("unread", () => {

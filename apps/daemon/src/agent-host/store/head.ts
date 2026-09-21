@@ -6,7 +6,7 @@
  * carrying the whole timeline in memory beside W1's fold.
  *
  * **These are the same arms as `applyDomainEvent` in `@orquester/api`, and they
- * are kept in step by hand.** `fold.head.test.ts` is the guard: it folds a
+ * are kept in step by hand.** `head.test.ts` is the guard: it folds a
  * representative log both ways and asserts the two heads are identical. The
  * fold stays authoritative — `ThreadStore.saveHead` overwrites whatever this
  * tracked, which is also how `continueAfterRestart` (§3.3) survives: it has no

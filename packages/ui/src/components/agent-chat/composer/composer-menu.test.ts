@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { Skill, SlashCommand } from "@orquester/api/agent-chat";
 
 import {
+  blockedProviderCommandMessage,
   buildSkillMenuItems,
   buildSlashMenuItems,
   compactCommandAvailable,
@@ -229,4 +230,59 @@ test("insertion: provider commands and skills insert text, host commands insert 
     }),
     "@src/index.ts "
   );
+});
+
+// ---------------------------------------------------------------------------
+// Fix wave
+// ---------------------------------------------------------------------------
+
+test("R2-2: a synthesised provider /effort never duplicates the host row", () => {
+  // Codex and OpenCode both synthesise an `effort` entry; `/effort` is
+  // client-only, so the provider row would insert literal text and reach a CLI
+  // that does not implement it.
+  const items = buildSlashMenuItems({
+    ...BASE,
+    hasEffortOption: true,
+    slashCommands: [command("effort"), command("init")]
+  });
+  const effortRows = items.filter(
+    (item) =>
+      (item.type === "host-command" && item.command === "effort") ||
+      (item.type === "provider-command" && item.command.name === "effort")
+  );
+  assert.equal(effortRows.length, 1);
+  assert.equal(effortRows[0]?.type, "host-command");
+});
+
+test("R2-2: the host dedupe is by name, case- and whitespace-insensitively", () => {
+  assert.deepEqual(
+    providerCommandsForSlashMenu([command(" Effort "), command("init")], [], ["effort"]).map(
+      (entry) => entry.name
+    ),
+    ["init"]
+  );
+});
+
+test("R2-2: /compact stays a provider row — the host path reads it from the sent text", () => {
+  const items = buildSlashMenuItems({
+    ...BASE,
+    compactAvailable: true,
+    slashCommands: [command("compact")]
+  });
+  assert.equal(
+    items.some((item) => item.type === "provider-command" && item.command.name === "compact"),
+    true
+  );
+});
+
+test("R2-5: Grok's /always-approve is refused with a pointer at the mode chip", () => {
+  assert.match(blockedProviderCommandMessage("grok", "/always-approve") ?? "", /mode chip/);
+  assert.match(blockedProviderCommandMessage("grok", "  /ALWAYS-APPROVE now ") ?? "", /mode chip/);
+});
+
+test("R2-5: the refusal is Grok-only and never fires on a lookalike", () => {
+  assert.equal(blockedProviderCommandMessage("claude", "/always-approve"), null);
+  assert.equal(blockedProviderCommandMessage(undefined, "/always-approve"), null);
+  assert.equal(blockedProviderCommandMessage("grok", "/always-approve-not"), null);
+  assert.equal(blockedProviderCommandMessage("grok", "tell me about /always-approve"), null);
 });
