@@ -3,7 +3,7 @@
  */
 
 export { ChatStatusLine } from "./ChatStatusLine";
-export { ContextMeter, type ContextMeterProps } from "./ContextMeter";
+export { ContextMeter, ContextMeterPanel, type ContextMeterProps } from "./ContextMeter";
 
 export {
   deriveContextMeter,

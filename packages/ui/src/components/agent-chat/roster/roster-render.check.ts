@@ -20,6 +20,8 @@ import {
 import { AgentRoster } from "./AgentRoster";
 import { AgentDrillIn } from "./AgentDrillIn";
 import { ChatStatusLine } from "../status/ChatStatusLine";
+import { ContextMeterPanel } from "../status/ContextMeter";
+import { deriveContextMeter } from "../status/context-meter";
 
 /**
  * The drill-in reads `useAgentChatDrillIn`, which resolves its thread store
@@ -342,6 +344,72 @@ const broken = render(
 );
 assert.ok(broken.includes("Disconnected"));
 assert.ok(!broken.includes("Running tests"));
+
+// ---------------------------------------------------------------------------
+// Fix-wave regressions (R8 m3, m5, m9)
+// ---------------------------------------------------------------------------
+
+// m9 — the working hairline exists only while a turn is in flight.
+assert.ok(live.includes("ac-working-bar"), "a running turn draws the indeterminate hairline");
+assert.ok(!degraded.includes("ac-working-bar"), "a settled thread draws no hairline");
+assert.ok(!broken.includes("ac-working-bar"), "a dead stream draws no hairline");
+
+// m5 — the meter's popover opens on hover, not on a click alone.
+assert.ok(
+  live.includes('data-hover-open="true"'),
+  "the meter trigger carries the hover affordance"
+);
+
+// m9 — `ping` is the act-now halo, and the thread's own row is its one home.
+const awaiting = render(
+  createElement(AgentRoster, {
+    sessionId: "s1",
+    agents: [],
+    panel: emptyPanel,
+    expanded: false,
+    onExpandedChange: () => {},
+    onOpenAgent: () => {},
+    main: {
+      turnActive: false,
+      awaitingUser: true,
+      activityLabel: "Approve the edit to src/index.ts?",
+      turnStartedAt: null,
+      tokensUsed: null
+    }
+  })
+);
+assert.ok(awaiting.includes("ac-dot-ping"), "a thread waiting on the user pings");
+assert.ok(awaiting.includes("Waiting for you"));
+assert.ok(!collapsed.includes("ac-dot-ping"), "a working thread breathes, it does not ping");
+
+// m3 — the auto-compaction sentence names the model when no threshold is known.
+const panelModel = deriveContextMeter({
+  usedTokens: 50_000,
+  maxTokens: 200_000,
+  autoCompactAtTokens: null,
+  totalProcessedTokens: null,
+  reportsContextWindow: true
+});
+assert.ok(panelModel);
+const namedPanel = render(
+  createElement(ContextMeterPanel, {
+    model: panelModel,
+    modelLabel: "claude-opus-4",
+    onCompact: () => {}
+  })
+);
+assert.ok(
+  namedPanel.includes("Context for claude-opus-4 compacts automatically when needed."),
+  "the sentence names the thread's model"
+);
+assert.ok(namedPanel.includes("Compact context"), "the Compact button is always offered");
+const anonymousPanel = render(
+  createElement(ContextMeterPanel, { model: panelModel, onCompact: () => {} })
+);
+assert.ok(
+  anonymousPanel.includes("Context compacts automatically when needed."),
+  "without a label it degrades to the generic sentence rather than inventing one"
+);
 
 console.error = consoleError;
 console.log("agent-chat roster/status render checks passed");

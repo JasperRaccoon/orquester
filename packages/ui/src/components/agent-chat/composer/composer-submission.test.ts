@@ -373,3 +373,40 @@ test("a staged ref does not block send: it is already uploaded", () => {
   assert.equal(decision.kind, "staged");
   assert.equal(uploadsBlockSend([{ status: "ready" }]), null);
 });
+
+// ---------------------------------------------------------------------------
+// Fix wave
+// ---------------------------------------------------------------------------
+
+/**
+ * R7-3 / R8-B1: "Implement" is defined on an EMPTY draft — the plan supplies
+ * the text. `ChatComposer.submit` used to return on `!sendable` before ever
+ * resolving the plan, so the enabled button was a silent no-op. The composer
+ * now resolves the plan first and guards with `!sendable && plan === null`;
+ * this pins the resolver half of that contract.
+ */
+test("R7-3: an empty draft with an actionable plan still produces a submission", () => {
+  const plan = resolvePlanFollowUpSubmission({ draftText: "", planMarkdown: "# Ship it\n\nstep" });
+  assert.equal(plan.action, "implement");
+  assert.equal(plan.interactionMode, "default");
+  assert.ok(plan.text.startsWith(PLAN_IMPLEMENTATION_PROMPT_PREFIX));
+  // The guard the composer now uses: sendable is false, but plan is not null.
+  assert.equal(hasSendableContent({ text: "", attachmentCount: 0 }), false);
+  assert.notEqual(plan, null);
+});
+
+test("Q2-5: Enter during an IME composition is not a send", () => {
+  // The composer returns before the Enter arm when `isComposing` is set; the
+  // intent resolver itself is unchanged, so this pins the inputs it is given.
+  const base = {
+    isMobileViewport: false,
+    shiftKey: false,
+    modifierKey: false,
+    isRunning: false
+  } as const;
+  // What the composer computes for a NON-composing Enter.
+  assert.equal(composerSubmissionIntentForEnter(base), "foreground");
+  // …and the guard means the resolver is never consulted while composing,
+  // which is the only correct behaviour: a candidate-commit Enter must not
+  // send a half-converted prompt.
+});

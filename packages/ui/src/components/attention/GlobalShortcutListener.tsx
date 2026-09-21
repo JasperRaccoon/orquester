@@ -67,8 +67,12 @@ export function matchesPaletteToggle(event: ShortcutEventLike): boolean {
  * A blocking layer owns the screen: jumping a tab out from under an open
  * Settings modal, close-confirmation or palette would leave the layer floating
  * over a view the user never asked for. Same gate the palette's own opener uses.
+ *
+ * Exported because the chat surface's own scoped Escape listener has to stand
+ * down for exactly the same set — two copies of this list would drift, and the
+ * drift would only show up as a shortcut firing under a modal.
  */
-function anotherLayerHasTheKeyboard(): boolean {
+export function anotherLayerOwnsTheKeyboard(): boolean {
   const state = useAppStore.getState();
   return (
     state.settingsOpen ||
@@ -85,7 +89,7 @@ export const GlobalShortcutListener: React.FC = () => {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (matchesAttentionCycle(event)) {
-        if (anotherLayerHasTheKeyboard()) {
+        if (anotherLayerOwnsTheKeyboard()) {
           return;
         }
         event.preventDefault();
