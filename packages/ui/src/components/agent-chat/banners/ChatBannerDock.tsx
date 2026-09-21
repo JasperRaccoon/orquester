@@ -18,7 +18,8 @@ import {
   showBackgroundLivenessBanner,
   sortBannerStack,
   type BannerPriority,
-  type BannerVariantName
+  type BannerVariantName,
+  type DockCard
 } from "./banner-model";
 import { questionAttachmentKey } from "./pending-answer";
 
@@ -55,8 +56,10 @@ export interface ChatBannerDockExtraProps {
   uploadAttachment?: AgentChatActions["uploadAttachment"];
   /** The general notice stack. Sorted activity-first, then by severity. */
   notices?: readonly DockNotice[];
-  /** Mobile's one focus-moving affordance, wired by the integration layer. */
+  /** Retained for API compatibility; the card opens its own field (R8-B2). */
   onRequestCustomAnswerFocus?: () => void;
+  /** `false` while this tab is open but not visible — gates the digit keys. */
+  active?: boolean;
   /**
    * The pending proposal's own title, for the "Plan ready" card's description
    * slot. Without it the banner names a plan the user cannot identify.
@@ -114,7 +117,7 @@ export function ChatBannerDock({
   isTurnWorking = false,
   uploadAttachment,
   notices,
-  onRequestCustomAnswerFocus,
+  active,
   planTitle = null
 }: ChatBannerDockProps & ChatBannerDockExtraProps): React.ReactElement | null {
   // One breakpoint governs every mobile rule in the chat surface (§7.8).
@@ -143,12 +146,41 @@ export function ChatBannerDock({
     []
   );
 
-  const card = resolveDockCard({
+  const liveCard = resolveDockCard({
     hasApproval: approval !== null,
     hasUserInput: userInput !== null,
     hasActionableProposedPlan: actionableProposedPlan,
     isComposerCollapsedMobile: isMobile
   });
+  /*
+   * R8-m1: answering an approval or a question used to make the card vanish in
+   * one frame — only the ambient notices got T3's 64px drop. Hold the resolved
+   * card for the exit's duration so the user sees where it went. The held card
+   * is `pointer-events: none` via `ac-banner-exit`, so a click cannot land on
+   * something already half-way behind the composer.
+   */
+  const [exitingCard, setExitingCard] = React.useState<DockCard>(null);
+  const previousCardRef = React.useRef<DockCard>(liveCard);
+  const cardExitTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  React.useEffect(() => {
+    const previous = previousCardRef.current;
+    previousCardRef.current = liveCard;
+    if (liveCard !== null || previous === null) return;
+    setExitingCard(previous);
+    if (cardExitTimerRef.current !== null) clearTimeout(cardExitTimerRef.current);
+    cardExitTimerRef.current = setTimeout(() => {
+      cardExitTimerRef.current = null;
+      setExitingCard(null);
+    }, DISMISS_TRANSITION_MS);
+  }, [liveCard]);
+  React.useEffect(
+    () => () => {
+      if (cardExitTimerRef.current !== null) clearTimeout(cardExitTimerRef.current);
+    },
+    []
+  );
+  const card = liveCard ?? exitingCard;
+  const cardLeaving = liveCard === null && exitingCard !== null;
 
   const stackItems = React.useMemo(() => {
     const entries: Array<DockNotice & { render: React.ReactNode }> = [];
@@ -201,6 +233,13 @@ export function ChatBannerDock({
     sessionId,
     stopping
   ]);
+
+  // R8-m6: expand the stack, let the notices resolve, and the next one would
+  // otherwise arrive already open. T3 resets on exactly this condition.
+  const stackCount = stackItems.length;
+  React.useEffect(() => {
+    if (stackCount < 2) setStackExpanded(false);
+  }, [stackCount]);
 
   function requestDismiss(notice: DockNotice): void {
     if (!notice.onDismiss || exitingNoticeId !== null) return;
@@ -270,7 +309,6 @@ export function ChatBannerDock({
   return (
     <div
       data-agent-chat-banner-dock={sessionId}
-      data-chat-composer-collapsed-controls="true"
       className="pointer-events-auto flex w-full min-w-0 flex-col gap-px px-[1.375rem]"
     >
       {frontItem ? <div className={CARD_BACKDROP}>{frontItem.render}</div> : null}
@@ -302,7 +340,7 @@ export function ChatBannerDock({
         </>
       ) : null}
 
-      <div className={card === null ? "hidden" : CARD_BACKDROP}>
+      <div className={cn(card === null ? "hidden" : CARD_BACKDROP, cardLeaving && "ac-banner-exit")}>
       {card === "approval" && approval ? (
         <ApprovalCard
           key={approval.requestId}
@@ -333,7 +371,7 @@ export function ChatBannerDock({
           }
           onDismiss={userInput.dismissible ? () => onDismiss(userInput.requestId) : null}
           onCarryTextToDraft={onCarryTextToDraft}
-          onRequestCustomAnswerFocus={onRequestCustomAnswerFocus}
+          active={active}
         />
       ) : null}
 

@@ -578,7 +578,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 }
                 isTurnWorking={!paintOnly && turnActive}
                 uploadAttachment={actions.uploadAttachment}
-                onRequestCustomAnswerFocus={() => focusComposer(sessionId)}
+                active={active}
                 planTitle={
                   actionableProposedPlan
                     ? proposedPlanTitle(actionableProposedPlan.planMarkdown)
@@ -601,6 +601,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 activePlan={paintOnly ? null : activePlan}
                 actionableProposedPlan={planFollowUp}
                 reverting={reverting}
+                active={active}
                 actions={actions}
                 onHeightChange={setComposerHeight}
                 // `/compact` is offered only where there is something to

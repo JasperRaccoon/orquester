@@ -5,7 +5,8 @@ import type { AttachmentRef, PendingUserInput, UserInputQuestion } from "@orques
 import { MAX_TURN_ATTACHMENTS } from "@orquester/api/agent-chat";
 
 import { cn } from "../../../lib/cn";
-import { BannerCard, ChatIconButton, DisclosurePanel, Kbd } from "../primitives";
+import { BannerCard, ChatIconButton, DisclosureChevron, DisclosurePanel, Kbd } from "../primitives";
+import { isChatTabListenerActive } from "../composer/tab-visibility";
 import {
   allowsAnswerAttachments,
   allowsCustomAnswer,
@@ -46,8 +47,13 @@ export interface QuestionCardProps {
   onCarryTextToDraft: (text: string) => void;
   /** The compact layout used while the mobile composer is collapsed (§7.8). */
   compact?: boolean;
-  /** Mobile's one focus-moving affordance: "Write a custom answer". */
+  /**
+   * Retained for API compatibility; the compact layout now opens the card's
+   * own field instead (R8-B2), because the composer has no answer path.
+   */
   onRequestCustomAnswerFocus?: () => void;
+  /** `false` while this tab is open but not visible — gates the digit keys. */
+  active?: boolean;
 }
 
 /** 200 ms: long enough to see the tick land, short enough not to feel slow. */
@@ -87,7 +93,7 @@ export function QuestionCard({
   onDismiss,
   onCarryTextToDraft,
   compact = false,
-  onRequestCustomAnswerFocus
+  active
 }: QuestionCardProps): React.ReactElement | null {
   const [draftAnswers, setDraftAnswers] = React.useState<Record<string, PendingAnswerDraft>>({});
   const [questionIndex, setQuestionIndex] = React.useState(0);
@@ -97,6 +103,9 @@ export function QuestionCard({
     optionValue: string;
   } | null>(null);
   const advanceTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cardRef = React.useRef<HTMLDivElement>(null);
+  /** Compact layout only: the custom field starts behind a tap (R8-B2). */
+  const [customFieldOpen, setCustomFieldOpen] = React.useState(false);
   const customAnswerRef = React.useRef<HTMLInputElement | HTMLTextAreaElement | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
@@ -107,6 +116,7 @@ export function QuestionCard({
     setQuestionIndex(0);
     setCollapsedQuestionId(null);
     setOptimisticSelection(null);
+    setCustomFieldOpen(false);
   }, [requestId]);
 
   React.useEffect(
@@ -195,6 +205,9 @@ export function QuestionCard({
   React.useEffect(() => {
     if (!activeQuestion || isResponding || isCollapsed) return;
     const handler = (event: KeyboardEvent) => {
+      // Q2-2: hidden tabs stay mounted, so without this gate one `1` answers
+      // the question in EVERY open chat tab — and an answer cannot be undone.
+      if (!isChatTabListenerActive(active, cardRef.current)) return;
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       const target = event.target;
       if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return;
@@ -213,7 +226,7 @@ export function QuestionCard({
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, [activeQuestion, isCollapsed, isResponding, selectOption]);
+  }, [active, activeQuestion, isCollapsed, isResponding, selectOption]);
 
   React.useEffect(() => {
     if (!optimisticSelection || !activeQuestion) return;
@@ -258,8 +271,13 @@ export function QuestionCard({
           title={isCollapsed ? "Show the question and its options" : "Hide the question and its options"}
           data-pending-user-input-toggle={isCollapsed ? "collapsed" : "expanded"}
           onClick={() => setCollapsedQuestionId(isCollapsed ? null : activeQuestion.id)}
-          className="rounded px-0.5 text-left focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
+          className={cn(
+            "-mx-0.5 flex items-center gap-1 rounded px-0.5 text-left",
+            "focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
+          )}
         >
+          {/* R8-m2: without this, nothing signals the header is a toggle. */}
+          <DisclosureChevron open={!isCollapsed} />
           {activeQuestion.header}
         </button>
       }
@@ -269,7 +287,16 @@ export function QuestionCard({
       dismissLabel="Dismiss question without answering"
     >
       <DisclosurePanel open={!isCollapsed}>
-        <div className="min-w-0 pb-0.5">
+        {/*
+         * R8-M1: the dock is anchored to the bottom of an `overflow-hidden`
+         * overlay, so an uncapped card grows UPWARD past the top of the chat
+         * area and clips its own header and first options with no scrollbar.
+         * A dozen options is normal for both Claude and Codex.
+         */}
+        <div
+          ref={cardRef}
+          className="ac-scroll-thin max-h-[min(24rem,40dvh)] min-w-0 overflow-y-auto pb-0.5"
+        >
           <p className="break-words text-sm text-neutral-200">{activeQuestion.question}</p>
           {activeQuestion.multiSelect ? (
             <p className="mt-1 text-[11px] text-neutral-500">Select one or more options.</p>
@@ -318,12 +345,25 @@ export function QuestionCard({
 
           {customAllowed ? (
             <div className="mt-2">
-              {compact && onRequestCustomAnswerFocus ? (
+              {compact && !customFieldOpen && !secret ? (
+                /*
+                 * R8-B2: this must open the card's OWN field, never the
+                 * composer. Our ownership is inverted from T3's — the card
+                 * owns Submit and the custom field, and `ChatComposer` has no
+                 * answer path at all — so focusing the composer left a
+                 * free-text question permanently unanswerable on mobile. It is
+                 * never rendered for a secret question: a credential typed
+                 * into the thread draft would be rendered, persisted as a user
+                 * message and sent to the model.
+                 */
                 <button
                   type="button"
-                  onPointerDown={(event) => event.preventDefault()}
-                  onClick={onRequestCustomAnswerFocus}
                   aria-label="Write a custom answer"
+                  onClick={() => {
+                    setCustomFieldOpen(true);
+                    // After the field exists.
+                    queueMicrotask(() => customAnswerRef.current?.focus());
+                  }}
                   className={cn(
                     "w-full truncate rounded-lg border border-neutral-800 bg-neutral-900/60 px-3 py-2",
                     "text-left text-sm text-neutral-500 transition-colors hover:bg-neutral-900"
