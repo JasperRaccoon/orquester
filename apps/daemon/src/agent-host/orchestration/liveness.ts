@@ -12,6 +12,22 @@
  *
  * In memory only, on purpose: after a host restart the registry is empty,
  * which is correct, because orphaned background work is not live.
+ *
+ * **Differs from T3: background rows expire.** T3 drops a task only on a
+ * terminal status, which assumes every provider reports one. Grok does not —
+ * a backgrounded task (`_x.ai/task_backgrounded`) never reports completion at
+ * all, so a thread would read `"monitoring"` for the rest of the host's life
+ * and the §6.4 ladder would keep the tab out of "finished" forever. Two bounds
+ * fix it, both on the **background** bucket only:
+ *
+ * - a watch loop with no transition for {@link BACKGROUND_LIVENESS_TTL_MS} is
+ *   dropped (evaluated lazily on read, so there is no timer to leak and a test
+ *   drives it with a set clock);
+ * - a turn ending drops every background row that reported nothing **during
+ *   that turn** — it was already not live while the agent worked.
+ *
+ * Agent rows are never expired: a subagent that runs for hours is real work,
+ * and `session.exited` clears the thread anyway.
  */
 
 import {
@@ -22,10 +38,27 @@ import {
 } from "@orquester/api/agent-chat";
 
 import type { LivenessRegistry } from "../services.ts";
+import { systemClock, type Clock } from "./runtime-seams.ts";
+
+/**
+ * How long a watch loop may stay silent before it stops counting as live. Ten
+ * minutes, the same horizon as the turn watchdog's idle window (§3.1): if
+ * nothing has happened for that long, nothing is happening.
+ */
+export const BACKGROUND_LIVENESS_TTL_MS = 10 * 60_000;
 
 interface ThreadLivenessState {
   readonly agents: Set<string>;
-  readonly monitors: Set<string>;
+  /** taskId → the epoch ms of its last transition, for the TTL. */
+  readonly monitors: Map<string, number>;
+  /** When the thread's current turn started, for the turn-boundary sweep. */
+  turnStartedAt: number | null;
+}
+
+export interface LivenessRegistryOptions {
+  clock?: Clock;
+  /** Overridable so a test drives the TTL with a set clock (§9). */
+  backgroundTtlMs?: number;
 }
 
 /** *T3: `ThreadBackgroundLiveness.ts:35-41`.* */
@@ -87,7 +120,11 @@ function transitionFor(event: RuntimeEvent): TaskTransition | null {
   }
 }
 
-export function createLivenessRegistry(): LivenessRegistry {
+export function createLivenessRegistry(
+  options: LivenessRegistryOptions = {}
+): LivenessRegistry {
+  const clock = options.clock ?? systemClock;
+  const backgroundTtlMs = options.backgroundTtlMs ?? BACKGROUND_LIVENESS_TTL_MS;
   const stateByThreadId = new Map<string, ThreadLivenessState>();
 
   const stateFor = (threadId: string): ThreadLivenessState => {
@@ -95,7 +132,11 @@ export function createLivenessRegistry(): LivenessRegistry {
     if (existing) {
       return existing;
     }
-    const created: ThreadLivenessState = { agents: new Set(), monitors: new Set() };
+    const created: ThreadLivenessState = {
+      agents: new Set(),
+      monitors: new Map(),
+      turnStartedAt: null
+    };
     stateByThreadId.set(threadId, created);
     return created;
   };
@@ -111,9 +152,30 @@ export function createLivenessRegistry(): LivenessRegistry {
     }
     state.agents.delete(taskId);
     state.monitors.delete(taskId);
-    if (state.agents.size === 0 && state.monitors.size === 0) {
+    dropIfEmpty(threadId, state);
+  };
+
+  const dropIfEmpty = (threadId: string, state: ThreadLivenessState): void => {
+    if (state.agents.size === 0 && state.monitors.size === 0 && state.turnStartedAt === null) {
       stateByThreadId.delete(threadId);
     }
+  };
+
+  /** Lazy TTL: evaluated on every read and write, so no timer can leak. */
+  const expireBackground = (threadId: string, state: ThreadLivenessState): void => {
+    const cutoff = clock.now().getTime() - backgroundTtlMs;
+    for (const [taskId, lastSeenAt] of [...state.monitors]) {
+      if (lastSeenAt <= cutoff) {
+        state.monitors.delete(taskId);
+      }
+    }
+  };
+
+  const readState = (threadId: string): ThreadLivenessState | undefined => {
+    const state = stateByThreadId.get(threadId);
+    if (!state) return undefined;
+    expireBackground(threadId, state);
+    return state;
   };
 
   const record = (input: TaskTransition): void => {
@@ -159,15 +221,40 @@ export function createLivenessRegistry(): LivenessRegistry {
 
     drop(input.threadId, input.taskId);
     const state = stateFor(input.threadId);
-    const bucket =
-      taskType !== undefined && MONITOR_TASK_TYPES.has(taskType) ? state.monitors : state.agents;
-    bucket.add(input.taskId);
+    if (taskType !== undefined && MONITOR_TASK_TYPES.has(taskType)) {
+      state.monitors.set(input.taskId, clock.now().getTime());
+      return;
+    }
+    state.agents.add(input.taskId);
   };
 
   return {
     observe(event: RuntimeEvent): void {
       if (event.type === "session.exited") {
         stateByThreadId.delete(event.threadId);
+        return;
+      }
+      if (event.type === "turn.started") {
+        const state = stateFor(event.threadId);
+        state.turnStartedAt = clock.now().getTime();
+        return;
+      }
+      if (event.type === "turn.completed" || event.type === "turn.aborted") {
+        const state = stateByThreadId.get(event.threadId);
+        if (!state) return;
+        const turnStartedAt = state.turnStartedAt;
+        state.turnStartedAt = null;
+        if (turnStartedAt !== null) {
+          // A watch loop that reported nothing for the whole turn was already
+          // not live while the agent worked.
+          for (const [taskId, lastSeenAt] of [...state.monitors]) {
+            if (lastSeenAt < turnStartedAt) {
+              state.monitors.delete(taskId);
+            }
+          }
+        }
+        expireBackground(event.threadId, state);
+        dropIfEmpty(event.threadId, state);
         return;
       }
       const transition = transitionFor(event);
@@ -177,7 +264,7 @@ export function createLivenessRegistry(): LivenessRegistry {
     },
 
     liveness(threadId: string): BackgroundLiveness | null {
-      const state = stateByThreadId.get(threadId);
+      const state = readState(threadId);
       if (!state) {
         return null;
       }
@@ -191,7 +278,7 @@ export function createLivenessRegistry(): LivenessRegistry {
     },
 
     liveAgentCount(threadId: string): number {
-      return stateByThreadId.get(threadId)?.agents.size ?? 0;
+      return readState(threadId)?.agents.size ?? 0;
     },
 
     clear(threadId: string): void {

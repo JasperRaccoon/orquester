@@ -31,6 +31,8 @@ import {
   type DomainEvent,
   type InteractionMode,
   type ModelSelection,
+  type PendingApproval,
+  type PendingUserInput,
   type ProviderSession,
   type ProviderSnapshot,
   type RuntimeEvent,
@@ -82,6 +84,12 @@ import {
   threadNotFound
 } from "./errors.ts";
 import { DEFAULT_FOLD_OPS, type FoldOps } from "./fold-ops.ts";
+import {
+  createMemoryLaunchConfigStore,
+  launchConfigFromRequest,
+  type LaunchConfigStore,
+  type ThreadLaunchConfig
+} from "./launch-config.ts";
 import {
   createDeferred,
   createSerialQueue,
@@ -161,6 +169,8 @@ export interface OrchestratorOptions {
   adapterForRefId(refId: string): AgentAdapterId | null;
   /** Absolute home dir for a thread's account (§3.1). Host-side only. */
   resolveHome(input: {
+    /** So the resolver can consult that thread's §6.1 `homePath`. */
+    threadId: string;
     adapter: AgentAdapterId;
     refId: string;
     accountId: string;
@@ -180,6 +190,12 @@ export interface OrchestratorOptions {
    * sees what the entry declares.
    */
   launchArgsForRefId?(refId: string): readonly string[];
+  /**
+   * Where the §6.1 `launchEnv`/`unsetEnv`/`homePath`/`proxyRefId` are kept. The
+   * daemon sends them once, at create; a session may be started much later by
+   * lazy recovery or by the reconcile, so they must survive a host restart.
+   */
+  launchConfigs?: LaunchConfigStore;
   clock?: Clock;
   ids?: IdGen;
   fold?: FoldOps;
@@ -239,6 +255,8 @@ interface ThreadRuntime {
    * with `commandId: null`, which is the discriminator.
    */
   titleManual: boolean;
+  /** The §6.1 launcher env, loaded once with the thread. */
+  launch: ThreadLaunchConfig | null;
   /**
    * Set once `captureBaseline` answers `null` — a non-git project skips
    * checkpoints silently (§5.4), and no placeholder may be written for it.
@@ -289,7 +307,7 @@ export interface Orchestrator {
     turnCount: number,
     options?: { ignoreWhitespace?: boolean }
   ): Promise<{ fromTurnCount: number; toTurnCount: number; diff: string } | null>;
-  summary(threadId: string): AgentChatSessionSummaryFields | null;
+  summary(threadId: string): HostThreadSummary | null;
 
   subscribe(threadId: string, subscription: ThreadSubscription): Promise<() => void>;
 
@@ -338,6 +356,11 @@ export interface Orchestrator {
   /** The adapter serving a thread, or null when it is not loaded. */
   adapterForThread(threadId: string): AgentAdapterId | null;
   /**
+   * The §6.1 launcher env for a loaded thread. `main.ts` reads it when it
+   * builds a provider child's environment (§3.1).
+   */
+  launchConfig(threadId: string): ThreadLaunchConfig | null;
+  /**
    * Where `createIngestion({sink})` delivers translated domain events (§5.1).
    * They are appended through the store, in order, on the thread's own command
    * queue, so an ingestion append can never interleave with a command's.
@@ -352,6 +375,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   const setTimer = options.setTimer ?? ((fn, ms) => setTimeout(fn, ms).unref());
   const clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle as NodeJS.Timeout));
   const buildEvent: BuildEvent = createEventBuilder({ clock, ids });
+  const launchConfigs = options.launchConfigs ?? createMemoryLaunchConfigStore();
   const { store, ingestion, checkpoints, liveness, snapshots, logger } = options;
 
   const runtimes = new Map<string, ThreadRuntime>();
@@ -408,6 +432,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     const tail = await store.readAll(threadId);
     const state = fold.foldAll(tail.events);
     const persistedHead = await store.loadHead(threadId).catch(() => null);
+    const launch = await launchConfigs.load(threadId).catch(() => null);
     const runtime: ThreadRuntime = {
       id: threadId,
       commands: createSerialQueue(),
@@ -422,6 +447,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       watchdog: null,
       subscribers: new Set(),
       parseError: store.threadError?.(threadId) ?? null,
+      launch,
       titleManual: tail.events.some(
         (event) =>
           event.type === "thread.meta-updated" &&
@@ -682,6 +708,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       throw new Error(gateResult.message);
     }
     const home = await options.resolveHome({
+      threadId: runtime.id,
       adapter: head.adapter,
       refId: head.refId,
       accountId: head.accountId,
@@ -1685,6 +1712,13 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           )
         );
       }
+      // Persisted BEFORE the thread exists on the wire: the very first turn
+      // may start a session, and it must already see the launcher env.
+      const launch = launchConfigFromRequest(request);
+      runtime.launch = launch;
+      await launchConfigs.save(threadId, launch).catch((error: unknown) => {
+        logger.warn(`agent-host: failed to persist the launch config for ${threadId}`, error);
+      });
       await runtime.commands.run(() => commit(runtime, events));
       await saveHeadNow(runtime);
       return requireHead(runtime);
@@ -1899,7 +1933,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       }
     });
 
-  const summary = (threadId: string): AgentChatSessionSummaryFields | null => {
+  const summary = (threadId: string): HostThreadSummary | null => {
     const runtime = runtimes.get(threadId);
     const head = runtime ? headOf(runtime) : null;
     if (!runtime || !head) return null;
@@ -1909,6 +1943,20 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     return {
       hasPendingApprovals: pending.approvals.length > 0,
       hasPendingUserInput: pending.userInputs.length > 0,
+      // The ids and labels the daemon's `agentChat.pending` needs (§6.4): the
+      // booleans say that something is pending, not which.
+      pendingRequests: [
+        ...pending.approvals.map((approval) => ({
+          requestId: approval.requestId,
+          kind: "approval" as const,
+          title: approvalTitle(approval)
+        })),
+        ...pending.userInputs.map((question) => ({
+          requestId: question.requestId,
+          kind: "question" as const,
+          title: questionTitle(question)
+        }))
+      ],
       hasActionableProposedPlan: (runtime.state.items ?? []).some(
         (item) => item.kind === "activity" && item.activityKind === "turn.proposed.completed"
       ),
@@ -1958,6 +2006,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     }
     return { turnCount: maxCheckpointTurnCount(runtime) + 1 };
   };
+
+  const launchConfig = (threadId: string): ThreadLaunchConfig | null =>
+    runtimes.get(threadId)?.launch ?? null;
 
   const adapterForThread = (threadId: string): AgentAdapterId | null => {
     const runtime = runtimes.get(threadId);
@@ -2346,6 +2397,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     summary,
     subscribe,
     threadContext,
+    launchConfig,
     placeholderCheckpoint,
     onAccountEvent,
     adapterForThread,
@@ -2383,6 +2435,38 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     // The sink `createIngestion({sink})` is wired to in `main.ts`.
     ingestionSink
   };
+}
+
+/**
+ * The §6.4 fields plus the open requests behind two of the booleans. Declared
+ * here rather than on `AgentChatSessionSummaryFields`, which is the shared
+ * client-facing contract; this shape never leaves the host↔daemon socket.
+ */
+export interface HostThreadSummary extends AgentChatSessionSummaryFields {
+  pendingRequests: Array<{
+    requestId: string;
+    kind: "approval" | "question";
+    title: string;
+  }>;
+}
+
+const REQUEST_KIND_TITLES: Readonly<Record<string, string>> = {
+  command: "Run a command",
+  "file-read": "Read a file",
+  "file-change": "Change a file",
+  "mcp-elicitation": "Answer an MCP request",
+  permission: "Grant a permission"
+};
+
+/** A short, safe label — never the tool payload, which can be the repository. */
+function approvalTitle(approval: PendingApproval): string {
+  return REQUEST_KIND_TITLES[approval.requestKind] ?? "Approve a request";
+}
+
+function questionTitle(question: PendingUserInput): string {
+  const first = question.questions[0];
+  const text = first?.header?.trim() || first?.question?.trim();
+  return text && text.length > 0 ? text : "Answer a question";
 }
 
 const sizeCache = new WeakMap<object, number>();

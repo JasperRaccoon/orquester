@@ -20,4 +20,9 @@ export {
   type ThreadStream,
   type ThreadStreamOptions
 } from "./stream.ts";
-export { agentHostExtraRoutes, type AttachmentPathResponse } from "./extra-routes.ts";
+export {
+  agentHostExtraRoutes,
+  type AgentHostPendingRequest,
+  type AgentHostThreadSummary,
+  type AttachmentPathResponse
+} from "./extra-routes.ts";

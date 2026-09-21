@@ -18,7 +18,10 @@ import {
   type AgentHostHealthResponse
 } from "../host-protocol.ts";
 import { createTestHost, type TestHost } from "../orchestration/testing/index.ts";
-import { agentHostExtraRoutes } from "./extra-routes.ts";
+import {
+  agentHostExtraRoutes,
+  type AgentHostThreadSummary
+} from "./extra-routes.ts";
 import { createAgentHostServer, type AgentHostServer } from "./http-server.ts";
 
 const TOKEN = "test-token";
@@ -387,9 +390,49 @@ describe("agent host server — commands and reads (§6.2, §6.3)", () => {
     await h.host.settle();
     const summary = await h.call("GET", agentHostExtraRoutes.summary(threadId));
     assert.equal(summary.status, 200);
-    const body = summary.body as { chatSessionStatus: string; backgroundLiveness: null };
+    const body = summary.body as AgentHostThreadSummary;
     assert.equal(body.chatSessionStatus, "running");
     assert.equal(body.backgroundLiveness, null);
+    assert.deepEqual(body.pendingRequests, []);
+    await h.stop();
+  });
+
+  it("names every open request so the daemon can publish agentChat.pending", async () => {
+    const h = await harness();
+    const threadId = await h.host.createThread();
+    // Ingestion's rows, as the adapter would produce them.
+    await h.host.orchestrator.ingestionSink(threadId, [
+      {
+        eventId: "req",
+        threadId,
+        type: "thread.activity-appended",
+        payload: {
+          activity: {
+            kind: "activity",
+            id: "approval:req-7",
+            tone: "approval",
+            activityKind: "approval.requested",
+            summary: "Run a command?",
+            payload: { requestId: "req-7", requestKind: "file-change" },
+            turnId: null,
+            createdAt: h.host.clock.nowIso(),
+            updatedAt: h.host.clock.nowIso()
+          }
+        },
+        occurredAt: h.host.clock.nowIso(),
+        commandId: null,
+        causationEventId: null,
+        metadata: {}
+      }
+    ]);
+    await h.host.settle();
+
+    const body = (await h.call("GET", agentHostExtraRoutes.summary(threadId)))
+      .body as AgentHostThreadSummary;
+    assert.equal(body.hasPendingApprovals, true);
+    assert.deepEqual(body.pendingRequests, [
+      { requestId: "req-7", kind: "approval", title: "Change a file" }
+    ]);
     await h.stop();
   });
 

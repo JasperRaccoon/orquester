@@ -8,6 +8,8 @@
  * builders from here rather than hand-writing the strings.
  */
 
+import type { AgentChatSessionSummaryFields } from "@orquester/api/agent-chat";
+
 const thread = (threadId: string): string => `/threads/${encodeURIComponent(threadId)}`;
 
 export const agentHostExtraRoutes = {
@@ -30,6 +32,27 @@ export const agentHostExtraRoutes = {
    */
   summary: (threadId: string): string => `${thread(threadId)}/summary`
 } as const;
+
+/**
+ * One open request, as `GET …/summary` reports it. The daemon publishes
+ * `agentChat.pending {id, requestId, kind, title, open}` from this (§6.4); the
+ * booleans on {@link AgentChatSessionSummaryFields} say *that* something is
+ * pending, not *which*, and a coarse bus event needs the id and a label.
+ */
+export interface AgentHostPendingRequest {
+  requestId: string;
+  kind: "approval" | "question";
+  /** A short label for the notification. Never the full tool payload. */
+  title: string;
+}
+
+/**
+ * `GET …/summary`. The six §6.4 fields the daemon hangs on `SessionSummary`,
+ * plus the open requests behind two of those booleans.
+ */
+export interface AgentHostThreadSummary extends AgentChatSessionSummaryFields {
+  pendingRequests: AgentHostPendingRequest[];
+}
 
 /** Response of `GET …/attachments/:id`. */
 export interface AttachmentPathResponse {

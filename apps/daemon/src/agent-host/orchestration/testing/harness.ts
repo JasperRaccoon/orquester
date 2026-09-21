@@ -31,6 +31,11 @@ import {
   type TestClock,
   type TestTimers
 } from "./fakes.ts";
+import {
+  createMemoryLaunchConfigStore,
+  type LaunchConfigStore,
+  type ThreadLaunchConfig
+} from "../launch-config.ts";
 import { createScriptedAdapter, type ScriptedAdapter } from "./scripted-adapter.ts";
 
 export interface TestHostOptions {
@@ -42,6 +47,8 @@ export interface TestHostOptions {
   minimumVersions?: OrchestratorOptions["minimumVersions"];
   /** Leave the gate shut so queue-before-ready can be asserted. */
   openGate?: boolean;
+  /** Reuse a launch-config store, to assert what survives a host restart. */
+  launchConfigs?: LaunchConfigStore & { readonly entries: Map<string, ThreadLaunchConfig> };
 }
 
 export interface TestHost {
@@ -53,11 +60,21 @@ export interface TestHost {
   checkpoints: FakeCheckpointService;
   snapshots: ProviderSnapshotRegistry & { set(snapshot: ProviderSnapshot): void };
   logger: RecordingLogger;
+  launchConfigs: LaunchConfigStore & { readonly entries: Map<string, ThreadLaunchConfig> };
   clock: TestClock;
   timers: TestTimers;
   /** Every event published to subscribers, in order. */
   published: DomainEvent[];
-  createThread(input?: { threadId?: string; refId?: string; cwd?: string }): Promise<string>;
+  createThread(input?: {
+    threadId?: string;
+    refId?: string;
+    cwd?: string;
+    home?: "system" | "account" | "cliproxy";
+    launchEnv?: Record<string, string>;
+    unsetEnv?: string[];
+    homePath?: string;
+    proxyRefId?: string;
+  }): Promise<string>;
   settle(): Promise<void>;
   stop(): Promise<void>;
 }
@@ -95,7 +112,8 @@ export function createTestHost(options: TestHostOptions = {}): TestHost {
   const store = options.store ?? createFakeThreadStore();
   const checkpoints = createFakeCheckpointService();
   const snapshots = createStubSnapshotRegistry();
-  const liveness = createLivenessRegistry();
+  const launchConfigs = options.launchConfigs ?? createMemoryLaunchConfigStore();
+  const liveness = createLivenessRegistry({ clock });
 
   const adapters = new Map<AgentAdapterId, ScriptedAdapter>();
   for (const [id, adapter] of Object.entries(options.adapters ?? {})) {
@@ -124,14 +142,20 @@ export function createTestHost(options: TestHostOptions = {}): TestHost {
       if (refId === "claudex" || refId === "claudemix") return "claude";
       return adapters.has(refId as AgentAdapterId) ? (refId as AgentAdapterId) : null;
     },
-    resolveHome: async ({ home, accountId }) => ({
-      kind: home,
-      ...(home === "account" ? { accountId } : {}),
-      path: `/tmp/home/${accountId}`
-    }),
+    // Mirrors `main.ts`: the daemon's resolved `homePath` is the authority.
+    resolveHome: async ({ home, accountId, refId, threadId }) => {
+      const launch = orchestrator.launchConfig(threadId);
+      return {
+        kind: home,
+        ...(home === "account" ? { accountId } : {}),
+        ...(home === "cliproxy" ? { proxyRefId: launch?.proxyRefId ?? refId } : {}),
+        path: launch?.homePath ?? `/tmp/home/${accountId}`
+      };
+    },
     ...(options.continuationEnabled ? { continuationEnabled: options.continuationEnabled } : {}),
     ...(options.isThreadClosed ? { isThreadClosed: options.isThreadClosed } : {}),
     ...(options.minimumVersions ? { minimumVersions: options.minimumVersions } : {}),
+    launchConfigs,
     clock,
     ids,
     setTimer: (fn, ms) => timers.setTimer(fn, ms),
@@ -153,6 +177,7 @@ export function createTestHost(options: TestHostOptions = {}): TestHost {
     checkpoints,
     snapshots,
     logger,
+    launchConfigs,
     clock,
     timers,
     published,
@@ -165,9 +190,13 @@ export function createTestHost(options: TestHostOptions = {}): TestHost {
         title: "Test thread",
         refId: input.refId ?? adapter.id,
         accountId: "acc1",
-        home: "account",
+        home: input.home ?? "account",
         modelSelection: { model: "test-model" },
-        runtimeMode: "approval-required"
+        runtimeMode: "approval-required",
+        ...(input.launchEnv ? { launchEnv: input.launchEnv } : {}),
+        ...(input.unsetEnv ? { unsetEnv: input.unsetEnv } : {}),
+        ...(input.homePath ? { homePath: input.homePath } : {}),
+        ...(input.proxyRefId ? { proxyRefId: input.proxyRefId } : {})
       });
       await orchestrator.subscribe(threadId, {
         onEvents: (events) => {

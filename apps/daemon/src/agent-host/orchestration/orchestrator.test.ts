@@ -1076,12 +1076,20 @@ describe("orchestrator — the §6.4 summary fields", () => {
     assert.equal(initial?.latestTurn?.state, "running");
     assert.equal(initial?.latestTurn?.completedAt, null);
 
+    assert.deepEqual(initial?.pendingRequests, []);
+
     await openApproval(host, "req-1");
     await openQuestion(host, "q-1", { dismissible: true });
     await host.settle();
     const summary = host.orchestrator.summary(threadId);
     assert.equal(summary?.hasPendingApprovals, true);
     assert.equal(summary?.hasPendingUserInput, true);
+    // The ids and labels `agentChat.pending` needs (§6.4): a boolean says that
+    // something is pending, not which.
+    assert.deepEqual(summary?.pendingRequests, [
+      { requestId: "req-1", kind: "approval", title: "Run a command" },
+      { requestId: "q-1", kind: "question", title: "Branch" }
+    ]);
     await host.stop();
   });
 });
@@ -1162,6 +1170,64 @@ describe("orchestrator — the ingestion hooks (§5.1, §5.4)", () => {
     // The harness declares none, so the field is absent rather than empty.
     assert.equal(host.adapter.lastStart?.launchArgs, undefined);
     await host.stop();
+  });
+});
+
+describe("orchestrator — the §6.1 launch config (§3.1)", () => {
+  it("persists the launcher env at create and hands it back for the child's env", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread({
+      refId: "claudex",
+      home: "cliproxy",
+      launchEnv: {
+        ANTHROPIC_BASE_URL: "http://127.0.0.1:9",
+        ANTHROPIC_AUTH_TOKEN: "proxy-token"
+      },
+      unsetEnv: ["ANTHROPIC_API_KEY"],
+      homePath: "/var/lib/orquester/daemon/cliproxy/claude-home-claudex",
+      proxyRefId: "claudex"
+    });
+
+    assert.deepEqual(host.orchestrator.launchConfig(threadId), {
+      launchEnv: {
+        ANTHROPIC_BASE_URL: "http://127.0.0.1:9",
+        ANTHROPIC_AUTH_TOKEN: "proxy-token"
+      },
+      unsetEnv: ["ANTHROPIC_API_KEY"],
+      homePath: "/var/lib/orquester/daemon/cliproxy/claude-home-claudex",
+      proxyRefId: "claudex"
+    });
+    // Written before the thread exists on the wire, so the very first turn
+    // already sees it.
+    assert.ok(host.launchConfigs.entries.has(threadId));
+    assert.equal(host.orchestrator.launchConfig("unknown"), null);
+    await host.stop();
+  });
+
+  it("survives a host restart — the daemon sends it once, at create", async () => {
+    const first = createTestHost();
+    const threadId = await first.createThread({
+      refId: "claudex",
+      home: "cliproxy",
+      launchEnv: { ANTHROPIC_AUTH_TOKEN: "proxy-token" },
+      homePath: "/home/proxy"
+    });
+    await first.stop();
+
+    // A new host over the same store and the same on-disk launch config: the
+    // thread is only loaded lazily, by the first command.
+    const next = createTestHost({ store: first.store, launchConfigs: first.launchConfigs });
+    await next.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await next.settle();
+    assert.deepEqual(next.orchestrator.launchConfig(threadId)?.launchEnv, {
+      ANTHROPIC_AUTH_TOKEN: "proxy-token"
+    });
+    // …and the daemon's resolved home is what reaches `startSession`.
+    assert.equal(next.adapter.lastStart?.home.path, "/home/proxy");
+    assert.equal(next.adapter.lastStart?.home.kind, "cliproxy");
+    // No `proxyRefId` was sent, so the launcher's own refId is the owner.
+    assert.equal(next.adapter.lastStart?.home.proxyRefId, "claudex");
+    await next.stop();
   });
 });
 

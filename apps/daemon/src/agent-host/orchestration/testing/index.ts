@@ -29,3 +29,8 @@ export {
   type TestTimers
 } from "./fakes.ts";
 export { createTestHost, type TestHost, type TestHostOptions } from "./harness.ts";
+export {
+  createMemoryLaunchConfigStore,
+  type LaunchConfigStore,
+  type ThreadLaunchConfig
+} from "../launch-config.ts";

@@ -3,9 +3,13 @@ import { describe, it } from "node:test";
 
 import type { RuntimeEvent } from "@orquester/api/agent-chat";
 
-import { createLivenessRegistry } from "./liveness.ts";
+import { BACKGROUND_LIVENESS_TTL_MS, createLivenessRegistry } from "./liveness.ts";
+import { createTestClock } from "./testing/fakes.ts";
 
 const base = { eventId: "e", threadId: "t1", createdAt: "1970-01-01T00:00:00.000Z" };
+
+const turn = (type: "turn.started" | "turn.completed" | "turn.aborted"): RuntimeEvent =>
+  ({ ...base, type, turnId: "turn-1", payload: {} }) as unknown as RuntimeEvent;
 
 const task = (
   type: "task.started" | "task.progress" | "task.updated" | "task.completed",
@@ -89,5 +93,99 @@ describe("background liveness registry (§3.1)", () => {
     // The next row reveals it as a shell: it moves bucket rather than pinning.
     registry.observe(task("task.updated", { taskId: "x1", taskType: "shell", status: "running" }));
     assert.equal(registry.liveness("t1"), "monitoring");
+  });
+});
+
+/**
+ * Grok never reports completion for a backgrounded task, so without a bound
+ * `backgroundLiveness` would read `"monitoring"` for the rest of the host's
+ * life and the §6.4 ladder would keep the tab out of "finished" forever.
+ */
+describe("background liveness expiry (Grok: tasks that never complete)", () => {
+  it("drops a watch loop that has been silent for the TTL", () => {
+    const clock = createTestClock(0);
+    const registry = createLivenessRegistry({ clock });
+    registry.observe(task("task.started", { taskId: "m1", taskType: "monitor" }));
+    assert.equal(registry.liveness("t1"), "monitoring");
+
+    clock.set(BACKGROUND_LIVENESS_TTL_MS - 1);
+    assert.equal(registry.liveness("t1"), "monitoring", "still inside the window");
+
+    clock.set(BACKGROUND_LIVENESS_TTL_MS);
+    assert.equal(registry.liveness("t1"), null, "silent for the whole window");
+  });
+
+  it("a transition refreshes the window", () => {
+    const clock = createTestClock(0);
+    const registry = createLivenessRegistry({ clock });
+    registry.observe(task("task.started", { taskId: "m1", taskType: "monitor" }));
+    clock.set(BACKGROUND_LIVENESS_TTL_MS - 1);
+    registry.observe(task("task.progress", { taskId: "m1", taskType: "monitor", status: "running" }));
+    clock.set(BACKGROUND_LIVENESS_TTL_MS + 1);
+    assert.equal(registry.liveness("t1"), "monitoring");
+    clock.set(BACKGROUND_LIVENESS_TTL_MS * 2);
+    assert.equal(registry.liveness("t1"), null);
+  });
+
+  it("never expires an agent — a subagent that runs for hours is real work", () => {
+    const clock = createTestClock(0);
+    const registry = createLivenessRegistry({ clock });
+    registry.observe(task("task.started", { taskId: "a1", taskType: "subagent" }));
+    clock.set(BACKGROUND_LIVENESS_TTL_MS * 100);
+    assert.equal(registry.liveness("t1"), "working");
+    assert.equal(registry.liveAgentCount("t1"), 1);
+  });
+
+  it("a turn ending drops a watch loop that reported nothing during it", () => {
+    const clock = createTestClock(0);
+    const registry = createLivenessRegistry({ clock });
+    registry.observe(task("task.started", { taskId: "m1", taskType: "monitor" }));
+
+    clock.set(1_000);
+    registry.observe(turn("turn.started"));
+    clock.set(2_000);
+    registry.observe(turn("turn.completed"));
+    assert.equal(registry.liveness("t1"), null, "silent for the whole turn");
+  });
+
+  it("…but keeps one that did report during the turn", () => {
+    const clock = createTestClock(0);
+    const registry = createLivenessRegistry({ clock });
+    registry.observe(turn("turn.started"));
+    clock.set(500);
+    registry.observe(task("task.started", { taskId: "m1", taskType: "monitor" }));
+    clock.set(1_000);
+    registry.observe(turn("turn.completed"));
+    assert.equal(registry.liveness("t1"), "monitoring");
+  });
+
+  it("an aborted turn sweeps the same way", () => {
+    const clock = createTestClock(0);
+    const registry = createLivenessRegistry({ clock });
+    registry.observe(task("task.started", { taskId: "m1", taskType: "monitor" }));
+    clock.set(1_000);
+    registry.observe(turn("turn.started"));
+    clock.set(2_000);
+    registry.observe(turn("turn.aborted"));
+    assert.equal(registry.liveness("t1"), null);
+  });
+
+  it("a turn end with no turn start recorded leaves the registry alone", () => {
+    const clock = createTestClock(0);
+    const registry = createLivenessRegistry({ clock });
+    registry.observe(task("task.started", { taskId: "m1", taskType: "monitor" }));
+    registry.observe(turn("turn.completed"));
+    assert.equal(registry.liveness("t1"), "monitoring");
+  });
+
+  it("an agent survives the turn-boundary sweep", () => {
+    const clock = createTestClock(0);
+    const registry = createLivenessRegistry({ clock });
+    registry.observe(task("task.started", { taskId: "a1", taskType: "subagent" }));
+    clock.set(1_000);
+    registry.observe(turn("turn.started"));
+    clock.set(2_000);
+    registry.observe(turn("turn.completed"));
+    assert.equal(registry.liveness("t1"), "working");
   });
 });

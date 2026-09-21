@@ -44,6 +44,7 @@ import { createCheckpointService } from "./checkpoints/index.ts";
 import type { AgentHostStopResponse } from "@orquester/api/agent-chat";
 import { newHostInstanceId } from "./host-protocol.ts";
 import { createIngestion } from "./ingestion/index.ts";
+import { createFileLaunchConfigStore } from "./orchestration/launch-config.ts";
 import { createLivenessRegistry } from "./orchestration/liveness.ts";
 import { createOrchestrator, type Orchestrator } from "./orchestration/orchestrator.ts";
 import {
@@ -54,6 +55,14 @@ import { systemClock, systemIdGen } from "./orchestration/runtime-seams.ts";
 import { createAgentHostServer, type AgentHostServer } from "./server/index.ts";
 import { createThreadStore } from "./store/index.ts";
 import { buildProviderEnv } from "./support/env.ts";
+
+/**
+ * The ONE ambient credential a cliproxy launcher may keep: for `claudex` and
+ * `claudemix` the proxy's bearer token IS the selected identity, so the §3.1
+ * denylist must not strip it. Everything else in
+ * `AMBIENT_CREDENTIAL_ENV_VARS` stays denied.
+ */
+const CLIPROXY_CREDENTIAL_ENV_VAR = "ANTHROPIC_AUTH_TOKEN";
 
 // ---------------------------------------------------------------------------
 // Small host-local helpers
@@ -224,6 +233,7 @@ export async function startAgentHost(
 
   // ---- services ----------------------------------------------------------
   const liveness = createLivenessRegistry();
+  const launchConfigs = createFileLaunchConfigStore({ rootDir: stateDir });
   // Exactly ONE checkpoint service for the host: its git permit pool is per
   // instance, so a second one would double the concurrency §5.4 bounds.
   const checkpoints = createCheckpointService({
@@ -261,19 +271,36 @@ export async function startAgentHost(
       store.resolveAttachment(threadId, attachmentId),
     attachmentsDir: (threadId) => agentChatThreadAttachmentsDir(appdir, threadId),
     logRawFrame: (threadId, frame) => store.logRawFrame(threadId, frame),
-    buildEnv: ({ threadId, home, extraEnv }) =>
-      buildProviderEnv({
+    buildEnv: ({ threadId, home, extraEnv }) => {
+      // The §6.1 launcher env the daemon composed for this thread: the registry
+      // entry's own env (which already carries `<appdir>/daemon/env/<id>.env`)
+      // under every `resolveExtraEnv` contributor. It layers OVER the adapter's
+      // own extras, exactly as the terminal wrapper's `export` wins over
+      // `tmux -e`.
+      const launch = orchestrator?.launchConfig(threadId) ?? null;
+      const accountHomeDir = launch?.homePath ?? (home.kind !== "system" ? home.path : undefined);
+      const env = buildProviderEnv({
         adapter,
         sessionPath,
         tmpDir,
         homeDir,
-        ...(home.kind !== "system" ? { accountHomeDir: home.path } : {}),
-        ...(extraEnv !== undefined ? { extraEnv } : {}),
+        ...(accountHomeDir !== undefined ? { accountHomeDir } : {}),
+        extraEnv: { ...extraEnv, ...launch?.launchEnv },
         sessionId: threadId,
-        // The cliproxy launcher's `ANTHROPIC_AUTH_TOKEN` *is* the selected
-        // identity, so it is the one ambient credential that may survive.
-        ...(home.kind === "cliproxy" ? { allowCredentialVars: ["ANTHROPIC_AUTH_TOKEN"] } : {})
-      }),
+        // For a cliproxy launcher the proxy token IS the selected identity, so
+        // it is the one ambient credential that may survive the denylist —
+        // without this, `claudex`/`claudemix` launch with no credential at all.
+        ...(home.kind === "cliproxy"
+          ? { allowCredentialVars: [CLIPROXY_CREDENTIAL_ENV_VAR] }
+          : {})
+      });
+      // The `unset` half of §3.1: the daemon names the ambient vars this launch
+      // must not carry, and they are removed after everything else is layered.
+      for (const name of launch?.unsetEnv ?? []) {
+        delete env[name];
+      }
+      return env;
+    },
     resolveBin: async (refId: string) => {
       const entry = refIds.get(refId);
       if (!entry) return null;
@@ -342,26 +369,37 @@ export async function startAgentHost(
     logger,
     hostInstanceId,
     adapterForRefId: (refId) => refIds.get(refId)?.adapter ?? null,
-    resolveHome: async ({ adapter, refId, accountId, home }): Promise<AccountHome> => {
+    resolveHome: async ({ adapter, refId, accountId, home, threadId }): Promise<AccountHome> => {
+      // The daemon resolved the absolute home when it created the thread and
+      // it is the authority: it read the same `ACCOUNT_HOME_ENV_VAR` the child
+      // itself will read. The conventions below are the fallback for a thread
+      // created before the daemon sent one.
+      const launch = orchestrator?.launchConfig(threadId) ?? null;
       if (home === "cliproxy") {
+        const proxyRefId = launch?.proxyRefId ?? refId;
         return {
           kind: "cliproxy",
-          proxyRefId: refId,
-          path: join(daemonConfigDir(appdir), "cliproxy", `claude-home-${refId}`)
+          proxyRefId,
+          path:
+            launch?.homePath ??
+            join(daemonConfigDir(appdir), "cliproxy", `claude-home-${proxyRefId}`)
         };
       }
       const family = accountFamilyFor(adapter);
-      if (home === "account" && family && accountId.length > 0) {
+      if (home === "account" && (launch?.homePath || (family && accountId.length > 0))) {
         return {
           kind: "account",
           accountId,
-          path: join(daemonConfigDir(appdir), "agent-accounts", family, accountId, "home")
+          path:
+            launch?.homePath ??
+            join(daemonConfigDir(appdir), "agent-accounts", family!, accountId, "home")
         };
       }
-      return { kind: "system", path: homeDir };
+      return { kind: "system", path: launch?.homePath ?? homeDir };
     },
     continuationEnabled: (projectPath) => continuationEnabledFor(appdir, projectPath, env),
     launchArgsForRefId: (refId) => refIds.get(refId)?.args ?? [],
+    launchConfigs,
     clock,
     ids
   });
