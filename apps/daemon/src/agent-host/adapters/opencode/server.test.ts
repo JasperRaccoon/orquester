@@ -23,7 +23,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import type { AdapterLogger } from "../../adapter.ts";
+import type { AdapterLogger, StartSessionInput } from "../../adapter.ts";
+import { projectDirFor } from "./index.ts";
 import {
   OpenCodeServerPool,
   parseServerUrl,
@@ -358,6 +359,53 @@ test("a re-acquire inside the idle window cancels the close", async () => {
     controller.abort();
     peer.cleanup();
   }
+});
+
+test("§3.2: two threads in ONE project share one server, keyed by projectPath", async () => {
+  // The end-to-end half of R4 #6: `projectDirFor` collapses both threads to
+  // the project root, and the pool must then hand out the same child — one
+  // `opencode serve`, one port, one catalogue probe. Before the fix these were
+  // two servers.
+  const peer = makePeer();
+  const controller = new AbortController();
+  const pool = makePool(peer, { MOCK_MODE: "ok" }, controller);
+  const seen: string[] = [];
+  try {
+    const rootThread = projectDirFor({
+      threadId: "t1",
+      cwd: peer.dir,
+      projectPath: peer.dir,
+      home: { kind: "system", path: peer.dir },
+      modelSelection: { model: "openrouter/x" },
+      runtimeMode: "approval-required"
+    } as StartSessionInput);
+    const subdirThread = projectDirFor({
+      threadId: "t2",
+      // A thread opened on a subdirectory of the same checkout.
+      cwd: join(peer.dir, "packages", "ui"),
+      projectPath: peer.dir,
+      home: { kind: "system", path: peer.dir },
+      modelSelection: { model: "openrouter/x" },
+      runtimeMode: "approval-required"
+    } as StartSessionInput);
+    assert.equal(rootThread, subdirThread, "both threads resolve to the project root");
+
+    const a = await pool.acquire(rootThread);
+    seen.push(a.url);
+    const b = await pool.acquire(subdirThread);
+    seen.push(b.url);
+
+    assert.equal(a.pid, b.pid, "one `opencode serve` for the project");
+    assert.equal(a.url, b.url, "one port");
+    assert.equal(pool.list().length, 1);
+    a.release();
+    b.release();
+  } finally {
+    await pool.stopAll();
+    controller.abort();
+    peer.cleanup();
+  }
+  assert.equal(new Set(seen).size, 1);
 });
 
 test("two projects get two servers", async () => {

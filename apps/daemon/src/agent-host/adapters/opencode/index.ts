@@ -123,7 +123,16 @@ class OpenCodeAdapterImpl implements AgentAdapter {
       buildEnv: ({ projectDir }) =>
         ctx.buildEnv({
           // The server is shared by a project's threads, so it is stamped with
-          // the project rather than any one thread's session id.
+          // the project rather than any one thread's session id. The host
+          // resolves the project's launcher env from `projectPath`; the
+          // `project:<dir>` thread id is the older convention it still
+          // honours, kept here so this works either way.
+          //
+          // `projectPath` is passed through a SPREAD on purpose: the field is
+          // additive on `AdapterContext.buildEnv` and lands with W1's change,
+          // and a spread is not subject to excess-property checking — so this
+          // compiles against both shapes and needs no follow-up edit.
+          ...{ projectPath: projectDir },
           threadId: `project:${projectDir}`,
           home: { kind: "system", path: process.env.HOME ?? "/" }
         }),

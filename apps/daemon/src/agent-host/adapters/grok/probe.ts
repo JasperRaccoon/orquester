@@ -69,6 +69,14 @@ export interface ProbeResult {
   models: ProviderModel[];
   slashCommands: SlashCommand[];
   skills: Skill[];
+  /**
+   * Which catalogues this run could not read (§4.5: "typed probe errors so a
+   * failure never caches an empty catalogue"). A caller MUST keep its previous
+   * non-empty list for every entry named here — one timed-out
+   * `grok inspect --json` otherwise blanks the Settings card and the composer
+   * skill menu until a later refresh happens to succeed (R4 #5).
+   */
+  unavailable: { models: boolean; skills: boolean; slashCommands: boolean };
 }
 
 export interface ProbeDeps {
@@ -385,7 +393,10 @@ export async function probeGrok(deps: ProbeDeps): Promise<ProbeResult> {
     auth: { status: "unknown" },
     models: [],
     slashCommands: [COMPACT_SLASH_COMMAND],
-    skills: []
+    skills: [],
+    // A binary that is genuinely absent has no catalogue to keep; that is a
+    // fact about the host, not a failed read.
+    unavailable: { models: false, skills: false, slashCommands: false }
   };
   if (deps.command === null) {
     return notInstalled;
@@ -402,7 +413,9 @@ export async function probeGrok(deps: ProbeDeps): Promise<ProbeResult> {
     return {
       ...notInstalled,
       installed: true,
-      message: "Grok CLI is installed but timed out while running `grok --version`."
+      message: "Grok CLI is installed but timed out while running `grok --version`.",
+      // A timeout IS a failed read: keep whatever the card already showed.
+      unavailable: { models: true, skills: true, slashCommands: true }
     };
   }
   const version = parseGrokVersion(`${versionOut.stdout}\n${versionOut.stderr}`);
@@ -411,7 +424,8 @@ export async function probeGrok(deps: ProbeDeps): Promise<ProbeResult> {
       ...notInstalled,
       installed: true,
       version,
-      message: "Grok CLI is installed but failed to run."
+      message: "Grok CLI is installed but failed to run.",
+      unavailable: { models: true, skills: true, slashCommands: true }
     };
   }
 
@@ -439,7 +453,8 @@ export async function probeGrok(deps: ProbeDeps): Promise<ProbeResult> {
     });
   }
 
-  const skills = await probeSkills(deps.command, env, deps.cwd);
+  const probedSkills = await probeSkills(deps.command, env, deps.cwd);
+  const skills = probedSkills ?? [];
 
   const auth: ProviderAuth =
     cli.authenticated === true
@@ -449,6 +464,11 @@ export async function probeGrok(deps: ProbeDeps): Promise<ProbeResult> {
         : { status: "unknown" };
 
   const models = acpModels.length > 0 ? acpModels : cli.models;
+  const unavailable = {
+    models: models.length === 0,
+    skills: probedSkills === null,
+    slashCommands: acpCommands === null
+  };
 
   if (cli.authenticated === false) {
     return {
@@ -459,7 +479,8 @@ export async function probeGrok(deps: ProbeDeps): Promise<ProbeResult> {
       auth,
       models,
       slashCommands: acpCommands ?? [COMPACT_SLASH_COMMAND],
-      skills
+      skills,
+      unavailable
     };
   }
 
@@ -479,7 +500,8 @@ export async function probeGrok(deps: ProbeDeps): Promise<ProbeResult> {
     auth,
     models,
     slashCommands: acpCommands ?? [COMPACT_SLASH_COMMAND],
-    skills
+    skills,
+    unavailable
   };
 }
 
@@ -509,15 +531,20 @@ async function probeInitialize(
   }
 }
 
-/** Per-cwd when a cwd is given — only SKILLS are re-scoped for Grok (§4.6.4). */
+/**
+ * Per-cwd when a cwd is given — only SKILLS are re-scoped for Grok (§4.6.4).
+ *
+ * `null` means **the catalogue could not be read**, which is a different thing
+ * from "this directory has no skills"; the caller keeps whatever it had.
+ */
 export async function probeSkills(
   command: string,
   env: Record<string, string>,
   cwd: string
-): Promise<Skill[]> {
+): Promise<Skill[] | null> {
   const output = await runCommand(command, ["inspect", "--json"], env, cwd, AGENT_HOST_DEADLINES.probeMs);
   if (output.failed || output.timedOut || output.code !== 0) {
-    return [];
+    return null;
   }
-  return parseGrokInspectSkills(output.stdout) ?? [];
+  return parseGrokInspectSkills(output.stdout);
 }

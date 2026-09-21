@@ -46,6 +46,9 @@ export interface RedactAcpOptions {
  * Keys whose value is a credential wherever it appears. `value` is NOT in the
  * list — it is far too common — so MCP env is handled structurally below.
  */
+/** Keys whose value is an environment block, in either spelling. */
+const ENV_CONTAINER_KEYS: ReadonlySet<string> = new Set(["env", "environment", "envvars", "env_vars"]);
+
 const SECRET_KEYS = new Set([
   "apikey",
   "api_key",
@@ -103,11 +106,24 @@ function walk(value: unknown, options: RedactAcpOptions, depth: number, inMcpEnv
   for (const [key, item] of Object.entries(source)) {
     const lower = key.toLowerCase();
 
-    // An MCP server's `env` is an array of {name, value} pairs whose values
-    // are the host's real credentials — the whole reason this module exists.
-    if (lower === "env" && Array.isArray(item)) {
-      out[key] = item.map((entry) => walk(entry, options, depth + 1, true));
-      continue;
+    // An MCP server's `env` carries the host's real credentials — the whole
+    // reason this module exists. Grok's ACP frames use an array of
+    // `{name, value}` pairs; `~/.claude.json`, which Grok reads through its
+    // Claude-compat layer, stores the SAME thing as an object map, and only
+    // the array spelling was recognised (R4 #13).
+    if (ENV_CONTAINER_KEYS.has(lower)) {
+      if (Array.isArray(item)) {
+        out[key] = item.map((entry) => walk(entry, options, depth + 1, true));
+        continue;
+      }
+      if (item !== null && typeof item === "object") {
+        const masked: Record<string, unknown> = {};
+        for (const name of Object.keys(item as Record<string, unknown>)) {
+          masked[name] = REDACTED;
+        }
+        out[key] = masked;
+        continue;
+      }
     }
     if (inMcpEnv && lower === "value") {
       out[key] = REDACTED;

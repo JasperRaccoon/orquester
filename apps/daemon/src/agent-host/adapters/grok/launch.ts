@@ -9,7 +9,7 @@
  * on-disk configuration the host owns.
  */
 
-import { readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { ModelSelection, RuntimeMode } from "@orquester/api/agent-chat";
@@ -231,129 +231,110 @@ export function grokReasoningEffort(selection: ModelSelection | undefined): stri
 // ---------------------------------------------------------------------------
 
 /**
- * Keys the adapter writes into a **managed** account home's `config.toml`:
+ * The config the adapter needs the CLI to see, as an **overlay it owns
+ * outright** — never a key written into a file somebody else's process owns.
  *
- * - `[features] support_permission = true`. This is the single biggest
- *   behavioural surprise in the capture set (observation 5): with the stock
- *   configuration a file write under `--permission-mode default` produces **no
- *   `session/request_permission` at all** — the agent resolves the interaction
+ * - `[features] support_permission = true`. The single biggest behavioural
+ *   surprise in the capture set (observation 5): with the stock configuration
+ *   a file write under `--permission-mode default` produces **no
+ *   `session/request_permission` at all` — the agent resolves the interaction
  *   itself, 6 ms apart, and the whole approvals surface of §4.3 silently never
- *   fires. The user would get an agent that approves itself while the UI
- *   claims it is supervised. Neither the spec nor T3 mentions the setting.
+ *   fires while the UI claims the thread is supervised. Neither the spec nor
+ *   T3 mentions the setting.
  * - `[cli] auto_update = false`. The stock home ships `auto_update = true` and
  *   the binary replaced itself *mid-capture* (1.0.3 → 1.0.34), changing the
  *   model list, the auth methods and the effort catalog between two spawns of
- *   one thread (observation 26). A deployment that pins the version it was
- *   validated against is the only way a version gate means anything.
+ *   one thread (observation 26). **Measured caveat:** `grok inspect --json`
+ *   reports the overlay as `sections: features` only, so the CLI appears to
+ *   honour `[cli]` at user scope alone — pinning the version is a deployment
+ *   concern, not something this adapter can enforce. It is emitted anyway
+ *   because it costs nothing and a later release may widen the overlay; the
+ *   adapter's real defence is reading `agentVersion` on every handshake.
  *
- * Applied ONLY to a home the host owns. A `system` home is the user's own
- * `~/.grok` and the adapter must not rewrite it — see
- * {@link grokConfigAdvisory}.
+ * **Why an overlay and not the account home.** The previous revision patched
+ * `<accountHome>/config.toml`. On this host that path is a SYMLINK:
+ *
+ * ```
+ * …/agent-accounts/grok/<id>/home/config.toml -> /var/lib/orquester/.grok/config.toml
+ * ```
+ *
+ * so `writeFile` followed it and rewrote the daemon user's **global** Grok
+ * configuration for every Grok process on the box, terminal tabs included
+ * (R4 #4; the orchestrator restored the file). The host owns its appdir and
+ * nothing else — so the settings now ride `GROK_CONFIG_PATH`, which the CLI
+ * applies as an `env_overlay` layer ON TOP of whatever the user's own config
+ * says, touching no shared file at all.
  */
 export const GROK_MANAGED_CONFIG: ReadonlyArray<{ section: string; key: string; value: string }> = [
   { section: "features", key: "support_permission", value: "true" },
   { section: "cli", key: "auto_update", value: "false" }
 ];
 
-export function grokConfigPath(homeDir: string): string {
-  return join(homeDir, "config.toml");
+/** The env var the CLI reads an additional config layer from. */
+export const GROK_CONFIG_PATH_ENV = "GROK_CONFIG_PATH";
+
+/** The overlay's contents. Fully host-owned, so it is rendered, not patched. */
+export function renderGrokOverlayConfig(): string {
+  const bySection = new Map<string, string[]>();
+  for (const { section, key, value } of GROK_MANAGED_CONFIG) {
+    const lines = bySection.get(section) ?? [];
+    lines.push(`${key} = ${value}`);
+    bySection.set(section, lines);
+  }
+  const blocks: string[] = [
+    "# Written by Orquester for one agent-chat thread. Not the user's config:",
+    "# it reaches the CLI through GROK_CONFIG_PATH as an overlay layer.",
+    ""
+  ];
+  for (const [section, lines] of bySection) {
+    blocks.push(`[${section}]`, ...lines, "");
+  }
+  return blocks.join("\n");
 }
 
 /**
- * What to tell the user when the home is not ours to edit. Returned rather
+ * What to tell the user when the overlay could not be written. Returned rather
  * than thrown: a missing setting degrades the approvals surface, it does not
  * stop the session.
  */
 export function grokConfigAdvisory(): string {
-  return "Grok will approve tool calls itself unless `[features] support_permission = true` is set in its config; approval cards are disabled for this session.";
+  return "Grok will approve tool calls itself unless `[features] support_permission = true` reaches it; approval cards are disabled for this session.";
 }
 
 /**
- * Apply {@link GROK_MANAGED_CONFIG} to a TOML file, preserving everything
- * else. Returns the new text, or `null` when nothing needed changing.
+ * Write the overlay into a host-owned directory and return its path, or `null`
+ * when it could not be written.
  *
- * Deliberately a **targeted patcher, not a TOML parser**: this file is the
- * user's (through the managed home) and a round-trip through a serialiser
- * would reformat comments and ordering it is not ours to touch. No new
- * dependency either (§1 rule 5).
+ * **Refuses to follow a symlink.** The whole reason this module changed is that
+ * a path inside an account home turned out to be a link into the user's global
+ * config; the guard makes that class of mistake impossible rather than merely
+ * unlikely, even though the directory is now the host's own.
  */
-export function patchGrokConfig(source: string): string | null {
-  let text = source;
-  let changed = false;
-
-  for (const { section, key, value } of GROK_MANAGED_CONFIG) {
-    const range = sectionRange(text, section);
-    if (range === null) {
-      const prefix = text.length === 0 || text.endsWith("\n") ? "" : "\n";
-      text = `${text}${prefix}${text.length === 0 ? "" : "\n"}[${section}]\n${key} = ${value}\n`;
-      changed = true;
-      continue;
-    }
-    const body = text.slice(range.start, range.end);
-    const assignment = new RegExp(`^([ \\t]*)${escapeRegExp(key)}([ \\t]*=[ \\t]*)(.*)$`, "m");
-    const match = assignment.exec(body);
-    if (match === null) {
-      // Insert BEFORE the blank lines that separate this section from the
-      // next header, or the new key lands in the following section's gap.
-      const trailing = /(?:[ \t]*\n)*$/.exec(body)?.[0] ?? "";
-      const head = body.slice(0, body.length - trailing.length);
-      const separator = head.length === 0 || head.endsWith("\n") ? "" : "\n";
-      const nextBody = `${head}${separator}${key} = ${value}\n${trailing}`;
-      text = `${text.slice(0, range.start)}${nextBody}${text.slice(range.end)}`;
-      changed = true;
-      continue;
-    }
-    if (match[3].trim() === value) {
-      continue;
-    }
-    const nextBody = body.replace(assignment, `$1${key}$2${value}`);
-    text = `${text.slice(0, range.start)}${nextBody}${text.slice(range.end)}`;
-    changed = true;
-  }
-
-  return changed ? text : null;
-}
-
-/**
- * Best-effort: read, patch, write. Never throws — a read-only home or a
- * malformed file must not stop a session starting, it only costs the
- * approvals surface, which the caller surfaces as a warning.
- */
-export async function ensureGrokManagedConfig(homeDir: string): Promise<"unchanged" | "patched" | "failed"> {
-  const path = grokConfigPath(homeDir);
-  let existing = "";
+export async function writeGrokOverlayConfig(dir: string): Promise<string | null> {
+  const path = join(dir, "orquester-grok.toml");
   try {
-    existing = await readFile(path, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      return "failed";
-    }
-  }
-  const next = patchGrokConfig(existing);
-  if (next === null) {
-    return "unchanged";
-  }
-  try {
-    await writeFile(path, next, { encoding: "utf8", mode: 0o600 });
-    return "patched";
+    await mkdir(dir, { recursive: true, mode: 0o700 });
   } catch {
-    return "failed";
-  }
-}
-
-/** `[name]` … up to the next `[` at the start of a line, or EOF. */
-function sectionRange(text: string, section: string): { start: number; end: number } | null {
-  const header = new RegExp(`^[ \\t]*\\[${escapeRegExp(section)}\\][ \\t]*$`, "m");
-  const match = header.exec(text);
-  if (match === null) {
     return null;
   }
-  const start = match.index + match[0].length + 1;
-  const rest = text.slice(start);
-  const next = /^[ \t]*\[/m.exec(rest);
-  return { start, end: next === null ? text.length : start + next.index };
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  try {
+    const existing = await lstat(path);
+    if (existing.isSymbolicLink()) {
+      // Never write through a link: the target belongs to somebody else.
+      return null;
+    }
+    if (!existing.isFile()) {
+      return null;
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      return null;
+    }
+  }
+  try {
+    await writeFile(path, renderGrokOverlayConfig(), { encoding: "utf8", mode: 0o600 });
+    return path;
+  } catch {
+    return null;
+  }
 }

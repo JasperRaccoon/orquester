@@ -51,6 +51,17 @@ export function stripAnsi(value: string): string {
  * only the first word left `Authorization: [redacted] <the actual token>`.
  * `m` keeps it from eating the next line of a multi-line tail.
  */
+/**
+ * A device-pairing URL is a bearer credential: anyone who opens it completes
+ * the sign-in. §4.5 Grok names it explicitly in the stderr rule ("home dir,
+ * **pairing URLs**, `Bearer`, `x-api-key`, …"), and it is the one path no
+ * capture covers — a healthy Grok run writes nothing to stderr, so this only
+ * ever appears when a login is needed, which is exactly when it must not be
+ * written to `events.ndjson` (R4 #3).
+ *
+ * *T3: `apps/server/src/provider/acp/AcpStderr.ts:7` (`PAIRING_URL_PATTERN`).*
+ */
+const PAIRING_URL_RE = /https?:\/\/[^\s]*\/pair#[^\s]*/gi;
 const AUTH_HEADER_RE = /\b(authorization|x-api-key|proxy-authorization)\b(\s*[:=]\s*)\S.*$/gim;
 const BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi;
 /**
@@ -73,7 +84,9 @@ export interface RedactOptions {
  * before it becomes an event, and to the tail before it becomes an excerpt.
  */
 export function redactStderr(value: string, options: RedactOptions = {}): string {
-  let out = value;
+  // NUL bytes first: they can split a pattern in two and they have no business
+  // in a log line either way.
+  let out = value.replaceAll("\0", "");
 
   const homes = [...(options.homeDirs ?? [])]
     .filter((dir) => dir.length > 1)
@@ -82,6 +95,7 @@ export function redactStderr(value: string, options: RedactOptions = {}): string
     out = out.split(dir).join("~");
   }
 
+  out = out.replace(PAIRING_URL_RE, "[pairing-url]");
   out = out.replace(AUTH_HEADER_RE, (_m, key: string, sep: string) => `${key}${sep}[redacted]`);
   out = out.replace(BEARER_RE, "Bearer [redacted]");
   out = out.replace(TOKEN_SHAPE_RE, "[redacted]");
