@@ -46,7 +46,11 @@ import {
 } from "../orchestration/errors.ts";
 import { isAgentAdapterId } from "../adapters/index.ts";
 import type { Orchestrator } from "../orchestration/orchestrator.ts";
-import { agentHostExtraRoutes, type AttachmentPathResponse } from "./extra-routes.ts";
+import {
+  agentHostExtraRoutes,
+  type AgentHostThreadSummary,
+  type AttachmentPathResponse
+} from "./extra-routes.ts";
 import { createThreadStream, type ThreadStream } from "./stream.ts";
 
 /** Command bodies are small; §4.1 caps `input` at 120 000 characters. */
@@ -365,7 +369,12 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
         // The thread exists but nothing is loaded yet: read it first.
         await orchestrator.readThread(threadId);
       }
-      sendJson(response, 200, orchestrator.summary(threadId) ?? {});
+      // `pendingRequests` is always present, even for a thread that answered
+      // nothing: the daemon iterates it without a guard.
+      const body: AgentHostThreadSummary = orchestrator.summary(threadId) ?? {
+        pendingRequests: []
+      };
+      sendJson(response, 200, body);
       return;
     }
 
