@@ -39,8 +39,8 @@ export type RuntimeEventDraft = {
 }[RuntimeEvent["type"]];
 
 /** Codex's two raw sources (§4.2 `RuntimeEventRawSource`). */
-export const CODEX_RAW_NOTIFICATION: RuntimeEventRaw["source"] = "codex.app-server.notification";
-export const CODEX_RAW_REQUEST: RuntimeEventRaw["source"] = "codex.app-server.request";
+export const CODEX_RAW_NOTIFICATION = "codex.app-server.notification" as const;
+export const CODEX_RAW_REQUEST = "codex.app-server.request" as const;
 
 export interface CodexNormaliserOptions {
   usage: CodexUsageTracker;
