@@ -19,11 +19,14 @@ import type {
   PendingApproval,
   PendingUserInput,
   ProviderSnapshot,
-  RuntimeMode,
   RuntimeSubagent,
   SessionSummary
 } from "@orquester/api";
 import type { AgentPanelModel } from "@orquester/api/agent-chat";
+// The documented collision (SEAMS §1): `@orquester/api` already exports
+// `RuntimeMode` as the client-platform type, so the PERMISSION mode is
+// `AgentRuntimeMode` at that path. Aliased here so the prop keeps its name.
+import type { AgentRuntimeMode as RuntimeMode } from "@orquester/api";
 
 import type {
   ActivePlanState,

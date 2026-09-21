@@ -252,6 +252,12 @@ test("text in the draft refines the plan and STAYS in plan mode", () => {
 
 test("the plan title is its first heading, at any level, or null", () => {
   assert.equal(proposedPlanTitle("### Ship it\nbody"), "Ship it");
+  assert.equal(proposedPlanTitle("  ## Indented\n"), "Indented");
   assert.equal(proposedPlanTitle("body only"), null);
-  assert.equal(proposedPlanTitle("#    \nbody"), null);
+  assert.equal(proposedPlanTitle("#"), null);
+  // Inherited from T3's regex verbatim: the `\s+` after the hashes may span
+  // the newline, so an empty heading borrows the next line. Harmless, and
+  // pinned here so a future "tidy-up" of the pattern is a visible decision
+  // rather than a silent divergence from the reference.
+  assert.equal(proposedPlanTitle("#    \nbody"), "body");
 });
