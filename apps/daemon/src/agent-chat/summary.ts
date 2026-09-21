@@ -24,6 +24,7 @@ import type {
   AgentChatTurnEventPayload,
   AgentProvidersChangedPayload
 } from "@orquester/api/agent-chat";
+import { SETTLED_TURN_STATES } from "@orquester/api/agent-chat";
 import { agentHostRoutes } from "../agent-host/host-protocol.ts";
 import { pushTypeForFields, resolveChatActivity } from "./activity-ladder.ts";
 import type { ChatSessionManager } from "./chat-sessions.ts";
@@ -50,6 +51,13 @@ export interface AgentChatSummaryOptions {
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   logger?: { warn?: (...a: unknown[]) => void; error?: (...a: unknown[]) => void };
+  /**
+   * A turn reached a settled state. The supervisor's version drain-restart
+   * (§3.1 case 3) waits on "no thread has an active turn", and this is what
+   * lets a deploy hand over the moment the host goes quiet instead of on the
+   * next 15 s health tick.
+   */
+  onTurnSettled?: () => void;
 }
 
 /** What the service remembers per thread, beyond the summary itself. */
@@ -164,6 +172,9 @@ export class AgentChatSummaryService {
         };
         if (frame.tokenUsage) payload.tokenUsage = frame.tokenUsage;
         this.opts.broadcaster.publish("sessions", "agentChat.turn", payload);
+        if (SETTLED_TURN_STATES.has(frame.state)) {
+          this.opts.onTurnSettled?.();
+        }
         return;
       }
       case "pending": {

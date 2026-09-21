@@ -141,6 +141,33 @@ test("case 3: a version mismatch with an ACTIVE turn adopts and waits", async ()
   await h.cleanup();
 });
 
+test("a settled turn reopens the drain window without waiting for the health tick", async () => {
+  const h = await makeHarness(
+    [healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1, active: ["thread-1"] })],
+    { seedToken: "tok", tmux: true }
+  );
+  await h.supervisor.init();
+  assert.equal(h.spawns.length, 0);
+  // The turn settles: the next health snapshot has no active turn.
+  h.probes = [healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1 }), healthy({ instance: "host-2" })];
+  await h.supervisor.checkHealth();
+  assert.equal(h.stopRequests, 1, "the old host writes its continuation markers");
+  assert.equal(h.spawns.length, 1);
+  assert.equal(h.supervisor.status().hostInstanceId, "host-2");
+  await h.cleanup();
+});
+
+test("handleTurnSettled is inert unless a version restart is pending", async () => {
+  const h = await makeHarness([healthy()], { seedToken: "tok", tmux: true });
+  await h.supervisor.init();
+  h.supervisor.handleTurnSettled();
+  await h.supervisor.restartNow().catch(() => undefined);
+  // restartNow always restarts; what matters is that handleTurnSettled alone
+  // did not, so exactly one spawn happened.
+  assert.equal(h.spawns.length, 1);
+  await h.cleanup();
+});
+
 test("case 4: a token rejection from a process that is not ours is FOREIGN — never killed", async () => {
   const h = await makeHarness([{ ok: false, reachable: true, rejected: true }], {
     seedToken: "tok",

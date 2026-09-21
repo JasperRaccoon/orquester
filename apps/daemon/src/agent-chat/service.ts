@@ -149,7 +149,10 @@ export class AgentChatService {
       push: opts.push,
       now: opts.now,
       sleep: opts.sleep,
-      logger: opts.logger
+      logger: opts.logger,
+      // A settled turn reopens the §3.1 drain window, so a deploy's version
+      // handover happens the moment the host goes quiet.
+      onTurnSettled: () => this.supervisor.handleTurnSettled()
     });
   }
 
