@@ -174,7 +174,18 @@ export class ChatSessionManager {
   applyFields(id: string, fields: AgentChatSessionSummaryFields): SessionSummary | null {
     const session = this.sessions.get(id);
     if (!session) return null;
-    const next: SessionSummary = { ...session.summary, ...fields };
+    // REPLACE, never merge: a `hello` frame from a restarted host carries the
+    // whole truth, and a merge would leave a stale `backgroundLiveness` from an
+    // in-memory registry that no longer exists (§3.1, §6.4).
+    const next: SessionSummary = {
+      ...session.summary,
+      hasPendingApprovals: fields.hasPendingApprovals,
+      hasPendingUserInput: fields.hasPendingUserInput,
+      hasActionableProposedPlan: fields.hasActionableProposedPlan,
+      backgroundLiveness: fields.backgroundLiveness,
+      latestTurn: fields.latestTurn,
+      chatSessionStatus: fields.chatSessionStatus
+    };
     if (sameDerivedFields(session.summary, next)) return null;
     session.summary = next;
     this.lifecycle.emit("updated", { ...next });
