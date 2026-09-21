@@ -9,6 +9,7 @@ import { ChatIconButton, CopyButton, DisclosureChevron, ShimmerText } from "../.
 import { useTimelineRowContext } from "../context";
 import { ChatMarkdown } from "../markdown/ChatMarkdown";
 import { queuedStatusLabel, shouldClampUserMessage } from "../row-format";
+import { splitSkillMentions } from "../row-chrome";
 import { formatRowTimestamp, formatRowTimestampTooltip } from "../timestamp";
 
 type Row<K extends AgentChatTimelineRow["kind"]> = Extract<AgentChatTimelineRow, { kind: K }>;
@@ -54,6 +55,42 @@ function AttachmentChips({ attachments }: { attachments: readonly AttachmentRef[
   );
 }
 
+/**
+ * A sent message's text, with `$skill` mentions re-chipped (§4.6.7).
+ *
+ * **No `isCommand` flag is persisted** — the text is the record — so the chip
+ * is derived at render time by running the same shape of tokeniser the composer
+ * uses over the stored text and matching against the *current* per-cwd skill
+ * list. A mention of a skill that no longer exists therefore reads as the plain
+ * text it is, which is the honest outcome.
+ *
+ * *T3: `packages/shared/src/composerInlineTokens.ts:100-127`.*
+ */
+function MessageBodyText({ text }: { text: string }): React.ReactElement {
+  const { skills } = useTimelineRowContext();
+  const runs = React.useMemo(() => splitSkillMentions(text, skills), [text, skills]);
+  if (runs.length === 1) return <>{text}</>;
+  return (
+    <>
+      {runs.map((run, index) =>
+        run.skill === undefined ? (
+          // eslint-disable-next-line react/no-array-index-key
+          <React.Fragment key={index}>{run.text}</React.Fragment>
+        ) : (
+          <span
+            // eslint-disable-next-line react/no-array-index-key
+            key={index}
+            title={`Skill: ${run.skill}`}
+            className="rounded border border-neutral-700 bg-neutral-900/60 px-1 font-mono text-[0.75rem] text-neutral-200"
+          >
+            {run.text}
+          </span>
+        )
+      )}
+    </>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // User message
 // ---------------------------------------------------------------------------
@@ -88,7 +125,7 @@ export const UserMessageRow = React.memo(function UserMessageRow({
             clamp && "max-h-44 overflow-hidden [mask-image:linear-gradient(to_bottom,black_calc(100%-1.75rem),transparent)]"
           )}
         >
-          {text}
+          <MessageBodyText text={text} />
         </div>
         {shouldClampUserMessage(text) ? (
           <button
@@ -282,7 +319,9 @@ export const QueuedMessageRow = React.memo(function QueuedMessageRow({
     <div className="flex flex-col items-end" data-queued-message-id={queued.id}>
       <div className="max-w-[80%] rounded-2xl border border-dashed border-neutral-700 p-3 text-neutral-300">
         {text.length > 0 ? (
-          <div className="whitespace-pre-wrap text-sm leading-relaxed [overflow-wrap:anywhere]">{text}</div>
+          <div className="whitespace-pre-wrap text-sm leading-relaxed [overflow-wrap:anywhere]">
+            <MessageBodyText text={text} />
+          </div>
         ) : null}
         {attachmentCount > 0 || contextCount > 0 ? (
           <div className={cn("text-xs text-neutral-500", text.length > 0 && "mt-1.5")}>

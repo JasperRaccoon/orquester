@@ -99,6 +99,15 @@ export interface ChatTimelineProps {
   /** The project directory, so changed-file paths render workspace-relative. */
   projectPath?: string | undefined;
   /**
+   * The current per-cwd skill names, so a sent message's `$mentions` are
+   * **re-chipped from the stored text** (§4.6.7) — no `isCommand` flag is
+   * persisted, the text is the record. Wire it from the provider snapshot
+   * (`provider.skills.map((skill) => skill.name)`); empty means no chips.
+   *
+   * *Added by W12; additive to the foundation's contract.*
+   */
+  skills?: readonly string[] | undefined;
+  /**
    * The remembered reading position for this thread, from W11's 100-entry LRU
    * (§7.2). Restored on mount and on every `sessionId` change.
    *
