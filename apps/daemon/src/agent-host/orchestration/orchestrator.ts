@@ -133,6 +133,14 @@ export interface ResolvedLaunch {
  * and the backwards log scan that serves a `GET …/items/:id` for a row the
  * fold's retention window already dropped.
  */
+/** The snapshot registry, plus the change flag `agent.providers.changed` needs. */
+export type HostProviderSnapshotRegistry = ProviderSnapshotRegistry & {
+  refreshDetailed?(
+    adapterId: AgentAdapterId,
+    input?: { cwd?: string }
+  ): Promise<{ snapshot: ProviderSnapshot; changed: boolean }>;
+};
+
 export type HostThreadStore = ThreadStore & {
   threadError?(threadId: string): string | null;
   readItem?(threadId: string, itemId: string): Promise<ThreadItem | null>;
@@ -143,7 +151,7 @@ export interface OrchestratorOptions {
   ingestion: Ingestion;
   checkpoints: CheckpointService;
   liveness: LivenessRegistry;
-  snapshots: ProviderSnapshotRegistry;
+  snapshots: HostProviderSnapshotRegistry;
   /** Acquired before the command gate opens (§3.1) — never lazily imported (§8). */
   adapters: ReadonlyMap<AgentAdapterId, AgentAdapter>;
   logger: AdapterLogger;
@@ -1647,6 +1655,13 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       // every checkpoint ref under the thread's prefix and removes the
       // directory. A closed tab whose record is gone is gone (§6.1).
       await runtime.effects.run(() => stopSessionInternal(runtime));
+      if (head) {
+        // One last frame for anything still watching this thread, before the
+        // log it would replay from stops existing.
+        await append(runtime, [
+          buildEvent(threadId, "thread.deleted", { deletedAt: clock.nowIso() })
+        ]).catch(() => undefined);
+      }
       // The store also calls `deleteThreadRefs` through its own hook before it
       // removes the directory (a throw there aborts the delete). Doing it here
       // too keeps the cascade honest for any store that has no hook wired;
@@ -2186,6 +2201,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     subscribe,
     providers: () => snapshots.all(),
     refreshProvider: async (adapterId, input) => {
+      if (snapshots.refreshDetailed) {
+        const { snapshot, changed } = await snapshots.refreshDetailed(adapterId, input);
+        return { provider: snapshot, changed };
+      }
+      // An identical configuration short-circuits to the cached value, so a
+      // registry without the detailed call reports "changed" by identity.
       const before = snapshots.get(adapterId);
       const provider = await snapshots.refresh(adapterId, input);
       return { provider, changed: before !== provider };

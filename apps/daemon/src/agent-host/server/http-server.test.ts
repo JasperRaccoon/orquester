@@ -377,6 +377,49 @@ describe("agent host server — the event stream (§6.3)", () => {
     await h.stop();
   });
 
+  it("two clients converge on the same order (§6.6)", async () => {
+    const h = await harness();
+    const threadId = await h.host.createThread();
+    const a = await h.stream(agentHostRoutes.events(threadId));
+    const b = await h.stream(agentHostRoutes.events(threadId));
+    await a.waitFor((frames) => frames.some((frame) => frame.kind === "synchronized"));
+    await b.waitFor((frames) => frames.some((frame) => frame.kind === "synchronized"));
+
+    await h.call("POST", agentHostRoutes.turn(threadId), { commandId: "m1", input: "one" });
+    await h.host.settle();
+    const seen = (frames: AgentChatStreamFrame[]): number[] =>
+      frames.filter((frame) => frame.kind === "event").map((frame) => frame.seq);
+    await a.waitFor((frames) => seen(frames).length >= 4);
+    await b.waitFor((frames) => seen(frames).length >= 4);
+
+    // Host-authoritative and cursor-ordered: no CRDT, no client-side merge.
+    assert.deepEqual(seen(a.frames), seen(b.frames));
+    assert.deepEqual(
+      seen(a.frames),
+      [...seen(a.frames)].sort((left, right) => left - right)
+    );
+    a.close();
+    b.close();
+    await h.stop();
+  });
+
+  it("the intentional stop writes the continuation markers first (§3.3)", async () => {
+    const h = await harness();
+    const threadId = await h.host.createThread();
+    await h.call("POST", agentHostRoutes.turn(threadId), { commandId: "stop-1", input: "go" });
+    await h.host.settle();
+
+    // The harness's own `onStop` is replaced by a real marker pass.
+    const marked = await h.host.orchestrator.markThreadsForContinuation();
+    assert.deepEqual(marked, [threadId]);
+    assert.deepEqual(h.host.store.heads.get(threadId)?.continueAfterRestart, { turnId: "turn-1" });
+
+    const stopped = await h.call("POST", agentHostRoutes.stop);
+    assert.equal(stopped.status, 200);
+    assert.equal((stopped.body as { ok: boolean }).ok, true);
+    await h.stop();
+  });
+
   it("closes every open stream when the host stops", async () => {
     const h = await harness();
     const threadId = await h.host.createThread();

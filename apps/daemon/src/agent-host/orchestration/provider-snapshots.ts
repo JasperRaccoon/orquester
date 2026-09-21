@@ -59,6 +59,15 @@ export interface ManagedProviderSnapshotRegistry extends ProviderSnapshotRegistr
   addWatcher(): () => void;
   /** Load the persisted cache. Never throws — a bad file is simply ignored. */
   load(): Promise<void>;
+  /**
+   * Like {@link ProviderSnapshotRegistry.refresh}, but also says whether
+   * anything actually changed — `agent.providers.changed` is gated on it
+   * (§6.3), and an identical configuration must not raise it.
+   */
+  refreshDetailed(
+    adapterId: AgentAdapterId,
+    input?: { cwd?: string }
+  ): Promise<{ snapshot: ProviderSnapshot; changed: boolean }>;
   /** Run one background pass now, respecting the refresh semaphore. */
   refreshAllNow(): Promise<void>;
   /** Await the in-flight cache write. The drain seam a test waits on (§9). */
@@ -296,6 +305,10 @@ export function createProviderSnapshotRegistry(
     async refresh(adapterId: AgentAdapterId, input?: { cwd?: string }): Promise<ProviderSnapshot> {
       const { snapshot } = await serialise(() => refreshOne(adapterId, input));
       return snapshot;
+    },
+
+    refreshDetailed(adapterId: AgentAdapterId, input?: { cwd?: string }) {
+      return serialise(() => refreshOne(adapterId, input));
     },
 
     ensureWorkspaceSnapshot(adapterId: AgentAdapterId, cwd: string): void {
