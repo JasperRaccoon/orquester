@@ -62,7 +62,9 @@ export function AgentDrillIn({
   agentId,
   agent,
   rows,
-  onBack
+  onBack,
+  roster,
+  projectPath
 }: AgentDrillInProps): React.ReactElement {
   const [disclosures, setDisclosures] = React.useState<DisclosureState>(EMPTY_DISCLOSURES);
   const onDisclosureChange = React.useCallback((patch: Partial<DisclosureState>) => {
@@ -140,6 +142,12 @@ export function AgentDrillIn({
       {rows.length > 0 ? (
         <ChatTimeline
           sessionId={sessionId}
+          // `agentId` is what makes the timeline a child view: W12 forces
+          // read-only from it, and we say so explicitly as well.
+          agentId={agentId}
+          readOnly
+          roster={roster}
+          projectPath={projectPath}
           rows={rows}
           follow
           onFollowChange={noop}
