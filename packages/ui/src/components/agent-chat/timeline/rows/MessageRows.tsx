@@ -8,6 +8,8 @@ import type { AgentChatTimelineRow } from "../../../../lib/agent-chat/contracts"
 import { ChatIconButton, CopyButton, DisclosureChevron, ShimmerText } from "../../primitives";
 import { useTimelineRowContext } from "../context";
 import { ChatMarkdown } from "../markdown/ChatMarkdown";
+import { queuedStatusLabel, shouldClampUserMessage } from "../row-format";
+import { formatRowTimestamp, formatRowTimestampTooltip } from "../timestamp";
 
 type Row<K extends AgentChatTimelineRow["kind"]> = Extract<AgentChatTimelineRow, { kind: K }>;
 
@@ -56,14 +58,6 @@ function AttachmentChips({ attachments }: { attachments: readonly AttachmentRef[
 // User message
 // ---------------------------------------------------------------------------
 
-/** Over this the body clamps with a mask fade and a "Show full message" toggle. */
-const USER_MESSAGE_CLAMP_CHARS = 600;
-const USER_MESSAGE_CLAMP_LINES = 8;
-
-export function shouldClampUserMessage(text: string): boolean {
-  return text.length > USER_MESSAGE_CLAMP_CHARS || text.split("\n").length > USER_MESSAGE_CLAMP_LINES;
-}
-
 /**
  * The only filled bubble in the timeline (§5.1 of the design reference).
  *
@@ -107,6 +101,9 @@ export const UserMessageRow = React.memo(function UserMessageRow({
         ) : null}
       </div>
       <div className="ac-reveal ac-tabular flex w-full max-w-[80%] items-center justify-end gap-2 pe-1 text-xs">
+        <span className="text-neutral-500" title={formatRowTimestampTooltip(row.createdAt)}>
+          {formatRowTimestamp(row.createdAt)}
+        </span>
         {/* The rewind affordance is only offered where the adapter supports a
             conversation rollback, and never in the read-only drill-in. */}
         {!ctx.readOnly && ctx.canRevert && typeof revertTurnCount === "number" ? (
@@ -152,6 +149,7 @@ export const AssistantMetaRow = React.memo(function AssistantMetaRow({
 }): React.ReactElement {
   return (
     <div className="group/assistant ac-reveal ac-tabular flex items-center gap-2 px-1 text-xs text-neutral-500">
+      <span title={formatRowTimestampTooltip(row.createdAt)}>{formatRowTimestamp(row.createdAt)}</span>
       <CopyButton size="micro" value={() => row.message.text} label="Copy response" />
     </div>
   );
@@ -212,11 +210,6 @@ export const ReasoningRow = React.memo(function ReasoningRow({
 // ---------------------------------------------------------------------------
 // Queued ghost bubble
 // ---------------------------------------------------------------------------
-
-export function queuedStatusLabel(holdUntilUserAction: boolean, isNext: boolean): string {
-  if (holdUntilUserAction) return "Waits for Send now";
-  return isNext ? "Sends after the next tool call or when the turn ends" : "Sends after the messages above it";
-}
 
 /**
  * Dashed and unfilled against the user bubble's solid fill — "this is not sent

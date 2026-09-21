@@ -7,7 +7,7 @@
  */
 
 export { ChatTimeline, default } from "./ChatTimeline";
-export { TimelineRow, rowBottomPadding } from "./TimelineRow";
+export { TimelineRow } from "./TimelineRow";
 export {
   TimelineRowContext,
   useTimelineRowContext,
@@ -33,7 +33,16 @@ export * from "./diff-tree";
 export * from "./unified-diff";
 export * from "./follow";
 
-export { deriveAgentSpawnSummary, type AgentSpawnSummary } from "./rows/ActivityRows";
-export { compactionLabel, formatTokenCount, planFileName, proposedPlanTitle } from "./rows/StructureRows";
-export { queuedStatusLabel, shouldClampUserMessage } from "./rows/MessageRows";
-export { looksLikeUnifiedDiff } from "./rows/InlineDiff";
+export * from "./row-format";
+// The spawn summary lives beside the roster (W14), because it resolves against
+// the roster model; re-exported here so a timeline consumer finds it.
+export {
+  deriveAgentSpawnSummary,
+  type AgentSpawnSummary,
+  type AgentSpawnTone
+} from "../roster/spawn-summary";
+export {
+  formatRowTimestamp,
+  formatRowTimestampTooltip,
+  TimelineRowTimestamp
+} from "./timestamp";
