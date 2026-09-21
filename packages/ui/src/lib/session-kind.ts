@@ -127,7 +127,7 @@ export const DEFAULT_THREAD_TITLE = "New thread";
 
 export function seedThreadTitle(
   text: string,
-  attachments: readonly { name: string; kind?: "image" | "file" }[] = []
+  attachments: readonly { name: string; type?: string }[] = []
 ): string {
   const plain = stripContextReferences(text).trim();
   if (plain.length > 0) {
@@ -135,9 +135,22 @@ export function seedThreadTitle(
   }
   const first = attachments[0];
   if (first) {
-    return truncateTitle(`${first.kind === "image" ? "Image" : "File"}: ${first.name}`);
+    return truncateTitle(`${first.type === "image" ? "Image" : "File"}: ${first.name}`);
   }
   return DEFAULT_THREAD_TITLE;
+}
+
+/**
+ * Whether a tab's title is still the launcher's own, i.e. nobody has chosen it.
+ * The seed only ever overwrites one of these (§7.7): the literal default, the
+ * registry entry's display name, or the bare entry id.
+ */
+export function isDefaultThreadTitle(title: string, agentRefId: string): boolean {
+  if (title === DEFAULT_THREAD_TITLE || title === agentRefId) {
+    return true;
+  }
+  const agents: readonly RegistryEntryDef[] = REGISTRY.agents;
+  return agents.find((a) => a.id === agentRefId)?.name === title;
 }
 
 /**

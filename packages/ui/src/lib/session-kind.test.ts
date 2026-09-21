@@ -12,6 +12,7 @@ import {
   isAgentLikeSession,
   isChatResumableConversation,
   isChatSession,
+  isDefaultThreadTitle,
   isLegacyAgentTerminal,
   isPtySession,
   launchKindForAgent,
@@ -105,9 +106,18 @@ test("the title seed truncates at the cap with one ellipsis", () => {
 
 test("the title seed falls back to the first attachment, then to the default", () => {
   assert.equal(
-    seedThreadTitle("", [{ name: "screenshot.png", kind: "image" }]),
+    seedThreadTitle("", [{ name: "screenshot.png", type: "image" }]),
     "Image: screenshot.png"
   );
   assert.equal(seedThreadTitle("   ", [{ name: "notes.md" }]), "File: notes.md");
   assert.equal(seedThreadTitle(""), DEFAULT_THREAD_TITLE);
+});
+
+test("only a title nobody chose may be overwritten by the seed", () => {
+  assert.equal(isDefaultThreadTitle(DEFAULT_THREAD_TITLE, "claude"), true);
+  assert.equal(isDefaultThreadTitle("Claude Code", "claude"), true);
+  assert.equal(isDefaultThreadTitle("claude", "claude"), true);
+  // A manual rename — and a seed already written — are both off limits.
+  assert.equal(isDefaultThreadTitle("fix the login bug", "claude"), false);
+  assert.equal(isDefaultThreadTitle("Codex", "claude"), false);
 });

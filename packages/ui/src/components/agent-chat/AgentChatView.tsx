@@ -12,6 +12,7 @@ import {
 } from "../../lib/agent-chat/hooks";
 import { clearComposerInbox } from "../../lib/composer-inbox";
 import { cn } from "../../lib/cn";
+import { isDefaultThreadTitle, seedThreadTitle } from "../../lib/session-kind";
 import { useAppStore } from "../../store/app";
 import { AgentDrillIn } from "./roster/AgentDrillIn";
 import { AgentRoster } from "./roster/AgentRoster";
@@ -144,6 +145,34 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   // A closed tab keeps nothing (§7.2), and an undelivered element-pick payload
   // for a tab that no longer exists must not linger in the inbox.
   React.useEffect(() => () => clearComposerInbox(sessionId), [sessionId]);
+
+  // --- the client-seeded thread title (§7.7) -------------------------------
+  // There is no title-generation service and none is introduced: the client
+  // seeds the title from the first message and writes it through the ordinary
+  // rename `PUT`, which appends `thread.meta-updated`. The host may improve it
+  // later, but only while the title is still exactly the seed or the default,
+  // so a manual rename is never clobbered — and the same rule applies here:
+  // once per thread, and only over a title nobody has chosen.
+  const seededRef = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    if (seededRef.current === sessionId) {
+      return;
+    }
+    const first = slice.entries.find(
+      (item) => item.kind === "message" && item.role === "user" && item.agentId === undefined
+    );
+    if (!first || first.kind !== "message") {
+      return;
+    }
+    seededRef.current = sessionId;
+    if (!isDefaultThreadTitle(session.title, session.refId)) {
+      return;
+    }
+    const seed = seedThreadTitle(first.text, first.attachments ?? []);
+    if (seed && seed !== session.title) {
+      void useAppStore.getState().renameTab(sessionId, seed);
+    }
+  }, [sessionId, slice.entries, session.title, session.refId]);
 
   const turnActive = slice.turnStatus !== null && !SETTLED_TURN_STATES.has(slice.turnStatus);
   const accountLabel = session.accountId

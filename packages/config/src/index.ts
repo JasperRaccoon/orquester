@@ -412,9 +412,31 @@ export const agentPrefsSchema = z.object({
    * value is silently floored by the harness, so it is rejected here rather
    * than displayed as a number that does nothing.
    */
-  claudeTimeoutMinutes: z.number().int().min(1).max(30).default(30)
+  claudeTimeoutMinutes: z.number().int().min(1).max(30).default(30),
+  /**
+   * Agent chat §3.3: after the host restarts, whether a thread whose turn was
+   * interrupted is continued from its saved provider resume cursor. Host-wide
+   * default, **off** — "pick up where you left off" is wrong for a project
+   * where a turn was halfway through a destructive operation.
+   */
+  continueThreadsAfterRestart: z.boolean().default(false),
+  /**
+   * Per-project override of the flag above, keyed by absolute project path.
+   * Resolved per the thread's project over the host-wide default; an absent
+   * entry means "use the default".
+   */
+  continueThreadsByProject: z.record(z.string(), z.boolean()).default({})
 });
 export type AgentPrefs = z.infer<typeof agentPrefsSchema>;
+
+/**
+ * Whether an interrupted turn in this project is continued after a host
+ * restart (agent chat §3.3). The single resolution point, so the host, the
+ * Settings panel and any future surface cannot disagree.
+ */
+export function continueThreadsForProject(prefs: AgentPrefs, projectPath: string): boolean {
+  return prefs.continueThreadsByProject[projectPath] ?? prefs.continueThreadsAfterRestart;
+}
 
 // agent-accounts.json (managed per-agent accounts; daemon-side)
 

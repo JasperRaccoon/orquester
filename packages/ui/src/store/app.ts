@@ -160,7 +160,12 @@ const DEFAULT_USAGE_PREFS: UsagePrefs = {
   chip: "busiest"
 };
 
-const DEFAULT_AGENT_PREFS: AgentPrefs = { claudeTimeoutMinutes: 30 };
+const DEFAULT_AGENT_PREFS: AgentPrefs = {
+  claudeTimeoutMinutes: 30,
+  // Agent chat §3.3: continuing an interrupted turn is opt-in, per project.
+  continueThreadsAfterRestart: false,
+  continueThreadsByProject: {}
+};
 
 /**
  * Stable empty pane-sizes object for the {@link usePaneSizes} fallback. A fresh
