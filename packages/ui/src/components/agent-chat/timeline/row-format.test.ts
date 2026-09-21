@@ -4,9 +4,9 @@ import { test } from "node:test";
 import type { RuntimeSubagent } from "@orquester/api";
 
 import type { AgentChatTimelineRow, QueuedComposerMessage, WorkLogEntry } from "../../../lib/agent-chat/contracts";
+import { deriveAgentSpawnSummary } from "../roster/spawn-summary";
 import {
   compactionLabel,
-  deriveAgentSpawnSummary,
   formatTokenCount,
   looksLikeUnifiedDiff,
   planFileName,

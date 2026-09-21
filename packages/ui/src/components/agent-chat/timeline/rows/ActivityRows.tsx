@@ -22,7 +22,7 @@ import {
   workEntryIsWarning,
   type WorkEntryIconName
 } from "../work-presentation";
-import { deriveAgentSpawnSummary } from "../row-format";
+import { deriveAgentSpawnSummary } from "../../roster/spawn-summary";
 import { TimelineRowTimestamp } from "../timestamp";
 import { InlineDiff, looksLikeUnifiedDiff } from "./InlineDiff";
 import { WorkEntryIcon } from "./icons";

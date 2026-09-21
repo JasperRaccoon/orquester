@@ -229,9 +229,17 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
     if (!scroll || scroll.atEnd) {
       node.scrollTop = node.scrollHeight;
     } else if (scroll.rowId !== null) {
-      const target = node.querySelector<HTMLElement>(
-        `[data-timeline-row-id="${CSS.escape(scroll.rowId)}"]`
-      );
+      // `CSS.escape` is not universal (and absent in a non-DOM render): a row
+      // id we cannot safely quote falls back to the pixel offset rather than
+      // throwing inside a layout effect.
+      const escaped =
+        typeof CSS !== "undefined" && typeof CSS.escape === "function"
+          ? CSS.escape(scroll.rowId)
+          : null;
+      const target =
+        escaped === null
+          ? null
+          : node.querySelector<HTMLElement>(`[data-timeline-row-id="${escaped}"]`);
       if (target) {
         node.scrollTop =
           node.scrollTop + (target.getBoundingClientRect().top - node.getBoundingClientRect().top) - scroll.offsetWithinRow;

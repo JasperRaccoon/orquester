@@ -7,8 +7,6 @@
  * import from this file; nothing here imports a component.
  */
 
-import type { RuntimeSubagent } from "@orquester/api";
-
 import type { AgentChatTimelineRow } from "../../../lib/agent-chat/contracts";
 
 type Row<K extends AgentChatTimelineRow["kind"]> = Extract<AgentChatTimelineRow, { kind: K }>;
@@ -106,76 +104,3 @@ export function queuedStatusLabel(holdUntilUserAction: boolean, isNext: boolean)
 export function looksLikeUnifiedDiff(text: string): boolean {
   return /^diff --git /m.test(text) || (/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/m.test(text) && /^[+-]/m.test(text));
 }
-
-
-const ACTIVE_STATUSES = new Set<RuntimeSubagent["status"]>(["pending", "running", "waiting"]);
-const TERMINAL_STATUSES = new Set<RuntimeSubagent["status"]>([
-  "completed",
-  "failed",
-  "cancelled",
-  "interrupted"
-]);
-
-export interface AgentSpawnSummary {
-  live: boolean;
-  lead: string;
-  status: string;
-  tone: "working" | "failed" | "completed" | "inactive";
-}
-
-/**
- * Summarises observed states **without treating idle or missing agents as
- * completed** — the row says "Status unavailable" rather than inventing a tick.
- * *T3: `agentSpawnSummary.ts:8-64`.*
- */
-export function deriveAgentSpawnSummary(input: {
-  agents: ReadonlyArray<Pick<RuntimeSubagent, "kind" | "status">>;
-  agentCount: number;
-  coordinatorStatus?: RuntimeSubagent["status"] | undefined;
-}): AgentSpawnSummary {
-  const { agents, agentCount, coordinatorStatus } = input;
-  const working = agents.filter((agent) => ACTIVE_STATUSES.has(agent.status)).length;
-  const failed = agents.filter((agent) => agent.status === "failed").length;
-  const idle = agents.filter((agent) => agent.status === "idle").length;
-  const stopped = agents.filter(
-    (agent) => agent.status === "cancelled" || agent.status === "interrupted"
-  ).length;
-  const batches = agents.filter((agent) => agent.kind === "subagent_batch").length;
-  const individuals = agentCount - batches;
-  // A workflow coordinator keeps running between dynamic member launches.
-  const live = coordinatorStatus !== undefined ? !TERMINAL_STATUSES.has(coordinatorStatus) : working > 0;
-  const subjects = [
-    individuals > 0 ? `${individuals} subagent${individuals === 1 ? "" : "s"}` : null,
-    batches > 0 ? `${batches} ${individuals > 0 ? "" : "subagent "}batch${batches === 1 ? "" : "es"}` : null
-  ]
-    .filter((value) => value !== null)
-    .join(" and ");
-  const lead = `${batches > 0 ? "Launched" : live ? "Kicked off" : "Ran"} ${subjects || "subagents"}`;
-
-  const status = live
-    ? working > 0
-      ? `${working} working`
-      : "working"
-    : coordinatorStatus === "failed"
-      ? "Workflow failed"
-      : coordinatorStatus === "cancelled" || coordinatorStatus === "interrupted"
-        ? "Workflow stopped"
-        : failed > 0
-          ? `${failed} failed`
-          : stopped > 0
-            ? `${stopped} stopped`
-            : idle > 0
-              ? `${idle} idle`
-              : coordinatorStatus !== "completed" && (agents.length === 0 || agents.length < agentCount)
-                ? "Status unavailable"
-                : "✓ completed";
-  const tone: AgentSpawnSummary["tone"] = live
-    ? "working"
-    : failed > 0 || coordinatorStatus === "failed"
-      ? "failed"
-      : status === "✓ completed"
-        ? "completed"
-        : "inactive";
-  return { live, lead, status, tone };
-}
-
