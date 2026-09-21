@@ -2467,16 +2467,24 @@ export function resultOutcome(
       ? trimmedString((result as { result?: unknown }).result)
       : undefined;
 
+  const terminalError = terminalResultError(
+    (result as { terminal_reason?: unknown }).terminal_reason,
+    failureHint
+  );
   const structuredError = isOverloadedResult(result)
     ? "Claude API is overloaded (529). Try again shortly."
-    : (terminalResultError((result as { terminal_reason?: unknown }).terminal_reason, failureHint) ??
-      (successTaggedFailure
-        ? (cliSentence ??
-          failureHint ??
-          (typeof apiErrorStatus === "number"
-            ? `Claude turn failed (API status ${apiErrorStatus}).`
-            : "Claude turn failed."))
-        : undefined));
+    : successTaggedFailure
+      ? // A success-tagged failure carries the CLI's own user-facing sentence
+        // in `result` ("There's an issue with the selected model (…)"), which
+        // beats this adapter's generic terminal-reason wording (fixtures
+        // README observation 13).
+        (cliSentence ??
+        failureHint ??
+        terminalError ??
+        (typeof apiErrorStatus === "number"
+          ? `Claude turn failed (API status ${apiErrorStatus}).`
+          : "Claude turn failed."))
+      : terminalError;
 
   // CLI diagnostic entries must never become the error banner: the interrupt
   // result carries `[ede_diagnostic] …` and nothing else (§4.5).
