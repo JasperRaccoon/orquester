@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import type { SessionActivity } from "@orquester/api";
 import type { ProjectIndex } from "../../lib/project-index";
 import { isProjectRefVisible, jumpToProject, resolveProjectRef } from "../../lib/session-nav";
+import { isAgentLikeSession } from "../../lib/session-kind";
 import { useAppStore } from "../../store/app";
 import type { ProjectSummary, SessionSummary, WorkspaceSummary } from "../../types";
 
@@ -77,7 +78,11 @@ export function deriveAgentSessions(
 ): AgentSessionEntry[] {
   const entries: AgentSessionEntry[] = [];
   for (const session of sessions) {
-    if (session.kind !== "agent" || session.projectPath === "") {
+    // Both agent kinds: a chat tab is the agent surface now, and a pre-chat
+    // agent terminal keeps reattaching until it is closed (§5.2). Filtering on
+    // `kind === "agent"` alone would make every chat session disappear from the
+    // sidebar, the badge and the Ctrl+Shift+A cycle.
+    if (!isAgentLikeSession(session) || session.projectPath === "") {
       continue;
     }
     const project = resolveProjectRef(session.projectPath, workspaces, projects);

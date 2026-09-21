@@ -22,11 +22,11 @@ import type {
   RuntimeSubagent,
   SessionSummary
 } from "@orquester/api";
-import type { AgentPanelModel } from "@orquester/api/agent-chat";
-// The documented collision (SEAMS §1): `@orquester/api` already exports
-// `RuntimeMode` as the client-platform type, so the PERMISSION mode is
-// `AgentRuntimeMode` at that path. Aliased here so the prop keeps its name.
-import type { AgentRuntimeMode as RuntimeMode } from "@orquester/api";
+// `RuntimeMode` MUST come from this path: the root `@orquester/api` declares a
+// `RuntimeMode` of its own (the client platform — `desktop-local` | …) whose
+// local declaration shadows the star re-export, so importing it from there
+// silently types the composer's permission-mode chip as a platform name.
+import type { AgentPanelModel, RuntimeMode } from "@orquester/api/agent-chat";
 
 import type {
   ActivePlanState,

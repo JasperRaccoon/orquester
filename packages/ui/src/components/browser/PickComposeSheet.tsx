@@ -1,7 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Crosshair, Send, X } from "lucide-react";
-import type { BrowserPickPayload } from "@orquester/api";
+import type { AttachmentRef, BrowserPickPayload } from "@orquester/api";
 import { useAppStore } from "../../store/app";
+import { deliverToComposerDraft } from "../../lib/composer-inbox";
+import { isAgentLikeSession, isChatSession } from "../../lib/session-kind";
 import { formatDesignFeedback, type PickIntent } from "../../lib/design-feedback";
 import { base64ToBlob } from "../../lib/files";
 import { BatchProgress, type UploadProgress } from "../../lib/upload-progress";
@@ -9,11 +11,25 @@ import { Button, IconButton, UploadProgressBar } from "../ui";
 import { cn } from "../../lib/cn";
 
 /**
+ * A screenshot the daemon has written, as a turn attachment. The upload route's
+ * returned **path** is the attachment reference (agent chat spec §6.1).
+ */
+const imageAttachment = (path: string, name: string, sizeBytes = 0): AttachmentRef => ({
+  type: "image",
+  id: path,
+  name,
+  mimeType: "image/png",
+  sizeBytes
+});
+
+/**
  * Bottom sheet shown after element picks: per-element summary + screenshot
  * thumbnails + one comment/intent/target for the whole batch. "Pick another"
  * re-arms the picker while the batch accumulates. Delivery reuses the existing
- * routes verbatim: upload each PNG (→ daemon path), then ONE bracketed-paste
- * input write + "\r" to submit (see session-upload.ts for the paste format).
+ * routes verbatim: upload each PNG (→ daemon path), then — for a legacy agent
+ * terminal — ONE bracketed-paste input write + "\r" to submit (see
+ * session-upload.ts for the paste format), or — for a chat tab — an insert into
+ * that thread's composer draft, which is sent by the user, not by us.
  */
 export const PickComposeSheet: React.FC<{
   payloads: BrowserPickPayload[];
@@ -24,8 +40,15 @@ export const PickComposeSheet: React.FC<{
 }> = ({ payloads, projectPath, onRemove, onPickAnother, onClose }) => {
   const api = useAppStore((s) => s.api);
   const sessions = useAppStore((s) => s.sessions);
+  // Both agent kinds are eligible targets. A chat tab is the *better* one — it
+  // takes the payload as text plus structured attachments instead of a
+  // bracketed paste — but a legacy agent terminal still runs until it is
+  // closed (§5.2), so it stays offered.
   const agents = useMemo(
-    () => sessions.filter((s) => s.kind === "agent" && s.projectPath === projectPath && s.status === "running"),
+    () =>
+      sessions.filter(
+        (s) => isAgentLikeSession(s) && s.projectPath === projectPath && s.status === "running"
+      ),
     [sessions, projectPath]
   );
   const [targetId, setTargetId] = useState<string>(agents[0]?.id ?? "");
@@ -48,6 +71,7 @@ export const PickComposeSheet: React.FC<{
   // Keyed per target session too: a path is only valid for the session it was
   // uploaded to.
   const uploadedRef = useRef(new WeakMap<BrowserPickPayload, { targetId: string; path: string }>());
+  const targetIsChat = agents.some((a) => a.id === targetId && isChatSession(a));
 
   const sendToAgent = async () => {
     if (!api || !targetId || payloads.length === 0) return;
@@ -55,6 +79,7 @@ export const PickComposeSheet: React.FC<{
     setError(null);
     try {
       const picks: Array<{ payload: BrowserPickPayload; screenshotPath?: string }> = [];
+      const attachments: AttachmentRef[] = [];
       // Only the screenshots not already uploaded to this session go up.
       const pending = payloads
         .map((payload, i) => ({ payload, i, blob: payload.screenshotBase64 ? base64ToBlob(payload.screenshotBase64, "image/png") : null }))
@@ -68,11 +93,12 @@ export const PickComposeSheet: React.FC<{
       for (let i = 0; i < payloads.length; i++) {
         const payload = payloads[i];
         let screenshotPath: string | undefined;
+        const name = payloads.length === 1 ? "design-pick.png" : `design-pick-${i + 1}.png`;
         const cached = uploadedRef.current.get(payload);
         if (cached && cached.targetId === targetId) {
           screenshotPath = cached.path;
+          attachments.push(imageAttachment(cached.path, name));
         } else if (payload.screenshotBase64) {
-          const name = payloads.length === 1 ? "design-pick.png" : `design-pick-${i + 1}.png`;
           const blob = pending[slot].blob!;
           batch.begin(slot, name);
           const uploaded = await api.uploadSessionFile(targetId, { name, type: "image/png" }, blob, batch.onBytes);
@@ -80,12 +106,21 @@ export const PickComposeSheet: React.FC<{
           slot++;
           screenshotPath = uploaded.path;
           uploadedRef.current.set(payload, { targetId, path: uploaded.path });
+          attachments.push(imageAttachment(uploaded.path, uploaded.name, uploaded.size));
         }
         picks.push({ payload, screenshotPath });
       }
       setProgress(null);
       const markdown = formatDesignFeedback(picks, { comment, intent });
-      await api.sendSessionInput(targetId, `\x1b[200~${markdown}\x1b[201~\r`);
+      if (targetIsChat) {
+        // A chat tab has no pane to type into, and a design pick is not a
+        // keystroke: it lands in the composer's draft as text plus structured
+        // attachments and the user still chooses when to send (§7.4).
+        deliverToComposerDraft(targetId, { text: markdown, attachments });
+        useAppStore.getState().activateTab(targetId);
+      } else {
+        await api.sendSessionInput(targetId, `\x1b[200~${markdown}\x1b[201~\r`);
+      }
       onClose();
     } catch {
       setProgress(null);
@@ -188,7 +223,20 @@ export const PickComposeSheet: React.FC<{
           {agents.map((a) => <option key={a.id} value={a.id}>{a.title}</option>)}
         </select>
         <Button size="sm" disabled={!targetId || sending} onClick={() => void sendToAgent()}>
-          <Send size={12} /> {sending ? "Sending…" : payloads.length > 1 ? `Send ${payloads.length}` : "Send"}
+          <Send size={12} />{" "}
+          {sending
+            ? targetIsChat
+              ? "Attaching…"
+              : "Sending…"
+            : // A chat tab is not sent to — the payload lands in its composer
+              // and the user decides. Say so rather than promising a send.
+              targetIsChat
+              ? payloads.length > 1
+                ? `Add ${payloads.length} to composer`
+                : "Add to composer"
+              : payloads.length > 1
+                ? `Send ${payloads.length}`
+                : "Send"}
         </Button>
       </div>
       {progress && (
