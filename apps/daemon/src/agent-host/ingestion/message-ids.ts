@@ -1,0 +1,93 @@
+// Ported from T3 Code (MIT): apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts:252-308
+/**
+ * Message identity (spec §5.1 "Message identity and the streaming merge").
+ *
+ * A message id is minted by the host, never by the provider:
+ * `assistant:<itemId ?? turnId ?? eventId>` for the first segment of a turn and
+ * `assistant:<baseKey>:segment:<n>` for later ones, with the `reasoning:`
+ * prefix and a `summary:`/`raw:` stream key for reasoning, so a provider that
+ * streams a summary and a raw chain of thought over one item gets two
+ * messages.
+ */
+
+import type { RuntimeContentStreamKind, RuntimeEvent } from "@orquester/api/agent-chat";
+
+/**
+ * Reasoning shares the assistant segmenting, buffering and finalisation
+ * machinery; only the message-id namespace differs. The prefix is what tells a
+ * buffered segment apart when it is flushed long after the delta that opened
+ * it, so the role never has to be threaded through those paths.
+ */
+export type MessageStreamRole = "assistant" | "reasoning";
+
+export const ASSISTANT_MESSAGE_ID_PREFIX = "assistant:";
+export const REASONING_MESSAGE_ID_PREFIX = "reasoning:";
+
+export function messageStreamRoleOf(messageId: string): MessageStreamRole {
+  return messageId.startsWith(REASONING_MESSAGE_ID_PREFIX) ? "reasoning" : "assistant";
+}
+
+/** `assistant:<baseKey>` / `assistant:<baseKey>:segment:<n>` (and `reasoning:` ditto). */
+export function segmentMessageId(
+  baseKey: string,
+  segmentIndex: number,
+  role: MessageStreamRole = "assistant"
+): string {
+  const prefix = role === "reasoning" ? REASONING_MESSAGE_ID_PREFIX : ASSISTANT_MESSAGE_ID_PREFIX;
+  return segmentIndex === 0
+    ? `${prefix}${baseKey}`
+    : `${prefix}${baseKey}:segment:${segmentIndex}`;
+}
+
+export function segmentBaseKeyFromEvent(event: RuntimeEvent): string {
+  return String(event.itemId ?? event.turnId ?? event.eventId);
+}
+
+/**
+ * A provider may stream a reasoning summary and the raw chain of thought over
+ * the same item. They are different texts, so they get different segments.
+ */
+export function reasoningSegmentBaseKeyFromEvent(
+  event: RuntimeEvent,
+  streamKind: Extract<RuntimeContentStreamKind, "reasoning_text" | "reasoning_summary_text">
+): string {
+  const stream = streamKind === "reasoning_summary_text" ? "summary" : "raw";
+  return `${stream}:${segmentBaseKeyFromEvent(event)}`;
+}
+
+/** The proposal buffer's identity, stable for a turn (§5.1 plan-text buffer). */
+export function proposedPlanIdForTurn(threadId: string, turnId: string): string {
+  return `plan:${threadId}:turn:${turnId}`;
+}
+
+export function proposedPlanIdFromEvent(event: RuntimeEvent, threadId: string): string {
+  if (event.turnId !== undefined) {
+    return proposedPlanIdForTurn(threadId, String(event.turnId));
+  }
+  if (event.itemId !== undefined) {
+    return `plan:${threadId}:item:${event.itemId}`;
+  }
+  return `plan:${threadId}:event:${event.eventId}`;
+}
+
+/** Stable activity ids — a row that is "latest state", not history. */
+export function taskProgressActivityId(threadId: string, taskId: string): string {
+  return `task-progress:${threadId}:${taskId}`;
+}
+
+export function taskUsageActivityId(threadId: string, taskId: string): string {
+  return `task-usage:${threadId}:${taskId}`;
+}
+
+export function toolProgressActivityId(threadId: string, taskId: string): string {
+  return `tool-progress:${threadId}:${taskId}`;
+}
+
+export function proposedPlanActivityId(planId: string): string {
+  return `proposed-plan:${planId}`;
+}
+
+/** Command/file-change output deltas are buffered per item id (§5.6). */
+export function toolOutputBufferKey(threadId: string, itemId: string): string {
+  return `tool-output:${threadId}:${itemId}`;
+}

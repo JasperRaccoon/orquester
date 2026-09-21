@@ -6,7 +6,10 @@ import { getRegistryIcon } from "../../icons";
 import { ConfirmDialog } from "../ui";
 import { ContextMenu, type ContextMenuItem } from "../ui/context-menu";
 import { SessionStatusDot } from "../ui/session-status-dot";
+import { isLegacyAgentTerminal } from "../../lib/session-kind";
 import {
+  isSessionTab,
+  tabSession,
   useActiveTabId,
   useAppStore,
   useProjectTabs,
@@ -77,7 +80,9 @@ export const TabStrip: React.FC = () => {
     return null;
   }
 
-  const sessionIds = tabs.filter((t) => t.type === "session").map((t) => t.id);
+  // Both session arms reorder together: `POST /api/sessions/reorder` takes the
+  // project's session ids in strip order and does not care what renders them.
+  const sessionIds = tabs.filter(isSessionTab).map((t) => t.id);
 
   const drop = (targetId: string) => {
     const from = sessionIds.indexOf(dragId ?? "");
@@ -94,7 +99,7 @@ export const TabStrip: React.FC = () => {
   };
 
   const menuItems = (tab: ProjectTab): ContextMenuItem[] => {
-    if (tab.type === "session") {
+    if (isSessionTab(tab)) {
       return [
         { label: "Rename", icon: <Pencil size={13} />, onClick: () => setEditingId(tab.id) },
         { label: "Close", icon: <X size={13} />, danger: true, onClick: () => void requestCloseTab(tab.id) }
@@ -119,26 +124,28 @@ export const TabStrip: React.FC = () => {
     <div className="app-no-drag flex items-center gap-1">
       {tabs.map((tab) => {
         const active = tab.id === activeTabId;
-        const isSession = tab.type === "session";
+        const session = tabSession(tab);
+        const isSession = session !== null;
         const canRename = isSession || tab.type === "todo";
-        const accountId = tab.type === "session" ? tab.session.accountId : undefined;
+        const accountId = session?.accountId;
         const accountLabel = accountId
           ? shortAccountLabel(agentAccounts?.accounts.find((a) => a.id === accountId)?.label)
           : undefined;
         // `model` is set by the daemon only for the claudex/claudemix proxy
         // launchers, so its presence gates the backing-model badge.
-        const modelLabel =
-          tab.type === "session" && tab.session.model
-            ? shortModelLabel(tab.session.model)
-            : undefined;
+        const modelLabel = session?.model ? shortModelLabel(session.model) : undefined;
+        // A pre-chat agent terminal still reattaches until its tab is closed
+        // (§5.2 migration), so it says so rather than being mistaken for a chat
+        // tab that failed to render. Nothing creates one any more.
+        const legacy = session !== null && isLegacyAgentTerminal(session);
         const editing = editingId === tab.id;
-        const title = isSession
+        const title = isSessionTab(tab)
           ? tab.session.title
           : tab.type === "browser"
             ? tab.browser.title || "Browser"
             : tab.title;
-        const icon = isSession ? (
-          getRegistryIcon(tab.session.kind, tab.session.refId, 13)
+        const icon = session ? (
+          getRegistryIcon(session.kind, session.refId, 13)
         ) : tab.type === "git" ? (
           <GitBranch size={13} />
         ) : tab.type === "todo" ? (
@@ -206,10 +213,18 @@ export const TabStrip: React.FC = () => {
             ) : (
               <span className="max-w-[140px] truncate">{title}</span>
             )}
+            {legacy ? (
+              <span
+                className="ml-1 shrink-0 rounded bg-neutral-800 px-1 text-[10px] text-neutral-500"
+                title="A pre-chat agent terminal. It keeps running until you close it; new agent tabs open as chat."
+              >
+                legacy terminal
+              </span>
+            ) : null}
             {modelLabel ? (
               <span
                 className="ml-1 rounded bg-warn-500/15 px-1 text-[10px] text-warn-300"
-                title={tab.type === "session" ? tab.session.model : undefined}
+                title={session?.model}
               >
                 {modelLabel}
               </span>
@@ -219,8 +234,13 @@ export const TabStrip: React.FC = () => {
                 {accountLabel}
               </span>
             ) : null}
-            {isSession ? (
-              <SessionStatusDot sessionId={tab.id} status={tab.session.status} className="ml-0.5" />
+            {session ? (
+              <SessionStatusDot
+                sessionId={tab.id}
+                status={session.status}
+                backgroundLiveness={session.backgroundLiveness}
+                className="ml-0.5"
+              />
             ) : null}
             <button
               type="button"
