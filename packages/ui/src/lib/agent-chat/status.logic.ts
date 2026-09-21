@@ -22,6 +22,8 @@ import type {
   TurnState
 } from "@orquester/api/agent-chat";
 
+import { hasUnseenCompletion as threadHasUnseenCompletion } from "../thread-visits";
+
 // ---------------------------------------------------------------------------
 // The §6.4 ladder
 // ---------------------------------------------------------------------------
@@ -160,28 +162,20 @@ export function statusPillPulses(pill: ChatStatusPill): boolean {
  * **Needs-attention and unread are two different things.** Unread is: the
  * latest turn's `completedAt` is newer than this client's last visit.
  *
+ * The rule itself lives **once**, in `lib/thread-visits.ts` (which also owns
+ * the persisted per-device map); this is the `LatestTurnSummary`-shaped
+ * adapter the chat surfaces already hold.
+ *
  * *T3: `Sidebar.logic.ts:635-644` (`hasUnseenCompletion`).*
  */
 export function hasUnseenCompletion(input: {
   latestTurn?: LatestTurnSummary | null;
   lastVisitedAt?: string | null;
 }): boolean {
-  const completedAt = input.latestTurn?.completedAt;
-  if (!completedAt) {
-    return false;
-  }
-  const completed = Date.parse(completedAt);
-  if (Number.isNaN(completed)) {
-    return false;
-  }
-  if (!input.lastVisitedAt) {
-    return false;
-  }
-  const visited = Date.parse(input.lastVisitedAt);
-  if (Number.isNaN(visited)) {
-    return true;
-  }
-  return completed > visited;
+  return threadHasUnseenCompletion(
+    input.latestTurn?.completedAt,
+    input.lastVisitedAt ?? undefined
+  );
 }
 
 /**
