@@ -12,6 +12,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  GitAbortedError,
   GitExitError,
   GitOutputLimitError,
   GitTimeoutError,
@@ -250,6 +251,66 @@ test("Semaphore hands out exactly its permits and releases once", async () => {
   assert.equal(thirdAcquired, true);
   release();
   second();
+});
+
+test("R5 #13: a streaming scanner is never replayed by the retry", async (t) => {
+  const { dir, script } = await fakeGit(t);
+  const runner = runnerFor();
+  const counter = join(dir, "attempts-scanner");
+  const chunks: string[] = [];
+
+  // Same flaky command as above, but with a stateful consumer attached: the
+  // retry must be off STRUCTURALLY, not by the caller remembering.
+  await assert.rejects(
+    runner.run({
+      operation: "test",
+      cwd: process.cwd(),
+      args: [script, "flaky", counter, "2"],
+      retryTransient: true,
+      onStdoutChunk: (chunk) => chunks.push(chunk.toString("utf8"))
+    }),
+    GitExitError
+  );
+  assert.equal((await readFile(counter, "utf8")).trim(), "1", "the command ran exactly once");
+  assert.deepEqual(chunks, [], "and the scanner was never fed twice");
+});
+
+test("Q1 #44: an already-aborted signal never spawns a process", async (t) => {
+  const { dir, script } = await fakeGit(t);
+  const trace = join(dir, "aborted-trace.log");
+  const runner = runnerFor();
+  const controller = new AbortController();
+  controller.abort();
+
+  await assert.rejects(
+    runner.run({
+      operation: "test",
+      cwd: process.cwd(),
+      args: [script, "trace", trace],
+      signal: controller.signal
+    }),
+    GitAbortedError
+  );
+  await assert.rejects(readFile(trace, "utf8"), /ENOENT/, "nothing ever ran");
+});
+
+test("Q1 #44: an abort mid-run kills the child and reports the abort", async (t) => {
+  const { script } = await fakeGit(t);
+  const runner = runnerFor();
+  const controller = new AbortController();
+
+  const pending = runner.run({
+    operation: "test",
+    cwd: process.cwd(),
+    args: [script, "hang"],
+    // Generous timeout: the abort, not the deadline, must be what ends this.
+    timeoutMs: 30_000,
+    allowNonZeroExit: true,
+    signal: controller.signal
+  });
+  controller.abort();
+
+  await assert.rejects(pending, GitAbortedError);
 });
 
 test("only real lock/ENOENT noise is classified as transient", () => {

@@ -549,6 +549,16 @@ export interface TurnProposedDeltaPayload {
 
 export interface TurnProposedCompletedPayload {
   planMarkdown: string;
+  /**
+   * Where the provider saved the plan, when it saved one. Claude's
+   * `ExitPlanMode` carries a `planFilePath` (fixtures/claude README obs. 10)
+   * and it is the handle for "open the plan the CLI actually saved".
+   *
+   * It is a **host** path, and on Claude it lives under `CLAUDE_CONFIG_DIR` —
+   * outside `fsRoot` — so it cannot be opened through `/api/fs/*`; treat it as
+   * a label, not a link. Optional: no other provider reports one.
+   */
+  planFilePath?: string;
 }
 
 export interface TurnDiffUpdatedPayload {

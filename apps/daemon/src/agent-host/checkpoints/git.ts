@@ -89,6 +89,14 @@ export class GitTimeoutError extends GitError {
   }
 }
 
+/** The caller's budget expired before (or while) this command ran. */
+export class GitAbortedError extends GitError {
+  constructor(operation: string) {
+    super(operation, `git was aborted before it could finish (${operation})`);
+    this.name = "GitAbortedError";
+  }
+}
+
 export class GitOutputLimitError extends GitError {
   readonly maxBytes: number;
 
@@ -202,8 +210,14 @@ export function createGitRunner(options: GitRunnerOptions): GitRunner {
   let binary: string | null = null;
 
   const runOnce = async (input: GitRunInput): Promise<GitRunResult> => {
+    // An abort that arrived while this call was queued must not spend a
+    // process: the permit wait is unbounded by design (8 permits, 30 s each),
+    // so a recovery budget that expired in the queue would otherwise still
+    // spawn and run to its own timeout.
+    throwIfAborted(input);
     const release = await permits.acquire();
     try {
+      throwIfAborted(input);
       binary ??= resolveBinary(env);
       return await runGit(binary, env, input);
     } finally {
@@ -212,7 +226,11 @@ export function createGitRunner(options: GitRunnerOptions): GitRunner {
   };
 
   const run = async (input: GitRunInput): Promise<GitRunResult> => {
-    if (input.retryTransient !== true) {
+    // A retry replays the command from the start, so it can never be combined
+    // with a streaming scanner: attempt 2 would re-feed a stateful consumer
+    // mid-record. T3 excludes the pair structurally for the same reason
+    // (`VcsProcess.ts:205-227`), and so does this.
+    if (input.retryTransient !== true || input.onStdoutChunk !== undefined) {
       return await runOnce(input);
     }
     let attempt = 0;
@@ -231,6 +249,13 @@ export function createGitRunner(options: GitRunnerOptions): GitRunner {
   };
 
   return { run, env };
+}
+
+/** An already-aborted signal never fires `abort` again, so it is checked, not listened for. */
+function throwIfAborted(input: GitRunInput): void {
+  if (input.signal?.aborted === true) {
+    throw new GitAbortedError(input.operation);
+  }
 }
 
 function delay(ms: number): Promise<void> {
@@ -344,7 +369,9 @@ async function runGit(
 
   let timer: NodeJS.Timeout | null = null;
   let timedOut = false;
+  let aborted = false;
   const onAbort = (): void => {
+    aborted = true;
     void child.kill();
   };
   input.signal?.addEventListener("abort", onAbort, { once: true });
@@ -354,15 +381,21 @@ async function runGit(
       void child.kill();
     }, timeoutMs);
     const result = await settled;
+    // A killed child can still exit 0-ish under `allowNonZeroExit`; the expiry
+    // or the abort is the outcome that matters, never the corpse's exit code.
     if (timedOut) {
-      // A killed child can still exit 0-ish under `allowNonZeroExit`; the
-      // expiry is the outcome that matters.
       throw new GitTimeoutError(input.operation, timeoutMs);
+    }
+    if (aborted) {
+      throw new GitAbortedError(input.operation);
     }
     return result;
   } catch (error) {
     if (timedOut) {
       throw new GitTimeoutError(input.operation, timeoutMs);
+    }
+    if (aborted) {
+      throw new GitAbortedError(input.operation);
     }
     throw error;
   } finally {

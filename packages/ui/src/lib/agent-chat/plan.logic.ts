@@ -73,20 +73,25 @@ export function deriveActivePlanState(
   activities: readonly ThreadActivityItem[],
   latestTurnId: string | null | undefined
 ): ActivePlanState | null {
-  const planActivities = activities.filter(
-    (activity) => activity.activityKind === "turn.plan.updated"
-  );
-  if (planActivities.length === 0) {
-    return null;
+  // One backwards scan with an early exit, no intermediate arrays: this runs
+  // once per streamed frame over up to `ACTIVITY_RETENTION_LIMIT` rows, and
+  // the filter-then-reverse-then-find version allocated three times per frame
+  // only to have `samePlan` throw the result away (fix-wave Q2-10).
+  let newestAnyTurn: ThreadActivityItem | null = null;
+  for (let index = activities.length - 1; index >= 0; index -= 1) {
+    const activity = activities[index]!;
+    if (activity.activityKind !== "turn.plan.updated") {
+      continue;
+    }
+    // Prefer the current turn's plan…
+    if (latestTurnId && activity.turnId === latestTurnId) {
+      return planStateFromActivity(activity);
+    }
+    // …falling back to the most recent plan from ANY turn, so a follow-up
+    // message does not blank the checklist.
+    newestAnyTurn ??= activity;
   }
-  const fromCurrentTurn = latestTurnId
-    ? [...planActivities].reverse().find((activity) => activity.turnId === latestTurnId)
-    : undefined;
-  const latest = fromCurrentTurn ?? planActivities.at(-1);
-  if (!latest) {
-    return null;
-  }
-  return planStateFromActivity(latest);
+  return newestAnyTurn ? planStateFromActivity(newestAnyTurn) : null;
 }
 
 export function planProgress(plan: ActivePlanState | null): {

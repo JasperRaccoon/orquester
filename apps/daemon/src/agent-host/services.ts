@@ -214,10 +214,17 @@ export interface TurnDiffSummary extends CaptureResult {
  */
 export interface CheckpointService {
   /**
-   * On `turn.started`: capture the baseline at `turn/<turnCount>` if absent,
-   * where `turnCount` is the highest checkpoint turn count the thread already
-   * has — derived from the checkpoints, never stored independently, so a lost
-   * `meta.json` cannot desynchronise it.
+   * On `turn.started` — and on the `/turn` dispatch, before the provider is
+   * asked, so the baseline really is the tree as it was before the turn:
+   * capture the baseline at `turn/<turnCount>` if absent, where `turnCount` is
+   * the highest checkpoint turn count the thread already has — derived from
+   * the checkpoints, never stored independently, so a lost `meta.json` cannot
+   * desynchronise it.
+   *
+   * **`null` means this project has no checkpoints at all** (it is not a git
+   * work tree). A baseline that was already published answers
+   * `status: "ready"` instead, because the two are not the same thing: from a
+   * thread's second turn onwards the baseline is always already there.
    */
   captureBaseline(input: {
     threadId: string;
@@ -228,6 +235,12 @@ export interface CheckpointService {
      * see it; without this the counter falls back to the refs on disk alone.
      */
     checkpoints?: readonly Checkpoint[];
+    /**
+     * The turn this baseline precedes. Recorded as the thread's started turn,
+     * which is what lets a stale `turn.aborted` for a DIFFERENT turn be
+     * refused at turn end rather than minting a checkpoint nobody expects.
+     */
+    turnId?: string | null;
   }): Promise<CaptureResult | null>;
 
   /**
@@ -247,6 +260,11 @@ export interface CheckpointService {
     checkpoints?: readonly Checkpoint[];
     /** The session's active turn, when known — the guard above needs it. */
     activeTurnId?: string | null;
+    /**
+     * The turn the host recorded as started, when it tracks one itself;
+     * otherwise the service uses what `captureBaseline` told it.
+     */
+    startedTurnId?: string | null;
   }): Promise<TurnDiffSummary | null>;
 
   /**

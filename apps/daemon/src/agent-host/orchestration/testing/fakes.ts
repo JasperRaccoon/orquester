@@ -216,6 +216,8 @@ export interface FakeCheckpointService extends CheckpointService {
   rollbackUnsupported: Set<AgentAdapterId>;
   diff: string;
   turnCount: number;
+  /** Override what `captureBaseline` answers; `null` models a non-git project. */
+  baseline?: CaptureResult | null;
 }
 
 export function createFakeCheckpointService(): FakeCheckpointService {
@@ -227,8 +229,20 @@ export function createFakeCheckpointService(): FakeCheckpointService {
     rollbackUnsupported: new Set<AgentAdapterId>(["grok"]),
     diff: "",
     turnCount: 0,
-    async captureBaseline(): Promise<CaptureResult | null> {
-      return null;
+    /**
+     * A git-backed project by default. `null` is reserved for "this project
+     * has no checkpoints at all"; an already-published baseline answers
+     * `ready`, which is what the real service does from a thread's second turn
+     * onwards. Set `fake.baseline = null` to model a non-git project.
+     */
+    async captureBaseline(input: { threadId: string }): Promise<CaptureResult | null> {
+      return fake.baseline === undefined
+        ? {
+            turnCount: fake.turnCount,
+            ref: `refs/orquester/checkpoints/${input.threadId}/turn/${fake.turnCount}`,
+            status: "ready"
+          }
+        : fake.baseline;
     },
     async captureTurnEnd(input: {
       threadId: string;

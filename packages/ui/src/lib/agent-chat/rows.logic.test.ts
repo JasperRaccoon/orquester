@@ -410,3 +410,72 @@ describe("formatWorkDuration", () => {
     assert.equal(formatWorkDuration(Number.NaN), "0ms");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Fix-wave regressions
+// ---------------------------------------------------------------------------
+
+describe("R2-4 — /compact renders as the marker, not a bubble", () => {
+  it("drops the verbatim user message the host persisted", () => {
+    const rows = deriveTimelineRows(
+      baseInput(
+        entriesFrom([
+          message("user", "go", { createdAt: stamp(1) }),
+          message("user", "  /COMPACT  ", { createdAt: stamp(2) }),
+          activity(
+            "thread.state.changed",
+            { state: "compacted", beforeTokens: 100, afterTokens: 20 },
+            { createdAt: stamp(3), summary: "Compacted" }
+          )
+        ])
+      )
+    );
+    const texts = rows.flatMap((row) => (row.kind === "message" ? [row.message.text] : []));
+    assert.deepEqual(texts, ["go"], "the /compact bubble is gone");
+    assert.ok(kinds(rows).includes("context-compaction"), "the marker is what the user sees");
+  });
+
+  it("keeps a /compact message that carries attachments — it is not the command", () => {
+    const rows = deriveTimelineRows(
+      baseInput(
+        entriesFrom([
+          message("user", "/compact", {
+            createdAt: stamp(1),
+            attachments: [{ type: "file", id: "/a", name: "a", sizeBytes: 1 }]
+          })
+        ])
+      )
+    );
+    assert.equal(rows.filter((row) => row.kind === "message").length, 1);
+  });
+});
+
+describe("R7-12 — stable rows survive a duplicate row id", () => {
+  it("keeps reusing the rows that do NOT share an id", () => {
+    const duplicate: AgentChatTimelineRow[] = [
+      { kind: "working", id: "dup", createdAt: stamp(1) },
+      { kind: "thinking", id: "dup", createdAt: stamp(1) },
+      { kind: "turn-fold", id: "f", createdAt: stamp(1), turnId: "t1", label: "Worked", expanded: false }
+    ];
+    const first = computeStableRows(duplicate, EMPTY_STABLE_ROWS);
+    const second = computeStableRows(
+      duplicate.map((row) => ({ ...row })) as AgentChatTimelineRow[],
+      first
+    );
+    // The colliding pair cannot be reused (one id, two rows) — but the row
+    // that does not collide must still keep its identity. Seeding `anyChanged`
+    // from `byId.size` made the map smaller than the array, which pinned it
+    // true forever and disabled reuse for EVERY row (fix-wave R7-12).
+    assert.equal(second.result[2], first.result[2]);
+  });
+
+  it("returns the previous state object when no ids collide", () => {
+    const rows: AgentChatTimelineRow[] = [
+      { kind: "working", id: "w", createdAt: stamp(1) },
+      { kind: "turn-fold", id: "f", createdAt: stamp(1), turnId: "t1", label: "Worked", expanded: false }
+    ];
+    const first = computeStableRows(rows, EMPTY_STABLE_ROWS);
+    const second = computeStableRows(rows.map((row) => ({ ...row })) as AgentChatTimelineRow[], first);
+    assert.equal(second, first);
+  });
+});
