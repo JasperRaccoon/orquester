@@ -60,9 +60,16 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
 
   const scrollerRef = React.useRef<HTMLDivElement>(null);
   const contentRef = React.useRef<HTMLDivElement>(null);
-  // Suppresses the restore effect's own scroll from being read as a user
-  // gesture that would disarm follow.
-  const restoringRef = React.useRef(false);
+  /**
+   * Until when a scroll event is **ours**, not the user's.
+   *
+   * This is load-bearing for the smooth follow: a `behavior: "smooth"` scroll
+   * fires scroll events for its whole animation, and every intermediate frame
+   * is outside the 40 px band — so without this window, animating the follow
+   * would disarm the follow. A real gesture (wheel, touch, a key in the
+   * scroller) clears the window immediately, so the user always wins.
+   */
+  const ignoreScrollUntilRef = React.useRef(0);
   const firstPaintRef = React.useRef(true);
 
   // The drill-in dispatches no commands, whether or not the caller says so.
@@ -169,12 +176,15 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
   const scrollToEnd = React.useCallback((animate: boolean) => {
     const node = scrollerRef.current;
     if (!node) return;
-    restoringRef.current = true;
+    // A smooth scroll animates for a few hundred ms and fires a scroll event
+    // per frame; an instant one fires exactly one, on the next tick.
+    ignoreScrollUntilRef.current = Date.now() + (animate ? 700 : 80);
     node.scrollTo({ top: node.scrollHeight, behavior: animate ? "smooth" : "auto" });
-    // One frame is enough: the flag only has to survive this scroll's own event.
-    requestAnimationFrame(() => {
-      restoringRef.current = false;
-    });
+  }, []);
+
+  /** Any real gesture ends the window at once: the user outranks the follow. */
+  const releaseScrollSuppression = React.useCallback(() => {
+    ignoreScrollUntilRef.current = 0;
   }, []);
 
   const readMetrics = React.useCallback(() => {
@@ -211,7 +221,7 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
   );
 
   const handleScroll = React.useCallback(() => {
-    if (restoringRef.current) return;
+    if (Date.now() < ignoreScrollUntilRef.current) return;
     const metrics = readMetrics();
     if (metrics === null) return;
     const next = nextFollowState(metrics);
@@ -225,7 +235,7 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
   React.useLayoutEffect(() => {
     const node = scrollerRef.current;
     if (!node) return;
-    restoringRef.current = true;
+    ignoreScrollUntilRef.current = Date.now() + 80;
     if (!scroll || scroll.atEnd) {
       node.scrollTop = node.scrollHeight;
     } else if (scroll.rowId !== null) {
@@ -250,7 +260,6 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
       node.scrollTop = scroll.scrollOffset;
     }
     requestAnimationFrame(() => {
-      restoringRef.current = false;
       firstPaintRef.current = false;
     });
     // Only on a thread switch: a rows change must not re-run the restore.
@@ -304,6 +313,12 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
       <div
         ref={scrollerRef}
         onScroll={handleScroll}
+        // A deliberate gesture ends the follow-scroll's own suppression window
+        // immediately, so scrolling up mid-stream disarms follow on the very
+        // first event rather than after the animation finishes.
+        onWheel={releaseScrollSuppression}
+        onTouchStart={releaseScrollSuppression}
+        onKeyDown={releaseScrollSuppression}
         data-agent-chat-timeline={sessionId}
         {...(agentId === undefined ? {} : { "data-agent-id": agentId })}
         className="ac-scroll-thin ac-fade-top min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 sm:px-5"

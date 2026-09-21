@@ -10,9 +10,9 @@
  * extending the recorded duration.
  *
  * *differs from T3: there is no `interrupted` session status here — §5.1 folds
- * it into `stopped` — and a runtime `waiting` state is never emitted at all
- * (`RuntimeSessionState` has no such arm), so T3's `waiting → running`
- * collapse has no counterpart.*
+ * it into `stopped`. T3's `waiting → running` collapse IS kept, even though
+ * `RuntimeSessionState` has no `waiting` arm: Codex puts the state on the wire
+ * anyway (see {@link threadStatusFromRuntimeState}).*
  */
 
 import type {
@@ -53,11 +53,24 @@ export function isSessionLifecycleEvent(event: RuntimeEvent): event is SessionLi
   return SESSION_LIFECYCLE_TYPES.has(event.type);
 }
 
-export function threadStatusFromRuntimeState(state: RuntimeSessionState): ThreadSessionStatus {
+/**
+ * `RuntimeSessionState` has no `waiting` arm — §4.2 says `waiting` is derived
+ * from an unresolved request and is never emitted. Codex nevertheless puts it
+ * on the wire as a `thread/status/changed` active flag
+ * (`apps/daemon/test/fixtures/codex/README.md`, observation 4), so the string
+ * is accepted here and mapped to `running`, per §5.1 ("a runtime `waiting`
+ * state maps to session status `running` — `waiting` is a derived UI state
+ * from an unresolved request, never a stored status"). Keeping the mapping in
+ * one place means no adapter has to remember it.
+ */
+export function threadStatusFromRuntimeState(
+  state: RuntimeSessionState | "waiting"
+): ThreadSessionStatus {
   switch (state) {
     case "starting":
       return "starting";
     case "running":
+    case "waiting":
       return "running";
     case "ready":
       return "ready";
@@ -68,7 +81,11 @@ export function threadStatusFromRuntimeState(state: RuntimeSessionState): Thread
     default: {
       const exhaustive: never = state;
       void exhaustive;
-      return "error";
+      // An unrecognised state from a future adapter means "alive, doing
+      // something". A real stop always arrives as `session.exited`, which maps
+      // to `stopped` without going through here, so guessing `running` cannot
+      // strand a dead session — guessing `error` would kill a live one.
+      return "running";
     }
   }
 }

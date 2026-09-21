@@ -222,6 +222,25 @@ export interface UserInputQuestion {
   allowCustomAnswer?: boolean;
   /** Defaults to false when absent. */
   multiSelect?: boolean;
+  /**
+   * The provider's own "offer a free-text *other* option" flag, Codex's
+   * `isOther` (`ToolRequestUserInputQuestion`). It is the source
+   * {@link allowCustomAnswer} is derived from and is carried through so the
+   * composer can render the provider's wording rather than a generic one; a
+   * provider that has no such notion leaves it absent.
+   *
+   * *Added for the real 0.154.0 shape; `apps/daemon/test/fixtures/codex/README.md`
+   * observation 11.*
+   */
+  isOther?: boolean;
+  /**
+   * The answer is a secret and the input must be **masked**, and never carried
+   * into a draft or persisted beside the message. Codex's `isSecret`; absent
+   * means false.
+   *
+   * *Added for the real 0.154.0 shape; fixtures README observation 11.*
+   */
+  isSecret?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -608,6 +627,15 @@ export interface UserInputRequestedPayload {
   responseMode?: "message";
   /** `responseMode === "message"`; what gates `/dismiss` (§6.2). */
   dismissible: boolean;
+  /**
+   * The provider is **blocked** on this reply. Codex's `isBlocking`, which
+   * supersedes its deprecated `autoResolutionMs`; `dismissible` is its inverse
+   * for a protocol-reply request, and this field is the provider's own signal
+   * rather than our derivation. Absent when the provider does not say.
+   *
+   * *Added for the real 0.154.0 shape; fixtures README observation 11.*
+   */
+  isBlocking?: boolean;
 }
 
 export interface UserInputResolvedPayload {
