@@ -57,6 +57,13 @@ export interface ChatBannerDockExtraProps {
   notices?: readonly DockNotice[];
   /** Mobile's one focus-moving affordance, wired by the integration layer. */
   onRequestCustomAnswerFocus?: () => void;
+  /**
+   * The pending proposal's own title, for the "Plan ready" card's description
+   * slot. Without it the banner names a plan the user cannot identify.
+   *
+   * *Added by W15; the boolean `actionableProposedPlan` still gates the card.*
+   */
+  planTitle?: string | null;
 }
 
 /** Match `ac-banner-exit`: keep a dismissed notice mounted while it leaves. */
@@ -107,7 +114,8 @@ export function ChatBannerDock({
   isTurnWorking = false,
   uploadAttachment,
   notices,
-  onRequestCustomAnswerFocus
+  onRequestCustomAnswerFocus,
+  planTitle = null
 }: ChatBannerDockProps & ChatBannerDockExtraProps): React.ReactElement | null {
   // One breakpoint governs every mobile rule in the chat surface (§7.8).
   const isMobile = !useMediaQuery("(min-width: 640px)");
@@ -329,7 +337,7 @@ export function ChatBannerDock({
         />
       ) : null}
 
-      {card === "plan-ready" ? <PlanReadyBanner planTitle={null} /> : null}
+      {card === "plan-ready" ? <PlanReadyBanner planTitle={planTitle} /> : null}
       </div>
     </div>
   );
