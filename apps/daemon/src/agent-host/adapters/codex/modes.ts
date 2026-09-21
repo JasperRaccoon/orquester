@@ -102,6 +102,25 @@ export function runtimeModeToTurnSandboxPolicy(
  * selected mode". T3 builds and sends its own ~9 KB prompt; on this CLI that
  * would *replace* a maintained upstream one, so we send `null`.
  */
+/**
+ * Normalise a skill mention to the `$name` Codex parses natively (§4.6.8).
+ *
+ * Invocation is `$name` on the wire for every provider and the adapter
+ * translates — for Codex that translation is only this: the composer's skill
+ * trigger is `\p{Sc}` (ANY currency symbol), because a `€`, `£` or `¥` key is
+ * where `$` sits on a non-US layout, and the CLI understands `$` alone. A
+ * currency AMOUNT (`€50`, `$1.5k`) is left as prose, and an unknown `$foo`
+ * stays literal — the CLI decides, not us (§4.6.5 c).
+ *
+ * *Ported from T3 Code (MIT): `CodexSessionRuntime.ts:608-610`.*
+ */
+const SKILL_MENTION_PATTERN =
+  /(^|\s)\p{Sc}(?![0-9][0-9_]*(?:[kKmMbBtT]|[eE][0-9]+)?(?:\s|$))(?=[a-zA-Z0-9:_-]*[a-zA-Z])([a-zA-Z0-9][a-zA-Z0-9:_-]*)(?=\s|$)/gu;
+
+export function normaliseSkillMentions(text: string): string {
+  return text.replace(SKILL_MENTION_PATTERN, "$1$$$2");
+}
+
 export function interactionModeToCollaborationMode(
   interactionMode: InteractionMode,
   settings: { model: string; effort?: string }

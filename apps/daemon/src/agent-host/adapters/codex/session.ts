@@ -65,6 +65,7 @@ import {
 } from "./decisions.ts";
 import {
   interactionModeToCollaborationMode,
+  normaliseSkillMentions,
   runtimeModeToThreadConfig,
   runtimeModeToTurnSandboxPolicy
 } from "./modes.ts";
@@ -167,6 +168,7 @@ export class CodexSession {
   private closedPromise: Promise<void> | null = null;
   private requestSeq = 0;
   private livenessTimer: NodeJS.Timeout | null = null;
+  private lastActivityAt = Date.now();
   private readonly createdAt: string;
   private updatedAt: string;
 
@@ -328,7 +330,14 @@ export class CodexSession {
 
     const items: CodexProtocol.v2.UserInput[] = [];
     if (input.input.length > 0) {
-      items.push({ type: "text", text: input.input, text_elements: [] });
+      // Forwarded verbatim except for the §4.6.8 skill-mention normalisation:
+      // the host does not validate a `/command` against any catalog, does not
+      // rewrite it and does not block it — the CLI decides (§4.6.5 c).
+      items.push({
+        type: "text",
+        text: normaliseSkillMentions(input.input),
+        text_elements: []
+      });
     }
     for (const attachment of input.attachments) {
       // Images by PATH, never base64 (§4.5). Everything else is already
@@ -370,11 +379,19 @@ export class CodexSession {
       "turn/start"
     );
 
+    // Steering reuses the ACTIVE turn id (§4.1): `turn/start` on a live turn
+    // injects into it and is neither an error nor a second turn, so the id is
+    // read off the response rather than minted here — and the usage baseline
+    // is left alone, or a steered turn would report only the delta since the
+    // steer.
     const turnId = response.turn.id;
+    const isSteering = turnId === this.activeTurnId;
     this.activeTurnId = turnId;
-    this.normaliser.noteTurnStarted(turnId, this.modelSelection.model, effort);
+    if (!isSteering) {
+      this.normaliser.noteTurnStarted(turnId, this.modelSelection.model, effort);
+    }
     this.setStatus("running");
-    this.armLivenessWatchdog();
+    this.noteActivity();
     return { turnId, resumeCursor: { threadId: providerThreadId } };
   }
 
@@ -1021,15 +1038,31 @@ export class CodexSession {
   // Liveness watchdog (§3.1)
   // -------------------------------------------------------------------------
 
+  /**
+   * The window in force right now: **10 minutes with no activity, widened to
+   * 30 while a tool call is open** (§3.1, stated there and nowhere else).
+   */
+  private livenessWindowMs(): number {
+    return this.liveTasks.size > 0 || this.normaliser.openItemIds().length > 0
+      ? TURN_LIVENESS_WINDOWS.activeToolMs
+      : TURN_LIVENESS_WINDOWS.idleMs;
+  }
+
+  /**
+   * Arm the watchdog, sleeping on the REMAINING window rather than restarting
+   * a timer on every frame — a turn produces hundreds of deltas and a timer
+   * per delta is pure churn. Activity only moves `lastActivityAt`; the timer
+   * re-arms itself for whatever is left.
+   */
   private armLivenessWatchdog(): void {
     this.disarmLivenessWatchdog();
     if (this.activeTurnId === null || this.hasLivenessPause()) {
       return;
     }
-    const window = this.liveTasks.size > 0 || this.normaliser.openItemIds().length > 0
-      ? TURN_LIVENESS_WINDOWS.activeToolMs
-      : TURN_LIVENESS_WINDOWS.idleMs;
+    const window = this.livenessWindowMs();
+    const remaining = Math.max(50, this.lastActivityAt + window - Date.now());
     const timer = setTimeout(() => {
+      this.livenessTimer = null;
       // Re-check the pause immediately before cancelling: a turn waiting on a
       // human is not a stalled turn, and a watchdog that ignored that would
       // cancel every request the user left open over lunch (§3.1).
@@ -1037,7 +1070,13 @@ export class CodexSession {
         this.armLivenessWatchdog();
         return;
       }
-      const minutes = Math.round(window / 60_000);
+      if (Date.now() - this.lastActivityAt < this.livenessWindowMs()) {
+        // Activity landed while we slept, or a tool opened and widened the
+        // window. Sleep on the remainder instead of cancelling.
+        this.armLivenessWatchdog();
+        return;
+      }
+      const minutes = Math.round(this.livenessWindowMs() / 60_000);
       this.emit({
         type: "runtime.warning",
         payload: { message: `No Codex activity for ${minutes} minutes; stopping the turn.` },
@@ -1046,7 +1085,7 @@ export class CodexSession {
       void this.interruptTurn().catch(() => {
         // The interrupt is best effort; the turn is settled either way.
       });
-    }, window);
+    }, remaining);
     timer.unref?.();
     this.livenessTimer = timer;
   }
@@ -1071,8 +1110,13 @@ export class CodexSession {
     this.armLivenessWatchdog();
   }
 
+  /**
+   * The deadline does not start until the protocol has produced observable
+   * progress (§3.1), which is exactly what this stamp records.
+   */
   private noteActivity(): void {
-    if (this.activeTurnId !== null) {
+    this.lastActivityAt = Date.now();
+    if (this.activeTurnId !== null && this.livenessTimer === null) {
       this.armLivenessWatchdog();
     }
   }

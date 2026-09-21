@@ -15,7 +15,12 @@ import type { ProviderSnapshot, RuntimeEvent } from "@orquester/api/agent-chat";
 import { AsyncEventQueue } from "./event-queue.ts";
 import { MAX_WORKSPACE_SNAPSHOTS, mergeSnapshot, resolveCodexHome } from "./index.ts";
 import { classifyItem, isKnownCodexItemType, type CodexThreadItem } from "./items.ts";
-import { CODEX_COMMAND_CATALOG_NOTE, CODEX_SLASH_COMMANDS } from "./probe.ts";
+import {
+  CODEX_COMMAND_CATALOG_NOTE,
+  CODEX_SLASH_COMMANDS,
+  codexSlashCommands
+} from "./probe.ts";
+import { normaliseSkillMentions } from "./modes.ts";
 import { CodexUsageTracker, usageWindowsFromRateLimits } from "./usage.ts";
 
 describe("item classification — typed on the generated discriminants", () => {
@@ -306,7 +311,7 @@ describe("rate limits", () => {
   });
 });
 
-describe("§4.6.2 the Codex command catalogue", () => {
+describe("§4.6.2 / §4.6.3 the Codex command catalogue", () => {
   it("is exactly two entries — Codex has no command-catalog RPC", () => {
     assert.deepEqual(
       CODEX_SLASH_COMMANDS.map((command) => command.name),
@@ -316,6 +321,66 @@ describe("§4.6.2 the Codex command catalogue", () => {
 
   it("names the gap so an empty list never reads as a failed probe", () => {
     assert.equal(CODEX_COMMAND_CATALOG_NOTE, "Codex reports no commands");
+  });
+
+  it("synthesises /effort ONLY when a model exposes a reasoning descriptor", () => {
+    assert.deepEqual(
+      codexSlashCommands([{ slug: "m", name: "M", capabilities: null }]).map((c) => c.name),
+      ["compact", "feedback"]
+    );
+    assert.deepEqual(
+      codexSlashCommands([
+        {
+          slug: "m",
+          name: "M",
+          capabilities: {
+            optionDescriptors: [
+              { id: "serviceTier", label: "Speed", type: "select", options: [] }
+            ]
+          }
+        }
+      ]).map((c) => c.name),
+      ["compact", "feedback"],
+      "serviceTier is not a reasoning descriptor"
+    );
+    assert.deepEqual(
+      codexSlashCommands([
+        {
+          slug: "m",
+          name: "M",
+          capabilities: {
+            optionDescriptors: [
+              { id: "effort", label: "Reasoning", type: "select", options: [] }
+            ]
+          }
+        }
+      ]).map((c) => c.name),
+      ["compact", "feedback", "effort"]
+    );
+  });
+});
+
+describe("§4.6.8 skill mentions are normalised to `$name`", () => {
+  it("rewrites any currency symbol, because that is where $ sits on other layouts", () => {
+    assert.equal(normaliseSkillMentions("run €review please"), "run $review please");
+    assert.equal(normaliseSkillMentions("£deep-dive"), "$deep-dive");
+    assert.equal(normaliseSkillMentions("¥a:b_c"), "$a:b_c");
+  });
+
+  it("leaves a currency AMOUNT as prose", () => {
+    for (const text of ["it costs €50", "about $1.5k", "£20", "¥300", "$4e5"]) {
+      assert.equal(normaliseSkillMentions(text), text);
+    }
+  });
+
+  it("leaves an already-correct mention and a mid-token symbol alone", () => {
+    assert.equal(normaliseSkillMentions("$review"), "$review");
+    assert.equal(normaliseSkillMentions("a€b"), "a€b");
+  });
+
+  it("does not touch a slash command, which must stay the first character", () => {
+    assert.equal(normaliseSkillMentions("/compact"), "/compact");
+    assert.equal(normaliseSkillMentions("/feedback it is broken"), "/feedback it is broken");
   });
 });
 

@@ -48,6 +48,28 @@ export const CODEX_SLASH_COMMANDS: readonly SlashCommand[] = [
 ] as const;
 
 /**
+ * `/effort`, synthesised per §4.6.3 **only** when a model actually exposes a
+ * reasoning descriptor. T3 has no such command; Orquester adds it because
+ * effort is the single most-changed knob in an agent session, and it writes
+ * the `effort` option of the current `ModelSelection` and nothing else.
+ */
+export const CODEX_EFFORT_COMMAND: SlashCommand = {
+  name: "effort",
+  description: "Set the reasoning effort for this thread",
+  input: { hint: "low | medium | high | xhigh | max" }
+};
+
+/** The catalogue as one provider's models allow it (§4.6.3). */
+export function codexSlashCommands(models: readonly ProviderModel[]): SlashCommand[] {
+  const hasEffort = models.some((model) =>
+    model.capabilities?.optionDescriptors?.some((descriptor) => descriptor.id === "effort")
+  );
+  return hasEffort
+    ? [...CODEX_SLASH_COMMANDS, CODEX_EFFORT_COMMAND]
+    : [...CODEX_SLASH_COMMANDS];
+}
+
+/**
  * The menu's empty state when the catalogue is what it is. Orquester treats
  * Codex's missing command catalog as a **known gap** and says so, rather than
  * letting an empty list read as a failed probe (§4.6.2 "differs").
@@ -157,6 +179,7 @@ export async function probeCodex(input: CodexProbeInput): Promise<ProviderSnapsh
   ]);
 
   const belowMinimum = !meetsMinimumVersion(version, MINIMUM_CODEX_VERSION);
+  const slashCommands = codexSlashCommands(models);
 
   return {
     id: "codex",
@@ -172,14 +195,12 @@ export async function probeCodex(input: CodexProbeInput): Promise<ProviderSnapsh
     auth,
     checkedAt: nowIso,
     models,
-    slashCommands: [...CODEX_SLASH_COMMANDS],
+    slashCommands,
     skills,
+    // Only SKILLS are re-scoped per cwd for Codex; the command list is
+    // machine-level (§4.6.4).
     ...(cwd !== undefined
-      ? {
-          workspaceSnapshots: [
-            { cwd, checkedAt: nowIso, slashCommands: [...CODEX_SLASH_COMMANDS], skills }
-          ]
-        }
+      ? { workspaceSnapshots: [{ cwd, checkedAt: nowIso, slashCommands, skills }] }
       : {}),
     ...(usageLimits !== undefined ? { usageLimits } : {}),
     capabilities: CODEX_ADAPTER_CAPABILITIES

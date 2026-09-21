@@ -241,6 +241,24 @@ describe("codex session — steering", () => {
     );
     await r.stop();
   });
+
+  it("steering does not reset the turn's usage baseline", async () => {
+    const r = rig({ turns: [{ kind: "text", text: "a" }] });
+    await r.session.start();
+    await r.session.sendTurn({ input: "one", attachments: [], interactionMode: "default" });
+    await r.events.waitForType("thread.token-usage.updated");
+    // Steer while the turn is still live; the mock's script keeps running.
+    await r.session.sendTurn({ input: "two", attachments: [], interactionMode: "default" });
+    const completed = await r.events.waitForType("turn.completed");
+    const usage = (completed.payload as { tokenUsage?: { usageStatus: string; inputTokens?: number } })
+      .tokenUsage;
+    assert.equal(usage?.usageStatus, "complete", "a steered turn still reports its usage");
+    assert.ok(
+      (usage?.inputTokens ?? 0) > 0,
+      "the baseline was not reset to the mid-turn total by the steer"
+    );
+    await r.stop();
+  });
 });
 
 describe("codex session — approvals", () => {
