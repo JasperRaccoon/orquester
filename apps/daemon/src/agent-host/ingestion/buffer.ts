@@ -36,8 +36,6 @@ export interface BufferTimers {
  */
 interface BufferEntry {
   text: string;
-  /** Epoch millis of the last delivery, for pacing. */
-  lastDeliveredAtMs: number;
   /** Stamp the first delta of the block carried, so "Thought for …" measures the model. */
   openedAt: string;
   timer: TimerHandle | null;
@@ -59,6 +57,13 @@ export class DeltaBufferSet {
   readonly #now: () => number;
   readonly #onTimerFlush: (flush: BufferFlush) => void;
   readonly #entries = new Map<string, BufferEntry>();
+  /**
+   * Epoch millis of the last delivery per key. Deliberately NOT on the entry:
+   * a delivery that empties the buffer disposes the entry, and losing the
+   * stamp with it would make the very next delta unpaced — turning a
+   * paragraph-per-token model back into one event per token.
+   */
+  readonly #lastDeliveredAtMs = new Map<string, number>();
 
   constructor(options: {
     timers: BufferTimers;
@@ -93,7 +98,6 @@ export class DeltaBufferSet {
   append(key: string, delta: string, createdAt: string): string {
     const entry = this.#entries.get(key) ?? {
       text: "",
-      lastDeliveredAtMs: 0,
       openedAt: createdAt,
       timer: null
     };
@@ -102,11 +106,12 @@ export class DeltaBufferSet {
 
     const nowMs = this.#now();
     const { ready, rest } = splitBufferedText(entry.text);
+    const lastDeliveredAtMs = this.#lastDeliveredAtMs.get(key);
     const paced =
-      entry.lastDeliveredAtMs === 0 || nowMs - entry.lastDeliveredAtMs >= BATCH_INTERVAL_MS;
+      lastDeliveredAtMs === undefined || nowMs - lastDeliveredAtMs >= BATCH_INTERVAL_MS;
 
     if (paced && ready.trim().length > 0 && rest.length <= BATCH_MAX_CHARS) {
-      entry.lastDeliveredAtMs = nowMs;
+      this.#lastDeliveredAtMs.set(key, nowMs);
       if (rest.length > 0) {
         entry.text = rest;
         this.#arm(key, entry);
@@ -119,7 +124,7 @@ export class DeltaBufferSet {
     if (entry.text.length > BATCH_MAX_CHARS) {
       // Safety valve: the 8 KB bound is memory, so it wins over the fence rule.
       const text = entry.text;
-      entry.lastDeliveredAtMs = nowMs;
+      this.#lastDeliveredAtMs.set(key, nowMs);
       this.#dispose(key, entry);
       return text;
     }
@@ -136,6 +141,8 @@ export class DeltaBufferSet {
     }
     const text = entry.text;
     this.#dispose(key, entry);
+    // A take is a finalisation: the next stream under this key is a new block.
+    this.#lastDeliveredAtMs.delete(key);
     return text;
   }
 
@@ -145,6 +152,7 @@ export class DeltaBufferSet {
     if (entry !== undefined) {
       this.#dispose(key, entry);
     }
+    this.#lastDeliveredAtMs.delete(key);
   }
 
   /** Every pending timer, cancelled. Used by `clear()` and on shutdown. */
@@ -152,6 +160,7 @@ export class DeltaBufferSet {
     for (const [key, entry] of [...this.#entries]) {
       this.#dispose(key, entry);
     }
+    this.#lastDeliveredAtMs.clear();
   }
 
   #arm(key: string, entry: BufferEntry): void {
@@ -166,7 +175,7 @@ export class DeltaBufferSet {
       current.timer = null;
       const { ready, rest, openFence } = splitBufferedText(current.text);
       if (ready.trim().length > 0) {
-        current.lastDeliveredAtMs = this.#now();
+        this.#lastDeliveredAtMs.set(key, this.#now());
         const openedAt = current.openedAt;
         if (rest.length > 0) {
           current.text = rest;
@@ -189,7 +198,7 @@ export class DeltaBufferSet {
       }
       const text = current.text;
       const openedAt = current.openedAt;
-      current.lastDeliveredAtMs = this.#now();
+      this.#lastDeliveredAtMs.set(key, this.#now());
       this.#dispose(key, current);
       this.#onTimerFlush({ key, text, openedAt });
     }, BATCH_INTERVAL_MS);

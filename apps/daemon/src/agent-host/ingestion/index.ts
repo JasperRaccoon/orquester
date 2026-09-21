@@ -421,6 +421,22 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     }
   }
 
+  /**
+   * Close an open coalescing window and ship its survivors immediately, ahead
+   * of anything the flush itself is about to emit. Every explicit flush seam
+   * (`flushTurn`, `finalizeReasoning`, `flushThread`, `drain`) goes through
+   * this — otherwise a `tool.updated` that arrived less than 50 ms before a
+   * drain would sit in memory forever. It cannot go back through `commit`,
+   * which would simply re-open the window on the same rows.
+   */
+  function closeCoalesceWindow(threadId: string, state: ThreadState): void {
+    cancelCoalesceWindow(state);
+    const pending = takePendingUpdates(state);
+    if (pending.length > 0) {
+      void enqueue(threadId, state, pending);
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Segments and buffered text
   // -------------------------------------------------------------------------
@@ -1183,7 +1199,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     } else {
       finalizeTurn(threadId, state, turnId, { cause: null, occurredAt });
     }
-    cancelCoalesceWindow(state);
+    closeCoalesceWindow(threadId, state);
     await commit(threadId, state);
   }
 
@@ -1197,7 +1213,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     for (const id of turnIds) {
       finalizeSegment(threadId, state, id, "reasoning", { cause: null, occurredAt });
     }
-    cancelCoalesceWindow(state);
+    closeCoalesceWindow(threadId, state);
     await commit(threadId, state);
   }
 
@@ -1207,7 +1223,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       return;
     }
     flushThreadState(threadId, state, { cause: null, occurredAt: clock.nowIso() });
-    cancelCoalesceWindow(state);
+    closeCoalesceWindow(threadId, state);
     await commit(threadId, state);
   }
 
@@ -1235,7 +1251,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
           });
         }
       }
-      cancelCoalesceWindow(state);
+      closeCoalesceWindow(threadId, state);
       await commit(threadId, state);
     }
     // A sink may itself have enqueued nothing; awaiting each chain twice is

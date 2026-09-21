@@ -106,18 +106,18 @@ export class RecordingSink {
     this.batches.push({ threadId, events: [...events] });
   };
 
-  get events(): AppendableDomainEvent[] {
+  events(): AppendableDomainEvent[] {
     return this.batches.flatMap((batch) => batch.events);
   }
 
   types(): string[] {
-    return this.events.map((event) => event.type);
+    return this.events().map((event) => event.type);
   }
 
   ofType<TType extends AppendableDomainEvent["type"]>(
     type: TType
   ): Extract<AppendableDomainEvent, { type: TType }>[] {
-    return this.events.filter((event) => event.type === type) as Extract<
+    return this.events().filter((event) => event.type === type) as Extract<
       AppendableDomainEvent,
       { type: TType }
     >[];
@@ -182,4 +182,13 @@ export function runtimeEvent<TType extends RuntimeEvent["type"]>(
 
 export function resetRuntimeEventCounter(): void {
   eventCounter = 0;
+}
+
+/**
+ * Let the per-thread sink chain run. `advance()` fires a batch timer
+ * synchronously, but the sink call it triggers is a microtask — this is the
+ * "wait on the event, not on a sleep" seam for that hop.
+ */
+export function settle(): Promise<void> {
+  return new Promise<void>((resolve) => setImmediate(resolve));
 }
