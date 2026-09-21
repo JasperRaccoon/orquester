@@ -14,6 +14,7 @@ import {
   isToolOutputRow,
   joinLifecycleDetails,
   showDestructiveRowStyle,
+  splitSkillMentions,
   summaryKindIconName,
   workEntryIsActiveTurnActivity,
   workEntryIsRerouteNotice
@@ -114,6 +115,73 @@ test("only a bare `/compact` from the user, with no attachments, is the command"
   assert.ok(
     !isCompactCommandMessage({ role: "user", text: "/compact", attachments: [{ id: "a" }] })
   );
+});
+
+// ---------------------------------------------------------------------------
+// R2-8 — `$skill` mentions are re-chipped from the stored text
+// ---------------------------------------------------------------------------
+
+const SKILLS = ["review", "deep-research", "write_tests"];
+
+test("a known skill mention becomes its own run", () => {
+  assert.deepEqual(splitSkillMentions("please $review this", SKILLS), [
+    { text: "please " },
+    { text: "$review", skill: "review" },
+    { text: " this" }
+  ]);
+});
+
+test("a mention at the very start and at the very end both chip", () => {
+  assert.deepEqual(splitSkillMentions("$review", SKILLS), [{ text: "$review", skill: "review" }]);
+  assert.deepEqual(splitSkillMentions("run $review", SKILLS), [
+    { text: "run " },
+    { text: "$review", skill: "review" }
+  ]);
+});
+
+test("several mentions in one message all chip, in order", () => {
+  const runs = splitSkillMentions("$review then $write_tests", SKILLS);
+  assert.deepEqual(
+    runs.filter((run) => run.skill !== undefined).map((run) => run.skill),
+    ["review", "write_tests"]
+  );
+  assert.equal(runs.map((run) => run.text).join(""), "$review then $write_tests");
+});
+
+test("kebab and snake names survive intact", () => {
+  assert.deepEqual(splitSkillMentions("$deep-research", SKILLS), [
+    { text: "$deep-research", skill: "deep-research" }
+  ]);
+});
+
+test("an UNKNOWN name stays plain text — the catalog decides, not the syntax", () => {
+  assert.deepEqual(splitSkillMentions("$nope here", SKILLS), [{ text: "$nope here" }]);
+  assert.deepEqual(splitSkillMentions("$review", []), [{ text: "$review" }]);
+});
+
+test("shell and currency `$` are never mistaken for mentions", () => {
+  // `$PATH` is not in the catalog; `$5` and `a$review` are not mentions at all.
+  assert.deepEqual(splitSkillMentions("echo $PATH", SKILLS), [{ text: "echo $PATH" }]);
+  assert.deepEqual(splitSkillMentions("costs $5", SKILLS), [{ text: "costs $5" }]);
+  assert.deepEqual(splitSkillMentions("a$review", SKILLS), [{ text: "a$review" }]);
+  assert.deepEqual(splitSkillMentions("$$review", SKILLS), [{ text: "$$review" }]);
+});
+
+test("text with no `$` at all allocates exactly one run", () => {
+  const runs = splitSkillMentions("nothing to chip", SKILLS);
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0]?.skill, undefined);
+});
+
+test("the concatenated runs always reproduce the input exactly", () => {
+  for (const text of ["$review x", "a $review $write_tests b", "$nope", "", "$review$review"]) {
+    assert.equal(
+      splitSkillMentions(text, SKILLS)
+        .map((run) => run.text)
+        .join(""),
+      text
+    );
+  }
 });
 
 // ---------------------------------------------------------------------------

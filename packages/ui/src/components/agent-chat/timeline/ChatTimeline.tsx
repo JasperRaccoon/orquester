@@ -95,6 +95,7 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
     agentId,
     readOnly,
     roster,
+    skills,
     projectPath,
     scroll,
     onScrollPositionChange
@@ -167,6 +168,7 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
       canRevert,
       disclosures,
       roster: roster ?? [],
+      skills: skills ?? [],
       // A tool row and an activity group both live in `expandedGroupIds`: their
       // ids come from disjoint id spaces (an activity item id and a group id),
       // so one set is enough and the store keeps one list to persist.
@@ -207,7 +209,8 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
       onSendQueuedNow,
       patchList,
       projectPath,
-      roster
+      roster,
+      skills
     ]
   );
 
