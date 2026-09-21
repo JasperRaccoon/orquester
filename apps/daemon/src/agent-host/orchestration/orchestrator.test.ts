@@ -918,6 +918,107 @@ describe("orchestrator — reads (§6.3)", () => {
   });
 });
 
+describe("orchestrator — queue while the session is down (§3.4)", () => {
+  it("persists the user message before any provider work, even when the start fails", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    host.adapter.failNext("failStartSession", new Error("binary not found"));
+
+    const receipt = await host.orchestrator.command(threadId, "turn", {
+      commandId: cmd(),
+      input: "still mine"
+    });
+    await host.settle();
+
+    assert.ok(receipt.seq > 0, "the command is accepted, not refused");
+    const messages = (host.store.logs.get(threadId) ?? []).filter(
+      (event): event is Extract<DomainEvent, { type: "thread.message-sent" }> =>
+        event.type === "thread.message-sent"
+    );
+    assert.equal(messages.length, 1);
+    assert.equal(messages[0]?.payload.text, "still mine");
+    // The message survives; the failure is a timeline row, not a lost turn.
+    const failure = activityEvents(host).find(
+      (row) => row.activityKind === "provider.turn.start.failed"
+    );
+    assert.ok(failure);
+
+    // A retry re-adopts the thread: session/stop clears the error state first.
+    await host.orchestrator.command(threadId, "session/stop", { commandId: cmd() });
+    await host.settle();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "again" });
+    await host.settle();
+    assert.equal(host.adapter.calls.filter((call) => call.kind === "sendTurn").length, 1);
+    await host.stop();
+  });
+});
+
+describe("orchestrator — answering a question (§6.2)", () => {
+  it("folds attachments into the answer text before the adapter sees it", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await openQuestion(host, "q-1", { dismissible: false });
+    await host.settle();
+    const ref = await host.store.putAttachment({
+      threadId,
+      name: "notes.md",
+      sourcePath: "/tmp/notes.md"
+    });
+
+    await host.orchestrator.command(threadId, "answer", {
+      commandId: cmd(),
+      requestId: "q-1",
+      answers: { "Which branch?": "main" },
+      attachmentsByQuestionId: { "Which branch?": [ref] }
+    });
+    await host.settle();
+
+    const call = host.adapter.calls.find((entry) => entry.kind === "respondToUserInput");
+    const answers = (call?.detail as { answers: Record<string, string> }).answers;
+    assert.match(answers["Which branch?"] ?? "", /^main\n\n\/tmp\/notes\.md$/);
+
+    // The question text is persisted so an answered card renders without the
+    // original request.
+    const persisted = (host.store.logs.get(threadId) ?? []).find(
+      (event) => event.type === "thread.user-input-response-requested"
+    );
+    assert.ok(persisted);
+    assert.deepEqual(
+      (persisted as Extract<DomainEvent, { type: "thread.user-input-response-requested" }>).payload
+        .questionTextById,
+      { "Which branch?": "Which branch?" }
+    );
+    await host.stop();
+  });
+});
+
+describe("orchestrator — the §6.4 summary fields", () => {
+  it("reports pending approvals, questions and the latest turn", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await host.settle();
+    const initial = host.orchestrator.summary(threadId);
+    assert.equal(initial?.hasPendingApprovals, false);
+    assert.equal(initial?.hasPendingUserInput, false);
+    assert.equal(initial?.hasActionableProposedPlan, false);
+    assert.equal(initial?.backgroundLiveness, null);
+    assert.equal(initial?.chatSessionStatus, "running");
+    assert.equal(initial?.latestTurn?.turnId, "turn-1");
+    assert.equal(initial?.latestTurn?.state, "running");
+    assert.equal(initial?.latestTurn?.completedAt, null);
+
+    await openApproval(host, "req-1");
+    await openQuestion(host, "q-1", { dismissible: true });
+    await host.settle();
+    const summary = host.orchestrator.summary(threadId);
+    assert.equal(summary?.hasPendingApprovals, true);
+    assert.equal(summary?.hasPendingUserInput, true);
+    await host.stop();
+  });
+});
+
 describe("orchestrator — runtime events", () => {
   it("feeds the liveness registry and clears it on session.exited", async () => {
     const host = createTestHost();

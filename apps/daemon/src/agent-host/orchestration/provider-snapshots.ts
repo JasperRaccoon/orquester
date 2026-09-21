@@ -61,6 +61,8 @@ export interface ManagedProviderSnapshotRegistry extends ProviderSnapshotRegistr
   load(): Promise<void>;
   /** Run one background pass now, respecting the refresh semaphore. */
   refreshAllNow(): Promise<void>;
+  /** Await the in-flight cache write. The drain seam a test waits on (§9). */
+  flush(): Promise<void>;
   stop(): void;
 }
 
@@ -373,6 +375,10 @@ export function createProviderSnapshotRegistry(
     },
 
     refreshAllNow,
+
+    async flush(): Promise<void> {
+      await persistChain.catch(() => undefined);
+    },
 
     stop(): void {
       stopped = true;
