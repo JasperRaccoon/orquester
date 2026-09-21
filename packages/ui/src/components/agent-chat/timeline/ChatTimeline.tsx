@@ -4,11 +4,14 @@ import { TriangleAlert, X } from "lucide-react";
 import { cn } from "../../../lib/cn";
 import type { DisclosureState } from "../../../lib/agent-chat/contracts";
 import { useAgentChatDrillIn } from "../../../lib/agent-chat/hooks";
+import { isActiveChatTab } from "../../../lib/agent-chat-active-tab";
+import { resolveChatShortcut } from "../../../lib/agent-chat/keybindings.logic";
 import { peekThreadStore } from "../../../lib/agent-chat/store";
 import type { ChatTimelineProps, TimelineScrollPosition } from "../contracts";
 import { ChatIconButton, ScrollToBottomButton } from "../primitives";
 import { TimelineRowContext, type TimelineRowContextValue } from "./context";
 import { TimelineRow } from "./TimelineRow";
+import { findFirstVisibleIndex, offsetWithinRow, type RowMetric } from "./anchor";
 import { nextFollowState, shouldAnimateFollow } from "./follow";
 
 /**
@@ -93,6 +96,7 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
     agentId,
     readOnly,
     roster,
+    skills,
     projectPath,
     scroll,
     onScrollPositionChange
@@ -165,6 +169,7 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
       canRevert,
       disclosures,
       roster: roster ?? [],
+      skills: skills ?? [],
       // A tool row and an activity group both live in `expandedGroupIds`: their
       // ids come from disjoint id spaces (an activity item id and a group id),
       // so one set is enough and the store keeps one list to persist.
@@ -205,7 +210,8 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
       onSendQueuedNow,
       patchList,
       projectPath,
-      roster
+      roster,
+      skills
     ]
   );
 
@@ -283,37 +289,91 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
   // position is the one that is remembered.
   React.useEffect(() => flushRememberScroll, [flushRememberScroll]);
 
+  /**
+   * The anchor row, found by binary search over the rows container's children.
+   *
+   * The children are in document order and `offsetTop` is monotonic, so this
+   * reads O(log rows) offsets instead of calling `getBoundingClientRect()` on
+   * every row above the viewport (Q2-6). `offsetTop` is relative to a shared
+   * `offsetParent`, so the container's own offset is subtracted rather than
+   * assumed to be zero. The two spacers carry no row id; the walk forward past
+   * them is bounded by their count, not by the row count.
+   */
+  const anchorAtOffset = React.useCallback(
+    (scrollOffset: number): { rowId: string | null; offsetWithinRow: number } => {
+      const container = contentRef.current;
+      if (!container) return { rowId: null, offsetWithinRow: 0 };
+      const children = container.children;
+      const base = container.offsetTop;
+      const metricAt = (index: number): RowMetric => {
+        const element = children[index] as HTMLElement;
+        return { top: element.offsetTop - base, height: element.offsetHeight };
+      };
+      let index = findFirstVisibleIndex(children.length, metricAt, scrollOffset);
+      if (index < 0) return { rowId: null, offsetWithinRow: 0 };
+      // Land on a real row, never on a spacer.
+      while (index < children.length) {
+        const element = children[index] as HTMLElement;
+        const rowId = element.dataset["timelineRowId"];
+        if (rowId !== undefined) {
+          return { rowId, offsetWithinRow: offsetWithinRow(metricAt(index), scrollOffset) };
+        }
+        index += 1;
+      }
+      return { rowId: null, offsetWithinRow: 0 };
+    },
+    []
+  );
+
   const publishPosition = React.useCallback(
     (scrollOffset: number, atEnd: boolean) => {
-      const node = scrollerRef.current;
-      let rowId: string | null = null;
-      let offsetWithinRow = 0;
-      if (node) {
-        const top = node.getBoundingClientRect().top;
-        for (const element of node.querySelectorAll<HTMLElement>("[data-timeline-row-id]")) {
-          const box = element.getBoundingClientRect();
-          if (box.bottom > top) {
-            rowId = element.dataset["timelineRowId"] ?? null;
-            offsetWithinRow = Math.max(0, top - box.top);
-            break;
-          }
-        }
-      }
-      const position: TimelineScrollPosition = { rowId, offsetWithinRow, scrollOffset, atEnd };
+      const anchor = anchorAtOffset(scrollOffset);
+      const position: TimelineScrollPosition = {
+        rowId: anchor.rowId,
+        offsetWithinRow: anchor.offsetWithinRow,
+        scrollOffset,
+        atEnd
+      };
       onScrollPositionChange?.(position);
       rememberScroll(position);
     },
-    [onScrollPositionChange, rememberScroll]
+    [anchorAtOffset, onScrollPositionChange, rememberScroll]
   );
 
-  const handleScroll = React.useCallback(() => {
-    if (Date.now() < ignoreScrollUntilRef.current) return;
+  /**
+   * One measurement per animation frame, never one per scroll event.
+   *
+   * A flick fires scroll events far faster than the compositor paints, and each
+   * measurement forces a layout flush; coalescing to a frame is the difference
+   * between a smooth flick and a janky one (Q2-6). The follow flag is
+   * consequently decided from the frame's position, which is the one the user
+   * actually sees.
+   */
+  const scrollFrame = React.useRef<number | null>(null);
+
+  const measureScroll = React.useCallback(() => {
     const metrics = readMetrics();
     if (metrics === null) return;
     const next = nextFollowState(metrics);
     if (next !== follow) onFollowChange(next);
     publishPosition(metrics.scroll, next);
   }, [follow, onFollowChange, publishPosition, readMetrics]);
+
+  const handleScroll = React.useCallback(() => {
+    if (Date.now() < ignoreScrollUntilRef.current) return;
+    if (scrollFrame.current !== null) return;
+    scrollFrame.current = requestAnimationFrame(() => {
+      scrollFrame.current = null;
+      measureScroll();
+    });
+  }, [measureScroll]);
+
+  React.useEffect(
+    () => () => {
+      if (scrollFrame.current !== null) cancelAnimationFrame(scrollFrame.current);
+    },
+    []
+  );
 
   // Restore the remembered reading position on mount and on every thread
   // switch. A thread that was left at the end is re-pinned to the end rather
@@ -376,6 +436,36 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
     onFollowChange(true);
     scrollToEnd(false);
   }, [onFollowChange, scrollToEnd]);
+
+  /**
+   * `mod+J` — the keyboard half of the scroll-to-end pill (R7-8).
+   *
+   * The shared table has always resolved this chord; nothing implemented it, so
+   * the composer advertised a shortcut that did nothing. It re-arms follow
+   * through the same `reArmFollow` the pill uses, because §7.3 wants exactly
+   * one place that scrolls the user back.
+   *
+   * **It acts only for the visible tab.** Every chat tab stays mounted
+   * (`MainView` shows and hides), so a naive `window` listener would fire once
+   * per open thread. `isActiveChatTab` is the shell's answer to "am I the one
+   * on screen?", and the layout check behind it covers the drill-in, which
+   * mounts a second timeline for the *same* session id while the parent's is
+   * still mounted — only the one with a layout box may take the chord.
+   */
+  React.useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.defaultPrevented) return;
+      if (!isActiveChatTab(sessionId)) return;
+      const command = resolveChatShortcut(event);
+      if (command?.kind !== "scroll-to-end") return;
+      const node = scrollerRef.current;
+      if (!node || node.offsetParent === null) return;
+      event.preventDefault();
+      reArmFollow();
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [reArmFollow, sessionId]);
 
   // -------------------------------------------------------------------------
 

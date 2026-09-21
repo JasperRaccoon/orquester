@@ -23,7 +23,7 @@ const attachmentsDirOf = (root: string, id: string): string =>
 const receiptsPathOf = (root: string): string => path.join(root, "receipts.json");
 
 import type { AppendableDomainEvent, Clock, IdGen } from "../services.ts";
-import { HEAD_CHECKPOINT_EVENTS, createThreadStore } from "./index.ts";
+import { HEAD_CHECKPOINT_EVENTS, createThreadStore, isSafeThreadId } from "./index.ts";
 
 /**
  * The sweep reads REAL file mtimes, so its clock has to move relative to now
@@ -127,6 +127,65 @@ test("concurrent appends never reuse a sequence", async () => {
   const tail = await store.readAll("t1");
   assert.equal(tail.events.length, 26);
   assert.equal(tail.seq, 26);
+});
+
+test("a first-touch read racing a first-touch append never re-uses a seq", async () => {
+  // Q1 #2: `ensureLoaded` used to mark a thread loaded BEFORE its disk reads,
+  // so a read that arrived in that window returned `seq: 0` and the queued
+  // append stamped 1 over sequences already on disk. On-disk seqs came back
+  // `[1, 2, 3, 1]`, and `readLog` then truncated the thread at the duplicate
+  // FOREVER.
+  const rootDir = await tempRoot();
+  const first = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  await first.append({
+    threadId: "t1",
+    events: [created(), message("t1", "m1"), message("t1", "m2")]
+  });
+  await first.drain();
+
+  // A fresh instance: nothing is loaded, so both calls race the first load.
+  const reopened = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  const [, appended] = await Promise.all([
+    reopened.readAll("t1"),
+    reopened.append({ threadId: "t1", events: [message("t1", "m3")] })
+  ]);
+  await reopened.drain();
+
+  assert.equal(appended.seq, 4, "the append must continue the existing sequence");
+
+  const onDisk = (await fs.readFile(eventsPathOf(rootDir, "t1"), "utf8"))
+    .split("\n")
+    .filter((line) => line.length > 0)
+    .map((line) => (JSON.parse(line) as { seq: number }).seq);
+  assert.deepEqual(onDisk, [1, 2, 3, 4]);
+
+  const tail = await reopened.readAll("t1");
+  assert.equal(tail.truncated, false, "a duplicate seq would truncate the thread permanently");
+  assert.equal(tail.events.length, 4);
+});
+
+test("many concurrent first-touch callers all serialise on one load", async () => {
+  const rootDir = await tempRoot();
+  const first = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  await first.append({ threadId: "t1", events: [created()] });
+  await first.drain();
+
+  const reopened = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  const work: Array<Promise<unknown>> = [];
+  for (let i = 0; i < 12; i += 1) {
+    work.push(reopened.readTail("t1", 0));
+    work.push(reopened.loadHead("t1"));
+    work.push(reopened.append({ threadId: "t1", events: [message("t1", `m${i}`)] }));
+  }
+  await Promise.all(work);
+  await reopened.drain();
+
+  const tail = await reopened.readAll("t1");
+  assert.equal(tail.truncated, false);
+  assert.deepEqual(
+    tail.events.map((event) => event.seq),
+    Array.from({ length: 13 }, (_unused, index) => index + 1)
+  );
 });
 
 test("a torn trailing line is truncated on load, never fatal", async () => {
@@ -439,12 +498,13 @@ test("bounds are checked against the stat'd file, per kind", async () => {
     store.putAttachment({ threadId: "t1", name: "big.png", mimeType: "image/png", sourcePath: big }),
     /over the/
   );
-  // The same bytes as a plain file are under the 50 MiB file limit.
+  // The same bytes under a non-image name are under the 50 MiB file limit.
+  const blob = await writeSource(path.join(rootDir, "src"), "big.bin", 11 * 1024 * 1024);
   const ref = await store.putAttachment({
     threadId: "t1",
-    name: "big.png",
+    name: "big.bin",
     mimeType: "application/octet-stream",
-    sourcePath: big
+    sourcePath: blob
   });
   assert.equal(ref.type, "file");
 });
@@ -633,4 +693,98 @@ test("drain settles every queued write", async () => {
   await store.drain();
   await Promise.all(appends);
   assert.equal((await store.listThreads()).length, 10);
+});
+
+// --- fix-wave regressions ---------------------------------------------------
+
+test("an unusable thread id is refused before it reaches path.join or rm -rf", async () => {
+  // S1 #11: the host is a separate process with its own trust boundary; one
+  // wrong caller would turn a DELETE into an arbitrary recursive delete.
+  const rootDir = await tempRoot();
+  const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  for (const bad of ["../../etc", "a/b", "", ".hidden", "..", "x".repeat(200)]) {
+    assert.equal(isSafeThreadId(bad), false, bad);
+    await assert.rejects(store.deleteThread(bad), /unusable thread id/, bad);
+    await assert.rejects(store.loadHead(bad), /unusable thread id/, bad);
+  }
+  assert.equal(isSafeThreadId("3f2504e0-4f89-41d3-9a0c-0305e82c3301"), true);
+});
+
+test("the image cap follows the stored extension, not just the declared mime", async () => {
+  // S1 #7: `?name=x.png&type=application/octet-stream` carried 40 MiB in under
+  // the 50 MiB FILE limit and was then re-declared `image/png` on the turn.
+  const rootDir = await tempRoot();
+  const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  const big = await writeSource(path.join(rootDir, "src"), "sneaky.png", 11 * 1024 * 1024);
+  await assert.rejects(
+    store.putAttachment({
+      threadId: "t1",
+      name: "sneaky.png",
+      mimeType: "application/octet-stream",
+      sourcePath: big
+    }),
+    /over the/
+  );
+
+  // A genuine non-image extension still gets the file bound.
+  const blob = await writeSource(path.join(rootDir, "src"), "dump.bin", 11 * 1024 * 1024);
+  const ref = await store.putAttachment({
+    threadId: "t1",
+    name: "dump.bin",
+    mimeType: "application/octet-stream",
+    sourcePath: blob
+  });
+  assert.equal(ref.type, "file");
+});
+
+test("two head writes in the same millisecond do not collide on a temp name", async () => {
+  // Q1 #51: the temp name was `pid + Date.now()`, so the second rename threw
+  // ENOENT out of saveHead.
+  const rootDir = await tempRoot();
+  const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  await store.append({ threadId: "t1", events: [created()] });
+  const head = await headOf(store, "t1");
+  await Promise.all([
+    store.saveHead({ ...head, title: "one" }),
+    store.saveHead({ ...head, title: "two" }),
+    store.saveHead({ ...head, title: "three" })
+  ]);
+  await store.drain();
+  const written = JSON.parse(await fs.readFile(metaPath(rootDir, "t1"), "utf8")) as ThreadHead;
+  assert.ok(["one", "two", "three"].includes(written.title));
+  const leftovers = (await fs.readdir(threadDir(rootDir, "t1"))).filter((entry) =>
+    entry.includes(".tmp")
+  );
+  assert.deepEqual(leftovers, []);
+});
+
+test("the receipts file is compact JSON, not a pretty-printed ring", async () => {
+  const rootDir = await tempRoot();
+  const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  await store.putReceipt({
+    commandId: "cmd-1",
+    threadId: "t1",
+    seq: 1,
+    status: "accepted",
+    acceptedAt: "2026-01-01T00:00:00.000Z"
+  });
+  await store.drain();
+  const raw = await fs.readFile(receiptsPathOf(rootDir), "utf8");
+  assert.ok(!raw.includes("\n  "), "the ring is rewritten once per command; do not indent it");
+  assert.equal((JSON.parse(raw) as { receipts: unknown[] }).receipts.length, 1);
+});
+
+test("the host-wide raw-log ceiling runs on the sweep schedule", async () => {
+  const rootDir = await tempRoot();
+  const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  await store.append({ threadId: "t1", events: [created()] });
+  await store.drain();
+  // A stale rotated rung from a thread with no open writer.
+  const rung = path.join(rootDir, "threads", "t1", "raw.ndjson.1");
+  await fs.writeFile(rung, "old\n");
+  const ancient = (Date.now() - 30 * 24 * 60 * 60 * 1000) / 1000;
+  await fs.utimes(rung, ancient, ancient);
+
+  await store.pruneAttachments({ now: hoursFromNow(0) });
+  await assert.rejects(fs.stat(rung), "the sweep must reach raw logs, not just attachments");
 });

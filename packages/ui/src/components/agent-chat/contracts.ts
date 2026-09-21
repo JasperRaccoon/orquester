@@ -99,6 +99,15 @@ export interface ChatTimelineProps {
   /** The project directory, so changed-file paths render workspace-relative. */
   projectPath?: string | undefined;
   /**
+   * The current per-cwd skill names, so a sent message's `$mentions` are
+   * **re-chipped from the stored text** (§4.6.7) — no `isCommand` flag is
+   * persisted, the text is the record. Wire it from the provider snapshot
+   * (`provider.skills.map((skill) => skill.name)`); empty means no chips.
+   *
+   * *Added by W12; additive to the foundation's contract.*
+   */
+  skills?: readonly string[] | undefined;
+  /**
    * The remembered reading position for this thread, from W11's 100-entry LRU
    * (§7.2). Restored on mount and on every `sessionId` change.
    *
@@ -262,12 +271,13 @@ export interface ChatStatusLineProps {
   onCompact: () => void;
   latestCheckpoint: Checkpoint | null;
   /**
-   * The thread's model, for the meter's auto-compaction sentence (§7.6). With
-   * no `autoCompactAtTokens` the sentence can still name what compacts —
-   * without it, it degrades to a generic line although the model is right
-   * there on the thread head.
+   * The thread's model, for the meter's auto-compaction sentence (§7.6): with
+   * no `autoCompactAtTokens` the sentence can still name what compacts, and
+   * without the label it degrades to a generic line although the model is
+   * right there on the thread head.
    *
-   * *Added by W15; additive to the foundation's contract.*
+   * *Added by W14 and W15 for R8 m3; T3 passes `modelDisplayName`,
+   * `ContextWindowMeter.tsx:136-138`.*
    */
   modelLabel?: string | null;
 }

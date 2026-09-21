@@ -447,3 +447,27 @@ test("the roster caps at ROSTER_LIMIT, evicting live rows last", () => {
   const live = agents.filter((agent) => agent.status === "running");
   assert.equal(live.length, 10, "every live row survives the cap");
 });
+
+test("the cap evicts by rank but returns survivors in first-seen order", () => {
+  // R8 m8: the ranked array was returned as the roster, so crossing 100 rows
+  // reordered every surviving row (settled ones came back newest-first) —
+  // against §7.6's "without reshuffling rows that stay visible".
+  resetActivityIds();
+  const rows = [];
+  for (let i = 0; i < ROSTER_LIMIT + 20; i += 1) {
+    rows.push(activity("task.started", agentTask(`t${String(i).padStart(3, "0")}`)));
+    if (i < ROSTER_LIMIT + 10) {
+      rows.push(
+        activity("task.completed", agentTask(`t${String(i).padStart(3, "0")}`, {
+          status: "completed"
+        }))
+      );
+    }
+  }
+  const agents = foldSubagentActivities(rows);
+  assert.equal(agents.length, ROSTER_LIMIT);
+
+  const firstSeen = agents.map((agent) => agent.firstSeenAt);
+  const sorted = [...firstSeen].sort();
+  assert.deepEqual(firstSeen, sorted, "survivors keep their original insertion order");
+});

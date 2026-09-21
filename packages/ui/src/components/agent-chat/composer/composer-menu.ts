@@ -94,13 +94,51 @@ export function skillsForSkillMenu(skills: readonly Skill[]): Skill[] {
   return dedupeSkillsByName(skills.filter(isProviderSkillUserInvocable));
 }
 
-/** Drop any command whose name collides with a visible skill (§4.6.8). */
+/**
+ * Drop any command whose name collides with a visible skill (§4.6.8) **or with
+ * a host command** (§4.6.5(a)).
+ *
+ * The host collision is not hypothetical: the Codex and OpenCode snapshots
+ * synthesise an `effort` entry, and `/effort` is client-only — picking the
+ * provider row would insert the literal text `/effort ` and forward it to a
+ * CLI that does not implement it. `/compact` is the one host command a
+ * provider catalog legitimately carries (§4.6.3 synthesises it), and it is
+ * deduped the same way: one row, which takes the host-native path rather than
+ * being typed into the draft.
+ */
 export function providerCommandsForSlashMenu(
   commands: readonly SlashCommand[],
-  visibleSkills: readonly Skill[]
+  visibleSkills: readonly Skill[],
+  hostCommandNames: readonly string[] = []
 ): SlashCommand[] {
-  const skillNames = new Set(visibleSkills.map((skill) => skill.name.trim().toLowerCase()));
-  return commands.filter((command) => !skillNames.has(command.name.trim().toLowerCase()));
+  const taken = new Set([
+    ...visibleSkills.map((skill) => skill.name.trim().toLowerCase()),
+    ...hostCommandNames.map((name) => name.trim().toLowerCase())
+  ]);
+  return commands.filter((command) => !taken.has(command.name.trim().toLowerCase()));
+}
+
+// Absorbed from W11's `lib/agent-chat/slash-commands.logic.ts`, which this
+// module replaces (fix-wave arbitration R2-5).
+/**
+ * **Grok's `/always-approve` is refused** with a pointer at the permission
+ * chip, because a provider-side permission change would desynchronise the
+ * host's runtime mode (§4.6.5(c)).
+ *
+ * The daemon enforces it too; the composer checks first so the user gets the
+ * pointer instead of a turn that fails after the message is already committed.
+ * Must be called on the SEND path, not only in the menu — it can be typed.
+ */
+export function blockedProviderCommandMessage(
+  adapterId: string | undefined,
+  text: string
+): string | null {
+  if (adapterId !== "grok") {
+    return null;
+  }
+  return /^\/always-approve(\s|$)/i.test(text.trim())
+    ? "Change the permission mode with the composer's mode chip — a provider-side change would desynchronise this thread."
+    : null;
 }
 
 function titleCaseWords(value: string): string {
@@ -396,7 +434,12 @@ export function buildSlashMenuItems(input: SlashMenuInput): SlashMenuItem[] {
   const visibleSkills = skillsForSlashMenu(input.skills, input.showSkillsInSlashMenu);
   const providerItems: SlashMenuItem[] = providerCommandsForSlashMenu(
     input.slashCommands,
-    visibleSkills
+    visibleSkills,
+    // `/effort` is client-only, so a synthesised provider row for it is a
+    // duplicate that would reach the CLI as literal text (R2-2). `/compact` is
+    // handled below: it stays a provider row, because the host-native path
+    // recognises it from the sent text.
+    hostCommands
   )
     .filter((command) => command.name !== "compact" || input.compactAvailable)
     .map((command) => ({

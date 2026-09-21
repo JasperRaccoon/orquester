@@ -111,6 +111,21 @@ export function ChatStatusLine({
           </>
         ) : null}
       </div>
+
+      {/*
+        The indeterminate turn hairline, D's `ac-working-bar`: a 40%-wide fill
+        sliding inside a 1px track, directly under the status line, which is
+        where the design reference puts it. It reads as "the turn is alive"
+        from the corner of the eye without another spinner, and it is the one
+        element here that says so while the label is truncated or the tab is
+        half-scrolled away. The track only exists while a turn runs, so a
+        settled thread has no extra hairline under its status row.
+      */}
+      <div className="mx-auto h-px w-full max-w-3xl overflow-hidden" aria-hidden>
+        {status.ticking ? (
+          <div className="ac-working-bar h-px rounded-full bg-info/70" />
+        ) : null}
+      </div>
     </div>
   );
 }
