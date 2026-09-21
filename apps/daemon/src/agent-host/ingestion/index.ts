@@ -858,7 +858,13 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       threadId,
       state,
       planId,
-      { text, createdAt: entry?.createdAt ?? clock.nowIso() },
+      {
+        text,
+        createdAt: entry?.createdAt ?? clock.nowIso(),
+        // The completion often arrives without an agentId; the buffer is what
+        // remembers which subagent streamed the proposal (R5 #8).
+        ...(entry?.agentId !== undefined ? { agentId: entry.agentId } : {})
+      },
       turnId ?? entry?.turnId ?? null,
       "turn.proposed.completed",
       cause

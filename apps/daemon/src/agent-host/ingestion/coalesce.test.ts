@@ -124,10 +124,12 @@ describe("the §5.6 read projection is the single choke point (R5 #1)", () => {
     ]);
     assert.ok(row);
     const payload = row.payload as { detail: string; truncated?: boolean };
+    // The cap plus the one-character elision marker W2's slimmer appends.
     assert.ok(
-      payload.detail.length <= SLIM_MAX_STRING_BYTES,
+      payload.detail.length <= SLIM_MAX_STRING_BYTES + 1,
       `detail was ${payload.detail.length}`
     );
+    assert.ok(payload.detail.endsWith("\u2026"));
     assert.equal(payload.truncated, true, "'load full output' needs this flag");
   });
 
@@ -146,7 +148,7 @@ describe("the §5.6 read projection is the single choke point (R5 #1)", () => {
     const slimmed = slimActivityEvent(event);
     assert.notEqual(slimmed, event);
     const payload = slimmed.payload.activity.payload as { detail: string };
-    assert.ok(payload.detail.length <= SLIM_MAX_STRING_BYTES);
+    assert.ok(payload.detail.length <= SLIM_MAX_STRING_BYTES + 1);
 
     const other = { type: "thread.session-set", payload: { session: { status: "ready" } } };
     assert.equal(slimActivityEvent(other), other);
