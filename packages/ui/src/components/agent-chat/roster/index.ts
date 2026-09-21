@@ -30,6 +30,12 @@ export {
 } from "./roster-rows";
 
 export {
+  deriveAgentSpawnSummary,
+  type AgentSpawnSummary,
+  type AgentSpawnTone
+} from "./spawn-summary";
+
+export {
   TOOL_PREFIX,
   agentActivityText,
   formatSubagentModelLabel,

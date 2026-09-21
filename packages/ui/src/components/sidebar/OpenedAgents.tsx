@@ -53,7 +53,11 @@ const AgentRow: React.FC<{ entry: AgentSessionEntry; showWorkspace: boolean }> =
       {showWorkspace && entry.project.workspace ? `${entry.project.workspace}/` : ""}
       {entry.project.name}
     </span>
-    <SessionStatusDot sessionId={entry.session.id} status={entry.session.status} />
+    <SessionStatusDot
+      sessionId={entry.session.id}
+      status={entry.session.status}
+      backgroundLiveness={entry.session.backgroundLiveness}
+    />
   </button>
 );
 

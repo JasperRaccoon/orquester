@@ -1,6 +1,7 @@
 import type { ClientConfig, DaemonConfig } from "@orquester/config";
 import type {
   BackgroundLiveness as AgentChatBackgroundLiveness,
+  CreateAgentChatSessionFields,
   LatestTurnSummary as AgentChatLatestTurnSummary,
   ThreadSessionStatus as AgentChatThreadSessionStatus
 } from "./agent-chat/index.ts";
@@ -1287,6 +1288,19 @@ export interface CreateSessionRequest {
    * with a sleep + a droppable WS frame.
    */
   initialCommand?: string;
+  /**
+   * The agent-chat launch block (agent chat design spec §6.1), required in
+   * practice for `kind: "agent-chat"` and ignored for every other kind: the
+   * model selection, the permission mode the session is started in, and an
+   * optional conversation to resume — one the adapter cannot use is refused at
+   * creation with 400 `RESUME_UNAVAILABLE` rather than opening a fresh thread
+   * the user believes is their old one.
+   *
+   * `accountId` is carried at the top level (shared with the terminal path);
+   * `chat.accountId` exists on the field type for host-side callers and clients
+   * may leave it unset.
+   */
+  chat?: CreateAgentChatSessionFields;
 }
 
 /** Longest `CreateSessionRequest.initialCommand` the daemon will type. */

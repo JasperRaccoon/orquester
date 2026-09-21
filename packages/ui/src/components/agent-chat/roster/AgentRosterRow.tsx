@@ -68,7 +68,11 @@ export function AgentRosterRow({
       data-status={agent.status}
       data-agent-kind={agent.agentKind}
       className={cn(
-        "group ac-press",
+        // `ac-enter` is a one-shot on insertion: a row that updates in place
+        // keeps the same element, so a spawn animates and a status change does
+        // not. *T3: `AgentsPanel.tsx:4-5` — "Activity and completion update
+        // rows in place".*
+        "group ac-press ac-enter",
         ROW_GRID,
         "transition-opacity duration-300 motion-reduce:transition-none",
         "hover:bg-neutral-800/40 focus:outline-none focus-visible:ring-1",

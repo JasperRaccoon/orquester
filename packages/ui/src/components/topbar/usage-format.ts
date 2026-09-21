@@ -1,4 +1,9 @@
-import type { AgentUsage, ScopedUsageWindow, UsageWindow } from "@orquester/api";
+import type {
+  AgentUsage,
+  ProviderUsageWindow,
+  ScopedUsageWindow,
+  UsageWindow
+} from "@orquester/api";
 import { usageAgentEnabled, type UsagePrefs as _Prefs } from "@orquester/config";
 import { REGISTRY } from "@orquester/registry";
 import type { UsageResetFormat } from "../../lib/usage-display";
@@ -235,6 +240,77 @@ export function normalizeUsageWindows(
   // labeled with the provider's own model name.
   for (const w of src.scopedWindows ?? []) {
     out.push({ ...w, id: `scoped:${w.label}`, label: w.label, longLabel: `${w.label} (week)`, period: "weekly", unit });
+  }
+  return out;
+}
+
+/* ── Provider rate-limit windows from the chat streams ──────────────────── */
+
+/**
+ * Merge an `account.rate-limits.updated` payload onto the windows already held
+ * for one agent (spec §7.7).
+ *
+ * **Sparse by contract** (`ProviderUsageLimitsUpdate`): windows merge *by id*
+ * and an omitted window is unchanged, never cleared — a provider that reports
+ * only its 5h pool on one turn must not erase the weekly bar it published
+ * earlier. Order is stable: an already-known id keeps its slot (so a bar never
+ * jumps under the pointer) and a new id lands at the end.
+ */
+export function mergeProviderUsageWindows(
+  previous: readonly ProviderUsageWindow[] | undefined,
+  update: readonly ProviderUsageWindow[]
+): ProviderUsageWindow[] {
+  const byId = new Map(update.map((w) => [w.id, w]));
+  const merged = (previous ?? []).map((w) => byId.get(w.id) ?? w);
+  const known = new Set(merged.map((w) => w.id));
+  for (const w of update) {
+    if (!known.has(w.id)) {
+      merged.push(w);
+      known.add(w.id);
+    }
+  }
+  return merged;
+}
+
+/** Window-kind → the display period the usage cards render with. */
+const PROVIDER_WINDOW_PERIOD: Record<ProviderUsageWindow["kind"], "rolling" | "weekly"> = {
+  session: "rolling",
+  weekly: "weekly",
+  monthly: "weekly",
+  other: "rolling"
+};
+
+/**
+ * Project a provider's own rate-limit windows into the presentation shape the
+ * usage cards render, dropping any whose id the daemon's snapshot already
+ * covers — the daemon polls the same pools out-of-band, and showing both would
+ * print the 5h bar twice with two slightly different readings.
+ *
+ * The provider reports a percentage and (sometimes) a reset time; it never
+ * reports absolute counts, so `unit` stays the agent's own inference and the
+ * capacity line simply does not render.
+ */
+export function providerWindowsToNormalized(
+  agentId: string,
+  windows: readonly ProviderUsageWindow[],
+  coveredIds: Iterable<string> = []
+): NormalizedUsageWindow[] {
+  const covered = new Set(coveredIds);
+  const unit = usageUnitFor(agentId);
+  const out: NormalizedUsageWindow[] = [];
+  for (const w of windows) {
+    if (covered.has(w.id)) {
+      continue;
+    }
+    out.push({
+      id: `provider:${w.id}`,
+      label: w.label,
+      longLabel: w.label,
+      period: PROVIDER_WINDOW_PERIOD[w.kind] ?? "rolling",
+      unit,
+      percent: Math.max(0, Math.min(100, w.usedPercent)),
+      resetsAt: w.resetsAt
+    });
   }
   return out;
 }
