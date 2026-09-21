@@ -172,6 +172,20 @@ const reopened = renderToStaticMarkup(
 assert.ok(!reopened.includes('data-agent-id="old"'));
 assert.ok(reopened.includes('data-roster-main="true"'));
 
+// Without a main row there is no turn signal, so nothing is faded away on a
+// guess — every row the fold produced still renders.
+const noMain = renderToStaticMarkup(
+  createElement(AgentRoster, {
+    sessionId: "s1",
+    agents: [agent("old", { status: "completed", completedAt: "2026-09-21T10:01:00.000Z" })],
+    panel: emptyPanel,
+    expanded: false,
+    onExpandedChange: () => {},
+    onOpenAgent: () => {}
+  })
+);
+assert.ok(noMain.includes('data-agent-id="old"'));
+
 // ---------------------------------------------------------------------------
 // The drill-in
 // ---------------------------------------------------------------------------

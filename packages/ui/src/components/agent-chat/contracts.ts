@@ -223,6 +223,16 @@ export interface AgentDrillInProps {
   rows: AgentChatTimelineRow[];
   /** Read-only: the child view dispatches no commands (§7.6). */
   onBack: () => void;
+  /**
+   * The thread's roster, forwarded to the timeline so a spawn row *inside* a
+   * child (an agent that spawned its own) resolves its members at render time
+   * instead of reading "Status unavailable".
+   *
+   * *Added by W14; additive to the foundation's contract.*
+   */
+  roster?: readonly RuntimeSubagent[] | undefined;
+  /** Forwarded so changed-file paths render workspace-relative. */
+  projectPath?: string | undefined;
 }
 
 export interface ChatStatusLineProps {
