@@ -37,7 +37,9 @@ import {
   expandVars,
   parseAppConfig,
   parseDaemonConfig,
-  resolveDaemonPaths
+  parseSessionsConfig,
+  resolveDaemonPaths,
+  sessionsIndexPath
 } from "@orquester/config";
 import { REGISTRY, type RegistryEntryDef } from "@orquester/registry";
 import type { AccountHome, AgentAdapterId, ProviderSnapshot } from "@orquester/api/agent-chat";
@@ -459,6 +461,7 @@ export async function startAgentHost(
       return { kind: "system", path: launch?.homePath ?? homeDir };
     },
     continuationEnabled: (projectPath) => continuationEnabledFor(appdir, projectPath, env),
+    isThreadClosed: (threadId) => isThreadClosedFor(appdir, threadId),
     launchArgsForRefId: (refId) => refIds.get(refId)?.args ?? [],
     launchConfigs,
     clock,
@@ -563,6 +566,30 @@ export async function startAgentHost(
 }
 
 /**
+ * §3.3: "archived and deleted threads are settled, never continued".
+ *
+ * The daemon's `deleteThread` is fire-and-forget over the socket, so a tab
+ * closed while the host is **down** never gets a `thread.deleted` event — the
+ * log alone cannot tell the difference between "closed" and "orphaned", and
+ * resuming it spends tokens on a tab that no longer exists. The daemon's own
+ * tab index is the authority, so the host reads it.
+ *
+ * An unreadable index answers `false`: never settle a live thread because a
+ * file could not be read.
+ */
+async function isThreadClosedFor(appdir: string, threadId: string): Promise<boolean> {
+  try {
+    const raw = await readFile(sessionsIndexPath(appdir), "utf8");
+    const sessions = parseSessionsConfig(JSON.parse(raw) as unknown);
+    return !sessions.sessions.some(
+      (session) => session.id === threadId && session.kind === "agent-chat"
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The workspaces root every chat `cwd` lives under — `daemon.json`'s
  * `workspacesDir`, expanded. Read once at startup; `null` when the config
  * cannot be read, which leaves the guard open rather than breaking refreshes
@@ -636,8 +663,14 @@ if (isProcessEntry()) {
         if (stopping) return;
         stopping = true;
         // The same 3 s hard-exit backstop the daemon uses: a stream that
-        // refuses to drain must never stall the stop, and provider children
-        // parented to tmux survive regardless.
+        // refuses to drain must never stall the stop.
+        //
+        // Note what it costs. Provider children are children of THIS process
+        // (the tmux pane's), not of the tmux server, so a backstop exit
+        // orphans any child `stop()` had not reaped — and a `detached` one
+        // (OpenCode's per-project server) escapes the process group entirely.
+        // That is why the daemon must give the host a grace window before it
+        // kills the host's tmux session, rather than assuming tmux owns them.
         const force = setTimeout(() => process.exit(0), 3_000);
         force.unref();
         void host

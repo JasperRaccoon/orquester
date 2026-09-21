@@ -151,6 +151,8 @@ export interface ResolvedLaunch {
 export type HostProviderSnapshotRegistry = ProviderSnapshotRegistry & {
   /** §7.7: an `auth.status {error}` from a turn must reach the snapshot. */
   applyAuthStatus?(adapterId: AgentAdapterId, event: RuntimeEvent): void;
+  /** Monotonic; lets the daemon notice a host-triggered change (§6.4). */
+  changeCount?(): number;
   refreshDetailed?(
     adapterId: AgentAdapterId,
     input?: { cwd?: string }
@@ -274,6 +276,14 @@ interface ThreadRuntime {
 
 const HEAD_SAVE_EVENT_INTERVAL = 50;
 
+/**
+ * §3.4's "bounded grace window" on a queued turn start. A `pending` turn older
+ * than this on a host that is only now starting belongs to a send that never
+ * happened; anything shorter would settle a turn that is merely slow to reach
+ * the provider.
+ */
+const PENDING_TURN_GRACE_MS = 5 * 60_000;
+
 /** Events that change `meta.json`'s own fields, so the head is rewritten. */
 const HEAD_WRITING_EVENTS: ReadonlySet<string> = new Set([
   "thread.created",
@@ -319,6 +329,13 @@ export interface Orchestrator {
   subscribe(threadId: string, subscription: ThreadSubscription): Promise<() => void>;
 
   providers(): ProviderSnapshot[];
+  /**
+   * Monotonic counter of snapshot changes. The daemon polls it to publish
+   * `agent.providers.changed` for a change the HOST noticed on its own — a CLI
+   * upgraded underneath it, a login gone stale — which no client request would
+   * otherwise reveal.
+   */
+  providersChangeCount(): number;
   refreshProvider(
     adapterId: AgentAdapterId,
     input?: { cwd?: string }
@@ -2096,9 +2113,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           title: questionTitle(question)
         }))
       ],
-      hasActionableProposedPlan: (runtime.state.items ?? []).some(
-        (item) => item.kind === "activity" && item.activityKind === "turn.proposed.completed"
-      ),
+      hasActionableProposedPlan: hasActionableProposedPlan(runtime),
       backgroundLiveness: liveness.liveness(threadId),
       latestTurn: latest
         ? {
@@ -2378,6 +2393,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         // Only threads that are running with a usable cursor (§3.3).
         if (session.status !== "running" || session.activeTurnId === null) continue;
         if (session.resumeCursor === undefined || session.resumeCursor === null) continue;
+        // …and only where the project opted in. Continuation is opt-in per
+        // project over a host-wide default that is OFF, so a marker written
+        // for an opted-out thread would make the next boot resume it — the
+        // reconcile trusts a marker on its own, exactly because the stop path
+        // is supposed to be the place that filter is applied.
+        if ((await options.continuationEnabled?.(head.projectPath)) !== true) continue;
         await writeMarker(runtime, { turnId: session.activeTurnId });
         marked.push(threadId);
       } catch (error) {
@@ -2411,6 +2432,37 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       kind: "runtime.error",
       summary: "Session did not survive a restart",
       detail: message
+    });
+  };
+
+  /**
+   * A `pending` turn belongs to a `/turn` whose effect never ran — the host
+   * died between the commit and the send. Nothing on the live path settles it
+   * (the provider produced no frames at all), so the reconcile does, bounded
+   * by {@link PENDING_TURN_GRACE_MS} so a turn that is merely slow to start on
+   * a live session is left alone.
+   */
+  const settleStalePendingTurns = async (runtime: ThreadRuntime): Promise<void> => {
+    const head = headOf(runtime);
+    if (!head) return;
+    const now = clock.now().getTime();
+    const stale = (runtime.state.turns ?? []).some((turn) => {
+      if (turn.state !== "pending") return false;
+      const requestedAt = Date.parse(turn.requestedAt);
+      return !Number.isFinite(requestedAt) || now - requestedAt > PENDING_TURN_GRACE_MS;
+    });
+    if (!stale) return;
+    await appendActivity(runtime, {
+      kind: "provider.turn.start.failed",
+      summary: "Queued message was not sent",
+      detail: CONTINUATION_FAILED_MESSAGE
+    });
+    // Settling is by session status (§5.1): `stopped` folds the pending turn
+    // to `interrupted` without claiming the session itself failed.
+    await persistSession(runtime, {
+      ...currentSession(runtime),
+      status: "stopped",
+      activeTurnId: null
     });
   };
 
@@ -2459,8 +2511,16 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     if (!orphaned) {
       // Threads without an active turn are not resumed eagerly; the first
       // `sendTurn` re-adopts them (lazy recovery, §4.1).
+      await settleStalePendingTurns(runtime);
       return;
     }
+
+    // §3.4's bounded grace window. A `/turn` commits its message and its
+    // pending turn row BEFORE the effect runs, so a host that dies in that
+    // window leaves a `pending` turn with an idle head: not "orphaned" by the
+    // filter above, but `deriveLatestTurn` reports it forever and the status
+    // line shows the thread working with nothing behind it.
+    await settleStalePendingTurns(runtime);
 
     const closed = runtime.deleted || (await options.isThreadClosed?.(threadId)) === true;
     const markerMatches =
@@ -2584,6 +2644,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     onAccountEvent,
     adapterForThread,
     providers: () => snapshots.all(),
+    providersChangeCount: () => snapshots.changeCount?.() ?? 0,
     refreshProvider: async (adapterId, input) => {
       if (snapshots.refreshDetailed) {
         const { snapshot, changed } = await snapshots.refreshDetailed(adapterId, input);
@@ -2630,6 +2691,47 @@ export interface HostThreadSummary extends AgentChatSessionSummaryFields {
     kind: "approval" | "question";
     title: string;
   }>;
+}
+
+/**
+ * The prefix the client puts on the turn it sends when the user clicks
+ * Implement. Mirrors `PLAN_IMPLEMENTATION_PROMPT_PREFIX` in
+ * `packages/ui/src/lib/agent-chat/entries.logic.ts`; the host cannot import
+ * from the UI package, so the literal is pinned here and in a test.
+ */
+export const PLAN_IMPLEMENTATION_PROMPT_PREFIX = "PLEASE IMPLEMENT THIS PLAN:\n";
+
+/**
+ * §6.4 / §7.3: `hasActionableProposedPlan` is `implementedAt === null` for the
+ * **latest** proposed plan — not "a plan was ever proposed". Without the
+ * second half the flag is sticky-true for as long as that one row survives
+ * retention, so every surface reading it shows a permanent "Plan Ready" and
+ * §6.4's ranking puts it above Monitoring forever.
+ */
+function hasActionableProposedPlan(runtime: ThreadRuntime): boolean {
+  const items = runtime.state.items ?? [];
+  let latestPlanIndex = -1;
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index]!;
+    if (item.kind === "activity" && item.activityKind === "turn.proposed.completed") {
+      latestPlanIndex = index;
+      break;
+    }
+  }
+  if (latestPlanIndex < 0) {
+    return false;
+  }
+  for (let index = latestPlanIndex + 1; index < items.length; index += 1) {
+    const item = items[index]!;
+    if (
+      item.kind === "message" &&
+      item.role === "user" &&
+      item.text.startsWith(PLAN_IMPLEMENTATION_PROMPT_PREFIX)
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 const REQUEST_KIND_TITLES: Readonly<Record<string, string>> = {

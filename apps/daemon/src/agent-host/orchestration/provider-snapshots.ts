@@ -82,6 +82,13 @@ export interface ManagedProviderSnapshotRegistry extends ProviderSnapshotRegistr
   refreshAllNow(): Promise<void>;
   /** Await the in-flight cache write. The drain seam a test waits on (§9). */
   flush(): Promise<void>;
+  /**
+   * Bumped on every snapshot change, so a host-triggered one — a CLI upgraded
+   * under the host, a login going stale, an `auth.status` error — is visible
+   * to the daemon without it having to diff the whole snapshot list. `onChange`
+   * fires inside the host process only; this is what crosses the socket.
+   */
+  changeCount(): number;
   stop(): void;
 }
 
@@ -161,6 +168,7 @@ export function createProviderSnapshotRegistry(
   // Concurrent `ensureWorkspaceSnapshot` calls for one (adapter, cwd) collapse.
   const inFlightWorkspaces = new Map<string, Promise<void>>();
 
+  let changeCount = 0;
   let watchers = 0;
   let timerHandle: unknown = null;
   let stopped = false;
@@ -203,6 +211,7 @@ export function createProviderSnapshotRegistry(
       return false;
     }
     snapshots.set(snapshot.id, snapshot);
+    changeCount += 1;
     persist();
     notify(snapshot.id);
     return true;
@@ -449,6 +458,10 @@ export function createProviderSnapshotRegistry(
 
     async flush(): Promise<void> {
       await persistChain.catch(() => undefined);
+    },
+
+    changeCount(): number {
+      return changeCount;
     },
 
     stop(): void {

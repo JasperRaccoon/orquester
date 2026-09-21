@@ -212,6 +212,10 @@ export function createFakeIngestion(input: {
 export interface FakeCheckpointService extends CheckpointService {
   readonly pruned: Array<{ threadId: string; targetTurnCount: number }>;
   readonly deleted: string[];
+  /** Thread ids a baseline was requested for, in order. */
+  readonly baselines: string[];
+  /** Set to model a project that is not a git repo (§5.4 skips silently). */
+  nonGit: boolean;
   /** Adapters whose rollback is refused (§5.5 step 2). Grok by default. */
   rollbackUnsupported: Set<AgentAdapterId>;
   diff: string;
@@ -221,14 +225,28 @@ export interface FakeCheckpointService extends CheckpointService {
 export function createFakeCheckpointService(): FakeCheckpointService {
   const pruned: Array<{ threadId: string; targetTurnCount: number }> = [];
   const deleted: string[] = [];
+  const baselines: string[] = [];
   const fake: FakeCheckpointService = {
     pruned,
     deleted,
+    baselines,
+    nonGit: false,
     rollbackUnsupported: new Set<AgentAdapterId>(["grok"]),
     diff: "",
     turnCount: 0,
-    async captureBaseline(): Promise<CaptureResult | null> {
-      return null;
+    /**
+     * A git project by default: `null` means "not a git repo" and makes the
+     * host stop offering §5.4 placeholders for the thread, which is a
+     * behaviour a test should have to opt into rather than get by accident.
+     */
+    async captureBaseline(input: { threadId: string }): Promise<CaptureResult | null> {
+      fake.baselines.push(input.threadId);
+      if (fake.nonGit) return null;
+      return {
+        turnCount: fake.turnCount,
+        ref: `refs/orquester/checkpoints/${input.threadId}/turn/${fake.turnCount}`,
+        status: "ready"
+      };
     },
     async captureTurnEnd(input: {
       threadId: string;

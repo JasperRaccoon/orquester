@@ -27,6 +27,16 @@ import {
   type DomainEvent
 } from "@orquester/api/agent-chat";
 
+/**
+ * The one non-`AgentChatStreamFrame` line the stream may write: the budget
+ * overflow of §6.3, immediately before the close. Exported so the client and
+ * its tests name the same shape instead of matching on the message text.
+ */
+export const STREAM_OVERFLOW_FRAME = {
+  kind: "error" as const,
+  message: "The live event buffer is full. Resume from the last received sequence."
+};
+
 /** *T3: `ThreadLiveEventCoalescer.ts:18-19`.* */
 export const COALESCE_WINDOW_MS = 50;
 export const MAX_PENDING_UPDATES = 512;
@@ -248,12 +258,10 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
       // A slow client is cut and told to resume by cursor; it is never allowed
       // to grow host memory.
       try {
-        response.write(
-          `${JSON.stringify({
-            kind: "error",
-            message: "The live event buffer is full. Resume from the last received sequence."
-          })}\n`
-        );
+        // Not an `AgentChatStreamFrame`: a client that does not know this
+        // shape must skip it rather than fail to decode. It is the last line
+        // before the close, and the close itself is the signal.
+        response.write(`${JSON.stringify(STREAM_OVERFLOW_FRAME)}\n`);
       } catch {
         // Nothing more to say on a socket we are closing anyway.
       }
@@ -370,6 +378,16 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
       writeFrame(frame);
     }
 
+    // The heartbeat starts as soon as the headers are out: a very large
+    // snapshot can take longer than a proxy's idle timeout to write, and the
+    // stream would be cut before it ever reached `synchronized`.
+    const beat = (): void => {
+      if (closed) return;
+      writeLine(AGENT_CHAT_HEARTBEAT_LINE);
+      heartbeatHandle = setTimer(beat, heartbeatMs);
+    };
+    heartbeatHandle = setTimer(beat, heartbeatMs);
+
     // Everything buffered during the read, then the marker — through the same
     // path, so the client is never told it is caught up early.
     const buffered = preReadBuffer.splice(0, preReadBuffer.length);
@@ -387,13 +405,6 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
     emitEvents(coalesceToolUpdates(buffered.filter((event) => event.seq > highest)));
     writeFrame({ kind: "synchronized", hostInstanceId });
     live = true;
-
-    const beat = (): void => {
-      if (closed) return;
-      writeLine(AGENT_CHAT_HEARTBEAT_LINE);
-      heartbeatHandle = setTimer(beat, heartbeatMs);
-    };
-    heartbeatHandle = setTimer(beat, heartbeatMs);
   };
 
   return {
