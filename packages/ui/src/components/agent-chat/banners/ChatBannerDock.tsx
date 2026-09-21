@@ -15,6 +15,7 @@ import { PlanReadyBanner } from "./PlanReadyBanner";
 import { QuestionCard, type QuestionAttachment } from "./QuestionCard";
 import {
   resolveDockCard,
+  showBackgroundLivenessBanner,
   sortBannerStack,
   type BannerPriority,
   type BannerVariantName
@@ -40,6 +41,16 @@ export interface DockNotice {
 }
 
 export interface ChatBannerDockExtraProps {
+  /**
+   * `true` while a turn is working. The liveness banner is **hidden** then,
+   * because the composer already carries a Stop; it is the only stop
+   * affordance once the turn settles (§7.6).
+   *
+   * The shared contract expects the caller to have nulled `backgroundLiveness`
+   * in that case; passing this instead — or as well — makes the rule hold here
+   * rather than depending on every caller remembering it.
+   */
+  isTurnWorking?: boolean;
   /** Enables per-question attachments (§7.5). Without it the card has none. */
   uploadAttachment?: AgentChatActions["uploadAttachment"];
   /** The general notice stack. Sorted activity-first, then by severity. */
@@ -93,6 +104,7 @@ export function ChatBannerDock({
   onDismiss,
   onStopBackgroundWork,
   onCarryTextToDraft,
+  isTurnWorking = false,
   uploadAttachment,
   notices,
   onRequestCustomAnswerFocus
@@ -132,7 +144,10 @@ export function ChatBannerDock({
 
   const stackItems = React.useMemo(() => {
     const entries: Array<DockNotice & { render: React.ReactNode }> = [];
-    if (backgroundLiveness !== null) {
+    if (
+      backgroundLiveness !== null &&
+      showBackgroundLivenessBanner({ backgroundLiveness, isTurnWorking })
+    ) {
       entries.push({
         id: `background-liveness:${sessionId}`,
         variant: "default",
@@ -171,6 +186,7 @@ export function ChatBannerDock({
   }, [
     backgroundLiveness,
     exitingNoticeId,
+    isTurnWorking,
     liveAgentCount,
     notices,
     onStopBackgroundWork,
