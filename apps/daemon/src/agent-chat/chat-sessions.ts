@@ -12,11 +12,7 @@
 
 import { EventEmitter } from "node:events";
 import { sep } from "node:path";
-import type {
-  AgentChatSessionSummaryFields,
-  CreateSessionRequest,
-  SessionSummary
-} from "@orquester/api";
+import type { AgentChatSessionSummaryFields, SessionSummary } from "@orquester/api";
 import type { AgentChatHome, SessionRecord } from "@orquester/config";
 
 /** Thrown for a refusal the route maps to a 400. */
