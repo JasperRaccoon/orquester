@@ -11,7 +11,12 @@
  * seams. No test that uses it needs a timeout to pass.
  */
 
-import type { AgentAdapterId, DomainEvent, ProviderSnapshot } from "@orquester/api/agent-chat";
+import type {
+  AgentAdapterId,
+  DomainEvent,
+  ProviderSnapshot,
+  RuntimeEvent
+} from "@orquester/api/agent-chat";
 
 import type { ProviderSnapshotRegistry } from "../../services.ts";
 import { createLivenessRegistry } from "../liveness.ts";
@@ -58,7 +63,10 @@ export interface TestHost {
   store: FakeThreadStore;
   ingestion: FakeIngestion;
   checkpoints: FakeCheckpointService;
-  snapshots: ProviderSnapshotRegistry & { set(snapshot: ProviderSnapshot): void };
+  snapshots: ProviderSnapshotRegistry & {
+    set(snapshot: ProviderSnapshot): void;
+    applyAuthStatus?(adapterId: AgentAdapterId, event: RuntimeEvent): void;
+  };
   logger: RecordingLogger;
   launchConfigs: LaunchConfigStore & { readonly entries: Map<string, ThreadLaunchConfig> };
   clock: TestClock;
@@ -81,6 +89,7 @@ export interface TestHost {
 
 function createStubSnapshotRegistry(): ProviderSnapshotRegistry & {
   set(snapshot: ProviderSnapshot): void;
+  applyAuthStatus?(adapterId: AgentAdapterId, event: RuntimeEvent): void;
 } {
   const snapshots = new Map<AgentAdapterId, ProviderSnapshot>();
   const listeners = new Set<(adapterId: AgentAdapterId) => void>();

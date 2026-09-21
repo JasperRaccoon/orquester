@@ -432,3 +432,99 @@ describe("R2-6: an empty probe never blanks a non-empty cached list", () => {
     }
   });
 });
+
+describe("E2: a pending turn row is adopted, never settled", () => {
+  it("a `ready` session state while a turn start is in flight does not complete it", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+
+    // What the adapter reports the moment its session is up, before the
+    // provider has minted a turn id — the exact frame the E2E trace saw at
+    // seq 4, one step after `thread.turn-start-requested`.
+    await host.orchestrator.ingestionSink(threadId, [
+      {
+        eventId: "ready",
+        threadId,
+        type: "thread.session-set",
+        payload: { session: { status: "ready", activeTurnId: null } },
+        occurredAt: host.clock.nowIso(),
+        commandId: null,
+        causationEventId: null,
+        metadata: {}
+      }
+    ]);
+    await host.settle();
+
+    const read = await host.orchestrator.readThread(threadId);
+    assert.equal(read.kind, "snapshot");
+    const turns = read.kind === "snapshot" ? read.thread.turns : [];
+    assert.equal(
+      turns.filter((turn) => turn.turnId === null && turn.state === "completed").length,
+      0,
+      "one user message must not grow a phantom completed turn"
+    );
+    await host.stop();
+  });
+});
+
+describe("E8: a capture for a reverted turn never resurrects the head", () => {
+  it("drops a turn-diff whose turn count is above the revert target", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    for (const turnCount of [1, 2, 3]) {
+      await host.orchestrator.ingestionSink(threadId, [
+        {
+          eventId: `cp${turnCount}`,
+          threadId,
+          type: "thread.turn-diff-completed",
+          payload: {
+            turnCount,
+            turnId: `turn-${turnCount}`,
+            ref: `refs/orquester/checkpoints/x/turn/${turnCount}`,
+            status: "ready",
+            files: [],
+            assistantMessageId: null,
+            completedAt: host.clock.nowIso()
+          },
+          occurredAt: host.clock.nowIso(),
+          commandId: null,
+          causationEventId: null,
+          metadata: {}
+        }
+      ]);
+    }
+    await host.settle();
+    await host.orchestrator.command(threadId, "revert", { commandId: cmd(), targetTurnCount: 2 });
+    await host.settle();
+
+    const before = (await host.orchestrator.readThread(threadId)) as {
+      kind: "snapshot";
+      thread: { head: { turnCount: number } };
+    };
+    assert.equal(before.thread.head.turnCount, 2);
+
+    // The in-flight turn's capture lands after the revert.
+    host.checkpoints.turnCount = 3;
+    const consumed = host.orchestrator.consume(host.adapter);
+    host.adapter.emit({
+      eventId: "late",
+      threadId,
+      createdAt: host.clock.nowIso(),
+      type: "turn.completed",
+      turnId: "turn-4",
+      payload: { state: "completed" }
+    } as unknown as RuntimeEvent);
+    await new Promise((resolve) => setImmediate(resolve));
+    await host.settle();
+
+    const after = (await host.orchestrator.readThread(threadId)) as {
+      kind: "snapshot";
+      thread: { head: { turnCount: number } };
+    };
+    assert.equal(after.thread.head.turnCount, 2, "the revert must stay reverted");
+    host.adapter.close();
+    await consumed;
+    await host.stop();
+  });
+});

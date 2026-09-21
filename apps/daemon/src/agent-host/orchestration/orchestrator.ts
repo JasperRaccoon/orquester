@@ -267,6 +267,16 @@ interface ThreadRuntime {
   /** The §6.1 launcher env, loaded once with the thread. */
   launch: ThreadLaunchConfig | null;
   /**
+   * Target of the most recent `thread.reverted`, or null.
+   *
+   * A capture that lands after a revert belongs to a turn the revert
+   * truncated, and appending it raises `head.turnCount` past the target —
+   * visibly undoing the rewind and leaving a checkpoint row with no turn. It
+   * cannot be derived from the fold: after the revert the head's count and the
+   * highest surviving checkpoint are equal again.
+   */
+  revertedTo: number | null;
+  /**
    * Set once `captureBaseline` answers `null` — a non-git project skips
    * checkpoints silently (§5.4), and no placeholder may be written for it.
    */
@@ -308,7 +318,15 @@ export interface Orchestrator {
   whenReady<T>(task: () => Promise<T>): Promise<T>;
 
   createThread(request: CreateHostThreadRequest): Promise<ThreadHead>;
-  updateThread(threadId: string, input: { title?: string }): Promise<{ seq: number }>;
+  /**
+   * The §6.1 rename. `seed: true` marks the client's auto-generated title from
+   * the first user message, which must stay replaceable by a provider retitle
+   * — only a user rename is manual (§5.1).
+   */
+  updateThread(
+    threadId: string,
+    input: { title?: string; seed?: boolean }
+  ): Promise<{ seq: number }>;
   deleteThread(threadId: string): Promise<void>;
 
   command(
@@ -516,6 +534,11 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       subscribers: new Set(),
       parseError: store.threadError?.(threadId) ?? null,
       launch,
+      revertedTo: tail.events.reduce<number | null>(
+        (target, event) =>
+          event.type === "thread.reverted" ? event.payload.turnCount : target,
+        null
+      ),
       titleManual: tail.events.some(
         (event) =>
           event.type === "thread.meta-updated" &&
@@ -665,11 +688,49 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     ]);
   };
 
+  /**
+   * §5.1: between a `/turn` command and the provider's first `turn.started` the
+   * turn exists as a **pending row**, and that row is *adopted* when the id
+   * arrives — never settled. A `ready` session state published in that window
+   * settles it (`settledTurnStateForSessionStatus("ready") === "completed"`),
+   * so one user message grows two turn rows and every ambient surface reads
+   * `completed` milliseconds after the user pressed send.
+   *
+   * `startSession` already maps its own `ready` to `starting` for exactly this
+   * reason; this applies the same rule to every writer, including the events
+   * ingestion translates from the adapter's own `session.state.changed`.
+   */
+  const coerceSessionForPendingTurn = (
+    runtime: ThreadRuntime,
+    session: ThreadSessionState
+  ): ThreadSessionState => {
+    if (session.status !== "ready" || session.activeTurnId !== null) {
+      return session;
+    }
+    const hasUnstartedTurn = (runtime.state.turns ?? []).some(
+      (turn) => turn.state === "pending" && turn.startedAt === null
+    );
+    return hasUnstartedTurn ? { ...session, status: "starting" } : session;
+  };
+
+  const sessionStateEquals = (left: ThreadSessionState, right: ThreadSessionState): boolean =>
+    left.status === right.status &&
+    left.activeTurnId === right.activeTurnId &&
+    (left.lastError ?? null) === (right.lastError ?? null) &&
+    (left.providerThreadId ?? null) === (right.providerThreadId ?? null) &&
+    left.resumeCursor === right.resumeCursor;
+
   const persistSession = async (
     runtime: ThreadRuntime,
     session: ThreadSessionState
   ): Promise<void> => {
-    await append(runtime, [buildEvent(runtime.id, "thread.session-set", { session })]);
+    const next = coerceSessionForPendingTurn(runtime, session);
+    // An unchanged republish is pure noise on every open stream, and it is the
+    // republish — not a real transition — that produced the phantom row above.
+    if (sessionStateEquals(currentSession(runtime), next)) {
+      return;
+    }
+    await append(runtime, [buildEvent(runtime.id, "thread.session-set", { session: next })]);
   };
 
   const currentSession = (runtime: ThreadRuntime): ThreadSessionState =>
@@ -1258,6 +1319,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       await append(runtime, [
         buildEvent(runtime.id, "thread.reverted", { turnCount: targetTurnCount })
       ]);
+      runtime.revertedTo = targetTurnCount;
       await store.pruneAttachments({ threadId: runtime.id }).catch(() => undefined);
     } catch (error) {
       // Any failure is appended as an activity with tone `error`, not raised as
@@ -2287,6 +2349,19 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           activeTurnId: currentSession(runtime).activeTurnId
         });
         if (!summary) return;
+        // A capture that lands after a revert belongs to a turn the revert
+        // truncated; appending it raises `head.turnCount` past the target and
+        // visibly undoes the rewind (the checkpoint list keeps a row with no
+        // matching turn).
+        const revertedTo = runtime.revertedTo;
+        if (revertedTo !== null && summary.turnCount > revertedTo) {
+          logger.info("agent-host: dropping a checkpoint for a reverted turn", {
+            threadId: runtime.id,
+            turnCount: summary.turnCount,
+            revertedTo
+          });
+          return;
+        }
         await append(runtime, [
           buildEvent(runtime.id, "thread.turn-diff-completed", {
             turnCount: summary.turnCount,
@@ -2367,7 +2442,17 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   ): Promise<void> => {
     if (events.length === 0) return;
     const runtime = runtimes.get(threadId) ?? (await loadRuntime(threadId));
-    await append(runtime, events);
+    // The pending-turn rule is the host's, not any one writer's: an adapter
+    // that reports `ready` while a turn start is in flight must not settle the
+    // row the command opened.
+    const guarded = events.map((event) => {
+      if (event.type !== "thread.session-set") return event;
+      const session = coerceSessionForPendingTurn(runtime, event.payload.session);
+      return session === event.payload.session
+        ? event
+        : { ...event, payload: { ...event.payload, session } };
+    });
+    await append(runtime, guarded);
   };
 
   // -------------------------------------------------------------------------
