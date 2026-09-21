@@ -15,7 +15,13 @@ import test from "node:test";
 import type { RuntimeEvent } from "@orquester/api/agent-chat";
 
 import type { AdapterContext } from "../../adapter.ts";
-import { OpenCodeThreadSession, parseOpenCodeModelSlug, toQuestionAnswers } from "./session.ts";
+import { resumeCursorFor } from "../../orchestration/resume.ts";
+import {
+  OpenCodeThreadSession,
+  parseOpenCodeModelSlug,
+  parseOpenCodeResume,
+  toQuestionAnswers
+} from "./session.ts";
 import type { OpenCodeServerHandle } from "./server.ts";
 import { OpenCodeClient } from "./http.ts";
 import { deferred } from "./util.ts";
@@ -449,6 +455,48 @@ test("resume against a 500 PROPAGATES — a blip must never reset a live thread"
     /500/
   );
   assert.equal(harness.fake.find("POST", "/session"), undefined, "no silent new session");
+  harness.dispose();
+});
+
+test("the host's §6.1 create-time cursor resumes, byte for byte", async () => {
+  // W1 builds the minimal §4.1 cursor for a thread created from the resume
+  // picker, where all the host has is a conversation id. If this adapter did
+  // not accept that partial form, §6.1 resume would silently degrade to a
+  // fresh, empty session the user believes is their old one.
+  const cursor = resumeCursorFor("opencode", "thread-1", "ses_from_picker");
+  assert.deepEqual(cursor, { schemaVersion: 1, sessionId: "ses_from_picker" });
+  assert.deepEqual(parseOpenCodeResume(cursor), { sessionId: "ses_from_picker" });
+
+  const harness = makeHarness();
+  harness.fake.sessions.set("ses_from_picker", {
+    id: "ses_from_picker",
+    directory: "/repo"
+  });
+  const session = await startSession(harness, { resumeCursor: cursor });
+  assert.equal(session.sessionId, "ses_from_picker");
+  assert.equal(harness.fake.find("POST", "/session"), undefined, "must not create a session");
+  assert.ok(harness.fake.find("PATCH", "/session/ses_from_picker") !== undefined);
+  // The adapter re-mints its own full cursor from the adopted session.
+  assert.deepEqual(session.resumeCursor, { schemaVersion: 1, sessionId: "ses_from_picker" });
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("a cursor carrying unknown extra fields still resumes", async () => {
+  // Forward-compat: a newer host (or a newer adapter release) may persist more
+  // than the two fields this version reads. Extras are ignored, never fatal.
+  const harness = makeHarness();
+  harness.fake.sessions.set("ses_old", { id: "ses_old", directory: "/repo" });
+  const session = await startSession(harness, {
+    resumeCursor: {
+      schemaVersion: 1,
+      sessionId: "ses_old",
+      somethingNewerWrote: { turnCount: 7 }
+    }
+  });
+  assert.equal(session.sessionId, "ses_old");
+  assert.equal(harness.fake.find("POST", "/session"), undefined);
+  await session.stop({ reason: "test", hostInitiated: true });
   harness.dispose();
 });
 
