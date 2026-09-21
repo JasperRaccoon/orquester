@@ -168,9 +168,14 @@ function firstLine(text: string): string {
 }
 
 /**
- * Collapsed to one line. The label is "summary" when the provider sent a
- * summary rather than raw reasoning — the distinction matters, because a
- * summary is all some providers will ever hand over.
+ * Collapsed to one line (§7.3).
+ *
+ * The badge reads "summary" only where the provider actually sent
+ * `reasoning_summary_text`; raw reasoning gets no badge, and an item from an
+ * adapter that does not report the distinction gets none either. A blanket
+ * "summary" label would be a claim about the provider's output we cannot make —
+ * and on the providers that hand over a summary *instead of* the reasoning, it
+ * is the one thing worth saying.
  */
 export const ReasoningRow = React.memo(function ReasoningRow({
   row
@@ -190,9 +195,11 @@ export const ReasoningRow = React.memo(function ReasoningRow({
         onClick={() => ctx.setReasoningExpanded(id, !expanded)}
         className="flex min-h-6 w-fit max-w-full min-w-0 cursor-pointer select-none items-center gap-1.5 rounded-md px-0.5 py-0.5 text-left text-sm leading-relaxed transition-colors hover:bg-neutral-800/40 focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500"
       >
-        <span className="text-[10px] font-medium uppercase tracking-wider text-neutral-500">
-          summary
-        </span>
+        {row.message.reasoningKind === "summary" ? (
+          <span className="shrink-0 text-[10px] font-medium uppercase tracking-wider text-neutral-500">
+            summary
+          </span>
+        ) : null}
         <ShimmerText live={live} className="min-w-0 flex-1 truncate">
           {summary || (live ? "Thinking" : "Thought")}
         </ShimmerText>
