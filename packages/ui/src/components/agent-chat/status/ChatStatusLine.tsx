@@ -37,7 +37,8 @@ export function ChatStatusLine({
   reportsContextWindow,
   activePlan,
   onCompact,
-  latestCheckpoint
+  latestCheckpoint,
+  modelLabel = null
 }: ChatStatusLineProps): React.ReactElement {
   const status = resolveStatusLine({ connection, turnStartedAt, activityLabel });
   const meter = React.useMemo(
@@ -106,8 +107,23 @@ export function ChatStatusLine({
             <span className="ac-tabular shrink-0 font-mono text-neutral-500">
               {formatContextTokens(meter.usedTokens)} tok
             </span>
-            <ContextMeter model={meter} onCompact={onCompact} />
+            <ContextMeter model={meter} modelLabel={modelLabel} onCompact={onCompact} />
           </>
+        ) : null}
+      </div>
+
+      {/*
+        The indeterminate turn hairline, D's `ac-working-bar`: a 40%-wide fill
+        sliding inside a 1px track, directly under the status line, which is
+        where the design reference puts it. It reads as "the turn is alive"
+        from the corner of the eye without another spinner, and it is the one
+        element here that says so while the label is truncated or the tab is
+        half-scrolled away. The track only exists while a turn runs, so a
+        settled thread has no extra hairline under its status row.
+      */}
+      <div className="mx-auto h-px w-full max-w-3xl overflow-hidden" aria-hidden>
+        {status.ticking ? (
+          <div className="ac-working-bar h-px rounded-full bg-info/70" />
         ) : null}
       </div>
     </div>

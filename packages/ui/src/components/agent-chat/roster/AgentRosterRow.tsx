@@ -136,6 +136,13 @@ export interface RosterMainRowProps {
   title: string;
   tone: ChatTone;
   pulse: boolean;
+  /**
+   * The act-now halo, D's one "at most one dot on screen should ever ping"
+   * affordance. The thread's own row is where it belongs in this surface: the
+   * roster's other rows are agents doing their job, and only the parent can be
+   * *waiting on the user*.
+   */
+  ping?: boolean;
   statusLabel: string;
   activityLabel: string | null;
   startedAt: string | null;
@@ -153,6 +160,7 @@ export function RosterMainRow({
   title,
   tone,
   pulse,
+  ping = false,
   statusLabel,
   activityLabel,
   startedAt,
@@ -163,7 +171,7 @@ export function RosterMainRow({
   return (
     <div className={cn(ROW_GRID, "cursor-default")} data-roster-main="true">
       <span className="col-start-1 row-start-1 flex items-center">
-        <StatusDot tone={tone} size="xs" pulse={pulse} />
+        <StatusDot tone={tone} size="xs" pulse={pulse} ping={ping} label={statusLabel} />
       </span>
       <span className="col-start-2 row-start-1 flex min-w-0 items-center gap-1.5">
         <span className="min-w-0 truncate text-sm font-medium text-neutral-200">{title}</span>

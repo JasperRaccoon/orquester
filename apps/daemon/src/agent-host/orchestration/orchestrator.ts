@@ -291,7 +291,12 @@ export interface Orchestrator {
   whenReady<T>(task: () => Promise<T>): Promise<T>;
 
   createThread(request: CreateHostThreadRequest): Promise<ThreadHead>;
-  updateThread(threadId: string, input: { title?: string }): Promise<{ seq: number }>;
+  /**
+   * `input.seed` marks a client auto-seeded title (§7.7): it is written like
+   * any other, but leaves `titleManual` false so a provider retitle may still
+   * replace it (§5.1). Only a title the USER typed is manual.
+   */
+  updateThread(threadId: string, input: { title?: string; seed?: boolean }): Promise<{ seq: number }>;
   deleteThread(threadId: string): Promise<void>;
 
   command(
@@ -1735,7 +1740,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
 
   const updateThread = async (
     threadId: string,
-    input: { title?: string }
+    input: { title?: string; seed?: boolean }
   ): Promise<{ seq: number }> =>
     whenReady(async () => {
       const runtime = await loadRuntime(threadId);
@@ -1747,17 +1752,24 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         if (input.title.length > 300) {
           throw invalidCommand("title is too long.");
         }
+        // A client-minted `rename:` id marks the user's OWN rename, which a
+        // provider retitle may never overwrite (§5.1). The client's auto-seed
+        // from the first message travels this same route but is not a rename
+        // (§7.7): it carries no such id and leaves `titleManual` alone, so the
+        // provider's generated name can still land. Without this split every
+        // real thread — they all get seeded — froze at the seed forever.
+        const seeded = input.seed === true;
         const result = await commit(runtime, [
           buildEvent(
             threadId,
             "thread.meta-updated",
             { title: input.title.trim() },
-            // A client-minted id marks this as the user's own rename, which a
-            // provider retitle may never overwrite (§5.1).
-            { commandId: `rename:${ids.uuid()}` }
+            seeded ? {} : { commandId: `rename:${ids.uuid()}` }
           )
         ]);
-        runtime.titleManual = true;
+        if (!seeded) {
+          runtime.titleManual = true;
+        }
         await saveHeadNow(runtime);
         return { seq: result.seq };
       });

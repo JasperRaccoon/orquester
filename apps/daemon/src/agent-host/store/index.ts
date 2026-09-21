@@ -78,7 +78,7 @@ import {
 } from "./attachments.ts";
 import { atomicWriteFile, readFileOrNull, readLastCompleteLine, splitCompleteLines } from "./files.ts";
 import { applyEventToHead } from "./head.ts";
-import { RawFrameLog } from "./raw-log.ts";
+import { RawFrameLog, pruneRawLogDirectory } from "./raw-log.ts";
 
 /** `meta.json` is rewritten after this many appended events (§5.1). */
 export const HEAD_CHECKPOINT_EVENTS = 50;
@@ -99,6 +99,35 @@ const threadRawPath = (rootDir: string, threadId: string): string =>
 const threadAttachmentsDir = (rootDir: string, threadId: string): string =>
   path.join(threadDir(rootDir, threadId), "attachments");
 const receiptsPath = (rootDir: string): string => path.join(rootDir, "receipts.json");
+
+/** The stored extensions that make a file an image for the §4.1 size bound. */
+const IMAGE_FILE_EXTENSIONS: ReadonlySet<string> = new Set([
+  ".gif",
+  ".jpg",
+  ".jpeg",
+  ".png",
+  ".webp"
+]);
+
+/**
+ * A thread id may name a directory the store creates, reads and recursively
+ * deletes, so it is shape-checked here rather than trusted from the caller.
+ * The daemon mints UUIDs and gates every per-session route, but the host is a
+ * separate process with its own trust boundary: one wrong caller would turn a
+ * `DELETE` into an arbitrary recursive delete. `store/attachments.ts` does the
+ * same for attachment ids.
+ */
+const SAFE_THREAD_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+export function isSafeThreadId(threadId: string): boolean {
+  return SAFE_THREAD_ID.test(threadId) && !threadId.includes("..");
+}
+
+function assertSafeThreadId(threadId: string): void {
+  if (!isSafeThreadId(threadId)) {
+    throw new Error(`agent-chat: unusable thread id ${JSON.stringify(threadId)}`);
+  }
+}
 
 /**
  * An unreferenced attachment younger than this is never swept: it is a file
@@ -230,15 +259,16 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
       }
     }
     receiptIndex.set(receipt.commandId, receipt);
-    await atomicWriteFile(
-      receiptsPath(rootDir),
-      `${JSON.stringify({ version: 1, receipts: ring }, null, 2)}\n`
-    );
+    // Compact, not pretty-printed: this file is rewritten once per command and
+    // the indentation roughly doubled the bytes fsynced each time. It is a
+    // de-duplication cache, never something a human reads in place.
+    await atomicWriteFile(receiptsPath(rootDir), `${JSON.stringify({ version: 1, receipts: ring })}\n`);
   }
 
   // --- per-thread runtime --------------------------------------------------
 
   function runtime(threadId: string): ThreadRuntime {
+    assertSafeThreadId(threadId);
     let entry = threads.get(threadId);
     if (entry === undefined) {
       entry = {
@@ -255,18 +285,39 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
   }
 
   const loaded = new Set<string>();
+  /**
+   * In-flight first loads, keyed by thread. Inserted **synchronously** before
+   * the first await, which is the whole point: `ensureLoaded` used to mark a
+   * thread loaded and only then read the log, so a caller arriving in that
+   * window got `seq: 0` and the next append stamped 1 over sequences already
+   * on disk — and `readLog` then treats the duplicate as corruption and
+   * truncates that thread permanently. Every caller now awaits the same
+   * promise, so the seed happens exactly once and nobody sees a half-seeded
+   * runtime.
+   */
+  const loading = new Map<string, Promise<ThreadRuntime>>();
 
   /**
    * Seed a thread's sequence and head from disk, once. A failure here marks
    * THIS thread `error` and returns — it never propagates.
    */
-  async function ensureLoaded(threadId: string): Promise<ThreadRuntime> {
+  function ensureLoaded(threadId: string): Promise<ThreadRuntime> {
     const entry = runtime(threadId);
     if (loaded.has(threadId)) {
-      return entry;
+      return Promise.resolve(entry);
     }
-    loaded.add(threadId);
+    const inFlight = loading.get(threadId);
+    if (inFlight !== undefined) {
+      return inFlight;
+    }
+    const promise = loadRuntime(threadId, entry).finally(() => {
+      loading.delete(threadId);
+    });
+    loading.set(threadId, promise);
+    return promise;
+  }
 
+  async function loadRuntime(threadId: string, entry: ThreadRuntime): Promise<ThreadRuntime> {
     try {
       const headRaw = await readFileOrNull(threadMetaPath(rootDir, threadId));
       if (headRaw !== null) {
@@ -311,6 +362,8 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
       // ordering; the head keeps its fields.
       entry.head = { ...entry.head, seq: entry.seq };
     }
+    // Marked loaded only now, with `seq` seeded: anything earlier is the race.
+    loaded.add(threadId);
     return entry;
   }
 
@@ -577,7 +630,7 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
       try {
         const entries = await fsp.readdir(threadsDir(rootDir), { withFileTypes: true });
         return entries
-          .filter((entry) => entry.isDirectory())
+          .filter((entry) => entry.isDirectory() && isSafeThreadId(entry.name))
           .map((entry) => entry.name)
           .sort();
       } catch {
@@ -609,6 +662,7 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
         await fsp.rm(threadDir(rootDir, threadId), { recursive: true, force: true });
         threads.delete(threadId);
         loaded.delete(threadId);
+        loading.delete(threadId);
       });
     },
 
@@ -622,6 +676,7 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
     },
 
     async putAttachment(input: AttachmentPutInput): Promise<AttachmentRef> {
+      assertSafeThreadId(input.threadId);
       const stat = await fsp.stat(input.sourcePath);
       if (!stat.isFile()) {
         throw new Error("agent-chat: an attachment source must be a regular file");
@@ -629,9 +684,17 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
       // Bounds are validated against the STAT'd file, never the declared size.
       const sizeBytes = stat.size;
       const mimeType = input.mimeType?.trim().toLowerCase();
+      const extension = attachmentFileExtension(input.name);
+      // The image cap keys on BOTH the declared mime and the extension the
+      // host actually stores: keying on the mime alone let
+      // `?name=x.png&type=application/octet-stream` carry 40 MiB in under the
+      // 50 MiB file limit and then be re-declared `image/png` on the turn
+      // (S1 #7). The wider of the two claims decides, so neither string alone
+      // buys the larger bound.
       const isImage =
-        mimeType !== undefined &&
-        (SUPPORTED_ATTACHMENT_IMAGE_MIME_TYPES as readonly string[]).includes(mimeType);
+        (mimeType !== undefined &&
+          (SUPPORTED_ATTACHMENT_IMAGE_MIME_TYPES as readonly string[]).includes(mimeType)) ||
+        IMAGE_FILE_EXTENSIONS.has(extension);
       const limit = isImage ? MAX_TURN_IMAGE_BYTES : MAX_TURN_FILE_BYTES;
       if (sizeBytes > limit) {
         throw new Error(
@@ -639,7 +702,6 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
         );
       }
 
-      const extension = attachmentFileExtension(input.name);
       const attachmentId = createAttachmentId(
         input.threadId,
         ids.uuid(),
@@ -656,8 +718,11 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
       await fsp.copyFile(input.sourcePath, destination);
       await fsp.chmod(destination, 0o600);
 
-      if (isImage) {
-        return { type: "image", id: attachmentId, name: input.name, mimeType: mimeType!, sizeBytes };
+      if (
+        mimeType !== undefined &&
+        (SUPPORTED_ATTACHMENT_IMAGE_MIME_TYPES as readonly string[]).includes(mimeType)
+      ) {
+        return { type: "image", id: attachmentId, name: input.name, mimeType, sizeBytes };
       }
       return {
         type: "file",
@@ -669,6 +734,7 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
     },
 
     async resolveAttachment(threadId: string, attachmentId: string): Promise<string> {
+      assertSafeThreadId(threadId);
       const dir = dirForAttachment(threadId, attachmentId);
       if (dir === null) {
         throw new Error("agent-chat: attachment does not belong to this thread");
@@ -685,6 +751,27 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
       // `pending`-segment uploads and `.part` files: nothing references them
       // by construction, so the age bounds are the whole rule.
       await sweepDirectory(pendingDir, nowMs, () => false);
+
+      // §3.1's host-wide raw-log ceiling rides the same schedule: it is the
+      // only bound above the per-thread rotation, and it cannot live inside a
+      // single thread's writer (S1 #5).
+      if (input?.threadId === undefined) {
+        const liveThreadIds = new Set<string>();
+        for (const [id, entry] of threads) {
+          if (entry.raw !== null) {
+            liveThreadIds.add(id);
+          }
+        }
+        try {
+          pruneRawLogDirectory({
+            threadsRoot: threadsDir(rootDir),
+            liveThreadIds,
+            now: () => nowMs
+          });
+        } catch {
+          // Diagnostics never block a turn, and never fail a sweep.
+        }
+      }
 
       const targets =
         input?.threadId !== undefined ? [input.threadId] : await store.listThreads();
@@ -735,6 +822,7 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
     },
 
     async readItem(threadId: string, itemId: string): Promise<ThreadItem | null> {
+      assertSafeThreadId(threadId);
       const tail = await readLog(threadId);
       for (let index = tail.events.length - 1; index >= 0; index -= 1) {
         const event = tail.events[index]!;

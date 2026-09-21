@@ -191,14 +191,22 @@ export function parseQuestions(value: unknown): UserInputQuestion[] {
  *
  * Request ids are unique, so a terminal row stays final even when provider
  * sequences and host-generated activities arrive in a different order.
+ *
+ * `closed` is the fold's **tombstone set** (§5.1's "closes the request id
+ * permanently"). Without it the closed sets are rebuilt from the retained
+ * activity list alone, so once a `*.resolved` row aged out of the 500-row
+ * window a replayed `*.requested` reopened a dead card and the provider
+ * rejected the answer. The seed is what makes "permanently" true.
  */
 export function derivePendingRequests(
-  activities: readonly ThreadActivityItem[]
+  activities: readonly ThreadActivityItem[],
+  options?: { readonly closed?: ReadonlySet<string> }
 ): PendingRequests {
   const approvals = new Map<string, PendingApproval>();
   const userInputs = new Map<string, PendingUserInput>();
-  const closedApprovals = new Set<string>();
-  const closedUserInputs = new Set<string>();
+  // Request ids are unique across both kinds, so one seed feeds both sets.
+  const closedApprovals = new Set<string>(options?.closed);
+  const closedUserInputs = new Set<string>(options?.closed);
 
   for (const activity of activities) {
     if (!REQUEST_ACTIVITY_KINDS.has(activity.activityKind)) {

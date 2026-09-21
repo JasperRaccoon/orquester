@@ -15,7 +15,8 @@ import {
   RAW_LOG_MAX_FILES,
   RAW_LOG_MAX_FILE_BYTES,
   RAW_LOG_MAX_STRING_CHARS,
-  RawFrameLog
+  RawFrameLog,
+  pruneRawLogDirectory
 } from "./raw-log.ts";
 
 async function tempFile(): Promise<string> {
@@ -164,7 +165,11 @@ test("the file rotates past 10 MiB and keeps at most 10 generations", async () =
   assert.ok(fs.statSync(filePath).size <= RAW_LOG_MAX_FILE_BYTES);
 });
 
-test("a rotated generation older than the age bound is removed", async () => {
+test("a plain flush leaves the directory alone; the age prune rides rotation", async () => {
+  // Q1 #51: `pruneSiblings` ran on EVERY flush, putting a synchronous
+  // readdirSync + statSync on the host's event loop once a second per live
+  // thread. The 14-day prune now happens when a file actually rotates, and the
+  // host-wide sweep (`pruneRawLogDirectory`) catches the rest.
   const filePath = await tempFile();
   const stale = `${filePath}.3`;
   fs.writeFileSync(filePath, "");
@@ -176,6 +181,10 @@ test("a rotated generation older than the age bound is removed", async () => {
   log.write({ type: "turn/completed" });
   log.flush();
   log.close();
+  assert.equal(fs.existsSync(stale), true, "a plain flush does not scan or prune");
+
+  // The host-wide sweep is what collects it.
+  pruneRawLogDirectory({ threadsRoot: path.dirname(path.dirname(filePath)) });
   assert.equal(fs.existsSync(stale), false);
 });
 
@@ -217,3 +226,81 @@ test("the record threshold flushes on its own too", async () => {
   assert.equal(readLines(filePath).length, RAW_LOG_FLUSH_RECORDS);
   log.close();
 });
+
+// --- the host-wide ceiling (S1 #5) ----------------------------------------
+
+async function seedThreadLog(
+  threadsRoot: string,
+  threadId: string,
+  fileName: string,
+  bytes: number,
+  ageMs = 0
+): Promise<string> {
+  const dir = path.join(threadsRoot, threadId);
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, fileName);
+  fs.writeFileSync(file, Buffer.alloc(bytes, 0x61));
+  if (ageMs > 0) {
+    const when = (Date.now() - ageMs) / 1000;
+    fs.utimesSync(file, when, when);
+  }
+  return file;
+}
+
+test("the ceiling is enforced ACROSS threads, which rotation alone cannot do", async () => {
+  // S1 #5: `pruneSiblings` only ever saw one thread's own directory, where
+  // rotation already caps the set at 9 x 10 MiB — so the 512 MiB test was
+  // unconditionally true and the prune was unreachable. 100 threads were
+  // 10 GiB in the one writable appdir.
+  const threadsRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "orq-raw-ceiling-"));
+  for (let i = 0; i < 6; i += 1) {
+    // t0 is the OLDEST, so oldest-first eviction takes it before t5.
+    await seedThreadLog(threadsRoot, `t${i}`, "raw.ndjson.1", 4_000, (6 - i) * 60_000);
+  }
+  const before = fs.readdirSync(threadsRoot).length;
+  assert.equal(before, 6);
+
+  const result = pruneRawLogDirectory({ threadsRoot, ceilingBytes: 10_000 });
+  assert.ok(result.deleted >= 3, `expected rungs to be deleted, got ${result.deleted}`);
+  assert.ok(result.totalBytes <= 10_000, `still over the ceiling: ${result.totalBytes}`);
+
+  // Oldest first: t0's rung goes before t5's.
+  assert.equal(fs.existsSync(path.join(threadsRoot, "t0", "raw.ndjson.1")), false);
+  assert.equal(fs.existsSync(path.join(threadsRoot, "t5", "raw.ndjson.1")), true);
+});
+
+test("a live file whose thread has an open writer is never unlinked", async () => {
+  const threadsRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "orq-raw-ceiling-"));
+  const live = await seedThreadLog(threadsRoot, "live", "raw.ndjson", 8_000, 600_000);
+  const idle = await seedThreadLog(threadsRoot, "idle", "raw.ndjson", 8_000, 300_000);
+
+  pruneRawLogDirectory({
+    threadsRoot,
+    ceilingBytes: 1_000,
+    liveThreadIds: new Set(["live"])
+  });
+  assert.equal(fs.existsSync(live), true, "a file the host is appending to must survive");
+  assert.equal(fs.existsSync(idle), false, "an idle thread's live file is fair game");
+});
+
+test("a rung past the age bound is removed even when the ceiling is not reached", async () => {
+  const threadsRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "orq-raw-ceiling-"));
+  const stale = await seedThreadLog(
+    threadsRoot,
+    "t1",
+    "raw.ndjson.2",
+    100,
+    30 * 24 * 60 * 60 * 1000
+  );
+  const fresh = await seedThreadLog(threadsRoot, "t1", "raw.ndjson.1", 100);
+  const result = pruneRawLogDirectory({ threadsRoot });
+  assert.equal(fs.existsSync(stale), false);
+  assert.equal(fs.existsSync(fresh), true);
+  assert.equal(result.deleted, 1);
+});
+
+test("a missing threads root is not an error", () => {
+  const result = pruneRawLogDirectory({ threadsRoot: path.join(os.tmpdir(), "orq-nope-xyz") });
+  assert.deepEqual(result, { deleted: 0, totalBytes: 0 });
+});
+

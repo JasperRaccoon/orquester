@@ -35,8 +35,51 @@
  * SLIMMED payload, so stripping there would empty the roster on the wire.
  */
 
-/** Any string in an activity payload is capped at this on the wire. */
+/**
+ * Any string in an activity payload is capped at this many UTF-8 **bytes** on
+ * the wire. Measured with a byte count, not `String.length`: the latter counts
+ * UTF-16 code units, so a 16 384-character CJK or emoji string was ~64 KB on
+ * the wire — four times the stated cap (R5 #16). The fold must stay Node-free,
+ * so the measurement is `TextEncoder`, not `Buffer.byteLength`.
+ */
 export const SLIM_MAX_STRING_BYTES = 16 * 1024;
+
+const utf8 = new TextEncoder();
+
+/**
+ * Truncate to at most {@link SLIM_MAX_STRING_BYTES} UTF-8 bytes, never
+ * splitting a surrogate pair. Returns the input by identity when it fits, so
+ * the common case costs no allocation and no encode of the whole string.
+ */
+function capUtf8(value: string): string | null {
+  // One UTF-16 unit is at most 3 UTF-8 bytes (a surrogate PAIR is 4 bytes for
+  // 2 units), so anything this short cannot exceed the cap and needs no encode.
+  if (value.length * 3 <= SLIM_MAX_STRING_BYTES) {
+    return null;
+  }
+  const encoded = utf8.encode(value);
+  if (encoded.length <= SLIM_MAX_STRING_BYTES) {
+    return null;
+  }
+  // Binary search on code-unit length for the longest prefix that fits.
+  let low = 0;
+  let high = value.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (utf8.encode(value.slice(0, mid)).length <= SLIM_MAX_STRING_BYTES) {
+      low = mid;
+    } else {
+      high = mid - 1;
+    }
+  }
+  let end = low;
+  // Never end on a lone high surrogate.
+  const lastCode = value.charCodeAt(end - 1);
+  if (end > 0 && lastCode >= 0xd800 && lastCode <= 0xdbff) {
+    end -= 1;
+  }
+  return `${value.slice(0, end)}…`;
+}
 /** Tool text output is elided at this many characters. */
 export const SLIM_SUMMARY_ELIDE_CHARS = 84;
 export const SLIM_MAX_CHANGED_FILES = 12;
@@ -373,12 +416,13 @@ function projectAcpContent(value: unknown): Record<string, unknown> | undefined 
  */
 function capStrings(value: unknown, flag: { truncated: boolean }, depth: number): unknown {
   if (typeof value === "string") {
-    if (value.length <= SLIM_MAX_STRING_BYTES) {
+    const capped = capUtf8(value);
+    if (capped === null) {
       return value;
     }
     flag.truncated = true;
     // Own the bytes: a slice can retain the whole source string in V8.
-    return `${Array.from(value.slice(0, SLIM_MAX_STRING_BYTES)).join("")}…`;
+    return Array.from(capped).join("");
   }
   if (value === null || typeof value !== "object") {
     return value;

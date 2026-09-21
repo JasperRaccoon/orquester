@@ -19,7 +19,7 @@ import {
 
 import type { LucideIcon } from "lucide-react";
 
-import type { WorkEntryIconName } from "../work-presentation";
+import type { RowGlyphName } from "../row-chrome";
 
 /**
  * Row glyphs, resolved by name.
@@ -29,7 +29,7 @@ import type { WorkEntryIconName } from "../work-presentation";
  * indent. `strokeWidth={1.8}` matters too — lucide's default 2 reads heavy at
  * 16px against muted text.
  */
-const GLYPHS: Record<WorkEntryIconName, LucideIcon> = {
+const GLYPHS: Record<RowGlyphName, LucideIcon> = {
   brain: Brain,
   check: Check,
   "circle-alert": CircleAlert,
@@ -52,7 +52,7 @@ export function WorkEntryIcon({
   size = 16,
   className
 }: {
-  name: WorkEntryIconName;
+  name: RowGlyphName;
   size?: number;
   className?: string;
 }): React.ReactElement {

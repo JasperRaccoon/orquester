@@ -2,6 +2,7 @@ import React from "react";
 
 import { cn } from "../../../lib/cn";
 import type { AgentChatTimelineRow } from "../../../lib/agent-chat/contracts";
+import { isCompactCommandMessage } from "./row-chrome";
 import { rowBottomPadding } from "./row-format";
 import {
   ActivityGroupRow,
@@ -17,6 +18,7 @@ import {
   UserMessageRow
 } from "./rows/MessageRows";
 import {
+  CompactRequestRow,
   CompactionRow,
   ProposedPlanRow,
   ThinkingRow,
@@ -40,6 +42,10 @@ function RowBody({ row }: { row: AgentChatTimelineRow }): React.ReactElement | n
     case "context-compaction":
       return <CompactionRow row={row} />;
     case "message":
+      // §4.6.5(b): the submission is persisted verbatim as `/compact` and
+      // **re-recognised at render time** so it reads as a compaction marker
+      // rather than a literal slash-command bubble.
+      if (isCompactCommandMessage(row.message)) return <CompactRequestRow row={row} />;
       if (row.message.role === "user") return <UserMessageRow row={row} />;
       if (row.message.role === "reasoning") return <ReasoningRow row={row} />;
       return <AssistantMessageRow row={row} />;

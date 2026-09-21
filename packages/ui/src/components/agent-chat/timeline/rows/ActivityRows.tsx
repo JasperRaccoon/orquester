@@ -5,24 +5,35 @@ import type { RuntimeSubagent } from "@orquester/api";
 
 import { cn } from "../../../../lib/cn";
 import type { AgentChatTimelineRow, WorkLogEntry } from "../../../../lib/agent-chat/contracts";
-import { DisclosureChevron, ShimmerText, TONE_BAND, TONE_BAND_TEXT } from "../../primitives";
-import { useTimelineRowContext, type TimelineRowContextValue } from "../context";
 import {
-  joinLifecycleDetails,
+  DisclosureChevron,
+  ShimmerText,
+  TONE_BAND,
+  TONE_BAND_TEXT,
+  useVisibleAnimation
+} from "../../primitives";
+import { useTimelineRowContext, type TimelineRowContextValue } from "../context";
+// The ONE presentation resolver (§7.2). Everything that decides something
+// about an entry comes from here; `row-chrome` below holds only what turns a
+// decision into a class name or a glyph.
+import {
   liveWorkEntryLabel,
   omitSupersededLifecycleMarkers,
-  showDestructiveRowStyle,
   summarizeToolGroup,
-  summaryKindIconName,
   workEntryDisplayIndicatesToolFailure,
   workEntryDisplayLabel,
   workEntryIconName,
+  workEntryIsVisibleInGroup,
+  workEntryIsWarning
+} from "../../../../lib/agent-chat/presentation.logic";
+import {
+  joinLifecycleDetails,
+  showDestructiveRowStyle,
+  summaryKindIconName,
   workEntryIsActiveTurnActivity,
   workEntryIsRerouteNotice,
-  workEntryIsVisibleInGroup,
-  workEntryIsWarning,
-  type WorkEntryIconName
-} from "../work-presentation";
+  type RowGlyphName
+} from "../row-chrome";
 import { deriveAgentSpawnSummary } from "../../roster/spawn-summary";
 import { TimelineRowTimestamp } from "../timestamp";
 import { InlineDiff, looksLikeUnifiedDiff } from "./InlineDiff";
@@ -48,13 +59,25 @@ export function LiveActivityLine({
   trailing
 }: {
   label: React.ReactNode;
-  iconName: WorkEntryIconName;
+  iconName: RowGlyphName;
   live?: boolean;
   failed?: boolean;
   trailing?: React.ReactNode;
 }): React.ReactElement {
+  const animate = useVisibleAnimation();
+  // D §4.2's travelling focus band — T3's `live-tool-shine` rail. It rides
+  // *behind* the row while the row is genuinely running, never on a failure
+  // (a failed row is settled, and a band under it reads as still-working).
+  const sweeping = live && !failed;
   return (
     <span className="relative flex min-h-6 w-fit max-w-full min-w-0 items-center gap-1.5 overflow-hidden rounded-md px-0.5 py-0.5 text-sm leading-relaxed">
+      {sweeping ? (
+        <span
+          ref={animate}
+          aria-hidden
+          className="ac-sweep pointer-events-none absolute inset-y-0 bg-neutral-100/[0.06]"
+        />
+      ) : null}
       {/* Muted in both states: a failed tool keeps its identity glyph and gets
           the trailing mark below — the destructive treatment is reserved for a
           severe failure, which the standalone tool row renders (§7.3). */}
@@ -217,7 +240,7 @@ export const ToolEntryRow = React.memo(function ToolEntryRow({
   // the thread, not an action the agent took.
   if (reroute) return <RerouteNoticeRow entry={entry} />;
 
-  const iconName: WorkEntryIconName = warning || destructive ? "circle-alert" : workEntryIconName(entry);
+  const iconName: RowGlyphName = warning || destructive ? "circle-alert" : workEntryIconName(entry);
   const label = displayLabel ?? workEntryDisplayLabel(entry, ctx.workspaceRoot);
   const detail = entry.detail?.trim() ?? "";
   const command = entry.command?.trim() ?? "";
@@ -381,7 +404,7 @@ export const WorkLiveRow = React.memo(function WorkLiveRow({
 }): React.ReactElement {
   const ctx = useTimelineRowContext();
   if (row.entry.agentSpawn) return <AgentSpawnRow entry={row.entry} active={row.active} />;
-  const label = liveWorkEntryLabel(row.entry, ctx.workspaceRoot, row.active);
+  const label = liveWorkEntryLabel(row.entry, row.active, ctx.workspaceRoot);
   const failed = workEntryDisplayIndicatesToolFailure(row.entry);
   return (
     <button
@@ -476,7 +499,7 @@ export const ActivityGroupRow = React.memo(function ActivityGroupRow({
 
   const label = row.active
     ? liveWork
-      ? liveWorkEntryLabel(liveWork, ctx.workspaceRoot, true)
+      ? liveWorkEntryLabel(liveWork, true, ctx.workspaceRoot)
       : "Thinking"
     : tools.length > 0
       ? summarizeToolGroup(tools)

@@ -317,11 +317,16 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
         return;
       }
       if (method === "PUT") {
-        const body = (await readJsonBody(request)) as { title?: unknown };
+        const body = (await readJsonBody(request)) as { title?: unknown; seed?: unknown };
         const title = typeof body?.title === "string" ? body.title : undefined;
+        // `seed` = the client's auto-generated first-message title (§7.7), not
+        // a rename the user typed. It must stay replaceable by a provider
+        // retitle, so it is carried through rather than collapsed into one
+        // "the title changed" call.
+        const seed = body?.seed === true;
         const receipt = await orchestrator.updateThread(
           threadId,
-          title !== undefined ? { title } : {}
+          title !== undefined ? { title, seed } : {}
         );
         sendJson(response, 200, receipt);
         return;
