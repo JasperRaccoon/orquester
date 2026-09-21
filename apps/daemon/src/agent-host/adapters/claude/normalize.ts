@@ -297,12 +297,18 @@ export class ClaudeNormalizer {
     };
   }
 
+  /**
+   * Deduped on the **state**, not on the reason. `system/status` alone is ~3
+   * frames per turn and `api_retry` one per attempt (fixtures README
+   * observation 6); keying the dedupe on the reason too would put every one of
+   * them on the bus as a "change" that changes nothing.
+   */
   sessionStateChanged(
     state: RuntimeSessionState,
     reason?: string,
     detail?: unknown
   ): RuntimeEvent[] {
-    if (this.lastSessionState === state && this.lastSessionStateReason === reason) {
+    if (this.lastSessionState === state) {
       return [];
     }
     this.lastSessionState = state;
@@ -1719,7 +1725,10 @@ export class ClaudeNormalizer {
     if (!this.initSeen) {
       this.initSeen = true;
       this.lastInitModel = model;
-      events.push(...this.sessionStateChanged("ready", "init"));
+      // Deliberately emits NO session state: `init` arrives once per turn, so
+      // the first one lands INSIDE the first turn and a `ready` here would
+      // flip a running session back and forth (observed live on CLI 2.1.278).
+      // Session state is driven by the session and turn lifecycle only.
       return events;
     }
     if (

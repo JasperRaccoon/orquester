@@ -422,8 +422,9 @@ describe("claude normaliser — the unknown-frame contract (§10)", () => {
     } as unknown as SDKMessage;
     const first = normalizer.handleMessage(init);
     const second = normalizer.handleMessage(init);
-    assert.equal(second.filter((event) => event.type === "session.state.changed").length, 0);
-    assert.ok(first.some((event) => event.type === "thread.started"));
+    // `init` lands once per turn, so it drives no session state at all: a
+    // `ready` here would flip a running session back and forth.
+    assert.deepEqual(eventTypes(first), ["thread.started"]);
     assert.equal(second.length, 0);
   });
 

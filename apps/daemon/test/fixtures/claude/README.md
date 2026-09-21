@@ -335,6 +335,16 @@ Two consequences:
 - **Hooks run before `canUseTool`.** A slow `PreToolUse` hook delays the approval card, not the
   tool. The "waiting for you" state of §7.6 must not be derived from "a tool_use block arrived".
 
+> **Correction, found while implementing the adapter (W6).** The first bullet is wrong, and the
+> cause is the capture's own deviation: these fixtures were taken with
+> `settingSources: ["project","local"]`, dropping `"user"`. The adapter sets
+> `["user","project","local"]` as §4.5 requires, and driving the real CLI that way
+> (`smoke.ts`, claude **2.1.278**) produced `system/hook_started` and `system/hook_response`
+> for the host's own user-level `SessionStart` hooks — four of each, with `hook_id`,
+> `hook_name` (`SessionStart:startup`), `hook_event`, `outcome`, `exit_code` and `stdout`.
+> So the `hook.*` group **does** have a producer, the Claude adapter emits it, and a re-capture
+> with the user source enabled should record it.
+
 Related trap discovered while setting this up: **project-level `.claude/settings.json` is silently
 ignored in an untrusted directory.** Until the sandbox's `hasTrustDialogAccepted` was set, the
 hooks did not run and no message said so. Orquester creates project directories, so every new chat
