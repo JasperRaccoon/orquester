@@ -150,6 +150,78 @@ export function usageTokensCacheFile(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "usage-tokens.json");
 }
 
+// --- agent chat: the host-owned thread store (spec §5.1) -------------------
+//
+//   <appdir>/daemon/agent/
+//     threads/<sessionId>/
+//       meta.json          ThreadHead, rewritten atomically every 50 events
+//       events.ndjson      append-only domain events, per-thread monotonic seq
+//       raw.ndjson         provider frames, rotated (§3.1)
+//       attachments/<id>.<ext>
+//     receipts.json        commandId -> {seq, status}, a ring of 500
+//   <appdir>/daemon/agent-host.sock    the host's HTTP-over-unix-socket API
+//   <appdir>/daemon/agent-host.token   0600 shared secret, daemon <-> host
+//
+// `raw.ndjson` is as sensitive as the repository it watched (§10) and lives
+// under the same permissions as the rest of `daemon/`.
+
+/** Root of the agent host's own state. */
+export function agentChatDir(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "agent");
+}
+
+/** Parent of every per-thread directory. */
+export function agentChatThreadsDir(baseDir: string): string {
+  return joinPath(agentChatDir(baseDir), "threads");
+}
+
+/** One thread's directory. `threadId` equals the session id. */
+export function agentChatThreadDir(baseDir: string, threadId: string): string {
+  return joinPath(agentChatThreadsDir(baseDir), threadId);
+}
+
+/** The thread head. Rewritten atomically (tmp + rename), never appended to. */
+export function agentChatThreadMetaPath(baseDir: string, threadId: string): string {
+  return joinPath(agentChatThreadDir(baseDir, threadId), "meta.json");
+}
+
+/** The durable domain-event log. Not rotated — it is the record (§3.1). */
+export function agentChatThreadEventsPath(baseDir: string, threadId: string): string {
+  return joinPath(agentChatThreadDir(baseDir, threadId), "events.ndjson");
+}
+
+/** Untranslated provider frames. Rotated: 10 MiB per file, 10 files, 14 days. */
+export function agentChatThreadRawPath(baseDir: string, threadId: string): string {
+  return joinPath(agentChatThreadDir(baseDir, threadId), "raw.ndjson");
+}
+
+/** Attachment bytes. Never in an event and never inline on the wire (§5.1). */
+export function agentChatThreadAttachmentsDir(baseDir: string, threadId: string): string {
+  return joinPath(agentChatThreadDir(baseDir, threadId), "attachments");
+}
+
+/** The bounded command-receipt ring shared by every thread. */
+export function agentChatReceiptsPath(baseDir: string): string {
+  return joinPath(agentChatDir(baseDir), "receipts.json");
+}
+
+/** The agent host's control socket (named pipe on Windows). */
+export function agentHostSocketPath(baseDir: string, platform: RuntimePlatform): string {
+  if (platform === "win32") {
+    return "\\\\.\\pipe\\orquester-agent-host";
+  }
+  return joinPath(daemonConfigDir(baseDir), "agent-host.sock");
+}
+
+/**
+ * The 0600 token file the daemon and the host authenticate with. Regenerated
+ * only when no host is alive (§3.1) — a live host's token must keep working
+ * across a daemon restart, which is the whole point of adoption.
+ */
+export function agentHostTokenPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "agent-host.token");
+}
+
 /** `yyyy-mm-dd` in local time. */
 export function localDateStamp(date = new Date()): string {
   const year = date.getFullYear();
@@ -585,13 +657,35 @@ export function parseWorkspacesConfig(value: unknown): WorkspacesConfig {
 // "is the command still running?"; this file remembers tab metadata (title /
 // order / project) that tmux doesn't track.
 
+/**
+ * Which home dir an agent-chat thread's provider child runs under. Mirrors
+ * `AgentConversationHome` in the resume picker. Agent chat spec §5.2.
+ */
+export const agentChatHomeSchema = z.enum(["system", "account", "cliproxy"]);
+export type AgentChatHome = z.infer<typeof agentChatHomeSchema>;
+
+/**
+ * The agent-chat block on a tab record (spec §5.2). `sessions.json` stays tab
+ * metadata only; the agent host is the source of truth for thread state, so
+ * this holds just enough to re-bind the tab to its thread after a restart.
+ */
+export const sessionChatRecordSchema = z.object({
+  /** Equals the session id; kept explicit for clarity. */
+  threadId: z.string().min(1),
+  accountId: z.string(),
+  home: agentChatHomeSchema,
+  /** Last sequence this tab is known to have been rendered at. */
+  lastSeq: z.number().int().nonnegative().default(0)
+});
+export type SessionChatRecord = z.infer<typeof sessionChatRecordSchema>;
+
 export const sessionRecordSchema = z.object({
   id: z.string().min(1),
   title: z.string(),
   order: z.number().int(),
   projectPath: z.string(),
   refId: z.string(),
-  kind: z.enum(["shell", "agent", "ide", "file-explorer", "browser"]),
+  kind: z.enum(["shell", "agent", "agent-chat", "ide", "file-explorer", "browser"]),
   cwd: z.string(),
   createdAt: z.string(),
   // Managed agent account the session was launched under (the EFFECTIVE resolved
@@ -610,7 +704,11 @@ export const sessionRecordSchema = z.object({
   // Effective per-launch model for claudex/claudemix sessions, persisted so a
   // reattach after a daemon restart keeps the tab pinned to the model it was
   // launched with. Optional: absent for every other launcher and pre-field records.
-  model: z.string().optional()
+  model: z.string().optional(),
+  // Agent-chat tabs only (kind "agent-chat"). Absent for terminals. See
+  // parseSessionsConfig: a bad chat block drops that ONE session, never the
+  // index — an unparseable index disables orphan reaping for every terminal.
+  chat: sessionChatRecordSchema.optional()
 });
 
 export const sessionsConfigSchema = z.object({
@@ -620,6 +718,151 @@ export const sessionsConfigSchema = z.object({
 
 export type SessionRecord = z.infer<typeof sessionRecordSchema>;
 export type SessionsConfig = z.infer<typeof sessionsConfigSchema>;
+
+// --- agent chat: persisted thread head + receipt ring (spec §5.1) ----------
+//
+// These schemas mirror `ThreadHead` / `CommandReceipt` in `@orquester/api`'s
+// `agent-chat` module. `@orquester/config` cannot import `@orquester/api`
+// (the dependency runs the other way), so the two must be kept in step by
+// hand; the api types carry the doc comments, these carry the validation.
+//
+// ROLLBACK BOUNDARY (§8): rolling the deploy back rolls back code, never
+// `<appdir>/daemon/agent/threads/`. Add optional fields, never required ones,
+// and never repurpose a name — a head written by a newer host must still
+// decode here.
+
+/** Permission mode. Mirrors `AgentRuntimeMode` in `@orquester/api`. */
+export const agentRuntimeModeSchema = z.enum([
+  "approval-required",
+  "auto-accept-edits",
+  "auto",
+  "full-access"
+]);
+export type AgentRuntimeMode = z.infer<typeof agentRuntimeModeSchema>;
+
+/** The four chat adapters. claudex/claudemix map to `claude` (spec §5.3). */
+export const agentAdapterIdSchema = z.enum(["claude", "codex", "opencode", "grok"]);
+export type AgentAdapterId = z.infer<typeof agentAdapterIdSchema>;
+
+export const agentModelSelectionSchema = z.object({
+  instanceId: z.string().optional(),
+  model: z.string(),
+  options: z
+    .array(z.object({ id: z.string(), value: z.union([z.string(), z.boolean()]) }))
+    .optional()
+});
+export type AgentModelSelection = z.infer<typeof agentModelSelectionSchema>;
+
+/** `idle` exists only on the head — a thread that has no session yet. */
+export const agentThreadSessionStatusSchema = z.enum([
+  "idle",
+  "starting",
+  "ready",
+  "running",
+  "stopped",
+  "error"
+]);
+
+export const agentThreadSessionSchema = z.object({
+  status: agentThreadSessionStatusSchema,
+  /** Adapter-owned blob; a cursor failing its own shape check means "no resume". */
+  resumeCursor: z.unknown().optional(),
+  providerThreadId: z.string().optional(),
+  activeTurnId: z.string().nullable().default(null),
+  lastError: z.string().optional()
+});
+
+/**
+ * `meta.json`. `continueAfterRestart` is a TURN ID, never a boolean (§3.3), so
+ * a marker left over from an older turn is ignored rather than replaying the
+ * wrong work.
+ */
+export const agentThreadHeadSchema = z.object({
+  id: z.string().min(1),
+  projectPath: z.string(),
+  cwd: z.string(),
+  title: z.string(),
+  adapter: agentAdapterIdSchema,
+  refId: z.string(),
+  accountId: z.string(),
+  home: agentChatHomeSchema,
+  modelSelection: agentModelSelectionSchema,
+  runtimeMode: agentRuntimeModeSchema,
+  session: agentThreadSessionSchema,
+  turnCount: z.number().int().nonnegative().default(0),
+  seq: z.number().int().nonnegative().default(0),
+  continueAfterRestart: z
+    .object({ turnId: z.string().min(1), prepared: z.boolean().optional() })
+    .optional(),
+  createdAt: z.string(),
+  updatedAt: z.string()
+});
+export type AgentThreadHead = z.infer<typeof agentThreadHeadSchema>;
+
+/**
+ * A thread directory that fails to parse marks THAT thread `error` with the
+ * parse message; it never affects other threads or host startup (§5.1). So
+ * this returns null rather than throwing.
+ */
+export function parseAgentThreadHead(value: unknown): AgentThreadHead | null {
+  const parsed = agentThreadHeadSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+export const agentCommandReceiptStatusSchema = z.enum(["accepted", "rejected"]);
+
+/**
+ * One command receipt. A receipt proves only that THIS exact command was
+ * handled, which is why `threadId` is recorded: the same `commandId` against a
+ * different thread is a hard conflict, never a replay (§6.2).
+ */
+export const agentCommandReceiptSchema = z.object({
+  commandId: z.string().min(1),
+  threadId: z.string().min(1),
+  seq: z.number().int().nonnegative(),
+  status: agentCommandReceiptStatusSchema,
+  acceptedAt: z.string(),
+  /** The recorded rejection, replayed verbatim on a retry rather than re-run. */
+  error: z
+    .object({ code: z.string(), message: z.string(), detail: z.unknown().optional() })
+    .optional()
+});
+export type AgentCommandReceipt = z.infer<typeof agentCommandReceiptSchema>;
+
+/** `receipts.json` holds at most this many entries, oldest evicted first. */
+export const AGENT_RECEIPTS_RING_SIZE = 500;
+
+export const agentReceiptsFileSchema = z.object({
+  version: z.literal(1).default(1),
+  receipts: z.array(agentCommandReceiptSchema).default([])
+});
+export type AgentReceiptsFile = z.infer<typeof agentReceiptsFileSchema>;
+
+export function createDefaultAgentReceiptsFile(): AgentReceiptsFile {
+  return { version: 1, receipts: [] };
+}
+
+/**
+ * Entry-wise tolerant, and falls back to empty on an unusable file: a receipt
+ * ring is a de-duplication cache, so losing it costs at most one replayed
+ * command — never a thread.
+ */
+export function parseAgentReceiptsFile(value: unknown): AgentReceiptsFile {
+  const outer = z
+    .object({ version: z.literal(1).default(1), receipts: z.array(z.unknown()).default([]) })
+    .safeParse(value);
+  if (!outer.success) {
+    return createDefaultAgentReceiptsFile();
+  }
+  const receipts: AgentCommandReceipt[] = [];
+  for (const entry of outer.data.receipts) {
+    const parsed = agentCommandReceiptSchema.safeParse(entry);
+    if (parsed.success) {
+      receipts.push(parsed.data);
+    }
+  }
+  return { version: 1, receipts: receipts.slice(-AGENT_RECEIPTS_RING_SIZE) };
+}
 
 /** One persisted browser tab. The Chromium PROCESS does not survive a daemon
  *  restart (it is a daemon child, unlike tmux) — only the tab record does;
@@ -654,8 +897,26 @@ export function createDefaultSessionsConfig(): SessionsConfig {
   return sessionsConfigSchema.parse({ sessions: [] });
 }
 
+/**
+ * Entry-wise tolerant (the `parseRecentProjectsConfig` pattern, spec §5.2): a
+ * record that fails its schema — a malformed `chat` block written by a newer
+ * or a half-migrated bundle — drops that ONE session and the rest of the index
+ * survives. The OUTER shape still throws, because `sessions.ts` reads a throw
+ * here as "index unreadable, skip orphan reaping" and that caution is the
+ * right answer to a truncated file.
+ */
 export function parseSessionsConfig(value: unknown): SessionsConfig {
-  return sessionsConfigSchema.parse(value);
+  const outer = z
+    .object({ version: z.literal(1).default(1), sessions: z.array(z.unknown()).default([]) })
+    .parse(value);
+  const sessions: SessionRecord[] = [];
+  for (const entry of outer.sessions) {
+    const parsed = sessionRecordSchema.safeParse(entry);
+    if (parsed.success) {
+      sessions.push(parsed.data);
+    }
+  }
+  return { version: 1, sessions };
 }
 
 // todos.json — the daemon's index of synced to-do lists. One record per list;
