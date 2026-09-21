@@ -29,7 +29,10 @@ import {
 } from "./composer/composer-bridge";
 import { cn } from "../../lib/cn";
 import { isDefaultThreadTitle } from "../../lib/session-kind";
+import { isActiveChatTab, releaseActiveChatTab } from "../../lib/agent-chat-active-tab";
+import { anotherLayerOwnsTheKeyboard } from "../attention/GlobalShortcutListener";
 import { deriveThreadTitleSeed } from "../../lib/agent-chat/title.logic";
+import { shouldShowPlanFollowUpPrompt } from "../../lib/agent-chat/plan.logic";
 import { useAppStore } from "../../store/app";
 import { AgentDrillIn } from "./roster/AgentDrillIn";
 import { AgentRoster } from "./roster/AgentRoster";
@@ -52,6 +55,21 @@ const NO_REQUEST_IDS: readonly string[] = [];
 
 /** Every row callback is a no-op while the paint hold is in effect (§7.1). */
 const noop = (): void => {};
+
+/**
+ * Fire a §6.2 command from a `void`-returning UI callback.
+ *
+ * The store's `command()` sets `slice.errorBanner` and then **rethrows**, so
+ * the user-visible half is already handled — but a bare `void` on a rejecting
+ * promise is an `unhandledrejection`, which is noise in the console and a hard
+ * failure in the web smoke test (it fails on any uncaught page error). The
+ * banner carries the reason; this only stops the rejection escaping.
+ */
+function dispatch(run: () => Promise<unknown>): void {
+  void run().catch(() => {
+    /* surfaced by the thread's own error banner */
+  });
+}
 
 /** The read-only overlay for a turn diff or one item's full, unslimmed payload. */
 interface ChatViewerState {
@@ -124,7 +142,8 @@ function fullOutputText(item: ThreadItem): string {
  */
 export function AgentChatView({ session, projectPath, active }: AgentChatViewProps): JSX.Element {
   const sessionId = session.id;
-  const { slice, actions, rows, activePlan } = useAgentChatThread(sessionId);
+  const { slice, actions, rows, activePlan, actionableProposedPlan, reverting } =
+    useAgentChatThread(sessionId);
   const pending = useAgentChatPending(sessionId);
   const roster = useAgentChatRoster(sessionId);
   const status = useAgentChatStatus(sessionId);
@@ -173,15 +192,6 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   // The child's rows and its roster row come from `useAgentChatDrillIn`, which
   // AgentDrillIn calls itself: one projection off this thread's slice, sharing
   // the parent's memoisation instead of a second one beside it.
-  // Escape leaves the child view. Bound on the subtree, not on `window`: the
-  // app's one global listener owns window-level keys (AGENTS.md), and Escape
-  // here must not reach a tab that merely has a drill-in open in the background.
-  const onKeyDown = (event: React.KeyboardEvent) => {
-    if (event.key === "Escape" && drillInAgentId) {
-      event.stopPropagation();
-      setDrillInAgentId(null);
-    }
-  };
 
   // --- roster collapse state (§7.6) ----------------------------------------
   const [rosterExpanded, setRosterExpanded] = React.useState(false);
@@ -222,8 +232,16 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   }, [sessionId]);
 
   // A closed tab keeps nothing (§7.2), and an undelivered element-pick payload
-  // for a tab that no longer exists must not linger in the inbox.
-  React.useEffect(() => () => clearComposerInbox(sessionId), [sessionId]);
+  // for a tab that no longer exists must not linger in the inbox. A tab that
+  // was the visible one also gives the keyboard back, so no unmounted thread
+  // keeps a claim the shell will never correct.
+  React.useEffect(
+    () => () => {
+      clearComposerInbox(sessionId);
+      releaseActiveChatTab(sessionId);
+    },
+    [sessionId]
+  );
 
   // --- the client-seeded thread title (§7.7) -------------------------------
   // There is no title-generation service and none is introduced: the client
@@ -253,11 +271,93 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
       context: first.context
     });
     if (seed && seed !== session.title) {
-      void useAppStore.getState().renameTab(sessionId, seed);
+      // `seed: true`: this is the shell's own first-message title, not a
+      // rename the user typed, so the host leaves it replaceable by a provider
+      // retitle (§7.7). Sending it as a plain rename marked every real thread
+      // manually-renamed and no provider name could ever land.
+      dispatch(() => useAppStore.getState().renameTab(sessionId, seed, { seed: true }));
     }
   }, [sessionId, slice.entries, session.title, session.refId]);
 
   const turnActive = slice.turnStatus !== null && !SETTLED_TURN_STATES.has(slice.turnStatus);
+
+  // --- the plan-ready decision (§7.3, §7.5) --------------------------------
+  // The "Plan ready" banner deliberately carries no buttons: the decision is
+  // the composer's primary action, which becomes Implement on an empty draft
+  // and Refine once the user types. Handing the composer the proposal is what
+  // makes that switch happen — without it the banner is a dead end and the
+  // thread can never leave plan mode.
+  //
+  // The thread-side half of §7.4's gate lives here (nothing pending, still in
+  // plan mode, the turn has settled); the composer adds the one condition it
+  // owns, an empty attachment tray.
+  const planFollowUp =
+    !paintOnly &&
+    shouldShowPlanFollowUpPrompt({
+      pendingUserInputCount: pending.userInputs.length,
+      interactionMode: slice.interactionMode,
+      latestTurnSettled: !turnActive,
+      hasActionableProposedPlan: actionableProposedPlan !== null,
+      hasComposerAttachments: false
+    })
+      ? actionableProposedPlan
+      : null;
+
+  // --- Escape, for the whole visible tab (§7.4, §7.6) ----------------------
+  // Escape leaves the drill-in and, failing that, interrupts a running turn.
+  // Both are advertised by the shared keybinding table, and both used to work
+  // only while focus happened to be inside the chat subtree: click a tool row
+  // to expand it and `document.activeElement` becomes `<body>`, after which a
+  // React handler on our root never fires again.
+  //
+  // So it is a `window` listener — but a *scoped* one. Three gates, in the
+  // order they can go wrong:
+  //   1. this tab is the one on screen (every tab stays mounted, so without
+  //      this an Escape stops an agent in a tab the user cannot see);
+  //   2. no blocking layer owns the screen — the same set the app's global
+  //      shortcut listener stands down for;
+  //   3. focus is not inside this thread's composer, which owns Escape itself
+  //      and gives its open token menu first refusal. Ours is the "focus is
+  //      anywhere else" case, so the two can never both fire.
+  const escapeState = React.useRef({ drillInAgentId, turnActive });
+  escapeState.current = { drillInAgentId, turnActive };
+  React.useEffect(() => {
+    if (!active) {
+      return;
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) {
+        return;
+      }
+      if (!isActiveChatTab(sessionId) || anotherLayerOwnsTheKeyboard()) {
+        return;
+      }
+      const target = event.target as Element | null;
+      if (
+        typeof target?.closest === "function" &&
+        target.closest(`[data-agent-chat-composer-shell="${CSS.escape(sessionId)}"]`)
+      ) {
+        return;
+      }
+      const state = escapeState.current;
+      if (state.drillInAgentId) {
+        event.preventDefault();
+        event.stopPropagation();
+        setDrillInAgentId(null);
+        return;
+      }
+      if (state.turnActive) {
+        event.preventDefault();
+        event.stopPropagation();
+        void actions.interrupt().catch(() => {
+          // The thread's own error banner already carries the reason.
+        });
+      }
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [active, sessionId, actions]);
+
   const accountLabel = session.accountId
     ? (shortAccountLabel(
         agentAccounts?.accounts.find((a) => a.id === session.accountId)?.label
@@ -366,7 +466,6 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
 
   return (
     <div
-      onKeyDown={onKeyDown}
       data-agent-chat={sessionId}
       className={cn(
         "relative flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-neutral-950",
@@ -402,13 +501,13 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               onRevert={
                 paintOnly
                   ? noop
-                  : (targetTurnCount) => void actions.revert({ targetTurnCount })
+                  : (targetTurnCount) => dispatch(() => actions.revert({ targetTurnCount }))
               }
               onOpenTurnDiff={paintOnly ? noop : openTurnDiff}
               onOpenFile={paintOnly ? noop : openFile}
               onLoadFullOutput={paintOnly ? noop : loadFullOutput}
               onOpenAgent={paintOnly ? noop : setDrillInAgentId}
-              onSendQueuedNow={paintOnly ? noop : (id) => void actions.sendQueuedNow(id)}
+              onSendQueuedNow={paintOnly ? noop : (id) => dispatch(() => actions.sendQueuedNow(id))}
               // A straight pass-through: the store's action already puts the
               // message's text back in the draft and its attachments back as
               // chips (`appendToDraft`), so wrapping it would insert twice.
@@ -444,7 +543,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 totalProcessedTokens={slice.contextWindow?.totalProcessedTokens ?? null}
                 reportsContextWindow={status.reportsContextWindow}
                 activePlan={paintOnly ? null : activePlan}
-                onCompact={paintOnly ? noop : () => void actions.compact()}
+                onCompact={paintOnly ? noop : () => dispatch(() => actions.compact())}
                 latestCheckpoint={latestCheckpoint}
               />
             </div>
@@ -460,12 +559,12 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 actionableProposedPlan={
                   !paintOnly && session.hasActionableProposedPlan === true
                 }
-                onApprove={paintOnly ? noop : (input) => void actions.respondApproval(input)}
-                onAnswer={paintOnly ? noop : (input) => void actions.answerQuestion(input)}
+                onApprove={paintOnly ? noop : (input) => dispatch(() => actions.respondApproval(input))}
+                onAnswer={paintOnly ? noop : (input) => dispatch(() => actions.answerQuestion(input))}
                 onDismiss={
-                  paintOnly ? noop : (requestId) => void actions.dismissQuestion({ requestId })
+                  paintOnly ? noop : (requestId) => dispatch(() => actions.dismissQuestion({ requestId }))
                 }
-                onStopBackgroundWork={paintOnly ? noop : () => void actions.interrupt()}
+                onStopBackgroundWork={paintOnly ? noop : () => dispatch(() => actions.interrupt())}
                 // Text displaced by an answer goes back into the draft rather
                 // than being silently discarded (§7.5).
                 onCarryTextToDraft={
@@ -489,8 +588,8 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 hasPendingRequest={!paintOnly && pending.totalCount > 0}
                 queue={slice.queue}
                 activePlan={paintOnly ? null : activePlan}
-                actionableProposedPlan={null}
-                reverting={false}
+                actionableProposedPlan={planFollowUp}
+                reverting={reverting}
                 actions={actions}
                 onHeightChange={setComposerHeight}
                 // `/compact` is offered only where there is something to

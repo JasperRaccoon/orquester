@@ -1324,6 +1324,20 @@ export const MAX_INITIAL_COMMAND = 4096;
 export interface RenameSessionRequest {
   /** New label; empty/whitespace reverts to the registry entry's default name. */
   title: string;
+  /**
+   * This title is the client's **auto-seed** from the thread's first message
+   * (agent chat spec §7.7), not a rename the user typed.
+   *
+   * The two must be told apart: a provider that later reports a better name
+   * through `thread.metadata.updated` may replace a seed but must never
+   * overwrite a manual rename (§5.1). Without this flag the seed travels the
+   * same route as a rename, marks the thread manually renamed, and no
+   * provider retitle can ever fire — which is every real thread, because the
+   * client seeds on the first message.
+   *
+   * Ignored for terminal sessions, which have no such notion.
+   */
+  seed?: boolean;
 }
 
 export interface ReorderSessionsRequest {

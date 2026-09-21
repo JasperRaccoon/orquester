@@ -1109,6 +1109,24 @@ describe("orchestrator — the ingestion hooks (§5.1, §5.4)", () => {
     await host.stop();
   });
 
+  it("the client's first-message seed writes the title without marking it manual", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+
+    // §7.7: the client seeds every thread's title from its first message
+    // through this same route. Treating that as a rename marked EVERY real
+    // thread manually-renamed, so a provider's generated name could never land.
+    await host.orchestrator.updateThread(threadId, { title: "fix the login bug", seed: true });
+    await host.settle();
+    assert.equal(host.orchestrator.threadContext(threadId)?.titleManual, false);
+
+    // …and a rename the user actually typed still locks it, seed or no seed.
+    await host.orchestrator.updateThread(threadId, { title: "Mine" });
+    await host.settle();
+    assert.equal(host.orchestrator.threadContext(threadId)?.titleManual, true);
+    await host.stop();
+  });
+
   it("offers a placeholder turn count only for the running turn, and never without git", async () => {
     const host = createTestHost();
     const threadId = await host.createThread();
