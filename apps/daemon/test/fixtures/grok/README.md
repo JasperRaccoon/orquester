@@ -747,6 +747,56 @@ user's whole Claude Code fleet by default.
   git facets (`branch`, `gitRoot`, `repo`). A useful resume picker without touching the on-disk
   transcript format.
 
+### 32. `cancellationCategory` disambiguates a declined tool from a user Stop
+
+Observation 12 asks for a way to tell "the user declined a tool" apart from "the user pressed
+Stop", since both settle `stopReason: "cancelled"`, and suggests the `permission_denied` hook
+event or the absence of a `session/cancel`. There is a **direct discriminant** on
+`_x.ai/session/prompt_complete` that the observation does not name, and both captures carry it:
+
+```json
+// 04-permission-reject.ndjson  t=4260
+{"stopReason":"cancelled","cancellationCategory":"PermissionRejected",
+ "cancellationContext":{"tool_name":"write","reason":"User rejected the execution"}}
+
+// 05-cancel-with-pending-permission.ndjson  t=3999
+{"stopReason":"cancelled","cancellationCategory":"MidTurnAbort"}
+```
+
+The adapter maps `PermissionRejected` → `turn.completed {state:"cancelled"}` and everything else
+that stops `cancelled` → `"interrupted"`, falling back to the hook signal when the field is absent
+(`turnStateFromOutcome` in `apps/daemon/src/agent-host/adapters/grok/normalize.ts`).
+
+### 33. `pending_interaction` has a third kind: `question`
+
+Observation 15 records `permission` and `plan_approval`. `07b-ask-user-question.ndjson` t=4823 adds
+`{"sessionUpdate":"pending_interaction","tool_call_id":"…","kind":"question"}`, raised immediately
+before `_x.ai/ask_user_question`. Note the `ask_user_question` tool call *also* raises a
+`kind:"permission"` interaction first (t=4793) which the agent resolves itself — so the kinds are
+not one-to-one with the request that follows and must not be used to predict one.
+
+### 34. The two extension REPLIES have different shapes
+
+Easy to get the wrong way round, and both were observed accepted verbatim:
+
+| reply to | shape |
+|---|---|
+| `session/request_permission` | `{"outcome":{"outcome":"selected","optionId":"allow-once"}}` — **nested** |
+| `_x.ai/exit_plan_mode` | `{"outcome":"abandoned","feedback":"…"}` — **flat** |
+| `_x.ai/ask_user_question` | `{"outcome":"accepted","answers":{…}}` — **flat** |
+
+### 35. The probe must run under the account home, or it reports a false "not logged in"
+
+Not visible in the captures, found while running the adapter's smoke script: with `GROK_HOME`
+pointing anywhere without an `auth.json`, `grok models` prints `You are not authenticated.` and
+exits **0**, so the probe's own verdict is `unauthenticated` for an account whose sessions work
+perfectly. `grok --version`, `grok models` and `grok inspect --json` must all be spawned with the
+same `GROK_HOME` a thread would use.
+
+Also confirmed live against 1.0.34 through the adapter: `initialize._meta.availableCommands` is 7
+commands, while `available_commands_update` after `session/new` is **69** and the machine-level
+skill list from `grok inspect --json` is 57 — observation 20's ratio, reproduced end to end.
+
 ---
 
 ## Reproducing
