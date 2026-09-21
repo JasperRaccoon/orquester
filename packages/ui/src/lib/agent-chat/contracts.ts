@@ -415,6 +415,21 @@ export interface AgentChatThreadView {
   /** Memoised rows (§7.2: entries → rows → stable rows). */
   rows: AgentChatTimelineRow[];
   activePlan: ActivePlanState | null;
+  /**
+   * The un-implemented proposal the composer's primary action acts on (§7.3):
+   * `null` turns the split button back into a plain send. Derived from the
+   * timeline projection's `proposedPlans`, which never leaves the store.
+   *
+   * *Added by W15; `contracts.ts` stays additive-only.*
+   */
+  actionableProposedPlan: { planMarkdown: string } | null;
+  /**
+   * True while a `/revert` is in flight — §7.5's one reason the composer goes
+   * `inert`, so a turn cannot race history the host is rewriting.
+   *
+   * *Added by W15; `contracts.ts` stays additive-only.*
+   */
+  reverting: boolean;
 }
 
 export interface AgentChatRosterView {

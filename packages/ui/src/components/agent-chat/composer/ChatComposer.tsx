@@ -384,6 +384,20 @@ export function ChatComposer({
     return true;
   }, []);
 
+  /**
+   * R8-m12: §7.8 suppresses autofocus **on mobile only** — "a keyboard on every
+   * navigation is worse than a tap". On a desktop viewport opening a thread
+   * should put the caret in the composer, which is what T3 does; without this
+   * every desktop tab switch cost a click. Skipped while a request is docked,
+   * so the caret never lands behind a card the user has to read first.
+   */
+  React.useEffect(() => {
+    if (isMobile || active === false || hasPendingRequest || reverting) return;
+    textareaRef.current?.focus({ preventScroll: true });
+    // One shot per thread, not per keystroke: `sessionId` is the identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, isMobile, active]);
+
   React.useEffect(
     () =>
       registerComposerHandle(sessionId, {
@@ -429,8 +443,23 @@ export function ChatComposer({
     () => provider?.workspaceSnapshots?.find((snapshot) => snapshot.cwd === root),
     [provider, root]
   );
-  const slashCommands = workspaceSnapshot?.slashCommands ?? provider?.slashCommands ?? [];
-  const skills = workspaceSnapshot?.skills ?? provider?.skills ?? [];
+  /**
+   * The per-cwd overlay wins, **per array and only when it is non-empty**
+   * (R2-1, defence in depth).
+   *
+   * `??` alone falls back on `undefined` but not on `[]`, and an adapter whose
+   * overlay carries skills but drops `slashCommands` (Claude's did) therefore
+   * blanked the provider half of the `/` menu from the first turn onward — no
+   * `/init`, no `/review`, no user `.claude/commands`. The machine snapshot is
+   * still the right answer for an array the overlay does not speak to, so the
+   * two arrays fall back independently rather than as one object.
+   */
+  const slashCommands = workspaceSnapshot?.slashCommands?.length
+    ? workspaceSnapshot.slashCommands
+    : (provider?.slashCommands ?? []);
+  const skills = workspaceSnapshot?.skills?.length
+    ? workspaceSnapshot.skills
+    : (provider?.skills ?? []);
   const models = provider?.models ?? [];
   const selectedModel = resolveSelectedModel(models, modelSelection);
   const selectDescriptors = optionDescriptors(selectedModel).filter(
@@ -879,10 +908,21 @@ export function ChatComposer({
         });
         return;
       }
-      // `interrupt` and `scroll-to-end` are in the shared table but are not
-      // this listener's: Escape is handled on the textarea, where the open
-      // token menu gets first refusal, and the scroll pill belongs to the
-      // timeline. Taking either here would fire it twice.
+      /*
+       * R7-7: Escape must stop a running turn from anywhere in the thread, not
+       * only while the textarea has focus — the user clicks a tool row to
+       * expand it and the chord goes dead. The textarea branch keeps first
+       * refusal (an open token menu consumes Escape there and stops
+       * propagation), so this only ever sees the events it did not take.
+       * `scroll-to-end` stays the timeline's.
+       */
+      if (shortcut.kind === "interrupt") {
+        if (!isTurnActive) return;
+        if (event.target === textareaRef.current) return;
+        event.preventDefault();
+        interrupt();
+        return;
+      }
       if (shortcut.kind !== "control") return;
       // Only swallow the chord when a control actually answers to it, so a
       // composer without a plan toggle leaves its key to whoever wants it.
@@ -893,7 +933,7 @@ export function ChatComposer({
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [actions, active, openControl, queue]);
+  }, [actions, active, interrupt, isTurnActive, openControl, queue]);
 
   const onTextareaKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (isPasteAsTextShortcut(event, isApplePlatform())) bypassPasteRef.current = true;

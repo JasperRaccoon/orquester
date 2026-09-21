@@ -37,7 +37,8 @@ export function ChatStatusLine({
   reportsContextWindow,
   activePlan,
   onCompact,
-  latestCheckpoint
+  latestCheckpoint,
+  modelLabel = null
 }: ChatStatusLineProps): React.ReactElement {
   const status = resolveStatusLine({ connection, turnStartedAt, activityLabel });
   const meter = React.useMemo(
@@ -106,7 +107,7 @@ export function ChatStatusLine({
             <span className="ac-tabular shrink-0 font-mono text-neutral-500">
               {formatContextTokens(meter.usedTokens)} tok
             </span>
-            <ContextMeter model={meter} onCompact={onCompact} />
+            <ContextMeter model={meter} modelLabel={modelLabel} onCompact={onCompact} />
           </>
         ) : null}
       </div>

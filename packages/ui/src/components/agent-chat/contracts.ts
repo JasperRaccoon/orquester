@@ -261,4 +261,13 @@ export interface ChatStatusLineProps {
   /** Always present: §4.6.3 synthesises `/compact` on all four adapters. */
   onCompact: () => void;
   latestCheckpoint: Checkpoint | null;
+  /**
+   * The thread's model, for the meter's auto-compaction sentence (§7.6). With
+   * no `autoCompactAtTokens` the sentence can still name what compacts —
+   * without it, it degrades to a generic line although the model is right
+   * there on the thread head.
+   *
+   * *Added by W15; additive to the foundation's contract.*
+   */
+  modelLabel?: string | null;
 }

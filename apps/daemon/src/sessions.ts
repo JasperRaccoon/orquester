@@ -86,7 +86,13 @@ export interface ISessionManager {
   agentEvent(id: string, req: AgentEventRequest): boolean;
   input(id: string, data: string, options?: SessionInputOptions): void;
   resize(id: string, cols: number, rows: number): void;
-  rename(id: string, title: string): SessionSummary | undefined;
+  /**
+   * `opts.seed` marks a title the CLIENT auto-generated from the thread's
+   * first message rather than one the user typed (agent chat §7.7). Only the
+   * chat backend cares: a seed stays replaceable by a provider retitle, a
+   * manual rename never is. PTY sessions ignore it.
+   */
+  rename(id: string, title: string, opts?: { seed?: boolean }): SessionSummary | undefined;
   reorder(projectPath: string, ids: string[]): void;
   close(id: string): boolean;
   /** Close every session whose project is `prefix` (exact) or under it (`prefix + sep`). */

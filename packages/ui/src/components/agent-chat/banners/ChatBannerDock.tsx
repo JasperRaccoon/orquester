@@ -60,7 +60,12 @@ export interface ChatBannerDockExtraProps {
   onRequestCustomAnswerFocus?: () => void;
   /** `false` while this tab is open but not visible — gates the digit keys. */
   active?: boolean;
-  /** The plan's title, shown as the plan-ready banner's description. */
+  /**
+   * The pending proposal's own title, for the "Plan ready" card's description
+   * slot. Without it the banner names a plan the user cannot identify.
+   *
+   * *Added by W15; the boolean `actionableProposedPlan` still gates the card.*
+   */
   planTitle?: string | null;
 }
 
