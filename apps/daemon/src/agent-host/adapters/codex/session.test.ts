@@ -793,6 +793,23 @@ describe("codex session — a dead child never leaves a running state", () => {
       "a non-zero exit settles the turn failed"
     );
 
+    // A SIGTERM'd child writes not one further byte (fixtures README obs. 16),
+    // so `handleExit` is the ONLY thing that can close its in-progress item —
+    // the `14-…` capture's dangling `command_execution` (R3 finding 1).
+    const closed = r.events.events.filter((event) => event.type === "item.completed");
+    const opened = r.events.events.filter((event) => event.type === "item.started");
+    assert.ok(opened.length > 0, "the turn really opened a tool item");
+    for (const open of opened) {
+      assert.ok(
+        closed.some((done) => done.itemId === open.itemId),
+        `item ${String(open.itemId)} was left spinning after the child died`
+      );
+    }
+    assert.ok(
+      r.events.types().lastIndexOf("item.completed") < exitIndex,
+      "items close BEFORE session.exited"
+    );
+
     const exited = r.events.events[exitIndex]!.payload as {
       exitKind: string;
       recoverable: boolean;
