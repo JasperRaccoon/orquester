@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { SessionRecord } from "@orquester/config";
-import { SessionManager } from "../sessions.ts";
+import { SessionManager, drainSessionIndexWrites } from "../sessions.ts";
 import type { RegistryService } from "../registry.ts";
 import type { Tmux } from "../tmux.ts";
 import { ChatSessionManager } from "./chat-sessions.ts";
@@ -75,7 +75,17 @@ async function harness(
       owns: (record) => record.kind === "agent-chat"
     }
   });
-  return { manager, chat, indexPath, cleanup: () => rm(dir, { recursive: true, force: true }) };
+  return {
+    manager,
+    chat,
+    indexPath,
+    // `persistIndexNow()` is fire-and-forget: drain it before the teardown, or
+    // a temp file can appear after the rmdir listed the directory.
+    cleanup: async () => {
+      await drainSessionIndexWrites(indexPath);
+      await rm(dir, { recursive: true, force: true });
+    }
+  };
 }
 
 test("reattach routes chat records to their contributor and never attaches a PTY to them", async () => {
@@ -149,9 +159,17 @@ test("the PTY manager is the only writer: one file holds both kinds", async () =
   const h = await harness([chatRecord("chat-1", 1), terminalRecord("bash-1", "shell", 0)], ["bash-1"]);
   await h.manager.reattach();
   h.manager.persistIndexNow();
-  // persistIndexNow is fire-and-forget; wait for the atomic rename to land.
+  // persistIndexNow is fire-and-forget; wait for the atomic rename to land. A
+  // parse failure here is only "the write has not landed yet" — never a
+  // half-written file, which is what the unique temp name guarantees.
   for (let i = 0; i < 50; i++) {
-    const raw = JSON.parse(await readFile(h.indexPath, "utf8")) as { sessions: SessionRecord[] };
+    let raw: { sessions: SessionRecord[] };
+    try {
+      raw = JSON.parse(await readFile(h.indexPath, "utf8")) as { sessions: SessionRecord[] };
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      continue;
+    }
     if (raw.sessions.some((s) => s.kind === "agent-chat")) {
       const chatRow = raw.sessions.find((s) => s.kind === "agent-chat");
       assert.equal(chatRow?.id, "chat-1", "the contributor's record is in the one file");
@@ -164,4 +182,40 @@ test("the PTY manager is the only writer: one file holds both kinds", async () =
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   assert.fail("the contributor's records never reached sessions.json");
+});
+
+test("concurrent writes never publish a mixture of two documents", async () => {
+  // Regression: a FIXED `<path>.tmp` let two in-flight writes interleave in the
+  // same temp file, and the rename then published a complete JSON document
+  // followed by the tail of a longer one. `readIndex()` reads that as corrupt,
+  // and `reattach()` then refuses to reap orphans for EVERY terminal — the
+  // exact failure persistence exists to prevent.
+  const h = await harness([], []);
+  await h.manager.reattach();
+  const seen: string[] = [];
+  for (let round = 0; round < 40; round++) {
+    // Alternate long and short payloads: a shorter document overwriting a
+    // longer one in place is what leaves trailing bytes behind.
+    h.chat.clear();
+    if (round % 2 === 0) {
+      for (let i = 0; i < 12; i++) {
+        h.chat.adopt([chatRecord(`long-${round}-${i}`, i)]);
+      }
+    } else {
+      h.chat.adopt([chatRecord("short", 0)]);
+    }
+    h.manager.persistIndexNow();
+  }
+  for (let i = 0; i < 100; i++) {
+    const raw = await readFile(h.indexPath, "utf8").catch(() => null);
+    if (raw !== null) {
+      seen.push(raw);
+      // Every observation must be exactly one document.
+      JSON.parse(raw);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+  assert.ok(seen.length > 0, "the index was observed at least once");
+  h.manager.closeAll();
+  await h.cleanup();
 });

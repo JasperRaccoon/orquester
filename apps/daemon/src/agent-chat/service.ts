@@ -27,7 +27,9 @@ import {
   type AgentHostHealthResponse,
   type CreateHostThreadRequest
 } from "../agent-host/host-protocol.ts";
+import type { Readable } from "node:stream";
 import { isAgentAdapterId } from "../agent-host/adapters/index.ts";
+import { agentHostExtraRoutes } from "../agent-host/server/extra-routes.ts";
 import { ACCOUNT_HOME_ENV_VAR } from "../agent-host/support/env.ts";
 import { ChatSessionManager, ChatSessionError } from "./chat-sessions.ts";
 import { AgentHostClient, HostUnavailableError } from "./host-client.ts";
@@ -397,6 +399,46 @@ export class AgentChatService {
     void this.client
       .json("DELETE", agentHostRoutes.deleteThread(id))
       .catch((error) => this.opts.logger?.warn?.(`agent host thread delete failed for ${id}`, error));
+  }
+
+  /**
+   * A chat attachment (§6.3). The bytes are streamed straight through to the
+   * host, which claims the file into the thread's attachment namespace and
+   * answers the `AttachmentRef` — the host, not the daemon, mints the id and
+   * re-checks the §4.1 bounds against the file it stat'd, and its thread-delete
+   * cascade is what cleans the file up.
+   *
+   * The daemon deliberately does not write into the thread directory itself:
+   * that directory is the host's, and a file the host never claimed could not
+   * be resolved by `GET …/attachments/:id` when an adapter goes looking for it.
+   */
+  async uploadAttachment(
+    sessionId: string,
+    query: { name?: string; type?: string },
+    body: Readable
+  ): Promise<{ status: number; value: unknown }> {
+    const params = new URLSearchParams();
+    if (query.name) params.set("name", query.name);
+    if (query.type) params.set("type", query.type);
+    const suffix = params.toString();
+    const path = `${agentHostExtraRoutes.putAttachment(sessionId)}${suffix ? `?${suffix}` : ""}`;
+    const stream = await this.client.open("POST", path, {
+      body,
+      headers: { "content-type": "application/octet-stream" },
+      timeoutMs: 0
+    });
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream.body) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+    }
+    const raw = Buffer.concat(chunks).toString("utf8");
+    let value: unknown = null;
+    try {
+      value = raw.trim() ? JSON.parse(raw) : null;
+    } catch {
+      value = null;
+    }
+    return { status: stream.status, value };
   }
 
   /** `PUT` rename (§6.1) — the host appends `thread.meta-updated`. */
