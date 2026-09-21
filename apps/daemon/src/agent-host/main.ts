@@ -22,7 +22,7 @@ import { randomBytes } from "node:crypto";
 import { accessSync, constants as fsConstants, statSync } from "node:fs";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { delimiter, isAbsolute, join, resolve as resolvePath } from "node:path";
+import { delimiter, isAbsolute, join, resolve as resolvePath, sep } from "node:path";
 
 import {
   agentChatDir,
@@ -33,7 +33,11 @@ import {
   continueThreadsForProject,
   createDefaultAppConfig,
   daemonConfigDir,
-  parseAppConfig
+  daemonConfigPath,
+  expandVars,
+  parseAppConfig,
+  parseDaemonConfig,
+  resolveDaemonPaths
 } from "@orquester/config";
 import { REGISTRY, type RegistryEntryDef } from "@orquester/registry";
 import type { AccountHome, AgentAdapterId, ProviderSnapshot } from "@orquester/api/agent-chat";
@@ -272,6 +276,35 @@ export async function startAgentHost(
         ) ?? null)
       : null;
 
+  /**
+   * Exact secrets this host injects into children, masked wherever they could
+   * surface (a CLI echoing its resolved config on stderr, an error message).
+   * The cliproxy `ANTHROPIC_AUTH_TOKEN` is a bare hex string that matches no
+   * credential shape, so nothing but the literal catches it.
+   */
+  const hostInjectedSecrets: string[] = [];
+  const noteInjectedSecret = (value: string | undefined): void => {
+    if (value !== undefined && value.length >= 8 && !hostInjectedSecrets.includes(value)) {
+      hostInjectedSecrets.push(value);
+    }
+  };
+
+  /**
+   * §4.6.4's optional refresh `cwd` becomes a spawn cwd and a
+   * `<cwd>/.claude/skills` readdir, so it is confined to the workspaces root
+   * the way every other path-taking route on this daemon is.
+   */
+  const workspacesRoot = await resolveWorkspacesRoot(appdir, homeDir, env);
+  const isAllowedCwd = (candidate: string): boolean => {
+    if (workspacesRoot === null) {
+      // The daemon's config could not be read, so there is no root to confine
+      // to; refusing every per-cwd refresh would be worse than today.
+      return true;
+    }
+    const resolved = resolvePath(candidate);
+    return resolved === workspacesRoot || resolved.startsWith(`${workspacesRoot}${sep}`);
+  };
+
   const shutdown = new AbortController();
 
   // ---- adapters (acquired BEFORE the gate opens, §3.1) -------------------
@@ -285,13 +318,20 @@ export async function startAgentHost(
       store.resolveAttachment(threadId, attachmentId),
     attachmentsDir: (threadId) => agentChatThreadAttachmentsDir(appdir, threadId),
     logRawFrame: (threadId, frame) => store.logRawFrame(threadId, frame),
-    buildEnv: ({ threadId, home, extraEnv }) => {
+    buildEnv: ({ threadId, home, projectPath, extraEnv }) => {
       // The §6.1 launcher env the daemon composed for this thread: the registry
       // entry's own env (which already carries `<appdir>/daemon/env/<id>.env`)
       // under every `resolveExtraEnv` contributor. It layers OVER the adapter's
       // own extras, exactly as the terminal wrapper's `export` wins over
       // `tmux -e`.
-      const launch = orchestrator?.launchConfig(threadId) ?? projectLaunchConfig(threadId);
+      // A child shared by a project (OpenCode's server, §3.2) names the project
+      // rather than a thread, so it resolves the project's launcher env.
+      const launch =
+        orchestrator?.launchConfig(threadId) ??
+        (projectPath !== undefined
+          ? (orchestrator?.launchConfigForCwd(projectPath) ?? null)
+          : null) ??
+        projectLaunchConfig(threadId);
       const accountHomeDir = launch?.homePath ?? (home.kind !== "system" ? home.path : undefined);
       const env = buildProviderEnv({
         adapter,
@@ -312,6 +352,13 @@ export async function startAgentHost(
       // must not carry, and they are removed after everything else is layered.
       for (const name of launch?.unsetEnv ?? []) {
         delete env[name];
+      }
+      // Remember what we handed out so the redactor can mask it by value.
+      noteInjectedSecret(env.ANTHROPIC_AUTH_TOKEN);
+      for (const [key, value] of Object.entries(env)) {
+        if (/(_API_KEY|_TOKEN)$/.test(key)) {
+          noteInjectedSecret(value);
+        }
       }
       return env;
     },
@@ -430,6 +477,11 @@ export async function startAgentHost(
     socketPath,
     tmpDir,
     startedAt,
+    // Everything that leaves the host as a message goes through the same
+    // redaction the stderr path uses (§3.1).
+    homeDirs: [homeDir],
+    secretLiterals: hostInjectedSecrets,
+    isAllowedCwd,
     onStop: async (): Promise<AgentHostStopResponse> => {
       // The intentional stop of §3.3: write every continuation marker for a
       // running thread with a usable cursor, then drain and stop.
@@ -508,6 +560,33 @@ export async function startAgentHost(
     ready,
     stop
   };
+}
+
+/**
+ * The workspaces root every chat `cwd` lives under — `daemon.json`'s
+ * `workspacesDir`, expanded. Read once at startup; `null` when the config
+ * cannot be read, which leaves the guard open rather than breaking refreshes
+ * on a host whose daemon config is missing.
+ */
+async function resolveWorkspacesRoot(
+  appdir: string,
+  homeDir: string,
+  env: NodeJS.ProcessEnv
+): Promise<string | null> {
+  try {
+    const raw = await readFile(daemonConfigPath(appdir), "utf8");
+    const config = parseDaemonConfig(JSON.parse(raw) as unknown);
+    const paths = resolveDaemonPaths({
+      homeDir,
+      platform: process.platform === "win32" ? "win32" : "linux",
+      cwd: appdir,
+      appdir,
+      env: env as Record<string, string | undefined>
+    });
+    return resolvePath(expandVars(config.workspacesDir, paths.vars));
+  } catch {
+    return null;
+  }
 }
 
 /**
