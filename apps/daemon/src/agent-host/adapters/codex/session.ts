@@ -39,6 +39,7 @@ import type {
 } from "@orquester/api/agent-chat";
 
 import type { AdapterContext } from "../../adapter.ts";
+import { isUsableConversationId } from "../../orchestration/resume.ts";
 import { AGENT_HOST_DEADLINES, TURN_LIVENESS_WINDOWS, withDeadline } from "../../support/deadline.ts";
 import {
   describeExit,
@@ -85,18 +86,34 @@ import {
 } from "./protocol.ts";
 import { CodexUsageTracker } from "./usage.ts";
 
-/** What a resumed session persists. Codex's cursor is just `{threadId}` (§4.1). */
+/**
+ * What a resumed session persists. Codex's cursor is just `{threadId}` (§4.1),
+ * which means the **minimal create-time cursor the host builds from the resume
+ * picker is identical to the full one** — `resumeCursorFor("codex", …)` in
+ * `orchestration/resume.ts` returns exactly this shape, so §6.1 resume needs no
+ * widening here, only the guarantee (and the test) that it round-trips.
+ */
 export interface CodexResumeCursor {
   threadId: string;
 }
 
-/** A cursor that fails its own shape check means "no resume", **never** an error. */
+/**
+ * A cursor that fails its own shape check means "no resume", **never** an
+ * error (§4.1).
+ *
+ * The id is shape-checked with the host's own rule rather than a local one, so
+ * a cursor the host would have refused to build cannot sneak in through
+ * `meta.json` written by an older bundle. It is not a security boundary — the
+ * id rides `thread/resume {threadId}` as a JSON string, never argv — but a
+ * `..`-shaped or flag-shaped id is a corrupt cursor, and §4.1 says a corrupt
+ * cursor means no resume.
+ */
 export function parseResumeCursor(value: unknown): CodexResumeCursor | null {
   if (typeof value !== "object" || value === null) {
     return null;
   }
   const threadId = (value as { threadId?: unknown }).threadId;
-  return typeof threadId === "string" && threadId.length > 0 ? { threadId } : null;
+  return isUsableConversationId(threadId) ? { threadId } : null;
 }
 
 export interface CodexSessionOptions {
