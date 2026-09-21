@@ -293,8 +293,12 @@ export function patchGrokConfig(source: string): string | null {
     const assignment = new RegExp(`^([ \\t]*)${escapeRegExp(key)}([ \\t]*=[ \\t]*)(.*)$`, "m");
     const match = assignment.exec(body);
     if (match === null) {
-      const insertion = body.endsWith("\n") || body.length === 0 ? "" : "\n";
-      const nextBody = `${body}${insertion}${key} = ${value}\n`;
+      // Insert BEFORE the blank lines that separate this section from the
+      // next header, or the new key lands in the following section's gap.
+      const trailing = /(?:[ \t]*\n)*$/.exec(body)?.[0] ?? "";
+      const head = body.slice(0, body.length - trailing.length);
+      const separator = head.length === 0 || head.endsWith("\n") ? "" : "\n";
+      const nextBody = `${head}${separator}${key} = ${value}\n${trailing}`;
       text = `${text.slice(0, range.start)}${nextBody}${text.slice(range.end)}`;
       changed = true;
       continue;

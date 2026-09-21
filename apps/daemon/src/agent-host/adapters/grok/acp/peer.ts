@@ -278,14 +278,16 @@ export class AcpPeer {
       return;
     }
     this.closedReason = new AcpTransportClosedError(reason, detail);
-    const inFlight = [...this.pending.values()];
-    this.pending.clear();
-    for (const entry of inFlight) {
+    // Iterate a copy but leave the map populated: `fail` routes through the
+    // per-request `finish`, which looks the id up and is what actually
+    // rejects. Clearing first would settle nothing and hang every caller.
+    for (const entry of [...this.pending.values()]) {
       if (entry.timer !== null) {
         clearTimeout(entry.timer);
       }
       entry.fail(this.closedReason);
     }
+    this.pending.clear();
   }
 
   get isClosed(): boolean {

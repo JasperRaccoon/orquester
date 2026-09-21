@@ -100,6 +100,7 @@ export interface GrokTurnOutcome {
 interface ToolTrack extends ToolCallSnapshot {
   readonly toolCallId: string;
   kind?: string;
+  rawInput?: unknown;
   itemType: ReturnType<typeof itemTypeFromToolKind>;
   started: boolean;
   lastEmittedProgressLength?: number;
@@ -443,12 +444,21 @@ export class GrokNormalizer {
       | undefined;
     const content = update.content === undefined ? previous?.content : boundToolContent(update.content);
     const rawOutput = update.rawOutput === undefined ? previous?.rawOutput : boundRawOutput(update.rawOutput);
-    const command = extractToolCommand(update.rawInput ?? previous?.detail, title ?? undefined);
-    const detail = command ?? toolContentText(content) ?? title ?? undefined;
+    const rawInput = update.rawInput ?? previous?.rawInput;
+    const command = extractToolCommand(rawInput, title ?? undefined);
+    const contentText = toolContentText(content);
+    // On a FAILED call the content is the reason — "User rejected the
+    // execution for tool `write`" — and that is what the row must read.
+    // Everywhere else the command is the better summary (T3's order).
+    const detail =
+      status === "failed"
+        ? (contentText ?? command ?? title ?? undefined)
+        : (command ?? contentText ?? title ?? undefined);
 
     const next: ToolTrack = {
       toolCallId,
       kind: kind ?? undefined,
+      rawInput,
       // `_meta["x.ai/tool"].kind` is Grok's own authoritative discriminant and
       // is finer-grained than ACP's (a plain `write` arrives as `edit`).
       itemType: vendor?.kind === "execute" ? "command_execution" : itemTypeFromToolKind(kind ?? undefined),
@@ -493,7 +503,7 @@ export class GrokNormalizer {
               ...(next.kind === undefined ? {} : { kind: next.kind }),
               ...(command === undefined ? {} : { command }),
               ...(vendor === undefined ? {} : { vendorTool: vendor.name, readOnly: vendor.read_only }),
-              ...(update.rawInput === undefined ? {} : { rawInput: update.rawInput }),
+              ...(rawInput === undefined ? {} : { rawInput }),
               ...(rawOutput === undefined ? {} : { rawOutput }),
               ...(content === undefined ? {} : { content }),
               ...(update.locations === undefined || update.locations === null
@@ -535,7 +545,7 @@ export class GrokNormalizer {
       }
     }
 
-    events.push(...this.backgroundFromToolCall(toolCallId, update.rawInput, rawOutput, status));
+    events.push(...this.backgroundFromToolCall(toolCallId, rawInput, rawOutput, status));
     return events;
   }
 
