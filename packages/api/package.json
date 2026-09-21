@@ -4,11 +4,13 @@
   "version": "0.0.0",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./agent-chat": "./src/agent-chat/index.ts"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --import tsx --test $(find src -name '*.test.ts')"
   },
   "dependencies": {
     "@orquester/config": "workspace:*"
