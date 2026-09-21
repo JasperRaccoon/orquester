@@ -41,7 +41,7 @@ import type {
 import { SUPPORTED_ATTACHMENT_IMAGE_MIME_TYPES } from "@orquester/api/agent-chat";
 
 import type { AdapterContext } from "../../adapter.ts";
-import { AGENT_HOST_DEADLINES, TURN_LIVENESS_WINDOWS, withDeadline } from "../../support/deadline.ts";
+import { TURN_LIVENESS_WINDOWS, withDeadline } from "../../support/deadline.ts";
 import { StderrCapture } from "../../support/stderr.ts";
 import { createDeferred, type Deferred } from "./async-queue.ts";
 import { classifyRequestType, summarizeToolRequest, trimmedString } from "./classify.ts";
@@ -267,7 +267,7 @@ export class ClaudeSession {
     try {
       await withDeadline(this.query.initializationResult(), {
         label: "claude/handshake",
-        timeoutMs: AGENT_HOST_DEADLINES.handshakeMs,
+        timeoutMs: this.options.deps.deadlines.handshakeMs,
         onTimeout: () => {
           // An expired deadline kills the child rather than leaving the thread
           // `starting` forever (§3.1).
@@ -845,14 +845,14 @@ export class ClaudeSession {
 
   /** `/compact` as an ordinary turn, awaited to a terminal turn state (§4.1). */
   async compact(): Promise<void> {
-    const settled = createDeferred<void>();
-    this.turnSettled = settled;
     await this.sendTurn({
       text: COMPACT_COMMAND,
       attachments: [],
       interactionMode: "default"
     });
-    await settled.promise;
+    // The deferred belongs to the turn `sendTurn` just opened (or to the live
+    // one it steered into), so it is read AFTER the send rather than before.
+    await this.turnSettled?.promise;
   }
 
   /**
@@ -879,7 +879,7 @@ export class ClaudeSession {
     try {
       receipt = (await withDeadline(this.query!.interrupt(), {
         label: "claude/interrupt",
-        timeoutMs: AGENT_HOST_DEADLINES.cancelMs
+        timeoutMs: this.options.deps.deadlines.cancelMs
       })) as { still_queued?: string[] } | undefined;
     } catch {
       // The interrupt RPC is the graceful path; the hard one follows.
@@ -900,7 +900,7 @@ export class ClaudeSession {
     try {
       await withDeadline(settled.promise, {
         label: "claude/interrupt/settle",
-        timeoutMs: AGENT_HOST_DEADLINES.cancelMs
+        timeoutMs: this.options.deps.deadlines.cancelMs
       });
     } catch {
       await this.stop("Stop: the turn did not settle after the interrupt.");
@@ -926,7 +926,7 @@ export class ClaudeSession {
     await Promise.race([
       this.streamDone ?? Promise.resolve(),
       new Promise<void>((resolve) => {
-        const handle = this.options.deps.setTimer(resolve, AGENT_HOST_DEADLINES.cancelMs);
+        const handle = this.options.deps.setTimer(resolve, this.options.deps.deadlines.cancelMs);
         void handle;
       })
     ]);

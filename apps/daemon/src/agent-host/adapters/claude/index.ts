@@ -250,6 +250,14 @@ export async function createClaudeAdapterWith(
       scopedLimitNames,
       emit,
       onClosed: (closed) => {
+        // §4.1 "cursor per turn", plus Claude's own refresh on every assistant
+        // message: the cursor a lazy recovery resumes from is the one the
+        // dying session last held, not the one `sendTurn` happened to return.
+        const start = starts.get(closed.threadId);
+        const latest = closed.currentCursor();
+        if (start !== undefined && latest !== undefined) {
+          starts.set(closed.threadId, { ...start, cursor: latest });
+        }
         if (sessions.get(closed.threadId) === closed) {
           sessions.delete(closed.threadId);
         }

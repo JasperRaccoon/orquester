@@ -14,6 +14,7 @@
 import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 import type { Options as ClaudeQueryOptions, Query, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 
+import { AGENT_HOST_DEADLINES } from "../../support/deadline.ts";
 import { spawnProviderChild } from "../../support/spawn.ts";
 
 export type ClaudeQueryFactory = (params: {
@@ -31,12 +32,21 @@ export interface ClaudeAdapterDeps {
   hostConfigDir: string | undefined;
   /** Node binary used for the history worker. */
   nodePath: string;
+  /**
+   * The §3.1 windows, so a test asserts an expired deadline's behaviour
+   * without waiting one out — §9's "nothing waits on a timer".
+   */
+  deadlines: { handshakeMs: number; cancelMs: number };
 }
 
 export function defaultClaudeAdapterDeps(): ClaudeAdapterDeps {
   return {
     query: sdkQuery,
     spawn: spawnProviderChild,
+    deadlines: {
+      handshakeMs: AGENT_HOST_DEADLINES.handshakeMs,
+      cancelMs: AGENT_HOST_DEADLINES.cancelMs
+    },
     setTimer: (fn, ms) => setTimeout(fn, ms),
     clearTimer: (handle) => {
       clearTimeout(handle as NodeJS.Timeout);

@@ -247,14 +247,22 @@ export function resolveEffortLevel(
   if (requested === undefined || !EFFORT_LEVELS.has(requested)) {
     return undefined;
   }
-  const descriptor = model?.capabilities?.optionDescriptors?.find(
+  if (model === undefined) {
+    // No catalogue entry to check against (a probe that failed): pass the
+    // level through and let the CLI reject it rather than silently dropping
+    // the user's choice.
+    return requested as "low" | "medium" | "high" | "xhigh" | "max";
+  }
+  const descriptor = model.capabilities?.optionDescriptors?.find(
     (entry) => entry.id === CLAUDE_OPTION_IDS.effort
   );
-  if (descriptor !== undefined && descriptor.type === "select") {
-    const supported = descriptor.options.some((option) => option.id === requested);
-    if (!supported) {
-      return undefined;
-    }
+  // Absence means "not supported", not "unknown": the haiku row omits every
+  // capability flag (fixtures/claude README observation 15).
+  if (descriptor === undefined || descriptor.type !== "select") {
+    return undefined;
+  }
+  if (!descriptor.options.some((option) => option.id === requested)) {
+    return undefined;
   }
   return requested as "low" | "medium" | "high" | "xhigh" | "max";
 }
