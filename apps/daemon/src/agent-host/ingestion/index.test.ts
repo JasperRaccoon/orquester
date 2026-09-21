@@ -497,6 +497,33 @@ describe("mandatory flush points (§5.6)", () => {
     assert.equal(messageTexts(sink).at(-1)?.id, "reasoning:raw:item-2:segment:1");
   });
 
+  it("a NON-tool item.started leaves the thinking block open", async () => {
+    const { ingestion, sink } = harness();
+    const turn = { turnId: "turn-1", itemId: "item-1" };
+    await ingestion.ingest(
+      runtimeEvent("content.delta", { streamKind: "reasoning_text", delta: "pondering" }, turn)
+    );
+    await ingestion.ingest(
+      // `review_entered` is classified and then dropped (§2/§4.2); it produces
+      // no row, so it must not break a thinking block either.
+      runtimeEvent("item.started", { itemType: "review_entered" }, {
+        turnId: "turn-1",
+        itemId: "review-1"
+      })
+    );
+    assert.equal(sink.messages().length, 0);
+    await ingestion.ingest(
+      runtimeEvent("content.delta", { streamKind: "reasoning_text", delta: " more" }, turn)
+    );
+    await ingestion.flushTurn("t1", "turn-1");
+    assert.equal(
+      messageTexts(sink)
+        .map((m) => m.text)
+        .join(""),
+      "pondering more"
+    );
+  });
+
   it("assistant text closes the thinking block that preceded it", async () => {
     const { ingestion, sink } = harness();
     const turn = { turnId: "turn-1", itemId: "item-1" };
@@ -924,6 +951,28 @@ describe("proposals (§5.1 plan buffer)", () => {
     assert.equal(
       (last.payload.activity.payload as { planMarkdown: string }).planMarkdown,
       "# Plan\n- step one\n"
+    );
+  });
+
+  it("plan deltas are BATCHED: a token-by-token plan is not one row per token", async () => {
+    const { ingestion, sink, timers } = harness();
+    const turn = { turnId: "turn-1" };
+    for (let i = 0; i < 40; i += 1) {
+      await ingestion.ingest(runtimeEvent("turn.proposed.delta", { delta: `w${i} ` }, turn));
+      timers.advance(5);
+      await settle();
+    }
+    await ingestion.drain();
+    const rows = sink
+      .activities()
+      .filter((event) => event.payload.activity.activityKind.startsWith("turn.proposed"));
+    assert.ok(rows.length <= 4, `40 plan tokens became ${rows.length} rows`);
+    // Every row is the whole accumulation so far, under one stable id.
+    assert.equal(new Set(rows.map((row) => row.payload.activity.id)).size, 1);
+    assert.ok(
+      (rows.at(-1)!.payload.activity.payload as { planMarkdown: string }).planMarkdown.endsWith(
+        "w39 "
+      )
     );
   });
 

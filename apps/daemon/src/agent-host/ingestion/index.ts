@@ -21,6 +21,7 @@
  */
 
 import {
+  isToolLifecycleItemType,
   slimActivityPayload,
   type DomainEvent,
   type RuntimeEvent,
@@ -144,8 +145,15 @@ interface ThreadState {
   messageTurn: Map<string, string | null>;
   /** messageId → the last reasoning part index seen (Codex splits traces). */
   reasoningPartIndex: Map<string, number>;
-  /** planId → the accumulated proposal markdown. */
-  plans: Map<string, { text: string; createdAt: string }>;
+  /** planId → the accumulated proposal markdown and the turn it belongs to. */
+  plans: Map<string, { text: string; createdAt: string; turnId: string | null }>;
+  /**
+   * §5.6: plan deltas buffer like assistant and reasoning text. The proposal
+   * row is a single stable id carrying the WHOLE markdown so far, so this
+   * buffer is used only for its 250 ms / 8 KB pacing and its timer — the
+   * accumulated text comes from `plans`.
+   */
+  planPacer: DeltaBufferSet;
   /** taskId → the remembered description, for titling `task.completed`. */
   taskTitles: Map<string, string>;
   /** toolOutput buffer key → the item/stream it belongs to. */
@@ -216,6 +224,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       messageTurn: new Map(),
       reasoningPartIndex: new Map(),
       plans: new Map(),
+      planPacer: undefined as unknown as DeltaBufferSet,
       taskTitles: new Map(),
       outputMeta: new Map(),
       outbox: [],
@@ -238,6 +247,14 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       now,
       onTimerFlush: (flush) => {
         emitToolOutput(threadId, state, flush);
+        void commit(threadId, state);
+      }
+    });
+    state.planPacer = new DeltaBufferSet({
+      timers,
+      now,
+      onTimerFlush: (flush) => {
+        emitBufferedPlan(threadId, state, flush.key, null);
         void commit(threadId, state);
       }
     });
@@ -621,17 +638,39 @@ export function createIngestion(options: IngestionOptions): Ingestion {
   // The proposal buffer (§5.1 `plan_text` / `turn.proposed.*`)
   // -------------------------------------------------------------------------
 
+  /**
+   * Accumulate a proposal delta and report whether §5.6's pacing says it is
+   * time to publish. The row is replace-by-id, so what gets published is the
+   * whole accumulation — the pacer only decides *when*.
+   */
   function appendPlan(
     state: ThreadState,
     planId: string,
     delta: string,
-    createdAt: string
-  ): void {
+    createdAt: string,
+    turnId: string | null
+  ): boolean {
     const existing = state.plans.get(planId);
     state.plans.set(planId, {
       text: `${existing?.text ?? ""}${delta}`,
-      createdAt: existing?.createdAt ?? createdAt
+      createdAt: existing?.createdAt ?? createdAt,
+      turnId: existing?.turnId ?? turnId
     });
+    return state.planPacer.append(planId, delta, createdAt).length > 0;
+  }
+
+  /** Publish the accumulated proposal for `planId`, if there is any. */
+  function emitBufferedPlan(
+    threadId: string,
+    state: ThreadState,
+    planId: string,
+    cause: RuntimeEvent | null
+  ): void {
+    const entry = state.plans.get(planId);
+    if (entry === undefined || entry.text.trim().length === 0) {
+      return;
+    }
+    emitPlanRow(threadId, state, planId, entry, entry.turnId, "turn.proposed.delta", cause);
   }
 
   function emitPlanRow(
@@ -668,6 +707,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
   ): void {
     const entry = state.plans.get(planId);
     state.plans.delete(planId);
+    state.planPacer.discard(planId);
     const text = entry?.text.trim().length ? entry.text : (fallbackMarkdown ?? "");
     if (text.trim().length === 0) {
       return;
@@ -677,7 +717,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       state,
       planId,
       { text, createdAt: entry?.createdAt ?? clock.nowIso() },
-      turnId,
+      turnId ?? entry?.turnId ?? null,
       "turn.proposed.completed",
       cause
     );
@@ -780,9 +820,15 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       finalizeSegment(threadId, state, pauseTurnId, "assistant", { cause: event, occurredAt: now });
     }
 
-    // A tool `item.started` closes the active reasoning segment, or post-tool
+    // A TOOL `item.started` closes the active reasoning segment, or post-tool
     // thinking is appended to a block that already sits above the tool row.
-    if (event.type === "item.started" && eventTurnId !== null) {
+    // Gated on the same predicate the activity row is: a non-tool item never
+    // produces a row, so it must not break a thinking block either.
+    if (
+      event.type === "item.started" &&
+      eventTurnId !== null &&
+      isToolLifecycleItemType(event.payload.itemType)
+    ) {
       finalizeSegment(threadId, state, eventTurnId, "reasoning", {
         cause: event,
         occurredAt: now
@@ -801,10 +847,8 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     // --- proposals --------------------------------------------------------
     if (event.type === "turn.proposed.delta") {
       const planId = proposedPlanIdFromEvent(event, threadId);
-      appendPlan(state, planId, event.payload.delta, now);
-      const entry = state.plans.get(planId);
-      if (entry !== undefined && entry.text.trim().length > 0) {
-        emitPlanRow(threadId, state, planId, entry, eventTurnId, "turn.proposed.delta", event);
+      if (appendPlan(state, planId, event.payload.delta, now, eventTurnId)) {
+        emitBufferedPlan(threadId, state, planId, event);
       }
     }
     if (event.type === "turn.proposed.completed") {
@@ -1016,9 +1060,9 @@ export function createIngestion(options: IngestionOptions): Ingestion {
 
     if (streamKind === "plan_text") {
       const planId = proposedPlanIdFromEvent(event, threadId);
-      appendPlan(state, planId, delta, now);
-      const entry = state.plans.get(planId)!;
-      emitPlanRow(threadId, state, planId, entry, eventTurnId, "turn.proposed.delta", event);
+      if (appendPlan(state, planId, delta, now, eventTurnId)) {
+        emitBufferedPlan(threadId, state, planId, event);
+      }
       return;
     }
 
@@ -1208,6 +1252,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     state.messageTurn.clear();
     state.reasoningPartIndex.clear();
     state.plans.clear();
+    state.planPacer.clear();
     state.taskTitles.clear();
     state.outputMeta.clear();
   }
@@ -1274,6 +1319,10 @@ export function createIngestion(options: IngestionOptions): Ingestion {
             openedAt: state.toolOutput.openedAt(key, clock.nowIso())
           });
         }
+      }
+      for (const planId of state.planPacer.keys()) {
+        state.planPacer.take(planId);
+        emitBufferedPlan(threadId, state, planId, null);
       }
       closeCoalesceWindow(threadId, state);
       await commit(threadId, state);
