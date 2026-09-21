@@ -704,6 +704,214 @@ describe("tool.updated is persisted already slimmed (§5.6)", () => {
   });
 });
 
+describe("the §7.3 badge fields (reasoningKind / messageKind)", () => {
+  const reasoningCases: [
+    "reasoning_text" | "reasoning_summary_text",
+    "text" | "summary"
+  ][] = [
+    ["reasoning_text", "text"],
+    ["reasoning_summary_text", "summary"]
+  ];
+  for (const [streamKind, expected] of reasoningCases) {
+    it(`${streamKind} -> reasoningKind ${expected}`, async () => {
+      const { ingestion, sink } = harness();
+      const turn = { turnId: "turn-1", itemId: "item-1" };
+      await ingestion.ingest(
+        runtimeEvent("content.delta", { streamKind, delta: "thinking" }, turn)
+      );
+      await ingestion.flushTurn("t1", "turn-1");
+      const rows = sink.messages();
+      assert.ok(rows.length >= 2, "a delta and a completion");
+      for (const row of rows) {
+        assert.equal(row.payload.role, "reasoning");
+        assert.equal(row.payload.reasoningKind, expected, "every row must carry the badge");
+        assert.equal(row.payload.messageKind, undefined, "messageKind is assistant-only");
+      }
+    });
+  }
+
+  it("a whole-block reasoning snapshot carries NO reasoningKind", async () => {
+    const { ingestion, sink } = harness();
+    await ingestion.ingest(
+      runtimeEvent(
+        "item.completed",
+        { itemType: "reasoning", detail: "I thought about it" },
+        { turnId: "turn-1", itemId: "item-1" }
+      )
+    );
+    await ingestion.drain();
+    // The stream kind was never observed, so the row renders without a badge
+    // rather than guessing.
+    for (const row of sink.messages()) {
+      assert.equal(row.payload.reasoningKind, undefined);
+    }
+  });
+
+  it("an assistant message defaults to messageKind 'answer'", async () => {
+    const { ingestion, sink } = harness();
+    const turn = { turnId: "turn-1", itemId: "item-1" };
+    await ingestion.ingest(
+      runtimeEvent("content.delta", { streamKind: "assistant_text", delta: "Done." }, turn)
+    );
+    await ingestion.flushTurn("t1", "turn-1");
+    const rows = sink.messages();
+    assert.ok(rows.length >= 2);
+    for (const row of rows) {
+      assert.equal(row.payload.messageKind, "answer");
+      assert.equal(row.payload.reasoningKind, undefined, "reasoningKind is reasoning-only");
+    }
+  });
+
+  const phaseCases: [string | undefined, "answer" | "commentary"][] = [
+    ["commentary", "commentary"],
+    ["COMMENTARY ", "commentary"],
+    ["final_answer", "answer"],
+    ["some real detail text", "answer"],
+    [undefined, "answer"]
+  ];
+  for (const [detail, expected] of phaseCases) {
+    it(`item detail ${JSON.stringify(detail)} -> messageKind ${expected}`, async () => {
+      const { ingestion, sink } = harness();
+      const turn = { turnId: "turn-1", itemId: "item-1" };
+      await ingestion.ingest(
+        runtimeEvent(
+          "item.started",
+          { itemType: "assistant_message", ...(detail !== undefined ? { detail } : {}) },
+          turn
+        )
+      );
+      await ingestion.ingest(
+        runtimeEvent("content.delta", { streamKind: "assistant_text", delta: "text" }, turn)
+      );
+      await ingestion.flushTurn("t1", "turn-1");
+      for (const row of sink.messages()) {
+        assert.equal(row.payload.messageKind, expected);
+      }
+    });
+  }
+
+  it("the phase stamps a message that ALREADY started streaming", async () => {
+    const { ingestion, sink } = harness();
+    const turn = { turnId: "turn-1", itemId: "item-1" };
+    await ingestion.ingest(
+      runtimeEvent(
+        "content.delta",
+        { streamKind: "assistant_text", delta: "I'll read the file next.\n\n" },
+        turn
+      )
+    );
+    assert.equal(sink.messages()[0]?.payload.messageKind, "answer", "not known yet");
+    sink.reset();
+    await ingestion.ingest(
+      runtimeEvent(
+        "item.completed",
+        { itemType: "assistant_message", detail: "commentary" },
+        turn
+      )
+    );
+    await ingestion.drain();
+    const rows = sink.messages();
+    assert.ok(rows.length > 0);
+    for (const row of rows) {
+      assert.equal(row.payload.messageKind, "commentary");
+    }
+  });
+
+  it("a phase-marker detail is metadata, NOT the message text", async () => {
+    const { ingestion, sink } = harness();
+    await ingestion.ingest(
+      runtimeEvent(
+        "item.completed",
+        { itemType: "assistant_message", detail: "commentary" },
+        { turnId: "turn-1", itemId: "item-1" }
+      )
+    );
+    await ingestion.drain();
+    assert.deepEqual(
+      sink.messages().map((row) => row.payload.text),
+      [],
+      "the phase marker must never be rendered as the answer"
+    );
+  });
+
+  it("a real detail still stands in for deltas that never arrived", async () => {
+    const { ingestion, sink } = harness();
+    await ingestion.ingest(
+      runtimeEvent(
+        "item.completed",
+        { itemType: "assistant_message", detail: "the whole answer" },
+        { turnId: "turn-1", itemId: "item-1" }
+      )
+    );
+    await ingestion.drain();
+    assert.equal(sink.messages()[0]?.payload.text, "the whole answer");
+    assert.equal(sink.messages()[0]?.payload.messageKind, "answer");
+  });
+
+  it("commentary on one item does not leak onto the turn's next message", async () => {
+    const { ingestion, sink } = harness();
+    const turn = { turnId: "turn-1" };
+    await ingestion.ingest(
+      runtimeEvent(
+        "item.started",
+        { itemType: "assistant_message", detail: "commentary" },
+        { ...turn, itemId: "item-1" }
+      )
+    );
+    await ingestion.ingest(
+      runtimeEvent("content.delta", { streamKind: "assistant_text", delta: "narration" }, {
+        ...turn,
+        itemId: "item-1"
+      })
+    );
+    await ingestion.ingest(
+      runtimeEvent(
+        "item.completed",
+        { itemType: "assistant_message", detail: "commentary" },
+        { ...turn, itemId: "item-1" }
+      )
+    );
+    await ingestion.ingest(
+      runtimeEvent("content.delta", { streamKind: "assistant_text", delta: "the answer" }, {
+        ...turn,
+        itemId: "item-2"
+      })
+    );
+    await ingestion.flushTurn("t1", "turn-1");
+    const byMessage = new Map<string, string | undefined>();
+    for (const row of sink.messages()) {
+      byMessage.set(row.payload.messageId, row.payload.messageKind);
+    }
+    assert.equal(byMessage.get("assistant:item-1"), "commentary");
+    assert.equal(byMessage.get("assistant:item-2"), "answer");
+  });
+
+  it("a dead session forgets the remembered phases", async () => {
+    const { ingestion, sink } = harness();
+    await ingestion.ingest(
+      runtimeEvent(
+        "item.started",
+        { itemType: "assistant_message", detail: "commentary" },
+        { turnId: "turn-1", itemId: "item-1" }
+      )
+    );
+    await ingestion.ingest(
+      runtimeEvent("session.exited", { recoverable: true, exitKind: "graceful" })
+    );
+    sink.reset();
+    await ingestion.ingest(
+      runtimeEvent("content.delta", { streamKind: "assistant_text", delta: "fresh" }, {
+        turnId: "turn-2",
+        itemId: "item-1"
+      })
+    );
+    await ingestion.flushTurn("t1", "turn-2");
+    for (const row of sink.messages()) {
+      assert.equal(row.payload.messageKind, "answer");
+    }
+  });
+});
+
 describe("account events are provider-snapshot facts (§5.1)", () => {
   it("writes nothing to the thread and hands them to the host instead", async () => {
     const routed: string[] = [];
