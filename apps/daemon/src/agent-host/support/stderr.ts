@@ -68,12 +68,6 @@ const BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi;
  * `sk-`, `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`, and Slack's `xox?-` shapes. The
  * length floors keep a bare `sk-` or a prose "ghp_" from being masked.
  */
-/**
- * A Grok/ACP pairing URL — `https://…/pair#<token>`. *T3:
- * `apps/server/src/provider/acp/AcpStderr.ts:7` (`PAIRING_URL_PATTERN`).*
- */
-const PAIRING_URL_RE = /https?:\/\/\S*\/pair#\S*/gi;
-
 const TOKEN_SHAPE_RE =
   /\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{16,}|xox[abprs]-[A-Za-z0-9-]{8,})/g;
 
@@ -119,7 +113,6 @@ export function redactStderr(value: string, options: RedactOptions = {}): string
   out = out.replace(TOKEN_SHAPE_RE, "[redacted]");
   // §4.5 Grok names it explicitly: a pairing URL is a bearer credential, and
   // the one it prints on stderr is the whole handshake.
-  out = out.replace(PAIRING_URL_RE, "[pairing-url]");
 
   // Exact host-injected secrets last, so a value that also matched a shape
   // pattern is already gone and this only catches what the shapes cannot see.
