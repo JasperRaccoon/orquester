@@ -15,7 +15,7 @@ import { describe, it } from "node:test";
 import type { RuntimeEvent } from "@orquester/api/agent-chat";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 
-import { ClaudeNormalizer } from "./normalize.ts";
+import { ClaudeNormalizer, readPreservedUuids } from "./normalize.ts";
 import {
   countingIds,
   eventTypes,
@@ -212,7 +212,10 @@ describe("claude normaliser — fixture replay", () => {
     const proposed = allOf(events, "turn.proposed.completed");
     assert.equal(proposed.length, 1, "the plan must be captured exactly once");
     assert.ok(proposed[0]!.payload.planMarkdown.includes("# Plan"));
-    assert.ok(proposed[0]!.payload.planMarkdown.includes("planFilePath:"));
+    // `planFilePath` is its OWN field: the markdown is user-facing content the
+    // plan card offers for copy and download, so it is never edited.
+    assert.ok(proposed[0]!.payload.planFilePath?.endsWith(".md"));
+    assert.ok(!proposed[0]!.payload.planMarkdown.includes("planFilePath"));
     // ExitPlanMode never becomes an approval card.
     assert.ok(
       !allOf(events, "request.opened").some((event) =>
@@ -523,5 +526,42 @@ describe("claude normaliser — captured message vocabulary", () => {
   it("tags a message the same way the replay harness does", () => {
     assert.equal(sdkMessageTag({ type: "system", subtype: "init" }), "system/init");
     assert.equal(sdkMessageTag({ type: "assistant" }), "assistant");
+  });
+});
+
+describe("claude normaliser — compaction bookkeeping", () => {
+  it("records the uuids a compaction preserved", () => {
+    const normalizer = new ClaudeNormalizer({
+      threadId: "t",
+      clock: fixedClock(),
+      ids: countingIds()
+    });
+    assert.equal(normalizer.preservedMessageUuids, undefined);
+    normalizer.handleMessage({
+      type: "system",
+      subtype: "compact_boundary",
+      compact_metadata: {
+        trigger: "manual",
+        pre_tokens: 100,
+        post_tokens: 10,
+        preserved_messages: { anchor_uuid: "a", uuids: ["a"], all_uuids: ["a", "b"] }
+      },
+      session_id: "s",
+      uuid: "u"
+    } as unknown as SDKMessage);
+    // Without this the "a compaction in between" refusal of §4.5 has nothing
+    // to check and a doomed rewind creates an orphan fork first.
+    assert.deepEqual(normalizer.preservedMessageUuids, ["a", "b"]);
+  });
+
+  it("prefers all_uuids, falls back to uuids, and stays undefined otherwise", () => {
+    assert.deepEqual(
+      readPreservedUuids({ preserved_messages: { all_uuids: ["x"], uuids: ["y"] } }),
+      ["x"]
+    );
+    assert.deepEqual(readPreservedUuids({ preserved_messages: { uuids: ["y"] } }), ["y"]);
+    assert.equal(readPreservedUuids({ preserved_messages: {} }), undefined);
+    assert.equal(readPreservedUuids({}), undefined);
+    assert.equal(readPreservedUuids(undefined), undefined);
   });
 });

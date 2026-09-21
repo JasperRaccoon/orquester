@@ -20,6 +20,7 @@ import {
 } from "./decisions.ts";
 import {
   CLAUDE_NEVER_SET_OPTIONS,
+  CLAUDE_SESSION_ALLOWED_DESPITE_SPEC,
   CLAUDE_RUNTIME_INSTRUCTIONS,
   buildClaudeProbeOptions,
   buildClaudeQueryOptions,
@@ -135,12 +136,71 @@ describe("claude launch — the options object (§4.5)", () => {
     assert.equal(options.resume, undefined);
   });
 
-  it("never sets the forbidden options", () => {
+  it("never sets the forbidden options, with one declared exception", () => {
     const { options } = build("full-access", { model: "default" });
     const record = options as unknown as Record<string, unknown>;
+    const allowed = new Set<string>(CLAUDE_SESSION_ALLOWED_DESPITE_SPEC);
+    // The constant is the SPEC's list, verbatim; the exception is named
+    // separately so a regression on any other entry still fails here.
+    assert.ok(CLAUDE_NEVER_SET_OPTIONS.includes("stderr"));
     for (const key of CLAUDE_NEVER_SET_OPTIONS) {
+      if (allowed.has(key)) {
+        continue;
+      }
       assert.equal(record[key], undefined, `${key} must never be set`);
     }
+    // …and the exception really is only stderr, which §3.1 requires captured.
+    assert.deepEqual([...allowed], ["stderr"]);
+    const withCapture = buildClaudeQueryOptions({
+      cwd: "/work",
+      executablePath: "/bin/claude",
+      env: {},
+      runtimeMode: "approval-required",
+      models: MODELS,
+      attachmentsDir: "/a",
+      canUseTool: noopCanUseTool,
+      stderr: () => {}
+    });
+    assert.equal(typeof withCapture.options.stderr, "function");
+  });
+
+  it("sends resume OR sessionId, never both", () => {
+    const both = buildClaudeQueryOptions({
+      cwd: "/work",
+      executablePath: "/bin/claude",
+      env: {},
+      runtimeMode: "approval-required",
+      models: MODELS,
+      attachmentsDir: "/a",
+      canUseTool: noopCanUseTool,
+      resume: "b46b654b-57bb-40e4-8c82-d3536bd06a28",
+      sessionId: "11111111-2222-3333-4444-555555555555"
+    });
+    assert.equal(both.options.resume, "b46b654b-57bb-40e4-8c82-d3536bd06a28");
+    assert.equal(both.options.sessionId, undefined);
+  });
+
+  it("ultracode is xhigh effort PLUS the setting", () => {
+    const { options, effort } = build("approval-required", {
+      model: "default",
+      options: [
+        { id: "ultracode", value: true },
+        { id: "effort", value: "low" }
+      ]
+    });
+    assert.equal(options.effort, "xhigh");
+    assert.equal(effort, "xhigh");
+    assert.equal((options.settings as Record<string, unknown>).ultracode, true);
+
+    // Not offered on a model without xhigh support, so it cannot be set there.
+    const haiku = MODELS.find((entry) => entry.slug === "haiku")!;
+    assert.equal(haiku.capabilities, null);
+    const off = build("approval-required", {
+      model: "haiku",
+      options: [{ id: "ultracode", value: true }]
+    });
+    assert.equal(off.options.effort, undefined);
+    assert.equal((off.options.settings as Record<string, unknown> | undefined)?.ultracode, undefined);
   });
 
   it("does not leave the model empty when none is selected", () => {

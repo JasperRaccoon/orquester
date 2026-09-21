@@ -103,9 +103,15 @@ export interface SendTurnResult {
  *   requests inline on its read loop is blocked by an open prompt, so
  *   cancelling after the interrupt RPC deadlocks Stop exactly when a card is
  *   open (§3.1).
- * - **Interrupt is turn-scoped.** `interruptTurn` carries the turn id the user
- *   pressed Stop on and is a no-op when that turn is no longer the active one,
- *   so a Stop that races a settling turn cannot kill the next one.
+ * - **Interrupt has two scopes.** With a `turnId` it is turn-scoped: it
+ *   carries the turn the user pressed Stop on and is a no-op when that turn
+ *   is no longer the active one, so a Stop that races a settling turn cannot
+ *   kill the next one. **Without** one it is session-scoped and is valid
+ *   with no turn running (§6.2): it is the only way to stop background
+ *   work, and it stops ALL of it — every live subagent, background shell
+ *   and watch loop — closing each with `task.completed {status:"stopped"}`
+ *   so the roster and the liveness registry clear. Returning early there
+ *   leaves the client's "Stopping…" latch set forever.
  * - **Lazy recovery.** `sendTurn` on a thread with no live session starts one
  *   from the persisted cursor first. A crashed, OOM-killed or restarted
  *   session is indistinguishable from a fresh one.

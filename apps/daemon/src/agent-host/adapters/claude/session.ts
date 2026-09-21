@@ -917,15 +917,39 @@ export class ClaudeSession {
   }
 
   /**
-   * §4.1: turn-scoped, and a no-op when that turn is no longer the active one,
-   * so a Stop that races a settling turn cannot kill the next one.
+   * Interrupt has **two** scopes.
+   *
+   * §4.1, turn-scoped: an interrupt that NAMES a turn is a no-op when that turn
+   * is no longer the active one, so a Stop that races a settling turn cannot
+   * kill the next one.
+   *
+   * §6.2, session-scoped: *"`/interrupt` is also the only way to stop
+   * background work, and it stops all of it. It is addressed to the session,
+   * not to a turn, so it is **valid with no turn running**"*. The client omits
+   * `turnId` whenever the session is not `running`, and this must then kill
+   * every live subagent, background shell and watch loop. Returning early here
+   * left the fleet running and the client's "Stopping…" latch set forever,
+   * because `backgroundLiveness` never dropped to `null`.
+   *
+   * T3 does the same by construction: its `interruptTurn` **is**
+   * `stopSessionInternal` (`ClaudeAdapter.ts:5289-5297`), i.e. unconditional.
    */
   async interruptTurn(turnId?: string): Promise<void> {
     if (this.closed) {
       return;
     }
     const active = this.normalizer.turnState?.turnId;
-    if (active === undefined || (turnId !== undefined && turnId !== active)) {
+    if (turnId !== undefined && turnId !== active) {
+      // Named a turn that is no longer running: deliberately nothing.
+      return;
+    }
+    if (active === undefined) {
+      // Session-scoped Stop with no running turn. The CLI keeps subagents,
+      // background shells and watch loops alive inside its own process after a
+      // turn settles, and closing the query is the only thing that reaches
+      // them — `teardown` closes every live task `stopped` on the way out, so
+      // the roster and the liveness registry clear.
+      await this.stop("Stop: background work stopped.");
       return;
     }
 

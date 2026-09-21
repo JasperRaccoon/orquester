@@ -276,6 +276,10 @@ export async function createClaudeAdapterWith(
       models: models(),
       executablePath,
       env,
+      // The registry entry's own flags: `--permission-mode` and
+      // `--dangerously-skip-permissions` are folded into `permissionMode` so
+      // argv order cannot decide which wins (§4.5).
+      ...(input.launchArgs !== undefined ? { launchArgs: input.launchArgs } : {}),
       ...(cursor !== undefined ? { resumeCursor: cursor } : {}),
       scopedLimitNames,
       emit,
