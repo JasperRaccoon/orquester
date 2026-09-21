@@ -25,6 +25,7 @@ import {
   DEFAULT_RUNTIME_MODE,
   MAX_TURN_FILE_BYTES,
   MAX_TURN_IMAGE_BYTES,
+  isHistoricalRuntimeEvent,
   SETTLED_TURN_STATES,
   slimActivityPayload,
   type AgentAdapterId,
@@ -78,6 +79,7 @@ import {
   CheckpointTurnRangeError
 } from "../checkpoints/index.ts";
 import { projectSnapshotActivities } from "../ingestion/index.ts";
+import { AGENT_HOST_DEADLINES, withDeadline } from "../support/deadline.ts";
 import { createEventBuilder, describeFailure, makeActivity, type BuildEvent } from "./events.ts";
 import {
   AgentChatCommandError,
@@ -267,6 +269,15 @@ interface ThreadRuntime {
   /** The §6.1 launcher env, loaded once with the thread. */
   launch: ThreadLaunchConfig | null;
   /**
+   * E6: this thread resumes a conversation and has nothing of its own yet, so
+   * the provider's history is still owed.
+   *
+   * Decided when the thread is loaded or created — NOT at session start: by
+   * then the `/turn` that triggered the start has already appended its user
+   * message, and an items-based test would never fire.
+   */
+  historyPending: boolean;
+  /**
    * Target of the most recent `thread.reverted`, or null.
    *
    * A capture that lands after a revert belongs to a turn the revert
@@ -427,6 +438,16 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   const { store, ingestion, checkpoints, liveness, snapshots, logger } = options;
 
   const runtimes = new Map<string, ThreadRuntime>();
+  /**
+   * §6.1 / E5: which thread owns a provider conversation.
+   *
+   * Two tabs resuming one provider thread would advance one cursor from two
+   * processes — the invariant §3.1 spends a whole paragraph on. The provider's
+   * own id is only knowable once a session announces it (`thread.started`), so
+   * the map is fed from there and cleared when the thread stops or is deleted.
+   * In memory only: after a host restart nothing is live, which is correct.
+   */
+  const providerThreadOwners = new Map<string, string>();
   /** In-flight `loadRuntime` calls, memoised so two never build two runtimes. */
   const loadingRuntimes = new Map<string, Promise<ThreadRuntime>>();
   const gate: Deferred<void> = createDeferred<void>();
@@ -531,6 +552,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       subscribers: new Set(),
       parseError: store.threadError?.(threadId) ?? null,
       launch,
+      // A resumed thread with no timeline of its own still owes its history —
+      // including after a host restart, when nothing replayed it the first time.
+      historyPending:
+        (state.items ?? []).length === 0 && state.head?.session.resumeCursor !== undefined,
       revertedTo: tail.events.reduce<number | null>(
         (target, event) =>
           event.type === "thread.reverted" ? event.payload.turnCount : target,
@@ -851,6 +876,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       ...(resumeCursor !== undefined ? { resumeCursor } : {})
     });
     runtime.bound = { ...desired, session };
+    // E6: a resumed thread whose log is empty must show the conversation it is
+    // resuming. Before the session is announced, not after — otherwise the
+    // first live frames interleave with history and the timeline is scrambled.
+    if (resumeCursor !== undefined) {
+      await projectHistoryIfEmpty(runtime, adapter);
+    }
     await persistSession(runtime, {
       status: mapSessionStatus(session.status, pendingTurnStart),
       activeTurnId: session.activeTurnId ?? null,
@@ -864,6 +895,57 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     // Forked off the session start so it never delays a turn (§4.6.4).
     snapshots.ensureWorkspaceSnapshot(head.adapter, head.cwd);
     return session;
+  };
+
+  /**
+   * Replay the provider's own history into the thread, once, for a thread that
+   * resumes from a cursor and has nothing of its own (§4.1 `readThread`).
+   *
+   * Everything it produces is stamped `raw.source: "host.history"`, so it is
+   * persisted and rendered but ignored by anything that reacts to new work.
+   * Failure is never fatal: a thread that cannot show its history is still a
+   * usable thread, so the reason lands as one activity row.
+   */
+  const projectHistoryIfEmpty = async (
+    runtime: ThreadRuntime,
+    adapter: AgentAdapter
+  ): Promise<void> => {
+    if (!runtime.historyPending) return;
+    runtime.historyPending = false;
+    if (!adapter.projectHistory) {
+      await appendActivity(runtime, {
+        kind: "runtime.warning",
+        tone: "info",
+        summary: "History not available for this provider",
+        detail:
+          "This conversation was resumed, but the agent cannot replay what was said before. New messages appear here as usual."
+      });
+      return;
+    }
+    try {
+      const snapshot = await withDeadline(() => adapter.readThread(runtime.id), {
+        timeoutMs: AGENT_HOST_DEADLINES.sessionOpenMs,
+        label: `history:${adapter.id}`
+      });
+      const events = adapter.projectHistory(snapshot);
+      for (const event of events) {
+        if (!isHistoricalRuntimeEvent(event)) {
+          logger.warn("agent-host: a projected history event was not marked historical", {
+            threadId: runtime.id,
+            type: event.type
+          });
+        }
+        await ingestion.ingest(event);
+      }
+      await ingestion.flushThread(runtime.id);
+    } catch (error) {
+      await appendActivity(runtime, {
+        kind: "runtime.warning",
+        tone: "info",
+        summary: "History not available for this provider",
+        detail: describeFailure(error)
+      });
+    }
   };
 
   /**
@@ -963,6 +1045,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       }
     }
     runtime.bound = null;
+    releaseProviderThreads(runtime.id);
     liveness.clear(runtime.id);
     await ingestion.flushThread(runtime.id).catch(() => undefined);
   };
@@ -1869,6 +1952,27 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
 
       let resumeCursor: unknown;
       if (request.resume !== undefined) {
+        // E5: the conversation may already be open in another tab. Resuming it
+        // there too would advance one provider cursor from two processes, and
+        // what the user actually saw was a silent FRESH thread that remembered
+        // nothing. Refuse by name unless the adapter can fork it.
+        const owner = ownerOfProviderThread(request.resume.conversationId);
+        if (owner !== null && owner !== threadId) {
+          const canFork =
+            options.adapters.get(adapterId)?.capabilities.supportsSessionFork === true;
+          if (!canFork) {
+            const ownerTitle = headOf(runtimes.get(owner)!)?.title ?? owner;
+            throw new AgentChatCommandError(
+              "COMMAND_REJECTED",
+              `That conversation is already open in "${ownerTitle}". Close that tab first, or open a new conversation.`,
+              { code: "RESUME_UNAVAILABLE", ownerThreadId: owner }
+            );
+          }
+          logger.info("agent-host: forking a conversation already open elsewhere", {
+            threadId,
+            ownerThreadId: owner
+          });
+        }
         // §6.1: refused at creation rather than opening a fresh thread the user
         // believes is their old one. The only route that answers this code.
         if (!isUsableConversationId(request.resume.conversationId)) {
@@ -1918,6 +2022,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         logger.warn(`agent-host: failed to persist the launch config for ${threadId}`, error);
       });
       await runtime.commands.run(() => commit(runtime, events));
+      runtime.historyPending = resumeCursor !== undefined;
       await saveHeadNow(runtime);
       return requireHead(runtime);
     });
@@ -1994,6 +2099,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       runtime.subscribers.clear();
       runtime.watchdog?.stop();
       await ingestion.forget(threadId);
+      releaseProviderThreads(threadId);
       runtimes.delete(threadId);
       loadingRuntimes.delete(threadId);
     });
@@ -2398,6 +2504,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
               runtime.bound = null;
             }
             trackSessionCursor(runtime, event);
+            if (event.type === "thread.started") {
+              providerThreadOwners.set(event.payload.providerThreadId, event.threadId);
+            }
           }
           // `auth.status` and `account.rate-limits.updated` are not thread
           // facts: ingestion hands them to `onAccountEvent`, which routes them
@@ -2424,6 +2533,31 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       if (!stopped) {
         logger.error(`agent-host: ${adapter.id} event stream failed`, error);
       }
+    }
+  };
+
+  /** The thread that currently owns a provider conversation, if any is live. */
+  const ownerOfProviderThread = (providerThreadId: string): string | null => {
+    const owner = providerThreadOwners.get(providerThreadId);
+    if (owner === undefined) return null;
+    // An owner whose session is gone no longer owns anything.
+    const runtime = runtimes.get(owner);
+    const head = runtime ? headOf(runtime) : null;
+    const live =
+      head !== null &&
+      head.session.status !== "stopped" &&
+      head.session.status !== "idle" &&
+      (options.adapters.get(head.adapter)?.hasSession(owner) ?? false);
+    if (!live) {
+      providerThreadOwners.delete(providerThreadId);
+      return null;
+    }
+    return owner;
+  };
+
+  const releaseProviderThreads = (threadId: string): void => {
+    for (const [providerThreadId, owner] of [...providerThreadOwners]) {
+      if (owner === threadId) providerThreadOwners.delete(providerThreadId);
     }
   };
 

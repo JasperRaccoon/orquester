@@ -191,6 +191,28 @@ export interface AgentAdapter {
    */
   refreshSnapshot(input?: { cwd?: string; home?: AccountHome }): Promise<ProviderSnapshot>;
 
+  /**
+   * Turn this adapter's own `readThread` result into the normalised union, so
+   * a resumed thread shows the conversation it is resuming (§4.1).
+   *
+   * `ThreadSnapshot.turns[].items` is opaque by contract — only the adapter
+   * knows its provider's shape — so only the adapter can project it. The host
+   * calls this once, at session start, when a thread resumes from a cursor and
+   * has no items of its own; everything returned is stamped
+   * `raw.source: "host.history"` so ingestion persists it while the surfaces
+   * that react to new work ignore it.
+   *
+   * Shape the host expects per historical turn: one `turn.started`, the turn's
+   * `item.completed` rows (`user_message` / `assistant_message` with their
+   * final text, tool items under their tool-lifecycle item type), then one
+   * `turn.completed {state: "completed"}` whose `tokenUsage` is `unavailable`
+   * — history carries no live accounting.
+   *
+   * Optional: an adapter that cannot read its own history omits it, and the
+   * host says so in the timeline rather than rendering an empty thread.
+   */
+  projectHistory?(snapshot: ThreadSnapshot): RuntimeEvent[];
+
   /** The adapter's canonical event stream. One consumer: the host's ingestion. */
   readonly events: AsyncIterable<RuntimeEvent>;
 }
