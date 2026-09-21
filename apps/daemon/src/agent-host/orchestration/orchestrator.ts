@@ -909,6 +909,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   const sendTurnEffect = async (runtime: ThreadRuntime, turn: QueuedTurn): Promise<void> => {
     const head = headOf(runtime);
     if (!head) return;
+    // The pre-turn baseline, BEFORE the session is ensured and before the
+    // provider is asked (§5.4; T3 captures it from the domain turn-start for
+    // the same reason). Waiting on `turn.started` would fold everything the
+    // agent writes in the meantime — and anything a provider writes on session
+    // start — into the baseline, and the turn's numstat would under-report it.
+    await captureBaseline(runtime);
     try {
       await ensureSession(runtime, { pendingTurnStart: true });
     } catch (error) {
@@ -2096,15 +2102,23 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     });
   };
 
-  const captureBaseline = (runtime: ThreadRuntime): void => {
+  /**
+   * Awaitable on purpose (§5.4, R5 #6): the baseline must be "the tree as it
+   * was before the turn", so the `/turn` dispatch path waits for it. The
+   * `turn.started` call site stays fire-and-forget — by then it is only the
+   * idempotent backstop, and `checkpoints.captureBaseline` answers `null`
+   * without touching the tree once the ref exists.
+   */
+  const captureBaseline = (runtime: ThreadRuntime, turnId?: string | null): Promise<void> => {
     const head = headOf(runtime);
-    if (!head) return;
-    void runtime.captures
+    if (!head) return Promise.resolve();
+    return runtime.captures
       .run(async () => {
         const result = await checkpoints.captureBaseline({
           threadId: runtime.id,
           cwd: head.cwd,
-          checkpoints: runtime.state.checkpoints ?? []
+          checkpoints: runtime.state.checkpoints ?? [],
+          ...(turnId === undefined ? {} : { turnId })
         });
         // A non-git project skips silently — and stops the ingestion
         // placeholder of §5.4 being written for it at all.
@@ -2183,7 +2197,11 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
             // After ingestion, so the fold already holds the turn row the
             // capture reads its `assistantMessageId` from.
             if (event.type === "turn.started") {
-              captureBaseline(runtime);
+              // Backstop for turns the host did not dispatch itself (a
+              // continuation, an adapter-initiated turn). The turn id is
+              // recorded with it, so a stale abort for another turn cannot
+              // mint a checkpoint later (§5.4).
+              void captureBaseline(runtime, event.turnId ?? null);
             } else if (event.type === "turn.completed" || event.type === "turn.aborted") {
               captureTurnEnd(runtime, event.turnId ?? null);
             }
