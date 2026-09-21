@@ -26,6 +26,15 @@ export type RuntimeEventRawSource =
   | "claude.sdk.permission"
   | "codex.app-server.notification"
   | "codex.app-server.request"
+  /**
+   * **Replayed history, not live traffic** — a turn read back out-of-band from
+   * the provider's own transcript on resume (§4.5 `readThread`, §7.3). A row
+   * carrying this claims no token usage and describes an already-settled turn,
+   * so nothing downstream may treat it as progress.
+   *
+   * *Added in the fix wave for E2E finding E6.*
+   */
+  | "codex.app-server.history"
   | "opencode.sdk.event"
   | "acp.jsonrpc"
   | `acp.${string}.extension`;

@@ -170,6 +170,21 @@ export interface AgentAdapter {
   readThread(threadId: string): Promise<ThreadSnapshot>;
   rollbackThread(threadId: string, numTurns: number): Promise<ThreadSnapshot>;
 
+  /**
+   * Translate a {@link readThread} result into the events §7.3 renders, so a
+   * RESUMED thread does not open as a blank page (E2E finding E6).
+   *
+   * `ThreadSnapshot.turns[].items` is **opaque by contract** — only the
+   * adapter that produced it can read it — which is why the projection lives
+   * behind the adapter rather than in the host.
+   *
+   * Optional: an adapter whose provider cannot hand back a transcript simply
+   * omits it, and the host falls back to an empty timeline exactly as today.
+   * Every event it returns is already settled and claims no token usage; the
+   * `raw.source` says "history", never live traffic.
+   */
+  projectHistory?(snapshot: ThreadSnapshot): RuntimeEvent[];
+
   listSessions(): ProviderSession[];
   hasSession(threadId: string): boolean;
   stopSession(threadId: string): Promise<void>;
