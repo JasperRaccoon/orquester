@@ -10,7 +10,7 @@ const base = { eventId: "e", threadId: "t1", createdAt: "1970-01-01T00:00:00.000
 const task = (
   type: "task.started" | "task.progress" | "task.updated" | "task.completed",
   payload: Record<string, unknown>
-): RuntimeEvent => ({ ...base, type, payload } as RuntimeEvent);
+): RuntimeEvent => ({ ...base, type, payload }) as unknown as RuntimeEvent;
 
 describe("background liveness registry (§3.1)", () => {
   it("is null for an untouched thread", () => {
@@ -77,7 +77,7 @@ describe("background liveness registry (§3.1)", () => {
       ...base,
       type: "session.exited",
       payload: { recoverable: false, exitKind: "error" }
-    } as RuntimeEvent);
+    } as unknown as RuntimeEvent);
     assert.equal(registry.liveness("t1"), null);
   });
 

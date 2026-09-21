@@ -32,7 +32,6 @@ import {
   type TestTimers
 } from "./fakes.ts";
 import { createScriptedAdapter, type ScriptedAdapter } from "./scripted-adapter.ts";
-import { TEST_FOLD_OPS } from "./test-fold.ts";
 
 export interface TestHostOptions {
   adapters?: Partial<Record<AgentAdapterId, ScriptedAdapter>>;
@@ -135,7 +134,6 @@ export function createTestHost(options: TestHostOptions = {}): TestHost {
     ...(options.minimumVersions ? { minimumVersions: options.minimumVersions } : {}),
     clock,
     ids,
-    fold: TEST_FOLD_OPS,
     setTimer: (fn, ms) => timers.setTimer(fn, ms),
     clearTimer: (handle) => timers.clearTimer(handle)
   });

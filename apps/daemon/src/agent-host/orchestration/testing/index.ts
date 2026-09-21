@@ -28,5 +28,4 @@ export {
   type TestClock,
   type TestTimers
 } from "./fakes.ts";
-export { TEST_FOLD_OPS } from "./test-fold.ts";
 export { createTestHost, type TestHost, type TestHostOptions } from "./harness.ts";

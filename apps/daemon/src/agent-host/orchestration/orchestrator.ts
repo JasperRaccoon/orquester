@@ -59,12 +59,17 @@ import {
 } from "../host-protocol.ts";
 import type {
   AppendableDomainEvent,
+  CaptureResult,
   CheckpointService,
   Ingestion,
   LivenessRegistry,
   ProviderSnapshotRegistry,
   ThreadStore
 } from "../services.ts";
+import {
+  CheckpointRefUnavailableError,
+  CheckpointTurnRangeError
+} from "../checkpoints/index.ts";
 import { createEventBuilder, describeFailure, makeActivity, type BuildEvent } from "./events.ts";
 import {
   AgentChatCommandError,
@@ -180,6 +185,11 @@ interface ThreadRuntime {
   commands: SerialQueue;
   /** Provider work, one at a time (§3.1 "one command at a time"). */
   effects: SerialQueue;
+  /**
+   * Checkpoint capture, on its own queue: git work must never sit in front of
+   * an interrupt, and a capture or diff failure never fails the turn (§5.4).
+   */
+  captures: SerialQueue;
   state: ThreadFoldState;
   /**
    * `continueAfterRestart` is head-only state: no domain event carries it, so
@@ -337,6 +347,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       id: threadId,
       commands: createSerialQueue(),
       effects: createSerialQueue(),
+      captures: createSerialQueue(),
       state,
       continueAfterRestart: persistedHead?.continueAfterRestart,
       eventsSinceHeadSave: 0,
@@ -1728,14 +1739,26 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         return null;
       }
       const fromTurnCount = Math.max(0, turnCount - 1);
-      const diff = await checkpoints.readTurnDiff({
-        threadId,
-        cwd: head.cwd,
-        fromTurnCount,
-        toTurnCount: turnCount,
-        ignoreWhitespace: diffOptions.ignoreWhitespace ?? true
-      });
-      return { fromTurnCount, toTurnCount: turnCount, diff };
+      try {
+        const diff = await checkpoints.readTurnDiff({
+          threadId,
+          cwd: head.cwd,
+          fromTurnCount,
+          toTurnCount: turnCount,
+          ignoreWhitespace: diffOptions.ignoreWhitespace ?? true
+        });
+        return { fromTurnCount, toTurnCount: turnCount, diff };
+      } catch (error) {
+        // A range the checkpoints cannot serve is a 404, not a 500: the ref may
+        // have been pruned by a revert between the read and the request (§5.4).
+        if (
+          error instanceof CheckpointTurnRangeError ||
+          error instanceof CheckpointRefUnavailableError
+        ) {
+          return null;
+        }
+        throw error;
+      }
     });
 
   const summary = (threadId: string): AgentChatSessionSummaryFields | null => {
@@ -1776,6 +1799,85 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   };
 
   // -------------------------------------------------------------------------
+  // Checkpoints (§5.4) — driven off the runtime turn boundary
+  // -------------------------------------------------------------------------
+
+  /**
+   * One activity per capture: `checkpoint.captured` when the ref landed clean,
+   * `checkpoint.capture.failed` when the capture failed **or** only the diff
+   * summary was unavailable. Never fails the turn (§5.4).
+   */
+  const appendCaptureOutcome = async (
+    runtime: ThreadRuntime,
+    result: CaptureResult,
+    turnId: string | null
+  ): Promise<void> => {
+    const failed = result.status === "error" || result.detail !== undefined;
+    await appendActivity(runtime, {
+      kind: failed ? "checkpoint.capture.failed" : "checkpoint.captured",
+      summary: failed ? "Checkpoint capture failed" : "Checkpoint captured",
+      tone: failed ? "error" : "info",
+      ...(result.detail !== undefined ? { detail: result.detail } : {}),
+      turnId,
+      payload: { turnCount: result.turnCount, ref: result.ref, status: result.status }
+    });
+  };
+
+  const captureBaseline = (runtime: ThreadRuntime): void => {
+    const head = headOf(runtime);
+    if (!head) return;
+    void runtime.captures
+      .run(async () => {
+        const result = await checkpoints.captureBaseline({
+          threadId: runtime.id,
+          cwd: head.cwd,
+          checkpoints: runtime.state.checkpoints ?? []
+        });
+        // A non-git project skips silently.
+        if (!result) return;
+        if (result.status === "error" || result.detail !== undefined) {
+          await appendCaptureOutcome(runtime, result, currentSession(runtime).activeTurnId);
+        }
+      })
+      .catch((error: unknown) => {
+        logger.warn(`agent-host: baseline capture failed for ${runtime.id}`, error);
+      });
+  };
+
+  const captureTurnEnd = (runtime: ThreadRuntime, turnId: string | null): void => {
+    const head = headOf(runtime);
+    if (!head) return;
+    void runtime.captures
+      .run(async () => {
+        const turn = (runtime.state.turns ?? []).find((entry) => entry.turnId === turnId);
+        const summary = await checkpoints.captureTurnEnd({
+          threadId: runtime.id,
+          cwd: head.cwd,
+          turnId,
+          assistantMessageId: turn?.assistantMessageId ?? null,
+          checkpoints: runtime.state.checkpoints ?? [],
+          activeTurnId: currentSession(runtime).activeTurnId
+        });
+        if (!summary) return;
+        await append(runtime, [
+          buildEvent(runtime.id, "thread.turn-diff-completed", {
+            turnCount: summary.turnCount,
+            turnId: summary.turnId,
+            ref: summary.ref,
+            status: summary.status,
+            files: summary.files,
+            assistantMessageId: summary.assistantMessageId,
+            completedAt: summary.completedAt
+          })
+        ]);
+        await appendCaptureOutcome(runtime, summary, turnId);
+      })
+      .catch((error: unknown) => {
+        logger.warn(`agent-host: turn-end capture failed for ${runtime.id}`, error);
+      });
+  };
+
+  // -------------------------------------------------------------------------
   // Runtime event consumption
   // -------------------------------------------------------------------------
 
@@ -1797,6 +1899,15 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           }
           snapshots.applyUsageLimits(adapter.id, event);
           await ingestion.ingest(event);
+          if (runtime) {
+            // After ingestion, so the fold already holds the turn row the
+            // capture reads its `assistantMessageId` from.
+            if (event.type === "turn.started") {
+              captureBaseline(runtime);
+            } else if (event.type === "turn.completed" || event.type === "turn.aborted") {
+              captureTurnEnd(runtime, event.turnId ?? null);
+            }
+          }
         } catch (error) {
           logger.error("agent-host: failed to ingest a runtime event", error);
         }
@@ -2003,11 +2114,13 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     for (const runtime of [...runtimes.values()]) {
       await runtime.commands.drain();
       await runtime.effects.drain();
+      await runtime.captures.drain();
       await runtime.commands.drain();
     }
     await ingestion.drain();
     await store.drain();
     for (const runtime of [...runtimes.values()]) {
+      await runtime.captures.drain();
       await runtime.commands.drain();
     }
   };

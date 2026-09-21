@@ -447,9 +447,9 @@ describe("orchestrator — compaction (§3.4)", () => {
     ]);
 
     // Hold the compaction open so the next /turn genuinely lands during it.
-    let releaseCompact: (() => void) | null = null;
+    let releaseCompact: () => void = () => undefined;
     const compactGate = new Promise<void>((resolve) => {
-      releaseCompact = resolve;
+      releaseCompact = () => resolve();
     });
     const originalCompact = host.adapter.compact.bind(host.adapter);
     host.adapter.compact = async (id: string) => {
@@ -466,7 +466,7 @@ describe("orchestrator — compaction (§3.4)", () => {
     const sendsBefore = host.adapter.calls.filter((call) => call.kind === "sendTurn").length;
     assert.equal(sendsBefore, 1, "the queued turn has not been sent yet");
 
-    releaseCompact?.();
+    releaseCompact();
     await host.settle();
 
     const sendsAfter = host.adapter.calls.filter((call) => call.kind === "sendTurn");
@@ -498,9 +498,9 @@ describe("orchestrator — compaction (§3.4)", () => {
       }
     ]);
 
-    let releaseCompact: (() => void) | null = null;
+    let releaseCompact: () => void = () => undefined;
     const compactGate = new Promise<void>((resolve) => {
-      releaseCompact = resolve;
+      releaseCompact = () => resolve();
     });
     host.adapter.compact = async () => {
       await compactGate;
@@ -511,7 +511,7 @@ describe("orchestrator — compaction (§3.4)", () => {
     await new Promise((resolve) => setImmediate(resolve));
     await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "queued" });
     await new Promise((resolve) => setImmediate(resolve));
-    releaseCompact?.();
+    releaseCompact();
     await host.settle();
 
     const rows = activityEvents(host);
@@ -935,7 +935,7 @@ describe("orchestrator — runtime events", () => {
       ...base,
       type: "task.started",
       payload: { taskId: "t1", taskType: "subagent" }
-    } as RuntimeEvent);
+    } as unknown as RuntimeEvent);
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(host.orchestrator.summary(threadId)?.backgroundLiveness, "working");
 
@@ -944,7 +944,7 @@ describe("orchestrator — runtime events", () => {
       eventId: "e2",
       type: "session.exited",
       payload: { recoverable: false, exitKind: "error" }
-    } as RuntimeEvent);
+    } as unknown as RuntimeEvent);
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(host.orchestrator.summary(threadId)?.backgroundLiveness, null);
 
