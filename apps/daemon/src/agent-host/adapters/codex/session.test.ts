@@ -353,7 +353,10 @@ describe("codex session — approvals", () => {
         exitCode: null,
         durationMs: null
       },
-      threadId: "t",
+      // The session's OWN provider thread id: a notification for any other
+      // thread is now routed as collab-child traffic (R3 finding 2), so a
+      // stray id here would silently become a `task.progress` row.
+      threadId: (r.session.summary().resumeCursor as { threadId: string }).threadId,
       turnId: "turn-x",
       completedAtMs: 1
     });
