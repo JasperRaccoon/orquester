@@ -18,6 +18,7 @@ import {
   type AgentHostHealthResponse
 } from "../host-protocol.ts";
 import { createTestHost, type TestHost } from "../orchestration/testing/index.ts";
+import { agentHostExtraRoutes } from "./extra-routes.ts";
 import { createAgentHostServer, type AgentHostServer } from "./http-server.ts";
 
 const TOKEN = "test-token";
@@ -329,6 +330,66 @@ describe("agent host server — commands and reads (§6.2, §6.3)", () => {
       (await h.call("POST", agentHostRoutes.providerRefresh("nope"))).status,
       404
     );
+    await h.stop();
+  });
+
+  it("claims an attachment from a raw octet-stream body and resolves it back", async () => {
+    const h = await harness();
+    const threadId = await h.host.createThread();
+    const bytes = Buffer.from("hello attachment");
+    const uploaded = await new Promise<{ status: number; body: unknown }>((resolve, reject) => {
+      const req = request(
+        {
+          socketPath: h.socketPath,
+          method: "POST",
+          path: `${agentHostExtraRoutes.putAttachment(threadId)}?name=notes.md&type=text/markdown`,
+          headers: {
+            authorization: `Bearer ${TOKEN}`,
+            "content-type": "application/octet-stream",
+            "content-length": bytes.length
+          }
+        },
+        (response) => {
+          const chunks: Buffer[] = [];
+          response.on("data", (chunk: Buffer) => chunks.push(chunk));
+          response.on("end", () =>
+            resolve({
+              status: response.statusCode ?? 0,
+              body: JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown
+            })
+          );
+        }
+      );
+      req.on("error", reject);
+      req.end(bytes);
+    });
+    assert.equal(uploaded.status, 200);
+    const ref = uploaded.body as { id: string; name: string };
+    assert.equal(ref.name, "notes.md");
+
+    const resolved = await h.call(
+      "GET",
+      agentHostExtraRoutes.attachment(threadId, ref.id)
+    );
+    assert.equal(resolved.status, 200);
+    assert.equal(typeof (resolved.body as { path: string }).path, "string");
+    assert.equal(
+      (await h.call("GET", agentHostExtraRoutes.attachment(threadId, "nope"))).status,
+      404
+    );
+    await h.stop();
+  });
+
+  it("serves the §6.4 summary fields the daemon cannot derive from the log", async () => {
+    const h = await harness();
+    const threadId = await h.host.createThread();
+    await h.call("POST", agentHostRoutes.turn(threadId), { commandId: "sum-1", input: "go" });
+    await h.host.settle();
+    const summary = await h.call("GET", agentHostExtraRoutes.summary(threadId));
+    assert.equal(summary.status, 200);
+    const body = summary.body as { chatSessionStatus: string; backgroundLiveness: null };
+    assert.equal(body.chatSessionStatus, "running");
+    assert.equal(body.backgroundLiveness, null);
     await h.stop();
   });
 
