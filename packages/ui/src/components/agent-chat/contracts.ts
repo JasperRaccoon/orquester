@@ -19,11 +19,14 @@ import type {
   PendingApproval,
   PendingUserInput,
   ProviderSnapshot,
-  RuntimeMode,
   RuntimeSubagent,
   SessionSummary
 } from "@orquester/api";
-import type { AgentPanelModel } from "@orquester/api/agent-chat";
+// `RuntimeMode` MUST come from this path: the root `@orquester/api` declares a
+// `RuntimeMode` of its own (the client platform — `desktop-local` | …) whose
+// local declaration shadows the star re-export, so importing it from there
+// silently types the composer's permission-mode chip as a platform name.
+import type { AgentPanelModel, RuntimeMode } from "@orquester/api/agent-chat";
 
 import type {
   ActivePlanState,
@@ -31,7 +34,8 @@ import type {
   AgentChatConnectionState,
   AgentChatTimelineRow,
   DisclosureState,
-  QueuedComposerMessage
+  QueuedComposerMessage,
+  RememberedTimelinePosition
 } from "../../lib/agent-chat/contracts";
 
 /**
@@ -75,7 +79,45 @@ export interface ChatTimelineProps {
   /** Overlaid, never a row: it must not change the list's content height (§7.3). */
   errorBanner: string | null;
   onDismissErrorBanner: () => void;
+  /**
+   * Set by the drill-in (§7.6): the same component renders THIS agent's rows,
+   * already filtered by the store. Its presence also forces {@link readOnly},
+   * because a child view dispatches no commands.
+   *
+   * *Added by W12; additive to the foundation's contract.*
+   */
+  agentId?: string | undefined;
+  /** Read-only: every mutating affordance is withheld, nothing is disabled-looking. */
+  readOnly?: boolean | undefined;
+  /**
+   * The roster the spawn row resolves against **at render time** — a persisted
+   * member count goes stale the moment a member finishes (§7.6).
+   *
+   * *Added by W12; additive to the foundation's contract.*
+   */
+  roster?: readonly RuntimeSubagent[] | undefined;
+  /** The project directory, so changed-file paths render workspace-relative. */
+  projectPath?: string | undefined;
+  /**
+   * The remembered reading position for this thread, from W11's 100-entry LRU
+   * (§7.2). Restored on mount and on every `sessionId` change.
+   *
+   * *Added by W12; additive to the foundation's contract.*
+   */
+  scroll?: TimelineScrollPosition | null | undefined;
+  /** Publishes the reading position back into that LRU as the user scrolls. */
+  onScrollPositionChange?: ((position: TimelineScrollPosition) => void) | undefined;
 }
+
+/**
+ * The scroll half of {@link RememberedTimelinePosition}: the disclosure sets
+ * and the interaction mode belong to the store and the composer, not to the
+ * scroll container, so the timeline reads and writes only these four fields.
+ */
+export type TimelineScrollPosition = Pick<
+  RememberedTimelinePosition,
+  "rowId" | "offsetWithinRow" | "scrollOffset" | "atEnd"
+>;
 
 export interface ChatComposerProps {
   sessionId: string;
@@ -184,6 +226,16 @@ export interface AgentDrillInProps {
   rows: AgentChatTimelineRow[];
   /** Read-only: the child view dispatches no commands (§7.6). */
   onBack: () => void;
+  /**
+   * The thread's roster, forwarded to the timeline so a spawn row *inside* a
+   * child (an agent that spawned its own) resolves its members at render time
+   * instead of reading "Status unavailable".
+   *
+   * *Added by W14; additive to the foundation's contract.*
+   */
+  roster?: readonly RuntimeSubagent[] | undefined;
+  /** Forwarded so changed-file paths render workspace-relative. */
+  projectPath?: string | undefined;
 }
 
 export interface ChatStatusLineProps {
