@@ -1,107 +1,55 @@
-// Ported from T3 Code (MIT): apps/web/src/components/chat/ChatComposer.tsx (openControl),
-// packages/shared/src/keybindings.ts
 /**
- * One keybinding handler drives every composer control (spec §7.4).
+ * The composer's half of the `data-composer-shortcut` convention (spec §7.4).
  *
- * **Every composer control carries a `data-composer-shortcut` token.**
- * `openComposerControl` un-collapses and focuses the composer, then queries
- * `button[data-composer-shortcut~="<command>"]:not(:disabled)` inside the
- * composer shell, skipping `[inert]` and invisible nodes, and focuses and
- * clicks the match. That replaces one imperative handle per control — model,
- * effort, account, runtime mode, plan — with a DOM convention: a control that
- * moves into an overflow menu keeps working, and a menu that absorbs two
- * controls carries both tokens (the attribute is space-separated, matched with
- * `~=`).
+ * **The keybinding table itself is not here.** It lives in
+ * `lib/agent-chat/keybindings.logic.ts` (W11) and that is the single source of
+ * truth for every chord, including the one conflict this host has: T3 binds
+ * the runtime-mode picker to `Ctrl/Cmd+Shift+A`, which the Attention Center
+ * already owns, so the table moves it to `Ctrl/Cmd+Shift+M`. This module used
+ * to carry a second table that had resolved the same conflict differently
+ * (`mod+shift+y`); two tables meant the label a chip printed and the chord that
+ * actually fired could disagree, which is exactly the bug a single table
+ * exists to prevent.
  *
- * *T3: `ChatComposer.tsx:5880-5901` (`openControl`), `:1116` and
- * `CompactComposerControlsMenu.tsx:44-46` (the attribute sites, including the
- * multi-token value).*
+ * What remains here is the DOM half — finding the control a command names —
+ * plus the thin adapters the composer components call.
  */
 
-/** The tokens a control may advertise. */
-export const COMPOSER_SHORTCUT_COMMANDS = [
-  "model",
-  "effort",
-  "account",
-  "mode",
-  "plan",
-  "attach",
-  "send",
-  "stop"
-] as const;
+import {
+  chatShortcutLabel,
+  composerControlSelector,
+  isOperableControl,
+  resolveChatShortcut,
+  type ChatShortcutCommand,
+  type ChatShortcutEventLike,
+  type ComposerControlCommand
+} from "../../../lib/agent-chat/keybindings.logic";
+import { isAppleLike } from "../primitives";
 
-export type ComposerShortcutCommand = (typeof COMPOSER_SHORTCUT_COMMANDS)[number];
-
-/** The keydown fields the matcher reads, so it can be exercised as data. */
-export interface ComposerKeyEvent {
-  key: string;
-  code?: string;
-  ctrlKey: boolean;
-  metaKey: boolean;
-  shiftKey: boolean;
-  altKey: boolean;
-  repeat?: boolean;
-}
+/** Re-exported under the name the composer components already use. */
+export type ComposerShortcutCommand = ComposerControlCommand;
+export type { ChatShortcutCommand, ChatShortcutEventLike };
+export { resolveChatShortcut };
 
 /**
- * A composer keybinding. `key` is the platform-neutral chord the `Kbd`
- * primitive renders; `code` is what the matcher actually compares, so a layout
- * that rewrites `key` under a modifier still resolves.
+ * The chord to print beside a control, already resolved for this platform, or
+ * `null` when the command has no chord. Pass it to `Kbd` as children — the
+ * label is platform-resolved text, not a neutral `mod+…` combo.
  */
-export interface ComposerKeybinding {
-  key: string;
-  code: string;
-  command: ComposerShortcutCommand | "steerQueued";
-}
-
-/**
- * The table. It is a table rather than a set of per-component handlers because
- * **the one conflict on this host is resolved here, once**: T3 binds the
- * runtime-mode picker to `mod+shift+a`, which Orquester's Attention Center
- * already owns (`GlobalShortcutListener`), so the mode picker gets its own key
- * and nothing else moves.
- *
- * *T3: `keybindings.ts:44-55` — `composer.mode` (`mod+shift+a`),
- * `composer.effort`, `modelPicker.toggle` (`mod+shift+m`),
- * `thread.steerQueuedMessage` (`mod+shift+enter`).*
- */
-export const COMPOSER_KEYBINDINGS: readonly ComposerKeybinding[] = [
-  { key: "mod+shift+m", code: "KeyM", command: "model" },
-  { key: "mod+shift+e", code: "KeyE", command: "effort" },
-  // differs from T3: `mod+shift+a` is the Attention Center's on this host.
-  { key: "mod+shift+y", code: "KeyY", command: "mode" },
-  { key: "mod+shift+enter", code: "Enter", command: "steerQueued" }
-];
-
-/** Held keys must not machine-gun, and Alt is somebody else's chord. */
-function isChordCandidate(event: ComposerKeyEvent): boolean {
-  return !event.repeat && !event.altKey && event.shiftKey && (event.ctrlKey || event.metaKey);
-}
-
-export function matchComposerKeybinding(
-  event: ComposerKeyEvent
-): ComposerKeybinding["command"] | null {
-  if (!isChordCandidate(event)) return null;
-  for (const binding of COMPOSER_KEYBINDINGS) {
-    const matches = event.code
-      ? event.code === binding.code
-      : event.key.toLowerCase() === binding.code.replace(/^Key/, "").toLowerCase();
-    if (matches) return binding.command;
-  }
-  return null;
-}
-
-/** The chord to print beside a control, or `null` when it has no key. */
-export function shortcutComboFor(command: ComposerShortcutCommand): string | null {
-  return COMPOSER_KEYBINDINGS.find((binding) => binding.command === command)?.key ?? null;
+export function shortcutLabelFor(
+  command: ComposerShortcutCommand,
+  apple = isAppleLike()
+): string | null {
+  return chatShortcutLabel({ kind: "control", command }, apple);
 }
 
 /**
  * The first enabled, visible, non-inert control advertising `command`.
  *
- * `checkVisibility` is behind a capability check because jsdom and older
- * engines do not implement it; the fallback (an element with a layout box) is
- * the same question asked less precisely.
+ * The selector and the operability rule both come from the shared module, so a
+ * control that moves into an overflow menu keeps working and a menu that
+ * absorbs two controls can carry both tokens (the attribute is
+ * space-separated, matched with `~=`).
  */
 export function findComposerShortcutTarget(
   shell: ParentNode | null | undefined,
@@ -109,20 +57,7 @@ export function findComposerShortcutTarget(
 ): HTMLElement | null {
   if (!shell) return null;
   const candidates = Array.from(
-    shell.querySelectorAll<HTMLElement>(
-      `button[data-composer-shortcut~="${command}"]:not(:disabled)`
-    )
+    shell.querySelectorAll<HTMLElement>(composerControlSelector(command))
   );
-  return (
-    candidates.find((element) => {
-      if (element.closest("[inert]")) return false;
-      const withCheck = element as HTMLElement & {
-        checkVisibility?: (options?: { visibilityProperty?: boolean }) => boolean;
-      };
-      if (typeof withCheck.checkVisibility === "function") {
-        return withCheck.checkVisibility({ visibilityProperty: true });
-      }
-      return element.offsetParent !== null || element.getClientRects().length > 0;
-    }) ?? null
-  );
+  return candidates.find((element) => isOperableControl(element)) ?? null;
 }
