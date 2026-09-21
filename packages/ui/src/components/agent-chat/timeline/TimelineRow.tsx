@@ -2,6 +2,7 @@ import React from "react";
 
 import { cn } from "../../../lib/cn";
 import type { AgentChatTimelineRow } from "../../../lib/agent-chat/contracts";
+import { rowBottomPadding } from "./row-format";
 import {
   ActivityGroupRow,
   WorkLiveRow,
@@ -23,33 +24,6 @@ import {
   TurnFoldRow,
   WorkingRow
 } from "./rows/StructureRows";
-
-/**
- * Vertical rhythm is **bottom padding on the row shell**, not a `gap` on the
- * list, so each row kind declares its own relationship to the next one.
- *
- * The pattern is the whole point: *activity rows cling together (8px),
- * conversation turns breathe (16px)*. A stream of twenty tool calls should read
- * as one block of work, not as twenty separate events.
- * *T3: `MessagesTimeline.tsx:1669-1701`.*
- */
-export function rowBottomPadding(row: AgentChatTimelineRow): string {
-  if (row.kind === "work" && row.isExpandedToolGroup) return "pb-1";
-  if ((row.kind === "work-toggle" || row.kind === "work-live") && row.expanded) return "pb-0";
-  if (row.kind === "turn-fold" || row.kind === "working") return "pb-1.5";
-  if (
-    (row.kind === "message" && row.message.role === "assistant" && !row.showAssistantMeta) ||
-    (row.kind === "message" && row.message.role === "reasoning") ||
-    row.kind === "work" ||
-    row.kind === "work-live" ||
-    row.kind === "work-toggle" ||
-    row.kind === "activity-group" ||
-    row.kind === "thinking"
-  ) {
-    return "pb-2";
-  }
-  return "pb-4";
-}
 
 function RowBody({ row }: { row: AgentChatTimelineRow }): React.ReactElement | null {
   switch (row.kind) {
@@ -97,9 +71,16 @@ function RowBody({ row }: { row: AgentChatTimelineRow }): React.ReactElement | n
  * the timeline context, never as a prop — a prop would defeat this memo.
  */
 export const TimelineRow = React.memo(function TimelineRow({
-  row
+  row,
+  enter = false
 }: {
   row: AgentChatTimelineRow;
+  /**
+   * This row arrived after the first paint, so it plays the one-shot 200ms
+   * rise. Decided once per row id and never flipped, or the memo would break
+   * and a settled row would re-animate. Re-opening a thread replays nothing.
+   */
+  enter?: boolean;
 }): React.ReactElement {
   return (
     <div
@@ -107,6 +88,7 @@ export const TimelineRow = React.memo(function TimelineRow({
       data-timeline-row-kind={row.kind}
       className={cn(
         "mx-auto w-full min-w-0 max-w-3xl overflow-x-clip",
+        enter && "ac-enter",
         rowBottomPadding(row),
         (row.kind === "message" && row.message.role === "assistant") || row.kind === "assistant-meta"
           ? "group/assistant"
