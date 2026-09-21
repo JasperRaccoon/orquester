@@ -1,4 +1,4 @@
-node_modules/
+node_modules
 dist/
 dist-electron/
 .turbo/
@@ -26,3 +26,4 @@ release/
 
 # Local Claude Code config/workflows
 /.claude/
+node_modules
