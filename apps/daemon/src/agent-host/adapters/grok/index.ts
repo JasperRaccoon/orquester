@@ -49,6 +49,8 @@ import type {
   SendTurnResult,
   StartSessionInput
 } from "../../adapter.ts";
+import { join } from "node:path";
+
 import { MAX_TURN_INPUT_CHARS } from "@orquester/api/agent-chat";
 import { GROK_EXTRA_ENV } from "./launch.ts";
 import { COMPACT_SLASH_COMMAND, probeGrok, probeSkills } from "./probe.ts";
@@ -207,6 +209,9 @@ class GrokAdapter implements AgentAdapter {
       logRaw: (direction, frame) =>
         this.context.logRawFrame(input.threadId, { direction, frame }),
       logger: this.context.logger,
+      // Under the host's own tmp dir: the overlay is ours, and `/tmp` is
+      // unavailable under `ProtectSystem=strict`.
+      overlayDir: join(this.context.tmpDir(), "grok-config", input.threadId),
       homeDirs: [input.home.path, env["HOME"]].filter(
         (value): value is string => typeof value === "string" && value.length > 1
       )
