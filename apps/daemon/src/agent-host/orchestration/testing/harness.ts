@@ -36,6 +36,8 @@ import { TEST_FOLD_OPS } from "./test-fold.ts";
 
 export interface TestHostOptions {
   adapters?: Partial<Record<AgentAdapterId, ScriptedAdapter>>;
+  /** Reuse a store from an earlier host, to assert a restart (§3.3). */
+  store?: FakeThreadStore;
   continuationEnabled?: (projectPath: string) => boolean;
   isThreadClosed?: (threadId: string) => boolean;
   minimumVersions?: OrchestratorOptions["minimumVersions"];
@@ -91,7 +93,7 @@ export function createTestHost(options: TestHostOptions = {}): TestHost {
   const timers = createTestTimers();
   const ids = createTestIdGen();
   const logger = createRecordingLogger();
-  const store = createFakeThreadStore();
+  const store = options.store ?? createFakeThreadStore();
   const checkpoints = createFakeCheckpointService();
   const snapshots = createStubSnapshotRegistry();
   const liveness = createLivenessRegistry();

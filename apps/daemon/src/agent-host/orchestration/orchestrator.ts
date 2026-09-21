@@ -197,6 +197,17 @@ interface ThreadRuntime {
 
 const HEAD_SAVE_EVENT_INTERVAL = 50;
 
+/** Events that change `meta.json`'s own fields, so the head is rewritten. */
+const HEAD_WRITING_EVENTS: ReadonlySet<string> = new Set([
+  "thread.created",
+  "thread.meta-updated",
+  "thread.runtime-mode-set",
+  "thread.session-set",
+  "thread.turn-diff-completed",
+  "thread.reverted",
+  "thread.deleted"
+]);
+
 // ---------------------------------------------------------------------------
 // The orchestrator
 // ---------------------------------------------------------------------------
@@ -270,33 +281,32 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
 
   const runtimes = new Map<string, ThreadRuntime>();
   const gate: Deferred<void> = createDeferred<void>();
+  const gateQueue = createSerialQueue();
   let gateOpen = false;
-  const pendingGateTasks: Array<() => void> = [];
   let stopped = false;
 
   // -------------------------------------------------------------------------
   // The readiness gate (§3.1 "Readiness is a gate, not a race")
   // -------------------------------------------------------------------------
 
-  const whenReady = async <T>(task: () => Promise<T>): Promise<T> => {
-    if (!gateOpen) {
-      await new Promise<void>((resolve, reject) => {
-        // Arrival order is preserved: every queued command waits on the same
-        // deferred and is released in the order it was registered.
-        pendingGateTasks.push(resolve);
-        gate.promise.catch(reject);
-      });
+  const whenReady = <T>(task: () => Promise<T>): Promise<T> => {
+    if (gateOpen) {
+      return task();
     }
-    return task();
+    // Commands that arrive before the gate opens are queued and run in arrival
+    // order once it resolves; if startup fails, the gate is failed with that
+    // error and every queued and subsequent command answers with it rather
+    // than hanging (§3.1). One at a time, like T3's single command worker.
+    return gateQueue.run(async () => {
+      await gate.promise;
+      return task();
+    });
   };
 
   const openGate = (): void => {
     if (gateOpen) return;
     gateOpen = true;
     gate.resolve();
-    while (pendingGateTasks.length > 0) {
-      pendingGateTasks.shift()?.();
-    }
   };
 
   const failGate = (error: unknown): void => {
@@ -421,13 +431,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     }
     runtime.eventsSinceHeadSave += result.events.length;
     publish(runtime, result.events);
-    const turnEnded = result.events.some(
-      (event) =>
-        event.type === "thread.session-set" &&
-        event.payload.session.activeTurnId === null &&
-        event.payload.session.status !== "running"
-    );
-    if (runtime.eventsSinceHeadSave >= HEAD_SAVE_EVENT_INTERVAL || turnEnded) {
+    // Rewritten every 50 events and on every head-shaped change (§5.1). A
+    // session transition always writes: the §3.3 reconcile reads `meta.json`
+    // alone, so a head that lagged behind the log would make a live turn look
+    // settled on the next boot.
+    const headChanged = result.events.some((event) => HEAD_WRITING_EVENTS.has(event.type));
+    if (runtime.eventsSinceHeadSave >= HEAD_SAVE_EVENT_INTERVAL || headChanged) {
       await saveHeadNow(runtime);
     }
     return result;
@@ -853,7 +862,6 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   };
 
   const compactEffect = async (runtime: ThreadRuntime, messageId: string): Promise<void> => {
-    runtime.compacting = true;
     try {
       await ensureSession(runtime, { pendingTurnStart: true });
       const head = requireHead(runtime);
@@ -1024,7 +1032,15 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
 
   interface Decision {
     events: AppendableDomainEvent[];
+    /** Provider work, run on the thread's effect queue after the receipt lands. */
     effect?: () => Promise<void>;
+    /**
+     * Runs **synchronously** right after the commit, still inside the command
+     * queue. The compaction queue of §3.4 needs this: whether a `/turn` is
+     * queued or dispatched is decided at command time, while the compaction is
+     * genuinely in flight, not later when the effect queue reaches it.
+     */
+    schedule?: () => void;
   }
 
   const turnIsActive = (runtime: ThreadRuntime): boolean => {
@@ -1074,7 +1090,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           { commandId, occurredAt }
         )
       ],
-      effect: () => compactEffect(runtime, messageId)
+      schedule: () => {
+        // Claimed synchronously, so a `/turn` committed a moment later is
+        // queued rather than dispatched into an uncompacted conversation.
+        runtime.compacting = true;
+        void runEffect(runtime, () => compactEffect(runtime, messageId));
+      }
     };
   };
 
@@ -1170,14 +1191,16 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         };
         return {
           events,
-          effect: async () => {
+          schedule: () => {
             // A `/turn` that arrives during a compaction is queued per thread
-            // and replayed in order afterwards (§3.4).
+            // and replayed in order afterwards, each awaited before the next is
+            // dispatched and the original message id reused so the user sees
+            // one bubble, not two (§3.4).
             if (runtime.compacting || runtime.queuedTurns.length > 0) {
               runtime.queuedTurns.push(queuedTurn);
               return;
             }
-            await sendTurnEffect(runtime, queuedTurn);
+            void runEffect(runtime, () => sendTurnEffect(runtime, queuedTurn));
           }
         };
       }
@@ -1470,10 +1493,13 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           commandId,
           status: "accepted"
         });
-        if (decision.effect) {
-          // Strictly after the receipt: `/turn` answers as soon as the command
-          // is recorded, and a provider refusal becomes a timeline row (§6.2).
-          void runEffect(runtime, decision.effect);
+        // Strictly after the receipt: `/turn` answers as soon as the command is
+        // recorded, and a provider refusal becomes a timeline row (§6.2).
+        if (decision.schedule) {
+          decision.schedule();
+        } else if (decision.effect) {
+          const effect = decision.effect;
+          void runEffect(runtime, effect);
         }
         return { seq: result.seq };
       });
