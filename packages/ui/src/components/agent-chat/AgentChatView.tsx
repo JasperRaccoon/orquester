@@ -579,6 +579,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 isTurnWorking={!paintOnly && turnActive}
                 uploadAttachment={actions.uploadAttachment}
                 active={active}
+                entries={paintOnly ? undefined : slice.entries}
                 planTitle={
                   actionableProposedPlan
                     ? proposedPlanTitle(actionableProposedPlan.planMarkdown)

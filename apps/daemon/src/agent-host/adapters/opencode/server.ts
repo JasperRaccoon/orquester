@@ -49,6 +49,11 @@ const READY_URL_RE = /on\s+(https?:\/\/[^\s]+)/;
 const STARTUP_CAPTURE_MAX_CHARS = 64 * 1024;
 /** How long a project's server survives its last thread (T3's 30 s). */
 export const SERVER_IDLE_CLOSE_MS = 30_000;
+/**
+ * §4.5: "SIGTERM to the **process group**, 1 s, then SIGKILL". `spawn.ts`
+ * defaults to 2 s, which doubles teardown latency on host shutdown.
+ */
+export const OPENCODE_KILL_GRACE_MS = 1_000;
 
 /**
  * Scrape the readiness URL out of accumulated stdout. Line-oriented on
@@ -65,6 +70,21 @@ export function parseServerUrl(output: string): string | null {
     return match?.[1] ?? null;
   }
   return null;
+}
+
+/**
+ * Keep the tail under `maxChars` without ever cutting inside a line: drop
+ * whole leading lines until it fits.
+ */
+export function trimToLastLines(text: string, maxChars: number): string {
+  if (text.length <= maxChars) {
+    return text;
+  }
+  let start = text.length - maxChars;
+  const newline = text.indexOf("\n", start);
+  // No newline left in the tail: keep the tail as-is rather than everything.
+  start = newline === -1 ? start : newline + 1;
+  return text.slice(start);
 }
 
 /** Bind :0, read the assigned port, release it. */
@@ -202,6 +222,18 @@ export class OpenCodeServerPool {
     }
   }
 
+  /**
+   * Is this project's server already warm? Never starts one.
+   *
+   * The snapshot probe uses this to stay inside the host's budget: a cold
+   * start plus the ~4.3 MB catalogue read cannot finish in 10 s, while the
+   * same read against a warm server takes ~474 ms.
+   */
+  isWarm(projectDir: string): boolean {
+    const entry = this.entries.get(projectDir);
+    return entry?.started !== undefined && !entry.started.child.hasExited();
+  }
+
   /** Every live server, for the host's own diagnostics. */
   list(): { projectDir: string; url: string; version: string; pid: number | undefined }[] {
     const out: { projectDir: string; url: string; version: string; pid: number | undefined }[] = [];
@@ -315,8 +347,10 @@ export class OpenCodeServerPool {
       args: ["serve", `--hostname=${this.hostname}`, `--port=${port}`],
       env: childEnv,
       cwd: projectDir,
-      // The whole process group is what a kill must signal (§3.1).
-      detached: true
+      // The whole process group is what a kill must signal (§3.1): `opencode
+      // serve` is a Bun binary that spawns its own children.
+      detached: true,
+      killGraceMs: OPENCODE_KILL_GRACE_MS
     });
 
     const stderr = new StderrCapture({ homeDirs: [childEnv.HOME ?? ""] });
@@ -334,7 +368,11 @@ export class OpenCodeServerPool {
       if (stdoutCapture === null) {
         return;
       }
-      stdoutCapture = `${stdoutCapture}${chunk}`.slice(-STARTUP_CAPTURE_MAX_CHARS);
+      // Trim on a LINE boundary. Front-truncating mid-line would make the
+      // line-oriented scrape (`parseServerUrl`, which uses `startsWith`) skip
+      // a real readiness line, and a healthy server would then be killed at
+      // the handshake deadline.
+      stdoutCapture = trimToLastLines(`${stdoutCapture}${chunk}`, STARTUP_CAPTURE_MAX_CHARS);
       if (readyUrl !== null) {
         return;
       }
@@ -354,6 +392,13 @@ export class OpenCodeServerPool {
     });
 
     void child.exited.then((reason) => {
+      // Diagnostics must never report a dead pid as live: `list()` reads
+      // `entry.started`, and without this it stays populated until the next
+      // `acquire` happens to notice.
+      const entry = this.entries.get(projectDir);
+      if (entry?.started?.child === child) {
+        entry.started = undefined;
+      }
       if (readyUrl === null) {
         const tail = stderr.excerpt().trim();
         rejectReady?.(
