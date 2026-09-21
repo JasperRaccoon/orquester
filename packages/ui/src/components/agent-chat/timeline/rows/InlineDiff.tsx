@@ -5,7 +5,7 @@ import { cn } from "../../../../lib/cn";
 import { parseUnifiedDiff } from "../../../git/git-diff";
 import { looksLikeUnifiedDiff } from "../row-format";
 import { countDiffLines, splitUnifiedDiff } from "../unified-diff";
-import { formatWorkspaceRelativePath } from "../work-presentation";
+import { shortenPath } from "../../../../lib/agent-chat/presentation.logic";
 
 /**
  * A file change rendered as a real unified diff, with click-through.
@@ -47,7 +47,7 @@ export const InlineDiff = React.memo(function InlineDiff({
             >
               <FileDiff size={13} strokeWidth={1.8} aria-hidden className="shrink-0 text-neutral-500" />
               <span className="min-w-0 flex-1 truncate font-mono text-xs text-neutral-300">
-                {formatWorkspaceRelativePath(file.path, workspaceRoot)}
+                {shortenPath(file.path, workspaceRoot)}
               </span>
               <span className="ac-tabular shrink-0 font-mono text-[10px]">
                 <span className="text-[color:var(--diff-add-fg)]">+{stat.additions}</span>{" "}

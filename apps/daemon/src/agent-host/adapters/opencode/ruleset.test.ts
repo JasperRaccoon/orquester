@@ -9,6 +9,11 @@ import test from "node:test";
 import { RUNTIME_MODES, type ApprovalDecision, type RuntimeMode } from "@orquester/api/agent-chat";
 
 import {
+  SYNTHESISED_COMMANDS,
+  toSlashCommands,
+  unusableSnapshot
+} from "./snapshot.ts";
+import {
   approvalOptionsFor,
   buildOpenCodePermissionRules,
   fromOpenCodePermissionReply,
@@ -180,4 +185,48 @@ test("every RuntimeMode produces a usable ruleset", () => {
       assert.ok(rule.pattern.length > 0);
     }
   }
+});
+
+// ---------------------------------------------------------------------------
+// §4.6.3 / §4.6.5(a) — what the adapter synthesises
+// ---------------------------------------------------------------------------
+
+test("§4.6.5(a): `/effort` is CLIENT-only — the adapter synthesises `/compact` alone", () => {
+  // R2-2: the composer adds its own `/effort` host row whenever the selected
+  // model exposes a reasoning descriptor (every OpenCode model has `variant`),
+  // so a synthesised provider entry produced TWO `/effort` rows — and picking
+  // the provider one inserted the literal text and forwarded it to a CLI that
+  // does not implement it.
+  assert.deepEqual(
+    SYNTHESISED_COMMANDS.map((command) => command.name),
+    ["compact"]
+  );
+});
+
+test("§4.6.3: a real command list keeps `/compact` first and drops skill-sourced rows", () => {
+  const commands = toSlashCommands([
+    { name: "fixture", description: "a fixture command", hints: ["arg"] },
+    { name: "a-skill", source: "skill" },
+    { name: "compact", description: "the provider's own" }
+  ]);
+  assert.deepEqual(
+    commands.map((command) => command.name),
+    ["compact", "fixture"],
+    "skill rows reappear as skills; a provider `compact` never shadows the host one"
+  );
+  assert.equal(commands[1]?.input?.hint, "arg");
+});
+
+test("R2-11: a not-installed snapshot advertises no `/effort` either", () => {
+  // It carries `models: []`, so no reasoning descriptor exists at all.
+  const snapshot = unusableSnapshot({
+    installed: false,
+    version: null,
+    checkedAt: "2026-09-21T00:00:00.000Z"
+  });
+  assert.deepEqual(
+    snapshot.slashCommands.map((command) => command.name),
+    ["compact"]
+  );
+  assert.deepEqual(snapshot.models, []);
 });

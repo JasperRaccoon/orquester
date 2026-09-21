@@ -54,15 +54,29 @@ export class CodexUsageTracker {
 
   /** Feed one `thread/tokenUsage/updated`. Returns the thread-level snapshot. */
   observe(notification: CodexProtocol.v2.ThreadTokenUsageUpdatedNotification): ThreadTokenUsage {
+    // Captured BEFORE the overwrite: for a turn we never saw start, the
+    // thread total as it stood a moment ago is the only honest baseline.
+    // Using `ZERO` instead would charge that turn the whole thread — the exact
+    // thing the rule below forbids (Q1 finding 18).
+    const previousTotal = this.latestTotal;
     this.latestTotal = notification.tokenUsage.total;
     this.contextWindow = notification.tokenUsage.modelContextWindow;
     if (notification.turnId.length > 0) {
       this.turnObserved.add(notification.turnId);
       if (!this.turnBaselines.has(notification.turnId)) {
-        // A usage row for a turn we never saw start (resume, or a compaction
-        // turn the server began on its own): treat the first observation as
-        // the baseline so the delta is never the whole thread.
-        this.turnBaselines.set(notification.turnId, ZERO);
+        // A usage row for a turn we never saw start (a resume that missed
+        // `turn/started`, or a compaction turn the server began on its own):
+        // treat the state before this observation as the baseline so the delta
+        // is never the whole thread.
+        //
+        // When there is no previous observation either, fall back to this
+        // notification's own `total` minus its `last` — the server tells us how
+        // much of the total this very model call added, which is the closest
+        // thing to a pre-turn snapshot that exists.
+        this.turnBaselines.set(
+          notification.turnId,
+          previousTotal ?? subtractLast(notification.tokenUsage)
+        );
       }
     }
     return this.threadUsage();
@@ -133,6 +147,27 @@ export class CodexUsageTracker {
     this.turnBaselines.delete(turnId);
     this.turnObserved.delete(turnId);
   }
+}
+
+/**
+ * `total - last`: the thread's totals as they stood immediately before this
+ * model call. The one baseline available for a turn whose start we never saw
+ * and for which no earlier observation exists (Q1 finding 18).
+ */
+function subtractLast(usage: CodexProtocol.v2.ThreadTokenUsage): Breakdown {
+  const { total, last } = usage;
+  return {
+    totalTokens: clampNonNegative(total.totalTokens - last.totalTokens),
+    inputTokens: clampNonNegative(total.inputTokens - last.inputTokens),
+    cachedInputTokens: clampNonNegative(total.cachedInputTokens - last.cachedInputTokens),
+    cacheWriteInputTokens: clampNonNegative(
+      total.cacheWriteInputTokens - last.cacheWriteInputTokens
+    ),
+    outputTokens: clampNonNegative(total.outputTokens - last.outputTokens),
+    reasoningOutputTokens: clampNonNegative(
+      total.reasoningOutputTokens - last.reasoningOutputTokens
+    )
+  };
 }
 
 function clampNonNegative(value: number): number {

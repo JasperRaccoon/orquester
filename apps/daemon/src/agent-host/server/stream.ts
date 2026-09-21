@@ -25,6 +25,7 @@ import {
   type AgentChatStreamFrame,
   type DomainEvent
 } from "@orquester/api/agent-chat";
+import { slimActivityEvent } from "../ingestion/index.ts";
 
 /** *T3: `ThreadLiveEventCoalescer.ts:18-19`.* */
 export const COALESCE_WINDOW_MS = 50;
@@ -241,7 +242,14 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
 
   const emitEvents = (events: readonly DomainEvent[]): void => {
     for (const event of events) {
-      writeFrame({ kind: "event", seq: event.seq, event });
+      // §5.6: the full payload is persisted, and slimming runs before anything
+      // goes on the wire. It happens HERE, before `writeFrame` measures the
+      // line, so the per-stream byte budget is charged the wire size rather
+      // than the multi-MB persisted one — otherwise ordinary tool output cuts
+      // a client on a slow link with "the live event buffer is full", and
+      // `payload.truncated` never reaches the UI so "load full output" can
+      // never appear (R5 #1). `readItem` stays unslimmed: it IS that fetch.
+      writeFrame({ kind: "event", seq: event.seq, event: slimActivityEvent(event) });
     }
   };
 

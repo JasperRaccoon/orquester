@@ -214,6 +214,70 @@ describe("codex replay — the whole recorded corpus", () => {
   });
 });
 
+describe("codex replay — no item is left dangling inProgress (R3 finding 1)", () => {
+  /**
+   * The reviewer's exact reproduction: replay each capture and pair
+   * `item.started` / `item.completed` by `itemId`. Before the fix, `06-…`,
+   * `14-…` and `05-…` each left one.
+   *
+   * `14-…` is SIGTERM with no `turn/completed` at all, so the protocol stream
+   * alone cannot close it — the session's `handleExit` does, which the replay
+   * models by draining `closeOpenItems()` at stream end exactly as
+   * `handleExit` step 1 does.
+   */
+  function danglingItems(name: string, drainAtEnd: boolean): string[] {
+    const normaliser = new CodexNormaliser({ usage: new CodexUsageTracker() });
+    const open = new Map<string, string>();
+    const apply = (drafts: ReturnType<CodexNormaliser["notification"]>): void => {
+      for (const draft of drafts) {
+        if (draft.type === "item.started") {
+          open.set(String(draft.itemId), draft.payload.itemType);
+        } else if (draft.type === "item.completed") {
+          open.delete(String(draft.itemId));
+        }
+      }
+    };
+    for (const notification of inbound(readFixture(name)).notifications) {
+      apply(normaliser.notification(notification.method as never, notification.params));
+    }
+    if (drainAtEnd) {
+      apply(normaliser.closeOpenItems("failed"));
+    }
+    return [...open.keys()];
+  }
+
+  it("every capture that ends with a settled turn closes all its items", () => {
+    const leftOpen: Record<string, string[]> = {};
+    for (const name of fixtureNames()) {
+      // `14-…` is the SIGTERM capture: the stream simply stops.
+      const dangling = danglingItems(name, name.startsWith("14-"));
+      if (dangling.length > 0) {
+        leftOpen[name] = dangling;
+      }
+    }
+    assert.deepEqual(leftOpen, {});
+  });
+
+  it("06 (interrupt with a pending approval) closes its abandoned command", () => {
+    // Fixtures README obs. 5: "the commandExecution item that was inProgress
+    // never gets an item/completed … Both dangle forever."
+    assert.deepEqual(danglingItems("06-interrupt-with-pending-approval.ndjson", false), []);
+  });
+
+  it("14 (SIGTERM mid-turn) needs the session's exit drain, and is closed by it", () => {
+    assert.equal(
+      danglingItems("14-sigterm-mid-turn.ndjson", false).length,
+      1,
+      "the protocol stream alone cannot close it — SIGTERM writes not one further byte"
+    );
+    assert.deepEqual(
+      danglingItems("14-sigterm-mid-turn.ndjson", true),
+      [],
+      "handleExit's closeOpenItems is what closes it"
+    );
+  });
+});
+
 describe("codex replay — 01 initialize, thread start, one text turn", () => {
   const { events } = replay("01-initialize-thread-start-text-turn.ndjson");
 

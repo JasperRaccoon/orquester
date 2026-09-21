@@ -76,6 +76,15 @@ export interface AgentChatStreamHandle extends StreamHandle {
   readonly lastSeq: number;
   /** The last `synchronized` instance id, or null before the first one. */
   readonly hostInstanceId: string | null;
+  /**
+   * Drop the sequence floor and ask for a snapshot on the next connection.
+   *
+   * The store calls this when it detects a changed `hostInstanceId` and
+   * re-reads (§6.3, §8). Without it the reader keeps its own `lastSeq` floor
+   * across the resync, so a host that restarted its sequence space *lower*
+   * would have its live frames silently suppressed (fix-wave Q2-8).
+   */
+  resetCursor(): void;
 }
 
 export interface AgentChatUploadMeta {
@@ -329,6 +338,12 @@ function openAgentChatStream(
   let attempt = 0;
   let lastSeq = options.after ?? 0;
   let hostInstanceId: string | null = options.hostInstanceId ?? null;
+  /**
+   * The instance id this reader last *connected under*, so a reconnect can
+   * compare it to the one it observes. Tracking only the caller's initial
+   * option made the resume-vs-resync check unreachable (fix-wave Q2-8).
+   */
+  let knownHostInstanceId: string | null = options.hostInstanceId ?? null;
   let inner: StreamHandle | null = null;
   let retryTimer: unknown = null;
   let stallTimer: unknown = null;
@@ -374,9 +389,10 @@ function openAgentChatStream(
     // A changed host instance id means resync, not resume (§6.3).
     const after = resumeCursorFor({
       lastSeq,
-      knownHostInstanceId: options.hostInstanceId ?? null,
+      knownHostInstanceId,
       observedHostInstanceId: hostInstanceId
     });
+    knownHostInstanceId = hostInstanceId;
     const query = after === undefined ? "" : `?after=${after}`;
     let opened = false;
 
@@ -440,6 +456,10 @@ function openAgentChatStream(
     },
     get hostInstanceId() {
       return hostInstanceId;
+    },
+    resetCursor() {
+      lastSeq = 0;
+      knownHostInstanceId = hostInstanceId;
     },
     close() {
       if (closed) {

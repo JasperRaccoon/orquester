@@ -241,11 +241,47 @@ describe("token usage — the delta is two reported totals, not a sum of `last`"
   it("a usage row for a turn that was never begun does not attribute the whole thread to it", () => {
     const usage = new CodexUsageTracker();
     usage.observe(usageNotification("earlier", 5000, 4500, 500));
-    // A compaction turn the server started on its own.
+    // A compaction turn the server started on its own, so `beginTurn` never
+    // ran for it. The baseline is the thread total as it stood a moment
+    // before — NOT zero, which would charge this turn the whole thread
+    // (Q1 finding 18; the previous assertion locked that bug in).
     usage.observe(usageNotification("compaction", 5500, 4500, 1000));
     const settled = usage.completeTurn("compaction");
     assert.equal(settled.usageStatus, "complete");
-    assert.equal(settled.inputTokens, 4500);
+    assert.equal(settled.inputTokens, 0, "the 4500 input tokens were the EARLIER turn's");
+    assert.equal(settled.outputTokens, 500, "only the 500 this turn added");
+  });
+
+  it("falls back to `total - last` when a turn is the very first observation", () => {
+    // A resume that missed `turn/started`: no previous observation exists, so
+    // the server's own per-call delta is the only honest baseline.
+    const usage = new CodexUsageTracker();
+    usage.observe({
+      threadId: "t",
+      turnId: "resumed",
+      tokenUsage: {
+        total: {
+          totalTokens: 5000,
+          inputTokens: 4000,
+          cachedInputTokens: 0,
+          cacheWriteInputTokens: 0,
+          outputTokens: 1000,
+          reasoningOutputTokens: 0
+        },
+        last: {
+          totalTokens: 300,
+          inputTokens: 200,
+          cachedInputTokens: 0,
+          cacheWriteInputTokens: 0,
+          outputTokens: 100,
+          reasoningOutputTokens: 0
+        },
+        modelContextWindow: 258_400
+      }
+    });
+    const settled = usage.completeTurn("resumed");
+    assert.equal(settled.inputTokens, 200, "this model call's input, not the thread's 4000");
+    assert.equal(settled.outputTokens, 100);
   });
 
   it("never reports a negative count when the provider resets after a compaction", () => {
@@ -323,40 +359,26 @@ describe("§4.6.2 / §4.6.3 the Codex command catalogue", () => {
     assert.equal(CODEX_COMMAND_CATALOG_NOTE, "Codex reports no commands");
   });
 
-  it("synthesises /effort ONLY when a model exposes a reasoning descriptor", () => {
-    assert.deepEqual(
-      codexSlashCommands([{ slug: "m", name: "M", capabilities: null }]).map((c) => c.name),
-      ["compact", "feedback"]
-    );
-    assert.deepEqual(
-      codexSlashCommands([
-        {
-          slug: "m",
-          name: "M",
-          capabilities: {
-            optionDescriptors: [
-              { id: "serviceTier", label: "Speed", type: "select", options: [] }
-            ]
-          }
+  it("NEVER synthesises a provider /effort — it is client-only (§4.6.5(a))", () => {
+    // R2 finding 2 / fix-wave arbitration: a provider `/effort` row put two
+    // entries in the menu, and picking the provider one inserted the literal
+    // `/effort ` and forwarded it to a CLI that does not implement it.
+    const withReasoning = [
+      {
+        slug: "m",
+        name: "M",
+        capabilities: {
+          optionDescriptors: [{ id: "effort", label: "Reasoning", type: "select" as const, options: [] }]
         }
-      ]).map((c) => c.name),
-      ["compact", "feedback"],
-      "serviceTier is not a reasoning descriptor"
-    );
-    assert.deepEqual(
-      codexSlashCommands([
-        {
-          slug: "m",
-          name: "M",
-          capabilities: {
-            optionDescriptors: [
-              { id: "effort", label: "Reasoning", type: "select", options: [] }
-            ]
-          }
-        }
-      ]).map((c) => c.name),
-      ["compact", "feedback", "effort"]
-    );
+      }
+    ];
+    for (const models of [[], [{ slug: "m", name: "M", capabilities: null }], withReasoning]) {
+      assert.deepEqual(
+        codexSlashCommands(models).map((c) => c.name),
+        ["compact", "feedback"],
+        "only /compact is synthesised by an adapter"
+      );
+    }
   });
 });
 

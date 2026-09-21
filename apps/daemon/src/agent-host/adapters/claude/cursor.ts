@@ -66,7 +66,17 @@ export function isUuid(value: unknown): value is string {
  * `orchestration/resumeCursorFor`) are accepted: every field beyond `resume`
  * is optional and the adapter refreshes them itself on the first turn.
  */
-export function readClaudeResumeCursor(value: unknown): ClaudeResumeCursor | undefined {
+export function readClaudeResumeCursor(
+  value: unknown,
+  /**
+   * The thread this cursor is about to be used for. A cursor that names a
+   * DIFFERENT thread is rejected: "one live session per thread, a resume cursor
+   * must never be advanced by two processes" (§3.1) depends on it, and the
+   * field's whole purpose is to catch a cursor copied onto the wrong thread.
+   * Optional so a caller that is only validating a shape need not have one.
+   */
+  expectedThreadId?: string
+): ClaudeResumeCursor | undefined {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return undefined;
   }
@@ -76,6 +86,13 @@ export function readClaudeResumeCursor(value: unknown): ClaudeResumeCursor | und
     return undefined;
   }
   const threadId = typeof record.threadId === "string" ? record.threadId : undefined;
+  if (
+    expectedThreadId !== undefined &&
+    threadId !== undefined &&
+    threadId !== expectedThreadId
+  ) {
+    return undefined;
+  }
   const resumeSessionAt = isResumeId(record.resumeSessionAt)
     ? record.resumeSessionAt
     : undefined;

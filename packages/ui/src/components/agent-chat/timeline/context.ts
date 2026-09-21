@@ -26,6 +26,12 @@ export interface TimelineRowContextValue {
   disclosures: DisclosureState;
   /** The roster a spawn row resolves its label and member list against. */
   roster: readonly RuntimeSubagent[];
+  /**
+   * The current per-cwd skill names, for re-chipping `$mentions` in a sent
+   * message (§4.6.7). Empty means no chips — a mention only reads as one while
+   * the skill it names exists.
+   */
+  skills: readonly string[];
 
   isExpanded: (id: string) => boolean;
   setExpanded: (id: string, expanded: boolean) => void;
@@ -62,6 +68,7 @@ const FALLBACK: TimelineRowContextValue = {
     toolOutputOffsets: {}
   },
   roster: [],
+  skills: [],
   isExpanded: () => false,
   setExpanded: NOOP,
   isReasoningExpanded: () => false,

@@ -9,6 +9,24 @@ export interface DropdownProps {
   /** Tailwind width class for the panel. */
   width?: string;
   className?: string;
+  /**
+   * Also open on hover, for a panel that is a *readout* rather than a menu —
+   * reading it is a glance, not a decision, and requiring a click costs one
+   * interaction for information the pointer is already next to.
+   *
+   * Off by default, so every existing menu keeps click-only behaviour. Only a
+   * **mouse** opens it (`pointerType === "mouse"`): on touch, `pointerenter`
+   * fires on tap and would make the first tap open and the second close.
+   * Click still works, and the panel stays open while the pointer is inside it
+   * so its own controls remain reachable.
+   * *T3: `apps/web/src/components/chat/ContextWindowMeter.tsx:39-42` —
+   * `openOnHover delay={150} closeDelay={150}`.*
+   */
+  openOnHover?: boolean;
+  /** Hover dwell before opening. T3's value; a shorter one opens on a pass-by. */
+  hoverOpenDelay?: number;
+  /** Grace after the pointer leaves, so the gap to the panel is crossable. */
+  hoverCloseDelay?: number;
 }
 
 interface DropdownContextValue {
@@ -43,14 +61,53 @@ export const Dropdown: React.FC<DropdownProps> = ({
   children,
   align = "left",
   width = "w-56",
-  className
+  className,
+  openOnHover = false,
+  hoverOpenDelay = 150,
+  hoverCloseDelay = 150
 }) => {
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState<PanelPosition | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const close = useCallback(() => setOpen(false), []);
+
+  const cancelHoverTimer = useCallback(() => {
+    if (hoverTimer.current !== null) {
+      clearTimeout(hoverTimer.current);
+      hoverTimer.current = null;
+    }
+  }, []);
+
+  // A pending open/close must not outlive the component, or it fires against a
+  // dead setState after the panel's owner unmounts (a chat tab closing).
+  useEffect(() => cancelHoverTimer, [cancelHoverTimer]);
+
+  const scheduleHover = useCallback(
+    (next: boolean, delay: number) => {
+      cancelHoverTimer();
+      hoverTimer.current = setTimeout(() => {
+        hoverTimer.current = null;
+        setOpen(next);
+      }, delay);
+    },
+    [cancelHoverTimer]
+  );
+
+  const hoverProps = openOnHover
+    ? {
+        onPointerEnter: (event: React.PointerEvent) => {
+          if (event.pointerType !== "mouse") return;
+          scheduleHover(true, hoverOpenDelay);
+        },
+        onPointerLeave: (event: React.PointerEvent) => {
+          if (event.pointerType !== "mouse") return;
+          scheduleHover(false, hoverCloseDelay);
+        }
+      }
+    : {};
 
   const updatePosition = useCallback(() => {
     const el = triggerRef.current;
@@ -123,8 +180,19 @@ export const Dropdown: React.FC<DropdownProps> = ({
         ref={triggerRef}
         type="button"
         className="inline-flex app-no-drag"
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => {
+          // A click is decisive: it must not be undone by a hover timer that
+          // was already in flight when the pointer arrived.
+          cancelHoverTimer();
+          setOpen((value) => !value);
+        }}
         aria-expanded={open}
+        // Marks the hover affordance in the DOM: it is the only observable
+        // trace of `openOnHover` (handlers are not markup), so a render test
+        // can assert the wiring, and a debugger can see why a panel opened
+        // without a click.
+        data-hover-open={openOnHover ? "true" : undefined}
+        {...hoverProps}
       >
         {trigger}
       </button>
@@ -134,6 +202,7 @@ export const Dropdown: React.FC<DropdownProps> = ({
           <div
             ref={panelRef}
             role="menu"
+            {...hoverProps}
             style={{
               position: "fixed",
               top: position.top,

@@ -72,7 +72,8 @@ export const createCodexAdapter: AdapterFactory = async (
 
   let cachedSnapshot: ProviderSnapshot | null = null;
   let cachedSnapshotAt = 0;
-  let inFlightSnapshot: Promise<ProviderSnapshot> | null = null;
+  /** Keyed by probe key, so probes for different cwds do not share a result. */
+  const inFlightSnapshots = new Map<string, Promise<ProviderSnapshot>>();
   /** §4.6.4: at most 16 cwds per provider, oldest evicted. */
   const probedCwds: string[] = [];
 
@@ -204,20 +205,28 @@ export const createCodexAdapter: AdapterFactory = async (
     if (fresh && cwdAlreadyProbed && cachedSnapshot !== null) {
       return cachedSnapshot;
     }
-    if (inFlightSnapshot !== null) {
-      return inFlightSnapshot;
+    // Coalesce by the PROBE KEY, not globally: a Settings-wide probe and a
+    // per-project one issued together must not hand one caller the other's
+    // snapshot, or the §4.6.4 per-cwd overlay is silently absent for that call
+    // (Q1 finding 35). `force` is part of the key so an explicit refresh is
+    // never served by a passive probe already in flight.
+    const key = `${options.cwd ?? ""}\u0000${options.force === true ? "force" : ""}`;
+    const running = inFlightSnapshots.get(key);
+    if (running !== undefined) {
+      return running;
     }
-    inFlightSnapshot = (async () => {
+    const probe = (async () => {
       try {
         const next = await runProbe(options.cwd);
         cachedSnapshot = mergeSnapshot(cachedSnapshot, next, probedCwds);
         cachedSnapshotAt = Date.now();
         return cachedSnapshot;
       } finally {
-        inFlightSnapshot = null;
+        inFlightSnapshots.delete(key);
       }
     })();
-    return inFlightSnapshot;
+    inFlightSnapshots.set(key, probe);
+    return probe;
   };
 
   const probeHome = (): StartSessionInput["home"] => ({
