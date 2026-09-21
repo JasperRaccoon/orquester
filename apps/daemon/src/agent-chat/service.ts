@@ -216,10 +216,17 @@ export class AgentChatService {
       isHostHealthy: () => this.supervisor.isHealthy(),
       chatSession: (id) => this.chat.get(id),
       noteSeq: (id, seq) => this.chat.noteSeq(id, seq),
-      restartHost: () => this.supervisor.restartNow(),
+      restartHost: async () => {
+        this.lastMarkedThreadIds = [];
+        const hostInstanceId = await this.supervisor.restartNow();
+        return { hostInstanceId, markedThreadIds: this.lastMarkedThreadIds };
+      },
       logger: this.opts.logger
     };
   }
+
+  /** Threads the OLD host marked for continuation on its way out (§3.3). */
+  private lastMarkedThreadIds: string[] = [];
 
   // --- §6.1 lifecycle ------------------------------------------------------
 
@@ -382,7 +389,16 @@ export class AgentChatService {
   }
 
   private async requestHostStop(): Promise<void> {
-    await this.client.json("POST", agentHostRoutes.stop, {}, { timeoutMs: 30_000 });
+    const response = await this.client.json<{ markedThreadIds?: unknown }>(
+      "POST",
+      agentHostRoutes.stop,
+      {},
+      { timeoutMs: 30_000 }
+    );
+    const marked = response.value?.markedThreadIds;
+    this.lastMarkedThreadIds = Array.isArray(marked)
+      ? marked.filter((id): id is string => typeof id === "string")
+      : [];
   }
 }
 

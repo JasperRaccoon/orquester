@@ -82,7 +82,7 @@ async function makeHarness(sessions: Record<string, SessionSummary | undefined> 
     noteSeq: (id, seq) => harness.seqs?.push([id, seq]),
     restartHost: async () => {
       harness.restarts = (harness.restarts ?? 0) + 1;
-      return "host-2";
+      return { hostInstanceId: "host-2", markedThreadIds: ["t1"] };
     }
   });
   await app.ready();
@@ -264,7 +264,11 @@ test("the host-stop route drives the supervisor's drain restart", async () => {
   const response = await h.app.inject({ method: "POST", url: agentChatRoutes.hostStop, payload: {} });
   assert.equal(response.statusCode, 200);
   assert.equal(h.restarts, 1);
-  assert.equal(response.json().ok, true);
+  assert.deepEqual(response.json(), {
+    ok: true,
+    markedThreadIds: ["t1"],
+    hostInstanceId: "host-2"
+  });
   await h.close();
 });
 

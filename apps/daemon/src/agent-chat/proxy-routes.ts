@@ -45,8 +45,14 @@ export interface AgentChatRouteDeps {
   chatSession(id: string): SessionSummary | undefined;
   /** Remember the sequence a client has been served to (§5.2 `lastSeq`). */
   noteSeq(id: string, seq: number): void;
-  /** §6.3 `POST /api/agent-host/stop`, and the restart that follows it. */
-  restartHost(): Promise<string | null>;
+  /**
+   * §6.3 `POST /api/agent-host/stop`: the host writes every continuation
+   * marker for a running thread with a usable cursor, then drains and stops,
+   * and the supervisor brings a replacement up. Answers the threads that were
+   * marked, and the new instance id (null when the replacement never became
+   * ready — §8's "reported as not switched").
+   */
+  restartHost(): Promise<{ hostInstanceId: string | null; markedThreadIds: string[] }>;
   logger?: { warn?: (...a: unknown[]) => void; error?: (...a: unknown[]) => void };
 }
 
@@ -216,8 +222,8 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
   app.post(agentChatRoutes.hostStop, async (_request, reply) => {
     if (!deps.isHostHealthy()) return reply.code(503).send(HOST_UNAVAILABLE);
     try {
-      const hostInstanceId = await deps.restartHost();
-      return { ok: hostInstanceId !== null, markedThreadIds: [], hostInstanceId };
+      const { hostInstanceId, markedThreadIds } = await deps.restartHost();
+      return { ok: hostInstanceId !== null, markedThreadIds, hostInstanceId };
     } catch (error) {
       deps.logger?.error?.("agent host stop failed", error);
       return reply.code(503).send(HOST_UNAVAILABLE);
