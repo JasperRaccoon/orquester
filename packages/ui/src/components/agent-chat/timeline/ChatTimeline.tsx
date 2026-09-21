@@ -82,6 +82,7 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
   );
 
   const reducedMotion = usePrefersReducedMotion();
+  const enterFlag = useRowEnterFlags(rows, sessionId);
 
   // -------------------------------------------------------------------------
   // Disclosure plumbing
@@ -228,9 +229,17 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
     if (!scroll || scroll.atEnd) {
       node.scrollTop = node.scrollHeight;
     } else if (scroll.rowId !== null) {
-      const target = node.querySelector<HTMLElement>(
-        `[data-timeline-row-id="${CSS.escape(scroll.rowId)}"]`
-      );
+      // `CSS.escape` is not universal (and absent in a non-DOM render): a row
+      // id we cannot safely quote falls back to the pixel offset rather than
+      // throwing inside a layout effect.
+      const escaped =
+        typeof CSS !== "undefined" && typeof CSS.escape === "function"
+          ? CSS.escape(scroll.rowId)
+          : null;
+      const target =
+        escaped === null
+          ? null
+          : node.querySelector<HTMLElement>(`[data-timeline-row-id="${escaped}"]`);
       if (target) {
         node.scrollTop =
           node.scrollTop + (target.getBoundingClientRect().top - node.getBoundingClientRect().top) - scroll.offsetWithinRow;
@@ -303,7 +312,7 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
           <div className="h-3 shrink-0 sm:h-4" aria-hidden />
           {rows.map((row) => (
             <TimelineRowContext.Provider key={row.id} value={context}>
-              <TimelineRow row={row} />
+              <TimelineRow row={row} enter={enterFlag(row.id)} />
             </TimelineRowContext.Provider>
           ))}
           {rows.length === 0 ? (
@@ -326,6 +335,42 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
 
 const NOOP_NUMBER = (): void => {};
 const NOOP_STRING = (): void => {};
+
+/**
+ * Decides, once per row id, whether that row animates in.
+ *
+ * The first render of a thread is a page of history and must not replay a
+ * hundred fades; every row that appears *after* it did just arrive and should
+ * rise. The answer is memoised per id and never revisited, so the flag is a
+ * stable prop and cannot break `TimelineRow`'s memo.
+ */
+function useRowEnterFlags(
+  rows: readonly { id: string }[],
+  sessionId: string
+): (id: string) => boolean {
+  const state = React.useRef<{ session: string; flags: Map<string, boolean>; primed: boolean }>({
+    session: sessionId,
+    flags: new Map(),
+    primed: false
+  });
+  if (state.current.session !== sessionId) {
+    state.current = { session: sessionId, flags: new Map(), primed: false };
+  }
+  const current = state.current;
+  for (const row of rows) {
+    if (!current.flags.has(row.id)) current.flags.set(row.id, current.primed);
+  }
+  current.primed = true;
+  // Drop ids that have left, so a long-lived tab does not accumulate a flag per
+  // row it ever showed.
+  if (current.flags.size > rows.length * 2 + 64) {
+    const live = new Set(rows.map((row) => row.id));
+    for (const id of [...current.flags.keys()]) {
+      if (!live.has(id)) current.flags.delete(id);
+    }
+  }
+  return React.useCallback((id: string) => state.current.flags.get(id) === true, []);
+}
 
 function usePrefersReducedMotion(): boolean {
   const [reduced, setReduced] = React.useState(false);

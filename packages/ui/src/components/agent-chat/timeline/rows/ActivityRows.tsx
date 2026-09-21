@@ -22,6 +22,8 @@ import {
   workEntryIsWarning,
   type WorkEntryIconName
 } from "../work-presentation";
+import { deriveAgentSpawnSummary } from "../../roster/spawn-summary";
+import { TimelineRowTimestamp } from "../timestamp";
 import { InlineDiff, looksLikeUnifiedDiff } from "./InlineDiff";
 import { WorkEntryIcon } from "./icons";
 
@@ -52,11 +54,11 @@ export function LiveActivityLine({
 }): React.ReactElement {
   return (
     <span className="relative flex min-h-6 w-fit max-w-full min-w-0 items-center gap-1.5 overflow-hidden rounded-md px-0.5 py-0.5 text-sm leading-relaxed">
+      {/* Muted in both states: a failed tool keeps its identity glyph and gets
+          the trailing mark below — the destructive treatment is reserved for a
+          severe failure, which the standalone tool row renders (§7.3). */}
       <span
-        className={cn(
-          "flex h-6 w-6 shrink-0 items-center justify-center",
-          failed ? "text-neutral-500" : "text-neutral-500"
-        )}
+        className="flex h-6 w-6 shrink-0 items-center justify-center text-neutral-500"
         role={failed ? "img" : undefined}
         aria-label={failed ? "Tool call failed" : undefined}
       >
@@ -254,6 +256,7 @@ export const ToolEntryRow = React.memo(function ToolEntryRow({
           {failed && !destructive ? (
             <X size={12} strokeWidth={1.8} aria-hidden className="shrink-0 text-neutral-500/40" />
           ) : null}
+          <TimelineRowTimestamp createdAt={entry.createdAt} />
           {/* `invisible`, not absent, so labels stay aligned down the column. */}
           <span className={cn("flex h-4 w-4 shrink-0 items-center justify-center", !canExpand && "invisible")}>
             <DisclosureChevron open={expanded} />
@@ -291,14 +294,17 @@ export const ToolEntryRow = React.memo(function ToolEntryRow({
               ))}
             </div>
           ) : null}
-          {/* §5.6: a slimmed payload can be fetched in full on demand. */}
-          <button
-            type="button"
-            onClick={() => ctx.onLoadFullOutput(entry.id)}
-            className="mt-2 rounded text-[11px] text-neutral-500 transition-colors hover:text-neutral-100 focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
-          >
-            Load full output
-          </button>
+          {/* §5.6: offered ONLY where the slimmer stamped `truncated`, so the
+              button is a promise that the full read really has more. */}
+          {entry.truncated === true ? (
+            <button
+              type="button"
+              onClick={() => ctx.onLoadFullOutput(entry.id)}
+              className="mt-2 rounded text-[11px] text-neutral-500 transition-colors hover:text-neutral-100 focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
+            >
+              Load full output
+            </button>
+          ) : null}
         </div>
       ) : null}
     </div>
@@ -363,10 +369,13 @@ export const WorkToggleRow = React.memo(function WorkToggleRow({
   row: Row<"work-toggle">;
 }): React.ReactElement {
   const ctx = useTimelineRowContext();
+  // Collapsed, the row names what is hidden ("+4 more"); with nothing hidden it
+  // falls back to the group's own settled summary. Expanded it offers the way
+  // back, because a "+N more" that stays after opening reads as a second batch.
   const label = row.expanded
     ? "Show less"
     : row.hiddenCount > 0
-      ? `${row.hiddenCount} more`
+      ? `+${row.hiddenCount} more`
       : row.summary;
   return (
     <button
@@ -380,6 +389,7 @@ export const WorkToggleRow = React.memo(function WorkToggleRow({
         <WorkEntryIcon name={summaryKindIconName(row.summaryKind)} />
       </span>
       <span className="min-w-0 flex-1 truncate text-neutral-400">{label}</span>
+      <TimelineRowTimestamp createdAt={row.createdAt} />
       <DisclosureChevron open={row.expanded} />
     </button>
   );
@@ -472,77 +482,6 @@ function ReasoningTraceBlock({ entry }: { entry: WorkLogEntry }): React.ReactEle
 // ---------------------------------------------------------------------------
 // The spawn row
 // ---------------------------------------------------------------------------
-
-const ACTIVE_STATUSES = new Set<RuntimeSubagent["status"]>(["pending", "running", "waiting"]);
-const TERMINAL_STATUSES = new Set<RuntimeSubagent["status"]>([
-  "completed",
-  "failed",
-  "cancelled",
-  "interrupted"
-]);
-
-export interface AgentSpawnSummary {
-  live: boolean;
-  lead: string;
-  status: string;
-  tone: "working" | "failed" | "completed" | "inactive";
-}
-
-/**
- * Summarises observed states **without treating idle or missing agents as
- * completed** — the row says "Status unavailable" rather than inventing a tick.
- * *T3: `agentSpawnSummary.ts:8-64`.*
- */
-export function deriveAgentSpawnSummary(input: {
-  agents: ReadonlyArray<Pick<RuntimeSubagent, "kind" | "status">>;
-  agentCount: number;
-  coordinatorStatus?: RuntimeSubagent["status"] | undefined;
-}): AgentSpawnSummary {
-  const { agents, agentCount, coordinatorStatus } = input;
-  const working = agents.filter((agent) => ACTIVE_STATUSES.has(agent.status)).length;
-  const failed = agents.filter((agent) => agent.status === "failed").length;
-  const idle = agents.filter((agent) => agent.status === "idle").length;
-  const stopped = agents.filter(
-    (agent) => agent.status === "cancelled" || agent.status === "interrupted"
-  ).length;
-  const batches = agents.filter((agent) => agent.kind === "subagent_batch").length;
-  const individuals = agentCount - batches;
-  // A workflow coordinator keeps running between dynamic member launches.
-  const live = coordinatorStatus !== undefined ? !TERMINAL_STATUSES.has(coordinatorStatus) : working > 0;
-  const subjects = [
-    individuals > 0 ? `${individuals} subagent${individuals === 1 ? "" : "s"}` : null,
-    batches > 0 ? `${batches} ${individuals > 0 ? "" : "subagent "}batch${batches === 1 ? "" : "es"}` : null
-  ]
-    .filter((value) => value !== null)
-    .join(" and ");
-  const lead = `${batches > 0 ? "Launched" : live ? "Kicked off" : "Ran"} ${subjects || "subagents"}`;
-
-  const status = live
-    ? working > 0
-      ? `${working} working`
-      : "working"
-    : coordinatorStatus === "failed"
-      ? "Workflow failed"
-      : coordinatorStatus === "cancelled" || coordinatorStatus === "interrupted"
-        ? "Workflow stopped"
-        : failed > 0
-          ? `${failed} failed`
-          : stopped > 0
-            ? `${stopped} stopped`
-            : idle > 0
-              ? `${idle} idle`
-              : coordinatorStatus !== "completed" && (agents.length === 0 || agents.length < agentCount)
-                ? "Status unavailable"
-                : "✓ completed";
-  const tone: AgentSpawnSummary["tone"] = live
-    ? "working"
-    : failed > 0 || coordinatorStatus === "failed"
-      ? "failed"
-      : status === "✓ completed"
-        ? "completed"
-        : "inactive";
-  return { live, lead, status, tone };
-}
 
 const MEMBER_STATUS_LABEL: Record<RuntimeSubagent["status"], string> = {
   pending: "Working",

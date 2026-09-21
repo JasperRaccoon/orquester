@@ -156,6 +156,14 @@ export interface WorkLogEntry {
   toolLifecycleStatus?: WorkLogToolLifecycleStatus;
   /** The originating activity kind (e.g. `user-input.requested`), for row chrome. */
   sourceActivityKind?: string;
+  /**
+   * True when §5.6's slimming dropped something and `GET …/items/:itemId`
+   * genuinely holds more, so the expanded row may offer "load full output".
+   * Mirrors `ThreadActivityPayloadFields.truncated`.
+   *
+   * *Added by W12; additive to the foundation's contract.*
+   */
+  truncated?: boolean;
   /** Grouping key for subagent lifecycle rows — one row per agent. */
   taskId?: string;
   agentRole?: string;
