@@ -21,6 +21,7 @@ export type {
   ChatComposerProps,
   ChatBannerDockProps,
   AgentRosterProps,
+  AgentRosterMainRow,
   AgentDrillInProps,
   ChatStatusLineProps
 } from "./contracts";
