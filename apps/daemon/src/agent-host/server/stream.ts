@@ -22,6 +22,7 @@ import {
   AGENT_CHAT_HEARTBEAT_LINE,
   AGENT_CHAT_HEARTBEAT_MS,
   AGENT_CHAT_STREAM_BUFFER_LIMIT_BYTES,
+  slimActivityPayload,
   type AgentChatStreamFrame,
   type DomainEvent
 } from "@orquester/api/agent-chat";
@@ -44,6 +45,33 @@ export function serializedSize(value: object): number {
   const bytes = Buffer.byteLength(JSON.stringify(value));
   sizeCache.set(value, bytes);
   return bytes;
+}
+
+/**
+ * §5.6: the full activity payload is persisted and `slimPayload()` runs before
+ * anything goes on the wire. This is one of the two choke points (the other is
+ * the §6.3 snapshot); `GET …/items/:itemId` stays unslimmed and is what "load
+ * full output" reads.
+ *
+ * Without it a `tool.completed` carrying a few MB of command output is written
+ * into the stream verbatim — charged in full against the per-stream byte
+ * budget, so an ordinary tool result cuts a client on a slow link with "The
+ * live event buffer is full" — and `truncated` is never stamped, which is what
+ * makes the "load full output" affordance appear at all.
+ */
+export function slimStreamEvent(event: DomainEvent): DomainEvent {
+  if (event.type !== "thread.activity-appended") {
+    return event;
+  }
+  const activity = event.payload.activity;
+  const slimmed = slimActivityPayload(activity.payload);
+  if (slimmed === activity.payload) {
+    return event;
+  }
+  return {
+    ...event,
+    payload: { ...event.payload, activity: { ...activity, payload: slimmed } }
+  };
 }
 
 function isToolUpdated(event: DomainEvent): boolean {
@@ -185,6 +213,15 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
   let heartbeatHandle: unknown = null;
   /** Bytes handed to the socket that have not drained yet (§6.3). */
   let chargedBytes = 0;
+  /**
+   * Bytes written since the last `drain`. One listener is armed for the whole
+   * backlog rather than one per write: a slow client would otherwise collect a
+   * listener per un-flushed frame and trip Node's `MaxListenersExceededWarning`
+   * (default 10) long before the 8 MiB budget does, and any still pending when
+   * `close()` runs would stay attached to the response.
+   */
+  let pendingDrainBytes = 0;
+  let drainArmed = false;
 
   const close = (reason: "client" | "budget" | "host" = "host"): void => {
     if (closed) return;
@@ -230,8 +267,16 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
       chargedBytes -= bytes;
       return;
     }
+    pendingDrainBytes += bytes;
+    if (drainArmed) {
+      return;
+    }
+    drainArmed = true;
     response.once("drain", () => {
-      chargedBytes = Math.max(0, chargedBytes - bytes);
+      drainArmed = false;
+      const released = pendingDrainBytes;
+      pendingDrainBytes = 0;
+      chargedBytes = Math.max(0, chargedBytes - released);
     });
   };
 
@@ -241,7 +286,7 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
 
   const emitEvents = (events: readonly DomainEvent[]): void => {
     for (const event of events) {
-      writeFrame({ kind: "event", seq: event.seq, event });
+      writeFrame({ kind: "event", seq: event.seq, event: slimStreamEvent(event) });
     }
   };
 
@@ -294,10 +339,17 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
     });
 
     // Attach live delivery BEFORE reading either replay or snapshot state.
-    unsubscribe = await subscribe((events) => {
+    const attached = await subscribe((events) => {
       offerLive(events);
     });
-    if (closed) return;
+    if (closed) {
+      // The client went away during the await, so `close()` already ran and
+      // found `unsubscribe` still null. Detach here or the subscriber stays in
+      // the thread's set for the life of the host and every event iterates it.
+      attached();
+      return;
+    }
+    unsubscribe = attached;
 
     let frames: AgentChatStreamFrame[];
     try {

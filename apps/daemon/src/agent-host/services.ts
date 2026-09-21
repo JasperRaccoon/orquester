@@ -178,6 +178,21 @@ export interface Ingestion {
 
   /** Flush everything. The drain seam every test waits on instead of sleeping (§9). */
   drain(): Promise<void>;
+
+  /**
+   * Release every per-thread buffer and index for a thread that is gone.
+   *
+   * `stateFor` inserts and, without this, nothing ever removes: each thread
+   * holds eleven Maps/Sets plus three delta buffers, and `projected` grows by
+   * one entry per activity **for the life of the host**. `clearThreadState` is
+   * reached only on `session.exited` and deliberately keeps some of it, so a
+   * deleted thread's state would otherwise be immortal — and the host is
+   * designed to survive deploys indefinitely on a 2 GB VPS (§3.1).
+   *
+   * Called by the orchestrator from `deleteThread`. Optional so a store built
+   * before this seam existed still satisfies the interface.
+   */
+  forget?(threadId: string): Promise<void> | void;
 }
 
 // ---------------------------------------------------------------------------

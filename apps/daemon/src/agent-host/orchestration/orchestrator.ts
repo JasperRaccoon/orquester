@@ -23,7 +23,10 @@
 import {
   COMMANDS_ALLOWED_IN_ERROR_STATE,
   DEFAULT_RUNTIME_MODE,
+  MAX_TURN_FILE_BYTES,
+  MAX_TURN_IMAGE_BYTES,
   SETTLED_TURN_STATES,
+  slimActivityPayload,
   type AgentAdapterId,
   type AgentChatCommandName,
   type AgentChatSessionSummaryFields,
@@ -51,6 +54,8 @@ import {
 } from "@orquester/api/agent-chat";
 
 import type { AccountHome } from "@orquester/api/agent-chat";
+
+import { stat } from "node:fs/promises";
 
 import type { AdapterLogger, AgentAdapter } from "../adapter.ts";
 import {
@@ -144,6 +149,8 @@ export interface ResolvedLaunch {
  */
 /** The snapshot registry, plus the change flag `agent.providers.changed` needs. */
 export type HostProviderSnapshotRegistry = ProviderSnapshotRegistry & {
+  /** §7.7: an `auth.status {error}` from a turn must reach the snapshot. */
+  applyAuthStatus?(adapterId: AgentAdapterId, event: RuntimeEvent): void;
   refreshDetailed?(
     adapterId: AgentAdapterId,
     input?: { cwd?: string }
@@ -388,6 +395,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   const { store, ingestion, checkpoints, liveness, snapshots, logger } = options;
 
   const runtimes = new Map<string, ThreadRuntime>();
+  /** In-flight `loadRuntime` calls, memoised so two never build two runtimes. */
+  const loadingRuntimes = new Map<string, Promise<ThreadRuntime>>();
   const gate: Deferred<void> = createDeferred<void>();
   const gateQueue = createSerialQueue();
   let gateOpen = false;
@@ -433,11 +442,44 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     return adapter;
   };
 
-  const loadRuntime = async (threadId: string): Promise<ThreadRuntime> => {
+  /**
+   * One runtime per thread, even under concurrent first-touches.
+   *
+   * The normal tab-open flow issues `GET …/thread` and `GET …/events`
+   * together, and the stream's `subscribe` runs concurrently with the read. If
+   * both miss the cache and both build a runtime, the second `runtimes.set`
+   * discards the first — and with it the `subscribers` set the stream just
+   * registered on, so that tab renders its snapshot and never updates again.
+   * The loser's command queue is also no longer the serialising one, which
+   * lets two `commit()`s interleave on one thread.
+   *
+   * So the in-flight promise is memoised **synchronously**, before the first
+   * await — the same shape `ProviderSnapshotRegistry.ensureWorkspaceSnapshot`
+   * uses. The entry is dropped only on failure, so a transient read error does
+   * not poison the thread for the life of the host.
+   */
+  const loadRuntime = (threadId: string): Promise<ThreadRuntime> => {
     const existing = runtimes.get(threadId);
     if (existing) {
-      return existing;
+      return Promise.resolve(existing);
     }
+    const inFlight = loadingRuntimes.get(threadId);
+    if (inFlight) {
+      return inFlight;
+    }
+    const load = buildRuntime(threadId)
+      .then((runtime) => {
+        runtimes.set(threadId, runtime);
+        return runtime;
+      })
+      .finally(() => {
+        loadingRuntimes.delete(threadId);
+      });
+    loadingRuntimes.set(threadId, load);
+    return load;
+  };
+
+  const buildRuntime = async (threadId: string): Promise<ThreadRuntime> => {
     const tail = await store.readAll(threadId);
     const state = fold.foldAll(tail.events);
     const persistedHead = await store.loadHead(threadId).catch(() => null);
@@ -466,7 +508,6 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       checkpointsUnavailable: false,
       deleted: state.deleted
     };
-    runtimes.set(threadId, runtime);
     return runtime;
   };
 
@@ -904,6 +945,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   const sendTurnEffect = async (runtime: ThreadRuntime, turn: QueuedTurn): Promise<void> => {
     const head = headOf(runtime);
     if (!head) return;
+    // Before anything the provider could write: a session start can itself
+    // touch the tree (§5.4).
+    await captureBaseline(runtime);
     try {
       await ensureSession(runtime, { pendingTurnStart: true });
     } catch (error) {
@@ -957,11 +1001,23 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       });
       watchdogFor(runtime);
     } catch (error) {
+      const detail = describeFailure(error);
       await appendActivity(runtime, {
         kind: "provider.turn.start.failed",
         summary: "Provider turn start failed",
-        detail: describeFailure(error),
+        detail,
         requestId: turn.messageId
+      });
+      // `ensureSession` persisted `starting` for the pending turn start. The
+      // provider produced no frames, so nothing else will ever settle it: left
+      // alone the tab spins on "starting" forever, `/compact` is refused by its
+      // `status === "starting"` guard and the error-state recovery carve-out
+      // (`/session/stop`, `/revert`) does not apply either.
+      await persistSession(runtime, {
+        ...currentSession(runtime),
+        status: "error",
+        activeTurnId: null,
+        lastError: detail
       });
     }
   };
@@ -1130,6 +1186,36 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         detail: describeFailure(error),
         requestId
       });
+    }
+  };
+
+  /**
+   * §6.3: "the bounds are checked against the file the host stat'd, not against
+   * what the client claimed". The upload hop checks the stat against the
+   * *declared* mime and the command hop checks the *declared* size, so neither
+   * alone closes the gap — this is the one place both are known.
+   */
+  const assertAttachmentWithinBounds = async (
+    threadId: string,
+    attachment: AttachmentRef
+  ): Promise<void> => {
+    let path: string;
+    try {
+      path = await store.resolveAttachment(threadId, attachment.id);
+    } catch {
+      throw invalidCommand(`Attachment '${attachment.name}' is not available.`);
+    }
+    let sizeBytes: number;
+    try {
+      sizeBytes = (await stat(path)).size;
+    } catch {
+      throw invalidCommand(`Attachment '${attachment.name}' is not available.`);
+    }
+    const limit = attachment.type === "image" ? MAX_TURN_IMAGE_BYTES : MAX_TURN_FILE_BYTES;
+    if (sizeBytes > limit) {
+      throw invalidCommand(
+        `Attachment '${attachment.name}' is ${sizeBytes} bytes, over the ${limit}-byte limit.`
+      );
     }
   };
 
@@ -1327,6 +1413,17 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           );
         }
 
+        // The upload cap keyed on the mime the CLIENT declared at upload time,
+        // and the command bounds key on the size it declares here — so a
+        // 40 MiB file uploaded as `application/octet-stream` could be sent as a
+        // 1 KB "image". §6.3's rule is that the bounds hold against the file
+        // the host STAT'd, so the resolve path re-checks it.
+        const verifyAttachments = async (): Promise<void> => {
+          for (const attachment of attachments) {
+            await assertAttachmentWithinBounds(runtime.id, attachment);
+          }
+        };
+
         const queuedTurn: QueuedTurn = {
           messageId,
           input,
@@ -1345,7 +1442,20 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
               runtime.queuedTurns.push(queuedTurn);
               return;
             }
-            void runEffect(runtime, () => sendTurnEffect(runtime, queuedTurn));
+            void runEffect(runtime, async () => {
+              try {
+                await verifyAttachments();
+              } catch (error) {
+                await appendActivity(runtime, {
+                  kind: "provider.turn.start.failed",
+                  summary: "Attachment rejected",
+                  detail: describeFailure(error),
+                  requestId: queuedTurn.messageId
+                });
+                return;
+              }
+              await sendTurnEffect(runtime, queuedTurn);
+            });
           }
         };
       }
@@ -1735,7 +1845,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
 
   const updateThread = async (
     threadId: string,
-    input: { title?: string }
+    input: { title?: string; seed?: boolean }
   ): Promise<{ seq: number }> =>
     whenReady(async () => {
       const runtime = await loadRuntime(threadId);
@@ -1747,17 +1857,24 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         if (input.title.length > 300) {
           throw invalidCommand("title is too long.");
         }
+        // §5.1: a MANUAL rename is never overwritten by a provider retitle —
+        // but the client auto-seeds the title from the first user message
+        // through this same route, and that seed is auto-generated: it must
+        // stay replaceable, or the provider's generated name can never land on
+        // any real thread. The caller says which it is; only a user rename is
+        // manual.
+        const manual = input.seed !== true;
         const result = await commit(runtime, [
           buildEvent(
             threadId,
             "thread.meta-updated",
             { title: input.title.trim() },
-            // A client-minted id marks this as the user's own rename, which a
-            // provider retitle may never overwrite (§5.1).
-            { commandId: `rename:${ids.uuid()}` }
+            manual ? { commandId: `rename:${ids.uuid()}` } : {}
           )
         ]);
-        runtime.titleManual = true;
+        if (manual) {
+          runtime.titleManual = true;
+        }
         await saveHeadNow(runtime);
         return { seq: result.seq };
       });
@@ -1791,10 +1908,15 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       }
       await store.deleteThread(threadId);
       runtime.deleted = true;
-      for (const subscriber of [...runtime.subscribers]) {
-        void subscriber;
-      }
+      // The `thread.deleted` event above is the last frame every open stream
+      // gets; detach them so a stream that outlives this call cannot be
+      // published into, and free the per-thread ingestion state — nothing else
+      // ever tells ingestion a thread is gone.
+      runtime.subscribers.clear();
+      runtime.watchdog?.stop();
+      await ingestion.forget?.(threadId);
       runtimes.delete(threadId);
+      loadingRuntimes.delete(threadId);
     });
 
   // -------------------------------------------------------------------------
@@ -1811,9 +1933,17 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         payload.items.filter((item): item is ThreadActivityItem => item.kind === "activity")
       ).map((activity) => activity.id)
     );
-    const items = payload.items.filter(
-      (item) => item.kind !== "activity" || kept.has(item.id)
-    );
+    // §5.6: the full payload is persisted and slimmed on the way to the wire.
+    // This is the snapshot half of the choke point (`stream.ts` is the live
+    // half); `GET …/items/:itemId` stays unslimmed and is what "load full
+    // output" reads.
+    const items = payload.items
+      .filter((item) => item.kind !== "activity" || kept.has(item.id))
+      .map((item) => {
+        if (item.kind !== "activity") return item;
+        const slimmed = slimActivityPayload(item.payload);
+        return slimmed === item.payload ? item : { ...item, payload: slimmed };
+      });
     const head =
       runtime.continueAfterRestart === undefined
         ? payload.head
@@ -2045,19 +2175,27 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   const onAccountEvent = (event: RuntimeEvent): void => {
     const adapterId = adapterForThread(event.threadId);
     if (!adapterId) return;
+    // Two different facts arrive on this hook: a rate-limit window and an auth
+    // failure. `applyUsageLimits` ignores everything but the former, so the
+    // latter needs its own sink or it is dropped on the floor and §7.7's toast
+    // never fires.
     snapshots.applyUsageLimits(adapterId, event);
+    snapshots.applyAuthStatus?.(adapterId, event);
   };
 
   const subscribe = async (
     threadId: string,
     subscription: ThreadSubscription
-  ): Promise<() => void> => {
-    const runtime = await loadRuntime(threadId);
-    runtime.subscribers.add(subscription);
-    return () => {
-      runtime.subscribers.delete(subscription);
-    };
-  };
+  ): Promise<() => void> =>
+    // Through the gate like every other entry point: a stream that loaded a
+    // runtime before the gate opened would race the §3.3 reconcile for it.
+    whenReady(async () => {
+      const runtime = await loadRuntime(threadId);
+      runtime.subscribers.add(subscription);
+      return () => {
+        runtime.subscribers.delete(subscription);
+      };
+    });
 
   // -------------------------------------------------------------------------
   // Checkpoints (§5.4) — driven off the runtime turn boundary
@@ -2084,10 +2222,19 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     });
   };
 
-  const captureBaseline = (runtime: ThreadRuntime): void => {
+  /**
+   * Returns its promise so the send path can **await** it: §5.4's baseline is
+   * "the tree as it was before the turn", and a fire-and-forget capture leaves
+   * the window [turn.started ingested → the captures queue drains → `git add
+   * -A` completes] unbounded, folding anything the agent wrote in it into the
+   * baseline itself. The `turn.started` dispatch stays as the idempotent
+   * backstop for adapter-initiated turns and continuations — the service
+   * returns early once the ref exists, so the second trigger is nearly free.
+   */
+  const captureBaseline = (runtime: ThreadRuntime): Promise<void> => {
     const head = headOf(runtime);
-    if (!head) return;
-    void runtime.captures
+    if (!head) return Promise.resolve();
+    return runtime.captures
       .run(async () => {
         const result = await checkpoints.captureBaseline({
           threadId: runtime.id,
@@ -2365,6 +2512,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           activeTurnId: result.turnId,
           ...(result.resumeCursor !== undefined ? { resumeCursor: result.resumeCursor } : {})
         });
+        // The continuation is the one send that bypasses `sendTurnEffect`, and
+        // a turn resumed from a cursor is the case most likely to wedge — arm
+        // the §3.1 watchdog for it too, or it has no liveness bound at all.
+        watchdogFor(runtime);
         // 4. Clear the marker on success.
         await writeMarker(runtime, undefined);
       } catch (error) {
@@ -2393,7 +2544,15 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     }
   };
 
-  const stop = async (): Promise<void> => {
+  let stopping: Promise<void> | null = null;
+  const stop = (): Promise<void> => {
+    // A second caller awaits the first rather than returning to a half-stopped
+    // host.
+    stopping ??= runStop();
+    return stopping;
+  };
+
+  const runStop = async (): Promise<void> => {
     stopped = true;
     for (const runtime of runtimes.values()) {
       runtime.watchdog?.stop();
