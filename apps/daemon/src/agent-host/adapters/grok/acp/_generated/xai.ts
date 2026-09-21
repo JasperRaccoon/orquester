@@ -36,6 +36,8 @@ export const XAI_EXTENSION_NOTIFICATIONS = {
   session_notification: "x.ai/session_notification",
   /** The same payload shape as `session_notification`, used only during `session/load` replay. */
   session_update: "x.ai/session/update",
+  /** A `{sessionId, update, _meta}` frame of its own when a shell command is backgrounded. */
+  task_backgrounded: "x.ai/task_backgrounded",
   models_update: "x.ai/models/update",
   settings_update: "x.ai/settings/update",
   announcements_update: "x.ai/announcements/update",
@@ -82,10 +84,10 @@ export const XAI_EXTENSION_CATALOG: ReadonlyArray<XaiExtensionEntry> = [
   {
     method: "x.ai/ask_user_question",
     kind: "request",
-    observed: false,
-    observedSpelling: null,
+    observed: true,
+    observedSpelling: "underscore",
     observedWrapped: false,
-    note: "Not produced by any capture; gated behind the CLI's GROK_ASK_USER_QUESTION feature. Shape below is T3's.",
+    note: "Only fires when GROK_ASK_USER_QUESTION=1 is in the child environment. Question carries no `id`, so answers must be keyed by question text.",
   },
   {
     method: "x.ai/session/prompt_complete",
@@ -110,6 +112,14 @@ export const XAI_EXTENSION_CATALOG: ReadonlyArray<XaiExtensionEntry> = [
     observedSpelling: "underscore",
     observedWrapped: false,
     note: "Same payload as session_notification but used only for `_meta.isReplay` frames during session/load.",
+  },
+  {
+    method: "x.ai/task_backgrounded",
+    kind: "notification",
+    observed: true,
+    observedSpelling: "underscore",
+    observedWrapped: false,
+    note: "Its own method rather than a session_notification variant. Ties tool_call_id to task_id, and names the on-disk output_file.",
   },
   {
     method: "x.ai/models/update",
@@ -362,6 +372,21 @@ export type XaiSessionUpdate =
   | { readonly sessionUpdate: "last_turn_summary"; readonly summary: string; readonly prompt_id?: string }
   | { readonly sessionUpdate: "session_summary_generated"; readonly session_summary: string }
   | { readonly sessionUpdate: string; readonly [key: string]: unknown };
+
+/** `_x.ai/task_backgrounded` params. */
+export interface XaiTaskBackgroundedParams {
+  readonly sessionId: SessionId;
+  readonly update: {
+    readonly sessionUpdate: "task_backgrounded";
+    readonly tool_call_id: string;
+    readonly task_id: string;
+    readonly command: string;
+    readonly cwd?: string;
+    readonly output_file?: string;
+    readonly description?: string;
+  };
+  readonly _meta?: XaiUpdateMeta;
+}
 
 export interface XaiBackgroundTask {
   readonly task_id: string;
