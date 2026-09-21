@@ -1018,6 +1018,70 @@ test("a host-initiated stop settles the turn as interrupted and exits gracefully
   harness.dispose();
 });
 
+test("a live subagent is closed `stopped` before session.exited", async () => {
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  const sessionId = session.sessionId;
+  await session.sendTurn({
+    threadId: "thread-1",
+    input: "delegate it",
+    attachments: [],
+    interactionMode: "default"
+  });
+  // The child announces itself with a parentID this thread owns.
+  harness.fake.push({
+    type: "session.created",
+    properties: {
+      sessionID: "ses_child",
+      info: { id: "ses_child", parentID: sessionId, title: "digging (@explore subagent)" }
+    }
+  });
+  const started = await waitFor(harness, "task.started");
+  assert.equal(started.payload.taskId, "ses_child");
+  assert.equal(session.hasLiveSubagents(), true);
+
+  await session.stop({ reason: "tab closed", hostInitiated: true });
+
+  const completed = eventsOfType(harness.events, "task.completed");
+  assert.equal(completed.length, 1);
+  assert.equal(completed[0]?.payload.status, "stopped");
+  const order = typesOf(harness.events);
+  assert.ok(
+    order.lastIndexOf("task.completed") < order.lastIndexOf("session.exited"),
+    "a subagent row must never outlive the process that ran it"
+  );
+  assert.equal(session.hasLiveSubagents(), false);
+  harness.dispose();
+});
+
+test("interrupting a turn closes its subagents too", async () => {
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  const sessionId = session.sessionId;
+  const turn = await session.sendTurn({
+    threadId: "thread-1",
+    input: "delegate it",
+    attachments: [],
+    interactionMode: "default"
+  });
+  harness.fake.push({
+    type: "session.created",
+    properties: {
+      sessionID: "ses_child",
+      info: { id: "ses_child", parentID: sessionId, title: "digging (@explore subagent)" }
+    }
+  });
+  await waitFor(harness, "task.started");
+
+  await session.interruptTurn(turn.turnId);
+
+  const completed = eventsOfType(harness.events, "task.completed");
+  assert.equal(completed[0]?.payload.status, "stopped");
+  const order = typesOf(harness.events);
+  assert.ok(order.lastIndexOf("task.completed") < order.lastIndexOf("turn.aborted"));
+  harness.dispose();
+});
+
 test("stop is idempotent and emits exactly one session.exited", async () => {
   const harness = makeHarness();
   const session = await startSession(harness);

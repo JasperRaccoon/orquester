@@ -13,12 +13,19 @@
  * completion machines (which *do* need HTTP) in `session.ts` where their
  * deadlines live.
  *
- * The demux switch over the handled union ends in `satisfies never` (§10): an
- * unmapped provider message is a typecheck error, and at runtime an unknown
- * frame is surfaced as `runtime.warning` — never swallowed by a catch-all,
- * never ending an active turn. `server.heartbeat` and the 37 dormant
- * `session.next.*` / `*.v2.*` members are allow-listed as "known, ignored"
- * rather than warned about every ten seconds (fixtures README observation 18).
+ * There are **two** demuxes, both ending in `satisfies never` (§10): `demux`
+ * for the thread's own session and `demuxChild` for its subagents. An unmapped
+ * provider message is a typecheck error, and at runtime an unknown frame is
+ * surfaced as `runtime.warning` — never swallowed by a catch-all, never ending
+ * an active turn. `server.heartbeat` and the 37 dormant `session.next.*` /
+ * `*.v2.*` members are allow-listed as "known, ignored" rather than warned
+ * about every ten seconds (fixtures README observation 18).
+ *
+ * *differs from T3:* it keeps only a child's permission and question frames and
+ * drops the other 38 (fixture 12), which is why its OpenCode roster is thin.
+ * Here a child session becomes a `task.*` row set and its own work is stamped
+ * with `agentId`, so §7.6's roster shows what the provider actually reports
+ * while §7.2's re-homing keeps it out of the parent timeline.
  */
 
 import type {
@@ -26,6 +33,9 @@ import type {
   RuntimeEvent,
   RuntimeEventBase,
   RuntimeItemStatus,
+  RuntimeTaskCompletedStatus,
+  RuntimeTaskStatus,
+  TaskAgentLinkage,
   ToolLifecycleItemType,
   UserInputQuestion
 } from "@orquester/api/agent-chat";
@@ -54,6 +64,7 @@ import {
   addRelatedSession,
   mergeOpenCodeAssistantText,
   messageRoleForPart,
+  type OpenCodeChildAgent,
   type OpenCodeSessionState,
   type OpenCodeTextPartState
 } from "./state.ts";
@@ -259,6 +270,12 @@ class Emitter {
     turnId?: string | undefined;
     itemId?: string | undefined;
     requestId?: string | undefined;
+    /**
+     * The owning subagent. Set on EVERY event decoded from a child session, so
+     * §7.2's re-homing rule keeps the child's own work out of the parent
+     * timeline and in the roster's drill-in instead.
+     */
+    agentId?: string | undefined;
     createdAt?: string | undefined;
     raw?: unknown;
   }): RuntimeEventBase {
@@ -269,7 +286,10 @@ class Emitter {
       ...(input.turnId !== undefined ? { turnId: input.turnId } : {}),
       ...(input.itemId !== undefined ? { itemId: input.itemId } : {}),
       ...(input.requestId !== undefined ? { requestId: input.requestId } : {}),
-      providerRefs: { providerTurnId: this.state.openCodeSessionId },
+      ...(input.agentId !== undefined ? { agentId: input.agentId } : {}),
+      providerRefs: {
+        providerTurnId: input.agentId ?? this.state.openCodeSessionId
+      },
       ...(input.raw === undefined
         ? {}
         : {
@@ -356,10 +376,36 @@ export function normalizeOpenCodeEvent(
     isRequestEventType(raw.type) &&
     (state.relatedSessionIds.has(payloadSessionId) || knownPendingTerminal);
 
+  /**
+   * A non-request frame from a child session of this thread.
+   *
+   * *differs from T3* (`OpenCodeAdapter.ts:2215-2265`), which drops every
+   * child frame that is not a permission or a question — the reason its
+   * OpenCode roster is thinner than Claude's. Fixture 12 shows the child is
+   * fully observable (38 frames across eight types), so those frames are
+   * routed into `demuxChild` and become the roster's `task.*` rows plus the
+   * child's own `agentId`-stamped items. Request frames keep the old path,
+   * because an approval belongs on the parent thread whichever session raised
+   * it.
+   */
+  const isChildOwnEvent =
+    payloadSessionId !== undefined &&
+    !isParentEvent &&
+    !isChildRequestEvent &&
+    state.relatedSessionIds.has(payloadSessionId);
+
   // A frame with no session id at all is startup chatter (`plugin.added`,
   // `catalog.updated`, `server.*`) — it belongs to no thread by design
   // (fixtures README observation 19). It is triaged as known-ignored below.
-  if (payloadSessionId !== undefined && !isParentEvent && !isChildRequestEvent) {
+  if (payloadSessionId !== undefined && !isParentEvent && !isChildRequestEvent && !isChildOwnEvent) {
+    return { events: out.events, signals: out.signals };
+  }
+
+  if (isChildOwnEvent && payloadSessionId !== undefined) {
+    const childEvent = triage(state, raw, out);
+    if (childEvent !== null) {
+      demuxChild(state, childEvent, raw, payloadSessionId, out);
+    }
     return { events: out.events, signals: out.signals };
   }
 
@@ -380,7 +426,26 @@ export function normalizeOpenCodeEvent(
     return { events: out.events, signals: out.signals };
   }
 
-  // ---- triage (§10: known-ignored vs unknown) ----------------------------
+  const event = triage(state, raw, out);
+  if (event === null) {
+    return { events: out.events, signals: out.signals };
+  }
+
+  demux(state, event, raw, out);
+  return { events: out.events, signals: out.signals };
+}
+
+/**
+ * §10: known-ignored vs unknown. An unknown frame is **surfaced** as a
+ * `runtime.warning` — which never ends an active turn — and never dropped by a
+ * catch-all. Shared by the parent and the child paths so a child cannot
+ * silently swallow a frame the parent would have warned about.
+ */
+function triage(
+  state: OpenCodeSessionState,
+  raw: OpenCodeRawEvent,
+  out: Emitter
+): OpenCodeHandledEvent | null {
   if (!isHandledEventType(raw.type)) {
     if (!KNOWN_IGNORED_EVENT_TYPES.has(raw.type)) {
       out.push({
@@ -392,7 +457,7 @@ export function normalizeOpenCodeEvent(
         }
       });
     }
-    return { events: out.events, signals: out.signals };
+    return null;
   }
 
   const event = asHandledEvent(raw);
@@ -405,11 +470,8 @@ export function normalizeOpenCodeEvent(
         detail: raw.properties
       }
     });
-    return { events: out.events, signals: out.signals };
   }
-
-  demux(state, event, raw, out);
-  return { events: out.events, signals: out.signals };
+  return event;
 }
 
 function demux(
@@ -553,7 +615,13 @@ function demux(
       }
 
       if (part.type === "tool") {
-        emitToolItem(part as Extract<OpenCodePart, { type: "tool" }>, turnId, raw, out);
+        const tool = part as Extract<OpenCodePart, { type: "tool" }>;
+        emitToolItem(tool, turnId, raw, out);
+        if (tool.tool === "task") {
+          // The parent's own row stays on the timeline; the child it names
+          // additionally becomes a roster task (§7.6).
+          linkChildFromTaskPart(state, tool, raw, out);
+        }
       }
       return;
     }
@@ -715,6 +783,462 @@ function demux(
 }
 
 // ---------------------------------------------------------------------------
+// Subagents (§4.2 tasks, §7.6 roster)
+// ---------------------------------------------------------------------------
+
+/**
+ * The linkage block. §4.2 requires it on **every** task row, not just
+ * `task.started`, so a client fold can rebuild an agent whose start row aged
+ * out of activity retention.
+ *
+ * `agentKind` is deliberately absent: the host stamps it at ingestion and does
+ * not trust it from the provider. `taskType: "subagent"` is what makes
+ * `classifyTaskAgentKind` resolve it to `"agent"`.
+ */
+function childLinkage(agent: OpenCodeChildAgent): TaskAgentLinkage {
+  return {
+    taskType: "subagent",
+    agentId: agent.sessionId,
+    ...(agent.title !== undefined ? { title: agent.title } : {}),
+    ...(agent.role !== undefined ? { role: agent.role } : {}),
+    ...(agent.model !== undefined ? { model: agent.model } : {}),
+    ...(agent.toolUseId !== undefined ? { toolUseId: agent.toolUseId } : {}),
+    ...(agent.parentAgentId !== undefined ? { parentAgentId: agent.parentAgentId } : {})
+  };
+}
+
+function ensureChildAgent(
+  state: OpenCodeSessionState,
+  sessionId: string,
+  seed: Partial<OpenCodeChildAgent> = {}
+): OpenCodeChildAgent {
+  const existing = state.childAgents.get(sessionId);
+  if (existing !== undefined) {
+    // Later frames only ever enrich: the parent's `task` part carries the
+    // role, the model and the tool call, and arrives after `session.created`.
+    if (seed.title !== undefined) {
+      existing.title = seed.title;
+    }
+    if (seed.description !== undefined && seed.description.length > 0) {
+      existing.description = seed.description;
+    }
+    if (seed.role !== undefined) {
+      existing.role = seed.role;
+    }
+    if (seed.model !== undefined) {
+      existing.model = seed.model;
+    }
+    if (seed.toolUseId !== undefined) {
+      existing.toolUseId = seed.toolUseId;
+    }
+    if (seed.parentAgentId !== undefined) {
+      existing.parentAgentId = seed.parentAgentId;
+    }
+    return existing;
+  }
+  const created: OpenCodeChildAgent = {
+    sessionId,
+    parentSessionId: seed.parentSessionId ?? state.openCodeSessionId,
+    ...(seed.title !== undefined ? { title: seed.title } : {}),
+    description: seed.description ?? seed.title ?? "Subagent",
+    ...(seed.role !== undefined ? { role: seed.role } : {}),
+    ...(seed.model !== undefined ? { model: seed.model } : {}),
+    ...(seed.toolUseId !== undefined ? { toolUseId: seed.toolUseId } : {}),
+    ...(seed.parentAgentId !== undefined ? { parentAgentId: seed.parentAgentId } : {}),
+    started: false,
+    completed: false
+  };
+  state.childAgents.set(sessionId, created);
+  return created;
+}
+
+/** `task.started` once per child; every later row is progress/updated. */
+function emitTaskStarted(
+  state: OpenCodeSessionState,
+  agent: OpenCodeChildAgent,
+  raw: unknown,
+  out: Emitter
+): void {
+  if (agent.started) {
+    return;
+  }
+  agent.started = true;
+  out.push({
+    ...out.base({ turnId: state.activeTurnId, agentId: agent.sessionId, raw }),
+    type: "task.started",
+    payload: {
+      ...childLinkage(agent),
+      taskId: agent.sessionId,
+      description: agent.description
+    }
+  });
+}
+
+function emitTaskProgress(
+  state: OpenCodeSessionState,
+  agent: OpenCodeChildAgent,
+  raw: unknown,
+  out: Emitter,
+  extra: { summary?: string; lastToolName?: string; status?: RuntimeTaskStatus } = {}
+): void {
+  if (agent.completed) {
+    return;
+  }
+  emitTaskStarted(state, agent, raw, out);
+  out.push({
+    ...out.base({ turnId: state.activeTurnId, agentId: agent.sessionId, raw }),
+    type: "task.progress",
+    payload: {
+      ...childLinkage(agent),
+      taskId: agent.sessionId,
+      description: agent.description,
+      ...(extra.summary !== undefined ? { summary: extra.summary } : {}),
+      ...(extra.lastToolName !== undefined ? { lastToolName: extra.lastToolName } : {}),
+      ...(extra.status !== undefined ? { status: extra.status } : {})
+    }
+  });
+}
+
+/** A non-terminal status patch; repeated identical statuses are dropped. */
+function emitTaskStatus(
+  state: OpenCodeSessionState,
+  agent: OpenCodeChildAgent,
+  status: RuntimeTaskStatus,
+  raw: unknown,
+  out: Emitter
+): void {
+  if (agent.completed || agent.lastStatus === status) {
+    return;
+  }
+  emitTaskStarted(state, agent, raw, out);
+  agent.lastStatus = status;
+  out.push({
+    ...out.base({ turnId: state.activeTurnId, agentId: agent.sessionId, raw }),
+    type: "task.updated",
+    payload: {
+      ...childLinkage(agent),
+      taskId: agent.sessionId,
+      status,
+      description: agent.description
+    }
+  });
+}
+
+function emitTaskCompleted(
+  state: OpenCodeSessionState,
+  agent: OpenCodeChildAgent,
+  status: RuntimeTaskCompletedStatus,
+  raw: unknown,
+  out: Emitter,
+  summary?: string
+): void {
+  if (agent.completed) {
+    return;
+  }
+  emitTaskStarted(state, agent, raw, out);
+  agent.completed = true;
+  out.push({
+    ...out.base({ turnId: state.activeTurnId, agentId: agent.sessionId, raw }),
+    type: "task.completed",
+    payload: {
+      ...childLinkage(agent),
+      taskId: agent.sessionId,
+      status,
+      ...(summary !== undefined && summary.length > 0 ? { summary } : {})
+    }
+  });
+}
+
+/**
+ * §3.1: "a dead child never leaves a running turn" — closing every live task
+ * with `task.completed {status: "stopped"}`, which the roster folds to
+ * `interrupted` (§7.6). Called by `session.ts` before `session.exited`, and
+ * when a turn is interrupted or fails.
+ */
+export function closeLiveChildAgents(
+  state: OpenCodeSessionState,
+  ctx: NormalizeContext,
+  reason?: string
+): RuntimeEvent[] {
+  const out = new Emitter(state, ctx);
+  for (const agent of state.childAgents.values()) {
+    if (!agent.completed) {
+      emitTaskCompleted(state, agent, "stopped", undefined, out, reason);
+    }
+  }
+  return out.events;
+}
+
+/** Are any subagents still live? Feeds §6.4's `backgroundLiveness`. */
+export function hasLiveChildAgents(state: OpenCodeSessionState): boolean {
+  for (const agent of state.childAgents.values()) {
+    if (!agent.completed) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * The parent's `task` tool part is where the child's identity lives: its
+ * `state.metadata.sessionId` names the child, `state.input.subagent_type` its
+ * role, `state.input.description` its label and `callID` the tool call it
+ * belongs to. The **pending** frame carries none of that — only `running` and
+ * later do — so this enriches rather than creates.
+ */
+function linkChildFromTaskPart(
+  state: OpenCodeSessionState,
+  part: Extract<OpenCodePart, { type: "tool" }>,
+  raw: unknown,
+  out: Emitter
+): void {
+  const metadata = isRecord(part.state.metadata) ? part.state.metadata : undefined;
+  const childId = typeof metadata?.sessionId === "string" ? metadata.sessionId : undefined;
+  if (childId === undefined || childId === state.openCodeSessionId) {
+    return;
+  }
+  addRelatedSession(state, childId);
+
+  const input = isRecord(part.state.input) ? part.state.input : undefined;
+  const model = isRecord(metadata?.model) ? metadata.model : undefined;
+  const parentSessionId =
+    typeof metadata?.parentSessionId === "string"
+      ? metadata.parentSessionId
+      : state.openCodeSessionId;
+  const agent = ensureChildAgent(state, childId, {
+    parentSessionId,
+    ...(typeof input?.description === "string" ? { description: input.description } : {}),
+    ...(typeof input?.subagent_type === "string" ? { role: input.subagent_type } : {}),
+    ...(typeof model?.providerID === "string" && typeof model.modelID === "string"
+      ? { model: `${model.providerID}/${model.modelID}` }
+      : {}),
+    toolUseId: part.callID,
+    // A grandchild's parent is the intermediate agent, not the thread.
+    ...(parentSessionId !== state.openCodeSessionId ? { parentAgentId: parentSessionId } : {})
+  });
+
+  if (part.state.status === "completed") {
+    emitTaskCompleted(state, agent, "completed", raw, out, part.state.output);
+    return;
+  }
+  if (part.state.status === "error") {
+    emitTaskCompleted(state, agent, "failed", raw, out, part.state.error);
+    return;
+  }
+  emitTaskProgress(state, agent, raw, out, { status: "running" });
+}
+
+/**
+ * Everything a child session emits that is not a permission or a question.
+ * The child's own text, tool calls and status become roster rows plus
+ * `agentId`-stamped items; **no** child frame ever touches the parent's
+ * completion machines, its token accounting or its plan.
+ */
+function demuxChild(
+  state: OpenCodeSessionState,
+  event: OpenCodeHandledEvent,
+  raw: OpenCodeRawEvent,
+  childSessionId: string,
+  out: Emitter
+): void {
+  const turnId = state.activeTurnId;
+
+  switch (event.type) {
+    case "session.created":
+    case "session.updated": {
+      const info = event.properties.info;
+      const parentID = typeof info.parentID === "string" ? info.parentID : undefined;
+      const agentName = isRecord(raw.properties)
+        ? isRecord(raw.properties.info) && typeof raw.properties.info.agent === "string"
+          ? raw.properties.info.agent
+          : undefined
+        : undefined;
+      const title = info.title?.trim();
+      const agent = ensureChildAgent(state, childSessionId, {
+        ...(parentID !== undefined ? { parentSessionId: parentID } : {}),
+        ...(title !== undefined && title.length > 0 ? { title } : {}),
+        ...(agentName !== undefined ? { role: agentName } : {}),
+        ...(parentID !== undefined && parentID !== state.openCodeSessionId
+          ? { parentAgentId: parentID }
+          : {})
+      });
+      if (event.type === "session.created") {
+        emitTaskStarted(state, agent, raw, out);
+        return;
+      }
+      // `session.updated` re-states an unchanged title on every recompute
+      // (observation 25), so only a real change is worth a progress row.
+      if (title !== undefined && title.length > 0 && title !== agent.title) {
+        agent.title = title;
+        emitTaskProgress(state, agent, raw, out, { summary: title });
+      }
+      return;
+    }
+
+    case "session.deleted": {
+      const agent = state.childAgents.get(childSessionId);
+      if (agent !== undefined) {
+        emitTaskCompleted(state, agent, "stopped", raw, out);
+      }
+      return;
+    }
+
+    case "session.status": {
+      const agent = ensureChildAgent(state, childSessionId);
+      const status = event.properties.status;
+      emitTaskStatus(
+        state,
+        agent,
+        status.type === "busy" || status.type === "retry" ? "running" : "idle",
+        raw,
+        out
+      );
+      return;
+    }
+
+    case "session.idle": {
+      // The child's terminal signal. Its parent `task` tool part settles at
+      // the same moment and carries the result text.
+      const agent = ensureChildAgent(state, childSessionId);
+      emitTaskCompleted(state, agent, "completed", raw, out);
+      return;
+    }
+
+    case "session.error": {
+      const agent = ensureChildAgent(state, childSessionId);
+      emitTaskCompleted(
+        state,
+        agent,
+        "failed",
+        raw,
+        out,
+        sessionErrorMessage(event.properties.error)
+      );
+      return;
+    }
+
+    case "message.updated": {
+      const info = event.properties.info;
+      state.messageRoleById.set(info.id, info.role);
+      if (info.role === "user") {
+        state.textPartsByMessageId.delete(info.id);
+        return;
+      }
+      const agent = ensureChildAgent(state, childSessionId);
+      for (const part of state.textPartsByMessageId.get(info.id)?.values() ?? []) {
+        emitTextDelta(part, turnId, raw, out, agent.sessionId);
+      }
+      return;
+    }
+
+    case "message.removed": {
+      state.messageRoleById.delete(event.properties.messageID);
+      state.textPartsByMessageId.delete(event.properties.messageID);
+      return;
+    }
+
+    case "message.part.removed": {
+      const parts = state.textPartsByMessageId.get(event.properties.messageID);
+      parts?.delete(event.properties.partID);
+      return;
+    }
+
+    case "message.part.delta": {
+      const existing = state.textPartsByMessageId
+        .get(event.properties.messageID)
+        ?.get(event.properties.partID);
+      if (
+        existing === undefined ||
+        existing.text === undefined ||
+        event.properties.field !== "text" ||
+        messageRoleForPart(state, existing) !== "assistant" ||
+        event.properties.delta.length === 0
+      ) {
+        return;
+      }
+      const nextText = (existing.emittedText ?? existing.text) + event.properties.delta;
+      existing.emittedText = nextText;
+      existing.text = nextText;
+      out.push({
+        ...out.base({ turnId, itemId: existing.id, agentId: childSessionId, raw }),
+        type: "content.delta",
+        payload: {
+          streamKind: existing.type === "reasoning" ? "reasoning_text" : "assistant_text",
+          delta: event.properties.delta
+        }
+      });
+      return;
+    }
+
+    case "message.part.updated": {
+      const part = event.properties.part;
+      const role =
+        messageRoleForPart(state, part) ?? (part.type === "tool" ? "assistant" : undefined);
+
+      // A child's `step-finish` tokens belong to the child, never to the
+      // parent turn's accumulator — they are a different session's spend.
+      if ((part.type === "text" || part.type === "reasoning") && role !== "user") {
+        const stored = retainTextPart(state, part as Extract<OpenCodePart, { type: "text" | "reasoning" }>);
+        if (role === "assistant") {
+          emitTextDelta(stored, turnId, raw, out, childSessionId);
+        }
+      } else {
+        const previous = state.textPartsByMessageId.get(part.messageID)?.get(part.id);
+        if (previous !== undefined) {
+          previous.text = undefined;
+        }
+      }
+
+      if (part.type === "tool") {
+        const tool = part as Extract<OpenCodePart, { type: "tool" }>;
+        const agent = ensureChildAgent(state, childSessionId);
+        emitToolItem(tool, turnId, raw, out, childSessionId);
+        if (tool.state.status === "running" || tool.state.status === "pending") {
+          emitTaskProgress(state, agent, raw, out, {
+            lastToolName: tool.tool,
+            ...(tool.state.title !== undefined ? { summary: tool.state.title } : {}),
+            status: "running"
+          });
+        }
+      }
+      return;
+    }
+
+    case "todo.updated": {
+      // A child's todo list is its own plan, not the thread's. It rides the
+      // roster as a progress summary rather than overwriting `turn.plan`.
+      const agent = ensureChildAgent(state, childSessionId);
+      const open = event.properties.todos.filter(
+        (todo) => todo.status !== "completed" && todo.status !== "cancelled"
+      ).length;
+      emitTaskProgress(state, agent, raw, out, {
+        summary: `${event.properties.todos.length - open}/${event.properties.todos.length} steps done`
+      });
+      return;
+    }
+
+    case "session.compacted":
+    case "command.executed":
+      return;
+
+    // Request frames never reach here: they keep the parent path, because an
+    // approval belongs on the thread whichever session raised it.
+    case "permission.asked":
+    case "permission.replied":
+    case "question.asked":
+    case "question.replied":
+    case "question.rejected":
+      return;
+
+    default: {
+      const exhaustive: never = event;
+      void exhaustive;
+      return;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers the demux leans on
 // ---------------------------------------------------------------------------
 
@@ -743,7 +1267,8 @@ function emitTextDelta(
   part: OpenCodeTextPartState,
   turnId: string | undefined,
   raw: unknown,
-  out: Emitter
+  out: Emitter,
+  agentId?: string
 ): void {
   if (part.text === undefined) {
     return;
@@ -757,6 +1282,7 @@ function emitTextDelta(
       ...out.base({
         turnId,
         itemId: part.id,
+        agentId,
         createdAt: isoFromEpochMs(part.time?.start),
         raw
       }),
@@ -773,6 +1299,7 @@ function emitTextDelta(
       ...out.base({
         turnId,
         itemId: part.id,
+        agentId,
         createdAt: isoFromEpochMs(part.time.end),
         raw
       }),
@@ -781,6 +1308,7 @@ function emitTextDelta(
         itemType: "assistant_message",
         status: "completed",
         title: "Assistant message",
+        ...(agentId !== undefined ? { agentId } : {}),
         ...(latestText.length > 0 ? { detail: latestText } : {})
       }
     });
@@ -848,7 +1376,8 @@ function emitToolItem(
   part: Extract<OpenCodePart, { type: "tool" }>,
   turnId: string | undefined,
   raw: unknown,
-  out: Emitter
+  out: Emitter,
+  agentId?: string
 ): void {
   const itemType: CanonicalItemType = toToolLifecycleItemType(part.tool);
   const title =
@@ -865,7 +1394,7 @@ function emitToolItem(
   const command = part.state.input?.command;
 
   out.push({
-    ...out.base({ turnId, itemId: part.callID, createdAt: toolCreatedAt(part), raw }),
+    ...out.base({ turnId, itemId: part.callID, agentId, createdAt: toolCreatedAt(part), raw }),
     type:
       part.state.status === "pending"
         ? "item.started"
@@ -877,6 +1406,7 @@ function emitToolItem(
       status,
       ...(title !== undefined ? { title } : {}),
       ...(detail !== undefined ? { detail } : {}),
+      ...(agentId !== undefined ? { agentId } : {}),
       data: {
         tool: part.tool,
         toolUseId: part.callID,
