@@ -22,7 +22,11 @@ import {
   takeComposerDeliveries,
   type ComposerDelivery
 } from "../../lib/composer-inbox";
-import { focusComposer, insertComposerText } from "./composer/composer-bridge";
+import {
+  focusComposer,
+  insertComposerText,
+  stageComposerAttachment
+} from "./composer/composer-bridge";
 import { cn } from "../../lib/cn";
 import { isDefaultThreadTitle, seedThreadTitle } from "../../lib/session-kind";
 import { useAppStore } from "../../store/app";
@@ -224,7 +228,15 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   // drains the queue and hands each one to W13's composer bridge.
   React.useEffect(() => {
     const apply = (delivery: ComposerDelivery) => {
-      const text = composerTextForDelivery(delivery);
+      // Attachments become real chips: they are already uploaded, so the
+      // composer stages them exactly like a picked file. Only the ones it
+      // refuses (the eight-attachment budget, the turn's size bounds, or no
+      // composer mounted yet) fall back to their path in the draft text —
+      // a visible path beats a file that silently disappears.
+      const unstaged = delivery.attachments.filter(
+        (attachment) => !stageComposerAttachment(sessionId, attachment)
+      );
+      const text = composerTextForDelivery({ ...delivery, attachments: unstaged });
       if (text.length > 0) {
         insertComposerText(sessionId, text, "append");
       }
@@ -300,9 +312,14 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
       const queued = slice.queue.find((message) => message.id === queuedId);
       actions.returnQueuedToComposer(queuedId);
       if (queued) {
+        // A queued message is a full draft snapshot (§7.4), so its attachments
+        // come back as chips rather than as paths pasted into the text.
+        const unstaged = queued.attachments.filter(
+          (attachment) => !stageComposerAttachment(sessionId, attachment)
+        );
         insertComposerText(
           sessionId,
-          composerTextForDelivery({ text: queued.text, attachments: queued.attachments }),
+          composerTextForDelivery({ text: queued.text, attachments: unstaged }),
           "append"
         );
       }
