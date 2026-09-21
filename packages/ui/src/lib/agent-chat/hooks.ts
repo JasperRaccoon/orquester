@@ -11,9 +11,13 @@
  * project (§7.1) never re-opens a stream on a tab switch.
  */
 
-import { useEffect, useMemo, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 
-import type { AgentPanelModel, ProviderSnapshot } from "@orquester/api/agent-chat";
+import type {
+  AgentPanelModel,
+  ProviderSnapshot,
+  RuntimeSubagent
+} from "@orquester/api/agent-chat";
 import { deriveAgentPanelModel, emptyAgentPanelModel } from "@orquester/api/agent-chat";
 
 import { useApi } from "../../context/orquester-context";
@@ -22,12 +26,26 @@ import type {
   AgentChatRosterView,
   AgentChatStatusView,
   AgentChatThreadView,
+  AgentChatTimelineRow,
   UseAgentChatPending,
   UseAgentChatRoster,
   UseAgentChatStatus,
   UseAgentChatThread,
   UseProviderSnapshot
 } from "./contracts";
+import {
+  deriveTimelineEntriesFromItems,
+  EMPTY_TIMELINE_PROJECTION,
+  itemsForAgent,
+  type ThreadTimelineProjection
+} from "./entries.logic";
+import {
+  computeStableRows,
+  deriveTimelineRowsWithState,
+  EMPTY_STABLE_ROWS,
+  type StableRowsState,
+  type TimelineRowsProjection
+} from "./rows.logic";
 import { loadProviders, providerForRefId, providersStore } from "./providers";
 import { resolveActivityLabel } from "./status.logic";
 import {
@@ -159,6 +177,64 @@ export const useAgentChatStatus: UseAgentChatStatus = (sessionId) => {
     };
   }, [slice, rows, snapshot]);
 };
+
+/**
+ * The drill-in view: **one subagent's own timeline** (§7.6).
+ *
+ * Its prompt at the top, then its items filtered by `agentId`, streaming live,
+ * rendered with the same row components, **read-only**. The parent's slice is
+ * reused rather than opened again, which is what keeps the composer and roster
+ * mounted so the parent can be steered while watching a child — and the child
+ * view dispatches no commands, so no actions are returned.
+ */
+export function useAgentChatDrillIn(
+  sessionId: string,
+  agentId: string | null
+): { rows: AgentChatTimelineRow[]; agent: RuntimeSubagent | null } {
+  const store = useThreadStore(sessionId);
+  const entries = useThreadState(store, (state) => state.slice.entries);
+  const roster = useThreadState(store, (state) => state.slice.roster);
+
+  // One projection per drill-in, held across renders so a streamed token in
+  // the child's timeline changes one row object, exactly as in the parent.
+  const projections = useRef<{
+    agentId: string | null;
+    timeline: ThreadTimelineProjection;
+    rows: TimelineRowsProjection | null;
+    stable: StableRowsState;
+  }>({ agentId: null, timeline: EMPTY_TIMELINE_PROJECTION, rows: null, stable: EMPTY_STABLE_ROWS });
+
+  return useMemo(() => {
+    if (agentId === null) {
+      return { rows: [], agent: null };
+    }
+    const held = projections.current;
+    // A different child is a different timeline: never reuse the previous
+    // agent's projection as the fast path's baseline.
+    const previous = held.agentId === agentId ? held : null;
+    const timeline = deriveTimelineEntriesFromItems(
+      itemsForAgent(entries, agentId),
+      previous?.timeline ?? null
+    );
+    const rows = deriveTimelineRowsWithState(
+      {
+        timelineEntries: timeline.entries,
+        isWorking: false,
+        activeTurnStartedAt: null,
+        // A child timeline offers no rewind: §5.5 rolls back the thread, and
+        // a subagent has no turn of the thread's own to roll back to.
+        supportsConversationRollback: false
+      },
+      previous?.rows ?? null
+    );
+    const stable = computeStableRows(rows.rows, previous?.stable ?? EMPTY_STABLE_ROWS);
+    projections.current = { agentId, timeline, rows, stable };
+    return {
+      rows: stable.result,
+      agent: roster.find((candidate) => candidate.id === agentId) ?? null
+    };
+  }, [agentId, entries, roster]);
+}
 
 // ---------------------------------------------------------------------------
 // Provider snapshots

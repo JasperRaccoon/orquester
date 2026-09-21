@@ -143,15 +143,32 @@ function lastUserMessageIndex(entries: readonly TimelineEntry[]): number {
 }
 
 /**
- * A group qualifies only when a message in it is reasoning; a work row is
- * excluded when it carries `agentSpawn` or `questionAnswer`, is a compaction,
- * or has `tone === "error"` (§7.3).
+ * A message that belongs **inside** the activity group rather than above it:
+ * reasoning, and an assistant message the provider marked as commentary.
+ *
+ * REALITY (Codex): an `agentMessage` carries a `phase` of `final_answer` or
+ * `commentary`, and a thread of narration rendered as full-width answers is
+ * unreadable — §7.3 demotes commentary into the surrounding group. The
+ * projection does it here, once, so no surface has to re-derive it.
+ */
+export function isDemotedAssistantMessage(message: ThreadMessageItem): boolean {
+  return message.role === "assistant" && message.messageKind === "commentary";
+}
+
+function isGroupMessage(message: ThreadMessageItem): boolean {
+  return message.role === "reasoning" || isDemotedAssistantMessage(message);
+}
+
+/**
+ * A group qualifies only when a message in it is reasoning or demoted
+ * commentary; a work row is excluded when it carries `agentSpawn` or
+ * `questionAnswer`, is a compaction, or has `tone === "error"` (§7.3).
  *
  * *T3: `MessagesTimeline.logic.ts:317-327`.*
  */
 export function isGroupingEntry(entry: TimelineEntry): boolean {
   if (entry.kind === "message") {
-    return entry.message.role === "reasoning";
+    return isGroupMessage(entry.message);
   }
   if (entry.kind !== "work") {
     return false;
@@ -204,7 +221,9 @@ function deriveTerminalAssistantMessageIds(entries: readonly TimelineEntry[]): S
       nullTurnIndex += 1;
       continue;
     }
-    if (message.role !== "assistant") {
+    // Commentary is never the turn's answer, so it can never be the terminal
+    // message whose metadata row closes the response.
+    if (message.role !== "assistant" || isDemotedAssistantMessage(message)) {
       continue;
     }
     lastByResponseKey.set(
@@ -328,7 +347,7 @@ function deriveTurnFolds(input: {
       }
       // A thinking block stranded by a crashed provider keeps its streaming
       // flag forever and must not hold a fold open.
-      if (entry.message.streaming && entry.message.role !== "reasoning") {
+      if (entry.message.streaming && !isGroupMessage(entry.message)) {
         group.hasStreamingMessage = true;
       }
     }
@@ -347,7 +366,7 @@ function deriveTurnFolds(input: {
     const trailingEntryCount = group.entries.filter(
       (candidate, candidateIndex) =>
         candidateIndex > terminalIndex &&
-        !(candidate.kind === "message" && candidate.message.role === "reasoning")
+        !(candidate.kind === "message" && isGroupMessage(candidate.message))
     ).length;
 
     for (const [index, entry] of group.entries.entries()) {
@@ -359,7 +378,7 @@ function deriveTurnFolds(input: {
         trailingEntryCount === 1 &&
         entry.kind === "work" &&
         !workEntryDisplayIndicatesToolFailure(entry.entry);
-      const isReasoning = entry.kind === "message" && entry.message.role === "reasoning";
+      const isReasoning = entry.kind === "message" && isGroupMessage(entry.message);
       if (!isCompaction && !isReasoning && index > terminalIndex && !isSingleTrailingActivity) {
         continue;
       }
@@ -380,7 +399,7 @@ function deriveTurnFolds(input: {
       (entry) =>
         hiddenEntryIds.has(entry.id) &&
         !isCompactionEntry(entry) &&
-        !(entry.kind === "message" && entry.message.role === "reasoning")
+        !(entry.kind === "message" && isGroupMessage(entry.message))
     );
     if (!hidesFoldableWork) {
       continue;
@@ -940,17 +959,33 @@ function reasoningEntry(message: ThreadMessageItem): WorkLogEntry {
   if (cached) {
     return cached;
   }
+  const commentary = isDemotedAssistantMessage(message);
   const entry: WorkLogEntry = {
     id: message.id,
     createdAt: message.createdAt,
     turnId: message.turnId,
-    label: "Thought",
+    // A reasoning block collapses to "Thought" plus its text; demoted
+    // commentary keeps its own first line as the label, because it is prose
+    // the user wrote no prompt for and a generic verb would hide it.
+    label: commentary ? firstLine(message.text) || "Note" : "Thought",
     detail: message.text,
-    tone: "thinking",
-    sourceActivityKind: "reasoning"
+    tone: commentary ? "info" : "thinking",
+    sourceActivityKind: commentary ? "assistant.commentary" : "reasoning",
+    ...(message.reasoningKind === "summary" ? { toolTitle: "summary" } : {})
   };
   reasoningEntryCache.set(message, entry);
   return entry;
+}
+
+/** The first non-empty line, trimmed — a demoted message's one-line label. */
+function firstLine(text: string): string {
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.length > 0) {
+      return trimmed.length > 120 ? `${trimmed.slice(0, 120)}…` : trimmed;
+    }
+  }
+  return "";
 }
 
 /**
@@ -981,7 +1016,7 @@ function attachTrailingToolGroupsToAssistant(
       if (!candidate) {
         break;
       }
-      if (candidate.kind === "message" && candidate.message.role === "reasoning") {
+      if (candidate.kind === "message" && isGroupMessage(candidate.message)) {
         continue;
       }
       if (candidate.kind === "message") {

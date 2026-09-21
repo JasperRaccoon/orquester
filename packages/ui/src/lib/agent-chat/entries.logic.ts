@@ -268,6 +268,12 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
     }
   }
 
+  // Gates the row's "Load full output": the rest is behind
+  // `GET …/items/:itemId` (§5.6, §6.3).
+  if (payload?.truncated === true) {
+    entry.truncated = true;
+  }
+
   if (isCompactionActivity(activity)) {
     const tokens = compactionTokens(activity);
     if (tokens.beforeTokens !== undefined || tokens.afterTokens !== undefined) {
