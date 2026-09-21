@@ -397,8 +397,12 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
     const turnCount = resolveCurrentTurnCount(refTurnCounts, input.checkpoints);
     const ref = checkpointRefForThreadTurn(input.threadId, turnCount);
     if (refTurnCounts.includes(turnCount)) {
-      // Idempotent: the baseline for this turn is already published.
-      return null;
+      // Idempotent: the baseline for this turn is already published. This
+      // answers `ready`, NOT `null` — `null` means "this project has no
+      // checkpoints at all", and a caller that conflates the two would mark
+      // every thread checkpoint-less from its second turn onwards, when the
+      // baseline is always already there.
+      return { turnCount, ref, status: "ready" };
     }
     try {
       await captureCheckpoint(runner, { cwd: input.cwd, ref, uuid: uuid() });

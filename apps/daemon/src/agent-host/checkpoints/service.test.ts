@@ -183,8 +183,15 @@ test("a baseline is idempotent: the second call captures nothing", async (t) => 
   await repo.write("tracked.txt", "changed after the baseline\n");
   const second = await service.captureBaseline({ threadId: THREAD, cwd: repo.dir });
 
-  assert.equal(second, null, "an existing baseline is never recaptured");
-  assert.equal((await repo.gitReadOnly("rev-parse", first.ref)).trim(), firstCommit);
+  // Answers the existing baseline rather than `null`: `null` is reserved for
+  // "this project has no checkpoints", and from turn 2 on the baseline is
+  // always already there.
+  assert.deepEqual(second, { turnCount: 0, ref: first.ref, status: "ready" });
+  assert.equal(
+    (await repo.gitReadOnly("rev-parse", first.ref)).trim(),
+    firstCommit,
+    "an existing baseline is never recaptured"
+  );
 });
 
 test("a placeholder checkpoint is reused at its own turn count", async (t) => {
@@ -470,7 +477,11 @@ test("a non-git directory is a silent no-op on every path", async (t) => {
     gitEnv: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: dir }
   });
 
-  assert.equal(await service.captureBaseline({ threadId: THREAD, cwd: dir }), null);
+  assert.equal(
+    await service.captureBaseline({ threadId: THREAD, cwd: dir }),
+    null,
+    "null is reserved for a project with no checkpoints at all"
+  );
   assert.equal(
     await service.captureTurnEnd({
       threadId: THREAD,

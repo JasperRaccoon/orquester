@@ -214,10 +214,17 @@ export interface TurnDiffSummary extends CaptureResult {
  */
 export interface CheckpointService {
   /**
-   * On `turn.started`: capture the baseline at `turn/<turnCount>` if absent,
-   * where `turnCount` is the highest checkpoint turn count the thread already
-   * has — derived from the checkpoints, never stored independently, so a lost
-   * `meta.json` cannot desynchronise it.
+   * On `turn.started` — and on the `/turn` dispatch, before the provider is
+   * asked, so the baseline really is the tree as it was before the turn:
+   * capture the baseline at `turn/<turnCount>` if absent, where `turnCount` is
+   * the highest checkpoint turn count the thread already has — derived from
+   * the checkpoints, never stored independently, so a lost `meta.json` cannot
+   * desynchronise it.
+   *
+   * **`null` means this project has no checkpoints at all** (it is not a git
+   * work tree). A baseline that was already published answers
+   * `status: "ready"` instead, because the two are not the same thing: from a
+   * thread's second turn onwards the baseline is always already there.
    */
   captureBaseline(input: {
     threadId: string;
