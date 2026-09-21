@@ -1,6 +1,6 @@
 import React from "react";
 import { Loader2, RefreshCw } from "lucide-react";
-import type { AgentUsage, UsageAccount } from "@orquester/api";
+import type { AgentUsage, ProviderUsageWindow, UsageAccount } from "@orquester/api";
 import { usageAgentEnabled } from "@orquester/config";
 import { cn } from "../../lib/cn";
 import { shortAccountLabel } from "../../lib/account-label";
@@ -18,9 +18,13 @@ import {
   minutesSince,
   missingUsageAgents,
   normalizeUsageWindows,
+  providerWindowsToNormalized,
   usageLoginHint,
   type NormalizedUsageWindow
 } from "../topbar/usage-format";
+
+/** Stable empty slice, so an agent with no live windows never churns props. */
+const NO_PROVIDER_WINDOWS: readonly ProviderUsageWindow[] = [];
 
 const RESET_OPTIONS: { value: UsageResetFormat; label: string }[] = [
   { value: "relative", label: "Countdown" },
@@ -100,9 +104,23 @@ const AgentCard: React.FC<{
   hidden: boolean;
   resetFormat: UsageResetFormat;
   now: number;
-}> = ({ agent, hidden, resetFormat, now }) => {
+  /** Merged `account.rate-limits.updated` windows for this agent (§7.7). */
+  liveWindows: readonly ProviderUsageWindow[];
+}> = ({ agent, hidden, resetFormat, now, liveWindows }) => {
   const accounts = agent.accounts ?? [];
-  const ownWindows = normalizeUsageWindows(agent.id, agent);
+  const pollWindows = normalizeUsageWindows(agent.id, agent);
+  // Windows an open chat thread reported through `account.rate-limits.updated`
+  // (§7.7). They merge by window id — already done in the store — and anything
+  // the daemon's own poll covers is dropped here rather than printed twice with
+  // two slightly different readings.
+  const providerWindows = providerWindowsToNormalized(
+    agent.id,
+    liveWindows,
+    // The daemon's snapshot slots its pools as "session" / "weekly"; a provider
+    // window with either of those ids is the same pool by another route.
+    pollWindows.map((w) => w.id)
+  );
+  const ownWindows = [...pollWindows, ...providerWindows];
   const hasData = Boolean(agent.asOf) && (ownWindows.length > 0 || accounts.length > 0);
   const isOld = Boolean(agent.asOf) && minutesSince(agent.asOf, now) > STALE_MIN;
   const muted = !hasData || isOld || agent.stale;
@@ -147,6 +165,12 @@ const AgentCard: React.FC<{
                 now={now}
               />
             )}
+            {/* A pooling agent still gets its live provider windows: they are
+                per credential, not per account, so they sit below the blocks
+                rather than inside one. */}
+            {providerWindows.map((w) => (
+              <WindowRow key={w.id} window={w} resetFormat={resetFormat} now={now} muted={muted} />
+            ))}
           </>
         ) : ownWindows.length > 0 ? (
           ownWindows.map((w) => (
@@ -188,6 +212,7 @@ const MissingCard: React.FC<{ id: string }> = ({ id }) => (
 export const UsageOverview: React.FC = () => {
   const usage = useAppStore((s) => s.usage);
   const prefs = useAppStore((s) => s.appConfig.usage);
+  const providerRateLimits = useAppStore((s) => s.providerRateLimits);
   const loadUsage = useAppStore((s) => s.loadUsage);
   const [resetFormat, setResetFormat] = useUsageResetFormat();
   const now = useUsageNow();
@@ -263,6 +288,7 @@ export const UsageOverview: React.FC = () => {
                 hidden={!usageAgentEnabled(prefs, a.id)}
                 resetFormat={resetFormat}
                 now={now}
+                liveWindows={providerRateLimits[a.id] ?? NO_PROVIDER_WINDOWS}
               />
             </div>
           ))}
