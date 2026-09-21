@@ -441,10 +441,15 @@ export class AgentChatService {
     return { status: stream.status, value };
   }
 
-  /** `PUT` rename (§6.1) — the host appends `thread.meta-updated`. */
-  renameThread(id: string, title: string): void {
+  /**
+   * `PUT` rename (§6.1) — the host appends `thread.meta-updated`.
+   *
+   * `opts.seed` forwards §7.7's "this is the client's auto-seed, not a rename"
+   * so the host leaves the title replaceable by a provider retitle.
+   */
+  renameThread(id: string, title: string, opts?: { seed?: boolean }): void {
     void this.client
-      .json("PUT", agentHostRoutes.updateThread(id), { title })
+      .json("PUT", agentHostRoutes.updateThread(id), { title, seed: opts?.seed === true })
       .catch((error) => this.opts.logger?.warn?.(`agent host thread rename failed for ${id}`, error));
   }
 
