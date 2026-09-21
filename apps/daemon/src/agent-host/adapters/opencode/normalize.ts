@@ -186,6 +186,15 @@ export function sessionErrorMessage(error: unknown): string {
   return head.length > 600 ? `${head.slice(0, 600)}…` : head;
 }
 
+/**
+ * `Model not found: x` and `ProviderModelNotFoundError: Model not found: x`
+ * are the same failure. The class prefix is what 1.18.5 adds on the re-emit,
+ * so it is stripped for comparison only — never from what the user reads.
+ */
+function dedupeKey(message: string): string {
+  return message.replace(/^[A-Za-z][A-Za-z0-9_]*Error:\s*/, "").trim();
+}
+
 function isAbortError(error: unknown): boolean {
   return isRecord(error) && error.name === "MessageAbortedError";
 }
@@ -670,12 +679,15 @@ function demux(
         }
       }
 
-      // One bad model produces three frames, two of them a bun stack trace
-      // (fixtures README observation 13). Collapse consecutive duplicates.
-      if (state.lastSessionErrorMessage === message) {
+      // One bad model produces THREE frames, two of them re-stating the same
+      // failure with the real class in front of it and a full bun stack trace
+      // behind it (fixtures README observation 13). Collapse them on a key
+      // that ignores that class prefix, and keep the FIRST (cleanest) text.
+      const key = dedupeKey(message);
+      if (state.lastSessionErrorMessage === key) {
         return;
       }
-      state.lastSessionErrorMessage = message;
+      state.lastSessionErrorMessage = key;
 
       out.signal({ kind: "turn-failed", message });
       out.push({
