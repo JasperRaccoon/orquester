@@ -5,7 +5,7 @@ import type { RuntimeSubagent } from "@orquester/api";
 
 import { cn } from "../../../../lib/cn";
 import type { AgentChatTimelineRow, WorkLogEntry } from "../../../../lib/agent-chat/contracts";
-import { DisclosureChevron, ShimmerText } from "../../primitives";
+import { DisclosureChevron, ShimmerText, TONE_BAND, TONE_BAND_TEXT } from "../../primitives";
 import { useTimelineRowContext, type TimelineRowContextValue } from "../context";
 import {
   liveWorkEntryLabel,
@@ -153,6 +153,44 @@ function QuestionAnswerHistory({
 }
 
 // ---------------------------------------------------------------------------
+// The rerouted-model notice
+// ---------------------------------------------------------------------------
+
+/**
+ * "You asked for X, Y answered" (§7.3).
+ *
+ * DELIBERATE DIFFERENCE FROM T3: T3 has **no** rerouted-model UI at all —
+ * `model.rerouted` exists in its contracts (`providerRuntime.ts:757-762,
+ * 1127-1132`) and is never rendered. Here it is a banded inline notice, because
+ * a proxy silently answering with a different model than the chip says is the
+ * kind of thing a user must be able to see without reading a log.
+ *
+ * It is an inline row rather than a banner on purpose: it is a fact about *this
+ * point in the conversation*, and a banner would outlive the turn it describes.
+ */
+function RerouteNoticeRow({ entry }: { entry: WorkLogEntry }): React.ReactElement {
+  const detail = entry.detail?.trim() ?? "";
+  return (
+    <div
+      data-activity-id={entry.id}
+      className={cn(
+        "my-0.5 flex min-w-0 items-start gap-1.5 rounded-md border px-2 py-1 text-xs leading-4",
+        TONE_BAND.info,
+        TONE_BAND_TEXT.info
+      )}
+    >
+      <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+        <WorkEntryIcon name="shuffle" size={12} />
+      </span>
+      <span className="min-w-0 flex-1 break-words">
+        {entry.label}
+        {detail.length > 0 ? <span className="text-neutral-400"> · {detail}</span> : null}
+      </span>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // The tool row
 // ---------------------------------------------------------------------------
 
@@ -173,6 +211,11 @@ export const ToolEntryRow = React.memo(function ToolEntryRow({
   const destructive = showDestructiveRowStyle(entry);
   const reroute = workEntryIsRerouteNotice(entry);
 
+  // A reroute is not a tool call and must not be dressed as one: the model the
+  // user picked is not the model that answered, and that is a statement about
+  // the thread, not an action the agent took.
+  if (reroute) return <RerouteNoticeRow entry={entry} />;
+
   const iconName: WorkEntryIconName = warning || destructive ? "circle-alert" : workEntryIconName(entry);
   const label = displayLabel ?? workEntryDisplayLabel(entry, ctx.workspaceRoot);
   const detail = entry.detail?.trim() ?? "";
@@ -186,20 +229,15 @@ export const ToolEntryRow = React.memo(function ToolEntryRow({
     detail.length > 0 ||
     changedFiles.length > 0;
 
-  const iconClass = warning
-    ? "text-warn"
-    : destructive
-      ? "text-danger"
-      : reroute
-        ? "text-info"
-        : "text-neutral-500";
+  // §7.3's row-tone table, and nothing beyond it: a warning gets the warn
+  // colour, a SEVERE failure the destructive one, and every other row —
+  // including a tool that exited non-zero — stays muted.
+  const iconClass = warning ? "text-warn" : destructive ? "text-danger" : "text-neutral-500";
   const headingClass = warning
     ? "font-medium text-warn"
     : destructive
       ? "font-medium text-danger"
-      : reroute
-        ? "text-info-300"
-        : "text-neutral-400";
+      : "text-neutral-400";
 
   const toggle = (): void => ctx.setExpanded(entry.id, !expanded);
 
