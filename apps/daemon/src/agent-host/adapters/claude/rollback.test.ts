@@ -9,7 +9,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { buildClaudeResumeCursor, readClaudeResumeCursor } from "./cursor.ts";
+import { resumeCursorFor } from "../../orchestration/resume.ts";
+import { buildClaudeResumeCursor, isResumeId, readClaudeResumeCursor } from "./cursor.ts";
 import {
   ROLLBACK_BOUNDARY_UNAVAILABLE,
   ROLLBACK_HISTORY_UNAVAILABLE,
@@ -200,7 +201,27 @@ describe("claude resume cursor — a bad cursor means no resume, never an error"
     });
   });
 
-  it("rejects anything that is not a uuid resume, without throwing", () => {
+  it("accepts the minimal {threadId, resume} the §6.1 resume picker builds", () => {
+    // The host builds this shape in `orchestration/resume.ts`; a uuid-only
+    // rule here would silently degrade a real resume into a fresh session.
+    const built = resumeCursorFor("claude", "thread-1", sessionId);
+    assert.deepEqual(readClaudeResumeCursor(built), { threadId: "thread-1", resume: sessionId });
+
+    // The picker's ids are not guaranteed to be uuids, only usable.
+    assert.deepEqual(readClaudeResumeCursor({ threadId: "t", resume: "conv_2026-09-21.01" }), {
+      threadId: "t",
+      resume: "conv_2026-09-21.01"
+    });
+  });
+
+  it("accepts every id the host's own resume rule accepts", () => {
+    for (const id of [sessionId, "conv_2026-09-21.01", "a", "a/b/c", "x.y-z_0"]) {
+      assert.equal(isResumeId(id), true, id);
+      assert.equal(readClaudeResumeCursor({ resume: id })?.resume, id, id);
+    }
+  });
+
+  it("rejects an unusable resume, without throwing", () => {
     for (const bad of [
       undefined,
       null,
@@ -208,7 +229,12 @@ describe("claude resume cursor — a bad cursor means no resume, never an error"
       "a string",
       {},
       { resume: "" },
-      { resume: "not-a-uuid" },
+      { resume: "a string with spaces" },
+      // A leading `-` could arrive at the CLI as a flag.
+      { resume: "-rf" },
+      { resume: "../../etc/passwd" },
+      { resume: "a\nb" },
+      { resume: "x".repeat(257) },
       { resume: 7 }
     ]) {
       assert.equal(readClaudeResumeCursor(bad), undefined, JSON.stringify(bad));

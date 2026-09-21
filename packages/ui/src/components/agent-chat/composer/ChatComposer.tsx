@@ -44,6 +44,7 @@ import {
   attachmentRejectionReason,
   composerSubmissionIntentForEnter,
   composerSubmissionValidationMessage,
+  decideStagedAttachmentForRef,
   hasSendableContent,
   isPasteAsTextShortcut,
   nextPastedTextFileName,
@@ -304,9 +305,50 @@ export function ChatComposer({
     target.click();
   }, []);
 
+  /**
+   * Stage an attachment whose bytes are already on the daemon — a browser
+   * element pick, a chat-targeted drop, a queued message coming back.
+   *
+   * The optimistic write to `draftRef` is what makes a *batch* of these
+   * correct: a delivery carrying three files calls this three times in one
+   * tick, and without it every call would measure the budget against the same
+   * pre-batch draft and let a ninth attachment through.
+   */
+  const stageAttachment = React.useCallback((ref: AttachmentRef): boolean => {
+    const current = draftRef.current;
+    const decision = decideStagedAttachmentForRef({ existing: current.attachments, ref });
+    if (decision.kind === "duplicate") return true;
+    if (decision.kind === "rejected") {
+      setNotice(decision.reason);
+      return false;
+    }
+    const entry: StagedAttachment = {
+      key: decision.key,
+      name: decision.name,
+      sizeBytes: decision.sizeBytes,
+      mimeType: decision.mimeType,
+      status: "ready",
+      progress: 1,
+      ref
+    };
+    draftRef.current = { ...current, attachments: [...current.attachments, entry] };
+    setDraft((state) =>
+      state.attachments.some((existing) => existing.key === entry.key)
+        ? state
+        : { ...state, attachments: [...state.attachments, entry] }
+    );
+    return true;
+  }, []);
+
   React.useEffect(
-    () => registerComposerHandle(sessionId, { insertText, focusAtEnd, openControl }),
-    [focusAtEnd, insertText, openControl, sessionId]
+    () =>
+      registerComposerHandle(sessionId, {
+        insertText,
+        stageAttachment,
+        focusAtEnd,
+        openControl
+      }),
+    [focusAtEnd, insertText, openControl, sessionId, stageAttachment]
   );
 
   // ---------------------------------------------------------------------

@@ -15,6 +15,7 @@ import {
   MAX_TURN_INPUT_CHARS,
   SUPPORTED_ATTACHMENT_IMAGE_MIME_TYPES
 } from "@orquester/api/agent-chat";
+import type { AttachmentRef } from "@orquester/api/agent-chat";
 
 // ---------------------------------------------------------------------------
 // Enter
@@ -217,6 +218,68 @@ export function attachmentRejectionReason(input: {
     return `${input.name} is over the ${Math.round(limit / (1024 * 1024))} MB limit.`;
   }
   return null;
+}
+
+/**
+ * The minimum a staged attachment has to look like for the decision below.
+ * Kept structural so this module stays free of component types.
+ */
+export interface StagedAttachmentLike {
+  key: string;
+  status: "uploading" | "ready" | "failed";
+  ref?: { id: string };
+}
+
+/**
+ * What staging an **already-uploaded** reference should do (§7.4, §7.7).
+ *
+ * A browser element pick, a chat-targeted file drop and a queued message
+ * coming back to the composer all arrive as an `AttachmentRef` whose bytes are
+ * already on the daemon. They still have to behave exactly like a file the
+ * user picked here: count against the eight, show a chip, and be removable.
+ * Only the upload is skipped, because it already happened.
+ *
+ * Three outcomes, so the caller can react honestly:
+ *  - `duplicate` — this ref is already staged. Delivering the same pick twice
+ *    must not produce two chips, and it is **not** an error.
+ *  - `rejected` — the turn bounds refuse it; the caller may fall back to
+ *    writing the path into the draft, which is better than losing the file.
+ *  - `staged` — the chip's fields, ready to insert.
+ *
+ * A ref that declares no `mimeType` is deliberately measured as a file rather
+ * than guessed into an image subtype: refusing an already-uploaded image for
+ * not having declared `image/png` would be inventing a rule the upload route
+ * never applied.
+ */
+export type StageRefDecision =
+  | { kind: "duplicate"; key: string }
+  | { kind: "rejected"; reason: string }
+  | { kind: "staged"; key: string; name: string; sizeBytes: number; mimeType: string };
+
+/** Stable per ref, so re-delivering one is idempotent all the way down. */
+export function stagedAttachmentKeyForRef(ref: { id: string }): string {
+  return `ref:${ref.id}`;
+}
+
+export function decideStagedAttachmentForRef(input: {
+  existing: readonly StagedAttachmentLike[];
+  ref: AttachmentRef;
+}): StageRefDecision {
+  const key = stagedAttachmentKeyForRef(input.ref);
+  if (input.existing.some((entry) => entry.key === key || entry.ref?.id === input.ref.id)) {
+    return { kind: "duplicate", key };
+  }
+  const mimeType = input.ref.mimeType ?? "application/octet-stream";
+  const sizeBytes = input.ref.sizeBytes ?? 0;
+  const reason = attachmentRejectionReason({
+    name: input.ref.name,
+    sizeBytes,
+    mimeType,
+    stagedCount: input.existing.filter((entry) => entry.status === "ready").length,
+    preparingCount: input.existing.filter((entry) => entry.status !== "ready").length
+  });
+  if (reason) return { kind: "rejected", reason };
+  return { kind: "staged", key, name: input.ref.name, sizeBytes, mimeType };
 }
 
 /** §7.4: **uploads must finish before send.** */

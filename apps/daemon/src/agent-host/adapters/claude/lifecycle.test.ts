@@ -24,6 +24,7 @@ import type {
 import type { RuntimeEvent } from "@orquester/api/agent-chat";
 
 import type { AdapterContext, AgentAdapter } from "../../adapter.ts";
+import { resumeCursorFor } from "../../orchestration/resume.ts";
 import type { ChildExitReason, ProviderChild } from "../../support/spawn.ts";
 import { AsyncEventQueue, createDeferred } from "./async-queue.ts";
 import type { ClaudeAdapterDeps } from "./deps.ts";
@@ -833,9 +834,48 @@ describe("claude adapter — death and recovery", () => {
     assert.equal(options.sessionId, undefined);
   });
 
+  it("the §6.1 create-time cursor resumes, and its first turn refreshes it", async () => {
+    // The minimal `{threadId, resume}` the host builds from the resume picker.
+    // Accepting only the adapter's own full cursor would silently degrade a
+    // real resume into a fresh session.
+    const conversationId = "b46b654b-57bb-40e4-8c82-d3536bd06a28";
+    const harness = await makeHarness();
+    await harness.adapter.startSession({
+      ...START,
+      resumeCursor: resumeCursorFor("claude", START.threadId, conversationId)
+    });
+    const options = harness.queryOptions.at(-1)!;
+    assert.equal(options.resume, conversationId);
+    assert.equal(options.sessionId, undefined);
+
+    // The turn runs, and the cursor it returns is the full shape — the fields
+    // the minimal form omits are the adapter's to fill in (§4.1).
+    const peer = harness.peers[0]!;
+    const turn = await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "carry on",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await peer.nextTurn();
+    const cursor = turn.resumeCursor as {
+      resume: string;
+      turnCount: number;
+      turnStartMessageIds: string[];
+    };
+    assert.equal(cursor.resume, conversationId);
+    assert.equal(cursor.turnCount, 1);
+    assert.deepEqual(cursor.turnStartMessageIds, [turn.turnId]);
+
+    peer.emit(systemInit(conversationId));
+    peer.emit(successResult(conversationId));
+    const completed = await harness.waitFor("turn.completed");
+    assert.equal(completed.payload.state, "completed");
+  });
+
   it("a cursor that fails its shape check means no resume, never an error", async () => {
     const harness = await makeHarness();
-    await harness.adapter.startSession({ ...START, resumeCursor: { resume: "nonsense" } });
+    await harness.adapter.startSession({ ...START, resumeCursor: { resume: "-rf" } });
     const options = harness.queryOptions.at(-1)!;
     assert.equal(options.resume, undefined);
     assert.equal(typeof options.sessionId, "string");
