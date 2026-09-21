@@ -133,6 +133,16 @@ export interface AgentHostHealthResponse {
   activeTurnThreadIds: string[];
   pid: number;
   startedAt: string;
+  /**
+   * Monotonic counter the host bumps whenever a provider snapshot actually
+   * changes (§4.6.4: the host's OWN session-start / turn-reuse refresh must
+   * broadcast `agent.providers.changed` too, not just the explicit refresh
+   * route). The daemon already polls `/health` every
+   * {@link AGENT_HOST_HEALTH_INTERVAL_MS}, so a moving number is enough for a
+   * coarse event the client re-reads on. Optional: an older host omits it and
+   * the daemon simply never raises the event from this path.
+   */
+  providersRevision?: number;
 }
 
 /** Body of `POST /threads`. */

@@ -83,24 +83,69 @@ test("an unchanged activity is not re-broadcast on every poll tick", () => {
 test("a pending approval pushes 'needs your input' exactly once per raise", () => {
   const h = harness();
   seedTab(h.chat, "t1");
+  // The first poll only seeds the baseline (see the restart test below), so
+  // start from a quiet thread and let the approval be a real transition.
+  h.service.applyFields("t1", { chatSessionStatus: "running" });
   h.service.applyFields("t1", { hasPendingApprovals: true });
   h.service.applyFields("t1", { hasPendingApprovals: true });
   assert.deepEqual(h.pushes, [{ id: "t1", type: "needs-input" }]);
 });
 
-test("a completed turn pushes 'finished'", () => {
+test("a completed turn pushes 'finished' — on the TRANSITION, not the first sight of it", () => {
   const h = harness();
   seedTab(h.chat, "t1");
-  h.service.applyFields("t1", {
-    chatSessionStatus: "ready",
+  const completed = {
+    turnId: "a",
+    state: "completed" as const,
+    startedAt: null,
+    completedAt: "2026-09-21T00:00:01.000Z"
+  };
+  // First poll = the daemon discovering the thread; it only seeds the baseline.
+  h.service.applyFields("t1", { chatSessionStatus: "running", latestTurn: null });
+  h.service.applyFields("t1", { chatSessionStatus: "ready", latestTurn: completed });
+  assert.deepEqual(h.pushes, [{ id: "t1", type: "finished" }]);
+});
+
+test("a daemon restart NEVER pushes for state it is merely discovering", () => {
+  // Regression: after `systemctl restart orquester` (every deploy) the first
+  // poll tick reads each open tab's long-settled turn as a brand-new
+  // "finished" attention and fired one Web Push per tab for work the user saw
+  // hours ago. The 30 s debounce is in-memory and resets with the process, so
+  // it was no backstop.
+  const h = harness();
+  seedTab(h.chat, "t1");
+  seedTab(h.chat, "t2");
+  seedTab(h.chat, "t3");
+  const settledHoursAgo = {
+    chatSessionStatus: "ready" as const,
     latestTurn: {
       turnId: "a",
-      state: "completed",
+      state: "completed" as const,
       startedAt: null,
-      completedAt: "2026-09-21T00:00:01.000Z"
+      completedAt: "2026-09-20T09:00:00.000Z"
     }
-  });
-  assert.deepEqual(h.pushes, [{ id: "t1", type: "finished" }]);
+  };
+  for (const id of ["t1", "t2", "t3"]) {
+    h.service.applyFields(id, settledHoursAgo);
+  }
+  assert.deepEqual(h.pushes, [], "no push for state the daemon is discovering");
+  // …but the tabs still get their activity, so the UI is correct immediately.
+  assert.equal(h.chat.get("t1")?.activity?.attention, "finished");
+  assert.equal(h.published.filter((p) => p.type === "session.activity").length, 3);
+  // And a genuine transition after that still pushes.
+  h.service.applyFields("t1", { hasPendingApprovals: true });
+  assert.deepEqual(h.pushes, [{ id: "t1", type: "needs-input" }]);
+});
+
+test("a re-adopted thread (after forget) also seeds silently", () => {
+  const h = harness();
+  seedTab(h.chat, "t1");
+  h.service.applyFields("t1", { hasPendingApprovals: true });
+  h.service.applyFields("t1", { chatSessionStatus: "running" });
+  const before = h.pushes.length;
+  h.service.forget("t1");
+  h.service.applyFields("t1", { hasPendingApprovals: true });
+  assert.equal(h.pushes.length, before, "a host handover is not a new attention");
 });
 
 test("NEVER a 'finished' push while background liveness is non-null", () => {
@@ -137,6 +182,22 @@ test("NEVER a 'finished' push while background liveness is non-null", () => {
     latestTurn: completed
   });
   assert.deepEqual(h.pushes, [{ id: "t1", type: "finished" }]);
+});
+
+test("an errored thread keeps status 'running' — the TAB is live — and shows the error via activity", () => {
+  // E2E E18: `SessionSummary.status` is the tab's liveness, not the thread's.
+  // `exited` would make every client drop a tab the user can still recover
+  // with `/session/stop` or a new turn; the error reaches the tab strip and the
+  // Attention Center through `activity` + `chatSessionStatus`.
+  const h = harness();
+  seedTab(h.chat, "t1");
+  h.service.applyFields("t1", { chatSessionStatus: "running" });
+  h.service.applyFields("t1", { chatSessionStatus: "error" });
+  const summary = h.chat.get("t1");
+  assert.equal(summary?.status, "running");
+  assert.equal(summary?.chatSessionStatus, "error");
+  assert.equal(summary?.activity?.state, "idle");
+  assert.equal(summary?.activity?.attention, "finished");
 });
 
 test("an errored thread whose watch loop is still live does not push 'finished'", () => {

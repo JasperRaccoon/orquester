@@ -1,17 +1,13 @@
 import { strict as assert } from "node:assert";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import {
-  applyClaudeProjectTrust,
-  ensureGrokChatConfig,
-  markClaudeProjectTrusted,
-  setTomlKey
-} from "./home-prep.ts";
+import { applyClaudeProjectTrust, markClaudeProjectTrusted } from "./home-prep.ts";
 
-// Reality findings from the real CLIs (SEAMS §2), each a silent failure if the
-// daemon skips it.
+// Claude project trust: a reality finding (SEAMS §2) whose write lands on the
+// user's own credential-bearing `~/.claude.json`, so the *how* matters as much
+// as the *what*.
 
 test("a never-seen directory is marked trusted, with onboarding forced", () => {
   const next = applyClaudeProjectTrust({}, "/w/p");
@@ -56,6 +52,19 @@ test("a malformed projects map is replaced rather than crashing the launch", () 
   assert.equal(typeof next.projects, "object");
 });
 
+test("the other projects in the file survive the grant", () => {
+  // The file is the user's: a lost entry is lost history and account state.
+  const next = applyClaudeProjectTrust(
+    { projects: { "/other": { hasTrustDialogAccepted: true }, "/third": { history: [1, 2] } } },
+    "/w/p"
+  );
+  assert.ok(next);
+  const projects = next.projects as Record<string, Record<string, unknown>>;
+  assert.equal(projects["/other"].hasTrustDialogAccepted, true);
+  assert.deepEqual(projects["/third"].history, [1, 2]);
+  assert.equal(projects["/w/p"].hasTrustDialogAccepted, true);
+});
+
 test("markClaudeProjectTrusted writes 0600 and survives an absent file", async () => {
   const dir = await mkdtemp(join(tmpdir(), "orq-home-prep-"));
   const file = join(dir, ".claude.json");
@@ -65,12 +74,56 @@ test("markClaudeProjectTrusted writes 0600 and survives an absent file", async (
     (written.projects as Record<string, Record<string, unknown>>)["/w/p"].hasTrustDialogAccepted,
     true
   );
+  // Explicitly asserted, not assumed: `{mode}` on writeFile is inert for an
+  // existing file, which is why the write forces the mode itself.
+  assert.equal((await stat(file)).mode & 0o777, 0o600);
   // Second call changes nothing.
   assert.equal(await markClaudeProjectTrusted(file, "/w/p"), false);
   await rm(dir, { recursive: true, force: true });
 });
 
-test("an unreadable claude config never fails a launch", async () => {
+test("a pre-existing 0644 config is NARROWED to 0600, never left wide", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "orq-home-prep-"));
+  const file = join(dir, ".claude.json");
+  await writeFile(file, JSON.stringify({ oauthAccount: { id: "x" } }), { mode: 0o644 });
+  assert.equal(await markClaudeProjectTrusted(file, "/w/p"), true);
+  assert.equal((await stat(file)).mode & 0o777, 0o600);
+  const written = JSON.parse(await readFile(file, "utf8")) as Record<string, unknown>;
+  assert.deepEqual(written.oauthAccount, { id: "x" }, "the credential block survives");
+  await rm(dir, { recursive: true, force: true });
+});
+
+test("the write is atomic: tmp + rename, and no temp file is left behind", async () => {
+  // A plain truncating writeFile leaves an EMPTY `.claude.json` on a crash or a
+  // full disk, destroying every project entry and the account state.
+  const dir = await mkdtemp(join(tmpdir(), "orq-home-prep-"));
+  const file = join(dir, ".claude.json");
+  await writeFile(file, JSON.stringify({ hasCompletedOnboarding: false }), { mode: 0o600 });
+  assert.equal(await markClaudeProjectTrusted(file, "/w/p"), true);
+  assert.deepEqual(await readdir(dir), [".claude.json"], "no .tmp left over");
+  await rm(dir, { recursive: true, force: true });
+});
+
+test("a symlinked config is written THROUGH, never replaced by a regular file", async () => {
+  // Users symlink agent configs into dotfiles repos; renaming onto the link
+  // path would silently sever the setup.
+  const dir = await mkdtemp(join(tmpdir(), "orq-home-prep-"));
+  const real = join(dir, "real.json");
+  const link = join(dir, ".claude.json");
+  await writeFile(real, JSON.stringify({ keep: true }), { mode: 0o600 });
+  await symlink(real, link);
+  assert.equal(await markClaudeProjectTrusted(link, "/w/p"), true);
+  assert.equal((await lstat(link)).isSymbolicLink(), true, "the link survives the write");
+  const written = JSON.parse(await readFile(real, "utf8")) as Record<string, unknown>;
+  assert.equal(written.keep, true);
+  assert.equal(
+    (written.projects as Record<string, Record<string, unknown>>)["/w/p"].hasTrustDialogAccepted,
+    true
+  );
+  await rm(dir, { recursive: true, force: true });
+});
+
+test("an unwritable config never fails a launch", async () => {
   const warnings: unknown[] = [];
   // A directory where a file is expected: the write throws, the launch does not.
   const dir = await mkdtemp(join(tmpdir(), "orq-home-prep-"));
@@ -82,66 +135,30 @@ test("an unreadable claude config never fails a launch", async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-// --- the minimal TOML writer -----------------------------------------------
-
-test("a key is added to an existing table without touching the rest", () => {
-  const source = ['[compat.claude]', 'hooks = false', '', '[features]', 'other = 1', ''].join("\n");
-  const next = setTomlKey(source, "features", "support_permission", "true");
-  assert.ok(next.includes("hooks = false"), "the critical compat key is untouched");
-  assert.ok(next.includes("other = 1"));
-  assert.ok(next.includes("support_permission = true"));
-  assert.ok(next.indexOf("support_permission") > next.indexOf("[features]"));
-});
-
-test("an existing key is rewritten in place, and an identical one is a no-op", () => {
-  const source = "[features]\nsupport_permission = false\n";
-  const next = setTomlKey(source, "features", "support_permission", "true");
-  assert.equal(next, "[features]\nsupport_permission = true\n");
-  assert.equal(setTomlKey(next, "features", "support_permission", "true"), next);
-});
-
-test("a missing table is appended", () => {
-  const next = setTomlKey("auto_update = true\n", "features", "support_permission", "true");
-  assert.ok(next.includes("[features]"));
-  assert.ok(next.trimEnd().endsWith("support_permission = true"));
-});
-
-test("a ROOT key lands above the first table, never inside one", () => {
-  const source = "[features]\nsupport_permission = true\n";
-  const next = setTomlKey(source, null, "auto_update", "false");
-  assert.equal(next.indexOf("auto_update"), 0, "a root key below a header would belong to that table");
-});
-
-test("a root key already present is rewritten, not duplicated", () => {
-  const next = setTomlKey("auto_update = true\n[features]\n", null, "auto_update", "false");
-  assert.equal(next.split("auto_update").length - 1, 1);
-  assert.ok(next.startsWith("auto_update = false"));
-});
-
-test("a same-named key in ANOTHER table is not mistaken for ours", () => {
-  const source = "[other]\nsupport_permission = false\n";
-  const next = setTomlKey(source, "features", "support_permission", "true");
-  assert.ok(next.includes("[other]\nsupport_permission = false"));
-  assert.ok(next.includes("[features]\nsupport_permission = true"));
-});
-
-test("ensureGrokChatConfig turns approvals on and auto-update off, idempotently", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "orq-grok-"));
-  await writeFile(join(dir, "config.toml"), "[compat.claude]\nhooks = false\n", "utf8");
-  assert.equal(await ensureGrokChatConfig(dir), true);
-  const written = await readFile(join(dir, "config.toml"), "utf8");
-  assert.ok(written.includes("hooks = false"), "the hooks=false compat key must survive");
-  assert.ok(/\[features\][\s\S]*support_permission = true/.test(written));
-  assert.ok(written.startsWith("auto_update = false"));
-  assert.equal(await ensureGrokChatConfig(dir), false, "no write churn on the second launch");
-  await rm(dir, { recursive: true, force: true });
-});
-
-test("ensureGrokChatConfig creates the file when the home has none", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "orq-grok-"));
-  assert.equal(await ensureGrokChatConfig(dir), true);
-  const written = await readFile(join(dir, "config.toml"), "utf8");
-  assert.ok(written.includes("support_permission = true"));
-  assert.ok(written.includes("auto_update = false"));
-  await rm(dir, { recursive: true, force: true });
+test("the module writes NOTHING for Grok any more", async () => {
+  // Regression: `ensureGrokChatConfig` used to set `[features]
+  // support_permission` / `auto_update` in `<grokHome>/config.toml`, which on a
+  // managed account home is a SYMLINK to the daemon user's own
+  // `~/.grok/config.toml` — so one chat launch reconfigured Grok host-wide, for
+  // every terminal tab and every account. The daemon no longer writes any
+  // shared home file; W9 owns getting those settings to the CLI.
+  const module = (await import("./home-prep.ts")) as Record<string, unknown>;
+  for (const removed of ["ensureGrokChatConfig", "setTomlKey", "GROK_CHAT_CONFIG"]) {
+    assert.equal(module[removed], undefined, `${removed} must stay removed`);
+  }
+  // Code, not prose: exactly one write call in the module, and it is the
+  // atomic Claude one. (The doc comment still explains why the Grok write is
+  // gone, so a substring match on "config.toml" would be a false positive.)
+  const source = (await readFile(new URL("./home-prep.ts", import.meta.url), "utf8"))
+    .split("\n")
+    .filter((line) => !/^\s*(\*|\/\/|\/\*)/.test(line))
+    .join("\n");
+  assert.equal(source.includes("GROK_HOME"), false, "no grok home is resolved here");
+  assert.equal(source.includes("config.toml"), false, "no config.toml path is built here");
+  assert.equal(
+    (source.match(/writeFileAtomic\(/g) ?? []).length,
+    1,
+    "one write, and it is the atomic Claude one"
+  );
+  assert.equal(/\bwriteFile\(/.test(source), false, "no plain truncating write remains");
 });
