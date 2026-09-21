@@ -363,20 +363,27 @@ export function buildClaudeSnapshot(input: BuildSnapshotInput): {
 /**
  * The per-cwd overlay of §4.6.4. Only **skills** are re-scoped for Claude: its
  * command list is machine-level, already merged by the CLI.
+ *
+ * The machine list is nevertheless **copied into the overlay**, exactly as
+ * T3's `ClaudeDriver.snapshotForCwd` returns `{...machineSnapshot, skills}`
+ * and as the Codex and Grok adapters do here. The client resolves the catalog
+ * as `workspaceSnapshot?.slashCommands ?? provider?.slashCommands`, and `??`
+ * does not fall back on an **empty array** — so an overlay that hard-coded
+ * `[]` left a Claude tab with no provider commands at all from its first turn
+ * onward, `/compact` included.
  */
 export async function buildClaudeWorkspaceSnapshot(input: {
   cwd: string;
   configDir: string;
   checkedAt: string;
+  /** The machine-level command list this overlay carries forward. */
+  slashCommands?: readonly SlashCommand[];
 }): Promise<WorkspaceSnapshot> {
   const skills = await discoverClaudeSkills({ configDir: input.configDir, cwd: input.cwd });
   return {
     cwd: input.cwd,
     checkedAt: input.checkedAt,
-    // Machine-level; the overlay carries an empty list so a merge never blanks
-    // the snapshot's own commands (§4.6.4 "a probe that comes back empty never
-    // blanks a non-empty cached list").
-    slashCommands: [],
+    slashCommands: [...(input.slashCommands ?? [])],
     skills
   };
 }
@@ -384,16 +391,26 @@ export async function buildClaudeWorkspaceSnapshot(input: {
 /** At most 16 cwds are retained per provider, oldest evicted (§4.6.4). */
 export const MAX_WORKSPACE_SNAPSHOTS = 16;
 
+function keepNonEmpty<T>(next: readonly T[], previous: readonly T[]): T[] {
+  return next.length === 0 && previous.length > 0 ? [...previous] : [...next];
+}
+
 export function mergeWorkspaceSnapshot(
   existing: readonly WorkspaceSnapshot[],
   next: WorkspaceSnapshot
 ): WorkspaceSnapshot[] {
   const previous = existing.find((entry) => entry.cwd === next.cwd);
-  // A probe that comes back empty never blanks a non-empty cached list.
+  // A probe that comes back empty never blanks a non-empty cached list — and
+  // the rule is applied **per array**, independently for `slashCommands` and
+  // `skills`, so a transient failure on one cannot discard the other.
   const merged: WorkspaceSnapshot =
-    previous !== undefined && next.skills.length === 0 && previous.skills.length > 0
-      ? { ...next, skills: previous.skills }
-      : next;
+    previous === undefined
+      ? next
+      : {
+          ...next,
+          slashCommands: keepNonEmpty(next.slashCommands, previous.slashCommands),
+          skills: keepNonEmpty(next.skills, previous.skills)
+        };
   const without = existing.filter((entry) => entry.cwd !== next.cwd);
   return [...without, merged].slice(-MAX_WORKSPACE_SNAPSHOTS);
 }

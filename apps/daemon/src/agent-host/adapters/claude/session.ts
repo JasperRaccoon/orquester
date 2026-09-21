@@ -46,7 +46,12 @@ import { StderrCapture } from "../../support/stderr.ts";
 import { createDeferred, type Deferred } from "./async-queue.ts";
 import { classifyRequestType, summarizeToolRequest, trimmedString } from "./classify.ts";
 import { buildClaudeResumeCursor, type ClaudeResumeCursor } from "./cursor.ts";
-import { permissionResultForDecision, shouldShortCircuitToAllow } from "./decisions.ts";
+import {
+  claudeCanUseToolRoute,
+  claudeRequestKey,
+  permissionResultForDecision,
+  shouldShortCircuitToAllow
+} from "./decisions.ts";
 import type { ClaudeAdapterDeps } from "./deps.ts";
 import { createClaudeHistoryReader } from "./history.ts";
 import { buildClaudeQueryOptions } from "./launch.ts";
@@ -55,8 +60,10 @@ import { ClaudeNormalizer, extractExitPlanModePlan } from "./normalize.ts";
 import { PromptQueue } from "./prompt-queue.ts";
 import { buildAskUserQuestionReply, parseAskUserQuestionInput } from "./questions.ts";
 import {
+  ROLLBACK_COMPACTED,
   ROLLBACK_SESSION_UNAVAILABLE,
   ROLLBACK_FORK_MISALIGNED,
+  isAnchorReachableAfterCompaction,
   planClaudeRollback,
   remapClaudeForkTurnBoundaries
 } from "./rollback.ts";
@@ -262,7 +269,17 @@ export class ClaudeSession {
 
     // The message loop starts before the handshake so the frames the CLI emits
     // while initialising are normalised rather than buffered.
-    this.streamDone = this.runStream();
+    //
+    // The `.catch` is load-bearing: `runStream` guards the `for await` and each
+    // `handleMessage`, but not the trailing `handleStreamEnd`, and the host
+    // installs no `unhandledRejection` handler — so a throw there would end the
+    // whole long-lived host and every other thread's session with it.
+    this.streamDone = this.runStream().catch((error: unknown) => {
+      this.options.context.logger.error(
+        `claude: the message loop for thread ${this.threadId} failed`,
+        error
+      );
+    });
 
     try {
       await withDeadline(this.query.initializationResult(), {
@@ -482,13 +499,12 @@ export class ClaudeSession {
       return { behavior: "deny", message: "The Claude session is no longer running." };
     }
 
-    // AskUserQuestion is intercepted BEFORE any approval logic, in every
-    // runtime mode — plan mode leans on it heavily (§4.5).
-    if (toolName === "AskUserQuestion") {
+    const route = claudeCanUseToolRoute(toolName);
+    if (route === "user-input") {
       return this.handleAskUserQuestion(toolInput, callbackOptions);
     }
 
-    if (toolName === "ExitPlanMode") {
+    if (route === "proposed-plan") {
       const plan = extractExitPlanModePlan(toolInput);
       if (plan) {
         this.emit(
@@ -510,10 +526,9 @@ export class ClaudeSession {
       return { behavior: "allow", updatedInput: toolInput };
     }
 
-    // Keyed on the SDK's own request id: it redelivers a request whose
-    // response was lost in a transport gap, and a freshly minted key would
-    // open a second card for the same tool call (fixtures README obs. 11).
-    const requestId = trimmedString(callbackOptions.requestId) ?? this.options.context.ids.uuid();
+    const requestId = claudeRequestKey(callbackOptions.requestId, () =>
+      this.options.context.ids.uuid()
+    );
     const existing = this.pendingApprovals.get(requestId);
     if (existing) {
       // Idempotent per request id: the first card stays, and this delivery
@@ -626,7 +641,28 @@ export class ClaudeSession {
       };
     }
 
-    const requestId = trimmedString(callbackOptions.requestId) ?? this.options.context.ids.uuid();
+    const requestId = claudeRequestKey(callbackOptions.requestId, () =>
+      this.options.context.ids.uuid()
+    );
+    const open = this.pendingUserInputs.get(requestId);
+    if (open !== undefined) {
+      // Idempotent per request id, like the approval path: the SDK redelivers a
+      // request whose response was lost in a transport gap, and overwriting the
+      // map entry would park the first control request forever (nothing could
+      // reach its deferred any more) and open a second question card.
+      return new Promise<PermissionResult>((resolve) => {
+        const previous = open.settle;
+        open.settle = (answers) => {
+          previous(answers);
+          resolve(
+            answers === null
+              ? { behavior: "deny", message: "User cancelled tool execution." }
+              : { behavior: "allow", updatedInput: buildAskUserQuestionReply(toolInput, answers) }
+          );
+        };
+      });
+    }
+
     const answered = createDeferred<Record<string, unknown> | null>();
     const pending: PendingUserInput = {
       requestId,
@@ -685,7 +721,13 @@ export class ClaudeSession {
     callbackOptions: { signal: AbortSignal; requestId: string }
   ): Promise<UserDialogResult | null> => {
     if (request.dialogKind !== "resume_return") {
-      return { behavior: "cancelled" };
+      // `null`, never `{behavior: "cancelled"}`. The SDK's contract is explicit:
+      // a host that receives a kind it did not declare MUST NOT answer it —
+      // `cancelled` is a real settlement, read as the user dismissing the
+      // dialog, and in a multi-client session that would dismiss it for
+      // everyone. Returning `null` leaves it pending for a host that declared
+      // it.
+      return null;
     }
     const ageMinutes = Number(request.payload.sessionAgeMinutes ?? 0);
     const estimatedTokens = Number(request.payload.estimatedTokens ?? 0);
@@ -852,19 +894,62 @@ export class ClaudeSession {
     });
     // The deferred belongs to the turn `sendTurn` just opened (or to the live
     // one it steered into), so it is read AFTER the send rather than before.
-    await this.turnSettled?.promise;
+    const settled = this.turnSettled;
+    if (settled === undefined) {
+      return;
+    }
+    // Bounded like every other wait on a child (§3.1). A `/compact` whose CLI
+    // keeps streaming status frames but never emits a terminal `result` would
+    // otherwise leave the host's `compacting` latch set forever, and every
+    // message the user sent afterwards would queue silently with no error and
+    // no recovery short of restarting the host.
+    await withDeadline(settled.promise, {
+      label: "claude/compact",
+      timeoutMs: this.options.deps.deadlines.compactMs,
+      onTimeout: () => {
+        this.emit([
+          this.normalizer.warning(
+            "Claude did not finish compacting in time; the compaction was abandoned."
+          )
+        ]);
+      }
+    });
   }
 
   /**
-   * §4.1: turn-scoped, and a no-op when that turn is no longer the active one,
-   * so a Stop that races a settling turn cannot kill the next one.
+   * Interrupt has **two** scopes.
+   *
+   * §4.1, turn-scoped: an interrupt that NAMES a turn is a no-op when that turn
+   * is no longer the active one, so a Stop that races a settling turn cannot
+   * kill the next one.
+   *
+   * §6.2, session-scoped: *"`/interrupt` is also the only way to stop
+   * background work, and it stops all of it. It is addressed to the session,
+   * not to a turn, so it is **valid with no turn running**"*. The client omits
+   * `turnId` whenever the session is not `running`, and this must then kill
+   * every live subagent, background shell and watch loop. Returning early here
+   * left the fleet running and the client's "Stopping…" latch set forever,
+   * because `backgroundLiveness` never dropped to `null`.
+   *
+   * T3 does the same by construction: its `interruptTurn` **is**
+   * `stopSessionInternal` (`ClaudeAdapter.ts:5289-5297`), i.e. unconditional.
    */
   async interruptTurn(turnId?: string): Promise<void> {
     if (this.closed) {
       return;
     }
     const active = this.normalizer.turnState?.turnId;
-    if (active === undefined || (turnId !== undefined && turnId !== active)) {
+    if (turnId !== undefined && turnId !== active) {
+      // Named a turn that is no longer running: deliberately nothing.
+      return;
+    }
+    if (active === undefined) {
+      // Session-scoped Stop with no running turn. The CLI keeps subagents,
+      // background shells and watch loops alive inside its own process after a
+      // turn settles, and closing the query is the only thing that reaches
+      // them — `teardown` closes every live task `stopped` on the way out, so
+      // the roster and the liveness registry clear.
+      await this.stop("Stop: background work stopped.");
       return;
     }
 
@@ -922,14 +1007,21 @@ export class ClaudeSession {
       turnError: reason
     });
     // The stream loop ends once the query is closed; wait so a caller that
-    // stops and immediately restarts cannot race two loops on one thread.
-    await Promise.race([
-      this.streamDone ?? Promise.resolve(),
-      new Promise<void>((resolve) => {
-        const handle = this.options.deps.setTimer(resolve, this.options.deps.deadlines.cancelMs);
-        void handle;
-      })
-    ]);
+    // stops and immediately restarts cannot race two loops on one thread. The
+    // timer is CLEARED when the loop wins — `support/deadline.ts` deliberately
+    // does not unref, so a leaked one per stop would hold the event loop open
+    // and delay the drain-restart the shutdown design depends on.
+    let timer: NodeJS.Timeout | number | undefined;
+    const guard = new Promise<void>((resolve) => {
+      timer = this.options.deps.setTimer(resolve, this.options.deps.deadlines.cancelMs);
+    });
+    try {
+      await Promise.race([this.streamDone ?? Promise.resolve(), guard]);
+    } finally {
+      if (timer !== undefined) {
+        this.options.deps.clearTimer(timer);
+      }
+    }
   }
 
   readThread(): ThreadSnapshot {
@@ -979,13 +1071,33 @@ export class ClaudeSession {
       cwd: this.options.cwd
     });
     const plan = planClaudeRollback({ messages, boundaries, numTurns });
+    // Sliced by the plan's OWN retained count, not by `turns.length - numTurns`:
+    // `beginTurn` pushes a boundary while only `completeTurn` pushes a turn, so
+    // during a live turn `turnStartMessageIds.length === turns.length + 1` and
+    // the two disagreed by one — the restarted session was seeded with one turn
+    // fewer than its cursor claimed, and every later rewind then targeted the
+    // wrong boundary.
     const retainedTurns = this.normalizer.turns.slice(
       0,
-      Math.max(0, this.normalizer.turns.length - numTurns)
+      Math.min(plan.retainedCount, this.normalizer.turns.length)
     );
 
     if (plan.rollbackAt === undefined) {
       return { cursor: undefined, retainedTurns };
+    }
+
+    // A compaction between the anchor and now makes the anchor unreachable.
+    // Checked BEFORE the fork, so a doomed rewind says why instead of creating
+    // an orphan fork session on disk and then failing the deep-equal scan with
+    // a misleading "did not preserve the retained turn boundaries" (§4.5 "or a
+    // compaction in between", fixtures README obs. 17).
+    if (
+      !isAnchorReachableAfterCompaction({
+        anchorUuid: plan.rollbackAt,
+        preservedUuids: this.normalizer.preservedMessageUuids
+      })
+    ) {
+      throw new Error(ROLLBACK_COMPACTED);
     }
 
     const fork = await history.fork({
@@ -1198,7 +1310,11 @@ export class ClaudeSession {
       ? TURN_LIVENESS_WINDOWS.activeToolMs
       : TURN_LIVENESS_WINDOWS.idleMs;
     this.watchdog = this.options.deps.setTimer(() => {
-      void this.checkLiveness();
+      this.checkLiveness().catch((error: unknown) => {
+        // The host installs no `unhandledRejection` handler; a throw from a
+        // timer callback would take it down.
+        this.options.context.logger.error("claude: the liveness watchdog failed", error);
+      });
     }, window);
   }
 

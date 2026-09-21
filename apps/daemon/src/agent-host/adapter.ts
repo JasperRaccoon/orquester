@@ -103,9 +103,15 @@ export interface SendTurnResult {
  *   requests inline on its read loop is blocked by an open prompt, so
  *   cancelling after the interrupt RPC deadlocks Stop exactly when a card is
  *   open (§3.1).
- * - **Interrupt is turn-scoped.** `interruptTurn` carries the turn id the user
- *   pressed Stop on and is a no-op when that turn is no longer the active one,
- *   so a Stop that races a settling turn cannot kill the next one.
+ * - **Interrupt has two scopes.** With a `turnId` it is turn-scoped: it
+ *   carries the turn the user pressed Stop on and is a no-op when that turn
+ *   is no longer the active one, so a Stop that races a settling turn cannot
+ *   kill the next one. **Without** one it is session-scoped and is valid
+ *   with no turn running (§6.2): it is the only way to stop background
+ *   work, and it stops ALL of it — every live subagent, background shell
+ *   and watch loop — closing each with `task.completed {status:"stopped"}`
+ *   so the roster and the liveness registry clear. Returning early there
+ *   leaves the client's "Stopping…" latch set forever.
  * - **Lazy recovery.** `sendTurn` on a thread with no live session starts one
  *   from the persisted cursor first. A crashed, OOM-killed or restarted
  *   session is indistinguishable from a fresh one.
@@ -164,8 +170,16 @@ export interface AgentAdapter {
    * and never open a real session; the background refresh that keeps
    * `installed`/`version`/`auth` current must never open a provider session
    * (§6.3). `cwd` scopes the per-directory overlay of §4.6.4.
+   *
+   * `home` names the account the snapshot should describe. Without it the
+   * probe runs under the HOST's identity, so `auth`, the subscription label
+   * and the usage windows report the daemon user's own login rather than the
+   * identity a thread runs under — which is the wrong answer on any host using
+   * managed accounts. It is optional so an adapter that has no per-account
+   * notion can ignore it; §4.5's cache key (`binaryPath\0configDir\0cwd`)
+   * already assumes the config dir varies with it.
    */
-  refreshSnapshot(input?: { cwd?: string }): Promise<ProviderSnapshot>;
+  refreshSnapshot(input?: { cwd?: string; home?: AccountHome }): Promise<ProviderSnapshot>;
 
   /** The adapter's canonical event stream. One consumer: the host's ingestion. */
   readonly events: AsyncIterable<RuntimeEvent>;

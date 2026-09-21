@@ -18,6 +18,8 @@
 
 import { forkSession, getSessionMessages } from "@anthropic-ai/claude-agent-sdk";
 
+import { writeAllToStdout as writeAll } from "./stdout-write.ts";
+
 async function main(): Promise<void> {
   const [method, sessionId, rawArgs] = process.argv.slice(2);
   if (method === undefined || sessionId === undefined) {
@@ -28,12 +30,12 @@ async function main(): Promise<void> {
 
   if (method === "getSessionMessages") {
     const messages = await getSessionMessages(sessionId, options);
-    process.stdout.write(JSON.stringify(messages));
+    await writeAll(JSON.stringify(messages));
     return;
   }
   if (method === "forkSession") {
     const result = await forkSession(sessionId, options);
-    process.stdout.write(JSON.stringify(result));
+    await writeAll(JSON.stringify(result));
     return;
   }
   throw new Error(`unknown history method '${method}'`);
@@ -41,10 +43,12 @@ async function main(): Promise<void> {
 
 main().then(
   () => {
-    process.exit(0);
+    // No `process.exit()`: the write above is flushed, but stdout may still
+    // hold queued bytes and the loop must be allowed to drain them.
+    process.exitCode = 0;
   },
   (error: unknown) => {
     process.stderr.write(error instanceof Error ? error.message : String(error));
-    process.exit(1);
+    process.exitCode = 1;
   }
 );

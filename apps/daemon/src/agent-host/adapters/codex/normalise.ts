@@ -16,15 +16,18 @@
  */
 
 import type {
+  CanonicalItemType,
   CanonicalRequestType,
   RuntimeContentStreamKind,
   RuntimeErrorClass,
   RuntimeEvent,
   RuntimeEventRaw,
-  RuntimeTurnState
+  RuntimeTurnState,
+  UserInputQuestion
 } from "@orquester/api/agent-chat";
 
 import type { CodexProtocol, ServerNotificationMethod } from "./_generated/index.ts";
+import { notificationThreadId, routeCodexChildNotification } from "./child-routing.ts";
 import { classifyItem, type CodexThreadItem } from "./items.ts";
 import { usageWindowsFromRateLimits, CodexUsageTracker } from "./usage.ts";
 
@@ -43,15 +46,25 @@ export const CODEX_RAW_REQUEST = "codex.app-server.request" as const;
 
 export interface CodexNormaliserOptions {
   usage: CodexUsageTracker;
+  /**
+   * The session's own provider thread id, once `thread/start` / `thread/resume`
+   * has answered. Until then every notification is ours by construction (no
+   * child can exist yet). Notifications for any OTHER thread are routed as
+   * collab-child traffic (`child-routing.ts`).
+   */
+  ownThreadId?: () => string | null;
 }
 
 /** Per-session normalisation state. */
 export class CodexNormaliser {
   private readonly usage: CodexUsageTracker;
+  private readonly ownThreadId: () => string | null;
   /** `turn/diff/updated` is cumulative and repeats; de-duplicate on content. */
   private lastDiff: string | null = null;
-  /** itemId → whether the item is still `inProgress`, for `tool.progress`. */
-  private readonly openItems = new Map<string, string>();
+  /** itemId → canonical item type, while the item is still `inProgress`. */
+  private readonly openItems = new Map<string, CanonicalItemType>();
+  /** itemId → the turn it belongs to, so a settle closes only that turn's items. */
+  private readonly openItemTurns = new Map<string, string>();
   /** Set while a turn is live, so `turn.completed` can carry the usage. */
   private activeTurnId: string | null = null;
   private turnModel: string | null = null;
@@ -60,13 +73,32 @@ export class CodexNormaliser {
   private lastTurnError: string | null = null;
   /** Agent paths seen, so the `/root` trap never registers the root as a child. */
   private readonly knownAgentPaths = new Set<string>();
+  /** Child thread id → its live turn id, so Stop can reach the fleet (§4.5). */
+  private readonly childTurns = new Map<string, string>();
+  /**
+   * Turns already settled by `turn/completed`. `turn/start`'s response can
+   * arrive AFTER the completion notification for the same turn — re-activating
+   * it would leave the session `running` forever (Q1 finding 3).
+   */
+  private readonly settledTurns = new Set<string>();
 
   constructor(options: CodexNormaliserOptions) {
     this.usage = options.usage;
+    this.ownThreadId = options.ownThreadId ?? ((): string | null => null);
   }
 
   get currentTurnId(): string | null {
     return this.activeTurnId;
+  }
+
+  /** True when `turn/completed` has already settled this turn (Q1 finding 3). */
+  hasSettled(turnId: string): boolean {
+    return this.settledTurns.has(turnId);
+  }
+
+  /** Live collab children as `[childThreadId, childTurnId]` (§4.5 step 3). */
+  liveChildTurns(): [string, string][] {
+    return [...this.childTurns.entries()];
   }
 
   /** Called by the session when it starts a turn, before any notification. */
@@ -84,9 +116,63 @@ export class CodexNormaliser {
     this.lastTurnError = null;
   }
 
+  /**
+   * Forget the agent bookkeeping a dead child abandoned (Q1 finding 19).
+   *
+   * `knownAgentPaths` is otherwise pruned only by a terminal
+   * `subAgentActivity`, which an interrupted fleet never sends, so
+   * `hasSubagents` would stay true for the session's life — and `childTurns`
+   * would keep naming turns nothing can interrupt any more.
+   */
+  forgetAgents(): void {
+    this.knownAgentPaths.clear();
+    this.childTurns.clear();
+  }
+
   /** Item ids still `inProgress`, used to close them when a child dies. */
   openItemIds(): string[] {
     return [...this.openItems.keys()];
+  }
+
+  /**
+   * Close every item still `inProgress` and forget it (R3 finding 1, Q1 19).
+   *
+   * `turn/interrupt` **silently abandons** in-progress items — no
+   * `item/completed` ever arrives for them (fixtures README obs. 5), and a
+   * SIGTERM'd child stops mid-item too (obs. 16). Without this the timeline
+   * keeps a permanently spinning command row after every Stop, and `openItems`
+   * grows for the session's life, pinning `livenessWindowMs()` at the
+   * 30-minute active-tool window.
+   *
+   * `turnId` scopes the close-out so a settled turn does not reap a later
+   * turn's items; `undefined` closes everything (the child is gone).
+   */
+  closeOpenItems(
+    status: "completed" | "failed",
+    turnId?: string,
+    raw?: RuntimeEventRaw
+  ): RuntimeEventDraft[] {
+    const events: RuntimeEventDraft[] = [];
+    for (const [itemId, itemType] of [...this.openItems.entries()]) {
+      const itemTurn = this.openItemTurns.get(itemId);
+      if (turnId !== undefined && itemTurn !== undefined && itemTurn !== turnId) {
+        continue;
+      }
+      this.openItems.delete(itemId);
+      this.openItemTurns.delete(itemId);
+      events.push({
+        type: "item.completed",
+        payload: { itemType, status },
+        ...(itemTurn !== undefined ? { turnId: itemTurn } : {}),
+        itemId,
+        providerRefs: {
+          ...(itemTurn !== undefined ? { providerTurnId: itemTurn } : {}),
+          providerItemId: itemId
+        },
+        ...(raw !== undefined ? { raw } : {})
+      });
+    }
+    return events;
   }
 
   /**
@@ -97,6 +183,33 @@ export class CodexNormaliser {
    * default arm.
    */
   notification<TMethod extends ServerNotificationMethod>(
+    method: TMethod,
+    params: unknown
+  ): RuntimeEventDraft[] {
+    const raw = (): RuntimeEventRaw => ({
+      source: CODEX_RAW_NOTIFICATION,
+      method,
+      payload: params
+    });
+
+    // Collab children are separate threads on the SAME connection, so the
+    // first question about any notification is whose thread it is about
+    // (§4.5 "Trap"; R3 finding 2). A `null` threadId means the notification is
+    // connection-scoped (`account/rateLimits/updated`) and is ours.
+    const own = this.ownThreadId();
+    const about = notificationThreadId(method, params);
+    if (own !== null && about !== null && about !== own) {
+      return this.childNotification(method, about, params, raw());
+    }
+    return this.notificationForOwnThread(method, params);
+  }
+
+  /**
+   * Translate a notification that belongs to THIS thread. Reached directly by
+   * {@link notification}, and by the child router's `"parent"` route for a
+   * parent-owned or unknown method.
+   */
+  private notificationForOwnThread<TMethod extends ServerNotificationMethod>(
     method: TMethod,
     params: unknown
   ): RuntimeEventDraft[] {
@@ -199,7 +312,13 @@ export class CodexNormaliser {
           this.activeTurnId = null;
         }
         this.lastTurnError = null;
+        this.settledTurns.add(p.turn.id);
+        // A turn the provider abandoned leaves its in-progress items with no
+        // `item/completed` of their own (R3 finding 1). Close them BEFORE the
+        // turn row so the timeline never shows a tool still running under a
+        // finished turn.
         return [
+          ...this.closeOpenItems(interrupted ? "failed" : "completed", p.turn.id, raw()),
           {
             type: "turn.completed",
             payload: {
@@ -584,8 +703,10 @@ export class CodexNormaliser {
 
     if (phase === "started") {
       this.openItems.set(item.id, classified.itemType);
+      this.openItemTurns.set(item.id, p.turnId);
     } else {
       this.openItems.delete(item.id);
+      this.openItemTurns.delete(item.id);
     }
 
     const base = {
@@ -606,6 +727,31 @@ export class CodexNormaliser {
       ...base,
       raw
     });
+
+    // The REPLY-LESS question path (§4.5 "Two question paths"; R3 finding 3).
+    // An `agentMessage` completing with `delivery: "async"` and questions is
+    // Codex asking without blocking on a JSON-RPC reply: the answer goes back
+    // as an ordinary turn, so no pending request is created and the id is
+    // synthetic. Never observed in the captures, but fully typed in the
+    // bindings (`AgentMessageDelivery`, `AsyncUserInputQuestion`).
+    if (phase === "completed" && item.type === "agentMessage" && item.delivery === "async") {
+      const asyncQuestions = toAsyncUserInputQuestions(item.questions);
+      if (asyncQuestions.length > 0) {
+        events.push({
+          type: "user-input.requested",
+          payload: {
+            questions: asyncQuestions,
+            // The answer is an ordinary `sendTurn`, not a protocol reply —
+            // which is exactly what makes it dismissible (§4.2).
+            responseMode: "message",
+            dismissible: true
+          },
+          ...base,
+          requestId: `codex-async:${p.threadId}:${item.id}`,
+          raw
+        });
+      }
+    }
 
     // The plan item's completed text is the proposal §4.2 shows as a plan card;
     // `item/plan/delta` streamed it, and this is the authoritative final form.
@@ -644,6 +790,143 @@ export class CodexNormaliser {
    * *about the root thread*; registering that as its own child made threads
    * hang "working" forever. The root path is therefore never a task.
    */
+  /**
+   * A notification about a collab CHILD thread (R3 finding 2).
+   *
+   * Three routes, and the default is deliberately `"parent"`: §4.5's "Trap"
+   * records that *two shipped bugs came from a catch-all*, so an unknown method
+   * is forwarded and surfaced rather than swallowed.
+   */
+  private childNotification(
+    method: string,
+    childThreadId: string,
+    params: unknown,
+    raw: RuntimeEventRaw
+  ): RuntimeEventDraft[] {
+    const route = routeCodexChildNotification(method);
+    switch (route) {
+      case "drop":
+        return [];
+
+      case "agent-event":
+        return this.childAgentEvent(method, childThreadId, params, raw);
+
+      case "parent":
+        // Parent-owned (`serverRequest/resolved`, warnings) or a method this
+        // build has never seen. Fall through to the ordinary switch, which
+        // either maps it or surfaces it as a `runtime.warning`.
+        return this.notificationForOwnThread(method as ServerNotificationMethod, params);
+
+      default:
+        route satisfies never;
+        return [];
+    }
+  }
+
+  /**
+   * A child's own lifecycle becomes `task.*` rows on the child's agent id — it
+   * must never touch the parent's `activeTurnId`, usage baseline or thread
+   * state.
+   */
+  private childAgentEvent(
+    method: string,
+    childThreadId: string,
+    params: unknown,
+    raw: RuntimeEventRaw
+  ): RuntimeEventDraft[] {
+    const linkage = {
+      taskType: "subagent",
+      agentKind: "agent" as const,
+      agentId: childThreadId
+    };
+    const base = { agentId: childThreadId, raw } as const;
+
+    switch (method) {
+      case "turn/started": {
+        const p = params as CodexProtocol.v2.TurnStartedNotification;
+        // Remembered so Stop can interrupt the fleet before the parent (§4.5
+        // step 3) — the child turn id exists nowhere else.
+        this.childTurns.set(childThreadId, p.turn.id);
+        return [
+          {
+            type: "task.progress",
+            payload: {
+              taskId: childThreadId,
+              description: `agent ${childThreadId}`,
+              status: "running",
+              ...linkage
+            },
+            ...base
+          }
+        ];
+      }
+      case "turn/completed": {
+        this.childTurns.delete(childThreadId);
+        const p = params as CodexProtocol.v2.TurnCompletedNotification;
+        const state = turnState(p.turn.status);
+        return [
+          {
+            type: "task.updated",
+            payload: {
+              taskId: childThreadId,
+              status: state === "completed" ? "idle" : "interrupted",
+              ...linkage
+            },
+            ...base
+          }
+        ];
+      }
+      case "thread/closed": {
+        this.childTurns.delete(childThreadId);
+        return [
+          {
+            type: "task.completed",
+            payload: { taskId: childThreadId, status: "completed", ...linkage },
+            ...base
+          }
+        ];
+      }
+      case "error": {
+        const p = params as CodexProtocol.v2.ErrorNotification;
+        return [
+          {
+            type: "task.progress",
+            payload: {
+              taskId: childThreadId,
+              description: `agent ${childThreadId}`,
+              error: presentableError(p.error.message),
+              ...linkage
+            },
+            ...base
+          }
+        ];
+      }
+      case "item/started":
+      case "item/completed": {
+        const p = params as CodexProtocol.v2.ItemStartedNotification;
+        const classified = classifyItem(p.item as CodexThreadItem);
+        return [
+          {
+            type: "task.progress",
+            payload: {
+              taskId: childThreadId,
+              description: classified.title ?? classified.itemType,
+              lastToolName: classified.itemType,
+              ...linkage
+            },
+            ...base
+          }
+        ];
+      }
+      default:
+        // `thread/status/changed`, `thread/tokenUsage/updated`,
+        // `thread/settings/updated`, `model/rerouted`: the child is live, but
+        // none of it belongs on the parent's timeline and none of it carries a
+        // roster field we publish.
+        return [];
+    }
+  }
+
   private subAgentActivity(
     item: Extract<CodexThreadItem, { type: "subAgentActivity" }>,
     turnId: string,
@@ -746,6 +1029,43 @@ export class CodexNormaliser {
 // ---------------------------------------------------------------------------
 // Request classification (§4.3)
 // ---------------------------------------------------------------------------
+
+/**
+ * The reply-less path's questions (§4.5; R3 finding 3).
+ *
+ * `AsyncUserInputQuestion` is `{title, options: Array<string> | null}` — a
+ * DIFFERENT shape from the RPC path's `{id, header, question, options:[{label,
+ * description}]}`. There is no id on the wire, so the title is the id (the
+ * answer is prose in a follow-up turn, not a keyed reply), and an option is a
+ * bare string with no description of its own.
+ */
+export function toAsyncUserInputQuestions(
+  questions: readonly CodexProtocol.v2.AsyncUserInputQuestion[] | null
+): UserInputQuestion[] {
+  if (questions === null) {
+    return [];
+  }
+  const out: UserInputQuestion[] = [];
+  for (const question of questions) {
+    const title = question.title.trim();
+    if (title.length === 0) {
+      continue;
+    }
+    out.push({
+      id: title,
+      header: title,
+      question: title,
+      options: (question.options ?? [])
+        .map((label) => label.trim())
+        .filter((label) => label.length > 0)
+        .map((label) => ({ label, description: "" })),
+      // Answered in prose, so free text is always allowed.
+      allowCustomAnswer: true,
+      multiSelect: false
+    });
+  }
+  return out;
+}
 
 /** Server→client request method → §4.3's canonical request type. */
 export function canonicalRequestType(method: string): CanonicalRequestType {

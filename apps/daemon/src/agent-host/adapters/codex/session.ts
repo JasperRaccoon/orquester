@@ -49,6 +49,7 @@ import {
   type ProviderChild
 } from "../../support/spawn.ts";
 import { StderrCapture } from "../../support/stderr.ts";
+import { notificationThreadId } from "./child-routing.ts";
 import type {
   CodexProtocol,
   ServerNotificationMethod,
@@ -135,6 +136,12 @@ export interface CodexSessionOptions {
    * the child" is exercised in milliseconds rather than half a minute.
    */
   deadlines?: Partial<Record<keyof typeof AGENT_HOST_DEADLINES, number>>;
+  /**
+   * Overrides for {@link TURN_LIVENESS_WINDOWS}. Production passes nothing; a
+   * test shrinks the window so §3.1's "paused entirely while a request is
+   * pending" is exercised in milliseconds rather than ten minutes.
+   */
+  livenessWindows?: { idleMs: number; activeToolMs: number };
   emit: (draft: RuntimeEventDraft) => void;
   /** Called once the session has settled for good, so the adapter can forget it. */
   onClosed: () => void;
@@ -166,7 +173,15 @@ export class CodexSession {
   private readonly options: CodexSessionOptions;
   private readonly usage = new CodexUsageTracker();
   private readonly normaliser: CodexNormaliser;
-  private readonly stderr = new StderrCapture();
+  /**
+   * §3.1 requires the excerpt to be redacted before it leaves the host — home
+   * paths collapsed to `~` as well as token masking. `redactStderr` only
+   * collapses the dirs it is handed, so the account home and the daemon HOME
+   * are both passed or every Codex warning leaks
+   * `/var/lib/orquester/daemon/agent-accounts/codex/<accountId>/home/...`
+   * (which also discloses the account id) into `events.ndjson` (S1 finding 4).
+   */
+  private readonly stderr: StderrCapture;
   private readonly pendingApprovals = new Map<string, PendingApproval>();
   private readonly pendingUserInputs = new Map<string, PendingUserInput>();
   private readonly liveTasks = new Map<string, LiveTask>();
@@ -176,6 +191,17 @@ export class CodexSession {
    * by the user, and §4.2 wants that as `tool.denied`.
    */
   private readonly askedItemIds = new Set<string>();
+  /**
+   * `fileChange` item id → the changes it declared.
+   *
+   * `item/fileChange/requestApproval` is a MUCH thinner shape than the command
+   * one: it carries no `availableDecisions`, no path and **no diff at all**.
+   * The diff lives on the `item/started` `fileChange` item that precedes it,
+   * so "an approval card must be rendered by joining on `itemId`, not from the
+   * request alone" (fixtures README obs. 2). The card cannot do that join —
+   * it never sees the item payload — so the adapter does it here (E2E E7).
+   */
+  private readonly fileChangesByItem = new Map<string, CodexProtocol.v2.FileUpdateChange[]>();
 
   private child: ProviderChild | null = null;
   private peer: CodexPeer | null = null;
@@ -192,6 +218,12 @@ export class CodexSession {
   private requestSeq = 0;
   private livenessTimer: NodeJS.Timeout | null = null;
   private lastActivityAt = Date.now();
+  /**
+   * True once any MCP server has reported startup on this connection — the
+   * cheap live signal that MCP is configured at all, which gates the
+   * before-turn `config/mcpServer/reload` (§4.5 "Turn"; R3 finding 10).
+   */
+  private sawMcpServer = false;
   private readonly createdAt: string;
   private updatedAt: string;
 
@@ -200,7 +232,15 @@ export class CodexSession {
     this.threadId = options.threadId;
     this.modelSelection = options.modelSelection;
     this.runtimeMode = options.runtimeMode;
-    this.normaliser = new CodexNormaliser({ usage: this.usage });
+    this.normaliser = new CodexNormaliser({
+      usage: this.usage,
+      ownThreadId: () => this.providerThreadId
+    });
+    this.stderr = new StderrCapture({
+      homeDirs: [options.codexHome, options.env.HOME].filter(
+        (dir): dir is string => typeof dir === "string" && dir.length > 0
+      )
+    });
     this.createdAt = options.context.clock.nowIso();
     this.updatedAt = this.createdAt;
   }
@@ -260,9 +300,20 @@ export class CodexSession {
     });
     this.child = child;
     this.watchStderr(child);
-    void child.exited.then((reason) => {
-      this.handleExit(reason);
-    });
+    // `exited` never rejects, but `handleExit` runs the whole settle path
+    // (emits, `stderr.excerpt()`, `usage.completeTurn`, `onClosed`); a throw in
+    // there would be an unhandled rejection that ends the HOST, not just this
+    // session (Q1 finding 34).
+    void child.exited
+      .then((reason) => {
+        this.handleExit(reason);
+      })
+      .catch((error: unknown) => {
+        this.options.context.logger.error("codex: exit handling failed", {
+          threadId: this.threadId,
+          error: describeError(error)
+        });
+      });
 
     const peer = new CodexPeer({
       stdin: child.stdin,
@@ -407,6 +458,21 @@ export class CodexSession {
       })
     };
 
+    // Best-effort, before the turn (§4.5 "Turn"): an MCP server added to
+    // `~/.codex/config.toml` mid-session is otherwise not picked up until the
+    // thread restarts (R3 finding 10). Awaited so the reload really precedes
+    // the turn, but never allowed to fail it.
+    if (this.sawMcpServer) {
+      try {
+        await withDeadline(() => peer.request("config/mcpServer/reload", undefined), {
+          label: "codex config/mcpServer/reload",
+          timeoutMs: AGENT_HOST_DEADLINES.probeMs
+        });
+      } catch {
+        // A server that cannot reload its MCP config still runs the turn.
+      }
+    }
+
     const response = await this.bounded(
       () => peer.request("turn/start", params),
       this.deadline("submitMs"),
@@ -420,6 +486,17 @@ export class CodexSession {
     // steer.
     const turnId = response.turn.id;
     const isSteering = turnId === this.activeTurnId;
+
+    // The response can land AFTER the turn has already finished — a fast turn
+    // completes on the notification stream while `turn/start`'s reply is still
+    // in flight. Re-activating it would leave `activeTurnId` pointing at a
+    // settled turn and the session stuck `running` for ever, with `interrupt`
+    // unable to recover it (Q1 finding 3). A settled id is reported back to
+    // the caller unchanged; it is a real turn that really ran.
+    if (this.normaliser.hasSettled(turnId)) {
+      return { turnId, resumeCursor: { threadId: providerThreadId } };
+    }
+
     this.activeTurnId = turnId;
     if (!isSteering) {
       this.normaliser.noteTurnStarted(turnId, this.modelSelection.model, effort);
@@ -430,18 +507,27 @@ export class CodexSession {
   }
 
   /**
-   * Stop a turn. Order matters and is the spec's, not the server's (§4.5):
-   * settle approvals, settle user inputs, then `turn/interrupt`.
+   * Stop. Order matters and is the spec's, not the server's (§4.5): settle
+   * approvals, settle user inputs, interrupt every live child, then the
+   * parent's `turn/interrupt`.
+   *
+   * **Two shapes of Stop**, and the difference is the whole of R6's blocker:
+   *
+   * - *Turn-scoped* — `turnId` names a turn. A no-op when that turn is no
+   *   longer the active one (§4.1), so a Stop racing a settling turn cannot
+   *   kill the next one.
+   * - *Session-scoped* — no `turnId`, which §6.2 uses for "stop the background
+   *   work". Background work **outlives the turn that launched it** (§3.1), so
+   *   an early return when no turn is active left subagent fleets and watch
+   *   loops running with nothing to close them — and the UI's Stop sat on
+   *   "Stopping…" for ever because the liveness registry never cleared.
    */
   async interruptTurn(turnId?: string): Promise<void> {
     const active = this.activeTurnId;
-    if (active === null) {
-      // Turn-scoped and a no-op when that turn is no longer active (§4.1).
-      // Enforced HERE because the server answers a stale turn id with a hard
-      // `-32600 "no active turn to interrupt"` (fixtures README observation 5).
-      return;
-    }
     if (turnId !== undefined && turnId !== active) {
+      // Turn-scoped and stale. Enforced HERE because the server answers a
+      // stale turn id with a hard `-32600 "no active turn to interrupt"`
+      // (fixtures README observation 5).
       return;
     }
 
@@ -449,6 +535,17 @@ export class CodexSession {
 
     const peer = this.peer;
     if (peer === null || peer.isClosed) {
+      // The transport is gone, so nothing can be interrupted on the wire — but
+      // the live-work bookkeeping must still be closed out or it never clears.
+      this.stopBackgroundWork();
+      return;
+    }
+
+    if (active === null) {
+      // Session-scoped Stop with no running turn: the background work IS the
+      // thing being stopped (§6.2, R6 blocker).
+      await this.interruptChildren(peer);
+      this.stopBackgroundWork();
       return;
     }
     // The settle above only RESOLVES the handlers; their replies are written on
@@ -456,6 +553,12 @@ export class CodexSession {
     // first and the server would abandon the requests unanswered — which is
     // exactly the leak §4.1's ordering exists to prevent.
     await peer.whenServerRequestsSettled();
+
+    // Step (3): every live CHILD turn first. Collab children are full threads,
+    // so interrupting only the parent leaves the fleet running and spending
+    // tokens (§4.5 "Interrupt, in order"; R3 finding 4).
+    await this.interruptChildren(peer);
+
     try {
       await this.bounded(
         () =>
@@ -469,10 +572,94 @@ export class CodexSession {
     } catch (error) {
       if (error instanceof CodexRpcError) {
         // "no active turn to interrupt" — the turn settled underneath us.
-        // Not a failure: the user's Stop achieved what they asked for.
+        // Not a failure: the user's Stop achieved what they asked for. Clear
+        // the stale id so the session does not stay `running` for ever
+        // (Q1 finding 3).
+        if (this.activeTurnId === active) {
+          this.activeTurnId = null;
+          this.normaliser.noteTurnSettled();
+          this.disarmLivenessWatchdog();
+          this.setStatus("ready");
+        }
         return;
       }
       throw error;
+    }
+  }
+
+  /**
+   * Close every live task with `task.completed {status:"stopped"}` (R6).
+   *
+   * This is what §3.1's background-liveness registry folds to drop the thread
+   * out of `backgroundLiveness`, and what the roster folds to `interrupted`.
+   * Without it a session-scoped Stop interrupts the fleet on the wire but
+   * leaves the host still believing work is live, so the tab keeps reading
+   * "working" and the UI's Stop never resolves.
+   *
+   * Idempotent: the registry is emptied, so a second Stop emits nothing.
+   */
+  private stopBackgroundWork(): void {
+    for (const task of this.liveTasks.values()) {
+      this.emit({
+        type: "task.completed",
+        payload: {
+          taskId: task.taskId,
+          status: "stopped",
+          ...(task.agentId !== undefined ? { agentId: task.agentId } : {}),
+          ...(task.agentPath !== undefined ? { agentPath: task.agentPath } : {})
+        },
+        ...(task.agentId !== undefined ? { agentId: task.agentId } : {})
+      });
+    }
+    this.liveTasks.clear();
+    // Close any tool row the abandoned work left spinning, then forget the
+    // agent bookkeeping so `hasSubagents` and `childTurns` do not outlive it.
+    for (const draft of this.normaliser.closeOpenItems("failed")) {
+      this.emit(draft);
+    }
+    this.normaliser.forgetAgents();
+  }
+
+  /**
+   * Interrupt every live collab child, bounded exactly as §4.5 states: 3 s per
+   * child, 10 s overall, concurrency 8. A child that answers
+   * `-32600 "no active turn to interrupt"` has already finished — swallowed.
+   */
+  private async interruptChildren(peer: CodexPeer): Promise<void> {
+    const children = this.normaliser.liveChildTurns();
+    if (children.length === 0) {
+      return;
+    }
+    const queue = [...children];
+    const worker = async (): Promise<void> => {
+      for (;;) {
+        const next = queue.shift();
+        if (next === undefined) {
+          return;
+        }
+        const [childThreadId, childTurnId] = next;
+        try {
+          await withDeadline(
+            () => peer.request("turn/interrupt", { threadId: childThreadId, turnId: childTurnId }),
+            {
+              label: `codex child turn/interrupt ${childThreadId}`,
+              timeoutMs: AGENT_HOST_DEADLINES.interruptChildMs
+            }
+          );
+        } catch {
+          // A wedged or already-finished child must never stop the parent's
+          // interrupt — the runaway-fleet case is exactly when Stop has to work.
+        }
+      }
+    };
+    const workers = Array.from({ length: Math.min(8, queue.length) }, () => worker());
+    try {
+      await withDeadline(Promise.all(workers).then(() => undefined), {
+        label: "codex child interrupts",
+        timeoutMs: AGENT_HOST_DEADLINES.interruptAllMs
+      });
+    } catch {
+      // The overall bound expired; the parent's interrupt still goes out.
     }
   }
 
@@ -483,6 +670,11 @@ export class CodexSession {
       return;
     }
     this.pendingApprovals.delete(requestId);
+    // The window is "paused entirely while a request is pending" (§3.1), and a
+    // pause has to move the clock: without this, answering a card that was open
+    // longer than the window leaves `remaining` at its 50 ms floor and the
+    // watchdog kills the turn the user just approved (Q1 finding 16).
+    this.noteActivity();
     this.disarmIfIdle();
     pending.settle(decision);
   }
@@ -493,6 +685,8 @@ export class CodexSession {
       return;
     }
     this.pendingUserInputs.delete(requestId);
+    // Same pause rule as `respondToApproval` (Q1 finding 16).
+    this.noteActivity();
     this.disarmIfIdle();
     pending.settle(answers);
   }
@@ -619,10 +813,18 @@ export class CodexSession {
         // matcher over the error message; that matcher was never exercised on
         // this CLI (fixtures README observation 17) and the brief forbids
         // copying it, so the fallback is unconditional and the user is told.
+        // `runtime.error`, NOT a warning: a warning renders tone `info` and
+        // this row got buried among the host's bubblewrap notices while the
+        // user believed they had reopened their conversation (E2E E5/E19).
+        // Losing the conversation is the loudest thing this adapter can say
+        // short of refusing — and refusing is the host's call, since the usual
+        // cause is another LIVE session still holding that provider thread.
         this.emit({
-          type: "runtime.warning",
+          type: "runtime.error",
           payload: {
-            message: "Could not resume the Codex conversation; starting a fresh one.",
+            message:
+              "Could not resume this Codex conversation — a NEW, empty one was started instead. The old conversation may still be open in another tab.",
+            class: "provider_error",
             detail: describeError(error)
           }
         });
@@ -680,12 +882,22 @@ export class CodexSession {
     // Any observable progress refreshes the liveness window (§3.1).
     this.noteActivity();
 
+    // The SESSION's own stateful branches below must be gated on the thread
+    // too, not just the normaliser's: a collab child's `turn/started` would
+    // otherwise overwrite `activeTurnId` and flip the session to `running`
+    // even though the child's events never reach the parent's timeline
+    // (R3 finding 2 — this is the half that hides behind the normaliser fix).
+    const about = notificationThreadId(method, params);
+    const isOurs =
+      this.providerThreadId === null || about === null || about === this.providerThreadId;
+
     for (const draft of this.normaliser.notification(method, params)) {
       if (draft.type === "thread.started") {
         this.announceThread(draft.payload.providerThreadId);
         continue;
       }
       this.trackTask(draft);
+      this.rememberFileChange(draft);
       this.emit(draft);
       const denied = this.toolDeniedFor(draft);
       if (denied !== null) {
@@ -693,23 +905,33 @@ export class CodexSession {
       }
     }
 
-    if (method === "turn/started") {
+    if (method === "turn/started" && isOurs) {
       const p = params as CodexProtocol.v2.TurnStartedNotification;
       this.activeTurnId = p.turn.id;
       this.setStatus("running");
       this.armLivenessWatchdog();
-    } else if (method === "turn/completed") {
+    } else if (method === "turn/completed" && isOurs) {
       const p = params as CodexProtocol.v2.TurnCompletedNotification;
       if (this.activeTurnId === p.turn.id) {
         this.activeTurnId = null;
         this.setStatus("ready");
         this.disarmLivenessWatchdog();
+        // A settled turn's per-item bookkeeping is dead weight: `askedItemIds`
+        // is otherwise pruned only when an item completes `declined`, so every
+        // APPROVED command left a permanent entry (Q1 finding 19).
+        this.askedItemIds.clear();
+        this.fileChangesByItem.clear();
       }
-    } else if (method === "error") {
+    } else if (method === "error" && isOurs) {
       const p = params as CodexProtocol.v2.ErrorNotification;
       if (!p.willRetry) {
         this.lastError = presentableError(p.error.message);
       }
+    } else if (method === "mcpServer/startupStatus/updated") {
+      // Pure noise on the timeline (190 across the captures), but it is the
+      // one live signal that MCP is configured, which gates the before-turn
+      // reload (R3 finding 10).
+      this.sawMcpServer = true;
     }
   }
 
@@ -769,16 +991,26 @@ export class CodexSession {
         // on the `item/started` `fileChange` item that precedes it, so a card
         // must be rendered by joining on `itemId` (fixtures README obs. 2).
         const params = request.params as CodexProtocol.v2.FileChangeRequestApprovalParams;
+        // THE JOIN (E2E E7): without it the card renders its own type name and
+        // the user approves a write they cannot see.
+        const changes = this.fileChangesByItem.get(params.itemId) ?? [];
+        this.fileChangesByItem.delete(params.itemId);
         const decision = await this.parkApproval({
           method: request.method,
           turnId: params.turnId,
           itemId: params.itemId,
           providerRequestId: String(request.id),
-          ...(params.reason !== null && params.reason !== undefined
-            ? { detail: params.reason }
-            : {}),
+          detail: fileChangeDetail(changes, params.reason ?? undefined),
           options: [...DEFAULT_APPROVAL_OPTIONS],
-          args: { grantRoot: params.grantRoot },
+          // The card renders the diff from here; `changes` is the same shape
+          // the `file_change` item carries, so one renderer serves both.
+          args: {
+            changes,
+            grantRoot: params.grantRoot,
+            ...(params.reason !== null && params.reason !== undefined
+              ? { reason: params.reason }
+              : {})
+          },
           raw
         });
         return {
@@ -802,6 +1034,27 @@ export class CodexSession {
             _meta: null
           } satisfies CodexProtocol.v2.McpServerElicitationRequestResponse;
         }
+        // `mode: "form"` alone does NOT mean "approval" — it is also how a
+        // genuine MCP form arrives. `_meta.codex_approval_kind` is what tells
+        // the two apart (fixtures README obs. 12). Rendering a real form as
+        // Approve/Decline would answer it `content: null`, i.e. the MCP server
+        // gets an *accepted* elicitation with none of the fields it asked for
+        // (R3 finding 11). We can only answer the approval flavour.
+        const elicitation = describeElicitation(params);
+        if (!elicitation.isApproval) {
+          this.emit({
+            type: "runtime.warning",
+            payload: {
+              message: `Declined an MCP form from "${params.serverName}": Orquester cannot render provider forms, only approvals.`,
+              detail: { mode: params.mode }
+            }
+          });
+          return {
+            action: "decline",
+            content: null,
+            _meta: null
+          } satisfies CodexProtocol.v2.McpServerElicitationRequestResponse;
+        }
         const decision = await this.parkApproval({
           method: request.method,
           ...(params.turnId !== null ? { turnId: params.turnId } : {}),
@@ -809,7 +1062,10 @@ export class CodexSession {
           // `message` is the provider's own wording and is the card's title.
           detail: params.message,
           appName: params.serverName,
-          options: [...DEFAULT_APPROVAL_OPTIONS],
+          // `_meta.persist` is the provider telling us which scopes it would
+          // accept, so the card never offers one the server would refuse
+          // (fixtures README obs. 12; R3 finding 11).
+          options: elicitation.options,
           args: { meta: params._meta, serverName: params.serverName },
           raw
         });
@@ -838,16 +1094,36 @@ export class CodexSession {
       case "item/tool/requestUserInput": {
         const params = request.params as CodexProtocol.v2.ToolRequestUserInputParams;
         const questions = toUserInputQuestions(params.questions);
-        if (questions.length === 0) {
-          // Every question was dropped by the filter; suppressing the event
-          // and refusing is better than an empty card (§4.5).
-          throw CodexRequestRefusal.invalidParams("no answerable questions in the request");
+        // §4.5 maps a **per-question** validation failure to `invalidParams`.
+        // Answering a partially filtered request would tell the model the
+        // dropped question simply did not exist, and it would then proceed on
+        // an answer it never got (R3 finding 12). Refusing the whole request is
+        // documented-safe: the server reads it as "the model was refused"
+        // (fixtures README obs. 14), never as a protocol violation.
+        if (questions.length !== params.questions.length) {
+          throw CodexRequestRefusal.invalidParams(
+            questions.length === 0
+              ? "no answerable questions in the request"
+              : `${params.questions.length - questions.length} of ${params.questions.length} questions could not be rendered`
+          );
         }
         const requestId = this.nextRequestId();
         const answers = await new Promise<Record<string, unknown>>((resolve, reject) => {
           this.pendingUserInputs.set(requestId, {
             requestId,
-            settle: resolve,
+            // `settle` is the SINGLE emitter, exactly as `parkApproval` does it
+            // — `settlePendingRequests` must not emit a second row for the
+            // same requestId (Q1 finding 17).
+            settle: (resolved) => {
+              this.emit({
+                type: "user-input.resolved",
+                payload: { answers: resolved },
+                turnId: params.turnId,
+                requestId,
+                raw
+              });
+              resolve(resolved);
+            },
             fail: reject
           });
           this.emit({
@@ -869,13 +1145,6 @@ export class CodexSession {
             raw
           });
           this.disarmIfIdle();
-        });
-        this.emit({
-          type: "user-input.resolved",
-          payload: { answers },
-          turnId: params.turnId,
-          requestId,
-          raw
         });
         return {
           answers: toCodexAnswers(questions, answers)
@@ -968,13 +1237,14 @@ export class CodexSession {
     const inputs = [...this.pendingUserInputs.values()];
     this.pendingUserInputs.clear();
     for (const input of inputs) {
-      this.emit({
-        type: "user-input.resolved",
-        payload: { answers: {} },
-        requestId: input.requestId
-      });
+      // `settle` owns the emit (as it does for approvals), so settling here
+      // does NOT also emit — otherwise every interrupted question produced two
+      // `user-input.resolved` rows for one requestId (Q1 finding 17).
       input.settle({});
     }
+    // The watchdog was paused while these were open; resume the clock from now
+    // rather than from when the cards opened (Q1 finding 16).
+    this.noteActivity();
   }
 
   /** Fail every parked request outright — used when the transport is gone. */
@@ -1017,7 +1287,16 @@ export class CodexSession {
     const outcome = exitOutcome(reason, this.hostInitiatedClose);
     const excerpt = this.stderr.excerpt();
 
-    // 1. Settle the in-flight turn: `interrupted` when the stream simply
+    // 1. Close every item the dead child left `inProgress`. A SIGTERM'd child
+    //    writes not one further byte (fixtures README obs. 16), so no
+    //    `item/completed` is ever coming and the timeline would keep a command
+    //    row spinning for ever (R3 finding 1). Before the turn row, so the
+    //    tool never outlives the turn that owns it.
+    for (const draft of this.normaliser.closeOpenItems("failed")) {
+      this.emit(draft);
+    }
+
+    // 2. Settle the in-flight turn: `interrupted` when the stream simply
     //    ended, `failed` with the first captured failure when it ended in
     //    error.
     const turnId = this.activeTurnId;
@@ -1038,8 +1317,11 @@ export class CodexSession {
       this.activeTurnId = null;
       this.normaliser.noteTurnSettled();
     }
+    this.askedItemIds.clear();
+    this.fileChangesByItem.clear();
+    this.normaliser.forgetAgents();
 
-    // 2. Close every live task; the roster folds `stopped` to `interrupted`.
+    // 3. Close every live task; the roster folds `stopped` to `interrupted`.
     for (const task of this.liveTasks.values()) {
       this.emit({
         type: "task.completed",
@@ -1054,12 +1336,12 @@ export class CodexSession {
     }
     this.liveTasks.clear();
 
-    // 3. Fail every request still parked on the dead transport, and make every
+    // 4. Fail every request still parked on the dead transport, and make every
     //    later call fail fast.
     this.peer?.close(describeExit(reason));
     this.failPendingRequests(`codex exited: ${describeExit(reason)}`);
 
-    // 4. Only now the exit itself.
+    // 5. Only now the exit itself.
     this.setStatus(outcome.status);
     if (outcome.status === "error") {
       this.lastError = excerpt.length > 0 ? `${outcome.reason}\n${excerpt}` : outcome.reason;
@@ -1086,9 +1368,10 @@ export class CodexSession {
    * 30 while a tool call is open** (§3.1, stated there and nowhere else).
    */
   private livenessWindowMs(): number {
+    const windows = this.options.livenessWindows ?? TURN_LIVENESS_WINDOWS;
     return this.liveTasks.size > 0 || this.normaliser.openItemIds().length > 0
-      ? TURN_LIVENESS_WINDOWS.activeToolMs
-      : TURN_LIVENESS_WINDOWS.idleMs;
+      ? windows.activeToolMs
+      : windows.idleMs;
   }
 
   /**
@@ -1168,28 +1451,40 @@ export class CodexSession {
   // Plumbing
   // -------------------------------------------------------------------------
 
-  private watchStderr(child: ProviderChild): void {
-    const surface = (lines: ReturnType<StderrCapture["push"]>): void => {
-      for (const line of lines) {
-        if (line.class === "drop") {
-          continue;
-        }
-        if (line.class === "error") {
-          this.emit({
-            type: "runtime.error",
-            payload: { message: line.text, class: "provider_error" }
-          });
-        } else {
-          this.emit({ type: "runtime.warning", payload: { message: line.text } });
-        }
+  private surfaceStderr(lines: ReturnType<StderrCapture["push"]>): void {
+    for (const line of lines) {
+      if (line.class === "drop") {
+        continue;
       }
-    };
+      if (line.class === "error") {
+        this.emit({
+          type: "runtime.error",
+          payload: { message: line.text, class: "provider_error" }
+        });
+      } else {
+        this.emit({ type: "runtime.warning", payload: { message: line.text } });
+      }
+    }
+  }
+
+  private watchStderr(child: ProviderChild): void {
     child.stderr.on("data", (chunk: Buffer) => {
-      surface(this.stderr.push(chunk));
+      this.surfaceStderr(this.stderr.push(chunk));
     });
     child.stderr.on("end", () => {
-      surface(this.stderr.flush());
+      this.surfaceStderr(this.stderr.flush());
     });
+  }
+
+  /**
+   * Feed one stderr chunk as if the child had written it.
+   *
+   * Test-only seam: the redaction is a property of how `StderrCapture` was
+   * CONSTRUCTED, which `stderr.test.ts` cannot see because it tests the
+   * function rather than its call site (S1 finding 4).
+   */
+  injectStderrForTest(chunk: string): void {
+    this.surfaceStderr(this.stderr.push(chunk));
   }
 
   /**
@@ -1255,6 +1550,26 @@ export class CodexSession {
       itemId,
       ...(draft.providerRefs !== undefined ? { providerRefs: draft.providerRefs } : {})
     };
+  }
+
+  /**
+   * Remember a `fileChange` item's declared changes so the approval that
+   * follows can be joined to them by `itemId` (E2E E7).
+   *
+   * Bounded by construction: an entry is dropped the moment its approval is
+   * answered, and the whole map is cleared when the turn settles.
+   */
+  private rememberFileChange(draft: RuntimeEventDraft): void {
+    if (draft.type !== "item.started" && draft.type !== "item.completed") {
+      return;
+    }
+    if (draft.payload.itemType !== "file_change" || draft.itemId === undefined) {
+      return;
+    }
+    const changes = (draft.payload.data as { changes?: unknown } | undefined)?.changes;
+    if (Array.isArray(changes) && changes.length > 0) {
+      this.fileChangesByItem.set(draft.itemId, changes as CodexProtocol.v2.FileUpdateChange[]);
+    }
   }
 
   /** Keep the live-task registry in step with what the normaliser emitted. */
@@ -1346,6 +1661,131 @@ const HOST_CLIENT_VERSION = "1";
  *
  * (fixtures README observation 11.)
  */
+// ---------------------------------------------------------------------------
+// File-change approvals (E2E E7)
+// ---------------------------------------------------------------------------
+
+/** How many added/removed lines a unified diff hunk declares. */
+export function countDiffLines(diff: string): { added: number; removed: number } {
+  let added = 0;
+  let removed = 0;
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("+++") || line.startsWith("---")) {
+      continue;
+    }
+    if (line.startsWith("+")) {
+      added += 1;
+    } else if (line.startsWith("-")) {
+      removed += 1;
+    }
+  }
+  return { added, removed };
+}
+
+/**
+ * The approval card's body: the path(s) and the size of the change, joined
+ * from the `fileChange` item because the request itself carries neither
+ * (fixtures README obs. 2; E2E E7).
+ *
+ * The full diff rides `args.changes`; this is the one-line summary, so a card
+ * with no room for a diff still names the file rather than its own type.
+ */
+export function fileChangeDetail(
+  changes: readonly CodexProtocol.v2.FileUpdateChange[],
+  reason?: string
+): string {
+  if (changes.length === 0) {
+    // The join found nothing — say so plainly rather than inventing a path.
+    return reason ?? "Apply a file change (the provider sent no file list).";
+  }
+  const parts = changes.map((change) => {
+    const { added, removed } = countDiffLines(change.diff);
+    const counts = added > 0 || removed > 0 ? ` +${added} −${removed}` : "";
+    return `${change.path}${counts}`;
+  });
+  const summary = parts.join("\n");
+  return reason !== undefined && reason.length > 0 ? `${reason}\n${summary}` : summary;
+}
+
+// ---------------------------------------------------------------------------
+// MCP elicitation (§4.5 the five handlers; R3 finding 11)
+// ---------------------------------------------------------------------------
+
+export interface ElicitationShape {
+  /**
+   * True when this elicitation is an **approval** rather than a real MCP form.
+   *
+   * `mode: "form"` is used for both. `_meta.codex_approval_kind` is what tells
+   * them apart (fixtures README obs. 12); an empty `requestedSchema.properties`
+   * is the corroborating signal, since an approval asks for no fields. Only the
+   * approval flavour can be answered by an Approve/Decline card — answering a
+   * genuine form that way would accept it with `content: null`, handing the MCP
+   * server none of the fields it asked for.
+   */
+  isApproval: boolean;
+  /** The option set, narrowed by `_meta.persist` when the server states it. */
+  options: ApprovalOption[];
+}
+
+export function describeElicitation(
+  params: CodexProtocol.v2.McpServerElicitationRequestParams
+): ElicitationShape {
+  const meta = readMetaRecord(params);
+  const approvalKind = meta === null ? undefined : meta.codex_approval_kind;
+  const hasApprovalKind = typeof approvalKind === "string" && approvalKind.length > 0;
+  const schemaIsEmpty = requestedSchemaIsEmpty(params);
+
+  const persist = meta === null ? undefined : meta.persist;
+  const scopes = Array.isArray(persist)
+    ? persist.filter((entry): entry is string => typeof entry === "string")
+    : null;
+
+  // Absent `persist` means the server did not say; offer the default four.
+  // Present means it enumerated what it accepts, so drop what it did not.
+  const options =
+    scopes === null
+      ? [...DEFAULT_APPROVAL_OPTIONS]
+      : DEFAULT_APPROVAL_OPTIONS.filter((option) => {
+          if (option.decision === "acceptForSession") {
+            return scopes.includes("session");
+          }
+          if (option.decision === "acceptAlways") {
+            return scopes.includes("always");
+          }
+          // Cancel, Decline and a one-shot Approve are always available.
+          return true;
+        });
+
+  return {
+    isApproval: hasApprovalKind || schemaIsEmpty,
+    options: options.length > 0 ? options : [...DEFAULT_APPROVAL_OPTIONS]
+  };
+}
+
+function readMetaRecord(
+  params: CodexProtocol.v2.McpServerElicitationRequestParams
+): Record<string, unknown> | null {
+  const meta = (params as { _meta?: unknown })._meta;
+  if (typeof meta !== "object" || meta === null || Array.isArray(meta)) {
+    return null;
+  }
+  return meta as Record<string, unknown>;
+}
+
+function requestedSchemaIsEmpty(
+  params: CodexProtocol.v2.McpServerElicitationRequestParams
+): boolean {
+  const schema = (params as { requestedSchema?: unknown }).requestedSchema;
+  if (typeof schema !== "object" || schema === null) {
+    return true;
+  }
+  const properties = (schema as { properties?: unknown }).properties;
+  if (typeof properties !== "object" || properties === null) {
+    return true;
+  }
+  return Object.keys(properties).length === 0;
+}
+
 export function toUserInputQuestions(
   questions: readonly CodexProtocol.v2.ToolRequestUserInputQuestion[]
 ): UserInputQuestion[] {

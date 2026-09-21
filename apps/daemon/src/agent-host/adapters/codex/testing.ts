@@ -83,9 +83,17 @@ export function createFakeContext(
 export type MockTurnScript =
   | { kind: "text"; text: string }
   | { kind: "command-approval"; command: string; availableDecisions?: unknown[] }
-  | { kind: "file-change-approval"; path: string; diff: string }
-  | { kind: "user-input"; questionId: string; header: string; question: string; options: { label: string; description: string }[]; isOther?: boolean; isBlocking?: boolean }
+  | { kind: "file-change-approval"; path: string; diff: string; /** Stay SILENT this long after the answer, so no notification shields the watchdog. */ holdAfterApprovalMs?: number }
+  | { kind: "user-input"; questionId: string; header: string; question: string; options: { label: string; description: string }[]; isOther?: boolean; isBlocking?: boolean; /** Append a question the filter must drop, to exercise the partial-refusal rule. */ withUnrenderable?: boolean }
   | { kind: "elicitation"; serverName: string; message: string }
+  | { kind: "mcp-form"; serverName: string; message: string }
+  | { kind: "async-questions"; title: string; options: string[] }
+  /**
+   * Spawn a collab child that keeps running after the parent turn settles —
+   * §3.1's "background work outlives the turn". The child is a separate thread
+   * on the SAME connection, which is what R3 finding 2 and R6 are about.
+   */
+  | { kind: "spawn-child"; childThreadId: string }
   | { kind: "silent" }
   | { kind: "exit-mid-turn"; exitCode: number };
 
@@ -326,6 +334,9 @@ async function runTurn(turnId, script) {
     case "file-change-approval": {
       send({ method: "item/started", params: { item: { type: "fileChange", id: itemId, changes: [{ path: script.path, kind: { type: "add" }, diff: script.diff }], status: "inProgress" }, threadId, turnId, startedAtMs: 0 } });
       const reply = await askServerRequest("item/fileChange/requestApproval", { threadId, turnId, itemId, startedAtMs: 0, reason: null, grantRoot: null });
+      if (script.holdAfterApprovalMs) {
+        await new Promise((r) => setTimeout(r, script.holdAfterApprovalMs));
+      }
       const accepted = reply && reply.result && reply.result.decision !== "decline" && reply.result.decision !== "cancel";
       send({ method: "item/completed", params: { item: { type: "fileChange", id: itemId, changes: [{ path: script.path, kind: { type: "add" }, diff: script.diff }], status: accepted ? "completed" : "declined" }, threadId, turnId, completedAtMs: 1 } });
       break;
@@ -333,7 +344,12 @@ async function runTurn(turnId, script) {
     case "user-input": {
       const reply = await askServerRequest("item/tool/requestUserInput", {
         threadId, turnId, itemId,
-        questions: [{ id: script.questionId, header: script.header, question: script.question, isOther: script.isOther === true, isSecret: false, options: script.options }],
+        questions: script.withUnrenderable
+          ? [
+              { id: script.questionId, header: script.header, question: script.question, isOther: script.isOther === true, isSecret: false, options: script.options },
+              { id: "unrenderable", header: "H", question: "Q?", isOther: false, isSecret: false, options: null }
+            ]
+          : [{ id: script.questionId, header: script.header, question: script.question, isOther: script.isOther === true, isSecret: false, options: script.options }],
         isBlocking: script.isBlocking !== false, autoResolutionMs: null
       });
       send({ method: "item/agentMessage/delta", params: { threadId, turnId, itemId, delta: JSON.stringify(reply && reply.result) } });
@@ -346,6 +362,33 @@ async function runTurn(turnId, script) {
         message: script.message, requestedSchema: { type: "object", properties: {} }
       });
       break;
+    }
+    case "mcp-form": {
+      // A GENUINE MCP form: mode "form" like an approval, but no
+      // \`codex_approval_kind\` and a non-empty requestedSchema.
+      await askServerRequest("mcpServer/elicitation/request", {
+        threadId, turnId, serverName: script.serverName, mode: "form",
+        _meta: null,
+        message: script.message,
+        requestedSchema: { type: "object", properties: { branch: { type: "string" } } }
+      });
+      break;
+    }
+    case "async-questions": {
+      send({ method: "item/completed", params: { item: { type: "agentMessage", id: itemId, text: "Which branch?", phase: "final_answer", memoryCitation: null, delivery: "async", questions: [{ title: script.title, options: script.options }] }, threadId, turnId, completedAtMs: 1 } });
+      break;
+    }
+    case "spawn-child": {
+      const child = script.childThreadId;
+      // The collab tool call, then the subagent activity that registers the
+      // child as live background work, then the child's OWN turn on its own
+      // thread id — all on this one connection.
+      send({ method: "item/started", params: { item: { type: "subAgentActivity", id: "sub-" + child, kind: "started", agentThreadId: child, agentPath: "/root/" + child }, threadId, turnId, startedAtMs: 0 } });
+      send({ method: "turn/started", params: { threadId: child, turn: turnObject(child + "-turn", "inProgress") } });
+      // The PARENT turn finishes while the child keeps working.
+      send({ method: "turn/completed", params: { threadId, turn: turnObject(turnId, "completed") } });
+      activeTurnId = null;
+      return;
     }
     case "silent":
       return;

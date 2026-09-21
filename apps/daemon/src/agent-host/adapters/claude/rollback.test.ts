@@ -221,6 +221,21 @@ describe("claude resume cursor — a bad cursor means no resume, never an error"
     }
   });
 
+  it("rejects a cursor that names a different thread", () => {
+    const cursor = buildClaudeResumeCursor({
+      threadId: "thread-1",
+      sessionId,
+      turnStartMessageIds: ["t1"]
+    });
+    // "one live session per thread, a resume cursor must never be advanced by
+    // two processes" (§3.1) is what this guard protects.
+    assert.equal(readClaudeResumeCursor(cursor, "thread-2"), undefined);
+    assert.ok(readClaudeResumeCursor(cursor, "thread-1"));
+    // A cursor that names no thread is still usable — the minimal §6.1 form
+    // may omit it.
+    assert.ok(readClaudeResumeCursor({ resume: sessionId }, "thread-2"));
+  });
+
   it("rejects an unusable resume, without throwing", () => {
     for (const bad of [
       undefined,
