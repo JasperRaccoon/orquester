@@ -26,14 +26,6 @@ import {
   sdkMessageTag
 } from "./fixtures.ts";
 
-function payloadOf<T extends RuntimeEvent["type"]>(
-  events: readonly RuntimeEvent[],
-  type: T
-): Extract<RuntimeEvent, { type: T }>["payload"] | undefined {
-  const found = events.find((event) => event.type === type);
-  return found?.payload as Extract<RuntimeEvent, { type: T }>["payload"] | undefined;
-}
-
 function allOf<T extends RuntimeEvent["type"]>(
   events: readonly RuntimeEvent[],
   type: T
@@ -55,11 +47,8 @@ describe("claude normaliser — fixture replay", () => {
   for (const fixture of fixtures) {
     it(`${fixture}: every captured message has a defined disposition`, () => {
       const { events, observed } = replayClaudeFixture(fixture);
-      const unhandled = events.filter(
-        (event) =>
-          event.type === "runtime.warning" &&
-          typeof event.payload.message === "string" &&
-          event.payload.message.includes(UNHANDLED_MARKER)
+      const unhandled = allOf(events, "runtime.warning").filter((event) =>
+        event.payload.message.includes(UNHANDLED_MARKER)
       );
       assert.deepEqual(
         unhandled.map((event) => event.payload.message),
@@ -91,7 +80,7 @@ describe("claude normaliser — fixture replay", () => {
       .join("");
     assert.equal(deltas, "OK");
 
-    const completed = payloadOf(events, "turn.completed");
+    const completed = allOf(events, "turn.completed")[0]?.payload;
     assert.equal(completed?.state, "completed");
     assert.equal(completed?.stopReason, "end_turn");
     assert.equal(completed?.tokenUsage?.usageStatus, "complete");
@@ -115,11 +104,11 @@ describe("claude normaliser — fixture replay", () => {
 
   it("03: an approval is opened and accepted", () => {
     const { events } = replayClaudeFixture("03-bash-approval-accept.ndjson");
-    const opened = payloadOf(events, "request.opened");
+    const opened = allOf(events, "request.opened")[0]?.payload;
     assert.equal(opened?.requestType, "command_execution_approval");
     assert.equal(opened?.dismissible, false);
     assert.equal(opened?.detail, "Remove scratch-tmp.txt");
-    const resolved = payloadOf(events, "request.resolved");
+    const resolved = allOf(events, "request.resolved")[0]?.payload;
     assert.equal(resolved?.decision, "accept");
     // The request id is the SDK's own, so a redelivery cannot open a second
     // card (fixtures README observation 11).
@@ -137,22 +126,22 @@ describe("claude normaliser — fixture replay", () => {
 
   it("04a/04b: decline and cancel are two answers, not two labels", () => {
     const decline = replayClaudeFixture("04a-bash-approval-decline.ndjson");
-    assert.equal(payloadOf(decline.events, "request.resolved")?.decision, "decline");
+    assert.equal(allOf(decline.events, "request.resolved")[0]?.payload?.decision, "decline");
     const cancel = replayClaudeFixture("04b-bash-approval-cancel.ndjson");
-    assert.equal(payloadOf(cancel.events, "request.resolved")?.decision, "cancel");
+    assert.equal(allOf(cancel.events, "request.resolved")[0]?.payload?.decision, "cancel");
   });
 
   it("05: accept-for-session prompts once across two turns", () => {
     const { events } = replayClaudeFixture("05-accept-for-session.ndjson");
     const opened = allOf(events, "request.opened");
     assert.equal(opened.length, 1);
-    assert.equal(payloadOf(events, "request.resolved")?.decision, "acceptForSession");
+    assert.equal(allOf(events, "request.resolved")[0]?.payload?.decision, "acceptForSession");
     assert.equal(allOf(events, "turn.completed").length, 2);
   });
 
   it("06: AskUserQuestion becomes a question keyed by its text", () => {
     const { events } = replayClaudeFixture("06-ask-user-question.ndjson");
-    const requested = payloadOf(events, "user-input.requested");
+    const requested = allOf(events, "user-input.requested")[0]?.payload;
     assert.ok(requested);
     assert.equal(requested.questions.length, 1);
     const question = requested.questions[0]!;
@@ -165,7 +154,7 @@ describe("claude normaliser — fixture replay", () => {
     );
     // No `value` on Claude's options.
     assert.ok(question.options.every((option) => option.value === undefined));
-    const resolved = payloadOf(events, "user-input.resolved");
+    const resolved = allOf(events, "user-input.resolved")[0]?.payload;
     assert.deepEqual(resolved?.answers, { "Which file should I read?": "a.txt" });
     // A question is never an approval.
     assert.equal(allOf(events, "request.opened").length, 0);
@@ -234,7 +223,7 @@ describe("claude normaliser — fixture replay", () => {
 
   it("10: an interrupt settles the turn as interrupted without a diagnostic banner", () => {
     const { events } = replayClaudeFixture("10-interrupt-mid-turn.ndjson");
-    const completed = payloadOf(events, "turn.completed");
+    const completed = allOf(events, "turn.completed")[0]?.payload;
     assert.equal(completed?.state, "interrupted");
     assert.ok(
       completed?.errorMessage === undefined ||
