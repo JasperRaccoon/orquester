@@ -197,7 +197,10 @@ export const XAI_EXTENSION_CATALOG: ReadonlyArray<XaiExtensionEntry> = [
 
 /* -------------------------------------------------------------- the shapes */
 
-/** `x.ai/ask_user_question` params. Shape from T3; not observed on 1.0.34. */
+/**
+ * `x.ai/ask_user_question` params. Observed verbatim on 1.0.34 (gated behind
+ * `GROK_ASK_USER_QUESTION=1`); see the catalog entry above and README 16.
+ */
 export interface XaiAskUserQuestionParams {
   readonly sessionId: SessionId;
   readonly toolCallId: ToolCallId;
@@ -342,7 +345,8 @@ export type XaiSessionUpdate =
   | {
       readonly sessionUpdate: "pending_interaction";
       readonly tool_call_id: string;
-      readonly kind: "permission" | "plan_approval" | (string & {});
+      /** `question` accompanies `_x.ai/ask_user_question` (README 33). */
+      readonly kind: "permission" | "plan_approval" | "question" | (string & {});
     }
   | { readonly sessionUpdate: "interaction_resolved"; readonly tool_call_id: string }
   | {

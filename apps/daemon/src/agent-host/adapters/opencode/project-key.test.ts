@@ -64,9 +64,9 @@ test("the key is RESOLVED, because the server never validates a directory", () =
 test("a blank or non-string projectPath is ignored, not trusted", () => {
   assert.equal(projectDirFor(input({ cwd: "/repo", projectPath: "   " })), "/repo");
   assert.equal(projectDirFor(input({ cwd: "/repo", projectPath: "" })), "/repo");
-  // `StartSessionInput.projectPath` is now typed `string | undefined` (W1's
-  // seam), so the wrong-type cases are cast: what this asserts is that the
-  // RUNTIME guard still holds for a caller that did not typecheck against it.
+  // The type says `string | undefined`, but the value originates in persisted
+  // `meta.json` and crosses a JSON boundary, so the runtime guard stays and is
+  // tested past the type. Cast, rather than weaken the guard.
   assert.equal(
     projectDirFor(input({ cwd: "/repo", projectPath: 42 as unknown as string })),
     "/repo"

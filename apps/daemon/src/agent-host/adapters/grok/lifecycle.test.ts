@@ -27,7 +27,7 @@ import type {
 
 import type { AdapterContext } from "../../adapter.ts";
 import { resumeCursorFor } from "../../orchestration/resume.ts";
-import { createGrokAdapter, GROK_CAPABILITIES } from "./index.ts";
+import { createGrokAdapter, GROK_CAPABILITIES, isBlockedGrokCommand } from "./index.ts";
 import { parseGrokResumeCursor } from "./session.ts";
 
 const MOCK = join(dirname(fileURLToPath(import.meta.url)), "testing/mock-grok.mjs");
@@ -431,7 +431,7 @@ test("a cursor with the wrong shape means 'no resume', never an error", async ()
   await r.dispose();
 });
 
-test("steering reuses the turn id and emits no second turn.started", async () => {
+test("steering reuses the turn id and emits no second turn.started (see the steer test for the settlement)", async () => {
   const r = await rig({ scenario: "slow" });
   await start(r);
   const first = await r.adapter.sendTurn({
@@ -653,6 +653,149 @@ test("the adapter runs no watchdog of its own — the host owns it", async () =>
     1,
     "exactly one terminal row"
   );
+  await r.dispose();
+});
+
+
+test("a steer settles the turn from the STEERED prompt, not the cancelled one", async () => {
+  // R4 #1 / Q1 #4 (blocker). The old guard was inverted: the cancelled first
+  // prompt matched `turn.epoch` and ended the turn, and the steered answer was
+  // discarded. The previous steering test could not see it — it asserted only
+  // the turn id and a `turn.started` count, both of which held with the bug.
+  const r = await rig({ scenario: "steer" });
+  await start(r);
+  const first = await r.adapter.sendTurn({
+    threadId: "t1",
+    input: "count to twenty",
+    attachments: [],
+    interactionMode: "default"
+  });
+  await r.waitFor(
+    (event) => event.type === "content.delta" && event.payload.delta === "one",
+    "the first prompt streaming"
+  );
+  const second = await r.adapter.sendTurn({
+    threadId: "t1",
+    input: "stop and say DONE",
+    attachments: [],
+    interactionMode: "default"
+  });
+  assert.equal(second.turnId, first.turnId, "a steer reuses the turn id");
+
+  const completed = (await r.waitFor(
+    (event) => event.type === "turn.completed",
+    "turn.completed"
+  )) as Extract<RuntimeEvent, { type: "turn.completed" }>;
+  assert.equal(completed.payload.state, "completed", "the STEERED prompt settles the turn");
+  assert.equal(completed.payload.stopReason, "end_turn");
+  assert.equal(completed.payload.tokenUsage?.usageStatus, "complete");
+  assert.equal(completed.turnId, first.turnId);
+
+  // The steered answer really reached the timeline.
+  const text = r.events
+    .filter((event): event is Extract<RuntimeEvent, { type: "content.delta" }> => event.type === "content.delta")
+    .filter((event) => event.payload.streamKind === "assistant_text")
+    .map((event) => event.payload.delta)
+    .join("");
+  assert.match(text, /DONE/, "the steered prompt's output is not dropped");
+  assert.equal(
+    r.events.filter((event) => event.type === "turn.completed").length,
+    1,
+    "exactly one terminal row"
+  );
+  assert.equal(r.events.filter((event) => event.type === "turn.started").length, 1);
+  await r.dispose();
+});
+
+test("Stop with NO active turn is session-scoped: live background work is closed", async () => {
+  // R6 #1 / §6.2. The turn settles while a background shell keeps running, so
+  // §7.6 still shows Stop and the client posts an interrupt with no turnId.
+  // An early return here leaves the work running and the client's `stopping`
+  // flag stuck, because `backgroundLiveness` never drops to null.
+  const r = await rig({ scenario: "background" });
+  await start(r);
+  await r.adapter.sendTurn({
+    threadId: "t1",
+    input: "start a background job",
+    attachments: [],
+    interactionMode: "default"
+  });
+  await r.waitFor((event) => event.type === "task.started", "task.started");
+  await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
+  assert.equal(
+    r.events.some((event) => event.type === "task.completed"),
+    false,
+    "Grok never reports a background task's completion of its own accord"
+  );
+
+  await r.adapter.interruptTurn("t1");
+
+  const stopped = (await r.waitFor(
+    (event) => event.type === "task.completed",
+    "task.completed"
+  )) as Extract<RuntimeEvent, { type: "task.completed" }>;
+  assert.equal(stopped.payload.status, "stopped");
+  assert.equal(stopped.payload.taskId, "task-bg-1");
+  // The session itself stays up: the user pressed Stop, not Close.
+  assert.equal(r.adapter.hasSession("t1"), true);
+  await r.dispose();
+});
+
+test("a session that dies on its own is removed from the adapter's map", async () => {
+  // Q1 #30: a stale entry keeps winning `hasSession` and is reported to the
+  // §3.3 reconcile as live.
+  const r = await rig({ scenario: "exit-mid-turn" });
+  await start(r);
+  assert.equal(r.adapter.hasSession("t1"), true);
+  void r.adapter.sendTurn({ threadId: "t1", input: "count", attachments: [], interactionMode: "default" });
+  await r.waitFor((event) => event.type === "session.exited", "session.exited");
+  await r.drain();
+  assert.equal(r.adapter.hasSession("t1"), false);
+  assert.equal(r.adapter.listSessions().length, 0);
+  await r.dispose();
+});
+
+test("a host-initiated stop emits no runtime.error after session.exited", async () => {
+  // Q1 #22: the parked `session/prompt` rejects when the child is killed, and
+  // the rejection handler used to emit an error row after the exit.
+  const r = await rig({ scenario: "slow" });
+  await start(r);
+  void r.adapter.sendTurn({ threadId: "t1", input: "long", attachments: [], interactionMode: "default" });
+  await r.waitFor((event) => event.type === "turn.started", "turn.started");
+  await r.adapter.stopSession("t1");
+  await r.waitFor((event) => event.type === "session.exited", "session.exited");
+  await r.drain();
+  const order = r.events.map((event) => event.type);
+  const exitedAt = order.indexOf("session.exited");
+  assert.equal(
+    order.slice(exitedAt).includes("runtime.error"),
+    false,
+    "everything is settled before session.exited"
+  );
+  await r.dispose();
+});
+
+test("the /always-approve refusal is a typed 400 with a pointer at the chip", () => {
+  // R2 #7: it must be a validation refusal, not a failed-turn activity.
+  assert.equal(isBlockedGrokCommand("/always-approve off"), true);
+  assert.equal(isBlockedGrokCommand("  /always-approve  "), true);
+  assert.equal(isBlockedGrokCommand("/always-approve-ish"), false);
+  assert.equal(isBlockedGrokCommand("tell me about /always-approve"), false);
+});
+
+test("sendTurn refuses /always-approve with INVALID_COMMAND / 400", async () => {
+  const r = await rig();
+  await start(r);
+  const error = (await r.adapter
+    .sendTurn({ threadId: "t1", input: "/always-approve off", attachments: [], interactionMode: "default" })
+    .then(
+      () => null,
+      (reason: unknown) => reason
+    )) as (Error & { code?: string; status?: number }) | null;
+  assert.ok(error !== null);
+  assert.equal(error.code, "INVALID_COMMAND");
+  assert.equal(error.status, 400);
+  assert.match(error.message, /permission selector/);
   await r.dispose();
 });
 

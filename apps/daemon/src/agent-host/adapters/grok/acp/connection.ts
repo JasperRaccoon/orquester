@@ -11,8 +11,14 @@
  * §3.1.
  */
 
-import { NdjsonLineReader } from "../../../support/ndjson.ts";
-import { spawnProviderChild, describeExit, type ChildExitReason, type ProviderChild } from "../../../support/spawn.ts";
+import { NdjsonLineReader, NdjsonWriter, type NdjsonSink } from "../../../support/ndjson.ts";
+import {
+  DEFAULT_KILL_GRACE_MS,
+  describeExit,
+  spawnProviderChild,
+  type ChildExitReason,
+  type ProviderChild
+} from "../../../support/spawn.ts";
 import { StderrCapture, type ClassifiedStderrLine } from "../../../support/stderr.ts";
 import { AGENT_HOST_DEADLINES } from "../../../support/deadline.ts";
 import { ACP_PROTOCOL_VERSION } from "./_generated/meta.ts";
@@ -83,9 +89,13 @@ export class AcpConnection {
     });
 
     const stderr = new StderrCapture({ homeDirs: options.homeDirs });
+    // `NdjsonWriter` exists for exactly this: a wedged agent that stops reading
+    // stdin would otherwise make Node buffer every outbound frame — prompt
+    // bodies and permission replies included — with no ceiling (Q1 #31).
+    const writer = new NdjsonWriter(child.stdin as unknown as NdjsonSink);
     const peer = new AcpPeer({
       send: (line) => {
-        child.stdin.write(`${line}\n`);
+        writer.writeLine(line);
       },
       onFrame: (direction, frame) => {
         if (options.onRawFrame === undefined) {
@@ -178,6 +188,17 @@ export class AcpConnection {
       for (const line of reader.flush()) {
         this.peer.handleLine(line);
       }
+      // A child that closes stdout but stays alive would leave the
+      // deadline-less `session/prompt` parked forever (R4 #16). Give the exit
+      // watcher the kill grace to settle it properly; if the process really is
+      // still there after that, close the peer so every in-flight request
+      // fails exactly once, as §3.1 requires.
+      const timer = setTimeout(() => {
+        if (!this.child.hasExited()) {
+          this.peer.close("grok: the agent closed its stdout while still running");
+        }
+      }, DEFAULT_KILL_GRACE_MS);
+      timer.unref?.();
     });
     // An EPIPE on a child that has already gone is not actionable: the exit
     // watcher is what decides the outcome.
@@ -211,16 +232,42 @@ export class AcpConnection {
 }
 
 /**
- * `_meta.defaultAuthMethodId` when the agent names one, else the first
- * advertised method, else null (nothing to authenticate with — the handshake
- * still succeeds and the failure surfaces on the first model call).
+ * Auth methods that would start an INTERACTIVE sign-in. Selecting one on a
+ * headless stdio session asks the CLI to begin a browser login nobody can see.
+ *
+ * README observation 2: with a bound logged-in home the agent advertises
+ * `cached_token` and names it as `_meta.defaultAuthMethodId`; **without** one
+ * the list collapses to `[{"id":"grok.com","description":"Sign in with Grok"}]`
+ * and `defaultAuthMethodId` is `null`. So the old "first advertised method"
+ * fallback was precisely a rule for picking the sign-in on exactly the home
+ * where it must not be picked (R4 #2).
+ */
+const INTERACTIVE_AUTH_METHOD_IDS: ReadonlySet<string> = new Set(["grok.com", "x.ai", "browser"]);
+
+/** Non-interactive ids, in preference order, when the agent names no default. */
+const NON_INTERACTIVE_AUTH_METHOD_IDS: readonly string[] = ["cached_token", "xai.api_key"];
+
+/**
+ * `_meta.defaultAuthMethodId` when the agent names one and it is not a sign-in,
+ * else a non-interactive advertised id, else **null** — send no `authenticate`
+ * at all and let the first model call surface the login failure. Never
+ * auto-select a method whose whole purpose is to open a browser.
  */
 export function resolveAuthMethodId(initialize: InitializeResponse): string | null {
   const meta = (initialize as { _meta?: Record<string, unknown> })._meta;
   const preferred = meta?.["defaultAuthMethodId"];
-  if (typeof preferred === "string" && preferred.length > 0) {
+  if (typeof preferred === "string" && preferred.length > 0 && !INTERACTIVE_AUTH_METHOD_IDS.has(preferred)) {
     return preferred;
   }
-  const first = initialize.authMethods?.[0]?.id;
-  return typeof first === "string" && first.length > 0 ? first : null;
+  const advertised = new Set(
+    (initialize.authMethods ?? [])
+      .map((method) => method.id)
+      .filter((id): id is string => typeof id === "string" && id.length > 0)
+  );
+  for (const candidate of NON_INTERACTIVE_AUTH_METHOD_IDS) {
+    if (advertised.has(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
 }

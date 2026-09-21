@@ -5,7 +5,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -14,14 +14,15 @@ import {
   GROK_PRODUCT_SLUG,
   MINIMUM_GROK_VERSION,
   compareVersions,
-  ensureGrokManagedConfig,
+  GROK_CONFIG_PATH_ENV,
   grokReasoningEffort,
   hasReasoningEffortPreference,
   meetsMinimumGrokVersion,
   parseGrokVersion,
-  patchGrokConfig,
+  renderGrokOverlayConfig,
   resolveGrokModelUpdate,
-  versionGateMessage
+  versionGateMessage,
+  writeGrokOverlayConfig
 } from "./launch.ts";
 
 test("the version line the CLI actually prints parses", () => {
@@ -115,60 +116,48 @@ test("effort token validation matches T3's shape guard", () => {
 });
 
 // ---------------------------------------------------------------------------
-// The managed config
+// The config overlay (R4 #4 — it used to write through a symlink)
 // ---------------------------------------------------------------------------
 
-test("an empty config gains both managed keys", () => {
-  const patched = patchGrokConfig("");
-  assert.ok(patched !== null);
-  assert.match(patched, /\[features\]\nsupport_permission = true/);
-  assert.match(patched, /\[cli\]\nauto_update = false/);
+test("the overlay carries the setting the approvals surface depends on", () => {
+  const rendered = renderGrokOverlayConfig();
+  assert.match(rendered, /\[features\]\nsupport_permission = true/);
+  assert.match(rendered, /\[cli\]\nauto_update = false/);
+  assert.equal(GROK_CONFIG_PATH_ENV, "GROK_CONFIG_PATH");
 });
 
-test("an existing section is edited in place and everything else survives", () => {
-  const source = [
-    "# my notes",
-    "[ui]",
-    'theme = "dark"',
-    "",
-    "[features]",
-    "support_permission = false",
-    "other = 1",
-    ""
-  ].join("\n");
-  const patched = patchGrokConfig(source);
-  assert.ok(patched !== null);
-  assert.match(patched, /support_permission = true/);
-  assert.match(patched, /# my notes/);
-  assert.match(patched, /theme = "dark"/);
-  assert.match(patched, /other = 1/);
-  assert.equal(/support_permission = false/.test(patched), false);
+test("the overlay is written into a host-owned dir and its path returned", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "grok-overlay-"));
+  const path = await writeGrokOverlayConfig(join(dir, "thread-1"));
+  assert.ok(path !== null);
+  assert.match(await readFile(path, "utf8"), /support_permission = true/);
+  // Idempotent: a second start of the same thread rewrites it in place.
+  assert.equal(await writeGrokOverlayConfig(join(dir, "thread-1")), path);
 });
 
-test("a config already correct is left untouched", () => {
-  const source = "[features]\nsupport_permission = true\n\n[cli]\nauto_update = false\n";
-  assert.equal(patchGrokConfig(source), null);
+test("a SYMLINKED config is never written — the bug that rewrote the user's global config", async () => {
+  // The managed account home's `config.toml` is a symlink to the daemon
+  // user's `~/.grok/config.toml` on this host; the previous revision followed
+  // it and rewrote the global file for every Grok process on the box.
+  const dir = await mkdtemp(join(tmpdir(), "grok-overlay-"));
+  const victim = join(dir, "the-users-real-config.toml");
+  const original = '[ui]\ntheme = "dark"\n';
+  await writeFile(victim, original, "utf8");
+
+  const overlayDir = join(dir, "overlay");
+  await mkdtemp(join(tmpdir(), "grok-overlay-x-"));
+  const { mkdir } = await import("node:fs/promises");
+  await mkdir(overlayDir, { recursive: true });
+  await symlink(victim, join(overlayDir, "orquester-grok.toml"));
+
+  assert.equal(await writeGrokOverlayConfig(overlayDir), null, "the write is refused");
+  assert.equal(await readFile(victim, "utf8"), original, "the link target is untouched");
 });
 
-test("a missing key is appended to its existing section", () => {
-  const patched = patchGrokConfig("[features]\nother = 1\n\n[cli]\nauto_update = false\n");
-  assert.ok(patched !== null);
-  assert.match(patched, /\[features\]\nother = 1\nsupport_permission = true/);
-});
-
-test("ensureGrokManagedConfig writes the file when it does not exist", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "grok-config-"));
-  assert.equal(await ensureGrokManagedConfig(dir), "patched");
-  const written = await readFile(join(dir, "config.toml"), "utf8");
-  assert.match(written, /support_permission = true/);
-  assert.equal(await ensureGrokManagedConfig(dir), "unchanged");
-});
-
-test("ensureGrokManagedConfig preserves an existing file's other settings", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "grok-config-"));
-  await writeFile(join(dir, "config.toml"), '[ui]\npermission_mode = "default"\n', "utf8");
-  assert.equal(await ensureGrokManagedConfig(dir), "patched");
-  const written = await readFile(join(dir, "config.toml"), "utf8");
-  assert.match(written, /permission_mode = "default"/);
-  assert.match(written, /support_permission = true/);
+test("an unwritable directory degrades to a warning, not a failed session", async () => {
+  // `null` is the caller's signal to emit `grokConfigAdvisory()` and carry on.
+  const dir = await mkdtemp(join(tmpdir(), "grok-overlay-"));
+  const blocker = join(dir, "not-a-dir");
+  await writeFile(blocker, "", "utf8");
+  assert.equal(await writeGrokOverlayConfig(join(blocker, "nested")), null);
 });

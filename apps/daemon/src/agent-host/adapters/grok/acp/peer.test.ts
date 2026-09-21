@@ -307,3 +307,45 @@ function tick(): Promise<void> {
     setImmediate(resolve);
   });
 }
+
+test("a frame that is not JSON-RPC 2.0 is warned about but still dispatched", () => {
+  // Tolerant reader, strict writer (R4 #14): a vendor extension that omits the
+  // field must not take the session down, but it must not pass unseen either.
+  const h = harness();
+  let seen = false;
+  h.peer.onNotification("session/update", () => {
+    seen = true;
+  });
+  h.peer.handleLine(JSON.stringify({ method: "session/update", params: {} }));
+  assert.equal(seen, true);
+  assert.ok(h.warnings.some((warning) => /not JSON-RPC 2\.0/.test(warning.message)));
+});
+
+test("an inbound request id that is not a string or a number is refused", async () => {
+  // Q1 #32: the one place an untrusted field would otherwise reach the
+  // handlers typed-but-wrong and be echoed back verbatim.
+  const h = harness();
+  let called = false;
+  h.peer.onRequest("session/request_permission", async () => {
+    called = true;
+    return await Promise.resolve({});
+  });
+  h.recv({ jsonrpc: "2.0", id: { nested: true }, method: "session/request_permission", params: {} });
+  await tick();
+  assert.equal(called, false);
+  assert.equal(h.sent.length, 0, "a reply would echo the bogus id back");
+  assert.ok(h.warnings.some((warning) => /request id/.test(warning.message)));
+});
+
+test("a re-emitted error keeps the peer's own message, undecorated", async () => {
+  // R4 #15: `Error.message` carries the method and the data for a human;
+  // sending THAT back produced "boom: Invalid params (bad)" plus a duplicate.
+  const h = harness();
+  h.peer.onRequest("boom", async () => {
+    await Promise.resolve();
+    throw new AcpRpcError("boom", { code: -32602, message: "Invalid params", data: "bad" });
+  });
+  h.recv({ jsonrpc: "2.0", id: 7, method: "boom" });
+  await tick();
+  assert.deepEqual(h.sent[0]["error"], { code: -32602, message: "Invalid params", data: "bad" });
+});
