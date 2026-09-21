@@ -54,7 +54,6 @@ import type {
   ServerRequestMethod,
   ServerRequestResultsByMethod
 } from "./_generated/index.ts";
-import { CODEX_ADAPTER_CAPABILITIES } from "./capabilities.ts";
 import {
   DEFAULT_APPROVAL_OPTIONS,
   approvalOptionsFromAvailableDecisions,
@@ -161,7 +160,6 @@ export class CodexSession {
   private status: ProviderSessionStatus = "starting";
   private lastError: string | undefined;
   private activeTurnId: string | null = null;
-  private interactionMode: InteractionMode = "default";
   private modelSelection: ModelSelection;
   private runtimeMode: RuntimeMode;
   private hostInitiatedClose = false;
@@ -327,7 +325,6 @@ export class CodexSession {
     if (input.modelSelection !== undefined) {
       this.modelSelection = input.modelSelection;
     }
-    this.interactionMode = input.interactionMode;
 
     const items: CodexProtocol.v2.UserInput[] = [];
     if (input.input.length > 0) {

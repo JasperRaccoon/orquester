@@ -64,11 +64,6 @@ export function isKnownCodexItemType(type: string): type is CodexItemType {
   return KNOWN_ITEM_TYPES.has(type);
 }
 
-/** The item's provider id, whatever arm it is. */
-export function codexItemId(item: CodexThreadItem): string {
-  return item.id;
-}
-
 /**
  * Classify one item. `phase` handling matters: an `agentMessage` whose phase
  * is `commentary` is the running "I'll do X next" narration, not the answer
@@ -281,15 +276,4 @@ function dynamicStatus(status: CodexProtocol.v2.DynamicToolCallStatus): RuntimeI
 /** `interrupted` has no `RuntimeItemStatus` equivalent; it settles as `failed`. */
 function collabStatus(status: CodexProtocol.v2.CollabAgentToolCallStatus): RuntimeItemStatus {
   return status === "interrupted" ? "failed" : status;
-}
-
-/**
- * The text an `agentMessage` contributes to the transcript, or `undefined`
- * when it is the running commentary rather than the answer.
- */
-export function agentMessageText(item: CodexThreadItem): string | undefined {
-  if (item.type !== "agentMessage") {
-    return undefined;
-  }
-  return item.text;
 }

@@ -16,7 +16,6 @@
  */
 
 import type {
-  ApprovalOption,
   CanonicalRequestType,
   RuntimeContentStreamKind,
   RuntimeErrorClass,
@@ -59,7 +58,6 @@ export class CodexNormaliser {
   private turnEffort: string | null = null;
   /** The last error notification of the active turn, for its `errorMessage`. */
   private lastTurnError: string | null = null;
-  private lastTurnErrorClass: RuntimeErrorClass | null = null;
   /** Agent paths seen, so the `/root` trap never registers the root as a child. */
   private readonly knownAgentPaths = new Set<string>();
 
@@ -77,7 +75,6 @@ export class CodexNormaliser {
     this.turnModel = model ?? null;
     this.turnEffort = effort ?? null;
     this.lastTurnError = null;
-    this.lastTurnErrorClass = null;
     this.usage.beginTurn(turnId);
   }
 
@@ -85,7 +82,6 @@ export class CodexNormaliser {
   noteTurnSettled(): void {
     this.activeTurnId = null;
     this.lastTurnError = null;
-    this.lastTurnErrorClass = null;
   }
 
   /** Item ids still `inProgress`, used to close them when a child dies. */
@@ -203,7 +199,6 @@ export class CodexNormaliser {
           this.activeTurnId = null;
         }
         this.lastTurnError = null;
-        this.lastTurnErrorClass = null;
         return [
           {
             type: "turn.completed",
@@ -386,14 +381,12 @@ export class CodexNormaliser {
             }
           ];
         }
-        const errorClass = errorClassOf(p.error.codexErrorInfo);
-        this.lastTurnErrorClass = errorClass;
         return [
           {
             type: "runtime.error",
             payload: {
               message,
-              class: errorClass,
+              class: errorClassOf(p.error.codexErrorInfo),
               detail: { codexErrorInfo: p.error.codexErrorInfo }
             },
             ...(p.turnId.length > 0 ? { turnId: p.turnId } : {}),
@@ -798,8 +791,6 @@ export function providerRequestKind(
       return "permission";
   }
 }
-
-export type { ApprovalOption };
 
 // ---------------------------------------------------------------------------
 // Small helpers
