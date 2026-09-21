@@ -42,20 +42,30 @@ export interface ChatShortcutEventLike {
 export type ComposerControlCommand =
   | "model"
   | "effort"
-  | "account"
   | "mode"
   | "plan"
-  | "compact"
-  | "attach";
+  | "attach"
+  | "send"
+  | "stop";
 
+/**
+ * Every token that a mounted composer actually carries.
+ *
+ * `account` and `compact` were in this union with **no DOM target**, so
+ * `openControl("account")` was a silent no-op that read like a bug (fix-wave
+ * R7-12) — the account chip deliberately carries no token (see
+ * `ComposerChips.tsx`) and compaction is reached through the context meter,
+ * not a composer control. A token belongs here only once a control advertises
+ * it.
+ */
 export const COMPOSER_CONTROL_COMMANDS: readonly ComposerControlCommand[] = [
   "model",
   "effort",
-  "account",
   "mode",
   "plan",
-  "compact",
-  "attach"
+  "attach",
+  "send",
+  "stop"
 ];
 
 /** Actions the composer performs directly rather than by clicking a control. */

@@ -167,6 +167,15 @@ export interface WorkLogEntry {
   truncated?: boolean;
   /** Grouping key for subagent lifecycle rows — one row per agent. */
   taskId?: string;
+  /**
+   * The tool call this row happened *inside* — a hook run or a CLI-side denial
+   * belongs under the call that triggered it, not beside it. §5.1 promotes it
+   * out of the payload precisely so the presentation layer can read it without
+   * decoding.
+   *
+   * *Added by W11 in the fix wave (R7-10); `contracts.ts` stays additive-only.*
+   */
+  parentToolUseId?: string;
   agentRole?: string;
   /** Present on an answered-question row; the expansion shows the full history. */
   questionAnswer?: {
@@ -419,10 +428,13 @@ export interface AgentChatThreadView {
    * The un-implemented proposal the composer's primary action acts on (§7.3):
    * `null` turns the split button back into a plain send. Derived from the
    * timeline projection's `proposedPlans`, which never leaves the store.
+   * `id`/`turnId` ride along so a consumer can tell one proposal from the next
+   * without diffing markdown.
    *
-   * *Added by W15; `contracts.ts` stays additive-only.*
+   * *Added by W15, widened by W11 in the fix wave (R8-B1 / R7-2);
+   * `contracts.ts` stays additive-only.*
    */
-  actionableProposedPlan: { planMarkdown: string } | null;
+  actionableProposedPlan: { id: string; planMarkdown: string; turnId: string | null } | null;
   /**
    * True while a `/revert` is in flight — §7.5's one reason the composer goes
    * `inert`, so a turn cannot race history the host is rewriting.

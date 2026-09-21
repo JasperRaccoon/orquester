@@ -14,6 +14,9 @@ import {
   workEntryIndicatesToolNeutralStatus,
   workEntryIsProviderDenial,
   workEntrySeverity,
+  workEntryIsActiveTurnActivity,
+  nestRowsUnderParentCall,
+  showDestructiveRowStyle,
   workLogEntryIsToolLike
 } from "./presentation.logic";
 
@@ -201,5 +204,78 @@ describe("misc helpers", () => {
       liveWorkEntryLabel(entry({ command: "pnpm test", toolLifecycleStatus: "failed" }), true),
       "Failed pnpm"
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix-wave regressions (R7-6: this is the ONE presentation resolver)
+// ---------------------------------------------------------------------------
+
+describe("R7-6 — arms absorbed from the deleted second resolver", () => {
+  it("buckets an answered question as an update, not as a tool call", () => {
+    assert.equal(
+      toolGroupAction(entry({ sourceActivityKind: "user-input.requested", tone: "info" })),
+      "update"
+    );
+    assert.equal(
+      toolGroupAction(entry({ sourceActivityKind: "user-input.resolved", tone: "info" })),
+      "update"
+    );
+  });
+
+  it("keeps the arms W11 already had", () => {
+    assert.equal(
+      toolGroupAction(entry({ sourceActivityKind: "approval.requested", tone: "info" })),
+      "update"
+    );
+    assert.equal(
+      toolGroupAction(entry({ itemType: "web_search", toolTitle: "Grep" })),
+      "code-search"
+    );
+  });
+
+  it("exposes the live-row predicate the activity group needs", () => {
+    assert.equal(
+      workEntryIsActiveTurnActivity(entry({ toolLifecycleStatus: "inProgress" })),
+      true
+    );
+    assert.equal(
+      workEntryIsActiveTurnActivity(entry({ sourceActivityKind: "task.progress", tone: "thinking" })),
+      true
+    );
+    assert.equal(
+      workEntryIsActiveTurnActivity(entry({ toolLifecycleStatus: "completed" })),
+      false
+    );
+  });
+
+  it("reserves the destructive style for severe or non-tool-like failures", () => {
+    // A non-zero exit is a failure but not destructive (§7.3).
+    assert.equal(
+      showDestructiveRowStyle(entry({ command: "false", detail: "exited with exit code 1" })),
+      false
+    );
+    assert.equal(
+      showDestructiveRowStyle(entry({ sourceActivityKind: "runtime.error", tone: "error" })),
+      true
+    );
+    assert.equal(showDestructiveRowStyle(entry({ command: "ls", detail: "ok" })), false);
+  });
+});
+
+describe("R7-10 — parentToolUseId has a reader", () => {
+  it("nests a consequence row under the call it happened inside", () => {
+    const call = entry({ id: "c1", toolCallId: "tu1", command: "pnpm test" });
+    const hook = entry({ id: "h1", parentToolUseId: "tu1", label: "PostToolUse" });
+    const sibling = entry({ id: "s1", command: "ls" });
+    const nested = nestRowsUnderParentCall([call, hook, sibling]);
+    assert.deepEqual(nested.map((node) => node.entry.id), ["c1", "s1"]);
+    assert.deepEqual(nested[0]?.children.map((child) => child.id), ["h1"]);
+  });
+
+  it("leaves a row whose parent is not in this run at the top level", () => {
+    const orphan = entry({ id: "o1", parentToolUseId: "elsewhere" });
+    const nested = nestRowsUnderParentCall([orphan]);
+    assert.deepEqual(nested.map((node) => node.entry.id), ["o1"]);
   });
 });
