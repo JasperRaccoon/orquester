@@ -6,6 +6,14 @@ import type { ProjectSummary, WorkspaceSummary } from "../types";
  * down: the terminal (Ctrl+K is readline's kill-line, Ctrl+A beginning-of-line)
  * and a Design-Mode browser tab, whose keys are forwarded to a remote page.
  * One selector so every global shortcut bails on exactly the same set.
+ *
+ * **A chat tab is deliberately NOT in here.** Its composer is a plain
+ * `<textarea>` with no readline semantics, so `Ctrl/Cmd+K` means nothing in it
+ * and the command palette may have the key; its own chords are all
+ * `mod+shift+…` and none of them collide. `Ctrl+Shift+A` is stolen
+ * unconditionally elsewhere anyway, and that theft is harmless here — the
+ * reason it exists is that xterm would otherwise encode `\x01` into a PTY, and
+ * a chat tab has no PTY.
  */
 export const SHORTCUT_BAIL_SELECTOR = ".xterm, [data-browser-view]";
 
