@@ -17,6 +17,41 @@
 import type { PermissionResult, PermissionUpdate } from "@anthropic-ai/claude-agent-sdk";
 import type { ApprovalDecision } from "@orquester/api/agent-chat";
 
+/**
+ * Which of `canUseTool`'s three branches a tool takes (§4.5). Shared by the
+ * live session and the fixture replay harness so a replay exercises the same
+ * routing decision the adapter makes, rather than the harness's own copy of it.
+ */
+export type CanUseToolRoute = "user-input" | "proposed-plan" | "approval";
+
+export function claudeCanUseToolRoute(toolName: string): CanUseToolRoute {
+  if (toolName === "AskUserQuestion") {
+    // Intercepted BEFORE any approval logic, in every runtime mode — plan mode
+    // leans on it heavily.
+    return "user-input";
+  }
+  if (toolName === "ExitPlanMode") {
+    // The plan is a client-owned card, never the SDK's gate; it is captured
+    // and then always denied.
+    return "proposed-plan";
+  }
+  return "approval";
+}
+
+/**
+ * The key the pending-request maps use. The SDK's own `requestId` is preferred
+ * because it **redelivers** a request whose response was lost in a transport
+ * gap, and a freshly minted key would open a second card for the same call
+ * (fixtures/claude README observation 11).
+ */
+export function claudeRequestKey(
+  requestId: string | undefined,
+  fallback: () => string
+): string {
+  const trimmed = typeof requestId === "string" ? requestId.trim() : "";
+  return trimmed.length > 0 ? trimmed : fallback();
+}
+
 export const DECLINE_MESSAGE = "User declined tool execution.";
 export const CANCEL_MESSAGE = "User cancelled tool execution.";
 /**

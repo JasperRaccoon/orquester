@@ -213,6 +213,8 @@ interface Harness {
   drain: () => Promise<void>;
   /** Moves the injected clock, so a window expires without a real wait (§9). */
   advance: (ms: number) => void;
+  /** Every timer handle the adapter cleared, so a leak is visible. */
+  clearedTimers: Array<NodeJS.Timeout | number>;
 }
 
 interface HarnessOptions {
@@ -222,6 +224,8 @@ interface HarnessOptions {
   initResolves?: boolean;
   historyStdout?: (method: string) => string;
   deadlineMs?: number;
+  compactDeadlineMs?: number;
+  signal?: AbortSignal;
 }
 
 async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
@@ -229,6 +233,7 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
   const peers: ScriptedQuery[] = [];
   const queryOptions: ClaudeQueryOptions[] = [];
   const timers: Array<{ fn: () => void; ms: number }> = [];
+  const clearedTimers: Array<NodeJS.Timeout | number> = [];
   const listeners: Array<() => void> = [];
 
   let nowMs = Date.parse("2026-09-21T00:00:00.000Z");
@@ -253,7 +258,7 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
       options.binaryPath === undefined ? "/usr/local/bin/claude" : options.binaryPath,
     sessionPath: () => "/usr/bin",
     tmpDir: () => "/tmp",
-    signal: new AbortController().signal
+    signal: options.signal ?? new AbortController().signal
   };
 
   const deps: ClaudeAdapterDeps = {
@@ -286,10 +291,16 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
       timers.push(entry);
       return timers.length as unknown as NodeJS.Timeout;
     },
-    clearTimer: () => {},
+    clearTimer: (handle) => {
+      clearedTimers.push(handle);
+    },
     hostConfigDir: "/host/.claude",
     nodePath: process.execPath,
-    deadlines: { handshakeMs: options.deadlineMs ?? 50, cancelMs: options.deadlineMs ?? 50 }
+    deadlines: {
+      handshakeMs: options.deadlineMs ?? 50,
+      cancelMs: options.deadlineMs ?? 50,
+      compactMs: options.compactDeadlineMs ?? 5_000
+    }
   };
 
   const adapter = await createClaudeAdapterWith(context, deps);
@@ -347,7 +358,17 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     await new Promise((resolve) => setImmediate(resolve));
   };
 
-  return { adapter, events, peers, queryOptions, waitFor, timers, drain, advance };
+  return {
+    adapter,
+    events,
+    peers,
+    queryOptions,
+    waitFor,
+    timers,
+    drain,
+    advance,
+    clearedTimers
+  };
 }
 
 const START = {
@@ -397,6 +418,24 @@ function successResult(sessionId = "sess-1"): SDKMessage {
     terminal_reason: "completed",
     uuid: "u-result"
   } as unknown as SDKMessage;
+}
+
+function userRow(uuid: string, text: string): Record<string, unknown> {
+  return {
+    type: "user",
+    uuid,
+    parent_tool_use_id: null,
+    message: { role: "user", content: [{ type: "text", text }] }
+  };
+}
+
+function assistantRow(uuid: string): Record<string, unknown> {
+  return {
+    type: "assistant",
+    uuid,
+    parent_tool_use_id: null,
+    message: { role: "assistant", content: [{ type: "text", text: "ok" }] }
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1093,5 +1132,346 @@ describe("claude adapter — snapshot", () => {
       harness.queryOptions.some((options) => options.persistSession === false),
       false
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix-wave regressions
+// ---------------------------------------------------------------------------
+
+describe("claude adapter — fix-wave regressions", () => {
+  it("R6 #1: a session-scoped Stop with no running turn stops the background work", async () => {
+    const harness = await makeHarness();
+    await harness.adapter.startSession(START);
+    const peer = harness.peers[0]!;
+    await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "spawn a watcher",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await peer.nextTurn();
+    peer.emit({
+      type: "system",
+      subtype: "task_started",
+      task_id: "watch-1",
+      description: "Monitor the log",
+      task_type: "local_bash",
+      session_id: "sess-1",
+      uuid: "u-task"
+    } as unknown as SDKMessage);
+    await harness.waitFor("task.started");
+    // The turn settles; the watch loop keeps running inside the CLI.
+    peer.emit(successResult());
+    await harness.waitFor("turn.completed");
+    assert.equal(harness.adapter.hasSession(START.threadId), true);
+
+    // §6.2: `/interrupt` is addressed to the SESSION and is valid with no turn
+    // running — it is the only way to stop background work.
+    const before = harness.events.length;
+    await harness.adapter.interruptTurn(START.threadId);
+
+    const tail = harness.events.slice(before);
+    const stopped = findEvent(tail, "task.completed");
+    assert.ok(stopped, `no task.completed in ${tail.map((e) => e.type).join(", ")}`);
+    assert.equal(stopped.payload.status, "stopped");
+    assert.equal(stopped.payload.taskId, "watch-1");
+    const types = tail.map((event) => event.type);
+    assert.ok(types.indexOf("task.completed") < types.indexOf("session.exited"));
+    assert.equal(peer.closed, true, "the CLI owns the background work; closing it is the only reach");
+    assert.equal(harness.adapter.hasSession(START.threadId), false);
+  });
+
+  it("R6 #1: naming a turn that is not running is still a no-op", async () => {
+    const harness = await makeHarness();
+    await harness.adapter.startSession(START);
+    const peer = harness.peers[0]!;
+    await harness.adapter.interruptTurn(START.threadId, "some-other-turn");
+    assert.equal(peer.closed, false);
+    assert.equal(harness.adapter.hasSession(START.threadId), true);
+  });
+
+  it("Q1 #12: an already-aborted host signal still stops everything", async () => {
+    const aborted = new AbortController();
+    aborted.abort();
+    const harness = await makeHarness({ signal: aborted.signal });
+    // `addEventListener("abort")` on an already-aborted signal never fires, so
+    // the adapter has to check `aborted` itself or the event queue is never
+    // closed and the ingestion iterator hangs forever.
+    let closed = false;
+    void (async () => {
+      for await (const _event of harness.adapter.events) {
+        void _event;
+      }
+      closed = true;
+    })();
+    await harness.drain();
+    assert.equal(closed, true, "the event stream must end when the host is already stopping");
+  });
+
+  it("Q1 #13: a compaction that never settles is bounded, not a permanent wedge", async () => {
+    const harness = await makeHarness({ compactDeadlineMs: 20 });
+    await harness.adapter.startSession(START);
+    const peer = harness.peers[0]!;
+    const compaction = harness.adapter.compact(START.threadId);
+    await peer.nextTurn();
+    // The CLI keeps the turn alive and never emits a terminal `result`.
+    await assert.rejects(() => compaction, /timed out/);
+    assert.ok(
+      harness.events.some(
+        (event) =>
+          event.type === "runtime.warning" && event.payload.message.includes("compacting")
+      )
+    );
+  });
+
+  it("Q1 #14: a rewind during a live turn keeps the right number of turns", async () => {
+    const sessionId = "b46b654b-57bb-40e4-8c82-d3536bd06a28";
+    // Three human turns, each followed by an assistant reply. The uuids of the
+    // three user rows are patched to the turn ids the adapter actually mints.
+    const boundaries: string[] = [];
+    const makeHistory = (): unknown[] => [
+      userRow(boundaries[0] ?? "TURN-A", "one"),
+      assistantRow("asst-a"),
+      userRow(boundaries[1] ?? "TURN-B", "two"),
+      assistantRow("asst-b"),
+      userRow(boundaries[2] ?? "TURN-C", "three")
+    ];
+    let forked = false;
+    const harness = await makeHarness({
+      historyStdout: (method) => {
+        if (method === "forkSession") {
+          forked = true;
+          return JSON.stringify({ sessionId: "d908c283-1c9a-45ee-9506-3ca4a69c8579" });
+        }
+        if (!forked) {
+          return JSON.stringify(makeHistory());
+        }
+        // The fork rewrites every uuid but preserves the retained BODIES — the
+        // four conversation rows before the removed turn.
+        return JSON.stringify([
+          { ...userRow(boundaries[0]!, "one"), uuid: "fork-1" },
+          { ...assistantRow("asst-a"), uuid: "fork-2" },
+          { ...userRow(boundaries[1]!, "two"), uuid: "fork-3" },
+          { ...assistantRow("asst-b"), uuid: "fork-4" }
+        ]);
+      }
+    });
+    await harness.adapter.startSession(START);
+    const peer = harness.peers[0]!;
+
+    for (const text of ["one", "two"]) {
+      await harness.adapter.sendTurn({
+        threadId: START.threadId,
+        input: text,
+        attachments: [],
+        interactionMode: "default"
+      });
+      await peer.nextTurn();
+      peer.emit(systemInit(sessionId));
+      peer.emit(successResult(sessionId));
+      await harness.waitFor("turn.completed", harness.events.length - 1);
+    }
+    // A third turn that is still RUNNING: `turnStartMessageIds` now leads
+    // `turns` by one, which is exactly where the old slice went wrong.
+    await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "three",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await peer.nextTurn();
+
+    boundaries.push(
+      ...harness.events
+        .filter((event) => event.type === "turn.started")
+        .map((event) => event.turnId!)
+    );
+    assert.equal(boundaries.length, 3);
+
+    const snapshot = await harness.adapter.rollbackThread(START.threadId, 1);
+    // Three boundaries minus one rewound turn = two retained. The old code
+    // sliced `turns.length - numTurns` = 1 and seeded one turn fewer than the
+    // cursor claimed, so every later rewind targeted the wrong boundary.
+    assert.equal(snapshot.turns.length, 2);
+  });
+
+  it("Q1 #15 / R3 #5: a rewind across a compaction refuses BEFORE forking", async () => {
+    const sessionId = "b46b654b-57bb-40e4-8c82-d3536bd06a28";
+    const boundaries: string[] = [];
+    let forkCalls = 0;
+    const harness = await makeHarness({
+      historyStdout: (method) => {
+        if (method === "forkSession") {
+          forkCalls += 1;
+          return JSON.stringify({ sessionId: "d908c283-1c9a-45ee-9506-3ca4a69c8579" });
+        }
+        return JSON.stringify([
+          userRow(boundaries[0] ?? "TURN-A", "one"),
+          assistantRow("asst-a"),
+          userRow(boundaries[1] ?? "TURN-B", "two")
+        ]);
+      }
+    });
+    await harness.adapter.startSession(START);
+    const peer = harness.peers[0]!;
+    for (const text of ["one", "two"]) {
+      await harness.adapter.sendTurn({
+        threadId: START.threadId,
+        input: text,
+        attachments: [],
+        interactionMode: "default"
+      });
+      await peer.nextTurn();
+      peer.emit(systemInit(sessionId));
+      peer.emit(successResult(sessionId));
+      await harness.waitFor("turn.completed", harness.events.length - 1);
+    }
+    boundaries.push(
+      ...harness.events
+        .filter((event) => event.type === "turn.started")
+        .map((event) => event.turnId!)
+    );
+
+    // A compaction whose preserved set does NOT contain the rewind anchor.
+    peer.emit({
+      type: "system",
+      subtype: "compact_boundary",
+      compact_metadata: {
+        trigger: "auto",
+        pre_tokens: 30_000,
+        post_tokens: 900,
+        preserved_messages: { anchor_uuid: "x", all_uuids: ["something-else"] }
+      },
+      session_id: sessionId,
+      uuid: "u-compact"
+    } as unknown as SDKMessage);
+    await harness.waitFor("thread.state.changed");
+
+    await assert.rejects(
+      () => harness.adapter.rollbackThread(START.threadId, 1),
+      /compacted after that turn/
+    );
+    assert.equal(forkCalls, 0, "no orphan fork session may be created by a doomed rewind");
+    assert.equal(harness.adapter.hasSession(START.threadId), true);
+  });
+
+  it("Q1 #37: a redelivered question does not open a second card", async () => {
+    const harness = await makeHarness();
+    await harness.adapter.startSession(START);
+    const peer = harness.peers[0]!;
+    await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "ask me",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await peer.nextTurn();
+
+    const input = {
+      questions: [
+        { question: "Which file?", header: "Choice", options: [{ label: "a.txt", description: "" }] }
+      ]
+    };
+    const options = {
+      signal: new AbortController().signal,
+      toolUseID: "toolu_q",
+      requestId: "req-q"
+    } as unknown as Parameters<CanUseTool>[2];
+    const first = peer.canUseTool!("AskUserQuestion", input, options);
+    await harness.waitFor("user-input.requested");
+    const second = peer.canUseTool!("AskUserQuestion", input, options);
+    await harness.drain();
+
+    assert.equal(harness.events.filter((e) => e.type === "user-input.requested").length, 1);
+    harness.adapter.respondToUserInput(START.threadId, "req-q", { "Which file?": "a.txt" });
+    // BOTH deliveries settle: the old code dropped the first deferred, parking
+    // that control request forever.
+    assert.equal(((await first) as { behavior: string }).behavior, "allow");
+    assert.equal(((await second) as { behavior: string }).behavior, "allow");
+  });
+
+  it("R3 #8: an undeclared dialog kind is not answered at all", async () => {
+    const harness = await makeHarness();
+    await harness.adapter.startSession(START);
+    const onUserDialog = harness.queryOptions.at(-1)!.onUserDialog!;
+    const answer = await onUserDialog(
+      { dialogKind: "something_new", payload: {} },
+      { signal: new AbortController().signal, requestId: "req-d" }
+    );
+    // `{behavior:"cancelled"}` is a real settlement the SDK forbids here.
+    assert.equal(answer, null);
+  });
+
+  it("R2-1: the per-cwd overlay carries the machine command list", async () => {
+    const harness = await makeHarness();
+    const snapshot = await harness.adapter.refreshSnapshot({ cwd: "/work/project" });
+    const overlay = snapshot.workspaceSnapshots?.find((entry) => entry.cwd === "/work/project");
+    assert.ok(overlay, "the per-cwd overlay must exist");
+    // The client resolves `overlay.slashCommands ?? provider.slashCommands`, and
+    // `??` does not fall back on an empty array — an empty overlay left the tab
+    // with no provider commands at all.
+    assert.ok(overlay.slashCommands.length > 0);
+    assert.ok(overlay.slashCommands.some((command) => command.name === "compact"));
+    assert.ok(overlay.slashCommands.some((command) => command.name === "review"));
+  });
+
+  it("R3 #13: the probe runs under the account home when one is named", async () => {
+    const harness = await makeHarness();
+    await harness.adapter.refreshSnapshot({
+      cwd: "/work/project",
+      home: { kind: "account", accountId: "acc-1", path: "/homes/acc-1/home" }
+    });
+    const probeOptions = harness.queryOptions.filter((o) => o.persistSession === false).at(-1)!;
+    assert.equal(probeOptions.env?.CLAUDE_CONFIG_DIR, "/homes/acc-1/home");
+  });
+
+  it("Q1 #35: two probes with different keys do not share one in-flight result", async () => {
+    const harness = await makeHarness();
+    const [wide, scoped] = await Promise.all([
+      harness.adapter.refreshSnapshot(),
+      harness.adapter.refreshSnapshot({ cwd: "/work/project" })
+    ]);
+    assert.equal(wide.workspaceSnapshots?.some((e) => e.cwd === "/work/project") ?? false, false);
+    assert.ok(scoped.workspaceSnapshots?.some((entry) => entry.cwd === "/work/project"));
+  });
+
+  it("Q1 #36: stop() clears its guard timer", async () => {
+    const harness = await makeHarness();
+    await harness.adapter.startSession(START);
+    const clearedBefore = harness.clearedTimers.length;
+    await harness.adapter.stopSession(START.threadId);
+    assert.ok(
+      harness.clearedTimers.length > clearedBefore,
+      "a ref'd guard timer left behind holds the event loop open at shutdown"
+    );
+  });
+
+  it("Q1 #38: a cursor naming another thread is rejected", async () => {
+    const harness = await makeHarness();
+    await harness.adapter.startSession({
+      ...START,
+      resumeCursor: {
+        threadId: "some-other-thread",
+        resume: "b46b654b-57bb-40e4-8c82-d3536bd06a28"
+      }
+    });
+    const options = harness.queryOptions.at(-1)!;
+    assert.equal(options.resume, undefined, "a cursor copied onto the wrong thread must not resume");
+    assert.equal(typeof options.sessionId, "string");
+  });
+
+  it("launchArgs reach the query and fold into the permission mode", async () => {
+    const harness = await makeHarness();
+    await harness.adapter.startSession({
+      ...START,
+      launchArgs: ["--dangerously-skip-permissions", "--verbose"]
+    });
+    const options = harness.queryOptions.at(-1)!;
+    assert.equal(options.permissionMode, "bypassPermissions");
+    assert.equal(options.allowDangerouslySkipPermissions, true);
+    const extra = options.extraArgs as Record<string, unknown> | undefined;
+    assert.equal(extra?.verbose, null);
+    assert.equal(extra?.["dangerously-skip-permissions"], undefined);
   });
 });

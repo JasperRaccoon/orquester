@@ -18,6 +18,21 @@
  *
  * A small static fallback remains for the case where the probe itself failed,
  * so the composer can still offer the aliases every recent CLI accepts.
+ *
+ * **Two consequences of that swap, stated here so they are not re-derived.**
+ *
+ * 1. §4.1's *"gates each catalogue model on a `minVersion`/`maxVersionExclusive`
+ *    range … and explains the gap rather than hiding the model"* no longer has
+ *    a per-model half: an unsupported model is simply absent from
+ *    `supportedModels()`, so there is nothing to explain a gap about. The
+ *    "explain the gap" requirement therefore applies only to the **whole-CLI**
+ *    gate, which {@link claudeVersionGateMessage} satisfies by naming the
+ *    version needed and how to install it.
+ * 2. T3's `ultracode` was an *effort choice* in its bundled manifest
+ *    (`effortMap` → `effort: "xhigh"` **plus** `settings.ultracode: true`). The
+ *    CLI's own `supportedEffortLevels` never contains it, so it is offered here
+ *    as a separate boolean descriptor gated on `xhigh` support — the SDK still
+ *    accepts the setting and it would otherwise be unreachable.
  */
 
 import type {
@@ -113,7 +128,8 @@ const DEFAULT_EFFORT_CHOICE = "medium";
 export const CLAUDE_OPTION_IDS = {
   effort: "effort",
   thinking: "thinking",
-  fastMode: "fastMode"
+  fastMode: "fastMode",
+  ultracode: "ultracode"
 } as const;
 
 function optionDescriptorsFor(info: ClaudeModelInfo): ProviderOptionDescriptor[] {
@@ -149,6 +165,17 @@ function optionDescriptorsFor(info: ClaudeModelInfo): ProviderOptionDescriptor[]
       id: CLAUDE_OPTION_IDS.fastMode,
       label: "Fast mode",
       description: "Trade some quality for latency where the plan allows it.",
+      type: "boolean"
+    });
+  }
+  // T3 carried `ultracode` as an effort choice in its bundled manifest; the
+  // CLI's own level list never names it, so it is its own boolean, gated on the
+  // `xhigh` support the SDK requires for it.
+  if (levels.includes("xhigh")) {
+    descriptors.push({
+      id: CLAUDE_OPTION_IDS.ultracode,
+      label: "Ultracode",
+      description: "Extra-high effort plus standing dynamic-workflow orchestration.",
       type: "boolean"
     });
   }
