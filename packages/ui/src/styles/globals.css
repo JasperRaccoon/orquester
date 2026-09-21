@@ -1,3 +1,8 @@
+/* The agent chat GUI's motion + surface layer (keyframes and `ac-*` utilities).
+   Inlined by Vite's postcss-import before Tailwind runs, so it must stay the
+   first statement in this file — @import may not follow another rule. */
+@import "./agent-chat.css";
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
