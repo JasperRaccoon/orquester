@@ -88,6 +88,10 @@ import type {
   TransportRequest
 } from "./transporter";
 import type { WsBrowserChannel } from "./transporters/ws-browser-channel";
+import {
+  resolveAgentChatTransport,
+  type AgentChatTransport
+} from "./agent-chat/transport";
 import { fsPathQuery } from "./fs-path-query";
 import { agentChatRoutes } from "@orquester/api/agent-chat";
 import type { ThreadItemResponse, TurnDiffQuery, TurnDiffResponse } from "@orquester/api/agent-chat";
@@ -137,6 +141,9 @@ export class ApiClient {
   /** Multiplexed session I/O (web/HTTP); null on transports without it (unix). */
   private readonly channel: SessionChannel | null;
 
+  /** Lazily built once per client, so a re-render never re-opens a stream. */
+  private agentChatTransport: AgentChatTransport | null = null;
+
   constructor(
     public readonly connection: UiConnection,
     private readonly transporter: Transporter
@@ -146,6 +153,21 @@ export class ApiClient {
 
   get transportKind(): string {
     return this.transporter.kind;
+  }
+
+  /**
+   * The agent-chat surface (spec §7.1): `{stream, command, read, …}` for the
+   * §6.2 commands and the §6.3 chunked-NDJSON thread stream.
+   *
+   * Built from this client's transporter — `request` + `openStream`, which
+   * every runtime already has — so it works unchanged on the web HTTP
+   * transport and on the desktop unix-socket transport (§6.5: nothing in the
+   * chat UI depends on WebSockets). A transporter may override it by
+   * implementing `agentChat()`.
+   */
+  get agentChat(): AgentChatTransport {
+    this.agentChatTransport ??= resolveAgentChatTransport(this.transporter);
+    return this.agentChatTransport;
   }
 
   /** Low-level escape hatch for endpoints not yet wrapped below. */

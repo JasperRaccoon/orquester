@@ -127,6 +127,20 @@ export interface ThreadMessageItem {
    * *Added by W12; additive. Producers: the adapters / ingestion (W3, W6–W9).*
    */
   reasoningKind?: "text" | "summary";
+  /**
+   * Only on an `assistant` message: whether this is the turn's answer or the
+   * running "I'll do X next" narration.
+   *
+   * REALITY (Codex): an `agentMessage` carries a `phase` of `final_answer` or
+   * `commentary`, and §7.3 wants commentary demoted into the activity group
+   * rather than shown as a second full-width answer — a thread of narration
+   * rendered as answers is unreadable. The projection (W11) demotes it; the
+   * timeline additionally renders a commentary message quietly if one reaches
+   * it, so a missed demotion degrades instead of shouting.
+   *
+   * *Added by W12; additive. Producers: the adapters / ingestion (W3, W6–W9).*
+   */
+  messageKind?: "answer" | "commentary";
   streaming: boolean;
   createdAt: string;
   updatedAt: string;
