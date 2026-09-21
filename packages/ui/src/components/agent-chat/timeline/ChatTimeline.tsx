@@ -3,11 +3,22 @@ import { TriangleAlert, X } from "lucide-react";
 
 import { cn } from "../../../lib/cn";
 import type { DisclosureState } from "../../../lib/agent-chat/contracts";
+import { useAgentChatDrillIn } from "../../../lib/agent-chat/hooks";
+import { peekThreadStore } from "../../../lib/agent-chat/store";
 import type { ChatTimelineProps, TimelineScrollPosition } from "../contracts";
 import { ChatIconButton, ScrollToBottomButton } from "../primitives";
 import { TimelineRowContext, type TimelineRowContextValue } from "./context";
 import { TimelineRow } from "./TimelineRow";
 import { nextFollowState, shouldAnimateFollow } from "./follow";
+
+/**
+ * How long a scroll settles before its position is written into the §7.2 LRU.
+ *
+ * Long enough that a flick is one write instead of sixty, short enough that a
+ * tab switch a moment after scrolling still records where the user was — and
+ * the pending write is flushed on unmount regardless, so nothing is lost.
+ */
+const REMEMBER_SCROLL_DEBOUNCE_MS = 200;
 
 /**
  * The timeline (spec §7.3).
@@ -32,6 +43,35 @@ import { nextFollowState, shouldAnimateFollow } from "./follow";
  *     else from a context, so one streamed token re-renders one row.
  */
 export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
+  // Two surfaces, one component. The drill-in sources its rows from the
+  // per-agent projection (§7.6) rather than from the `rows` prop, so the
+  // subscription that projection needs is not paid for by the parent
+  // timeline — hence a separate component rather than a conditional hook.
+  // The branch is fixed per mount site (W15 never passes `agentId`, W14
+  // always does), so nothing remounts.
+  return props.agentId === undefined ? (
+    <TimelineSurface {...props} rows={props.rows} />
+  ) : (
+    <DrillInTimeline {...props} agentId={props.agentId} />
+  );
+}
+
+/**
+ * The drill-in's rows come from `useAgentChatDrillIn`, which reuses the
+ * parent's slice and holds its own projection so a streamed token in the
+ * child's timeline changes one row object — exactly as in the parent. Filtering
+ * the parent's already-projected rows here would rebuild the whole list on
+ * every frame and would lose the per-agent turn grouping.
+ */
+function DrillInTimeline(props: ChatTimelineProps & { agentId: string }): React.ReactElement {
+  const { rows } = useAgentChatDrillIn(props.sessionId, props.agentId);
+  // The projection is the source of truth; the prop is the fallback for a
+  // caller that already resolved the child's rows another way, so a surface
+  // that has rows never renders the empty state because the hook has none.
+  return <TimelineSurface {...props} rows={rows.length > 0 ? rows : props.rows} readOnly />;
+}
+
+function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
   const {
     sessionId,
     rows,
@@ -197,9 +237,54 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
     };
   }, []);
 
+  /**
+   * Writes the reading position through W11's store action, debounced.
+   *
+   * The `onScrollPositionChange` prop feeds the shell's own paint-hold copy;
+   * **this** is what lands in the §7.2 100-entry LRU. Two rules:
+   *
+   *  - it is debounced, so a flick is one write rather than sixty, and the
+   *    pending write is flushed on unmount so leaving a tab still records where
+   *    the user was;
+   *  - a **drill-in never writes**. The child view reuses the parent's slice,
+   *    so recording the child's scroll offset would overwrite the parent
+   *    thread's remembered position with a position in a different list.
+   */
+  const pendingScroll = React.useRef<TimelineScrollPosition | null>(null);
+  const rememberTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const flushRememberScroll = React.useCallback(() => {
+    if (rememberTimer.current !== null) {
+      clearTimeout(rememberTimer.current);
+      rememberTimer.current = null;
+    }
+    const position = pendingScroll.current;
+    pendingScroll.current = null;
+    if (position === null) return;
+    // Read the store at call time rather than subscribing: a scroll must not
+    // re-render the timeline, and the actions object is stable anyway.
+    peekThreadStore(sessionId)?.getState().actions.rememberScroll(position);
+  }, [sessionId]);
+
+  const rememberScroll = React.useCallback(
+    (position: TimelineScrollPosition) => {
+      if (agentId !== undefined) return;
+      pendingScroll.current = position;
+      if (rememberTimer.current !== null) return;
+      rememberTimer.current = setTimeout(() => {
+        rememberTimer.current = null;
+        flushRememberScroll();
+      }, REMEMBER_SCROLL_DEBOUNCE_MS);
+    },
+    [agentId, flushRememberScroll]
+  );
+
+  // Flush on unmount and on a thread switch, so the outgoing thread's last
+  // position is the one that is remembered.
+  React.useEffect(() => flushRememberScroll, [flushRememberScroll]);
+
   const publishPosition = React.useCallback(
     (scrollOffset: number, atEnd: boolean) => {
-      if (!onScrollPositionChange) return;
       const node = scrollerRef.current;
       let rowId: string | null = null;
       let offsetWithinRow = 0;
@@ -215,9 +300,10 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
         }
       }
       const position: TimelineScrollPosition = { rowId, offsetWithinRow, scrollOffset, atEnd };
-      onScrollPositionChange(position);
+      onScrollPositionChange?.(position);
+      rememberScroll(position);
     },
-    [onScrollPositionChange]
+    [onScrollPositionChange, rememberScroll]
   );
 
   const handleScroll = React.useCallback(() => {
