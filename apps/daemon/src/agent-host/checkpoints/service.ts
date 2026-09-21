@@ -192,12 +192,14 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
   const startedTurns = new Map<string, string>();
   /** Per thread: the turns that already produced a completion checkpoint. */
   const completedTurns = new Map<string, Set<string>>();
+  /** Per thread: turns a revert truncated, whose late capture must be dropped. */
+  const truncatedTurns = new Map<string, Set<string>>();
 
-  const rememberCompletedTurn = (threadId: string, turnId: string): void => {
-    let seen = completedTurns.get(threadId);
+  const remember = (store: Map<string, Set<string>>, threadId: string, turnId: string): void => {
+    let seen = store.get(threadId);
     if (seen === undefined) {
       seen = new Set<string>();
-      completedTurns.set(threadId, seen);
+      store.set(threadId, seen);
     }
     seen.add(turnId);
     // Insertion-ordered: drop the oldest ids once the window is full.
@@ -208,6 +210,14 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
       }
       seen.delete(oldest.value);
     }
+  };
+
+  const rememberCompletedTurn = (threadId: string, turnId: string): void => {
+    remember(completedTurns, threadId, turnId);
+  };
+
+  const rememberTruncatedTurn = (threadId: string, turnId: string): void => {
+    remember(truncatedTurns, threadId, turnId);
   };
 
   const dropCache = (threadId: string): void => {
@@ -439,6 +449,11 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
     if (turnId !== null && completedTurns.get(threadId)?.has(turnId) === true) {
       return null;
     }
+    // A turn a revert truncated no longer exists; its late capture would land
+    // a checkpoint above the revert target and undo the rewind (E2E #E8).
+    if (turnId !== null && truncatedTurns.get(threadId)?.has(turnId) === true) {
+      return null;
+    }
     // A turn the host never recorded as started is not the session's turn
     // either (T3: `CheckpointReactor.ts:981-987`). Only positive knowledge
     // skips — with no record at all the capture proceeds, as before.
@@ -658,6 +673,18 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
     cwd: string;
     targetTurnCount: number;
   }): Promise<void> => {
+    // A revert truncates the conversation, and a turn that was in flight when
+    // it happened is now a turn that no longer exists (E2E #E8: its late
+    // capture otherwise lands a `thread.turn-diff-completed` above the revert
+    // target and visibly undoes the rewind in the head). Remember exactly
+    // those ids — ids we positively know were started before the revert — and
+    // refuse their completion checkpoints. An id we never saw start is left
+    // alone, so no legitimate capture is lost.
+    const started = startedTurns.get(input.threadId);
+    if (started !== undefined) {
+      rememberTruncatedTurn(input.threadId, started);
+      startedTurns.delete(input.threadId);
+    }
     if (!(await isInsideWorkTree(runner, input.cwd))) {
       return;
     }
@@ -674,6 +701,7 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
     // so nothing may keep growing on its behalf.
     startedTurns.delete(input.threadId);
     completedTurns.delete(input.threadId);
+    truncatedTurns.delete(input.threadId);
     if (!(await isInsideWorkTree(runner, input.cwd))) {
       return;
     }

@@ -852,6 +852,52 @@ test("Q1 #42: a ref that survives deletion fails the prune instead of reporting 
   );
 });
 
+test("E2E #E8: a capture for a turn a revert truncated is dropped", async (t) => {
+  const repo = await seededRepo();
+  t.after(() => repo.cleanup());
+  const service = serviceFor(repo);
+
+  await service.captureBaseline({ threadId: THREAD, cwd: repo.dir, turnId: "turn-1" });
+  await repo.write("tracked.txt", "turn one\n");
+  const first = await service.captureTurnEnd({
+    threadId: THREAD,
+    cwd: repo.dir,
+    turnId: "turn-1",
+    assistantMessageId: null
+  });
+  assert.ok(first);
+
+  // A second turn is in flight when the user rewinds to turn 1.
+  await service.captureBaseline({ threadId: THREAD, cwd: repo.dir, turnId: "turn-2" });
+  await service.pruneAbove({ threadId: THREAD, cwd: repo.dir, targetTurnCount: 1 });
+
+  // Its capture arrives late. It must not land a checkpoint above the target.
+  await repo.write("tracked.txt", "work from the truncated turn\n");
+  const late = await service.captureTurnEnd({
+    threadId: THREAD,
+    cwd: repo.dir,
+    turnId: "turn-2",
+    assistantMessageId: null
+  });
+
+  assert.equal(late, null, "the truncated turn's capture is dropped");
+  assert.deepEqual(await refNames(repo, checkpointRefNamespace(THREAD)), [
+    checkpointRefForThreadTurn(THREAD, 0),
+    checkpointRefForThreadTurn(THREAD, 1)
+  ]);
+
+  // A genuinely new turn after the revert still captures.
+  await service.captureBaseline({ threadId: THREAD, cwd: repo.dir, turnId: "turn-3" });
+  const fresh = await service.captureTurnEnd({
+    threadId: THREAD,
+    cwd: repo.dir,
+    turnId: "turn-3",
+    assistantMessageId: null
+  });
+  assert.ok(fresh, "the rewound thread can still make new checkpoints");
+  assert.equal(fresh.turnCount, 2);
+});
+
 test("R5 #14/Q1 #43: the diff cache is bounded by bytes, not only by entries", async (t) => {
   const repo = await createTempRepo();
   t.after(() => repo.cleanup());
