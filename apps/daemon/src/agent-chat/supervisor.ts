@@ -138,6 +138,13 @@ export class AgentHostSupervisor {
   private pendingVersionRestart = false;
   private respawnAttempts = 0;
   private nextRespawnAt = 0;
+  /**
+   * True once `init()` has run. Distinguishes "never started" from "a spawn
+   * failed and the state is `stopped`" — without it the health interval would
+   * see `stopped` and never retry, turning one failed spawn into a permanent
+   * outage.
+   */
+  private supervising = false;
   /** Serialises every transition, so adoption, health and restart never interleave. */
   private queue: Promise<unknown> = Promise.resolve();
   private readonly listeners = new Set<(status: AgentHostStatus) => void>();
@@ -199,6 +206,7 @@ export class AgentHostSupervisor {
    */
   init(): Promise<void> {
     return this.transition(async () => {
+      this.supervising = true;
       this.token = await this.readToken();
       const probed = this.token ? await this.safeProbe() : ({ ok: false, reachable: false } as ProbeOutcome);
 
@@ -247,7 +255,7 @@ export class AgentHostSupervisor {
    */
   checkHealth(): Promise<void> {
     return this.transition(async () => {
-      if (this.state === "error") return;
+      if (!this.supervising || this.state === "error") return;
       if (this.state === "foreign") {
         // Re-probe: a foreign listener may have gone away, and then the socket
         // is ours to take. Still rejected ⇒ stay foreign, still never kill.
@@ -260,7 +268,6 @@ export class AgentHostSupervisor {
         await this.spawnAndWait(false);
         return;
       }
-      if (this.state === "stopped") return;
 
       const probed = await this.safeProbe();
       if (probed.ok) {

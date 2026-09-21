@@ -1,5 +1,6 @@
 import type { ClientConfig, DaemonConfig } from "@orquester/config";
 import type {
+  AgentAdapterId,
   BackgroundLiveness as AgentChatBackgroundLiveness,
   LatestTurnSummary as AgentChatLatestTurnSummary,
   ThreadSessionStatus as AgentChatThreadSessionStatus
@@ -867,6 +868,13 @@ export interface RegistryEntry {
   installState: RegistryInstallState;
   /** Captured output when `installState === "error"`. */
   installError?: string;
+  /**
+   * Agent-chat adapter this entry opens a chat tab with (chat design spec
+   * §5.3), mirrored from the static catalog. `claudex`/`claudemix` map to
+   * `claude` with their launcher env. **An agent row without `chat` cannot
+   * open a chat tab** — that is the whole gate the launch flow reads.
+   */
+  chat?: { adapter: AgentAdapterId };
 }
 
 export interface RegistryResponse {
