@@ -490,7 +490,22 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
 
       queueMessage(message) {
         update((state) => {
-          const { state: queue } = enqueue(state.queue, message, now, newId);
+          // The anchor is stamped HERE, not by the composer: the boundary a
+          // queued message waits for is the newest completed tool call at the
+          // moment it was queued, and only the store observes activities. A
+          // caller that passes `null` (the composer does — it has no activity
+          // feed) would otherwise flush at the very next boundary check
+          // instead of the next *new* tool call (§7.4).
+          const anchored =
+            message.queuedAfterToolActivityId === null
+              ? {
+                  ...message,
+                  queuedAfterToolActivityId: latestCompletedToolActivityId(
+                    state.timeline.activities
+                  )
+                }
+              : message;
+          const { state: queue } = enqueue(state.queue, anchored, now, newId);
           const reducer = patchSlice(state.reducer, { queue: [...queue.messages] });
           return { ...state, queue, reducer, slice: reducer.slice };
         });

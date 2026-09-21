@@ -12,6 +12,7 @@
 
 import {
   applyDomainEvent as defaultApplyDomainEvent,
+  createEmptyThreadState,
   DEFAULT_INTERACTION_MODE,
   isSettledTurnState,
   type AgentChatStreamFrame,
@@ -72,20 +73,8 @@ export const EMPTY_DISCLOSURES: DisclosureState = {
 const EMPTY_ITEMS: ThreadItem[] = [];
 const EMPTY_PENDING: PendingRequests = { approvals: [], userInputs: [] };
 
-function emptyFold(): ThreadFoldState {
-  return {
-    head: null,
-    items: [],
-    itemIndex: new Map(),
-    turns: [],
-    checkpoints: [],
-    pending: { approvals: [], userInputs: [] },
-    roster: [],
-    closedRequestIds: new Set(),
-    seq: 0,
-    deleted: false
-  };
-}
+/** W2's empty fold. Re-exported through a local name so the seam is one import. */
+const emptyFold = createEmptyThreadState;
 
 /** A slice for a thread whose stream has not produced anything yet. */
 export function emptySlice(sessionId: string): AgentChatThreadSlice {
@@ -151,12 +140,18 @@ const requestIdOf = (activity: ThreadActivityItem): string | null => {
 export function foldStateFromSnapshot(snapshot: ThreadSnapshotPayload): ThreadFoldState {
   const itemIndex = new Map<string, number>();
   const closedRequestIds = new Set<string>();
+  // The activity subset, same objects and same order — W2's fold keeps it
+  // beside `items` because every derivation over it is activity-only.
+  const activities: ThreadActivityItem[] = [];
   snapshot.items.forEach((item, index) => {
     itemIndex.set(item.id, index);
-    if (isActivity(item) && item.activityKind.endsWith(".resolved")) {
-      const requestId = requestIdOf(item);
-      if (requestId !== null) {
-        closedRequestIds.add(requestId);
+    if (isActivity(item)) {
+      activities.push(item);
+      if (item.activityKind.endsWith(".resolved")) {
+        const requestId = requestIdOf(item);
+        if (requestId !== null) {
+          closedRequestIds.add(requestId);
+        }
       }
     }
   });
@@ -164,6 +159,7 @@ export function foldStateFromSnapshot(snapshot: ThreadSnapshotPayload): ThreadFo
     head: snapshot.head,
     items: snapshot.items,
     itemIndex,
+    activities,
     turns: snapshot.turns,
     checkpoints: snapshot.checkpoints,
     pending: snapshot.pending,
