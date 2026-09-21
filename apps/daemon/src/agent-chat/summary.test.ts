@@ -3,10 +3,9 @@ import { test } from "node:test";
 import type { SessionSummary } from "@orquester/api";
 import { ChatSessionManager } from "./chat-sessions.ts";
 import { AgentHostClient } from "./host-client.ts";
-import { parseAgentHostSignalFrame } from "./host-signals.ts";
-import { AgentChatSummaryService } from "./summary.ts";
+import { AgentChatSummaryService, sanitizeFields } from "./summary.ts";
 
-// §6.4: the six derived fields, the three new bus events, and the pushes the
+// §6.4: the six derived fields, the coarse bus events, and the pushes the
 // protocol now produces instead of bells and hooks.
 
 interface Published {
@@ -15,17 +14,19 @@ interface Published {
   payload: unknown;
 }
 
-function harness(now = () => 1_000_000): {
+interface Harness {
   service: AgentChatSummaryService;
   chat: ChatSessionManager;
   published: Published[];
   pushes: Array<{ id: string; type: string }>;
-} {
+}
+
+function harness(now: () => number = () => 1_000_000, onTurnSettled?: () => void): Harness {
   const chat = new ChatSessionManager({ requestPersist: () => undefined });
   const published: Published[] = [];
   const pushes: Array<{ id: string; type: string }> = [];
   const service = new AgentChatSummaryService({
-    // The client is never used: every test drives `applyFrame` directly.
+    // The client is never dialled: every test drives `applyFields` directly.
     client: new AgentHostClient({ socketPath: "/dev/null", token: () => null }),
     chat,
     broadcaster: {
@@ -36,7 +37,8 @@ function harness(now = () => 1_000_000): {
         pushes.push({ id: session.id, type });
       }
     },
-    now
+    now,
+    onTurnSettled
   });
   return { service, chat, published, pushes };
 }
@@ -54,47 +56,44 @@ function seedTab(chat: ChatSessionManager, id: string): void {
   });
 }
 
-test("a thread frame folds onto the tab and publishes session.activity", () => {
+test("a summary read folds onto the tab and publishes session.activity", () => {
   const h = harness();
   seedTab(h.chat, "t1");
-  h.service.applyFrame({
-    kind: "thread",
-    threadId: "t1",
-    fields: { chatSessionStatus: "running" }
-  });
+  h.service.applyFields("t1", { chatSessionStatus: "running" });
   const summary = h.chat.get("t1");
   assert.equal(summary?.chatSessionStatus, "running");
   assert.equal(summary?.activity?.state, "working");
   const activity = h.published.filter((p) => p.type === "session.activity");
   assert.equal(activity.length, 1);
-  assert.deepEqual((activity[0].payload as { id: string }).id, "t1");
+  assert.equal((activity[0].payload as { id: string }).id, "t1");
 });
 
-test("an unchanged activity is not re-broadcast", () => {
+test("an unchanged activity is not re-broadcast on every poll tick", () => {
   const h = harness();
   seedTab(h.chat, "t1");
-  h.service.applyFrame({ kind: "thread", threadId: "t1", fields: { chatSessionStatus: "running" } });
-  h.service.applyFrame({ kind: "thread", threadId: "t1", fields: { chatSessionStatus: "running" } });
+  h.service.applyFields("t1", { chatSessionStatus: "running" });
+  h.service.applyFields("t1", { chatSessionStatus: "running" });
   assert.equal(h.published.filter((p) => p.type === "session.activity").length, 1);
 });
 
 test("a pending approval pushes 'needs your input' exactly once per raise", () => {
   const h = harness();
   seedTab(h.chat, "t1");
-  h.service.applyFrame({ kind: "thread", threadId: "t1", fields: { hasPendingApprovals: true } });
-  h.service.applyFrame({ kind: "thread", threadId: "t1", fields: { hasPendingApprovals: true } });
+  h.service.applyFields("t1", { hasPendingApprovals: true });
+  h.service.applyFields("t1", { hasPendingApprovals: true });
   assert.deepEqual(h.pushes, [{ id: "t1", type: "needs-input" }]);
 });
 
 test("a completed turn pushes 'finished'", () => {
   const h = harness();
   seedTab(h.chat, "t1");
-  h.service.applyFrame({
-    kind: "thread",
-    threadId: "t1",
-    fields: {
-      chatSessionStatus: "ready",
-      latestTurn: { turnId: "a", state: "completed", startedAt: null, completedAt: "2026-09-21T00:00:01.000Z" }
+  h.service.applyFields("t1", {
+    chatSessionStatus: "ready",
+    latestTurn: {
+      turnId: "a",
+      state: "completed",
+      startedAt: null,
+      completedAt: "2026-09-21T00:00:01.000Z"
     }
   });
   assert.deepEqual(h.pushes, [{ id: "t1", type: "finished" }]);
@@ -103,41 +102,35 @@ test("a completed turn pushes 'finished'", () => {
 test("NEVER a 'finished' push while background liveness is non-null", () => {
   const h = harness();
   seedTab(h.chat, "t1");
+  const completed = {
+    turnId: "a",
+    state: "completed" as const,
+    startedAt: null,
+    completedAt: "2026-09-21T00:00:01.000Z"
+  };
   // A settled turn whose subagents are still running: working, no push.
-  h.service.applyFrame({
-    kind: "thread",
-    threadId: "t1",
-    fields: {
-      chatSessionStatus: "ready",
-      backgroundLiveness: "working",
-      latestTurn: { turnId: "a", state: "completed", startedAt: null, completedAt: "2026-09-21T00:00:01.000Z" }
-    }
+  h.service.applyFields("t1", {
+    chatSessionStatus: "ready",
+    backgroundLiveness: "working",
+    latestTurn: completed
   });
   assert.deepEqual(h.pushes, []);
   assert.equal(h.chat.get("t1")?.activity?.state, "working");
 
   // Monitoring: idle, but still no finished stamp and still no push.
-  h.service.applyFrame({
-    kind: "thread",
-    threadId: "t1",
-    fields: {
-      chatSessionStatus: "ready",
-      backgroundLiveness: "monitoring",
-      latestTurn: { turnId: "a", state: "completed", startedAt: null, completedAt: "2026-09-21T00:00:01.000Z" }
-    }
+  h.service.applyFields("t1", {
+    chatSessionStatus: "ready",
+    backgroundLiveness: "monitoring",
+    latestTurn: completed
   });
   assert.deepEqual(h.pushes, []);
   assert.equal(h.chat.get("t1")?.activity?.attention, null);
 
   // The work drains: now it is finished, and now it pushes.
-  h.service.applyFrame({
-    kind: "thread",
-    threadId: "t1",
-    fields: {
-      chatSessionStatus: "ready",
-      backgroundLiveness: null,
-      latestTurn: { turnId: "a", state: "completed", startedAt: null, completedAt: "2026-09-21T00:00:01.000Z" }
-    }
+  h.service.applyFields("t1", {
+    chatSessionStatus: "ready",
+    backgroundLiveness: null,
+    latestTurn: completed
   });
   assert.deepEqual(h.pushes, [{ id: "t1", type: "finished" }]);
 });
@@ -147,11 +140,7 @@ test("an errored thread whose watch loop is still live does not push 'finished'"
   // suppressed — work is live in the thread.
   const h = harness();
   seedTab(h.chat, "t1");
-  h.service.applyFrame({
-    kind: "thread",
-    threadId: "t1",
-    fields: { chatSessionStatus: "error", backgroundLiveness: "monitoring" }
-  });
+  h.service.applyFields("t1", { chatSessionStatus: "error", backgroundLiveness: "monitoring" });
   assert.deepEqual(h.pushes, []);
   assert.equal(h.chat.get("t1")?.activity?.attention, "finished", "the failure is still surfaced");
 });
@@ -160,78 +149,69 @@ test("needsAttentionAt is stamped when attention rises and cleared when it clear
   let clock = 1_000;
   const h = harness(() => clock);
   seedTab(h.chat, "t1");
-  h.service.applyFrame({ kind: "thread", threadId: "t1", fields: { hasPendingApprovals: true } });
+  h.service.applyFields("t1", { hasPendingApprovals: true });
   const raised = h.chat.get("t1")?.activity?.needsAttentionAt;
   assert.equal(raised, new Date(1_000).toISOString());
   clock = 9_999;
-  h.service.applyFrame({ kind: "thread", threadId: "t1", fields: { hasPendingApprovals: true } });
+  h.service.applyFields("t1", { hasPendingApprovals: true });
   assert.equal(
     h.chat.get("t1")?.activity?.needsAttentionAt,
     raised,
     "a still-raised attention keeps its original stamp — the Attention Center orders by it"
   );
-  h.service.applyFrame({ kind: "thread", threadId: "t1", fields: { chatSessionStatus: "running" } });
+  h.service.applyFields("t1", { chatSessionStatus: "running" });
   assert.equal(h.chat.get("t1")?.activity?.needsAttentionAt, null);
 });
 
-test("turn / pending / providers frames become the three coarse bus events", () => {
+test("a turn transition becomes the coarse agentChat.turn bus event", () => {
   const h = harness();
   seedTab(h.chat, "t1");
-  h.service.applyFrame({ kind: "turn", threadId: "t1", turnId: "a", state: "running" });
-  h.service.applyFrame({
-    kind: "pending",
-    threadId: "t1",
-    requestId: "r1",
-    requestKind: "approval",
-    title: "Run tests?",
-    open: true
+  const turn = (state: "running" | "completed") => ({
+    chatSessionStatus: "running" as const,
+    latestTurn: { turnId: "a", state, startedAt: null, completedAt: null }
   });
-  h.service.applyFrame({ kind: "providers", adapterId: "codex" });
+  h.service.applyFields("t1", turn("running"));
+  h.service.applyFields("t1", turn("running"));
+  h.service.applyFields("t1", turn("completed"));
   assert.deepEqual(
-    h.published.map((p) => p.type),
-    ["agentChat.turn", "agentChat.pending", "agent.providers.changed"]
+    h.published
+      .filter((p) => p.type === "agentChat.turn")
+      .map((p) => (p.payload as { state: string }).state),
+    ["running", "completed"],
+    "one event per transition, never per poll tick"
   );
-  assert.deepEqual(h.published[1].payload, {
-    id: "t1",
-    requestId: "r1",
-    kind: "approval",
-    title: "Run tests?",
-    open: true
-  });
 });
 
-test("a `hello` frame REPLACES the world: an absent thread has no live background work", () => {
-  const h = harness();
+test("a settled turn reopens the version drain window", () => {
+  const settled: number[] = [];
+  const h = harness(
+    () => 1_000_000,
+    () => settled.push(1)
+  );
   seedTab(h.chat, "t1");
-  seedTab(h.chat, "t2");
-  h.service.applyFrame({
-    kind: "thread",
-    threadId: "t1",
-    fields: { backgroundLiveness: "working", chatSessionStatus: "ready" }
+  h.service.applyFields("t1", {
+    chatSessionStatus: "running",
+    latestTurn: { turnId: "a", state: "running", startedAt: null, completedAt: null }
   });
-  h.service.applyFrame({
-    kind: "hello",
-    hostInstanceId: "host-2",
-    threads: [{ threadId: "t2", fields: { chatSessionStatus: "ready" } }]
+  assert.deepEqual(settled, []);
+  h.service.applyFields("t1", {
+    chatSessionStatus: "ready",
+    latestTurn: { turnId: "a", state: "completed", startedAt: null, completedAt: "x" }
   });
-  assert.equal(h.chat.get("t1")?.backgroundLiveness ?? null, null, "a restarted host's registry is empty");
-  assert.equal(h.chat.get("t2")?.chatSessionStatus, "ready");
-  assert.equal(h.service.currentHostInstanceId(), "host-2");
+  assert.deepEqual(settled, [1]);
 });
 
-test("a changed host instance id notifies listeners (a restart is not a reconnect)", () => {
+test("agent.providers.changed is the one coarse provider event", () => {
   const h = harness();
-  const seen: string[] = [];
-  h.service.onHostInstanceChanged((id) => seen.push(id));
-  h.service.applyFrame({ kind: "hello", hostInstanceId: "host-1", threads: [] });
-  assert.deepEqual(seen, [], "the first hello is not a change");
-  h.service.applyFrame({ kind: "hello", hostInstanceId: "host-2", threads: [] });
-  assert.deepEqual(seen, ["host-2"]);
+  h.service.publishProvidersChanged({ adapterId: "codex" });
+  assert.deepEqual(h.published, [
+    { channel: "registry", type: "agent.providers.changed", payload: { adapterId: "codex" } }
+  ]);
 });
 
-test("a frame for a thread with no tab is dropped, never pushed", () => {
+test("a summary for a thread with no tab is dropped, never pushed", () => {
   const h = harness();
-  h.service.applyFrame({ kind: "thread", threadId: "ghost", fields: { hasPendingApprovals: true } });
+  h.service.applyFields("ghost", { hasPendingApprovals: true });
   assert.deepEqual(h.pushes, []);
   assert.deepEqual(h.published, []);
 });
@@ -239,48 +219,62 @@ test("a frame for a thread with no tab is dropped, never pushed", () => {
 test("forget() stops a closed tab producing any further activity", () => {
   const h = harness();
   seedTab(h.chat, "t1");
-  h.service.applyFrame({ kind: "thread", threadId: "t1", fields: { chatSessionStatus: "running" } });
+  h.service.applyFields("t1", { chatSessionStatus: "running" });
   h.service.forget("t1");
   h.chat.close("t1");
-  h.service.applyFrame({ kind: "thread", threadId: "t1", fields: { hasPendingApprovals: true } });
+  h.service.applyFields("t1", { hasPendingApprovals: true });
   assert.deepEqual(h.pushes, []);
 });
 
-// --- the tolerant line parser ----------------------------------------------
+test("the poll idles entirely while nothing is open or the host is down", async () => {
+  const h = harness();
+  // No tabs: no I/O at all (the client would throw — it has no token).
+  await h.service.refreshAll();
+  assert.deepEqual(h.published, []);
 
-test("the signal parser skips blanks, heartbeats and malformed lines", () => {
-  assert.equal(parseAgentHostSignalFrame(""), null);
-  assert.equal(parseAgentHostSignalFrame("   "), null);
-  assert.equal(parseAgentHostSignalFrame(":hb"), null);
-  assert.equal(parseAgentHostSignalFrame("{not json"), null);
-  assert.equal(parseAgentHostSignalFrame("[1,2]"), null);
-  assert.equal(parseAgentHostSignalFrame('{"kind":"thread"}'), null, "a frame with no threadId");
-  assert.equal(
-    parseAgentHostSignalFrame('{"kind":"from-the-future","x":1}'),
-    null,
-    "a build-ahead host's unknown kind is skipped, never fatal"
-  );
+  const down = new AgentChatSummaryService({
+    client: new AgentHostClient({ socketPath: "/dev/null", token: () => "tok" }),
+    chat: h.chat,
+    broadcaster: { publish: () => undefined },
+    push: { notifyStructural: async () => undefined },
+    isHostHealthy: () => false
+  });
+  seedTab(h.chat, "t1");
+  await down.refreshAll();
+  assert.equal(down.activity("t1"), undefined, "a down host is never dialled");
 });
 
-test("the signal parser keeps only well-shaped §6.4 fields", () => {
-  const frame = parseAgentHostSignalFrame(
-    JSON.stringify({
-      kind: "thread",
-      threadId: "t1",
-      fields: {
-        hasPendingApprovals: "yes",
-        hasPendingUserInput: true,
-        backgroundLiveness: "spinning",
-        chatSessionStatus: "ready",
-        latestTurn: { turnId: 7, state: "completed", startedAt: null, completedAt: null },
-        somethingElse: { big: "payload" }
-      }
-    })
-  );
-  assert.ok(frame && frame.kind === "thread");
-  assert.equal(frame.fields.hasPendingApprovals, undefined, "a wrongly-typed field is dropped");
-  assert.equal(frame.fields.hasPendingUserInput, true);
-  assert.equal(frame.fields.backgroundLiveness, undefined, "an unknown liveness value is dropped");
-  assert.equal(frame.fields.latestTurn?.turnId, null, "a non-string turn id normalises to null");
-  assert.equal((frame.fields as Record<string, unknown>).somethingElse, undefined);
+test("a failed read leaves the last known state alone rather than blanking the tab", async () => {
+  const h = harness();
+  seedTab(h.chat, "t1");
+  h.service.applyFields("t1", { chatSessionStatus: "running" });
+  // The socket does not exist, so the read throws.
+  await h.service.refreshThread("t1");
+  assert.equal(h.chat.get("t1")?.activity?.state, "working", "a host restarting mid-poll must not flicker every tab");
+});
+
+// --- validation of the host's JSON ------------------------------------------
+
+test("a summary body is validated field-wise before it reaches typed code", () => {
+  const fields = sanitizeFields({
+    hasPendingApprovals: "yes",
+    hasPendingUserInput: true,
+    backgroundLiveness: "spinning",
+    chatSessionStatus: "ready",
+    latestTurn: { turnId: 7, state: "completed", startedAt: null, completedAt: null },
+    somethingElse: { big: "payload" }
+  });
+  assert.equal(fields.hasPendingApprovals, undefined, "a wrongly-typed field is dropped");
+  assert.equal(fields.hasPendingUserInput, true);
+  assert.equal(fields.backgroundLiveness, undefined, "an unknown liveness value is dropped");
+  assert.equal(fields.chatSessionStatus, "ready");
+  assert.equal(fields.latestTurn?.turnId, null, "a non-string turn id normalises to null");
+  assert.equal((fields as Record<string, unknown>).somethingElse, undefined);
+});
+
+test("a non-object body yields no fields rather than throwing", () => {
+  assert.deepEqual(sanitizeFields(null), {});
+  assert.deepEqual(sanitizeFields("nope"), {});
+  assert.deepEqual(sanitizeFields([1, 2]), {});
+  assert.deepEqual(sanitizeFields({ backgroundLiveness: null }), { backgroundLiveness: null });
 });

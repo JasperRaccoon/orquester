@@ -68,13 +68,14 @@ interface Harness {
   healthy: boolean;
   seqs: Array<[string, number]>;
   restarts: number;
+  providerBroadcasts: string[];
   close(): Promise<void>;
 }
 
 async function makeHarness(sessions: Record<string, SessionSummary | undefined> = {}): Promise<Harness> {
   const host = await makeFakeHost();
   const app = Fastify({ logger: false });
-  const harness: Partial<Harness> = { host, healthy: true, seqs: [], restarts: 0 };
+  const harness: Partial<Harness> = { host, healthy: true, seqs: [], restarts: 0, providerBroadcasts: [] };
   registerAgentChatRoutes(app, {
     client: new AgentHostClient({ socketPath: host.socketPath, token: () => "tok" }),
     isHostHealthy: () => harness.healthy === true,
@@ -83,7 +84,8 @@ async function makeHarness(sessions: Record<string, SessionSummary | undefined> 
     restartHost: async () => {
       harness.restarts = (harness.restarts ?? 0) + 1;
       return { hostInstanceId: "host-2", markedThreadIds: ["t1"] };
-    }
+    },
+    onProvidersChanged: (adapterId) => harness.providerBroadcasts?.push(adapterId)
   });
   await app.ready();
   harness.app = app;
@@ -256,6 +258,23 @@ test("an events-shaped read records its sequence too", async () => {
       .end(JSON.stringify({ kind: "events", seq: 9, events: [] }));
   await h.app.inject({ method: "GET", url: agentChatRoutes.thread("t1") });
   assert.deepEqual(h.seqs, [["t1", 9]]);
+  await h.close();
+});
+
+test("a refresh broadcasts agent.providers.changed ONLY when it changed something", async () => {
+  const h = await makeHarness();
+  h.host.handler = (_req, res) =>
+    res
+      .writeHead(200, { "content-type": "application/json" })
+      .end(JSON.stringify({ provider: { id: "codex" }, changed: false }));
+  await h.app.inject({ method: "POST", url: agentChatRoutes.providerRefresh("codex"), payload: {} });
+  assert.deepEqual(h.providerBroadcasts, [], "a no-op refresh must not wake every client");
+  h.host.handler = (_req, res) =>
+    res
+      .writeHead(200, { "content-type": "application/json" })
+      .end(JSON.stringify({ provider: { id: "codex" }, changed: true }));
+  await h.app.inject({ method: "POST", url: agentChatRoutes.providerRefresh("codex"), payload: {} });
+  assert.deepEqual(h.providerBroadcasts, ["codex"]);
   await h.close();
 });
 

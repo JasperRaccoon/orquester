@@ -928,14 +928,57 @@ export class SessionManager implements ISessionManager {
     } catch (error) {
       console.error("Failed to collect agent-chat session records", error);
     }
-    const tmpPath = `${this.indexPath}.tmp`;
+    await writeSessionsIndex(this.indexPath, sessions);
+  }
+}
+
+/**
+ * Atomic write of `sessions.json`: a UNIQUE temp file, then a rename.
+ *
+ * The temp name must be unique per write, not a fixed `<path>.tmp`. Two writes
+ * in flight at once — a resize coalesce landing beside an agent-chat tab's
+ * `persistIndexNow`, which the chat design made routine — otherwise open the
+ * SAME temp file and interleave, and the rename then publishes whatever mixture
+ * they left: a complete JSON document followed by the tail of a longer one.
+ * `readIndex()` reads that as corrupt and `reattach()` then refuses to reap
+ * orphans for every terminal, which is exactly the failure persistence exists
+ * to prevent.
+ *
+ * Writes are additionally serialised per path, so a slower older payload can
+ * never win the rename race against a newer one.
+ */
+const sessionIndexWrites = new Map<string, Promise<unknown>>();
+
+/**
+ * Await every in-flight index write (optionally for one path). The drain seam
+ * tests wait on instead of sleeping — `persistIndexNow()` is fire-and-forget,
+ * so without it a teardown can race a temp file into existence.
+ */
+export async function drainSessionIndexWrites(indexPath?: string): Promise<void> {
+  const pending =
+    indexPath === undefined
+      ? [...sessionIndexWrites.values()]
+      : [sessionIndexWrites.get(indexPath)];
+  await Promise.all(pending.map((p) => p?.catch(() => undefined)));
+}
+
+async function writeSessionsIndex(indexPath: string, sessions: SessionRecord[]): Promise<void> {
+  const previous = sessionIndexWrites.get(indexPath) ?? Promise.resolve();
+  const run = previous.then(async () => {
+    const tmpPath = `${indexPath}.${process.pid}.${randomUUID()}.tmp`;
     try {
-      await mkdir(dirname(this.indexPath), { recursive: true });
+      await mkdir(dirname(indexPath), { recursive: true });
       await writeFile(tmpPath, `${JSON.stringify({ version: 1, sessions }, null, 2)}\n`, "utf8");
-      await rename(tmpPath, this.indexPath);
+      await rename(tmpPath, indexPath);
     } catch (error) {
       console.error("Failed to persist sessions index", error);
+      await rm(tmpPath, { force: true }).catch(() => undefined);
     }
+  });
+  sessionIndexWrites.set(indexPath, run);
+  await run;
+  if (sessionIndexWrites.get(indexPath) === run) {
+    sessionIndexWrites.delete(indexPath);
   }
 }
 
@@ -1319,16 +1362,14 @@ export class LocalSessionManager implements ISessionManager {
       return;
     }
     const indexPath = this.indexPath;
-    void (async () => {
-      const tmpPath = `${indexPath}.tmp`;
-      try {
-        const sessions = contributor.records();
-        await mkdir(dirname(indexPath), { recursive: true });
-        await writeFile(tmpPath, `${JSON.stringify({ version: 1, sessions }, null, 2)}\n`, "utf8");
-        await rename(tmpPath, indexPath);
-      } catch (error) {
-        console.error("Failed to persist sessions index", error);
-      }
-    })();
+    let records: SessionRecord[];
+    try {
+      records = contributor.records();
+    } catch (error) {
+      console.error("Failed to collect agent-chat session records", error);
+      return;
+    }
+    // Same atomic, uniquely-named, serialised write as the tmux backend.
+    void writeSessionsIndex(indexPath, records);
   }
 }
