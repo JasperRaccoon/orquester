@@ -14,7 +14,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { StartSessionInput } from "../../adapter.ts";
+import type { AdapterContext, StartSessionInput } from "../../adapter.ts";
 import { createOpenCodeAdapter, projectDirFor } from "./index.ts";
 
 function input(over: Partial<StartSessionInput> & Record<string, unknown>): StartSessionInput {
@@ -66,6 +66,65 @@ test("a blank or non-string projectPath is ignored, not trusted", () => {
   assert.equal(projectDirFor(input({ cwd: "/repo", projectPath: "" })), "/repo");
   assert.equal(projectDirFor(input({ cwd: "/repo", projectPath: 42 })), "/repo");
   assert.equal(projectDirFor(input({ cwd: "/repo", projectPath: null })), "/repo");
+});
+
+// ---------------------------------------------------------------------------
+// E9 — a cold snapshot probe must not wait on a server start
+// ---------------------------------------------------------------------------
+
+function probeCtx(over: Partial<AdapterContext> = {}): AdapterContext {
+  return {
+    logger: {
+      debug: () => undefined,
+      info: () => undefined,
+      warn: () => undefined,
+      error: () => undefined
+    },
+    clock: { now: () => new Date(0), nowIso: () => "2026-09-21T00:00:00.000Z" },
+    ids: { eventId: () => "e", messageId: (p) => p, uuid: () => "u" },
+    resolveAttachmentPath: async () => "/tmp/a",
+    attachmentsDir: () => "/tmp",
+    logRawFrame: () => undefined,
+    buildEnv: () => ({}),
+    resolveBin: async () => "/definitely/not/a/real/opencode",
+    sessionPath: () => "/usr/bin",
+    tmpDir: () => "/tmp",
+    signal: new AbortController().signal,
+    ...over
+  } as AdapterContext;
+}
+
+test("E9: a COLD snapshot probe answers without waiting for a server start", async () => {
+  // Measured cold: 10 435 ms against a 10 s host budget, so the first visit to
+  // Settings showed no OpenCode at all and had to retry blind. Warm: 474 ms.
+  // The fix answers from the CLI (no server needed) and warms in background.
+  const adapter = await createOpenCodeAdapter(probeCtx());
+  const started = Date.now();
+  const snapshot = await adapter.refreshSnapshot({ cwd: "/tmp" });
+  const elapsed = Date.now() - started;
+
+  // The binary path resolves but cannot be spawned here, so every probe fails
+  // fast. The point is that it FAILS FAST and returns a snapshot rather than
+  // hanging on a server start until the caller's 10 s deadline fires.
+  assert.ok(elapsed < 5_000, `cold probe took ${elapsed}ms`);
+  assert.equal(snapshot.id, "opencode");
+  assert.equal(snapshot.version, null, "the version probe could not run");
+  assert.equal(snapshot.status, "error");
+  // Even a total failure is a well-formed snapshot the client can render.
+  assert.deepEqual(snapshot.models, []);
+  assert.deepEqual(
+    snapshot.slashCommands.map((command) => command.name),
+    ["compact"]
+  );
+  await adapter.stopAll();
+});
+
+test("E9: a cwd-less refresh never starts a server either", async () => {
+  const adapter = await createOpenCodeAdapter(probeCtx());
+  const snapshot = await adapter.refreshSnapshot();
+  assert.equal(snapshot.id, "opencode");
+  assert.equal(snapshot.capabilities.reportsContextWindow, false);
+  await adapter.stopAll();
 });
 
 // ---------------------------------------------------------------------------

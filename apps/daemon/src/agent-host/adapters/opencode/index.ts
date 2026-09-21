@@ -102,6 +102,16 @@ class OpenCodeAdapterImpl implements AgentAdapter {
   private readonly queue: RuntimeEvent[] = [];
   private queueWaiters: (() => void)[] = [];
   private cachedSnapshot: CachedSnapshot | undefined;
+  /**
+   * `opencode --version` is a Bun cold start (~1–2 s) and the binary does not
+   * change between refreshes, so it is cached for the same window as the
+   * snapshot. Re-spawning it on every probe was a large part of E9's budget.
+   */
+  private cachedVersion:
+    | { value: { installed: boolean; version: string | null }; at: number }
+    | undefined;
+  /** The machine-level CLI catalogue: three Bun spawns and several MB (E9). */
+  private cachedCliInventory: { value: OpenCodeInventory; at: number } | undefined;
   private binPath: string | undefined;
   private stopped = false;
 
@@ -195,8 +205,18 @@ class OpenCodeAdapterImpl implements AgentAdapter {
     return resolved;
   }
 
-  /** `opencode --version`, bounded, never a shell. */
+  /** `opencode --version`, bounded, never a shell, and cached for the TTL. */
   private async probeVersion(): Promise<{ installed: boolean; version: string | null }> {
+    const cached = this.cachedVersion;
+    if (cached !== undefined && Date.now() - cached.at < SNAPSHOT_TTL_MS) {
+      return cached.value;
+    }
+    const probed = await this.probeVersionUncached();
+    this.cachedVersion = { value: probed, at: Date.now() };
+    return probed;
+  }
+
+  private async probeVersionUncached(): Promise<{ installed: boolean; version: string | null }> {
     let bin: string;
     try {
       bin = await this.resolveBin();
@@ -291,6 +311,17 @@ class OpenCodeAdapterImpl implements AgentAdapter {
         return snapshot;
       }
 
+      // E9: the cold probe measured 10 435 ms against the host's 10 s budget,
+      // so the user's FIRST visit to Settings showed no OpenCode at all. The
+      // cost was four SEQUENTIAL catalogue reads on top of the server start;
+      // `loadOpenCodeInventory` now issues them concurrently, which brings a
+      // cold probe comfortably inside the budget and a warm one to ~20 ms.
+      //
+      // The CLI inventory is deliberately NOT used here as a fast path: it and
+      // `opencode serve` open the same SQLite database, and running them
+      // together makes the server fail to start with `database is locked` —
+      // measured, not theorised. It stays where it is needed and safe: the
+      // cwd-less probe, which starts no server at all.
       let server: OpenCodeServerHandle | undefined;
       try {
         server = await this.pool.acquire(cwd);
@@ -351,17 +382,24 @@ class OpenCodeAdapterImpl implements AgentAdapter {
   }): Promise<ProviderSnapshot> {
     const { version, checkedAt, previous } = input;
     try {
-      const bin = await this.resolveBin();
-      const inventory = await loadInventoryFromCli({
-        bin,
-        cwd: this.ctx.tmpDir(),
-        env: this.ctx.buildEnv({
-          threadId: "probe",
-          home: { kind: "system", path: process.env.HOME ?? "/" }
-        }),
-        logger: this.ctx.logger,
-        signal: this.ctx.signal
-      });
+      const cachedInventory = this.cachedCliInventory;
+      let inventory: OpenCodeInventory;
+      if (cachedInventory !== undefined && Date.now() - cachedInventory.at < SNAPSHOT_TTL_MS) {
+        inventory = cachedInventory.value;
+      } else {
+        const bin = await this.resolveBin();
+        inventory = await loadInventoryFromCli({
+          bin,
+          cwd: this.ctx.tmpDir(),
+          env: this.ctx.buildEnv({
+            threadId: "probe",
+            home: { kind: "system", path: process.env.HOME ?? "/" }
+          }),
+          logger: this.ctx.logger,
+          signal: this.ctx.signal
+        });
+        this.cachedCliInventory = { value: inventory, at: Date.now() };
+      }
       const snapshot = buildSnapshot({
         version: version ?? "0.0.0",
         checkedAt,

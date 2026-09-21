@@ -222,6 +222,18 @@ export class OpenCodeServerPool {
     }
   }
 
+  /**
+   * Is this project's server already warm? Never starts one.
+   *
+   * The snapshot probe uses this to stay inside the host's budget: a cold
+   * start plus the ~4.3 MB catalogue read cannot finish in 10 s, while the
+   * same read against a warm server takes ~474 ms.
+   */
+  isWarm(projectDir: string): boolean {
+    const entry = this.entries.get(projectDir);
+    return entry?.started !== undefined && !entry.started.child.hasExited();
+  }
+
   /** Every live server, for the host's own diagnostics. */
   list(): { projectDir: string; url: string; version: string; pid: number | undefined }[] {
     const out: { projectDir: string; url: string; version: string; pid: number | undefined }[] = [];
