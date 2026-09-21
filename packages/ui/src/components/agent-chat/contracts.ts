@@ -19,11 +19,14 @@ import type {
   PendingApproval,
   PendingUserInput,
   ProviderSnapshot,
-  RuntimeMode,
   RuntimeSubagent,
   SessionSummary
 } from "@orquester/api";
-import type { AgentPanelModel } from "@orquester/api/agent-chat";
+// `RuntimeMode` MUST come from this path: the root `@orquester/api` declares a
+// `RuntimeMode` of its own (the client platform — `desktop-local` | …) whose
+// local declaration shadows the star re-export, so importing it from there
+// silently types the composer's permission-mode chip as a platform name.
+import type { AgentPanelModel, RuntimeMode } from "@orquester/api/agent-chat";
 
 import type {
   ActivePlanState,

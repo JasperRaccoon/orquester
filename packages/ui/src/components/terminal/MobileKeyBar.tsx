@@ -110,6 +110,9 @@ export const MobileKeyBar: React.FC = () => {
   }, [status]);
 
   const active = tabs.find((t) => t.id === activeId);
+  // `type === "session"` and nothing else: the bar writes raw control bytes into
+  // a PTY, so a chat tab (the sixth `ProjectTab` arm) must never mount it — its
+  // composer supplies its own send/attach/paste affordances (chat spec §7.1).
   if (isDesktop || !active || active.type !== "session") {
     return null;
   }
