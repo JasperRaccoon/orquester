@@ -75,6 +75,9 @@
   --ac-dur-fast: 150ms;
   --ac-dur-base: 200ms;
   --ac-dur-slow: 260ms;
+  /* The banner dock's own exit, which travels much further than anything else
+     (see `ac-banner-out`). *T3: apps/web/src/components/chat/ComposerBannerStack.tsx:10, 126* */
+  --ac-dur-banner: 220ms;
   --ac-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --ac-ease-in: cubic-bezier(0.4, 0, 1, 1);
   --ac-ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
@@ -189,8 +192,17 @@
   }
 }
 
-/* Banner enter/exit. The dock sits directly above the composer, so a banner
-   rises into place and falls back out of it. */
+/*
+ * Banner enter/exit. The dock is glued to the top edge of the composer, so the
+ * two directions are deliberately asymmetric and that asymmetry is the whole
+ * effect: a banner *rises* 4px into place over 150ms ease-out, and when it is
+ * answered or dismissed it *falls behind the composer* — 64px down over 220ms
+ * ease-in. A short symmetric fade reads as a glitch; the long fall reads as
+ * "that went away, and it went there".
+ * *T3: apps/web/src/components/chat/ComposerBannerStack.tsx:210-215 (enter:
+ * translate-y-1, 150ms ease-out), :125-130 (front exit: translate-y-16, 220ms
+ * ease-in), :220-225 (an item behind the front travels translate-y-28)*
+ */
 @keyframes ac-banner-in {
   from {
     opacity: 0;
@@ -209,7 +221,7 @@
   }
   to {
     opacity: 0;
-    transform: translateY(4px);
+    transform: translateY(4rem);
   }
 }
 
@@ -458,8 +470,46 @@
   animation: ac-banner-in var(--ac-dur-fast) var(--ac-ease-out) both;
 }
 
+/* Keep the exiting banner mounted for `--ac-dur-banner` and set
+   `pointer-events: none` on it, or a click can land on a card that is already
+   half-way behind the composer. */
 .ac-banner-exit {
-  animation: ac-banner-out var(--ac-dur-instant) var(--ac-ease-in) both;
+  pointer-events: none;
+  animation: ac-banner-out var(--ac-dur-banner) var(--ac-ease-in) both;
+}
+
+/*
+ * The stack's expand/collapse. Same `0fr → 1fr` grid trick as `ac-disclosure`
+ * but at the stack's own 150ms, and the inner list additionally fades and
+ * travels 4px so collapsed cards do not appear to slide out of the composer.
+ * *T3: apps/web/src/components/chat/ComposerBannerStack.tsx:203-215*
+ */
+.ac-stack {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--ac-dur-fast) var(--ac-ease-out);
+}
+
+.ac-stack[data-open="true"] {
+  grid-template-rows: 1fr;
+}
+
+.ac-stack-panel {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.ac-stack-items {
+  opacity: 0;
+  transform: translateY(4px);
+  transition:
+    opacity var(--ac-dur-fast) var(--ac-ease-out),
+    transform var(--ac-dur-fast) var(--ac-ease-out);
+}
+
+.ac-stack[data-open="true"] .ac-stack-items {
+  opacity: 1;
+  transform: translateY(0);
 }
 
 /*
@@ -497,6 +547,15 @@
   .ac-banner-exit,
   .ac-attention {
     animation: none;
+  }
+  /* The exit is the only signal that the card is going; without it the card
+     must simply be gone. */
+  .ac-banner-exit {
+    display: none;
+  }
+  .ac-stack,
+  .ac-stack-items {
+    transition: none;
   }
   /* Without the pulse the ring must still mark the destination. */
   .ac-attention {
