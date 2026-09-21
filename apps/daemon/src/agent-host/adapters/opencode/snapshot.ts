@@ -58,10 +58,19 @@ export const OPENCODE_CAPABILITIES: AdapterCapabilities = {
   compaction: { type: "native" }
 };
 
-/** §4.6.3: host features with no CLI equivalent on this surface. */
+/**
+ * §4.6.3: the host features with no CLI equivalent on this surface.
+ *
+ * `/compact` only. **`/effort` is CLIENT-ONLY** (§4.6.5(a)) — the composer
+ * owns that row and gates it on the selected model actually exposing a
+ * reasoning descriptor. Synthesising it here too produced a *second*,
+ * provider-flavoured `/effort` in the menu whose selection inserted the literal
+ * text `/effort ` and forwarded it to a CLI that does not implement it; it also
+ * advertised the command on a not-installed or too-old snapshot, which carries
+ * no models and therefore no descriptor at all.
+ */
 export const SYNTHESISED_COMMANDS: readonly SlashCommand[] = [
-  { name: "compact", description: "Compact this conversation's context" },
-  { name: "effort", description: "Set the reasoning variant for the selected model" }
+  { name: "compact", description: "Compact this conversation's context" }
 ];
 
 export interface OpenCodeInventory {
@@ -72,26 +81,37 @@ export interface OpenCodeInventory {
 }
 
 /**
- * Four reads off one server. Sequential rather than concurrent: T3's CLI
- * fallback had to serialise because concurrent runs hit the same SQLite file
- * and failed "database is locked", and on the HTTP path serialising also keeps
- * ~5 MB of catalogue from landing in one heap spike (observation 22).
+ * Four reads off one server, **concurrently**.
+ *
+ * The "sequential because concurrent runs hit the same SQLite file" rule is
+ * the CLI path's (`cli-inventory.ts`), where it is real. Over HTTP the server
+ * serialises its own database access, and serialising here instead cost a
+ * whole extra round of latency on the one probe the user waits for: E9 measured
+ * the cold refresh at 10 435 ms against a 10 s host budget, so the first visit
+ * to Settings showed no OpenCode at all.
+ *
+ * Each call keeps its own deadline, and each degrades independently — a failed
+ * `/command` must not cost the model list.
  */
 export async function loadOpenCodeInventory(client: OpenCodeClient): Promise<OpenCodeInventory> {
-  const providers = await client
-    .get<ProviderListResponse>(openCodeRoutes.providers, {
-      timeoutMs: AGENT_HOST_DEADLINES.authProbeMs
-    })
-    .catch((): ProviderListResponse => ({ all: [], connected: [] }));
-  const agents = await client
-    .get<OpenCodeAgentRow[]>(openCodeRoutes.agents, { timeoutMs: AGENT_HOST_DEADLINES.probeMs })
-    .catch(() => [] as OpenCodeAgentRow[]);
-  const commands = await client
-    .get<OpenCodeCommandRow[]>(openCodeRoutes.commands, { timeoutMs: AGENT_HOST_DEADLINES.probeMs })
-    .catch(() => [] as OpenCodeCommandRow[]);
-  const skills = await client
-    .get<OpenCodeSkillRow[]>(openCodeRoutes.skills, { timeoutMs: AGENT_HOST_DEADLINES.probeMs })
-    .catch(() => [] as OpenCodeSkillRow[]);
+  const [providers, agents, commands, skills] = await Promise.all([
+    client
+      .get<ProviderListResponse>(openCodeRoutes.providers, {
+        timeoutMs: AGENT_HOST_DEADLINES.authProbeMs
+      })
+      .catch((): ProviderListResponse => ({ all: [], connected: [] })),
+    client
+      .get<OpenCodeAgentRow[]>(openCodeRoutes.agents, { timeoutMs: AGENT_HOST_DEADLINES.probeMs })
+      .catch(() => [] as OpenCodeAgentRow[]),
+    client
+      .get<OpenCodeCommandRow[]>(openCodeRoutes.commands, {
+        timeoutMs: AGENT_HOST_DEADLINES.probeMs
+      })
+      .catch(() => [] as OpenCodeCommandRow[]),
+    client
+      .get<OpenCodeSkillRow[]>(openCodeRoutes.skills, { timeoutMs: AGENT_HOST_DEADLINES.probeMs })
+      .catch(() => [] as OpenCodeSkillRow[])
+  ]);
   return {
     providers: {
       all: Array.isArray(providers?.all) ? providers.all : [],

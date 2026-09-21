@@ -23,6 +23,7 @@
 import {
   isToolLifecycleItemType,
   slimActivityPayload,
+  type AgentAdapterId,
   type DomainEvent,
   type RuntimeEvent,
   type ThreadActivityItem,
@@ -43,6 +44,7 @@ import {
   segmentMessageId,
   messageStreamRoleOf,
   reasoningKindOfMessageId,
+  toolOutputBufferKey,
   type MessageStreamRole
 } from "./message-ids.ts";
 import {
@@ -62,6 +64,8 @@ export {
   dropStaleContextWindowActivities,
   dropSupersededToolUpdatedActivities,
   projectSnapshotActivities,
+  slimActivity,
+  slimActivityEvent,
   stableToolCallId,
   toolLifecycleIdentity
 } from "./coalesce.ts";
@@ -76,6 +80,13 @@ export { nextSessionState, threadStatusFromRuntimeState } from "./session-status
 export interface IngestionThreadContext {
   /** The head's session state, used as the base after a host restart. */
   session?: ThreadSessionState;
+  /**
+   * The adapter that produced this thread's frames, stamped into
+   * {@link DomainEventMetadata.adapterKey} (§5.1). Without it a forensic read
+   * of `events.ndjson` can only join against the head's *current* adapter,
+   * which a model change may have moved (R5 #17).
+   */
+  adapter?: AgentAdapterId;
   /**
    * True when the user renamed the thread. §5.1: a manual rename is **never**
    * overwritten by `thread.metadata.updated`.
@@ -97,7 +108,7 @@ export interface IngestionOptions {
   /** Injectable timers so batching is testable without sleeping (§9). */
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
-  /** The head's view of a thread (§5.1 title rule, §3.3 restart). */
+  /** The head's view of a thread (§5.1 title rule, §3.3 restart, §5.1 metadata). */
   threadContext?: (threadId: string) => IngestionThreadContext | null | undefined;
   /**
    * §5.4: `turn.diff.updated` produces a **placeholder** checkpoint. The turn
@@ -134,13 +145,20 @@ interface SegmentState {
 
 interface ThreadState {
   session: ThreadSessionState;
+  /** Stamped into every event's `metadata.adapterKey` (§5.1). */
+  adapter?: AgentAdapterId;
   messages: DeltaBufferSet;
   toolOutput: DeltaBufferSet;
   /** `${turnId}:${role}` → the open segment. */
   segments: Map<string, SegmentState>;
   /** turnId → every message id the turn has opened. */
   turnMessageIds: Map<string, Set<string>>;
-  /** Message ids whose text already reached the log, so a completion is owed. */
+  /**
+   * Message ids whose text already reached the log, so a completion is owed.
+   * Scoped to the live turn: `finalizeMessage` drops each id as it closes it,
+   * and `finalizeTurn` sweeps whatever a provider left open — without that it
+   * grew by one entry per streamed message for the life of the host (Q1 #9).
+   */
   projected: Set<string>;
   /** messageId → the turn it belongs to. */
   messageTurn: Map<string, string | null>;
@@ -156,8 +174,15 @@ interface ThreadState {
   assistantPhaseByItemId: Map<string, "answer" | "commentary">;
   /** messageId → the resolved {@link ThreadMessageItem.messageKind}. */
   messageKind: Map<string, "answer" | "commentary">;
-  /** planId → the accumulated proposal markdown and the turn it belongs to. */
-  plans: Map<string, { text: string; createdAt: string; turnId: string | null }>;
+  /**
+   * planId → the accumulated proposal markdown, the turn it belongs to and the
+   * subagent that streamed it (§5.1 attribution; the completion may arrive
+   * without an `agentId`).
+   */
+  plans: Map<
+    string,
+    { text: string; createdAt: string; turnId: string | null; agentId?: string }
+  >;
   /**
    * §5.6: plan deltas buffer like assistant and reasoning text. The proposal
    * row is a single stable id carrying the WHOLE markdown so far, so this
@@ -168,7 +193,10 @@ interface ThreadState {
   /** taskId → the remembered description, for titling `task.completed`. */
   taskTitles: Map<string, string>;
   /** toolOutput buffer key → the item/stream it belongs to. */
-  outputMeta: Map<string, { toolUseId: string; streamKind: string; turnId: string | null }>;
+  outputMeta: Map<
+    string,
+    { toolUseId: string; streamKind: string; turnId: string | null; agentId?: string }
+  >;
   outbox: AppendableDomainEvent[];
   pendingUpdates: AppendableDomainEvent[];
   coalesceTimer: TimerHandle | null;
@@ -227,6 +255,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     const context = safeContext(threadId);
     const state: ThreadState = {
       session: context?.session ?? initialSessionState(),
+      ...(context?.adapter !== undefined ? { adapter: context.adapter } : {}),
       messages: undefined as unknown as DeltaBufferSet,
       toolOutput: undefined as unknown as DeltaBufferSet,
       segments: new Map(),
@@ -297,6 +326,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     occurredAt: string
   ): Omit<AppendableDomainEvent, "type" | "payload"> {
     const refs = cause?.providerRefs;
+    const adapterKey = threads.get(threadId)?.adapter;
     return {
       eventId: ids.eventId(),
       threadId,
@@ -306,6 +336,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       metadata: {
         ...(refs?.providerTurnId !== undefined ? { providerTurnId: refs.providerTurnId } : {}),
         ...(refs?.providerItemId !== undefined ? { providerItemId: refs.providerItemId } : {}),
+        ...(adapterKey !== undefined ? { adapterKey } : {}),
         ...(cause?.requestId !== undefined ? { requestId: cause.requestId } : {}),
         ingestedAt: clock.nowIso()
       }
@@ -447,6 +478,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
         delta: flush.text
       },
       turnId: meta.turnId,
+      ...(meta.agentId !== undefined ? { agentId: meta.agentId } : {}),
       createdAt: flush.openedAt,
       updatedAt: clock.nowIso()
     });
@@ -572,6 +604,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     state.messageTurn.delete(messageId);
     state.projected.delete(messageId);
     state.reasoningPartIndex.delete(messageId);
+    state.messageKind.delete(messageId);
     if (turnId === null) {
       return;
     }
@@ -724,6 +757,13 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     state.segments.delete(segmentKey(turnId, "assistant"));
     state.segments.delete(segmentKey(turnId, "reasoning"));
     finalizePlansForTurn(threadId, state, turnId, input);
+    // Nothing keyed on this turn can still be written to, so the dedupe and
+    // phase bookkeeping for it goes with it (Q1 #9).
+    for (const [messageId, messageTurnId] of [...state.messageTurn]) {
+      if (messageTurnId === turnId) {
+        forgetMessage(state, turnId, messageId);
+      }
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -740,13 +780,17 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     planId: string,
     delta: string,
     createdAt: string,
-    turnId: string | null
+    turnId: string | null,
+    agentId: string | undefined
   ): boolean {
     const existing = state.plans.get(planId);
     state.plans.set(planId, {
       text: `${existing?.text ?? ""}${delta}`,
       createdAt: existing?.createdAt ?? createdAt,
-      turnId: existing?.turnId ?? turnId
+      turnId: existing?.turnId ?? turnId,
+      ...(existing?.agentId ?? agentId) !== undefined
+        ? { agentId: existing?.agentId ?? agentId }
+        : {}
     });
     return state.planPacer.append(planId, delta, createdAt).length > 0;
   }
@@ -769,11 +813,16 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     threadId: string,
     state: ThreadState,
     planId: string,
-    entry: { text: string; createdAt: string },
+    entry: { text: string; createdAt: string; agentId?: string },
     turnId: string | null,
     activityKind: "turn.proposed.delta" | "turn.proposed.completed",
     cause: RuntimeEvent | null
   ): void {
+    // §5.1: a catch-all row carries that event's payload and its
+    // `turnId`/`agentId`. A proposal streamed inside a subagent keeps its
+    // attribution, so it can be tied to a §7.6 roster row (R5 #8). The buffer
+    // remembers the agent, because the completion may arrive without one.
+    const agentId = cause?.agentId ?? entry.agentId;
     // One stable id per proposal, so a streaming card is replaced rather than
     // appended to — the same "latest state" treatment task.progress gets.
     emitActivity(state, threadId, cause, {
@@ -784,6 +833,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       summary: "Plan proposed",
       payload: { planId, planMarkdown: entry.text },
       turnId,
+      ...(agentId !== undefined ? { agentId } : {}),
       createdAt: entry.createdAt,
       updatedAt: clock.nowIso()
     });
@@ -808,7 +858,13 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       threadId,
       state,
       planId,
-      { text, createdAt: entry?.createdAt ?? clock.nowIso() },
+      {
+        text,
+        createdAt: entry?.createdAt ?? clock.nowIso(),
+        // The completion often arrives without an agentId; the buffer is what
+        // remembers which subagent streamed the proposal (R5 #8).
+        ...(entry?.agentId !== undefined ? { agentId: entry.agentId } : {})
+      },
       turnId ?? entry?.turnId ?? null,
       "turn.proposed.completed",
       cause
@@ -953,7 +1009,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     // --- proposals --------------------------------------------------------
     if (event.type === "turn.proposed.delta") {
       const planId = proposedPlanIdFromEvent(event, threadId);
-      if (appendPlan(state, planId, event.payload.delta, now, eventTurnId)) {
+      if (appendPlan(state, planId, event.payload.delta, now, eventTurnId, event.agentId)) {
         emitBufferedPlan(threadId, state, planId, event);
       }
     }
@@ -988,9 +1044,31 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       // which is exactly the §3.3 post-restart case.
       const previous = state.session;
       const next = nextSessionState({ event, previous });
-      if (!sameSessionState(previous, next)) {
+      // The provider's per-turn numbers ride the event that settles the turn
+      // (E10): `turn.completed` is the only frame that carries them, and the
+      // fold settles from session status, so anywhere else they would arrive
+      // after the turn had already closed.
+      const turnResult =
+        (event.type === "turn.completed" || event.type === "turn.aborted") &&
+        eventTurnId !== null &&
+        (event.payload.tokenUsage !== undefined ||
+          (event.type === "turn.completed" && event.payload.totalCostUsd !== undefined))
+          ? {
+              turnId: eventTurnId,
+              ...(event.payload.tokenUsage !== undefined
+                ? { tokenUsage: event.payload.tokenUsage }
+                : {}),
+              ...(event.type === "turn.completed" && event.payload.totalCostUsd !== undefined
+                ? { totalCostUsd: event.payload.totalCostUsd }
+                : {})
+            }
+          : undefined;
+      if (!sameSessionState(previous, next) || turnResult !== undefined) {
         state.session = next;
-        emit(state, threadId, event, now, "thread.session-set", { session: next });
+        emit(state, threadId, event, now, "thread.session-set", {
+          session: next,
+          ...(turnResult !== undefined ? { turn: turnResult } : {})
+        });
       } else {
         state.session = next;
       }
@@ -1093,25 +1171,30 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       return;
     }
     if (streamKind === "reasoning_text" || streamKind === "reasoning_summary_text") {
-      // Every close path for a thinking block is keyed by turn. Without one the
-      // block could never be completed, and a row stuck mid-thought is worse
-      // than no row at all.
-      if (eventTurnId === null) {
-        return;
-      }
       const baseKey = reasoningSegmentBaseKeyFromEvent(event, streamKind);
-      const open = state.segments.get(segmentKey(eventTurnId, "reasoning"));
+      // Every SEGMENTED close path for a thinking block is keyed by turn. T3
+      // drops a turnless reasoning delta for that reason, but §5.1 states the
+      // rule unconditionally and grok really does emit one before
+      // `turn.started` — so it is buffered under its own event-derived id
+      // instead, exactly as turnless assistant text already was. It closes
+      // from `flushThreadState`, which walks `messageTurn` rather than the
+      // segment map (R5 #7).
       let messageId: string;
-      if (open?.activeMessageId != null && open.baseKey === baseKey) {
-        messageId = open.activeMessageId;
+      if (eventTurnId === null) {
+        messageId = segmentMessageId(baseKey, 0, "reasoning");
       } else {
-        if (open?.activeMessageId != null) {
-          finalizeSegment(threadId, state, eventTurnId, "reasoning", {
-            cause: event,
-            occurredAt: now
-          });
+        const open = state.segments.get(segmentKey(eventTurnId, "reasoning"));
+        if (open?.activeMessageId != null && open.baseKey === baseKey) {
+          messageId = open.activeMessageId;
+        } else {
+          if (open?.activeMessageId != null) {
+            finalizeSegment(threadId, state, eventTurnId, "reasoning", {
+              cause: event,
+              occurredAt: now
+            });
+          }
+          messageId = startSegment(state, eventTurnId, baseKey, "reasoning");
         }
-        messageId = startSegment(state, eventTurnId, baseKey, "reasoning");
       }
       rememberMessage(state, eventTurnId, messageId);
 
@@ -1173,7 +1256,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
 
     if (streamKind === "plan_text") {
       const planId = proposedPlanIdFromEvent(event, threadId);
-      if (appendPlan(state, planId, delta, now, eventTurnId)) {
+      if (appendPlan(state, planId, delta, now, eventTurnId, event.agentId)) {
         emitBufferedPlan(threadId, state, planId, event);
       }
       return;
@@ -1185,11 +1268,15 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       if (event.itemId === undefined) {
         return;
       }
-      const key = `${streamKind}\u0000${event.itemId}`;
+      // §5.6: keyed by ITEM ID, so one item that emits both a command-output
+      // and a file-change-output stream shares one 250 ms / 8 KB buffer and
+      // one row rather than two interleaved ones (R5 #9).
+      const key = toolOutputBufferKey(threadId, event.itemId);
       state.outputMeta.set(key, {
         toolUseId: event.itemId,
         streamKind,
-        turnId: eventTurnId
+        turnId: eventTurnId,
+        ...(event.agentId !== undefined ? { agentId: event.agentId } : {})
       });
       const spill = state.toolOutput.append(key, delta, now);
       if (spill.length > 0) {
@@ -1324,11 +1411,14 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       ref: `provider-diff:${event.eventId}`,
       status: "missing",
       files: [],
-      assistantMessageId: segmentMessageId(
-        String(event.itemId ?? event.turnId ?? event.eventId),
-        0,
-        "assistant"
-      ),
+      // The turn's REAL anchor, or null — never a synthesised one. The
+      // `itemId` on a `turn.diff.updated` frame names the diff item, not an
+      // assistant message, so `assistant:<diffItemId>` used to name a message
+      // that never exists; the fold's `payload.assistantMessageId ??
+      // turn.assistantMessageId` then made that phantom permanent, because
+      // `stampAssistantMessage` only ever fills a null. Emitting null lets the
+      // fold keep what it stamped from the real assistant message (R5 #3).
+      assistantMessageId: activeSegmentId(state, turnId, "assistant"),
       completedAt: now
     });
   }
@@ -1414,6 +1504,28 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     await commit(threadId, state);
   }
 
+  async function forget(threadId: string): Promise<void> {
+    const state = threads.get(threadId);
+    if (state === undefined) {
+      return;
+    }
+    // Drop the entry first, so a buffer timer that fires during the awaited
+    // chain cannot resurrect it through `stateFor`.
+    threads.delete(threadId);
+    cancelCoalesceWindow(state);
+    state.pendingUpdates = [];
+    state.outbox = [];
+    clearThreadState(state);
+    try {
+      options.liveness.clear(threadId);
+    } catch (error) {
+      logger?.warn("agent-chat/ingestion: liveness.clear failed", error);
+    }
+    // Let an append already in flight settle, so the caller can delete the
+    // thread directory knowing nothing else will write to it.
+    await state.chain;
+  }
+
   async function drain(): Promise<void> {
     // Deliver everything buffered without closing any message: a drain is a
     // synchronisation point, not a turn end.
@@ -1450,5 +1562,5 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     await Promise.all([...threads.values()].map((state) => state.chain));
   }
 
-  return { ingest, flushTurn, finalizeReasoning, flushThread, drain };
+  return { ingest, flushTurn, finalizeReasoning, flushThread, forget, drain };
 }

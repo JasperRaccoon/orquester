@@ -1,6 +1,7 @@
 import React from "react";
 import { AlertTriangle, X } from "lucide-react";
 import { useAppStore } from "../../store/app";
+import { useAutoDismiss } from "./use-auto-dismiss";
 
 /**
  * Toast for a claudex/claudemix session's launch-time pre-flight: the models it
@@ -13,6 +14,9 @@ import { useAppStore } from "../../store/app";
 export const ModelWarningToast: React.FC = () => {
   const warning = useAppStore((s) => s.modelWarning);
   const dismiss = useAppStore((s) => s.dismissModelWarning);
+  // Advisory: the launch already succeeded, so it leaves on its own rather
+  // than sitting over the timeline until someone clicks it.
+  useAutoDismiss(warning ? `${warning.title}\u0000${warning.models.join(",")}` : null, dismiss);
 
   if (!warning) {
     return null;

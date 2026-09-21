@@ -25,9 +25,20 @@ export class SseParser {
   private event: string | undefined;
   private id: string | undefined;
   private data: string[] = [];
+  /**
+   * A BOM is only a BOM at the very start of the STREAM. Keying the strip on
+   * an empty remainder ran it again after every frame that ended on a chunk
+   * boundary, so a payload legitimately starting with U+FEFF lost it.
+   */
+  private sawFirstChunk = false;
 
   push(chunk: string): SseFrame[] {
-    this.remainder += this.remainder.length === 0 ? chunk.replace(/^﻿/, "") : chunk;
+    if (!this.sawFirstChunk) {
+      this.sawFirstChunk = true;
+      this.remainder += chunk.replace(/^﻿/, "");
+    } else {
+      this.remainder += chunk;
+    }
     const frames: SseFrame[] = [];
     let start = 0;
     for (;;) {
@@ -102,10 +113,12 @@ export async function* readSseFrames(
   const parser = new SseParser();
   const decoder = new TextDecoder();
   const reader = body.getReader();
+  let drained = false;
   try {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) {
+        drained = true;
         break;
       }
       for (const frame of parser.push(decoder.decode(value, { stream: true }))) {
@@ -113,6 +126,13 @@ export async function* readSseFrames(
       }
     }
   } finally {
+    // Every exit that is NOT a clean EOF — the consumer breaking out, or a
+    // throw while handling a frame — leaves the `fetch` body unconsumed and
+    // its socket open while the pump opens the next `/event` stream. One
+    // leaked connection per reconnect, so cancel before releasing.
+    if (!drained) {
+      await reader.cancel().catch(() => undefined);
+    }
     reader.releaseLock();
   }
 }

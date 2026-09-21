@@ -17,7 +17,7 @@
  * leave the dropped update unrepresented.
  */
 
-import type { ThreadActivityItem } from "@orquester/api/agent-chat";
+import { slimActivityPayload, type ThreadActivityItem } from "@orquester/api/agent-chat";
 
 /** §5.6: the coalescing window. */
 export const COALESCE_WINDOW_MS = 50;
@@ -198,9 +198,71 @@ export function dropSupersededToolUpdatedActivities(
   });
 }
 
-/** Both snapshot drops, in the order §5.6 states them. */
+/**
+ * §5.6 slimming for one activity row, on the way OUT. The full payload stays
+ * on disk; `GET …/items/:itemId` is the one read that serves it unslimmed, and
+ * is what the UI's "load full output" affordance fetches.
+ *
+ * A `tool.updated` row was already slimmed at write time (§5.6's one
+ * exception), and `slimActivityPayload` returns its argument by reference when
+ * nothing needed slimming — so a row that is already small costs no
+ * allocation and keeps its identity, which the client's row memoisation
+ * depends on.
+ *
+ * Never throws: W2 owns the slimmer, and a failure there must cost the row its
+ * size, not its existence.
+ */
+export function slimActivity(activity: ThreadActivityItem): ThreadActivityItem {
+  try {
+    const payload = slimActivityPayload(activity.payload);
+    return payload === activity.payload ? activity : { ...activity, payload };
+  } catch {
+    return activity;
+  }
+}
+
+/**
+ * §5.6 slimming for a whole domain event, on the way out. Anything that is not
+ * an activity row passes through by reference.
+ *
+ * This is the hook the LIVE stream needs (`server/stream.ts`): without it the
+ * per-stream byte budget is charged the full persisted payload, so a client on
+ * a slow link is cut with "the live event buffer is full" on ordinary tool
+ * output, and `payload.truncated` never reaches the UI so "load full output"
+ * can never appear (R5 #1).
+ */
+export function slimActivityEvent<TEvent extends { type: string; payload: unknown }>(
+  event: TEvent
+): TEvent {
+  if (event.type !== "thread.activity-appended") {
+    return event;
+  }
+  const payload = event.payload as { activity?: ThreadActivityItem } | null;
+  const activity = payload?.activity;
+  if (activity === undefined || activity.kind !== "activity") {
+    return event;
+  }
+  const slimmed = slimActivity(activity);
+  return slimmed === activity
+    ? event
+    : ({ ...event, payload: { ...payload, activity: slimmed } } as TEvent);
+}
+
+/**
+ * The §5.6 read projection: the two snapshot-time drops, then slimming.
+ *
+ * This is T3's "single choke point every read passes through"
+ * (`ActivityPayloadProjection.ts:645-689`, `projectThreadDetailSnapshot`),
+ * which applies `projectActivityPayload` alongside the drops rather than
+ * leaving the second half to each caller. Slimming last is deliberate: the
+ * drops match on `toolUseId`, `itemType`, `title` and `detail`, and the
+ * allow-list rebuild can elide a `detail` — dropping first keeps the matching
+ * honest.
+ */
 export function projectSnapshotActivities(
   activities: readonly ThreadActivityItem[]
 ): ThreadActivityItem[] {
-  return dropStaleContextWindowActivities(dropSupersededToolUpdatedActivities(activities));
+  return dropStaleContextWindowActivities(
+    dropSupersededToolUpdatedActivities(activities)
+  ).map(slimActivity);
 }
