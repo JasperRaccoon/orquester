@@ -202,10 +202,10 @@ export function nextDueQueuedMessage(
 /**
  * The user's standing preference for what a send does during a live turn.
  *
- * Structurally identical to the composer's own `FollowUpBehavior`
- * (`components/agent-chat/composer/composer-submission.ts`, W13) and to
- * `lib/chat-prefs.ts`'s; declared here so this module stays free of any
- * component import. The three are one union — do not let them diverge.
+ * Declared here — the module that acts on it — so it stays free of any
+ * component import; `components/agent-chat/composer/composer-submission.ts`
+ * (W13) and `lib/chat-prefs.ts` (the persisted setting) both re-export this
+ * one. There is exactly one declaration; keep it that way.
  */
 export type FollowUpBehavior = "steer" | "queue";
 

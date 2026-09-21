@@ -4,6 +4,7 @@ import { useApi } from "../../context/orquester-context";
 import { useIsDesktop } from "../../hooks";
 import { useActiveTabId, useAppStore, useProjectTabs, useTerminalFontSize } from "../../store/app";
 import { uploadFilesToSession, type UploadStatus } from "../../lib/session-upload";
+import { isLegacyAgentTerminal } from "../../lib/session-kind";
 import { UploadProgressBar } from "../ui/upload-progress";
 import { pasteTextForSession } from "../../lib/paste";
 import { TERMINAL_FONT_MIN, TERMINAL_FONT_MAX, TERMINAL_FONT_STEP } from "../../lib/terminal-font";
@@ -117,7 +118,10 @@ export const MobileKeyBar: React.FC = () => {
     return null;
   }
   const sessionId = active.session.id;
-  const isAgent = active.session.kind === "agent";
+  // A LEGACY agent terminal (§5.2): the `↵` submit key exists because an agent
+  // TUI reads a bare Enter as "newline" on a soft keyboard. Chat tabs never
+  // reach here — the guard above already excluded them.
+  const isAgent = isLegacyAgentTerminal(active.session);
 
   const handlePick = async (files: File[]) => {
     if (files.length === 0) {

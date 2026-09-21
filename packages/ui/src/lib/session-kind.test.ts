@@ -3,9 +3,8 @@ import assert from "node:assert/strict";
 
 import type { AgentConversationSummary } from "@orquester/api";
 
+import { DEFAULT_THREAD_TITLE } from "./agent-chat/title.logic.ts";
 import {
-  DEFAULT_THREAD_TITLE,
-  THREAD_TITLE_SEED_MAX,
   canOpenChat,
   chatAdapterFor,
   chatLaunchRefId,
@@ -15,8 +14,7 @@ import {
   isDefaultThreadTitle,
   isLegacyAgentTerminal,
   isPtySession,
-  launchKindForAgent,
-  seedThreadTitle
+  launchKindForAgent
 } from "./session-kind.ts";
 
 test("the three session kinds are classified without overlap", () => {
@@ -88,29 +86,6 @@ test("a cliproxy row with no proxyRefId falls back to the agent it names", () =>
 test("a conversation whose agent has no adapter is not offered", () => {
   assert.equal(isChatResumableConversation(conversation({ agentRefId: "deepseek" })), false);
   assert.equal(isChatResumableConversation(conversation({ agentRefId: "gemini" })), false);
-});
-
-test("the title seed strips composer markup and collapses to one line", () => {
-  assert.equal(seedThreadTitle("  fix the login bug  "), "fix the login bug");
-  assert.equal(seedThreadTitle("fix\nthe\nbug"), "fix the bug");
-  assert.equal(seedThreadTitle("$review check @src/app.ts please"), "check please");
-  assert.equal(seedThreadTitle("/compact"), DEFAULT_THREAD_TITLE);
-});
-
-test("the title seed truncates at the cap with one ellipsis", () => {
-  const long = "a".repeat(THREAD_TITLE_SEED_MAX + 40);
-  const seeded = seedThreadTitle(long);
-  assert.equal(seeded.length, THREAD_TITLE_SEED_MAX);
-  assert.ok(seeded.endsWith("…"));
-});
-
-test("the title seed falls back to the first attachment, then to the default", () => {
-  assert.equal(
-    seedThreadTitle("", [{ name: "screenshot.png", type: "image" }]),
-    "Image: screenshot.png"
-  );
-  assert.equal(seedThreadTitle("   ", [{ name: "notes.md" }]), "File: notes.md");
-  assert.equal(seedThreadTitle(""), DEFAULT_THREAD_TITLE);
 });
 
 test("only a title nobody chose may be overwritten by the seed", () => {

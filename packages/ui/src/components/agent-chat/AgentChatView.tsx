@@ -28,7 +28,8 @@ import {
   stageComposerAttachment
 } from "./composer/composer-bridge";
 import { cn } from "../../lib/cn";
-import { isDefaultThreadTitle, seedThreadTitle } from "../../lib/session-kind";
+import { isDefaultThreadTitle } from "../../lib/session-kind";
+import { deriveThreadTitleSeed } from "../../lib/agent-chat/title.logic";
 import { useAppStore } from "../../store/app";
 import { AgentDrillIn } from "./roster/AgentDrillIn";
 import { AgentRoster } from "./roster/AgentRoster";
@@ -43,11 +44,7 @@ import {
   type HeldTimeline
 } from "./thread-switch";
 import type { AgentChatTimelineRow } from "../../lib/agent-chat/contracts";
-import type {
-  AgentChatViewProps,
-  AgentRosterMainRow,
-  TimelineScrollPosition
-} from "./contracts";
+import type { AgentChatViewProps, AgentRosterMainRow } from "./contracts";
 
 /** Stable empty arrays, so a neutralised render never churns child props. */
 const NO_APPROVALS: never[] = [];
@@ -191,27 +188,11 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   React.useEffect(() => setRosterExpanded(false), [sessionId]);
 
   // --- the remembered reading position (§7.2) ------------------------------
-  // The store owns the 100-entry LRU and hands it over as `slice.scroll`, but
-  // `AgentChatActions` has no write for it, so the timeline's publishes are
-  // held here and only *fall back* to the slice. The effect is the same for a
-  // tab hidden and re-shown — which is the case that matters in this shell,
-  // since a tab is never unmounted — and a real store write supersedes it the
-  // moment one exists.
-  const scrollRef = React.useRef(new Map<string, TimelineScrollPosition>());
-  const [, bumpScroll] = React.useReducer((n: number) => n + 1, 0);
-  const rememberScrollPosition = React.useCallback(
-    (position: TimelineScrollPosition) => {
-      scrollRef.current.set(sessionId, position);
-    },
-    [sessionId]
-  );
-  // Read once per render rather than on every publish: a scroll must not
-  // re-render the shell, only feed the next mount.
-  const scrollPosition = scrollRef.current.get(sessionId) ?? slice.scroll ?? null;
-  React.useEffect(() => {
-    // One re-read when the thread changes, so a switch picks the right entry.
-    bumpScroll();
-  }, [sessionId]);
+  // Straight through to the store's 100-entry LRU: the timeline publishes the
+  // four scroll fields, the store keeps the disclosures beside them, and
+  // `slice.scroll` is what a remount reads back.
+  const rememberScrollPosition = actions.rememberScroll;
+  const scrollPosition = slice.scroll;
 
   // --- deliveries into the composer draft (§7.4) ---------------------------
   // A browser element pick and a session upload both end in this thread's
@@ -266,7 +247,11 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
     if (!isDefaultThreadTitle(session.title, session.refId)) {
       return;
     }
-    const seed = seedThreadTitle(first.text, first.attachments ?? []);
+    const seed = deriveThreadTitleSeed({
+      text: first.text,
+      attachments: first.attachments,
+      context: first.context
+    });
     if (seed && seed !== session.title) {
       void useAppStore.getState().renameTab(sessionId, seed);
     }
@@ -295,31 +280,6 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
     tokensUsed: slice.contextWindow?.usedTokens ?? null,
     model: slice.head?.modelSelection.model ?? session.model ?? null
   };
-  /**
-   * "Return this queued message to the composer" is two halves: the store drops
-   * it from the queue, and its text goes back into the draft. Dropping it
-   * without the second half loses what the user typed.
-   */
-  const returnQueuedToComposer = React.useCallback(
-    (queuedId: string) => {
-      const queued = slice.queue.find((message) => message.id === queuedId);
-      actions.returnQueuedToComposer(queuedId);
-      if (queued) {
-        // A queued message is a full draft snapshot (§7.4), so its attachments
-        // come back as chips rather than as paths pasted into the text.
-        const unstaged = queued.attachments.filter(
-          (attachment) => !stageComposerAttachment(sessionId, attachment)
-        );
-        insertComposerText(
-          sessionId,
-          composerTextForDelivery({ text: queued.text, attachments: unstaged }),
-          "append"
-        );
-      }
-    },
-    [sessionId, slice.queue, actions]
-  );
-
   // --- the read-only viewer for a turn diff / a full tool output -----------
   // Both are §6.3 reads with no store slice behind them: the timeline asks,
   // the shell fetches, and the answer is shown in the existing modal + diff
@@ -449,7 +409,10 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               onLoadFullOutput={paintOnly ? noop : loadFullOutput}
               onOpenAgent={paintOnly ? noop : setDrillInAgentId}
               onSendQueuedNow={paintOnly ? noop : (id) => void actions.sendQueuedNow(id)}
-              onReturnQueuedToComposer={paintOnly ? noop : returnQueuedToComposer}
+              // A straight pass-through: the store's action already puts the
+              // message's text back in the draft and its attachments back as
+              // chips (`appendToDraft`), so wrapping it would insert twice.
+              onReturnQueuedToComposer={paintOnly ? noop : actions.returnQueuedToComposer}
               errorBanner={paintOnly ? null : slice.errorBanner}
               onDismissErrorBanner={paintOnly ? noop : actions.dismissErrorBanner}
               roster={roster.agents}

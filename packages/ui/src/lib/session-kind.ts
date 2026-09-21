@@ -1,6 +1,8 @@
 import { REGISTRY, type RegistryEntryDef } from "@orquester/registry";
 import type { AgentConversationSummary, SessionKind, SessionSummary } from "@orquester/api";
 
+import { DEFAULT_THREAD_TITLE } from "./agent-chat/title.logic";
+
 /**
  * Session-kind predicates every ambient surface shares (spec §5.2, §5.3, §7.1).
  *
@@ -108,42 +110,16 @@ export function chatLaunchRefId(conversation: AgentConversationSummary): string 
   return conversation.agentRefId;
 }
 
-/** Longest client-seeded thread title (§7.7; T3 `packages/shared/src/String.ts:1-8`). */
-export const THREAD_TITLE_SEED_MAX = 50;
-
 /**
- * The client-seeded thread title (§7.7). There is no title-generation service:
- * this seed *is* the title until a provider offers a better one through
- * `thread.metadata.updated`, and the host only replaces it while it is still
- * exactly the seed or exactly the default.
+ * Whether a tab's title is still the **launcher's** own, i.e. nobody has
+ * chosen it: the literal default, the registry entry's display name, or the
+ * bare entry id.
  *
- * T3's fallback chain, in order: the first message's plain text with context
- * references stripped → the first attachment's name (`Image: …` / `File: …`) →
- * the literal default.
- *
- * *Ported from T3 Code (MIT): `apps/web/src/components/ChatView.tsx:8271-8287`.*
- */
-export const DEFAULT_THREAD_TITLE = "New thread";
-
-export function seedThreadTitle(
-  text: string,
-  attachments: readonly { name: string; type?: string }[] = []
-): string {
-  const plain = stripContextReferences(text).trim();
-  if (plain.length > 0) {
-    return truncateTitle(plain);
-  }
-  const first = attachments[0];
-  if (first) {
-    return truncateTitle(`${first.type === "image" ? "Image" : "File"}: ${first.name}`);
-  }
-  return DEFAULT_THREAD_TITLE;
-}
-
-/**
- * Whether a tab's title is still the launcher's own, i.e. nobody has chosen it.
- * The seed only ever overwrites one of these (§7.7): the literal default, the
- * registry entry's display name, or the bare entry id.
+ * A companion to `canReplaceThreadTitle` (`lib/agent-chat/title.logic`), not a
+ * copy of it. That one asks "is this still the default or the seed we already
+ * wrote", which is the *host's* gate; this one runs before any seed exists, at
+ * the moment the first message lands, and the only titles in play then are the
+ * ones `openTab` puts on a fresh chat tab.
  */
 export function isDefaultThreadTitle(title: string, agentRefId: string): boolean {
   if (title === DEFAULT_THREAD_TITLE || title === agentRefId) {
@@ -151,24 +127,4 @@ export function isDefaultThreadTitle(title: string, agentRefId: string): boolean
   }
   const agents: readonly RegistryEntryDef[] = REGISTRY.agents;
   return agents.find((a) => a.id === agentRefId)?.name === title;
-}
-
-/**
- * Drop the composer's own markup from a title seed: `$skill` mentions, `@path`
- * context chips and a leading `/command`, plus collapsing whitespace so a
- * multi-line first message becomes one line.
- */
-function stripContextReferences(text: string): string {
-  return text
-    .replace(/^\s*\/\S+\s*/, "")
-    .replace(/(^|\s)[$@]\S+/g, "$1")
-    .replace(/\s+/g, " ");
-}
-
-/** T3's truncation: a hard cut at the cap with a single ellipsis, never mid-cap. */
-function truncateTitle(value: string): string {
-  if (value.length <= THREAD_TITLE_SEED_MAX) {
-    return value;
-  }
-  return `${value.slice(0, THREAD_TITLE_SEED_MAX - 1).trimEnd()}…`;
 }

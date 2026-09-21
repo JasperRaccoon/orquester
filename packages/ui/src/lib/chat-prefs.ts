@@ -1,5 +1,7 @@
 import { DEFAULT_RUNTIME_MODE, RUNTIME_MODES, type AgentRuntimeMode } from "@orquester/api";
 
+import type { FollowUpBehavior } from "./agent-chat/queue.logic";
+
 /**
  * Client-local agent-chat preferences (spec §7.4, §4.6.7).
  *
@@ -14,8 +16,14 @@ import { DEFAULT_RUNTIME_MODE, RUNTIME_MODES, type AgentRuntimeMode } from "@orq
  * every deploy (see `lib/app-config.ts`, `lib/view-mode.ts`).
  */
 
-/** Which of send/queue a plain Enter performs while a turn is running (§7.4). */
-export type FollowUpBehavior = "steer" | "queue";
+/**
+ * Which of send/queue a plain Enter performs while a turn is running (§7.4).
+ *
+ * Re-exported, not re-declared: the queue logic owns the union because it is
+ * the module that acts on it, and the composer re-exports the same one. Three
+ * structurally-identical copies is how they silently diverge.
+ */
+export type { FollowUpBehavior } from "./agent-chat/queue.logic";
 
 export interface ChatPrefs {
   /**
