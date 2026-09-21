@@ -174,6 +174,17 @@ export interface WorkLogEntry {
     workflowId: string | null;
     agentTaskIds: readonly string[];
   };
+  /**
+   * Present on a compaction marker. Carried on `thread.state.changed` and
+   * formatted client-side (§7.3 — differs from T3, which bakes the numbers
+   * into a server-side label the row never reads).
+   *
+   * *Added by W11; `contracts.ts` stays additive-only.*
+   */
+  compaction?: {
+    beforeTokens?: number;
+    afterTokens?: number;
+  };
 }
 
 // ---------------------------------------------------------------------------
