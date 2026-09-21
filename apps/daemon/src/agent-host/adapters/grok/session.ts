@@ -70,6 +70,9 @@ import { XAI_EMPTY_PLAN_MARKDOWN, XAI_EXIT_PLAN_FEEDBACK, type PlanPathHost } fr
 import { answersToXaiResponse } from "./questions.ts";
 import { agentVersionOf, contextWindowFromModelState, modelStateOf, promptIdOf } from "./xai-meta.ts";
 
+/** How many settled turns `readThread` remembers. */
+const MAX_RECORDED_TURNS = 200;
+
 /** `{schemaVersion: 1, sessionId}` — the only thing persisted for resume (§4.1). */
 export const GROK_RESUME_SCHEMA_VERSION = 1;
 
@@ -129,6 +132,12 @@ interface PendingUserInput {
   resolve(answers: Record<string, unknown> | null): void;
 }
 
+/** One settled turn, kept for `readThread`'s provider-side snapshot. */
+interface RecordedTurn {
+  readonly id: string;
+  readonly items: unknown[];
+}
+
 interface ActiveTurn {
   readonly turnId: string;
   readonly epoch: number;
@@ -165,6 +174,7 @@ export class GrokSession {
   private readonly sessionGrants = new Set<string>();
 
   private activeTurn: ActiveTurn | null = null;
+  private readonly recordedTurns: RecordedTurn[] = [];
   private epoch = 0;
   /** The provider prompt ids we have not yet matched to a turn. */
   private readonly unclaimedPromptIds: Array<{ id: string; text: string }> = [];
@@ -235,6 +245,17 @@ export class GrokSession {
 
   get hasActiveTurn(): boolean {
     return this.activeTurn !== null && !this.activeTurn.settled;
+  }
+
+  /**
+   * The provider-side turn snapshot (§4.1). Grok exposes no transcript RPC and
+   * `session/load` replays only a fraction of the history, so this is what the
+   * adapter itself observed: one opaque item per settled turn, carrying the
+   * provider's own prompt id and stop reason. Bounded, because a long-lived
+   * session must not grow this without limit.
+   */
+  get turns(): RecordedTurn[] {
+    return this.recordedTurns.map((turn) => ({ id: turn.id, items: [...turn.items] }));
   }
 
   private planHost(): PlanPathHost {
@@ -605,6 +626,7 @@ export class GrokSession {
    */
   async sendTurn(input: {
     text: string;
+    attachments?: ReadonlyArray<{ id: string; name: string; path: string; mimeType?: string }>;
     modelSelection?: ModelSelection;
     interactionMode: "default" | "plan";
   }): Promise<{ turnId: string; resumeCursor: GrokResumeCursor }> {
@@ -646,6 +668,7 @@ export class GrokSession {
       if (input.modelSelection !== undefined) {
         await this.applyModelSelection(input.modelSelection);
       }
+      await this.applyInteractionMode(input.interactionMode);
 
       // The deadline must NOT start until the protocol has produced observable
       // progress: ACP hides Grok's private `streaming_reasoning` phase, and a
@@ -655,7 +678,19 @@ export class GrokSession {
       this.openToolCalls.clear();
       this.pokeWatchdog();
 
-      const prompt = [{ type: "text" as const, text: input.text }];
+      // Attachments reach the agent as PATHS, not bytes:
+      // `agentCapabilities.promptCapabilities.image` is **false** on this CLI,
+      // so T3's "Grok ingests images only" path would be sending a content
+      // block the agent has said it cannot take. A path line is something the
+      // agent's own `read_file` tool can act on.
+      const attachmentLines = (input.attachments ?? []).map(
+        (attachment) => `- ${attachment.name}: ${attachment.path}`
+      );
+      const text =
+        attachmentLines.length === 0
+          ? input.text
+          : `${input.text}\n\nAttached files:\n${attachmentLines.join("\n")}`;
+      const prompt = [{ type: "text" as const, text }];
       const promise = this.peer().request<PromptResponse>(
         "session/prompt",
         { sessionId: this.acpSessionId, prompt },
@@ -664,7 +699,7 @@ export class GrokSession {
         // it (§3.1). A fixed timeout here would cancel real work.
         { timeoutMs: 0 }
       );
-      this.trackPrompt(turnId, epoch, input.text, promise);
+      this.trackPrompt(turnId, epoch, text, promise);
 
       return {
         turnId,
@@ -800,6 +835,7 @@ export class GrokSession {
       return;
     }
     turn.settled = true;
+    this.recordTurn(turn, outcome, errorMessage);
 
     const merged: GrokTurnOutcome = {
       ...turn.outcome,
@@ -833,6 +869,26 @@ export class GrokSession {
       this.status = "ready";
       this.touch();
       this.emitEvent(this.normalizer.event("session.state.changed", { state: "ready" }));
+    }
+  }
+
+  /** Keep a bounded, opaque record of the turn for `readThread`. */
+  private recordTurn(turn: ActiveTurn, outcome: GrokTurnOutcome, errorMessage?: string): void {
+    this.recordedTurns.push({
+      id: turn.turnId,
+      items: [
+        {
+          providerPromptId: turn.providerPromptId ?? null,
+          stopReason: outcome.stopReason,
+          ...(outcome.cancellationCategory === undefined
+            ? {}
+            : { cancellationCategory: outcome.cancellationCategory }),
+          ...(errorMessage === undefined ? {} : { errorMessage })
+        }
+      ]
+    });
+    while (this.recordedTurns.length > MAX_RECORDED_TURNS) {
+      this.recordedTurns.shift();
     }
   }
 
@@ -892,6 +948,41 @@ export class GrokSession {
   }
 
   // ----------------------------------------------------------------- model
+
+  /**
+   * Plan mode is per turn (§4.4), and Grok's column there is "none": the mode
+   * is entered by the MODEL through `enter_plan_mode`, which is why
+   * `showPlanModeToggle` is false and the UI never sends `"plan"`. If it ever
+   * does, `session/set_mode` is honoured — `13-errors-and-rpcs.ndjson` shows
+   * it accepted (and answered with a `current_mode_update`) even though the
+   * agent advertises no `modeState`. Best-effort: a refusal must not fail the
+   * turn.
+   */
+  private async applyInteractionMode(mode: "default" | "plan"): Promise<void> {
+    const desired = mode === "plan" ? "plan" : "default";
+    if (this.normalizer.modeId === desired) {
+      return;
+    }
+    if (mode === "default" && this.normalizer.modeId === undefined) {
+      // Never advertised a mode and none was requested: sending one would be
+      // an unprompted state change.
+      return;
+    }
+    try {
+      await this.peer().request(
+        "session/set_mode",
+        { sessionId: this.acpSessionId, modeId: desired },
+        { timeoutMs: AGENT_HOST_DEADLINES.probeMs }
+      );
+    } catch (error) {
+      this.emitEvent(
+        this.normalizer.event("runtime.warning", {
+          message: `grok: could not switch to ${desired} mode`,
+          detail: { error: error instanceof Error ? error.message : String(error) }
+        })
+      );
+    }
+  }
 
   private async applyModelSelection(selection: ModelSelection | undefined): Promise<void> {
     const update = resolveGrokModelUpdate(selection, {

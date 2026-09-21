@@ -337,12 +337,13 @@ export class GrokNormalizer {
         return this.usageUpdate(update);
       default: {
         // §10 / §4.2: a protocol release that adds a variant must be a TYPE
-        // error here, not a silent drop.
-        const exhaustive: never = update;
+        // error here, not a silent drop. At runtime it degrades to a visible
+        // warning, which never ends an active turn.
+        update satisfies never;
         return [
           this.event("runtime.warning", {
             message: "grok: unmapped ACP session/update variant",
-            detail: { sessionUpdate: (exhaustive as { sessionUpdate?: unknown }).sessionUpdate }
+            detail: { sessionUpdate: (update as { sessionUpdate?: unknown }).sessionUpdate }
           })
         ];
       }

@@ -528,6 +528,70 @@ test("listSessions and the adapter id", async () => {
   await r.dispose();
 });
 
+test("attachments reach the agent as PATHS, because promptCapabilities.image is false", async () => {
+  const r = await rig();
+  await start(r);
+  await r.adapter.sendTurn({
+    threadId: "t1",
+    input: "look at this",
+    attachments: [{ type: "image", id: "a1", name: "shot.png", mimeType: "image/png", sizeBytes: 10 }],
+    interactionMode: "default"
+  });
+  const completed = (await r.waitFor(
+    (event) => event.type === "turn.completed",
+    "turn.completed"
+  )) as Extract<RuntimeEvent, { type: "turn.completed" }>;
+  assert.equal(completed.payload.state, "completed");
+  // The mock echoes the prompt text back, so the path line is observable.
+  const echoed = r.events
+    .filter((event): event is Extract<RuntimeEvent, { type: "content.delta" }> => event.type === "content.delta")
+    .filter((event) => event.payload.streamKind === "assistant_text")
+    .map((event) => event.payload.delta)
+    .join("");
+  assert.match(echoed, /Attached files:/);
+  assert.match(echoed, /shot\.png/);
+  await r.dispose();
+});
+
+test("readThread returns the turns the adapter actually observed", async () => {
+  const r = await rig();
+  await start(r);
+  const first = await r.adapter.sendTurn({
+    threadId: "t1",
+    input: "one",
+    attachments: [],
+    interactionMode: "default"
+  });
+  await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
+
+  const snapshot = await r.adapter.readThread("t1");
+  assert.equal(snapshot.threadId, "t1");
+  assert.equal(snapshot.turns.length, 1);
+  assert.equal(snapshot.turns[0].id, first.turnId);
+  const item = snapshot.turns[0].items[0] as Record<string, unknown>;
+  assert.equal(item["stopReason"], "end_turn");
+  // The provider's OWN prompt id, resolved from `_x.ai/queue/changed`.
+  assert.equal(item["providerPromptId"], "prompt-1");
+  await r.dispose();
+});
+
+test("stopAll stops sessions without ending the event stream", async () => {
+  const r = await rig();
+  await start(r);
+  await r.adapter.stopAll();
+  assert.equal(r.adapter.listSessions().length, 0);
+  // A host that stopped every session and then started a new one must still
+  // have a live consumer.
+  await start(r, { threadId: "t2" });
+  const started = await r.waitFor(
+    (event) => event.type === "thread.started" && event.threadId === "t2",
+    "thread.started for t2"
+  );
+  assert.equal(started.threadId, "t2");
+  await r.dispose();
+});
+
+
 test("teardown: no provider child outlives the suite", async () => {
   const leaked = openRigs.filter((entry) => !entry.disposed);
   for (const entry of leaked) {
