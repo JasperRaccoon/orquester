@@ -8,7 +8,7 @@ import { request } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, describe, it } from "node:test";
+import { describe, it } from "node:test";
 
 import type { AgentChatStreamFrame } from "@orquester/api/agent-chat";
 
@@ -492,9 +492,4 @@ describe("agent host server — the event stream (§6.3)", () => {
     await h.host.stop();
     await rm(h.dir, { recursive: true, force: true });
   });
-});
-
-after(() => {
-  // Node's test runner keeps the process alive on a stray handle; every
-  // harness closes its own socket in `stop()`.
 });
