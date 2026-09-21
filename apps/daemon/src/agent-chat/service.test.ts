@@ -1,8 +1,8 @@
 import { strict as assert } from "node:assert";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { test } from "node:test";
 import type { RegistryEntry } from "@orquester/api";
 import { agentHostSocketPath, agentHostTokenPath } from "@orquester/config";
@@ -20,6 +20,8 @@ interface Fixture {
   /** Set to make the fake host refuse the thread. */
   refuse: { status: number; body: unknown } | null;
   appdir: string;
+  /** Every path the service asked to confine before granting trust. */
+  trustQueries: string[];
   cleanup(): Promise<void>;
 }
 
@@ -67,6 +69,7 @@ async function makeFixture(
     created: [],
     refuse: null,
     appdir,
+    trustQueries: [],
     service: null as unknown as AgentChatService,
     cleanup: async () => {
       await new Promise<void>((resolve) => host.close(() => resolve()));
@@ -121,6 +124,14 @@ async function makeFixture(
     registryEntry: (refId) => (refId === entry.id ? entry : undefined),
     resolveLaunchEnv: async () => launch,
     systemClaudeConfigFile: () => join(appdir, ".claude.json"),
+    // The real confinement lives in `index.ts` (realpath + assertInsideFsRoot);
+    // here the sandbox is `<appdir>/ws`, so a path outside it answers null.
+    resolveTrustedProjectDir: async (projectPath) => {
+      state.trustQueries.push(projectPath);
+      const root = join(appdir, "ws");
+      const resolvedPath = resolve(projectPath);
+      return resolvedPath === root || resolvedPath.startsWith(root + sep) ? resolvedPath : null;
+    },
     nodeBin: "/usr/bin/node",
     sleep: async () => undefined,
     // A test must never start an agent host process.
@@ -206,16 +217,87 @@ test("the project is marked trusted for the home the thread will run under", asy
     { ...CLAUDEX, id: "claude", name: "Claude Code" },
     { env: { CLAUDE_CONFIG_DIR: dir }, accountId: "acc-1" }
   );
+  const projectPath = join(f.appdir, "ws", "proj");
   await f.service.createSession(
-    { kind: "agent-chat", refId: "claude", projectPath: "/w/p", cwd: "/w/p" },
+    { kind: "agent-chat", refId: "claude", projectPath, cwd: projectPath },
     0
   );
   const config = JSON.parse(await readFile(join(dir, ".claude.json"), "utf8")) as Record<string, unknown>;
   assert.equal(
-    (config.projects as Record<string, Record<string, unknown>>)["/w/p"].hasTrustDialogAccepted,
+    (config.projects as Record<string, Record<string, unknown>>)[projectPath].hasTrustDialogAccepted,
     true
   );
   await rm(dir, { recursive: true, force: true });
+  await f.cleanup();
+});
+
+test("trust is granted for the validated projectPath, NEVER the request's cwd", async () => {
+  // Claude's trust dialog is a security control: an untrusted directory's hooks
+  // (arbitrary shell as the daemon user, which holds scoped passwordless sudo)
+  // are ignored until it is accepted. A client naming any `cwd` on the box must
+  // not be able to enable them — host-wide and permanently, since a system-home
+  // grant also applies to every future terminal `claude` tab on that path.
+  const dir = await mkdtemp(join(tmpdir(), "orq-claude-home-"));
+  const f = await makeFixture(
+    { ...CLAUDEX, id: "claude", name: "Claude Code" },
+    { env: { CLAUDE_CONFIG_DIR: dir }, accountId: "acc-1" }
+  );
+  const projectPath = join(f.appdir, "ws", "proj");
+  await f.service.createSession(
+    { kind: "agent-chat", refId: "claude", projectPath, cwd: "/some/other/repo" },
+    0
+  );
+  const config = JSON.parse(await readFile(join(dir, ".claude.json"), "utf8")) as Record<string, unknown>;
+  const projects = config.projects as Record<string, unknown>;
+  assert.deepEqual(Object.keys(projects), [projectPath]);
+  assert.equal(projects["/some/other/repo"], undefined, "an arbitrary cwd is never trusted");
+  assert.deepEqual(f.trustQueries, [projectPath], "only the project path is ever confined");
+  await rm(dir, { recursive: true, force: true });
+  await f.cleanup();
+});
+
+test("a projectPath outside the sandbox grants NO trust, and the launch still works", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "orq-claude-home-"));
+  const f = await makeFixture(
+    { ...CLAUDEX, id: "claude", name: "Claude Code" },
+    { env: { CLAUDE_CONFIG_DIR: dir }, accountId: "acc-1" }
+  );
+  await f.service.createSession(
+    { kind: "agent-chat", refId: "claude", projectPath: "/etc", cwd: "/etc" },
+    0
+  );
+  await assert.rejects(() => readFile(join(dir, ".claude.json"), "utf8"), /ENOENT/);
+  assert.equal(f.created.length, 1, "home prep never blocks a launch");
+  await rm(dir, { recursive: true, force: true });
+  await f.cleanup();
+});
+
+test("a Grok thread no longer touches any home config file", async () => {
+  // Regression: the daemon used to write `[features] support_permission` and
+  // `auto_update` into `<grokHome>/config.toml`, which on a managed account
+  // home is a SYMLINK to the daemon user's own `~/.grok/config.toml`.
+  const grokHome = await mkdtemp(join(tmpdir(), "orq-grok-home-"));
+  const shared = join(grokHome, "shared.toml");
+  const link = join(grokHome, "config.toml");
+  await writeFile(shared, "[compat.claude]\nhooks = false\n", "utf8");
+  await symlink(shared, link);
+  const f = await makeFixture(
+    { ...OPENCODE, id: "grok", name: "Grok", env: {}, chat: { adapter: "grok" } },
+    { env: { GROK_HOME: grokHome }, accountId: "acc-1" }
+  );
+  const projectPath = join(f.appdir, "ws", "proj");
+  await f.service.createSession(
+    { kind: "agent-chat", refId: "grok", projectPath, cwd: projectPath },
+    0
+  );
+  assert.equal(
+    await readFile(shared, "utf8"),
+    "[compat.claude]\nhooks = false\n",
+    "the user's shared grok config is byte-identical"
+  );
+  assert.deepEqual(f.trustQueries, [], "no trust confinement is even attempted for grok");
+  assert.equal(f.created.length, 1);
+  await rm(grokHome, { recursive: true, force: true });
   await f.cleanup();
 });
 
@@ -317,32 +399,6 @@ test("a bad resume in the nested block is refused just as the flat one is", asyn
     (error: unknown) => error instanceof ChatSessionError && error.code === "RESUME_UNAVAILABLE"
   );
   assert.equal(f.created.length, 0);
-  await f.cleanup();
-});
-
-test("a Grok thread gets permission requests on and auto-update off", async () => {
-  const grokHome = await mkdtemp(join(tmpdir(), "orq-grok-home-"));
-  const f = await makeFixture(
-    {
-      ...OPENCODE,
-      id: "grok",
-      name: "Grok",
-      env: {},
-      chat: { adapter: "grok" }
-    },
-    { env: { GROK_HOME: grokHome }, accountId: "acc-1" }
-  );
-  await f.service.createSession(
-    { kind: "agent-chat", refId: "grok", projectPath: "/w/p", cwd: "/w/p" },
-    0
-  );
-  const config = await readFile(join(grokHome, "config.toml"), "utf8");
-  // Without support_permission no approval ever reaches the protocol, and
-  // auto_update let the CLI swap its own binary mid-session.
-  assert.ok(config.includes("support_permission = true"));
-  assert.ok(config.includes("auto_update = false"));
-  assert.equal(f.created[0].homePath, grokHome);
-  await rm(grokHome, { recursive: true, force: true });
   await f.cleanup();
 });
 
