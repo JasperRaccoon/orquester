@@ -24,6 +24,7 @@ import {
   runtimeModeToThreadConfig,
   runtimeModeToTurnSandboxPolicy
 } from "./modes.ts";
+import { isUsableConversationId, resumeCursorFor } from "../../orchestration/resume.ts";
 import { toCodexAnswers, toUserInputQuestions, parseResumeCursor } from "./session.ts";
 import { MINIMUM_CODEX_VERSION, codexVersionFromUserAgent, meetsMinimumVersion } from "./probe.ts";
 
@@ -272,9 +273,52 @@ describe("§4.1 the resume cursor", () => {
     assert.deepEqual(parseResumeCursor({ threadId: "t-1" }), { threadId: "t-1" });
   });
 
+  it("accepts the host's MINIMAL create-time cursor (§6.1), not just its own", () => {
+    // The shape the resume picker produces, built by the host and never by the
+    // adapter. If this ever stopped parsing, §6.1 resume would degrade in
+    // silence to a fresh thread — the exact failure §4.1 forbids.
+    const conversationId = "01a0c19d-e1f9-7e73-8dc5-a0d355d3d232";
+    const minimal = resumeCursorFor("codex", "orq-thread-1", conversationId);
+    assert.deepEqual(minimal, { threadId: conversationId });
+    assert.deepEqual(parseResumeCursor(minimal), { threadId: conversationId });
+  });
+
+  it("round-trips a cursor the adapter itself produced", () => {
+    // `sendTurn` persists `{threadId: <provider thread id>}` after every turn;
+    // the minimal form and the persisted form are the SAME shape for Codex, so
+    // one parser serves both.
+    const persisted = { threadId: "01a0c1a2-f62c-7000-8000-000000000000" };
+    assert.deepEqual(parseResumeCursor(persisted), persisted);
+  });
+
   it("a cursor that fails its own shape check means 'no resume', NEVER an error", () => {
-    for (const bad of [undefined, null, {}, { threadId: "" }, { threadId: 4 }, "t-1", []]) {
+    for (const bad of [
+      undefined,
+      null,
+      {},
+      { threadId: "" },
+      { threadId: 4 },
+      "t-1",
+      [],
+      // A bare conversation id is NOT a cursor: the host wraps it.
+      "01a0c19d-e1f9-7e73-8dc5-a0d355d3d232",
+      // Shapes the host would have refused to build in the first place.
+      { threadId: "../../etc/passwd" },
+      { threadId: "-flag-shaped" },
+      { threadId: `${"x".repeat(257)}` }
+    ]) {
       assert.equal(parseResumeCursor(bad), null);
+    }
+  });
+
+  it("agrees with the host on which ids are usable", () => {
+    for (const id of ["01a0c19d-e1f9-7e73-8dc5-a0d355d3d232", "abc.def", "a/b"]) {
+      assert.equal(isUsableConversationId(id), true);
+      assert.deepEqual(parseResumeCursor({ threadId: id }), { threadId: id });
+    }
+    for (const id of ["../x", "-x", "", "a b"]) {
+      assert.equal(isUsableConversationId(id), false);
+      assert.equal(parseResumeCursor({ threadId: id }), null);
     }
   });
 });

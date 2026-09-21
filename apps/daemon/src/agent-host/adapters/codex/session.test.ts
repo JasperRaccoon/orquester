@@ -15,6 +15,7 @@ import { after, describe, it } from "node:test";
 
 import type { RuntimeEvent } from "@orquester/api/agent-chat";
 
+import { resumeCursorFor } from "../../orchestration/resume.ts";
 import { AsyncEventQueue } from "./event-queue.ts";
 import { CodexSession, type CodexSessionOptions } from "./session.ts";
 import {
@@ -658,6 +659,27 @@ describe("codex session — resume", () => {
         String((event.payload as { message: string }).message).includes("Could not resume")
     );
     assert.ok(warning !== undefined, "never a silent degrade");
+    await r.stop();
+  });
+
+  it("resumes from the host's MINIMAL create-time cursor (§6.1)", async () => {
+    // The §6.1 path: a thread created from the resume picker carries only a
+    // conversation id, and the host wraps it with `resumeCursorFor`. The
+    // adapter must open that conversation, NOT a fresh thread — a silent
+    // degrade here is a user opening what they believe is their old session.
+    const conversationId = "01a0c19d-e1f9-7e73-8dc5-a0d355d3d232";
+    const minimal = resumeCursorFor("codex", "thread-1", conversationId);
+    const r = rig({ turns: [{ kind: "text", text: "a" }] }, { resumeCursor: minimal });
+    await r.session.start();
+
+    const [resume] = sentFrames(r.received(), "thread/resume");
+    assert.ok(resume !== undefined, "the picker's conversation was resumed");
+    assert.equal(resume.threadId, conversationId);
+    assert.equal(
+      sentFrames(r.received(), "thread/start").length,
+      0,
+      "a fresh thread would be the silent degrade §6.1 forbids"
+    );
     await r.stop();
   });
 
