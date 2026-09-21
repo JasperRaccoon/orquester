@@ -37,7 +37,6 @@ import { ChatComposer } from "./composer/ChatComposer";
 import { ChatErrorBoundary } from "./ChatErrorBoundary";
 import { ChatStatusLine } from "./status/ChatStatusLine";
 import { ChatTimeline } from "./timeline/ChatTimeline";
-import { deriveAgentDrillInRows } from "./agent-rows";
 import {
   nextHeldTimeline,
   resolveThreadSwitchTimeline,
@@ -51,7 +50,6 @@ import type {
 } from "./contracts";
 
 /** Stable empty arrays, so a neutralised render never churns child props. */
-const NO_ROWS: AgentChatTimelineRow[] = [];
 const NO_APPROVALS: never[] = [];
 const NO_REQUEST_IDS: readonly string[] = [];
 
@@ -175,14 +173,9 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   // A drill-in belongs to one thread; carrying it across a switch would open a
   // stranger's agent. The hold is exactly the window where that could happen.
   React.useEffect(() => setDrillInAgentId(null), [sessionId]);
-  const drillInAgent = React.useMemo(
-    () => (drillInAgentId ? (roster.agents.find((a) => a.id === drillInAgentId) ?? null) : null),
-    [roster.agents, drillInAgentId]
-  );
-  const drillInRows = React.useMemo(
-    () => (drillInAgentId ? deriveAgentDrillInRows(slice.entries, drillInAgentId) : NO_ROWS),
-    [slice.entries, drillInAgentId]
-  );
+  // The child's rows and its roster row come from `useAgentChatDrillIn`, which
+  // AgentDrillIn calls itself: one projection off this thread's slice, sharing
+  // the parent's memoisation instead of a second one beside it.
   // Escape leaves the child view. Bound on the subtree, not on `window`: the
   // app's one global listener owns window-level keys (AGENTS.md), and Escape
   // here must not reach a tab that merely has a drill-in open in the background.
@@ -430,8 +423,6 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
             <AgentDrillIn
               sessionId={sessionId}
               agentId={drillInAgentId}
-              agent={drillInAgent}
-              rows={drillInRows}
               roster={roster.agents}
               projectPath={projectPath}
               onBack={() => setDrillInAgentId(null)}

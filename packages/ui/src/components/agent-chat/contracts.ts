@@ -221,9 +221,16 @@ export interface AgentRosterProps {
 export interface AgentDrillInProps {
   sessionId: string;
   agentId: string;
-  agent: RuntimeSubagent | null;
-  /** The agent's own items, filtered by `agentId`, streaming live. */
-  rows: AgentChatTimelineRow[];
+  /**
+   * Overrides for what the component otherwise reads itself from
+   * `useAgentChatDrillIn(sessionId, agentId)` — the agent's own items,
+   * filtered by `agentId` and streaming live, projected off the parent's
+   * slice. A host that already holds them may pass them; nobody has to.
+   *
+   * *Relaxed from required by W14 once W11's hook landed.*
+   */
+  agent?: RuntimeSubagent | null;
+  rows?: AgentChatTimelineRow[];
   /** Read-only: the child view dispatches no commands (§7.6). */
   onBack: () => void;
   /**

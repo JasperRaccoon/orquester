@@ -18,14 +18,26 @@
  *     five, and hiding or showing the rest never moves it — which falls out of
  *     rule 2: everything is one filtered list in one stable order, never two
  *     partitioned groups.
+ *
+ * **Which rows survive is W11's `deriveRosterDockView`** (`lib/agent-chat/
+ * roster.logic.ts`) — one implementation of the collapse, the fade and the
+ * background exemption, shared with the rest of the client. This module adds
+ * only what a *dock* needs on top of it: the stable order those rows render in
+ * (the selector returns them partitioned), the intermediate `fading` phase
+ * that the exit transition needs, and the presentational status mapping.
  */
 
-import { ACTIVE_SUBAGENT_STATUSES, TERMINAL_SUBAGENT_STATUSES } from "@orquester/api/agent-chat";
 import type { RuntimeSubagent, RuntimeSubagentStatus } from "@orquester/api/agent-chat";
+import {
+  ROSTER_VISIBLE_ROWS,
+  deriveRosterDockView,
+  isActiveSubagentStatus,
+  isTerminalSubagentStatus
+} from "../../../lib/agent-chat/roster.logic";
 import type { ChatTone } from "../primitives/tone";
 
 /** How many non-exempt rows render before the rest collapse behind "N more". */
-export const ROSTER_COLLAPSED_ROWS = 5;
+export const ROSTER_COLLAPSED_ROWS = ROSTER_VISIBLE_ROWS;
 
 /**
  * Where a finished row is in its exit.
@@ -57,9 +69,7 @@ export interface RosterSelection {
 }
 
 /** The three in-flight statuses — one steady "working" look (§7.6). */
-export function isActiveStatus(status: RuntimeSubagentStatus): boolean {
-  return ACTIVE_SUBAGENT_STATUSES.has(status);
-}
+export const isActiveStatus = isActiveSubagentStatus;
 
 /**
  * Finished = terminal. `idle` is deliberately **not** finished: a resumable
@@ -67,7 +77,7 @@ export function isActiveStatus(status: RuntimeSubagentStatus): boolean {
  * *T3: `state/subagentRuntime.ts:89-105`.*
  */
 export function isFinishedRow(agent: Pick<RuntimeSubagent, "status">): boolean {
-  return TERMINAL_SUBAGENT_STATUSES.has(agent.status);
+  return isTerminalSubagentStatus(agent.status);
 }
 
 /** A background task that is still running — the row exempt from both rules. */
@@ -108,20 +118,24 @@ export interface SelectRosterRowsInput {
   expanded: boolean;
   /** Where finished rows are in their exit; `visible` while a turn runs. */
   finished: FinishedRowsPhase;
-  /** Test seam. Production always uses {@link ROSTER_COLLAPSED_ROWS}. */
-  limit?: number;
 }
 
 /**
- * Pick the rows to render.
+ * Pick the rows to render, in the order they render in.
  *
- * Order of operations matters: **drop** removed rows, then **cap**. A finished
- * row that has already faded out must not still be occupying one of the five
- * slots, or a turn that ends with five completed children leaves the roster
- * showing "5 more" over an empty list.
+ * The survivors come from W11's `deriveRosterDockView` — it owns the collapse,
+ * the drop of finished rows and the background exemption — and are then **put
+ * back into first-seen order**: the selector hands back `visible` and
+ * `pinnedBackground` as separate lists, and rendering them one after the other
+ * would move a live background row to the end of the dock every time the rest
+ * collapsed, which is the reshuffle §7.6 forbids.
+ *
+ * The only rule this layer owns is the middle of the exit: during `fading` a
+ * finished row is still passed to the selector (`turnSettled: false`), so it
+ * keeps its slot and its place while its opacity runs out, and only the
+ * `removed` phase drops it.
  */
 export function selectRosterRows(input: SelectRosterRowsInput): RosterSelection {
-  const limit = input.limit ?? ROSTER_COLLAPSED_ROWS;
   const ordered = rosterDisplayOrder(input.agents);
 
   let liveCount = 0;
@@ -131,35 +145,29 @@ export function selectRosterRows(input: SelectRosterRowsInput): RosterSelection 
     if (isFinishedRow(agent)) finishedCount += 1;
   }
 
+  const view = deriveRosterDockView({
+    roster: ordered,
+    expanded: input.expanded,
+    turnSettled: input.finished === "removed"
+  });
+  const kept = new Set<string>();
+  for (const agent of view.visible) kept.add(agent.id);
+  for (const agent of view.pinnedBackground) kept.add(agent.id);
+
   const rows: RosterVisibleRow[] = [];
-  let shown = 0;
-  let hiddenCount = 0;
-
   for (const agent of ordered) {
+    if (!kept.has(agent.id)) continue;
     const exempt = isLiveBackgroundRow(agent);
-    const finished = isFinishedRow(agent);
-
-    if (!exempt && finished && input.finished === "removed") continue;
-
-    if (exempt) {
-      // Always rendered, never counted, never faded — and still in its own
-      // place in the stable order, so collapsing the rest cannot move it.
-      rows.push({ agent, exempt: true, fading: false });
-      continue;
-    }
-
-    if (!input.expanded && shown >= limit) {
-      hiddenCount += 1;
-      continue;
-    }
-
-    shown += 1;
-    rows.push({ agent, exempt: false, fading: finished && input.finished === "fading" });
+    rows.push({
+      agent,
+      exempt,
+      fading: !exempt && isFinishedRow(agent) && input.finished === "fading"
+    });
   }
 
   return {
     rows,
-    hiddenCount,
+    hiddenCount: view.hiddenCount,
     totalCount: ordered.length,
     liveCount,
     finishedCount

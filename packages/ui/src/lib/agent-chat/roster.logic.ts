@@ -65,8 +65,14 @@ export function rosterRowLook(status: RuntimeSubagentStatus): RosterRowLook {
  */
 export function agentActivityText(agent: RuntimeSubagent): string | null {
   const live = isActiveSubagentStatus(agent.status);
+  // While live the *result* precedes the error — a child that has already
+  // produced something is described by it, and an error on a row that is still
+  // running is usually a step that was retried. Once settled the order
+  // reverses, because an error is then the outcome.
+  // *T3: `AgentsPanel.tsx:120-137` — `progress ?? tool ?? result ?? error`
+  // live, `error ?? result ?? progress ?? tool` settled.*
   const candidates = live
-    ? [agent.progress, agent.lastToolName, agent.error, agent.result]
+    ? [agent.progress, agent.lastToolName, agent.result, agent.error]
     : [agent.error, agent.result, agent.progress, agent.lastToolName];
   for (const candidate of candidates) {
     if (typeof candidate === "string" && candidate.trim().length > 0) {

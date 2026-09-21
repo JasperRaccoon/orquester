@@ -11,6 +11,10 @@
  */
 
 import type { RuntimeSubagent } from "@orquester/api/agent-chat";
+import {
+  agentActivityText as activityTextFor,
+  isActiveSubagentStatus
+} from "../../../lib/agent-chat/roster.logic";
 
 /** U+25B8 + space. The mark that says "this line names a tool, not a summary". */
 export const TOOL_PREFIX = "▸ ";
@@ -52,9 +56,7 @@ export function formatSubagentTokenCount(totalTokens: number | null | undefined)
 }
 
 /** The three in-flight statuses (§7.6: they all present as one "working" look). */
-export function isLiveStatus(status: RuntimeSubagent["status"]): boolean {
-  return status === "pending" || status === "running" || status === "waiting";
-}
+export const isLiveStatus = isActiveSubagentStatus;
 
 /**
  * The activity line, whose **order flips with status**: a live row leads with
@@ -63,20 +65,23 @@ export function isLiveStatus(status: RuntimeSubagent["status"]): boolean {
  * glance.
  *
  * ```
- * live:    progress ?? "▸ " + lastToolName ?? result ?? error
- * settled: error ?? result ?? progress ?? "▸ " + lastToolName
+ * live:    progress ?? lastToolName ?? result ?? error
+ * settled: error ?? result ?? progress ?? lastToolName
  * ```
+ *
+ * The precedence is W11's `agentActivityText`; this adds the one thing a *row*
+ * needs and a selector should not encode — the `▸ ` marker that says the line
+ * is a tool name rather than a sentence the agent wrote.
  *
  * *T3: `AgentsPanel.tsx:120-137`.*
  */
 export function agentActivityText(
   agent: Pick<RuntimeSubagent, "status" | "progress" | "lastToolName" | "result" | "error">
 ): string | null {
-  const tool = agent.lastToolName ? `${TOOL_PREFIX}${agent.lastToolName}` : null;
-  if (isLiveStatus(agent.status)) {
-    return agent.progress ?? tool ?? agent.result ?? agent.error ?? null;
-  }
-  return agent.error ?? agent.result ?? agent.progress ?? tool ?? null;
+  const text = activityTextFor(agent as RuntimeSubagent);
+  if (text === null) return null;
+  const tool = agent.lastToolName?.trim();
+  return tool !== undefined && tool.length > 0 && text === tool ? `${TOOL_PREFIX}${text}` : text;
 }
 
 /**

@@ -19,10 +19,17 @@
  *    is a no-op here too.
  *
  * §7.2's rule holds on the way in: items stamped with an `agentId` never
- * render in the parent timeline, they are re-homed here. On OpenCode and Grok
- * the surface shows whatever their protocols report and nothing more — when a
- * provider reports a task but no per-agent items, this falls back to the
- * roster row's own recent-activity ring rather than inventing lineage.
+ * render in the parent timeline, they are re-homed here. **Both halves come
+ * from W11's `useAgentChatDrillIn`**, which projects them off the *parent's*
+ * slice — so the child streams live without opening a second stream, and the
+ * parent's composer and roster keep their state. On OpenCode and Grok the
+ * surface shows whatever their protocols report and nothing more; when a
+ * provider reports a task but no per-agent items, the timeline says so rather
+ * than this view inventing lineage.
+ *
+ * Escape is **not** bound here: the app has one window-level key listener
+ * (AGENTS.md), and the view that owns the drill-in state owns the key that
+ * closes it. This component's own affordance is the breadcrumb's Back.
  *
  * *T3 has no equivalent: its rows are not clickable and there is no per-agent
  * timeline (`AgentsPanel.tsx:139-140`, "Flat, non-interactive agent status
@@ -34,6 +41,7 @@ import React from "react";
 import { ArrowLeft, Bot, Terminal } from "lucide-react";
 import { cn } from "../../../lib/cn";
 import type { DisclosureState } from "../../../lib/agent-chat/contracts";
+import { useAgentChatDrillIn } from "../../../lib/agent-chat/hooks";
 import type { AgentDrillInProps } from "../contracts";
 import { ChatTimeline } from "../timeline/ChatTimeline";
 import { ElapsedTicker, StatusDot } from "../primitives";
@@ -50,37 +58,25 @@ const EMPTY_DISCLOSURES: DisclosureState = {
 
 const noop = (): void => {};
 
-/** Editable targets own Escape — in the composer it interrupts the turn (§7.4). */
-function isEditableTarget(target: EventTarget | null): boolean {
-  const element = target as HTMLElement | null;
-  if (!element || typeof element.closest !== "function") return false;
-  return element.closest("input, textarea, select, [contenteditable=''], [contenteditable='true']") !== null;
-}
-
 export function AgentDrillIn({
   sessionId,
   agentId,
-  agent,
-  rows,
+  agent: agentOverride,
+  rows: rowsOverride,
   onBack,
   roster,
   projectPath
 }: AgentDrillInProps): React.ReactElement {
+  const live = useAgentChatDrillIn(sessionId, agentId);
+  // The hook is the source; the props are an override for a host that already
+  // holds the projection (and for tests, which have no store).
+  const rows = rowsOverride ?? live.rows;
+  const agent = agentOverride ?? live.agent;
+
   const [disclosures, setDisclosures] = React.useState<DisclosureState>(EMPTY_DISCLOSURES);
   const onDisclosureChange = React.useCallback((patch: Partial<DisclosureState>) => {
     setDisclosures((current) => ({ ...current, ...patch }));
   }, []);
-
-  React.useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || event.defaultPrevented) return;
-      if (isEditableTarget(event.target)) return;
-      event.preventDefault();
-      onBack();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onBack]);
 
   const visuals = agent ? rosterStatusVisual(agent.status) : null;
   const background = agent?.agentKind === "background";
@@ -137,81 +133,42 @@ export function AgentDrillIn({
             </p>
           </div>
         </div>
-      ) : null}
-
-      {rows.length > 0 ? (
-        <ChatTimeline
-          sessionId={sessionId}
-          // `agentId` is what makes the timeline a child view: W12 forces
-          // read-only from it, and we say so explicitly as well.
-          agentId={agentId}
-          readOnly
-          roster={roster}
-          projectPath={projectPath}
-          rows={rows}
-          follow
-          onFollowChange={noop}
-          disclosures={disclosures}
-          onDisclosureChange={onDisclosureChange}
-          bottomInset={0}
-          canRevert={false}
-          onRevert={noop}
-          onOpenTurnDiff={noop}
-          onOpenFile={noop}
-          onLoadFullOutput={noop}
-          onOpenAgent={noop}
-          onSendQueuedNow={noop}
-          onReturnQueuedToComposer={noop}
-          errorBanner={null}
-          onDismissErrorBanner={noop}
-        />
       ) : (
-        <AgentFallbackLog
-          entries={agent?.recentActivity ?? []}
-          empty={
-            agent
-              ? "This agent has not reported any work of its own yet."
-              : "That agent is no longer in this thread's roster."
-          }
-        />
+        // The roster dropped the row (retention, or a host restart) while its
+        // items are still in the thread. Say so, and keep showing them.
+        <div className="shrink-0 border-b border-neutral-800 px-3 py-2 sm:px-5">
+          <p className="mx-auto w-full max-w-3xl text-sm italic text-neutral-600">
+            This agent is no longer in the thread&apos;s roster.
+          </p>
+        </div>
       )}
-    </div>
-  );
-}
 
-/**
- * What a provider that reports task progress but no per-agent items can still
- * show: the roster fold's own bounded activity ring. It is the truth we have,
- * and it is labelled as such rather than dressed up as a timeline.
- */
-function AgentFallbackLog({
-  entries,
-  empty
-}: {
-  entries: readonly { at: string; summary: string }[];
-  empty: string;
-}): React.ReactElement {
-  return (
-    <div className="ac-scroll-thin min-h-0 flex-1 overflow-y-auto px-3 py-3 sm:px-5">
-      <div className="mx-auto w-full max-w-3xl">
-        {entries.length === 0 ? (
-          <p className="text-sm italic text-neutral-600">{empty}</p>
-        ) : (
-          <ol className="ac-rows flex flex-col">
-            {entries.map((entry) => (
-              <li
-                key={`${entry.at}:${entry.summary}`}
-                className="flex min-w-0 items-baseline gap-2 py-0.5 text-sm leading-relaxed text-neutral-500"
-              >
-                <span aria-hidden className="shrink-0 text-neutral-600">
-                  ·
-                </span>
-                <span className="min-w-0 break-words">{entry.summary}</span>
-              </li>
-            ))}
-          </ol>
-        )}
-      </div>
+      <ChatTimeline
+        sessionId={sessionId}
+        // `agentId` is what makes the timeline a child view: W12 forces
+        // read-only from it, and we say so explicitly as well. It also owns
+        // the empty state, so there is no second "nothing here yet" surface.
+        agentId={agentId}
+        readOnly
+        roster={roster}
+        projectPath={projectPath}
+        rows={rows}
+        follow
+        onFollowChange={noop}
+        disclosures={disclosures}
+        onDisclosureChange={onDisclosureChange}
+        bottomInset={0}
+        canRevert={false}
+        onRevert={noop}
+        onOpenTurnDiff={noop}
+        onOpenFile={noop}
+        onLoadFullOutput={noop}
+        onOpenAgent={noop}
+        onSendQueuedNow={noop}
+        onReturnQueuedToComposer={noop}
+        errorBanner={null}
+        onDismissErrorBanner={noop}
+      />
     </div>
   );
 }

@@ -219,14 +219,17 @@ test("counts report the whole fold, not the visible slice", () => {
     agent("a", { firstSeenAt: at(1), status: "running" }),
     agent("b", { firstSeenAt: at(2), status: "waiting" }),
     agent("c", { firstSeenAt: at(3), status: "completed" }),
-    agent("d", { firstSeenAt: at(4), status: "idle" })
+    agent("d", { firstSeenAt: at(4), status: "idle" }),
+    agent("e", { firstSeenAt: at(5), status: "running" }),
+    agent("f", { firstSeenAt: at(6), status: "running" }),
+    agent("g", { firstSeenAt: at(7), status: "failed" })
   ];
-  const selection = selectRosterRows({ agents, expanded: false, finished: "visible", limit: 1 });
-  assert.equal(selection.rows.length, 1);
-  assert.equal(selection.totalCount, 4);
-  assert.equal(selection.liveCount, 2);
-  assert.equal(selection.finishedCount, 1);
-  assert.equal(selection.hiddenCount, 3);
+  const selection = selectRosterRows({ agents, expanded: false, finished: "visible" });
+  assert.equal(selection.rows.length, ROSTER_COLLAPSED_ROWS);
+  assert.equal(selection.totalCount, 7);
+  assert.equal(selection.liveCount, 4);
+  assert.equal(selection.finishedCount, 2);
+  assert.equal(selection.hiddenCount, 2);
 });
 
 // ---------------------------------------------------------------------------

@@ -10,12 +10,38 @@
  */
 
 import assert from "node:assert/strict";
-import { createElement } from "react";
+import { createElement, type ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { AgentPanelModel, Checkpoint, RuntimeSubagent } from "@orquester/api/agent-chat";
+import {
+  OrquesterProvider,
+  type OrquesterProviderProps
+} from "../../../context/orquester-context";
 import { AgentRoster } from "./AgentRoster";
 import { AgentDrillIn } from "./AgentDrillIn";
 import { ChatStatusLine } from "../status/ChatStatusLine";
+
+/**
+ * The drill-in reads `useAgentChatDrillIn`, which resolves its thread store
+ * through the app context. The store only *captures* its transport (the stream
+ * opens in an effect, and effects never run under the static renderer), so a
+ * bare provider is enough to render one — and rendering it under a provider is
+ * the point: it proves the hook path compiles and runs, not just the props.
+ */
+function render(element: ReactElement): string {
+  const context = {
+    useTitlebar: false,
+    // A store opens its stream on a microtask, so the fake transport needs a
+    // `stream` that hands back a closed handle — nothing is ever delivered,
+    // which is exactly the state these assertions render against.
+    api: {
+      agentChat: {
+        stream: () => ({ close: () => {}, lastSeq: 0, hostInstanceId: null })
+      }
+    }
+  } as unknown as OrquesterProviderProps;
+  return renderToStaticMarkup(createElement(OrquesterProvider, { ...context, children: element }));
+}
 
 /**
  * The app's `Dropdown` (the meter's popover) uses `useLayoutEffect`, which the
@@ -89,7 +115,7 @@ const seven = Array.from({ length: 7 }, (_, index) =>
   agent(`agent-${index}`, { firstSeenAt: `2026-09-21T10:00:0${index}.000Z` })
 );
 
-const collapsed = renderToStaticMarkup(
+const collapsed = render(
   createElement(AgentRoster, {
     sessionId: "s1",
     agents: seven,
@@ -116,7 +142,7 @@ assert.ok(collapsed.includes("main"), "the thread's own row is labelled");
 assert.ok(collapsed.includes("opus-4"), "the main row carries the model chip");
 
 // A live background row renders past the cap and keeps its place in the order.
-const withBackground = renderToStaticMarkup(
+const withBackground = render(
   createElement(AgentRoster, {
     sessionId: "s1",
     agents: [
@@ -144,7 +170,7 @@ assert.equal(
 
 // No main row, no agents, no workflows ⇒ nothing at all, not an empty bar.
 assert.equal(
-  renderToStaticMarkup(
+  render(
     createElement(AgentRoster, {
       sessionId: "s1",
       agents: [],
@@ -158,7 +184,7 @@ assert.equal(
 );
 
 // A settled thread (no turn running) opens with its finished rows already gone.
-const reopened = renderToStaticMarkup(
+const reopened = render(
   createElement(AgentRoster, {
     sessionId: "s1",
     agents: [agent("old", { status: "completed", completedAt: "2026-09-21T10:01:00.000Z" })],
@@ -174,7 +200,7 @@ assert.ok(reopened.includes('data-roster-main="true"'));
 
 // Without a main row there is no turn signal, so nothing is faded away on a
 // guess — every row the fold produced still renders.
-const noMain = renderToStaticMarkup(
+const noMain = render(
   createElement(AgentRoster, {
     sessionId: "s1",
     agents: [agent("old", { status: "completed", completedAt: "2026-09-21T10:01:00.000Z" })],
@@ -190,7 +216,7 @@ assert.ok(noMain.includes('data-agent-id="old"'));
 // The drill-in
 // ---------------------------------------------------------------------------
 
-const drillIn = renderToStaticMarkup(
+const drillIn = render(
   createElement(AgentDrillIn, {
     sessionId: "s1",
     agentId: "agent-1",
@@ -208,10 +234,14 @@ assert.ok(drillIn.includes("Agents"), "the breadcrumb has a root");
 assert.ok(drillIn.includes("Back"));
 assert.ok(
   drillIn.includes("Reading src/index.ts"),
-  "with no per-agent items it falls back to what the provider did report"
+  "the prompt block leads with what the provider reported the agent is doing"
+);
+assert.ok(
+  drillIn.includes('data-agent-id="agent-1"'),
+  "the child timeline renders, scoped to this agent"
 );
 
-const unknownAgent = renderToStaticMarkup(
+const unknownAgent = render(
   createElement(AgentDrillIn, {
     sessionId: "s1",
     agentId: "gone",
@@ -220,7 +250,10 @@ const unknownAgent = renderToStaticMarkup(
     onBack: () => {}
   })
 );
-assert.ok(unknownAgent.includes("no longer in this thread"));
+assert.ok(
+  unknownAgent.includes("no longer in the thread"),
+  "a row the roster dropped says so instead of rendering a blank header"
+);
 
 // ---------------------------------------------------------------------------
 // The status line
@@ -236,7 +269,7 @@ const checkpoint: Checkpoint = {
   completedAt: "2026-09-21T10:01:00.000Z"
 };
 
-const live = renderToStaticMarkup(
+const live = render(
   createElement(ChatStatusLine, {
     sessionId: "s1",
     connection: "synchronized",
@@ -266,7 +299,7 @@ assert.ok(live.includes("1/2"), "the plan chip counts its steps");
 assert.ok(live.includes("1 file"), "the checkpoint chip counts its files");
 assert.ok(live.includes("25%"), "the ring announces its percentage");
 
-const degraded = renderToStaticMarkup(
+const degraded = render(
   createElement(ChatStatusLine, {
     sessionId: "s1",
     connection: "synchronized",
@@ -291,7 +324,7 @@ assert.ok(!degraded.includes("ac-shimmer\"") || degraded.includes("ac-shimmer-se
 assert.ok(degraded.includes("Ready"));
 
 // A broken stream outranks everything else the line could say.
-const broken = renderToStaticMarkup(
+const broken = render(
   createElement(ChatStatusLine, {
     sessionId: "s1",
     connection: "error",
