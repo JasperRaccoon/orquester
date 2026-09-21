@@ -114,7 +114,10 @@ export function AgentRoster({
   main = null,
   activeAgentId = null
 }: AgentRosterProps): React.ReactElement | null {
-  const finished = useFinishedRowsPhase(main?.turnActive ?? false);
+  const phase = useFinishedRowsPhase(main?.turnActive ?? false);
+  // Without a `main` row there is no turn signal, so there is nothing to fade
+  // *on*: keep every row rather than dropping finished ones on a guess.
+  const finished: FinishedRowsPhase = main ? phase : "visible";
   const selection = React.useMemo(
     () => selectRosterRows({ agents: flatRows(agents, panel), expanded, finished }),
     [agents, panel, expanded, finished]
