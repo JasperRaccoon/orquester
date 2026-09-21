@@ -255,9 +255,7 @@ function retainMessagesAfterRevert(
 ): Set<string> {
   const retained = new Set<string>();
   for (const message of messages) {
-    // Rows with `turnId: null` survive — a message persisted before the
-    // provider minted its turn id would otherwise vanish (§5.5).
-    if (message.turnId === null || retainedTurnIds.has(message.turnId)) {
+    if (message.turnId !== null && retainedTurnIds.has(message.turnId)) {
       retained.add(message.id);
     }
   }
@@ -265,6 +263,11 @@ function retainMessagesAfterRevert(
   const byCreatedAt = (left: ThreadMessageItem, right: ThreadMessageItem): number =>
     left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
 
+  // The fallback pass. A message persisted before the provider minted its turn
+  // id carries `turnId: null` and is invisible to the pass above — without
+  // this a revert would leave the thread showing fewer turns than it reverted
+  // to, and the user's own prompts would vanish. Bounded at `turnCount` per
+  // role so it restores the turns that survived, never the ones it undid.
   for (const role of ["user", "assistant"] as const) {
     const have = messages.filter(
       (message) => message.role === role && retained.has(message.id)
@@ -272,7 +275,12 @@ function retainMessagesAfterRevert(
     const missing = Math.max(0, turnCount - have);
     if (missing === 0) continue;
     const fallback = messages
-      .filter((message) => message.role === role && !retained.has(message.id))
+      .filter(
+        (message) =>
+          message.role === role &&
+          !retained.has(message.id) &&
+          (message.turnId === null || retainedTurnIds.has(message.turnId))
+      )
       .slice()
       .sort(byCreatedAt)
       .slice(0, missing);
