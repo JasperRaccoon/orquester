@@ -64,6 +64,10 @@ import {
 import { normalizeAgentPrefs, normalizeUsagePrefs, type AppConfigAdapter } from "../lib/app-config";
 import { mergeProviderUsageWindows } from "../components/topbar/usage-format";
 import { isAgentLikeSession } from "../lib/session-kind";
+import {
+  rememberAgentAuthDismissal,
+  shouldRaiseAgentAuthNotice
+} from "../lib/agent-auth-notice";
 import { ProjectSetupError } from "../lib/project-setup-error";
 import { invalidateProjectIndex } from "../lib/project-index";
 import type { HttpClient } from "../lib/http-client";
@@ -738,6 +742,12 @@ export interface AppState {
    * → Accounts" — rather than being folded into the plain `notice`, which has
    * none. Advisory, dismissible, never persisted.
    */
+  /**
+   * Auth-error toasts the user has closed, as `sessionId\u0000message`. The
+   * publisher re-fires on every coarse `agent.providers.changed` while a
+   * provider stays signed out, so without this a dismissal never sticks.
+   */
+  dismissedAgentAuthErrors: string[];
   agentAuthError: {
     sessionId: string;
     /** The registry entry's display name, e.g. "Claude Code". */
@@ -1098,6 +1108,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   modelWarning: null,
   resumeError: null,
   agentAuthError: null,
+  dismissedAgentAuthErrors: [],
   providerRateLimits: {},
   settingsSection: null,
   notice: null,
@@ -1638,6 +1649,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         resumeError: null,
         modelWarning: null,
         agentAuthError: null,
+        dismissedAgentAuthErrors: [],
         providerRateLimits: {},
         notice: null,
         protectArchived: false,
@@ -1672,6 +1684,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       resumeError: null,
       modelWarning: null,
       agentAuthError: null,
+      dismissedAgentAuthErrors: [],
       providerRateLimits: {},
       notice: null,
       // Per-daemon flag: never let one server's curtain setting apply to the
@@ -2540,9 +2553,30 @@ export const useAppStore = create<AppState>((set, get) => ({
     });
   },
 
-  reportAgentAuthError: (error) => set({ agentAuthError: error }),
+  reportAgentAuthError: (error) =>
+    set((state) =>
+      // A dismissal sticks until something CHANGES: the publisher re-fires on
+      // every `agent.providers.changed` while the provider stays signed out,
+      // so a plain overwrite made the toast un-dismissable.
+      shouldRaiseAgentAuthNotice(error, state.dismissedAgentAuthErrors)
+        ? { agentAuthError: error }
+        : state
+    ),
 
-  dismissAgentAuthError: () => set({ agentAuthError: null }),
+  dismissAgentAuthError: () =>
+    set((state) => {
+      const current = state.agentAuthError;
+      if (!current) {
+        return state;
+      }
+      return {
+        agentAuthError: null,
+        dismissedAgentAuthErrors: rememberAgentAuthDismissal(
+          current,
+          state.dismissedAgentAuthErrors
+        )
+      };
+    }),
 
   applyProviderRateLimits: (agentRefId, update) =>
     set((state) => ({

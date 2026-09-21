@@ -32,7 +32,7 @@ import { isDefaultThreadTitle } from "../../lib/session-kind";
 import { isActiveChatTab, releaseActiveChatTab } from "../../lib/agent-chat-active-tab";
 import { anotherLayerOwnsTheKeyboard } from "../attention/GlobalShortcutListener";
 import { deriveThreadTitleSeed } from "../../lib/agent-chat/title.logic";
-import { shouldShowPlanFollowUpPrompt } from "../../lib/agent-chat/plan.logic";
+import { proposedPlanTitle, shouldShowPlanFollowUpPrompt } from "../../lib/agent-chat/plan.logic";
 import { useAppStore } from "../../store/app";
 import { AgentDrillIn } from "./roster/AgentDrillIn";
 import { AgentRoster } from "./roster/AgentRoster";
@@ -496,7 +496,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               onDisclosureChange={paintOnly ? noop : actions.setDisclosure}
               bottomInset={bottomInset}
               canRevert={
-                !paintOnly && provider?.capabilities.supportsConversationRollback !== false
+                !paintOnly && provider?.capabilities?.supportsConversationRollback !== false
               }
               onRevert={
                 paintOnly
@@ -545,9 +545,15 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 activePlan={paintOnly ? null : activePlan}
                 onCompact={paintOnly ? noop : () => dispatch(() => actions.compact())}
                 latestCheckpoint={latestCheckpoint}
+                modelLabel={slice.head?.modelSelection.model ?? session.model ?? null}
               />
             </div>
-            <div className="pointer-events-auto mx-auto w-full min-w-0 max-w-3xl px-3 sm:px-5">
+            {/* The dock overlaps the composer by 17px so the two read as ONE
+                shape — a drawer pulled out of the composer, not a card resting
+                on it. `BannerCard` already draws a square, border-less bottom
+                edge for the composer to close; this is the pull that puts it
+                behind. (D's reference §1.5, T3 `ComposerBanner.tsx:55`.) */}
+            <div className="pointer-events-auto mx-auto -mb-[calc(1rem+1px)] w-full min-w-0 max-w-3xl px-3 sm:px-5">
               <ChatBannerDock
                 sessionId={sessionId}
                 approvals={paintOnly ? NO_APPROVALS : pending.approvals}
@@ -573,6 +579,11 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 isTurnWorking={!paintOnly && turnActive}
                 uploadAttachment={actions.uploadAttachment}
                 onRequestCustomAnswerFocus={() => focusComposer(sessionId)}
+                planTitle={
+                  actionableProposedPlan
+                    ? proposedPlanTitle(actionableProposedPlan.planMarkdown)
+                    : null
+                }
               />
             </div>
             <div className="pointer-events-auto mx-auto w-full min-w-0 max-w-3xl px-3 sm:px-5">
@@ -582,7 +593,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 modelSelection={slice.head?.modelSelection ?? null}
                 runtimeMode={slice.head?.runtimeMode ?? DEFAULT_RUNTIME_MODE}
                 interactionMode={slice.interactionMode}
-                showPlanModeToggle={provider?.capabilities.showPlanModeToggle === true}
+                showPlanModeToggle={provider?.capabilities?.showPlanModeToggle === true}
                 accountLabel={accountLabel}
                 isTurnActive={!paintOnly && turnActive}
                 hasPendingRequest={!paintOnly && pending.totalCount > 0}
