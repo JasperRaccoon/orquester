@@ -55,12 +55,11 @@ export function ChatStatusLine({
   const checkpointFiles = latestCheckpoint?.files.length ?? 0;
 
   return (
-    <div
-      data-session-id={sessionId}
-      className="w-full shrink-0 px-3 sm:px-5"
-      role="status"
-      aria-live="polite"
-    >
+    // Deliberately not a live region: the activity label changes every few
+    // seconds while a turn runs, and an `aria-live` here would read the whole
+    // line out on every tool call. The banner dock and the roster carry the
+    // announcements that actually need one.
+    <div data-session-id={sessionId} aria-label="Thread status" className="w-full shrink-0 px-3 sm:px-5">
       <div className="mx-auto flex h-7 w-full max-w-3xl min-w-0 items-center gap-2 text-[11px] leading-4">
         <StatusDot tone={status.tone} size="xs" pulse={status.pulse} />
         <ShimmerText
