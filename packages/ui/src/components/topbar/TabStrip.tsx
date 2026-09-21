@@ -1,15 +1,19 @@
 import React, { useState } from "react";
-import { FolderTree, GitBranch, Globe, ListTodo, Pencil, Trash2, X } from "lucide-react";
+import { Dot, FolderTree, GitBranch, Globe, ListTodo, Pencil, Trash2, X } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { shortAccountLabel } from "../../lib/account-label";
 import { getRegistryIcon } from "../../icons";
 import { ConfirmDialog } from "../ui";
 import { ContextMenu, type ContextMenuItem } from "../ui/context-menu";
 import { SessionStatusDot } from "../ui/session-status-dot";
+import { isLegacyAgentTerminal } from "../../lib/session-kind";
 import {
+  isSessionTab,
+  tabSession,
   useActiveTabId,
   useAppStore,
   useProjectTabs,
+  useThreadUnread,
   type ProjectTab
 } from "../../store/app";
 
@@ -24,6 +28,28 @@ const shortModelLabel = (model: string): string => {
   if (lower.includes("kimi")) return "kimi";
   const parts = model.split(/[/-]/).filter(Boolean);
   return parts[parts.length - 1] ?? model;
+};
+
+/**
+ * The unread mark: this client has not looked at the tab since its latest turn
+ * finished (§7.7). Deliberately separate from the status dot — needs-attention
+ * is the daemon's ladder and is spent on three colours; unread is a private
+ * reading mark and gets none of them.
+ *
+ * Its own component so only this tab re-renders when the mark flips.
+ */
+const TabUnreadMark: React.FC<{ sessionId: string }> = ({ sessionId }) => {
+  const unread = useThreadUnread(sessionId);
+  if (!unread) {
+    return null;
+  }
+  return (
+    <span
+      aria-label="Unread"
+      title="Finished since you last looked"
+      className="h-1.5 w-1.5 shrink-0 rounded-full bg-neutral-300"
+    />
+  );
 };
 
 /** Small inline editor shown in place of a tab label while renaming. */
@@ -65,6 +91,7 @@ export const TabStrip: React.FC = () => {
   const renameTodo = useAppStore((s) => s.renameTodo);
   const deleteTodo = useAppStore((s) => s.deleteTodo);
   const reorderTabs = useAppStore((s) => s.reorderTabs);
+  const markTabUnread = useAppStore((s) => s.markTabUnread);
   const agentAccounts = useAppStore((s) => s.agentAccounts);
 
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -77,7 +104,9 @@ export const TabStrip: React.FC = () => {
     return null;
   }
 
-  const sessionIds = tabs.filter((t) => t.type === "session").map((t) => t.id);
+  // Both session arms reorder together: `POST /api/sessions/reorder` takes the
+  // project's session ids in strip order and does not care what renders them.
+  const sessionIds = tabs.filter(isSessionTab).map((t) => t.id);
 
   const drop = (targetId: string) => {
     const from = sessionIds.indexOf(dragId ?? "");
@@ -94,9 +123,20 @@ export const TabStrip: React.FC = () => {
   };
 
   const menuItems = (tab: ProjectTab): ContextMenuItem[] => {
-    if (tab.type === "session") {
+    if (isSessionTab(tab)) {
       return [
         { label: "Rename", icon: <Pencil size={13} />, onClick: () => setEditingId(tab.id) },
+        // Unread is a per-device reading mark, not the daemon's attention state
+        // (§7.7), so it is offered only where there is a turn to have missed.
+        ...(tab.type === "agent-chat" && tab.session.latestTurn?.completedAt
+          ? [
+              {
+                label: "Mark unread",
+                icon: <Dot size={13} />,
+                onClick: () => markTabUnread(tab.id)
+              }
+            ]
+          : []),
         { label: "Close", icon: <X size={13} />, danger: true, onClick: () => void requestCloseTab(tab.id) }
       ];
     }
@@ -119,26 +159,28 @@ export const TabStrip: React.FC = () => {
     <div className="app-no-drag flex items-center gap-1">
       {tabs.map((tab) => {
         const active = tab.id === activeTabId;
-        const isSession = tab.type === "session";
+        const session = tabSession(tab);
+        const isSession = session !== null;
         const canRename = isSession || tab.type === "todo";
-        const accountId = tab.type === "session" ? tab.session.accountId : undefined;
+        const accountId = session?.accountId;
         const accountLabel = accountId
           ? shortAccountLabel(agentAccounts?.accounts.find((a) => a.id === accountId)?.label)
           : undefined;
         // `model` is set by the daemon only for the claudex/claudemix proxy
         // launchers, so its presence gates the backing-model badge.
-        const modelLabel =
-          tab.type === "session" && tab.session.model
-            ? shortModelLabel(tab.session.model)
-            : undefined;
+        const modelLabel = session?.model ? shortModelLabel(session.model) : undefined;
+        // A pre-chat agent terminal still reattaches until its tab is closed
+        // (§5.2 migration), so it says so rather than being mistaken for a chat
+        // tab that failed to render. Nothing creates one any more.
+        const legacy = session !== null && isLegacyAgentTerminal(session);
         const editing = editingId === tab.id;
-        const title = isSession
+        const title = isSessionTab(tab)
           ? tab.session.title
           : tab.type === "browser"
             ? tab.browser.title || "Browser"
             : tab.title;
-        const icon = isSession ? (
-          getRegistryIcon(tab.session.kind, tab.session.refId, 13)
+        const icon = session ? (
+          getRegistryIcon(session.kind, session.refId, 13)
         ) : tab.type === "git" ? (
           <GitBranch size={13} />
         ) : tab.type === "todo" ? (
@@ -188,6 +230,7 @@ export const TabStrip: React.FC = () => {
             )}
           >
             <span className="text-neutral-500">{icon}</span>
+            {tab.type === "agent-chat" ? <TabUnreadMark sessionId={tab.id} /> : null}
             {editing ? (
               <TabRenameInput
                 initial={title}
@@ -206,10 +249,18 @@ export const TabStrip: React.FC = () => {
             ) : (
               <span className="max-w-[140px] truncate">{title}</span>
             )}
+            {legacy ? (
+              <span
+                className="ml-1 shrink-0 rounded bg-neutral-800 px-1 text-[10px] text-neutral-500"
+                title="A pre-chat agent terminal. It keeps running until you close it; new agent tabs open as chat."
+              >
+                legacy terminal
+              </span>
+            ) : null}
             {modelLabel ? (
               <span
                 className="ml-1 rounded bg-warn-500/15 px-1 text-[10px] text-warn-300"
-                title={tab.type === "session" ? tab.session.model : undefined}
+                title={session?.model}
               >
                 {modelLabel}
               </span>
@@ -219,8 +270,13 @@ export const TabStrip: React.FC = () => {
                 {accountLabel}
               </span>
             ) : null}
-            {isSession ? (
-              <SessionStatusDot sessionId={tab.id} status={tab.session.status} className="ml-0.5" />
+            {session ? (
+              <SessionStatusDot
+                sessionId={tab.id}
+                status={session.status}
+                backgroundLiveness={session.backgroundLiveness}
+                className="ml-0.5"
+              />
             ) : null}
             <button
               type="button"

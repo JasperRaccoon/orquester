@@ -1,13 +1,14 @@
 import React from "react";
 import { MessagesSquare, Plus } from "lucide-react";
 import type { AgentConversationSummary, RegistryEntry } from "@orquester/api";
-import { canResumeAgent } from "@orquester/registry";
 import { getRegistryIcon } from "../../icons";
 import { useRegistry } from "../../hooks";
 import { useAppStore } from "../../store/app";
 import { launchWithNotice } from "../../lib/launch-notice";
 import { relativeTime } from "../../lib/relative-time";
-import { isResumableConversation, resumeAccountId } from "../../lib/resume-account";
+import { resumeAccountId } from "../../lib/resume-account";
+import { canOpenChat, chatLaunchRefId, isChatResumableConversation } from "../../lib/session-kind";
+import { runtimeModeForAgent } from "../../lib/chat-prefs";
 
 const SkeletonRow: React.FC = () => (
   <div className="flex items-center gap-3 rounded-lg px-3 py-2.5">
@@ -34,25 +35,29 @@ export const ProjectOverview: React.FC<{ projectPath: string }> = ({ projectPath
   const cached = useAppStore((s) => s.agentConversationsByProject[projectPath]);
   const openTab = useAppStore((s) => s.openTab);
   const preferredAccountByAgent = useAppStore((s) => s.preferredAccountByAgent);
+  const chatPrefs = useAppStore((s) => s.chatPrefs);
 
   React.useEffect(() => {
     void loadAgentConversations(projectPath);
   }, [projectPath, loadAgentConversations]);
 
   const agents = registry.agents;
-  const quickStart = agents.filter((a) => a.enabled);
+  // Agent tabs are chat only (§1), so "quick start" lists exactly the installed
+  // entries an adapter can drive — a detect-only row has no launch path left.
+  const quickStart = agents.filter((a) => a.enabled && canOpenChat(a.id));
 
   /**
-   * A conversation is offerable only when its agent is installed AND has a
-   * resume flag — otherwise the click could only end in the daemon's
-   * `RESUME_UNAVAILABLE` (or a launch failure), so it is better never shown.
-   * `isResumableConversation` drops the proxy-home rows for the same reason.
+   * A conversation is offerable when the entry that would run it is installed
+   * and has an adapter. Unlike the terminal path this no longer drops the
+   * `cliproxy`-home rows: chat resumes under the conversation's own HOME, so a
+   * claudex/claudemix transcript is resumable for the first time (§5.3) — under
+   * the launcher that owns that home, which is what `chatLaunchRefId` returns.
    */
   const resumable = React.useMemo(() => {
     const byId = new Map<string, RegistryEntry>(agents.map((a) => [a.id, a]));
     return (cached ?? []).filter((c) => {
-      const entry = byId.get(c.agentRefId);
-      return Boolean(entry?.enabled) && canResumeAgent(c.agentRefId) && isResumableConversation(c);
+      const entry = byId.get(chatLaunchRefId(c));
+      return Boolean(entry?.enabled) && isChatResumableConversation(c);
     });
   }, [cached, agents]);
 
@@ -63,16 +68,25 @@ export const ProjectOverview: React.FC<{ projectPath: string }> = ({ projectPath
     // Prefer the home the daemon read the row out of; otherwise fall back to the
     // same per-agent account the "+" menu would launch with (a bare launch would
     // take the daemon default instead, which may be a different home).
+    const refId = chatLaunchRefId(conversation);
+    const accountId = resumeAccountId(conversation, preferredAccountByAgent[refId]);
     launchWithNotice(
-      openTab(
-        "agent",
-        conversation.agentRefId,
-        agentName(conversation.agentRefId),
-        resumeAccountId(conversation, preferredAccountByAgent[conversation.agentRefId]),
-        undefined,
-        conversation.id
-      ),
-      agentName(conversation.agentRefId)
+      openTab({
+        kind: "agent-chat",
+        refId,
+        // The tab reads as the thread it continues, not as the agent.
+        title: conversation.title || agentName(refId),
+        accountId,
+        chat: {
+          accountId,
+          // No model pin here, as for a quick start: the overview offers
+          // "pick up where you left off", not a re-configuration.
+          modelSelection: { model: "" },
+          runtimeMode: runtimeModeForAgent(chatPrefs, refId),
+          resume: { home: conversation.home ?? "system", conversationId: conversation.id }
+        }
+      }),
+      agentName(refId)
     );
   };
 
@@ -135,7 +149,22 @@ export const ProjectOverview: React.FC<{ projectPath: string }> = ({ projectPath
               // No account/model pin: those are the "+" menu's chips. A bare
               // launch takes the daemon's configured defaults, which is exactly
               // what "quick start" should mean.
-              onClick={() => launchWithNotice(openTab("agent", agent.id, agent.name), agent.name)}
+              onClick={() =>
+                launchWithNotice(
+                  openTab({
+                    kind: "agent-chat",
+                    refId: agent.id,
+                    title: agent.name,
+                    chat: {
+                      // No account/model pin — see above; the daemon's own
+                      // defaults are exactly what "quick start" should mean.
+                      modelSelection: { model: "" },
+                      runtimeMode: runtimeModeForAgent(chatPrefs, agent.id)
+                    }
+                  }),
+                  agent.name
+                )
+              }
               className="flex items-center gap-1.5 rounded-md border border-neutral-800 px-2.5 py-1.5 text-[12px] text-neutral-400 transition-colors hover:border-neutral-700 hover:bg-neutral-900 hover:text-neutral-200"
             >
               <Plus size={12} />
