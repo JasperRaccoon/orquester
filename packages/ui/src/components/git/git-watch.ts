@@ -102,6 +102,48 @@ export function subscribeProjectGit(
   };
 }
 
+/* ── Client-local refresh nudges (agent chat spec §7.7) ─────────────────── */
+
+/**
+ * The chat GUI's own reason to refresh a project's git view.
+ *
+ * When an open chat tab's thread stream delivers `thread.turn-diff-completed`,
+ * the agent has just finished writing files — the Git tab must catch up. The
+ * spec is explicit that **no new bus event is introduced for it** (§6.4): the
+ * signal already arrived, on a stream this module knows nothing about, so it is
+ * relayed in-process instead of asking the daemon to broadcast it again.
+ *
+ * Separate from `subscribeProjectGit`'s handlers on purpose: those describe a
+ * daemon subscription with a lifetime, a refcount and a reconnect policy, while
+ * this is a fire-and-forget "look again now" with no transport behind it.
+ */
+type Nudge = () => void;
+const nudges = new Map<string, Set<Nudge>>();
+
+/** Tell every mounted Git view of this project to reconcile now. */
+export function nudgeProjectGit(projectPath: string): void {
+  for (const nudge of nudges.get(projectPath) ?? []) {
+    nudge();
+  }
+}
+
+/** Listen for {@link nudgeProjectGit}. Returns an unsubscribe function. */
+export function subscribeProjectGitNudge(projectPath: string, nudge: Nudge): () => void {
+  const set = nudges.get(projectPath) ?? new Set<Nudge>();
+  set.add(nudge);
+  nudges.set(projectPath, set);
+  return () => {
+    const current = nudges.get(projectPath);
+    if (!current) {
+      return;
+    }
+    current.delete(nudge);
+    if (current.size === 0) {
+      nudges.delete(projectPath);
+    }
+  };
+}
+
 function setState(entry: Entry, patch: Partial<GitWatchState>): void {
   entry.state = { ...entry.state, ...patch };
   for (const handler of entry.handlers) handler.onState(entry.state);

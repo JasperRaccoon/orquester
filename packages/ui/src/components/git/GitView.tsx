@@ -7,7 +7,7 @@ import { EmptyState } from "../main/EmptyState";
 import { ChangesPanel } from "./ChangesPanel";
 import { GitHeader } from "./GitHeader";
 import { HistoryPanel } from "./HistoryPanel";
-import { subscribeProjectGit, type GitWatchState } from "./git-watch";
+import { subscribeProjectGit, subscribeProjectGitNudge, type GitWatchState } from "./git-watch";
 import { useApi } from "../../context/orquester-context";
 import { usePollWhileActive } from "../../hooks";
 
@@ -194,6 +194,16 @@ export const GitView: React.FC<{ projectPath: string; active?: boolean }> = ({
       onState: setWatch
     });
   }, [api, projectPath, active]);
+
+  // An open chat tab's `thread.turn-diff-completed` means the agent just
+  // finished writing files in this project (agent chat spec §7.7). The daemon's
+  // own watcher will see it too, but only on its poll cadence and only while a
+  // `/events?project=` stream is open — the chat stream already knows, so it
+  // relays in-process rather than adding a bus event (§6.4).
+  useEffect(() => {
+    if (!active) return;
+    return subscribeProjectGitNudge(projectPath, () => reconcileRef.current());
+  }, [projectPath, active]);
 
   // Fetch whenever the user ENTERS the Git tab: on first load once we know the
   // branch has an upstream, and on every re-activation — the tab stays mounted
