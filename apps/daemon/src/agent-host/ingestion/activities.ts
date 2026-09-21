@@ -505,8 +505,15 @@ export function runtimeEventToActivities(
       const description = event.payload.description ?? "";
       const title =
         description.trim().length > 0 ? { title: truncateDetail(description, 120) } : {};
+      // T3 gates this on `typedUsage`, a field it carries beside `usage`; our
+      // §4.2 payload has one `usage`, so the same intent reads: always a
+      // progress row when there is no usage at all, and a progress row beside
+      // the usage row whenever the tick also carries real progress content. A
+      // usage-only tick produces the usage row alone, which is what stops it
+      // blanking the last meaningful activity line.
       const hasProgressState =
         event.payload.usage === undefined ||
+        description.trim().length > 0 ||
         event.payload.summary !== undefined ||
         event.payload.lastToolName !== undefined ||
         event.payload.status !== undefined ||
