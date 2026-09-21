@@ -301,6 +301,15 @@ export interface PendingApproval {
   createdAt: string;
   detail?: string;
   appName?: string;
+  /**
+   * The tool call this request gates, when the adapter knows it.
+   *
+   * Stable across that call's in-progress and completed updates (§5.1), so the
+   * card can join the approval to its `item.started` activity and show the
+   * paths and diff it is about to approve — without it a file-change card has
+   * nothing to render but its own title (E2E E7).
+   */
+  toolUseId?: string;
   /** Absent ⇒ the UI offers §4.3's default four. */
   options?: ApprovalOption[];
 }
