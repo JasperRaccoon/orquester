@@ -95,6 +95,32 @@ export function clearComposerInbox(sessionId: string): void {
   listeners.delete(sessionId);
 }
 
+/**
+ * A delivery as composer text.
+ *
+ * Attachments are appended as their **daemon-side paths**, one per line, which
+ * is what an `AttachmentRef.id` is for an uploaded file (§6.1: "upload's
+ * returned path is the attachment reference"). The composer's `@`-path search
+ * already understands a path in the draft, and the adapters read the file from
+ * disk, so this is the same contract the terminal path had — minus the
+ * bracketed-paste escape, which a textarea has no use for.
+ *
+ * (A richer seam — staging a real attachment chip from outside the composer —
+ * would need a `stageAttachment` on W13's composer handle; until then a path is
+ * strictly better than dropping the file on the floor.)
+ */
+export function composerTextForDelivery(delivery: ComposerDelivery): string {
+  const paths = delivery.attachments.map((a) => a.id).filter((id) => id.length > 0);
+  const parts: string[] = [];
+  if (delivery.text.length > 0) {
+    parts.push(delivery.text);
+  }
+  if (paths.length > 0) {
+    parts.push(paths.join("\n"));
+  }
+  return parts.join("\n\n");
+}
+
 /** Merge several deliveries into one, preserving order. */
 export function mergeComposerDeliveries(
   deliveries: readonly ComposerDelivery[]

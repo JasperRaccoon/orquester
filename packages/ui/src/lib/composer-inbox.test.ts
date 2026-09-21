@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   clearComposerInbox,
+  composerTextForDelivery,
   deliverToComposerDraft,
   mergeComposerDeliveries,
   subscribeComposerInbox,
@@ -58,6 +59,31 @@ test("clearing a closed tab drops what was queued for it", () => {
   deliverToComposerDraft("s6", delivery("gone"));
   clearComposerInbox("s6");
   assert.deepEqual(takeComposerDeliveries("s6"), []);
+});
+
+test("a delivery becomes draft text plus one attachment path per line", () => {
+  assert.equal(
+    composerTextForDelivery({
+      text: "Fix this button",
+      attachments: [
+        { type: "image", id: "/up/a.png", name: "a.png", mimeType: "image/png", sizeBytes: 1 },
+        { type: "file", id: "/up/b.txt", name: "b.txt", sizeBytes: 2 }
+      ]
+    }),
+    "Fix this button\n\n/up/a.png\n/up/b.txt"
+  );
+});
+
+test("either half alone stands on its own, and an empty delivery is empty text", () => {
+  assert.equal(composerTextForDelivery({ text: "just words", attachments: [] }), "just words");
+  assert.equal(
+    composerTextForDelivery({
+      text: "",
+      attachments: [{ type: "file", id: "/up/a", name: "a", sizeBytes: 1 }]
+    }),
+    "/up/a"
+  );
+  assert.equal(composerTextForDelivery({ text: "", attachments: [] }), "");
 });
 
 test("merging keeps order and concatenates attachments", () => {
