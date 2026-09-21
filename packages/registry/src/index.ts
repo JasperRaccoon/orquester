@@ -26,6 +26,15 @@ export interface RegistryEntryDef {
   installCmdWin32?: string;
   updateCmd?: string;
   /**
+   * The chat adapter that drives this entry in an agent-chat tab (agent chat
+   * design spec §5.3). Present on every agent row that has an adapter;
+   * claudex/claudemix map to `claude` and carry their launcher env on top.
+   * Absent means the entry can only be launched as a legacy terminal — the
+   * catalog is deliberately allowed to list a detect-only agent (`deepseek`)
+   * that no adapter serves.
+   */
+  chat?: { adapter: "claude" | "codex" | "opencode" | "grok" };
+  /**
    * When false, the entry is disabled at rest even if its bin resolves — a
    * daemon service (the CliProxyManager) enables it at runtime once its backing
    * infrastructure is healthy. Absent/true means "enabled as soon as bin found".
@@ -68,7 +77,8 @@ export const REGISTRY = {
       installCmd: "curl -fsSL https://claude.ai/install.sh | bash",
       installCmdWin32: 'powershell -NoProfile -Command "irm https://claude.ai/install.ps1 | iex"',
       updateCmd: "claude update",
-      resumeArgs: ["--resume", "{id}"] as const
+      resumeArgs: ["--resume", "{id}"] as const,
+      chat: { adapter: "claude" as const }
     },
     {
       id: "codex",
@@ -80,17 +90,8 @@ export const REGISTRY = {
       installCmd: "npm install -g @openai/codex",
       updateCmd: "npm update -g @openai/codex",
       // A subcommand, not a flag: codex's argument-free launch is a distinct mode.
-      resumeArgs: ["resume", "{id}"] as const
-    },
-    {
-      id: "cline",
-      name: "Cline",
-      kind: "agent",
-      bin: ["cline"] as const,
-      versionFlag: "--version",
-      installCmd: "npm install -g cline",
-      updateCmd: "npm update -g cline",
-      resumeArgs: ["--id", "{id}"] as const
+      resumeArgs: ["resume", "{id}"] as const,
+      chat: { adapter: "codex" as const }
     },
     {
       // DETECT-ONLY on purpose — no installCmd/updateCmd, so Settings → Agents
@@ -111,39 +112,6 @@ export const REGISTRY = {
       versionFlag: "--version"
     },
     {
-      // Not a rename of `deepseek` above — a different vendor's CLI (vegamo's
-      // deepcode-cli, binary `deepcode`) that happens to drive DeepSeek models.
-      id: "deepcode",
-      name: "Deep Code",
-      kind: "agent",
-      bin: ["deepcode"] as const,
-      versionFlag: "--version",
-      installCmd: "npm install -g @vegamo/deepcode-cli",
-      updateCmd: "npm update -g @vegamo/deepcode-cli"
-    },
-    {
-      id: "gemini",
-      name: "Gemini CLI",
-      kind: "agent",
-      bin: ["gemini"] as const,
-      versionFlag: "--version",
-      installCmd: "npm install -g @google/gemini-cli",
-      updateCmd: "npm update -g @google/gemini-cli"
-    },
-    {
-      id: "kimi",
-      name: "Kimi Code",
-      kind: "agent",
-      bin: ["kimi"] as const,
-      versionFlag: "--version",
-      // Single-binary installer (no npm package); the documented POSIX and
-      // PowerShell one-liners from code.kimi.com.
-      installCmd: "curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash",
-      installCmdWin32: 'powershell -NoProfile -Command "irm https://code.kimi.com/kimi-code/install.ps1 | iex"',
-      updateCmd: "kimi upgrade",
-      resumeArgs: ["--session", "{id}"] as const
-    },
-    {
       id: "opencode",
       name: "OpenCode",
       kind: "agent",
@@ -152,7 +120,8 @@ export const REGISTRY = {
       versionFlag: "--version",
       installCmd: "npm install -g opencode-ai",
       updateCmd: "npm update -g opencode-ai",
-      resumeArgs: ["--session", "{id}"] as const
+      resumeArgs: ["--session", "{id}"] as const,
+      chat: { adapter: "opencode" as const }
     },
     {
       id: "grok",
@@ -167,20 +136,8 @@ export const REGISTRY = {
       installCmd: "npm install -g @xai-official/grok",
       installCmdWin32: "npm install -g @xai-official/grok",
       updateCmd: "npm update -g @xai-official/grok",
-      resumeArgs: ["--resume", "{id}"] as const
-    },
-    {
-      // Google's Antigravity CLI. The id is `agy` (its binary name) because the
-      // IDE entry already owns `antigravity` and registry ids are one namespace.
-      id: "agy",
-      name: "Antigravity CLI",
-      kind: "agent",
-      bin: ["agy"] as const,
-      versionFlag: "--version",
-      installCmd: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
-      installCmdWin32: 'powershell -NoProfile -Command "irm https://antigravity.google/cli/install.ps1 | iex"',
-      updateCmd: "agy update",
-      resumeArgs: ["--conversation", "{id}"] as const
+      resumeArgs: ["--resume", "{id}"] as const,
+      chat: { adapter: "grok" as const }
     },
     {
       // Claude Code driven through the managed CLIProxyAPI against a GPT/Kimi
@@ -196,7 +153,8 @@ export const REGISTRY = {
       args: ["--dangerously-skip-permissions", "--effort", "high", "--verbose"] as const,
       env: { CLAUDE_CODE_NO_FLICKER: "1" },
       versionFlag: "--version",
-      enabledAtRest: false
+      enabledAtRest: false,
+      chat: { adapter: "claude" as const }
     },
     {
       // Claude Code with a mixed model set (Claude OAuth main loop + GPT/Kimi
@@ -209,7 +167,8 @@ export const REGISTRY = {
       args: ["--dangerously-skip-permissions", "--effort", "high", "--verbose"] as const,
       env: { CLAUDE_CODE_NO_FLICKER: "1" },
       versionFlag: "--version",
-      enabledAtRest: false
+      enabledAtRest: false,
+      chat: { adapter: "claude" as const }
     }
   ] as const,
 

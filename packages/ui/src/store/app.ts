@@ -203,11 +203,17 @@ function applyRegistryEntry(registry: RegistryResponse, entry: RegistryEntry): R
     {
       shell: "shells",
       agent: "agents",
+      // "agent-chat" is a SESSION kind, never a catalog kind: no REGISTRY entry
+      // carries it, so there is no list to replace into.
+      "agent-chat": null,
       ide: "ides",
       "file-explorer": "fileExplorers",
       browser: "browsers"
     } as const
   )[entry.kind];
+  if (key === null) {
+    return registry;
+  }
   const list = registry[key];
   const index = list.findIndex((e) => e.id === entry.id);
   const next = index === -1 ? [...list, entry] : list.map((e) => (e.id === entry.id ? entry : e));
