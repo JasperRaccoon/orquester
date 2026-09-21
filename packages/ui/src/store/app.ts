@@ -18,6 +18,15 @@ import {
 import { loadViewModes, saveViewModes, type ViewMode } from "../lib/view-mode";
 import { loadPreferredAccounts, savePreferredAccounts } from "../lib/preferred-account";
 import { loadPreferredModels, savePreferredModels } from "../lib/preferred-model";
+import { loadChatPrefs, saveChatPrefs, type ChatPrefs } from "../lib/chat-prefs";
+import {
+  hasUnseenCompletion,
+  loadThreadVisits,
+  markThreadUnread,
+  markThreadVisited,
+  saveThreadVisits,
+  type ThreadVisits
+} from "../lib/thread-visits";
 import {
   clampTerminalFontSize,
   loadTerminalFontSize,
@@ -51,6 +60,8 @@ import {
   type PaneSizes
 } from "../lib/panel-sizes";
 import { normalizeAgentPrefs, normalizeUsagePrefs, type AppConfigAdapter } from "../lib/app-config";
+import { mergeProviderUsageWindows } from "../components/topbar/usage-format";
+import { isAgentLikeSession } from "../lib/session-kind";
 import { ProjectSetupError } from "../lib/project-setup-error";
 import { invalidateProjectIndex } from "../lib/project-index";
 import type { HttpClient } from "../lib/http-client";
@@ -83,9 +94,14 @@ import type {
   CliProxySeedRequest,
   CliProxyStatus,
   CliProxyUnseedRequest,
+  CreateAgentChatSessionFields,
+  ProviderUsageWindow,
+  ProviderUsageLimitsUpdate,
   RecentProjectSummary,
   SessionActivity,
   SessionActivityEvent,
+  SessionKind,
+  AgentRuntimeMode,
   TodoListRecord,
   TodoScope,
   UsageResponse,
@@ -152,7 +168,12 @@ const DEFAULT_USAGE_PREFS: UsagePrefs = {
   chip: "busiest"
 };
 
-const DEFAULT_AGENT_PREFS: AgentPrefs = { claudeTimeoutMinutes: 30 };
+const DEFAULT_AGENT_PREFS: AgentPrefs = {
+  claudeTimeoutMinutes: 30,
+  // Agent chat §3.3: continuing an interrupted turn is opt-in, per project.
+  continueThreadsAfterRestart: false,
+  continueThreadsByProject: {}
+};
 
 /**
  * Stable empty pane-sizes object for the {@link usePaneSizes} fallback. A fresh
@@ -442,13 +463,65 @@ export interface TodoTab {
   title: string;
 }
 
-/** A tab in the current project: a daemon session or a local tool tab. */
+/**
+ * A tab in the current project: a daemon session or a local tool tab.
+ *
+ * `agent-chat` is a SIXTH arm (spec §7.1) rather than a `kind` check inside the
+ * `session` arm, for one concrete reason: every PTY-shaped surface already keys
+ * off `tab.type === "session"` — the mobile key bar's mount guard most of all —
+ * so a separate arm makes "the terminal key bar does not mount for chat tabs"
+ * structural instead of a rule each surface has to remember.
+ *
+ * It still carries the whole `SessionSummary`, because §7.1's other half is that
+ * the tab strip and every ambient surface read a **shell** (the six §6.4 fields
+ * on the summary) and never open a thread. Read it through {@link tabSession} so
+ * a surface that treats both arms alike says so once.
+ */
 export type ProjectTab =
   | { id: string; type: "session"; session: SessionSummary }
+  | { id: string; type: "agent-chat"; sessionId: string; session: SessionSummary }
   | { id: string; type: "files"; title: string }
   | { id: string; type: "git"; title: string }
   | { id: string; type: "todo"; todoId: string; title: string }
   | { id: string; type: "browser"; browser: BrowserSummary };
+
+/** The two arms that carry a daemon session. */
+export type SessionProjectTab = Extract<ProjectTab, { type: "session" } | { type: "agent-chat" }>;
+
+/** True for both session arms — what rename, reorder and drag are offered on. */
+export function isSessionTab(tab: ProjectTab): tab is SessionProjectTab {
+  return tab.type === "session" || tab.type === "agent-chat";
+}
+
+/** Either session arm's summary; `null` for a client-local tool tab. */
+export function tabSession(tab: ProjectTab): SessionSummary | null {
+  return isSessionTab(tab) ? tab.session : null;
+}
+
+/**
+ * Everything a launch collects, in one object (see `openTab`).
+ *
+ * `resumeConversationId` is the TERMINAL resume path — the daemon substitutes it
+ * into the entry's `resumeArgs` — and applies only to `kind: "agent"`. A chat
+ * launch resumes through `chat.resume` instead, which is why a cliproxy-home
+ * conversation is resumable in chat and not in a terminal (§5.3).
+ */
+export interface OpenTabRequest {
+  kind: SessionKind;
+  refId: string;
+  title?: string;
+  accountId?: string;
+  model?: string;
+  /** Legacy-terminal resume only. Refused with 400 `RESUME_UNAVAILABLE`. */
+  resumeConversationId?: string;
+  /**
+   * A first line TYPED into the new session's PTY by the daemon right after
+   * spawn (see `createProjectWithCommand`). Terminals only.
+   */
+  initialCommand?: string;
+  /** The §6.1 chat block. Required in practice for `kind: "agent-chat"`. */
+  chat?: CreateAgentChatSessionFields;
+}
 
 /** What the tab strip + MainView are showing. A project (full tab set) or a
  *  workspace (to-do tabs only). The `key` is the map key for all per-context tab state:
@@ -651,7 +724,37 @@ export interface AppState {
     accountId?: string;
     model?: string;
     projectPath: string;
+    /** Which kind the refused attempt was, so "Start fresh" opens the same one. */
+    kind: SessionKind;
+    /** The chat launch fields of the refused attempt, minus its `resume`. */
+    chat?: CreateAgentChatSessionFields;
   } | null;
+  /**
+   * Transient notice for a chat provider's `auth.status` reporting an error
+   * (§7.7): the agent's credential is gone or expired, so every turn on that
+   * thread will fail until it is fixed. Carries its own action — "Open Settings
+   * → Accounts" — rather than being folded into the plain `notice`, which has
+   * none. Advisory, dismissible, never persisted.
+   */
+  agentAuthError: {
+    sessionId: string;
+    /** The registry entry's display name, e.g. "Claude Code". */
+    agentName: string;
+    message: string;
+  } | null;
+  /**
+   * Provider rate-limit windows harvested from the chat streams'
+   * `account.rate-limits.updated` (§7.7), merged **by window id** per agent so a
+   * sparse update only replaces the windows it names. Read by the Settings usage
+   * overview alongside the daemon's own `usage` snapshot; never persisted (a
+   * window is only as good as the live thread that reported it).
+   */
+  providerRateLimits: Record<string, ProviderUsageWindow[]>;
+  /**
+   * Which Settings section to open on. `null` = the default landing section.
+   * Set by the surfaces that deep-link into Settings (the agent-auth toast).
+   */
+  settingsSection: string | null;
   /**
    * Transient after-the-fact notice with no action of its own (e.g. "the
    * project was created, but its setup command could not be started"). Rendered
@@ -677,6 +780,18 @@ export interface AppState {
   preferredAccountByAgent: Record<string, string>;
   /** Last backing model chosen per agent (claudex/claudemix) in the launcher (client-local, persisted). */
   preferredModelByAgent: Record<string, string>;
+  /**
+   * Agent-chat composer + launcher preferences, per device (chat spec §7.4,
+   * §4.6.7): steer-vs-queue, skills under `/`, and the last permission mode
+   * picked per agent. Persisted client-side through a validating loader.
+   */
+  chatPrefs: ChatPrefs;
+  /**
+   * Per-device last-visit stamps for chat tabs (§7.7). Unread is derived from
+   * these and `SessionSummary.latestTurn.completedAt`; it is deliberately NOT
+   * the same thing as needs-attention, which the daemon owns.
+   */
+  threadVisits: ThreadVisits;
   /** Global terminal font size (px); persisted client-side, per device. */
   terminalFontSize: number;
   /** Colour scheme; persisted client-side, per device. See lib/theme.ts. */
@@ -830,28 +945,29 @@ export interface AppState {
   /**
    * Launch a tab in the current project.
    *
-   * `resumeConversationId` resumes a past conversation instead of starting a
-   * fresh one; the daemon refuses (400 `RESUME_UNAVAILABLE`) rather than
-   * silently starting a fresh one when the id is unusable — surfaced as
-   * `resumeError`. `initialCommand` is typed into the new session's PTY by the
-   * **daemon** right after spawn (see `createProjectWithCommand`).
+   * An options object rather than positionals: the terminal path already took
+   * seven, and a chat launch (§6.1) adds a whole `chat` block on top —
+   * account, model selection, runtime mode and an optional resume cursor.
    *
    * Resolves to the created session, or `undefined` when nothing launched (no
    * api, or a refused resume).
    */
-  openTab: (
-    kind: RegistryKind,
-    refId: string,
-    title?: string,
-    accountId?: string,
-    model?: string,
-    resumeConversationId?: string,
-    initialCommand?: string
-  ) => Promise<SessionSummary | undefined>;
+  openTab: (request: OpenTabRequest) => Promise<SessionSummary | undefined>;
   /** Dismiss the transient missing-models launch notice. */
   dismissModelWarning: () => void;
   /** Dismiss the transient refused-resume notice. */
   dismissResumeError: () => void;
+  /** Raise the chat provider auth-error toast (§7.7). Replaces any current one. */
+  reportAgentAuthError: (error: { sessionId: string; agentName: string; message: string }) => void;
+  /** Dismiss the chat provider auth-error toast. */
+  dismissAgentAuthError: () => void;
+  /**
+   * Merge a chat stream's `account.rate-limits.updated` into the usage overview
+   * **by window id** (§7.7): windows the update does not name stay as they were.
+   */
+  applyProviderRateLimits: (agentRefId: string, update: ProviderUsageLimitsUpdate) => void;
+  /** Open Settings, optionally on a named section (the auth toast's action). */
+  openSettings: (section?: string) => void;
   /**
    * Act on `resumeError`: start a FRESH session with the same agent, account and
    * model, in the project the refused resume targeted (navigating there first
@@ -871,9 +987,15 @@ export interface AppState {
   confirmCloseTab: () => void;
   cancelCloseTab: () => void;
   activateTab: (id: string) => void;
+  /** Mark a chat tab unread again: a last-visit stamp 1 ms before its latest completion. */
+  markTabUnread: (id: string) => void;
   setViewMode: (mode: ViewMode) => void;
   setPreferredAccount: (agent: string, accountId: string) => void;
   setPreferredModel: (agent: string, model: string) => void;
+  /** Patch the per-device agent-chat preferences and persist them. */
+  setChatPrefs: (patch: Partial<ChatPrefs>) => void;
+  /** Remember the permission mode a launcher row will start this agent in. */
+  setPreferredRuntimeMode: (agent: string, mode: AgentRuntimeMode) => void;
   setTerminalFontSize: (size: number) => void;
   nudgeTerminalFontSize: (delta: number) => void;
   setColorScheme: (scheme: ColorScheme) => void;
@@ -965,6 +1087,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   activityById: {},
   modelWarning: null,
   resumeError: null,
+  agentAuthError: null,
+  providerRateLimits: {},
+  settingsSection: null,
   notice: null,
   fileTabsByProject: {},
   gitTabsByProject: {},
@@ -974,6 +1099,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   viewModeByProject: loadViewModes(),
   preferredAccountByAgent: loadPreferredAccounts(),
   preferredModelByAgent: loadPreferredModels(),
+  chatPrefs: loadChatPrefs(),
+  threadVisits: loadThreadVisits(),
   terminalFontSize: loadTerminalFontSize(),
   colorScheme: initialThemePrefs.scheme,
   themeMode: initialThemePrefs.mode,
@@ -1500,6 +1627,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         // daemon we just left, and their actions would launch into it.
         resumeError: null,
         modelWarning: null,
+        agentAuthError: null,
+        providerRateLimits: {},
         notice: null,
         protectArchived: false,
         protectArchivedLoaded: false,
@@ -1532,6 +1661,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       // daemon's session/project, so they must not survive the switch.
       resumeError: null,
       modelWarning: null,
+      agentAuthError: null,
+      providerRateLimits: {},
       notice: null,
       // Per-daemon flag: never let one server's curtain setting apply to the
       // next one. connect() reloads it from the newly selected daemon.
@@ -1783,15 +1914,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       // after the spawn — that removes the old client-side race entirely (a
       // fixed sleep guessing when the shell has drawn its prompt, then an input
       // frame the WS channel could drop on a reconnect).
-      const session = await get().openTab(
-        "shell",
-        shellId,
-        "Setup",
-        undefined,
-        undefined,
-        undefined,
-        command
-      );
+      const session = await get().openTab({
+        kind: "shell",
+        refId: shellId,
+        title: "Setup",
+        initialCommand: command
+      });
       if (!session) {
         throw new Error("the setup terminal could not be opened");
       }
@@ -2276,7 +2404,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     await get().api?.updateRegistryEntry(id).catch(() => undefined);
   },
 
-  openTab: async (kind, refId, title, accountId, model, resumeConversationId, initialCommand) => {
+  openTab: async (request) => {
+    const { kind, refId, title, accountId, model, resumeConversationId, initialCommand, chat } =
+      request;
     const api = get().api;
     if (!api) {
       return;
@@ -2293,7 +2423,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         accountId,
         model,
         resumeConversationId,
-        initialCommand
+        initialCommand,
+        chat
       });
     } catch (error) {
       // A refused RESUME is the one create failure with a useful recovery ("open
@@ -2312,11 +2443,15 @@ export const useAppStore = create<AppState>((set, get) => ({
             message:
               (error as ApiError).serverMessage ??
               "That conversation cannot be resumed with this agent.",
-            // Replay material for "Start fresh": the identity and the project
+            // Replay material for "Start fresh": the identity, kind and project
             // this attempt targeted, not whatever is current when it is clicked.
             accountId,
             model,
-            projectPath: project?.path ?? ""
+            projectPath: project?.path ?? "",
+            kind,
+            // Drop the cursor the daemon just refused; everything else about the
+            // chat launch (model selection, runtime mode) replays as-is.
+            chat: chat ? { ...chat, resume: undefined } : undefined
           }
         });
         // The refusal means our cached list offered an id the daemon rejects —
@@ -2385,8 +2520,29 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
       get().openProject(project);
     }
-    await get().openTab("agent", error.agentId, error.agentName, error.accountId, error.model);
+    await get().openTab({
+      kind: error.kind,
+      refId: error.agentId,
+      title: error.agentName,
+      accountId: error.accountId,
+      model: error.model,
+      chat: error.chat
+    });
   },
+
+  reportAgentAuthError: (error) => set({ agentAuthError: error }),
+
+  dismissAgentAuthError: () => set({ agentAuthError: null }),
+
+  applyProviderRateLimits: (agentRefId, update) =>
+    set((state) => ({
+      providerRateLimits: {
+        ...state.providerRateLimits,
+        [agentRefId]: mergeProviderUsageWindows(state.providerRateLimits[agentRefId], update.windows)
+      }
+    })),
+
+  openSettings: (section) => set({ settingsOpen: true, settingsSection: section ?? null }),
 
   setNotice: (notice) => set({ notice }),
 
@@ -2465,7 +2621,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       // The agent it just ran most likely wrote/extended a conversation on disk
       // — drop the cache so the next overview/menu open re-scans. Same `set` as
       // the removal so the tab and its stale cache never disagree mid-render.
-      if (session?.kind === "agent") {
+      if (session && isAgentLikeSession(session)) {
         return {
           ...next,
           agentConversationsByProject: dropConversationCache(
@@ -2512,7 +2668,33 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (!key) {
         return state;
       }
-      return { activeTabByProject: { ...state.activeTabByProject, [key]: id } };
+      // Looking at a chat tab IS the visit that clears its unread mark (§7.7).
+      // Only chat sessions carry one: a terminal has no "latest turn completed"
+      // to be newer than a visit.
+      const session = state.sessions.find((s) => s.id === id);
+      const threadVisits =
+        session && session.kind === "agent-chat"
+          ? markThreadVisited(state.threadVisits, id, new Date().toISOString())
+          : state.threadVisits;
+      if (threadVisits !== state.threadVisits) {
+        saveThreadVisits(threadVisits);
+      }
+      return { activeTabByProject: { ...state.activeTabByProject, [key]: id }, threadVisits };
+    }),
+
+  markTabUnread: (id) =>
+    set((state) => {
+      const session = state.sessions.find((s) => s.id === id);
+      const threadVisits = markThreadUnread(
+        state.threadVisits,
+        id,
+        session?.latestTurn?.completedAt
+      );
+      if (threadVisits === state.threadVisits) {
+        return state;
+      }
+      saveThreadVisits(threadVisits);
+      return { threadVisits };
     }),
 
   setViewMode: (mode) =>
@@ -2531,6 +2713,23 @@ export const useAppStore = create<AppState>((set, get) => ({
       const preferredAccountByAgent = { ...state.preferredAccountByAgent, [agent]: accountId };
       savePreferredAccounts(preferredAccountByAgent);
       return { preferredAccountByAgent };
+    }),
+
+  setChatPrefs: (patch) =>
+    set((state) => {
+      const chatPrefs = { ...state.chatPrefs, ...patch };
+      saveChatPrefs(chatPrefs);
+      return { chatPrefs };
+    }),
+
+  setPreferredRuntimeMode: (agent, mode) =>
+    set((state) => {
+      const chatPrefs = {
+        ...state.chatPrefs,
+        runtimeModeByAgent: { ...state.chatPrefs.runtimeModeByAgent, [agent]: mode }
+      };
+      saveChatPrefs(chatPrefs);
+      return { chatPrefs };
     }),
 
   setPreferredModel: (agent, model) =>
@@ -3155,11 +3354,17 @@ export function useProjectTabs(): ProjectTab[] {
     if (!project) {
       return todoTabs; // workspace context: to-do only
     }
+    // One sorted list, two arms: a chat tab keeps its place among the terminals
+    // (same daemon-assigned `order`/`createdAt` key), only its renderer differs.
     const sessionTabs = sessions
       .filter((s) => s.projectPath === key)
       .slice()
       .sort((a, b) => a.order - b.order || a.createdAt.localeCompare(b.createdAt))
-      .map<ProjectTab>((session) => ({ id: session.id, type: "session", session }));
+      .map<ProjectTab>((session) =>
+        session.kind === "agent-chat"
+          ? { id: session.id, type: "agent-chat", sessionId: session.id, session }
+          : { id: session.id, type: "session", session }
+      );
     const fileTabs = (fileTabsByProject[key] ?? []).map<ProjectTab>((t) => ({
       id: t.id,
       type: "files",
@@ -3225,4 +3430,21 @@ export function useGridTracks(): GridTracks | null {
  */
 export function useSessionActivity(id: string): SessionActivity | undefined {
   return useAppStore((s) => s.activityById[id]);
+}
+
+/**
+ * Whether a chat tab has a completion this client has not looked at (§7.7).
+ *
+ * A boolean selector on purpose: it compares two stamps in the store and hands
+ * back `true`/`false`, so a tab re-renders only when its unread state actually
+ * flips, not on every visit map write.
+ */
+export function useThreadUnread(id: string): boolean {
+  return useAppStore((s) => {
+    const session = s.sessions.find((entry) => entry.id === id);
+    if (!session || session.kind !== "agent-chat") {
+      return false;
+    }
+    return hasUnseenCompletion(session.latestTurn?.completedAt, s.threadVisits[id]);
+  });
 }

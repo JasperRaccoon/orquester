@@ -14,7 +14,6 @@ import ClaudeMix from "./agents/claudemix.svg?react";
 import ClaudeX from "./agents/claudex.svg?react";
 import Codex from "./agents/codex.svg?react";
 import DeepSeek from "./agents/deepseek.svg?react";
-import Gemini from "./agents/gemini.svg?react";
 import Grok from "./agents/grok.svg?react";
 import OpenCode from "./agents/opencode.svg?react";
 
@@ -56,6 +55,9 @@ import Zsh from "./shells/zsh.svg?react";
 const generic: Partial<Record<RegistryKind, React.ComponentType<React.SVGProps<SVGSVGElement> | { size?: number | string }>>> = {
   shell: TerminalSquare,
   agent: Bot,
+  // A chat tab still names an agent through `refId`, so the specific icon
+  // almost always wins; this only covers an entry with no artwork of its own.
+  "agent-chat": Bot,
   ide: Code2,
   "file-explorer": FolderOpen,
   browser: Globe
@@ -70,7 +72,6 @@ const specific: Record<string, React.ComponentType<React.SVGProps<SVGSVGElement>
   claudemix: ClaudeMix,
   codex: Codex,
   deepseek: DeepSeek,
-  gemini: Gemini,
   grok: Grok,
   opencode: OpenCode,
 

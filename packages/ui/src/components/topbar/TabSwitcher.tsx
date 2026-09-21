@@ -4,18 +4,26 @@ import { BottomSheet, ConfirmDialog, DropdownEmpty } from "../ui";
 import { SessionStatusDot } from "../ui/session-status-dot";
 import { cn } from "../../lib/cn";
 import { getRegistryIcon } from "../../icons";
-import { useActiveTabId, useAppStore, useProjectTabs } from "../../store/app";
+import {
+  isSessionTab,
+  tabSession,
+  useActiveTabId,
+  useAppStore,
+  useProjectTabs,
+  useThreadUnread
+} from "../../store/app";
 import type { ProjectTab } from "../../store/app";
 
-const tabLabel = (tab: ProjectTab) =>
-  tab.type === "session"
-    ? tab.session.title
-    : tab.type === "browser"
-      ? tab.browser.title || "Browser"
-      : tab.title;
-const tabIcon = (tab: ProjectTab, size = 16) =>
-  tab.type === "session" ? (
-    getRegistryIcon(tab.session.kind, tab.session.refId, size)
+const tabLabel = (tab: ProjectTab): string => {
+  if (isSessionTab(tab)) {
+    return tab.session.title;
+  }
+  return tab.type === "browser" ? tab.browser.title || "Browser" : tab.title;
+};
+const tabIcon = (tab: ProjectTab, size = 16) => {
+  const session = tabSession(tab);
+  return session ? (
+    getRegistryIcon(session.kind, session.refId, size)
   ) : tab.type === "git" ? (
     <GitBranch size={size} />
   ) : tab.type === "todo" ? (
@@ -25,6 +33,18 @@ const tabIcon = (tab: ProjectTab, size = 16) =>
   ) : (
     <FolderTree size={size} />
   );
+};
+
+/** The per-device "finished since you last looked" mark (§7.7). */
+const TabUnreadMark: React.FC<{ sessionId: string }> = ({ sessionId }) => {
+  const unread = useThreadUnread(sessionId);
+  return unread ? (
+    <span
+      aria-label="Unread"
+      className="h-1.5 w-1.5 shrink-0 rounded-full bg-neutral-300"
+    />
+  ) : null;
+};
 
 /** Inline editor shown in place of a tab row while renaming (touch-sized). */
 const SheetRenameInput: React.FC<{
@@ -85,7 +105,7 @@ export const TabSwitcher: React.FC = () => {
     }
     if (tab.type === "todo") {
       void renameTodo(tab.todoId, value);
-    } else if (tab.type === "session") {
+    } else if (isSessionTab(tab)) {
       void renameTab(tab.id, value);
     }
   };
@@ -107,7 +127,7 @@ export const TabSwitcher: React.FC = () => {
         {tabs.length === 0 && <DropdownEmpty>No tabs open</DropdownEmpty>}
         {tabs.map((tab) => {
           const isActive = tab.id === activeId;
-          const canRename = tab.type === "session" || tab.type === "todo";
+          const canRename = isSessionTab(tab) || tab.type === "todo";
           if (editingId === tab.id) {
             return (
               <div key={tab.id} className="flex items-center gap-2 px-2 py-1.5">
@@ -134,8 +154,13 @@ export const TabSwitcher: React.FC = () => {
                 className="flex min-w-0 flex-1 items-center gap-2 rounded px-2 py-2.5 text-left text-[15px] text-neutral-200 hover:bg-neutral-800"
               >
                 <span className="text-neutral-500">{tabIcon(tab)}</span>
-                {tab.type === "session" ? (
-                  <SessionStatusDot sessionId={tab.id} status={tab.session.status} />
+                {tab.type === "agent-chat" ? <TabUnreadMark sessionId={tab.id} /> : null}
+                {tabSession(tab) ? (
+                  <SessionStatusDot
+                    sessionId={tab.id}
+                    status={tabSession(tab)!.status}
+                    backgroundLiveness={tabSession(tab)!.backgroundLiveness}
+                  />
                 ) : null}
                 <span className="min-w-0 flex-1 truncate">{tabLabel(tab)}</span>
                 {isActive && <Circle size={7} className="shrink-0 fill-neutral-300 text-neutral-300" />}

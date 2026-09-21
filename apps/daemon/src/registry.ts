@@ -1,4 +1,5 @@
 import type {
+  AgentAdapterId,
   OpenResult,
   RegistryActionResult,
   RegistryEntry,
@@ -29,6 +30,8 @@ interface RegistryDef {
   versionFlag?: string;
   installCmd?: string;
   updateCmd?: string;
+  /** Chat design spec §5.3 — the adapter this agent opens a chat tab with. */
+  chat?: { adapter: AgentAdapterId };
 }
 
 function expand(tokens: readonly string[]): string[] {
@@ -145,6 +148,7 @@ function materialize(list: readonly RegistryEntryDef[]): RegistryDef[] {
     const installCmd = process.platform === "win32" && s.installCmdWin32 ? s.installCmdWin32 : s.installCmd;
     if (installCmd) d.installCmd = installCmd;
     if (s.updateCmd) d.updateCmd = s.updateCmd;
+    if (s.chat) d.chat = { adapter: s.chat.adapter };
     return d;
   });
 }
@@ -401,7 +405,11 @@ export class RegistryService {
       versionFlag: def.versionFlag,
       installCmd: def.installCmd,
       updateCmd: def.updateCmd,
-      installState: "idle"
+      installState: "idle",
+      // Chat design spec §5.3: the adapter an agent row opens a chat tab with.
+      // Carried verbatim from the static catalog — an agent WITHOUT it cannot
+      // open a chat tab, which is how `deepseek` stays detect-only.
+      chat: def.chat ? { adapter: def.chat.adapter } : undefined
     };
   }
 
