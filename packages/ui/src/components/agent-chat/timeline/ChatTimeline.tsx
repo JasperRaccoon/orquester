@@ -4,6 +4,7 @@ import { TriangleAlert, X } from "lucide-react";
 import { cn } from "../../../lib/cn";
 import type { DisclosureState } from "../../../lib/agent-chat/contracts";
 import { useAgentChatDrillIn } from "../../../lib/agent-chat/hooks";
+import { isActiveChatTab } from "../../../lib/agent-chat-active-tab";
 import { resolveChatShortcut } from "../../../lib/agent-chat/keybindings.logic";
 import { peekThreadStore } from "../../../lib/agent-chat/store";
 import type { ChatTimelineProps, TimelineScrollPosition } from "../contracts";
@@ -446,14 +447,15 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
    *
    * **It acts only for the visible tab.** Every chat tab stays mounted
    * (`MainView` shows and hides), so a naive `window` listener would fire once
-   * per open thread. The gate is the timeline's own layout box: a hidden tab
-   * has no `offsetParent`, which needs no new seam and cannot disagree with
-   * what the user is looking at. The drill-in does not take the chord either —
-   * its own scroller is the one on screen, and it registers the same way.
+   * per open thread. `isActiveChatTab` is the shell's answer to "am I the one
+   * on screen?", and the layout check behind it covers the drill-in, which
+   * mounts a second timeline for the *same* session id while the parent's is
+   * still mounted — only the one with a layout box may take the chord.
    */
   React.useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.defaultPrevented) return;
+      if (!isActiveChatTab(sessionId)) return;
       const command = resolveChatShortcut(event);
       if (command?.kind !== "scroll-to-end") return;
       const node = scrollerRef.current;
@@ -463,7 +465,7 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [reArmFollow]);
+  }, [reArmFollow, sessionId]);
 
   // -------------------------------------------------------------------------
 
