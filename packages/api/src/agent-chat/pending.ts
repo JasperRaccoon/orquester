@@ -246,6 +246,11 @@ export function derivePendingRequests(
         ...(typeof payload.appName === "string" && payload.appName
           ? { appName: payload.appName }
           : {}),
+        // Carries the join key to the card (E2E E7); absent on adapters that
+        // do not know which call they are gating, which the card handles.
+        ...(typeof payload.toolUseId === "string" && payload.toolUseId
+          ? { toolUseId: payload.toolUseId }
+          : {}),
         ...(options.length > 0 ? { options } : {})
       });
     } else if (activity.activityKind === "user-input.requested") {

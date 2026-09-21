@@ -1,7 +1,7 @@
 // Ported from T3 Code (MIT): apps/web/src/components/chat/ChatComposer.tsx:6131-6274,
 // apps/web/src/components/chat/ComposerBannerStack.tsx
 import React from "react";
-import type { AttachmentRef } from "@orquester/api/agent-chat";
+import type { AttachmentRef, ThreadItem } from "@orquester/api/agent-chat";
 import { MAX_TURN_ATTACHMENTS } from "@orquester/api/agent-chat";
 
 import { cn } from "../../../lib/cn";
@@ -61,6 +61,11 @@ export interface ChatBannerDockExtraProps {
   /** `false` while this tab is open but not visible — gates the digit keys. */
   active?: boolean;
   /**
+   * The thread's items, so a file-change approval carrying no `detail` can be
+   * joined to the tool call it gates and show its paths and diff (E2E E7).
+   */
+  entries?: readonly ThreadItem[];
+  /**
    * The pending proposal's own title, for the "Plan ready" card's description
    * slot. Without it the banner names a plan the user cannot identify.
    *
@@ -118,6 +123,7 @@ export function ChatBannerDock({
   uploadAttachment,
   notices,
   active,
+  entries,
   planTitle = null
 }: ChatBannerDockProps & ChatBannerDockExtraProps): React.ReactElement | null {
   // One breakpoint governs every mobile rule in the chat surface (§7.8).
@@ -183,12 +189,12 @@ export function ChatBannerDock({
   const cardLeaving = liveCard === null && exitingCard !== null;
 
   const stackItems = React.useMemo(() => {
-    const entries: Array<DockNotice & { render: React.ReactNode }> = [];
+    const stackEntries: Array<DockNotice & { render: React.ReactNode }> = [];
     if (
       backgroundLiveness !== null &&
       showBackgroundLivenessBanner({ backgroundLiveness, isTurnWorking })
     ) {
-      entries.push({
+      stackEntries.push({
         id: `background-liveness:${sessionId}`,
         variant: "default",
         priority: "activity",
@@ -204,7 +210,7 @@ export function ChatBannerDock({
       });
     }
     for (const notice of notices ?? []) {
-      entries.push({
+      stackEntries.push({
         ...notice,
         render: (
           <BannerCard
@@ -220,7 +226,7 @@ export function ChatBannerDock({
         )
       });
     }
-    return sortBannerStack(entries);
+    return sortBannerStack(stackEntries);
     // `requestDismiss` is stable for the life of the component.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
@@ -347,6 +353,7 @@ export function ChatBannerDock({
           approval={approval}
           pendingCount={approvals.length}
           isResponding={respondingRequestIds.includes(approval.requestId)}
+          entries={entries}
           onRespond={(decision) => onApprove({ requestId: approval.requestId, decision })}
         />
       ) : null}
