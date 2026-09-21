@@ -69,6 +69,46 @@ export function setProviderSideEffects(next: ProviderSideEffects): void {
   sideEffects = next;
 }
 
+/**
+ * Auth messages already raised, keyed `<adapterId>\0<message>`.
+ *
+ * Every coarse `agent.providers.changed` forces a reload and every reload
+ * re-publishes, so without this the toast came back the moment the user
+ * dismissed it and the provider was still signed out (fix-wave Q2-11). The
+ * same shape the thread error banner uses: a **different** message re-raises,
+ * the same one does not.
+ */
+const raisedAuthMessages = new Set<string>();
+
+/**
+ * Forget a raised auth message so a later occurrence re-raises. The app
+ * store calls this from `dismissAgentAuthError`; a provider that signs back
+ * in clears its own entry below.
+ */
+export function forgetRaisedAuthError(adapterId: string, message: string): void {
+  raisedAuthMessages.delete(`${adapterId}\u0000${message}`);
+}
+
+/**
+ * The auth message for a snapshot, or null when the provider is fine.
+ *
+ * §7.7: "`auth.status` with an error surfaces a toast pointing at Settings →
+ * Accounts." Both an explicit error status and a plain unauthenticated
+ * provider are that toast — the difference is only how the daemon learned it.
+ */
+export function authErrorMessage(provider: ProviderSnapshot): string | null {
+  const label = provider.refIds[0] ?? provider.id;
+  if (provider.auth.status === "unauthenticated") {
+    return provider.auth.label ?? `${label} is not signed in. Open Settings → Accounts.`;
+  }
+  // A provider whose snapshot carries an error while auth is unknown is the
+  // `auth.status {error}` case W1 routes onto the snapshot.
+  if (provider.status === "error" && provider.auth.status !== "authenticated") {
+    return provider.message ?? `${label} could not authenticate. Open Settings → Accounts.`;
+  }
+  return null;
+}
+
 /** Fan a fresh snapshot out to the ambient surfaces of §7.7. Never throws. */
 function publishAmbientFacts(providers: readonly ProviderSnapshot[]): void {
   for (const provider of providers) {
@@ -80,15 +120,26 @@ function publishAmbientFacts(providers: readonly ProviderSnapshot[]): void {
           sideEffects.onRateLimits?.(refId, { windows: provider.usageLimits.windows });
         }
       }
-      if (provider.auth.status === "unauthenticated") {
-        sideEffects.onAuthError?.({
-          adapterId: provider.id,
-          agentName: provider.refIds[0] ?? provider.id,
-          message:
-            provider.message ??
-            `${provider.refIds[0] ?? provider.id} is not signed in. Open Settings → Accounts.`
-        });
+      const message = authErrorMessage(provider);
+      if (message === null) {
+        // Signed back in: the next failure is news again.
+        for (const key of [...raisedAuthMessages]) {
+          if (key.startsWith(`${provider.id}\u0000`)) {
+            raisedAuthMessages.delete(key);
+          }
+        }
+        continue;
       }
+      const key = `${provider.id}\u0000${message}`;
+      if (raisedAuthMessages.has(key)) {
+        continue;
+      }
+      raisedAuthMessages.add(key);
+      sideEffects.onAuthError?.({
+        adapterId: provider.id,
+        agentName: provider.refIds[0] ?? provider.id,
+        message
+      });
     } catch {
       // An ambient surface must never be able to blank the provider catalog.
     }
@@ -162,9 +213,14 @@ export async function refreshProvider(
 ): Promise<void> {
   const response = await transport.refreshProvider(adapterId, cwd ? { cwd } : {});
   providersStore.setState((state) => ({
-    providers: state.providers.map((provider) =>
-      provider.id === response.provider.id ? response.provider : provider
-    ),
+    // Append when the id is absent: an adapter that becomes available only
+    // after the first load — the user installs an agent and hits Refresh —
+    // was otherwise discarded silently (fix-wave Q2-12).
+    providers: state.providers.some((provider) => provider.id === response.provider.id)
+      ? state.providers.map((provider) =>
+          provider.id === response.provider.id ? response.provider : provider
+        )
+      : [...state.providers, response.provider],
     loadedAt: new Date().toISOString()
   }));
   publishAmbientFacts([response.provider]);
@@ -184,4 +240,5 @@ export function resetProvidersStore(): void {
   inFlight = null;
   boundTransport = null;
   sideEffects = {};
+  raisedAuthMessages.clear();
 }

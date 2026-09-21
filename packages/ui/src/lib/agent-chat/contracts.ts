@@ -121,6 +121,13 @@ export interface AgentChatThreadSlice {
   respondingRequestIds: string[];
   /** Thread-level error banner text, overlaid — never a timeline row (§7.3). */
   errorBanner: string | null;
+  /**
+   * True while a `/revert` command is in flight. §7.5: "The composer goes
+   * `inert` for exactly one reason — while a revert is running."
+   *
+   * *Added by W11 in the fix wave (R8-M2); `contracts.ts` stays additive-only.*
+   */
+  reverting: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -167,6 +174,15 @@ export interface WorkLogEntry {
   truncated?: boolean;
   /** Grouping key for subagent lifecycle rows — one row per agent. */
   taskId?: string;
+  /**
+   * The tool call this row happened *inside* — a hook run or a CLI-side denial
+   * belongs under the call that triggered it, not beside it. §5.1 promotes it
+   * out of the payload precisely so the presentation layer can read it without
+   * decoding.
+   *
+   * *Added by W11 in the fix wave (R7-10); `contracts.ts` stays additive-only.*
+   */
+  parentToolUseId?: string;
   agentRole?: string;
   /** Present on an answered-question row; the expansion shows the full history. */
   questionAnswer?: {
@@ -415,6 +431,17 @@ export interface AgentChatThreadView {
   /** Memoised rows (§7.2: entries → rows → stable rows). */
   rows: AgentChatTimelineRow[];
   activePlan: ActivePlanState | null;
+  /**
+   * The latest plan proposal that has **not** been implemented, or null.
+   *
+   * §7.3's implement/refine split button needs the plan markdown, and the
+   * proposal is folded out of the activity stream by the projection — nothing
+   * else can reach it. `session.hasActionableProposedPlan` stays the dock's
+   * gate; both are the same fact.
+   *
+   * *Added by W11 in the fix wave (R8-B1 / R7-2); additive-only.*
+   */
+  actionableProposedPlan: { id: string; planMarkdown: string; turnId: string | null } | null;
 }
 
 export interface AgentChatRosterView {

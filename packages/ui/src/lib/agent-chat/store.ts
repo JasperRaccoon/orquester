@@ -54,7 +54,11 @@ import {
   EMPTY_TIMELINE_PROJECTION,
   type ThreadTimelineProjection
 } from "./entries.logic";
-import { deriveActivePlanState } from "./plan.logic";
+import {
+  deriveActivePlanState,
+  findLatestProposedPlan,
+  hasActionableProposedPlan
+} from "./plan.logic";
 import {
   applyFrame,
   createReducerState,
@@ -70,6 +74,7 @@ import {
   type StableRowsState,
   type TimelineRowsProjection
 } from "./rows.logic";
+import { providerForRefId, providersStore } from "./providers";
 import { liveAgentTaskIds } from "./roster.logic";
 import { latestContextWindowActivity } from "./status.logic";
 import {
@@ -78,6 +83,7 @@ import {
   enqueue,
   holdAtFront,
   latestCompletedToolActivityId,
+  nextDueQueuedMessage,
   removeQueued,
   takeQueued,
   type QueuePhase,
@@ -145,6 +151,8 @@ export interface AgentChatThreadState {
   /** The three memoised projection layers, kept so each can take its fast path. */
   rows: AgentChatTimelineRow[];
   activePlan: ActivePlanState | null;
+  /** The latest un-implemented plan proposal, for §7.3's split button. */
+  actionableProposedPlan: { id: string; planMarkdown: string; turnId: string | null } | null;
   /** The composer's persisted draft for this thread. */
   draft: ComposerDraft;
   /** True while an interrupt is in flight; the Stop button reads "Stopping…". */
@@ -158,6 +166,24 @@ interface InternalState extends AgentChatThreadState {
   timeline: ThreadTimelineProjection;
   rowsProjection: TimelineRowsProjection | null;
   stableRows: StableRowsState;
+  /**
+   * The three `Set`-valued row inputs, cached against the arrays they are
+   * built from.
+   *
+   * `shallowEqualInput` compares them by **reference**, so rebuilding them on
+   * every projection made the layer-2 fast path unreachable — a single
+   * streamed token re-ran the whole grouping and folding pass and allocated a
+   * new row array, on a provider that emits hundreds of delta frames per turn
+   * (fix-wave Q2-4). Recomputing only when the source identity moves is what
+   * makes `replaceStreamingMessageRows` reachable at all.
+   */
+  derivedSets: {
+    disclosures: DisclosureState;
+    roster: readonly RuntimeSubagent[];
+    expandedTurnIds: ReadonlySet<string>;
+    expandedGroupIds: ReadonlySet<string>;
+    liveAgentTaskIds: ReadonlySet<string>;
+  } | null;
 }
 
 export type ThreadStore = StoreApi<AgentChatThreadState>;
@@ -215,7 +241,31 @@ function project(state: InternalState): InternalState {
   }
   const slice = state.slice;
   const timeline = timeline0;
-  const sets = disclosureSets(slice.disclosures);
+  // `supportsConversationRollback` is the ADAPTER capability (§6.3). It is
+  // read here rather than passed in so one projection covers a snapshot that
+  // loads after the thread did; the store re-projects on a providers change.
+  const provider = slice.head ? providerForRefId(providersStore.getState().providers, slice.head.refId) : null;
+  const supportsRollback = provider ? provider.capabilities.supportsConversationRollback !== false : null;
+  // Rebuilt only when their source arrays move (Q2-4) — see `derivedSets`.
+  const cachedSets =
+    state.derivedSets &&
+    state.derivedSets.disclosures === slice.disclosures &&
+    state.derivedSets.roster === slice.roster
+      ? state.derivedSets
+      : (() => {
+          const fresh = disclosureSets(slice.disclosures);
+          return {
+            disclosures: slice.disclosures,
+            roster: slice.roster,
+            expandedTurnIds: fresh.expandedTurnIds,
+            expandedGroupIds: fresh.expandedGroupIds,
+            liveAgentTaskIds: liveAgentTaskIds(slice.roster) as ReadonlySet<string>
+          };
+        })();
+  if (cachedSets !== state.derivedSets) {
+    state = { ...state, derivedSets: cachedSets };
+  }
+  const sets = cachedSets;
   const runningTurnId = slice.head?.session.activeTurnId ?? null;
   const latestTurn = slice.turns.at(-1) ?? null;
   const rowsProjection = deriveTimelineRowsWithState(
@@ -238,10 +288,12 @@ function project(state: InternalState): InternalState {
         slice.turnStatus === "pending",
       activeTurnStartedAt: latestTurn?.startedAt ?? latestTurn?.requestedAt ?? null,
       checkpoints: slice.checkpoints,
-      // Without the provider snapshot we cannot know; "rewind to here" is then
-      // withheld rather than offered and failing at step 2 of §5.5.
-      supportsConversationRollback: state.slice.head !== null,
-      liveAgentTaskIds: liveAgentTaskIds(slice.roster),
+      // The adapter capability, not "a head exists": stamping `revertTurnCount`
+      // on a provider that cannot roll back leaves an affordance that only a
+      // second gate in the view saves (fix-wave R7-12). `null` while the
+      // snapshot has not loaded means withheld, never offered-and-failing.
+      supportsConversationRollback: supportsRollback ?? false,
+      liveAgentTaskIds: sets.liveAgentTaskIds,
       queuedMessages: state.queue.messages
     },
     state.rowsProjection
@@ -249,12 +301,29 @@ function project(state: InternalState): InternalState {
   const stableRows = computeStableRows(rowsProjection.rows, state.stableRows);
   const activities = timeline.activities;
   const activePlan = deriveActivePlanState(activities, latestTurn?.turnId ?? null);
+  // The proposal the composer's split button acts on (§7.3). Only the
+  // projection can reach it — it is folded out of the activity stream.
+  const latestProposal = findLatestProposedPlan(timeline.proposedPlans, latestTurn?.turnId ?? null);
+  const nextProposal = hasActionableProposedPlan(latestProposal)
+    ? {
+        id: latestProposal!.id,
+        planMarkdown: latestProposal!.planMarkdown,
+        turnId: latestProposal!.turnId
+      }
+    : null;
+  const actionableProposedPlan =
+    state.actionableProposedPlan?.id === nextProposal?.id &&
+    state.actionableProposedPlan?.planMarkdown === nextProposal?.planMarkdown
+      ? state.actionableProposedPlan
+      : nextProposal;
 
   if (
+    actionableProposedPlan === state.actionableProposedPlan &&
     timeline === state.timeline &&
     rowsProjection === state.rowsProjection &&
     stableRows === state.stableRows &&
-    activePlan === state.activePlan
+    activePlan === state.activePlan &&
+    cachedSets === state.derivedSets
   ) {
     return state;
   }
@@ -267,7 +336,8 @@ function project(state: InternalState): InternalState {
     // `deriveActivePlanState` rebuilds its object each call; keep the previous
     // one when nothing about it moved, so the composer's checklist does not
     // re-render on every streamed token.
-    activePlan: samePlan(state.activePlan, activePlan) ? state.activePlan : activePlan
+    activePlan: samePlan(state.activePlan, activePlan) ? state.activePlan : activePlan,
+    actionableProposedPlan
   };
 }
 
@@ -321,6 +391,11 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
 
   let stream: AgentChatStreamHandle | null = null;
   let closed = false;
+  /** In-flight latch for the §7.4 queue drive loop: one send per boundary. */
+  let sending = false;
+  /** Decided inside a zustand updater, acted on after `set` returns (Q2-9). */
+  let resyncWanted = false;
+  let unsubscribeProviders: (() => void) | null = null;
 
   const store = createStore<InternalState>()((set, get) => {
     const update = (mutate: (state: InternalState) => InternalState): void => {
@@ -392,19 +467,33 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
           const reducer = patchSlice(state.reducer, { respondingRequestIds: ids });
           return reducer === state.reducer ? state : { ...state, reducer, slice: reducer.slice };
         });
+        // Answering the last pending request lifts the queue's gate (§7.4).
+        driveQueue();
       }
     };
 
+    /**
+     * The **session** phase the queue's due-check reads — not the stream's.
+     *
+     * `"connecting"` is T3's gap between a send and the provider picking it up,
+     * so it is `starting`, or a thread with no session yet. Keying it on the
+     * stream connection instead was what made the queue undeliverable: every
+     * `snapshot` frame sets `connection: "connecting"` on the way to
+     * `synchronized`, so a boundary arriving as a snapshot always reported
+     * "connecting" and nothing was ever due (fix-wave R7-1).
+     *
+     * *T3: `apps/web/src/session-logic.ts:1747-1760` (`derivePhase`).*
+     */
     const phase = (): QueuePhase => {
       const state = get().slice;
-      if (state.connection === "connecting" || state.sessionStatus === "starting") {
+      if (state.sessionStatus === null || state.sessionStatus === "starting") {
         return "connecting";
-      }
-      if (state.sessionStatus === "running" || state.turnStatus === "running") {
-        return "running";
       }
       if (state.sessionStatus === "stopped" || state.sessionStatus === "error") {
         return "disconnected";
+      }
+      if (state.sessionStatus === "running" || state.turnStatus === "running") {
+        return "running";
       }
       return "ready";
     };
@@ -427,13 +516,24 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
      * not be lost. Keeping two live drafts would let them disagree.
      */
     const appendToDraft = (message: QueuedComposerMessage): void => {
-      if (composerHandle(sessionId)) {
+      const handle = composerHandle(sessionId);
+      if (handle) {
         insertComposerText(sessionId, message.text, "append");
-        if (message.attachments.length > 0 || message.context.length > 0) {
+        // The attachments go through the SAME handle as the text (fix-wave
+        // R7-5). Writing them to the fallback draft instead stranded them:
+        // the composer drains that draft once per mount, and a mounted tab
+        // never re-runs that effect, so the files only reappeared after a
+        // close-and-reopen.
+        // `stageAttachment` is idempotent and answers false at the cap; a
+        // refused one falls back to the store draft so it is not simply lost.
+        const refused = message.attachments.filter(
+          (attachment) => !handle.stageAttachment(attachment)
+        );
+        if (message.context.length > 0 || refused.length > 0) {
           const draft = get().draft;
           setDraft({
             text: draft.text,
-            attachments: [...draft.attachments, ...message.attachments],
+            attachments: [...draft.attachments, ...refused],
             context: [...draft.context, ...message.context]
           });
         }
@@ -514,7 +614,15 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       },
 
       async revert(input) {
-        await command("revert", { targetTurnCount: input.targetTurnCount });
+        // §7.5: the composer goes `inert` for exactly one reason — while a
+        // revert is running. Cleared in a `finally` so a rejected revert can
+        // never strand the composer (fix-wave R8-M2).
+        setSlice({ reverting: true });
+        try {
+          await command("revert", { targetTurnCount: input.targetTurnCount });
+        } finally {
+          setSlice({ reverting: false });
+        }
       },
 
       async compact() {
@@ -557,6 +665,8 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
           const reducer = patchSlice(state.reducer, { queue: [...queue.messages] });
           return { ...state, queue, reducer, slice: reducer.slice };
         });
+        // A message queued while the thread is already idle is due at once.
+        driveQueue();
       },
 
       async sendQueuedNow(id) {
@@ -660,6 +770,9 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       },
 
       rememberScroll(position) {
+        // Computed in the updater, persisted after `set` returns: an updater
+        // that writes `localStorage` is not replay-safe (fix-wave Q2-9).
+        let remembered: RememberedTimelinePosition | null = null;
         update((state) => {
           const next: RememberedTimelinePosition = {
             ...(state.slice.scroll ?? DEFAULT_SCROLL_POSITION),
@@ -668,10 +781,13 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
             disclosures: state.slice.disclosures,
             interactionMode: state.slice.interactionMode
           };
-          positions.remember(sessionId, next);
+          remembered = next;
           const reducer = patchSlice(state.reducer, { scroll: next, follow: next.atEnd });
           return reducer === state.reducer ? state : { ...state, reducer, slice: reducer.slice };
         });
+        if (remembered !== null) {
+          positions.remember(sessionId, remembered);
+        }
       },
 
       /**
@@ -722,22 +838,40 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       }
       update((state) => {
         // §6.3/§8: a different host instance id means re-read, not resume.
-        if (needsResync(state.reducer.hostInstanceId, frame)) {
-          queueMicrotask(() => {
-            void actions.refresh().catch(() => {
-              /* the stream's own reconnect will try again */
-            });
-          });
-        }
+        // Decided inside the updater, performed after `set` returns: a zustand
+        // updater must be pure, or a replay double-fires the read (Q2-9).
+        resyncWanted ||= needsResync(state.reducer.hostInstanceId, frame);
         const reducer = applyFrame(state.reducer, frame);
         if (reducer === state.reducer) {
           return state;
         }
-        // A `snapshot` replaces loaded history, so the queue's anchors are no
-        // longer meaningful but the queue itself is the user's live intent and
-        // survives; drafts, disclosures and scroll are client-local throughout.
+        // A `snapshot` replaces loaded history, so every projection cached
+        // against the old one is invalidated by the epoch rather than trusted
+        // to self-heal (fix-wave Q2-7). The queue survives — it is the user's
+        // live intent — and so do drafts, disclosures and scroll.
+        if (reducer.historyEpoch !== state.reducer.historyEpoch) {
+          return {
+            ...state,
+            reducer,
+            slice: reducer.slice,
+            timeline: EMPTY_TIMELINE_PROJECTION,
+            rowsProjection: null,
+            stableRows: EMPTY_STABLE_ROWS,
+            derivedSets: null
+          };
+        }
         return { ...state, reducer, slice: reducer.slice };
       });
+      if (resyncWanted) {
+        resyncWanted = false;
+        // A changed host instance id means re-read, not resume; the transport's
+        // own sequence floor is reset with it so a host that restarted its
+        // sequence space lower cannot have its live frames suppressed (Q2-8).
+        stream?.resetCursor();
+        void actions.refresh().catch(() => {
+          /* the stream's own reconnect will try again */
+        });
+      }
       // The Stop button reads "Stopping…" until `backgroundLiveness` clears,
       // not until the command returns: an accepted interrupt is not yet a dead
       // process (§7.6).
@@ -749,7 +883,62 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       ) {
         set({ stopping: false });
       }
+      driveQueue();
     };
+
+    /**
+     * **The queue's drive loop** (§7.4).
+     *
+     * The ghost bubble promises "sends after the next tool call or when the
+     * turn ends"; something has to keep that promise. Every state change that
+     * could move a boundary — a stream frame, a command settling, a request
+     * opening or closing — re-evaluates the head of the queue and dispatches
+     * **exactly one** message. Taking it re-anchors the rest, so the next
+     * boundary sends the next one rather than the whole queue draining at once.
+     *
+     * `sending` is the in-flight latch: without it a burst of frames would
+     * dispatch the same head twice (`takeQueued` would answer `null` for the
+     * second, but the send path would still have run).
+     *
+     * *T3: `apps/web/src/components/ChatView.tsx:8604-8642` — the same loop and
+     * the same pending-request gates.*
+     */
+    const driveQueue = (): void => {
+      if (sending || closed) {
+        return;
+      }
+      const state = get();
+      const due = nextDueQueuedMessage(state.queue, {
+        phase: phase(),
+        latestToolActivityId: latestCompletedToolActivityId(state.timeline.activities),
+        // Nothing flushes while an approval or a question is pending (§7.4).
+        hasPendingRequests:
+          state.slice.pending.approvals.length + state.slice.pending.userInputs.length > 0
+      });
+      if (!due) {
+        return;
+      }
+      sending = true;
+      void actions
+        .sendQueuedNow(due.id)
+        .catch(() => {
+          /* `sendQueuedNow` already held it at the front and banner'd it. */
+        })
+        .finally(() => {
+          sending = false;
+          // A boundary may have moved while this send was in flight; re-check
+          // once rather than waiting for the next frame.
+          driveQueue();
+        });
+    };
+
+    // A provider snapshot arriving after the thread did changes one row input
+    // (`supportsConversationRollback`), so re-project when the catalog moves.
+    unsubscribeProviders = providersStore.subscribe((next, previous) => {
+      if (next.providers !== previous.providers) {
+        update((state) => ({ ...state }));
+      }
+    });
 
     // The store is created with its stream already wired, so `open()` is not a
     // separate step a caller can forget.
@@ -791,8 +980,10 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       timeline: EMPTY_TIMELINE_PROJECTION,
       rowsProjection: null,
       stableRows: EMPTY_STABLE_ROWS,
+      derivedSets: null,
       rows: [],
       activePlan: null,
+      actionableProposedPlan: null,
       draft: readPersistedDrafts()[sessionId] ?? EMPTY_DRAFT,
       stopping: false,
       actions
@@ -804,6 +995,8 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
     closed = true;
     stream?.close();
     stream = null;
+    unsubscribeProviders?.();
+    unsubscribeProviders = null;
   };
 
   return store;

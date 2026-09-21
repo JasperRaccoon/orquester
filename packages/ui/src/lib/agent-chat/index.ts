@@ -82,7 +82,6 @@ export * from "./presentation.logic";
 export * from "./rows.logic";
 export * from "./queue.logic";
 export * from "./questions.logic";
-export * from "./slash-commands.logic";
 export * from "./composer.logic";
 export * from "./plan.logic";
 export * from "./status.logic";

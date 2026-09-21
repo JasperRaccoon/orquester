@@ -5,7 +5,11 @@ import { createTransporter } from "../lib/transporters";
 import { wakeSessionChannels } from "../lib/transporters/ws-session-channel";
 import { wakeBrowserChannels } from "../lib/transporters/ws-browser-channel";
 import { toRemoteConfig, toUiConnection } from "../lib/connections";
-import { notifyProvidersChanged, setProviderSideEffects } from "../lib/agent-chat/providers";
+import {
+  forgetRaisedAuthError,
+  notifyProvidersChanged,
+  setProviderSideEffects
+} from "../lib/agent-chat/providers";
 import type { AgentAdapterId } from "@orquester/api/agent-chat";
 import {
   buildCredential,
@@ -2534,7 +2538,16 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   reportAgentAuthError: (error) => set({ agentAuthError: error }),
 
-  dismissAgentAuthError: () => set({ agentAuthError: null }),
+  dismissAgentAuthError: () => {
+    // The snapshot cache remembers which auth messages it has already raised,
+    // so a dismissal sticks while the provider stays signed out; forget this
+    // one so a LATER occurrence of the same message can re-raise (Q2-11).
+    const current = get().agentAuthError;
+    if (current) {
+      forgetRaisedAuthError(current.sessionId.replace(/^provider:/, ""), current.message);
+    }
+    set({ agentAuthError: null });
+  },
 
   applyProviderRateLimits: (agentRefId, update) =>
     set((state) => ({

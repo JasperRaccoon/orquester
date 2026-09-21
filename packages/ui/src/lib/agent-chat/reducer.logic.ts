@@ -98,7 +98,8 @@ export function emptySlice(sessionId: string): AgentChatThreadSlice {
     interactionMode: DEFAULT_INTERACTION_MODE,
     queue: [],
     respondingRequestIds: [],
-    errorBanner: null
+    errorBanner: null,
+    reverting: false
   };
 }
 
