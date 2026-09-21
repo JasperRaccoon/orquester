@@ -58,10 +58,19 @@ export const OPENCODE_CAPABILITIES: AdapterCapabilities = {
   compaction: { type: "native" }
 };
 
-/** §4.6.3: host features with no CLI equivalent on this surface. */
+/**
+ * §4.6.3: the host features with no CLI equivalent on this surface.
+ *
+ * `/compact` only. **`/effort` is CLIENT-ONLY** (§4.6.5(a)) — the composer
+ * owns that row and gates it on the selected model actually exposing a
+ * reasoning descriptor. Synthesising it here too produced a *second*,
+ * provider-flavoured `/effort` in the menu whose selection inserted the literal
+ * text `/effort ` and forwarded it to a CLI that does not implement it; it also
+ * advertised the command on a not-installed or too-old snapshot, which carries
+ * no models and therefore no descriptor at all.
+ */
 export const SYNTHESISED_COMMANDS: readonly SlashCommand[] = [
-  { name: "compact", description: "Compact this conversation's context" },
-  { name: "effort", description: "Set the reasoning variant for the selected model" }
+  { name: "compact", description: "Compact this conversation's context" }
 ];
 
 export interface OpenCodeInventory {

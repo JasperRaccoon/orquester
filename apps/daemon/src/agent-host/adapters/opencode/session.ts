@@ -90,8 +90,14 @@ const COMPACTION_TIMEOUT_MS = 10 * 60_000;
 const FIRST_CONNECTION_TIMEOUT_MS = 10_000;
 /** Machine (3) hard-fails after this many attempts. */
 const ADMISSION_MAX_ATTEMPTS = 5;
-/** Ancestry retries: asked-events retry forever, terminal events give up here. */
+/** Ancestry retries for a terminal request frame. */
 const ANCESTRY_TERMINAL_MAX_ATTEMPTS = 5;
+/**
+ * Ancestry retries for an `*.asked` frame. T3 retries these forever, which is
+ * safe only with a per-thread server; ours is per project, so a co-tenant
+ * thread's ask would otherwise poll for the session's whole life (§3.2).
+ */
+const ANCESTRY_ASKED_MAX_ATTEMPTS = 12;
 /** OpenCode ingests these natively; anything else rides as a path in the prompt. */
 const NATIVE_IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const NATIVE_FILE_PART_MAX_BYTES = 20 * 1024 * 1024;
@@ -204,6 +210,8 @@ export class OpenCodeThreadSession {
   private readonly promptLock = new Mutex();
   private readonly pumpAbort = new AbortController();
   private readonly firstConnection = deferred<void>();
+  /** Resolves once `doStop` runs, so shared-promise listeners can detach. */
+  private readonly closed$ = deferred<void>();
   private readonly ancestryAttempts = new Map<string, number>();
   private pumpConnections = 0;
   private closed = false;
@@ -364,11 +372,22 @@ export class OpenCodeThreadSession {
 
     // The server dying is what settles every thread it carried: a running
     // state never outlives its process (§3.1/§4.1).
-    void input.server.exited.then((reason) => {
-      void session.stop({
-        reason: `OpenCode server ${describeReason(reason)}`,
-        hostInitiated: false
-      });
+    //
+    // `server.exited` is the SAME promise for every handle of a project's
+    // server, so a bare `.then` would pin this whole session — its text parts,
+    // its request sets — for as long as the project keeps any thread open.
+    // Racing it against the session's own closed signal lets the loser be
+    // collected as soon as this session stops.
+    void Promise.race([
+      input.server.exited.then((reason) => ({ exited: true as const, reason })),
+      session.closedSignal.then(() => ({ exited: false as const }))
+    ]).then((outcome) => {
+      if (outcome.exited) {
+        void session.stop({
+          reason: `OpenCode server ${describeReason(outcome.reason)}`,
+          hostInitiated: false
+        });
+      }
     });
 
     session.updateRecord({ status: "ready" });
@@ -378,6 +397,11 @@ export class OpenCodeThreadSession {
       payload: { state: "ready" }
     });
     return session;
+  }
+
+  /** Settles when this session stops, whatever the reason. */
+  get closedSignal(): Promise<void> {
+    return this.closed$.promise;
   }
 
   get session(): ProviderSession {
@@ -481,18 +505,37 @@ export class OpenCodeThreadSession {
       try {
         const response = await this.client.openEventStream(this.pumpAbort.signal);
         this.pumpConnections += 1;
-        attempt = 0;
-        warned = false;
         if (this.pumpConnections === 1) {
           this.firstConnection.resolve();
         } else {
           this.onReconnect();
         }
+        let sawFrame = false;
         for await (const frame of readSseFrames(response.body)) {
+          if (!sawFrame) {
+            // The backoff resets on PROGRESS, not on a successful connect. A
+            // server that answers `200 text/event-stream` and immediately
+            // closes the body would otherwise drive a flat 250 ms loop that
+            // re-arms both completion machines four times a second.
+            sawFrame = true;
+            attempt = 0;
+            warned = false;
+          }
           if (this.closed) {
             break;
           }
           this.handleFrame(frame.data);
+        }
+        if (!sawFrame && !this.closed && !warned) {
+          warned = true;
+          this.emit({
+            ...this.base({ turnId: this.state.activeTurnId }),
+            type: "runtime.warning",
+            payload: {
+              message: "OpenCode accepted the event stream but sent nothing. Reconnecting.",
+              detail: { attempt }
+            }
+          });
         }
       } catch (error) {
         if (this.closed || this.pumpAbort.signal.aborted) {
@@ -1077,24 +1120,36 @@ export class OpenCodeThreadSession {
 
   /**
    * A request event from a session we have not yet linked to this thread.
-   * Walk `parentID` up to 32 steps; asked-events retry forever (250 ms → 5 s),
-   * terminal events give up after five (§4.5 child-session event routing).
+   * Walk `parentID` up to 32 steps.
+   *
+   * **Every** retry chain is capped, asked-events included. T3 could retry an
+   * ask forever because its server was per *thread*, so a foreign session's
+   * frame could not appear; Orquester's server is per **project** (§3.2), so
+   * every thread's `GET /event` sees every co-tenant thread's frames. An
+   * uncapped chain therefore meant: thread B opens an approval card, thread A
+   * polls `GET /session/{B}` every 5 s **for the rest of its life**, one live
+   * chain per foreign ask, with a map key that is never released.
+   *
+   * A root whose id is not ours is a definitive answer — that ask belongs to
+   * another thread — so it gives up at once rather than retrying at all.
    */
   private async resolveAncestry(sessionId: string, raw: OpenCodeRawEvent): Promise<void> {
     const key = `${raw.type}:${sessionId}`;
     const attempt = this.ancestryAttempts.get(key) ?? 0;
     const terminal = raw.type !== "permission.asked" && raw.type !== "question.asked";
-    if (terminal && attempt >= ANCESTRY_TERMINAL_MAX_ATTEMPTS) {
+    const limit = terminal ? ANCESTRY_TERMINAL_MAX_ATTEMPTS : ANCESTRY_ASKED_MAX_ATTEMPTS;
+    if (attempt >= limit) {
       this.ancestryAttempts.delete(key);
       return;
     }
     this.ancestryAttempts.set(key, attempt + 1);
 
-    const linked = await this.isDescendant(sessionId);
+    const outcome = await this.resolveSessionRoot(sessionId);
     if (this.closed) {
+      this.ancestryAttempts.delete(key);
       return;
     }
-    if (linked) {
+    if (outcome === "descendant") {
       this.ancestryAttempts.delete(key);
       const result = normalizeOpenCodeEvent(this.state, raw, this.normalizeContext());
       for (const event of result.events) {
@@ -1107,22 +1162,43 @@ export class OpenCodeThreadSession {
       }
       return;
     }
-    await delay(backoffMs(attempt, 250, 5_000), this.pumpAbort.signal);
-    if (!this.closed) {
-      void this.resolveAncestry(sessionId, raw);
+    if (outcome === "foreign") {
+      // A fully-walked tree with a different root: retrying cannot change it.
+      this.ancestryAttempts.delete(key);
+      return;
     }
+    // "unknown" — the walk could not complete (a transient read, a session not
+    // yet visible). Back off and try again, within the cap.
+    await delay(backoffMs(attempt, 250, 5_000), this.pumpAbort.signal);
+    if (this.closed) {
+      this.ancestryAttempts.delete(key);
+      return;
+    }
+    void this.resolveAncestry(sessionId, raw);
   }
 
-  private async isDescendant(candidate: string): Promise<boolean> {
+  /**
+   * Walk a session's `parentID` chain, distinguishing the three answers a
+   * retry loop needs:
+   *
+   * - `descendant` — it belongs to this thread;
+   * - `foreign` — the walk completed and the root is somebody else's, or the
+   *   session is gone. Definitive: retrying cannot change it;
+   * - `unknown` — the walk could not complete (a transient read error, a
+   *   cycle, the 32-step cap). Only this one is worth a retry.
+   */
+  private async resolveSessionRoot(
+    candidate: string
+  ): Promise<"descendant" | "foreign" | "unknown"> {
     const seen = new Set<string>();
     let sessionId: string | undefined = candidate;
     for (let depth = 0; sessionId !== undefined && depth < 32; depth += 1) {
       if (this.state.relatedSessionIds.has(sessionId)) {
         addRelated(this.state, candidate);
-        return true;
+        return "descendant";
       }
       if (seen.has(sessionId)) {
-        return false;
+        return "unknown";
       }
       seen.add(sessionId);
       try {
@@ -1132,13 +1208,13 @@ export class OpenCodeThreadSession {
         );
         sessionId = typeof info?.parentID === "string" ? info.parentID : undefined;
       } catch (error) {
-        if (isOpenCodeNotFound(error)) {
-          return false;
-        }
-        return false;
+        // A confirmed 404 is an answer: that session does not exist here.
+        return isOpenCodeNotFound(error) ? "foreign" : "unknown";
       }
     }
-    return false;
+    // The chain ended at a root that is not ours — a co-tenant thread's
+    // session on this project's shared server.
+    return sessionId === undefined ? "foreign" : "unknown";
   }
 
   async respondToApproval(requestId: string, decision: ApprovalDecision): Promise<void> {
@@ -1446,7 +1522,11 @@ export class OpenCodeThreadSession {
         }),
         withDeadline(receipt.promise, {
           label: "opencode session.command receipt",
-          timeoutMs: AGENT_HOST_DEADLINES.submitMs
+          timeoutMs: AGENT_HOST_DEADLINES.submitMs,
+          // `withDeadline` deliberately keeps its timer ref'd, so without a
+          // signal this 10 s timer outlives every native slash-command turn
+          // and delays the drain-restart the shutdown design depends on.
+          signal: this.pumpAbort.signal
         })
       ]);
     } finally {
@@ -1690,6 +1770,7 @@ export class OpenCodeThreadSession {
     }
     this.closed = true;
     this.state.stopped = true;
+    this.closed$.resolve();
     this.cancelIdleReconciliation();
 
     await this.settlePendingRequests().catch(() => undefined);
