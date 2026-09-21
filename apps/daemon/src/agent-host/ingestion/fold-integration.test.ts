@@ -529,6 +529,144 @@ describe("ingestion output folded by the real fold (§5.1)", () => {
     assert.equal(messages(state)[0]?.text, "one\n\ntwo");
   });
 
+  // E3 confirmed R5 #2 in the running system: an Escape-interrupted Codex turn
+  // rendered "Worked for 9.7s" as completed. All four adapters end an
+  // interrupt through one of these two frames, so both are covered end to end.
+  const interruptCases: [
+    "turn.completed" | "turn.aborted",
+    "interrupted" | "cancelled" | undefined
+  ][] = [
+    ["turn.completed", "interrupted"],
+    ["turn.completed", "cancelled"],
+    ["turn.aborted", undefined]
+  ];
+  for (const [type, turnState] of interruptCases) {
+    const label = turnState === undefined ? type : `${type} {state:"${turnState}"}`;
+    it(`E3/R5 #2: a user Stop via ${label} settles the turn INTERRUPTED`, async () => {
+      const { ingestion, sink } = harness();
+      await ingestion.ingest(runtimeEvent("turn.started", {}, { turnId: "turn-1" }));
+      await ingestion.ingest(
+        runtimeEvent("content.delta", { streamKind: "assistant_text", delta: "half a" }, {
+          turnId: "turn-1",
+          itemId: "item-1"
+        })
+      );
+      await ingestion.ingest(
+        type === "turn.aborted"
+          ? runtimeEvent("turn.aborted", { reason: "user" }, { turnId: "turn-1" })
+          : runtimeEvent("turn.completed", { state: turnState! }, { turnId: "turn-1" })
+      );
+      await ingestion.drain();
+
+      const state = fold(sink.events());
+      const turn = state.turns.find((entry) => entry.turnId === "turn-1");
+      assert.ok(turn);
+      assert.equal(turn.state, "interrupted", "a Stop is never a completed turn");
+      assert.equal(state.head?.session.status, "stopped");
+      assert.equal(state.head?.session.lastError, undefined, "a Stop is not an error");
+    });
+  }
+
+  it("E10: turn.completed's tokenUsage and cost reach Turn", async () => {
+    const { ingestion, sink } = harness();
+    await ingestion.ingest(runtimeEvent("turn.started", {}, { turnId: "turn-1" }));
+    await ingestion.ingest(
+      runtimeEvent(
+        "turn.completed",
+        {
+          state: "completed",
+          totalCostUsd: 0.0412,
+          tokenUsage: {
+            usageScope: "main_agent",
+            usageStatus: "complete",
+            inputTokens: 28_784,
+            outputTokens: 64,
+            cachedInputTokens: 19_200,
+            hasSubagents: false
+          }
+        },
+        { turnId: "turn-1" }
+      )
+    );
+    await ingestion.drain();
+
+    const turn = fold(sink.events()).turns.find((entry) => entry.turnId === "turn-1");
+    assert.ok(turn);
+    assert.equal(turn.state, "completed");
+    assert.equal(turn.tokenUsage?.usageStatus, "complete");
+    assert.equal(turn.tokenUsage?.inputTokens, 28_784);
+    assert.equal(turn.tokenUsage?.outputTokens, 64);
+    assert.equal(turn.totalCostUsd, 0.0412);
+  });
+
+  it("E10: an interrupted turn keeps the usage it managed to report", async () => {
+    const { ingestion, sink } = harness();
+    await ingestion.ingest(runtimeEvent("turn.started", {}, { turnId: "turn-1" }));
+    await ingestion.ingest(
+      runtimeEvent(
+        "turn.aborted",
+        {
+          reason: "user",
+          tokenUsage: {
+            usageScope: "main_agent",
+            usageStatus: "partial",
+            inputTokens: 120,
+            hasSubagents: false
+          }
+        },
+        { turnId: "turn-1" }
+      )
+    );
+    await ingestion.drain();
+    const turn = fold(sink.events()).turns.find((entry) => entry.turnId === "turn-1");
+    assert.equal(turn?.state, "interrupted");
+    assert.equal(turn?.tokenUsage?.usageStatus, "partial");
+    assert.equal(turn?.tokenUsage?.inputTokens, 120);
+  });
+
+  it("E10: a replayed terminal event never rewrites a settled turn's numbers", async () => {
+    const { ingestion, sink } = harness();
+    await ingestion.ingest(runtimeEvent("turn.started", {}, { turnId: "turn-1" }));
+    await ingestion.ingest(
+      runtimeEvent(
+        "turn.completed",
+        {
+          state: "completed",
+          totalCostUsd: 1,
+          tokenUsage: {
+            usageScope: "main_agent",
+            usageStatus: "complete",
+            inputTokens: 10,
+            outputTokens: 1,
+            hasSubagents: false
+          }
+        },
+        { turnId: "turn-1" }
+      )
+    );
+    await ingestion.ingest(
+      runtimeEvent(
+        "turn.completed",
+        {
+          state: "completed",
+          totalCostUsd: 999,
+          tokenUsage: {
+            usageScope: "main_agent",
+            usageStatus: "complete",
+            inputTokens: 999,
+            outputTokens: 999,
+            hasSubagents: false
+          }
+        },
+        { turnId: "turn-1" }
+      )
+    );
+    await ingestion.drain();
+    const turn = fold(sink.events()).turns.find((entry) => entry.turnId === "turn-1");
+    assert.equal(turn?.totalCostUsd, 1);
+    assert.equal(turn?.tokenUsage?.inputTokens, 10);
+  });
+
   it("the provider's title reaches the head", async () => {
     const { ingestion, sink } = harness();
     await ingestion.ingest(

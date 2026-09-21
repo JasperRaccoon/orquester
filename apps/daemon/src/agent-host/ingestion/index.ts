@@ -1044,9 +1044,31 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       // which is exactly the §3.3 post-restart case.
       const previous = state.session;
       const next = nextSessionState({ event, previous });
-      if (!sameSessionState(previous, next)) {
+      // The provider's per-turn numbers ride the event that settles the turn
+      // (E10): `turn.completed` is the only frame that carries them, and the
+      // fold settles from session status, so anywhere else they would arrive
+      // after the turn had already closed.
+      const turnResult =
+        (event.type === "turn.completed" || event.type === "turn.aborted") &&
+        eventTurnId !== null &&
+        (event.payload.tokenUsage !== undefined ||
+          (event.type === "turn.completed" && event.payload.totalCostUsd !== undefined))
+          ? {
+              turnId: eventTurnId,
+              ...(event.payload.tokenUsage !== undefined
+                ? { tokenUsage: event.payload.tokenUsage }
+                : {}),
+              ...(event.type === "turn.completed" && event.payload.totalCostUsd !== undefined
+                ? { totalCostUsd: event.payload.totalCostUsd }
+                : {})
+            }
+          : undefined;
+      if (!sameSessionState(previous, next) || turnResult !== undefined) {
         state.session = next;
-        emit(state, threadId, event, now, "thread.session-set", { session: next });
+        emit(state, threadId, event, now, "thread.session-set", {
+          session: next,
+          ...(turnResult !== undefined ? { turn: turnResult } : {})
+        });
       } else {
         state.session = next;
       }
