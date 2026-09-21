@@ -153,6 +153,9 @@ test("a streaming delta touches only its own row object (structural sharing)", (
     })
   ]);
   const before = state.items;
+  const pendingBefore = state.pending;
+  const rosterBefore = state.roster;
+  const turnsBefore = state.turns;
   state = applyDomainEvent(
     state,
     ev("thread.message-sent", {
@@ -165,7 +168,11 @@ test("a streaming delta touches only its own row object (structural sharing)", (
   );
   assert.equal(state.items[0], before[0], "the untouched user message keeps its identity");
   assert.notEqual(state.items[1], before[1], "the streamed row is a new object");
-  assert.equal(state.pending, before.length > 0 ? state.pending : state.pending);
+  // Sub-models a message delta cannot touch must keep their references, or the
+  // UI's memoised row layers rebuild the whole timeline per token (§7.2).
+  assert.equal(state.pending, pendingBefore, "pending keeps its identity across a delta");
+  assert.equal(state.roster, rosterBefore, "roster keeps its identity across a delta");
+  assert.equal(state.turns, turnsBefore, "turns keep their identity across a delta");
 });
 
 test("reasoning is a sibling message with its own role and id namespace", () => {

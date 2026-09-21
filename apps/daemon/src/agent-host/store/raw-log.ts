@@ -10,9 +10,10 @@
  * - **best-effort, never blocking.** `write()` is synchronous bookkeeping into
  *   a bounded buffer; the flush is what touches the disk, and a writer that
  *   cannot open its file degrades to a no-op instead of failing host startup.
- * - **bounded.** 10 MiB per file, 10 files, 14 days, plus a total-bytes
- *   ceiling across the whole directory on top of the per-file rotation, plus
- *   per-record caps on string length, field count and nesting depth.
+ * - **bounded.** 10 MiB per file, 10 files and 14 days per thread here, plus
+ *   per-record caps on string length, field count and nesting depth. The
+ *   total-bytes ceiling across the whole directory is host-wide and therefore
+ *   lives in {@link pruneRawLogDirectory}, not in one thread's writer.
  * - **redacted.** `raw.ndjson` is as sensitive as the repository it watched
  *   (§10), and Grok's `_x.ai/mcp/servers_updated` carries the host's real MCP
  *   server credentials in an `env` map — so every record is scrubbed
@@ -289,7 +290,6 @@ export class RawFrameLog {
       return; // No file yet: nothing to rotate.
     }
     if (size + incomingBytes <= RAW_LOG_MAX_FILE_BYTES) {
-      this.pruneSiblings();
       return;
     }
     // Shift `.9` off the end and every other suffix up by one.
@@ -305,14 +305,23 @@ export class RawFrameLog {
         // A missing rung is normal early on.
       }
     }
-    this.pruneSiblings();
+    this.pruneAgedRungs();
   }
 
   /**
-   * The age and total-bytes bounds. Rotation alone caps ONE thread's log; the
-   * ceiling is what keeps a hundred threads from filling the appdir.
+   * The 14-day age bound, over THIS thread's rotated rungs.
+   *
+   * Only the age bound lives here: the total-bytes ceiling is host-wide and
+   * cannot be enforced from inside one thread's writer — rotation already caps
+   * a single thread at 9 rungs x 10 MiB, so a 512 MiB test against that set is
+   * unconditionally true and the prune is unreachable. See
+   * {@link pruneRawLogDirectory}.
+   *
+   * Called only from the rotation path: it does a synchronous `readdirSync` +
+   * `statSync` per entry, and running that on every flush put a directory scan
+   * on the host's event loop once a second per live thread.
    */
-  private pruneSiblings(): void {
+  private pruneAgedRungs(): void {
     const dir = path.dirname(this.options.filePath);
     const base = path.basename(this.options.filePath);
     let entries: string[];
@@ -322,38 +331,123 @@ export class RawFrameLog {
       return;
     }
     const cutoff = this.now() - RAW_LOG_MAX_AGE_MS;
-    const rotated: Array<{ file: string; mtimeMs: number; size: number }> = [];
     for (const entry of entries) {
       if (!entry.startsWith(`${base}.`)) {
         continue;
       }
       const file = path.join(dir, entry);
       try {
-        const stat = fs.statSync(file);
-        if (stat.mtimeMs < cutoff) {
+        if (fs.statSync(file).mtimeMs < cutoff) {
           fs.rmSync(file, { force: true });
-          continue;
         }
-        rotated.push({ file, mtimeMs: stat.mtimeMs, size: stat.size });
       } catch {
         continue;
       }
     }
-    let total = rotated.reduce((sum, entry) => sum + entry.size, 0);
-    if (total <= RAW_LOG_TOTAL_BYTES_CEILING) {
-      return;
+  }
+}
+
+/**
+ * §3.1's **total-bytes ceiling across the directory**, on top of the per-file
+ * rotation. Rotation bounds one thread at ~100 MiB; without this a hundred
+ * threads are 10 GiB in the one writable appdir.
+ *
+ * Deletes oldest-mtime first: every rotated rung across every thread, and only
+ * then a live `raw.ndjson` whose thread has no open writer in this process
+ * (`liveThreadIds`) — a file the host is appending to must not be unlinked out
+ * from under it. Purely best-effort: any error stops the sweep rather than
+ * raising, because diagnostics never block a turn.
+ *
+ * *T3: `apps/server/src/provider/Layers/EventNdjsonLogger.ts:25-34` — the
+ * ceiling is over the whole log store, not one thread's rung set.*
+ */
+export function pruneRawLogDirectory(input: {
+  /** `<rootDir>/threads` — the parent of every per-thread directory. */
+  readonly threadsRoot: string;
+  /** Threads with an open writer: their LIVE file is never unlinked. */
+  readonly liveThreadIds?: ReadonlySet<string>;
+  readonly ceilingBytes?: number;
+  readonly now?: () => number;
+}): { readonly deleted: number; readonly totalBytes: number } {
+  const ceiling = input.ceilingBytes ?? RAW_LOG_TOTAL_BYTES_CEILING;
+  const nowMs = input.now?.() ?? Date.now();
+  const cutoff = nowMs - RAW_LOG_MAX_AGE_MS;
+
+  let threadDirs: fs.Dirent[];
+  try {
+    threadDirs = fs.readdirSync(input.threadsRoot, { withFileTypes: true });
+  } catch {
+    return { deleted: 0, totalBytes: 0 };
+  }
+
+  type Entry = { file: string; mtimeMs: number; size: number; live: boolean };
+  const files: Entry[] = [];
+  let deleted = 0;
+  let total = 0;
+
+  for (const dirent of threadDirs) {
+    if (!dirent.isDirectory()) {
+      continue;
     }
-    rotated.sort((left, right) => left.mtimeMs - right.mtimeMs);
-    for (const entry of rotated) {
-      if (total <= RAW_LOG_TOTAL_BYTES_CEILING) {
-        break;
+    const threadId = dirent.name;
+    const dir = path.join(input.threadsRoot, threadId);
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry !== "raw.ndjson" && !entry.startsWith("raw.ndjson.")) {
+        continue;
       }
+      const file = path.join(dir, entry);
       try {
-        fs.rmSync(entry.file, { force: true });
-        total -= entry.size;
+        const stat = fs.statSync(file);
+        const live = entry === "raw.ndjson";
+        // The age bound applies host-wide too, and a rung old enough to drop
+        // never counts towards the ceiling.
+        if (!live && stat.mtimeMs < cutoff) {
+          fs.rmSync(file, { force: true });
+          deleted += 1;
+          continue;
+        }
+        total += stat.size;
+        files.push({
+          file,
+          mtimeMs: stat.mtimeMs,
+          size: stat.size,
+          live: live && input.liveThreadIds?.has(threadId) === true
+        });
       } catch {
-        break;
+        continue;
       }
     }
   }
+
+  if (total <= ceiling) {
+    return { deleted, totalBytes: total };
+  }
+
+  // Rotated rungs first, then a live file of a thread nobody is writing to.
+  files.sort(
+    (left, right) =>
+      Number(left.live) - Number(right.live) || left.mtimeMs - right.mtimeMs
+  );
+  for (const entry of files) {
+    if (total <= ceiling) {
+      break;
+    }
+    if (entry.live) {
+      continue;
+    }
+    try {
+      fs.rmSync(entry.file, { force: true });
+      total -= entry.size;
+      deleted += 1;
+    } catch {
+      break;
+    }
+  }
+  return { deleted, totalBytes: total };
 }
