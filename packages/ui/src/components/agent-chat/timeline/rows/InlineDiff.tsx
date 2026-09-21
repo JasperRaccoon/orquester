@@ -3,13 +3,9 @@ import { FileDiff } from "lucide-react";
 
 import { cn } from "../../../../lib/cn";
 import { parseUnifiedDiff } from "../../../git/git-diff";
+import { looksLikeUnifiedDiff } from "../row-format";
 import { countDiffLines, splitUnifiedDiff } from "../unified-diff";
 import { formatWorkspaceRelativePath } from "../work-presentation";
-
-/** Cheap enough to run on every expanded tool row; no parse involved. */
-export function looksLikeUnifiedDiff(text: string): boolean {
-  return /^diff --git /m.test(text) || (/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/m.test(text) && /^[+-]/m.test(text));
-}
 
 /**
  * A file change rendered as a real unified diff, with click-through.
@@ -103,3 +99,5 @@ export const InlineDiff = React.memo(function InlineDiff({
     </div>
   );
 });
+
+export { looksLikeUnifiedDiff };

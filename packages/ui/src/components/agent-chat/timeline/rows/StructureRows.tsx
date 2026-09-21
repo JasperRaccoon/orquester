@@ -3,37 +3,13 @@ import { ClipboardList, Download, Minimize2 } from "lucide-react";
 
 import { cn } from "../../../../lib/cn";
 import type { AgentChatTimelineRow } from "../../../../lib/agent-chat/contracts";
+import { compactionLabel, planFileName, proposedPlanTitle } from "../row-format";
 import { ChatIconButton, CopyButton, DisclosureChevron, WorkingIndicator } from "../../primitives";
 import { useTimelineRowContext } from "../context";
 import { ChatMarkdown } from "../markdown/ChatMarkdown";
 import { ChangedFilesCard } from "./ChangedFilesCard";
 
 type Row<K extends AgentChatTimelineRow["kind"]> = Extract<AgentChatTimelineRow, { kind: K }>;
-
-/** Compact token counts: `128k`, `12.4k`, `840`. */
-export function formatTokenCount(tokens: number): string {
-  if (!Number.isFinite(tokens) || tokens < 0) return "0";
-  if (tokens < 1000) return String(Math.round(tokens));
-  const thousands = tokens / 1000;
-  return thousands >= 100 ? `${Math.round(thousands)}k` : `${thousands.toFixed(1).replace(/\.0$/, "")}k`;
-}
-
-/**
- * The compaction label.
- *
- * DELIBERATE DIFFERENCE FROM T3: T3 bakes the before/after counts into the
- * label server-side and the row never sees the numbers
- * (`ProviderRuntimeIngestion.ts:863-868`). We carry `beforeTokens`/`afterTokens`
- * on the event and format here, so the same event renders in whatever unit the
- * client prefers and an older row without numbers still reads correctly.
- */
-export function compactionLabel(row: Pick<Row<"context-compaction">, "label" | "beforeTokens" | "afterTokens">): string {
-  const { beforeTokens, afterTokens } = row;
-  if (typeof beforeTokens === "number" && typeof afterTokens === "number") {
-    return `${row.label} · ${formatTokenCount(beforeTokens)} → ${formatTokenCount(afterTokens)} tokens`;
-  }
-  return row.label;
-}
 
 /** A hairline that carries a centred label: "everything above this was summarised". */
 export const CompactionRow = React.memo(function CompactionRow({
@@ -118,25 +94,6 @@ export const TurnDiffRow = React.memo(function TurnDiffRow({
 // ---------------------------------------------------------------------------
 // The plan proposal card
 // ---------------------------------------------------------------------------
-
-export function proposedPlanTitle(markdown: string): string {
-  const heading = /^#{1,6}\s+(.+)$/m.exec(markdown)?.[1]?.trim();
-  if (heading !== undefined && heading.length > 0) return heading;
-  const firstLine = markdown
-    .split("\n")
-    .map((line) => line.trim())
-    .find((line) => line.length > 0);
-  return firstLine !== undefined && firstLine.length > 0 ? firstLine.slice(0, 80) : "Proposed plan";
-}
-
-export function planFileName(markdown: string): string {
-  const slug = proposedPlanTitle(markdown)
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 60);
-  return `${slug.length > 0 ? slug : "plan"}.md`;
-}
 
 const PLAN_COLLAPSE_CHARS = 900;
 const PLAN_COLLAPSE_LINES = 20;
