@@ -386,6 +386,95 @@ describe("codex session — approvals", () => {
     await r.stop();
   });
 
+  it("declines a GENUINE MCP form rather than accepting it with no fields", async () => {
+    // `mode:"form"` is used for both an approval and a real form;
+    // `_meta.codex_approval_kind` tells them apart (R3 finding 11). Answering
+    // a real form Approve/Decline sends `content: null`, i.e. the MCP server
+    // gets an accepted elicitation with none of the fields it asked for.
+    const r = rig({
+      turns: [{ kind: "mcp-form", serverName: "serena", message: "Which branch?" }]
+    });
+    await r.session.start();
+    await r.session.sendTurn({ input: "x", attachments: [], interactionMode: "default" });
+    await r.events.waitForType("turn.completed");
+
+    assert.equal(
+      r.events.types().includes("request.opened"),
+      false,
+      "a form is not an approval card"
+    );
+    const answered = r.received().filter((frame) => frame.result !== undefined).at(-1);
+    assert.deepEqual(answered!.result, { action: "decline", content: null, _meta: null });
+    assert.ok(
+      r.events.events.some(
+        (event) =>
+          event.type === "runtime.warning" &&
+          String((event.payload as { message: string }).message).includes("cannot render provider forms")
+      ),
+      "surfaced, not silent"
+    );
+    await r.stop();
+  });
+
+  it("refuses a PARTIALLY renderable question set rather than answering half of it", async () => {
+    // §4.5 maps a per-question validation failure to `invalidParams`; answering
+    // only the survivors tells the model the dropped question never existed
+    // and it proceeds on an answer it never got (R3 finding 12).
+    const r = rig({
+      turns: [
+        {
+          kind: "user-input",
+          questionId: "q",
+          header: "H",
+          question: "Q?",
+          options: [{ label: "a", description: "b" }],
+          withUnrenderable: true
+        }
+      ]
+    });
+    await r.session.start();
+    await r.session.sendTurn({ input: "x", attachments: [], interactionMode: "plan" });
+    await waitUntil(
+      () => r.received().some((frame) => frame.error !== undefined),
+      "the request is refused"
+    );
+    const refusal = r.received().find((frame) => frame.error !== undefined)!;
+    assert.equal((refusal.error as { code: number }).code, -32602, "invalidParams");
+    assert.match(String((refusal.error as { message: string }).message), /could not be rendered/);
+    assert.equal(
+      r.events.types().includes("user-input.requested"),
+      false,
+      "no half-populated card is shown"
+    );
+    await r.stop();
+  });
+
+  it("asks the reply-less async questions as a dismissible message-mode card", async () => {
+    // §4.5's second question path: the answer is an ordinary turn, not a
+    // JSON-RPC reply, so there is no pending request (R3 finding 3).
+    const r = rig({
+      turns: [{ kind: "async-questions", title: "Which branch?", options: ["main", "dev"] }]
+    });
+    await r.session.start();
+    await r.session.sendTurn({ input: "x", attachments: [], interactionMode: "default" });
+    const asked = await r.events.waitForType("user-input.requested");
+    const payload = asked.payload as {
+      responseMode?: string;
+      dismissible: boolean;
+      questions: { question: string; options: { label: string }[]; allowCustomAnswer?: boolean }[];
+    };
+    assert.equal(payload.responseMode, "message");
+    assert.equal(payload.dismissible, true);
+    assert.equal(payload.questions[0]!.question, "Which branch?");
+    assert.deepEqual(
+      payload.questions[0]!.options.map((option) => option.label),
+      ["main", "dev"]
+    );
+    assert.equal(payload.questions[0]!.allowCustomAnswer, true, "answered in prose");
+    assert.match(String(asked.requestId), /^codex-async:/);
+    await r.stop();
+  });
+
   it("asks a blocking question and answers with the LABEL", async () => {
     const r = rig({
       turns: [
@@ -507,6 +596,58 @@ describe("codex session — interrupt ordering", () => {
     await r.stop();
   });
 
+  it("closes the abandoned in-progress item, so no tool row spins for ever", async () => {
+    // Fixtures README obs. 5: the `commandExecution` that was `inProgress`
+    // never gets an `item/completed` after an interrupt (R3 finding 1).
+    const r = rig({ turns: [{ kind: "command-approval", command: "sleep 30" }] });
+    await r.session.start();
+    await r.session.sendTurn({ input: "sleep", attachments: [], interactionMode: "default" });
+    await r.events.waitForType("request.opened");
+    await r.session.interruptTurn();
+    await r.events.waitForType("turn.completed");
+
+    const started = r.events.events.filter((event) => event.type === "item.started");
+    const completed = r.events.events.filter((event) => event.type === "item.completed");
+    for (const open of started) {
+      assert.ok(
+        completed.some((done) => done.itemId === open.itemId),
+        `item ${String(open.itemId)} was left dangling inProgress`
+      );
+    }
+    await r.stop();
+  });
+
+  it("emits exactly ONE user-input.resolved per parked question", async () => {
+    // `settlePendingRequests` used to emit its own row AND let the handler
+    // emit a second for the same requestId (Q1 finding 17).
+    const r = rig({
+      turns: [
+        {
+          kind: "user-input",
+          questionId: "q",
+          header: "H",
+          question: "Q?",
+          options: [{ label: "a", description: "b" }]
+        }
+      ]
+    });
+    await r.session.start();
+    await r.session.sendTurn({ input: "x", attachments: [], interactionMode: "plan" });
+    const asked = await r.events.waitForType("user-input.requested");
+    await r.session.interruptTurn();
+    await waitUntil(
+      () => r.events.types().includes("user-input.resolved"),
+      "user-input.resolved"
+    );
+    assert.equal(
+      r.events.events.filter(
+        (event) => event.type === "user-input.resolved" && event.requestId === asked.requestId
+      ).length,
+      1
+    );
+    await r.stop();
+  });
+
   it("settles a pending user-input request too", async () => {
     const r = rig({
       turns: [
@@ -525,6 +666,109 @@ describe("codex session — interrupt ordering", () => {
     await r.session.interruptTurn();
     const resolved = await r.events.waitForType("user-input.resolved");
     assert.deepEqual((resolved.payload as { answers: unknown }).answers, {});
+    await r.stop();
+  });
+});
+
+describe("codex session — session-scoped Stop with no running turn (R6)", () => {
+  it("stops the background fleet instead of returning a no-op", async () => {
+    const r = rig({ turns: [{ kind: "spawn-child", childThreadId: "child-1" }] });
+    await r.session.start();
+    await r.session.sendTurn({ input: "spawn", attachments: [], interactionMode: "default" });
+    // The parent turn finishes while the child keeps working — §3.1's
+    // "background work outlives the turn".
+    await r.events.waitForType("turn.completed");
+    await waitUntil(() => r.session.currentTurnId === null, "the parent turn settled");
+    await r.events.waitForType("task.started");
+
+    // Session-scoped Stop: no turn id.
+    await r.session.interruptTurn();
+
+    // (a) the child was interrupted ON THE WIRE, not just locally
+    const childInterrupts = sentFrames(r.received(), "turn/interrupt").filter(
+      (frame) => frame.threadId === "child-1"
+    );
+    assert.equal(childInterrupts.length, 1, "the fleet is reached, not only the root thread");
+
+    // (b) the live task is closed so the liveness registry can clear
+    const stopped = r.events.events.filter(
+      (event) =>
+        event.type === "task.completed" &&
+        (event.payload as { status: string }).status === "stopped"
+    );
+    assert.ok(stopped.length > 0, "task.completed {stopped} is what clears backgroundLiveness");
+    await r.stop();
+  });
+
+  it("is idempotent — a second Stop emits no further task rows", async () => {
+    const r = rig({ turns: [{ kind: "spawn-child", childThreadId: "child-1" }] });
+    await r.session.start();
+    await r.session.sendTurn({ input: "spawn", attachments: [], interactionMode: "default" });
+    await r.events.waitForType("task.started");
+    await waitUntil(() => r.session.currentTurnId === null, "the parent turn settled");
+
+    await r.session.interruptTurn();
+    const after = r.events.events.filter((event) => event.type === "task.completed").length;
+    await r.session.interruptTurn();
+    assert.equal(
+      r.events.events.filter((event) => event.type === "task.completed").length,
+      after,
+      "nothing is left to stop"
+    );
+    await r.stop();
+  });
+
+  it("a STALE turn-scoped Stop is still a no-op", async () => {
+    const r = rig({ turns: [{ kind: "silent" }] });
+    await r.session.start();
+    await r.session.sendTurn({ input: "x", attachments: [], interactionMode: "default" });
+    await r.events.waitForType("turn.started");
+    await r.session.interruptTurn("a-turn-that-is-not-active");
+    assert.equal(
+      sentFrames(r.received(), "turn/interrupt").length,
+      0,
+      "a Stop racing a settling turn must not kill the next one"
+    );
+    await r.stop();
+  });
+});
+
+describe("codex session — the liveness watchdog really pauses (Q1 finding 16)", () => {
+  it("answering a card that outlived the window does not kill the turn", async () => {
+    // The window is shrunk and the card is held open well past it. Before the
+    // fix, `remaining` collapsed to its 50 ms floor on re-arm and the watchdog
+    // interrupted the turn the user had just approved.
+    const r = rig(
+      {
+        turns: [
+          {
+            kind: "file-change-approval",
+            path: "/tmp/a.txt",
+            diff: "x\n",
+            // Silent after the answer — but for LESS than one window, so a
+            // correctly-reset clock never fires. Without the reset the re-arm
+            // collapses to its 50 ms floor and fires inside this hold.
+            holdAfterApprovalMs: 120
+          }
+        ]
+      },
+      { livenessWindows: { idleMs: 300, activeToolMs: 300 } }
+    );
+    await r.session.start();
+    await r.session.sendTurn({ input: "write", attachments: [], interactionMode: "default" });
+    const opened = await r.events.waitForType("request.opened");
+
+    // The card sits open well past the window — "left open over lunch".
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    r.session.respondToApproval(opened.requestId!, "accept");
+    await r.events.waitForType("turn.completed");
+
+    const killed = r.events.events.some(
+      (event) =>
+        event.type === "runtime.warning" &&
+        String((event.payload as { message: string }).message).includes("No Codex activity")
+    );
+    assert.equal(killed, false, "a turn waiting on a human is not a stalled turn (§3.1)");
     await r.stop();
   });
 });

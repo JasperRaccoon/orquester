@@ -49,6 +49,7 @@ import {
   type ProviderChild
 } from "../../support/spawn.ts";
 import { StderrCapture } from "../../support/stderr.ts";
+import { notificationThreadId } from "./child-routing.ts";
 import type {
   CodexProtocol,
   ServerNotificationMethod,
@@ -135,6 +136,12 @@ export interface CodexSessionOptions {
    * the child" is exercised in milliseconds rather than half a minute.
    */
   deadlines?: Partial<Record<keyof typeof AGENT_HOST_DEADLINES, number>>;
+  /**
+   * Overrides for {@link TURN_LIVENESS_WINDOWS}. Production passes nothing; a
+   * test shrinks the window so §3.1's "paused entirely while a request is
+   * pending" is exercised in milliseconds rather than ten minutes.
+   */
+  livenessWindows?: { idleMs: number; activeToolMs: number };
   emit: (draft: RuntimeEventDraft) => void;
   /** Called once the session has settled for good, so the adapter can forget it. */
   onClosed: () => void;
@@ -856,6 +863,15 @@ export class CodexSession {
     // Any observable progress refreshes the liveness window (§3.1).
     this.noteActivity();
 
+    // The SESSION's own stateful branches below must be gated on the thread
+    // too, not just the normaliser's: a collab child's `turn/started` would
+    // otherwise overwrite `activeTurnId` and flip the session to `running`
+    // even though the child's events never reach the parent's timeline
+    // (R3 finding 2 — this is the half that hides behind the normaliser fix).
+    const about = notificationThreadId(method, params);
+    const isOurs =
+      this.providerThreadId === null || about === null || about === this.providerThreadId;
+
     for (const draft of this.normaliser.notification(method, params)) {
       if (draft.type === "thread.started") {
         this.announceThread(draft.payload.providerThreadId);
@@ -869,12 +885,12 @@ export class CodexSession {
       }
     }
 
-    if (method === "turn/started") {
+    if (method === "turn/started" && isOurs) {
       const p = params as CodexProtocol.v2.TurnStartedNotification;
       this.activeTurnId = p.turn.id;
       this.setStatus("running");
       this.armLivenessWatchdog();
-    } else if (method === "turn/completed") {
+    } else if (method === "turn/completed" && isOurs) {
       const p = params as CodexProtocol.v2.TurnCompletedNotification;
       if (this.activeTurnId === p.turn.id) {
         this.activeTurnId = null;
@@ -885,7 +901,7 @@ export class CodexSession {
         // APPROVED command left a permanent entry (Q1 finding 19).
         this.askedItemIds.clear();
       }
-    } else if (method === "error") {
+    } else if (method === "error" && isOurs) {
       const p = params as CodexProtocol.v2.ErrorNotification;
       if (!p.willRetry) {
         this.lastError = presentableError(p.error.message);
@@ -1320,9 +1336,10 @@ export class CodexSession {
    * 30 while a tool call is open** (§3.1, stated there and nowhere else).
    */
   private livenessWindowMs(): number {
+    const windows = this.options.livenessWindows ?? TURN_LIVENESS_WINDOWS;
     return this.liveTasks.size > 0 || this.normaliser.openItemIds().length > 0
-      ? TURN_LIVENESS_WINDOWS.activeToolMs
-      : TURN_LIVENESS_WINDOWS.idleMs;
+      ? windows.activeToolMs
+      : windows.idleMs;
   }
 
   /**
