@@ -152,7 +152,14 @@ export interface AgentHostHealthResponse {
 /** Body of `POST /threads`. */
 export interface CreateHostThreadRequest {
   threadId: string;
+  /**
+   * The PROJECT ROOT — the `<workspacesDir>/<ws>/<project>` dir the tab belongs
+   * to, never a subdirectory. Any per-project pooling (OpenCode runs one server
+   * per project) must key on **this**, not on `cwd`: a thread opened on a
+   * subdirectory would otherwise spawn a second server for the same checkout.
+   */
   projectPath: string;
+  /** Working directory for the provider child. Usually equals `projectPath`. */
   cwd: string;
   title: string;
   /** Registry id; the host maps it to an adapter via the catalog's `chat`. */
