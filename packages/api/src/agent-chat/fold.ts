@@ -530,7 +530,12 @@ function reduceMessageSent(
       turnId: payload.turnId,
       updatedAt: event.occurredAt,
       ...(payload.attachments !== undefined ? { attachments: payload.attachments } : {}),
-      ...(payload.context !== undefined ? { context: payload.context } : {})
+      ...(payload.context !== undefined ? { context: payload.context } : {}),
+      // Carried forward, never downgraded: a later delta that omits them (an
+      // older adapter, or a flush that could not resolve the phase) must not
+      // strip a badge the first event established.
+      ...(payload.reasoningKind !== undefined ? { reasoningKind: payload.reasoningKind } : {}),
+      ...(payload.messageKind !== undefined ? { messageKind: payload.messageKind } : {})
     };
     const items = state.items.slice();
     items[existingIndex!] = next;
@@ -552,7 +557,9 @@ function reduceMessageSent(
     updatedAt: event.occurredAt,
     ...(payload.attachments !== undefined ? { attachments: payload.attachments } : {}),
     ...(payload.context !== undefined ? { context: payload.context } : {}),
-    ...(payload.agentId !== undefined ? { agentId: payload.agentId } : {})
+    ...(payload.agentId !== undefined ? { agentId: payload.agentId } : {}),
+    ...(payload.reasoningKind !== undefined ? { reasoningKind: payload.reasoningKind } : {}),
+    ...(payload.messageKind !== undefined ? { messageKind: payload.messageKind } : {})
   };
   const items = [...state.items, message];
   const itemIndex = new Map(state.itemIndex);

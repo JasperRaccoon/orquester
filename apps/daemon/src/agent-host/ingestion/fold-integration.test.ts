@@ -439,6 +439,96 @@ describe("ingestion output folded by the real fold (§5.1)", () => {
     );
   });
 
+  it("the §7.3 badge fields survive the fold onto the message item", async () => {
+    const { ingestion, sink } = harness();
+    const turn = { turnId: "turn-1" };
+    await ingestion.ingest(runtimeEvent("turn.started", {}, turn));
+    await ingestion.ingest(
+      runtimeEvent("content.delta", { streamKind: "reasoning_summary_text", delta: "hmm" }, {
+        ...turn,
+        itemId: "item-0"
+      })
+    );
+    await ingestion.ingest(
+      runtimeEvent(
+        "item.started",
+        { itemType: "assistant_message", detail: "commentary" },
+        { ...turn, itemId: "item-1" }
+      )
+    );
+    await ingestion.ingest(
+      runtimeEvent("content.delta", { streamKind: "assistant_text", delta: "I'll look." }, {
+        ...turn,
+        itemId: "item-1"
+      })
+    );
+    // The commentary item closes; only then does the next item open its own
+    // message — a segment stays open until a completion or a pause closes it.
+    await ingestion.ingest(
+      runtimeEvent(
+        "item.completed",
+        { itemType: "assistant_message", detail: "commentary" },
+        { ...turn, itemId: "item-1" }
+      )
+    );
+    await ingestion.ingest(
+      runtimeEvent("content.delta", { streamKind: "assistant_text", delta: "The answer." }, {
+        ...turn,
+        itemId: "item-2"
+      })
+    );
+    await ingestion.ingest(
+      runtimeEvent("turn.completed", { state: "completed" }, turn)
+    );
+    await ingestion.drain();
+
+    const state = fold(sink.events());
+    const byId = new Map(messages(state).map((message) => [message.id, message]));
+    assert.equal(byId.get("reasoning:summary:item-0")?.reasoningKind, "summary");
+    assert.equal(byId.get("assistant:item-1")?.messageKind, "commentary");
+    assert.equal(byId.get("assistant:item-2")?.messageKind, "answer");
+  });
+
+  it("a later delta that omits the fields never strips them", async () => {
+    const { ingestion, sink } = harness();
+    const turn = { turnId: "turn-1", itemId: "item-1" };
+    await ingestion.ingest(
+      runtimeEvent(
+        "item.started",
+        { itemType: "assistant_message", detail: "commentary" },
+        turn
+      )
+    );
+    await ingestion.ingest(
+      runtimeEvent("content.delta", { streamKind: "assistant_text", delta: "one\n\n" }, turn)
+    );
+    await ingestion.drain();
+    // Replay the folded events, then apply a hand-built delta with no fields —
+    // the shape an older adapter would produce.
+    const events = [...sink.events()];
+    let state = fold(events);
+    assert.equal(messages(state)[0]?.messageKind, "commentary");
+    state = applyDomainEvent(state, {
+      seq: state.seq + 1,
+      eventId: "legacy",
+      threadId: THREAD_ID,
+      occurredAt: "2026-09-21T10:00:05.000Z",
+      commandId: null,
+      causationEventId: null,
+      metadata: {},
+      type: "thread.message-sent",
+      payload: {
+        messageId: "assistant:item-1",
+        role: "assistant",
+        text: "two",
+        streaming: true,
+        turnId: "turn-1"
+      }
+    });
+    assert.equal(messages(state)[0]?.messageKind, "commentary");
+    assert.equal(messages(state)[0]?.text, "one\n\ntwo");
+  });
+
   it("the provider's title reaches the head", async () => {
     const { ingestion, sink } = harness();
     await ingestion.ingest(

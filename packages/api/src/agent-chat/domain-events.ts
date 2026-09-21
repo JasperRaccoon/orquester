@@ -113,6 +113,19 @@ export interface ThreadMessageSentPayload {
   attachments?: AttachmentRef[];
   context?: ComposerContextRecord[];
   agentId?: string;
+  /**
+   * `ThreadMessageItem.reasoningKind` / `.messageKind` (§7.3). Neither is
+   * recoverable from the text, and only ingestion knows them — the first from
+   * the content stream kind, the second from the provider's message phase — so
+   * they ride the event that creates the message. Both are optional and are
+   * only meaningful on their own role; absent means unknown, and the row then
+   * renders without a badge rather than guessing.
+   *
+   * *Added by W3 for W12's fields; additive (§8 rollback boundary: an older
+   * build ignores them, a newer build tolerates a row without them).*
+   */
+  reasoningKind?: "text" | "summary";
+  messageKind?: "answer" | "commentary";
 }
 
 export interface ThreadTurnStartRequestedPayload {
