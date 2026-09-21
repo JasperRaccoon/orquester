@@ -157,6 +157,7 @@ export class CodexSession {
   private child: ProviderChild | null = null;
   private peer: CodexPeer | null = null;
   private providerThreadId: string | null = null;
+  private announcedThreadId: string | null = null;
   private status: ProviderSessionStatus = "starting";
   private lastError: string | undefined;
   private activeTurnId: string | null = null;
@@ -562,7 +563,7 @@ export class CodexSession {
           "thread/resume"
         );
         this.providerThreadId = resumed.thread.id;
-        this.emit({ type: "thread.started", payload: { providerThreadId: resumed.thread.id } });
+        this.announceThread(resumed.thread.id);
         return;
       } catch (error) {
         // A resume that fails falls back to a FRESH thread rather than failing
@@ -594,7 +595,7 @@ export class CodexSession {
     );
     // NOT `{threadId}` — `result.thread.id` (fixtures README observation 1).
     this.providerThreadId = started.thread.id;
-    this.emit({ type: "thread.started", payload: { providerThreadId: started.thread.id } });
+    this.announceThread(started.thread.id);
   }
 
   private async listTurns(limit = 50): Promise<CodexProtocol.v2.Turn[]> {
@@ -632,6 +633,10 @@ export class CodexSession {
     this.noteActivity();
 
     for (const draft of this.normaliser.notification(method, params)) {
+      if (draft.type === "thread.started") {
+        this.announceThread(draft.payload.providerThreadId);
+        continue;
+      }
       this.trackTask(draft);
       this.emit(draft);
     }
@@ -1101,6 +1106,22 @@ export class CodexSession {
     child.stderr.on("end", () => {
       surface(this.stderr.flush());
     });
+  }
+
+  /**
+   * Emit `thread.started` exactly once per provider thread.
+   *
+   * `thread/start` answers the id AND fires a `thread/started` notification,
+   * while `thread/resume` answers the id and fires nothing (it sends
+   * `thread/goal/cleared` instead). Announcing from the response covers both,
+   * and this guard is what stops the `thread/start` path emitting twice.
+   */
+  private announceThread(providerThreadId: string): void {
+    if (this.announcedThreadId === providerThreadId) {
+      return;
+    }
+    this.announcedThreadId = providerThreadId;
+    this.emit({ type: "thread.started", payload: { providerThreadId } });
   }
 
   private emit(draft: RuntimeEventDraft): void {

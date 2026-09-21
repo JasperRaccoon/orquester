@@ -139,7 +139,23 @@ describe("codex session — start, turn, stop", () => {
 
     // `session.started` is emitted before anything else on the stream.
     assert.equal(r.events.events[0]!.type, "session.started");
-    assert.ok(r.events.types().includes("thread.started"));
+    assert.equal(
+      r.events.events.filter((event) => event.type === "thread.started").length,
+      1,
+      "thread/start answers the id AND fires thread/started; only one event may result"
+    );
+    await r.stop();
+  });
+
+  it("emits thread.started once on resume too, where no notification fires", async () => {
+    const r = rig({ turns: [{ kind: "text", text: "a" }] }, {
+      resumeCursor: { threadId: "prior" }
+    });
+    await r.session.start();
+    assert.equal(
+      r.events.events.filter((event) => event.type === "thread.started").length,
+      1
+    );
     await r.stop();
   });
 
