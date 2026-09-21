@@ -813,10 +813,18 @@ export class CodexSession {
         // matcher over the error message; that matcher was never exercised on
         // this CLI (fixtures README observation 17) and the brief forbids
         // copying it, so the fallback is unconditional and the user is told.
+        // `runtime.error`, NOT a warning: a warning renders tone `info` and
+        // this row got buried among the host's bubblewrap notices while the
+        // user believed they had reopened their conversation (E2E E5/E19).
+        // Losing the conversation is the loudest thing this adapter can say
+        // short of refusing — and refusing is the host's call, since the usual
+        // cause is another LIVE session still holding that provider thread.
         this.emit({
-          type: "runtime.warning",
+          type: "runtime.error",
           payload: {
-            message: "Could not resume the Codex conversation; starting a fresh one.",
+            message:
+              "Could not resume this Codex conversation — a NEW, empty one was started instead. The old conversation may still be open in another tab.",
+            class: "provider_error",
             detail: describeError(error)
           }
         });

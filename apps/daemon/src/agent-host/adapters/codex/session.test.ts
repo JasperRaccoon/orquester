@@ -964,12 +964,20 @@ describe("codex session — resume", () => {
     });
     await r.session.start();
     assert.equal(sentFrames(r.received(), "thread/start").length, 1, "fell back to a fresh thread");
-    const warning = r.events.events.find(
-      (event) =>
-        event.type === "runtime.warning" &&
-        String((event.payload as { message: string }).message).includes("Could not resume")
+    // A `runtime.warning` renders tone `info` and got buried among the host's
+    // bubblewrap notices, so the user believed they had reopened their
+    // conversation (E2E E5/E19). Losing a conversation is an ERROR row.
+    const surfaced = r.events.events.find((event) =>
+      String((event.payload as { message?: string }).message ?? "").includes("Could not resume")
     );
-    assert.ok(warning !== undefined, "never a silent degrade");
+    assert.ok(surfaced !== undefined, "never a silent degrade");
+    assert.equal(surfaced.type, "runtime.error", "not a tone-info warning");
+    assert.equal((surfaced.payload as { class: string }).class, "provider_error");
+    assert.match(
+      String((surfaced.payload as { message: string }).message),
+      /NEW, empty one/,
+      "says plainly that this is not the old conversation"
+    );
     await r.stop();
   });
 
