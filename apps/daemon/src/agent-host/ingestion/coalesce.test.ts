@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import type { ThreadActivityItem } from "@orquester/api/agent-chat";
+import { SLIM_MAX_STRING_BYTES, type ThreadActivityItem } from "@orquester/api/agent-chat";
 
 import {
   coalesceToolUpdates,
   dropStaleContextWindowActivities,
   dropSupersededToolUpdatedActivities,
+  projectSnapshotActivities,
+  slimActivityEvent,
   stableToolCallId,
   toolLifecycleIdentity
 } from "./coalesce.ts";
@@ -113,6 +115,74 @@ describe("dropSupersededToolUpdatedActivities (§5.6 snapshot drop)", () => {
     assert.equal(dropSupersededToolUpdatedActivities(rows).length, 2);
   });
 });
+
+describe("the §5.6 read projection is the single choke point (R5 #1)", () => {
+  it("slims a row on its way out, and stamps truncated", () => {
+    const huge = "x".repeat(SLIM_MAX_STRING_BYTES + 1000);
+    const [row] = projectSnapshotActivities([
+      activity("d1", "tool.completed", { toolUseId: "c1", detail: huge })
+    ]);
+    assert.ok(row);
+    const payload = row.payload as { detail: string; truncated?: boolean };
+    assert.ok(
+      payload.detail.length <= SLIM_MAX_STRING_BYTES,
+      `detail was ${payload.detail.length}`
+    );
+    assert.equal(payload.truncated, true, "'load full output' needs this flag");
+  });
+
+  it("returns a small row by REFERENCE, so the client's memoisation holds", () => {
+    const rows = [activity("t1", "tool.started", { toolUseId: "c1" })];
+    const [projected] = projectSnapshotActivities(rows);
+    assert.equal(projected, rows[0]);
+  });
+
+  it("slimActivityEvent slims an activity event and passes everything else through", () => {
+    const huge = "x".repeat(SLIM_MAX_STRING_BYTES + 1000);
+    const event = {
+      type: "thread.activity-appended",
+      payload: { activity: activity("d1", "tool.completed", { toolUseId: "c1", detail: huge }) }
+    };
+    const slimmed = slimActivityEvent(event);
+    assert.notEqual(slimmed, event);
+    const payload = slimmed.payload.activity.payload as { detail: string };
+    assert.ok(payload.detail.length <= SLIM_MAX_STRING_BYTES);
+
+    const other = { type: "thread.session-set", payload: { session: { status: "ready" } } };
+    assert.equal(slimActivityEvent(other), other);
+    const small = {
+      type: "thread.activity-appended",
+      payload: { activity: activity("t1", "tool.started", { toolUseId: "c1" }) }
+    };
+    assert.equal(slimActivityEvent(small), small);
+  });
+
+  it("the drops still run, and run BEFORE slimming", () => {
+    const kept = projectSnapshotActivities([
+      activity("u1", "tool.updated", { toolUseId: "c1" }),
+      activity("d1", "tool.completed", { toolUseId: "c1" }),
+      activity("c1", "context-window.updated", { usedTokens: 10 }),
+      activity("c2", "context-window.updated", { usedTokens: 20 })
+    ]);
+    assert.deepEqual(
+      kept.map((row) => row.id),
+      ["d1", "c2"]
+    );
+  });
+
+  it("a slimmer that throws costs the row its size, never its existence", () => {
+    // `slimActivityPayload` is W2's; ingestion must degrade, not drop.
+    const rows = [activity("d1", "tool.completed", { toolUseId: "c1", data: cyclic() })];
+    const kept = projectSnapshotActivities(rows);
+    assert.equal(kept.length, 1);
+  });
+});
+
+function cyclic(): unknown {
+  const node: Record<string, unknown> = {};
+  node.self = node;
+  return node;
+}
 
 describe("dropStaleContextWindowActivities (§5.6 snapshot drop)", () => {
   it("keeps only the newest resolvable row per turn", () => {

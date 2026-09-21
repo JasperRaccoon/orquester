@@ -18,6 +18,7 @@
 import type {
   RuntimeEvent,
   RuntimeSessionState,
+  RuntimeTurnState,
   ThreadSessionState,
   ThreadSessionStatus
 } from "@orquester/api/agent-chat";
@@ -95,6 +96,39 @@ function statusAllowsActiveTurn(status: ThreadSessionStatus): boolean {
 }
 
 /**
+ * The session status a terminal `turn.completed` leaves behind, chosen so that
+ * {@link settledTurnStateForSessionStatus} settles the turn with the state the
+ * provider actually reported.
+ *
+ * | `turn.completed.state` | session status | turn settles as |
+ * |---|---|---|
+ * | `completed`   | `ready`   | `completed`   |
+ * | `failed`      | `error`   | `failed`      |
+ * | `interrupted` | `stopped` | `interrupted` |
+ * | `cancelled`   | `stopped` | `interrupted` |
+ *
+ * `cancelled` collapses onto `interrupted` because §5.1 gives the head no
+ * `cancelled` session status and the two are the same user-visible fact: the
+ * turn stopped before it finished.
+ */
+export function turnStatusFromTurnState(state: RuntimeTurnState): ThreadSessionStatus {
+  switch (state) {
+    case "completed":
+      return "ready";
+    case "failed":
+      return "error";
+    case "interrupted":
+    case "cancelled":
+      return "stopped";
+    default: {
+      const exhaustive: never = state;
+      void exhaustive;
+      return "ready";
+    }
+  }
+}
+
+/**
  * Fold one lifecycle event onto the previous session state. `previous` is what
  * ingestion last emitted for the thread (or the head, after a host restart);
  * the result is what `thread.session-set` carries.
@@ -119,7 +153,17 @@ export function nextSessionState(input: {
       case "turn.aborted":
         return "stopped";
       case "turn.completed":
-        return event.payload.state === "failed" ? "error" : "ready";
+        // The WHOLE `RuntimeTurnState` vocabulary has to be honoured here,
+        // because §5.1 settles the turn from the session status and nowhere
+        // else: `ready` settles it `completed`, `stopped` `interrupted`,
+        // `error` `failed`. Mapping only `failed` and letting
+        // `interrupted`/`cancelled` fall through to `ready` recorded every
+        // user Stop as a completed turn on Claude, Codex and Grok — only
+        // OpenCode routes an interrupt through `turn.aborted`. T3 has the same
+        // two-way shape but owns an `interrupted` SESSION status; this design
+        // folded that into `stopped`, so the `turn.completed` arm has to move
+        // with it (R5 #2).
+        return turnStatusFromTurnState(event.payload.state);
       case "runtime.error":
         return "error";
       case "session.started":
@@ -162,6 +206,8 @@ export function nextSessionState(input: {
             ? undefined
             : previous.lastError;
       case "turn.completed":
+        // Only a genuine failure records an error; an interrupt is a user
+        // action and must not leave `lastError` set on the head.
         return event.payload.state === "failed"
           ? (event.payload.errorMessage ?? previous.lastError ?? "Turn failed")
           : undefined;
