@@ -42,6 +42,7 @@ import {
   segmentBaseKeyFromEvent,
   segmentMessageId,
   messageStreamRoleOf,
+  reasoningKindOfMessageId,
   type MessageStreamRole
 } from "./message-ids.ts";
 import {
@@ -145,6 +146,16 @@ interface ThreadState {
   messageTurn: Map<string, string | null>;
   /** messageId → the last reasoning part index seen (Codex splits traces). */
   reasoningPartIndex: Map<string, number>;
+  /**
+   * §7.3 `messageKind`. Codex's `agentMessage` carries a `phase`
+   * (`final_answer` vs `commentary`), which the adapter surfaces as the
+   * assistant item's `detail` — but the message itself is built from
+   * `content.delta`, which has no phase. So the phase is remembered per
+   * provider item id and stamped onto whichever message that item opened.
+   */
+  assistantPhaseByItemId: Map<string, "answer" | "commentary">;
+  /** messageId → the resolved {@link ThreadMessageItem.messageKind}. */
+  messageKind: Map<string, "answer" | "commentary">;
   /** planId → the accumulated proposal markdown and the turn it belongs to. */
   plans: Map<string, { text: string; createdAt: string; turnId: string | null }>;
   /**
@@ -223,6 +234,8 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       projected: new Set(),
       messageTurn: new Map(),
       reasoningPartIndex: new Map(),
+      assistantPhaseByItemId: new Map(),
+      messageKind: new Map(),
       plans: new Map(),
       planPacer: undefined as unknown as DeltaBufferSet,
       taskTitles: new Map(),
@@ -323,6 +336,76 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     emit(state, threadId, cause, activity.createdAt, "thread.activity-appended", { activity });
   }
 
+  /**
+   * Codex's `agentMessage` phase, as the adapter surfaces it on the
+   * `assistant_message` item's `detail` (`apps/daemon/test/fixtures/codex/README.md`
+   * observation 18: `"final_answer"` vs `"commentary"` — the running "I'll do X
+   * next" narration). Any other detail is that item's real text, and a
+   * provider with no such notion never sends either marker.
+   */
+  function assistantPhaseFromDetail(
+    detail: string | undefined
+  ): "answer" | "commentary" | null {
+    switch (detail?.trim().toLowerCase()) {
+      case "commentary":
+        return "commentary";
+      case "final_answer":
+        return "answer";
+      default:
+        return null;
+    }
+  }
+
+  /** True when `detail` is the phase marker and therefore NOT message text. */
+  function detailIsPhaseMarker(detail: string | undefined): boolean {
+    return assistantPhaseFromDetail(detail) !== null;
+  }
+
+  /**
+   * Record the phase for a provider item and stamp it onto the message that
+   * item opened. The phase can arrive before the first delta (`item.started`)
+   * or after the last one (`item.completed`), so both the remembered-by-item
+   * map and the already-open message are updated.
+   */
+  function noteAssistantPhase(
+    state: ThreadState,
+    itemId: string,
+    phase: "answer" | "commentary",
+    turnId: string | null
+  ): void {
+    state.assistantPhaseByItemId.set(itemId, phase);
+    state.messageKind.set(segmentMessageId(itemId, 0, "assistant"), phase);
+    if (turnId === null) {
+      return;
+    }
+    const segment = state.segments.get(segmentKey(turnId, "assistant"));
+    if (segment?.activeMessageId != null && segment.baseKey === itemId) {
+      state.messageKind.set(segment.activeMessageId, phase);
+    }
+  }
+
+  /**
+   * The §7.3 badge fields, resolved once so every `thread.message-sent` — the
+   * first delta, a later spill and the completion alike — carries them.
+   * `reasoningKind` is read straight off the message id (the stream key is
+   * baked into the base key); `messageKind` comes from the provider's message
+   * phase, remembered per item id.
+   */
+  function messageKindFields(
+    state: ThreadState,
+    messageId: string,
+    role: ThreadMessageRole
+  ): { reasoningKind?: "text" | "summary"; messageKind?: "answer" | "commentary" } {
+    if (role === "reasoning") {
+      const reasoningKind = reasoningKindOfMessageId(messageId);
+      return reasoningKind !== undefined ? { reasoningKind } : {};
+    }
+    if (role !== "assistant") {
+      return {};
+    }
+    return { messageKind: state.messageKind.get(messageId) ?? "answer" };
+  }
+
   function emitMessageDelta(threadId: string, state: ThreadState, flush: BufferFlush): void {
     if (!hasRenderableText(flush.text)) {
       return;
@@ -336,7 +419,14 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       null,
       role === "reasoning" ? flush.openedAt : clock.nowIso(),
       "thread.message-sent",
-      { messageId: flush.key, role, text: flush.text, streaming: true, turnId }
+      {
+        messageId: flush.key,
+        role,
+        text: flush.text,
+        streaming: true,
+        turnId,
+        ...messageKindFields(state, flush.key, role)
+      }
     );
   }
 
@@ -571,6 +661,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
         : hasRenderableText(input.fallbackText)
           ? input.fallbackText!
           : "";
+    const kindFields = messageKindFields(state, messageId, role);
     if (hasRenderableText(text)) {
       state.projected.add(messageId);
       emit(
@@ -579,7 +670,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
         input.cause,
         role === "reasoning" ? openedAt : input.occurredAt,
         "thread.message-sent",
-        { messageId, role, text, streaming: true, turnId }
+        { messageId, role, text, streaming: true, turnId, ...kindFields }
       );
     }
     if (state.projected.has(messageId)) {
@@ -588,7 +679,8 @@ export function createIngestion(options: IngestionOptions): Ingestion {
         role,
         text: "",
         streaming: false,
-        turnId
+        turnId,
+        ...kindFields
       });
     }
     forgetMessage(state, turnId, messageId);
@@ -835,6 +927,20 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       });
     }
 
+    // --- the provider's assistant-message phase (§7.3 `messageKind`) -------
+    if (
+      (event.type === "item.started" ||
+        event.type === "item.updated" ||
+        event.type === "item.completed") &&
+      event.payload.itemType === "assistant_message" &&
+      event.itemId !== undefined
+    ) {
+      const phase = assistantPhaseFromDetail(event.payload.detail);
+      if (phase !== null) {
+        noteAssistantPhase(state, event.itemId, phase, eventTurnId);
+      }
+    }
+
     // --- item completions that close a message ----------------------------
     if (event.type === "item.completed" && eventTurnId !== null) {
       if (event.payload.itemType === "reasoning") {
@@ -1047,6 +1153,13 @@ export function createIngestion(options: IngestionOptions): Ingestion {
           : (activeSegmentId(state, eventTurnId, "assistant") ??
             startSegment(state, eventTurnId, segmentBaseKeyFromEvent(event), "assistant"));
       rememberMessage(state, eventTurnId, messageId);
+      // The phase may have arrived on the item BEFORE the first delta.
+      if (event.itemId !== undefined && !state.messageKind.has(messageId)) {
+        const phase = state.assistantPhaseByItemId.get(event.itemId);
+        if (phase !== undefined) {
+          state.messageKind.set(messageId, phase);
+        }
+      }
       const spill = state.messages.append(messageId, delta, now);
       if (spill.length > 0) {
         emitMessageDelta(threadId, state, {
@@ -1127,6 +1240,8 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       0,
       "reasoning"
     );
+    // A whole-block snapshot arrived with no stream kind, so `reasoningKind`
+    // stays absent and the row renders without a badge rather than guessing.
     emit(state, threadId, event, now, "thread.message-sent", {
       messageId: snapshotId,
       role: "reasoning",
@@ -1155,7 +1270,8 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     const messageId =
       active ??
       segmentMessageId(String(event.itemId ?? event.turnId ?? event.eventId), 0, "assistant");
-    const detail = event.payload.detail;
+    // A `detail` that IS the phase marker is metadata, not the message body.
+    const detail = detailIsPhaseMarker(event.payload.detail) ? undefined : event.payload.detail;
     const streamed = state.projected.has(messageId) || state.messages.has(messageId);
     if (active === null && !streamed && !hasRenderableText(detail)) {
       // Nothing to complete: no stream ever opened and the completion is empty.
@@ -1251,6 +1367,8 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     state.projected.clear();
     state.messageTurn.clear();
     state.reasoningPartIndex.clear();
+    state.assistantPhaseByItemId.clear();
+    state.messageKind.clear();
     state.plans.clear();
     state.planPacer.clear();
     state.taskTitles.clear();
