@@ -103,12 +103,11 @@ export {
 } from "./composer-inset";
 
 export {
-  COMPOSER_KEYBINDINGS,
-  COMPOSER_SHORTCUT_COMMANDS,
   findComposerShortcutTarget,
-  matchComposerKeybinding,
-  shortcutComboFor,
-  type ComposerKeybinding,
+  resolveChatShortcut,
+  shortcutLabelFor,
+  type ChatShortcutCommand,
+  type ChatShortcutEventLike,
   type ComposerShortcutCommand
 } from "./composer-shortcuts";
 
@@ -125,12 +124,5 @@ export {
   resolveSelectedModel
 } from "./composer-model";
 
-export {
-  DEFAULT_COMPOSER_PREFERENCES,
-  loadComposerPreferences,
-  parseComposerPreferences,
-  saveComposerPreferences,
-  type ComposerPreferences
-} from "./composer-prefs";
 
 export { useComposerPathSearch, type ComposerPathSearch } from "./use-composer-path-search";
