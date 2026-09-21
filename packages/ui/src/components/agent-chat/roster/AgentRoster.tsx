@@ -136,7 +136,11 @@ export function AgentRoster({
       data-session-id={sessionId}
       className="flex min-h-0 w-full flex-col border-t border-neutral-800 bg-neutral-950"
     >
-      <div className="ac-scroll-thin flex max-h-[40vh] min-h-0 flex-col gap-1 overflow-y-auto px-1.5 py-1">
+      {/* Bounded twice: never more than 40% of the viewport, and never more
+          than ~4.5 rows. The second bound is the mobile one — `vh` is the
+          *layout* viewport, so with the soft keyboard up 40vh would be most of
+          what the user can actually see. */}
+      <div className="ac-scroll-thin flex max-h-[min(40vh,18rem)] min-h-0 flex-col gap-1 overflow-y-auto px-1.5 py-1">
         {main && visuals ? (
           <RosterMainRow
             title={main.title ?? "main"}
