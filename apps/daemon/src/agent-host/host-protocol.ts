@@ -112,20 +112,6 @@ export const agentHostRoutes = {
   providerRefresh: (adapterId: string): string =>
     `/providers/${encodeURIComponent(adapterId)}/refresh`,
 
-  /**
-   * The daemon's coarse signal subscription (§6.4) — one long-lived NDJSON
-   * stream for the WHOLE host, not per thread. It carries only the six
-   * `SessionSummary` fields, turn transitions, request open/close and
-   * `agent.providers.changed`; nothing higher-rate rides it.
-   *
-   * It is a separate channel from `events(threadId)` on purpose:
-   * `backgroundLiveness` lives in an in-memory registry (§3.1) and is not in
-   * `events.ndjson`, so no fold over the persisted log can produce it.
-   *
-   * Frames and the tolerant parser: `apps/daemon/src/agent-chat/host-signals.ts`
-   * (owner: W10). The first frame on every connect is `hello`.
-   */
-  signals: "/signals",
 
   /**
    * The intentional stop of §3.3: write every continuation marker for a
@@ -152,7 +138,14 @@ export interface AgentHostHealthResponse {
 /** Body of `POST /threads`. */
 export interface CreateHostThreadRequest {
   threadId: string;
+  /**
+   * The PROJECT ROOT — the `<workspacesDir>/<ws>/<project>` dir the tab belongs
+   * to, never a subdirectory. Any per-project pooling (OpenCode runs one server
+   * per project) must key on **this**, not on `cwd`: a thread opened on a
+   * subdirectory would otherwise spawn a second server for the same checkout.
+   */
   projectPath: string;
+  /** Working directory for the provider child. Usually equals `projectPath`. */
   cwd: string;
   title: string;
   /** Registry id; the host maps it to an adapter via the catalog's `chat`. */
@@ -163,6 +156,30 @@ export interface CreateHostThreadRequest {
   runtimeMode: unknown;
   /** §6.1: refused with `RESUME_UNAVAILABLE` when the adapter cannot use it. */
   resume?: { home: "system" | "account" | "cliproxy"; conversationId: string };
+  /**
+   * The launcher-specific environment §3.1 requires a chat thread to get —
+   * **exactly** what a terminal launch of the same registry entry gets today.
+   *
+   * The daemon composes it, because only the daemon has the sources: the
+   * registry entry's own `env` plus its per-launcher env file
+   * (`<appdir>/daemon/env/<id>.env`, e.g. `opencode.env`), and the
+   * `resolveExtraEnv` contributors — the managed account home, the cliproxy
+   * launcher env for `claudex`/`claudemix` (`ANTHROPIC_BASE_URL`,
+   * `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`, the compaction window and the
+   * Claude timeout), and the resolved per-launch model pin.
+   *
+   * The host layers it **over** what `buildProviderEnv()` produces and keeps
+   * `unsetEnv` as the ambient-credential denylist, so a thread can never
+   * silently bill a different identity. Values are already absolute: nothing
+   * expands `~` or `$VAR` for a spawned child.
+   */
+  launchEnv?: Record<string, string>;
+  /** Ambient vars to remove for this launch (the `unset` half of §3.1). */
+  unsetEnv?: string[];
+  /** Absolute home dir for `home`, resolved daemon-side. Never on a client wire. */
+  homePath?: string;
+  /** The proxy launcher owning the home when `home` is `"cliproxy"`. */
+  proxyRefId?: string;
 }
 
 /**

@@ -53,6 +53,12 @@ export interface AgentChatRouteDeps {
    * ready — §8's "reported as not switched").
    */
   restartHost(): Promise<{ hostInstanceId: string | null; markedThreadIds: string[] }>;
+  /**
+   * §6.3/§6.4: a refresh that actually changed something raises the coarse
+   * `agent.providers.changed` and the client re-reads. Only `changed: true`
+   * broadcasts — a no-op refresh must not wake every client.
+   */
+  onProvidersChanged(adapterId: string): void;
   logger?: { warn?: (...a: unknown[]) => void; error?: (...a: unknown[]) => void };
 }
 
@@ -206,13 +212,17 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
     pattern(agentChatRoutes.providerRefresh(":id")),
     async (request, reply) => {
       if (!deps.isHostHealthy()) return reply.code(503).send(HOST_UNAVAILABLE);
-      return forwardJson(
+      const value = await forwardJson(
         deps,
         reply,
         "POST",
         agentHostRoutes.providerRefresh(request.params.id),
         request.body ?? {}
       );
+      if (value && typeof value === "object" && (value as { changed?: unknown }).changed === true) {
+        deps.onProvidersChanged(request.params.id);
+      }
+      return value;
     }
   );
 

@@ -3968,15 +3968,32 @@ export function createServer(
           return refuseUpload(reply, 413, "UPLOAD_TOO_LARGE", new UploadTooLargeError().message);
         }
 
-        const name = uploadFileName(request.query.name ?? "", request.query.type);
         // Chat spec §6.3: a chat upload reuses this exact raw-binary path, but
-        // lands in the THREAD's attachments dir — so the returned path is a
-        // usable attachment reference, `GET /api/fs/download` can read it back,
-        // and the host's thread-delete cascade cleans it up with everything
-        // else the thread owns. A terminal upload keeps its own dir.
-        const dir = sessions.get(id)?.kind === "agent-chat"
-          ? agentChatThreadAttachmentsDir(resolved.baseDir, id)
-          : sessionUploadsDir(resolved.daemonDir, id);
+        // the bytes stream straight through to the agent host, which claims the
+        // file into the thread's attachment namespace, mints its id, re-checks
+        // the §4.1 bounds against the file it stat'd, and cleans it up with the
+        // rest of the thread on delete. A terminal upload keeps its own dir.
+        if (sessions.get(id)?.kind === "agent-chat") {
+          if (!services.agentChat) {
+            return reply.code(503).send({
+              code: "HOST_UNAVAILABLE",
+              message: "The agent host is restarting."
+            });
+          }
+          try {
+            const uploaded = await services.agentChat.uploadAttachment(id, request.query, request.raw);
+            return reply.code(uploaded.status).send(uploaded.value ?? undefined);
+          } catch (error) {
+            request.log?.warn?.({ err: error }, "agent chat attachment upload failed");
+            return reply.code(503).send({
+              code: "HOST_UNAVAILABLE",
+              message: "The agent host is restarting."
+            });
+          }
+        }
+
+        const name = uploadFileName(request.query.name ?? "", request.query.type);
+        const dir = sessionUploadsDir(resolved.daemonDir, id);
         const path = join(dir, name);
         // Mirror the accounts.json / keys conventions: 0700 dir, 0600 file. A
         // filesystem failure (disk full, permission denied, …) must surface as a

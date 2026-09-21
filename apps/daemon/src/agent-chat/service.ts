@@ -27,6 +27,10 @@ import {
   type AgentHostHealthResponse,
   type CreateHostThreadRequest
 } from "../agent-host/host-protocol.ts";
+import type { Readable } from "node:stream";
+import { isAgentAdapterId } from "../agent-host/adapters/index.ts";
+import { agentHostExtraRoutes } from "../agent-host/server/extra-routes.ts";
+import { ACCOUNT_HOME_ENV_VAR } from "../agent-host/support/env.ts";
 import { ChatSessionManager, ChatSessionError } from "./chat-sessions.ts";
 import { AgentHostClient, HostUnavailableError } from "./host-client.ts";
 import { ensureGrokChatConfig, markClaudeProjectTrusted } from "./home-prep.ts";
@@ -90,12 +94,33 @@ export interface AgentChatServiceOptions {
   /** Test seam: overrides `process.execPath`. */
   nodeBin?: string;
   mainPath?: string;
+  /**
+   * Test seam for the no-tmux spawn. Production leaves it unset and gets the
+   * real child; a test that supplies it can never start a host process.
+   */
+  spawnDirect?: (bin: string, args: string[], env: Record<string, string>) => DirectHostHandle;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
 }
 
-/** `POST /api/sessions` with `kind: "agent-chat"` — §6.1's extra fields. */
+/**
+ * `POST /api/sessions` with `kind: "agent-chat"`.
+ *
+ * The §6.1 extras ride the nested `chat` block the client sends; the flattened
+ * spelling is still accepted so a socket/curl caller (and an older bundle) is
+ * not a 400.
+ */
 export type CreateAgentChatRequest = CreateSessionRequest & Partial<CreateAgentChatSessionFields>;
+
+/** Read §6.1's fields from either spelling, nested first. */
+function chatFields(req: CreateAgentChatRequest): Partial<CreateAgentChatSessionFields> {
+  return {
+    ...(req.modelSelection !== undefined ? { modelSelection: req.modelSelection } : {}),
+    ...(req.runtimeMode !== undefined ? { runtimeMode: req.runtimeMode } : {}),
+    ...(req.resume !== undefined ? { resume: req.resume } : {}),
+    ...(req.chat ?? {})
+  };
+}
 
 export class AgentChatService {
   readonly chat: ChatSessionManager;
@@ -132,6 +157,10 @@ export class AgentChatService {
         requestStop: () => this.requestHostStop(),
         tmux: opts.tmux,
         spawnDirect: (bin, args, env) => {
+          if (opts.spawnDirect) {
+            this.directHandle = opts.spawnDirect(bin, args, env);
+            return this.directHandle;
+          }
           const child = spawn(bin, args, { cwd: opts.cwd, detached: false, stdio: "ignore", env });
           child.on("error", (error) => opts.logger?.error?.("agent host spawnDirect failed", error));
           this.directHandle = { kill: () => child.kill(), pid: child.pid };
@@ -148,8 +177,10 @@ export class AgentChatService {
       broadcaster: opts.broadcaster,
       push: opts.push,
       now: opts.now,
-      sleep: opts.sleep,
       logger: opts.logger,
+      // The poll idles while the host is restarting or foreign: every chat
+      // route answers 503 then anyway, and a read would only log noise.
+      isHostHealthy: () => this.supervisor.isHealthy(),
       // A settled turn reopens the §3.1 drain window, so a deploy's version
       // handover happens the moment the host goes quiet.
       onTurnSettled: () => this.supervisor.handleTurnSettled()
@@ -221,6 +252,10 @@ export class AgentChatService {
         const hostInstanceId = await this.supervisor.restartNow();
         return { hostInstanceId, markedThreadIds: this.lastMarkedThreadIds };
       },
+      onProvidersChanged: (adapterId) =>
+        this.summary.publishProvidersChanged(
+          isAgentAdapterId(adapterId) ? { adapterId } : {}
+        ),
       logger: this.opts.logger
     };
   }
@@ -246,7 +281,8 @@ export class AgentChatService {
       // §5.3: an agent row without `chat` cannot open a chat tab.
       throw new ChatSessionError(`"${entry.name}" has no chat adapter.`);
     }
-    if (req.resume && !isUsableConversationId(req.resume.conversationId)) {
+    const fields = chatFields(req);
+    if (fields.resume && !isUsableConversationId(fields.resume.conversationId)) {
       throw new ChatSessionError(
         "That conversation cannot be resumed with this agent.",
         "RESUME_UNAVAILABLE"
@@ -258,7 +294,12 @@ export class AgentChatService {
 
     let launch: ChatLaunchEnv | null = null;
     try {
-      launch = await this.opts.resolveLaunchEnv(entry, { accountId: req.accountId, model: req.model });
+      // The account rides the top level, shared with the terminal path;
+      // `chat.accountId` is the host-side spelling and is only a fallback.
+      launch = await this.opts.resolveLaunchEnv(entry, {
+        accountId: req.accountId ?? fields.accountId,
+        model: req.model
+      });
     } catch (error) {
       throw error instanceof ChatSessionError
         ? error
@@ -269,11 +310,21 @@ export class AgentChatService {
     const home = resolveHomeKind(entry.id, accountId);
     const cwd = req.cwd || req.projectPath || homedir();
     const id = randomUUID();
+    // EXACTLY the env a terminal launch composes today: the registry entry's
+    // own env (which already carries `<appdir>/daemon/env/<id>.env`, loaded by
+    // RegistryService) under the `resolveExtraEnv` contributors, which win a
+    // collision — the same order the terminal wrapper script's `export` has
+    // over `tmux -e`.
+    const launchEnv: Record<string, string> = { ...entry.env, ...(launch?.env ?? {}) };
+    // The adapter's home variable is the one authority on the home dir, so a
+    // managed account, a cliproxy launcher home and the system home all resolve
+    // through the same rule the child itself will read.
+    const homePath = launchEnv[ACCOUNT_HOME_ENV_VAR[adapter]];
 
     // Reality findings: a fresh directory is untrusted for Claude, and Grok
     // ships with approvals off and auto-update on. Best-effort and before the
     // thread exists, so the very first turn already sees the prepared home.
-    await this.prepareHome(adapter, launch?.env ?? {}, cwd);
+    await this.prepareHome(adapter, launchEnv, cwd);
 
     const summary = this.chat.create({
       id,
@@ -295,9 +346,23 @@ export class AgentChatService {
       refId: entry.id,
       accountId,
       home,
-      modelSelection: req.modelSelection,
-      runtimeMode: req.runtimeMode,
-      ...(req.resume ? { resume: req.resume } : {})
+      // Passed through as the client sent it. An empty `modelSelection.model`
+      // means "the provider's own default" — the launcher had no catalog to
+      // pick from — and is never a refusal here (the daemon's model gate above
+      // is the claudex/claudemix catalog check, which is a different thing).
+      modelSelection: fields.modelSelection,
+      runtimeMode: fields.runtimeMode,
+      // EXACTLY the env a terminal launch of this entry gets today (§3.1): the
+      // registry entry's own env — which is where the per-launcher env file
+      // `<appdir>/daemon/env/<id>.env` (opencode.env, the generated
+      // claudex.env/claudemix.env) has already been merged by RegistryService —
+      // under the `resolveExtraEnv` contributors, which win a collision exactly
+      // as the terminal wrapper script's `export` wins over `tmux -e`.
+      launchEnv,
+      ...(launch?.unset?.length ? { unsetEnv: launch.unset } : {}),
+      ...(homePath ? { homePath } : {}),
+      ...(home === "cliproxy" ? { proxyRefId: entry.id } : {}),
+      ...(fields.resume ? { resume: fields.resume } : {})
     };
     try {
       const response = await this.client.json<{ error?: { code: string; message: string } }>(
@@ -334,6 +399,46 @@ export class AgentChatService {
     void this.client
       .json("DELETE", agentHostRoutes.deleteThread(id))
       .catch((error) => this.opts.logger?.warn?.(`agent host thread delete failed for ${id}`, error));
+  }
+
+  /**
+   * A chat attachment (§6.3). The bytes are streamed straight through to the
+   * host, which claims the file into the thread's attachment namespace and
+   * answers the `AttachmentRef` — the host, not the daemon, mints the id and
+   * re-checks the §4.1 bounds against the file it stat'd, and its thread-delete
+   * cascade is what cleans the file up.
+   *
+   * The daemon deliberately does not write into the thread directory itself:
+   * that directory is the host's, and a file the host never claimed could not
+   * be resolved by `GET …/attachments/:id` when an adapter goes looking for it.
+   */
+  async uploadAttachment(
+    sessionId: string,
+    query: { name?: string; type?: string },
+    body: Readable
+  ): Promise<{ status: number; value: unknown }> {
+    const params = new URLSearchParams();
+    if (query.name) params.set("name", query.name);
+    if (query.type) params.set("type", query.type);
+    const suffix = params.toString();
+    const path = `${agentHostExtraRoutes.putAttachment(sessionId)}${suffix ? `?${suffix}` : ""}`;
+    const stream = await this.client.open("POST", path, {
+      body,
+      headers: { "content-type": "application/octet-stream" },
+      timeoutMs: 0
+    });
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream.body) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+    }
+    const raw = Buffer.concat(chunks).toString("utf8");
+    let value: unknown = null;
+    try {
+      value = raw.trim() ? JSON.parse(raw) : null;
+    } catch {
+      value = null;
+    }
+    return { status: stream.status, value };
   }
 
   /** `PUT` rename (§6.1) — the host appends `thread.meta-updated`. */
