@@ -127,8 +127,19 @@ export interface ResolvedLaunch {
   home: AccountHome;
 }
 
+/**
+ * The store plus the two optional members W2's implementation adds beyond the
+ * `ThreadStore` seam: the parse message for a thread that could not be read,
+ * and the backwards log scan that serves a `GET …/items/:id` for a row the
+ * fold's retention window already dropped.
+ */
+export type HostThreadStore = ThreadStore & {
+  threadError?(threadId: string): string | null;
+  readItem?(threadId: string, itemId: string): Promise<ThreadItem | null>;
+};
+
 export interface OrchestratorOptions {
-  store: ThreadStore;
+  store: HostThreadStore;
   ingestion: Ingestion;
   checkpoints: CheckpointService;
   liveness: LivenessRegistry;
@@ -202,6 +213,11 @@ interface ThreadRuntime {
   bound: BoundSessionShape | null;
   watchdog: TurnWatchdog | null;
   subscribers: Set<ThreadSubscription>;
+  /**
+   * §5.1: a thread directory that fails to parse marks **that thread** `error`
+   * with the parse message; it never affects another thread or host startup.
+   */
+  parseError: string | null;
   deleted: boolean;
 }
 
@@ -356,6 +372,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       bound: null,
       watchdog: null,
       subscribers: new Set(),
+      parseError: store.threadError?.(threadId) ?? null,
       deleted: state.deleted
     };
     runtimes.set(threadId, runtime);
@@ -373,6 +390,11 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   const requireHead = (runtime: ThreadRuntime): ThreadHead => {
     const head = headOf(runtime);
     if (!head || runtime.deleted) {
+      if (runtime.parseError !== null && !runtime.deleted) {
+        // The thread exists but its log could not be read: that thread alone
+        // is in error, and the message says why (§5.1).
+        throw commandRejected(`This thread could not be read: ${runtime.parseError}`);
+      }
       throw threadNotFound(runtime.id);
     }
     return head;
@@ -1122,7 +1144,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
 
     // 409 for any command against a thread in `error` except `/session/stop`
     // and `/revert` — without that carve-out a wedged session is unrecoverable.
-    if (session.status === "error" && !COMMANDS_ALLOWED_IN_ERROR_STATE.has(name)) {
+    if (
+      (session.status === "error" || runtime.parseError !== null) &&
+      !COMMANDS_ALLOWED_IN_ERROR_STATE.has(name)
+    ) {
       throw commandRejected(
         "This thread's session is in an error state. Stop the session or rewind to continue."
       );
@@ -1622,6 +1647,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       // every checkpoint ref under the thread's prefix and removes the
       // directory. A closed tab whose record is gone is gone (§6.1).
       await runtime.effects.run(() => stopSessionInternal(runtime));
+      // The store also calls `deleteThreadRefs` through its own hook before it
+      // removes the directory (a throw there aborts the delete). Doing it here
+      // too keeps the cascade honest for any store that has no hook wired;
+      // deleting refs under a prefix is idempotent.
       if (head) {
         await checkpoints
           .deleteThreadRefs({ threadId, cwd: head.cwd })
@@ -1708,12 +1737,17 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     whenReady(async () => {
       const runtime = await loadRuntime(threadId);
       requireHead(runtime);
+      // Retention drops the oldest 500 activities from the fold, and a
+      // `tool.updated` row is persisted already slimmed while its
+      // `tool.completed` carries the full payload — so the LOG, read
+      // backwards, is the authoritative answer, not the projection (§5.6).
+      if (store.readItem) {
+        return store.readItem(threadId, itemId);
+      }
       const inFold = (runtime.state.items ?? []).find((item) => item.id === itemId);
       if (inFold) {
         return inFold;
       }
-      // Retention drops the oldest 500 activities from the fold; the log still
-      // has the full, unslimmed payload (§5.6).
       const tail = await store.readAll(threadId);
       for (let index = tail.events.length - 1; index >= 0; index -= 1) {
         const event = tail.events[index]!;

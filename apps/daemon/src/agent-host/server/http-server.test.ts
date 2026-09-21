@@ -10,9 +10,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 
-import type { AgentChatStreamFrame, AgentHostHealthResponse } from "@orquester/api/agent-chat";
+import type { AgentChatStreamFrame } from "@orquester/api/agent-chat";
 
-import { AGENT_HOST_PROTOCOL_VERSION, agentHostRoutes } from "../host-protocol.ts";
+import {
+  AGENT_HOST_PROTOCOL_VERSION,
+  agentHostRoutes,
+  type AgentHostHealthResponse
+} from "../host-protocol.ts";
 import { createTestHost, type TestHost } from "../orchestration/testing/index.ts";
 import { createAgentHostServer, type AgentHostServer } from "./http-server.ts";
 

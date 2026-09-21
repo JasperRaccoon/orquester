@@ -169,25 +169,30 @@ describe("thread stream — the live tail is attached before the read (§6.3)", 
   it("loses no event published while the read is in flight, and duplicates none", async () => {
     const fake = fakeResponse();
     const timers = createTestTimers();
-    let emit: ((events: DomainEvent[]) => void) | null = null;
-    let releaseRead: (() => void) = () => undefined;
+    let attached = false;
+    let emit: (events: DomainEvent[]) => void = () => undefined;
+    const readGateHandles: Array<() => void> = [];
     const readGate = new Promise<void>((resolve) => {
-      releaseRead = () => resolve();
+      readGateHandles.push(() => resolve());
     });
+    const releaseRead = (): void => {
+      readGateHandles.forEach((fn) => fn());
+    };
 
     const stream = createThreadStream({
       response: fake.response,
       hostInstanceId: "host-1",
       subscribe: async (listener) => {
         emit = listener;
+        attached = true;
         return () => {
-          emit = null;
+          attached = false;
         };
       },
       read: async (): Promise<AgentChatStreamFrame[]> => {
         // The subscription must already be attached by now.
-        assert.ok(emit, "live delivery is attached before the read");
-        emit?.([event(4)]);
+        assert.ok(attached, "live delivery is attached before the read");
+        emit([event(4)]);
         await readGate;
         return [{ kind: "snapshot", thread: snapshot(5) }];
       },
@@ -198,7 +203,7 @@ describe("thread stream — the live tail is attached before the read (§6.3)", 
     const started = stream.start();
     await new Promise((resolve) => setImmediate(resolve));
     // Two more events land while the read is still parked.
-    emit?.([event(6)]);
+    emit([event(6)]);
     releaseRead();
     await started;
 
@@ -221,7 +226,7 @@ describe("thread stream — the live tail is attached before the read (§6.3)", 
   it("pushes `synchronized` after everything buffered, never straight to the socket", async () => {
     const fake = fakeResponse();
     const timers = createTestTimers();
-    let emit: ((events: DomainEvent[]) => void) | null = null;
+    let emit: (events: DomainEvent[]) => void = () => undefined;
     const stream = createThreadStream({
       response: fake.response,
       hostInstanceId: "host-1",
@@ -230,7 +235,7 @@ describe("thread stream — the live tail is attached before the read (§6.3)", 
         return () => undefined;
       },
       read: async () => {
-        emit?.([event(2), event(3)]);
+        emit([event(2), event(3)]);
         return [{ kind: "event", seq: 1, event: event(1) }];
       },
       setTimer: (fn, ms) => timers.setTimer(fn, ms),

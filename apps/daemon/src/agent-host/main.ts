@@ -213,7 +213,6 @@ export async function startAgentHost(
 
   // ---- services ----------------------------------------------------------
   const liveness = createLivenessRegistry();
-  const store = createThreadStore({ rootDir: stateDir, clock, idGen: ids });
   // Exactly ONE checkpoint service for the host: its git permit pool is per
   // instance, so a second one would double the concurrency §5.4 bounds.
   const checkpoints = createCheckpointService({
@@ -225,6 +224,17 @@ export async function startAgentHost(
       GIT_TERMINAL_PROMPT: "0"
     },
     log: (message, detail) => logger.debug(message, detail)
+  });
+
+  // `rootDir` is `<appdir>/daemon/agent`, NOT the appdir. The delete hook runs
+  // before the directory is removed and a throw there aborts the delete, so a
+  // thread can never be deleted and leave its checkpoint refs behind (§5.4).
+  const store = createThreadStore({
+    rootDir: stateDir,
+    clock,
+    idGen: ids,
+    homeDirs: [homeDir],
+    deleteThreadRefs: (input) => checkpoints.deleteThreadRefs(input)
   });
 
   const shutdown = new AbortController();
