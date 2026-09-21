@@ -236,8 +236,11 @@ export function classifyItem(item: CodexThreadItem): ClassifiedItem {
       return { itemType: "context_compaction", timelineBypass: true };
 
     default: {
-      const exhaustive: never = item;
-      const type = (exhaustive as { type?: unknown }).type;
+      // `satisfies never` proves the 19 generated arms are all handled; a new
+      // item type in a newer protocol is a TYPE ERROR here rather than a row
+      // silently landing in the wrong bucket (§4.2).
+      item satisfies never;
+      const type = (item as { type?: unknown }).type;
       return {
         itemType: "unknown",
         timelineBypass: false,

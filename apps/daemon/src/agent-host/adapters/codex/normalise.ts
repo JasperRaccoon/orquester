@@ -538,15 +538,16 @@ export class CodexNormaliser {
         return [];
 
       default: {
-        // A method the generated catalogue does not contain. The `never` proves
-        // every catalogued method is handled above; the runtime arm surfaces
-        // the unknown one as a warning (§10) and NEVER ends the turn.
-        const exhaustive: never = method;
+        // A method the generated catalogue does not contain. `satisfies never`
+        // proves every catalogued method is handled above — adding one to the
+        // protocol is a TYPE ERROR here (§4.2) — and the runtime arm surfaces
+        // the unknown one as a warning (§10), which never ends the turn.
+        method satisfies never;
         return [
           {
             type: "runtime.warning",
             payload: {
-              message: `Unrecognised codex notification: ${String(exhaustive)}`,
+              message: `Unrecognised codex notification: ${String(method)}`,
               detail: params
             },
             raw: raw()
