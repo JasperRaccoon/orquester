@@ -374,6 +374,15 @@ export interface AgentChatActions {
   setInteractionMode(mode: InteractionMode): void;
   setFollow(follow: boolean): void;
   setDisclosure(patch: Partial<DisclosureState>): void;
+  /**
+   * Write this thread's entry in the §7.2 100-entry LRU: reading position
+   * **and** the shape of the page under it. The timeline calls this as the
+   * user scrolls (debounced by the caller); the disclosures come from the
+   * slice, so a caller may pass the position fields alone.
+   *
+   * *Added by W11; `contracts.ts` stays additive-only.*
+   */
+  rememberScroll(position: Partial<RememberedTimelinePosition>): void;
   dismissErrorBanner(): void;
   /** Re-read the thread (a host instance change, or a user retry). */
   refresh(): Promise<void>;

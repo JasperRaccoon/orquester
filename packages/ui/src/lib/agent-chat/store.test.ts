@@ -6,7 +6,11 @@ import type {
   AgentChatStreamFrame
 } from "@orquester/api/agent-chat";
 
-import { createThreadStore, type AgentChatThreadState } from "./store";
+import {
+  createThreadStore,
+  resetDismissedErrorBanners,
+  type AgentChatThreadState
+} from "./store";
 import { AgentChatCommandError, type AgentChatTransport } from "./transport";
 import { activity, ev, message, resetBuilders, snapshot, stamp } from "./test-helpers";
 
@@ -313,11 +317,49 @@ describe("client-local view state", () => {
   });
 
   it("dismisses the error banner", async () => {
+    resetDismissedErrorBanners();
     const { api, fake, state } = await store();
     fake.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "no"), 99);
     await assert.rejects(() => api.getState().actions.compact());
     assert.equal(state().slice.errorBanner, "no");
     api.getState().actions.dismissErrorBanner();
     assert.equal(state().slice.errorBanner, null);
+  });
+
+  it("remembers a dismissal per (thread, message) — a DIFFERENT error still shows", async () => {
+    resetDismissedErrorBanners();
+    const { api, fake, state } = await store();
+    fake.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "same"), 1);
+    await assert.rejects(() => api.getState().actions.compact());
+    api.getState().actions.dismissErrorBanner();
+
+    fake.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "same"), 1);
+    await assert.rejects(() => api.getState().actions.compact());
+    assert.equal(state().slice.errorBanner, null, "the closed banner stays closed");
+
+    fake.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "different"), 1);
+    await assert.rejects(() => api.getState().actions.compact());
+    assert.equal(state().slice.errorBanner, "different");
+  });
+
+  it("retries a lost response with the SAME commandId", async () => {
+    const { api, fake } = await store();
+    // A transport-level throw: the response never arrived (§6.6).
+    fake.fail(new Error("socket hang up"), 1);
+    await api.getState().actions.stopSession();
+    assert.equal(fake.posted.length, 1);
+    assert.equal(fake.posted[0]?.body.commandId, "id1");
+  });
+
+  it("writes the scroll/disclosure LRU and mirrors follow from atEnd", async () => {
+    const { api, state } = await store();
+    api.getState().actions.rememberScroll({ rowId: "r9", scrollOffset: 120, atEnd: false });
+    assert.equal(state().slice.scroll?.rowId, "r9");
+    assert.equal(state().slice.scroll?.scrollOffset, 120);
+    assert.equal(state().slice.follow, false);
+
+    api.getState().actions.rememberScroll({ atEnd: true });
+    assert.equal(state().slice.follow, true);
+    assert.equal(state().slice.scroll?.rowId, "r9", "unspecified fields are kept");
   });
 });
