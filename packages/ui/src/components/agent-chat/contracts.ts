@@ -261,4 +261,13 @@ export interface ChatStatusLineProps {
   /** Always present: §4.6.3 synthesises `/compact` on all four adapters. */
   onCompact: () => void;
   latestCheckpoint: Checkpoint | null;
+  /**
+   * The thread's model, for the auto-compaction sentence ("Context for
+   * <model> compacts automatically when needed") when the provider reports no
+   * explicit threshold. Without it the sentence degrades to the generic form.
+   *
+   * *Added by W14 (R8 m3); T3 passes `modelDisplayName`,
+   * `ContextWindowMeter.tsx:136-138`.*
+   */
+  modelLabel?: string | null;
 }

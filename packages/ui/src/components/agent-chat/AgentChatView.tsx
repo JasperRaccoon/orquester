@@ -53,6 +53,19 @@ const NO_REQUEST_IDS: readonly string[] = [];
 /** Every row callback is a no-op while the paint hold is in effect (§7.1). */
 const noop = (): void => {};
 
+/**
+ * Fire a command and swallow its rejection.
+ *
+ * The store already surfaced the failure — `command()` sets `slice.errorBanner`
+ * and then rethrows — so the only thing left for a `void`-ed call to do is
+ * raise an `unhandledrejection`, which is noise in the console and a hard
+ * failure in `scripts/smoke-web.mjs` (it fails the deploy smoke test on any
+ * uncaught page error).
+ */
+function run(promise: Promise<unknown>): void {
+  void promise.catch(() => {});
+}
+
 /** The read-only overlay for a turn diff or one item's full, unslimmed payload. */
 interface ChatViewerState {
   kind: "diff" | "output";
@@ -402,13 +415,13 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               onRevert={
                 paintOnly
                   ? noop
-                  : (targetTurnCount) => void actions.revert({ targetTurnCount })
+                  : (targetTurnCount) => run(actions.revert({ targetTurnCount }))
               }
               onOpenTurnDiff={paintOnly ? noop : openTurnDiff}
               onOpenFile={paintOnly ? noop : openFile}
               onLoadFullOutput={paintOnly ? noop : loadFullOutput}
               onOpenAgent={paintOnly ? noop : setDrillInAgentId}
-              onSendQueuedNow={paintOnly ? noop : (id) => void actions.sendQueuedNow(id)}
+              onSendQueuedNow={paintOnly ? noop : (id) => run(actions.sendQueuedNow(id))}
               // A straight pass-through: the store's action already puts the
               // message's text back in the draft and its attachments back as
               // chips (`appendToDraft`), so wrapping it would insert twice.
@@ -444,8 +457,11 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 totalProcessedTokens={slice.contextWindow?.totalProcessedTokens ?? null}
                 reportsContextWindow={status.reportsContextWindow}
                 activePlan={paintOnly ? null : activePlan}
-                onCompact={paintOnly ? noop : () => void actions.compact()}
+                onCompact={paintOnly ? noop : () => run(actions.compact())}
                 latestCheckpoint={latestCheckpoint}
+                // Names the model in the meter's auto-compaction sentence when
+                // the provider reports no explicit threshold (R8 m3).
+                modelLabel={slice.head?.modelSelection.model ?? session.model ?? null}
               />
             </div>
             <div className="pointer-events-auto mx-auto w-full min-w-0 max-w-3xl px-3 sm:px-5">
@@ -460,12 +476,12 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 actionableProposedPlan={
                   !paintOnly && session.hasActionableProposedPlan === true
                 }
-                onApprove={paintOnly ? noop : (input) => void actions.respondApproval(input)}
-                onAnswer={paintOnly ? noop : (input) => void actions.answerQuestion(input)}
+                onApprove={paintOnly ? noop : (input) => run(actions.respondApproval(input))}
+                onAnswer={paintOnly ? noop : (input) => run(actions.answerQuestion(input))}
                 onDismiss={
-                  paintOnly ? noop : (requestId) => void actions.dismissQuestion({ requestId })
+                  paintOnly ? noop : (requestId) => run(actions.dismissQuestion({ requestId }))
                 }
-                onStopBackgroundWork={paintOnly ? noop : () => void actions.interrupt()}
+                onStopBackgroundWork={paintOnly ? noop : () => run(actions.interrupt())}
                 // Text displaced by an answer goes back into the draft rather
                 // than being silently discarded (§7.5).
                 onCarryTextToDraft={
