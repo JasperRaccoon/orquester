@@ -45,6 +45,8 @@ import {
   statusForCode
 } from "../orchestration/errors.ts";
 import { isAgentAdapterId } from "../adapters/index.ts";
+import { redactStderr } from "../support/stderr.ts";
+import { withDeadline } from "../support/deadline.ts";
 import type { Orchestrator } from "../orchestration/orchestrator.ts";
 import {
   agentHostExtraRoutes,
@@ -56,15 +58,37 @@ import { createThreadStream, type ThreadStream } from "./stream.ts";
 /** Command bodies are small; §4.1 caps `input` at 120 000 characters. */
 const MAX_JSON_BODY_BYTES = 4 * 1024 * 1024;
 
+/**
+ * How long `GET /health` waits on the command gate before answering 503.
+ * Comfortably inside the daemon's own `AGENT_HOST_PREPARED_TIMEOUT_MS` (120 s)
+ * so a slow-but-healthy start still reports ready, while a gate that never
+ * opens fails rather than hanging the probe.
+ */
+const HEALTH_GATE_TIMEOUT_MS = 30_000;
+
 export interface AgentHostServerOptions {
   orchestrator: Orchestrator;
-  store: ThreadStore;
+  /**
+   * The store, plus the staging dir W2's implementation exposes beyond the
+   * `ThreadStore` seam — a `.part` file written there is swept by the §5.1
+   * 1 h sweep, one written into `<appdir>/tmp` is swept by nothing.
+   */
+  store: ThreadStore & { pendingAttachmentsDir?(): string };
   logger: AdapterLogger;
   hostInstanceId: string;
   token: string;
   socketPath: string;
   /** `<appdir>/tmp` — `/tmp` is unavailable under `ProtectSystem=strict`. */
   tmpDir: string;
+  /** Collapsed to `~` in any message that leaves the host (§3.1 redaction). */
+  homeDirs?: readonly string[];
+  /** Exact secrets the host injected, masked wherever they surface. */
+  secretLiterals?: readonly string[];
+  /**
+   * Confines the optional `cwd` of `POST /providers/:id/refresh` (§4.6.4),
+   * which otherwise becomes an arbitrary spawn cwd and readdir root.
+   */
+  isAllowedCwd?(cwd: string): boolean;
   startedAt: string;
   pid?: number;
   /** Called by `POST /stop`: writes the §3.3 markers, then drains and stops. */
@@ -126,7 +150,12 @@ function sendJson(response: ServerResponse, status: number, body: unknown): void
   response.end(payload);
 }
 
-function sendError(response: ServerResponse, error: unknown, logger: AdapterLogger): void {
+function sendError(
+  response: ServerResponse,
+  error: unknown,
+  logger: AdapterLogger,
+  redact: (message: string) => string
+): void {
   if (isAgentChatCommandError(error)) {
     sendJson(response, statusForCode(error.code), error.toEnvelope());
     return;
@@ -135,12 +164,31 @@ function sendError(response: ServerResponse, error: unknown, logger: AdapterLogg
   sendJson(response, 500, {
     error: {
       code: "COMMAND_REJECTED",
-      message: error instanceof Error ? error.message : "Internal host error."
+      // An unexpected `ENOENT … '/var/lib/orquester/daemon/agent/threads/<id>/
+      // meta.json'` would otherwise reach the browser verbatim: the stderr path
+      // collapses home paths and masks token shapes, and this is the one place
+      // the redaction boundary was asymmetric.
+      message: redact(error instanceof Error ? error.message : "Internal host error.")
     }
   });
 }
 
 const COMMAND_NAMES: ReadonlySet<string> = new Set(AGENT_CHAT_COMMAND_NAMES);
+
+/**
+ * A thread id becomes a directory name (`threads/<id>/`), the target of a
+ * recursive `rm` on delete and the `launch.json` path. The daemon mints UUIDs
+ * and gates every per-session route on its own tab record, so nothing
+ * reachable violates this today — but the host is a separate process with its
+ * own trust boundary, and `[^/]+` in the route regex happily matches a
+ * percent-encoded `..`. One guard at the boundary is cheaper than trusting
+ * every future caller.
+ */
+const THREAD_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+export function isSafeThreadId(value: string): boolean {
+  return THREAD_ID_PATTERN.test(value) && !value.split(/[/\\]/).includes("..");
+}
 
 function parseAfter(url: URL): number | undefined {
   const raw = url.searchParams.get("after");
@@ -155,6 +203,11 @@ function parseAfter(url: URL): number | undefined {
 export function createAgentHostServer(options: AgentHostServerOptions): AgentHostServer {
   const { orchestrator, store, logger, hostInstanceId, token, socketPath } = options;
   const expectedAuth = `Bearer ${token}`;
+  const redactMessage = (message: string): string =>
+    redactStderr(message, {
+      ...(options.homeDirs !== undefined ? { homeDirs: options.homeDirs } : {}),
+      ...(options.secretLiterals !== undefined ? { literals: options.secretLiterals } : {})
+    });
   const streams = new Set<ThreadStream>();
 
   const handleCommand = async (
@@ -185,27 +238,37 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
       response.setHeader("connection", "close");
       throw new AgentChatCommandError("INVALID_COMMAND", "Attachment exceeds the 50 MiB limit.");
     }
-    await mkdir(options.tmpDir, { recursive: true });
-    const tempPath = join(options.tmpDir, `attachment-${Date.now()}-${Math.random().toString(36).slice(2)}.part`);
-    const handle = await open(tempPath, "w", 0o600);
-    let received = 0;
+    // The staging file lives in a directory the store's own `.part` sweeper
+    // walks, so the 1 h TTL of §5.1 is a real backstop rather than dead
+    // configuration — `<appdir>/tmp` is swept by nothing.
+    const stagingDir = store.pendingAttachmentsDir?.() ?? options.tmpDir;
+    await mkdir(stagingDir, { recursive: true });
+    const tempPath = join(
+      stagingDir,
+      `attachment-${Date.now()}-${Math.random().toString(36).slice(2)}.part`
+    );
+    // ONE finally covers the whole receive AND the claim: the mid-body cap
+    // throw and any client abort both escape the receive, and a temp file left
+    // behind by either fills the one writable carve-out the appdir has.
     try {
-      for await (const chunk of request) {
-        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
-        received += buffer.length;
-        if (received > MAX_TURN_FILE_BYTES) {
-          response.setHeader("connection", "close");
-          throw new AgentChatCommandError(
-            "INVALID_COMMAND",
-            "Attachment exceeds the 50 MiB limit."
-          );
+      const handle = await open(tempPath, "w", 0o600);
+      let received = 0;
+      try {
+        for await (const chunk of request) {
+          const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
+          received += buffer.length;
+          if (received > MAX_TURN_FILE_BYTES) {
+            response.setHeader("connection", "close");
+            throw new AgentChatCommandError(
+              "INVALID_COMMAND",
+              "Attachment exceeds the 50 MiB limit."
+            );
+          }
+          await handle.write(buffer);
         }
-        await handle.write(buffer);
+      } finally {
+        await handle.close();
       }
-    } finally {
-      await handle.close();
-    }
-    try {
       // The bounds that matter are checked by the store against the STAT'd
       // file, not against what the client claimed (§6.3).
       const ref = await store.putAttachment({
@@ -237,8 +300,26 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
     // ---- readiness --------------------------------------------------------
     if (path === agentHostRoutes.health && method === "GET") {
       // Answered only after the command gate opens: a bound socket is not
-      // readiness (§8).
-      await orchestrator.ready;
+      // readiness (§8). Bounded, though — the server runs with no request
+      // timeout so the long-lived stream is never cut, which would otherwise
+      // let a host whose gate never opens hang the daemon's readiness probe
+      // forever instead of failing it.
+      try {
+        await withDeadline(orchestrator.ready, {
+          timeoutMs: HEALTH_GATE_TIMEOUT_MS,
+          label: "agent-host/health"
+        });
+      } catch (error) {
+        sendJson(response, 503, {
+          error: {
+            code: "HOST_UNAVAILABLE",
+            message: redactMessage(
+              error instanceof Error ? error.message : "The agent host is not ready."
+            )
+          }
+        });
+        return;
+      }
       const body: AgentHostHealthResponse = {
         ok: true,
         protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
@@ -282,7 +363,14 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
         return;
       }
       const requestBody = (await readJsonBody(request)) as { cwd?: unknown };
-      const cwd = typeof requestBody?.cwd === "string" ? requestBody.cwd : undefined;
+      const rawCwd = typeof requestBody?.cwd === "string" ? requestBody.cwd : undefined;
+      // The cwd becomes a spawn cwd and a `<cwd>/.claude/skills` readdir, so it
+      // is confined the way every other path-taking route on this daemon is.
+      // An out-of-root value is dropped rather than refused: a machine-level
+      // refresh is still a valid answer.
+      const cwd = rawCwd !== undefined && options.isAllowedCwd?.(rawCwd) === false
+        ? undefined
+        : rawCwd;
       const result = await orchestrator.refreshProvider(
         adapterId,
         cwd !== undefined ? { cwd } : undefined
@@ -308,6 +396,12 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
       return;
     }
     const threadId = decodeURIComponent(threadMatch[1]!);
+    if (!isSafeThreadId(threadId)) {
+      sendJson(response, 400, {
+        error: { code: "INVALID_COMMAND", message: "Malformed thread id." }
+      });
+      return;
+    }
     const rest = threadMatch[2] ?? "";
 
     if (rest === "") {
@@ -457,7 +551,7 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
         logger.warn("agent-host: request failed after headers were sent", error);
         return;
       }
-      sendError(response, error, logger);
+      sendError(response, error, logger, redactMessage);
     });
   });
   // The stream keeps its own heartbeat; a socket that goes quiet is the
@@ -479,13 +573,25 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
         // that nothing answers on it.
         await unlink(socketPath).catch(() => undefined);
       }
-      await new Promise<void>((resolve, reject) => {
-        server.once("error", reject);
-        server.listen(socketPath, () => {
-          server.off("error", reject);
-          resolve();
+      // `chmod` after `listen` leaves a window where the socket carries umask
+      // perms (`srwxr-xr-x` at the usual 022) and another local user can
+      // `connect()`. They would still need the 0600 token, but the window is
+      // avoidable: create it under a 0077 umask and restore afterwards.
+      const previousUmask =
+        typeof process.umask === "function" ? process.umask(0o077) : undefined;
+      try {
+        await new Promise<void>((resolve, reject) => {
+          server.once("error", reject);
+          server.listen(socketPath, () => {
+            server.off("error", reject);
+            resolve();
+          });
         });
-      });
+      } finally {
+        if (previousUmask !== undefined) {
+          process.umask(previousUmask);
+        }
+      }
       if (!socketPath.startsWith("\\\\.\\pipe\\")) {
         await chmod(socketPath, 0o600).catch(() => undefined);
       }

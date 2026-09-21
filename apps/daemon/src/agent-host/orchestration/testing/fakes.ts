@@ -219,6 +219,10 @@ export function createFakeIngestion(input: {
 export interface FakeCheckpointService extends CheckpointService {
   readonly pruned: Array<{ threadId: string; targetTurnCount: number }>;
   readonly deleted: string[];
+  /** Thread ids a baseline was requested for, in order. */
+  readonly baselines: string[];
+  /** Set to model a project that is not a git repo (§5.4 skips silently). */
+  nonGit: boolean;
   /** Adapters whose rollback is refused (§5.5 step 2). Grok by default. */
   rollbackUnsupported: Set<AgentAdapterId>;
   diff: string;
@@ -230,9 +234,12 @@ export interface FakeCheckpointService extends CheckpointService {
 export function createFakeCheckpointService(): FakeCheckpointService {
   const pruned: Array<{ threadId: string; targetTurnCount: number }> = [];
   const deleted: string[] = [];
+  const baselines: string[] = [];
   const fake: FakeCheckpointService = {
     pruned,
     deleted,
+    baselines,
+    nonGit: false,
     rollbackUnsupported: new Set<AgentAdapterId>(["grok"]),
     diff: "",
     turnCount: 0,
@@ -243,6 +250,9 @@ export function createFakeCheckpointService(): FakeCheckpointService {
      * onwards. Set `fake.baseline = null` to model a non-git project.
      */
     async captureBaseline(input: { threadId: string }): Promise<CaptureResult | null> {
+      // Recorded so a test can assert WHEN the baseline was taken, not just
+      // what it answered — the §5.4 ordering is the thing under test.
+      baselines.push(input.threadId);
       return fake.baseline === undefined
         ? {
             turnCount: fake.turnCount,

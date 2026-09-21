@@ -21,7 +21,8 @@ import type {
   AgentAdapterId,
   ProviderSnapshot,
   ProviderUsageWindow,
-  RuntimeEvent
+  RuntimeEvent,
+  WorkspaceSnapshot
 } from "@orquester/api/agent-chat";
 
 import type { AdapterLogger } from "../adapter.ts";
@@ -55,6 +56,15 @@ export interface ProviderSnapshotRegistryOptions {
 }
 
 export interface ManagedProviderSnapshotRegistry extends ProviderSnapshotRegistry {
+  /**
+   * Fold an `auth.status` runtime event onto the cached snapshot (§7.7).
+   *
+   * A turn that hits an expired credential emits `auth.status {error}`, and
+   * that is the only fast signal there is — the periodic probe's
+   * `unauthenticated` verdict is minutes behind. Without this the event is
+   * dropped and the user sees only a failed turn with no explanation.
+   */
+  applyAuthStatus(adapterId: AgentAdapterId, event: RuntimeEvent): void;
   /** Ref-counted demand: the background loop only runs while something watches. */
   addWatcher(): () => void;
   /** Load the persisted cache. Never throws — a bad file is simply ignored. */
@@ -72,6 +82,13 @@ export interface ManagedProviderSnapshotRegistry extends ProviderSnapshotRegistr
   refreshAllNow(): Promise<void>;
   /** Await the in-flight cache write. The drain seam a test waits on (§9). */
   flush(): Promise<void>;
+  /**
+   * Bumped on every snapshot change, so a host-triggered one — a CLI upgraded
+   * under the host, a login going stale, an `auth.status` error — is visible
+   * to the daemon without it having to diff the whole snapshot list. `onChange`
+   * fires inside the host process only; this is what crosses the socket.
+   */
+  changeCount(): number;
   stop(): void;
 }
 
@@ -151,6 +168,7 @@ export function createProviderSnapshotRegistry(
   // Concurrent `ensureWorkspaceSnapshot` calls for one (adapter, cwd) collapse.
   const inFlightWorkspaces = new Map<string, Promise<void>>();
 
+  let changeCount = 0;
   let watchers = 0;
   let timerHandle: unknown = null;
   let stopped = false;
@@ -193,6 +211,7 @@ export function createProviderSnapshotRegistry(
       return false;
     }
     snapshots.set(snapshot.id, snapshot);
+    changeCount += 1;
     persist();
     notify(snapshot.id);
     return true;
@@ -228,18 +247,37 @@ export function createProviderSnapshotRegistry(
   };
 
   /** A per-cwd probe refreshes just that overlay, never the machine catalog. */
+  /**
+   * §4.6.4: "a probe that comes back empty never blanks a non-empty cached
+   * list". Per array and independently — a transient `EACCES` on a skills dir
+   * or a `skills/list` timeout recovers to `[]` while the command list is
+   * still good, so a combined `commands.length === 0 && skills.length === 0`
+   * guard lets exactly that case through.
+   */
+  const keepNonEmpty = <T>(next: readonly T[], previous: readonly T[] | undefined): T[] =>
+    next.length === 0 && previous !== undefined && previous.length > 0
+      ? [...previous]
+      : [...next];
+
   const mergeWorkspaceOverlay = (
     previous: ProviderSnapshot | undefined,
     fresh: ProviderSnapshot,
     cwd: string | undefined
   ): ProviderSnapshot => {
     if (cwd === undefined) {
+      // A machine-level probe replaces the catalog — but an empty list in it
+      // must not blank a good cached one either.
+      const merged: ProviderSnapshot = {
+        ...fresh,
+        slashCommands: keepNonEmpty(fresh.slashCommands, previous?.slashCommands),
+        skills: keepNonEmpty(fresh.skills, previous?.skills)
+      };
       // A full probe keeps whatever overlays we already hold unless it brought
       // its own.
       if (fresh.workspaceSnapshots === undefined && previous?.workspaceSnapshots !== undefined) {
-        return { ...fresh, workspaceSnapshots: previous.workspaceSnapshots };
+        return { ...merged, workspaceSnapshots: previous.workspaceSnapshots };
       }
-      return fresh;
+      return merged;
     }
     const base = previous ?? fresh;
     const overlay = fresh.workspaceSnapshots?.find((entry) => entry.cwd === cwd) ?? {
@@ -252,13 +290,11 @@ export function createProviderSnapshotRegistry(
     const previousOverlay = (previous?.workspaceSnapshots ?? []).find(
       (entry) => entry.cwd === cwd
     );
-    // A probe that comes back empty never blanks a non-empty cached list.
-    const effective =
-      overlay.slashCommands.length === 0 &&
-      overlay.skills.length === 0 &&
-      previousOverlay !== undefined
-        ? previousOverlay
-        : overlay;
+    const effective: WorkspaceSnapshot = {
+      ...overlay,
+      slashCommands: keepNonEmpty(overlay.slashCommands, previousOverlay?.slashCommands),
+      skills: keepNonEmpty(overlay.skills, previousOverlay?.skills)
+    };
     return {
       ...base,
       // Machine-level fields always come from the freshest full probe we hold.
@@ -354,6 +390,37 @@ export function createProviderSnapshotRegistry(
       store(next);
     },
 
+    applyAuthStatus(adapterId: AgentAdapterId, event: RuntimeEvent): void {
+      if (event.type !== "auth.status") {
+        return;
+      }
+      const snapshot = snapshots.get(adapterId);
+      if (!snapshot) {
+        return;
+      }
+      const error = event.payload.error;
+      if (typeof error === "string" && error.length > 0) {
+        store({
+          ...snapshot,
+          status: "degraded",
+          message: error,
+          // The probe decides `authenticated` vs `unauthenticated`; a turn-time
+          // failure only says the credential did not work just now, so the
+          // enum moves to `unknown` rather than claiming a verdict the probe
+          // has not reached.
+          auth: { ...snapshot.auth, status: "unknown" },
+          checkedAt: clock.nowIso()
+        });
+        return;
+      }
+      // A clean `auth.status` clears a previously reported error.
+      if (snapshot.status === "degraded" && snapshot.message !== undefined) {
+        const { message: _cleared, ...rest } = snapshot;
+        void _cleared;
+        store({ ...rest, status: "ready", checkedAt: clock.nowIso() });
+      }
+    },
+
     onChange(listener: (adapterId: AgentAdapterId) => void): () => void {
       listeners.add(listener);
       return () => {
@@ -391,6 +458,10 @@ export function createProviderSnapshotRegistry(
 
     async flush(): Promise<void> {
       await persistChain.catch(() => undefined);
+    },
+
+    changeCount(): number {
+      return changeCount;
     },
 
     stop(): void {

@@ -27,6 +27,16 @@ import {
 } from "@orquester/api/agent-chat";
 import { slimActivityEvent } from "../ingestion/index.ts";
 
+/**
+ * The one non-`AgentChatStreamFrame` line the stream may write: the budget
+ * overflow of §6.3, immediately before the close. Exported so the client and
+ * its tests name the same shape instead of matching on the message text.
+ */
+export const STREAM_OVERFLOW_FRAME = {
+  kind: "error" as const,
+  message: "The live event buffer is full. Resume from the last received sequence."
+};
+
 /** *T3: `ThreadLiveEventCoalescer.ts:18-19`.* */
 export const COALESCE_WINDOW_MS = 50;
 export const MAX_PENDING_UPDATES = 512;
@@ -186,6 +196,15 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
   let heartbeatHandle: unknown = null;
   /** Bytes handed to the socket that have not drained yet (§6.3). */
   let chargedBytes = 0;
+  /**
+   * Bytes written since the last `drain`. One listener is armed for the whole
+   * backlog rather than one per write: a slow client would otherwise collect a
+   * listener per un-flushed frame and trip Node's `MaxListenersExceededWarning`
+   * (default 10) long before the 8 MiB budget does, and any still pending when
+   * `close()` runs would stay attached to the response.
+   */
+  let pendingDrainBytes = 0;
+  let drainArmed = false;
 
   const close = (reason: "client" | "budget" | "host" = "host"): void => {
     if (closed) return;
@@ -212,12 +231,10 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
       // A slow client is cut and told to resume by cursor; it is never allowed
       // to grow host memory.
       try {
-        response.write(
-          `${JSON.stringify({
-            kind: "error",
-            message: "The live event buffer is full. Resume from the last received sequence."
-          })}\n`
-        );
+        // Not an `AgentChatStreamFrame`: a client that does not know this
+        // shape must skip it rather than fail to decode. It is the last line
+        // before the close, and the close itself is the signal.
+        response.write(`${JSON.stringify(STREAM_OVERFLOW_FRAME)}\n`);
       } catch {
         // Nothing more to say on a socket we are closing anyway.
       }
@@ -231,8 +248,16 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
       chargedBytes -= bytes;
       return;
     }
+    pendingDrainBytes += bytes;
+    if (drainArmed) {
+      return;
+    }
+    drainArmed = true;
     response.once("drain", () => {
-      chargedBytes = Math.max(0, chargedBytes - bytes);
+      drainArmed = false;
+      const released = pendingDrainBytes;
+      pendingDrainBytes = 0;
+      chargedBytes = Math.max(0, chargedBytes - released);
     });
   };
 
@@ -302,10 +327,17 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
     });
 
     // Attach live delivery BEFORE reading either replay or snapshot state.
-    unsubscribe = await subscribe((events) => {
+    const attached = await subscribe((events) => {
       offerLive(events);
     });
-    if (closed) return;
+    if (closed) {
+      // The client went away during the await, so `close()` already ran and
+      // found `unsubscribe` still null. Detach here or the subscriber stays in
+      // the thread's set for the life of the host and every event iterates it.
+      attached();
+      return;
+    }
+    unsubscribe = attached;
 
     let frames: AgentChatStreamFrame[];
     try {
@@ -326,6 +358,16 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
       writeFrame(frame);
     }
 
+    // The heartbeat starts as soon as the headers are out: a very large
+    // snapshot can take longer than a proxy's idle timeout to write, and the
+    // stream would be cut before it ever reached `synchronized`.
+    const beat = (): void => {
+      if (closed) return;
+      writeLine(AGENT_CHAT_HEARTBEAT_LINE);
+      heartbeatHandle = setTimer(beat, heartbeatMs);
+    };
+    heartbeatHandle = setTimer(beat, heartbeatMs);
+
     // Everything buffered during the read, then the marker — through the same
     // path, so the client is never told it is caught up early.
     const buffered = preReadBuffer.splice(0, preReadBuffer.length);
@@ -343,13 +385,6 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
     emitEvents(coalesceToolUpdates(buffered.filter((event) => event.seq > highest)));
     writeFrame({ kind: "synchronized", hostInstanceId });
     live = true;
-
-    const beat = (): void => {
-      if (closed) return;
-      writeLine(AGENT_CHAT_HEARTBEAT_LINE);
-      heartbeatHandle = setTimer(beat, heartbeatMs);
-    };
-    heartbeatHandle = setTimer(beat, heartbeatMs);
   };
 
   return {

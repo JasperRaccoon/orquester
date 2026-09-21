@@ -513,10 +513,11 @@ describe("agent host server — the event stream (§6.3)", () => {
     await h.call("POST", agentHostRoutes.turn(threadId), { commandId: "stop-1", input: "go" });
     await h.host.settle();
 
-    // The harness's own `onStop` is replaced by a real marker pass.
+    // The harness's own `onStop` is replaced by a real marker pass. This
+    // project did not opt in, so §3.3 says nothing is marked.
     const marked = await h.host.orchestrator.markThreadsForContinuation();
-    assert.deepEqual(marked, [threadId]);
-    assert.deepEqual(h.host.store.heads.get(threadId)?.continueAfterRestart, { turnId: "turn-1" });
+    assert.deepEqual(marked, []);
+    assert.equal(h.host.store.heads.get(threadId)?.continueAfterRestart, undefined);
 
     const stopped = await h.call("POST", agentHostRoutes.stop);
     assert.equal(stopped.status, 200);

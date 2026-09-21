@@ -77,6 +77,18 @@ export interface RedactOptions {
    * not half-replaced by its parent.
    */
   homeDirs?: readonly string[];
+  /**
+   * Exact secrets the HOST itself injected, masked verbatim.
+   *
+   * The shape patterns below only catch credentials that look like
+   * credentials. The cliproxy `ANTHROPIC_AUTH_TOKEN` handed to every
+   * `claudex`/`claudemix` child is `randomBytes(24).toString("hex")` — a bare
+   * 48-char hex string that matches none of them — so a CLI that echoes its
+   * resolved config or an env dump on stderr would land it unmasked in
+   * `events.ndjson` and in the timeline. The host knows exactly what it
+   * injected, so it says so. Masked longest-first, like `homeDirs`.
+   */
+  literals?: readonly string[];
 }
 
 /**
@@ -99,6 +111,17 @@ export function redactStderr(value: string, options: RedactOptions = {}): string
   out = out.replace(AUTH_HEADER_RE, (_m, key: string, sep: string) => `${key}${sep}[redacted]`);
   out = out.replace(BEARER_RE, "Bearer [redacted]");
   out = out.replace(TOKEN_SHAPE_RE, "[redacted]");
+  // §4.5 Grok names it explicitly: a pairing URL is a bearer credential, and
+  // the one it prints on stderr is the whole handshake.
+
+  // Exact host-injected secrets last, so a value that also matched a shape
+  // pattern is already gone and this only catches what the shapes cannot see.
+  const literals = [...(options.literals ?? [])]
+    .filter((literal) => literal.length >= 8)
+    .sort((a, b) => b.length - a.length);
+  for (const literal of literals) {
+    out = out.split(literal).join("[redacted]");
+  }
   return out;
 }
 

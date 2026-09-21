@@ -37,6 +37,16 @@ import type {
 export interface StartSessionInput {
   threadId: string;
   cwd: string;
+  /**
+   * The PROJECT ROOT the daemon validated — the `<workspacesDir>/<ws>/<project>`
+   * dir the tab belongs to, never a subdirectory.
+   *
+   * Any per-project pooling keys on **this**, not on `cwd`: OpenCode runs one
+   * `opencode serve` per project (§3.2), and a thread opened on a subdirectory
+   * would otherwise spawn a second server for the same checkout. Optional so
+   * an adapter can still fall back to `cwd`.
+   */
+  projectPath?: string;
   home: AccountHome;
   title?: string;
   modelSelection: ModelSelection;
@@ -235,6 +245,8 @@ export interface AdapterContext {
   buildEnv(input: {
     threadId: string;
     home: AccountHome;
+    /** The project root, for a child shared by a project rather than a thread. */
+    projectPath?: string;
     extraEnv?: Readonly<Record<string, string | undefined>>;
   }): Record<string, string>;
   /**
