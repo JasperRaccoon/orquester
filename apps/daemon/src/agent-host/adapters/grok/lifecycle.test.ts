@@ -35,9 +35,19 @@ interface Rig {
   events: RuntimeEvent[];
   /** Resolves when an event matching the predicate has been emitted. */
   waitFor(predicate: (event: RuntimeEvent) => boolean, label: string): Promise<RuntimeEvent>;
+  /** Let the event consumer catch up, so `events` reflects what was emitted. */
+  drain(): Promise<void>;
   dispose(): Promise<void>;
+  disposed: boolean;
   cwd: string;
 }
+
+/**
+ * Every rig, so the teardown test can prove no provider child outlived the
+ * suite. A test that fails before its own `dispose()` would otherwise leak a
+ * live `grok` child and hang the runner.
+ */
+const openRigs: Rig[] = [];
 
 async function rig(
   options: { scenario?: string; version?: string; bin?: string | null } = {}
@@ -84,9 +94,16 @@ async function rig(
     }
   })();
 
-  return {
+  const built: Rig = {
     adapter,
     events,
+    disposed: false,
+    drain: async () => {
+      // Two macrotasks: one for the async iterator's `next()` to resolve, one
+      // for the consumer loop to push into `events`.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    },
     waitFor: (predicate, label) =>
       new Promise<RuntimeEvent>((resolve, reject) => {
         const existing = events.find(predicate);
@@ -106,11 +123,14 @@ async function rig(
         });
       }),
     dispose: async () => {
+      built.disposed = true;
       controller.abort();
       await adapter.stopAll();
     },
     cwd
   };
+  openRigs.push(built);
+  return built;
 }
 
 function home(dir: string): AccountHome {
@@ -172,11 +192,11 @@ test("the happy path: session, turn, usage, and a settled turn", async () => {
   const r = await rig();
   await start(r);
   assert.equal(r.adapter.hasSession("t1"), true);
-  assert.deepEqual(
+  const threadStarted = await r.waitFor((event) => event.type === "thread.started", "thread.started");
+  assert.equal(
     r.events.filter((event) => event.type === "session.started").length,
     1
   );
-  const threadStarted = r.events.find((event) => event.type === "thread.started");
   assert.equal(
     (threadStarted as Extract<RuntimeEvent, { type: "thread.started" }>).payload.providerThreadId,
     "01a0c19e-de22-78c0-a72a-7e230ccfbec0"
@@ -379,10 +399,10 @@ test("lazy recovery: a fresh session starts from the persisted cursor after a de
     runtimeMode: "approval-required",
     resumeCursor: { schemaVersion: 1, sessionId: "01a0c19e-de22-78c0-a72a-7e230ccfbec0" }
   });
-  const started = r2.events.find((event) => event.type === "session.started") as Extract<
-    RuntimeEvent,
-    { type: "session.started" }
-  >;
+  const started = (await r2.waitFor(
+    (event) => event.type === "session.started",
+    "session.started"
+  )) as Extract<RuntimeEvent, { type: "session.started" }>;
   assert.deepEqual(started.payload.resume, {
     schemaVersion: 1,
     sessionId: "01a0c19e-de22-78c0-a72a-7e230ccfbec0"
@@ -401,10 +421,10 @@ test("lazy recovery: a fresh session starts from the persisted cursor after a de
 test("a cursor with the wrong shape means 'no resume', never an error", async () => {
   const r = await rig();
   await start(r, { resumeCursor: { schemaVersion: 99, sessionId: "x" } });
-  const started = r.events.find((event) => event.type === "session.started") as Extract<
-    RuntimeEvent,
-    { type: "session.started" }
-  >;
+  const started = (await r.waitFor(
+    (event) => event.type === "session.started",
+    "session.started"
+  )) as Extract<RuntimeEvent, { type: "session.started" }>;
   assert.equal(started.payload.resume, undefined);
   await r.dispose();
 });
@@ -424,6 +444,7 @@ test("steering reuses the turn id and emits no second turn.started", async () =>
     attachments: [],
     interactionMode: "default"
   });
+  await r.drain();
   assert.equal(second.turnId, first.turnId, "a mid-turn message is not a second turn");
   assert.equal(
     r.events.filter((event) => event.type === "turn.started").length,
@@ -498,10 +519,23 @@ test("stopSession settles everything and emits a graceful exit", async () => {
 test("listSessions and the adapter id", async () => {
   const r = await rig();
   await start(r);
+  await r.drain();
   const sessions = r.adapter.listSessions();
   assert.equal(sessions.length, 1);
   assert.equal(sessions[0].threadId, "t1");
   assert.equal(sessions[0].runtimeMode, "approval-required");
   assert.equal(r.adapter.id, "grok" satisfies AgentAdapterId);
   await r.dispose();
+});
+
+test("teardown: no provider child outlives the suite", async () => {
+  const leaked = openRigs.filter((entry) => !entry.disposed);
+  for (const entry of leaked) {
+    await entry.dispose();
+  }
+  assert.deepEqual(
+    leaked.length,
+    0,
+    "a test returned without stopping its session; the child would keep the host alive"
+  );
 });
