@@ -22,7 +22,10 @@
  */
 
 import type { ThreadActivityItem, ThreadItem, ThreadMessageItem } from "@orquester/api/agent-chat";
-import { IDENTITY_CHANGED_ACTIVITY_KIND } from "@orquester/api/agent-chat";
+import {
+  IDENTITY_CHANGED_ACTIVITY_KIND,
+  PLAN_IMPLEMENTATION_PROMPT_PREFIX
+} from "@orquester/api/agent-chat";
 
 import type {
   CompactionMarkerState,
@@ -65,8 +68,12 @@ export interface TimelineEntriesProjection {
   readonly entries: TimelineEntry[];
 }
 
-/** The §7.3 prefix a plan-implementing turn carries. *T3: `proposedPlan.ts:73`.* */
-export const PLAN_IMPLEMENTATION_PROMPT_PREFIX = "PLEASE IMPLEMENT THIS PLAN:\n";
+/**
+ * The §7.3 prefix a plan-implementing turn carries — one spelling in
+ * `@orquester/api/agent-chat`, shared with the host and the MCP.
+ * *T3: `proposedPlan.ts:73`.*
+ */
+export { PLAN_IMPLEMENTATION_PROMPT_PREFIX };
 
 // ---------------------------------------------------------------------------
 // Payload readers (the §5.6 allow-list, and nothing else)

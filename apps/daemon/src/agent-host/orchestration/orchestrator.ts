@@ -61,6 +61,14 @@ import {
 
 import type { AccountHome } from "@orquester/api/agent-chat";
 
+/**
+ * The prefix the client puts on the turn it sends when the user clicks
+ * Implement: one spelling in `@orquester/api/agent-chat`, shared with the UI
+ * and the MCP. Re-exported so existing imports from this module keep working.
+ */
+import { PLAN_IMPLEMENTATION_PROMPT_PREFIX } from "@orquester/api/agent-chat";
+export { PLAN_IMPLEMENTATION_PROMPT_PREFIX };
+
 import { stat } from "node:fs/promises";
 
 import type { AdapterLogger, AgentAdapter } from "../adapter.ts";
@@ -3703,14 +3711,6 @@ export interface HostThreadSummary extends AgentChatSessionSummaryFields {
     title: string;
   }>;
 }
-
-/**
- * The prefix the client puts on the turn it sends when the user clicks
- * Implement. Mirrors `PLAN_IMPLEMENTATION_PROMPT_PREFIX` in
- * `packages/ui/src/lib/agent-chat/entries.logic.ts`; the host cannot import
- * from the UI package, so the literal is pinned here and in a test.
- */
-export const PLAN_IMPLEMENTATION_PROMPT_PREFIX = "PLEASE IMPLEMENT THIS PLAN:\n";
 
 /**
  * `ThreadRuntime.revertedTo` as the log leaves it: the target of the last

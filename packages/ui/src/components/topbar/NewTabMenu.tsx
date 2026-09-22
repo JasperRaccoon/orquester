@@ -12,12 +12,13 @@ import {
   SlidersHorizontal
 } from "lucide-react";
 import {
+  proxyLaunchModels,
   RUNTIME_MODES,
   SYSTEM_ACCOUNT_ID,
   type CreateAgentChatSessionFields,
   type RegistryEntry
 } from "@orquester/api";
-import { CURATED_PROXY_MODEL_IDS, XAI_OAUTH_MODELS, resolveXaiModel } from "@orquester/config";
+import { resolveXaiModel } from "@orquester/config";
 import { CHROMIUM_FAMILY_IDS } from "@orquester/registry";
 import {
   AdaptiveMenu,
@@ -53,12 +54,6 @@ import { launchModelList, resolveLaunchModel } from "../../lib/launch-models";
 
 /** Past conversations listed inline per agent before the "…and N more" cutoff. */
 const MAX_INLINE_CONVERSATIONS = 10;
-
-/** Model chips for `claudex`: the curated picks, not the raw catalog dump. */
-const DEFAULT_PROXY_MODELS: string[] = [...CURATED_PROXY_MODEL_IDS];
-
-/** Provider label for the xAI OAuth models — the linked account IS the "key". */
-const XAI_PROVIDER_LABEL = "Grok account";
 
 /** The daemon strips this routing prefix before resolving a router model, so the
  *  UI must too (a stale per-account pick can still carry one). */
@@ -251,50 +246,36 @@ const AgentRow: React.FC<{ agent: RegistryEntry; projectPath?: string }> = ({
   // Model chips are a `claudex`-only affordance (claudemix's model is fixed to
   // the Claude main loop; its choice is the account instead).
   const showModels = agent.id === "claudex";
+  // The chips are the shared proxy launch catalogue (`proxyLaunchModels`, the
+  // same list the MCP reports): the curated picks plus the keyed-router and
+  // linked-xAI models, narrowed to what the live catalog confirms — the raw
+  // catalog enumerates every seeded account's models and acc-prefixed
+  // duplicates, which is noise as a picker — or all of them when none confirm,
+  // so the chips never vanish entirely.
+  const baseModels = React.useMemo(
+    () => proxyLaunchModels(cliproxy, cliproxyModels?.models ?? []).map((m) => m.id),
+    [cliproxy, cliproxyModels]
+  );
   // Models served by a KEYED router provider — or by the linked xAI account —
-  // are keyless: the account chip has no effect on them. Derived from live status
-  // (both the full name and the alias route), replacing the old hardcoded
-  // kimi/OpenRouter regex.
-  const keylessInfo = React.useMemo(() => {
-    const labelByModel = new Map<string, string>(); // model id (name or alias) → provider label
-    const displayIds: string[] = []; // what the chips offer: alias when there is one
+  // are keyless: the account chip has no effect on them. Built from the same
+  // derivation, but catalog-independent (a pick the catalog does not confirm
+  // still dims) and knowing a router model by its full name as well as its
+  // alias, since both route.
+  const labelByModel = React.useMemo(() => {
+    const labels = new Map<string, string>(); // model id (name or alias) → provider label
+    for (const m of proxyLaunchModels(cliproxy, [])) {
+      if (m.providerLabel) labels.set(m.id, m.providerLabel);
+    }
+    // The launch list names an aliased model by its alias; add its full name.
     // `?? []` — a stale bundle's persisted status may predate routerProviders.
     for (const p of cliproxy?.routerProviders ?? []) {
-      // Only a keyed provider is rendered into the proxy's config.yaml; an
-      // unkeyed one serves nothing, so it must not contribute chips.
-      if (p.keyState === "none") continue;
       for (const m of p.models) {
-        labelByModel.set(m.name, p.label);
-        if (m.alias) labelByModel.set(m.alias, p.label);
-        displayIds.push(m.alias ?? m.name);
+        const label = m.alias ? labels.get(m.alias) : undefined;
+        if (label) labels.set(m.name, label);
       }
     }
-    // The Grok models exist while an xAI credential exists — `expired` included,
-    // matching the daemon's files-present gate (the expiry stamp is
-    // informational; the proxy refreshes on next use, and the launcher stays
-    // coupled). `?.` guards a daemon/bundle pairing that predates the field
-    // (persisted-shape rule).
-    if (cliproxy?.xai?.state === "linked" || cliproxy?.xai?.state === "expired") {
-      for (const m of XAI_OAUTH_MODELS) {
-        labelByModel.set(m.id, XAI_PROVIDER_LABEL);
-        displayIds.push(m.id);
-      }
-    }
-    return { labelByModel, displayIds };
+    return labels;
   }, [cliproxy]);
-
-  // The live catalog enumerates EVERYTHING the proxy serves (every seeded
-  // account's models + acc-prefixed duplicates) — as a picker that's noise.
-  // Offer the curated picks plus the router-served ones the catalog confirms;
-  // all of them if none confirm (catalog empty/stale), so the chips never
-  // vanish entirely.
-  const catalogModels = cliproxyModels?.models ?? [];
-  const pickIds = React.useMemo(
-    () => [...new Set([...DEFAULT_PROXY_MODELS, ...keylessInfo.displayIds])],
-    [keylessInfo]
-  );
-  const available = catalogModels.length ? pickIds.filter((m) => catalogModels.includes(m)) : pickIds;
-  const baseModels = available.length ? available : pickIds;
   // Every non-proxy agent gets its models from the adapter's own catalog once
   // the host has published a snapshot; the proxy launchers keep the curated
   // cliproxy list, which is a different thing entirely (what the proxy serves).
@@ -349,7 +330,7 @@ const AgentRow: React.FC<{ agent: RegistryEntry; projectPath?: string }> = ({
   // dim the row AND drop the account on launch so a stale pick can't reattach a
   // prefix.
   const keylessLabel = selectedModel
-    ? keylessInfo.labelByModel.get(stripAccountPrefix(selectedModel))
+    ? labelByModel.get(stripAccountPrefix(selectedModel))
     : undefined;
   const accountDimmed = showModels && Boolean(keylessLabel);
   const dimReason = !accountDimmed
