@@ -34,6 +34,13 @@ test("missing project, bad names and escapes are refused with codes", async (t) 
   await assert.rejects(resolveProject(s.api, "acme"), (e: { code: string }) => e.code === "PROJECT_NOT_FOUND");
 });
 
+test("a directory inside a project is refused and names the project", async (t) => {
+  const s = await sandbox(); t.after(() => rm(s.root, { recursive: true, force: true }));
+  await mkdir(join(s.api.workspacesDir, "acme", "api", "src"));
+  await assert.rejects(resolveProject(s.api, join(s.api.workspacesDir, "acme", "api", "src")),
+    (e: { code: string; message: string }) => e.code === "PROJECT_NOT_FOUND" && /inside project acme\/api/.test(e.message));
+});
+
 test("projectNamesFor splits a sandbox path and nulls the rest", () => {
   assert.deepEqual(projectNamesFor("/w/acme/api", "/w"), { workspace: "acme", name: "api", path: "/w/acme/api" });
   assert.deepEqual(projectNamesFor("/w/acme/api/sub", "/w"), { workspace: "acme", name: "api", path: "/w/acme/api/sub" });

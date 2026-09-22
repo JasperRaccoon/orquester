@@ -45,6 +45,11 @@ export async function resolveProject(api: { fsRoot: string; workspacesDir: strin
   }
   if (!(await isDirectory(path))) throw new ToolError("PROJECT_NOT_FOUND", `No project directory at "${raw}". Use list_projects.`);
   const names = projectNamesFor(path, api.workspacesDir);
-  if (!names.name) throw new ToolError("PROJECT_NOT_FOUND", `"${raw}" is a workspace, not a project. Use "<workspace>/<project>".`);
+  if (!names.workspace || !names.name) throw new ToolError("PROJECT_NOT_FOUND", `"${raw}" is a workspace, not a project. Use "<workspace>/<project>".`);
+  // A project is exactly `<workspacesDir>/<ws>/<name>` (spec §5): a deeper directory would hand the
+  // daemon a projectPath that no session carries.
+  if (path !== join(api.workspacesDir, names.workspace, names.name)) {
+    throw new ToolError("PROJECT_NOT_FOUND", `"${raw}" is inside project ${names.workspace}/${names.name}; pass the project itself.`);
+  }
   return names;
 }

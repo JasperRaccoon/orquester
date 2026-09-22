@@ -6,25 +6,34 @@ export const MAX_RESULT_BYTES = 60_000;
 
 type TextContent = { type: "text"; text: string };
 
+/** Cut `text` to at most `maxChars` characters, counted and cut in code points so a surrogate pair never splits. */
 export function capText(text: string, maxChars: number): { text: string; truncated: boolean } {
-  if (text.length <= maxChars) return { text, truncated: false };
-  return { text: Array.from(text).slice(0, maxChars).join(""), truncated: true };
+  if (text.length <= maxChars) return { text, truncated: false }; // never more code points than UTF-16 units
+  let chars = 0;
+  let end = 0;
+  for (const char of text) {
+    if (chars >= maxChars) return { text: text.slice(0, end), truncated: true };
+    chars += 1;
+    end += char.length;
+  }
+  return { text, truncated: false };
 }
 
-/** A successful tool result: the object as text AND as structuredContent, capped. */
+/**
+ * A successful tool result: the object as text AND as the same structuredContent, capped at
+ * MAX_RESULT_BYTES. Over budget is a last-resort shed (the tool should have bounded itself):
+ * the object gains `truncated` + `truncationNote`, and when even that is too big only those two
+ * fields remain.
+ */
 export function ok(value: Record<string, unknown>): { content: [TextContent]; structuredContent: Record<string, unknown> } {
-  let text = JSON.stringify(value);
-  let structured = value;
-  if (Buffer.byteLength(text, "utf8") > MAX_RESULT_BYTES) {
-    // Last-resort shed: the tool should have bounded itself; keep the shape honest.
-    const capped = { ...value, truncated: true, truncationNote: `Result exceeded ${MAX_RESULT_BYTES} bytes; narrow the request (fewer turns, smaller maxChars).` };
-    text = JSON.stringify(capped);
-    structured = capped;
-    if (Buffer.byteLength(text, "utf8") > MAX_RESULT_BYTES) {
-      text = Buffer.from(text, "utf8").subarray(0, MAX_RESULT_BYTES - 3).toString("utf8").replace(/�+$/u, "") + "...";
-    }
-  }
-  return { content: [{ type: "text", text }], structuredContent: structured };
+  const text = JSON.stringify(value);
+  if (Buffer.byteLength(text, "utf8") <= MAX_RESULT_BYTES) return { content: [{ type: "text", text }], structuredContent: value };
+  const truncationNote = `Result exceeded ${MAX_RESULT_BYTES} bytes; narrow the request (fewer turns, smaller maxChars).`;
+  const capped = { ...value, truncated: true, truncationNote };
+  const cappedText = JSON.stringify(capped);
+  if (Buffer.byteLength(cappedText, "utf8") <= MAX_RESULT_BYTES) return { content: [{ type: "text", text: cappedText }], structuredContent: capped };
+  const note = { truncated: true, truncationNote };
+  return { content: [{ type: "text", text: JSON.stringify(note) }], structuredContent: note };
 }
 
 /** Map any thrown error to an isError result with a SAFE message (no path/stack leak). */

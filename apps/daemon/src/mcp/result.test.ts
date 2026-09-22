@@ -14,6 +14,8 @@ test("ok caps oversized text and says so", () => {
   const r = ok({ text: "x".repeat(MAX_RESULT_BYTES + 100) });
   assert.ok(Buffer.byteLength(r.content[0].text, "utf8") <= MAX_RESULT_BYTES);
   assert.equal((r.structuredContent as { truncated?: boolean }).truncated, true);
+  assert.ok(Buffer.byteLength(JSON.stringify(r.structuredContent), "utf8") <= MAX_RESULT_BYTES);
+  assert.equal(r.content[0].text, JSON.stringify(r.structuredContent), "text and structuredContent carry the same JSON");
 });
 
 test("ToolError surfaces code and message; sandbox errors never echo the path; unknown errors are generic", () => {
@@ -30,4 +32,7 @@ test("capText cuts on a character boundary and flags it", () => {
   assert.deepEqual(capText("hello", 10), { text: "hello", truncated: false });
   const r = capText("héllo wörld", 5);
   assert.equal(r.truncated, true); assert.equal(r.text.length, 5);
+  // Astral characters count once each: three emoji fit in 3, and 2 never splits a surrogate pair.
+  assert.deepEqual(capText("😀😀😀", 3), { text: "😀😀😀", truncated: false });
+  assert.deepEqual(capText("😀😀😀", 2), { text: "😀😀", truncated: true });
 });

@@ -48,19 +48,19 @@ export async function sendCommand(api: DaemonApi, sessionId: string, name: Agent
   const payload = { commandId: mintCommandId(), ...body };
   let last: ToolError | null = null;
   for (let attempt = 0; attempt <= RETRIES; attempt += 1) {
+    // Wait only between attempts: never before the first, never after the last.
+    if (attempt > 0) await new Promise((r) => setTimeout(r, delay(attempt - 1)));
     let res;
     try {
       res = await api.request("POST", path, { body: payload });
     } catch (error) {
       last = new ToolError("HOST_UNAVAILABLE", `The daemon call failed: ${(error as Error).message}`);
-      await new Promise((r) => setTimeout(r, delay(attempt)));
       continue;
     }
     if (res.status < 400) return expectOk<{ seq: number }>(res, name);
     const err = daemonError(res);
     if (err.code !== "HOST_UNAVAILABLE") throw err;
     last = err;
-    if (attempt < RETRIES) await new Promise((r) => setTimeout(r, delay(attempt)));
   }
   throw last ?? new ToolError("HOST_UNAVAILABLE", "The agent host is restarting.");
 }

@@ -52,3 +52,17 @@ test("sendCommand retries HOST_UNAVAILABLE with the SAME commandId up to 3 times
   await assert.rejects(sendCommand(rejected, "c1", "turn", { input: "x" }), (e: { code: string }) => e.code === "COMMAND_REJECTED");
   assert.equal(rejected.calls.length, 1);
 });
+
+test("sendCommand waits only between attempts, never after the last one", async () => {
+  const waits: number[] = [];
+  const retryDelayMs = (attempt: number) => { waits.push(attempt); return 0; };
+  const thrown = new FakeDaemonApi().on("POST", "/api/sessions/c1/turn", () => { throw new Error("socket hang up"); });
+  await assert.rejects(sendCommand(thrown, "c1", "turn", { input: "x" }, { retryDelayMs }), (e: { code: string }) => e.code === "HOST_UNAVAILABLE");
+  assert.equal(thrown.calls.length, 4);
+  assert.equal(new Set(thrown.calls.map((c) => (c.body as { commandId: string }).commandId)).size, 1);
+  assert.deepEqual(waits, [0, 1, 2]);
+  waits.length = 0;
+  const unavailable = new FakeDaemonApi().on("POST", "/api/sessions/c1/turn", { status: 503, body: { error: { code: "HOST_UNAVAILABLE", message: "restarting" } } });
+  await assert.rejects(sendCommand(unavailable, "c1", "turn", { input: "x" }, { retryDelayMs }), (e: { code: string }) => e.code === "HOST_UNAVAILABLE");
+  assert.deepEqual(waits, [0, 1, 2]);
+});
