@@ -97,6 +97,15 @@ import { slimActivityEvent } from "../ingestion/coalesce.ts";
 import { bindingResumeCursor } from "../store/binding.ts";
 import { projectSnapshotActivities } from "../ingestion/index.ts";
 import { AGENT_HOST_DEADLINES, withDeadline } from "../support/deadline.ts";
+import {
+  appendAttachmentLines,
+  attachmentLineName,
+  attachmentPathLine,
+  attachmentPathLines,
+  partitionAttachments,
+  unavailableAttachmentLine,
+  type ResolvedAttachment
+} from "./attachment-lines.ts";
 import { createEventBuilder, describeFailure, makeActivity, type BuildEvent } from "./events.ts";
 import {
   AgentChatCommandError,
@@ -1296,6 +1305,23 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   const sendTurnEffect = async (runtime: ThreadRuntime, turn: QueuedTurn): Promise<void> => {
     const head = headOf(runtime);
     if (!head) return;
+    // Every path that sends — a direct turn, a steer, a turn queued behind a
+    // compaction, a message-mode answer — lands here, so this is where each
+    // attachment is resolved and held to §6.3's bounds against the file the
+    // host STAT'd. A refusal is a timeline row, and nothing is captured,
+    // started or sent for it.
+    let resolved: ResolvedAttachment[];
+    try {
+      resolved = await resolveTurnAttachments(runtime.id, turn.attachments);
+    } catch (error) {
+      await appendActivity(runtime, {
+        kind: "provider.turn.start.failed",
+        summary: "Attachment rejected",
+        detail: describeFailure(error),
+        requestId: turn.messageId
+      });
+      return;
+    }
     // The pre-turn baseline, BEFORE the session is ensured and before the
     // provider is asked (§5.4; T3 captures it from the domain turn-start for
     // the same reason). Waiting on `turn.started` would fold everything the
@@ -1323,11 +1349,16 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
 
     const adapter = adapterFor(head.adapter);
     try {
+      // §4.1: what the adapter ingests natively rides `attachments`; every
+      // other file reaches the agent as an `Attached file:` path line.
+      const { native, flattened } = partitionAttachments(resolved, (attachment) =>
+        adapter.ingestsAttachment(attachment)
+      );
       const result = await adapter.sendTurn({
         threadId: runtime.id,
-        // §4.6.9: never prefixed, indented or wrapped.
-        input: providerInputFor(turn.input),
-        attachments: turn.attachments,
+        // §4.6.9: never prefixed, indented or wrapped — the lines go after.
+        input: providerInputFor(turn.input, attachmentPathLines(flattened)),
+        attachments: native,
         ...(turn.modelSelection !== undefined ? { modelSelection: turn.modelSelection } : {}),
         interactionMode: turn.interactionMode
       });
@@ -1507,13 +1538,20 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
    * The prose a message-mode answer becomes.
    *
    * **Every question is echoed before its answer**, joined by blank lines, and
-   * each question's attachments follow as `Attached file: <name> (<id>)` lines
+   * each question's attachments follow as `Attached file: <name>` lines
    * — T3 `decider.ts:1642-1660`. The echo is not decoration: the provider
    * parked no request, so the agent receives this as an ordinary user turn and
    * has nothing but the text to tell it which question was answered. The old
    * shape dropped the question whenever there was exactly one, which reads as
    * a bare "yes" arriving from nowhere in a transcript the agent resumes
    * later. A multi-select answer is joined with commas.
+   *
+   * The echo names a file by NAME only, where T3's line (and this one, before
+   * §4.1's path lines) went on to print `(<id>)`. The id means nothing to an
+   * agent, and the turn effect appends the file's real
+   * `Attached file: <name> (<absolute path>)` line after this text (§4.1) —
+   * so the echo says which question a file belongs to, and the path line says
+   * where it is, without a second parenthesised reference per file.
    */
   const answerMessageText = (
     questions: readonly { id: string; question: string }[],
@@ -1532,7 +1570,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       if (value.trim().length === 0 && attachments.length === 0) continue;
       const lines = [`${entry.question}\n${value.trim()}`.trimEnd()];
       for (const attachment of attachments) {
-        lines.push(`Attached file: ${attachment.name} (${attachment.id})`);
+        lines.push(`Attached file: ${attachmentLineName(attachment.name)}`);
       }
       parts.push(lines.join("\n"));
     }
@@ -1557,20 +1595,24 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       return;
     }
     // §6.2: attachments are folded into the answer text by the host, so the
-    // adapter interface stays free of a second attachment channel.
+    // adapter interface stays free of a second attachment channel — as the
+    // same `Attached file: <name> (<absolute path>)` lines a turn carries
+    // (§4.1), after the answer, and "(not available)" for one that no longer
+    // resolves rather than a bare name the agent cannot tell from prose.
     const folded: Record<string, unknown> = { ...answers };
     for (const [questionId, attachments] of Object.entries(attachmentsByQuestionId ?? {})) {
       if (attachments.length === 0) continue;
-      const paths: string[] = [];
+      const lines: string[] = [];
       for (const attachment of attachments) {
         try {
-          paths.push(await store.resolveAttachment(runtime.id, attachment.id));
+          const path = await store.resolveAttachment(runtime.id, attachment.id);
+          lines.push(attachmentPathLine({ ref: attachment, path }));
         } catch {
-          paths.push(attachment.name);
+          lines.push(unavailableAttachmentLine(attachment));
         }
       }
       const base = typeof folded[questionId] === "string" ? (folded[questionId] as string) : "";
-      folded[questionId] = base.length > 0 ? `${base}\n\n${paths.join("\n")}` : paths.join("\n");
+      folded[questionId] = appendAttachmentLines(base, lines.join("\n"));
     }
     try {
       await adapter.respondToUserInput(runtime.id, requestId, folded);
@@ -1589,29 +1631,40 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
    * what the client claimed". The upload hop checks the stat against the
    * *declared* mime and the command hop checks the *declared* size, so neither
    * alone closes the gap — this is the one place both are known.
+   *
+   * Resolves every ref of a turn, in order, to its absolute path in the
+   * thread's attachments dir and stamps the STAT'd size on it: that size is
+   * what the adapter's `ingestsAttachment` judges (OpenCode's 20 MiB file-part
+   * cap) and what a native attachment carries to the adapter. Throws
+   * `INVALID_COMMAND` for the first attachment that is gone or over its bound.
    */
-  const assertAttachmentWithinBounds = async (
+  const resolveTurnAttachments = async (
     threadId: string,
-    attachment: AttachmentRef
-  ): Promise<void> => {
-    let path: string;
-    try {
-      path = await store.resolveAttachment(threadId, attachment.id);
-    } catch {
-      throw invalidCommand(`Attachment '${attachment.name}' is not available.`);
+    refs: readonly AttachmentRef[]
+  ): Promise<ResolvedAttachment[]> => {
+    const resolved: ResolvedAttachment[] = [];
+    for (const ref of refs) {
+      let path: string;
+      try {
+        path = await store.resolveAttachment(threadId, ref.id);
+      } catch {
+        throw invalidCommand(`Attachment '${ref.name}' is not available.`);
+      }
+      let sizeBytes: number;
+      try {
+        sizeBytes = (await stat(path)).size;
+      } catch {
+        throw invalidCommand(`Attachment '${ref.name}' is not available.`);
+      }
+      const limit = ref.type === "image" ? MAX_TURN_IMAGE_BYTES : MAX_TURN_FILE_BYTES;
+      if (sizeBytes > limit) {
+        throw invalidCommand(
+          `Attachment '${ref.name}' is ${sizeBytes} bytes, over the ${limit}-byte limit.`
+        );
+      }
+      resolved.push({ ref: { ...ref, sizeBytes }, path });
     }
-    let sizeBytes: number;
-    try {
-      sizeBytes = (await stat(path)).size;
-    } catch {
-      throw invalidCommand(`Attachment '${attachment.name}' is not available.`);
-    }
-    const limit = attachment.type === "image" ? MAX_TURN_IMAGE_BYTES : MAX_TURN_FILE_BYTES;
-    if (sizeBytes > limit) {
-      throw invalidCommand(
-        `Attachment '${attachment.name}' is ${sizeBytes} bytes, over the ${limit}-byte limit.`
-      );
-    }
+    return resolved;
   };
 
   /**
@@ -1856,13 +1909,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         // and the command bounds key on the size it declares here — so a
         // 40 MiB file uploaded as `application/octet-stream` could be sent as a
         // 1 KB "image". §6.3's rule is that the bounds hold against the file
-        // the host STAT'd, so the resolve path re-checks it.
-        const verifyAttachments = async (): Promise<void> => {
-          for (const attachment of attachments) {
-            await assertAttachmentWithinBounds(runtime.id, attachment);
-          }
-        };
-
+        // the host STAT'd: `sendTurnEffect` re-checks it on EVERY path that
+        // sends, including a turn queued behind a compaction and a message-mode
+        // answer, which a check here would miss.
         const queuedTurn: QueuedTurn = {
           messageId,
           input,
@@ -1881,20 +1930,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
               runtime.queuedTurns.push(queuedTurn);
               return;
             }
-            void runEffect(runtime, async () => {
-              try {
-                await verifyAttachments();
-              } catch (error) {
-                await appendActivity(runtime, {
-                  kind: "provider.turn.start.failed",
-                  summary: "Attachment rejected",
-                  detail: describeFailure(error),
-                  requestId: queuedTurn.messageId
-                });
-                return;
-              }
-              await sendTurnEffect(runtime, queuedTurn);
-            });
+            void runEffect(runtime, () => sendTurnEffect(runtime, queuedTurn));
           }
         };
       }

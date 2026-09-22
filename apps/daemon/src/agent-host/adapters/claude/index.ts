@@ -56,7 +56,7 @@ import {
   type ClaudeProbeResult
 } from "./probe.ts";
 import { projectClaudeHistory } from "./project-history.ts";
-import { ClaudeSession } from "./session.ts";
+import { ClaudeSession, claudeIngestsAttachment } from "./session.ts";
 import type { ClaudeScopedLimitNames } from "./usage.ts";
 
 /** The registry id whose `bin` the SDK is pointed at. */
@@ -497,6 +497,8 @@ export async function createClaudeAdapterWith(
     refreshSnapshot,
 
     pendingSnapshot: pendingClaudeSnapshot,
+
+    ingestsAttachment: claudeIngestsAttachment,
 
     get events(): AsyncIterable<RuntimeEvent> {
       return events;

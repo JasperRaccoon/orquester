@@ -447,6 +447,125 @@ describe("S1-7: the image cap is re-checked against the stat'd file at dispatch"
   });
 });
 
+describe("S1-7 on every path: a queued turn and a message-mode answer are re-checked too", () => {
+  // The re-check used to live in `decide("turn")`'s direct path only, so a
+  // turn queued behind a compaction and a message-mode answer's steer reached
+  // the provider with a "small image" the file itself contradicted.
+  const oversized = async (dir: string): Promise<string> => {
+    const big = join(dir, "big.png");
+    await writeFile(big, Buffer.alloc(11 * 1024 * 1024));
+    return big;
+  };
+  const sendCount = (host: TestHost): number =>
+    host.adapter.calls.filter((call) => call.kind === "sendTurn").length;
+
+  it("a turn queued behind a compaction", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "agent-host-attach-"));
+    try {
+      const host = createTestHost();
+      const threadId = await host.createThread();
+      await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "first" });
+      await host.settle();
+      await host.orchestrator.ingestionSink(threadId, [
+        {
+          eventId: "settle-for-compact",
+          threadId,
+          type: "thread.session-set",
+          payload: { session: { status: "ready", activeTurnId: null } },
+          occurredAt: host.clock.nowIso(),
+          commandId: null,
+          causationEventId: null,
+          metadata: {}
+        }
+      ]);
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = () => resolve();
+      });
+      const originalCompact = host.adapter.compact.bind(host.adapter);
+      host.adapter.compact = async (id: string) => {
+        await gate;
+        return originalCompact(id);
+      };
+      await host.orchestrator.command(threadId, "compact", { commandId: cmd() });
+      await new Promise((resolve) => setImmediate(resolve));
+
+      const ref = await host.store.putAttachment({
+        threadId,
+        name: "big.png",
+        mimeType: "application/octet-stream",
+        sourcePath: await oversized(dir)
+      });
+      await host.orchestrator.command(threadId, "turn", {
+        commandId: cmd(),
+        input: "queued",
+        attachments: [
+          { type: "image", id: ref.id, name: "big.png", mimeType: "image/png", sizeBytes: 1_000 }
+        ]
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      release();
+      await host.settle();
+
+      assert.equal(sendCount(host), 1, "only the first turn reached the provider");
+      assert.ok(activities(host).some((row) => row.summary === "Attachment rejected"));
+      await host.stop();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a message-mode answer's steer", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "agent-host-attach-"));
+    try {
+      const host = createTestHost();
+      const threadId = await host.createThread();
+      await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+      await host.settle();
+      await pushActivity(host, threadId, {
+        id: "question:codex-async:t:7",
+        tone: "approval",
+        activityKind: "user-input.requested",
+        summary: "Which branch?",
+        payload: {
+          requestId: "codex-async:t:7",
+          questions: [
+            { id: "Which branch?", header: "Branch", question: "Which branch?", options: [] }
+          ],
+          responseMode: "message",
+          dismissible: true
+        }
+      });
+      await host.settle();
+      const before = sendCount(host);
+
+      const ref = await host.store.putAttachment({
+        threadId,
+        name: "big.png",
+        mimeType: "application/octet-stream",
+        sourcePath: await oversized(dir)
+      });
+      await host.orchestrator.command(threadId, "answer", {
+        commandId: cmd(),
+        requestId: "codex-async:t:7",
+        answers: { "Which branch?": "main" },
+        attachmentsByQuestionId: {
+          "Which branch?": [
+            { type: "image", id: ref.id, name: "big.png", mimeType: "image/png", sizeBytes: 1_000 }
+          ]
+        }
+      });
+      await host.settle();
+
+      assert.equal(sendCount(host), before, "the answer's steer must not reach the provider");
+      assert.ok(activities(host).some((row) => row.summary === "Attachment rejected"));
+      await host.stop();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("R2-6: an empty probe never blanks a non-empty cached list", () => {
   it("keeps each array independently, including on a machine-level probe", async () => {
     const { createProviderSnapshotRegistry } = await import("./provider-snapshots.ts");

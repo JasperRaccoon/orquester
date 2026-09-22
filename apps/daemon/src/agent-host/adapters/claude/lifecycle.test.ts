@@ -34,7 +34,7 @@ import { AsyncEventQueue, createDeferred } from "./async-queue.ts";
 import type { ClaudeAdapterDeps } from "./deps.ts";
 import { countingIds } from "./fixtures.ts";
 import { createClaudeAdapterWith } from "./index.ts";
-import { BACKGROUND_SHELL_TAIL_INTERVAL_MS } from "./session.ts";
+import { BACKGROUND_SHELL_TAIL_INTERVAL_MS, claudeIngestsAttachment } from "./session.ts";
 
 // ---------------------------------------------------------------------------
 // The scripted peer
@@ -289,6 +289,8 @@ interface HarnessOptions {
   /** How the scripted peer answers `getContextUsage` (§7.6). */
   contextUsage?: ContextUsageBehaviour;
   signal?: AbortSignal;
+  /** Where an attachment id lives, for a test that needs the bytes read for real. */
+  resolveAttachmentPath?: AdapterContext["resolveAttachmentPath"];
 }
 
 async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
@@ -316,7 +318,8 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     },
     clock: { now: () => new Date(nowMs), nowIso: () => new Date(nowMs).toISOString() },
     ids: countingIds(),
-    resolveAttachmentPath: async (_threadId, id) => `/attachments/${id}`,
+    resolveAttachmentPath:
+      options.resolveAttachmentPath ?? (async (_threadId, id) => `/attachments/${id}`),
     attachmentsDir: (threadId) => `/appdir/threads/${threadId}/attachments`,
     logRawFrame: () => {},
     buildEnv: ({ home }) => ({
@@ -678,6 +681,64 @@ describe("claude adapter — turns", () => {
     const compacted = findEvent(harness.events, "thread.state.changed");
     assert.ok(compacted);
     assert.equal(harness.adapter.capabilities.compaction.type, "slash-command");
+  });
+});
+
+describe("claude adapter — attachment delivery (§4.1)", () => {
+  const png = { type: "image" as const, id: "img-1", name: "shot.png", mimeType: "image/png", sizeBytes: 4 };
+  const pdf = { type: "file" as const, id: "doc-1", name: "report.pdf", mimeType: "application/pdf", sizeBytes: 4 };
+
+  it("ingests only the images the API takes inline; everything else is the host's path line", async () => {
+    assert.equal(claudeIngestsAttachment(png), true);
+    assert.equal(claudeIngestsAttachment(pdf), false);
+    assert.equal(
+      claudeIngestsAttachment({ type: "file", id: "t", name: "paste.txt", mimeType: "text/plain", sizeBytes: 1 }),
+      false
+    );
+    assert.equal(
+      claudeIngestsAttachment({ type: "image", id: "b", name: "x.bmp", mimeType: "image/bmp", sizeBytes: 1 }),
+      false,
+      "an image mime the API refuses is a path line, not a failed turn"
+    );
+    assert.equal(claudeIngestsAttachment({ type: "unknown", id: "u", name: "x" }), false);
+
+    const harness = await makeHarness();
+    assert.equal(harness.adapter.ingestsAttachment(png), true);
+    assert.equal(harness.adapter.ingestsAttachment(pdf), false);
+  });
+
+  it("keeps the host's path line inside the LAST text block, after the image blocks", async () => {
+    const dir = await mkdtemp(nodePath.join(tmpdir(), "claude-attach-"));
+    try {
+      await writeFile(nodePath.join(dir, png.id), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+      const harness = await makeHarness({
+        resolveAttachmentPath: async (_threadId, id) => nodePath.join(dir, id)
+      });
+      await harness.adapter.startSession(START);
+      const peer = harness.peers[0]!;
+
+      const input =
+        "/review src\n\nAttached file: report.pdf (/appdir/daemon/agent/threads/thread-1/attachments/doc-1.pdf)";
+      await harness.adapter.sendTurn({
+        threadId: START.threadId,
+        input,
+        attachments: [png],
+        interactionMode: "default"
+      });
+      if (peer.received.length === 0) {
+        await peer.nextTurn();
+      }
+
+      const content = peer.received[0]?.message.content as Array<{ type: string; text?: string }>;
+      assert.deepEqual(
+        content.map((block) => block.type),
+        ["image", "text"],
+        "the text block stays LAST, so the typed /command still expands"
+      );
+      assert.equal(content.at(-1)?.text, input, "the line rides the text verbatim, after it");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 

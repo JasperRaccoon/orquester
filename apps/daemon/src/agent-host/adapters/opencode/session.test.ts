@@ -18,10 +18,12 @@ import type { AdapterContext } from "../../adapter.ts";
 import { resumeCursorFor } from "../../orchestration/resume.ts";
 import {
   OpenCodeThreadSession,
+  openCodeIngestsAttachment,
   parseOpenCodeModelSlug,
   parseOpenCodeResume,
   toQuestionAnswers
 } from "./session.ts";
+import { createOpenCodeAdapter } from "./index.ts";
 import type { OpenCodeServerHandle } from "./server.ts";
 import { OpenCodeClient } from "./http.ts";
 import { deferred } from "./util.ts";
@@ -617,6 +619,46 @@ test("plan mode rides the `agent` field, per turn", async () => {
   const submit = harness.fake.find("POST", "/prompt_async");
   assert.equal((submit?.body as { agent?: string }).agent, "plan");
   await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("§4.1: a file part only for what the model API reads; the rest is the host's path line", async () => {
+  const MiB = 1024 * 1024;
+  const png = { type: "image" as const, id: "png-1", name: "shot.png", mimeType: "image/png", sizeBytes: 10 };
+  const csv = { type: "file" as const, id: "csv-1", name: "data.csv", mimeType: "text/csv", sizeBytes: 10 };
+  const pdf = { type: "file" as const, id: "pdf-1", name: "report.pdf", mimeType: "application/pdf", sizeBytes: 20 * MiB };
+  const zip = { type: "file" as const, id: "zip-1", name: "bundle.zip", mimeType: "application/zip", sizeBytes: 10 };
+  assert.equal(openCodeIngestsAttachment(png), true);
+  assert.equal(openCodeIngestsAttachment(csv), true);
+  assert.equal(openCodeIngestsAttachment(pdf), true, "20 MiB is still a file part");
+  assert.equal(openCodeIngestsAttachment(zip), false);
+  assert.equal(openCodeIngestsAttachment({ type: "file", id: "x", name: "blob", sizeBytes: 10 }), false);
+  assert.equal(
+    openCodeIngestsAttachment({ ...pdf, sizeBytes: 21 * MiB }),
+    false,
+    "judged on the STAT'd size the host stamps on the ref"
+  );
+
+  const harness = makeHarness();
+  const adapter = await createOpenCodeAdapter(harness.ctx);
+  assert.equal(adapter.ingestsAttachment(pdf), true);
+  assert.equal(adapter.ingestsAttachment(zip), false);
+
+  const session = await startSession(harness);
+  const input = "read these\n\nAttached file: bundle.zip (/attachments/zip-1)";
+  await session.sendTurn({
+    threadId: "thread-1",
+    input,
+    attachments: [pdf],
+    interactionMode: "default"
+  });
+  const submit = harness.fake.find("POST", "/prompt_async");
+  assert.deepEqual((submit?.body as { parts: unknown[] }).parts, [
+    { type: "text", text: input },
+    { type: "file", mime: "application/pdf", filename: "report.pdf", url: "file:///attachments/pdf-1" }
+  ]);
+  await session.stop({ reason: "test", hostInitiated: true });
+  await adapter.stopAll();
   harness.dispose();
 });
 

@@ -103,9 +103,28 @@ const ANCESTRY_TERMINAL_MAX_ATTEMPTS = 5;
  * thread's ask would otherwise poll for the session's whole life (§3.2).
  */
 const ANCESTRY_ASKED_MAX_ATTEMPTS = 12;
-/** OpenCode ingests these natively; anything else rides as a path in the prompt. */
+/**
+ * OpenCode ingests these natively, as a `file` part (see
+ * {@link openCodeIngestsAttachment}); anything else rides as the host's
+ * `Attached file:` path line in the prompt text (§4.1).
+ */
 const NATIVE_IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const NATIVE_FILE_PART_MAX_BYTES = 20 * 1024 * 1024;
+
+/**
+ * §4.1: OpenCode ingests an attachment natively — as a `file` part the model
+ * API reads — when it is one of the four image mimes, any `text/*` or a PDF,
+ * and at most 20 MiB. Anything else (a zip, a file with no declared type, a
+ * larger PDF) reaches the agent as the host's `Attached file:` path line.
+ * Judged on the size the host STAT'd, which it stamps on the ref.
+ */
+export function openCodeIngestsAttachment(attachment: AttachmentRef): boolean {
+  const mime = attachment.mimeType?.trim().toLowerCase() ?? "";
+  if ((attachment.sizeBytes ?? 0) > NATIVE_FILE_PART_MAX_BYTES) {
+    return false;
+  }
+  return NATIVE_IMAGE_MIMES.has(mime) || mime.startsWith("text/") || mime === "application/pdf";
+}
 
 export interface OpenCodeResumeCursor {
   schemaVersion: typeof OPENCODE_RESUME_VERSION;
@@ -1640,18 +1659,13 @@ export class OpenCodeThreadSession {
   private async buildFileParts(attachments: AttachmentRef[]): Promise<OpenCodePartInput[]> {
     const parts: OpenCodePartInput[] = [];
     for (const attachment of attachments) {
+      // The host hands this adapter only what `openCodeIngestsAttachment`
+      // accepts; anything the model API would reject is already an
+      // `Attached file:` line in the prompt text (§4.1).
+      if (!openCodeIngestsAttachment(attachment)) {
+        continue;
+      }
       const mime = attachment.mimeType?.trim().toLowerCase() ?? "";
-      const size = attachment.sizeBytes ?? 0;
-      if (size > NATIVE_FILE_PART_MAX_BYTES) {
-        continue;
-      }
-      const native =
-        NATIVE_IMAGE_MIMES.has(mime) || mime.startsWith("text/") || mime === "application/pdf";
-      if (!native) {
-        // Anything the model API would reject rides only as the file path the
-        // host already flattened into the prompt text (§4.1).
-        continue;
-      }
       let absolute: string;
       try {
         absolute = await this.deps.ctx.resolveAttachmentPath(this.state.threadId, attachment.id);

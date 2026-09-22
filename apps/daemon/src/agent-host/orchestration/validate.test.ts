@@ -110,6 +110,13 @@ describe("host-native slash commands (§4.6.5, §4.6.9)", () => {
     assert.equal(isSlashInvocation("/review src"), true);
     assert.equal(isSlashInvocation("not /review"), false);
     assert.equal(providerInputFor("/review src"), "/review src");
+    // §4.1: an attachment's path line goes AFTER the text, never before, so a
+    // typed command still opens the turn and still dispatches.
+    const line = "Attached file: a.pdf (/appdir/daemon/agent/threads/t/attachments/a.pdf)";
+    assert.equal(providerInputFor("/review src", line), `/review src\n\n${line}`);
+    assert.equal(isSlashInvocation(providerInputFor("/review", line)), true);
+    assert.equal(providerInputFor("", line), line, "a file-only turn is its lines alone");
+    assert.equal(providerInputFor("/review src", ""), "/review src");
   });
 });
 

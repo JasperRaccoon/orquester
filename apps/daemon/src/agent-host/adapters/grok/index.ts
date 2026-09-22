@@ -53,6 +53,7 @@ import type {
 import { join } from "node:path";
 
 import { MAX_TURN_INPUT_CHARS } from "@orquester/api/agent-chat";
+import { ATTACHMENT_LINES_MAX_CHARS } from "../../orchestration/attachment-lines.ts";
 import { projectGrokHistory } from "./history.ts";
 import { GROK_EXTRA_ENV } from "./launch.ts";
 import { pendingStatusMessage } from "../pending.ts";
@@ -137,6 +138,17 @@ class GrokAdapter implements AgentAdapter {
   /** §3.2 layer one. Synchronous, no I/O — see `adapters/pending.ts`. */
   pendingSnapshot(checkedAt: string): ProviderSnapshot {
     return pendingGrokSnapshot(checkedAt);
+  }
+
+  /**
+   * §4.1: nothing, not even an image. `agentCapabilities.promptCapabilities.
+   * image` is **false** on this CLI, so an image content block is one the
+   * agent has said it cannot take; every attachment instead reaches it as the
+   * host's `Attached file: <name> (<absolute path>)` line, which its own
+   * `read_file` tool can act on.
+   */
+  ingestsAttachment(): boolean {
+    return false;
   }
 
   private readonly context: AdapterContext;
@@ -294,8 +306,11 @@ class GrokAdapter implements AgentAdapter {
 
   async sendTurn(input: SendTurnInput): Promise<SendTurnResult> {
     const text = input.input.trim();
-    if (text.length > MAX_TURN_INPUT_CHARS) {
-      throw new Error(`grok: turn input exceeds ${MAX_TURN_INPUT_CHARS} characters`);
+    // The text the user typed is bounded by `MAX_TURN_INPUT_CHARS`; the host's
+    // `Attached file:` lines for the turn's attachments come on top (§4.1).
+    const maxInputChars = MAX_TURN_INPUT_CHARS + ATTACHMENT_LINES_MAX_CHARS;
+    if (text.length > maxInputChars) {
+      throw new Error(`grok: turn input exceeds ${maxInputChars} characters`);
     }
     // §4.6.5: a provider-side permission change would desynchronise the host's
     // runtime mode — and `/always-approve off` is additionally a no-op on this
@@ -303,26 +318,18 @@ class GrokAdapter implements AgentAdapter {
     if (isBlockedGrokCommand(text)) {
       throw grokBlockedCommandError();
     }
-    if (text.length === 0 && input.attachments.length === 0) {
+    if (text.length === 0) {
       // Grok does not declare `promptlessTurnContinuation`, so an empty
       // continuation is a validation error rather than a silently empty turn.
+      // A file-only turn is not empty: its attachments are path lines here.
       throw new Error("grok: a turn needs text");
     }
 
     const session = this.requireSession(input.threadId);
-    // References only (§4.1): the host owns the bytes, the adapter only ever
-    // hands the agent a path it can read for itself.
-    const attachments = await Promise.all(
-      input.attachments.map(async (attachment) => ({
-        id: attachment.id,
-        name: attachment.name,
-        path: await this.context.resolveAttachmentPath(input.threadId, attachment.id),
-        ...(attachment.mimeType === undefined ? {} : { mimeType: attachment.mimeType })
-      }))
-    );
+    // No attachment ever rides `input.attachments` here (`ingestsAttachment`
+    // is always false): every one is already a path line in `text`.
     const result = await session.sendTurn({
       text,
-      attachments,
       ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
       interactionMode: input.interactionMode
     });

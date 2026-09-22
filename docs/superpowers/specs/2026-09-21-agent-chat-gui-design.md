@@ -637,6 +637,29 @@ Rules of the interface, enforced by the orchestration layer so no adapter can fo
   ≤ 50 MiB; an unknown third arm is a deliberate forward-compat catch-all so a newer producer
   cannot break an older decoder. Claude gets that dir as an additional allowed directory so
   pasted images need no approval.
+  *Built: **attachment delivery is decided per adapter, and nothing is dropped.** Every adapter
+  declares `ingestsAttachment(ref): boolean` — required, synchronous and pure, judged on the size
+  the host STAT'd — and the turn effect (`sendTurnEffect`) resolves each attachment, holds it to
+  these bounds against the stat'd file, and partitions on it
+  (`apps/daemon/src/agent-host/orchestration/attachment-lines.ts`). What the adapter ingests
+  natively rides `attachments`, carrying the stat'd size: Claude inline base64 for the four image
+  mimes, Codex every image as a `localImage` path item, OpenCode a `file` part for those images,
+  `text/*` and PDF up to 20 MiB, Grok nothing at all (its CLI declares
+  `promptCapabilities.image: false`). Every other attachment — a PDF, a CSV, a large paste the
+  composer turned into `pasted-text.txt` — becomes one `Attached file: <name> (<absolute path>)`
+  line appended to `input` **after** the text and a blank line, never before, so a typed
+  `/command` still opens the turn (§4.6.9); a file-only turn is the lines alone. The name is
+  flattened to one line and capped at 255 code points; the path is the host's copy in the
+  thread's attachments dir, which is what Claude's additional-directory grant now serves. The
+  lines are provider input only — the persisted `thread.message-sent` keeps what the user typed —
+  and Grok's whole-input guard is widened by `ATTACHMENT_LINES_MAX_CHARS` to fit them. A native
+  question answer folds its attachments into the same line shape (`(not available)` for one that
+  no longer resolves). Before this, the Claude, Codex and OpenCode adapters skipped whatever they
+  did not ingest on the assumption that the host had already flattened it into the prompt, and
+  nothing had: a PDF never reached the agent and a file-only turn broke. The stat'd re-check also
+  moved into the turn effect, so it now covers every sending path, including the two a check on
+  the `/turn` decision never saw: a turn queued behind a compaction and a message-mode answer
+  (§6.2).*
 - **Composer context is not adapter input.** `@file` references are flattened into `input` and
   persisted beside the user message for re-render only.
 
@@ -2537,12 +2560,23 @@ reverse. Here that is one `events` array on one orchestrator decision — `respo
 `user-input.resolved` activity (deterministic id `async-answer:<requestId>`) and the
 `thread.message-sent` reach `append` together or not at all — with the steer as the decision's only
 effect. The reply text **echoes each question before its answer** (`"<question>\n<answer>"`, joined
-by blank lines), and a question's attachments follow as `Attached file: <name> (<id>)` lines and
+by blank lines), and a question's attachments follow as `Attached file: <name>` lines and
 ride the message as real attachment refs. The echo is not decoration: the provider parked no
 request, so the agent receives this as an ordinary user turn and has nothing but the text to tell
 it which question was answered — the previous shape dropped the question whenever there was exactly
 one, which reads as a bare "yes" arriving from nowhere in a resumed transcript. The message id is
 the deterministic `async-answer:<requestId>` too, so a replayed command cannot mint a duplicate.*
+
+*Built: **the message-mode echo names a file; it does not locate it.** T3's echo line ends in
+`(<id>)`, and so did this one until §4.1's path lines existed. The id means nothing to an agent,
+and the answer's steer goes through the ordinary turn effect, which appends each file's real
+`Attached file: <name> (<absolute path>)` line after the whole reply (or ingests it natively, per
+the adapter's `ingestsAttachment`) — so a file answering "Which branch?" reaches the agent as
+`Which branch?\nmain\nAttached file: notes.md\n\nAttached file: notes.md (<path>)`: the echo says
+which question the file belongs to, the path line says where it is, and there is no second
+parenthesised reference to read as a second file. The persisted `thread.message-sent` holds the
+echo only, never a path. The same turn effect re-checks the files against their stat'd size, so an
+oversized answer attachment is an "Attachment rejected" row, never a send.*
 
 `/session/stop` stops the provider child and leaves the thread, its log and its resume cursor
 intact; the next `/turn` re-adopts it through lazy recovery (§4.1). Without it a session wedged in
