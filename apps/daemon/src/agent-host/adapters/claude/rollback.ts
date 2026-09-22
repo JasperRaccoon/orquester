@@ -75,6 +75,32 @@ export function isClaudeHumanTurnStart(message: ClaudeHistoryMessage): boolean {
   );
 }
 
+/**
+ * Group a native transcript into turns, the way `ThreadSnapshot` wants them: a
+ * turn opens at each human prompt and runs to the next one, and everything
+ * before the first prompt (the CLI's own preamble) is dropped.
+ *
+ * The turn's id is the human row's uuid, which for a session this adapter
+ * started IS our own turn id — every `SDKUserMessage` is stamped with it
+ * (§4.5), so a projected turn and a live one agree.
+ */
+export function groupClaudeHistoryTurns(
+  messages: readonly ClaudeHistoryMessage[]
+): Array<{ id: string; items: unknown[] }> {
+  const turns: Array<{ id: string; items: unknown[] }> = [];
+  for (const message of messages) {
+    if (isClaudeHumanTurnStart(message)) {
+      turns.push({ id: message.uuid, items: [message] });
+      continue;
+    }
+    if (!isClaudeConversationMessage(message)) {
+      continue;
+    }
+    turns.at(-1)?.items.push(message);
+  }
+  return turns;
+}
+
 export function conversationIndexForUuid(
   messages: readonly ClaudeHistoryMessage[],
   uuid: string

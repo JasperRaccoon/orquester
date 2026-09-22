@@ -21,6 +21,19 @@
  *
  * *T3: `packages/contracts/src/providerRuntime.ts:23-34`.*
  */
+/**
+ * The marker every event **projected from a provider's own transcript** carries
+ * (`AgentAdapter.projectHistory`), as opposed to one decoded from a live frame.
+ *
+ * A resumed thread replays nothing onto its message stream, so its timeline is
+ * rebuilt from native history instead — and a consumer must be able to tell the
+ * two apart: a historical event describes something that already happened, so
+ * it never raises attention, never fires a push and never moves a live turn.
+ *
+ * Referred to by name, never spelled inline, so the literal is one edit.
+ */
+export const HISTORICAL_RAW_SOURCE = "history.replay";
+
 export type RuntimeEventRawSource =
   | "claude.sdk.message"
   | "claude.sdk.permission"
@@ -37,7 +50,8 @@ export type RuntimeEventRawSource =
   | "codex.app-server.history"
   | "opencode.sdk.event"
   | "acp.jsonrpc"
-  | `acp.${string}.extension`;
+  | `acp.${string}.extension`
+  | typeof HISTORICAL_RAW_SOURCE;
 
 /** The untranslated provider frame an event was decoded from (§4.2). */
 export interface RuntimeEventRaw {
