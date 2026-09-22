@@ -315,7 +315,10 @@ export function ChatBannerDock({
   return (
     <div
       data-agent-chat-banner-dock={sessionId}
-      className="pointer-events-auto flex w-full min-w-0 flex-col gap-px px-[1.375rem]"
+      // `-mb-[calc(1rem+1px)]` is the 17px pull behind the composer (T3
+      // `ComposerBanner.tsx:55`). It sits here, on the element that is absent
+      // when there is nothing to show, so an empty dock displaces nothing.
+      className="pointer-events-auto -mb-[calc(1rem+1px)] flex w-full min-w-0 flex-col gap-px px-[1.375rem]"
     >
       {frontItem ? <div className={CARD_BACKDROP}>{frontItem.render}</div> : null}
       {restItems.length > 0 ? (

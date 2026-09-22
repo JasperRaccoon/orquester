@@ -1,6 +1,7 @@
 import React from "react";
 import { KeyRound, X } from "lucide-react";
 import { useAppStore } from "../../store/app";
+import { ACTION_TOAST_AUTO_DISMISS_MS, useAutoDismiss } from "./use-auto-dismiss";
 
 /**
  * Toast for a chat provider's `auth.status` reporting an error (spec §7.7).
@@ -16,6 +17,11 @@ export const AgentAuthErrorToast: React.FC = () => {
   const error = useAppStore((s) => s.agentAuthError);
   const dismiss = useAppStore((s) => s.dismissAgentAuthError);
   const openSettings = useAppStore((s) => s.openSettings);
+  useAutoDismiss(
+    error ? `${error.sessionId}\u0000${error.message}` : null,
+    dismiss,
+    ACTION_TOAST_AUTO_DISMISS_MS
+  );
 
   if (!error) {
     return null;

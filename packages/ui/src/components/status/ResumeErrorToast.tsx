@@ -2,6 +2,7 @@ import React from "react";
 import { AlertTriangle, X } from "lucide-react";
 import { launchWithNotice } from "../../lib/launch-notice";
 import { useAppStore } from "../../store/app";
+import { ACTION_TOAST_AUTO_DISMISS_MS, useAutoDismiss } from "./use-auto-dismiss";
 
 /**
  * Toast for a refused resume. The daemon answers `RESUME_UNAVAILABLE` rather
@@ -16,6 +17,11 @@ export const ResumeErrorToast: React.FC = () => {
   const error = useAppStore((s) => s.resumeError);
   const dismiss = useAppStore((s) => s.dismissResumeError);
   const startFresh = useAppStore((s) => s.startFreshFromResumeError);
+  useAutoDismiss(
+    error ? `${error.agentId}\u0000${error.message}` : null,
+    dismiss,
+    ACTION_TOAST_AUTO_DISMISS_MS
+  );
 
   if (!error) {
     return null;

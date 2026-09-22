@@ -8,17 +8,21 @@ import { useEffect } from "react";
  * found launch-failure and sign-in toasts still sitting over the timeline and
  * the tab strip after twenty-five minutes.
  *
- * **Only advisory toasts get this.** A toast carrying an action (a refused
- * resume offering "Start fresh", an auth failure offering "Open Settings")
- * must not time out: dismissing it silently discards the one affordance it
- * exists for. Those close when the user closes them, and — since the auth
- * toast's dismissal is now remembered — stay closed.
+ * A toast carrying an action (a refused resume offering "Start fresh", an auth
+ * failure offering "Open Settings") gets the longer {@link ACTION_TOAST_AUTO_DISMISS_MS}
+ * rather than no timer at all: the affordance survives the toast — the thread
+ * keeps its own auth banner and the usage overview its auth state, and a fresh
+ * launch is one "+" away — while a card that never leaves covers the tab strip
+ * and the top of every timeline (T3's notices are transient, `sonner` defaults).
+ * The remembered auth dismissal still applies, so a timed-out auth toast does
+ * not come back for the same failure.
  *
  * The timer restarts whenever `key` changes, so a second notice arriving while
  * the first is up gets its own full reading time rather than inheriting the
  * remains of the previous one.
  */
 export const TOAST_AUTO_DISMISS_MS = 12_000;
+export const ACTION_TOAST_AUTO_DISMISS_MS = 20_000;
 
 export function useAutoDismiss(
   key: string | null,

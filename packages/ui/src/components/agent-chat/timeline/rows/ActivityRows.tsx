@@ -431,14 +431,12 @@ export const WorkToggleRow = React.memo(function WorkToggleRow({
   row: Row<"work-toggle">;
 }): React.ReactElement {
   const ctx = useTimelineRowContext();
-  // Collapsed, the row names what is hidden ("+4 more"); with nothing hidden it
-  // falls back to the group's own settled summary. Expanded it offers the way
-  // back, because a "+N more" that stays after opening reads as a second batch.
-  const label = row.expanded
-    ? "Show less"
-    : row.hiddenCount > 0
-      ? `+${row.hiddenCount} more`
-      : row.summary;
+  // The row always reads as what the group did ("Read 3 files", "Ran a
+  // command"), collapsed or expanded, exactly as T3's
+  // `WorkGroupToggleTimelineRow` (`MessagesTimeline.tsx:3320-3348`). A bare
+  // "+N more" told the user nothing — a settled Codex turn rendered as three
+  // consecutive "+1 more" rows — and the chevron already says it opens.
+  const label = row.summary;
   return (
     <button
       type="button"
