@@ -28,6 +28,24 @@ export {
   type ComposerPopoverProps,
   type ComposerMenuRowProps
 } from "./ComposerPopover";
+export {
+  RewindConfirmPanel,
+  RewindControl,
+  RewindPickerPanel,
+  REWIND_BUSY_TITLE,
+  REWIND_DISABLED_EXPLAINS_ITSELF,
+  REWIND_ESCAPE_HINT,
+  REWIND_ESCAPE_HINT_MS,
+  REWIND_PICKER_LIMIT,
+  rewindConfirmSentence,
+  rewindDroppedTurnCount,
+  rewindPickerEnabled,
+  rewindTargetHint,
+  rewindTurnsLabel,
+  type RewindConfirmPanelProps,
+  type RewindControlProps,
+  type RewindPickerPanelProps
+} from "./RewindControl";
 
 export {
   composerHandle,

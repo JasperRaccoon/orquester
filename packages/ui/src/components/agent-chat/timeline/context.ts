@@ -23,6 +23,17 @@ export interface TimelineRowContextValue {
   /** The drill-in dispatches no commands; every affordance below is withheld. */
   readOnly: boolean;
   canRevert: boolean;
+  /**
+   * A turn is running or a revert is in flight: "Rewind to here" is shown but
+   * disabled, and says it waits for the agent to be idle. Flips at turn
+   * boundaries only, so it is safe on this context (nothing here ticks).
+   */
+  revertBusy: boolean;
+  /**
+   * The thread's started turns (`startedTurns(turns).length`), so a user row
+   * can say how many turns its rewind removes. Changes once per turn.
+   */
+  startedTurnCount: number;
   disclosures: DisclosureState;
   /** The roster a spawn row resolves its label and member list against. */
   roster: readonly RuntimeSubagent[];
@@ -45,7 +56,8 @@ export interface TimelineRowContextValue {
   toolOutputOffset: (id: string) => number;
   setToolOutputOffset: (id: string, offset: number) => void;
 
-  onRevert: (targetTurnCount: number) => void;
+  /** A confirmed "Rewind to here" (§5.5). Conversation only; files stay. */
+  onRevert: (input: { messageId: string; targetTurnCount: number }) => void;
   onOpenTurnDiff: (turnCount: number) => void;
   onOpenFile: (path: string) => void;
   onLoadFullOutput: (itemId: string) => void;
@@ -75,6 +87,8 @@ const FALLBACK: TimelineRowContextValue = {
   workspaceRoot: undefined,
   readOnly: true,
   canRevert: false,
+  revertBusy: false,
+  startedTurnCount: 0,
   disclosures: {
     expandedTurnIds: [],
     expandedGroupIds: [],
