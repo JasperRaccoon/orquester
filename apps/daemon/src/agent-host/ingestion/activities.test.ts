@@ -206,6 +206,37 @@ describe("token usage and compaction (§5.1)", () => {
       assert.deepEqual(runtimeEventToActivities(runtimeEvent("thread.state.changed", { state })), []);
     }
   });
+
+  it("the compaction PHASE is a row too, so a /compact turn is not a blank 'Working'", () => {
+    const [opening, ...rest] = runtimeEventToActivities(
+      runtimeEvent("thread.state.changed", { state: "compacting" }, { requestId: "req-9" })
+    );
+    assert.deepEqual(rest, []);
+    assert.ok(opening);
+    assert.equal(opening.tone, "info");
+    assert.equal(opening.activityKind, "context-compaction");
+    assert.equal(opening.summary, "Compacting context");
+    // The client renders on `payload.state`, never on the summary text.
+    assert.equal(payloadOf(opening).state, "compacting");
+    assert.equal(payloadOf(opening).requestId, "req-9");
+    assert.equal(payloadOf(opening).beforeTokens, undefined);
+  });
+
+  it("a failed compaction is an error row carrying the provider's own reason", () => {
+    const [row, ...rest] = runtimeEventToActivities(
+      runtimeEvent("thread.state.changed", {
+        state: "compaction-failed",
+        error: "Not enough context to compact."
+      })
+    );
+    assert.deepEqual(rest, []);
+    assert.ok(row);
+    assert.equal(row.tone, "error");
+    assert.equal(row.activityKind, "context-compaction");
+    assert.equal(row.summary, "Context compaction failed");
+    assert.equal(payloadOf(row).state, "compaction-failed");
+    assert.equal(payloadOf(row).error, "Not enough context to compact.");
+  });
 });
 
 describe("task linkage rides every row (§4.2/§5.1)", () => {
