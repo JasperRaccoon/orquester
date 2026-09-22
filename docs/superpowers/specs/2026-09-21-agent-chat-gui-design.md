@@ -363,6 +363,11 @@ again.
 
 *T3: `apps/server/src/serverRuntimeStartup.ts:494-502` + `:578-586` — `continueThreadsAfterServerUpdate` resolved through `resolveProjectSettings` per project; `packages/contracts/src/settings.ts:1071-1074` — default `false`; `apps/server/src/provider/Layers/ProviderService.ts:2299-2321` — the same per-project resolution on the stop path*
 
+*Built: the preference lives in the daemon-owned `app.json`, and the **host reads it there itself**
+at reconcile rather than being told by the daemon. Reconcile runs before the daemon has necessarily
+adopted the host — that is the whole point of §3.3 — so a continuation that had to wait for the
+daemon to hand it a setting would either stall or silently take the default.*
+
 **Reconcile never blocks or fails host startup.** Each continuation is forked; the loop only
 prepares it. A thread whose directory binding cannot be read, whose projection dispatch fails, or
 whose continuation throws is logged and settled individually, and a failure of the whole pass is
