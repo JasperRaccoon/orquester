@@ -25,7 +25,11 @@ interface Harness {
   pushes: Array<{ id: string; type: string }>;
 }
 
-function harness(now: () => number = () => 1_000_000, onTurnSettled?: () => void): Harness {
+function harness(
+  now: () => number = () => 1_000_000,
+  onTurnSettled?: () => void,
+  onBackgroundWorkEnded?: () => void
+): Harness {
   const chat = new ChatSessionManager({ requestPersist: () => undefined });
   const published: Published[] = [];
   const pushes: Array<{ id: string; type: string }> = [];
@@ -42,7 +46,8 @@ function harness(now: () => number = () => 1_000_000, onTurnSettled?: () => void
       }
     },
     now,
-    onTurnSettled
+    onTurnSettled,
+    onBackgroundWorkEnded
   });
   return { service, chat, published, pushes };
 }
@@ -461,6 +466,37 @@ test("a summary body is validated field-wise before it reaches typed code", () =
   assert.equal(fields.chatSessionStatus, "ready");
   assert.equal(fields.latestTurn?.turnId, null, "a non-string turn id normalises to null");
   assert.equal((fields as Record<string, unknown>).somethingElse, undefined);
+});
+
+test("the daemon's own background-liveness view feeds the drain, and its ending reopens the window", () => {
+  // The §3.1 drain-restart also waits on subagent fleets and watch loops. A
+  // host from before `/health` reported them cannot say so itself, so the
+  // supervisor reads the summary poll's `backgroundLiveness` too.
+  let reopened = 0;
+  const h = harness(undefined, undefined, () => reopened++);
+  seedTab(h.chat, "t1");
+  seedTab(h.chat, "t2");
+  h.service.applyFields("t1", { chatSessionStatus: "ready", backgroundLiveness: "working" });
+  h.service.applyFields("t2", { chatSessionStatus: "ready", backgroundLiveness: "monitoring" });
+  assert.deepEqual(h.service.threadsWithBackgroundLiveness().sort(), ["t1", "t2"]);
+  assert.equal(reopened, 0, "work starting reopens nothing");
+  h.service.applyFields("t1", { chatSessionStatus: "ready", backgroundLiveness: null });
+  assert.deepEqual(h.service.threadsWithBackgroundLiveness(), ["t2"]);
+  assert.equal(reopened, 1, "the fleet finishing reopens the drain window");
+  h.service.applyFields("t2", { chatSessionStatus: "ready" });
+  assert.deepEqual(h.service.threadsWithBackgroundLiveness(), [], "an absent field reads as none");
+  assert.equal(reopened, 2);
+  h.service.forget("t2");
+  assert.deepEqual(h.service.threadsWithBackgroundLiveness(), []);
+});
+
+test("hasPolled flips after the first completed poll round, even an empty one", async () => {
+  // The supervisor adopts a host at boot BEFORE the poll starts; until one
+  // round has run, the background-liveness view is unknown, not empty.
+  const h = harness();
+  assert.equal(h.service.hasPolled(), false);
+  await h.service.refreshAll();
+  assert.equal(h.service.hasPolled(), true, "no tabs open is still a completed round");
 });
 
 test("a non-object body yields no fields rather than throwing", () => {

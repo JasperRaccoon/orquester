@@ -411,9 +411,14 @@ export interface Orchestrator {
     input?: { cwd?: string }
   ): Promise<{ provider: ProviderSnapshot; changed: boolean }>;
 
-  /** `GET /health` — the drain-restart of §3.1 waits on `activeTurnThreadIds`. */
+  /**
+   * `GET /health` — the drain-restart of §3.1 waits on `activeTurnThreadIds`
+   * AND `backgroundWorkThreadIds`: a subagent fleet or a background shell that
+   * outlives its turn is work a host restart would kill.
+   */
   liveThreadIds(): string[];
   activeTurnThreadIds(): string[];
+  backgroundWorkThreadIds(): string[];
 
   /** §3.3 step 1, for an intentional stop. Returns the threads it marked. */
   markThreadsForContinuation(): Promise<string[]>;
@@ -3679,6 +3684,14 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     activeTurnThreadIds: () =>
       [...runtimes.values()]
         .filter((runtime) => currentSession(runtime).activeTurnId !== null)
+        .map((runtime) => runtime.id),
+    // Both buckets count: an agent fleet ("working") is hours of real work,
+    // and a watch loop ("monitoring") loses its output the same way. The
+    // registry's own TTL bounds a silent watch loop, so a dev server left
+    // running cannot defer a deploy for longer than that window.
+    backgroundWorkThreadIds: () =>
+      [...runtimes.values()]
+        .filter((runtime) => liveness.liveness(runtime.id) !== null)
         .map((runtime) => runtime.id),
     markThreadsForContinuation,
     clearContinuationMarkers,

@@ -37,6 +37,13 @@ interface Harness {
   tokenAtSpawn: string | null;
   /** How many times `onProvidersRevision` fired. */
   providerRevisions: number;
+  /**
+   * How many `hasServiceSession` polls after the stop request the fake host's
+   * PROCESS takes to exit (its tmux session ends with it). `null` = never.
+   */
+  hostExitsAfterPolls: number | null;
+  /** Whether the service session still existed at the moment it was killed. */
+  killedSessionWasAlive: boolean | null;
   cleanup(): Promise<void>;
 }
 
@@ -47,6 +54,8 @@ const healthy = (
     instance: string;
     providersRevision: number;
     codeStamp: string | null;
+    /** Threads with live background work (a subagent fleet, a background shell). */
+    background: string[];
   }> = {}
 ): ProbeOutcome => ({
   ok: true,
@@ -56,6 +65,9 @@ const healthy = (
     hostInstanceId: overrides.instance ?? "host-1",
     liveThreadIds: [],
     activeTurnThreadIds: overrides.active ?? [],
+    ...(overrides.background === undefined
+      ? {}
+      : { backgroundWorkThreadIds: overrides.background }),
     pid: 4242,
     startedAt: "2026-09-21T00:00:00.000Z",
     ...(overrides.codeStamp === undefined ? {} : { codeStamp: overrides.codeStamp }),
@@ -80,7 +92,14 @@ function mismatchUntilReplaced(h: Harness, active: string[] = []): () => ProbeOu
 
 async function makeHarness(
   probes: ProbeOutcome[],
-  opts: { tmux?: boolean; seedToken?: string; spawnThrows?: boolean; codeStamp?: string | null } = {}
+  opts: {
+    tmux?: boolean;
+    seedToken?: string;
+    spawnThrows?: boolean;
+    codeStamp?: string | null;
+    /** The daemon's own liveness view (`SupervisorAdapters.backgroundWorkThreadIds`). */
+    daemonBackground?: () => readonly string[] | null;
+  } = {}
 ): Promise<Harness> {
   const dir = await mkdtemp(join(tmpdir(), "orq-agent-host-"));
   const tokenPath = join(dir, "agent-host.token");
@@ -98,6 +117,8 @@ async function makeHarness(
     order: [],
     tokenAtSpawn: null,
     providerRevisions: 0,
+    hostExitsAfterPolls: null,
+    killedSessionWasAlive: null,
     advance: (ms) => {
       clock += ms;
     },
@@ -111,8 +132,18 @@ async function makeHarness(
     opts.tmux === false
       ? null
       : {
-          hasServiceSession: async (name) => name === AGENT_HOST_SERVICE_SESSION && sessionExists,
+          hasServiceSession: async (name) => {
+            if (name !== AGENT_HOST_SERVICE_SESSION) return false;
+            // After a stop request the fake host takes N polls to exit, and its
+            // session ends with the process — the real teardown's shape.
+            if (sessionExists && harness.stopRequests > 0 && harness.hostExitsAfterPolls !== null) {
+              if (harness.hostExitsAfterPolls <= 0) sessionExists = false;
+              else harness.hostExitsAfterPolls -= 1;
+            }
+            return sessionExists;
+          },
           killServiceSession: async () => {
+            harness.killedSessionWasAlive = sessionExists;
             sessionExists = false;
             killedSinceSpawn = true;
             harness.order.push("kill");
@@ -149,6 +180,7 @@ async function makeHarness(
       onProvidersRevision: () => {
         harness.providerRevisions++;
       },
+      ...(opts.daemonBackground ? { backgroundWorkThreadIds: opts.daemonBackground } : {}),
       requestStop: async () => {
         harness.stopRequests++;
       },
@@ -538,38 +570,142 @@ test("a single answered probe clears the missed-probe streak", async () => {
   await h.cleanup();
 });
 
-test("the old host is given a grace window to exit before its session is killed", async () => {
-  // `/stop` answers once the continuation markers are written; the real
-  // teardown (four adapters × a 2 s kill grace) then runs asynchronously, and
-  // OpenCode's server is `detached: true` — it survives a kill of the process
-  // group and leaks one per project.
+test("the old host is given a grace window to EXIT before its session is killed — a closed socket is not enough", async () => {
+  // `/stop` answers once the continuation markers are written; the teardown
+  // that follows closes the SOCKET FIRST and only then stops the provider
+  // children (§3.1: settle the turn, close every live task `stopped`, then
+  // `session.exited`). Killing the tmux session the moment the socket went
+  // quiet cut that teardown short — owner incident 2026-09-23: one "Task
+  // stopped" row landed out of five, the other threads got nothing, and the
+  // roster kept reading "running" for subagents that were already dead. The
+  // supervisor therefore waits for the PROCESS: the service session ends when
+  // its command exits.
   const h = await makeHarness([], { seedToken: "tok", tmux: true });
-  // Before the stop it answers v+1; after it, twice more, then it goes quiet
-  // and the replacement answers.
-  let stillUp = 2;
+  h.hostExitsAfterPolls = 3;
   h.probeHook = () => {
     if (h.spawns.length > 0) return healthy({ instance: "host-2" });
     if (h.stopRequests === 0) return healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1 });
-    return stillUp-- > 0
-      ? healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1 })
-      : { ok: false, reachable: false };
+    // The socket is already closed: that is the first step of the teardown.
+    return { ok: false, reachable: false };
   };
   await h.supervisor.init();
   assert.equal(h.stopRequests, 1);
-  assert.ok(stillUp <= 0, "the supervisor polled until the socket went quiet");
+  assert.equal(h.hostExitsAfterPolls, 0, "the supervisor polled until the process was gone");
+  assert.equal(h.killedSessionWasAlive, false, "the kill came only after the session had ended");
   assert.equal(h.spawns.length, 1);
   await h.cleanup();
 });
 
 test("the grace window is bounded — a host that never exits is killed anyway", async () => {
   const h = await makeHarness([], { seedToken: "tok", tmux: true });
-  // Always answers healthy: it never exits.
+  // Always answers healthy and its session never ends: it never exits.
   h.probeHook = () =>
     h.spawns.length === 0
       ? healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1 })
       : healthy({ instance: "host-2" });
   await h.supervisor.init();
   assert.equal(h.spawns.length, 1, "the bounded grace lapsed and the restart proceeded");
+  assert.equal(h.killedSessionWasAlive, true, "the wedged host was killed with its session alive");
+  await h.cleanup();
+});
+
+test("case 3: live BACKGROUND work blocks the drain exactly like an active turn", async () => {
+  // A subagent fleet or a background shell keeps running inside the provider
+  // process after the turn that launched it settled (the host's liveness
+  // registry, §3.1). The deploy of 2026-09-23 restarted the host the moment
+  // the parent's turn settled and killed five subagents mid-work; the CLI
+  // reported every one as "didn't finish before the previous session ended"
+  // on the next message, and nothing had warned the user in between.
+  const h = await makeHarness([], { seedToken: "tok", tmux: true });
+  let background: string[] = ["thread-1"];
+  h.probeHook = () =>
+    h.spawns.length === 0
+      ? healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1, background })
+      : healthy({ instance: "host-2" });
+  await h.supervisor.init();
+  assert.equal(h.supervisor.status().state, "healthy", "the fleet keeps running");
+  assert.equal(h.spawns.length, 0, "no restart while a thread has live background work");
+  assert.equal(h.supervisor.status().pendingVersionRestart, true);
+  // A turn settling somewhere does not open the window: the fresh probe still
+  // shows the work.
+  h.supervisor.handleTurnSettled();
+  await h.supervisor.checkHealth();
+  assert.equal(h.spawns.length, 0);
+  // The fleet finishes: the next health tick hands over.
+  background = [];
+  await h.supervisor.checkHealth();
+  assert.equal(h.stopRequests, 1, "the old host writes its continuation markers");
+  assert.equal(h.spawns.length, 1);
+  assert.equal(h.supervisor.status().hostInstanceId, "host-2");
+  await h.cleanup();
+});
+
+test("an older host that omits the background field is still held by the daemon's own liveness view", async () => {
+  // The host a deploy replaces predates `backgroundWorkThreadIds`. The
+  // daemon's §6.4 summary poll already reads each thread's
+  // `backgroundLiveness`, so the very next deploy after this fix must not
+  // kill a fleet either.
+  let daemonBackground: string[] = ["thread-1"];
+  const h = await makeHarness([], {
+    seedToken: "tok",
+    tmux: true,
+    daemonBackground: () => daemonBackground
+  });
+  h.probeHook = mismatchUntilReplaced(h);
+  await h.supervisor.init();
+  assert.equal(h.spawns.length, 0, "the daemon's own view blocks the drain");
+  assert.equal(h.supervisor.status().pendingVersionRestart, true);
+  daemonBackground = [];
+  await h.supervisor.checkHealth();
+  assert.equal(h.spawns.length, 1, "the fleet finished; the next tick hands over");
+  await h.cleanup();
+});
+
+test("an older host is held while the daemon's view is still UNKNOWN — boot adoption runs before the first poll", async () => {
+  // `init()` adopts and evaluates the drain before `AgentChatSummaryService`
+  // has polled once. For a host that reports no background field, an empty
+  // daemon view would read as "nothing running" and the very deploy shipping
+  // this rule would still kill a fleet.
+  let daemonView: readonly string[] | null = null;
+  const h = await makeHarness([], { seedToken: "tok", tmux: true, daemonBackground: () => daemonView });
+  h.probeHook = mismatchUntilReplaced(h);
+  await h.supervisor.init();
+  assert.equal(h.spawns.length, 0, "unknown is not 'none'");
+  assert.equal(h.supervisor.status().pendingVersionRestart, true);
+  daemonView = [];
+  await h.supervisor.checkHealth();
+  assert.equal(h.spawns.length, 1, "the first poll round found nothing running; hand over");
+  await h.cleanup();
+});
+
+test("a host that reports the background field itself is never held by an unknown daemon view", async () => {
+  const h = await makeHarness([], { seedToken: "tok", tmux: true, daemonBackground: () => null });
+  h.probeHook = () =>
+    h.spawns.length === 0
+      ? healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1, background: [] })
+      : healthy({ instance: "host-2" });
+  await h.supervisor.init();
+  assert.equal(h.spawns.length, 1, "the host's own report is authoritative");
+  await h.cleanup();
+});
+
+test("a host with only background work gets the same extra patience as a busy one", async () => {
+  const h = await makeHarness([healthy({ background: ["thread-A"] })], {
+    seedToken: "tok",
+    tmux: true
+  });
+  await h.supervisor.init();
+  h.probes = [{ ok: false, reachable: false }];
+  for (let i = 0; i < UNREACHABLE_PROBES_BEFORE_RESTART; i++) {
+    h.advance(120_000);
+    await h.supervisor.checkHealth();
+  }
+  assert.equal(h.spawns.length, 0, "the last good health reported live background work");
+  for (let i = UNREACHABLE_PROBES_BEFORE_RESTART; i < UNREACHABLE_PROBES_BEFORE_RESTART_BUSY; i++) {
+    h.advance(120_000);
+    await h.supervisor.checkHealth();
+  }
+  assert.equal(h.spawns.length, 1);
   await h.cleanup();
 });
 

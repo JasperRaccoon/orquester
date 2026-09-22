@@ -105,6 +105,16 @@ any tool it was running on each deploy. The host preserves the current property.
 4. Socket answers but rejects the token: foreign process. Log an error, never kill or adopt.
 5. Nothing answers: spawn, poll readiness, then adopt.
 
+*Built: case 3's "no thread has an active turn" is "no thread has an active turn **or live
+background work**". `GET /health` carries `backgroundWorkThreadIds` (this section's liveness
+registry) next to `activeTurnThreadIds`, and the daemon unions it with its own §6.4 summary-poll
+view so the host a deploy replaces, which may predate the field, is held too (that view is
+"unknown" until the poll's first round, which also holds such a host at boot). A subagent fleet or
+a background shell outlives its turn inside the provider process, and restarting under it killed
+the fleet with no notice — the CLI reported each agent as "didn't finish before the previous
+session ended" on the next message (2026-09-23). Background work ending reopens the window exactly
+as a settled turn does; a manual `POST /api/agent-host/stop` still restarts at once.*
+
 A 15 s unref'd health interval with bounded backoff supervises it afterwards, as for cliproxy.
 
 **Readiness is a gate, not a race.** The host accepts no command until its own startup has
@@ -3495,11 +3505,15 @@ silently half-applied.
 *Built: the handover is **drain-then-replace**, not trial-then-commit. T3 starts the replacement,
 waits for its `prepared` and keeps the old version if it never comes; here both hosts would have to
 bind the same `agent-host.sock`, so a trial is not expressible. The restart is therefore deferred
-until no thread has an active turn, the old host is asked to `/stop` (which writes every
-continuation marker), and the supervisor then **waits for the socket to stop answering** before
-spawning the replacement — killing the tmux session milliseconds after `/stop` answers strands a
-teardown that needs seconds, and OpenCode's server is spawned `detached: true`, so it would survive
-the kill holding its port while the new host started a second one for the same project. A
+until no thread has an active turn or live background work, the old host is asked to `/stop`
+(which writes every continuation marker), and the supervisor then **waits for the old host's
+process to exit** — its tmux service session ending, plus the socket — bounded at 30 s, before
+spawning the replacement. The socket closing is the teardown's FIRST step, not its last: killing
+the tmux session the moment it went quiet cut the teardown short, so no `session.exited` and one
+"Task stopped" row out of five were written and the threads read "running" for dead work
+(2026-09-23); OpenCode's server is also spawned `detached: true`, so it would survive the kill
+holding its port while the new host started a second one for the same project. An intentional
+`/stop` ends the process explicitly once the teardown completes. A
 replacement that never reaches readiness latches `error` and is retried with backoff rather than
 being silently half-applied (`apps/daemon/src/agent-chat/supervisor.ts`).*
 

@@ -379,7 +379,28 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   triggered by a protocol-version bump **or by a moved code stamp**: the host reports the commit it
   started from in `/health` (`support/code-stamp.ts` reads `.git/HEAD` without the git binary) and
   the daemon compares it with its own at boot, so a code-only deploy replaces the host as soon as
-  no turn is active. An unreadable stamp on either side never restarts anything.
+  it is **drained**. An unreadable stamp on either side never restarts anything.
+- **"Drained" means no active turn AND no live background work, and the old host must EXIT before
+  its session is killed.** Two things that were bugs (owner incident 2026-09-23: a code-only deploy
+  under five working subagents). (1) The drain waited on `activeTurnThreadIds` alone, so the
+  restart fired the moment the parent's turn settled — a subagent fleet or a background shell
+  outlives its turn inside the provider process, the restart killed every one of them, and the CLI
+  reported each as "didn't finish before the previous session ended" on the next message with no
+  notice in between. `/health` now also carries `backgroundWorkThreadIds` (the host's liveness
+  registry, `working` and `monitoring` both — the registry's TTL bounds a silent watch loop, so a
+  dev server cannot defer a deploy for longer than that window); the supervisor unions it with the
+  daemon's own summary-poll view (`AgentChatSummaryService.threadsWithBackgroundLiveness`, so the
+  host a deploy replaces — which predates the field — is held too; that view is `null` = unknown
+  until the first poll round, because boot adoption runs BEFORE the poll starts and an empty view
+  would read as "nothing running"), and `onBackgroundWorkEnded` reopens the window exactly as a
+  settled turn does. (2) The supervisor read a quiet socket as "the
+  host is gone", but `server.close()` is the FIRST step of the host's teardown and
+  `adapter.stopAll()` runs after it: the tmux session was killed ~400 ms after `/stop`, so no
+  `session.exited` and one "Task stopped" row out of five were ever written, and the threads kept
+  reading "running" for work that was already dead. `awaitHostExit` now waits for the PROCESS —
+  the service session ending (`isAlive()` on a direct child) and the socket — bounded at 30 s, and
+  an intentional `/stop` ends the process explicitly (`onStopped` → `process.exit`). A manual
+  `POST /api/agent-host/stop` still restarts at once, by design.
 - **A fresh host must not answer `GET /providers` with `[]` for five minutes.** Three layers, all
   in `agent-host/orchestration/provider-snapshots.ts`, ported from T3 (`makeManagedServerProvider`
   + `ProviderRegistry`). **(1) A pending seed, synchronously at construction** — before the cache
@@ -453,6 +474,12 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   (1) Claude resumes a subagent under the SAME task id with a NEW launching `tool_use_id`, so the
   roster fold (`packages/api/src/agent-chat/roster.ts`) reopens a terminal row on a changed
   `toolUseId` and only then — an unchanged one is a late delivery and must not reopen anything.
+  The launching call is read off `task.started` rows ONLY: progress rows have stable ids
+  (`task-progress:…`, `task-usage:…`) and are replaced **in place**, so in list order the
+  relaunched run's progress row — already naming the new call — sits before the killed run's
+  `stopped` row, and reading the call off it kept every relaunched agent `interrupted` for as long
+  as it worked (2026-09-23). Anything that folds activities by position must remember that order
+  is first-emission order, not time.
   (2) `task_progress.description` is the agent's live activity, never its name: the normaliser
   fills a task's description from progress only when it has none. (3) Retention has two windows
   (`fold.ts`): the parent's last 500 rows, from which an agent's `task.started`/`task.completed`

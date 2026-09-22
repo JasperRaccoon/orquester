@@ -58,12 +58,19 @@ export const UNREACHABLE_PROBES_BEFORE_RESTART = 2;
 export const UNREACHABLE_PROBES_BEFORE_RESTART_BUSY = 4;
 
 /**
- * How long the daemon waits for a stopped host to actually exit before killing
- * its tmux session. Matches T3's `TERMINATE_GRACE_MS`: `/stop` returns once the
- * continuation markers are written, but the teardown that follows (four
- * adapters at a 2 s kill grace each, sequential) needs seconds.
+ * How long the daemon waits for a stopped host to actually EXIT before killing
+ * its tmux session. `/stop` returns once the continuation markers are written;
+ * the teardown that follows closes the socket first, then stops every provider
+ * child (each with a 2 s kill grace, adapters in sequence), and only then
+ * writes the last `session.exited`. The wait is on the process — the service
+ * session ends when its command does — never on the socket going quiet, which
+ * is the FIRST step of that teardown, not the last (owner incident
+ * 2026-09-23: the session was killed ~400 ms after `/stop`, one "Task stopped"
+ * row landed out of five, and the other threads got no notice at all). T3's
+ * `TERMINATE_GRACE_MS` is 5 s against a socket that stays up through its
+ * teardown; ours is generous because a wedged child costs the full grace.
  */
-export const HOST_EXIT_GRACE_MS = 5_000;
+export const HOST_EXIT_GRACE_MS = 30_000;
 export const HOST_EXIT_POLL_MS = 100;
 
 export type AgentHostState =
@@ -94,6 +101,8 @@ export type ProbeOutcome =
 export interface DirectHostHandle {
   kill(): void;
   pid?: number;
+  /** False once the child has exited; absent when the spawner cannot tell. */
+  isAlive?(): boolean;
 }
 
 export interface SupervisorTmux {
@@ -128,6 +137,16 @@ export interface SupervisorAdapters {
    * reload.
    */
   onProvidersRevision?(): void;
+  /**
+   * The daemon's OWN view of which threads have live background work — the
+   * `backgroundLiveness` its §6.4 summary poll already reads per thread. It is
+   * unioned with the host's `backgroundWorkThreadIds`, so a host from before
+   * that field existed (the one a deploy is about to replace) is still drained
+   * only once its fleets are done. `null` means "not known yet" (the poll has
+   * not completed a round), which holds such a host rather than reading as
+   * "nothing running".
+   */
+  backgroundWorkThreadIds?(): readonly string[] | null;
   logger?: { log?: (...a: unknown[]) => void; warn?: (...a: unknown[]) => void; error?: (...a: unknown[]) => void };
 }
 
@@ -183,6 +202,8 @@ export class AgentHostSupervisor {
   private nextRespawnAt = 0;
   /** Consecutive unreachable probes; cleared by any healthy adoption. */
   private missedProbes = 0;
+  /** The last logged reason a pending version restart was deferred. */
+  private lastDrainDeferral: string | null = null;
   /**
    * True once `init()` has run. Distinguishes "never started" from "a spawn
    * failed and the state is `stopped`" — without it the health interval would
@@ -259,7 +280,8 @@ export class AgentHostSupervisor {
         this.adopt(probed.health);
         if (this.isStale(probed.health)) {
           // Case 3. Adopt now — every in-flight turn keeps running — and hand
-          // over as soon as no thread has an active turn.
+          // over as soon as no thread has an active turn or live background
+          // work (a subagent fleet, a background shell).
           this.pendingVersionRestart = true;
           this.log("warn", `${this.staleReason(probed.health)}; restarting once drained`);
           this.emit();
@@ -338,11 +360,12 @@ export class AgentHostSupervisor {
       // a dead one. Killing it on the FIRST miss takes down every live chat
       // turn (and, before the grace above, leaked a detached OpenCode server on
       // the way out). Require consecutive misses, and never count a miss while
-      // the last good health reported an active turn: that is positive evidence
-      // the host had work, so give it the full window.
+      // the last good health reported an active turn or live background work:
+      // that is positive evidence the host had work, so give it the full
+      // window.
       this.missedProbes++;
       const required =
-        (this.health?.activeTurnThreadIds.length ?? 0) > 0
+        this.health !== null && hostHasWork(this.health, this.daemonBackgroundWork())
           ? UNREACHABLE_PROBES_BEFORE_RESTART_BUSY
           : UNREACHABLE_PROBES_BEFORE_RESTART;
       if (this.missedProbes < required) {
@@ -378,9 +401,9 @@ export class AgentHostSupervisor {
   }
 
   /**
-   * Re-evaluate the drain window (§3.1 case 3). Called when a turn settles, so
-   * a deploy's version handover happens the moment the host goes quiet rather
-   * than on the next 15 s tick.
+   * Re-evaluate the drain window (§3.1 case 3). Called when a turn settles —
+   * and when a thread's background work ends — so a deploy's version handover
+   * happens the moment the host goes quiet rather than on the next 15 s tick.
    */
   handleTurnSettled(): void {
     if (!this.pendingVersionRestart || this.state !== "healthy") return;
@@ -417,6 +440,20 @@ export class AgentHostSupervisor {
   }
 
   /**
+   * The daemon-side liveness view (`null` = not known yet); a failing reader
+   * never blocks supervision, and no reader at all means "none".
+   */
+  private daemonBackgroundWork(): readonly string[] | null {
+    const read = this.opts.adapters.backgroundWorkThreadIds;
+    if (!read) return [];
+    try {
+      return read();
+    } catch {
+      return [];
+    }
+  }
+
+  /**
    * Restart only once the host is genuinely drained — decided on a FRESH probe,
    * never on `this.health`.
    *
@@ -426,6 +463,17 @@ export class AgentHostSupervisor {
    * and the stale empty list would let the restart kill the host with A's turn
    * live. Readiness and drain are decided on a fresh report, never a cached one
    * (§8, T3 `server-updates.md`). The mirror case only costs a delay.
+   *
+   * "Drained" means no active turn AND no live background work. A subagent
+   * fleet or a background shell keeps running inside the provider process
+   * after the turn that launched it settled, and a restart kills it exactly
+   * as it kills a turn — the CLI then reports each one as "didn't finish
+   * before the previous session ended" on the next message, and nothing
+   * warned the user in between (owner incident 2026-09-23: a code-only deploy
+   * restarted the host the moment the parent's turn settled, under five
+   * working subagents). Background work ending is reported by the daemon's
+   * summary poll (`onBackgroundWorkEnded`, wired to `handleTurnSettled`); the
+   * 15 s health tick is the fallback.
    */
   private async restartIfDrained(): Promise<void> {
     if (!this.pendingVersionRestart) return;
@@ -436,7 +484,16 @@ export class AgentHostSupervisor {
       this.pendingVersionRestart = true; // `adopt` clears it only on a match
     }
     if (!this.pendingVersionRestart) return;
-    if (probed.health.activeTurnThreadIds.length > 0) return;
+    const blockers = drainBlockers(probed.health, this.daemonBackgroundWork());
+    if (blockers !== null) {
+      // Once per change of reason, not once per 15 s tick.
+      if (blockers !== this.lastDrainDeferral) {
+        this.lastDrainDeferral = blockers;
+        this.log("log", `agent host restart deferred: ${blockers}`);
+      }
+      return;
+    }
+    this.lastDrainDeferral = null;
     await this.drainAndRestart();
   }
 
@@ -463,11 +520,14 @@ export class AgentHostSupervisor {
       // drain → final head save) then runs asynchronously and needs SECONDS —
       // `DEFAULT_KILL_GRACE_MS` is 2 s per child, sequential over four
       // adapters. Killing the tmux session milliseconds later strands that
-      // teardown, and OpenCode's server is spawned `detached: true`, i.e. in
-      // its own process group, so it SURVIVES the kill holding its port and
-      // sessions while the replacement host starts a second one per project.
-      // Wait for the socket to stop answering, bounded by the same grace T3's
-      // launcher uses before killing an old child (`TERMINATE_GRACE_MS`).
+      // teardown: the provider children die with the pane before their turns
+      // are settled and their tasks closed `stopped`, so the thread reads
+      // "running" for work that is already dead; and OpenCode's server is
+      // spawned `detached: true`, i.e. in its own process group, so it SURVIVES
+      // the kill holding its port and sessions while the replacement host
+      // starts a second one per project. Wait for the PROCESS to exit — the
+      // socket closing is the teardown's first step, not its last — bounded
+      // by {@link HOST_EXIT_GRACE_MS}.
       await this.awaitHostExit();
     }
     this.pendingVersionRestart = false;
@@ -479,22 +539,42 @@ export class AgentHostSupervisor {
   }
 
   /**
-   * Poll the socket until the old host stops answering, bounded by
-   * {@link HOST_EXIT_GRACE_MS}. Returns true when it is gone.
+   * Poll until the old host is GONE — its process has exited and its socket
+   * no longer answers — bounded by {@link HOST_EXIT_GRACE_MS}. Returns true
+   * when it is gone.
    */
   private async awaitHostExit(): Promise<boolean> {
     const deadline = this.opts.adapters.now() + (this.opts.exitGraceMs ?? HOST_EXIT_GRACE_MS);
     for (;;) {
-      const probed = await this.safeProbe();
-      // Anything that is no longer a healthy answer means the listener is down
-      // (or already replaced); either way the socket is free to rebind.
-      if (!probed.ok) return true;
+      if (await this.hostGone()) return true;
       if (this.opts.adapters.now() >= deadline) {
         this.log("warn", "agent host did not exit within the drain grace; killing it");
         return false;
       }
       await this.opts.adapters.sleep(HOST_EXIT_POLL_MS);
     }
+  }
+
+  /**
+   * "Gone" is the process, not the listener: the host closes its socket
+   * FIRST and stops its provider children after, so a quiet socket still has a
+   * teardown running behind it. Under tmux the service session ends when its
+   * command exits; the direct child reports its own exit. The socket is
+   * checked as well, so a host running outside our session (a developer's
+   * hand-started one) is never mistaken for an exited one.
+   */
+  private async hostGone(): Promise<boolean> {
+    const tmux = this.opts.adapters.tmux;
+    if (tmux) {
+      const sessionAlive = await tmux
+        .hasServiceSession(AGENT_HOST_SERVICE_SESSION)
+        // tmux itself failing to answer: fall back to the socket alone.
+        .catch(() => false);
+      if (sessionAlive) return false;
+    } else if (this.directHandle?.isAlive?.() === true) {
+      return false;
+    }
+    return !(await this.safeProbe()).ok;
   }
 
   /**
@@ -693,6 +773,51 @@ export class AgentHostSupervisor {
     this.queue = run.catch(() => undefined);
     return run;
   }
+}
+
+/**
+ * Threads with live background work: what the host reports (optional on the
+ * wire — an older host omits it) unioned with the daemon's own liveness view.
+ */
+function backgroundWorkThreadIds(
+  health: AgentHostHealthResponse,
+  daemonView: readonly string[] | null
+): string[] {
+  return [...new Set([...(health.backgroundWorkThreadIds ?? []), ...(daemonView ?? [])])];
+}
+
+/** True while any thread has an active turn or live background work. */
+export function hostHasWork(
+  health: AgentHostHealthResponse,
+  daemonView: readonly string[] | null = []
+): boolean {
+  return (
+    health.activeTurnThreadIds.length > 0 || backgroundWorkThreadIds(health, daemonView).length > 0
+  );
+}
+
+/**
+ * Why the §3.1 drain cannot proceed yet, as one log-ready sentence, or null
+ * when the host is drained. A host that does not report background work
+ * itself is held while the daemon's own view is still unknown: at boot the
+ * supervisor adopts before the summary poll has run, and an empty view would
+ * otherwise read as "nothing running" and kill a fleet on the very deploy
+ * that ships this rule.
+ */
+export function drainBlockers(
+  health: AgentHostHealthResponse,
+  daemonView: readonly string[] | null = []
+): string | null {
+  if (health.backgroundWorkThreadIds === undefined && daemonView === null) {
+    return "background work not known yet (the host predates the health field; waiting for the first summary poll)";
+  }
+  const turns = health.activeTurnThreadIds.length;
+  const background = backgroundWorkThreadIds(health, daemonView).length;
+  if (turns === 0 && background === 0) return null;
+  const parts: string[] = [];
+  if (turns > 0) parts.push(`${turns} thread(s) with an active turn`);
+  if (background > 0) parts.push(`${background} thread(s) with live background work`);
+  return parts.join(", ");
 }
 
 /**

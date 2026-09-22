@@ -218,6 +218,15 @@ export interface StartAgentHostOptions {
   appdir?: string;
   env?: NodeJS.ProcessEnv;
   logger?: AdapterLogger;
+  /**
+   * Called once an intentional `POST /stop` has fully torn the host down —
+   * every provider child stopped, every `session.exited` written. The daemon
+   * waits for this PROCESS to exit (its tmux service session ends with it)
+   * before spawning the replacement, so the process entry passes
+   * `process.exit` here rather than trusting an event loop that may still
+   * hold a handle to wind down on its own.
+   */
+  onStopped?: () => void;
 }
 
 export async function startAgentHost(
@@ -527,12 +536,17 @@ export async function startAgentHost(
       // running thread with a usable cursor, then drain and stop.
       const markedThreadIds = await host.markThreadsForContinuation();
       queueMicrotask(() => {
-        void stop().catch(async (error: unknown) => {
-          logger.error("agent-host: intentional stop failed", error);
-          // A cancelled restart must not inject a phantom continuation on the
-          // next boot.
-          await host.clearContinuationMarkers(markedThreadIds).catch(() => undefined);
-        });
+        void stop().then(
+          () => {
+            options.onStopped?.();
+          },
+          async (error: unknown) => {
+            logger.error("agent-host: intentional stop failed", error);
+            // A cancelled restart must not inject a phantom continuation on the
+            // next boot.
+            await host.clearContinuationMarkers(markedThreadIds).catch(() => undefined);
+          }
+        );
       });
       return { ok: true, markedThreadIds };
     },
@@ -716,7 +730,12 @@ const isProcessEntry = (): boolean => {
 
 if (isProcessEntry()) {
   const { appdir } = parseHostArgs(process.argv.slice(2));
-  startAgentHost(appdir !== undefined ? { appdir } : {})
+  startAgentHost({
+    ...(appdir !== undefined ? { appdir } : {}),
+    // An intentional stop ends the process: the daemon's exit grace waits on
+    // the tmux session, which only ends when this command does.
+    onStopped: () => process.exit(0)
+  })
     .then((host) => {
       let stopping = false;
       const shutdown = (): void => {

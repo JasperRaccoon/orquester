@@ -1812,4 +1812,56 @@ describe("orchestrator — runtime events", () => {
     await consumed;
     await host.stop();
   });
+
+  it("reports threads with live background work for the drain-restart, and drops them on session.exited", async () => {
+    // `GET /health` carries these next to `activeTurnThreadIds`: a subagent
+    // fleet that outlives its turn is work a host restart would kill.
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await host.settle();
+
+    const consumed = host.orchestrator.consume(host.adapter);
+    const base = { eventId: "b1", threadId, createdAt: host.clock.nowIso() };
+    assert.deepEqual(host.orchestrator.backgroundWorkThreadIds(), []);
+
+    host.adapter.emit({
+      ...base,
+      type: "task.started",
+      payload: { taskId: "t1", taskType: "subagent" }
+    } as unknown as RuntimeEvent);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(host.orchestrator.backgroundWorkThreadIds(), [threadId]);
+
+    host.adapter.emit({
+      ...base,
+      eventId: "b2",
+      type: "task.completed",
+      payload: { taskId: "t1", taskType: "subagent", status: "completed" }
+    } as unknown as RuntimeEvent);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(host.orchestrator.backgroundWorkThreadIds(), [], "a finished fleet frees the drain");
+
+    host.adapter.emit({
+      ...base,
+      eventId: "b3",
+      type: "task.started",
+      payload: { taskId: "t2", taskType: "subagent" }
+    } as unknown as RuntimeEvent);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(host.orchestrator.backgroundWorkThreadIds(), [threadId]);
+
+    host.adapter.emit({
+      ...base,
+      eventId: "b4",
+      type: "session.exited",
+      payload: { recoverable: false, exitKind: "error" }
+    } as unknown as RuntimeEvent);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(host.orchestrator.backgroundWorkThreadIds(), [], "a dead session has no live work");
+
+    host.adapter.close();
+    await consumed;
+    await host.stop();
+  });
 });

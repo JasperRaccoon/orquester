@@ -360,14 +360,6 @@ const TASK_COMPLETED_STATUS: ReadonlyMap<string, RuntimeSubagentStatus> = new Ma
   ["stopped", "interrupted"]
 ]);
 
-/** The rows that repeat the task linkage (§4.2) and so may name the launching call. */
-const TASK_ROW_KINDS: ReadonlySet<string> = new Set([
-  "task.started",
-  "task.progress",
-  "task.updated",
-  "task.completed"
-]);
-
 const KNOWN_STATUSES: ReadonlySet<string> = new Set<RuntimeTaskStatus>([
   "pending",
   "running",
@@ -403,6 +395,14 @@ export function foldSubagentActivities(
   // The launching tool call of each task's LATEST run. A resumed subagent
   // keeps its task id but is launched by a new tool call, and that is the
   // only thing that tells a genuine resume apart from a late start row.
+  //
+  // Read off `task.started` rows ONLY. Progress rows carry stable ids
+  // (`task-progress:…`, `task-usage:…`) and are replaced in place, so in list
+  // order a progress row of the relaunched run — already naming the NEW call
+  // — sits BEFORE the killed run's terminal row; reading the call off it made
+  // the resume's start row look unchanged, and the row stayed `interrupted`
+  // for as long as the agent worked (owner incident 2026-09-23: a host
+  // restart under three running subagents, all relaunched by the agent).
   const lastToolUseIdByTask = new Map<string, string>();
 
   for (const activity of activities) {
@@ -567,7 +567,7 @@ export function foldSubagentActivities(
         break;
     }
 
-    if (TASK_ROW_KINDS.has(activity.activityKind)) {
+    if (activity.activityKind === "task.started") {
       const taskId = asString(payload.taskId);
       const toolUseId = asString(payload.toolUseId);
       if (taskId && toolUseId) lastToolUseIdByTask.set(taskId, toolUseId);
