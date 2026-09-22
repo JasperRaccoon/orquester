@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import type { DomainEvent, RuntimeEvent, ThreadActivityItem } from "@orquester/api/agent-chat";
 
+import type { AppendableDomainEvent } from "../services.ts";
 import { isAgentChatCommandError } from "./errors.ts";
 import { createTestHost, createScriptedAdapter, type TestHost } from "./testing/index.ts";
 
@@ -702,15 +703,159 @@ describe("orchestrator — session restart policy (§3.4)", () => {
   });
 });
 
+/** An event as ingestion hands it to the sink. */
+function sinkEvent<TType extends AppendableDomainEvent["type"]>(
+  host: TestHost,
+  threadId: string,
+  eventId: string,
+  type: TType,
+  payload: Extract<AppendableDomainEvent, { type: TType }>["payload"]
+): AppendableDomainEvent {
+  return {
+    eventId,
+    threadId,
+    type,
+    payload,
+    occurredAt: host.clock.nowIso(),
+    commandId: null,
+    causationEventId: null,
+    metadata: {}
+  } as AppendableDomainEvent;
+}
+
+/**
+ * One turn, seeded the way a real thread gets it (§5.1): the user's message
+ * and the `/turn` command's pending row, the provider's id adopted by a
+ * `running` session, the turn settled by `ready` — each through the sink, in
+ * that order. `settle: false` leaves it running; `checkpointTurnCount` adds
+ * its completion checkpoint at that count.
+ */
+async function seedTurn(
+  host: TestHost,
+  turnId: string,
+  options: { checkpointTurnCount?: number; settle?: boolean; threadId?: string } = {}
+): Promise<void> {
+  const threadId = options.threadId ?? "thread-1";
+  const messageId = `user:${turnId}`;
+  const events: AppendableDomainEvent[] = [
+    sinkEvent(host, threadId, `${turnId}:message`, "thread.message-sent", {
+      messageId,
+      role: "user",
+      text: `prompt for ${turnId}`,
+      streaming: false,
+      turnId: null
+    }),
+    sinkEvent(host, threadId, `${turnId}:start`, "thread.turn-start-requested", {
+      turnId: null,
+      messageId,
+      interactionMode: "default"
+    }),
+    sinkEvent(host, threadId, `${turnId}:running`, "thread.session-set", {
+      session: { status: "running", activeTurnId: turnId }
+    })
+  ];
+  if (options.settle !== false) {
+    events.push(
+      sinkEvent(host, threadId, `${turnId}:ready`, "thread.session-set", {
+        session: { status: "ready", activeTurnId: null }
+      })
+    );
+  }
+  if (options.checkpointTurnCount !== undefined) {
+    events.push(
+      sinkEvent(host, threadId, `${turnId}:checkpoint`, "thread.turn-diff-completed", {
+        turnCount: options.checkpointTurnCount,
+        turnId,
+        ref: `refs/orquester/checkpoints/x/turn/${options.checkpointTurnCount}`,
+        status: "ready",
+        files: [],
+        assistantMessageId: null,
+        completedAt: host.clock.nowIso()
+      })
+    );
+  }
+  for (const event of events) {
+    await host.orchestrator.ingestionSink(threadId, [event]);
+  }
+}
+
+function rollbackDetails(host: TestHost): unknown[] {
+  return host.adapter.calls
+    .filter((call) => call.kind === "rollbackThread")
+    .map((call) => call.detail);
+}
+
+/** The `turnCount` of every `thread.reverted` in the log, in order. */
+function revertedTargets(host: TestHost, threadId = "thread-1"): number[] {
+  return (host.store.logs.get(threadId) ?? []).flatMap((event) =>
+    event.type === "thread.reverted" ? [event.payload.turnCount] : []
+  );
+}
+
+/** The counts of the completion checkpoints the log recorded for one turn. */
+function capturedCounts(host: TestHost, turnId: string, threadId = "thread-1"): number[] {
+  return (host.store.logs.get(threadId) ?? []).flatMap((event) =>
+    event.type === "thread.turn-diff-completed" && event.payload.turnId === turnId
+      ? [event.payload.turnCount]
+      : []
+  );
+}
+
+async function headTurnCount(host: TestHost, threadId = "thread-1"): Promise<number | null> {
+  const read = await host.orchestrator.readThread(threadId);
+  return read.kind === "snapshot" ? read.thread.head.turnCount : null;
+}
+
+/**
+ * Yield to the event loop until `done()` holds: `consume` runs on the
+ * adapter's stream, so there is no receipt to wait on. Bounded, and never a
+ * timed sleep (§9).
+ */
+async function until(done: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 100 && !done(); attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.ok(done(), "the runtime event was never consumed");
+}
+
+function turnBoundary(
+  host: TestHost,
+  type: "turn.started" | "turn.completed",
+  turnId: string,
+  threadId = "thread-1"
+): RuntimeEvent {
+  return {
+    eventId: `${type}:${turnId}`,
+    threadId,
+    createdAt: host.clock.nowIso(),
+    type,
+    turnId,
+    payload: type === "turn.completed" ? { state: "completed" } : {}
+  } as unknown as RuntimeEvent;
+}
+
 describe("orchestrator — revert (§5.5)", () => {
-  it("refuses a target above the current turn count", async () => {
+  it("counts turns by order: a target above the started turns is refused, naming both", async () => {
     const host = createTestHost();
     const threadId = await host.createThread();
+    await seedTurn(host, "p-1");
+    // A checkpoint numbered far above the turn count must not widen what a
+    // rewind may target: the checkpoint list is no longer the counter.
+    await seedTurn(host, "p-2", { checkpointTurnCount: 5 });
+
     await assert.rejects(
       () =>
         host.orchestrator.command(threadId, "revert", { commandId: cmd(), targetTurnCount: 3 }),
-      (error: unknown) => isAgentChatCommandError(error) && error.code === "COMMAND_REJECTED"
+      (error: unknown) =>
+        isAgentChatCommandError(error) &&
+        error.code === "COMMAND_REJECTED" &&
+        /rewind to turn 3\b/.test(error.message) &&
+        /\bhas 2 turns\b/.test(error.message)
     );
+    await host.settle();
+    assert.deepEqual(rollbackDetails(host), []);
+    assert.deepEqual(host.checkpoints.pruned, []);
+    assert.deepEqual(revertedTargets(host), []);
     await host.stop();
   });
 
@@ -728,30 +873,28 @@ describe("orchestrator — revert (§5.5)", () => {
     await host.stop();
   });
 
+  it("refuses while a turn is running", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await seedTurn(host, "p-1");
+    await seedTurn(host, "p-2", { settle: false });
+
+    await assert.rejects(
+      () =>
+        host.orchestrator.command(threadId, "revert", { commandId: cmd(), targetTurnCount: 1 }),
+      (error: unknown) =>
+        isAgentChatCommandError(error) && /Stop the current turn/.test(error.message)
+    );
+    await host.settle();
+    assert.deepEqual(rollbackDetails(host), []);
+    await host.stop();
+  });
+
   it("checks rollback support before touching disk, and lands the failure as a row", async () => {
     const grok = createScriptedAdapter({ id: "grok" });
     const host = createTestHost({ adapters: { grok } });
     const threadId = await host.createThread({ refId: "grok" });
-    await host.orchestrator.ingestionSink(threadId, [
-      {
-        eventId: "cp",
-        threadId,
-        type: "thread.turn-diff-completed",
-        payload: {
-          turnCount: 1,
-          turnId: "turn-1",
-          ref: "refs/orquester/checkpoints/x/turn/1",
-          status: "ready",
-          files: [],
-          assistantMessageId: null,
-          completedAt: host.clock.nowIso()
-        },
-        occurredAt: host.clock.nowIso(),
-        commandId: null,
-        causationEventId: null,
-        metadata: {}
-      }
-    ]);
+    await seedTurn(host, "p-1", { checkpointTurnCount: 1 });
     await host.orchestrator.command(threadId, "revert", { commandId: cmd(), targetTurnCount: 0 });
     await host.settle();
 
@@ -762,40 +905,166 @@ describe("orchestrator — revert (§5.5)", () => {
     );
     assert.ok(failure);
     assert.equal(failure?.tone, "error");
+    assert.deepEqual(revertedTargets(host), [], "a refused rewind records no revert");
     await host.stop();
   });
 
-  it("rolls back, prunes and appends thread.reverted", async () => {
+  it("rewinds a thread with ZERO checkpoints, naming the cut to the adapter by turn id", async () => {
     const host = createTestHost();
     const threadId = await host.createThread();
-    await host.orchestrator.ingestionSink(threadId, [
-      {
-        eventId: "cp1",
-        threadId,
-        type: "thread.turn-diff-completed",
-        payload: {
-          turnCount: 2,
-          turnId: "turn-2",
-          ref: "refs/orquester/checkpoints/x/turn/2",
-          status: "ready",
-          files: [],
-          assistantMessageId: null,
-          completedAt: host.clock.nowIso()
-        },
-        occurredAt: host.clock.nowIso(),
-        commandId: null,
-        causationEventId: null,
-        metadata: {}
-      }
-    ]);
+    // A non-git project: three turns, not one checkpoint.
+    for (const turnId of ["p-1", "p-2", "p-3"]) {
+      await seedTurn(host, turnId);
+    }
+
     await host.orchestrator.command(threadId, "revert", { commandId: cmd(), targetTurnCount: 1 });
     await host.settle();
 
-    const rollback = host.adapter.calls.find((call) => call.kind === "rollbackThread");
-    assert.equal(rollback?.detail, 1);
-    assert.deepEqual(host.checkpoints.pruned, [{ threadId, targetTurnCount: 1 }]);
-    assert.ok(typesOf(host).includes("thread.reverted"));
+    assert.deepEqual(rollbackDetails(host), [
+      {
+        numTurns: 2,
+        target: {
+          firstRemovedTurnId: "p-2",
+          droppedTurnIds: ["p-2", "p-3"],
+          retainedTurnIds: ["p-1"]
+        }
+      }
+    ]);
+    assert.deepEqual(host.checkpoints.pruned, [
+      { threadId, targetTurnCount: 1, droppedTurnCounts: [] }
+    ]);
+    assert.deepEqual(revertedTargets(host), [1]);
+    assert.equal(
+      activityEvents(host).filter((row) => row.activityKind === "checkpoint.revert.failed")
+        .length,
+      0
+    );
     await host.stop();
+  });
+
+  it("prunes the dropped turns' own checkpoints, even where their counts are dense", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    // A resumed thread checkpointed before the counts followed the turns: only
+    // its 3rd and 4th turns were captured, as turn/1 and turn/2. The old
+    // counter called this thread two turns long and refused this very rewind.
+    await seedTurn(host, "p-1");
+    await seedTurn(host, "p-2");
+    await seedTurn(host, "p-3", { checkpointTurnCount: 1 });
+    await seedTurn(host, "p-4", { checkpointTurnCount: 2 });
+
+    await host.orchestrator.command(threadId, "revert", { commandId: cmd(), targetTurnCount: 3 });
+    await host.settle();
+
+    assert.deepEqual(rollbackDetails(host), [
+      {
+        numTurns: 1,
+        target: {
+          firstRemovedTurnId: "p-4",
+          droppedTurnIds: ["p-4"],
+          retainedTurnIds: ["p-1", "p-2", "p-3"]
+        }
+      }
+    ]);
+    // `> 3` alone would leave the dropped turn's own turn/2 behind.
+    assert.deepEqual(host.checkpoints.pruned, [
+      { threadId, targetTurnCount: 3, droppedTurnCounts: [2] }
+    ]);
+    assert.deepEqual(revertedTargets(host), [3]);
+    await host.stop();
+  });
+
+  it("a target equal to the started turns rolls nothing back and still records the revert", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await seedTurn(host, "p-1", { checkpointTurnCount: 1 });
+    await seedTurn(host, "p-2", { checkpointTurnCount: 2 });
+
+    await host.orchestrator.command(threadId, "revert", { commandId: cmd(), targetTurnCount: 2 });
+    await host.settle();
+
+    assert.deepEqual(rollbackDetails(host), [], "nothing to cut, so the provider is not asked");
+    assert.deepEqual(host.checkpoints.pruned, [
+      { threadId, targetTurnCount: 2, droppedTurnCounts: [] }
+    ]);
+    assert.deepEqual(revertedTargets(host), [2]);
+    await host.stop();
+  });
+
+  it("a new turn after a revert captures at target + 1 and moves head.turnCount there", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    // Every seeded turn owns its checkpoint, so the kept rows survive the
+    // revert in the fold however it truncates.
+    for (const [index, turnId] of ["p-1", "p-2", "p-3"].entries()) {
+      await seedTurn(host, turnId, { checkpointTurnCount: index + 1 });
+    }
+    await host.orchestrator.command(threadId, "revert", { commandId: cmd(), targetTurnCount: 2 });
+    await host.settle();
+    assert.equal(await headTurnCount(host), 2);
+
+    // The next genuine turn: dispatched by the host, started and completed by
+    // the provider.
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "again" });
+    await host.settle();
+    const turnId = host.adapter.turnIds[0];
+    assert.ok(turnId);
+    assert.deepEqual(
+      host.checkpoints.baselineRequests.at(-1),
+      { threadId, turnCount: 2 },
+      "the dispatch-time baseline is the count of turns started so far"
+    );
+
+    const consumed = host.orchestrator.consume(host.adapter);
+    host.adapter.emit(turnBoundary(host, "turn.started", turnId));
+    host.adapter.emit(turnBoundary(host, "turn.completed", turnId));
+    await until(() => host.checkpoints.turnEndRequests.length > 0);
+    await host.settle();
+
+    assert.deepEqual(
+      host.checkpoints.baselineRequests.at(-1),
+      { threadId, turnId, turnCount: 2 },
+      "the turn.started backstop names the same baseline"
+    );
+    assert.deepEqual(host.checkpoints.turnEndRequests, [{ threadId, turnId, turnCount: 3 }]);
+    assert.deepEqual(
+      capturedCounts(host, turnId),
+      [3],
+      "a genuinely new turn is not dropped as a reverted one"
+    );
+    assert.equal(await headTurnCount(host), 3);
+    host.adapter.close();
+    await consumed;
+    await host.stop();
+  });
+
+  it("a restart re-derives the guard from the log: a turn started after the revert lifts it", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    for (const [index, turnId] of ["p-1", "p-2", "p-3"].entries()) {
+      await seedTurn(host, turnId, { checkpointTurnCount: index + 1 });
+    }
+    await host.orchestrator.command(threadId, "revert", { commandId: cmd(), targetTurnCount: 2 });
+    await host.settle();
+    // A new turn starts after the revert, and the host goes down under it.
+    await seedTurn(host, "p-4", { settle: false });
+    await host.stop();
+
+    const next = createTestHost({ store: host.store });
+    await next.orchestrator.readThread(threadId);
+    const consumed = next.orchestrator.consume(next.adapter);
+    next.adapter.emit(turnBoundary(next, "turn.completed", "p-4"));
+    await until(() => next.checkpoints.turnEndRequests.length > 0);
+    await next.settle();
+
+    assert.deepEqual(next.checkpoints.turnEndRequests, [
+      { threadId, turnId: "p-4", turnCount: 3 }
+    ]);
+    assert.deepEqual(capturedCounts(next, "p-4"), [3]);
+    assert.equal(await headTurnCount(next), 3);
+    next.adapter.close();
+    await consumed;
+    await next.stop();
   });
 });
 
@@ -1352,6 +1621,41 @@ describe("orchestrator — the ingestion hooks (§5.1, §5.4)", () => {
       host.orchestrator.placeholderCheckpoint({ threadId, turnId: "turn-2" }),
       null,
       "a stale turn id never opens a placeholder"
+    );
+    await host.stop();
+  });
+
+  it("a placeholder takes the running turn's ORDINAL, not the checkpoint counter (§5.5)", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    // Two turns and no checkpoint between them — a stretch without git, say.
+    await seedTurn(host, "p-1");
+    await seedTurn(host, "p-2");
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "third" });
+    await host.settle();
+    const turnId = host.adapter.turnIds[0];
+    assert.ok(turnId);
+    assert.deepEqual(host.orchestrator.placeholderCheckpoint({ threadId, turnId }), {
+      turnCount: 3
+    });
+    await host.stop();
+  });
+
+  it("a dispatch baseline counts the turns started so far; a steer's names the running turn's own", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await seedTurn(host, "p-1");
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "second" });
+    await host.settle();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "steer" });
+    await host.settle();
+
+    // Turn 2's baseline is turn/1. The steer joins turn 2, so it names turn/1
+    // again: turn/2 is turn 2's COMPLETION, and capturing it now would freeze
+    // a half-finished tree there.
+    assert.deepEqual(
+      host.checkpoints.baselineRequests.map((request) => request.turnCount),
+      [1, 1]
     );
     await host.stop();
   });

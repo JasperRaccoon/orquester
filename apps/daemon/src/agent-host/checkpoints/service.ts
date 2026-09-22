@@ -137,6 +137,12 @@ export interface CaptureBaselineInput {
    * `turn.aborted` for some *other* turn be refused at turn end.
    */
   turnId?: string | null;
+  /**
+   * The baseline's own turn count — the ordinal of the turn about to start,
+   * minus one (§5.5: checkpoints are numbered by turn ORDER). Overrides the
+   * derived counter. Anything but a non-negative integer is ignored.
+   */
+  turnCount?: number;
 }
 
 export interface CaptureTurnEndInput {
@@ -152,10 +158,28 @@ export interface CaptureTurnEndInput {
    * what `captureBaseline` recorded for this thread.
    */
   startedTurnId?: string | null;
+  /**
+   * The completing turn's ordinal (§5.5). Preferred over a placeholder's count
+   * and over the derived `highest + 1`. Anything but a positive integer is
+   * ignored.
+   */
+  turnCount?: number;
 }
 
 /** How many completed turn ids are remembered per thread, for replay refusal. */
 const COMPLETED_TURN_MEMORY = 64;
+
+/**
+ * The turn count a caller named, when a ref can carry it (`turn/<n>` takes a
+ * non-negative safe integer). Anything else counts as not named: the derived
+ * counter still produces a checkpoint, because a bad number from a caller must
+ * never cost the turn its checkpoint — nor throw into it (§5.4).
+ */
+function namedTurnCount(value: number | undefined, minimum: number): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= minimum
+    ? value
+    : undefined;
+}
 
 const defaultClock: Clock = {
   now: () => new Date(),
@@ -363,6 +387,10 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
    * The highest turn count the thread has, counting both the refs on disk and
    * the fold's rows (a placeholder has a turn count but no ref yet). Derived,
    * never stored — a lost `meta.json` cannot desynchronise it (§5.4).
+   *
+   * Only the fallback now: the host numbers checkpoints by turn ORDER and
+   * says so through `turnCount` (§5.5). This is what a caller that cannot name
+   * the turn gets.
    */
   const resolveCurrentTurnCount = (
     refTurnCounts: readonly number[],
@@ -404,7 +432,9 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
     if (refTurnCounts === null) {
       return null;
     }
-    const turnCount = resolveCurrentTurnCount(refTurnCounts, input.checkpoints);
+    const turnCount =
+      namedTurnCount(input.turnCount, 0) ??
+      resolveCurrentTurnCount(refTurnCounts, input.checkpoints);
     const ref = checkpointRefForThreadTurn(input.threadId, turnCount);
     if (refTurnCounts.includes(turnCount)) {
       // Idempotent: the baseline for this turn is already published. This
@@ -493,10 +523,15 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
         : checkpoints.find(
             (checkpoint) => checkpoint.turnId === turnId && checkpoint.status === "missing"
           );
-    const currentTurnCount = resolveCurrentTurnCount(refTurnCounts, checkpoints);
-    // A placeholder is reused at its own turn count rather than incremented
+    // The turn's own ordinal when the host names it (§5.5): the numbers are
+    // the turns', not a counter over whatever happened to be captured. Else a
+    // placeholder is reused at its own turn count rather than incremented
     // past, or the turn the user sees would point at a ref nothing captured.
-    const turnCount = placeholder ? placeholder.checkpointTurnCount : currentTurnCount + 1;
+    const turnCount =
+      namedTurnCount(input.turnCount, 1) ??
+      (placeholder
+        ? placeholder.checkpointTurnCount
+        : resolveCurrentTurnCount(refTurnCounts, checkpoints) + 1);
     const ref = checkpointRefForThreadTurn(threadId, turnCount);
     const assistantMessageId =
       input.assistantMessageId ?? placeholder?.assistantMessageId ?? null;
@@ -672,6 +707,7 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
     threadId: string;
     cwd: string;
     targetTurnCount: number;
+    droppedTurnCounts?: readonly number[];
   }): Promise<void> => {
     // A revert truncates the conversation, and a turn that was in flight when
     // it happened is now a turn that no longer exists (E2E #E8: its late
@@ -689,8 +725,13 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
       return;
     }
     const turnCounts = await listRefTurnCounts(input.threadId, input.cwd);
+    // Above the target, plus the dropped turns' own counts: a thread written
+    // before checkpoints were numbered by turn order carries dense counts, so
+    // the 28th turn of a resumed thread can own `turn/2` — well below any
+    // target that drops it.
+    const dropped = new Set(input.droppedTurnCounts ?? []);
     const doomed = turnCounts
-      .filter((turnCount) => turnCount > input.targetTurnCount)
+      .filter((turnCount) => turnCount > input.targetTurnCount || dropped.has(turnCount))
       .map((turnCount) => checkpointRefForThreadTurn(input.threadId, turnCount));
     await deleteRefs(input.threadId, input.cwd, doomed);
     dropCache(input.threadId);
