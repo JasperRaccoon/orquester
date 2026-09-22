@@ -19,7 +19,7 @@
  */
 
 import React from "react";
-import { ChevronDown, ChevronUp } from "lucide-react";
+import { ChevronDown, ChevronUp, Terminal } from "lucide-react";
 import type { RuntimeSubagent } from "@orquester/api/agent-chat";
 import { cn } from "../../../lib/cn";
 import type { AgentRosterMainRow, AgentRosterProps } from "../contracts";
@@ -29,7 +29,14 @@ import {
   selectRosterRows,
   type FinishedRowsPhase
 } from "./roster-rows";
-import { AgentRosterRow, RosterMainRow } from "./AgentRosterRow";
+import {
+  collapsedRosterLabel,
+  expandedRosterLabel,
+  partitionRosterRows,
+  rosterKindCounts,
+  shellSectionLabel
+} from "./roster-summary";
+import { AgentRosterRow, BackgroundShellRow, RosterMainRow } from "./AgentRosterRow";
 import { WorkflowGroup } from "./WorkflowGroup";
 
 /** Matches the row's `duration-300` opacity transition. */
@@ -136,11 +143,19 @@ export function AgentRoster({
     [agents, panel, expanded, finished]
   );
 
+  // Agents above, shells below — two kinds of row, each in its own spawn
+  // order, so a status change never moves a row between the lists (§7.6).
+  const { agentRows, shellRows } = partitionRosterRows(selection.rows);
+  const counts = rosterKindCounts(agents);
+  const shellSection = shellSectionLabel(counts);
+
   const hasWorkflows = panel.workflows.length > 0;
   if (!main && selection.rows.length === 0 && !hasWorkflows) return null;
 
   const visuals = main ? mainRowVisuals(main) : null;
-  const workingCount = panel.runningCount + panel.waitingCount || selection.liveCount;
+  // "Working" counts agents only: a running shell is named by its own section
+  // and by the folded label, never blended into the fleet's number.
+  const workingCount = counts.liveAgents;
   const showFooter = selection.hiddenCount > 0 || expanded || workingCount > 0 || Boolean(onCollapsedChange);
 
   return (
@@ -182,8 +197,35 @@ export function AgentRoster({
           />
         ))}
 
-        {selection.rows.map((row) => (
+        {agentRows.map((row) => (
           <AgentRosterRow
+            key={row.agent.id}
+            agent={row.agent}
+            fading={row.fading}
+            active={row.agent.id === activeAgentId}
+            onOpen={onOpenAgent}
+          />
+        ))}
+
+        {shellRows.length > 0 ? (
+          <div
+            data-roster-shells="true"
+            className={cn(
+              "flex items-center gap-1.5 px-1.5 pb-0.5 pt-2 text-[10px] font-medium uppercase tracking-wider text-neutral-500",
+              (main || agentRows.length > 0 || hasWorkflows) && "mt-1 border-t border-neutral-800/80"
+            )}
+          >
+            <Terminal size={11} strokeWidth={2} aria-hidden className="text-neutral-600" />
+            <span>{shellSection.title}</span>
+            {shellSection.detail ? (
+              <span className="ac-tabular font-mono font-normal normal-case text-neutral-500">
+                · {shellSection.detail}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+        {shellRows.map((row) => (
+          <BackgroundShellRow
             key={row.agent.id}
             agent={row.agent}
             fading={row.fading}
@@ -210,7 +252,7 @@ export function AgentRoster({
             >
               {collapsed ? <ChevronUp size={12} aria-hidden /> : <ChevronDown size={12} aria-hidden />}
               <span className="ac-tabular">
-                {collapsed ? `${agents.length} agent${agents.length === 1 ? "" : "s"}` : "Agents"}
+                {collapsed ? collapsedRosterLabel(counts) : expandedRosterLabel(counts)}
               </span>
             </button>
           ) : null}
@@ -237,7 +279,7 @@ export function AgentRoster({
           ) : null}
           <span className="ml-auto flex items-center gap-2">
             {workingCount > 0 ? (
-              <span className="ac-tabular text-info-300">{workingCount} working</span>
+              <span className="ac-tabular text-info-300">● {workingCount} working</span>
             ) : null}
             {panel.idleCount > 0 ? (
               <span className="ac-tabular">{panel.idleCount} idle</span>

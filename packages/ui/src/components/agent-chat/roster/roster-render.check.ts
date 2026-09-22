@@ -292,11 +292,44 @@ const shellRow = render(
   })
 );
 assert.ok(shellRow.includes('data-agent-kind="background"'), "the row is stamped as a shell");
-assert.ok(shellRow.includes(">shell<"), "the role-chip slot says what kind of row this is");
-assert.ok(shellRow.includes("background shell"), "the metrics line names the row");
+assert.ok(shellRow.includes('data-roster-shells="true"'), "shells sit in their own section");
+assert.ok(shellRow.includes(">Shell<"), "whose caption names the kind");
+assert.ok(shellRow.includes("1 running"), "and says how many still run");
 assert.ok(!shellRow.includes("fable-5-1"), "and never the launching agent's model");
 assert.ok(!shellRow.includes("— tok"), "nor a token slot a shell can never fill");
+assert.ok(!shellRow.includes("data-shell-exit"), "a live shell has no exit badge yet");
 assert.ok(shellRow.includes(">Running<"), "a live shell is running, not 'Working'");
+
+// One agent and one shell: the folded label counts them apart, and the agent
+// row precedes the shells' caption in the markup.
+const mixedFolded = render(
+  createElement(AgentRoster, {
+    sessionId: "s1",
+    agents: [agent("agent-x"), shell()],
+    panel: emptyPanel,
+    expanded: false,
+    collapsed: true,
+    onCollapsedChange: () => {},
+    onExpandedChange: () => {},
+    onOpenAgent: () => {}
+  })
+);
+assert.ok(mixedFolded.includes("1 agent · 1 shell running"), "the folded roster names both kinds");
+const mixedOpen = render(
+  createElement(AgentRoster, {
+    sessionId: "s1",
+    agents: [shell(), agent("agent-x")],
+    panel: emptyPanel,
+    expanded: false,
+    onExpandedChange: () => {},
+    onOpenAgent: () => {}
+  })
+);
+assert.ok(
+  mixedOpen.indexOf('data-agent-id="agent-x"') < mixedOpen.indexOf('data-roster-shells="true"'),
+  "agents render above the shells section even when the shell spawned first"
+);
+assert.ok(mixedOpen.includes("● 1 working"), "working counts the agent, not the shell");
 
 const exitedRow = render(
   createElement(AgentRoster, {
@@ -309,7 +342,8 @@ const exitedRow = render(
   })
 );
 assert.ok(exitedRow.includes("Exited with code 0"), "a settled shell leads with its exit code");
-assert.ok(exitedRow.includes("background shell · exit 0"), "which the metrics line repeats");
+assert.ok(exitedRow.includes('data-shell-exit="0"'), "and wears it as a badge");
+assert.ok(exitedRow.includes(">exit 0<"), "in the row's own words");
 
 const failedRow = render(
   createElement(AgentRoster, {

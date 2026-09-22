@@ -21,7 +21,7 @@ import { cn } from "../../../lib/cn";
 import { ElapsedTicker, StatusDot } from "../primitives";
 import type { ChatTone } from "../primitives/tone";
 import { agentActivityText, rosterRoleChip, rosterRowMetrics } from "./format";
-import { isBackgroundShellRow, rosterRowTicks, rosterStatusVisual } from "./roster-rows";
+import { rosterRowTicks, rosterStatusVisual } from "./roster-rows";
 
 /** The grid every roster row shares. Changing this changes all of them. */
 const ROW_GRID = cn(
@@ -56,21 +56,12 @@ export function AgentRosterRow({
   const activity = agentActivityText(agent);
   const role = rosterRoleChip(agent);
   const metrics = rosterRowMetrics(agent);
-  // A shell keeps the terminal glyph, but the glyph alone was too quiet: the
-  // "shell" chip and the "background shell" metrics line are what make the row
-  // read as a command rather than as a subagent (§7.6).
-  const background = isBackgroundShellRow(agent);
-  const Icon = background ? Terminal : Bot;
 
   return (
     <button
       type="button"
       onClick={() => onOpen(agent.id)}
-      aria-label={
-        background
-          ? `${agent.title} — background shell, ${activity ?? statusLabel}`
-          : `${agent.title} — ${statusLabel}`
-      }
+      aria-label={`${agent.title} — ${statusLabel}`}
       data-agent-id={agent.id}
       data-status={agent.status}
       data-agent-kind={agent.agentKind}
@@ -93,12 +84,7 @@ export function AgentRosterRow({
       </span>
 
       <span className="col-start-2 row-start-1 flex min-w-0 items-center gap-1.5">
-        <Icon
-          size={13}
-          strokeWidth={1.8}
-          aria-hidden
-          className={cn("shrink-0", background ? "text-neutral-600" : "text-neutral-500")}
-        />
+        <Bot size={13} strokeWidth={1.8} aria-hidden className="shrink-0 text-neutral-500" />
         <span className="min-w-0 truncate text-sm font-medium text-neutral-200">{agent.title}</span>
         {role ? (
           <span className="max-w-28 shrink-0 truncate rounded-sm border border-neutral-800 px-1 font-mono text-[10px] text-neutral-500">
@@ -135,6 +121,98 @@ export function AgentRosterRow({
       </span>
       <span className={METRICS_LINE}>{metrics.join(" · ")}</span>
       <span className="sr-only">{statusLabel}</span>
+    </button>
+  );
+}
+
+/**
+ * A background shell's row (§7.6) — **two lines, not three, and its own shape.**
+ *
+ * A shell is a command, not a persona: it has no model, spends no tokens and
+ * calls no tools, so the agent row's third line had nothing true to say about
+ * it and a chip reading "shell" was the only thing telling the two apart. The
+ * shell row is therefore shorter and denser — identity, then the one fact a
+ * process has (running, or how it exited) — with the terminal glyph framed as
+ * a process box and the exit code as a badge whose tone says success or
+ * failure at a glance. Fixed height like every roster row (2.875rem).
+ */
+const SHELL_ROW_GRID = cn(
+  "grid h-[2.875rem] w-full grid-cols-[0.375rem_minmax(0,1fr)_auto]",
+  "grid-rows-[1.25rem_1.125rem] items-center gap-x-2 rounded-md px-1.5 py-1 text-left"
+);
+
+export function BackgroundShellRow({
+  agent,
+  fading = false,
+  active = false,
+  onOpen
+}: AgentRosterRowProps): React.ReactElement {
+  const visuals = rosterStatusVisual(agent.status);
+  const activity = agentActivityText(agent) ?? visuals.label;
+  const live = rosterRowTicks(agent.status);
+  const exit = typeof agent.exitCode === "number" && !live ? agent.exitCode : null;
+
+  return (
+    <button
+      type="button"
+      onClick={() => onOpen(agent.id)}
+      aria-label={`${agent.title} — background shell, ${activity}`}
+      data-agent-id={agent.id}
+      data-status={agent.status}
+      data-agent-kind={agent.agentKind}
+      className={cn(
+        "group ac-press ac-enter",
+        SHELL_ROW_GRID,
+        "transition-opacity duration-300 motion-reduce:transition-none",
+        "hover:bg-neutral-800/40 focus:outline-none focus-visible:ring-1",
+        "focus-visible:ring-inset focus-visible:ring-neutral-500",
+        active && "bg-neutral-800",
+        fading && "pointer-events-none opacity-0"
+      )}
+    >
+      <span className="col-start-1 row-start-1 flex items-center">
+        <StatusDot tone={visuals.tone} size="xs" pulse={visuals.pulse} />
+      </span>
+
+      <span className="col-start-2 row-start-1 flex min-w-0 items-center gap-1.5">
+        <span
+          aria-hidden
+          className="flex h-4 w-4 shrink-0 items-center justify-center rounded-[3px] bg-neutral-800 text-neutral-400"
+        >
+          <Terminal size={11} strokeWidth={2} />
+        </span>
+        <span className="min-w-0 truncate text-sm text-neutral-300">{agent.title}</span>
+      </span>
+
+      <span className="col-start-3 row-start-1 flex items-center gap-1 font-mono text-[11px] text-neutral-500">
+        <span className="inline-flex min-w-14 items-center justify-end gap-1.5">
+          {exit !== null ? (
+            <span
+              data-shell-exit={exit}
+              className={cn(
+                "rounded-sm px-1 text-[10px] leading-4",
+                exit === 0 ? "bg-ok-soft/40 text-ok" : "bg-danger-soft/40 text-danger-300"
+              )}
+            >
+              exit {exit}
+            </span>
+          ) : null}
+          <ElapsedTicker startedAt={agent.startedAt} endedAt={agent.completedAt} live={live} />
+        </span>
+        <span className="flex w-3 shrink-0 items-center justify-center">
+          <ChevronRight size={12} aria-hidden className="ac-reveal text-neutral-500" />
+        </span>
+      </span>
+
+      <span
+        className={cn(
+          "col-start-2 col-end-4 row-start-2 block truncate font-mono text-[11px]",
+          agent.status === "failed" ? "text-danger-300" : "text-neutral-500"
+        )}
+      >
+        {activity}
+      </span>
+      <span className="sr-only">{visuals.label}</span>
     </button>
   );
 }

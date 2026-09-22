@@ -9,7 +9,15 @@
 
 export { AgentRoster, useFinishedRowsPhase, ROSTER_FADE_MS } from "./AgentRoster";
 export { AgentDrillIn } from "./AgentDrillIn";
-export { AgentRosterRow, RosterMainRow } from "./AgentRosterRow";
+export { AgentRosterRow, BackgroundShellRow, RosterMainRow } from "./AgentRosterRow";
+export {
+  collapsedRosterLabel,
+  expandedRosterLabel,
+  partitionRosterRows,
+  rosterKindCounts,
+  shellSectionLabel,
+  type RosterKindCounts
+} from "./roster-summary";
 export type { AgentRosterRowProps, RosterMainRowProps } from "./AgentRosterRow";
 export { WorkflowGroup, type WorkflowGroupProps } from "./WorkflowGroup";
 
