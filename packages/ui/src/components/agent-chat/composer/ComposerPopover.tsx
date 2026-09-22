@@ -1,6 +1,7 @@
 import React from "react";
 import { createPortal } from "react-dom";
 import { cn } from "../../../lib/cn";
+import { isChatTabListenerActive } from "./tab-visibility";
 
 /**
  * The composer's own anchored popover.
@@ -132,6 +133,14 @@ export function ComposerPopover({
     };
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      /*
+       * V1 §7: tab-gated like every other keyboard listener in agent-chat.
+       * A hidden tab keeps its subtree mounted, so an open popover there would
+       * swallow Escape (`stopPropagation` + `preventDefault` below) and the
+       * VISIBLE tab's turn would never be interrupted. The trigger lives in
+       * the composer shell, so a hidden tab's trigger has no layout box.
+       */
+      if (!isChatTabListenerActive(undefined, triggerRef.current)) return;
       // The composer's own Escape interrupts a turn; a menu takes it first.
       event.stopPropagation();
       event.preventDefault();
