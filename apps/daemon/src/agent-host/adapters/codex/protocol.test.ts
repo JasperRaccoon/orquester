@@ -14,6 +14,7 @@ import {
   CodexRequestRefusal,
   CodexRpcError,
   CodexTransportClosedError,
+  isNoActiveTurnError,
   MAX_IN_FLIGHT_SERVER_REQUESTS,
   TOO_MANY_REQUESTS_CODE
 } from "./protocol.ts";
@@ -127,6 +128,28 @@ describe("codex transport — framing", () => {
     assert.equal(error.code, -32600);
     assert.equal(error.method, "turn/interrupt");
     assert.match(error.message, /no active turn to interrupt/);
+  });
+
+  it("isNoActiveTurnError separates the benign race from a real failure", async () => {
+    // Both arrive as `-32600` from the SAME method, so a code-only test would
+    // call a malformed request of ours a successful Stop (V1).
+    const h = harness();
+    const reject = (message: string): Promise<unknown> => {
+      const pending = h.peer.request("turn/interrupt", { threadId: "t", turnId: "x" });
+      h.deliver({ id: h.sent.length, error: { code: -32600, message } });
+      return pending.catch((error: unknown) => error);
+    };
+
+    assert.equal(isNoActiveTurnError(await reject("no active turn to interrupt")), true);
+    assert.equal(isNoActiveTurnError(await reject("unknown turn id")), true);
+    assert.equal(isNoActiveTurnError(await reject("Invalid request: missing field `turnId`")), false);
+    assert.equal(isNoActiveTurnError(await reject("stream disconnected before completion")), false);
+
+    // Not every rejection is even an RPC error — a transport teardown or a
+    // deadline must never be mistaken for "already settled".
+    assert.equal(isNoActiveTurnError(new Error("no active turn to interrupt")), false);
+    assert.equal(isNoActiveTurnError(new CodexTransportClosedError("child exited")), false);
+    assert.equal(isNoActiveTurnError(undefined), false);
   });
 
   it("handles a response split across chunk boundaries and CRLF", async () => {

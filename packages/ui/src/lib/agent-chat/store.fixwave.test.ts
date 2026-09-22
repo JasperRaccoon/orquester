@@ -9,8 +9,9 @@
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
 
-import type { AgentChatStreamFrame } from "@orquester/api/agent-chat";
+import type { AgentChatStreamFrame, AttachmentRef } from "@orquester/api/agent-chat";
 
+import { registerComposerHandle } from "../../components/agent-chat/composer/composer-bridge";
 import { createThreadStore, resetDismissedErrorBanners, type AgentChatThreadState } from "./store";
 import { AgentChatCommandError, type AgentChatTransport } from "./transport";
 import { activity, ev, head, message, resetBuilders, snapshot, stamp } from "./test-helpers";
@@ -192,6 +193,54 @@ describe("R7-1 — the client queue actually flushes", () => {
 });
 
 describe("Q2-4 — the layer-2 row memo is reachable", () => {
+  /**
+   * **Assert at layer 2, not layer 3.** V1 caught the first version of this
+   * suite testing `state.rows` — the *stable* rows — which restores object
+   * identity from its own `byId` map whether or not layer 2 ran, so it stayed
+   * green with the memo permanently dead. The only observation that separates
+   * the two is `rowsProjection.rows`: `deriveTimelineRows` allocates every row
+   * object afresh, so identity there can only come from
+   * `replaceStreamingMessageRows` taking its fast path.
+   */
+  const layer2 = (api: { getState(): AgentChatThreadState }): readonly unknown[] =>
+    (api.getState() as unknown as { rowsProjection: { rows: readonly unknown[] } }).rowsProjection
+      .rows;
+
+  it("takes the fast path — layer-2 rows are reused, before layer 3 can restore them", async () => {
+    const { fake, api } = await store();
+    const user = message("user", "hi", { createdAt: stamp(1) });
+    fake.push({ kind: "snapshot", thread: snapshot({ items: [user], seq: 1 }) });
+
+    fake.push({
+      kind: "event",
+      seq: 2,
+      event: ev(
+        "thread.message-sent",
+        { messageId: "a1", role: "assistant", text: "par", streaming: true, turnId: null },
+        { seq: 2 }
+      )
+    });
+    const before = layer2(api);
+
+    fake.push({
+      kind: "event",
+      seq: 3,
+      event: ev(
+        "thread.message-sent",
+        { messageId: "a1", role: "assistant", text: "tial", streaming: true, turnId: null },
+        { seq: 3 }
+      )
+    });
+    const after = layer2(api);
+
+    assert.equal(
+      after[0],
+      before[0],
+      "layer 2 reused the untouched row; a rebuild would have allocated a new object"
+    );
+    assert.notEqual(after[1], before[1], "and rebuilt exactly the row the token changed");
+  });
+
   it("keeps untouched row objects across consecutive streamed tokens", async () => {
     const { fake, api } = await store();
     const user = message("user", "hi", { createdAt: stamp(1) });
@@ -289,5 +338,107 @@ describe("Q2-7 — a snapshot invalidates the cached projections", () => {
       thread: snapshot({ seq: 9, items: [message("user", "one", { createdAt: stamp(1) })] })
     });
     assert.equal(api.getState().rows.filter((row) => row.kind === "message").length, 1);
+  });
+});
+
+describe("R7-5 — a returned queued message gives its attachments back as chips", () => {
+  /**
+   * The store's own draft is drained exactly **once**, on composer mount. So
+   * parking a returned attachment there while a composer is already mounted
+   * loses the file for good: the user hits Stop, the message comes back, and
+   * the thing they attached is simply gone. Only what the composer refuses may
+   * fall back, where the next mount finds it.
+   */
+  const attachment = (id: string): AttachmentRef => ({
+    type: "file",
+    id,
+    name: `${id}.txt`,
+    sizeBytes: 10
+  });
+
+  function mountComposer(sessionId: string, refuse: string[] = []): {
+    staged: string[];
+    inserted: string[];
+    unregister: () => void;
+  } {
+    const staged: string[] = [];
+    const inserted: string[] = [];
+    const unregister = registerComposerHandle(sessionId, {
+      insertText: (text) => inserted.push(text),
+      stageAttachment: (ref) => {
+        if (refuse.includes(ref.id)) {
+          return false;
+        }
+        staged.push(ref.id);
+        return true;
+      },
+      focusAtEnd: () => {},
+      openControl: () => {}
+    });
+    return { staged, inserted, unregister };
+  }
+
+  it("stages every accepted attachment as a chip and leaves the draft alone", async () => {
+    const { api, fake, state } = await store();
+    const composer = mountComposer("s1");
+    try {
+      fake.push({ kind: "snapshot", thread: snapshot({ seq: 1, head: running() }) });
+      api.getState().actions.queueMessage({
+        ...draft("with a file"),
+        attachments: [attachment("a1"), attachment("a2")]
+      });
+      await flush();
+      const queued = state().slice.queue[0]!;
+
+      api.getState().actions.returnQueuedToComposer(queued.id);
+      assert.deepEqual(composer.staged, ["a1", "a2"], "both went back as chips");
+      assert.deepEqual(composer.inserted, ["with a file"], "and the text went to the composer");
+      assert.deepEqual(state().draft.attachments, [], "nothing was parked in the fallback draft");
+      assert.equal(state().draft.text, "", "the composer owns the visible draft");
+    } finally {
+      composer.unregister();
+    }
+  });
+
+  it("falls back to the draft for exactly the attachments the composer refuses", async () => {
+    const { api, fake, state } = await store();
+    const composer = mountComposer("s1", ["a2"]);
+    try {
+      fake.push({ kind: "snapshot", thread: snapshot({ seq: 1, head: running() }) });
+      api.getState().actions.queueMessage({
+        ...draft("over the budget"),
+        attachments: [attachment("a1"), attachment("a2")]
+      });
+      await flush();
+      const queued = state().slice.queue[0]!;
+
+      api.getState().actions.returnQueuedToComposer(queued.id);
+      assert.deepEqual(composer.staged, ["a1"]);
+      assert.deepEqual(
+        state().draft.attachments.map((ref) => ref.id),
+        ["a2"],
+        "a refused file is visible in the fallback, never dropped"
+      );
+    } finally {
+      composer.unregister();
+    }
+  });
+
+  it("puts everything in the fallback draft when no composer is mounted", async () => {
+    const { api, fake, state } = await store();
+    fake.push({ kind: "snapshot", thread: snapshot({ seq: 1, head: running() }) });
+    api.getState().actions.queueMessage({
+      ...draft("tab not open"),
+      attachments: [attachment("a1")]
+    });
+    await flush();
+    const queued = state().slice.queue[0]!;
+
+    api.getState().actions.returnQueuedToComposer(queued.id);
+    assert.equal(state().draft.text, "tab not open");
+    assert.deepEqual(
+      state().draft.attachments.map((ref) => ref.id),
+      ["a1"]
+    );
   });
 });

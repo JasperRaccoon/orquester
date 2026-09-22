@@ -93,7 +93,15 @@ export type MockTurnScript =
    * §3.1's "background work outlives the turn". The child is a separate thread
    * on the SAME connection, which is what R3 finding 2 and R6 are about.
    */
-  | { kind: "spawn-child"; childThreadId: string }
+  | {
+      kind: "spawn-child";
+      childThreadId: string;
+      /**
+       * Leave the PARENT turn running too, so a turn-scoped Stop has both a
+       * live child and a live parent — the R3 finding 4 shape.
+       */
+      keepParentRunning?: boolean;
+    }
   | { kind: "silent" }
   | { kind: "exit-mid-turn"; exitCode: number };
 
@@ -107,6 +115,12 @@ export interface MockConfig {
   threadId?: string;
   /** `thread/resume` answers an error, exercising the fresh-thread fallback. */
   failResume?: boolean;
+  /**
+   * `turn/interrupt` answers THIS error instead of acting, whatever the turn
+   * id — so a test can drive a failure that is NOT the benign "no active turn"
+   * race the adapter is allowed to swallow.
+   */
+  interruptError?: { code: number; message: string };
   /** Consumed in order; the last one repeats. */
   turns?: MockTurnScript[];
   /** Turn ids handed back by `thread/turns/list`, newest first. */
@@ -385,6 +399,7 @@ async function runTurn(turnId, script) {
       // thread id — all on this one connection.
       send({ method: "item/started", params: { item: { type: "subAgentActivity", id: "sub-" + child, kind: "started", agentThreadId: child, agentPath: "/root/" + child }, threadId, turnId, startedAtMs: 0 } });
       send({ method: "turn/started", params: { threadId: child, turn: turnObject(child + "-turn", "inProgress") } });
+      if (script.keepParentRunning) { return; }
       // The PARENT turn finishes while the child keeps working.
       send({ method: "turn/completed", params: { threadId, turn: turnObject(turnId, "completed") } });
       activeTurnId = null;
@@ -440,6 +455,7 @@ function handle(frame) {
       return;
     }
     case "turn/interrupt": {
+      if (config.interruptError) { send({ id, error: config.interruptError }); return; }
       if (activeTurnId === null || params.turnId !== activeTurnId) {
         send({ id, error: { code: -32600, message: "no active turn to interrupt" } });
         return;
