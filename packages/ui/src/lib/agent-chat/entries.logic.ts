@@ -23,7 +23,11 @@
 
 import type { ThreadActivityItem, ThreadItem, ThreadMessageItem } from "@orquester/api/agent-chat";
 
-import type { WorkLogEntry, WorkLogToolLifecycleStatus } from "./contracts";
+import type {
+  CompactionMarkerState,
+  WorkLogEntry,
+  WorkLogToolLifecycleStatus
+} from "./contracts";
 import { normalizeCompactToolLabel } from "./presentation.logic";
 
 // ---------------------------------------------------------------------------
@@ -280,10 +284,12 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
   }
 
   if (isCompactionActivity(activity)) {
-    const tokens = compactionTokens(activity);
-    if (tokens.beforeTokens !== undefined || tokens.afterTokens !== undefined) {
-      entry.compaction = tokens;
-    }
+    const error = asTrimmedString(asRecord(activity.payload)?.error);
+    entry.compaction = {
+      state: compactionMarkerState(activity),
+      ...compactionTokens(activity),
+      ...(error ? { error } : {})
+    };
   }
 
   const collapseKey = deriveToolLifecycleCollapseKey(entry);
@@ -397,6 +403,20 @@ export function isCompactionActivity(activity: ThreadActivityItem): boolean {
     activity.activityKind === "thread.state.changed" &&
     asRecord(activity.payload)?.state === "compacted"
   );
+}
+
+/**
+ * Which of the three compaction markers this activity is (§7.3).
+ *
+ * **Anything unreadable is `compacted`.** An old log only ever recorded the
+ * settled marker — a `context-compaction` activity with no `state`, or the
+ * legacy `thread.state.changed` one — and reading an unknown spelling as an
+ * in-flight phase would leave a resumed thread shimmering "Compacting
+ * context…" against a provider that finished months ago.
+ */
+export function compactionMarkerState(activity: ThreadActivityItem): CompactionMarkerState {
+  const state = asRecord(activity.payload)?.state;
+  return state === "compacting" || state === "compaction-failed" ? state : "compacted";
 }
 
 /** Before/after token counts, carried on the event and formatted client-side (§7.3). */

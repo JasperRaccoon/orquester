@@ -14,6 +14,7 @@
 export { ShimmerText, type ShimmerTextProps } from "./ShimmerText";
 export { StatusDot, type StatusDotProps, type StatusDotSize } from "./StatusDot";
 export { WorkingIndicator, type WorkingIndicatorProps } from "./WorkingIndicator";
+export { IndeterminateBar, type IndeterminateBarProps } from "./IndeterminateBar";
 export {
   Disclosure,
   DisclosurePanel,

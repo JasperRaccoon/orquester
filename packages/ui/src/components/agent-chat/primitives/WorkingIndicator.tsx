@@ -2,6 +2,7 @@ import React from "react";
 import { cn } from "../../../lib/cn";
 import { ShimmerText } from "./ShimmerText";
 import { ElapsedTicker } from "./ElapsedTicker";
+import { IndeterminateBar } from "./IndeterminateBar";
 import type { ElapsedStamp } from "./elapsed";
 
 export interface WorkingIndicatorProps {
@@ -19,6 +20,13 @@ export interface WorkingIndicatorProps {
   live?: boolean;
   /** Draws the hairline under the row, as T3's working row does. */
   divider?: boolean;
+  /**
+   * Adds an {@link IndeterminateBar} under the label, for a phase that emits
+   * **no rows at all** while it runs — a context compaction is the one that
+   * does. An ordinary turn already has its tool rows arriving as motion and
+   * must not grow a second progress affordance.
+   */
+  progress?: boolean;
   className?: string;
 }
 
@@ -47,6 +55,7 @@ export function WorkingIndicator({
   startedAt,
   live = true,
   divider = false,
+  progress = false,
   className
 }: WorkingIndicatorProps): React.ReactElement {
   return (
@@ -66,6 +75,7 @@ export function WorkingIndicator({
           </span>
         ) : null}
       </div>
+      {progress ? <IndeterminateBar live={live} className="mx-1 mt-0.5" /> : null}
     </div>
   );
 }

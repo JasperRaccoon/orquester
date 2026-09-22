@@ -34,6 +34,7 @@ import {
   workEntryIsRerouteNotice,
   type RowGlyphName
 } from "../row-chrome";
+import { COMPACTING_LABEL } from "../row-format";
 import { deriveAgentSpawnSummary } from "../../roster/spawn-summary";
 import { TimelineRowTimestamp } from "../timestamp";
 import { InlineDiff, looksLikeUnifiedDiff } from "./InlineDiff";
@@ -523,10 +524,15 @@ export const ActivityGroupRow = React.memo(function ActivityGroupRow({
   const iconEntry = row.active ? liveWork : tools.at(-1);
   const failed = iconEntry !== undefined && workEntryDisplayIndicatesToolFailure(iconEntry);
 
+  // A live group's header is a live placeholder like any other: while the
+  // provider is rewriting the conversation it must name the phase rather than
+  // claim the agent is thinking. Swapped in place, never remounted (§7.3).
   const label = row.active
-    ? liveWork
-      ? liveWorkEntryLabel(liveWork, true, ctx.workspaceRoot)
-      : "Thinking"
+    ? row.compacting === true
+      ? COMPACTING_LABEL
+      : liveWork
+        ? liveWorkEntryLabel(liveWork, true, ctx.workspaceRoot)
+        : "Thinking"
     : tools.length > 0
       ? summarizeToolGroup(tools)
       : `Thought${reasoningCount > 1 ? ` (×${reasoningCount})` : ""}`;

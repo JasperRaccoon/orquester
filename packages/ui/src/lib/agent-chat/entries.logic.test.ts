@@ -5,6 +5,7 @@ import {
   deriveTimelineEntriesFromItems,
   deriveWorkLogEntries,
   EMPTY_TIMELINE_PROJECTION,
+  compactionMarkerState,
   isAgentInternalActivity,
   isCompactionActivity,
   itemsForAgent,
@@ -66,7 +67,41 @@ describe("workLogEntryFromActivity", () => {
     const entry = workLogEntryFromActivity(
       activity("thread.state.changed", { state: "compacted", beforeTokens: 120, afterTokens: 30 })
     );
-    assert.deepEqual(entry.compaction, { beforeTokens: 120, afterTokens: 30 });
+    assert.deepEqual(entry.compaction, {
+      state: "compacted",
+      beforeTokens: 120,
+      afterTokens: 30
+    });
+  });
+
+  it("carries the compaction PHASE, so the in-flight marker is not a divider", () => {
+    assert.deepEqual(
+      workLogEntryFromActivity(activity("context-compaction", { state: "compacting" })).compaction,
+      { state: "compacting" }
+    );
+    assert.deepEqual(
+      workLogEntryFromActivity(
+        activity("context-compaction", { state: "compaction-failed", error: "out of quota" })
+      ).compaction,
+      { state: "compaction-failed", error: "out of quota" }
+    );
+  });
+
+  it("reads an old marker with no state as `compacted` — the only thing old logs hold", () => {
+    assert.deepEqual(
+      workLogEntryFromActivity(activity("context-compaction", { beforeTokens: 9 })).compaction,
+      { state: "compacted", beforeTokens: 9 }
+    );
+    assert.equal(compactionMarkerState(activity("context-compaction", {})), "compacted");
+    assert.equal(compactionMarkerState(activity("context-compaction", { state: "wat" })), "compacted");
+    assert.equal(
+      compactionMarkerState(activity("thread.state.changed", { state: "compacted" })),
+      "compacted"
+    );
+    assert.equal(
+      compactionMarkerState(activity("context-compaction", { state: "compacting" })),
+      "compacting"
+    );
   });
 });
 

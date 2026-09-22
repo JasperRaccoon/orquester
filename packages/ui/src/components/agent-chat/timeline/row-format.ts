@@ -61,13 +61,31 @@ export function formatTokenCount(tokens: number): string {
  * on the event and format here, so the same event renders in whatever unit the
  * client prefers and an older row without numbers still reads correctly.
  */
-export function compactionLabel(row: Pick<Row<"context-compaction">, "label" | "beforeTokens" | "afterTokens">): string {
+export function compactionLabel(
+  row: Pick<Row<"context-compaction">, "label" | "beforeTokens" | "afterTokens" | "failed">
+): string {
   const { beforeTokens, afterTokens } = row;
-  if (typeof beforeTokens === "number" && typeof afterTokens === "number") {
+  // A failed compaction left the conversation unchanged, so any counts on it
+  // describe a saving that never happened. Never spell them.
+  if (row.failed !== true && typeof beforeTokens === "number" && typeof afterTokens === "number") {
     return `${row.label} · ${formatTokenCount(beforeTokens)} → ${formatTokenCount(afterTokens)} tokens`;
   }
   return row.label;
 }
+
+/**
+ * What the live placeholders say while the provider rewrites the conversation.
+ *
+ * One constant because three surfaces show it — the working row, the thinking
+ * placeholder and a live activity group's header — and a compaction that
+ * spells itself differently in two places reads as two different things
+ * happening.
+ *
+ * *T3: `MessagesTimeline.tsx:2875-2882` (`CompactingLabel`), which says
+ * "Compacting…"; ours names the noun because our status line already carries
+ * the short form and the timeline row has the width for it.*
+ */
+export const COMPACTING_LABEL = "Compacting context…";
 
 
 export function proposedPlanTitle(markdown: string): string {

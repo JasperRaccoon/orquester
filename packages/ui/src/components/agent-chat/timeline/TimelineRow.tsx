@@ -58,7 +58,7 @@ function RowBody({ row }: { row: AgentChatTimelineRow }): React.ReactElement | n
     case "working":
       return <WorkingRow row={row} />;
     case "thinking":
-      return <ThinkingRow />;
+      return <ThinkingRow row={row} />;
     case "queued-message":
       return <QueuedMessageRow row={row} />;
     default:

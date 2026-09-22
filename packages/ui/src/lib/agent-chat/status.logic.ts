@@ -13,16 +13,18 @@
  * No React import.
  */
 
-import type {
-  BackgroundLiveness,
-  LatestTurnSummary,
-  ThreadActivityItem,
-  ThreadSessionStatus,
-  ThreadTokenUsage,
-  TurnState
+import {
+  SETTLED_TURN_STATES,
+  type BackgroundLiveness,
+  type LatestTurnSummary,
+  type ThreadActivityItem,
+  type ThreadSessionStatus,
+  type ThreadTokenUsage,
+  type TurnState
 } from "@orquester/api/agent-chat";
 
 import { hasUnseenCompletion as threadHasUnseenCompletion } from "../thread-visits";
+import { compactionMarkerState, isCompactionActivity } from "./entries.logic";
 
 // ---------------------------------------------------------------------------
 // The §6.4 activity ladder lives on the HOST
@@ -151,6 +153,56 @@ export function nextVisitStamp(previous: string | null | undefined, visitedAt: s
 }
 
 // ---------------------------------------------------------------------------
+// The compaction phase (§7.3, §7.6)
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether the provider is rewriting the conversation **right now**.
+ *
+ * A compaction is the one kind of work that produces no rows at all while it
+ * runs: on a long thread the timeline sat on "Working for 31s" and a "Thinking"
+ * placeholder for minutes, which is indistinguishable from a hung agent. The
+ * phase is what lets every live surface say what is actually happening.
+ *
+ * Two halves, and the second is the one that matters:
+ *
+ *  - the **latest** compaction marker is the in-flight one (`compacting`), and
+ *    no later marker — `compacted` or `compaction-failed` — has superseded it;
+ *  - **the session is still live.** The host may abandon a compaction after a
+ *    deadline, and an adapter that dies mid-compaction emits no terminal
+ *    marker at all, so a phase only a marker could end would shimmer
+ *    "Compacting context…" forever on a thread that has been idle for hours. A
+ *    settled turn, or a session that is `ready`/`stopped`/`error`, ends it.
+ *
+ * *T3: `ChatView.tsx:3234-3237` — the same two halves, spelled against its own
+ * `phase`/`isSendBusy` pair.*
+ */
+export function isCompactingThread(input: {
+  activities: readonly ThreadActivityItem[];
+  sessionStatus: ThreadSessionStatus | null;
+  turnStatus: TurnState | null;
+}): boolean {
+  if (input.turnStatus !== null && SETTLED_TURN_STATES.has(input.turnStatus)) {
+    return false;
+  }
+  if (
+    input.sessionStatus !== null &&
+    input.sessionStatus !== "running" &&
+    input.sessionStatus !== "starting"
+  ) {
+    return false;
+  }
+  for (let index = input.activities.length - 1; index >= 0; index -= 1) {
+    const activity = input.activities[index]!;
+    if (!isCompactionActivity(activity)) {
+      continue;
+    }
+    return compactionMarkerState(activity) === "compacting";
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
 // The activity label (§7.6)
 // ---------------------------------------------------------------------------
 
@@ -167,6 +219,8 @@ export function resolveActivityLabel(input: {
   liveToolLabel?: string | null;
   pendingApprovals: number;
   pendingQuestions: number;
+  /** {@link isCompactingThread}; replaces the generic working label (§7.6). */
+  isCompacting?: boolean;
 }): string | null {
   if (input.connection === "reconnecting") {
     return "Reconnecting…";
@@ -190,7 +244,9 @@ export function resolveActivityLabel(input: {
     return "Sending…";
   }
   if (input.turnStatus === "running" || input.sessionStatus === "running") {
-    return input.liveToolLabel ?? "Working";
+    // A compaction outranks the live tool label: the last tool the agent ran
+    // before the compaction started is not what the thread is doing now.
+    return input.isCompacting === true ? "Compacting…" : (input.liveToolLabel ?? "Working");
   }
   if (input.backgroundLiveness === "working") {
     return "Background work";

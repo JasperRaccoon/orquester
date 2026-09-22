@@ -173,6 +173,18 @@ test("the compaction label carries before/after tokens when they are known", () 
   assert.equal(compactionLabel({ label: "Compacted", beforeTokens: 100 }), "Compacted");
 });
 
+test("a failed compaction never claims a before/after saving", () => {
+  assert.equal(
+    compactionLabel({
+      label: "Context compaction failed",
+      failed: true,
+      beforeTokens: 128_000,
+      afterTokens: 128_000
+    }),
+    "Context compaction failed"
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Plan card
 // ---------------------------------------------------------------------------

@@ -412,6 +412,169 @@ describe("formatWorkDuration", () => {
 });
 
 // ---------------------------------------------------------------------------
+// The compaction phase (§7.3)
+// ---------------------------------------------------------------------------
+
+describe("the compaction phase", () => {
+  const compactingMarker = () =>
+    activity("context-compaction", { state: "compacting" }, {
+      tone: "info",
+      summary: "Compacting context",
+      turnId: "t1",
+      createdAt: stamp(2)
+    });
+
+  const runningCompaction = (
+    entries: readonly TimelineEntry[],
+    overrides: Partial<TimelineRowsInput> = {}
+  ) =>
+    deriveTimelineRows(
+      baseInput(entries, {
+        isWorking: true,
+        isCompacting: true,
+        runningTurnId: "t1",
+        latestTurn: { turnId: "t1", state: "running", startedAt: stamp(1), completedAt: null },
+        activeTurnStartedAt: stamp(1),
+        ...overrides
+      })
+    );
+
+  it("never renders the in-flight marker as a divider — it is a phase, not an event", () => {
+    const rows = runningCompaction(
+      entriesFrom([message("user", "/compact", { createdAt: stamp(1) }), compactingMarker()])
+    );
+    assert.ok(
+      !kinds(rows).includes("context-compaction"),
+      "a `Context compacted \u00b7 \u2026` hairline would claim a compaction that has not happened"
+    );
+  });
+
+  it("keeps the settled marker exactly as it was", () => {
+    const rows = deriveTimelineRows(
+      baseInput(
+        entriesFrom([
+          activity("context-compaction", { state: "compacted", beforeTokens: 800_000, afterTokens: 11_000 }, {
+            summary: "Context compacted",
+            createdAt: stamp(1)
+          })
+        ])
+      )
+    );
+    const row = rows.find((candidate) => candidate.kind === "context-compaction");
+    assert.ok(row && row.kind === "context-compaction");
+    assert.equal(row.label, "Context compacted");
+    assert.equal(row.beforeTokens, 800_000);
+    assert.equal(row.afterTokens, 11_000);
+    assert.equal(row.failed, undefined, "a successful compaction is not a failure row");
+    assert.equal(row.detail, undefined);
+  });
+
+  it("renders a failed compaction as its own divider, carrying the reason", () => {
+    const rows = deriveTimelineRows(
+      baseInput(
+        entriesFrom([
+          activity("context-compaction", { state: "compaction-failed", error: "context window exhausted" }, {
+            tone: "error",
+            summary: "Context compaction failed",
+            createdAt: stamp(1)
+          })
+        ])
+      )
+    );
+    const row = rows.find((candidate) => candidate.kind === "context-compaction");
+    assert.ok(row && row.kind === "context-compaction");
+    assert.equal(row.label, "Context compaction failed");
+    assert.equal(row.failed, true);
+    assert.equal(row.detail, "context window exhausted");
+  });
+
+  it("stamps the working row, which is the placeholder the user is looking at", () => {
+    const rows = runningCompaction(
+      entriesFrom([message("user", "/compact", { createdAt: stamp(1) }), compactingMarker()])
+    );
+    const working = rows.find((row) => row.kind === "working");
+    assert.ok(working && working.kind === "working");
+    assert.equal(working.compacting, true);
+  });
+
+  it("stamps the thinking placeholder and the live activity-group header too", () => {
+    const thinking = runningCompaction(
+      entriesFrom([message("user", "/compact", { createdAt: stamp(1) }), compactingMarker()])
+    ).find((row) => row.kind === "thinking");
+    assert.ok(thinking && thinking.kind === "thinking");
+    assert.equal(thinking.compacting, true);
+
+    // A reasoning block that lands after the compaction started keeps the
+    // group live, and then the group header is the live placeholder.
+    const group = runningCompaction(
+      entriesFrom([
+        message("user", "go", { createdAt: stamp(1) }),
+        compactingMarker(),
+        message("reasoning", "hmm", { turnId: "t1", createdAt: stamp(3) })
+      ])
+    ).find((row) => row.kind === "activity-group");
+    assert.ok(group && group.kind === "activity-group");
+    assert.equal(group.active, true, "only a LIVE group has a label to replace");
+    assert.equal(group.compacting, true);
+  });
+
+  it("stamps nothing once the phase is over", () => {
+    const rows = runningCompaction(
+      entriesFrom([message("user", "/compact", { createdAt: stamp(1) })]),
+      { isCompacting: false }
+    );
+    for (const row of rows) {
+      if (row.kind === "working" || row.kind === "thinking" || row.kind === "activity-group") {
+        assert.equal(row.compacting, undefined, row.kind);
+      }
+    }
+  });
+
+  it("re-derives when only the phase moved — the streaming fast path must not swallow it", () => {
+    const entries = entriesFrom([
+      message("user", "/compact", { createdAt: stamp(1) }),
+      compactingMarker()
+    ]);
+    const before = deriveTimelineRowsWithState(
+      baseInput(entries, {
+        isWorking: true,
+        isCompacting: true,
+        runningTurnId: "t1",
+        activeTurnStartedAt: stamp(1)
+      })
+    );
+    const after = deriveTimelineRowsWithState(
+      baseInput(entries, {
+        isWorking: true,
+        isCompacting: false,
+        runningTurnId: "t1",
+        activeTurnStartedAt: stamp(1)
+      }),
+      before
+    );
+    const working = after.rows.find((row) => row.kind === "working");
+    assert.ok(working && working.kind === "working");
+    assert.equal(working.compacting, undefined);
+  });
+
+  it("is part of every affected row's identity check", () => {
+    const working = { kind: "working", id: "w", createdAt: stamp(1) } as const;
+    assert.equal(isRowUnchanged(working, { ...working, compacting: true }), false);
+    const thinking = { kind: "thinking", id: "t", createdAt: stamp(1) } as const;
+    assert.equal(isRowUnchanged(thinking, { ...thinking, compacting: true }), false);
+    const marker = {
+      kind: "context-compaction",
+      id: "c",
+      createdAt: stamp(1),
+      label: "Context compaction failed"
+    } as const;
+    assert.equal(isRowUnchanged(marker, { ...marker, failed: true }), false);
+    assert.equal(isRowUnchanged(marker, { ...marker, detail: "why" }), false);
+    assert.equal(isRowUnchanged(marker, { ...marker }), true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Fix-wave regressions
 // ---------------------------------------------------------------------------
 
