@@ -40,6 +40,14 @@ Decisions already taken with the user:
 | Background work | A live background row is never collapsed or faded in the roster. Stopping is T3's single Stop — the session interrupt — not a per-task command. |
 | Naming | Where T3 already names a field, event or status, this design uses T3's name. |
 
+*Built: every decision above survived implementation. Two **names** could not. `RuntimeMode` (the
+permission mode) collides with the client-platform `RuntimeMode` `@orquester/api` already
+exported, so it is `RuntimeMode` at `@orquester/api/agent-chat` and `AgentRuntimeMode` at
+`@orquester/api` — the same type, two spellings. And the thread head's session status rides
+`SessionSummary` as `chatSessionStatus`, because `status` was already the PTY status
+(`packages/api/src/agent-chat/adapter-types.ts`, `packages/api/src/index.ts`). The four default
+approval buttons are unchanged; what a button *sends* on Codex is not — see §4.3.*
+
 ## 2. Non-goals
 
 - Per-thread git worktrees (natural follow-up; see §10).
@@ -184,6 +192,12 @@ message.
 
 *T3: `apps/server/src/provider/Layers/GrokAdapter.ts:94-101` — 10 min turn / 30 min active-tool defaults and why; `:507-510` — `hasLivenessPause` (pending approvals, pending user input, in-flight updates); `:729-777` — `settleStalledTurn` re-checks the pause immediately before cancelling; `:778-812` — the watchdog sleeps on the remaining window and wakes on activity*
 
+*Built: the watchdog is **host-side and runs for all four adapters**
+(`apps/daemon/src/agent-host/orchestration/turn-watchdog.ts`), where T3 keeps it inside its Grok
+adapter — a wedged Codex or OpenCode turn is the same failure and deserves the same bound. A turn
+the watchdog stalls settles `failed` **and** puts the session in `error`, so the next `/turn` takes
+the §4.1 lazy-recovery path instead of steering into a child that stopped answering.*
+
 **Background liveness outlives the turn.** Subagent fleets, background shells and watch loops
 keep running inside the provider process after the turn that launched them has settled. The host
 tracks, per thread and in memory only, which task ids are still live from the same task events
@@ -216,6 +230,14 @@ child, so any path the host injects is already absolute. Managed hooks are **not
 chat sessions; the protocol replaces them.
 
 *T3: `apps/server/src/provider/ProviderInstanceEnvironment.ts:5-22` — differs: T3 layers per-instance vars **over** a spread of `process.env`; the host builds the map from nothing because the daemon's own environment holds cliproxy and push secrets; `:14-19` — "Child processes do not apply shell expansion to environment values", so only home-dir vars are expanded and everything else is verbatim; `docs/internals/providers.md:25-31` — the launch environment removes ambient vendor credentials so an instance cannot silently use another account or billing project; `apps/server/src/provider/antigravityAuthSupport.ts:64-80` + `:212-225` — the denylist pattern: strip every credential/config key from the inherited env, then re-add only the configured one*
+
+*Built: no hook script is installed for a chat session — but `ORQUESTER_SESSION_ID` still is (it is
+in the list above), and a managed account home's user-level `settings.json` already carries
+Orquester's **terminal** hooks, so those hooks fire carrying a chat session id.
+`POST /api/sessions/:id/agent-event` therefore **accepts and ignores** an event for a chat session
+rather than answering 404: the protocol is the only activity source for a chat thread, and a 404
+would make a working hook look broken to the user's agent
+(`apps/daemon/src/agent-chat/session-router.ts`).*
 
 **Kill guard.** `apps/daemon/src/system-status.ts` adds the host pid to the protected set via
 the same `protectedPids` hook cliproxy uses. Provider children remain legal kill targets.
@@ -271,6 +293,13 @@ unrecognised frame; for OpenCode the check runs both on `opencode --version` and
 own health response, because an already-running server can be older than the binary on PATH.
 
 *T3: `apps/server/src/provider/opencodeRuntime.ts:42` + `:143-177` — `MINIMUM_OPENCODE_VERSION` enforced against the health response; `apps/server/src/provider/Layers/OpenCodeProvider.ts:472-494` — the same gate on the CLI version*
+
+*Built: the host's `MINIMUM_CLI_VERSIONS`
+(`apps/daemon/src/agent-host/orchestration/version-gate.ts`) carries **only** OpenCode's
+`1.14.19`; `claude`, `codex` and `grok` are `null`. Those three declare the version they were
+validated against in their own adapter and surface drift as a `versionAdvisory` warning rather
+than a refused session — a floor invented for a CLI upstream never pinned would refuse sessions on
+installations that work.*
 
 **Provider snapshots refresh on a slow interval, not per request.** The snapshot of §4.1 is
 computed on demand, cached, and re-probed in the background every few minutes; refreshes are
@@ -384,6 +413,13 @@ conversation that was not compacted. §6.2 carries only the HTTP surface of this
 
 *T3: `apps/server/src/orchestration/Layers/ProviderCommandReactor.ts:1414-1427` — compaction refused while `starting`/`running` or already compacting; `:1467-1476` — turn starts arriving during compaction pushed onto the per-thread queue; `:327-370` — ordered replay, one awaited at a time, re-queued on dispatch failure; `:1450-1461` + `:306-324` — the queue drained into "Queued message was not sent" activities on failure; differs: our copy is "Context compaction failed. Send this message again to continue."*
 
+*Built: the queues are per thread and there are **two** of them plus a git queue — one for commands
+and one for turns — so a `/mode`, `/approval` or `/answer` arriving during a compaction is not
+parked behind a queued turn (`apps/daemon/src/agent-host/orchestration/`). And `/mode` against a
+thread with no live session records the new mode and starts **nothing**: a mode change is not a
+reason to boot a provider child, and spend an account's tokens on its startup, for a thread the
+user has not sent a message to.*
+
 ## 4. Adapter layer
 
 ### 4.1 Interface
@@ -457,6 +493,9 @@ Rules of the interface, enforced by the orchestration layer so no adapter can fo
   also refreshes it on every assistant message.
 - **Steering.** `sendTurn` while a turn is active reuses the active turn id and injects into the
   running loop. It is neither an error nor a second turn.
+  *Built: a steering send appends **only** the user message — no second
+  `thread.turn-start-requested` — so the turn's recorded start, its checkpoint baseline and its
+  duration stay those of the turn being steered.*
 - **Settle before interrupt.** Every pending approval and user-input request is resolved with
   `cancel` and emitted as `request.resolved` / `user-input.resolved` before `interruptTurn` or
   `stopSession` reaches the provider.
@@ -493,6 +532,15 @@ refresh, the same pattern as T3's `model-manifest.json`.
 
 *T3: `apps/server/src/provider/Services/ServerProvider.ts:6-25` — `getSnapshot`/`refresh`/`streamChanges`/`applyUsageLimits`; `packages/contracts/src/server.ts:188-238` — the one `ServerProvider` snapshot carrying installed/version/status/auth/models/slashCommands/skills/usageLimits/versionAdvisory; `apps/server/src/provider/Layers/ClaudeProvider.ts:331-400` — never-yielding prompt probe; `apps/server/src/provider/Layers/GrokProvider.ts:342-364` — initialize-only ACP probe; `apps/server/src/provider/Layers/OpenCodeProvider.ts:258-289, 543-567` — models and login from one `GET /provider`; `apps/server/src/provider/ModelManifest.ts:36, 39-43` — bundled manifest plus a 1 h TTL remote refresh*
 
+*Built: two changes. (1) There is **no bundled Claude manifest and no remote refresh**. The model
+list comes from the live CLI — `initializationResult().models` on an open session,
+`supportedModels()` on the probe — which is free, needs no network of our own and cannot go stale
+against the installed binary (`apps/daemon/src/agent-host/adapters/claude/models.ts`).
+`ultracode` is re-offered as its own boolean descriptor gated on `xhigh` support, because the
+CLI's effort list never names it. (2) The refresh takes an optional account `home`: run without
+one the probe answers under the **host** identity, and the account chip, label, email and usage
+bars then describe the daemon user's login rather than the thread's account.*
+
 The snapshot's sub-shapes are contracts the client binds to, so pin them here:
 
 - `auth`: `{status: "authenticated"|"unauthenticated"|"unknown", type?, label?, email?}`.
@@ -520,6 +568,11 @@ The snapshot's sub-shapes are contracts the client binds to, so pin them here:
   gap rather than hiding the model.
 
 *T3: `packages/contracts/src/server.ts:61-67` — auth; `:69-82` — model; `:88-93` — slash command; `:95-116` — skill incl. `userInvocationOnly`/`userInvocable`; `:118-123` — per-cwd workspace snapshot; `:158-166` — version advisory; `packages/contracts/src/model.ts:7-53, 90-94, 125-128` — option descriptors and selections; `packages/contracts/src/providerUsageLimits.ts:20-27, 49-61, 69-72` — usage windows, `unavailable`, and the sparse merge-by-`id` update; `apps/server/src/provider/opencodeRuntime.ts:42, 161-176` — `MINIMUM_OPENCODE_VERSION`; `apps/server/src/provider/ClaudeModelCatalog.ts:150-185` — model version gating and its message*
+
+*Built: with the Claude catalogue coming from the live CLI there is no per-model version window
+left to explain — a model the installed CLI does not support is simply not listed. The "explain
+the gap rather than hide the model" rule therefore survives only on the **whole-CLI** gate
+(`apps/daemon/src/agent-host/orchestration/version-gate.ts`).*
 
 Slash commands and skills are additionally **per-cwd** for Claude, Grok and OpenCode: the
 snapshot carries a narrower `workspaceSnapshots[{cwd, checkedAt, slashCommands, skills}]`
@@ -560,6 +613,18 @@ runtime.
 *T3 schema: `packages/contracts/src/providerRuntime.ts:1177-1228` — the 49-member union; payloads at `:219-222` (session.started), `:230-234` + enum `:54-61` (session.state.changed), `:237-241` (session.exited), `:244-246` (thread.started), `:249-254` + enum `:64-72` (thread.state.changed), `:257-260` (thread.metadata.updated), `:263-285` (thread.token-usage.updated), `:313-316` (turn.started), `:325-346` (TurnTokenUsage) + `:348-356` (turn.completed), `:359-362` (turn.aborted), `:365-375` + `:77` (turn.plan.updated), `:377-385` (turn.proposed.*), `:387-390` (turn.diff.updated), `:432-449` + `:80` + `:123-135` (item lifecycle, status, CanonicalItemType), `:451-456` + `:83-92` (content.delta), `:459-472` + `:137-150` (request.*, CanonicalRequestType), `:482-502` (user-input.*), `:561-572` (classifyTaskAgentKind) + `:580-618` (task linkage) + `:623-682` + `:630-640` (task.*, RuntimeTaskStatus), `:682-704` (hook.*), `:707-715` (tool.progress), `:796-801` (tool.denied), `:724-728` (auth.status), `:740-742` + `packages/contracts/src/providerUsageLimits.ts:20-27, 69-72` (account.rate-limits.updated), `:757-761` (model.rerouted), `:804-814` + `:97-104` (runtime.warning/error).*
 *T3 emit sites: Claude `apps/server/src/provider/Layers/ClaudeAdapter.ts:2555` (token usage), `:2660-2853` (turn.completed), `:2912-2964` (assistant_text), `:1725-1731` (reasoning_summary_text), `:3170-3331` (tool results → command_output/file_change_output), `:3620-3706` (session/thread state, hooks), `:3707-3873` (tasks), `:4081-4142` (rate limits), `:4145-4198` (the demux switch). Codex `apps/server/src/provider/Layers/CodexAdapter.ts:1304-2223` (notification → event mapping), `:1589` (token usage), `:1664-1672` (turn.diff.updated), `:1721, 1769` (turn.proposed.*), `:633-663` (item classification). OpenCode `apps/server/src/provider/Layers/OpenCodeAdapter.ts:2294-2660` (the SSE switch: `session.updated`, `session.compacted`, `message.updated`, `message.part.delta/updated/removed`, `permission.asked/replied`, `question.asked/replied/rejected`, `todo.updated` → `turn.plan.updated`, `session.status`, `session.error`). Grok `apps/server/src/provider/acp/AcpRuntimeModel.ts:795-884` (`session/update` variants) and `apps/server/src/provider/acp/AcpCoreRuntimeEvents.ts:37-50, 137` (normalised → runtime events).*
 
+*Built: three corrections the real CLIs forced. (1) `RuntimeSessionState` still has no `waiting`
+arm and the UI still derives `waiting` from an open request — but Codex **does** emit
+`thread/status/changed.activeFlags: ["waitingOnApproval"]`, so an adapter must tolerate the flag
+rather than report it as an unmapped frame
+(`apps/daemon/src/agent-host/adapters/codex/normalise.ts`). (2) The `hook.*` group has **no
+producer**: Claude's filesystem hooks run, but the SDK stream carries no `hook_*` messages at all,
+so nothing in the timeline is fed by that group on any provider. (3) `RuntimeEventRawSource`
+gained one member the adapters mint themselves, `HISTORICAL_RAW_SOURCE` (`"history.replay"`),
+which tags every event projected out of a provider's **native history** so nothing downstream
+mistakes a replayed row for live traffic and no historical turn claims token usage
+(`packages/api/src/agent-chat/runtime-events.ts`).*
+
 Task rows repeat their whole linkage block on **every** row, not just `task.started`, so a client
 fold can rebuild an agent whose start row aged out. `agentKind` is stamped by the host at
 ingestion (not trusted from the provider) with the rule: a task launched from inside a subagent
@@ -568,6 +633,15 @@ patch (`killed`→`cancelled`, `paused`→`idle` normalised at the adapter); `ta
 narrows to `completed|failed|stopped`.
 
 *T3: `packages/contracts/src/providerRuntime.ts:574-618` — "repeated on progress and terminal rows … so client folds can reconstruct an agent"; `:552-572` — `classifyTaskAgentKind`; `:656-669` — the `task.updated` normalisation note; `:672-679` — `task.completed`*
+
+*Built: no CLI actually repeats the linkage. Claude's `task_updated` carries `{task_id, patch}` and
+nothing else, so the **adapter** carries each task's identity forward and re-stamps the whole
+bundle on every `task.*` runtime event it emits
+(`apps/daemon/src/agent-host/adapters/claude/normalize.ts`). The rule above is therefore a contract
+the adapters honour rather than an observation about the providers — which is exactly what lets the
+fold keep relying on it. The Claude tools that drive it are `TaskCreate` / `TaskUpdate` (decimal
+string ids) and `Agent`, **not** `TodoWrite` and `Task`: a fold keyed on the old names produces
+nothing.*
 
 Deliberately excluded: `thread.realtime.*`, `mcp.status.updated`, `tool.summary`,
 `config.warning`, `deprecation.notice`, `account.updated`, `mcp.oauth.completed`,
@@ -607,6 +681,19 @@ provider that distinguishes them is told which, and the agent reads a decline as
 way" and a cancel as "stop this".
 
 *T3: `apps/web/src/components/chat/ComposerPendingApprovalActions.tsx:23-28` — `DEFAULT_APPROVAL_OPTIONS`, all four user-visible; `apps/server/src/provider/Layers/ClaudeAdapter.ts:4817-4823` — the same deny carrying "User cancelled…" versus "User declined…"; `apps/server/src/provider/Layers/CodexSessionRuntime.ts:397-402` — Codex's own elicitation options also lead with Cancel and Decline*
+
+*Built: both halves of this paragraph moved. (1) Codex downgrades `acceptAlways` to
+`acceptForSession` only when the server proposed nothing better: a command approval that carries a
+proposed execpolicy amendment is answered
+`{acceptWithExecpolicyAmendment: {execpolicy_amendment}}`, which is what "always allow" actually
+means on that CLI, while the file-change enum has no amendment arm and always downgrades
+(`apps/daemon/src/agent-host/adapters/codex/decisions.ts`). (2) Grok **does** advertise options —
+`allow_always` arrives as `options[0]` on a real `session/request_permission` — so `acceptAlways`
+maps onto it instead of being emulated by a local operation hash, and nothing ever treats
+`options[0]` as a default. Grok asks for permission **at all** only when
+`[features] support_permission = true` reaches the CLI; without it the agent self-resolves every
+approval and `session/request_permission` never fires. 4.5 Grok says how the host guarantees that
+setting without touching the user's config.*
 
 The full per-provider decision mapping:
 
@@ -649,6 +736,15 @@ card renders without the original request.
 
 *T3: `packages/contracts/src/orchestration.ts:128-135` — the four modes (differs: T3's `DEFAULT_RUNTIME_MODE` is `full-access`, `:135`; Orquester defaults to `approval-required`). Claude `apps/server/src/provider/Layers/ClaudeAdapter.ts:4878-4882` (the map — note `approval-required` is deliberately **absent**, so `permissionMode` stays undefined and gating is entirely `canUseTool`), `:4939-4942` (`allowDangerouslySkipPermissions` iff `bypassPermissions`), `:4704-4711` (full-access short-circuit). Codex `apps/server/src/provider/Layers/CodexSessionRuntime.ts:509-542` (`runtimeModeToThreadConfig`, all three axes) and `:562-580` (a **second, per-turn** sandbox policy with a different spelling: `readOnly`/`workspaceWrite`/`dangerFullAccess`). OpenCode `apps/server/src/provider/opencodeRuntime.ts:508-545` (`buildOpenCodePermissionRules`). Grok `apps/server/src/provider/acp/GrokAcpSupport.ts:33-46` (`grokAcpSpawnArgs`).*
 
+*Built: the Grok argv is as written — `--permission-mode` is a global option and precedes `agent`,
+`--always-approve` belongs to `agent` and follows it — but `acceptEdits` is a **no-op** for the ACP
+edit gate. Measured against a real file write: `default` asks, `auto` does not,
+`agent --always-approve` does not, and `acceptEdits` still asks. The flag is still sent (it is what
+the CLI documents and a later release may honour) and the mode's promise is kept by the adapter
+answering edit-flavoured approvals itself (`autoApprovesEdits` in
+`apps/daemon/src/agent-host/adapters/grok/launch.ts`). Without that compensation the mode would be
+a label for nothing.*
+
 Two structural consequences. First, **a RuntimeMode change restarts the session** (§3.4) because
 every provider expresses the mode as launch configuration: Claude's `canUseTool` closes over the
 start-time mode, Codex sends it on `thread/start`, Grok in argv. OpenCode is the one that could
@@ -675,6 +771,14 @@ OpenCode `agent: "plan"` (no proposal event); Grok none. The toggle is shown onl
 `showPlanModeToggle` is true.
 
 *T3: `apps/server/src/provider/Layers/ClaudeAdapter.ts:5187-5201` (per-turn `setPermissionMode`), `:4683-4703` (`ExitPlanMode` captured then always denied); `apps/server/src/provider/Layers/CodexSessionRuntime.ts:583-606` (`collaborationMode` carries its own model, `reasoning_effort` and `developer_instructions`) with the sandbox untouched at `:611-666`; `apps/server/src/provider/Layers/OpenCodeAdapter.ts:3207`; `apps/server/src/provider/Layers/ClaudeProvider.ts:57`, `apps/server/src/provider/Layers/CodexProvider.ts:68`, `apps/server/src/provider/Layers/OpenCodeProvider.ts:34`, `apps/server/src/provider/Layers/GrokProvider.ts:51` — the four `showInteractionModeToggle` values*
+
+*Built: Codex's `collaborationMode` is **sticky thread state**, not a per-turn field — leaving plan
+mode requires an explicit `{mode:"default"}` — so the adapter sends the collaboration mode on
+**every** turn including the default one, alongside `developer_instructions: null`
+(`apps/daemon/src/agent-host/adapters/codex/modes.ts`). And Grok's plan mode is **declared**, not
+inferred: the CLI marks the tool with `_meta["x.ai/tool"].kind`, which makes §4.5's `plan.md` path
+matcher a fallback rather than the primary detector
+(`apps/daemon/src/agent-host/adapters/grok/plan.ts`).*
 
 ### 4.5 Per-provider must-knows
 
