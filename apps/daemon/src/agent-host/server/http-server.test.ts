@@ -22,6 +22,7 @@ import {
   agentHostExtraRoutes,
   type AgentHostThreadSummary
 } from "./extra-routes.ts";
+import { DeadlineExceededError } from "../support/deadline.ts";
 import { createAgentHostServer, type AgentHostServer } from "./http-server.ts";
 
 const TOKEN = "test-token";
@@ -535,5 +536,71 @@ describe("agent host server — the event stream (§6.3)", () => {
     assert.equal(h.server.openStreams, 0);
     await h.host.stop();
     await rm(h.dir, { recursive: true, force: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// E9 - a deadline is a refusal, not an internal fault
+// ---------------------------------------------------------------------------
+
+/** POST an attachment body: the one route that reaches the store ungated. */
+function upload(h: Harness, threadId: string): Promise<{ status: number; body: unknown }> {
+  const bytes = Buffer.from("x");
+  return new Promise((resolve, reject) => {
+    const req = request(
+      {
+        socketPath: h.socketPath,
+        method: "POST",
+        path: `${agentHostExtraRoutes.putAttachment(threadId)}?name=notes.md`,
+        headers: {
+          authorization: `Bearer ${TOKEN}`,
+          "content-type": "application/octet-stream",
+          "content-length": bytes.length
+        }
+      },
+      (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => chunks.push(chunk));
+        response.on("end", () =>
+          resolve({
+            status: response.statusCode ?? 0,
+            body: JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown
+          })
+        );
+      }
+    );
+    req.on("error", reject);
+    req.end(bytes);
+  });
+}
+
+describe("agent host server - a deadline answers its specified status (E9)", () => {
+  it("is a 409 COMMAND_REJECTED once the host is up, never a 500", async () => {
+    const h = await harness();
+    const threadId = await h.host.createThread();
+    h.host.store.putAttachment = () =>
+      Promise.reject(new DeadlineExceededError("opencode/probe", 10_000));
+
+    const answer = await upload(h, threadId);
+    // The measured defect: every non-`AgentChatCommandError` fell through to
+    // `500 COMMAND_REJECTED`, a pairing 6.2 gives no retry rule for.
+    assert.equal(answer.status, 409);
+    const envelope = answer.body as { error: { code: string; message: string } };
+    assert.equal(envelope.error.code, "COMMAND_REJECTED");
+    assert.match(envelope.error.message, /timed out/);
+    await h.stop();
+  });
+
+  it("is a 503 HOST_UNAVAILABLE while the host is still cold", async () => {
+    // Gate shut: 6.2's "retry the same commandId once the host is back", which
+    // is a different instruction to the client than a plain refusal.
+    const h = await harness({ openGate: false });
+    h.host.store.putAttachment = () =>
+      Promise.reject(new DeadlineExceededError("agent-host/boot", 30_000));
+
+    const answer = await upload(h, "cold-thread");
+    assert.equal(answer.status, 503);
+    assert.equal((answer.body as { error: { code: string } }).error.code, "HOST_UNAVAILABLE");
+    await h.stop();
   });
 });

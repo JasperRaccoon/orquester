@@ -402,19 +402,30 @@ export function createProviderSnapshotRegistry(
       if (typeof error === "string" && error.length > 0) {
         store({
           ...snapshot,
-          status: "degraded",
+          // R8-M4: `error`, not `degraded`. The client's `authErrorMessage`
+          // (§7.7's toast) fires for `auth.status === "unauthenticated"` or
+          // `status === "error"`, and deliberately not for `degraded` — which
+          // `codex/probe.ts` and `opencode/index.ts` set for reasons that have
+          // nothing to do with auth. Writing `degraded` here meant the whole
+          // chain ran and the toast could never appear.
+          status: "error",
           message: error,
           // The probe decides `authenticated` vs `unauthenticated`; a turn-time
           // failure only says the credential did not work just now, so the
           // enum moves to `unknown` rather than claiming a verdict the probe
-          // has not reached.
+          // has not reached. The toast's second arm asks only for "not
+          // authenticated", so `unknown` still reaches it.
           auth: { ...snapshot.auth, status: "unknown" },
           checkedAt: clock.nowIso()
         });
         return;
       }
-      // A clean `auth.status` clears a previously reported error.
-      if (snapshot.status === "degraded" && snapshot.message !== undefined) {
+      // A clean `auth.status` clears a previously reported error. Both spellings
+      // are accepted so a snapshot stored by a pre-R8-M4 host still clears.
+      if (
+        (snapshot.status === "error" || snapshot.status === "degraded") &&
+        snapshot.message !== undefined
+      ) {
         const { message: _cleared, ...rest } = snapshot;
         void _cleared;
         store({ ...rest, status: "ready", checkedAt: clock.nowIso() });

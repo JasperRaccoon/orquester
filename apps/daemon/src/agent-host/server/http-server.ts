@@ -46,7 +46,7 @@ import {
 } from "../orchestration/errors.ts";
 import { isAgentAdapterId } from "../adapters/index.ts";
 import { redactStderr } from "../support/stderr.ts";
-import { withDeadline } from "../support/deadline.ts";
+import { DeadlineExceededError, withDeadline } from "../support/deadline.ts";
 import type { Orchestrator } from "../orchestration/orchestrator.ts";
 import {
   agentHostExtraRoutes,
@@ -154,10 +154,28 @@ function sendError(
   response: ServerResponse,
   error: unknown,
   logger: AdapterLogger,
-  redact: (message: string) => string
+  redact: (message: string) => string,
+  hostReady: () => boolean
 ): void {
   if (isAgentChatCommandError(error)) {
     sendJson(response, statusForCode(error.code), error.toEnvelope());
+    return;
+  }
+  // E9: a deadline is a REFUSAL, not an internal fault. Falling through to the
+  // 500 below told the client `COMMAND_REJECTED` with a status that §6.2 gives
+  // no retry rule for, so a slow first provider probe looked like a host bug.
+  //
+  // Which refusal depends on why we were waiting. Before the command gate
+  // opens, the host is still booting: §6.2 says `HOST_UNAVAILABLE`, whose
+  // contract is "retry the same `commandId` once the host is back", and whose
+  // rejection is deliberately NOT recorded as a receipt. After the gate, the
+  // host is up and this one step ran out of time, which is a 409 the client
+  // may surface and retry as a new command.
+  if (error instanceof DeadlineExceededError) {
+    const code = hostReady() ? "COMMAND_REJECTED" : "HOST_UNAVAILABLE";
+    sendJson(response, statusForCode(code), {
+      error: { code, message: redact(error.message) }
+    });
     return;
   }
   logger.error("agent-host: unhandled request failure", error);
@@ -541,6 +559,19 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
     });
   };
 
+  // Mirrors the command gate for the error mapping: `orchestrator.ready` is a
+  // promise, and `sendError` runs synchronously on a failed request.
+  let hostReady = false;
+  void orchestrator.ready.then(
+    () => {
+      hostReady = true;
+    },
+    () => {
+      // A failed gate is not readiness; every command answers with the gate's
+      // own error anyway.
+    }
+  );
+
   const server = createServer((request, response) => {
     void route(request, response).catch((error: unknown) => {
       if (response.headersSent) {
@@ -552,7 +583,7 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
         logger.warn("agent-host: request failed after headers were sent", error);
         return;
       }
-      sendError(response, error, logger, redactMessage);
+      sendError(response, error, logger, redactMessage, () => hostReady);
     });
   });
   // The stream keeps its own heartbeat; a socket that goes quiet is the

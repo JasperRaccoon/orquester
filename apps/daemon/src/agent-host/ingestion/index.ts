@@ -997,6 +997,25 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       }
     }
 
+    // --- an item's completion ends its tool-output buffer -----------------
+    if (event.type === "item.completed" && event.itemId !== undefined) {
+      // Q1-9: `outputMeta` is keyed by item, so a completed item's entry is
+      // dead — one small record per tool call otherwise survives until the
+      // thread is forgotten. Drained first: `emitToolOutput` reads the meta,
+      // so dropping it before the final spill would silently discard the last
+      // chunk of a command's output.
+      const key = toolOutputBufferKey(threadId, event.itemId);
+      const trailing = state.toolOutput.take(key);
+      if (trailing.length > 0) {
+        emitToolOutput(threadId, state, {
+          key,
+          text: trailing,
+          openedAt: state.toolOutput.openedAt(key, now)
+        });
+      }
+      state.outputMeta.delete(key);
+    }
+
     // --- item completions that close a message ----------------------------
     if (event.type === "item.completed" && eventTurnId !== null) {
       if (event.payload.itemType === "reasoning") {
@@ -1127,6 +1146,13 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     // --- activities -------------------------------------------------------
     const taskTitle =
       event.type === "task.completed" ? state.taskTitles.get(event.payload.taskId) : undefined;
+    if (event.type === "task.completed") {
+      // Q1-9: the remembered description exists to title exactly this event,
+      // so its life ends here. Without the delete a long session accumulates
+      // one entry per subagent task for as long as the thread is open — the
+      // map was only ever cleared when the whole thread was forgotten.
+      state.taskTitles.delete(event.payload.taskId);
+    }
     const activities = runtimeEventToActivities(
       event,
       taskTitle !== undefined ? { taskTitle } : {}

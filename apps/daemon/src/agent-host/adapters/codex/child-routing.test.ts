@@ -328,3 +328,52 @@ describe("a settled turn is never re-activated (Q1 finding 3)", () => {
     assert.equal(normaliser.hasSettled("t2"), false);
   });
 });
+
+describe("the settled-turn guard is bounded (V1 §10 #4)", () => {
+  it("remembers the recent turns and forgets the ancient ones", () => {
+    const { normaliser } = make();
+    // The guard's only question is whether the turn whose `turn/start` reply is
+    // arriving RIGHT NOW already completed, so the set never needed to be a
+    // session-long ledger — and `forgetAgents()` clears its neighbours but not
+    // this one, which made it the session's last unbounded set.
+    for (let i = 0; i < 200; i += 1) {
+      normaliser.notification("turn/completed" as never, {
+        threadId: PARENT,
+        turn: turn(`t${i}`, "completed")
+      });
+    }
+    assert.equal(normaliser.hasSettled("t199"), true, "the newest is remembered");
+    assert.equal(normaliser.hasSettled("t180"), true, "and so is the recent past");
+    assert.equal(
+      normaliser.hasSettled("t0"),
+      false,
+      "200 turns later, the first one is evicted rather than retained for ever"
+    );
+  });
+
+  it("keeps a re-completed turn rather than ageing it out on its original slot", () => {
+    const { normaliser } = make();
+    normaliser.notification("turn/completed" as never, {
+      threadId: PARENT,
+      turn: turn("keep-me", "completed")
+    });
+    for (let i = 0; i < 63; i += 1) {
+      normaliser.notification("turn/completed" as never, {
+        threadId: PARENT,
+        turn: turn(`filler-${i}`, "completed")
+      });
+    }
+    // Re-seen, so it moves to the back of the queue.
+    normaliser.notification("turn/completed" as never, {
+      threadId: PARENT,
+      turn: turn("keep-me", "completed")
+    });
+    for (let i = 0; i < 60; i += 1) {
+      normaliser.notification("turn/completed" as never, {
+        threadId: PARENT,
+        turn: turn(`late-${i}`, "completed")
+      });
+    }
+    assert.equal(normaliser.hasSettled("keep-me"), true);
+  });
+});

@@ -56,6 +56,14 @@ export interface CodexNormaliserOptions {
 }
 
 /** Per-session normalisation state. */
+/**
+ * How many settled turn ids the normaliser remembers. The guard's only
+ * question is whether the turn whose `turn/start` reply is arriving right now
+ * has already completed, so a handful would do; 64 leaves room for a provider
+ * that batches replies without letting the set grow with the session.
+ */
+const SETTLED_TURNS_CAP = 64;
+
 export class CodexNormaliser {
   private readonly usage: CodexUsageTracker;
   private readonly ownThreadId: () => string | null;
@@ -79,6 +87,12 @@ export class CodexNormaliser {
    * Turns already settled by `turn/completed`. `turn/start`'s response can
    * arrive AFTER the completion notification for the same turn — re-activating
    * it would leave the session `running` forever (Q1 finding 3).
+   *
+   * Bounded to the most recent {@link SETTLED_TURNS_CAP}: the guard only ever
+   * asks about the turn whose `turn/start` is still in flight, so an id older
+   * than that is dead weight — and `forgetAgents()` clears the neighbouring
+   * maps but never this one, which left it the session's one unbounded set
+   * (V1 §10 #4). Insertion order is eviction order.
    */
   private readonly settledTurns = new Set<string>();
 
@@ -94,6 +108,20 @@ export class CodexNormaliser {
   /** True when `turn/completed` has already settled this turn (Q1 finding 3). */
   hasSettled(turnId: string): boolean {
     return this.settledTurns.has(turnId);
+  }
+
+  /**
+   * Record a settled turn, evicting the oldest past the cap. A re-add moves
+   * the id to the back, which is why the delete comes first.
+   */
+  private rememberSettledTurn(turnId: string): void {
+    this.settledTurns.delete(turnId);
+    this.settledTurns.add(turnId);
+    while (this.settledTurns.size > SETTLED_TURNS_CAP) {
+      const oldest = this.settledTurns.values().next();
+      if (oldest.done === true) break;
+      this.settledTurns.delete(oldest.value);
+    }
   }
 
   /** Live collab children as `[childThreadId, childTurnId]` (§4.5 step 3). */
@@ -312,7 +340,7 @@ export class CodexNormaliser {
           this.activeTurnId = null;
         }
         this.lastTurnError = null;
-        this.settledTurns.add(p.turn.id);
+        this.rememberSettledTurn(p.turn.id);
         // A turn the provider abandoned leaves its in-progress items with no
         // `item/completed` of their own (R3 finding 1). Close them BEFORE the
         // turn row so the timeline never shows a tool still running under a
