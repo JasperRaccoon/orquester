@@ -20,6 +20,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+import { HISTORICAL_RAW_SOURCE } from "@orquester/api/agent-chat";
 import type { RuntimeEvent } from "@orquester/api/agent-chat";
 
 import { OPENCODE_HISTORY_SOURCE, projectOpenCodeHistory } from "./history.ts";
@@ -166,9 +167,10 @@ test("fixture 10: every projected event is stamped historical and carries the tu
 
   assert.ok(events.length > 0);
   for (const event of events) {
-    // W1's `isHistoricalRuntimeEvent` tests exactly this literal.
+    // The host tests this exact literal to keep history out of attention,
+    // pushes and live turns — so it must be the shared constant, not a local one.
     assert.equal(event.raw?.source, OPENCODE_HISTORY_SOURCE);
-    assert.equal(event.raw?.source, "host.history");
+    assert.equal(event.raw?.source, HISTORICAL_RAW_SOURCE);
     assert.equal(event.threadId, "thread-7");
     assert.equal(typeof event.turnId, "string");
     assert.equal(event.providerRefs?.providerTurnId, event.turnId);

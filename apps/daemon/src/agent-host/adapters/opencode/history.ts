@@ -25,6 +25,7 @@
  *   `item.completed` rows rather than a stream of `content.delta`.
  */
 
+import { HISTORICAL_RAW_SOURCE } from "@orquester/api/agent-chat";
 import type {
   CanonicalItemType,
   RuntimeEvent,
@@ -42,13 +43,12 @@ import { isRecord, type OpenCodeMessageInfo, type OpenCodePart } from "./protoco
  * The `raw.source` every replayed event carries, so a consumer can tell a
  * reconstructed row from one this host actually observed.
  *
- * `"host.history"` is W1's marker (§4.2): the host's `isHistoricalRuntimeEvent`
- * tests exactly this literal, and the orchestrator logs a warning for any
- * projected event that fails it. The `as` is temporary — the arm is landing on
- * `RuntimeEventRawSource` with W1's E6 commit, and the cast comes off when that
- * reaches the integration branch. The literal itself does not change.
+ * Taken from the shared `HISTORICAL_RAW_SOURCE` (§4.2) rather than spelled
+ * again here: the host tests that literal to decide what must not raise
+ * attention, fire a push or move a live turn, so a second spelling would
+ * silently make every replayed row look live.
  */
-export const OPENCODE_HISTORY_SOURCE = "host.history" as RuntimeEventRawSource;
+export const OPENCODE_HISTORY_SOURCE: RuntimeEventRawSource = HISTORICAL_RAW_SOURCE;
 
 /** Replayed turns produce no usable per-turn usage — see the module header. */
 const UNAVAILABLE_USAGE: TurnTokenUsage = {
