@@ -41,17 +41,16 @@ export type RuntimeEventRawSource =
    * persisted like any other so the timeline can render, but it describes the
    * past — so anything that reacts to *new* work (W10's summary/push gate, the
    * §5.4 checkpoint baseline) must ignore it. Test with
-   * {@link isHistoricalRuntimeEvent}.
+   * {@link isHistoricalRuntimeEvent}, never by spelling the literal.
    */
-  | "host.history"
+  | typeof HISTORICAL_RAW_SOURCE
   | "claude.sdk.message"
   | "claude.sdk.permission"
   | "codex.app-server.notification"
   | "codex.app-server.request"
   | "opencode.sdk.event"
   | "acp.jsonrpc"
-  | `acp.${string}.extension`
-  | typeof HISTORICAL_RAW_SOURCE;
+  | `acp.${string}.extension`;
 
 /**
  * True for an event the host replayed out of a provider's own history rather
@@ -60,7 +59,7 @@ export type RuntimeEventRawSource =
  * move a checkpoint.
  */
 export function isHistoricalRuntimeEvent(event: { raw?: { source: string } }): boolean {
-  return event.raw?.source === "host.history";
+  return event.raw?.source === HISTORICAL_RAW_SOURCE;
 }
 
 /** The untranslated provider frame an event was decoded from (§4.2). */

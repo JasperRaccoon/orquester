@@ -7,6 +7,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import { HISTORICAL_RAW_SOURCE } from "@orquester/api/agent-chat";
 import type {
   DomainEvent,
   RuntimeEvent,
@@ -32,7 +33,7 @@ function activities(host: TestHost, threadId: string): ThreadActivityItem[] {
 /** What an adapter's `projectHistory` is expected to produce (§4.1). */
 function historyEvents(threadId: string, snapshot: ThreadSnapshot): RuntimeEvent[] {
   const out: RuntimeEvent[] = [];
-  const raw = { source: "host.history" as const, payload: null };
+  const raw = { source: HISTORICAL_RAW_SOURCE, payload: null };
   for (const turn of snapshot.turns) {
     out.push({
       eventId: `h-${turn.id}-start`,
@@ -111,7 +112,7 @@ describe("E6: a resumed thread replays the provider's own history", () => {
     // Every projected event is marked historical, so nothing downstream treats
     // it as new work.
     assert.ok(
-      host.ingestion.ingested.every((event) => event.raw?.source === "host.history"),
+      host.ingestion.ingested.every((event) => event.raw?.source === HISTORICAL_RAW_SOURCE),
       "history is marked, not disguised as live"
     );
     // …and it lands BEFORE the session is announced ready.

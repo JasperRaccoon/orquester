@@ -901,7 +901,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
    * Replay the provider's own history into the thread, once, for a thread that
    * resumes from a cursor and has nothing of its own (§4.1 `readThread`).
    *
-   * Everything it produces is stamped `raw.source: "host.history"`, so it is
+   * Everything it produces is stamped {@link HISTORICAL_RAW_SOURCE}, so it is
    * persisted and rendered but ignored by anything that reacts to new work.
    * Failure is never fatal: a thread that cannot show its history is still a
    * usable thread, so the reason lands as one activity row.
