@@ -8,7 +8,8 @@ import {
   History,
   ListTodo,
   LoaderCircle,
-  Plus
+  Plus,
+  SlidersHorizontal
 } from "lucide-react";
 import {
   RUNTIME_MODES,
@@ -344,6 +345,16 @@ const AgentRow: React.FC<{ agent: RegistryEntry; projectPath?: string }> = ({
   // curated proxy list, or an adapter catalog the host has published.
   const showModelChips = showModels || catalogModelsForAgent.length > 1;
   const runtimeMode = runtimeModeForAgent(chatPrefs, agent.id);
+  // The launch options are folded away by default (T3's "+" is one row per
+  // agent; its pickers live in the composer). One muted line says what a
+  // click will launch with — account · mode · model — and opens the pickers
+  // for the one thing the composer cannot change afterwards, the account.
+  const [optionsOpen, setOptionsOpen] = React.useState(false);
+  const selectedModelLabel = selectedModel
+    ? (catalogModelsForAgent.find((m) => m.slug === selectedModel)?.shortName ??
+      catalogModelsForAgent.find((m) => m.slug === selectedModel)?.name ??
+      selectedModel)
+    : null;
 
   // A router- or Grok-served model is keyless → its account chip has no effect;
   // dim the row AND drop the account on launch so a stale pick can't reattach a
@@ -436,7 +447,35 @@ const AgentRow: React.FC<{ agent: RegistryEntry; projectPath?: string }> = ({
       >
         {agent.name}
       </DropdownItem>
-      {showModelChips ? (
+      <button
+        type="button"
+        aria-expanded={optionsOpen}
+        onClick={(event) => {
+          event.stopPropagation();
+          setOptionsOpen((open) => !open);
+        }}
+        className="mb-1 ml-8 mr-2 flex max-w-[calc(100%-2.5rem)] items-center gap-1 rounded px-1 py-0.5 text-left text-[11px] text-neutral-500 transition-colors hover:bg-neutral-800/60 hover:text-neutral-300"
+        title={optionsOpen ? "Hide launch options" : "Launch options"}
+      >
+        <SlidersHorizontal size={11} className="shrink-0" aria-hidden />
+        <span className="min-w-0 truncate">
+          {[
+            managed.length > 0
+              ? (options.find((o) => o.id === launchAccountId)?.label ?? "System")
+              : null,
+            RUNTIME_MODE_LABELS[runtimeMode],
+            selectedModelLabel
+          ]
+            .filter((part): part is string => Boolean(part))
+            .join(" · ")}
+        </span>
+        <ChevronDown
+          size={11}
+          className={cn("shrink-0 transition-transform", optionsOpen && "rotate-180")}
+          aria-hidden
+        />
+      </button>
+      {optionsOpen && showModelChips ? (
         <div
           className="mb-1.5 ml-8 mr-2 flex flex-col gap-1"
           onClick={(event) => event.stopPropagation()}
@@ -488,6 +527,7 @@ const AgentRow: React.FC<{ agent: RegistryEntry; projectPath?: string }> = ({
       {/* Permission mode (§4.4). Every provider expresses it as launch
           configuration, so it is picked BEFORE the session exists; changing it
           later restarts the session, which the composer's own chip owns. */}
+      {optionsOpen ? (
       <div
         className="mb-1.5 ml-8 mr-2 flex flex-wrap gap-1"
         onClick={(event) => event.stopPropagation()}
@@ -511,7 +551,8 @@ const AgentRow: React.FC<{ agent: RegistryEntry; projectPath?: string }> = ({
           </button>
         ))}
       </div>
-      {managed.length > 0 ? (
+      ) : null}
+      {optionsOpen && managed.length > 0 ? (
         <div
           className={cn(
             "mb-1.5 ml-8 mr-2 flex flex-wrap gap-1 transition-opacity",
