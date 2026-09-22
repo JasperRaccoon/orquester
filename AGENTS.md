@@ -355,11 +355,28 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   started from in `/health` (`support/code-stamp.ts` reads `.git/HEAD` without the git binary) and
   the daemon compares it with its own at boot, so a code-only deploy replaces the host as soon as
   no turn is active. An unreadable stamp on either side never restarts anything.
-- **A fresh host must not answer `GET /providers` with `[]` for five minutes.** The snapshot
-  registry probes on demand (its first watcher) and on an interval; the first watcher primes every
-  provider it has no cached snapshot for at once, otherwise every launcher shows "Still loading
-  this agent's models" until the interval fires. `POST /api/agent/providers/:id/refresh` is the
-  manual escape hatch.
+- **A fresh host must not answer `GET /providers` with `[]` for five minutes.** Three layers, all
+  in `agent-host/orchestration/provider-snapshots.ts`, ported from T3 (`makeManagedServerProvider`
+  + `ProviderRegistry`). **(1) A pending seed, synchronously at construction** — before the cache
+  is read and before any probe, every adapter's `pendingSnapshot()`
+  (`agent-host/adapters/pending.ts`, wired through `ADAPTER_PENDING_SNAPSHOTS`) supplies a row with
+  `status:"unknown"`, `auth:{status:"unknown"}`, "… has not been checked in this session yet." and
+  the best catalogue it can name without I/O (Claude's `FALLBACK_CLAUDE_MODELS` family aliases,
+  Grok's two; Codex/OpenCode read theirs off a live server and honestly answer `[]`). A pending row
+  is **never `status:"error"`** — that spelling makes the client raise "sign in again" for a
+  provider nobody has looked at — and is never persisted or hydrated. **(2) The disk cache is
+  correlated, not just keyed**: `provider-snapshots.json` is v2, each row `{identity, snapshot}`
+  with `{adapterId, hostProtocolVersion, binPath, version}` inside the file, and a row hydrates
+  only when the adapter id agrees in all three places, the protocol version matches and the CLI is
+  still at the same path — so a cache written before an `npm install -g` moved the binary is
+  discarded rather than rendered. A correlated row overrides the pending seed; a v1 identity-less
+  payload is dropped. **(3) The registry forces a probe of every provider at boot itself**
+  (`startBootRefresh()`), called from `main.ts` after `host.openGate()` and never awaited — a probe
+  must never delay readiness. The 5-minute interval is only a top-up and stays gated on a live
+  watcher; the old first-watcher priming survives as a no-op fallback.
+  `POST /api/agent/providers/:id/refresh` is the manual escape hatch. Client side nothing branches
+  on `status`: `resolveLaunchModel` takes only `models`, so a pending snapshot **with** a catalogue
+  is launchable and "Still loading this agent's models" means the catalogue is genuinely empty.
 - **The provider probe runs under the daemon user's own login.** `auth.status` from the host
   therefore describes the system home, which may be stale while every managed account is fine.
   The daemon overlays it on the way out (`agent-chat/provider-auth-overlay.ts`): a family with at

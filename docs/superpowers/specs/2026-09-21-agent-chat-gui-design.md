@@ -312,6 +312,58 @@ for a version, longer for an auth check that may touch disk or network.
 
 *T3: `apps/server/src/provider/makeManagedServerProvider.ts:248-283` — the interval loop, re-reading its interval each tick and racing a settings change against the sleep; `:64` + `:174-179` — refreshes serialised by a one-permit semaphore; `:129-152` — identical settings return the cache without probing; `:207-221` + `:264-271` — the demand gate; `packages/contracts/src/settings.ts:921` + `:1150-1153` — a 5-minute default, user-configurable; `apps/server/src/provider/providerStatusCache.ts:108-123` — the per-instance on-disk snapshot, with identity carried inside the file because "the filename alone is not trusted as a routing key"; `apps/server/src/provider/providerSnapshot.ts:23-25` — 4 s generic and 10 s auth probe timeouts*
 
+*Built: **a fresh host never answers `GET /providers` with `[]`, in three
+layers.** As first shipped, the registry started empty and only the 5-minute
+interval filled it, so after the 2026-09-22 deploy every launcher on vps-a/vps-b
+read "Still loading this agent's models" for five minutes and no chat could
+open. T3 never has that window, and its three mechanisms are adopted whole
+(`apps/daemon/src/agent-host/orchestration/provider-snapshots.ts`):*
+
+1. ***A pending seed, synchronously at construction** — before `load()` and
+   before any probe, the registry stores one snapshot per adapter from
+   `ADAPTER_PENDING_SNAPSHOTS` (`adapters/pending.ts`, and a `pendingSnapshot()`
+   on `AgentAdapter` so a new adapter cannot forget it). It carries
+   `status:"unknown"` (T3's `"warning"` has no member here), `auth:{status:
+   "unknown"}`, the sentence "… provider status has not been checked in this
+   session yet.", and **the best catalogue the adapter can name without I/O**:
+   Claude's bundled family aliases (`FALLBACK_CLAUDE_MODELS` — `default`,
+   `opus`, `sonnet`, `haiku`, `fable`) and Grok's two, so those launchers work
+   on a cold host. Codex and OpenCode read their catalogues off a live server
+   and answer `[]`; their row exists (the provider is listed, not missing) and
+   layers two and three close their window. **Never `status:"error"`** — that
+   would make §7.7's toast fire for a provider nobody has looked at. A pending
+   row is never persisted and never hydrated.
+   *T3: `makeManagedServerProvider.ts:69-73`; `Layers/ClaudeProvider.ts:595-640`.*
+2. ***The disk cache is correlated, not merely keyed.** The cache file is v2:
+   each row is `{identity, snapshot}` where identity is `{adapterId,
+   hostProtocolVersion, binPath, version}`. A row hydrates only when its
+   adapter id agrees in all three places (map key, identity, snapshot), the
+   protocol version matches, and the `binPath` still resolves to the same
+   executable — so a cache written before an `npm install -g` moved the binary
+   is discarded rather than rendered. A v1 identity-less payload is discarded
+   outright. A correlated row **overrides** the pending seed.
+   *T3: `Layers/ProviderRegistry.ts:292-352` — "old identity-less payloads are
+   discarded"; `:743-751` — "on-disk state wins where present and pending
+   fallbacks fill the gaps"; `providerStatusCache.ts:115-160`.*
+3. ***The registry forces one probe of every provider at boot itself**
+   (`startBootRefresh()`), called by `main.ts` **after** `host.openGate()` and
+   **never awaited**: the socket is already bound and readiness already
+   announced, so a probe's deadline can never delay either. Serialised through
+   the same one-permit chain, and idempotent. The 5-minute interval is now only
+   a top-up and stays demand-gated on a live watcher; the first-watcher priming
+   that was the stopgap is kept purely as a no-op fallback for a registry
+   nobody kicked.*
+   *T3: `makeManagedServerProvider.ts:280-284` —
+   `applySnapshot(initialSettings, {forceRefresh: true})` under
+   `Effect.forkScoped`.*
+
+*Client side nothing branches on `status`: `resolveLaunchModel`
+(`packages/ui/src/lib/launch-models.ts`) takes `Pick<ProviderSnapshot,
+"models">`, so a pending snapshot with a catalogue is launchable exactly like
+any other (the host validates `modelSelection.model` at thread creation), and
+"Still loading this agent's models" is reserved for a genuinely empty
+catalogue.*
+
 New runtime dependencies for the daemon package: `@anthropic-ai/claude-agent-sdk`,
 `@opencode-ai/sdk`. Both are plain npm packages.
 
@@ -545,6 +597,26 @@ against the installed binary (`apps/daemon/src/agent-host/adapters/claude/models
 CLI's effort list never names it. (2) The refresh takes an optional account `home`: run without
 one the probe answers under the **host** identity, and the account chip, label, email and usage
 bars then describe the daemon user's login rather than the thread's account.*
+
+*Built: `refresh()` has a **synchronous sibling, `pendingSnapshot(checkedAt)`**
+— the §3.2 layer-one seed. It produces the same `ProviderSnapshot` shape with
+no I/O at all: `installed:false`, `version:null`, `status:"unknown"`,
+`auth:{status:"unknown"}`, the "… has not been checked in this session yet."
+message, and the best catalogue the adapter can name without asking the CLI.
+That last part is where T3's bundled manifest survives in this codebase after
+change (1) above dropped it as the live source: `FALLBACK_CLAUDE_MODELS` keeps
+the model **family aliases** (`default`/`opus`/`sonnet`/`haiku`/`fable`, never
+T3's dated slugs, which go stale against the installed binary) purely as the
+pre-probe and probe-failed fallback that the live list replaces wholesale.
+Grok ships `FALLBACK_GROK_MODELS`; Codex and OpenCode enumerate nothing
+statically and answer `[]`. It is a hard rule that a pending snapshot is never
+`status:"error"` — §7.7's toast reads `error` with non-authenticated auth as
+"sign in again", and a provider nobody has probed has not failed to
+authenticate. `adapters/pending.ts` carries both rules and `pending.test.ts`
+asserts them across every adapter at once.
+*T3: `apps/server/src/provider/Layers/ClaudeProvider.ts:595-640`
+(`makePendingClaudeProvider`); `makeManagedServerProvider.ts:69-73`
+(`initialSnapshot`).**
 
 The snapshot's sub-shapes are contracts the client binds to, so pin them here:
 
