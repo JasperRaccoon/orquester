@@ -603,6 +603,9 @@ function reduce(state: ThreadFoldState, event: DomainEvent): Mutation {
         startedAt: payload.turnId === null ? null : event.occurredAt,
         completedAt: settled?.completedAt ?? null,
         assistantMessageId: settled?.assistantMessageId ?? null,
+        // The prompt that opened the turn. A replayed turn whose prompt the
+        // projection could not name carries `""`, which is no id at all.
+        ...(payload.messageId.length > 0 ? { userMessageId: payload.messageId } : {}),
         ...(settled?.tokenUsage !== undefined ? { tokenUsage: settled.tokenUsage } : {}),
         interactionMode: payload.interactionMode,
         ...(payload.modelSelection?.model !== undefined

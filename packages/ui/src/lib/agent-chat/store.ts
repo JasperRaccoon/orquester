@@ -770,6 +770,13 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         }
       },
 
+      async rewindTo(input) {
+        // Contract stub: the full flow (wait for the truncation, return the
+        // message to the composer) lands with the rewind work; until then a
+        // rewind is the bare revert.
+        await actions.revert({ targetTurnCount: input.targetTurnCount });
+      },
+
       async compact() {
         await command("compact", {});
       },
