@@ -5,6 +5,7 @@ import type { RuntimeSubagent, RuntimeSubagentStatus } from "@orquester/api/agen
 
 import {
   agentActivityText,
+  backgroundShellActivityText,
   deriveAgentSpawnSummary,
   deriveLivenessBanner,
   deriveRosterDockView,
@@ -77,6 +78,59 @@ describe("agentActivityText", () => {
 
   it("is null when nothing was reported", () => {
     assert.equal(agentActivityText(agent("a", "idle")), null);
+  });
+});
+
+describe("a background shell's activity line", () => {
+  const shell = (
+    status: RuntimeSubagentStatus,
+    overrides: Partial<RuntimeSubagent> = {}
+  ): RuntimeSubagent => agent("bg", status, { agentKind: "background", ...overrides });
+
+  it("says what a shell does — 'Running' — and never borrows the agent precedence", () => {
+    assert.equal(backgroundShellActivityText(shell("running")), "Running");
+    assert.equal(backgroundShellActivityText(shell("pending")), "Running");
+    assert.equal(backgroundShellActivityText(shell("waiting")), "Running");
+    // A provider that reports its own progress still wins: it is more specific
+    // than the state word.
+    assert.equal(
+      backgroundShellActivityText(shell("running", { progress: "  installing deps  " })),
+      "installing deps"
+    );
+  });
+
+  it("leads with the exit code once it settles, not with the provider's sentence", () => {
+    assert.equal(
+      backgroundShellActivityText(
+        shell("completed", {
+          exitCode: 0,
+          result: 'Background command "pnpm test" completed (exit code 0)'
+        })
+      ),
+      "Exited with code 0"
+    );
+    assert.equal(
+      backgroundShellActivityText(shell("failed", { exitCode: 2, error: "boom" })),
+      "Failed · exit 2"
+    );
+    assert.equal(backgroundShellActivityText(shell("interrupted")), "Stopped");
+    assert.equal(backgroundShellActivityText(shell("cancelled")), "Stopped");
+  });
+
+  it("degrades to the state alone when no exit code was ever reported", () => {
+    assert.equal(backgroundShellActivityText(shell("completed")), "Exited");
+    assert.equal(backgroundShellActivityText(shell("failed")), "Failed");
+    assert.equal(backgroundShellActivityText(shell("idle")), "Idle");
+  });
+
+  it("is what agentActivityText answers for a background row, and only for one", () => {
+    assert.equal(agentActivityText(shell("running")), "Running");
+    assert.equal(
+      agentActivityText(shell("completed", { exitCode: 1, result: "ignored" })),
+      "Exited with code 1"
+    );
+    // An agent row keeps the T3 precedence, including its "nothing yet" null.
+    assert.equal(agentActivityText(agent("a", "running")), null);
   });
 });
 

@@ -122,6 +122,20 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
     emptyThreadPanel !== undefined &&
     emptyThreadPanel !== null;
 
+  /**
+   * This surface is a **background shell's** drill-in (§7.6).
+   *
+   * Read off the roster rather than taken as a prop: the drill-in already
+   * forwards the roster for its spawn rows, and the kind of a row is the
+   * roster's own fact. It changes two things — the empty copy (a shell prints
+   * output, it does not "report"), and the shell variant of a tool row's
+   * output pane, which is the whole content of this view rather than a detail
+   * hidden under a label.
+   */
+  const backgroundShell =
+    agentId !== undefined &&
+    (roster ?? []).some((candidate) => candidate.id === agentId && candidate.agentKind === "background");
+
   const scrollerRef = React.useRef<HTMLDivElement>(null);
   const contentRef = React.useRef<HTMLDivElement>(null);
   /**
@@ -216,9 +230,11 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
       onSendQueuedNow: effectiveReadOnly ? NOOP_STRING : onSendQueuedNow,
       onReturnQueuedToComposer: effectiveReadOnly ? NOOP_STRING : onReturnQueuedToComposer,
       canBackgroundTasks: !effectiveReadOnly && canBackgroundTasks && onBackgroundTool !== undefined,
-      onBackgroundTool: effectiveReadOnly || !onBackgroundTool ? NOOP_STRING : onBackgroundTool
+      onBackgroundTool: effectiveReadOnly || !onBackgroundTool ? NOOP_STRING : onBackgroundTool,
+      backgroundShell
     }),
     [
+      backgroundShell,
       canBackgroundTasks,
       canRevert,
       disclosureSets,
@@ -637,7 +653,9 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
               <div className="mx-auto w-full max-w-3xl py-12 text-center text-sm italic text-neutral-600">
                 {agentId === undefined
                   ? "No messages yet."
-                  : "This agent has not reported anything yet."}
+                  : backgroundShell
+                    ? "No output yet."
+                    : "This agent has not reported anything yet."}
               </div>
             ) : null}
             {/* The footer spacer reserves exactly what the composer overlay hides. */}

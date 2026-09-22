@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { RuntimeSubagent, RuntimeSubagentStatus } from "@orquester/api/agent-chat";
 import {
   ROSTER_COLLAPSED_ROWS,
+  isBackgroundShellRow,
   isFinishedRow,
   isLiveBackgroundRow,
   rosterDisplayOrder,
@@ -321,22 +322,93 @@ test("the model label strips provider noise and appends effort", () => {
 });
 
 test("metrics always hold the token slot so the row's shape cannot change", () => {
-  assert.deepEqual(rosterRowMetrics({ model: null, effort: null, usage: null, activationCount: 1 }), [
-    "— tok"
-  ]);
   assert.deepEqual(
     rosterRowMetrics({
+      agentKind: "agent",
+      model: null,
+      effort: null,
+      usage: null,
+      activationCount: 1,
+      exitCode: null
+    }),
+    ["— tok"]
+  );
+  assert.deepEqual(
+    rosterRowMetrics({
+      agentKind: "agent",
       model: "claude-sonnet-4-20250514",
       effort: null,
       usage: { totalTokens: 4_200, toolUses: 7 },
-      activationCount: 3
+      activationCount: 3,
+      exitCode: null
     }),
     ["sonnet-4", "4.2k tok", "7 tools", "run 3"]
   );
 });
 
 test("the role chip is dropped when it repeats the title", () => {
-  assert.equal(rosterRoleChip({ title: "Reviewer", role: "reviewer" }), null);
-  assert.equal(rosterRoleChip({ title: "Reviewer", role: "  " }), null);
-  assert.equal(rosterRoleChip({ title: "Find the bug", role: "explorer" }), "explorer");
+  assert.equal(rosterRoleChip({ agentKind: "agent", title: "Reviewer", role: "reviewer" }), null);
+  assert.equal(rosterRoleChip({ agentKind: "agent", title: "Reviewer", role: "  " }), null);
+  assert.equal(
+    rosterRoleChip({ agentKind: "agent", title: "Find the bug", role: "explorer" }),
+    "explorer"
+  );
+});
+
+// ---------------------------------------------------------------------------
+// A background shell reads as a shell, not as a subagent (§7.6)
+// ---------------------------------------------------------------------------
+
+test("a background row is a shell row, live or settled", () => {
+  assert.equal(isBackgroundShellRow(agent("bg", { agentKind: "background" })), true);
+  assert.equal(
+    isBackgroundShellRow(agent("bg", { agentKind: "background", status: "completed" })),
+    true,
+    "a settled shell is still a shell — unlike the roster's live-only exemption"
+  );
+  assert.equal(isBackgroundShellRow(agent("a")), false);
+});
+
+test("the shell's chip says 'shell', whatever role the provider reported", () => {
+  const shell = agent("bg", { agentKind: "background", title: "run the suite" });
+  assert.equal(rosterRoleChip(shell), "shell");
+  assert.equal(rosterRoleChip({ ...shell, role: "bash" }), "shell");
+  // Even a provider that names the role "shell" gets the chip: the title-repeat
+  // suppression is about an agent's role, not about the kind of row this is.
+  assert.equal(rosterRoleChip({ ...shell, title: "shell" }), "shell");
+});
+
+test("the shell's metrics line names the row, never a model or a token slot", () => {
+  const shell = agent("bg", {
+    agentKind: "background",
+    title: "run the suite",
+    model: "claude-opus-4-20250514",
+    usage: { totalTokens: 4_200 }
+  });
+  const exited: RuntimeSubagent = { ...shell, status: "completed", exitCode: 0 };
+  const failed: RuntimeSubagent = { ...shell, status: "failed", exitCode: 127 };
+  assert.deepEqual(rosterRowMetrics(shell), ["background shell"]);
+  assert.deepEqual(rosterRowMetrics(exited), ["background shell", "exit 0"]);
+  assert.deepEqual(rosterRowMetrics(failed), ["background shell", "exit 127"]);
+});
+
+test("the shell's activity line is its state, and never carries the tool marker", () => {
+  const shell = agent("bg", { agentKind: "background", title: "run the suite" });
+  assert.equal(agentActivityText(shell), "Running");
+  assert.equal(
+    agentActivityText({ ...shell, progress: "step 2", lastToolName: "step 2" }),
+    "step 2",
+    "the ▸ marker says 'this is a tool name'; a shell has no tools"
+  );
+  assert.equal(
+    agentActivityText({
+      ...shell,
+      status: "completed",
+      exitCode: 0,
+      result: 'Background command "pnpm test" completed (exit code 0)'
+    }),
+    "Exited with code 0"
+  );
+  assert.equal(agentActivityText({ ...shell, status: "failed", exitCode: 1 }), "Failed · exit 1");
+  assert.equal(agentActivityText({ ...shell, status: "interrupted" }), "Stopped");
 });

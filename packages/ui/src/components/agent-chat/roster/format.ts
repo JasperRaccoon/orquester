@@ -19,6 +19,12 @@ import {
 /** U+25B8 + space. The mark that says "this line names a tool, not a summary". */
 export const TOOL_PREFIX = "▸ ";
 
+/** The chip that tells a shell row from an agent row at a glance (§7.6). */
+export const BACKGROUND_SHELL_CHIP = "shell";
+
+/** The shell row's third line — where an agent row names its model. */
+export const BACKGROUND_SHELL_METRIC = "background shell";
+
 /**
  * The model chip's text: the provider's slug with the noise stripped, plus the
  * effort when there is one.
@@ -76,10 +82,17 @@ export const isLiveStatus = isActiveSubagentStatus;
  * *T3: `AgentsPanel.tsx:120-137`.*
  */
 export function agentActivityText(
-  agent: Pick<RuntimeSubagent, "status" | "progress" | "lastToolName" | "result" | "error">
+  agent: Pick<
+    RuntimeSubagent,
+    "agentKind" | "status" | "progress" | "lastToolName" | "result" | "error" | "exitCode"
+  >
 ): string | null {
   const text = activityTextFor(agent as RuntimeSubagent);
   if (text === null) return null;
+  // A shell has no tools, so the `▸ ` marker would be a lie about what the
+  // line names — and a shell whose progress happens to equal a tool name is
+  // exactly how it would sneak in.
+  if (agent.agentKind === "background") return text;
   const tool = agent.lastToolName?.trim();
   return tool !== undefined && tool.length > 0 && text === tool ? `${TOOL_PREFIX}${text}` : text;
 }
@@ -93,8 +106,19 @@ export function agentActivityText(
  * *T3: `AgentsPanel.tsx:150-156`.*
  */
 export function rosterRowMetrics(
-  agent: Pick<RuntimeSubagent, "model" | "effort" | "usage" | "activationCount">
+  agent: Pick<
+    RuntimeSubagent,
+    "agentKind" | "model" | "effort" | "usage" | "activationCount" | "exitCode"
+  >
 ): string[] {
+  // A shell has no model and spends no tokens: the launching agent's model
+  // leaked onto the row (and `— tok` beside it) is precisely what made a
+  // background command read as a subagent. The line says what the row IS.
+  if (agent.agentKind === "background") {
+    return typeof agent.exitCode === "number"
+      ? [BACKGROUND_SHELL_METRIC, `exit ${agent.exitCode}`]
+      : [BACKGROUND_SHELL_METRIC];
+  }
   const parts: string[] = [];
   const model = formatSubagentModelLabel(agent.model, agent.effort);
   if (model) parts.push(model);
@@ -108,11 +132,18 @@ export function rosterRowMetrics(
  * The role chip, suppressed when it case-folds equal to the title — no
  * "Reviewer · reviewer".
  *
+ * A background shell always chips {@link BACKGROUND_SHELL_CHIP} instead: the
+ * Terminal glyph alone was too quiet to tell a shell from a subagent at a
+ * glance, and the chip slot is the one place on the row that says *what kind
+ * of thing this is*. It is not suppressed against the title, because it names
+ * the row's kind rather than a role the provider reported.
+ *
  * *T3: `AgentsPanel.tsx:146-149`.*
  */
 export function rosterRoleChip(
-  agent: Pick<RuntimeSubagent, "title" | "role">
+  agent: Pick<RuntimeSubagent, "agentKind" | "title" | "role">
 ): string | null {
+  if (agent.agentKind === "background") return BACKGROUND_SHELL_CHIP;
   const role = agent.role?.trim();
   if (!role) return null;
   return role.toLocaleLowerCase() === agent.title.trim().toLocaleLowerCase() ? null : role;
