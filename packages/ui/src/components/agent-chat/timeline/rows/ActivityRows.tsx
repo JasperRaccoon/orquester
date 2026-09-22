@@ -1,9 +1,12 @@
 import React from "react";
-import { ArrowDownToLine, X } from "lucide-react";
+import { ArrowDownToLine, UserRound, X } from "lucide-react";
 
 import type { RuntimeSubagent } from "@orquester/api";
 
 import { cn } from "../../../../lib/cn";
+import { shortAccountLabel } from "../../../../lib/account-label";
+import { identityChangeSummary } from "../../../../lib/agent-chat/account-switch";
+import { useAppStore } from "../../../../store/app";
 import type { AgentChatTimelineRow, WorkLogEntry } from "../../../../lib/agent-chat/contracts";
 import {
   DisclosureChevron,
@@ -31,6 +34,7 @@ import {
   showDestructiveRowStyle,
   summaryKindIconName,
   workEntryIsActiveTurnActivity,
+  workEntryIsIdentityChange,
   workEntryIsRerouteNotice,
   type RowGlyphName
 } from "../row-chrome";
@@ -248,6 +252,39 @@ function RerouteNoticeRow({ entry }: { entry: WorkLogEntry }): React.ReactElemen
   );
 }
 
+/**
+ * "From here on, another identity" (§3.4).
+ *
+ * The label is resolved against the LIVE account list rather than read off the
+ * event: the host has no labels to write, and an account renamed later should
+ * read under its current name. Reading the store in this leaf is deliberate —
+ * rows are memoised on their row object, so a prop would defeat that memo for
+ * every row on every account refresh.
+ */
+function IdentityNoticeRow({ entry }: { entry: WorkLogEntry }): React.ReactElement {
+  const accounts = useAppStore((state) => state.agentAccounts?.accounts);
+  const label = identityChangeSummary({
+    payload: entry.accountSwitch,
+    accounts,
+    shortLabel: shortAccountLabel
+  });
+  return (
+    <div
+      data-activity-id={entry.id}
+      className={cn(
+        "my-0.5 flex min-w-0 items-start gap-1.5 rounded-md border px-2 py-1 text-xs leading-4",
+        TONE_BAND.info,
+        TONE_BAND_TEXT.info
+      )}
+    >
+      <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+        <UserRound size={12} aria-hidden />
+      </span>
+      <span className="min-w-0 flex-1 break-words">{label}</span>
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // The tool row
 // ---------------------------------------------------------------------------
@@ -273,6 +310,8 @@ export const ToolEntryRow = React.memo(function ToolEntryRow({
   // user picked is not the model that answered, and that is a statement about
   // the thread, not an action the agent took.
   if (reroute) return <RerouteNoticeRow entry={entry} />;
+  // The §3.4 account switch is the same kind of statement.
+  if (workEntryIsIdentityChange(entry)) return <IdentityNoticeRow entry={entry} />;
 
   const iconName: RowGlyphName = warning || destructive ? "circle-alert" : workEntryIconName(entry);
   const label = displayLabel ?? workEntryDisplayLabel(entry, ctx.workspaceRoot);

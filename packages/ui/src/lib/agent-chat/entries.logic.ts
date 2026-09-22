@@ -22,6 +22,7 @@
  */
 
 import type { ThreadActivityItem, ThreadItem, ThreadMessageItem } from "@orquester/api/agent-chat";
+import { IDENTITY_CHANGED_ACTIVITY_KIND } from "@orquester/api/agent-chat";
 
 import type {
   CompactionMarkerState,
@@ -301,6 +302,18 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
       ...compactionTokens(activity),
       ...(error ? { error } : {})
     };
+  }
+
+  // §3.4's account switch: ids only, the label resolves at render time.
+  if (activity.activityKind === IDENTITY_CHANGED_ACTIVITY_KIND) {
+    const identity = asRecord(activity.payload);
+    if (identity && typeof identity.accountId === "string") {
+      const previousAccountId = asTrimmedString(identity.previousAccountId);
+      entry.accountSwitch = {
+        accountId: identity.accountId,
+        ...(previousAccountId ? { previousAccountId } : {})
+      };
+    }
   }
 
   const collapseKey = deriveToolLifecycleCollapseKey(entry);

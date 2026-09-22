@@ -87,6 +87,36 @@ describe("workLogEntryFromActivity", () => {
     );
   });
 
+  it("promotes the §3.4 account switch as IDS, never a label", () => {
+    assert.deepEqual(
+      workLogEntryFromActivity(
+        activity("session.identity-changed", {
+          accountId: "acc-2",
+          home: "account",
+          previousAccountId: "acc-1"
+        })
+      ).accountSwitch,
+      { accountId: "acc-2", previousAccountId: "acc-1" }
+    );
+    // The system identity is an EMPTY id, not an absent one.
+    assert.deepEqual(
+      workLogEntryFromActivity(
+        activity("session.identity-changed", { accountId: "", home: "system" })
+      ).accountSwitch,
+      { accountId: "" }
+    );
+    // A payload from a build that did not carry the field leaves the row bare
+    // rather than inventing one.
+    assert.equal(
+      workLogEntryFromActivity(activity("session.identity-changed", {})).accountSwitch,
+      undefined
+    );
+    assert.equal(
+      workLogEntryFromActivity(activity("tool.completed", { accountId: "acc-2" })).accountSwitch,
+      undefined
+    );
+  });
+
   it("reads an old marker with no state as `compacted` — the only thing old logs hold", () => {
     assert.deepEqual(
       workLogEntryFromActivity(activity("context-compaction", { beforeTokens: 9 })).compaction,

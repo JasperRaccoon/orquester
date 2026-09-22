@@ -557,13 +557,24 @@ function reduce(state: ThreadFoldState, event: DomainEvent): Mutation {
 
     case "thread.meta-updated": {
       if (state.head === null) return {};
-      const { title, modelSelection } = event.payload;
-      if (title === undefined && modelSelection === undefined) return {};
+      const { title, modelSelection, accountId, home } = event.payload;
+      if (
+        title === undefined &&
+        modelSelection === undefined &&
+        accountId === undefined &&
+        home === undefined
+      ) {
+        return {};
+      }
       return {
         head: {
           ...state.head,
           ...(title !== undefined ? { title } : {}),
-          ...(modelSelection !== undefined ? { modelSelection } : {})
+          ...(modelSelection !== undefined ? { modelSelection } : {}),
+          // §3.4's account switch. Field-wise: a rename must not clear the
+          // identity, and an identity change must not clear the title.
+          ...(accountId !== undefined ? { accountId } : {}),
+          ...(home !== undefined ? { home } : {})
         }
       };
     }

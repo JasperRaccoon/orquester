@@ -44,6 +44,10 @@ function fakeTransport(): {
       posted.push({ name, body: body as unknown as Record<string, unknown> });
       return { seq: posted.length };
     },
+    // §3.4's account switch rides its own daemon-owned route.
+    async switchAccount() {
+      return { seq: 0 };
+    },
     async read() {
       return { kind: "snapshot", thread: snapshot() };
     },

@@ -548,9 +548,20 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       commandId = newId()
     ): Promise<void> => {
       const payload = { ...body, commandId } as AgentChatCommandBodies[TName];
+      await withCommandRetries(() => deps.transport.command(sessionId, name, payload));
+    };
+
+    /**
+     * The retry + error-banner half of {@link command}, shared with the §3.4
+     * account switch — which posts to a daemon-owned route rather than a §6.2
+     * command path but carries the same `commandId` and the same envelope, so
+     * it must retry on the same rules. `run` is re-invoked with the SAME body,
+     * never a re-minted id.
+     */
+    const withCommandRetries = async (run: () => Promise<unknown>): Promise<void> => {
       for (let attempt = 0; ; attempt += 1) {
         try {
-          await deps.transport.command(sessionId, name, payload);
+          await run();
           return;
         } catch (error) {
           // §6.6: an in-flight command whose response was lost is retried with
@@ -763,6 +774,17 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
           ...(input.runtimeMode ? { runtimeMode: input.runtimeMode as RuntimeMode } : {}),
           ...(input.modelSelection ? { modelSelection: input.modelSelection as ModelSelection } : {})
         });
+      },
+
+      async setAccount(input) {
+        // §3.4: applied on the NEXT message. Nothing is optimistic here — the
+        // head's identity arrives as `thread.meta-updated` on the stream and
+        // the tab's as `session.updated`, so a refusal leaves the chip exactly
+        // where it was.
+        const commandId = newId();
+        await withCommandRetries(() =>
+          deps.transport.switchAccount(sessionId, { commandId, accountId: input.accountId })
+        );
       },
 
       async stopSession() {

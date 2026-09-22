@@ -1,0 +1,86 @@
+/**
+ * Render smoke checks for the account chip (§3.4's account switch, §7.4).
+ *
+ * `account-switch.test.ts` owns the rules (the gate, the options, the labels);
+ * this exists because "the chip is a disabled button while the agent is busy",
+ * "it carries the `account` token so one keybinding handler can address it"
+ * and "an OpenCode thread still gets a plain label, not a control that could
+ * only refuse" are claims about *markup* — and a React prop mistake typechecks
+ * perfectly while rendering nothing.
+ *
+ * Static markup only — no DOM, no effects — like every other `*.check.ts`.
+ */
+
+import assert from "node:assert/strict";
+import { createElement, type ReactElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+
+import type { ChatAccountOption } from "../../../lib/agent-chat/account-switch";
+import { AccountChip } from "./ComposerChips";
+
+function render(element: ReactElement): string {
+  return renderToStaticMarkup(element);
+}
+
+const OPTIONS: ChatAccountOption[] = [
+  { id: "system", label: "System", needsReauth: false },
+  { id: "acc-1", label: "one", needsReauth: false }
+];
+
+// ---------------------------------------------------------------------------
+// The picker
+// ---------------------------------------------------------------------------
+
+const idle = render(
+  createElement(AccountChip, {
+    label: "one",
+    options: OPTIONS,
+    selectedId: "acc-1",
+    canSwitch: true,
+    onChange: () => undefined
+  })
+);
+assert.ok(idle.includes("<button"), "an idle thread's chip is a control, not a label");
+assert.ok(
+  idle.includes('data-composer-shortcut="account"'),
+  "the token is what makes the chip addressable by the one keybinding handler"
+);
+// The HTML attribute, not the `disabled:` Tailwind variants in the class list.
+const DISABLED_ATTR = /\sdisabled=""/;
+assert.ok(!DISABLED_ATTR.test(idle), "nothing in flight ⇒ the picker opens");
+assert.ok(idle.includes("one"), "the chip shows the account it is running as");
+
+const busy = render(
+  createElement(AccountChip, {
+    label: "one",
+    options: OPTIONS,
+    selectedId: "acc-1",
+    canSwitch: false,
+    onChange: () => undefined
+  })
+);
+assert.ok(busy.includes("<button"), "still a control, so the tooltip can explain itself");
+assert.ok(DISABLED_ATTR.test(busy), "a turn, a request, a queue or a revert closes the picker");
+assert.ok(
+  busy.includes("Available when the agent is idle"),
+  "a disabled control must say why it is disabled"
+);
+
+// ---------------------------------------------------------------------------
+// The label-only fallback
+// ---------------------------------------------------------------------------
+
+// An OpenCode thread: its server owns the identity, so there is nothing to
+// pick and the chip stays what it always was.
+const label = render(createElement(AccountChip, { label: "System" }));
+assert.ok(!label.includes("<button"), "no control where a switch is impossible");
+assert.ok(!label.includes("data-composer-shortcut"), "and therefore no shortcut target");
+assert.ok(label.includes("Running as System"));
+
+// An empty option list is the same case — a menu of nothing is not a menu.
+const empty = render(
+  createElement(AccountChip, { label: "System", options: [], onChange: () => undefined })
+);
+assert.ok(!empty.includes("<button"));
+
+console.log("account-chip render checks passed");

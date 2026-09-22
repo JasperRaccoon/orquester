@@ -92,6 +92,19 @@ export interface ThreadCreatedPayload {
 export interface ThreadMetaUpdatedPayload {
   title?: string;
   modelSelection?: ModelSelection;
+  /**
+   * The managed account the thread now runs under, written by the daemon's
+   * `POST /api/sessions/:id/account` (§3.4 "account changed"). Empty string is
+   * the system identity, exactly as on `ThreadCreatedPayload`.
+   *
+   * Additive on purpose (§8 rollback boundary): an older build folds a log
+   * containing this event and simply ignores the field, keeping the identity
+   * `thread.created` recorded — which is the launch environment the older host
+   * would relaunch under anyway, since `launch.json` is what it actually reads.
+   */
+  accountId?: string;
+  /** The home KIND for that account. Never crosses the cliproxy boundary. */
+  home?: AccountHomeKind;
 }
 
 export interface ThreadRuntimeModeSetPayload {

@@ -155,6 +155,9 @@ export function ChatComposer({
   interactionMode,
   showPlanModeToggle,
   accountLabel,
+  accountOptions,
+  accountId,
+  accountSwitchEnabled,
   isTurnActive,
   hasPendingRequest,
   queue,
@@ -1290,7 +1293,28 @@ export function ChatComposer({
                   onChange={setPlanMode}
                 />
               ) : null}
-              {accountLabel ? <AccountChip label={accountLabel} /> : null}
+              {accountLabel ? (
+                <AccountChip
+                  label={accountLabel}
+                  {...(accountOptions ? { options: accountOptions } : {})}
+                  {...(accountId !== undefined ? { selectedId: accountId } : {})}
+                  canSwitch={accountSwitchEnabled === true && !reverting}
+                  {...(accountOptions
+                    ? {
+                        onChange: (next: string) => {
+                          void actions.setAccount({ accountId: next }).catch((error: unknown) => {
+                            setNotice(
+                              error instanceof Error
+                                ? error.message
+                                : "Could not switch the account."
+                            );
+                          });
+                        }
+                      }
+                    : {})}
+                  returnFocusTo={() => textareaRef.current}
+                />
+              ) : null}
             </div>
 
             <ComposerPrimaryActions

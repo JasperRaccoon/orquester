@@ -43,6 +43,10 @@ function fakeTransport(): {
     async command() {
       return { seq: 1 };
     },
+    // §3.4's account switch rides its own daemon-owned route.
+    async switchAccount() {
+      return { seq: 0 };
+    },
     async read() {
       counters.reads += 1;
       return { kind: "snapshot", thread: snapshot() };

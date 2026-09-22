@@ -10,6 +10,7 @@ import type {
 import { RUNTIME_MODES } from "@orquester/api/agent-chat";
 
 import { cn } from "../../../lib/cn";
+import type { ChatAccountOption } from "../../../lib/agent-chat/account-switch";
 import { Kbd } from "../primitives";
 import { ComposerMenuRow, ComposerPopover } from "./ComposerPopover";
 import {
@@ -29,10 +30,11 @@ import { shortcutLabelFor, type ComposerShortcutCommand } from "./composer-short
  *
  * **Every chip that does something is a `<button>` carrying a
  * `data-composer-shortcut` token**, which is what lets one keybinding handler
- * drive them all (see `composer-shortcuts.ts`). The account chip is the
- * exception and carries no token on purpose: the account is fixed at launch,
- * so it is a label, and a token that resolves to a control which cannot act
- * would swallow a keystroke and do nothing.
+ * drive them all (see `composer-shortcuts.ts`). The account chip carries one
+ * too now that it is a picker (§3.4), but no chord is bound to it — a token
+ * makes a control addressable, a chord is a separate decision (§7.4). Where a
+ * thread cannot switch accounts at all it stays the label it always was,
+ * because a control that could only refuse is worse than no control.
  */
 
 const CHIP =
@@ -384,23 +386,99 @@ export function PlanChip({
 
 export interface AccountChipProps {
   label: string;
+  /** Absent (or empty) makes the chip a plain label — see below. */
+  options?: readonly ChatAccountOption[];
+  /** The id currently selected; matched against `options`. */
+  selectedId?: string;
+  /** False while a turn, a request, a queue or a revert is in flight. */
+  canSwitch?: boolean;
+  onChange?: (accountId: string) => void;
+  returnFocusTo?: () => HTMLElement | null;
 }
 
+/** Why the chip is inert, in the one place the copy lives. */
+const ACCOUNT_BUSY_TITLE = "Available when the agent is idle";
+
 /**
- * The account, as a label.
+ * The account chip.
  *
- * Deliberately not a control and deliberately without a shortcut token: the
- * account a chat session runs under is fixed at launch (§3.2), so there is
- * nothing here to open.
+ * It is a **picker** (§3.4's account switch), gated on the thread being idle:
+ * the switch is applied on the next message by restarting the provider child,
+ * which is only safe when nothing is in flight. It carries a
+ * `data-composer-shortcut` token so the one keybinding handler can address it,
+ * but deliberately **no chord** (§7.4).
+ *
+ * With no `onChange` — an OpenCode thread, whose server owns the identity — it
+ * degrades to the label it has always been rather than offering a control that
+ * could only refuse.
  */
-export function AccountChip({ label }: AccountChipProps): React.ReactElement {
+export function AccountChip({
+  label,
+  options,
+  selectedId,
+  canSwitch = true,
+  onChange,
+  returnFocusTo
+}: AccountChipProps): React.ReactElement {
+  if (!onChange || !options || options.length === 0) {
+    return (
+      <span
+        title={`Running as ${label}`}
+        className="inline-flex h-7 max-w-40 items-center gap-1 px-2 text-xs text-neutral-500"
+      >
+        <UserRound size={12} aria-hidden className="shrink-0" />
+        <span className="truncate">{label}</span>
+      </span>
+    );
+  }
   return (
-    <span
-      title={`Running as ${label}`}
-      className="inline-flex h-7 max-w-40 items-center gap-1 px-2 text-xs text-neutral-500"
+    <ComposerPopover
+      label="Account"
+      width="w-72"
+      returnFocusTo={returnFocusTo}
+      renderTrigger={(triggerProps) => (
+        <button
+          {...triggerProps}
+          type="button"
+          disabled={!canSwitch}
+          data-composer-shortcut="account"
+          title={canSwitch ? `Running as ${label} — click to switch` : ACCOUNT_BUSY_TITLE}
+          className={cn(CHIP, "max-w-40")}
+        >
+          {chipContent({
+            icon: <UserRound size={12} aria-hidden />,
+            label: "Account",
+            value: label
+          })}
+        </button>
+      )}
     >
-      <UserRound size={12} aria-hidden className="shrink-0" />
-      <span className="truncate">{label}</span>
-    </span>
+      {(close) => (
+        <>
+          <div className="px-2 py-1 text-[11px] text-neutral-500">Account</div>
+          {options.map((option) => (
+            <ComposerMenuRow
+              key={option.id}
+              selected={option.id === selectedId}
+              hint={option.needsReauth ? "Signed out — sign in again to use it" : undefined}
+              trailing={
+                option.id === selectedId ? (
+                  <Check size={13} className="text-info" aria-hidden />
+                ) : undefined
+              }
+              onClick={() => {
+                close();
+                if (option.id !== selectedId) onChange(option.id);
+              }}
+            >
+              {option.label}
+            </ComposerMenuRow>
+          ))}
+          <p className="px-2 pb-1 pt-1.5 text-[11px] leading-snug text-neutral-500">
+            Applies to your next message. The conversation is kept.
+          </p>
+        </>
+      )}
+    </ComposerPopover>
   );
 }

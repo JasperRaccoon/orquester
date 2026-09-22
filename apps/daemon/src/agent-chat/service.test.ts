@@ -4,10 +4,18 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { test } from "node:test";
-import type { RegistryEntry } from "@orquester/api";
+import type { AgentAccount, RegistryEntry } from "@orquester/api";
 import { agentHostSocketPath, agentHostTokenPath } from "@orquester/config";
-import type { CreateHostThreadRequest } from "../agent-host/host-protocol.ts";
-import { AgentChatService, isUsableConversationId, resolveHomeKind } from "./service.ts";
+import type {
+  CreateHostThreadRequest,
+  SetThreadIdentityRequest
+} from "../agent-host/host-protocol.ts";
+import {
+  AgentChatService,
+  isUsableConversationId,
+  proxyAccountFamily,
+  resolveHomeKind
+} from "./service.ts";
 import { ChatSessionError } from "./chat-sessions.ts";
 
 // §6.1 thread creation: the tab record first, then the host thread, and the
@@ -17,11 +25,25 @@ import { ChatSessionError } from "./chat-sessions.ts";
 interface Fixture {
   service: AgentChatService;
   created: CreateHostThreadRequest[];
+  /** §3.4 account switches that reached the fake host, in order. */
+  identities: Array<{ threadId: string; body: SetThreadIdentityRequest }>;
   /** Set to make the fake host refuse the thread. */
   refuse: { status: number; body: unknown } | null;
+  /** Set to make the fake host refuse `POST /threads/:id/identity`. */
+  refuseIdentity: { status: number; body: unknown } | null;
   appdir: string;
   /** Every path the service asked to confine before granting trust. */
   trustQueries: string[];
+  /** Overridable per-account launch env, so a switch can be observed. */
+  launchFor: (ctx: { accountId?: string; model?: string }) => {
+    env: Record<string, string>;
+    unset?: string[];
+    accountId?: string;
+  } | null;
+  /** What `listManagedAccounts` answers — the family gate reads it. */
+  accounts: AgentAccount[];
+  /** What the injected seeded-account gate answers. */
+  seededRefusal: { code: string; message: string } | null;
   cleanup(): Promise<void>;
 }
 
@@ -67,9 +89,14 @@ async function makeFixture(
   await writeFile(agentHostTokenPath(appdir), "test-token\n", { mode: 0o600 });
   const state: Fixture = {
     created: [],
+    identities: [],
     refuse: null,
+    refuseIdentity: null,
     appdir,
     trustQueries: [],
+    launchFor: () => launch,
+    accounts: [],
+    seededRefusal: null,
     service: null as unknown as AgentChatService,
     cleanup: async () => {
       await new Promise<void>((resolve) => host.close(() => resolve()));
@@ -106,6 +133,21 @@ async function makeFixture(
         res.writeHead(200, { "content-type": "application/json" }).end("{}");
         return;
       }
+      const identity = /^\/threads\/([^/]+)\/identity$/.exec(req.url ?? "");
+      if (identity && req.method === "POST") {
+        state.identities.push({
+          threadId: identity[1]!,
+          body: JSON.parse(body) as SetThreadIdentityRequest
+        });
+        if (state.refuseIdentity) {
+          res
+            .writeHead(state.refuseIdentity.status, { "content-type": "application/json" })
+            .end(JSON.stringify(state.refuseIdentity.body));
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ seq: 42 }));
+        return;
+      }
       res.writeHead(200, { "content-type": "application/json" }).end("{}");
     });
   });
@@ -122,7 +164,9 @@ async function makeFixture(
     broadcaster: { publish: () => undefined },
     push: { notifyStructural: async () => undefined },
     registryEntry: (refId) => (refId === entry.id ? entry : undefined),
-    resolveLaunchEnv: async () => launch,
+    resolveLaunchEnv: async (_entry, ctx) => state.launchFor(ctx),
+    listManagedAccounts: () => ({ accounts: state.accounts }),
+    seededAccountRefusal: () => state.seededRefusal,
     systemClaudeConfigFile: () => join(appdir, ".claude.json"),
     // The real confinement lives in `index.ts` (realpath + assertInsideFsRoot);
     // here the sandbox is `<appdir>/ws`, so a path outside it answers null.
@@ -401,6 +445,160 @@ test("a bad resume in the nested block is refused just as the flat one is", asyn
   );
   assert.equal(f.created.length, 0);
   await f.cleanup();
+});
+
+// --- §3.4 switching an existing thread's account ---------------------------
+
+const CLAUDE: RegistryEntry = { ...CLAUDEX, id: "claude", name: "Claude Code" };
+
+/** A `claude` chat tab on `acc-1`, plus a second account it can move to. */
+async function switchableFixture(): Promise<Fixture & { sessionId: string }> {
+  const f = await makeFixture(CLAUDE, {
+    env: { CLAUDE_CONFIG_DIR: "/homes/acc-1" },
+    accountId: "acc-1"
+  });
+  f.launchFor = (ctx) =>
+    ctx.accountId === undefined || ctx.accountId === "system"
+      ? null
+      : { env: { CLAUDE_CONFIG_DIR: `/homes/${ctx.accountId}` }, accountId: ctx.accountId };
+  f.accounts = [
+    { id: "acc-1", agent: "claude", label: "one" } as AgentAccount,
+    { id: "acc-2", agent: "claude", label: "two" } as AgentAccount,
+    { id: "cod-1", agent: "codex", label: "codex one" } as AgentAccount
+  ];
+  const summary = await f.service.createSession(
+    { kind: "agent-chat", refId: "claude", accountId: "acc-1", projectPath: "/w/p", cwd: "/w/p" },
+    0
+  );
+  assert.equal(summary.accountId, "acc-1");
+  return Object.assign(f, { sessionId: summary.id });
+}
+
+test("a switch recomputes the launch env, calls the host, THEN moves the tab record", async () => {
+  const f = await switchableFixture();
+  const before = f.service.chat.get(f.sessionId)?.accountId;
+  assert.equal(before, "acc-1");
+
+  const receipt = await f.service.switchAccount(f.sessionId, {
+    commandId: "c1",
+    accountId: "acc-2"
+  });
+  assert.deepEqual(receipt, { seq: 42 });
+  assert.equal(f.identities.length, 1);
+  const body = f.identities[0]!.body;
+  assert.equal(f.identities[0]!.threadId, f.sessionId);
+  assert.equal(body.commandId, "c1");
+  assert.equal(body.accountId, "acc-2");
+  assert.equal(body.home, "account");
+  assert.equal(body.homePath, "/homes/acc-2", "the adapter's own home variable decides");
+  assert.equal(
+    body.launchEnv?.ORQ_FROM_ENV_FILE,
+    "1",
+    "the per-launcher env file is recomposed too, exactly as at create"
+  );
+  assert.equal(f.service.chat.get(f.sessionId)?.accountId, "acc-2");
+  await f.cleanup();
+});
+
+test("switching to System clears the account and never falls back to the family default", async () => {
+  const f = await switchableFixture();
+  await f.service.switchAccount(f.sessionId, { commandId: "c1", accountId: "system" });
+  const body = f.identities[0]!.body;
+  assert.equal(body.accountId, "");
+  assert.equal(body.home, "system");
+  assert.equal(body.homePath, undefined);
+  assert.equal(f.service.chat.get(f.sessionId)?.accountId, undefined);
+  await f.cleanup();
+});
+
+test("an account of another family is refused rather than silently degraded to System", async () => {
+  // `AgentAccountsService.resolveLaunchEnv` answers null for a wrong-family id,
+  // which would launch the SYSTEM identity while the tab claimed the account.
+  const f = await switchableFixture();
+  await assert.rejects(
+    () => f.service.switchAccount(f.sessionId, { commandId: "c1", accountId: "cod-1" }),
+    (error: unknown) => error instanceof ChatSessionError && error.code === "INVALID_COMMAND"
+  );
+  assert.equal(f.identities.length, 0, "nothing reached the host");
+  assert.equal(f.service.chat.get(f.sessionId)?.accountId, "acc-1");
+  await f.cleanup();
+});
+
+test("the seeded-account gate applies to a switch exactly as it does to a create", async () => {
+  const f = await switchableFixture();
+  f.seededRefusal = { code: "SESSION_UNAVAILABLE", message: "This account is not seeded." };
+  await assert.rejects(
+    () => f.service.switchAccount(f.sessionId, { commandId: "c1", accountId: "acc-2" }),
+    (error: unknown) =>
+      error instanceof ChatSessionError && /not seeded/.test(error.message)
+  );
+  assert.equal(f.identities.length, 0);
+  await f.cleanup();
+});
+
+test("an OpenCode thread cannot switch accounts", async () => {
+  const f = await makeFixture(OPENCODE, null);
+  const summary = await f.service.createSession(
+    { kind: "agent-chat", refId: "opencode", projectPath: "/w/p", cwd: "/w/p" },
+    0
+  );
+  await assert.rejects(
+    () => f.service.switchAccount(summary.id, { commandId: "c1", accountId: "acc-2" }),
+    (error: unknown) => error instanceof ChatSessionError && error.code === "INVALID_COMMAND"
+  );
+  assert.equal(f.identities.length, 0);
+  await f.cleanup();
+});
+
+test("a host refusal leaves the tab record exactly as it was", async () => {
+  const f = await switchableFixture();
+  f.refuseIdentity = {
+    status: 409,
+    body: { error: { code: "COMMAND_REJECTED", message: "Wait for the turn to finish." } }
+  };
+  await assert.rejects(
+    () => f.service.switchAccount(f.sessionId, { commandId: "c1", accountId: "acc-2" }),
+    (error: unknown) => error instanceof ChatSessionError && error.code === "COMMAND_REJECTED"
+  );
+  assert.equal(f.service.chat.get(f.sessionId)?.accountId, "acc-1");
+  await f.cleanup();
+});
+
+test("an older host with no identity route reads as HOST_UNAVAILABLE, not a refusal", async () => {
+  // A host that survived a deploy runs the code it started from (§8): it 404s
+  // this route until the drain-restart replaces it, and that is a retry.
+  const f = await switchableFixture();
+  f.refuseIdentity = { status: 404, body: {} };
+  await assert.rejects(
+    () => f.service.switchAccount(f.sessionId, { commandId: "c1", accountId: "acc-2" }),
+    (error: unknown) => error instanceof ChatSessionError && error.code === "HOST_UNAVAILABLE"
+  );
+  assert.equal(f.service.chat.get(f.sessionId)?.accountId, "acc-1");
+  await f.cleanup();
+});
+
+test("a switch on an unknown tab is THREAD_NOT_FOUND and a blank commandId is invalid", async () => {
+  const f = await switchableFixture();
+  await assert.rejects(
+    () => f.service.switchAccount("nope", { commandId: "c1", accountId: "acc-2" }),
+    (error: unknown) => error instanceof ChatSessionError && error.code === "THREAD_NOT_FOUND"
+  );
+  await assert.rejects(
+    () => f.service.switchAccount(f.sessionId, { commandId: "  ", accountId: "acc-2" }),
+    (error: unknown) => error instanceof ChatSessionError && error.code === "INVALID_COMMAND"
+  );
+  await assert.rejects(
+    () => f.service.switchAccount(f.sessionId, { commandId: "c1", accountId: "" }),
+    (error: unknown) => error instanceof ChatSessionError && error.code === "INVALID_COMMAND"
+  );
+  assert.equal(f.identities.length, 0);
+  await f.cleanup();
+});
+
+test("the proxy launchers draw their accounts from the mapped family", () => {
+  assert.equal(proxyAccountFamily("claudex"), "codex");
+  assert.equal(proxyAccountFamily("claudemix"), "claude");
+  assert.equal(proxyAccountFamily("claude"), null);
 });
 
 test("resolveHomeKind and the conversation-id shape check", () => {

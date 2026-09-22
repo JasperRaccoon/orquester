@@ -29,6 +29,7 @@ import type {
 // silently types the composer's permission-mode chip as a platform name.
 import type { AgentPanelModel, RuntimeMode } from "@orquester/api/agent-chat";
 
+import type { ChatAccountOption } from "../../lib/agent-chat/account-switch";
 import type {
   ActivePlanState,
   AgentChatActions,
@@ -157,6 +158,15 @@ export interface ChatComposerProps {
   /** Shown only where `capabilities.showPlanModeToggle` (§4.4). */
   showPlanModeToggle: boolean;
   accountLabel: string | null;
+  /**
+   * The §3.4 account picker. Omitted (or empty) keeps the chip a label —
+   * an OpenCode thread runs under its server's identity and has nothing to
+   * pick. `accountSwitchEnabled` is the idle gate (`canSwitchChatAccount`);
+   * the daemon is authoritative and refuses anything else with a 409.
+   */
+  accountOptions?: readonly ChatAccountOption[] | undefined;
+  accountId?: string | undefined;
+  accountSwitchEnabled?: boolean | undefined;
   /** A turn is live: Enter steers, Escape interrupts, the primary action is Stop. */
   isTurnActive: boolean;
   /** Blocks a flush and disables submit while a card is open (§7.4). */

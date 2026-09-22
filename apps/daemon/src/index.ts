@@ -450,6 +450,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // host probes under the daemon user's own login, which may well be stale
     // while every managed account is fine.
     listManagedAccounts: () => agentAccounts.list(),
+    // §3.4's account switch applies the same seeded-account gate a create does
+    // — injected rather than imported, so the service stays independent of this
+    // entry point.
+    seededAccountRefusal: (input, model) =>
+      seededAccountRefusal(input, model, resolved.daemonDir),
     systemClaudeConfigFile: () =>
       env.CLAUDE_CONFIG_DIR
         ? join(env.CLAUDE_CONFIG_DIR, ".claude.json")

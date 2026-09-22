@@ -88,6 +88,14 @@ export const agentHostRoutes = {
   deleteThread: (threadId: string): string => thread(threadId),
   /** The §6.1 rename; appends `thread.meta-updated`. */
   updateThread: (threadId: string): string => thread(threadId),
+  /**
+   * §3.4's account switch. Not a §6.2 command route: the daemon owns the
+   * client-facing `POST /api/sessions/:id/account`, validates the account,
+   * recomposes the launch environment and prepares the home, and only then
+   * calls this — so the host is handed a resolved identity, never an id it
+   * would have to look up.
+   */
+  setThreadIdentity: (threadId: string): string => `${thread(threadId)}/identity`,
 
   // §6.2 commands, one route per command.
   turn: (threadId: string): string => `${thread(threadId)}/turn`,
@@ -196,6 +204,34 @@ export interface CreateHostThreadRequest {
   /** Absolute home dir for `home`, resolved daemon-side. Never on a client wire. */
   homePath?: string;
   /** The proxy launcher owning the home when `home` is `"cliproxy"`. */
+  proxyRefId?: string;
+}
+
+/**
+ * Body of `POST /threads/:id/identity` — §3.4's account switch, applied on the
+ * thread's next message.
+ *
+ * The four launch fields are the SAME shapes {@link CreateHostThreadRequest}
+ * carries, because they replace exactly what create wrote: the host rewrites
+ * `launch.json` from them **before** it records the new identity on the head,
+ * so a host that dies in between relaunches under the environment the head
+ * still names rather than under a half-applied one. `main.ts`'s `buildEnv` and
+ * `resolveHome` both read the live launch config, so the next session start
+ * picks the new identity up with no further plumbing.
+ */
+export interface SetThreadIdentityRequest {
+  /** The client-minted idempotency key, exactly as a §6.2 command's. */
+  commandId: string;
+  /** The managed account id, or `""` for the system identity. */
+  accountId: string;
+  /**
+   * The home kind. It may never cross the cliproxy boundary: a thread's home
+   * KIND is a function of its registry entry, which never changes.
+   */
+  home: "system" | "account" | "cliproxy";
+  launchEnv?: Record<string, string>;
+  unsetEnv?: string[];
+  homePath?: string;
   proxyRefId?: string;
 }
 
