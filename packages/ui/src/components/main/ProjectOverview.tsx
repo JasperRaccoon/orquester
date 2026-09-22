@@ -110,8 +110,7 @@ const ResumeRow: React.FC<{
     // same per-agent account the "+" menu would launch with (a bare launch would
     // take the daemon default instead, which may be a different home).
     const accountId = resumeAccountId(conversation, preferredAccountByAgent[refId]);
-    launchWithNotice(
-      openTab({
+    const opened = openTab({
         kind: "agent-chat",
         refId,
         // The tab reads as the thread it continues, not as the agent.
@@ -123,10 +122,11 @@ const ResumeRow: React.FC<{
           runtimeMode: runtimeModeForAgent(chatPrefs, refId),
           resume: { home: conversation.home ?? "system", conversationId: conversation.id }
         }
-      }),
-      agentName
-    );
-    onPicked?.();
+      });
+    launchWithNotice(opened, agentName);
+    // AFTER the resumed tab exists and is active — closing the empty tab first
+    // flashed the project overview between the two (owner, 2026-09-22).
+    if (onPicked) void opened.then(() => onPicked(), () => undefined);
   };
 
   return (
@@ -171,7 +171,11 @@ export const RecentConversationsList: React.FC<{
   onPicked?: () => void;
   /** Rendered when the scan finds nothing resumable. */
   empty?: React.ReactNode;
-}> = ({ projectPath, onPicked, empty }) => {
+  /** Only conversations this adapter can resume (a Claude tab lists Claude's). */
+  adapter?: "claude" | "codex" | "opencode" | "grok";
+  /** Newest-first cap; absent means every row. */
+  limit?: number;
+}> = ({ projectPath, onPicked, empty, adapter, limit }) => {
   const registry = useRegistry();
   const loadAgentConversations = useAppStore((s) => s.loadAgentConversations);
   const cached = useAppStore((s) => s.agentConversationsByProject[projectPath]);
@@ -183,11 +187,13 @@ export const RecentConversationsList: React.FC<{
   const agents = registry.agents;
   const resumable = React.useMemo(() => {
     const byId = new Map<string, RegistryEntry>(agents.map((a) => [a.id, a]));
-    return (cached ?? []).filter((c) => {
+    const rows = (cached ?? []).filter((c) => {
       const entry = byId.get(chatLaunchRefId(c));
-      return Boolean(entry?.enabled) && isChatResumableConversation(c);
+      if (!entry?.enabled || !isChatResumableConversation(c)) return false;
+      return adapter === undefined || entry.chat?.adapter === adapter;
     });
-  }, [cached, agents]);
+    return limit === undefined ? rows : rows.slice(0, limit);
+  }, [cached, agents, adapter, limit]);
   const agentName = (refId: string) => agents.find((a) => a.id === refId)?.name ?? refId;
 
   return (

@@ -515,6 +515,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               onOpenFile={paintOnly ? noop : openFile}
               onLoadFullOutput={paintOnly ? noop : loadFullOutput}
               onOpenAgent={paintOnly ? noop : setDrillInAgentId}
+              agentRefId={session.refId}
               onSendQueuedNow={paintOnly ? noop : (id) => dispatch(() => actions.sendQueuedNow(id))}
               // The user's Ctrl+B (§4.5): offered on a running command only
               // where the provider can honour it.

@@ -76,6 +76,12 @@ export interface ChatTimelineProps {
   onOpenAgent: (agentId: string) => void;
   onSendQueuedNow: (queuedId: string) => void;
   onReturnQueuedToComposer: (queuedId: string) => void;
+  /**
+   * The registry id the thread launched from, for the empty-thread panel: it
+   * names the provider in the title and filters the resumable conversations
+   * to the ones this adapter can pick up.
+   */
+  agentRefId?: string;
   /** See `TimelineRowContextValue.canBackgroundTasks`; absent means no. */
   canBackgroundTasks?: boolean;
   /** The user's Ctrl+B on one running tool call (`/background`). */
