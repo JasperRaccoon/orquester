@@ -335,6 +335,12 @@ export function latestContextWindowActivity(
         : {}),
       ...(typeof record.totalProcessedTokens === "number"
         ? { totalProcessedTokens: record.totalProcessedTokens }
+        : {}),
+      // Copied field-wise like the rest: an activity written by an older host
+      // simply omits it, and "the provider never said" is a different reading
+      // from "the provider said no".
+      ...(typeof record.compactsAutomatically === "boolean"
+        ? { compactsAutomatically: record.compactsAutomatically }
         : {})
     };
     return { usage, updatedAt: activity.createdAt };

@@ -370,6 +370,10 @@ export class GrokSession {
     this.currentModelId = currentModelIdOf(modelState);
     this.currentReasoningEffort = currentEffortOf(modelState, this.currentModelId);
     this.contextWindow = contextWindowFromModelState(modelState, this.currentModelId);
+    // The normaliser stamps the window onto EVERY meter row it emits, chunk
+    // rows included — without it the client's last-writer-wins read of
+    // `context-window.updated` alternated between a ringed row and a bare one.
+    this.normalizer.setContextWindow(this.contextWindow);
 
     await this.applyModelSelection(this.options.modelSelection);
 
@@ -385,7 +389,11 @@ export class GrokSession {
     if (this.contextWindow !== undefined) {
       this.emitEvent(
         this.normalizer.event("thread.token-usage.updated", {
-          usage: { usedTokens: this.normalizer.contextSize ?? 0, maxTokens: this.contextWindow }
+          usage: {
+            usedTokens: this.normalizer.contextSize ?? 0,
+            maxTokens: this.contextWindow,
+            compactsAutomatically: true
+          }
         })
       );
     }
@@ -484,6 +492,7 @@ export class GrokSession {
       if (typeof state.currentModelId === "string") {
         this.currentModelId = state.currentModelId;
         this.contextWindow = contextWindowFromModelState(params, this.currentModelId) ?? this.contextWindow;
+        this.normalizer.setContextWindow(this.contextWindow);
       }
     });
 
@@ -899,7 +908,8 @@ export class GrokSession {
         this.normalizer.event("thread.token-usage.updated", {
           usage: {
             usedTokens: merged.contextTokens,
-            ...(this.contextWindow === undefined ? {} : { maxTokens: this.contextWindow })
+            ...(this.contextWindow === undefined ? {} : { maxTokens: this.contextWindow }),
+            compactsAutomatically: true
           }
         })
       );

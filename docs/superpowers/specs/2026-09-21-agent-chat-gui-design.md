@@ -3119,6 +3119,39 @@ a **Compact** button, which is always present because §4.6.3 synthesises `/comp
 adapters. Over 90 % the ring turns red.
 *T3: `apps/web/src/lib/contextWindow.ts:28-75` — `deriveLatestContextWindowSnapshot`; the percentage and remaining tokens are `null` whenever `maxTokens` is; `apps/web/src/components/chat/ContextWindowMeter.tsx:26-33` — the ring and the `> 90 %` error colour; `:60-90` — the degraded token-count-only readout; `:137-158` — the Compact button; `apps/web/src/components/chat/ContextWindowMeter.logic.ts:15-19` — `providerSupportsManualCompaction`; `:100-110` — the auto-compaction sentence*
 
+*Built: `thread.token-usage.updated` is **last-writer-wins and never merged** — the client takes
+the latest `context-window.updated` activity whole — so every emission must be a complete reading,
+window included, and nothing but the MAIN agent's own context may move it. All four adapters
+report one, so `reportsContextWindow` is now true everywhere (the spec's `false` for OpenCode and
+Grok was true only of the versions T3 was written against). Per adapter:*
+
+- ***Claude** — the authority is the SDK's `Query.getContextUsage({detail:"summary"})`, the CLI's
+  own `/context` accounting, called once the session is ready and again after every `result` and
+  `compact_boundary` under a 5 s deadline: `usedTokens = totalTokens`, `maxTokens = rawMaxTokens`
+  (what the CLI measures its own percentage against), `autoCompactAtTokens = autoCompactThreshold`
+  and `compactsAutomatically = isAutoCompactEnabled`. `summary` mode makes no token-count API call,
+  which is the reason T3 could not do this. Between calls the meter rides the main agent's
+  `message_delta` usage; `totalProcessedTokens` is Σ `modelUsage[*]`, which is cumulative across
+  turns and includes subagents. A rejection, a timeout or an older CLI is one debug line and the
+  last known reading — never a warning row and never a failed turn. **A subagent's
+  `task_progress`/`task_notification` usage never reaches the meter** (it is roster data), and
+  `result.usage` never sets `usedTokens` (it is the per-turn main-loop rollup, not a context size).*
+- ***Codex** — `thread/tokenUsage/updated` carries both halves: `usedTokens =
+  last.totalTokens − last.reasoningOutputTokens` against `modelContextWindow`, exactly as Codex's
+  own TUI computes it. `total.totalTokens` is the thread's cumulative spend and is reported as
+  `totalProcessedTokens` only.*
+- ***Grok** — the size is on every chunk's `_meta.totalTokens`, the window only on the handshake's
+  `modelState`; the normaliser holds the window and stamps it onto every row, including the
+  per-chunk ones, because one window-less row blanks the ring until the next session-level
+  emission.*
+- ***OpenCode** — each owned `step-finish` carries `tokens.total` (the context that model call
+  held) and `GET /provider` carries `limit.context` per `provider/model`, read once per server.
+  A child session's steps never count; the running sum of the owned ones is `totalProcessedTokens`.*
+
+*`ThreadTokenUsage` gained `compactsAutomatically?: boolean` for this: `false` is a verdict a
+provider proved and the popover then reads "Auto-compaction is off.", while an absent field still
+means nobody asked and keeps the existing copy.*
+
 Below the composer: the agent roster. A `main` row, then one row per task from the task events:
 type or title, live description, last tool, elapsed, tokens, status. Rows are fixed-height with a
 fixed number of lines, so a changing description or token count never changes a row's height and the

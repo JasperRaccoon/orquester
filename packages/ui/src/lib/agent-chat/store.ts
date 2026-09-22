@@ -473,7 +473,8 @@ function sameUsage(
     left.usedTokens === right.usedTokens &&
     left.maxTokens === right.maxTokens &&
     left.autoCompactAtTokens === right.autoCompactAtTokens &&
-    left.totalProcessedTokens === right.totalProcessedTokens
+    left.totalProcessedTokens === right.totalProcessedTokens &&
+    left.compactsAutomatically === right.compactsAutomatically
   );
 }
 

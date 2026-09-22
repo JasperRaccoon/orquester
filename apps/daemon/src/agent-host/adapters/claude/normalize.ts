@@ -58,6 +58,7 @@ import {
 import {
   claudeTotalProcessedTokens,
   compactBoundarySnapshot,
+  contextUsageSnapshot,
   describeUsageLimit,
   isRateLimitBlocking,
   isRateLimitClearing,
@@ -67,6 +68,7 @@ import {
   normalizeTurnTokenUsage,
   rateLimitEventToUpdate,
   toThreadTokenUsage,
+  totalProcessedFromModelUsage,
   type ClaudeScopedLimitNames,
   type ClaudeTokenUsageSnapshot
 } from "./usage.ts";
@@ -331,6 +333,12 @@ export class ClaudeNormalizer {
   lastKnownContextWindow: number | undefined;
   lastKnownTotalProcessedTokens: number | undefined;
   lastKnownTokenUsage: ClaudeTokenUsageSnapshot | undefined;
+  /**
+   * True once `getContextUsage` has named `rawMaxTokens` — the window the CLI
+   * itself measures against. From then on `result.modelUsage`'s nominal
+   * per-model window must not overwrite it (§7.6).
+   */
+  private contextWindowIsAuthoritative = false;
 
   /** The model this adapter last asked for; a diff against `init` is a reroute. */
   expectedModel: string | undefined;
@@ -700,10 +708,22 @@ export class ClaudeNormalizer {
     const events: RuntimeEvent[] = [];
 
     const resultContextWindow = maxContextWindowFromModelUsage(result?.modelUsage);
-    if (resultContextWindow !== undefined) {
+    // `modelUsage[*].contextWindow` is the model's NOMINAL window, and the max
+    // across models at that — on a 1M model under a smaller compaction policy
+    // it is not what the CLI measures its own percentage against. Once
+    // `getContextUsage` has named `rawMaxTokens`, that stays the denominator;
+    // this remains the only source before the first answer, and on a CLI that
+    // has none.
+    if (resultContextWindow !== undefined && !this.contextWindowIsAuthoritative) {
       this.lastKnownContextWindow = resultContextWindow;
     }
-    const accumulatedTotal = claudeTotalProcessedTokens(result?.usage);
+    // §7.6's "total processed across the thread" — `modelUsage` is cumulative
+    // across turns and counts subagents and compaction, while `result.usage`
+    // is the per-turn main-loop rollup. `result.usage` stays only as the
+    // fallback for a result that carries no `modelUsage` at all.
+    const accumulatedTotal =
+      totalProcessedFromModelUsage(result?.modelUsage) ??
+      claudeTotalProcessedTokens(result?.usage);
     if (accumulatedTotal !== undefined) {
       this.lastKnownTotalProcessedTokens = accumulatedTotal;
     }
@@ -2347,11 +2367,11 @@ export class ClaudeNormalizer {
         progressAgent.description = described;
       }
     }
-    const events = this.emitThreadTokenUsage(
-      this.taskProgressTokenUsage(message.usage),
-      "claude/system/task_progress",
-      message
-    );
+    // A subagent's `usage.total_tokens` is ITS cumulative spend, and it is
+    // roster data only: feeding it into the thread meter made the ring jump to
+    // whichever subagent had run longest, alternating with the parent's real
+    // value. Only the main agent's own frames move the meter (§7.6).
+    const events: RuntimeEvent[] = [];
     const usage = normalizeTaskUsage(message.usage);
     const linkage = this.taskLinkageFor(message.task_id);
     events.push({
@@ -2452,11 +2472,9 @@ export class ClaudeNormalizer {
     if (this.liveTaskIds.delete(message.task_id)) {
       this.options.onLiveTasksChanged?.(this.liveTaskIds);
     }
-    const events = this.emitThreadTokenUsage(
-      this.taskProgressTokenUsage(message.usage),
-      "claude/system/task_notification",
-      message
-    );
+    // Same rule as `task_progress`: a task's own total is never the thread's
+    // context size.
+    const events: RuntimeEvent[] = [];
     const exitCode = parseBackgroundShellExitCode(message.summary);
     if (agent !== undefined) {
       // The item settles BEFORE the task row: ingestion flushes the item's
@@ -2942,10 +2960,33 @@ export class ClaudeNormalizer {
   // Token usage plumbing
   // -------------------------------------------------------------------------
 
+  /**
+   * Fold an authoritative `Query.getContextUsage({detail:"summary"})` response
+   * into the meter (§7.6).
+   *
+   * `turnId` is the turn the request was made FOR, captured at call time: the
+   * control request is async, and attributing its answer to `activeTurnId`
+   * would stamp a reading taken at the end of one turn onto the next one if
+   * the user had already sent it.
+   */
+  applyContextUsage(response: unknown, turnId: string | undefined): RuntimeEvent[] {
+    const snapshot = contextUsageSnapshot(response, this.lastKnownTotalProcessedTokens);
+    if (snapshot?.maxTokens !== undefined) {
+      this.contextWindowIsAuthoritative = true;
+    }
+    return this.emitThreadTokenUsage(
+      snapshot,
+      "claude/control/get_context_usage",
+      response,
+      { turnId }
+    );
+  }
+
   private emitThreadTokenUsage(
     snapshot: ClaudeTokenUsageSnapshot | undefined,
     method: string,
-    payload: unknown
+    payload: unknown,
+    options?: { turnId: string | undefined }
   ): RuntimeEvent[] {
     if (!snapshot) {
       return [];
@@ -2955,7 +2996,9 @@ export class ClaudeNormalizer {
       previous !== undefined &&
       previous.usedTokens === snapshot.usedTokens &&
       previous.maxTokens === snapshot.maxTokens &&
-      previous.totalProcessedTokens === snapshot.totalProcessedTokens
+      previous.totalProcessedTokens === snapshot.totalProcessedTokens &&
+      previous.compactsAutomatically === snapshot.compactsAutomatically &&
+      previous.autoCompactAtTokens === snapshot.autoCompactAtTokens
     ) {
       return [];
     }
@@ -2966,33 +3009,17 @@ export class ClaudeNormalizer {
     if (snapshot.totalProcessedTokens !== undefined) {
       this.lastKnownTotalProcessedTokens = snapshot.totalProcessedTokens;
     }
+    const turnId = options === undefined ? this.activeTurnId : options.turnId;
     return [
       {
         ...this.base({
-          turnId: this.activeTurnId,
+          turnId,
           raw: { source: RAW_SDK_MESSAGE, method, payload }
         }),
         type: "thread.token-usage.updated",
         payload: { usage: toThreadTokenUsage(snapshot) }
       }
     ];
-  }
-
-  private taskProgressTokenUsage(usage: unknown): ClaudeTokenUsageSnapshot | undefined {
-    const totalTokens = claudeTotalProcessedTokens(usage);
-    if (totalTokens === undefined || totalTokens <= 0) {
-      return undefined;
-    }
-    const lastUsed = this.lastKnownTokenUsage?.usedTokens;
-    const activeTokens = lastUsed !== undefined ? Math.max(totalTokens, lastUsed) : totalTokens;
-    if (lastUsed !== undefined && activeTokens === lastUsed) {
-      return undefined;
-    }
-    return normalizeActiveTokenUsage(
-      { total_tokens: activeTokens },
-      this.lastKnownContextWindow,
-      Math.max(totalTokens, this.lastKnownTotalProcessedTokens ?? totalTokens)
-    );
   }
 
   private turnUsageSnapshot(
@@ -3013,10 +3040,11 @@ export class ClaudeNormalizer {
       // report a context that no longer exists.
       return undefined;
     }
-    const fromResult = normalizeActiveTokenUsage(result?.usage, maxTokens, totalProcessed);
-    if (fromResult) {
-      return fromResult;
-    }
+    // `result.usage` is deliberately NOT a fallback: the SDK documents it as
+    // the MAIN-AGENT-LOOP-ONLY, per-turn rollup, so on a long turn it is far
+    // larger than the context and the meter jumped to the turn's spend. The
+    // last reading the stream actually produced is the honest answer, and the
+    // authoritative `getContextUsage` refresh follows a result anyway.
     const lastGood = this.lastKnownTokenUsage;
     if (!lastGood) {
       return undefined;

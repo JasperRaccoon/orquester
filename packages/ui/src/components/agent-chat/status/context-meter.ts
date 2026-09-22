@@ -6,10 +6,14 @@
  *
  * The rule the whole file exists to enforce: **without `maxTokens` there is no
  * ring and no percentage, only a bare total.** An adapter with
- * `reportsContextWindow: false` (OpenCode, Grok) reports tokens and nothing
- * else, and inventing "0%" for it would be a lie the user cannot detect.
+ * `reportsContextWindow: false` — or one whose provider catalogue does not
+ * name a window for the thread's model — reports tokens and nothing else, and
+ * inventing "0%" for it would be a lie the user cannot detect.
  * `usedPercentage` is therefore `null` whenever `maxTokens` is, all the way
  * through to {@link MeterRing}, which draws its track only.
+ *
+ * *(All four adapters do report a window today; the degraded path is what a
+ * model the catalogue does not describe, or an older provider, still takes.)*
  *
  * *T3: `lib/contextWindow.ts:28-75` — the percentage and the remaining tokens
  * are `null` exactly when `maxTokens` is.*
@@ -23,6 +27,12 @@ export interface ContextMeterInput {
   totalProcessedTokens: number | null;
   /** The adapter's `AdapterCapabilities.reportsContextWindow`. */
   reportsContextWindow: boolean;
+  /**
+   * `thread.token-usage.updated {usage.compactsAutomatically}`. `false` is a
+   * verdict the provider proved; `null` means nobody asked, and the copy stays
+   * vague rather than guessing either way.
+   */
+  compactsAutomatically?: boolean | null;
 }
 
 export interface ContextMeterModel {
@@ -33,6 +43,8 @@ export interface ContextMeterModel {
   remainingTokens: number | null;
   autoCompactAtTokens: number | null;
   totalProcessedTokens: number | null;
+  /** `undefined` ⇒ the provider never said; see {@link ContextMeterInput}. */
+  compactsAutomatically?: boolean;
   /** True when there is no window to measure against. */
   degraded: boolean;
 }
@@ -70,6 +82,9 @@ export function deriveContextMeter(input: ContextMeterInput): ContextMeterModel 
     autoCompactAtTokens: autoCompactAtTokens !== null && autoCompactAtTokens > 0 ? autoCompactAtTokens : null,
     totalProcessedTokens:
       totalProcessedTokens !== null && totalProcessedTokens > 0 ? totalProcessedTokens : null,
+    ...(typeof input.compactsAutomatically === "boolean"
+      ? { compactsAutomatically: input.compactsAutomatically }
+      : {}),
     degraded: maxTokens === null
   };
 }
@@ -97,12 +112,21 @@ export function formatContextTokens(value: number | null | undefined): string {
  * because it is the number the user will watch the meter approach; without one
  * the sentence stays vague rather than guessing.
  *
+ * `compactsAutomatically === false` overrides both: it is a verdict the
+ * provider proved (Claude's `isAutoCompactEnabled`), and promising a
+ * compaction that will not happen is how a user loses a thread to a full
+ * window. `undefined` means nobody asked, and keeps the existing copy.
+ *
  * *T3: `ContextWindowMeter.logic.ts:100-110`.*
  */
 export function formatAutoCompactionSentence(
   modelLabel: string | null | undefined,
-  autoCompactAtTokens: number | null | undefined
+  autoCompactAtTokens: number | null | undefined,
+  compactsAutomatically?: boolean | null
 ): string {
+  if (compactsAutomatically === false) {
+    return "Auto-compaction is off.";
+  }
   if (typeof autoCompactAtTokens === "number" && autoCompactAtTokens > 0) {
     return `Compacts automatically at ${autoCompactAtTokens.toLocaleString("en-US")} tokens.`;
   }

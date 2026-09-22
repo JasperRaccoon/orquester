@@ -50,12 +50,18 @@ import { MINIMUM_OPENCODE_VERSION, tooOldMessage } from "./semver.ts";
 /** Registry ids this adapter serves. */
 export const OPENCODE_REF_IDS: readonly string[] = ["opencode"];
 
-/** §4.1: OpenCode reports no context window, has no plan-mode toggle. */
+/**
+ * §4.1 says OpenCode reports no context window; on 1.18.5 it reports both
+ * halves. Every main-agent `step-finish` carries that call's `tokens.total`
+ * (fixtures README observation 23) and `GET /provider` carries `limit.context`
+ * per model, so the meter has a numerator and a denominator. No plan-mode
+ * toggle.
+ */
 export const OPENCODE_CAPABILITIES: AdapterCapabilities = {
   sessionModelSwitch: "in-session",
   supportsConversationRollback: true,
   showPlanModeToggle: false,
-  reportsContextWindow: false,
+  reportsContextWindow: true,
   compaction: { type: "native" }
 };
 
@@ -123,6 +129,32 @@ export async function loadOpenCodeInventory(client: OpenCodeClient): Promise<Ope
     commands: Array.isArray(commands) ? commands : [],
     skills: Array.isArray(skills) ? skills : []
   };
+}
+
+/**
+ * `GET /provider` → `"<providerID>/<modelID>" → limit.context`, the context
+ * meter's denominator (§7.6).
+ *
+ * Keyed by the same `provider/model` slug a thread's `modelSelection.model`
+ * carries, so a lookup is one `Map.get`. A row with no positive `limit.context`
+ * is simply absent: the meter must degrade to a bare count rather than draw a
+ * ring against a guess.
+ */
+export function modelContextLimits(providers: ProviderListResponse): Map<string, number> {
+  const limits = new Map<string, number>();
+  for (const provider of Array.isArray(providers.all) ? providers.all : []) {
+    const providerId = typeof provider?.id === "string" ? provider.id : "";
+    if (providerId.length === 0 || provider.models === null || typeof provider.models !== "object") {
+      continue;
+    }
+    for (const [modelId, model] of Object.entries(provider.models)) {
+      const context = model?.limit?.context;
+      if (typeof context === "number" && Number.isFinite(context) && context > 0) {
+        limits.set(`${providerId}/${model?.id ?? modelId}`, Math.round(context));
+      }
+    }
+  }
+  return limits;
 }
 
 function titleCaseSlug(value: string): string {

@@ -40,6 +40,29 @@ import { BACKGROUND_SHELL_TAIL_INTERVAL_MS } from "./session.ts";
 // The scripted peer
 // ---------------------------------------------------------------------------
 
+/**
+ * `"ok"` answers with {@link CONTEXT_USAGE_RESPONSE}; `"reject"` is the older
+ * CLI that does not implement the control request; `"hang"` never answers, so
+ * only the deadline ends the wait; `"absent"` deletes the method entirely, the
+ * shape an SDK that predates it has.
+ */
+type ContextUsageBehaviour = "ok" | "reject" | "hang" | "absent";
+
+const CONTEXT_USAGE_RESPONSE = {
+  categories: [
+    { name: "Messages", tokens: 8, kind: "used" },
+    { name: "Free space", tokens: 984_132, kind: "free" }
+  ],
+  totalTokens: 15_868,
+  maxTokens: 1_000_000,
+  rawMaxTokens: 1_000_000,
+  percentage: 2,
+  autoCompactThreshold: 967_000,
+  isAutoCompactEnabled: true,
+  model: "claude-sonnet-5",
+  apiUsage: null
+};
+
 class ScriptedQuery {
   readonly messages = new AsyncEventQueue<SDKMessage>();
   readonly received: SDKUserMessage[] = [];
@@ -47,6 +70,8 @@ class ScriptedQuery {
   readonly options: ClaudeQueryOptions | undefined;
   readonly canUseTool: CanUseTool | undefined;
   readonly initialized = createDeferred<void>();
+  readonly contextUsage: ContextUsageBehaviour;
+  contextUsageCalls = 0;
 
   /** Resolves once the peer has been handed a turn. */
   private turnWaiters: Array<() => void> = [];
@@ -58,10 +83,12 @@ class ScriptedQuery {
     prompt: string | AsyncIterable<SDKUserMessage>;
     options?: ClaudeQueryOptions;
     initResolves?: boolean;
+    contextUsage?: ContextUsageBehaviour;
   }) {
     this.options = params.options;
     this.canUseTool = params.options?.canUseTool;
     this.initResolves = params.initResolves !== false;
+    this.contextUsage = params.contextUsage ?? "ok";
     if (typeof params.prompt !== "string") {
       void this.readPrompt(params.prompt);
     }
@@ -121,6 +148,27 @@ class ScriptedQuery {
       async applyFlagSettings(settings: unknown) {
         self.calls.push({ op: "applyFlagSettings", arg: settings });
       },
+      ...(this.contextUsage === "absent"
+        ? {}
+        : {
+            async getContextUsage(opts?: { detail?: string }) {
+              self.calls.push({ op: "getContextUsage", arg: opts });
+              self.contextUsageCalls += 1;
+              if (self.contextUsage === "reject") {
+                throw new Error("unknown control request subtype: get_context_usage");
+              }
+              if (self.contextUsage === "hang") {
+                return new Promise(() => {});
+              }
+              // The context grows between calls, as a real one does — so a
+              // later refresh is a genuinely new reading and not swallowed by
+              // the normaliser's dedupe.
+              return {
+                ...CONTEXT_USAGE_RESPONSE,
+                totalTokens: CONTEXT_USAGE_RESPONSE.totalTokens + (self.contextUsageCalls - 1) * 1_000
+              };
+            }
+          }),
       close() {
         self.calls.push({ op: "close" });
         self.closed = true;
@@ -230,6 +278,9 @@ interface HarnessOptions {
   historyStdout?: (method: string) => string;
   deadlineMs?: number;
   compactDeadlineMs?: number;
+  contextUsageDeadlineMs?: number;
+  /** How the scripted peer answers `getContextUsage` (§7.6). */
+  contextUsage?: ContextUsageBehaviour;
   signal?: AbortSignal;
 }
 
@@ -277,7 +328,8 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
       }
       const peer = new ScriptedQuery({
         ...params,
-        ...(options.initResolves !== undefined ? { initResolves: options.initResolves } : {})
+        ...(options.initResolves !== undefined ? { initResolves: options.initResolves } : {}),
+        ...(options.contextUsage !== undefined ? { contextUsage: options.contextUsage } : {})
       });
       peers.push(peer);
       return peer.asQuery();
@@ -304,7 +356,8 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     deadlines: {
       handshakeMs: options.deadlineMs ?? 50,
       cancelMs: options.deadlineMs ?? 50,
-      compactMs: options.compactDeadlineMs ?? 5_000
+      compactMs: options.compactDeadlineMs ?? 5_000,
+      contextUsageMs: options.contextUsageDeadlineMs ?? 50
     }
   };
 
@@ -1755,5 +1808,136 @@ describe("claude adapter — background shells", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("claude adapter — the context meter asks the CLI for its own /context accounting", () => {
+  const meterRows = (harness: Harness, from = 0): Array<EventOf<"thread.token-usage.updated">> =>
+    harness.events
+      .slice(from)
+      .filter((event): event is EventOf<"thread.token-usage.updated"> =>
+        event.type === "thread.token-usage.updated"
+      );
+
+  it("reads the window once the session is ready, before any turn has run", async () => {
+    const harness = await makeHarness();
+    await harness.adapter.startSession(START);
+    const row = await harness.waitFor("thread.token-usage.updated");
+    assert.equal(harness.peers[0]?.contextUsageCalls, 1);
+    assert.deepEqual(
+      harness.peers[0]?.calls.find((call) => call.op === "getContextUsage")?.arg,
+      { detail: "summary" },
+      "summary mode: it answers from the last response and makes no token-count call"
+    );
+    // The denominator used to arrive only with the first `result`, so the
+    // opening turn showed a bare count and no ring.
+    assert.equal(row.payload.usage.usedTokens, 15_868);
+    assert.equal(row.payload.usage.maxTokens, 1_000_000);
+    assert.equal(row.payload.usage.autoCompactAtTokens, 967_000);
+    assert.equal(row.payload.usage.compactsAutomatically, true);
+  });
+
+  it("refreshes after a result, attributing the row to the turn it was asked for", async () => {
+    const harness = await makeHarness();
+    await harness.adapter.startSession(START);
+    await harness.waitFor("thread.token-usage.updated");
+    const peer = harness.peers[0]!;
+
+    const turn = await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "do the thing",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await peer.nextTurn();
+    const before = harness.events.length;
+    peer.emit(systemInit());
+    peer.emit(successResult());
+    await harness.waitFor("turn.completed");
+    await harness.drain();
+
+    assert.equal(peer.contextUsageCalls, 2, "ready, then once per settled turn");
+    const refreshed = meterRows(harness, before);
+    assert.equal(refreshed.length, 1, "the settled turn produced exactly one fresh reading");
+    assert.equal(refreshed[0]?.payload.usage.usedTokens, 16_868);
+    assert.equal(
+      refreshed[0]?.turnId,
+      turn.turnId,
+      "the row names the turn it was asked for, never the next one"
+    );
+    // The result's `modelUsage[*].contextWindow` must not take the denominator
+    // back off the CLI's own resolved window.
+    assert.equal(refreshed[0]?.payload.usage.maxTokens, 1_000_000);
+  });
+
+  it("a CLI that rejects the control request never fails the turn and never warns", async () => {
+    const harness = await makeHarness({ contextUsage: "reject" });
+    await harness.adapter.startSession(START);
+    const peer = harness.peers[0]!;
+    await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "do the thing",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await peer.nextTurn();
+    peer.emit(successResult());
+    const completed = await harness.waitFor("turn.completed");
+    await harness.drain();
+
+    assert.equal(completed.payload.state, "completed");
+    assert.ok(peer.contextUsageCalls >= 1, "it was tried");
+    assert.deepEqual(
+      harness.events.filter(
+        (event) => event.type === "runtime.warning" || event.type === "runtime.error"
+      ),
+      [],
+      "an unavailable meter refresh is a debug line, never a row in the chat"
+    );
+  });
+
+  it("an unanswered request expires on its own deadline rather than hanging the thread", async () => {
+    const harness = await makeHarness({ contextUsage: "hang", contextUsageDeadlineMs: 20 });
+    await harness.adapter.startSession(START);
+    const peer = harness.peers[0]!;
+    await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "do the thing",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await peer.nextTurn();
+    peer.emit(successResult());
+    const completed = await harness.waitFor("turn.completed");
+    assert.equal(completed.payload.state, "completed");
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    await harness.drain();
+    assert.deepEqual(meterRows(harness), [], "no answer, no reading — and no invented one");
+    assert.deepEqual(
+      harness.events.filter((event) => event.type === "runtime.error"),
+      []
+    );
+  });
+
+  it("an SDK with no getContextUsage at all degrades silently", async () => {
+    const harness = await makeHarness({ contextUsage: "absent" });
+    await harness.adapter.startSession(START);
+    const peer = harness.peers[0]!;
+    await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "do the thing",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await peer.nextTurn();
+    peer.emit(successResult());
+    const completed = await harness.waitFor("turn.completed");
+    await harness.drain();
+    assert.equal(completed.payload.state, "completed");
+    assert.equal(peer.contextUsageCalls, 0);
+    assert.deepEqual(
+      harness.events.filter((event) => event.type === "runtime.error"),
+      []
+    );
   });
 });

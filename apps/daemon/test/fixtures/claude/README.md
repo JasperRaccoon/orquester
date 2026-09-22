@@ -702,6 +702,39 @@ tails the file; without it the shell's drill-in read "This agent has not reporte
 the whole run. `task_notification.summary` carries the exit code as `(exit code N)` — the only
 place the CLI reports it.
 
+### 19. `getContextUsage({detail:"summary"})` is the CLI's own `/context`, and it is free
+
+Scenario 13 captures it (650 ms, no API call — `summary` answers from the last response's usage
+plus local estimates; only `detail:"full"` makes token-count requests, which is why T3 avoided the
+call altogether):
+
+```json
+{"categories":[{"name":"System prompt","tokens":106,"color":"promptBorder"},
+               {"name":"System tools (deferred)","tokens":13467,"color":"inactive","isDeferred":true},
+               {"name":"Free space","tokens":984132,"color":"promptBorder"}],
+ "totalTokens":15868,"maxTokens":1000000,"rawMaxTokens":1000000,"percentage":2,
+ "autoCompactThreshold":967000,"isAutoCompactEnabled":true,
+ "model":"claude-opus-4-8[1m]","apiUsage":null}
+```
+
+Three things the context meter (§7.6) depends on:
+
+- **The denominator is `rawMaxTokens`**, not `maxTokens` — the SDK defines it as "the window
+  usage is measured against: the resolved autocompact window", i.e. what the CLI's own percentage
+  divides by. They agree here; they do not on a 1M-window model under a smaller compaction policy.
+- **`autoCompactThreshold` is reported outright**, so the meter states the number the user will
+  watch it approach instead of guessing; `isAutoCompactEnabled` is the only place the CLI says
+  auto-compaction is *off*.
+- **The captured `categories` carry no `kind` field.** The typed
+  `SDKContextUsageCategory.kind` (`used`/`free`/`buffer`/`deferred`) is newer than this capture,
+  so the "window minus the buffer rows" fallback sums to zero here and `autoCompactThreshold` is
+  the only source. Classify on `kind` when it is there, never on the English name — and never
+  require it.
+
+An older CLI rejects the control request outright. It is a display refresh, so a rejection, a
+timeout or an SDK with no such method is a debug line and the last known reading, never a
+`runtime.warning` and never a failed turn.
+
 ## Re-capturing
 
 Nothing here is generated; re-capturing means driving the real CLI again. Keep the format above,

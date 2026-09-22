@@ -11,6 +11,7 @@ import {
   CLAUDE_WEEKLY_WINDOW_ID,
   claudeTotalProcessedTokens,
   compactBoundarySnapshot,
+  contextUsageSnapshot,
   describeUsageLimit,
   formatUsageLimitWait,
   isRateLimitBlocking,
@@ -22,6 +23,7 @@ import {
   rateLimitEventToUpdate,
   scopedWindowId,
   toThreadTokenUsage,
+  totalProcessedFromModelUsage,
   usageResponseToLimits
 } from "./usage.ts";
 
@@ -267,5 +269,105 @@ describe("claude subscription windows", () => {
       names: {}
     });
     assert.ok(!far.includes(" in "), far);
+  });
+});
+
+describe("claude context usage — the authoritative /context accounting", () => {
+  const response = {
+    categories: [
+      { name: "System prompt", tokens: 106, kind: "used" },
+      { name: "Messages", tokens: 8, kind: "used" },
+      { name: "Autocompact buffer", tokens: 33_000, kind: "buffer" },
+      { name: "System tools (deferred)", tokens: 13_467, kind: "deferred" },
+      { name: "Free space", tokens: 984_132, kind: "free" }
+    ],
+    totalTokens: 15_868,
+    maxTokens: 1_000_000,
+    rawMaxTokens: 1_000_000,
+    percentage: 2,
+    autoCompactThreshold: 967_000,
+    isAutoCompactEnabled: true,
+    model: "claude-opus-4-8[1m]",
+    apiUsage: null
+  };
+
+  it("measures against rawMaxTokens and states the reported threshold", () => {
+    const snapshot = contextUsageSnapshot(response, undefined);
+    assert.ok(snapshot);
+    assert.equal(snapshot.usedTokens, 15_868);
+    assert.equal(snapshot.maxTokens, 1_000_000);
+    assert.equal(snapshot.autoCompactAtTokens, 967_000);
+    assert.equal(snapshot.compactsAutomatically, true);
+  });
+
+  it("derives the threshold from the buffer rows when the CLI reports none", () => {
+    const { autoCompactThreshold: _dropped, ...withoutThreshold } = response;
+    const snapshot = contextUsageSnapshot(withoutThreshold, undefined);
+    assert.equal(snapshot?.autoCompactAtTokens, 1_000_000 - 33_000);
+  });
+
+  it("carries no threshold and says so when auto-compaction is off", () => {
+    const snapshot = contextUsageSnapshot({ ...response, isAutoCompactEnabled: false }, undefined);
+    assert.equal(snapshot?.autoCompactAtTokens, undefined);
+    assert.equal(snapshot?.compactsAutomatically, false);
+  });
+
+  it("falls back to maxTokens when rawMaxTokens is missing, and keeps the known total", () => {
+    const { rawMaxTokens: _dropped, ...withoutRaw } = response;
+    const snapshot = contextUsageSnapshot(withoutRaw, 4_000_000);
+    assert.equal(snapshot?.maxTokens, 1_000_000);
+    assert.equal(snapshot?.totalProcessedTokens, 4_000_000);
+  });
+
+  it("refuses a malformed or empty response rather than emitting a zeroed meter", () => {
+    assert.equal(contextUsageSnapshot(null, undefined), undefined);
+    assert.equal(contextUsageSnapshot({ totalTokens: "lots" }, undefined), undefined);
+    assert.equal(
+      contextUsageSnapshot(
+        { totalTokens: 0, rawMaxTokens: 200_000, isAutoCompactEnabled: true },
+        undefined
+      ),
+      undefined
+    );
+  });
+
+  it("reads the real captured payload of fixture 13", () => {
+    const control = readClaudeFixture("13-probe-never-yielding.ndjson").find((frame) => {
+      const op = (frame.data as { op?: unknown } | null)?.op;
+      return frame.kind === "control" && typeof op === "string" && op.startsWith("getContextUsage");
+    });
+    assert.ok(control, "fixture 13 carries the getContextUsage capture");
+    const snapshot = contextUsageSnapshot((control.data as { result: unknown }).result, undefined);
+    assert.equal(snapshot?.usedTokens, 15_868);
+    assert.equal(snapshot?.maxTokens, 1_000_000);
+    assert.equal(snapshot?.autoCompactAtTokens, 967_000);
+  });
+});
+
+describe("claude totalProcessedTokens comes from modelUsage, not the per-turn rollup", () => {
+  it("sums every model's input, output and cache counts", () => {
+    const total = totalProcessedFromModelUsage({
+      "claude-opus-4-8[1m]": {
+        inputTokens: 100,
+        outputTokens: 20,
+        cacheReadInputTokens: 1_000,
+        cacheCreationInputTokens: 500,
+        contextWindow: 1_000_000
+      },
+      "claude-haiku-4-5": {
+        inputTokens: 7,
+        outputTokens: 3,
+        cacheReadInputTokens: 0,
+        cacheCreationInputTokens: 0,
+        contextWindow: 200_000
+      }
+    });
+    assert.equal(total, 1_630);
+  });
+
+  it("is undefined for a missing or empty map, so the caller can fall back", () => {
+    assert.equal(totalProcessedFromModelUsage(undefined), undefined);
+    assert.equal(totalProcessedFromModelUsage({}), undefined);
+    assert.equal(totalProcessedFromModelUsage("nope"), undefined);
   });
 });

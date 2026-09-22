@@ -14,8 +14,9 @@
  * adapters.
  *
  * **Without a context window there is no ring and no percentage**, only a bare
- * token count: an adapter with `reportsContextWindow: false` (OpenCode, Grok)
- * gets the degraded readout rather than a fabricated 0 %.
+ * token count: an adapter with `reportsContextWindow: false`, or a model whose
+ * provider catalogue names no window, gets the degraded readout rather than a
+ * fabricated 0 %.
  */
 
 import React from "react";
@@ -156,9 +157,15 @@ export function ContextMeterPanel({
         </div>
       ) : null}
 
-      {model.autoCompactAtTokens !== null || model.maxTokens !== null ? (
+      {model.autoCompactAtTokens !== null ||
+      model.maxTokens !== null ||
+      model.compactsAutomatically === false ? (
         <p className="text-[11px] leading-4 text-neutral-500">
-          {formatAutoCompactionSentence(modelLabel, model.autoCompactAtTokens)}
+          {formatAutoCompactionSentence(
+            modelLabel,
+            model.autoCompactAtTokens,
+            model.compactsAutomatically
+          )}
         </p>
       ) : null}
 

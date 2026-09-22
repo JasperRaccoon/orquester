@@ -151,6 +151,106 @@ export function toThreadTokenUsage(snapshot: ClaudeTokenUsageSnapshot): ThreadTo
   return rest;
 }
 
+/**
+ * `result.modelUsage` → §7.6's "total processed across the thread".
+ *
+ * `result.usage` cannot answer this: the SDK documents it as *"MAIN AGENT LOOP
+ * ONLY — excludes Task subagent, sidechain, and auxiliary model calls, and is
+ * per-turn in streaming-input sessions"*. `modelUsage` is the opposite —
+ * every model call through the query pipeline, subagents and compaction
+ * included, **cumulative across turns**, so the latest result already carries
+ * the running total and summing across results would double-count.
+ */
+export function totalProcessedFromModelUsage(modelUsage: unknown): number | undefined {
+  if (modelUsage === null || typeof modelUsage !== "object" || Array.isArray(modelUsage)) {
+    return undefined;
+  }
+  let total = 0;
+  for (const value of Object.values(modelUsage as Record<string, unknown>)) {
+    if (value === null || typeof value !== "object") {
+      continue;
+    }
+    const row = value as Record<string, unknown>;
+    total +=
+      (finiteNonNegativeInteger(row.inputTokens) ?? 0) +
+      (finiteNonNegativeInteger(row.outputTokens) ?? 0) +
+      (finiteNonNegativeInteger(row.cacheReadInputTokens) ?? 0) +
+      (finiteNonNegativeInteger(row.cacheCreationInputTokens) ?? 0);
+  }
+  return total > 0 ? total : undefined;
+}
+
+/**
+ * `Query.getContextUsage({detail:"summary"})` → the meter snapshot.
+ *
+ * This is the CLI's own `/context` accounting, so the meter can match the CLI
+ * to the token. `summary` answers from the last response's usage plus local
+ * estimates and makes **no** token-count API calls — the reason T3 avoided the
+ * control request (its `full` mode does) does not apply.
+ *
+ * Two deliberate choices:
+ *
+ * - The denominator is **`rawMaxTokens`**, not `maxTokens`: the SDK documents
+ *   it as *"the window usage is measured against: the resolved autocompact
+ *   window — the model's believed limit, or a smaller compaction-policy
+ *   window"*, which is exactly what the CLI's own percentage divides by. A
+ *   response that predates the field falls back to `maxTokens`.
+ * - `autoCompactAtTokens` prefers the reported `autoCompactThreshold` and
+ *   otherwise subtracts the **`kind: "buffer"`** rows (the compaction reserve)
+ *   from the window — and only while `isAutoCompactEnabled`. A capture from an
+ *   older CLI carries no `kind` at all (fixtures/claude README observation 25),
+ *   in which case the sum is 0 and the reported threshold is the only source.
+ */
+export function contextUsageSnapshot(
+  response: unknown,
+  lastKnownTotalProcessedTokens: number | undefined
+): ClaudeTokenUsageSnapshot | undefined {
+  if (response === null || typeof response !== "object" || Array.isArray(response)) {
+    return undefined;
+  }
+  const record = response as Record<string, unknown>;
+  const usedTokens = finiteNonNegativeInteger(record.totalTokens);
+  if (usedTokens === undefined || usedTokens <= 0) {
+    return undefined;
+  }
+  const maxTokens =
+    finitePositiveInteger(record.rawMaxTokens) ?? finitePositiveInteger(record.maxTokens);
+  const compactsAutomatically = record.isAutoCompactEnabled === true;
+  const autoCompactAtTokens = compactsAutomatically
+    ? (finitePositiveInteger(record.autoCompactThreshold) ??
+      autoCompactFromBuffers(record.categories, maxTokens))
+    : undefined;
+  const totalProcessedTokens = finiteNonNegativeInteger(lastKnownTotalProcessedTokens);
+  return {
+    usedTokens,
+    lastUsedTokens: usedTokens,
+    compactsAutomatically,
+    ...(maxTokens !== undefined ? { maxTokens } : {}),
+    ...(autoCompactAtTokens !== undefined ? { autoCompactAtTokens } : {}),
+    ...(totalProcessedTokens !== undefined && totalProcessedTokens > usedTokens
+      ? { totalProcessedTokens }
+      : {})
+  };
+}
+
+function autoCompactFromBuffers(categories: unknown, maxTokens: number | undefined): number | undefined {
+  if (maxTokens === undefined || !Array.isArray(categories)) {
+    return undefined;
+  }
+  let buffer = 0;
+  for (const row of categories) {
+    if (row === null || typeof row !== "object") {
+      continue;
+    }
+    const entry = row as { kind?: unknown; tokens?: unknown };
+    if (entry.kind !== "buffer") {
+      continue;
+    }
+    buffer += finiteNonNegativeInteger(entry.tokens) ?? 0;
+  }
+  return buffer > 0 && buffer < maxTokens ? maxTokens - buffer : undefined;
+}
+
 export function maxContextWindowFromModelUsage(modelUsage: unknown): number | undefined {
   if (modelUsage === null || typeof modelUsage !== "object" || Array.isArray(modelUsage)) {
     return undefined;

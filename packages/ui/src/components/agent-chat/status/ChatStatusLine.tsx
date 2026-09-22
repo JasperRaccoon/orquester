@@ -35,6 +35,7 @@ export function ChatStatusLine({
   autoCompactAtTokens,
   totalProcessedTokens,
   reportsContextWindow,
+  compactsAutomatically = null,
   activePlan,
   onCompact,
   latestCheckpoint,
@@ -48,9 +49,17 @@ export function ChatStatusLine({
         maxTokens: contextMaxTokens,
         autoCompactAtTokens,
         totalProcessedTokens,
-        reportsContextWindow
+        reportsContextWindow,
+        compactsAutomatically
       }),
-    [tokensUsed, contextMaxTokens, autoCompactAtTokens, totalProcessedTokens, reportsContextWindow]
+    [
+      tokensUsed,
+      contextMaxTokens,
+      autoCompactAtTokens,
+      totalProcessedTokens,
+      reportsContextWindow,
+      compactsAutomatically
+    ]
   );
   const planProgress = formatPlanProgress(activePlan);
   const checkpointFiles = latestCheckpoint?.files.length ?? 0;

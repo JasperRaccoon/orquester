@@ -69,11 +69,13 @@ import {
   buildSnapshot,
   keepNonEmpty,
   loadOpenCodeInventory,
+  modelContextLimits,
   pendingSnapshot,
   retainWorkspaceSnapshots,
   unusableSnapshot,
   type OpenCodeInventory
 } from "./snapshot.ts";
+import { openCodeRoutes, type ProviderListResponse } from "./routes.ts";
 import { Mutex } from "./util.ts";
 
 const ADAPTER_ID: AgentAdapterId = "opencode";
@@ -139,6 +141,13 @@ class OpenCodeAdapterImpl implements AgentAdapter {
     | undefined;
   /** The machine-level CLI catalogue: three Bun spawns and several MB (E9). */
   private cachedCliInventory: { value: OpenCodeInventory; at: number } | undefined;
+  /**
+   * `provider/model → limit.context`, per SERVER (§7.6's denominator). Keyed
+   * on the server URL, so the project's threads share one `GET /provider`
+   * rather than each paying for the catalogue, and a restarted server (new
+   * port) is a new key rather than a stale map.
+   */
+  private readonly contextLimits = new Map<string, Promise<Map<string, number>>>();
   private binPath: string | undefined;
   private stopped = false;
 
@@ -550,6 +559,11 @@ class OpenCodeAdapterImpl implements AgentAdapter {
     const server = await this.pool.acquire(projectDirFor(input));
     this.servers.set(input.threadId, server);
     try {
+      // Resolved BEFORE the session starts so the meter has its denominator
+      // from the first `step-finish`: a window that arrives late is exactly the
+      // on/off flicker §7.6 forbids, because the client keeps only the latest
+      // reading.
+      const contextLimits = await this.modelContextLimits(server, cwd);
       const session = await OpenCodeThreadSession.start(
         {
           ctx: this.ctx,
@@ -566,6 +580,7 @@ class OpenCodeAdapterImpl implements AgentAdapter {
           modelSelection: input.modelSelection,
           runtimeMode: input.runtimeMode,
           ...(input.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
+          contextLimits,
           server
         }
       );
@@ -579,6 +594,40 @@ class OpenCodeAdapterImpl implements AgentAdapter {
       this.servers.delete(input.threadId);
       throw error;
     }
+  }
+
+  /**
+   * The server's `provider/model → limit.context` map, one read per server.
+   *
+   * A failure resolves to an EMPTY map rather than rejecting: a missing
+   * denominator degrades the meter to a bare token count, and a catalogue read
+   * must never be the reason a thread fails to open.
+   */
+  private async modelContextLimits(
+    server: OpenCodeServerHandle,
+    cwd: string
+  ): Promise<Map<string, number>> {
+    const cached = this.contextLimits.get(server.url);
+    if (cached !== undefined) {
+      return await cached;
+    }
+    const pending = server
+      .client(cwd)
+      .get<ProviderListResponse>(openCodeRoutes.providers, {
+        timeoutMs: AGENT_HOST_DEADLINES.authProbeMs
+      })
+      .then((providers) => modelContextLimits(providers ?? { all: [], connected: [] }))
+      .catch((error: unknown) => {
+        this.ctx.logger.warn("opencode context-window catalogue read failed", {
+          url: server.url,
+          error: error instanceof Error ? error.message : String(error)
+        });
+        // Not cached as a failure: the next thread on this server tries again.
+        this.contextLimits.delete(server.url);
+        return new Map<string, number>();
+      });
+    this.contextLimits.set(server.url, pending);
+    return await pending;
   }
 
   /**

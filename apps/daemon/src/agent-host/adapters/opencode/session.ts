@@ -198,6 +198,12 @@ export interface StartOpenCodeSessionInput {
   modelSelection: ModelSelection;
   runtimeMode: RuntimeMode;
   resumeCursor?: unknown;
+  /**
+   * `provider/model → limit.context` off the server's catalogue (§7.6). Passed
+   * whole rather than as the one resolved number so an in-session model switch
+   * re-points the meter's denominator without another HTTP read.
+   */
+  contextLimits?: ReadonlyMap<string, number>;
   server: OpenCodeServerHandle;
 }
 
@@ -217,6 +223,7 @@ export class OpenCodeThreadSession {
   private closed = false;
   private closing: Promise<void> | undefined;
   private lastModelSlug: string;
+  private readonly contextLimits: ReadonlyMap<string, number>;
 
   private constructor(input: {
     deps: OpenCodeThreadSessionDeps;
@@ -225,6 +232,7 @@ export class OpenCodeThreadSession {
     state: OpenCodeSessionState;
     record: ProviderSession;
     modelSlug: string;
+    contextLimits: ReadonlyMap<string, number>;
   }) {
     this.deps = input.deps;
     this.server = input.server;
@@ -232,6 +240,7 @@ export class OpenCodeThreadSession {
     this.state = input.state;
     this.record = input.record;
     this.lastModelSlug = input.modelSlug;
+    this.contextLimits = input.contextLimits;
   }
 
   // -- lifecycle ----------------------------------------------------------
@@ -315,11 +324,14 @@ export class OpenCodeThreadSession {
     }
 
     const now = deps.ctx.clock.nowIso();
+    const contextLimits = input.contextLimits ?? new Map<string, number>();
+    const contextMaxTokens = contextLimits.get(input.modelSelection.model);
     const state = createSessionState({
       threadId: input.threadId,
       openCodeSessionId: sessionInfo.id,
       directory: input.cwd,
-      runtimeMode: input.runtimeMode
+      runtimeMode: input.runtimeMode,
+      ...(contextMaxTokens !== undefined ? { contextMaxTokens } : {})
     });
     const record: ProviderSession = {
       threadId: input.threadId,
@@ -341,7 +353,8 @@ export class OpenCodeThreadSession {
       client,
       state,
       record,
-      modelSlug: input.modelSelection.model
+      modelSlug: input.modelSelection.model,
+      contextLimits
     });
 
     session.emit({
@@ -1325,6 +1338,15 @@ export class OpenCodeThreadSession {
       throw new Error("OpenCode model selection must use the 'provider/model' format.");
     }
     this.lastModelSlug = selection.model;
+    // A model switch moves the meter's denominator with it; a model the
+    // catalogue never described clears it, so the ring disappears rather than
+    // measuring against the previous model's window.
+    const contextMaxTokens = this.contextLimits.get(selection.model);
+    if (contextMaxTokens === undefined) {
+      delete this.state.contextMaxTokens;
+    } else {
+      this.state.contextMaxTokens = contextMaxTokens;
+    }
 
     const text = input.input.trim();
     const fileParts = await this.buildFileParts(input.attachments);

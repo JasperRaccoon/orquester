@@ -134,6 +134,50 @@ test("the auto-compaction sentence states a reported threshold exactly", () => {
   );
 });
 
+test("a provider that says auto-compaction is OFF is believed over the vague copy", () => {
+  // `false` is a verdict the adapter proved (Claude's `isAutoCompactEnabled`);
+  // `undefined` only means nobody asked, and keeps the reassuring sentence.
+  assert.equal(
+    formatAutoCompactionSentence("Opus 4", null, false),
+    "Auto-compaction is off."
+  );
+  assert.equal(
+    formatAutoCompactionSentence("Opus 4", 180_000, false),
+    "Auto-compaction is off.",
+    "a stale threshold must not read as a promise the provider will act on it"
+  );
+  assert.equal(
+    formatAutoCompactionSentence("Opus 4", 180_000, true),
+    "Compacts automatically at 180,000 tokens."
+  );
+  assert.equal(
+    formatAutoCompactionSentence("Opus 4", null, undefined),
+    "Context for Opus 4 compacts automatically when needed."
+  );
+});
+
+test("the meter carries the auto-compaction verdict through to its model", () => {
+  const off = deriveContextMeter({
+    usedTokens: 1_000,
+    maxTokens: 200_000,
+    autoCompactAtTokens: null,
+    totalProcessedTokens: null,
+    reportsContextWindow: true,
+    compactsAutomatically: false
+  });
+  assert.equal(off?.compactsAutomatically, false);
+
+  const unknown = deriveContextMeter({
+    usedTokens: 1_000,
+    maxTokens: 200_000,
+    autoCompactAtTokens: null,
+    totalProcessedTokens: null,
+    reportsContextWindow: true,
+    compactsAutomatically: null
+  });
+  assert.equal(unknown?.compactsAutomatically, undefined, "unknown stays unknown");
+});
+
 // ---------------------------------------------------------------------------
 // The status line
 // ---------------------------------------------------------------------------

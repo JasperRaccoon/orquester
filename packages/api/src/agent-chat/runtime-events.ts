@@ -461,6 +461,16 @@ export interface ThreadTokenUsage {
   /** Where the provider will auto-compact, when it reports one. */
   autoCompactAtTokens?: number;
   totalProcessedTokens?: number;
+  /**
+   * Whether the provider compacts on its own when the window fills. `false` is
+   * a **verdict** the adapter can prove (Claude's `isAutoCompactEnabled`), and
+   * the client says "Auto-compaction is off." on it; `undefined` means nobody
+   * asked, and the copy stays vague rather than guessing.
+   *
+   * Last-writer-wins like every other field here: a snapshot that knows the
+   * answer must carry it on **every** emission, never on the first one only.
+   */
+  compactsAutomatically?: boolean;
 }
 
 // ---------------------------------------------------------------------------

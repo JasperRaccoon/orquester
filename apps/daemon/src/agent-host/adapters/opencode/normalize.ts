@@ -64,8 +64,10 @@ import {
   addRelatedSession,
   mergeOpenCodeAssistantText,
   messageRoleForPart,
+  stepTotalTokens,
   type OpenCodeChildAgent,
   type OpenCodeSessionState,
+  type OpenCodeStepUsage,
   type OpenCodeTextPartState
 } from "./state.ts";
 
@@ -531,7 +533,13 @@ function demux(
         state.textPartsByMessageId.delete(info.id);
       }
       if (info.role === "assistant") {
-        resolveAssistantOwnership(state, info.id, info.parentID);
+        emitContextWindow(
+          state,
+          resolveAssistantOwnership(state, info.id, info.parentID),
+          turnId,
+          raw,
+          out
+        );
         for (const part of state.textPartsByMessageId.get(info.id)?.values() ?? []) {
           emitTextDelta(part, turnId, raw, out);
         }
@@ -596,7 +604,13 @@ function demux(
       const role = messageRoleForPart(state, part) ?? (part.type === "tool" ? "assistant" : undefined);
 
       if (part.type === "step-finish" && turnId !== undefined && state.turnTokenUsage) {
-        accumulateStepPart(state, part as Extract<OpenCodePart, { type: "step-finish" }>);
+        emitContextWindow(
+          state,
+          accumulateStepPart(state, part as Extract<OpenCodePart, { type: "step-finish" }>),
+          turnId,
+          raw,
+          out
+        );
       }
 
       if ((part.type === "text" || part.type === "reasoning") && role !== "user") {
@@ -1318,14 +1332,20 @@ function emitTextDelta(
   }
 }
 
+/**
+ * Decide whether an assistant message is this turn's, and flush the steps that
+ * were deferred while the answer was unknown. Returns the steps it counted, so
+ * the caller can move the meter on them too — a step that resolved late is
+ * still a step of ours.
+ */
 function resolveAssistantOwnership(
   state: OpenCodeSessionState,
   messageId: string,
   parentID: string | undefined
-): void {
+): OpenCodeStepUsage[] {
   const usage = state.turnTokenUsage;
   if (usage === undefined) {
-    return;
+    return [];
   }
   const parentMessageId =
     typeof parentID === "string" && parentID.trim().length > 0 ? parentID : undefined;
@@ -1339,29 +1359,34 @@ function resolveAssistantOwnership(
   const ownership = prior === undefined || prior === "unknown" ? observed : prior;
   usage.assistantOwnershipByMessageId.set(messageId, ownership);
   if (ownership === "unknown") {
-    return;
+    return [];
   }
+  const counted: OpenCodeStepUsage[] = [];
   const steps = usage.unresolvedStepsByMessageId.get(messageId);
   if (ownership === "owned" && steps !== undefined) {
     for (const step of steps.values()) {
-      accumulateStepUsage(usage, step);
+      if (accumulateStepUsage(usage, step)) {
+        counted.push(step);
+      }
     }
   }
   usage.unresolvedStepsByMessageId.delete(messageId);
+  return counted;
 }
 
+/** The owned steps this part contributed, so the caller can move the meter. */
 function accumulateStepPart(
   state: OpenCodeSessionState,
   part: Extract<OpenCodePart, { type: "step-finish" }>
-): void {
+): OpenCodeStepUsage[] {
   const usage = state.turnTokenUsage;
   if (usage === undefined) {
-    return;
+    return [];
   }
   const ownership = usage.assistantOwnershipByMessageId.get(part.messageID);
   if (ownership === "owned") {
-    accumulateStepUsage(usage, { id: part.id, tokens: part.tokens }, part.cost);
-    return;
+    const step = { id: part.id, tokens: part.tokens };
+    return accumulateStepUsage(usage, step, part.cost) ? [step] : [];
   }
   if (
     ownership === "unknown" ||
@@ -1373,6 +1398,53 @@ function accumulateStepPart(
     steps.set(part.id, { id: part.id, tokens: part.tokens });
     usage.unresolvedStepsByMessageId.set(part.messageID, steps);
   }
+  return [];
+}
+
+/**
+ * The context meter (§7.6). Each owned `step-finish` states the size of the
+ * context that model call carried, so the LAST one is the window's occupancy;
+ * the running sum across the thread is "total processed".
+ *
+ * A child session's steps never reach here — they are a different session's
+ * spend (fixtures README observation 19) — and `maxTokens` is emitted only
+ * when the server's catalogue actually named a `limit.context` for the
+ * thread's model. Without it the client degrades to a bare count rather than
+ * drawing a ring against a guess.
+ */
+function emitContextWindow(
+  state: OpenCodeSessionState,
+  counted: readonly OpenCodeStepUsage[],
+  turnId: string | undefined,
+  raw: unknown,
+  out: Emitter
+): void {
+  if (counted.length === 0) {
+    return;
+  }
+  let usedTokens = 0;
+  for (const step of counted) {
+    const total = stepTotalTokens(step.tokens);
+    state.processedTokens += total;
+    usedTokens = total;
+  }
+  if (usedTokens <= 0) {
+    return;
+  }
+  out.push({
+    ...out.base({ turnId, raw }),
+    type: "thread.token-usage.updated",
+    payload: {
+      usage: {
+        usedTokens,
+        ...(state.contextMaxTokens !== undefined ? { maxTokens: state.contextMaxTokens } : {}),
+        ...(state.processedTokens > usedTokens
+          ? { totalProcessedTokens: state.processedTokens }
+          : {}),
+        compactsAutomatically: true
+      }
+    }
+  });
 }
 
 function emitToolItem(

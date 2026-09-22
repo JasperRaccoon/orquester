@@ -153,6 +153,12 @@ export interface OpenCodeModelRow {
   name?: string;
   /** An **object**, not an array — and its values name the reasoning effort. */
   variants?: Record<string, { reasoning?: { effort?: string } } | undefined>;
+  /**
+   * `context` is the model's window — §7.6's denominator. Present on every row
+   * in 1.18.5, optional here because a provider the catalogue only partly
+   * describes must degrade the meter, not break the snapshot.
+   */
+  limit?: { context?: number; input?: number; output?: number };
 }
 
 export interface OpenCodeProviderRow {

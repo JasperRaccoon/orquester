@@ -384,6 +384,16 @@ the **turn's** input+output. A locally-handled slash command reports `"totalToke
 ACP 0.11.3 also defines `Usage` / `UsageUpdate` and a `session/update` variant for them; this CLI
 does not use them, preferring `_meta`.
 
+**The window and the size arrive on different frames, and both halves must ride every emission.**
+The size is on each chunk's `_meta.totalTokens` (dozens per turn); the window is on the
+handshake's `modelState`, which no chunk repeats. The client keeps only the LATEST
+`context-window.updated` row (§7.6), so a chunk-driven row that carried the size and no
+`maxTokens` **erased** the ring the session-level row had just drawn — the meter appeared and
+disappeared throughout a turn. The normaliser therefore holds the resolved window
+(`setContextWindow`, pushed by the session at the handshake and on `_x.ai/models_update`) and
+stamps it onto every row, `usage_update`'s included when `update.size` is absent. A window nobody
+resolved is still omitted: a bare count is honest, a ring against a guess is not.
+
 ### 15. Plan mode is **declared**, not heuristic
 
 T3 detects `enter_plan_mode` by matching tool titles (`"enter_plan_mode"`, `"plan: enter"`,

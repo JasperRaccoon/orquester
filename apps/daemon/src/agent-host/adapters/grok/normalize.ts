@@ -29,6 +29,7 @@ import type {
   RuntimeEventRawSource,
   RuntimeItemStatus,
   RuntimeTaskStatus,
+  ThreadTokenUsage,
   TurnTokenUsage,
   UserInputQuestion
 } from "@orquester/api/agent-chat";
@@ -171,6 +172,16 @@ export class GrokNormalizer {
   private planModeActive = false;
   private lastProposedPlan: { markdown: string; turnId: string | undefined } | undefined;
   private contextTokens: number | undefined;
+  /**
+   * The model's window, from `modelState.availableModels[]._meta
+   * .totalContextTokens` (fixtures README observation 14). The session owns
+   * the handshake that learns it and pushes it here, because **every**
+   * `thread.token-usage.updated` has to carry it: the client keeps only the
+   * LATEST such row, so a chunk-driven row without `maxTokens` erased the ring
+   * the session-level row had just drawn, and the meter flickered on and off
+   * for the whole turn.
+   */
+  private contextWindow: number | undefined;
   private lastTurnUsage: XaiUsage | undefined;
   private lastResponseUsage: XaiUsage | undefined;
   /** Set when a `pending_interaction` was resolved with no request of ours. */
@@ -212,6 +223,27 @@ export class GrokNormalizer {
 
   get contextSize(): number | undefined {
     return this.contextTokens;
+  }
+
+  /** The window the session resolved. A `0`/absent reading clears nothing. */
+  setContextWindow(window: number | undefined): void {
+    if (typeof window === "number" && Number.isFinite(window) && window > 0) {
+      this.contextWindow = window;
+    }
+  }
+
+  get contextWindowTokens(): number | undefined {
+    return this.contextWindow;
+  }
+
+  /** The meter payload every emission must carry — window included when known. */
+  private tokenUsagePayload(usedTokens: number, maxTokens?: number): ThreadTokenUsage {
+    const window = maxTokens ?? this.contextWindow;
+    return {
+      usedTokens,
+      ...(window === undefined ? {} : { maxTokens: window }),
+      compactsAutomatically: true
+    };
   }
 
   /**
@@ -283,11 +315,16 @@ export class GrokNormalizer {
     if (contextSize !== undefined && contextSize !== this.contextTokens) {
       this.contextTokens = contextSize;
       events.push(
-        this.event("thread.token-usage.updated", { usage: { usedTokens: contextSize } }, undefined, {
-          source: ACP_RAW_SOURCE,
-          method: "session/update",
-          payload: { _meta: params._meta }
-        })
+        this.event(
+          "thread.token-usage.updated",
+          { usage: this.tokenUsagePayload(contextSize) },
+          undefined,
+          {
+            source: ACP_RAW_SOURCE,
+            method: "session/update",
+            payload: { _meta: params._meta }
+          }
+        )
       );
     }
     events.push(...this.handleUpdateBody(params.update, params));
@@ -387,10 +424,11 @@ export class GrokNormalizer {
       return [];
     }
     this.contextTokens = used;
+    // `update.size` wins when the CLI states it; otherwise the window the
+    // handshake resolved is still the truth, and dropping it here would blank
+    // the ring on the next chunk.
     return [
-      this.event("thread.token-usage.updated", {
-        usage: { usedTokens: used, ...(max === undefined ? {} : { maxTokens: max }) }
-      })
+      this.event("thread.token-usage.updated", { usage: this.tokenUsagePayload(used, max) })
     ];
   }
 

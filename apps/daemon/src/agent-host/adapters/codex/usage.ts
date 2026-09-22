@@ -40,6 +40,8 @@ const ZERO: Breakdown = {
 /** Per-thread usage accumulator. One instance per live session. */
 export class CodexUsageTracker {
   private latestTotal: Breakdown | null = null;
+  /** The most recent model call — the context meter's numerator (§7.6). */
+  private latestLast: Breakdown | null = null;
   private contextWindow: number | null = null;
   /** `total` as it stood when the current turn started, keyed by turn id. */
   private readonly turnBaselines = new Map<string, Breakdown>();
@@ -60,6 +62,7 @@ export class CodexUsageTracker {
     // thing the rule below forbids (Q1 finding 18).
     const previousTotal = this.latestTotal;
     this.latestTotal = notification.tokenUsage.total;
+    this.latestLast = notification.tokenUsage.last;
     this.contextWindow = notification.tokenUsage.modelContextWindow;
     if (notification.turnId.length > 0) {
       this.turnObserved.add(notification.turnId);
@@ -82,13 +85,26 @@ export class CodexUsageTracker {
     return this.threadUsage();
   }
 
-  /** The current context-meter snapshot (§7.6). */
+  /**
+   * The current context-meter snapshot (§7.6).
+   *
+   * The numerator is the **last model call**, never `total`: `total` is the
+   * thread's cumulative spend across every turn, so a long thread sailed past
+   * its own window and the ring pinned at 100 %. Codex's own TUI measures
+   * `last.total_tokens − last.reasoning_output_tokens` against
+   * `model_context_window` — reasoning output is billed but dropped from the
+   * next request, so it never occupies the window. `total` still answers
+   * §7.6's "total processed across the thread".
+   */
   threadUsage(): ThreadTokenUsage {
     const total = this.latestTotal ?? ZERO;
+    const last = this.latestLast ?? ZERO;
+    const usedTokens = clampNonNegative(last.totalTokens - last.reasoningOutputTokens);
     return {
-      usedTokens: total.totalTokens,
+      usedTokens,
       ...(this.contextWindow !== null ? { maxTokens: this.contextWindow } : {}),
-      totalProcessedTokens: total.totalTokens
+      ...(total.totalTokens > usedTokens ? { totalProcessedTokens: total.totalTokens } : {}),
+      compactsAutomatically: true
     };
   }
 

@@ -476,6 +476,27 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   "Task stopped" row just before the real completion, and the roster fold keeps the first terminal
   status, so a clean shell read as interrupted forever. The level may still name unknown tasks and
   clear liveness, but it is not a roster event (fixtures README observation 18).
+- **The context meter is per adapter and never a subagent's or a thread's cumulative total.**
+  `thread.token-usage.updated` is ingested verbatim into a `context-window.updated` activity and
+  the client takes the **latest one whole** — last-writer-wins, never merged — so every emission
+  must be a *complete* reading (`maxTokens` included whenever it is known) and only the MAIN
+  agent's own context may move it. The four sources: **Claude** asks the SDK
+  (`Query.getContextUsage({detail:"summary"})` — the CLI's own `/context`, no token-count API call)
+  after the handshake, after every `result` and after every `compact_boundary`, measuring
+  `totalTokens` against **`rawMaxTokens`**, with `message_delta` usage between calls and
+  `totalProcessedTokens` from Σ `modelUsage[*]` (cumulative across turns, subagents included);
+  **Codex** uses `last.totalTokens − last.reasoningOutputTokens` against `modelContextWindow`;
+  **Grok** stamps the handshake's window onto every row including the per-chunk ones; **OpenCode**
+  uses each owned `step-finish`'s `tokens.total` against `GET /provider`'s `limit.context`, read
+  once per server. Three things that were bugs and must not come back: a subagent's
+  `task_progress`/`task_notification` `usage.total_tokens` fed into the thread meter (it made the
+  ring jump to whichever subagent had run longest — that usage is roster data only); `result.usage`
+  used as `usedTokens` (it is the per-turn MAIN-LOOP rollup, not a context size); and an emission
+  that omits a window the adapter already knows (it erases the ring the previous row drew). Claude's
+  control request is best-effort in every direction — an older CLI, a timeout or an SDK without the
+  method is one debug line and the last known reading, never a `runtime.warning` and never a failed
+  turn. `compactsAutomatically: false` is a *verdict* (Claude's `isAutoCompactEnabled`) and the
+  popover then says "Auto-compaction is off."; an absent field means nobody asked.
 - **A `/compact` is a visible phase, not "Working".** The first `system/status {status:
   "compacting"}` latches `thread.state.changed {state:"compacting"}` (the CLI sends six of them);
   the next non-compacting status ends the phase. `compact_result: "failed"` emits

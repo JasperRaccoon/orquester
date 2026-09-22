@@ -594,6 +594,23 @@ a `total` and a per-step `cost` that T3 ignores; `cost` would let the timeline s
 per-turn figure without a price table. Assistant `message.updated` carries the same
 `tokens` and `cost` rolled up, plus `finish` (`"stop"`, `"tool-calls"`, `"unknown"`).
 
+**That `total` is the context meter, and `GET /provider` is its denominator** — so §4.5's
+`reportsContextWindow: false` is wrong for 1.18.5 and this adapter sets it **true**. Each owned
+step's `tokens.total` is the size of the context *that* model call carried (38 543 then 38 490 in
+fixture 03), and the catalogue carries the window beside every model:
+
+```jsonc
+"limit":{"context":1000000,"output":128000}
+```
+
+keyed `"<providerID>/<modelID>"`, the same slug a thread's `modelSelection.model` uses. Read once
+per server and cached on its URL. Two rules carry over unchanged from observation 19: a **child**
+session's steps are a different session's spend and never move the parent's meter (fixture 12's
+child spent 3 538 / 3 585 on the same server while the parent read 43 803 / 43 950), and the
+running sum of the parent's owned steps — not any one of them — is §7.6's *total processed*. A
+model the catalogue does not describe emits the count with no `maxTokens`, and the client degrades
+to a bare total rather than drawing a ring against a guess.
+
 ### 24. Smaller notes
 
 - `POST /session` takes the ruleset in the create body (`permission`), and `session.created`
