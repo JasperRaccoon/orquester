@@ -21,13 +21,15 @@
  *
  * 1. **Synchronous, no I/O.** It is built at construction, before any adapter
  *    exists and before the cache file is read, so it cannot await anything.
- * 2. **Never `status: "error"`.** The client's `authErrorMessage`
- *    (`packages/ui/src/lib/agent-chat/providers.ts`) raises the "sign in
- *    again" toast for `auth.status === "unauthenticated"` **or** for
- *    `status === "error"` with non-authenticated auth. A pending snapshot
- *    claims no verdict at all — `status:"unknown"` + `auth:{status:"unknown"}`
- *    — so it reaches neither arm. T3 spells this `status:"warning"`; Orquester's
- *    enum has no such member and `"unknown"` is its closest.
+ * 2. **Never `status: "error"`.** The client's `authErrorNotice`
+ *    (`packages/ui/src/lib/agent-chat/providers.ts`) raises a notice for
+ *    `auth.status === "unauthenticated"` **or** for `status === "error"` with
+ *    non-authenticated auth on an installed CLI. A pending snapshot claims no
+ *    verdict at all — `status:"unknown"` + `auth:{status:"unknown"}` — so it
+ *    reaches neither arm. (`unknown` never earns the "sign in again" copy
+ *    either way, §7.7, but a pending snapshot should raise nothing at all.)
+ *    T3 spells this `status:"warning"`; Orquester's enum has no such member and
+ *    `"unknown"` is its closest.
  * 3. **The best catalog it can give without probing.** A pending snapshot with
  *    no model is still unlaunchable, which is most of the bug. Claude ships a
  *    bundled fallback catalog; Grok a two-model one; Codex and OpenCode
