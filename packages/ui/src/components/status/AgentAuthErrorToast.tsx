@@ -1,6 +1,7 @@
 import React from "react";
 import { KeyRound, X } from "lucide-react";
 import { useAppStore } from "../../store/app";
+import { agentAuthNoticeKey } from "../../lib/agent-auth-notice";
 import { ACTION_TOAST_AUTO_DISMISS_MS, useAutoDismiss } from "./use-auto-dismiss";
 
 /**
@@ -18,7 +19,7 @@ export const AgentAuthErrorToast: React.FC = () => {
   const dismiss = useAppStore((s) => s.dismissAgentAuthError);
   const openSettings = useAppStore((s) => s.openSettings);
   useAutoDismiss(
-    error ? `${error.sessionId}\u0000${error.message}` : null,
+    error ? agentAuthNoticeKey(error) : null,
     dismiss,
     ACTION_TOAST_AUTO_DISMISS_MS
   );
@@ -27,11 +28,19 @@ export const AgentAuthErrorToast: React.FC = () => {
     return null;
   }
 
+  // The alarming title is reserved for a snapshot that can PROVE the credential
+  // is the problem (§7.7; T3 `ProviderStatusBanner.tsx:78-81`). An ambiguous
+  // `unknown` gets the neutral one — telling a user to re-authenticate an
+  // account that is signed in perfectly well is worse than saying nothing.
+  const signIn = error.tone !== "status";
+
   return (
     <div className="pointer-events-auto flex max-w-lg items-start gap-2.5 rounded-lg border border-danger-500/40 bg-neutral-900/95 py-2 pl-3 pr-2 text-sm shadow-xl shadow-black/40 backdrop-blur">
       <KeyRound size={16} className="mt-0.5 shrink-0 text-danger" />
       <div className="min-w-0 text-neutral-200">
-        <div className="font-medium">{error.agentName} needs signing in again</div>
+        <div className="font-medium">
+          {signIn ? `${error.agentName} needs signing in again` : `${error.agentName} status`}
+        </div>
         <div className="text-[12px] text-neutral-400">{error.message}</div>
         <button
           type="button"

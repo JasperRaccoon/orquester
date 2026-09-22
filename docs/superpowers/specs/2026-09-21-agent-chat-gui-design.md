@@ -2568,6 +2568,16 @@ The desktop's local transport reaches `/events?after=` through the same bridge t
 chunked terminal output today; commands are ordinary bridged requests. Nothing in the chat UI
 depends on WebSockets.
 
+*Built: `?after=` is not only the reconnect cursor — it is also how a **remount** catches up. A
+thread whose live stream was released keeps a retained snapshot (§7.2), and the next mount opens
+`/events?after=<retained seq>` rather than re-reading the thread body, so returning to a
+recently-viewed tab costs the deltas it missed instead of a full snapshot and a re-fold. The
+cursor needs no new failure mode: `readThread(threadId, afterSeq)` already answers a full
+`snapshot` frame whenever the cursor is unusable — above the head, too large a range, a truncated
+log — and a changed `hostInstanceId` is resync-not-resume as before
+(`apps/daemon/src/agent-host/orchestration/orchestrator.ts`, `resumeCursorFor` in
+`packages/ui/src/lib/agent-chat/stream.logic.ts`).*
+
 ### 6.6 Multi-client convergence
 
 The model is host-authoritative, cursor-ordered: no CRDT, no client-side merge. Every mutation is a
@@ -2663,11 +2673,49 @@ reasoning blocks, and the scroll offset inside each expanded tool output — so 
 restores the reading position *and* the shape of the page under it.
 *T3: `apps/web/src/components/chat/timelineScrollAnchoring.ts:110-125` — `RememberedTimelinePosition` and its five disclosure sets; `:127-141` — delete-then-set LRU, evicting past 100 entries*
 
+*Built: "dropped on tab close" is split in two, as T3 splits it. The **live subscription** — the
+stream and the slice that folds it — is released as soon as its last consumer leaves (a short
+grace only, for React's StrictMode double-mount and the §7.1 paint hold:
+`THREAD_STORE_DISPOSE_GRACE_MS` is 2 s). What survives it is a **value-only retained snapshot** —
+the folded state plus the sequence it was folded to — held in memory for a 5-minute *idle* TTL
+(`THREAD_SNAPSHOT_IDLE_TTL_MS`, `packages/ui/src/lib/agent-chat/retention.ts`). A remount takes
+that value, paints it before anything is fetched, and opens its stream with `after=<retained seq>`
+(§6.5). `cachedThreadState` keeps a retained `synchronized` connection **as-is**, so no sync label
+flashes over a timeline that is already on screen and correct; anything else falls back to the
+cold-start path. The in-flight command flags (`reverting`, `stopping`) and the thread-level error
+banner are dropped with the generation that owned them; the queue, drafts, disclosures and scroll
+position survive. Every write is guarded by an **owner token** minted per live generation, so a
+teardown that lands after a newer store has claimed the same thread cannot clobber the newer
+cache. The alternative first shipped here — holding the live stream open for fifteen minutes per
+recently-viewed tab — bought the same instant repaint at the cost of one live connection and one
+live fold per tab, and is gone.
+*T3: `packages/client-runtime/src/state/threadRetention.ts:1-3` — `THREAD_SNAPSHOT_IDLE_TTL_MS = 5 * 60_000`, "keep recent thread snapshots for back navigation; live subscriptions end when the last detail consumer leaves"; `packages/client-runtime/src/state/threads.ts:917-950` — the resume family at that idle TTL beside the state family at `setIdleTTL(0)`, and `Stream.concat(Stream.succeed(cachedThreadState(resume.snapshot.state)), live)`; `:161-176` — `cachedThreadState` keeping a retained "live" status; `:186-228` — the cached sequence seeding `afterSequence`; `:188-189, 228, 255, 274, 293, 418` — the owner guard.*
+
 ### 7.3 Timeline
 
 Plain scroll container with `content-visibility: auto`; no virtualizer until a profile calls for
 one.
 *T3: `apps/web/src/components/chat/MessagesTimeline.tsx:1279-1358` — `LegendList` with `getItemType` pools and `recycleItems` deliberately off on the main list. differs: with threads bounded at one tab's history and no recycling benefit to reclaim, we start with a plain container and adopt a virtualizer only on evidence*
+
+**The list mounts at its end, and only streamed growth ever glides.** The end pin happens in a
+layout effect — after layout, before the browser paints — so a thread opens already at its bottom
+rather than at the top and then travelling; a remembered position that is *not* at the end is the
+only case that restores an offset instead. Smooth scrolling is reserved for a paragraph landing
+inside an already-open thread: a thread switch, the arrival of a list's first page of rows, the
+pre-first-paint window and `prefers-reduced-motion` all keep the instant variant. What makes the
+switch instant is a **named two-frame latch** keyed on the list identity — two frames covers the
+fresh-data layout pass and the initial end pin — not a wall-clock window, which is both too long
+(a turn streaming into a thread opened half a second ago jumps instead of gliding) and too short
+(a slow first fold lands after it expires and glides down in front of the user). The latch is
+matched on the identity, so one armed for the thread just left cannot affect the one arrived at,
+and the subagent drill-in counts as its own identity because it mounts a second timeline for the
+same session id while the parent's is still mounted (§7.6).
+*T3: `apps/web/src/components/chat/MessagesTimeline.tsx:1287` — `initialScrollAtEnd={citationRequest === null && rememberedPosition?.atEnd !== false}`, with `positionedThreadKey` initialised at `:548-551` so no restore scroll runs in that case; `:389-395` — `TIMELINE_MAINTAIN_SCROLL_AT_END_SMOOTH`, "thread switches and layout settles keep the instant variant so nothing visibly travels"; `:555-567, :618-631` — `settlingListIdentity` and its two-frame `requestAnimationFrame` clear; `:1294-1304` — `isWorking && !prefersReducedMotion && settlingListIdentity === null` picks the smooth variant.*
+*Built: the rules are pure and live in `packages/ui/src/components/agent-chat/timeline/follow.ts`
+(`shouldAnimateFollow`, `armSettleLatch`/`tickSettleLatch`/`isSettling`,
+`timelineListIdentity`); `ChatTimeline` holds the latch in a ref, because the decision is read at
+call time inside a scroll handler and re-rendering the whole timeline twice per switch to publish
+a boolean nothing paints would be strictly worse.*
 
 Row kinds and behaviour:
 

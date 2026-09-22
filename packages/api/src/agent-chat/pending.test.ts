@@ -195,6 +195,58 @@ test("only async questions are dismissible", () => {
   );
 });
 
+test("`responseMode` is promoted onto the pending entry, with the turn that asked", () => {
+  // §6.2: four behaviours branch on it — dismiss legality, the terminal-turn
+  // cleanup, settle eligibility and the turn-pause gate — so it is a contract
+  // field rather than something each consumer re-derives from the raw payload.
+  // *T3: `providerRuntime.ts:496`.*
+  resetActivityIds();
+  const pending = derivePendingRequests([
+    activity(
+      "user-input.requested",
+      {
+        requestId: "async",
+        responseMode: "message",
+        questions: [{ id: "a", header: "h", question: "q", options: [{ label: "yes" }] }]
+      },
+      { turnId: "turn-7" }
+    ),
+    activity(
+      "user-input.requested",
+      {
+        requestId: "native",
+        questions: [{ id: "b", header: "h", question: "q", options: [{ label: "yes" }] }]
+      },
+      { turnId: "turn-7" }
+    )
+  ]);
+  assert.deepEqual(
+    pending.userInputs.map((entry) => [entry.requestId, entry.responseMode, entry.turnId]),
+    [
+      ["async", "message", "turn-7"],
+      ["native", undefined, "turn-7"]
+    ]
+  );
+  // `dismissible` stays exactly `responseMode === "message"` — derived, never
+  // independently authored, so the two can never disagree.
+  for (const entry of pending.userInputs) {
+    assert.equal(entry.dismissible, entry.responseMode === "message");
+  }
+});
+
+test("an unrecognised `responseMode` is not a message-mode question", () => {
+  resetActivityIds();
+  const pending = derivePendingRequests([
+    activity("user-input.requested", {
+      requestId: "q1",
+      responseMode: "inline",
+      questions: [{ id: "a", header: "h", question: "q", options: [{ label: "yes" }] }]
+    })
+  ]);
+  assert.equal(pending.userInputs[0]?.responseMode, undefined);
+  assert.equal(pending.userInputs[0]?.dismissible, false);
+});
+
 test("parseQuestions preserves native answer keys and drops unanswerable cards", () => {
   const questions = parseQuestions([
     {

@@ -103,8 +103,14 @@ import {
 import {
   AgentChatCommandError,
   type AgentChatStreamHandle,
+  type AgentChatStreamOptions,
   type AgentChatTransport
 } from "./transport";
+import {
+  ThreadRetentionCache,
+  THREAD_SNAPSHOT_IDLE_TTL_MS,
+  type RetainedThread
+} from "./retention";
 
 // ---------------------------------------------------------------------------
 // Dependencies
@@ -198,6 +204,94 @@ interface InternalState extends AgentChatThreadState {
 }
 
 export type ThreadStore = StoreApi<AgentChatThreadState>;
+
+// ---------------------------------------------------------------------------
+// Retention (spec §6.5, §7.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Everything a remount needs to paint the thread **without a network round
+ * trip**: the fold, the client-local view state riding on it, and every cached
+ * projection layer built from it.
+ *
+ * Deliberately *not* here: `actions` (they close over a dead store), the
+ * in-flight command flags `reverting`/`stopping` (a command of the destroyed
+ * generation can never settle), and the composer draft (already persisted, and
+ * read back on construction). Those are the fields T3's `cachedThreadState`
+ * normalises away for the same reason.
+ */
+export interface RetainedThreadState {
+  reducer: AgentChatReducerState;
+  queue: QueueState;
+  timeline: ThreadTimelineProjection;
+  rowsProjection: TimelineRowsProjection | null;
+  stableRows: StableRowsState;
+  derivedSets: InternalState["derivedSets"];
+  rows: AgentChatTimelineRow[];
+  activePlan: ActivePlanState | null;
+  actionableProposedPlan: AgentChatThreadState["actionableProposedPlan"];
+}
+
+/**
+ * The value-only retained-snapshot cache, 5-minute idle TTL. The *live*
+ * subscription is released after {@link THREAD_STORE_DISPOSE_GRACE_MS}; this
+ * is what makes coming back to it instant anyway.
+ */
+const retention = new ThreadRetentionCache<RetainedThreadState>();
+
+/** Test seam: drop every retained snapshot. */
+export function resetThreadRetention(): void {
+  retention.clear();
+}
+
+/** How many threads currently hold a retained snapshot. Test/diagnostic seam. */
+export function retainedThreadCount(): number {
+  return retention.size;
+}
+
+/**
+ * The retained state as a remount should paint it.
+ *
+ * A retained **synchronized** connection stays synchronized: the cursor resume
+ * that follows only replays what the thread missed, so downgrading here would
+ * flash "Connecting…" over a timeline that is already on screen and correct —
+ * which is exactly the regression the 15-minute dispose grace was papering
+ * over. Anything else falls back to `idle`, from which the stream's own
+ * `onOpen` takes it to `connecting` as on a cold start.
+ *
+ * The error banner is cleared with it: it described a command posted by a
+ * generation that no longer exists.
+ *
+ * *T3: `packages/client-runtime/src/state/threads.ts:161-176`
+ * (`cachedThreadState`).*
+ */
+export function cachedThreadState(retained: RetainedThreadState): RetainedThreadState {
+  const slice = retained.reducer.slice;
+  const connection =
+    slice.connection === "synchronized" && slice.head !== null ? "synchronized" : "idle";
+  const reducer = patchSlice(retained.reducer, { connection, errorBanner: null });
+  return reducer === retained.reducer ? retained : { ...retained, reducer };
+}
+
+/** Snapshot the live state into a retainable value. */
+function retainableFrom(state: InternalState): RetainedThread<RetainedThreadState> {
+  return {
+    state: {
+      reducer: state.reducer,
+      queue: state.queue,
+      timeline: state.timeline,
+      rowsProjection: state.rowsProjection,
+      stableRows: state.stableRows,
+      derivedSets: state.derivedSets,
+      rows: state.rows,
+      activePlan: state.activePlan,
+      actionableProposedPlan: state.actionableProposedPlan
+    },
+    // The fold's own cursor, never the slice's: they agree, and the fold is
+    // what `applyFrame` compares an incoming event against.
+    sequence: state.reducer.fold.seq
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Projection
@@ -395,6 +489,13 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
   const delay = deps.delay ?? defaultDelay;
   const maxRetries = deps.hostUnavailableRetries ?? 3;
   const positions = timelinePositionStore();
+
+  // §6.5/§7.2: take the retained snapshot (removing it — this generation is
+  // now the live copy) and claim the key, so only this generation may write it
+  // back. Reading before claiming is T3's order too: `get.once(resumeAtom)`
+  // then `resumeCache.owner = owner`.
+  const retained = retention.take(sessionId);
+  const retentionOwner = retention.claim(sessionId);
 
   let stream: AgentChatStreamHandle | null = null;
   let closed = false;
@@ -951,6 +1052,37 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       }
     });
 
+    const warm = retained ? cachedThreadState(retained.state) : null;
+    const initialReducer = warm
+      ? warm.reducer
+      : (() => {
+          const reducer = createReducerState(sessionId);
+          const remembered = positions.read(sessionId);
+          return remembered
+            ? patchSlice(reducer, {
+                scroll: remembered,
+                disclosures: remembered.disclosures,
+                interactionMode: remembered.interactionMode,
+                follow: remembered.atEnd
+              })
+            : reducer;
+        })();
+
+    /**
+     * **Resume by cursor, never re-download.** A warm remount asks the host for
+     * `events?after=<retained seq>`; the host answers with the deltas, or — if
+     * that cursor is unusable (above its head, too large a range, a truncated
+     * log, a different host) — with a full `snapshot` frame, which
+     * `applyFrame` treats as a history replacement and the projections are
+     * invalidated by the epoch. Either way nothing empty is ever painted.
+     *
+     * *T3: `threads.ts:823-841` — `...(canResume ? { afterSequence: sequence } : {})`.*
+     */
+    const resumeOptions: AgentChatStreamOptions =
+      retained !== null && retained.sequence > 0
+        ? { after: retained.sequence, hostInstanceId: initialReducer.hostInstanceId }
+        : {};
+
     // The store is created with its stream already wired, so `open()` is not a
     // separate step a caller can forget.
     queueMicrotask(() => {
@@ -959,7 +1091,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       }
       stream = deps.transport.stream(
         sessionId,
-        {},
+        resumeOptions,
         {
           onFrame: applyStreamFrame,
           onOpen: () => {
@@ -973,28 +1105,18 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       );
     });
 
-    const reducer = createReducerState(sessionId);
-    const remembered = positions.read(sessionId);
-    const initialReducer = remembered
-      ? patchSlice(reducer, {
-          scroll: remembered,
-          disclosures: remembered.disclosures,
-          interactionMode: remembered.interactionMode,
-          follow: remembered.atEnd
-        })
-      : reducer;
-
     return {
       reducer: initialReducer,
       slice: initialReducer.slice,
-      queue: EMPTY_QUEUE,
-      timeline: EMPTY_TIMELINE_PROJECTION,
-      rowsProjection: null,
-      stableRows: EMPTY_STABLE_ROWS,
-      derivedSets: null,
-      rows: [],
-      activePlan: null,
-      actionableProposedPlan: null,
+      queue: warm?.queue ?? EMPTY_QUEUE,
+      timeline: warm?.timeline ?? EMPTY_TIMELINE_PROJECTION,
+      rowsProjection: warm?.rowsProjection ?? null,
+      stableRows: warm?.stableRows ?? EMPTY_STABLE_ROWS,
+      derivedSets: warm?.derivedSets ?? null,
+      rows: warm?.rows ?? [],
+      activePlan: warm?.activePlan ?? null,
+      actionableProposedPlan: warm?.actionableProposedPlan ?? null,
+      // An in-flight command belonged to the generation that is gone.
       reverting: false,
       draft: readPersistedDrafts()[sessionId] ?? EMPTY_DRAFT,
       stopping: false,
@@ -1003,12 +1125,21 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
   });
 
   // Expose the teardown on the store object so the registry can call it.
-  (store as ThreadStore & { destroy?: () => void }).destroy = () => {
+  // `retain: false` is the "drop it for good" path (`resetThreadStores`).
+  (store as ThreadStore & { destroy?: (options?: { retain?: boolean }) => void }).destroy = (
+    options
+  ) => {
     closed = true;
     stream?.close();
     stream = null;
     unsubscribeProviders?.();
     unsubscribeProviders = null;
+    // The live subscription is gone; the VALUE survives for the idle TTL so a
+    // remount paints it instantly and resumes by cursor (§6.5, §7.2). Refused
+    // outright when a newer generation already claimed this key.
+    if (options?.retain !== false) {
+      retention.retain(sessionId, retentionOwner, retainableFrom(store.getState()));
+    }
   };
 
   return store;
@@ -1057,14 +1188,21 @@ const registry = new Map<string, RegistryEntry>();
  * re-mounts an effect in development; a zero grace would close and re-open
  * every stream on every mount.
  */
-// 15 minutes, not 2 seconds: with 2 s every tab switch longer than a blink
-// disposed the slice and the stream, and coming back meant "Connecting…", a
-// full snapshot fetch and a re-fold (1–3 s on a long thread, plus the
-// empty-thread panel flashing meanwhile). A hidden tab now stays warm — its
-// stream open, its fold in memory — so switching back is instant. The cost is
-// one live stream and one fold per recently-viewed tab; a tab closed for
-// good is released through `releaseThreadStore` as before.
-export const THREAD_STORE_DISPOSE_GRACE_MS = 15 * 60_000;
+// A short grace, because the LIVE subscription is the expensive half and T3
+// gives it TTL 0 — released as soon as its last consumer leaves. What makes a
+// return to a recently-viewed tab instant is not a stream held open for
+// fifteen minutes (this constant's previous value, a stopgap) but the
+// value-only retained snapshot in `retention.ts`: the fold survives the
+// teardown for its own 5-minute idle TTL, a remount paints it before anything
+// is fetched, and the fresh stream resumes with `after=<retained seq>`.
+//
+// *T3: `packages/client-runtime/src/state/threads.ts:917-950` — the resume
+// family carries `setIdleTTL(THREAD_SNAPSHOT_IDLE_TTL_MS)`, the live state
+// family `setIdleTTL(0)`.*
+export const THREAD_STORE_DISPOSE_GRACE_MS = 2_000;
+
+/** The retained snapshot's idle TTL, re-exported for callers that report it. */
+export { THREAD_SNAPSHOT_IDLE_TTL_MS };
 
 function scheduleDispose(sessionId: string, entry: RegistryEntry): void {
   if (entry.disposeTimer !== null) {
@@ -1138,13 +1276,16 @@ export function peekThreadStore(sessionId: string): ThreadStore | null {
   return registry.get(sessionId)?.store ?? null;
 }
 
-/** Test seam: drop every slice immediately. */
+/** Test seam: drop every slice immediately, retained snapshots included. */
 export function resetThreadStores(): void {
   for (const [sessionId, entry] of [...registry.entries()]) {
     cancelDispose(entry);
     registry.delete(sessionId);
-    (entry.store as ThreadStore & { destroy?: () => void }).destroy?.();
+    (
+      entry.store as ThreadStore & { destroy?: (options?: { retain?: boolean }) => void }
+    ).destroy?.({ retain: false });
   }
+  retention.clear();
 }
 
 export type { AttachmentRef, ComposerContextRecord, InteractionMode };
