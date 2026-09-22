@@ -2288,6 +2288,45 @@ rejected with `COMMAND_REJECTED`: the question was already answered, and the que
 
 *T3: `apps/server/src/orchestration/decider.ts:1753-1796` — both invariant errors and the `thread.activity-appended` the command decides to*
 
+*Built: **`responseMode` is a first-class field on the pending request**, not something each
+consumer re-derives from the raw payload (`PendingUserInput.responseMode` in
+`packages/api/src/agent-chat/thread.ts`, promoted by `derivePendingRequests`; `dismissible` stays
+`responseMode === "message"`, derived and never independently authored). Four behaviours branch on
+it and must never disagree — T3 `providerRuntime.ts:496` with the same four consumers:*
+
+*1. **dismiss legality** (`decider.ts:1769-1775`): only a message-mode question may be closed
+   without an answer;*
+*2. the **terminal-turn cleanup** (`ProviderRuntimeIngestion.ts:2330-2360`): when a turn ends with
+   a question still open, only the NON-message ones are force-resolved with a "User input
+   dismissed" activity — a message-mode question may outlive its turn and still accept a later
+   user message. Orquester did not have this rung of the rule at all; it is now
+   `settleStrandedQuestions` on `turn.completed`/`turn.aborted` in the orchestrator's runtime-event
+   loop, which is why `PendingUserInput` also carries the `turnId` that scopes it. Historical
+   (replayed) turn events are excluded: a replayed turn is the past and has no live provider to
+   strand;*
+*3. **settle eligibility** (`decider.ts:500-511`) — Orquester has no settle/snooze command, so this
+   consumer has no counterpart here and nothing to keep in sync;*
+*4. the **turn-pause gate** (`ProviderRuntimeIngestion.ts:2076-2079`): an async question never
+   parks the turn, already true of the mandatory flush point in
+   `apps/daemon/src/agent-host/ingestion/index.ts`. A message-mode question does still put the
+   THREAD in `waiting` on the §6.4 ladder, exactly as T3's sidebar reads it as `input` — that is
+   the row's status, not the turn's state, and the turn state machine (`turn-state.ts`) is driven
+   by session status alone and never by a pending request.*
+
+*Built: **the message-mode answer is committed as ONE decision.** T3 commits the resolved activity
+and the turn/steer with a single `decideCommandSequence([activity.append, turn.start])`
+(`decider.ts:1629-1702`) so the card cannot close without the message being committed, nor the
+reverse. Here that is one `events` array on one orchestrator decision — `responseRequested`, the
+`user-input.resolved` activity (deterministic id `async-answer:<requestId>`) and the
+`thread.message-sent` reach `append` together or not at all — with the steer as the decision's only
+effect. The reply text **echoes each question before its answer** (`"<question>\n<answer>"`, joined
+by blank lines), and a question's attachments follow as `Attached file: <name> (<id>)` lines and
+ride the message as real attachment refs. The echo is not decoration: the provider parked no
+request, so the agent receives this as an ordinary user turn and has nothing but the text to tell
+it which question was answered — the previous shape dropped the question whenever there was exactly
+one, which reads as a bare "yes" arriving from nowhere in a resumed transcript. The message id is
+the deterministic `async-answer:<requestId>` too, so a replayed command cannot mint a duplicate.*
+
 `/session/stop` stops the provider child and leaves the thread, its log and its resume cursor
 intact; the next `/turn` re-adopts it through lazy recovery (§4.1). Without it a session wedged in
 `starting` or `error` would be unrecoverable, because §6.2 answers 409 to every command against a
@@ -2496,6 +2535,19 @@ a failure still outranks lingering background liveness, and it still raises an a
 sees. A surface that wants to say "failed" reads `chatSessionStatus === "error"` or
 `latestTurn.state === "failed"` off the summary, exactly as it reads `backgroundLiveness` to say
 "Monitoring". Distinct push copy for a failure is a follow-up.
+
+*Built: the ladder carries a **`plan-ready` rung** between `running` and
+`background-working` (`apps/daemon/src/agent-chat/activity-ladder.ts`). An actionable proposed
+plan on a settled turn — `hasActionableProposedPlan`, no pending user input, `latestTurn` started
+and completed, session not `running` — resolves to `waiting` + `needs-input`, and its push is a
+third structural type, `plan-ready` ("has a plan ready"), rather than a `needs-input` with
+different words: nothing is blocked on an answer and the work is not finished either. It is
+ordered exactly as T3's pill is (`Sidebar.logic.ts:1049-1066`): it **outranks background
+working/monitoring** — the plan needs a decision, liveness merely reports — and sits below
+approval, question and error. Differs from T3 in one clause: T3 also requires `interactionMode ===
+"plan"`, which is not on `AgentChatSessionSummaryFields` and would be the wrong test anyway —
+`hasActionableProposedPlan` already means "the LATEST plan is unimplemented" (R6-3), and a thread
+switched out of plan mode after proposing still owes the user that decision.*
 
 **Amendment (implementation): the trust grant is confined to `projectPath`.** A chat launch
 auto-accepts Claude's project-trust dialog for the thread's project (a never-seen directory is
@@ -3012,6 +3064,40 @@ Settings usage overview by window id. `auth.status` with an error surfaces a toa
 Settings → Accounts. When an open chat tab's stream (§6.3) delivers `thread.turn-diff-completed`,
 the client refreshes the git tab for that project; no new bus event is introduced for it (§6.4).
 
+*Built: **`unknown` is not `unauthenticated`.** T3's Claude driver emits `auth: {status:"unknown"}`
+on every failure and ambiguity path — disabled, version probe failed, timed out, capabilities
+missing, no credentials found, still pending (`ClaudeProvider.ts:452,478,496,520,552,617,632`) —
+and `"authenticated"` only when the initialization result positively yields credentials (`:582-587`).
+`unauthenticated` is reserved for a driver that can PROVE it from a credential answer:
+`CodexProvider.ts:553` (`account/read` with `requiresOpenaiAuth`) and `GrokProvider.ts:491` (the
+CLI printed that it is not logged in). Orquester's Claude probe used to read a silent init result
+— one that succeeded but carried no `account` block — as a logged-out verdict, which is wrong:
+`claude` initialises fine under an API-key/Bedrock environment and under a first-party login whose
+account block the CLI simply does not return. That claim is what made the client toast "claude
+needs signing in again" at a host whose managed accounts were all valid, the bug
+`apps/daemon/src/agent-chat/provider-auth-overlay.ts` was written to paper over. The overlay stays
+— it still repairs the same claim arriving from an older surviving host — but the probe no longer
+manufactures it (`buildClaudeAuth`). Codex, Grok and OpenCode already followed the rule;
+`apps/daemon/src/agent-host/adapters/auth-status.test.ts` pins all four.*
+
+*Built: **the toast's alarming copy is gated on proof, and its dismissal is keyed on the whole
+verdict.** T3 shows "Not authenticated" only for `auth.status === "unauthenticated"` — `unknown`
+reads as "Available" (`providerStatus.ts:44-79`) — and the "<provider> is unauthenticated" banner
+title only when `status === "error"` AND `auth.status === "unauthenticated"`
+(`ProviderStatusBanner.tsx:78-81`). `authErrorNotice` in
+`packages/ui/src/lib/agent-chat/providers.ts` now returns a `tone`: `"sign-in"` (the "needs signing
+in again" title, Settings → Accounts) only for `unauthenticated`, and T3's neutral `"status"` copy
+for a snapshot that merely failed — and that arm additionally requires `installed`, because an
+absent CLI is a Settings → Agents problem with no credential to fix. **Differs from the plain
+reading of T3's rule in one place, deliberately:** an `unknown` + `status: "error"` snapshot still
+raises an ambient notice rather than nothing at all, because that is exactly what a turn-time
+`auth.status {error}` produces (`provider-snapshots.ts` applyAuthStatus stores `error` + `unknown`
+rather than claiming a verdict the probe has not reached) and dropping it would silence a real,
+provider-reported failure. It just no longer tells the user to re-authenticate. The remembered
+dismissal is keyed on `[adapterId, status, auth.status, message]`, T3's own banner key
+(`ProviderStatusBanner.tsx:20-23`), so the same result never re-toasts while a verdict that MOVED
+still gets through (`packages/ui/src/lib/agent-auth-notice.ts`).*
+
 **A thread's title is client-seeded and host-owned thereafter.** There is no title-generation
 service, and none is introduced. The client seeds the title at creation from the first message —
 plain text, context references stripped, truncated — falling back to the first attachment's name
@@ -3029,6 +3115,25 @@ outcomes: act-now (approval), in-motion (working) and broken (failed); resting i
 Unread is separate: the latest turn's `completedAt` is newer than this client's last visit to that
 tab. A "mark unread" action is just a last-visit stamp set one millisecond before that completion.
 *T3: `apps/web/src/components/Sidebar.logic.ts:805-818` — the five-state, three-colour model; `:835-864` — `resolveSidebarThreadStatus` and its precedence, including "A failed session outranks lingering background liveness"; `:635-644` — `hasUnseenCompletion`; `:1010-1099` — `resolveThreadStatusPill`, the label/colour/pulse table (only Working and Connecting pulse); `:820-833` — `shouldRecedeSidebarThread`; `apps/web/src/uiStateStore.ts:250-296` — `markThreadVisited` / `markThreadUnread`*
+
+*Built: the visit is stamped at the latest turn's **`completedAt`, never `now()`** — T3
+`ChatView.tsx:2108-2125`, and the difference is the whole behaviour: stamping the clock marks as
+read a completion that has not arrived yet, so a turn finishing a second after the user glanced at
+the tab is silently swallowed, while stamping the completion clears exactly the one on screen and
+lets a later one raise its own mark (`markThreadVisited` is monotonic). T3 does this from an effect
+keyed on `latestTurn.completedAt`, which fires on mount AND on every later completion; Orquester's
+chat tabs stay warm while hidden, so the equivalent lives in the store: `activateTab` stamps, and
+the `session.updated` handler re-stamps when the summary belongs to the tab the user is currently
+on (`markThreadRead` in `packages/ui/src/lib/thread-visits.ts`, `visitChatThread` in
+`store/app.ts`). "Mark unread" is on both the tab-strip and the sidebar-row menus. The mark refines
+the daemon's signal and never replaces it: `shouldRecedeSidebarThread` dims an "Opened Agents" row
+that wants nothing from the user (working/monitoring always, ready/approval only once read, input
+never, the selected row never — `resolveSidebarThreadStatus` +
+`shouldRecedeSidebarThread` in `packages/ui/src/lib/agent-chat/status.logic.ts`), and the status
+dot drops its pulse for a `finished` attention this client has already read while keeping its
+colour. Two differences from T3, both because Orquester has no snooze and no settle: the `isWoke`
+input is always false and is not plumbed, and T3's `failed` recede bucket is folded into `ready`
+(T3 recedes them identically).*
 
 ### 7.8 Mobile
 

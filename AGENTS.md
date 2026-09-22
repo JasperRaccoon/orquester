@@ -365,6 +365,27 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   The daemon overlays it on the way out (`agent-chat/provider-auth-overlay.ts`): a family with at
   least one managed account not flagged `needsReauth` is reported authenticated through it, so the
   "sign in again" toast fires only when nothing of that family is signed in.
+- **`auth.status: "unknown"` is NOT `"unauthenticated"`.** `unauthenticated` is a *verdict* and may
+  only be written where the adapter can prove it — Codex's `account/read` answering
+  `requiresOpenaiAuth`, Grok's CLI printing that it is not logged in. Every other failure, timeout
+  or silence is `unknown`: a Claude init that merely lacks an `account` block is NOT proof (the CLI
+  initialises fine under API-key/Bedrock envs and under logins whose account block it does not
+  return), and reading it as one made the client toast "claude needs signing in again" at a host
+  whose managed accounts were all valid. Client-side, only `unauthenticated` earns the sign-in
+  copy; an errored-but-`unknown` snapshot still surfaces, with neutral copy, and only while the CLI
+  is installed. The remembered dismissal is keyed on `[adapterId, status, auth.status, message]`, so
+  the same verdict never re-toasts but a moved one does
+  (`adapters/*/probe.ts`, `packages/ui/src/lib/agent-chat/providers.ts`, `lib/agent-auth-notice.ts`).
+- **`responseMode` decides four behaviours and they must never disagree.** It rides
+  `PendingUserInput` as a first-class field (`dismissible` is derived from it, never authored):
+  `/dismiss` is legal only for `"message"`; the terminal-turn cleanup force-resolves only the
+  NON-message requests of the turn that just ended (a message-mode question may outlive its turn
+  and still accept a later user message); an async question never parks the turn at ingestion's
+  flush point. A message-mode answer commits its `user-input.resolved` activity and its
+  `thread.message-sent` in **one** orchestrator decision with the steer as the only effect — the
+  card must not be able to close without the message, or the reverse — and its text echoes each
+  question before its answer so the agent, which sees an ordinary user turn, can tell what was
+  answered.
 - **`raw.ndjson` is as sensitive as the repository it watched** — it records whatever the agent
   read, and Grok's `_x.ai/mcp/servers_updated` carries the host's real MCP credentials. Redaction
   runs before anything is written, and before any stderr excerpt leaves the host.
