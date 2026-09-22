@@ -200,10 +200,29 @@ export interface WorkLogEntry {
    * *Added by W11; `contracts.ts` stays additive-only.*
    */
   compaction?: {
+    /**
+     * Which of the three markers this is. An old log only ever recorded the
+     * settled one and carries no `state` at all, so a marker with nothing
+     * readable reads as `compacted` — never as an in-flight phase that would
+     * shimmer forever.
+     */
+    state: CompactionMarkerState;
     beforeTokens?: number;
     afterTokens?: number;
+    /** Set on `compaction-failed`: the provider's own reason, already user-facing. */
+    error?: string;
   };
 }
+
+/**
+ * The three states a `context-compaction` activity comes in (mirrors
+ * `RuntimeThreadState`'s compaction arm in `@orquester/api/agent-chat`).
+ *
+ * `compacting` is a **phase, not an event**: it says the provider is rewriting
+ * the conversation right now, so it renders as the live placeholder's label
+ * rather than as a divider claiming a compaction that has not happened yet.
+ */
+export type CompactionMarkerState = "compacting" | "compacted" | "compaction-failed";
 
 // ---------------------------------------------------------------------------
 // §7.3 — the twelve projected row kinds
@@ -227,6 +246,8 @@ export type AgentChatTimelineRow =
       entries: WorkLogEntry[];
       expanded: boolean;
       active: boolean;
+      /** Set only on a LIVE group: its header is a live placeholder too. */
+      compacting?: boolean;
     }
   | {
       kind: "work";
@@ -274,6 +295,15 @@ export type AgentChatTimelineRow =
       /** Carried on the event and formatted client-side (differs from T3). */
       beforeTokens?: number;
       afterTokens?: number;
+      /**
+       * The compaction did not happen and the conversation is unchanged: the
+       * same hairline in the danger tone. Only ever set from a
+       * `compaction-failed` marker — the in-flight `compacting` one projects
+       * no row at all.
+       */
+      failed?: boolean;
+      /** The failure's reason, on a second line under the label. */
+      detail?: string;
     }
   | {
       kind: "message";
@@ -306,8 +336,14 @@ export type AgentChatTimelineRow =
       planMarkdown: string;
       implementedAt: string | null;
     }
-  | { kind: "working"; id: string; createdAt: string | null }
-  | { kind: "thinking"; id: string; createdAt: string | null }
+  /**
+   * The live placeholders. `compacting` is set while the thread is in the
+   * context-compaction phase, which replaces the generic label in place — the
+   * row must never be remounted for it, or the shimmer restarts and the line
+   * re-measures mid-turn (§7.3).
+   */
+  | { kind: "working"; id: string; createdAt: string | null; compacting?: boolean }
+  | { kind: "thinking"; id: string; createdAt: string | null; compacting?: boolean }
   | {
       kind: "queued-message";
       id: string;

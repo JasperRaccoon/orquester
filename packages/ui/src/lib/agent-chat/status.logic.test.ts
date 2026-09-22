@@ -9,6 +9,7 @@ import {
   latestContextWindowActivity,
   markUnreadVisitStamp,
   nextVisitStamp,
+  isCompactingThread,
   resolveActivityLabel,
   resolveSidebarThreadStatus,
   shouldRecedeSidebarThread
@@ -202,9 +203,174 @@ describe("the activity label", () => {
     assert.equal(resolveActivityLabel({ ...base, turnStatus: "running" }), "Working");
   });
 
+  it("says what the compaction is doing rather than a generic Working", () => {
+    assert.equal(
+      resolveActivityLabel({ ...base, turnStatus: "running", isCompacting: true }),
+      "Compacting\u2026"
+    );
+    assert.equal(
+      resolveActivityLabel({
+        ...base,
+        turnStatus: "running",
+        liveToolLabel: "Running pnpm",
+        isCompacting: true
+      }),
+      "Compacting\u2026",
+      "it outranks the live tool label"
+    );
+    assert.equal(
+      resolveActivityLabel({ ...base, sessionStatus: "running", isCompacting: true }),
+      "Compacting\u2026"
+    );
+  });
+
+  it("keeps the connection, approval, question and error checks above it", () => {
+    assert.equal(
+      resolveActivityLabel({ ...base, connection: "reconnecting", turnStatus: "running", isCompacting: true }),
+      "Reconnecting\u2026"
+    );
+    assert.equal(
+      resolveActivityLabel({ ...base, pendingApprovals: 1, turnStatus: "running", isCompacting: true }),
+      "Waiting for approval"
+    );
+    assert.equal(
+      resolveActivityLabel({ ...base, pendingQuestions: 1, turnStatus: "running", isCompacting: true }),
+      "Waiting for your answer"
+    );
+    assert.equal(
+      resolveActivityLabel({ ...base, sessionStatus: "error", isCompacting: true }),
+      "Session error"
+    );
+  });
+
+  it("says nothing about compaction once the turn is not running", () => {
+    assert.equal(resolveActivityLabel({ ...base, isCompacting: true }), null);
+  });
+
   it("falls back to the liveness words, then to nothing", () => {
     assert.equal(resolveActivityLabel({ ...base, backgroundLiveness: "working" }), "Background work");
     assert.equal(resolveActivityLabel({ ...base, backgroundLiveness: "monitoring" }), "Monitoring");
     assert.equal(resolveActivityLabel(base), null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The compaction phase
+// ---------------------------------------------------------------------------
+
+describe("the compaction phase", () => {
+  const compacting = () =>
+    activity("context-compaction", { state: "compacting" }, {
+      tone: "info",
+      summary: "Compacting context",
+      createdAt: stamp(1)
+    });
+
+  const live = { sessionStatus: "running" as const, turnStatus: "running" as const };
+
+  it("is on from the `compacting` marker until a terminal one lands", () => {
+    assert.equal(isCompactingThread({ activities: [compacting()], ...live }), true);
+  });
+
+  it("ends on `compacted`", () => {
+    assert.equal(
+      isCompactingThread({
+        activities: [
+          compacting(),
+          activity("context-compaction", { state: "compacted", beforeTokens: 800, afterTokens: 11 }, {
+            summary: "Context compacted",
+            createdAt: stamp(2)
+          })
+        ],
+        ...live
+      }),
+      false
+    );
+  });
+
+  it("ends on `compaction-failed`", () => {
+    assert.equal(
+      isCompactingThread({
+        activities: [
+          compacting(),
+          activity("context-compaction", { state: "compaction-failed", error: "quota" }, {
+            tone: "error",
+            summary: "Context compaction failed",
+            createdAt: stamp(2)
+          })
+        ],
+        ...live
+      }),
+      false
+    );
+  });
+
+  it("ends when the turn settles even though no terminal marker ever arrived", () => {
+    // The host may abandon a compaction after a deadline; a phase that only a
+    // marker could end would then shimmer forever.
+    assert.equal(
+      isCompactingThread({ activities: [compacting()], sessionStatus: "running", turnStatus: "completed" }),
+      false
+    );
+  });
+
+  it("ends when the session is no longer live", () => {
+    for (const sessionStatus of ["ready", "stopped", "error"] as const) {
+      assert.equal(
+        isCompactingThread({ activities: [compacting()], sessionStatus, turnStatus: "running" }),
+        false,
+        sessionStatus
+      );
+    }
+    assert.equal(
+      isCompactingThread({ activities: [compacting()], sessionStatus: "starting", turnStatus: null }),
+      true,
+      "a starting session is still live"
+    );
+  });
+
+  it("is off for an old log, which only ever recorded the settled marker", () => {
+    assert.equal(
+      isCompactingThread({
+        activities: [
+          activity("thread.state.changed", { state: "compacted", beforeTokens: 800, afterTokens: 11 }, {
+            summary: "Compacted",
+            createdAt: stamp(1)
+          })
+        ],
+        ...live
+      }),
+      false
+    );
+    assert.equal(isCompactingThread({ activities: [], ...live }), false);
+  });
+
+  it("reads the LATEST marker, so a second compaction re-enters the phase", () => {
+    assert.equal(
+      isCompactingThread({
+        activities: [
+          compacting(),
+          activity("context-compaction", { state: "compacted" }, { createdAt: stamp(2) }),
+          activity("context-compaction", { state: "compacting" }, { createdAt: stamp(3) })
+        ],
+        ...live
+      }),
+      true
+    );
+  });
+
+  it("ignores everything that is not a compaction marker", () => {
+    assert.equal(
+      isCompactingThread({
+        activities: [
+          compacting(),
+          activity("tool.completed", { itemType: "command_execution", command: "ls" }, {
+            createdAt: stamp(2)
+          })
+        ],
+        ...live
+      }),
+      true
+    );
   });
 });

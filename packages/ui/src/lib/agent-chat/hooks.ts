@@ -157,6 +157,10 @@ export const useAgentChatStatus: UseAgentChatStatus = (sessionId) => {
   const store = useThreadStore(sessionId);
   const slice = useThreadState(store, (state) => state.slice);
   const rows = useThreadState(store, (state) => state.rows);
+  // The same phase the timeline's live placeholders render, read off the store
+  // rather than re-derived: the status line and the timeline must never
+  // disagree about what the turn is doing (§7.6).
+  const isCompacting = useThreadState(store, (state) => state.isCompacting);
   const snapshot = useProviderSnapshot(slice.head?.refId ?? "");
 
   return useMemo<AgentChatStatusView>(() => {
@@ -179,7 +183,8 @@ export const useAgentChatStatus: UseAgentChatStatus = (sessionId) => {
         backgroundLiveness: slice.backgroundLiveness,
         liveToolLabel,
         pendingApprovals: slice.pending.approvals.length,
-        pendingQuestions: slice.pending.userInputs.length
+        pendingQuestions: slice.pending.userInputs.length,
+        isCompacting
       }),
       // Only an UNSETTLED turn has a start time the status line may tick from.
       // Handing it the last turn's `startedAt` regardless of state left the
@@ -190,7 +195,7 @@ export const useAgentChatStatus: UseAgentChatStatus = (sessionId) => {
       // whole signal that it stopped.
       turnStartedAt: turnStartedAt(latestTurn, slice.sessionStatus)
     };
-  }, [slice, rows, snapshot]);
+  }, [slice, rows, snapshot, isCompacting]);
 };
 
 /**

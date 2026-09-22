@@ -3,7 +3,7 @@ import { ClipboardList, Download, Minimize2 } from "lucide-react";
 
 import { cn } from "../../../../lib/cn";
 import type { AgentChatTimelineRow } from "../../../../lib/agent-chat/contracts";
-import { compactionLabel, planFileName, proposedPlanTitle } from "../row-format";
+import { COMPACTING_LABEL, compactionLabel, planFileName, proposedPlanTitle } from "../row-format";
 import { ChatIconButton, CopyButton, DisclosureChevron, WorkingIndicator } from "../../primitives";
 import { useTimelineRowContext } from "../context";
 import { ChatMarkdown } from "../markdown/ChatMarkdown";
@@ -11,19 +11,37 @@ import { ChangedFilesCard } from "./ChangedFilesCard";
 
 type Row<K extends AgentChatTimelineRow["kind"]> = Extract<AgentChatTimelineRow, { kind: K }>;
 
-/** A hairline that carries a centred label: "everything above this was summarised". */
+/**
+ * A hairline that carries a centred label: "everything above this was
+ * summarised".
+ *
+ * Three markers exist and only two reach this row: `compacted` is this
+ * hairline, `compaction-failed` is the same hairline in the danger tone with
+ * the provider's own reason under it — the conversation is *unchanged* after a
+ * failure and the user has to be able to tell that from a successful one —
+ * and `compacting` never projects a row at all (it is the live placeholder's
+ * label; see `rows.logic.ts`).
+ */
 export const CompactionRow = React.memo(function CompactionRow({
   row
 }: {
   row: Row<"context-compaction">;
 }): React.ReactElement {
   const label = compactionLabel(row);
+  const failed = row.failed === true;
   return (
-    <div role="separator" aria-label={label} className="ac-hairline py-1 text-xs text-neutral-500">
-      <span className="flex shrink-0 items-center gap-1.5">
-        <Minimize2 size={12} strokeWidth={1.8} aria-hidden />
-        {label}
-      </span>
+    <div className={cn("text-xs", failed ? "text-danger" : "text-neutral-500")}>
+      <div role="separator" aria-label={label} className="ac-hairline py-1">
+        <span className="flex shrink-0 items-center gap-1.5">
+          <Minimize2 size={12} strokeWidth={1.8} aria-hidden />
+          {label}
+        </span>
+      </div>
+      {failed && row.detail ? (
+        <p className="select-text whitespace-pre-wrap px-1 pb-0.5 text-center leading-relaxed">
+          {row.detail}
+        </p>
+      ) : null}
     </div>
   );
 });
@@ -90,28 +108,53 @@ export const TurnFoldRow = React.memo(function TurnFoldRow({
  *
  * **One element, label replaced.** The `starting → running → tool name`
  * progression is a text swap inside a stable span, never a remount — remounting
- * restarts the shimmer and re-measures the line, so the handoff stutters.
+ * restarts the shimmer and re-measures the line, so the handoff stutters. The
+ * compaction phase is the same swap: `Working for 31s` becomes
+ * `Compacting context…` in place, in the span that is already there.
+ * *T3: `MessagesTimeline.tsx:2510-2530` — "one span for every label".*
+ *
+ * A compaction also **drops the elapsed ticker** and grows an indeterminate
+ * bar. The timer is the honest readout for a turn whose rows keep arriving; a
+ * compaction produces no rows for minutes, so a climbing number beside a
+ * frozen timeline is exactly what made the owner think the thread had hung.
+ * The bar says "still moving" without pretending to know how far along it is.
  */
 export const WorkingRow = React.memo(function WorkingRow({
   row
 }: {
   row: Row<"working">;
 }): React.ReactElement {
+  const compacting = row.compacting === true;
   return (
     <WorkingIndicator
       divider
       live
-      label={row.createdAt === null ? "Working…" : "Working for"}
-      startedAt={row.createdAt}
+      progress={compacting}
+      icon={compacting ? <Minimize2 size={14} strokeWidth={1.8} aria-hidden /> : undefined}
+      label={compacting ? COMPACTING_LABEL : row.createdAt === null ? "Working…" : "Working for"}
+      startedAt={compacting ? undefined : row.createdAt}
     />
   );
 });
 
-/** Reserves the activity row's height while nothing has arrived yet. */
-export const ThinkingRow = React.memo(function ThinkingRow(): React.ReactElement {
+/**
+ * Reserves the activity row's height while nothing has arrived yet.
+ *
+ * **Silent during a compaction.** The working row above it is already saying
+ * `Compacting context…` with the bar under it; a second live label repeating
+ * the same fact reads as two things happening at once. The box stays so the
+ * timeline does not jump when the phase ends and `Thinking` comes back.
+ * *T3: `MessagesTimeline.tsx:2684-2690` (`ThinkingTimelineRow`) does exactly
+ * this — it renders `null` inside the reserved height while `isCompacting`.*
+ */
+export const ThinkingRow = React.memo(function ThinkingRow({
+  row
+}: {
+  row: Row<"thinking">;
+}): React.ReactElement {
   return (
     <div className="min-h-7">
-      <WorkingIndicator live label="Thinking" />
+      {row.compacting === true ? null : <WorkingIndicator live label="Thinking" />}
     </div>
   );
 });

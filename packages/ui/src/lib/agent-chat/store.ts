@@ -76,7 +76,7 @@ import {
 } from "./rows.logic";
 import { providerForRefId, providersStore } from "./providers";
 import { liveAgentTaskIds } from "./roster.logic";
-import { latestContextWindowActivity } from "./status.logic";
+import { isCompactingThread, latestContextWindowActivity } from "./status.logic";
 import {
   drainQueue,
   EMPTY_QUEUE,
@@ -157,6 +157,13 @@ export interface AgentChatThreadState {
   slice: AgentChatThreadSlice;
   /** The three memoised projection layers, kept so each can take its fast path. */
   rows: AgentChatTimelineRow[];
+  /**
+   * The provider is rewriting the conversation right now (§7.3, §7.6). Derived
+   * here beside the rows because the phase and the rows read the same three
+   * facts, and the status line must never disagree with the timeline about
+   * what the turn is doing.
+   */
+  isCompacting: boolean;
   activePlan: ActivePlanState | null;
   /**
    * The proposal the composer's primary action acts on (§7.3): the latest
@@ -228,6 +235,7 @@ export interface RetainedThreadState {
   stableRows: StableRowsState;
   derivedSets: InternalState["derivedSets"];
   rows: AgentChatTimelineRow[];
+  isCompacting: boolean;
   activePlan: ActivePlanState | null;
   actionableProposedPlan: AgentChatThreadState["actionableProposedPlan"];
 }
@@ -284,6 +292,7 @@ function retainableFrom(state: InternalState): RetainedThread<RetainedThreadStat
       stableRows: state.stableRows,
       derivedSets: state.derivedSets,
       rows: state.rows,
+      isCompacting: state.isCompacting,
       activePlan: state.activePlan,
       actionableProposedPlan: state.actionableProposedPlan
     },
@@ -373,6 +382,11 @@ function project(state: InternalState): InternalState {
   const sets = cachedSets;
   const runningTurnId = slice.head?.session.activeTurnId ?? null;
   const latestTurn = slice.turns.at(-1) ?? null;
+  const isCompacting = isCompactingThread({
+    activities: timeline.activities,
+    sessionStatus: slice.sessionStatus,
+    turnStatus: slice.turnStatus
+  });
   const rowsProjection = deriveTimelineRowsWithState(
     {
       timelineEntries: timeline.entries,
@@ -391,6 +405,7 @@ function project(state: InternalState): InternalState {
         slice.sessionStatus === "running" ||
         slice.turnStatus === "running" ||
         slice.turnStatus === "pending",
+      isCompacting,
       activeTurnStartedAt: latestTurn?.startedAt ?? latestTurn?.requestedAt ?? null,
       checkpoints: slice.checkpoints,
       // The adapter capability, not "a head exists": stamping `revertTurnCount`
@@ -423,6 +438,7 @@ function project(state: InternalState): InternalState {
     rowsProjection === state.rowsProjection &&
     stableRows === state.stableRows &&
     activePlan === state.activePlan &&
+    isCompacting === state.isCompacting &&
     cachedSets === state.derivedSets &&
     keptPlan === state.actionableProposedPlan
   ) {
@@ -434,6 +450,7 @@ function project(state: InternalState): InternalState {
     rowsProjection,
     stableRows,
     rows: stableRows.result,
+    isCompacting,
     // `deriveActivePlanState` rebuilds its object each call; keep the previous
     // one when nothing about it moved, so the composer's checklist does not
     // re-render on every streamed token.
@@ -1114,6 +1131,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       stableRows: warm?.stableRows ?? EMPTY_STABLE_ROWS,
       derivedSets: warm?.derivedSets ?? null,
       rows: warm?.rows ?? [],
+      isCompacting: warm?.isCompacting ?? false,
       activePlan: warm?.activePlan ?? null,
       actionableProposedPlan: warm?.actionableProposedPlan ?? null,
       // An in-flight command belonged to the generation that is gone.

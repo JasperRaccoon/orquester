@@ -504,6 +504,15 @@ export interface TimelineRowsInput {
   expandedTurnIds?: ReadonlySet<string>;
   expandedWorkGroupIds?: ReadonlySet<string>;
   isWorking: boolean;
+  /**
+   * The thread is in the context-compaction phase
+   * ({@link isCompactingThread}). It stamps the live placeholders — the
+   * working row, the thinking row and a live activity group — so each can say
+   * *what* the turn is doing instead of "Working"/"Thinking", and it is what
+   * keeps the in-flight marker from projecting a "Context compacted" divider
+   * for a compaction that has not happened yet.
+   */
+  isCompacting?: boolean;
   activeTurnStartedAt: string | null;
   checkpoints?: readonly Checkpoint[];
   supportsConversationRollback: boolean;
@@ -644,6 +653,10 @@ export function deriveTimelineRows(input: TimelineRowsInput): AgentChatTimelineR
     activeWorkRow !== null || latestToolFailed ? activeToolEntries.map((entry) => entry.id) : []
   );
 
+  // The phase only exists while a turn does; a stamp on a settled row would
+  // outlive the thing it describes.
+  const compacting = input.isCompacting === true && input.isWorking;
+
   let hasActivityRow = false;
   const appendWorkingRow = (): void => {
     const latestUserMessage = entries[lastUserMessageIndex(entries)];
@@ -653,7 +666,12 @@ export function deriveTimelineRows(input: TimelineRowsInput): AgentChatTimelineR
       latestUserMessage.message.role === "user"
         ? latestUserMessage.message.createdAt
         : input.activeTurnStartedAt;
-    rows.push({ kind: "working", id: WORKING_ROW_ID, createdAt: startedAt });
+    rows.push({
+      kind: "working",
+      id: WORKING_ROW_ID,
+      createdAt: startedAt,
+      ...(compacting ? { compacting: true } : {})
+    });
   };
   const appendActiveWorkRows = (): void => {
     if (activeWorkRow === null) {
@@ -740,7 +758,10 @@ export function deriveTimelineRows(input: TimelineRowsInput): AgentChatTimelineR
                 : []
           ),
           expanded: input.expandedWorkGroupIds?.has(groupId) ?? false,
-          active
+          active,
+          // Only a LIVE group has a label to replace: its header reads
+          // "Thinking" exactly where the phase should be named instead.
+          ...(active && compacting ? { compacting: true } : {})
         });
         hasActivityRow ||= active;
         index = cursor - 1;
@@ -754,12 +775,24 @@ export function deriveTimelineRows(input: TimelineRowsInput): AgentChatTimelineR
 
     // ── Compaction marker ─────────────────────────────────────────────────
     if (isCompactionEntry(timelineEntry) && timelineEntry.kind === "work") {
+      const marker = timelineEntry.entry.compaction;
+      // `compacting` is a PHASE, not an event: it is rendered by the live
+      // placeholder above (see `compacting`), never as a divider — a
+      // "Context compacted" hairline here would claim a compaction that has
+      // not happened, and would still be claiming it if the attempt failed.
+      if (marker?.state === "compacting") {
+        continue;
+      }
+      const failed = marker?.state === "compaction-failed";
       rows.push({
         kind: "context-compaction",
         id: timelineEntry.id,
         createdAt: timelineEntry.createdAt,
         label: timelineEntry.entry.label,
-        ...(timelineEntry.entry.compaction ?? {})
+        ...(marker?.beforeTokens !== undefined ? { beforeTokens: marker.beforeTokens } : {}),
+        ...(marker?.afterTokens !== undefined ? { afterTokens: marker.afterTokens } : {}),
+        ...(failed ? { failed: true } : {}),
+        ...(failed && marker?.error ? { detail: marker.error } : {})
       });
       continue;
     }
@@ -946,7 +979,12 @@ export function deriveTimelineRows(input: TimelineRowsInput): AgentChatTimelineR
   }
   // The turn is never represented by an empty timeline (§7.3).
   if (input.isWorking && (!hasActivityRow || latestToolFailed)) {
-    rows.push({ kind: "thinking", id: LIVE_ACTIVITY_ROW_ID, createdAt: input.activeTurnStartedAt });
+    rows.push({
+      kind: "thinking",
+      id: LIVE_ACTIVITY_ROW_ID,
+      createdAt: input.activeTurnStartedAt,
+      ...(compacting ? { compacting: true } : {})
+    });
   }
 
   const withMeta = attachTrailingToolGroupsToAssistant(rows);
@@ -1098,6 +1136,7 @@ export interface TimelineRowsProjection {
 function shallowEqualInput(left: TimelineRowsInput, right: TimelineRowsInput): boolean {
   return (
     left.isWorking === right.isWorking &&
+    left.isCompacting === right.isCompacting &&
     left.activeTurnStartedAt === right.activeTurnStartedAt &&
     left.runningTurnId === right.runningTurnId &&
     left.supportsConversationRollback === right.supportsConversationRollback &&
@@ -1255,12 +1294,15 @@ export function isRowUnchanged(a: AgentChatTimelineRow, b: AgentChatTimelineRow)
         a.expanded === other.expanded &&
         a.groupId === other.groupId &&
         a.turnId === other.turnId &&
+        a.compacting === other.compacting &&
         sameArray(a.entries, other.entries)
       );
     }
     case "working":
-    case "thinking":
-      return a.createdAt === (b as typeof a).createdAt;
+    case "thinking": {
+      const other = b as typeof a;
+      return a.createdAt === other.createdAt && a.compacting === other.compacting;
+    }
     case "assistant-meta": {
       const other = b as typeof a;
       return a.createdAt === other.createdAt && a.message === other.message;
@@ -1277,7 +1319,9 @@ export function isRowUnchanged(a: AgentChatTimelineRow, b: AgentChatTimelineRow)
         a.createdAt === other.createdAt &&
         a.label === other.label &&
         a.beforeTokens === other.beforeTokens &&
-        a.afterTokens === other.afterTokens
+        a.afterTokens === other.afterTokens &&
+        a.failed === other.failed &&
+        a.detail === other.detail
       );
     }
     case "turn-diff": {
