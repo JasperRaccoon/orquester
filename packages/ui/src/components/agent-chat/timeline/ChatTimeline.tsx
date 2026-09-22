@@ -497,7 +497,11 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
         onKeyDown={releaseScrollSuppression}
         data-agent-chat-timeline={sessionId}
         {...(agentId === undefined ? {} : { "data-agent-id": agentId })}
-        className="ac-scroll-thin ac-fade-top min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 sm:px-5"
+        // `select-text`: the app shell is `select-none` (a terminal UI has
+        // nothing to select), so without this nothing an agent says can be
+        // dragged or long-pressed and copied. Toggle rows opt back out with
+        // their own `select-none`, as before.
+        className="ac-scroll-thin ac-fade-top min-h-0 flex-1 select-text overflow-y-auto overflow-x-hidden px-3 sm:px-5"
       >
         {/* One provider for the whole list, not one per row: the value is
             already memoised, and a provider per row would be N context nodes
