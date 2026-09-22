@@ -59,6 +59,10 @@ export interface AgentChatRouteDeps {
    * broadcasts — a no-op refresh must not wake every client.
    */
   onProvidersChanged(adapterId: string): void;
+  /** §6.3 read-back: the host resolves an attachment id to an absolute path. */
+  attachmentPath(sessionId: string, attachmentId: string): Promise<string | null>;
+  /** Stream that file to the client (`index.ts` owns the download headers). */
+  sendAttachment(reply: FastifyReply, path: string): Promise<unknown>;
   logger?: { warn?: (...a: unknown[]) => void; error?: (...a: unknown[]) => void };
 }
 
@@ -223,6 +227,34 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
         deps.onProvidersChanged(request.params.id);
       }
       return value;
+    }
+  );
+
+  // §6.3 attachment read-back. `/api/fs/download` cannot serve these — it is
+  // confined to `fsRoot` and the thread's attachments live under the appdir's
+  // `daemon/agent/threads/<id>/attachments`. The host resolves the id (it owns
+  // the namespace and its traversal guard) and the daemon streams the file,
+  // carrying the same `?token=` carve-out a native `<a download>` needs.
+  app.get<{ Params: { id: string; attachmentId: string } }>(
+    pattern(agentChatRoutes.attachment(":id", ":attachmentId")),
+    async (request, reply) => {
+      const { id, attachmentId } = request.params;
+      if (!deps.chatSession(id)) return reply.code(404).send(THREAD_NOT_FOUND);
+      if (!deps.isHostHealthy()) return reply.code(503).send(HOST_UNAVAILABLE);
+      let path: string | null;
+      try {
+        path = await deps.attachmentPath(id, attachmentId);
+      } catch (error) {
+        if (error instanceof HostUnavailableError) {
+          return reply.code(503).send(HOST_UNAVAILABLE);
+        }
+        deps.logger?.error?.("agent chat attachment resolve failed", error);
+        return reply.code(503).send(HOST_UNAVAILABLE);
+      }
+      if (!path) {
+        return reply.code(404).send(chatError("THREAD_NOT_FOUND", "No such attachment."));
+      }
+      return deps.sendAttachment(reply, path);
     }
   );
 
