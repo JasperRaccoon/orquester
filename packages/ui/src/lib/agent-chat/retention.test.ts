@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { ThreadRetentionCache } from "./retention";
+import { ThreadRetentionCache, type ThreadRetentionOptions } from "./retention";
+
+type TimerHandle = ReturnType<typeof setTimeout>;
 
 interface FakeTimer {
   id: number;
@@ -10,7 +12,7 @@ interface FakeTimer {
 }
 
 function fakeTimers(): {
-  options: { setTimer: (fn: () => void, ms: number) => never; clearTimer: (h: never) => void };
+  options: Required<Pick<ThreadRetentionOptions, "setTimer" | "clearTimer">>;
   run(after: number): void;
   pending(): number;
 } {
@@ -18,12 +20,12 @@ function fakeTimers(): {
   const timers = new Map<number, FakeTimer>();
   return {
     options: {
-      setTimer: (fn, ms) => {
+      setTimer: (fn: () => void, ms: number): TimerHandle => {
         const id = next++;
         timers.set(id, { id, fn, ms });
-        return id as never;
+        return id as unknown as TimerHandle;
       },
-      clearTimer: (handle) => {
+      clearTimer: (handle: TimerHandle): void => {
         timers.delete(handle as unknown as number);
       }
     },

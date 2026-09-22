@@ -211,12 +211,10 @@ describe("the retained thread snapshot", () => {
     synchronize(first.fake);
     first.state().actions.setDisclosure({ expandedTurnIds: ["t1"] });
     first.state().actions.queueMessage({
-      id: "q1",
       text: "later",
       attachments: [],
       context: [],
       interactionMode: first.state().slice.interactionMode,
-      queuedAt: stamp(1),
       queuedAfterToolActivityId: null,
       holdUntilUserAction: true
     });
