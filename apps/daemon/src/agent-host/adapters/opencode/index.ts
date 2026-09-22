@@ -85,6 +85,25 @@ const OPENCODE_REF_ID = "opencode";
  */
 const SNAPSHOT_TTL_MS = 5 * 60_000;
 
+/**
+ * The ceiling the host must give this adapter's snapshot probe (E9).
+ *
+ * Unlike every other provider, OpenCode's catalogue is not on disk: it lives
+ * behind a per-project `opencode serve` that a **cold** probe has to start
+ * first. That is two phases — spawn to readiness, then the catalogue reads —
+ * and each keeps its own deadline inside (`handshakeMs` + `healthMs` in
+ * `server.ts`, `authProbeMs`/`probeMs` per call in `loadOpenCodeInventory`).
+ * The host's default `authProbeMs` covered the *pair*, so the first probe on a
+ * machine measured 10 435 ms against a 10 s window, answered an error, and the
+ * user's first visit to Settings showed no OpenCode at all.
+ *
+ * This is a ceiling for the pathological case, not a target: a warm probe
+ * returns in ~20 ms, and a genuinely stuck phase is still cut by that phase's
+ * own (much tighter) deadline, so raising this never makes a hang last longer
+ * than the step that hangs.
+ */
+export const OPENCODE_SNAPSHOT_TIMEOUT_MS = AGENT_HOST_DEADLINES.coldSnapshotMs;
+
 interface CachedSnapshot {
   snapshot: ProviderSnapshot;
   at: number;
@@ -234,13 +253,14 @@ class OpenCodeAdapterImpl implements AgentAdapter {
     } catch {
       return { installed: false, version: null };
     }
+    const probeEnv = this.ctx.buildEnv({
+      threadId: "probe",
+      home: { kind: "system", path: process.env.HOME ?? "/" }
+    });
     const child = spawnProviderChild({
       command: bin,
       args: ["--version"],
-      env: this.ctx.buildEnv({
-        threadId: "probe",
-        home: { kind: "system", path: process.env.HOME ?? "/" }
-      }),
+      env: probeEnv,
       cwd: this.ctx.tmpDir()
     });
     let stdout = "";
@@ -248,7 +268,9 @@ class OpenCodeAdapterImpl implements AgentAdapter {
     child.stdout.on("data", (chunk: string) => {
       stdout = `${stdout}${chunk}`.slice(0, 4096);
     });
-    const stderr = new StderrCapture();
+    // Home-redacted like every other capture (S1 #4): this tail reaches a log
+    // line on a failed probe, and a host path in a log is a path off the host.
+    const stderr = new StderrCapture({ homeDirs: [probeEnv.HOME ?? ""] });
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => {
       stderr.push(chunk);
@@ -323,19 +345,38 @@ class OpenCodeAdapterImpl implements AgentAdapter {
       }
 
       // E9: the cold probe measured 10 435 ms against the host's 10 s budget,
-      // so the user's FIRST visit to Settings showed no OpenCode at all. The
-      // cost was four SEQUENTIAL catalogue reads on top of the server start;
-      // `loadOpenCodeInventory` now issues them concurrently, which brings a
-      // cold probe comfortably inside the budget and a warm one to ~20 ms.
+      // so the user's FIRST visit to Settings showed no OpenCode at all. Two
+      // things fixed that, and both are load-bearing:
+      //
+      //  1. the four catalogue reads are CONCURRENT (`loadOpenCodeInventory`),
+      //     which alone brought a cold probe to ~7.4 s and a warm one to ~20 ms;
+      //  2. the two phases are budgeted SEPARATELY — waiting for the server to
+      //     report ready (`handshakeMs` + `healthMs`, inside the pool) and then
+      //     reading the catalogue (`authProbeMs`/`probeMs` per call) — and the
+      //     host gives this probe `OPENCODE_SNAPSHOT_TIMEOUT_MS` to cover both
+      //     rather than the auth window that covered neither.
       //
       // The CLI inventory is deliberately NOT used here as a fast path: it and
       // `opencode serve` open the same SQLite database, and running them
       // together makes the server fail to start with `database is locked` —
       // measured, not theorised. It stays where it is needed and safe: the
       // cwd-less probe, which starts no server at all.
+      //
+      // The pool is keyed on the PROJECT dir, resolved the same way a session
+      // keys it (R4 #6) — a probe and a thread in one project must never end up
+      // starting two servers because one spelled the path differently.
+      const projectDir = projectDirFor({ cwd });
+      const cold = !this.pool.isWarm(projectDir);
       let server: OpenCodeServerHandle | undefined;
       try {
-        server = await this.pool.acquire(cwd);
+        const startedAt = Date.now();
+        server = await this.pool.acquire(projectDir);
+        if (cold) {
+          this.ctx.logger.info("opencode snapshot started a server", {
+            projectDir,
+            readyMs: Date.now() - startedAt
+          });
+        }
         const inventory = await loadOpenCodeInventory(server.client(cwd));
         const merged = this.mergeInventory(inventory, cached?.snapshot);
         const workspace: WorkspaceSnapshot = {
@@ -659,8 +700,13 @@ class OpenCodeAdapterImpl implements AgentAdapter {
  * The path is resolved, never trusted verbatim: a directory that does not
  * exist is **not** rejected by the server — it silently serves a different
  * instance scope (fixtures README observation 21).
+ *
+ * The parameter is the two fields this reads rather than `StartSessionInput`,
+ * so the **snapshot probe** — which carries a `cwd` and nothing else — keys the
+ * pool through this same function. Two spellings of one project must not start
+ * two servers, whichever surface asked.
  */
-export function projectDirFor(input: StartSessionInput): string {
+export function projectDirFor(input: { cwd: string; projectPath?: string }): string {
   const candidate = (input as { projectPath?: unknown }).projectPath;
   if (typeof candidate === "string" && candidate.trim().length > 0) {
     return resolvePath(candidate);

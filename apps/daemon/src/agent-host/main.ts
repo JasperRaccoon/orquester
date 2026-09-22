@@ -45,7 +45,7 @@ import { REGISTRY, type RegistryEntryDef } from "@orquester/registry";
 import type { AccountHome, AgentAdapterId, ProviderSnapshot } from "@orquester/api/agent-chat";
 
 import type { AdapterContext, AdapterLogger, AgentAdapter } from "./adapter.ts";
-import { ADAPTER_IDS, adapterFactory } from "./adapters/index.ts";
+import { ADAPTER_IDS, SNAPSHOT_TIMEOUTS_MS, adapterFactory } from "./adapters/index.ts";
 import { createCheckpointService } from "./checkpoints/index.ts";
 import type { AgentHostStopResponse } from "@orquester/api/agent-chat";
 import { newHostInstanceId } from "./host-protocol.ts";
@@ -382,6 +382,10 @@ export async function startAgentHost(
   const snapshots: ManagedProviderSnapshotRegistry = createProviderSnapshotRegistry({
     probes: ADAPTER_IDS.map((id) => ({
       id,
+      // E9: an adapter whose catalogue lives behind a server it must start
+      // first needs a window covering the start too. Data, per adapter — every
+      // other probe keeps the tight auth window.
+      ...(SNAPSHOT_TIMEOUTS_MS[id] !== undefined ? { timeoutMs: SNAPSHOT_TIMEOUTS_MS[id] } : {}),
       refresh: async (input?: { cwd?: string }): Promise<ProviderSnapshot> => {
         const adapter = adapters.get(id);
         if (!adapter) {
