@@ -3303,6 +3303,21 @@ thread that settled while the tab was closed starts every row at `removed` rathe
 a fade nobody was watching. And there is no workflow-script viewer
 (`packages/ui/src/components/agent-chat/roster/`).*
 
+*Built: **shells are a section of their own, and the roster counts the two kinds apart.** Listing
+background shells beside subagents (the deliberate departure from T3 above) made them look like
+subagents — one chip reading "shell" was the only difference, and a folded roster said "5 agents"
+for four subagents and one command. Agent rows keep T3's three-line shape; shell rows sit below
+them under a "Shells · N running" caption with a **two-line** shape of their own — a framed
+terminal glyph, the command's description, then the one fact a process has (running, or its exit
+code, which also renders as a badge toned by success/failure). Each kind keeps its own spawn order
+and a row never moves between the two lists, because the partition is by `agentKind`, which never
+changes — so "never reshuffle rows that stay visible" still holds. The folded label reads
+"4 agents · 1 shell running", and the footer's "● N working" counts agents only
+(`roster-summary.ts`, `BackgroundShellRow`). The dock above the composer (§7.5) is a drawer, not a
+card: the composer's wrapper is stacked above the dock's, the bottom-most card carries the 17px
+overlap as padding, and the dock's inset equals the composer box's inset plus its corner radius so
+card sides meet the box's flat top edge (`ac-banner-attached`, `ChatBannerDock`).*
+
 ### 7.7 Other surfaces
 
 Status dots, the Attention Center, push notifications and the command palette work from
