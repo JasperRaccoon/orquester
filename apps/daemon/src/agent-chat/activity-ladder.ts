@@ -29,6 +29,8 @@ export type ChatActivityRung =
   | "error"
   | "starting"
   | "running"
+  /** A settled turn left an unimplemented plan proposal on the table. */
+  | "plan-ready"
   | "background-working"
   | "monitoring"
   | "completed"
@@ -51,11 +53,13 @@ export interface ChatActivityResolution {
  *    liveness value so it is never hidden behind a stale "working")
  * 4. session `starting` → `working`
  * 5. session or turn `running` → `working`
- * 6. `backgroundLiveness: "working"` → `working`
- * 7. `backgroundLiveness: "monitoring"` → `idle` with **no** finished stamp —
+ * 6. an actionable proposed plan on a settled turn → `waiting` +
+ *    `needs-input`: the agent is done and the user has a decision to make
+ * 7. `backgroundLiveness: "working"` → `working`
+ * 8. `backgroundLiveness: "monitoring"` → `idle` with **no** finished stamp —
  *    a settled turn whose subagents or watch loops are still running is not
  *    finished (§3.1)
- * 8. turn `completed` → `idle` + `finished`
+ * 9. turn `completed` → `idle` + `finished`
  *
  * Plus the two race fallbacks §6.4 calls non-optional:
  * - a turn recorded `interrupted` that carries a `completedAt` is
@@ -65,6 +69,41 @@ export interface ChatActivityResolution {
  *   is `idle` + `finished`, because a turn that changed no files leaves no turn
  *   row to read.
  */
+/**
+ * T3's `isLatestTurnSettled` (`session-logic.ts:195-204`): a turn is settled
+ * once it has both a start and a completion stamp, and the session is not
+ * running. No turn at all is **not** settled — there is nothing to be done
+ * with.
+ */
+function isLatestTurnSettled(fields: AgentChatSessionSummaryFields): boolean {
+  const turn = fields.latestTurn ?? null;
+  if (!turn || !turn.startedAt || !turn.completedAt) {
+    return false;
+  }
+  return fields.chatSessionStatus !== "running";
+}
+
+/**
+ * The §6.4 `plan-ready` rung's predicate.
+ *
+ * *T3: `Sidebar.logic.ts:1049-1066`* — no pending user input, the latest turn
+ * settled, and an actionable (unimplemented) proposed plan.
+ *
+ * **Differs from T3 in one clause, deliberately:** T3 also requires
+ * `interactionMode === "plan"`. The ladder is host-side and `interactionMode`
+ * is not on `AgentChatSessionSummaryFields`; it would also be the wrong test
+ * here, because `hasActionableProposedPlan` is already "the LATEST plan is
+ * unimplemented" (R6-3) and a thread switched out of plan mode after
+ * proposing still owes the user that decision.
+ */
+function isPlanReady(fields: AgentChatSessionSummaryFields): boolean {
+  return (
+    fields.hasActionableProposedPlan === true &&
+    fields.hasPendingUserInput !== true &&
+    isLatestTurnSettled(fields)
+  );
+}
+
 export function resolveChatActivity(fields: AgentChatSessionSummaryFields): ChatActivityResolution {
   const turn = fields.latestTurn ?? null;
   const session = fields.chatSessionStatus;
@@ -83,6 +122,14 @@ export function resolveChatActivity(fields: AgentChatSessionSummaryFields): Chat
   }
   if (session === "running" || turn?.state === "running" || turn?.state === "pending") {
     return { rung: "running", state: "working", attention: null };
+  }
+  // An actionable plan prompt **outranks lingering background work**: it needs
+  // the user's decision, while liveness merely reports (T3's own review
+  // finding, `Sidebar.logic.ts:1049-1066`). It sits BELOW approval and
+  // question — those are the agent blocked on you — and below `starting` /
+  // `running`, which `isLatestTurnSettled` excludes anyway.
+  if (isPlanReady(fields)) {
+    return { rung: "plan-ready", state: "waiting", attention: "needs-input" };
   }
   if (fields.backgroundLiveness === "working") {
     return { rung: "background-working", state: "working", attention: null };
@@ -114,9 +161,17 @@ export function resolveChatActivity(fields: AgentChatSessionSummaryFields): Chat
  * that is what rungs 6 and 7 exist for, and both answer null here, so the rule
  * is enforced by the ladder rather than by a second check that could drift.
  */
-export function pushTypeForRung(rung: ChatActivityRung): "needs-input" | "finished" | null {
+export function pushTypeForRung(rung: ChatActivityRung): ChatPushType | null {
   return pushTypeForRungInternal(rung);
 }
+
+/**
+ * The push kinds a chat thread produces. `plan-ready` is its own kind rather
+ * than a `needs-input` with different copy: "needs your input" reads as a
+ * blocked provider waiting on an answer, and a finished turn that left a plan
+ * on the table is neither blocked nor finished.
+ */
+export type ChatPushType = "needs-input" | "finished" | "plan-ready";
 
 /**
  * The push a set of fields produces, with §6.4's hard suppression applied:
@@ -125,9 +180,7 @@ export function pushTypeForRung(rung: ChatActivityRung): "needs-input" | "finish
  * outranks liveness, so without this an errored thread whose watch loop is
  * still running would push "finished" while work is live.
  */
-export function pushTypeForFields(
-  fields: AgentChatSessionSummaryFields
-): "needs-input" | "finished" | null {
+export function pushTypeForFields(fields: AgentChatSessionSummaryFields): ChatPushType | null {
   const type = pushTypeForRungInternal(resolveChatActivity(fields).rung);
   if (type === "finished" && fields.backgroundLiveness != null) {
     return null;
@@ -135,11 +188,13 @@ export function pushTypeForFields(
   return type;
 }
 
-function pushTypeForRungInternal(rung: ChatActivityRung): "needs-input" | "finished" | null {
+function pushTypeForRungInternal(rung: ChatActivityRung): ChatPushType | null {
   switch (rung) {
     case "approval":
     case "question":
       return "needs-input";
+    case "plan-ready":
+      return "plan-ready";
     case "completed":
     case "error":
       return "finished";

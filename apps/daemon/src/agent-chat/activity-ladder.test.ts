@@ -76,7 +76,77 @@ test("rung 5: a running session or a running turn is working", () => {
   );
 });
 
-test("rung 6: background liveness `working` keeps the thread working after the turn", () => {
+const settled = turn("completed", "2026-09-21T00:01:00.000Z");
+
+test("rung 6: an actionable plan on a settled turn is waiting + needs-input", () => {
+  // *T3: `Sidebar.logic.ts:1049-1066`.* The agent is done and the user owes it
+  // a decision, so it is `waiting`, not `finished`.
+  const resolved = resolveChatActivity({
+    chatSessionStatus: "ready",
+    hasActionableProposedPlan: true,
+    latestTurn: settled
+  });
+  assert.equal(resolved.rung, "plan-ready");
+  assert.equal(resolved.state, "waiting");
+  assert.equal(resolved.attention, "needs-input");
+});
+
+test("rung 6 outranks background working and monitoring", () => {
+  // T3's review finding: the plan needs a decision, liveness merely reports.
+  for (const liveness of ["working", "monitoring"] as const) {
+    assert.equal(
+      resolveChatActivity({
+        chatSessionStatus: "ready",
+        backgroundLiveness: liveness,
+        hasActionableProposedPlan: true,
+        latestTurn: settled
+      }).rung,
+      "plan-ready",
+      liveness
+    );
+  }
+});
+
+test("rung 6 sits BELOW approval, question, error and a running turn", () => {
+  const base = { hasActionableProposedPlan: true, latestTurn: settled } as const;
+  assert.equal(
+    resolveChatActivity({ ...base, chatSessionStatus: "ready", hasPendingApprovals: true }).rung,
+    "approval"
+  );
+  assert.equal(
+    resolveChatActivity({ ...base, chatSessionStatus: "ready", hasPendingUserInput: true }).rung,
+    "question"
+  );
+  assert.equal(resolveChatActivity({ ...base, chatSessionStatus: "error" }).rung, "error");
+  // A still-running session means the turn is not settled, so there is nothing
+  // to decide on yet.
+  assert.equal(
+    resolveChatActivity({
+      hasActionableProposedPlan: true,
+      chatSessionStatus: "running",
+      latestTurn: settled
+    }).rung,
+    "running"
+  );
+});
+
+test("rung 6 needs a SETTLED turn: no turn, or one still open, is not plan-ready", () => {
+  assert.equal(
+    resolveChatActivity({ chatSessionStatus: "ready", hasActionableProposedPlan: true }).rung,
+    "completed",
+    "no turn row at all — race fallback 2, not a plan prompt"
+  );
+  assert.equal(
+    resolveChatActivity({
+      chatSessionStatus: "ready",
+      hasActionableProposedPlan: true,
+      latestTurn: turn("completed", null)
+    }).rung,
+    "completed"
+  );
+});
+
+test("rung 7: background liveness `working` keeps the thread working after the turn", () => {
   const resolved = resolveChatActivity({
     chatSessionStatus: "ready",
     backgroundLiveness: "working",
@@ -87,7 +157,7 @@ test("rung 6: background liveness `working` keeps the thread working after the t
   assert.equal(resolved.attention, null);
 });
 
-test("rung 7: monitoring is idle WITHOUT a finished stamp", () => {
+test("rung 8: monitoring is idle WITHOUT a finished stamp", () => {
   const resolved = resolveChatActivity({
     chatSessionStatus: "ready",
     backgroundLiveness: "monitoring",
@@ -98,7 +168,7 @@ test("rung 7: monitoring is idle WITHOUT a finished stamp", () => {
   assert.equal(resolved.attention, null, "a settled turn whose watch loops run is not finished");
 });
 
-test("rung 8: a completed turn is idle + finished", () => {
+test("rung 9: a completed turn is idle + finished", () => {
   const resolved = resolveChatActivity({
     chatSessionStatus: "ready",
     latestTurn: turn("completed", "2026-09-21T00:01:00.000Z")
@@ -148,9 +218,26 @@ test("push copy follows the rung", () => {
   assert.equal(pushTypeForRung("question"), "needs-input");
   assert.equal(pushTypeForRung("completed"), "finished");
   assert.equal(pushTypeForRung("error"), "finished");
+  // Its own kind, not a `needs-input` with different words: nothing is blocked
+  // on an answer, and the work is not finished either.
+  assert.equal(pushTypeForRung("plan-ready"), "plan-ready");
   for (const rung of ["starting", "running", "background-working", "monitoring", "unknown"] as const) {
     assert.equal(pushTypeForRung(rung), null, rung);
   }
+});
+
+test("a plan-ready thread pushes even while background work is live", () => {
+  // Only a `finished` push is suppressed by liveness; being asked to decide is
+  // not a claim that the thread is done.
+  assert.equal(
+    pushTypeForFields({
+      chatSessionStatus: "ready",
+      hasActionableProposedPlan: true,
+      backgroundLiveness: "working",
+      latestTurn: { turnId: "t1", state: "completed", startedAt: "2026-09-21T00:00:00.000Z", completedAt: "2026-09-21T00:01:00.000Z" }
+    }),
+    "plan-ready"
+  );
 });
 
 test("never a `finished` push while background liveness is non-null", () => {
