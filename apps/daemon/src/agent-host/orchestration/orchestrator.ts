@@ -1063,6 +1063,60 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     }
   };
 
+  /**
+   * §6.2: **a terminal turn cannot accept native-callback answers.**
+   *
+   * When a turn ends with a protocol-callback question still open, nothing
+   * will ever answer it: the provider's request died with the turn, but the
+   * card stays on screen, the thread stays `waiting` and the composer stays
+   * blocked. Force-resolve those — and only those.
+   *
+   * **A message-mode question may outlive its turn** and still accept a later
+   * user message, which is the whole point of `delivery: "async"`; dismissing
+   * it here would delete a question the user is still meant to answer.
+   *
+   * *T3: `ProviderRuntimeIngestion.ts:2330-2360`* — same filter
+   * (`kind === "user-input.requested" && activity.turnId === turnId &&
+   * payload.responseMode !== "message"`), same "User input dismissed" summary.
+   *
+   * The drain is load-bearing: ingestion batches, so the request that opened
+   * moments ago may still be in its buffer when the terminal event arrives,
+   * and the fold this reads would not yet know about it.
+   */
+  const settleStrandedQuestions = async (
+    runtime: ThreadRuntime,
+    turnId: string | null
+  ): Promise<void> => {
+    if (turnId === null) return;
+    await ingestion.drain();
+    const stranded = (runtime.state.pending?.userInputs ?? []).filter(
+      (question) => question.responseMode !== "message" && question.turnId === turnId
+    );
+    if (stranded.length === 0) return;
+    const createdAt = clock.nowIso();
+    await append(
+      runtime,
+      stranded.map((question) =>
+        buildEvent(
+          runtime.id,
+          "thread.activity-appended",
+          {
+            activity: makeActivity({
+              id: `turn-end-dismiss:${turnId}:${question.requestId}`,
+              tone: "info",
+              activityKind: "user-input.resolved",
+              summary: "User input dismissed",
+              payload: { requestId: question.requestId },
+              turnId,
+              createdAt
+            })
+          },
+          { occurredAt: createdAt, metadata: { requestId: question.requestId } }
+        )
+      )
+    );
+  };
+
   const stopSessionInternal = async (runtime: ThreadRuntime): Promise<void> => {
     const head = headOf(runtime);
     if (!head) return;
@@ -1343,13 +1397,21 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   };
 
   /**
-   * The prose a message-mode answer becomes. One question reads as its bare
-   * answer; several are labelled by their question so the agent can tell them
-   * apart. A multi-select answer is joined with commas.
+   * The prose a message-mode answer becomes.
+   *
+   * **Every question is echoed before its answer**, joined by blank lines, and
+   * each question's attachments follow as `Attached file: <name> (<id>)` lines
+   * — T3 `decider.ts:1642-1660`. The echo is not decoration: the provider
+   * parked no request, so the agent receives this as an ordinary user turn and
+   * has nothing but the text to tell it which question was answered. The old
+   * shape dropped the question whenever there was exactly one, which reads as
+   * a bare "yes" arriving from nowhere in a transcript the agent resumes
+   * later. A multi-select answer is joined with commas.
    */
   const answerMessageText = (
     questions: readonly { id: string; question: string }[],
-    answers: Record<string, unknown>
+    answers: Record<string, unknown>,
+    attachmentsByQuestionId?: Record<string, AttachmentRef[]>
   ): string => {
     const parts: string[] = [];
     for (const entry of questions) {
@@ -1359,8 +1421,13 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         : typeof raw === "string"
           ? raw
           : "";
-      if (value.trim().length === 0) continue;
-      parts.push(questions.length === 1 ? value.trim() : `${entry.question}\n${value.trim()}`);
+      const attachments = attachmentsByQuestionId?.[entry.id] ?? [];
+      if (value.trim().length === 0 && attachments.length === 0) continue;
+      const lines = [`${entry.question}\n${value.trim()}`.trimEnd()];
+      for (const attachment of attachments) {
+        lines.push(`Attached file: ${attachment.name} (${attachment.id})`);
+      }
+      parts.push(lines.join("\n"));
     }
     return parts.join("\n\n");
   };
@@ -1746,17 +1813,30 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           { commandId, metadata: { requestId } }
         );
         // §4.5's second question path (Codex `delivery: "async"`, T3
-        // `decider.ts:1633-1700`): the provider parked NO request, so there is
+        // `decider.ts:1629-1702`): the provider parked NO request, so there is
         // nothing to reply to over RPC — the answer IS an ordinary message,
         // steered into the running turn (or starting one), and the card
         // closes with the same deterministic activity a dismissal writes.
-        if (question?.dismissible) {
-          const text = answerMessageText(question.questions, answers);
+        //
+        // **Resolution and message are ONE command sequence.** T3 commits them
+        // with a single `decideCommandSequence([activity.append,
+        // turn.start])`, and the reason is an invariant rather than a tidiness
+        // preference: the card must not be able to close without the message
+        // being committed, nor the message be committed while the card stays
+        // open. Here that is one `events` array on one decision — every event
+        // below reaches `append` together or not at all — with the steer as the
+        // decision's ONLY effect.
+        if (question?.responseMode === "message") {
+          const text = answerMessageText(question.questions, answers, attachmentsByQuestionId);
           if (text.length === 0) {
             throw invalidCommand("An answer needs some text.");
           }
           const occurredAt = clock.nowIso();
-          const messageId = ids.messageId("user:");
+          // Deterministic, like the activity's own id (T3 mints
+          // `async-answer:<requestId>` for both): a replayed command writes the
+          // same message id rather than a duplicate.
+          const messageId = `async-answer:${requestId}`;
+          const attachments = Object.values(attachmentsByQuestionId ?? {}).flat();
           const events: AppendableDomainEvent[] = [
             responseRequested,
             buildEvent(
@@ -1768,7 +1848,14 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
                   tone: "info",
                   activityKind: "user-input.resolved",
                   summary: "User input answered",
-                  payload: { requestId, responseMode: "message", answers },
+                  payload: {
+                    requestId,
+                    responseMode: "message",
+                    answers,
+                    ...(attachmentsByQuestionId !== undefined
+                      ? { attachmentsByQuestionId }
+                      : {})
+                  },
                   turnId: session.activeTurnId,
                   createdAt: occurredAt
                 })
@@ -1783,7 +1870,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
                 role: "user",
                 text,
                 streaming: false,
-                turnId: session.activeTurnId
+                turnId: session.activeTurnId,
+                ...(attachments.length > 0 ? { attachments } : {})
               },
               { commandId, occurredAt }
             )
@@ -1801,7 +1889,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           const queuedTurn: QueuedTurn = {
             messageId,
             input: text,
-            attachments: [],
+            attachments,
             interactionMode: runtime.lastInteractionMode
           };
           return {
@@ -1829,7 +1917,11 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         if (!question) {
           throw commandRejected("This question has already been answered.");
         }
-        if (!question.dismissible) {
+        // Dismiss is legal ONLY for a message-mode question (T3
+        // `decider.ts:1769-1775`): a native callback leaves the provider
+        // blocked until it gets a reply, so it still needs an answer or an
+        // interrupted turn.
+        if (question.responseMode !== "message") {
           throw commandRejected("This question needs an answer. Answer it or stop the turn.");
         }
         const createdAt = clock.nowIso();
@@ -2756,6 +2848,11 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
               void captureBaseline(runtime, event.turnId ?? null);
             } else if (event.type === "turn.completed" || event.type === "turn.aborted") {
               captureTurnEnd(runtime, event.turnId ?? null);
+              // A replayed turn is the past: its questions were settled when it
+              // happened, and there is no live provider to strand.
+              if (!isHistoricalRuntimeEvent(event)) {
+                await settleStrandedQuestions(runtime, event.turnId ?? null);
+              }
             }
           }
         } catch (error) {

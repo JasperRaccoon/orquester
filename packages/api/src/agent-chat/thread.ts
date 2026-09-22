@@ -320,11 +320,35 @@ export interface PendingUserInput {
   createdAt: string;
   questions: UserInputQuestion[];
   /**
-   * Async questions can be dismissed without a reply; native callbacks cannot
-   * — the provider is blocked waiting (§6.2). Equals
-   * `responseMode === "message"`.
+   * **How this question is answered**, carried as a first-class contract field
+   * rather than re-derived from the payload by each consumer (§6.2).
+   *
+   * `"message"` (Codex `delivery: "async"`) means the provider parked NO
+   * request: there is nothing to reply to over RPC, the answer is an ordinary
+   * user message steered into the turn, and the question may outlive the turn
+   * that asked it. Absent means a native protocol callback — the provider is
+   * blocked until it gets a reply.
+   *
+   * Four behaviours read it and must never disagree: `/dismiss` legality, the
+   * terminal-turn cleanup (only NON-message requests are force-resolved),
+   * settle eligibility, and the turn-pause gate (an async question never parks
+   * the turn).
+   *
+   * *T3: `providerRuntime.ts:496` (`responseMode` on the pending request),
+   * consumed at `decider.ts:500-511,653-661,1769-1775` and
+   * `ProviderRuntimeIngestion.ts:2076-2079,2330-2360`.*
+   */
+  responseMode?: "message";
+  /**
+   * `responseMode === "message"`, kept as the boolean every card already
+   * branches on. Derived, never independently authored.
    */
   dismissible: boolean;
+  /**
+   * The turn this question was asked in, or `null` when it was asked outside
+   * one. What the terminal-turn cleanup scopes itself by.
+   */
+  turnId?: string | null;
 }
 
 export interface PendingRequests {

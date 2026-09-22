@@ -23,8 +23,7 @@ import { describe, it } from "node:test";
 import { buildClaudeAuth } from "./claude/probe.ts";
 import { toProviderAuth as codexAuth } from "./codex/probe.ts";
 import { parseGrokModelsOutput } from "./grok/probe.ts";
-import { inferAuth as openCodeAuth } from "./opencode/snapshot.ts";
-import type { OpenCodeInventory } from "./opencode/cli-inventory.ts";
+import { inferAuth as openCodeAuth, type OpenCodeInventory } from "./opencode/snapshot.ts";
 
 describe("claude — an init result that merely lacks account info is an AMBIGUITY", () => {
   it("is `unknown` when the probe itself failed", () => {
