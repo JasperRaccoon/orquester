@@ -805,6 +805,14 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   `executable`, `strictMcpConfig`, `maxThinkingTokens`. There are no SDK hooks — the `hook.*`
   events are the *user's own* configured hooks reported back as `system` messages.
   *T3: `apps/server/src/provider/Layers/ClaudeAdapter.ts:4913-4965` — the whole options object; `:4834-4838` — the extraArgs strip; `:4886-4891` — the folded permission mode; `:4892-4900` — `settings`; `:4905-4912` — `additionalDirectories`; `apps/server/src/provider/ClaudeModelCatalog.ts:233-250` — the model-id suffix; `:4993-4998` — `query({prompt, options})`*
+  *Built: `stderr` **is** set, although the list above forbids it. §3.1 requires every child's
+  stderr to be captured, classified and redacted, and the SDK callback is the only access to it —
+  the §3.1 requirement wins over the §4.5 list. The list is kept verbatim in
+  `CLAUDE_NEVER_SET_OPTIONS` with the one exception named separately in
+  `CLAUDE_SESSION_ALLOWED_DESPITE_SPEC` (`apps/daemon/src/agent-host/adapters/claude/launch.ts`),
+  so the divergence is a constant a reader trips over rather than a silent edit. `settingSources`
+  is as written; the committed fixtures were captured with `["project","local"]` only, because this
+  host's user-level settings carry a hook that perturbs the capture.*
 - **Env is one variable.** `CLAUDE_CONFIG_DIR` only, on top of the base env; `HOME` is **never**
   overridden, because relocating `HOME` also relocates the macOS keychain lookup and the CLI then
   reports "Not logged in". Orquester's managed-account home is therefore bound through
@@ -828,6 +836,18 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   telling the model to stop and wait — plan mode is a client-owned card, never the SDK's gate.
   `full-access` short-circuits to allow with no event.
   *T3: `apps/server/src/provider/Layers/ClaudeAdapter.ts:4663-4824` (the callback), `:4463-4471` (the id-is-the-text rule and its issue link), `:4584-4590` (the answer shape), `:4683-4703` (ExitPlanMode), `:4704-4711` (full access)*
+  *Built: `canUseTool` is **not** the whole approval surface. The CLI gates first, and silently:
+  `echo hi`, `ls` and `Read` never reach the callback, and a `sleep 120 && …` was denied by the CLI
+  itself with a `<tool_use_error>` tool result nobody authorised. In `acceptEdits` **and**
+  `bypassPermissions` the callback is never called at all, even for `rm -f`; only
+  `approval-required` ever produces an approval card. The timeline therefore renders a tool result
+  that is a CLI denial as a denial — tone `error`, "denied by the CLI" — even though no
+  `request.*` event exists for it (`apps/daemon/src/agent-host/adapters/claude/classify.ts`,
+  `…/normalize.ts`). Two more shapes the callback forced: options carry a `requestId` that
+  **must** key the pending-approvals map, because the SDK redelivers a request on reinitialize; and
+  `ExitPlanMode` carries a `planFilePath`, which rides an additive optional field of the same name
+  on `turn.proposed.completed` rather than being smuggled into `planMarkdown` — the path lives
+  under `CLAUDE_CONFIG_DIR`, outside `fsRoot`, so it is a label and never a link.*
 - **Model and plan switch live, mode does not.** `query.setModel(apiModelId)` on a changed model
   (also refreshing the per-turn effort), `query.setPermissionMode("plan")` / back to the session's
   base mode per turn. A RuntimeMode change restarts (§4.4).
@@ -839,6 +859,15 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   `interrupted`. For Claude, Stop and interrupt are the same operation and the next turn needs
   lazy recovery from the cursor.
   *T3: `apps/server/src/provider/Layers/ClaudeAdapter.ts:5289-5297` (with the in-source reason), `:4262-4369` (teardown)*
+  *Built: Stop is `query.interrupt()` **first** and a process kill second, not the process kill this
+  paragraph prescribes. The `interrupt_receipt_v1` receipt is the fact the rationale above lacked:
+  an empty `still_queued` means the CLI took the interrupt, so the host waits for the turn to
+  settle and **keeps the session** (no CLI reboot per Stop); a non-empty receipt, an RPC failure or
+  a turn that does not settle closes the query exactly as written here. A **session-scoped** Stop
+  (no `turnId`, §6.2) always closes the query, because that is the only reach to the CLI's own
+  background work (`apps/daemon/src/agent-host/adapters/claude/session.ts`). Related invariant the
+  SDK imposes: breaking out of `for await (… of query)` closes the query and kills the session, so
+  the adapter never does.*
 - **Rollback is a native fork with a hard failure mode.** Rolling back *every* turn short-circuits
   to a fresh session rather than a fork. Otherwise: read native history through the SDK's
   `getSessionMessages` — run **in a child process** when `CLAUDE_CONFIG_DIR` differs from the
@@ -850,6 +879,13 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   compaction in between is a hard error telling the user to start a new thread — refuse rather
   than guess.
   *T3: `apps/server/src/provider/Layers/ClaudeAdapter.ts:5306-5486` (rollback), `:5316-5327` (full-rollback restart path), `:5337-5393` (the child-process history worker and its reason), `:180-225` (`remapClaudeForkTurnBoundaries`), `:5422-5433, 5453-5468` (the hard failures)*
+  *Built: as written, with one observation that makes it load-bearing — a resume replays **nothing**
+  onto the message stream (`replayUuids: []`), so `readThread` and rollback genuinely have to read
+  the native history out-of-band, and a resumed thread renders from that projection tagged
+  `HISTORICAL_RAW_SOURCE` (§4.2). Two more frame shapes the history and demux paths must survive:
+  `user.message.content` is sometimes a plain **string** (post-compaction frames), so `content.map`
+  throws on a long thread; and `command_lifecycle` is a top-level message type absent from the
+  SDK's exported union. `system/init` is emitted once **per turn**, not once per session.*
 - **Steering.** A `sendTurn` during a live turn reuses the turn id; a stale *synthetic* turn
   (auto-opened by background assistant output between prompts) is auto-closed first so it cannot
   block the user's next turn.
@@ -862,6 +898,9 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   meter plus `turn.completed.tokenUsage`, `complete` when input and output totals are both
   present, `partial` otherwise, `unavailable` when the turn produced none.
   *T3: `apps/server/src/provider/Layers/ClaudeAdapter.ts:2555` (thread usage), `:820, 855, 878, 885` (the three `usageStatus` arms), `:3483-3504` (`result` → usage + turn.completed)*
+  *Built: as written. Two result shapes to tolerate: `result.subtype: "success"` can carry
+  `is_error: true` with an `api_error_status`, and `terminal_reason` is absent on a compaction
+  result. An interrupt yields `aborted_streaming`.*
 - **Probe.** Auth, slash commands and usage all come from **one** never-yielding `query()`: the
   prompt async-generator never yields, so the CLI finishes local init IPC and never calls the API;
   then `await q.initializationResult()` gives `account.{email, subscriptionType, tokenSource,
@@ -961,6 +1000,16 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   notifications. Item classification is a **substring heuristic over a de-camel-cased type name**,
   not a switch — another one not to copy verbatim.
   *T3: `apps/server/src/provider/Layers/CodexSessionRuntime.ts:2352-2370` (generic registration), `:779, 833-875` (the four stateful ones); `apps/server/src/provider/Layers/CodexAdapter.ts:1304-2223` (the mapping), `:633-663` (`toCanonicalItemType`)*
+  *Built: the RPC shapes differ from the sentence above in three ways worth pinning.
+  `thread/start` and `thread/resume` answer `{thread:{…}}` plus the whole resolved config, not
+  `{threadId}`, and `turn/start` answers `{turn:{…}}`. Every request error is `-32600` — never
+  classify a Codex failure by code — and the `error` **notification** carries `willRetry`, which is
+  what separates a `runtime.warning` from a `runtime.error`. `configWarning`, `guardianWarning` and
+  `deprecationNotice` all land as `runtime.warning`. `thread.started` is emitted once, and there is
+  no `turn.aborted` producer on this adapter: an interrupted Codex turn settles through
+  `turn.completed {state:"interrupted"}`. A Codex `cancel` ends the turn as `status:"interrupted"`
+  with `items: []`, so a fold that trusts `turn.items` erases the turn — the fold must not
+  (`apps/daemon/src/agent-host/adapters/codex/normalise.ts`, `…/session.ts`).*
 - **Two question paths.** The RPC path (`item/tool/requestUserInput`) filters **hard**: a question
   is dropped unless it has id, header, prompt **and** at least one option whose label *and*
   description are both non-empty, and `multiSelect` is hard-coded `false`; if every question is
@@ -970,10 +1019,22 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   (`codex-async:<threadId>:<itemId>`) — the answer goes back as an ordinary turn, not a JSON-RPC
   response.
   *T3: `apps/server/src/provider/Layers/CodexAdapter.ts:885-910` (the filter), `:1691-1711` (the async path)*
+  *Built: the RPC path is implemented with the field names the CLI actually uses —
+  `requestUserInput` carries `question`, not `prompt`, its options are `{label, description}` with
+  **no `value`** (so an answer goes back as the option's *label*), and it additionally carries
+  `isOther`, `isSecret` and `isBlocking`, which the question card renders as a free-text option and
+  a masked field (§7.5). `availableDecisions` is a presentation hint, not a whitelist. The second,
+  reply-less **async** path is **not implemented**: it was never observed in any capture of this
+  CLI, and a synthetic request id for a path that does not exist would be a card nobody can close
+  (`apps/daemon/src/agent-host/adapters/codex/session.ts`).*
 - **Token usage.** `thread/tokenUsage/updated` carries *cumulative thread* totals, so the adapter
   keeps a baseline and diffs per turn, clamping cache subsets into `inputTokens`; a turn with no
   observed delta settles `unavailable`, an interrupted one `partial`.
   *T3: `apps/server/src/provider/Layers/CodexAdapter.ts:538-617` (accumulate + complete), `:1589` (thread usage), `:2417-2444` (stamped on turn.completed/aborted)*
+  *Built: no baseline arithmetic. `thread/tokenUsage/updated` already carries `last` — the per-call
+  delta — and `modelContextWindow`, so the adapter reports the delta the provider gives it instead
+  of diffing cumulative totals it would have to keep a baseline for; `turn/completed` carries no
+  usage at all (`apps/daemon/src/agent-host/adapters/codex/usage.ts`).*
 - **Interrupt, in order.** (1) settle pending approvals as `cancel`; (2) settle pending
   user-inputs; (3) interrupt every live **child** turn first, bounded at 3 s per child and 10 s
   overall, concurrency 8 — collab children are full threads and interrupting only the parent
@@ -989,12 +1050,22 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   *T3: `packages/effect-codex-app-server/src/protocol.ts:100-115` (line framing), `:455-474` (request/notify write only `{id, method, params}`)*
 - **Compaction is native:** `thread/compact/start {threadId}`.
   *T3: `apps/server/src/provider/Layers/CodexSessionRuntime.ts:2497-2500`; `apps/server/src/provider/Layers/CodexAdapter.ts:2729`*
+  *Built: `thread/compact/start` is the call, but compaction surfaces as a **whole extra turn**
+  signalled by a `contextCompaction` item — `thread/compacted` never fires on this CLI, so nothing
+  may wait on it. There is also a `thread/reverted` notification, which the adapter handles rather
+  than warning about (`apps/daemon/src/agent-host/adapters/codex/normalise.ts`).*
 - **Rollback has two code paths.** Legacy threads take `thread/rollback {threadId, numTurns}`;
   **paginated** threads do not support the count-based endpoint, so the adapter reads the thread
   (`thread/turns/list`, cursor loop, a raw call not in the generated meta) and issues
   `thread/revert {threadId, beforeTurnId}` at the computed boundary. An implementation that knows
   only `thread/rollback` fails silently on newer histories.
   *T3: `apps/server/src/provider/Layers/CodexSessionRuntime.ts:1215-1288`*
+  *Built: there is only **one** path. `thread/rollback` is dead on every thread this CLI creates —
+  it answers `-32600 "paginated threads do not support thread/rollback"` — so rollback is always
+  `thread/turns/list` (cursor loop) → `thread/revert {threadId, beforeTurnId}`. The adapter never
+  calls the count-based endpoint at all (`apps/daemon/src/agent-host/adapters/codex/session.ts`,
+  `…/history.ts`). `thread/turns/list` is also how a resumed thread is re-hydrated: `thread/resume`
+  hands back `turns: []` by design.*
 - **stderr becomes events.** Lines matching Codex's log format are parsed and re-emitted, with a
   benign-snippet denylist (`state db missing rollout path for thread`,
   `record_discrepancy … falling_back`) so routine noise never surfaces.
@@ -1012,6 +1083,13 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   it as its own child made threads hang "working" forever. Unknown child methods default to "pass
   to parent", not "drop" — two shipped bugs came from a catch-all.
   *T3: `apps/server/src/provider/Layers/CodexSessionRuntime.ts:1622-1636, 1080-1131`*
+  *Built: three more behaviours this adapter carries. A resume that fails falls back to a fresh
+  `thread/start` **unconditionally**, with a `runtime.warning` naming the lost context — refusing
+  the session instead would leave a tab that can never be used again. `tool.denied` is derived from
+  a tool that was declined without a request ever having been opened, since the CLI gates some
+  calls itself. And `developer_instructions: null` is sent explicitly (§4.4). Unverified because no
+  capture produced them: `item/permissions/requestApproval`, `item/tool/call`,
+  `account/chatgptAuthTokens/refresh` and `attestation/generate` — all answered, none exercised.*
 
 #### OpenCode
 
@@ -1028,6 +1106,12 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   their providers. Shutdown is SIGTERM to the **process group** (`process.kill(-pid)`), 1 s, then
   SIGKILL.
   *T3: `apps/server/src/provider/opencodeRuntime.ts:667-714` (spawn + env with the clobber rationale at `:704-711`), `:81, 290-299, 751-772` (readiness), `:42-49, 143-179` (health + minimum version), `:657-663` (basic auth), `:728-745` (group kill), `:837-841` (drain-but-discard)*
+  *Built: `--port 0` does **not** give an ephemeral port — this CLI binds the well-known 4096 when
+  it is free — so the adapter probes a free port itself and passes it explicitly
+  (`apps/daemon/src/agent-host/adapters/opencode/server.ts`). Auth is `Basic
+  base64("opencode:<password>")` exactly, and `/global/health` sits behind the same gate, so the
+  version check is an authenticated call. A malformed session id answers **500**, and a bad model
+  is accepted with 204 and then fails asynchronously with three `session.error` frames.*
 - **There is no cwd on the process.** The working directory travels per request as the client-level
   `directory`, which becomes header `x-opencode-directory` (rewritten to `?directory=` on
   GET/HEAD). That is what lets the per-project server of §3.2 serve every thread in a project; the
@@ -1071,17 +1155,36 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   part clears `text` but **keeps `emittedText`**. `message.part.delta` (only when `field ===
   "text"`) is genuinely incremental and appends instead of diffing.
   *T3: `apps/server/src/provider/Layers/OpenCodeAdapter.ts:633-656` (merge + resolve), `:1617-1644` (emit), `:2476-2483` (non-text update), `:2410-2445` (`message.part.delta`)*
+  *Built: text streaming is **both**, not one or the other. A part opens as a
+  `message.part.updated` with `text: ""`, then N `message.part.delta {field:"text"}` frames carry
+  the authoritative incremental text, then a closing full snapshot arrives with `time.end`. The
+  snapshot-diffing merge above is still required (it is what makes the closing frame idempotent),
+  and the deltas are still appended. One trap: `field: "text"` deltas arrive for **`reasoning`**
+  parts too, so the content stream kind must be taken from the *part's* `type`, never from the
+  delta's `field` (`apps/daemon/src/agent-host/adapters/opencode/normalize.ts`).*
 - **Permissions.** The ruleset (§4.4) is written on create, on resume-in-place, after a cwd fork
   and after a rollback fork — a plain `PATCH /session/{id}`, no server restart. Asks arrive as
   `permission.asked` and are answered on `POST /permission/{requestID}/reply {reply}` — *not* the
   `/session/:id/permissions/:permissionID` route that also exists in the SDK. Questions are the
   parallel `question.asked` / `POST /question/{id}/reply` pair.
   *T3: `apps/server/src/provider/Layers/OpenCodeAdapter.ts:2901-2947` (ruleset write points), `:3762-3769` (the reply route), `:2535-2560` (the ask/reply events)*
+  *Built: `permission.asked` additionally carries `always` — the pattern the server would persist —
+  and `tool: {messageID, callID}`. That `always` grant is **directory-wide across every session of
+  one server** (§3.2's second invariant, confirmed against the real server), which is why an
+  automatic approval is only ever sent `once`. An aborted turn leaves its permission request open
+  in `GET /permission`, so settling before interrupt (§4.1) is correctness here, not tidiness. And
+  under the supervised ruleset the `task` tool's own permission ask stalls a subagent turn
+  indefinitely — a known gap, surfaced rather than hidden.*
 - **Child-session event routing.** Parent-session events pass; **child-session events pass only if
   they are permission or question events**, behind an ancestry-resolution retry loop (250 ms→5 s
   backoff; asked-events retry forever, terminal events give up after 5). This is the whole reason
   the OpenCode roster is thinner than Claude's.
   *T3: `apps/server/src/provider/Layers/OpenCodeAdapter.ts:2215-2265`*
+  *Built: the OpenCode roster is **not** thin. A child session emits 38 frames across 8 event
+  types, all observable, so the adapter turns a child session into a `task.*` row set and stamps
+  its own work with `agentId` — §7.6's roster shows what the provider actually reports while
+  §7.2's re-homing keeps it out of the parent timeline. The ancestry-resolution retry loop above is
+  kept (`apps/daemon/src/agent-host/adapters/opencode/normalize.ts`).*
 - **Token usage** is accumulated per message part (`input + cache.read + cache.write` into input,
   `output + reasoning` into output) and settles `complete` only when the turn completed *and*
   every step resolved; otherwise `partial`, or `unavailable` when no part carried tokens.
@@ -1096,6 +1199,10 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   semaphore, a **10-minute** timeout, and an explicit refusal while a turn is active. The
   follow-up `session.compacted` event becomes `thread.state.changed {compacted}`.
   *T3: `apps/server/src/provider/Layers/OpenCodeAdapter.ts:3537-3599` (with the refusal at `:3568-3574`), `:2314-2328`*
+  *Built: the explicit refusal while a turn is active is **ours**. The server does not refuse a
+  `summarize` mid-turn; it accepts it and rewrites the conversation the turn is reading. §3.4's
+  "compaction refuses rather than queues" is therefore enforced by the adapter, not observed from
+  the provider (`apps/daemon/src/agent-host/adapters/opencode/session.ts`).*
 - **Rollback forks, deliberately not `session.revert`** — native revert also rewrites workspace
   files, and this design keeps file restore out of a revert (§5.5). The fork is verified to have
   kept exactly the expected message count and errors otherwise, then the ruleset is re-applied and
@@ -1124,6 +1231,18 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   but never written: it only picks the ACP auth method id (`xai.api_key` vs `cached_token`).
   `GROK_HOME` is not set by the adapter — Orquester sets it per §3.1 to bind the managed account.
   *T3: `apps/server/src/provider/acp/GrokAcpSupport.ts:33-46` (argv), `:48-63` (env), `:14-18, 65-69` (auth method)*
+  *Built: one file is added to that launch. Grok's `[features] support_permission = true` — without
+  which the agent self-resolves every approval and `session/request_permission` never fires (§4.3)
+  — and `auto_update = false` must reach the CLI, and the obvious place to put them is a **trap**:
+  on a managed account home `<GROK_HOME>/config.toml` is a **symlink** to the daemon user's own
+  `~/.grok/config.toml`, so writing it reconfigures Grok host-wide, for every terminal tab and
+  every account, from one chat launch (it happened twice during the build). The host therefore
+  writes a per-thread overlay and points `GROK_CONFIG_PATH` at it; nothing under a shared home is
+  written (`apps/daemon/src/agent-host/adapters/grok/launch.ts`,
+  `apps/daemon/src/agent-chat/home-prep.ts`). `auto_update` matters because the CLI upgraded
+  itself 1.0.3 → 1.0.34 mid-session: the version is read from `initialize._meta.agentVersion` on
+  **every** handshake and never cached per host, and `meetsMinimumGrokVersion(null)` is
+  deliberately permissive for the window before the first handshake answers.*
 - **Handshake.** `initialize {protocolVersion: 1, clientCapabilities, clientInfo}`, then
   **unconditionally** `authenticate {methodId}` — the agent's own advertised `authMethods` are not
   consulted. Grok declares **no client capabilities**: `fs.readTextFile/writeTextFile: false`,
@@ -1138,6 +1257,15 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   clock, and after 2 s idle a **synthetic** `LoadSessionResponse` is fabricated from
   `initialize._meta`; 90 s overall.
   *T3: `apps/server/src/provider/acp/AcpSessionRuntime.ts:755-880` (the three branches), `:791-796` (load payload), `:804-864` (the replay-idle race); `apps/server/src/provider/acp/AcpRuntimeModel.ts:709-758` (the synthetic response)*
+  *Built: `session/load` answers in ~266 ms in practice, and the replay arrives as
+  **`_x.ai/session/update`** — a method name T3 does not register at all, so an adapter that only
+  knows `session/update` silently loses the whole replayed history (and the usage rows in it).
+  `sessionCapabilities.resume` is declared. `session/new` boots **every** MCP server the home has
+  configured (~157 tools, ~3 s, discovered from `~/.claude.json` through the Claude-compat path);
+  a chat thread deliberately inherits exactly what a terminal tab under the same home would — see
+  §10. Concurrent prompts are **queued** by the CLI, not steered into the running turn, and there
+  is an `_x.ai/task_backgrounded` notification
+  (`apps/daemon/src/agent-host/adapters/grok/history.ts`, `…/normalize.ts`).*
 - **Every x.ai extension method, in both spellings.** Each exists bare (`x.ai/…`) and
   underscore-prefixed (`_x.ai/…`), and params may additionally arrive **wrapped** as
   `{method, params}` — register both names and unwrap.
@@ -1210,10 +1338,24 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   turn. Interrupt is also turn-scoped: a Stop naming a turn that is no longer active returns
   immediately.
   *T3: `apps/server/src/provider/Layers/GrokAdapter.ts:2015-2075`; `packages/effect-acp/src/_generated/schema.gen.ts:7782`*
+  *Built: as written, with one consequence the UI must live with: a **rejected tool** also ends the
+  turn as `stopReason: "cancelled"`, indistinguishable from a user Stop except through the
+  `permission_denied` hook event. A 116 s window of total ACP silence was observed mid-turn on a
+  trivial prompt, which is why §3.1's 10-minute watchdog is a floor and not a generosity.*
 - **Grok emits no token usage at all** — no `thread.token-usage.updated`, no
   `turn.completed.tokenUsage`. The context meter and per-turn cost are simply absent on Grok
   (`reportsContextWindow: false`), and the status line must degrade rather than show zeros.
   *T3: verified by absence — no `tokenUsage`/`usageStatus` emitter in `apps/server/src/provider/Layers/GrokAdapter.ts` or `apps/server/src/provider/acp/AcpCoreRuntimeEvents.ts`; cf. `packages/contracts/src/server.ts:200-201`*
+  ***Built: this is wrong for the shipped CLI and the adapter does the opposite.*** Grok 1.0.34
+  emits usage in four places: `_meta.totalTokens` on every streamed chunk, a complete per-turn
+  block with `costUsdTicks` on the `session/prompt` result, the same `usage` object repeated on
+  `_x.ai/session_notification turn_completed`, and per-model-call usage on `response_completed`.
+  The context window is `initialize._meta.modelState.availableModels[]._meta.totalContextTokens`
+  (500 000). So Grok's capabilities declare **`reportsContextWindow: true`**, the status line shows
+  a real meter and a real per-turn cost, and `TurnTokenUsage` is populated
+  (`apps/daemon/src/agent-host/adapters/grok/usage.ts`, `…/index.ts`). The sentence above stays on
+  record because it was true of the build T3 was written against — and because it is the clearest
+  example of why §10's "protocols move" rule exists.*
 - **No rollback.** `supportsConversationRollback: false`; `rollbackThread` always fails.
   Compaction is the slash command `/compact`.
   *T3: `apps/server/src/provider/Layers/GrokAdapter.ts:2190-2192`, `:2142-2157`*
@@ -1228,10 +1370,19 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   `userInvocable: false` skills are kept but marked disabled — with typed probe errors so a
   failure never caches an empty catalogue.
   *T3: `apps/server/src/provider/Layers/GrokProvider.ts:247-285` (`parseGrokModelsCliOutput`), `:315-340` (the two filtered commands), `:342-364` (the initialize-only probe and its comment), `:486-492` (verdict precedence); `apps/server/src/provider/Drivers/GrokSkills.ts:45-92`*
+  *Built: the probe is as written, but `initialize` advertises only **7** commands while the CLI's
+  real catalogue is **69** — the slash surface is built from the full catalogue, not from the
+  handshake's short list (§4.6). Not captured and therefore unverified: an unauthenticated failure
+  and `stopReason: "rate_limit"`.*
 - **Lifecycle.** One `grok agent stdio` child **per thread**, kept alive indefinitely, with a
   per-thread semaphore and a documented lock-ordering rule: never hold the prompt-lifecycle lock
   and the thread lock together.
   *T3: `apps/server/src/provider/Layers/GrokAdapter.ts:998, 1786-1787`*
+  *Built: one addition to the redaction of §3.1. `_x.ai/mcp/servers_updated` carries the host's
+  real MCP credentials in each server's `env` map, so `raw.ndjson` redaction runs over raw ACP
+  frames too and knows about `env` maps structurally, not only about token-shaped strings
+  (`apps/daemon/src/agent-host/adapters/grok/acp/redact.ts`,
+  `apps/daemon/src/agent-host/store/raw-log.ts`).*
 
 ### 4.6 Slash commands and skills
 
