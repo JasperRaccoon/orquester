@@ -39,6 +39,7 @@ import { runtimeEventToActivities } from "./activities.ts";
 import { DeltaBufferSet, type BufferFlush, type TimerHandle } from "./buffer.ts";
 import { COALESCE_WINDOW_MS, MAX_PENDING_UPDATES, coalesceToolUpdates } from "./coalesce.ts";
 import {
+  ownedBaseKey,
   proposedPlanActivityId,
   proposedPlanIdFromEvent,
   reasoningSegmentBaseKeyFromEvent,
@@ -163,10 +164,18 @@ interface ThreadState {
   >;
   messages: DeltaBufferSet;
   toolOutput: DeltaBufferSet;
-  /** `${turnId}:${role}` → the open segment. */
+  /** `${turnId}:${role}:${agentId ?? ""}` → the open segment. */
   segments: Map<string, SegmentState>;
   /** turnId → every message id the turn has opened. */
   turnMessageIds: Map<string, Set<string>>;
+  /**
+   * messageId → the subagent that owns it (§7.6). Every
+   * `thread.message-sent` for that message — the streaming flushes, the
+   * completion with the buffered text and the empty `streaming:false` close —
+   * carries it, or the fold files the row under the parent and the drill-in
+   * shows nothing.
+   */
+  messageAgent: Map<string, string>;
   /**
    * Message ids whose text already reached the log, so a completion is owed.
    * Scoped to the live turn: `finalizeMessage` drops each id as it closes it,
@@ -241,8 +250,31 @@ function messageRoleOf(messageId: string): ThreadMessageRole {
   return messageStreamRoleOf(messageId) === "reasoning" ? "reasoning" : "assistant";
 }
 
-function segmentKey(turnId: string, role: MessageStreamRole): string {
-  return `${turnId}\u0000${role}`;
+/**
+ * A segment belongs to a turn, a role **and an owner**. A subagent's blocks
+ * arrive on the parent's stream, inside the parent's turn: keyed by turn and
+ * role alone, an agent's text opened, closed and finalised the PARENT's
+ * segments — its prose landed in the parent's bubble and its first visible
+ * word ended the parent's thinking block (owner report, 2026-09-22).
+ * `undefined` is the thread's own agent, the parent.
+ */
+function segmentKey(turnId: string, role: MessageStreamRole, agentId?: string): string {
+  return `${turnId}\u0000${role}\u0000${agentId ?? ""}`;
+}
+
+/** Every open segment of a turn, whoever owns it, reasoning first. */
+function turnSegmentKeys(state: ThreadState, turnId: string): string[] {
+  const prefix = `${turnId}\u0000`;
+  const keys = [...state.segments.keys()].filter((key) => key.startsWith(prefix));
+  return [
+    ...keys.filter((key) => key.startsWith(`${prefix}reasoning\u0000`)),
+    ...keys.filter((key) => !key.startsWith(`${prefix}reasoning\u0000`))
+  ];
+}
+
+/** The owner an event's message belongs to, or `undefined` for the parent. */
+function ownerOf(event: { agentId?: string }): string | undefined {
+  return event.agentId !== undefined && event.agentId.length > 0 ? event.agentId : undefined;
 }
 
 
@@ -275,6 +307,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       toolOutput: undefined as unknown as DeltaBufferSet,
       segments: new Map(),
       turnMessageIds: new Map(),
+      messageAgent: new Map(),
       projected: new Set(),
       messageTurn: new Map(),
       reasoningPartIndex: new Map(),
@@ -450,15 +483,17 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     state: ThreadState,
     itemId: string,
     phase: "answer" | "commentary",
-    turnId: string | null
+    turnId: string | null,
+    agentId?: string
   ): void {
+    const baseKey = ownedBaseKey(itemId, agentId);
     state.assistantPhaseByItemId.set(itemId, phase);
-    state.messageKind.set(segmentMessageId(itemId, 0, "assistant"), phase);
+    state.messageKind.set(segmentMessageId(baseKey, 0, "assistant"), phase);
     if (turnId === null) {
       return;
     }
-    const segment = state.segments.get(segmentKey(turnId, "assistant"));
-    if (segment?.activeMessageId != null && segment.baseKey === itemId) {
+    const segment = state.segments.get(segmentKey(turnId, "assistant", agentId));
+    if (segment?.activeMessageId != null && segment.baseKey === baseKey) {
       state.messageKind.set(segment.activeMessageId, phase);
     }
   }
@@ -491,6 +526,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     }
     const role = messageRoleOf(flush.key);
     const turnId = state.messageTurn.get(flush.key) ?? null;
+    const agentId = state.messageAgent.get(flush.key);
     state.projected.add(flush.key);
     emit(
       state,
@@ -504,6 +540,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
         text: flush.text,
         streaming: true,
         turnId,
+        ...(agentId !== undefined ? { agentId } : {}),
         ...messageKindFields(state, flush.key, role)
       }
     );
@@ -638,8 +675,16 @@ export function createIngestion(options: IngestionOptions): Ingestion {
   // Segments and buffered text
   // -------------------------------------------------------------------------
 
-  function rememberMessage(state: ThreadState, turnId: string | null, messageId: string): void {
+  function rememberMessage(
+    state: ThreadState,
+    turnId: string | null,
+    messageId: string,
+    agentId?: string
+  ): void {
     state.messageTurn.set(messageId, turnId);
+    if (agentId !== undefined) {
+      state.messageAgent.set(messageId, agentId);
+    }
     if (turnId === null) {
       return;
     }
@@ -650,6 +695,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
 
   function forgetMessage(state: ThreadState, turnId: string | null, messageId: string): void {
     state.messageTurn.delete(messageId);
+    state.messageAgent.delete(messageId);
     state.projected.delete(messageId);
     state.reasoningPartIndex.delete(messageId);
     state.messageKind.delete(messageId);
@@ -669,9 +715,10 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     state: ThreadState,
     turnId: string,
     baseKey: string,
-    role: MessageStreamRole
+    role: MessageStreamRole,
+    agentId?: string
   ): string {
-    const key = segmentKey(turnId, role);
+    const key = segmentKey(turnId, role, agentId);
     const existing = state.segments.get(key);
     let next: SegmentState;
     if (existing === undefined) {
@@ -699,9 +746,10 @@ export function createIngestion(options: IngestionOptions): Ingestion {
   function activeSegmentId(
     state: ThreadState,
     turnId: string,
-    role: MessageStreamRole
+    role: MessageStreamRole,
+    agentId?: string
   ): string | null {
-    return state.segments.get(segmentKey(turnId, role))?.activeMessageId ?? null;
+    return state.segments.get(segmentKey(turnId, role, agentId))?.activeMessageId ?? null;
   }
 
   /**
@@ -714,9 +762,19 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     state: ThreadState,
     turnId: string,
     role: MessageStreamRole,
+    input: { cause: RuntimeEvent | null; occurredAt: string; fallbackText?: string },
+    agentId?: string
+  ): void {
+    finalizeSegmentKey(threadId, state, segmentKey(turnId, role, agentId), turnId, input);
+  }
+
+  function finalizeSegmentKey(
+    threadId: string,
+    state: ThreadState,
+    key: string,
+    turnId: string,
     input: { cause: RuntimeEvent | null; occurredAt: string; fallbackText?: string }
   ): void {
-    const key = segmentKey(turnId, role);
     const segment = state.segments.get(key);
     const messageId = segment?.activeMessageId ?? null;
     if (segment === undefined || messageId === null) {
@@ -736,6 +794,8 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     const buffered = state.messages.take(messageId);
     const openedAt = state.messages.openedAt(messageId, input.occurredAt);
     const role = messageRoleOf(messageId);
+    const agentId = state.messageAgent.get(messageId);
+    const owner = agentId !== undefined ? { agentId } : {};
     const text =
       buffered.length > 0
         ? buffered
@@ -751,7 +811,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
         input.cause,
         role === "reasoning" ? openedAt : input.occurredAt,
         "thread.message-sent",
-        { messageId, role, text, streaming: true, turnId, ...kindFields }
+        { messageId, role, text, streaming: true, turnId, ...owner, ...kindFields }
       );
     }
     if (state.projected.has(messageId)) {
@@ -761,6 +821,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
         text: "",
         streaming: false,
         turnId,
+        ...owner,
         ...kindFields
       });
     }
@@ -793,8 +854,12 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     turnId: string,
     input: { cause: RuntimeEvent | null; occurredAt: string }
   ): void {
-    finalizeSegment(threadId, state, turnId, "reasoning", input);
-    finalizeSegment(threadId, state, turnId, "assistant", input);
+    // Every open segment of the turn, whoever owns it: a subagent's row must
+    // not be left streaming because the turn it rode ended.
+    const segmentKeys = turnSegmentKeys(state, turnId);
+    for (const key of segmentKeys) {
+      finalizeSegmentKey(threadId, state, key, turnId, input);
+    }
     const messageIds = state.turnMessageIds.get(turnId);
     if (messageIds !== undefined) {
       for (const messageId of [...messageIds]) {
@@ -802,8 +867,9 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       }
     }
     state.turnMessageIds.delete(turnId);
-    state.segments.delete(segmentKey(turnId, "assistant"));
-    state.segments.delete(segmentKey(turnId, "reasoning"));
+    for (const key of segmentKeys) {
+      state.segments.delete(key);
+    }
     finalizePlansForTurn(threadId, state, turnId, input);
     // Nothing keyed on this turn can still be written to, so the dedupe and
     // phase bookkeeping for it goes with it (Q1 #9).
@@ -1019,8 +1085,25 @@ export function createIngestion(options: IngestionOptions): Ingestion {
         : null;
     if (pauseTurnId !== null) {
       flushTurnBuffers(threadId, state, pauseTurnId);
-      finalizeSegment(threadId, state, pauseTurnId, "reasoning", { cause: event, occurredAt: now });
-      finalizeSegment(threadId, state, pauseTurnId, "assistant", { cause: event, occurredAt: now });
+      // Scoped to whoever raised the request: an approval a subagent needs
+      // does not end the parent's paragraph, and vice versa.
+      const owner = ownerOf(event);
+      finalizeSegment(
+        threadId,
+        state,
+        pauseTurnId,
+        "reasoning",
+        { cause: event, occurredAt: now },
+        owner
+      );
+      finalizeSegment(
+        threadId,
+        state,
+        pauseTurnId,
+        "assistant",
+        { cause: event, occurredAt: now },
+        owner
+      );
     }
 
     // A TOOL `item.started` closes the active reasoning segment, or post-tool
@@ -1032,10 +1115,14 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       eventTurnId !== null &&
       isToolLifecycleItemType(event.payload.itemType)
     ) {
-      finalizeSegment(threadId, state, eventTurnId, "reasoning", {
-        cause: event,
-        occurredAt: now
-      });
+      finalizeSegment(
+        threadId,
+        state,
+        eventTurnId,
+        "reasoning",
+        { cause: event, occurredAt: now },
+        ownerOf(event)
+      );
     }
 
     // --- the provider's assistant-message phase (§7.3 `messageKind`) -------
@@ -1048,7 +1135,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     ) {
       const phase = assistantPhaseFromDetail(event.payload.detail);
       if (phase !== null) {
-        noteAssistantPhase(state, event.itemId, phase, eventTurnId);
+        noteAssistantPhase(state, event.itemId, phase, eventTurnId, ownerOf(event));
       }
     }
 
@@ -1398,6 +1485,9 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     if (typeof delta !== "string" || delta.length === 0) {
       return;
     }
+    // Which agent's paragraph this is. A subagent streams into the parent's
+    // turn, so the owner — not the turn — is what keeps the two apart.
+    const owner = ownerOf(event);
     if (streamKind === "reasoning_text" || streamKind === "reasoning_summary_text") {
       const baseKey = reasoningSegmentBaseKeyFromEvent(event, streamKind);
       // Every SEGMENTED close path for a thinking block is keyed by turn. T3
@@ -1411,20 +1501,24 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       if (eventTurnId === null) {
         messageId = segmentMessageId(baseKey, 0, "reasoning");
       } else {
-        const open = state.segments.get(segmentKey(eventTurnId, "reasoning"));
+        const open = state.segments.get(segmentKey(eventTurnId, "reasoning", owner));
         if (open?.activeMessageId != null && open.baseKey === baseKey) {
           messageId = open.activeMessageId;
         } else {
           if (open?.activeMessageId != null) {
-            finalizeSegment(threadId, state, eventTurnId, "reasoning", {
-              cause: event,
-              occurredAt: now
-            });
+            finalizeSegment(
+              threadId,
+              state,
+              eventTurnId,
+              "reasoning",
+              { cause: event, occurredAt: now },
+              owner
+            );
           }
-          messageId = startSegment(state, eventTurnId, baseKey, "reasoning");
+          messageId = startSegment(state, eventTurnId, baseKey, "reasoning", owner);
         }
       }
-      rememberMessage(state, eventTurnId, messageId);
+      rememberMessage(state, eventTurnId, messageId, owner);
 
       // Codex splits a reasoning trace into indexed parts, summary and raw
       // alike. The index is the only signal that one part ended and the next
@@ -1451,19 +1545,30 @@ export function createIngestion(options: IngestionOptions): Ingestion {
 
     if (streamKind === "assistant_text") {
       // Visible text ends the thinking block that preceded it, so the next
-      // block does not swallow this answer.
+      // block does not swallow this answer — the SAME author's thinking
+      // block: a subagent speaking says nothing about the parent's.
       if (eventTurnId !== null) {
-        finalizeSegment(threadId, state, eventTurnId, "reasoning", {
-          cause: event,
-          occurredAt: now
-        });
+        finalizeSegment(
+          threadId,
+          state,
+          eventTurnId,
+          "reasoning",
+          { cause: event, occurredAt: now },
+          owner
+        );
       }
       const messageId =
         eventTurnId === null
           ? segmentMessageId(segmentBaseKeyFromEvent(event), 0)
-          : (activeSegmentId(state, eventTurnId, "assistant") ??
-            startSegment(state, eventTurnId, segmentBaseKeyFromEvent(event), "assistant"));
-      rememberMessage(state, eventTurnId, messageId);
+          : (activeSegmentId(state, eventTurnId, "assistant", owner) ??
+            startSegment(
+              state,
+              eventTurnId,
+              segmentBaseKeyFromEvent(event),
+              "assistant",
+              owner
+            ));
+      rememberMessage(state, eventTurnId, messageId, owner);
       // The phase may have arrived on the item BEFORE the first delta.
       if (event.itemId !== undefined && !state.messageKind.has(messageId)) {
         const phase = state.assistantPhaseByItemId.get(event.itemId);
@@ -1527,23 +1632,33 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     now: string,
     turnId: string
   ): void {
-    const active = activeSegmentId(state, turnId, "reasoning");
+    const owner = ownerOf(event);
+    const ownerFields = owner !== undefined ? { agentId: owner } : {};
+    const active = activeSegmentId(state, turnId, "reasoning", owner);
     const detail = event.payload.detail;
     if (active !== null) {
       // The item detail is a whole-block snapshot, so it may only stand in for
       // deltas that never arrived. Appending it to a streamed block would
       // print the reasoning twice.
       const streamed = state.projected.has(active) || state.messages.has(active);
-      finalizeSegment(threadId, state, turnId, "reasoning", {
-        cause: event,
-        occurredAt: now,
-        ...(!streamed && hasRenderableText(detail) ? { fallbackText: detail } : {})
-      });
+      finalizeSegment(
+        threadId,
+        state,
+        turnId,
+        "reasoning",
+        {
+          cause: event,
+          occurredAt: now,
+          ...(!streamed && hasRenderableText(detail) ? { fallbackText: detail } : {})
+        },
+        owner
+      );
       return;
     }
     // Segment state outlives a closed block, so its presence means this turn
-    // already streamed a trace and the snapshot would duplicate it.
-    const alreadyStreamed = state.segments.has(segmentKey(turnId, "reasoning"));
+    // already streamed a trace — this author's — and the snapshot would
+    // duplicate it.
+    const alreadyStreamed = state.segments.has(segmentKey(turnId, "reasoning", owner));
     if (alreadyStreamed || !hasRenderableText(detail)) {
       return;
     }
@@ -1551,7 +1666,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     // is derived from the item so a repeated completion rewrites that row
     // instead of adding a copy.
     const snapshotId = segmentMessageId(
-      `snapshot:${event.itemId ?? event.eventId}`,
+      ownedBaseKey(`snapshot:${event.itemId ?? event.eventId}`, owner),
       0,
       "reasoning"
     );
@@ -1562,14 +1677,16 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       role: "reasoning",
       text: detail!,
       streaming: true,
-      turnId
+      turnId,
+      ...ownerFields
     });
     emit(state, threadId, event, now, "thread.message-sent", {
       messageId: snapshotId,
       role: "reasoning",
       text: "",
       streaming: false,
-      turnId
+      turnId,
+      ...ownerFields
     });
   }
 
@@ -1580,11 +1697,17 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     now: string,
     turnId: string
   ): void {
-    finalizeSegment(threadId, state, turnId, "reasoning", { cause: event, occurredAt: now });
-    const active = activeSegmentId(state, turnId, "assistant");
-    const messageId =
-      active ??
-      segmentMessageId(String(event.itemId ?? event.turnId ?? event.eventId), 0, "assistant");
+    const owner = ownerOf(event);
+    finalizeSegment(
+      threadId,
+      state,
+      turnId,
+      "reasoning",
+      { cause: event, occurredAt: now },
+      owner
+    );
+    const active = activeSegmentId(state, turnId, "assistant", owner);
+    const messageId = active ?? segmentMessageId(segmentBaseKeyFromEvent(event), 0, "assistant");
     // A `detail` that IS the phase marker is metadata, not the message body,
     // and `data.text` wins where an adapter elides `detail` for the label.
     const detail = detailIsPhaseMarker(event.payload.detail)
@@ -1595,7 +1718,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       // Nothing to complete: no stream ever opened and the completion is empty.
       return;
     }
-    rememberMessage(state, turnId, messageId);
+    rememberMessage(state, turnId, messageId, owner);
     const close = {
       cause: event,
       occurredAt: now,
@@ -1604,11 +1727,11 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       ...(!streamed && hasRenderableText(detail) ? { fallbackText: detail } : {})
     };
     if (active !== null) {
-      finalizeSegment(threadId, state, turnId, "assistant", close);
+      finalizeSegment(threadId, state, turnId, "assistant", close, owner);
     } else {
       finalizeMessage(threadId, state, messageId, turnId, close);
     }
-    state.segments.delete(segmentKey(turnId, "assistant"));
+    state.segments.delete(segmentKey(turnId, "assistant", owner));
   }
 
   function handleProviderDiff(
@@ -1685,6 +1808,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     state.toolOutput.clear();
     state.segments.clear();
     state.turnMessageIds.clear();
+    state.messageAgent.clear();
     state.projected.clear();
     state.messageTurn.clear();
     state.reasoningPartIndex.clear();

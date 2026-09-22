@@ -792,7 +792,10 @@ export function deriveTimelineRows(input: TimelineRowsInput): AgentChatTimelineR
         ...(marker?.beforeTokens !== undefined ? { beforeTokens: marker.beforeTokens } : {}),
         ...(marker?.afterTokens !== undefined ? { afterTokens: marker.afterTokens } : {}),
         ...(failed ? { failed: true } : {}),
-        ...(failed && marker?.error ? { detail: marker.error } : {})
+        ...(failed && marker?.error ? { detail: marker.error } : {}),
+        // A failed compaction dropped nothing, so it has nothing to summarise.
+        ...(!failed && marker?.summary !== undefined ? { summary: marker.summary } : {}),
+        ...(!failed && marker?.summaryTruncated === true ? { summaryTruncated: true } : {})
       });
       continue;
     }

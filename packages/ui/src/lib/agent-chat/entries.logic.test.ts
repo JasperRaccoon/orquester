@@ -74,6 +74,25 @@ describe("workLogEntryFromActivity", () => {
     });
   });
 
+  it("carries the compaction summary, which is all that survives of what it dropped", () => {
+    const summary = "This session is being continued…\n\n1. Fixed the composer.";
+    const entry = workLogEntryFromActivity(
+      activity("context-compaction", { state: "compacted", summary, truncated: true })
+    );
+    assert.equal(entry.compaction?.summary, summary);
+    assert.equal(
+      entry.compaction?.summaryTruncated,
+      true,
+      "a summary over the wire cap says so, so the row can offer the full read"
+    );
+    assert.equal(
+      workLogEntryFromActivity(activity("context-compaction", { state: "compacted" })).compaction
+        ?.summary,
+      undefined,
+      "a failed or older compaction has none"
+    );
+  });
+
   it("carries the compaction PHASE, so the in-flight marker is not a divider", () => {
     assert.deepEqual(
       workLogEntryFromActivity(activity("context-compaction", { state: "compacting" })).compaction,
@@ -327,5 +346,62 @@ describe("drill-in ownership and streamed output", () => {
       drill,
       "same items and owner reuse the projection"
     );
+  });
+});
+
+describe("a subagent's own messages in its drill-in (§7.6)", () => {
+  const items = [
+    message("user", "go"),
+    message("assistant", "parent answer"),
+    message("reasoning", "child thinking", { agentId: "ag1", id: "m-child-reason" }),
+    message("assistant", "child answer", { agentId: "ag1", id: "m-child-answer" }),
+    activity("tool.completed", { itemType: "command_execution", command: "ls" }, { agentId: "ag1" })
+  ];
+
+  it("keeps the owner's messages inside the drill-in", () => {
+    // The parent's view drops them (they are the child's), and for a long
+    // time so did the child's — `splitThreadItems` dropped every
+    // agent-stamped message unconditionally, so a drill-in showed the
+    // agent's tools with none of its words.
+    const own = splitThreadItems(itemsForAgent(items, "ag1"), "ag1");
+    assert.deepEqual(
+      own.messages.map((row) => row.text),
+      ["child thinking", "child answer"]
+    );
+  });
+
+  it("still drops them from the parent's view", () => {
+    assert.deepEqual(
+      splitThreadItems(items).messages.map((row) => row.text),
+      ["go", "parent answer"]
+    );
+  });
+
+  it("drops another agent's message from this agent's view", () => {
+    const own = splitThreadItems([...items, message("assistant", "other", { agentId: "ag2" })], "ag1");
+    assert.equal(
+      own.messages.some((row) => row.text === "other"),
+      false
+    );
+  });
+
+  it("derives the agent's assistant row in its entries and never in the parent's", () => {
+    const drillIn = deriveTimelineEntriesFromItems(itemsForAgent(items, "ag1"), null, {
+      ownerAgentId: "ag1"
+    });
+    const drillInMessages = drillIn.entries
+      .filter((entry) => entry.kind === "message")
+      .map((entry) => (entry.kind === "message" ? entry.message.text : ""));
+    assert.deepEqual(drillInMessages, ["child thinking", "child answer"]);
+    assert.ok(
+      drillIn.entries.some((entry) => entry.kind === "work"),
+      "its tool rows are still there too"
+    );
+
+    const parent = deriveTimelineEntriesFromItems(items, null);
+    const parentMessages = parent.entries
+      .filter((entry) => entry.kind === "message")
+      .map((entry) => (entry.kind === "message" ? entry.message.text : ""));
+    assert.deepEqual(parentMessages, ["go", "parent answer"]);
   });
 });

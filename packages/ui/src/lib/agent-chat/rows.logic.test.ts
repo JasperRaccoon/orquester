@@ -248,6 +248,43 @@ describe("compaction and changed-files rows", () => {
     assert.equal(row.afterTokens, 20);
   });
 
+  it("carries the provider's summary onto the marker row", () => {
+    const summary = "This session is being continued…\n\n- we fixed the composer";
+    const rows = deriveTimelineRows(
+      baseInput(
+        entriesFrom([
+          activity(
+            "context-compaction",
+            { state: "compacted", beforeTokens: 100, afterTokens: 20, summary, truncated: true },
+            { createdAt: stamp(1), tone: "info", summary: "Context compacted" }
+          )
+        ])
+      )
+    );
+    const row = rows.find((candidate) => candidate.kind === "context-compaction");
+    assert.ok(row && row.kind === "context-compaction");
+    assert.equal(row.summary, summary, "the row is what reveals it");
+    assert.equal(row.summaryTruncated, true);
+  });
+
+  it("a failed compaction has no summary to reveal", () => {
+    const rows = deriveTimelineRows(
+      baseInput(
+        entriesFrom([
+          activity(
+            "context-compaction",
+            { state: "compaction-failed", error: "out of quota" },
+            { createdAt: stamp(1), tone: "error", summary: "Context compaction failed" }
+          )
+        ])
+      )
+    );
+    const row = rows.find((candidate) => candidate.kind === "context-compaction");
+    assert.ok(row && row.kind === "context-compaction");
+    assert.equal(row.summary, undefined);
+    assert.equal(row.failed, true);
+  });
+
   it("puts the changed-files card at the end of the turn it belongs to", () => {
     const assistant = message("assistant", "done", { id: "am1", turnId: "t1", createdAt: stamp(2) });
     const rows = deriveTimelineRows(

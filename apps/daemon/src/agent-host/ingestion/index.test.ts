@@ -1609,3 +1609,181 @@ describe("Q1-9: per-item ingestion state is released as items finish", () => {
     assert.match(JSON.stringify(outputs[0]?.payload.activity.payload), /one line/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// §5.1 — a subagent's message segments are its own
+// ---------------------------------------------------------------------------
+
+describe("agent-owned message segments (§5.1, §7.6)", () => {
+  /** The runtime sequence one nested Claude `assistant` frame produces. */
+  async function nestedBlock(
+    ingestion: ReturnType<typeof createIngestion>,
+    input: {
+      itemType: "assistant_message" | "reasoning";
+      streamKind: "assistant_text" | "reasoning_summary_text";
+      itemId: string;
+      text: string;
+      agentId: string;
+    }
+  ): Promise<void> {
+    const envelope = { turnId: "turn-1", itemId: input.itemId, agentId: input.agentId };
+    await ingestion.ingest(
+      runtimeEvent("item.started", { itemType: input.itemType, status: "inProgress" }, envelope)
+    );
+    await ingestion.ingest(
+      runtimeEvent("content.delta", { streamKind: input.streamKind, delta: input.text }, envelope)
+    );
+    await ingestion.ingest(
+      runtimeEvent("item.completed", { itemType: input.itemType, status: "completed" }, envelope)
+    );
+  }
+
+  it("a subagent's text and thinking never open, close or join the parent's segments", async () => {
+    const { ingestion, sink } = harness();
+    await ingestion.ingest(runtimeEvent("turn.started", {}, { turnId: "turn-1" }));
+    // The parent starts thinking.
+    await ingestion.ingest(
+      runtimeEvent(
+        "content.delta",
+        { streamKind: "reasoning_summary_text", delta: "Parent thinking" },
+        { turnId: "turn-1", itemId: "p-reason" }
+      )
+    );
+    // Its subagent reports — thinking first, then prose. Both are complete
+    // blocks forwarded on the parent's stream.
+    await nestedBlock(ingestion, {
+      itemType: "reasoning",
+      streamKind: "reasoning_summary_text",
+      itemId: "a-reason",
+      text: "Agent thinking",
+      agentId: "task-1"
+    });
+    await nestedBlock(ingestion, {
+      itemType: "assistant_message",
+      streamKind: "assistant_text",
+      itemId: "a-msg",
+      text: "Agent says",
+      agentId: "task-1"
+    });
+    // The parent picks its own thinking back up: the agent must not have
+    // ended the block ("visible text ends the thinking block" is the
+    // PARENT's rule about the parent's own text).
+    await ingestion.ingest(
+      runtimeEvent(
+        "content.delta",
+        { streamKind: "reasoning_summary_text", delta: " continues" },
+        { turnId: "turn-1", itemId: "p-reason" }
+      )
+    );
+    await ingestion.ingest(
+      runtimeEvent(
+        "content.delta",
+        { streamKind: "assistant_text", delta: "Parent answer" },
+        { turnId: "turn-1", itemId: "p-msg" }
+      )
+    );
+    await ingestion.ingest(
+      runtimeEvent("turn.completed", { state: "completed" }, { turnId: "turn-1" })
+    );
+    await settle();
+
+    const texts = new Map<string, string>();
+    const owners = new Map<string, string | undefined>();
+    for (const event of sink.messages()) {
+      const { messageId, text, streaming } = event.payload;
+      owners.set(messageId, event.payload.agentId);
+      if (streaming) {
+        texts.set(messageId, `${texts.get(messageId) ?? ""}${text}`);
+      }
+    }
+
+    const parentReasoning = [...texts.entries()].filter(
+      ([id, text]) => owners.get(id) === undefined && text.includes("Parent thinking")
+    );
+    assert.equal(parentReasoning.length, 1, "the parent's thinking is ONE block, not two");
+    assert.equal(parentReasoning[0]![1], "Parent thinking continues");
+
+    const agentMessages = [...texts.entries()].filter(([id]) => owners.get(id) === "task-1");
+    assert.deepEqual(
+      agentMessages.map(([, text]) => text).sort(),
+      ["Agent says", "Agent thinking"],
+      "the agent's two blocks are two rows, each carrying its own text"
+    );
+    for (const [id] of agentMessages) {
+      const rows = sink.messages().filter((event) => event.payload.messageId === id);
+      assert.ok(rows.length >= 1);
+      assert.ok(
+        rows.every((row) => row.payload.agentId === "task-1"),
+        "every row of an agent-owned message — delta, completion and close — carries the agentId"
+      );
+      assert.ok(
+        rows.some((row) => !row.payload.streaming),
+        "and each of them is closed"
+      );
+    }
+    assert.equal(
+      [...texts.entries()].filter(([id, text]) => owners.get(id) === undefined && text === "Parent answer")
+        .length,
+      1,
+      "the parent's own answer is its own row"
+    );
+  });
+
+  it("an agent-owned message never takes the id of a parent message of the same turn", async () => {
+    const { ingestion, sink } = harness();
+    await ingestion.ingest(runtimeEvent("turn.started", {}, { turnId: "turn-1" }));
+    // Neither delta names an item, so both fall back to the turn id for their
+    // base key — the one shape where the two could collide.
+    await ingestion.ingest(
+      runtimeEvent(
+        "content.delta",
+        { streamKind: "assistant_text", delta: "parent" },
+        { turnId: "turn-1" }
+      )
+    );
+    await ingestion.ingest(
+      runtimeEvent(
+        "content.delta",
+        { streamKind: "assistant_text", delta: "agent" },
+        { turnId: "turn-1", agentId: "task-1" }
+      )
+    );
+    await ingestion.ingest(
+      runtimeEvent("turn.completed", { state: "completed" }, { turnId: "turn-1" })
+    );
+    await settle();
+
+    const byOwner = new Map<string | undefined, Set<string>>();
+    for (const event of sink.messages()) {
+      const owner = event.payload.agentId;
+      const ids = byOwner.get(owner) ?? new Set<string>();
+      ids.add(event.payload.messageId);
+      byOwner.set(owner, ids);
+    }
+    const parentIds = [...(byOwner.get(undefined) ?? [])];
+    const agentIds = [...(byOwner.get("task-1") ?? [])];
+    assert.equal(parentIds.length, 1);
+    assert.equal(agentIds.length, 1);
+    assert.notEqual(parentIds[0], agentIds[0], "two owners, two messages");
+  });
+
+  it("a turn end closes an agent's open segment too", async () => {
+    const { ingestion, sink } = harness();
+    await ingestion.ingest(runtimeEvent("turn.started", {}, { turnId: "turn-1" }));
+    await ingestion.ingest(
+      runtimeEvent(
+        "content.delta",
+        { streamKind: "assistant_text", delta: "half a thought" },
+        { turnId: "turn-1", itemId: "a-msg", agentId: "task-1" }
+      )
+    );
+    await ingestion.ingest(
+      runtimeEvent("turn.completed", { state: "completed" }, { turnId: "turn-1" })
+    );
+    await settle();
+    const closes = sink
+      .messages()
+      .filter((event) => !event.payload.streaming && event.payload.agentId === "task-1");
+    assert.equal(closes.length, 1, "no agent row is left streaming after its turn ended");
+  });
+});

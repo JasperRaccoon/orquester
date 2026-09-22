@@ -548,6 +548,17 @@ export interface ThreadStateChangedPayload {
   afterTokens?: number;
   /** Set on `compaction-failed`: the provider's own reason, already user-facing. */
   error?: string;
+  /**
+   * Set on `compacted`: the summary the provider wrote in place of everything
+   * it dropped — the ONLY record of what the thread used to say, and the
+   * agent's whole memory of it. Claude sends it as a synthetic user message
+   * right after the boundary; the marker carries it instead of the timeline
+   * showing it as a message nobody typed. A failed compaction has none.
+   *
+   * *Added by the compaction-summary fix; additive (§8 rollback boundary: an
+   * older fold that ignores it still renders the marker).*
+   */
+  summary?: string;
 }
 
 export interface ThreadMetadataUpdatedPayload {

@@ -385,3 +385,63 @@ describe("claude history projection — grouping a native transcript", () => {
     assert.equal(allOf(events, "turn.started")[0]!.turnId, "turn-a");
   });
 });
+
+describe("claude history projection — a compaction summary is a marker, not a user turn", () => {
+  /**
+   * The row the CLI writes into its own transcript for the summary it
+   * generated: `type: "user"`, plain-string content, and `isCompactSummary`.
+   * On the live stream the same text arrives as the synthetic frame the
+   * normaliser folds onto the boundary; here it is all that is left of it.
+   */
+  const SUMMARY =
+    "This session is being continued from a previous conversation that ran out of context.\n\n" +
+    "1. We fixed the composer draft.\n\nContinue the conversation from where it left off.";
+  const transcript = [
+    {
+      type: "user" as const,
+      uuid: "turn-a",
+      parent_tool_use_id: null,
+      message: { role: "user", content: [{ type: "text", text: "hello" }] }
+    },
+    {
+      type: "assistant" as const,
+      uuid: "a1",
+      parent_tool_use_id: null,
+      message: { role: "assistant", content: [{ type: "text", text: "hi" }] }
+    },
+    {
+      type: "user" as const,
+      uuid: "summary-1",
+      parent_tool_use_id: null,
+      isCompactSummary: true,
+      message: { role: "user", content: SUMMARY }
+    },
+    {
+      type: "user" as const,
+      uuid: "turn-b",
+      parent_tool_use_id: null,
+      message: { role: "user", content: [{ type: "text", text: "carry on" }] }
+    }
+  ];
+
+  it("replays it as the compaction marker, carrying the summary", () => {
+    const events = project({ threadId: "t", turns: groupClaudeHistoryTurns(transcript) });
+    const markers = allOf(events, "thread.state.changed");
+    assert.equal(markers.length, 1, "one marker for one compaction");
+    assert.equal(markers[0]!.payload.state, "compacted");
+    assert.equal(markers[0]!.payload.summary, SUMMARY);
+    assert.equal(
+      markers[0]!.raw?.source,
+      HISTORICAL_RAW_SOURCE,
+      "a replayed row is the past, and says so"
+    );
+  });
+
+  it("never replays it as a user message the user never wrote", () => {
+    const events = project({ threadId: "t", turns: groupClaudeHistoryTurns(transcript) });
+    const userTexts = allOf(events, "item.completed")
+      .filter((event) => event.payload.itemType === "user_message")
+      .map((event) => (event.payload.data as { text?: string } | undefined)?.text);
+    assert.deepEqual(userTexts, ["hello", "carry on"]);
+  });
+});

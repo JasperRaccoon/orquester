@@ -211,6 +211,14 @@ export interface WorkLogEntry {
     afterTokens?: number;
     /** Set on `compaction-failed`: the provider's own reason, already user-facing. */
     error?: string;
+    /**
+     * The summary the provider wrote in place of everything it dropped — the
+     * only record of what the thread used to say. Revealed behind the
+     * marker's own toggle, collapsed by default (the CLI's `ctrl+o`).
+     */
+    summary?: string;
+    /** The summary met §5.6's wire cap; the whole one is a full-item read away. */
+    summaryTruncated?: boolean;
   };
 }
 
@@ -304,6 +312,14 @@ export type AgentChatTimelineRow =
       failed?: boolean;
       /** The failure's reason, on a second line under the label. */
       detail?: string;
+      /**
+       * The provider's summary of everything the compaction dropped, revealed
+       * behind a toggle on the marker itself (§7.3). A failed compaction has
+       * none — nothing was dropped.
+       */
+      summary?: string;
+      /** The summary arrived capped by §5.6; the full one is one read away. */
+      summaryTruncated?: boolean;
     }
   | {
       kind: "message";
