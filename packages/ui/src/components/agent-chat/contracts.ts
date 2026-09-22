@@ -151,6 +151,20 @@ export interface ChatComposerProps {
   actions: AgentChatActions;
   /** Republished so the timeline can use it as its bottom content inset. */
   onHeightChange: (height: number) => void;
+  /**
+   * Publishes how many attachments the draft holds, so the shell can apply
+   * §7.3's last plan-ready condition ("the composer holds no attachments") to
+   * the **docked banner** as well as the primary action.
+   *
+   * The draft is component state — the shell cannot read it, and the banner
+   * lives above the composer in the shell's overlay stack — so the count has
+   * to come back out. Fires on mount and on every change; a composer that
+   * never mounts simply never publishes, and the shell's own default is 0.
+   *
+   * *Added by W15 for the R7-2 residual; additive to the foundation's
+   * contract.*
+   */
+  onDraftAttachmentCountChange?: ((count: number) => void) | undefined;
 }
 
 export interface ChatBannerDockProps {

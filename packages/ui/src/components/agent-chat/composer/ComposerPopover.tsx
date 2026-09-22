@@ -1,6 +1,7 @@
 import React from "react";
 import { createPortal } from "react-dom";
 import { cn } from "../../../lib/cn";
+import { subscribeActiveChatTab } from "../../../lib/agent-chat-active-tab";
 
 /**
  * The composer's own anchored popover.
@@ -121,6 +122,22 @@ export function ComposerPopover({
     },
     [updatePosition]
   );
+
+  // A tab switch closes it.
+  //
+  // Every chat tab stays mounted (§7.1) and this panel portals to
+  // `document.body`, so a menu left open in one thread would otherwise float
+  // over the next one *and* — through the capture-phase Escape below, which
+  // only ever knew `open` — steal that thread's Escape. Closing on any change
+  // of the visible chat tab settles both, and needs no session id: every
+  // caller of this popover lives inside a chat tab.
+  //
+  // `setOpenState`, not `close`: returning focus would pull it to a trigger in
+  // the tab the user just left.
+  React.useEffect(() => {
+    if (!open) return;
+    return subscribeActiveChatTab(() => setOpenState(false));
+  }, [open, setOpenState]);
 
   React.useEffect(() => {
     if (!open) return;

@@ -161,6 +161,7 @@ export function ChatComposer({
   reverting,
   actions,
   onHeightChange,
+  onDraftAttachmentCountChange,
   threadHasContent = true,
   searchRoot,
   active
@@ -266,12 +267,33 @@ export function ChatComposer({
     return () => observer.disconnect();
   }, [publishHeight]);
 
+  // ---------------------------------------------------------------------
+  // The last plan-ready condition (§7.3): an empty attachment tray
+  // ---------------------------------------------------------------------
+  // The shell owns every other term of `shouldShowPlanFollowUpPrompt` and
+  // hands over `null` when one fails. This one it cannot evaluate — the draft
+  // is state in here — so the count goes back out (the shell gates the docked
+  // banner with it) and is applied here as well, which is what keeps the
+  // primary action from reading "Implement" for the frame between the file
+  // landing in the tray and the shell's re-render.
+  //
+  // Why it matters beyond the label: `submit` resolves the plan follow-up
+  // BEFORE the emptiness guard, so an ungated Implement on a draft that is
+  // empty *except for files* would send the plan prompt and leave plan mode
+  // with the attachments riding along — a message the user never composed.
+  const hasAttachments = draft.attachments.length > 0;
+  const planFollowUp = hasAttachments ? null : actionableProposedPlan;
+
+  React.useEffect(() => {
+    onDraftAttachmentCountChange?.(draft.attachments.length);
+  }, [draft.attachments.length, onDraftAttachmentCountChange]);
+
   const collapsed = isComposerCollapsedMobile({
     isMobileViewport: isMobile,
     isFocused: focused,
     hasMultilineDraft: draft.text.includes("\n"),
-    hasAttachments: draft.attachments.length > 0,
-    hasDockedBanner: hasPendingRequest || actionableProposedPlan !== null
+    hasAttachments,
+    hasDockedBanner: hasPendingRequest || planFollowUp !== null
   });
 
   // Auto-grow. `field-sizing` would do this in CSS but is not in every engine
@@ -786,10 +808,10 @@ export function ChatComposer({
       // empty draft is exactly the input "Implement" is defined on — the plan
       // supplies the text. Guarding first made the enabled Implement button a
       // silent no-op.
-      const plan = actionableProposedPlan
+      const plan = planFollowUp
         ? resolvePlanFollowUpSubmission({
             draftText: text,
-            planMarkdown: actionableProposedPlan.planMarkdown
+            planMarkdown: planFollowUp.planMarkdown
           })
         : null;
 
@@ -854,7 +876,7 @@ export function ChatComposer({
       void runSend(outgoing, outgoingMode, refs);
     },
     [
-      actionableProposedPlan,
+      planFollowUp,
       actions,
       applyCaret,
       draft.attachments,
@@ -909,20 +931,22 @@ export function ChatComposer({
         return;
       }
       /*
-       * R7-7: Escape must stop a running turn from anywhere in the thread, not
-       * only while the textarea has focus — the user clicks a tool row to
-       * expand it and the chord goes dead. The textarea branch keeps first
-       * refusal (an open token menu consumes Escape there and stops
-       * propagation), so this only ever sees the events it did not take.
-       * `scroll-to-end` stays the timeline's.
+       * `interrupt` and `scroll-to-end` are NOT this listener's.
+       *
+       * R7-7 (Escape must stop a turn from anywhere in the thread, not only
+       * with the textarea focused) is answered by the shell's own window
+       * listener — `AgentChatView`'s `resolveChatEscape` — which is the tab's
+       * single Escape owner. Two capture-phase listeners on `window` for one
+       * key cannot be ordered: this effect's deps include `queue`, so it
+       * re-registers on every queue mutation and moves behind the shell's.
+       * Whichever fired first won, and with a drill-in open that meant Escape
+       * stopped the turn instead of going back.
+       *
+       * The textarea keeps Escape (see `onTextareaKeyDown`), where an open
+       * token menu gets first refusal; the shell stands down for any event
+       * whose target is inside this composer. `scroll-to-end` stays the
+       * timeline's.
        */
-      if (shortcut.kind === "interrupt") {
-        if (!isTurnActive) return;
-        if (event.target === textareaRef.current) return;
-        event.preventDefault();
-        interrupt();
-        return;
-      }
       if (shortcut.kind !== "control") return;
       // Only swallow the chord when a control actually answers to it, so a
       // composer without a plan toggle leaves its key to whoever wants it.
@@ -1024,9 +1048,7 @@ export function ChatComposer({
     );
   };
 
-  const planTitle = actionableProposedPlan
-    ? proposedPlanTitle(actionableProposedPlan.planMarkdown)
-    : null;
+  const planTitle = planFollowUp ? proposedPlanTitle(planFollowUp.planMarkdown) : null;
   const willQueue =
     resolveFollowUpDisposition({
       followUpBehavior: chatPrefs.followUpBehavior,
@@ -1218,7 +1240,7 @@ export function ChatComposer({
 
             <ComposerPrimaryActions
               isRunning={isTurnActive}
-              showPlanFollowUp={actionableProposedPlan !== null}
+              showPlanFollowUp={planFollowUp !== null}
               promptHasText={draft.text.trim().length > 0}
               hasSendableContent={sendable}
               isSendBusy={sending}
