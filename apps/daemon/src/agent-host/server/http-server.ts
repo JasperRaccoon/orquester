@@ -91,6 +91,8 @@ export interface AgentHostServerOptions {
   isAllowedCwd?(cwd: string): boolean;
   startedAt: string;
   pid?: number;
+  /** See `AgentHostHealthResponse.codeStamp`. */
+  codeStamp?: string | null;
   /** Called by `POST /stop`: writes the §3.3 markers, then drains and stops. */
   onStop(): Promise<AgentHostStopResponse>;
   /** A watcher handle the provider registry's demand gate counts (§3.2). */
@@ -346,6 +348,7 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
         activeTurnThreadIds: orchestrator.activeTurnThreadIds(),
         pid: options.pid ?? process.pid,
         startedAt: options.startedAt,
+        codeStamp: options.codeStamp ?? null,
         providersRevision: orchestrator.providersChangeCount()
       };
       sendJson(response, 200, body);

@@ -19,6 +19,7 @@ import { randomBytes } from "node:crypto";
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { codeStampsDiffer } from "../agent-host/support/code-stamp.ts";
 import {
   AGENT_HOST_HEALTH_INTERVAL_MS,
   AGENT_HOST_PREPARED_TIMEOUT_MS,
@@ -148,6 +149,13 @@ export interface SupervisorOptions {
   preparedTimeoutMs?: number;
   /** Grace for a stopped host to exit before its session is killed. */
   exitGraceMs?: number;
+  /**
+   * The commit the DAEMON's code was read from (`support/code-stamp.ts`). A
+   * healthy host reporting a different known stamp is a §3.1 case-3
+   * drain-restart exactly like a protocol mismatch: after a deploy the old
+   * host would otherwise keep running old code for as long as it lived.
+   */
+  codeStamp?: string | null;
 }
 
 export interface AgentHostStatus {
@@ -249,14 +257,11 @@ export class AgentHostSupervisor {
 
       if (probed.ok) {
         this.adopt(probed.health);
-        if (probed.health.protocolVersion !== AGENT_HOST_PROTOCOL_VERSION) {
+        if (this.isStale(probed.health)) {
           // Case 3. Adopt now — every in-flight turn keeps running — and hand
           // over as soon as no thread has an active turn.
           this.pendingVersionRestart = true;
-          this.log(
-            "warn",
-            `agent host protocol ${probed.health.protocolVersion} != ${AGENT_HOST_PROTOCOL_VERSION}; restarting once drained`
-          );
+          this.log("warn", `${this.staleReason(probed.health)}; restarting once drained`);
           this.emit();
           await this.restartIfDrained();
         }
@@ -314,7 +319,7 @@ export class AgentHostSupervisor {
           // §8: a restarted host is not a reconnect. Subscribers re-read.
           this.log("log", `agent host instance changed ${previous} -> ${probed.health.hostInstanceId}`);
         }
-        if (probed.health.protocolVersion !== AGENT_HOST_PROTOCOL_VERSION) {
+        if (this.isStale(probed.health)) {
           this.pendingVersionRestart = true;
         }
         if (this.pendingVersionRestart) {
@@ -427,7 +432,7 @@ export class AgentHostSupervisor {
     const probed = await this.safeProbe();
     if (!probed.ok) return; // not healthy right now — the health tick owns it
     this.adopt(probed.health);
-    if (probed.health.protocolVersion !== AGENT_HOST_PROTOCOL_VERSION) {
+    if (this.isStale(probed.health)) {
       this.pendingVersionRestart = true; // `adopt` clears it only on a match
     }
     if (!this.pendingVersionRestart) return;
@@ -617,10 +622,25 @@ export class AgentHostSupervisor {
     this.respawnAttempts = 0;
     this.nextRespawnAt = 0;
     this.missedProbes = 0;
-    if (health.protocolVersion === AGENT_HOST_PROTOCOL_VERSION) {
+    if (!this.isStale(health)) {
       this.pendingVersionRestart = false;
     }
     this.setState("healthy", null);
+  }
+
+  /** §3.1 case 3: a protocol mismatch, or a known code stamp that moved. */
+  private isStale(health: AgentHostHealthResponse): boolean {
+    return (
+      health.protocolVersion !== AGENT_HOST_PROTOCOL_VERSION ||
+      codeStampsDiffer(health.codeStamp, this.opts.codeStamp)
+    );
+  }
+
+  private staleReason(health: AgentHostHealthResponse): string {
+    if (health.protocolVersion !== AGENT_HOST_PROTOCOL_VERSION) {
+      return `agent host protocol ${health.protocolVersion} != ${AGENT_HOST_PROTOCOL_VERSION}`;
+    }
+    return `agent host code ${String(health.codeStamp).slice(0, 12)} != ${String(this.opts.codeStamp).slice(0, 12)}`;
   }
 
   private setState(state: AgentHostState, reason: string | null): void {

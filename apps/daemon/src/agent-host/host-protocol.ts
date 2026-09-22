@@ -134,6 +134,12 @@ export interface AgentHostHealthResponse {
   pid: number;
   startedAt: string;
   /**
+   * The commit the host's code was read from (`support/code-stamp.ts`), so a
+   * code-only deploy is a §3.1 case-3 drain-restart, not just a protocol bump.
+   * Optional: an older host omits it, and `null` means "could not read".
+   */
+  codeStamp?: string | null;
+  /**
    * Monotonic counter the host bumps whenever a provider snapshot actually
    * changes (§4.6.4: the host's OWN session-start / turn-reuse refresh must
    * broadcast `agent.providers.changed` too, not just the explicit refresh

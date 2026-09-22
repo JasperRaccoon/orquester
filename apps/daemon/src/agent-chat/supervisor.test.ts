@@ -46,6 +46,7 @@ const healthy = (
     active: string[];
     instance: string;
     providersRevision: number;
+    codeStamp: string | null;
   }> = {}
 ): ProbeOutcome => ({
   ok: true,
@@ -57,6 +58,7 @@ const healthy = (
     activeTurnThreadIds: overrides.active ?? [],
     pid: 4242,
     startedAt: "2026-09-21T00:00:00.000Z",
+    ...(overrides.codeStamp === undefined ? {} : { codeStamp: overrides.codeStamp }),
     ...(overrides.providersRevision === undefined
       ? {}
       : { providersRevision: overrides.providersRevision })
@@ -78,7 +80,7 @@ function mismatchUntilReplaced(h: Harness, active: string[] = []): () => ProbeOu
 
 async function makeHarness(
   probes: ProbeOutcome[],
-  opts: { tmux?: boolean; seedToken?: string; spawnThrows?: boolean } = {}
+  opts: { tmux?: boolean; seedToken?: string; spawnThrows?: boolean; codeStamp?: string | null } = {}
 ): Promise<Harness> {
   const dir = await mkdtemp(join(tmpdir(), "orq-agent-host-"));
   const tokenPath = join(dir, "agent-host.token");
@@ -136,6 +138,7 @@ async function makeHarness(
     mainPath: "/opt/orquester/apps/daemon/src/agent-host/main.ts",
     preparedTimeoutMs: 50,
     exitGraceMs: 500,
+    ...(opts.codeStamp === undefined ? {} : { codeStamp: opts.codeStamp }),
     adapters: {
       probe: async () => {
         harness.order.push("probe");
@@ -187,6 +190,54 @@ test("case 3: a version mismatch adopts first, then restarts once drained", asyn
   assert.equal(h.supervisor.status().pendingVersionRestart, false);
   assert.equal(h.supervisor.status().hostInstanceId, "host-2");
   await h.cleanup();
+});
+
+test("case 3: a moved CODE stamp is a drain-restart too, not only a protocol bump", async () => {
+  // A deploy that changes only host code used to leave the surviving host on
+  // the old code for as long as it lived (the protocol version was the only
+  // signal). The old host reports the commit it started from; the daemon
+  // knows its own.
+  const h = await makeHarness([], { seedToken: "tok", tmux: true, codeStamp: "b".repeat(40) });
+  h.probeHook = () =>
+    h.spawns.length === 0
+      ? healthy({ codeStamp: "a".repeat(40) })
+      : healthy({ instance: "host-2", codeStamp: "b".repeat(40) });
+  await h.supervisor.init();
+  assert.equal(h.stopRequests, 1, "the old host writes its continuation markers first");
+  assert.equal(h.spawns.length, 1, "a replacement is spawned");
+  assert.equal(h.supervisor.status().pendingVersionRestart, false);
+  assert.equal(h.supervisor.status().hostInstanceId, "host-2");
+  await h.cleanup();
+});
+
+test("the same code stamp, or an unknown one on either side, adopts without restarting", async () => {
+  const same = await makeHarness([healthy({ codeStamp: "a".repeat(40) })], {
+    seedToken: "tok",
+    tmux: true,
+    codeStamp: "a".repeat(40)
+  });
+  await same.supervisor.init();
+  assert.equal(same.spawns.length, 0);
+  assert.equal(same.supervisor.status().pendingVersionRestart, false);
+  await same.cleanup();
+
+  const unknownHost = await makeHarness([healthy({ codeStamp: null })], {
+    seedToken: "tok",
+    tmux: true,
+    codeStamp: "a".repeat(40)
+  });
+  await unknownHost.supervisor.init();
+  assert.equal(unknownHost.spawns.length, 0, "an older host that reports nothing is not restarted");
+  await unknownHost.cleanup();
+
+  const unknownDaemon = await makeHarness([healthy({ codeStamp: "a".repeat(40) })], {
+    seedToken: "tok",
+    tmux: true,
+    codeStamp: null
+  });
+  await unknownDaemon.supervisor.init();
+  assert.equal(unknownDaemon.spawns.length, 0, "a daemon outside a checkout never restarts on it");
+  await unknownDaemon.cleanup();
 });
 
 test("case 3: a version mismatch with an ACTIVE turn adopts and waits", async () => {

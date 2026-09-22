@@ -350,7 +350,21 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   fails silently after a deploy. `@codemirror/language-data`'s parsers are already in the bundle.
   Markdown is `react-markdown` + `remark-gfm`, never an HTML string.
 - **No lazy dynamic `import()` anywhere under `agent-host/`.** A surviving host runs old code until
-  its drain-restart; loading changed source into it is a correctness bug.
+  its drain-restart; loading changed source into it is a correctness bug. That drain-restart is
+  triggered by a protocol-version bump **or by a moved code stamp**: the host reports the commit it
+  started from in `/health` (`support/code-stamp.ts` reads `.git/HEAD` without the git binary) and
+  the daemon compares it with its own at boot, so a code-only deploy replaces the host as soon as
+  no turn is active. An unreadable stamp on either side never restarts anything.
+- **A fresh host must not answer `GET /providers` with `[]` for five minutes.** The snapshot
+  registry probes on demand (its first watcher) and on an interval; the first watcher primes every
+  provider it has no cached snapshot for at once, otherwise every launcher shows "Still loading
+  this agent's models" until the interval fires. `POST /api/agent/providers/:id/refresh` is the
+  manual escape hatch.
+- **The provider probe runs under the daemon user's own login.** `auth.status` from the host
+  therefore describes the system home, which may be stale while every managed account is fine.
+  The daemon overlays it on the way out (`agent-chat/provider-auth-overlay.ts`): a family with at
+  least one managed account not flagged `needsReauth` is reported authenticated through it, so the
+  "sign in again" toast fires only when nothing of that family is signed in.
 - **`raw.ndjson` is as sensitive as the repository it watched** — it records whatever the agent
   read, and Grok's `_x.ai/mcp/servers_updated` carries the host's real MCP credentials. Redaction
   runs before anything is written, and before any stderr excerpt leaves the host.

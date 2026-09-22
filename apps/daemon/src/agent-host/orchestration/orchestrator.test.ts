@@ -1021,6 +1021,43 @@ describe("orchestrator — queue while the session is down (§3.4)", () => {
 });
 
 describe("orchestrator — answering a question (§6.2)", () => {
+  it("answers a message-mode (Codex async) question as a steered message, never over RPC", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await host.settle();
+    const turnsBefore = host.adapter.calls.filter((call) => call.kind === "sendTurn").length;
+    await openQuestion(host, "codex-async:t:1", { dismissible: true });
+    await host.settle();
+
+    await host.orchestrator.command(threadId, "answer", {
+      commandId: cmd(),
+      requestId: "codex-async:t:1",
+      answers: { "Which branch?": "main" }
+    });
+    await host.settle();
+
+    assert.equal(
+      host.adapter.calls.some((call) => call.kind === "respondToUserInput"),
+      false,
+      "the provider parked no request; an RPC reply would fail with 'no pending request'"
+    );
+    const turns = host.adapter.calls.filter((call) => call.kind === "sendTurn");
+    assert.equal(turns.length, turnsBefore + 1, "the answer is delivered as a turn/steer");
+    assert.equal((turns.at(-1)?.detail as { input: string }).input, "main");
+    const log = host.store.logs.get(threadId) ?? [];
+    const message = log.find(
+      (event): event is Extract<DomainEvent, { type: "thread.message-sent" }> =>
+        event.type === "thread.message-sent" && event.payload.text === "main"
+    );
+    assert.ok(message, "the answer is a user message row");
+    const resolved = activityEvents(host).find(
+      (row) => row.activityKind === "user-input.resolved" && row.id === "async-answer:codex-async:t:1"
+    );
+    assert.ok(resolved, "the card closes through the same activity a dismissal writes");
+    await host.stop();
+  });
+
   it("folds attachments into the answer text before the adapter sees it", async () => {
     const host = createTestHost();
     const threadId = await host.createThread();

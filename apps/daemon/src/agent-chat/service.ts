@@ -11,6 +11,7 @@
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { readCodeStamp } from "../agent-host/support/code-stamp.ts";
 import { randomUUID } from "node:crypto";
 import type {
   AgentAdapterId,
@@ -169,6 +170,9 @@ export class AgentChatService {
       }),
       nodeBin: opts.nodeBin ?? process.execPath,
       mainPath: opts.mainPath,
+      // The daemon's own commit, read at boot; a surviving host reporting a
+      // different one is drained and replaced (see `support/code-stamp.ts`).
+      codeStamp: readCodeStamp(opts.cwd),
       adapters: {
         probe: () => this.probe(),
         requestStop: () => this.requestHostStop(),

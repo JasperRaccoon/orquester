@@ -19,6 +19,7 @@
  */
 
 import { randomBytes } from "node:crypto";
+import { readCodeStamp } from "./support/code-stamp.ts";
 import { accessSync, constants as fsConstants, statSync } from "node:fs";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -484,6 +485,9 @@ export async function startAgentHost(
     socketPath,
     tmpDir,
     startedAt,
+    // Read ONCE at boot: this is the code this process is running, which is
+    // the whole point — after a deploy the checkout moves and this does not.
+    codeStamp: readCodeStamp(process.cwd()),
     // Everything that leaves the host as a message goes through the same
     // redaction the stderr path uses (§3.1).
     homeDirs: [homeDir],

@@ -258,6 +258,12 @@ interface ThreadRuntime {
   eventsSinceHeadSave: number;
   compacting: boolean;
   queuedTurns: QueuedTurn[];
+  /**
+   * The interaction mode of the last `/turn` (§6.2: client-local, re-sent
+   * with every turn). A message-mode answer starts or steers a turn without a
+   * body of its own, so it inherits this rather than inventing a mode.
+   */
+  lastInteractionMode: InteractionMode;
   bound: BoundSessionShape | null;
   watchdog: TurnWatchdog | null;
   subscribers: Set<ThreadSubscription>;
@@ -570,6 +576,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       eventsSinceHeadSave: 0,
       compacting: false,
       queuedTurns: [],
+    lastInteractionMode: "default",
       bound: null,
       watchdog: null,
       subscribers: new Set(),
@@ -1335,6 +1342,29 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     }
   };
 
+  /**
+   * The prose a message-mode answer becomes. One question reads as its bare
+   * answer; several are labelled by their question so the agent can tell them
+   * apart. A multi-select answer is joined with commas.
+   */
+  const answerMessageText = (
+    questions: readonly { id: string; question: string }[],
+    answers: Record<string, unknown>
+  ): string => {
+    const parts: string[] = [];
+    for (const entry of questions) {
+      const raw = answers[entry.id];
+      const value = Array.isArray(raw)
+        ? raw.filter((item): item is string => typeof item === "string").join(", ")
+        : typeof raw === "string"
+          ? raw
+          : "";
+      if (value.trim().length === 0) continue;
+      parts.push(questions.length === 1 ? value.trim() : `${entry.question}\n${value.trim()}`);
+    }
+    return parts.join("\n\n");
+  };
+
   const answerEffect = async (
     runtime: ThreadRuntime,
     requestId: string,
@@ -1546,6 +1576,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         const attachments = parseAttachments(body.attachments);
         const context = parseComposerContext(body.context);
         const interactionMode = parseInteractionMode(body.interactionMode);
+        runtime.lastInteractionMode = interactionMode;
         const modelSelection =
           body.modelSelection === undefined
             ? undefined
@@ -1704,19 +1735,88 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         for (const entry of question?.questions ?? []) {
           questionTextById[entry.id] = entry.question;
         }
-        return {
-          events: [
+        const responseRequested = buildEvent(
+          runtime.id,
+          "thread.user-input-response-requested",
+          {
+            requestId,
+            answers,
+            ...(Object.keys(questionTextById).length > 0 ? { questionTextById } : {})
+          },
+          { commandId, metadata: { requestId } }
+        );
+        // §4.5's second question path (Codex `delivery: "async"`, T3
+        // `decider.ts:1633-1700`): the provider parked NO request, so there is
+        // nothing to reply to over RPC — the answer IS an ordinary message,
+        // steered into the running turn (or starting one), and the card
+        // closes with the same deterministic activity a dismissal writes.
+        if (question?.dismissible) {
+          const text = answerMessageText(question.questions, answers);
+          if (text.length === 0) {
+            throw invalidCommand("An answer needs some text.");
+          }
+          const occurredAt = clock.nowIso();
+          const messageId = ids.messageId("user:");
+          const events: AppendableDomainEvent[] = [
+            responseRequested,
             buildEvent(
               runtime.id,
-              "thread.user-input-response-requested",
+              "thread.activity-appended",
               {
-                requestId,
-                answers,
-                ...(Object.keys(questionTextById).length > 0 ? { questionTextById } : {})
+                activity: makeActivity({
+                  id: `async-answer:${requestId}`,
+                  tone: "info",
+                  activityKind: "user-input.resolved",
+                  summary: "User input answered",
+                  payload: { requestId, responseMode: "message", answers },
+                  turnId: session.activeTurnId,
+                  createdAt: occurredAt
+                })
               },
-              { commandId, metadata: { requestId } }
+              { commandId, occurredAt, metadata: { requestId } }
+            ),
+            buildEvent(
+              runtime.id,
+              "thread.message-sent",
+              {
+                messageId,
+                role: "user",
+                text,
+                streaming: false,
+                turnId: session.activeTurnId
+              },
+              { commandId, occurredAt }
             )
-          ],
+          ];
+          if (session.activeTurnId === null) {
+            events.push(
+              buildEvent(
+                runtime.id,
+                "thread.turn-start-requested",
+                { turnId: null, messageId, interactionMode: runtime.lastInteractionMode },
+                { commandId, occurredAt }
+              )
+            );
+          }
+          const queuedTurn: QueuedTurn = {
+            messageId,
+            input: text,
+            attachments: [],
+            interactionMode: runtime.lastInteractionMode
+          };
+          return {
+            events,
+            schedule: () => {
+              if (runtime.compacting || runtime.queuedTurns.length > 0) {
+                runtime.queuedTurns.push(queuedTurn);
+                return;
+              }
+              void runEffect(runtime, () => sendTurnEffect(runtime, queuedTurn));
+            }
+          };
+        }
+        return {
+          events: [responseRequested],
           effect: () => answerEffect(runtime, requestId, answers, attachmentsByQuestionId)
         };
       }
