@@ -61,6 +61,7 @@ export {
   providerCommandsForSlashMenu,
   searchSkills,
   searchSlashMenuItems,
+  skillMentionsInText,
   skillsForSkillMenu,
   skillsForSlashMenu,
   slashMenuItemsForPromptPosition,
@@ -87,6 +88,8 @@ export {
   resolveFollowUpDisposition,
   resolvePlanFollowUpSubmission,
   stagedAttachmentKeyForRef,
+  submitIsNoOp,
+  swallowsStandalonePlanCommand,
   uploadsBlockSend,
   type ComposerSubmissionIntent,
   type FollowUpBehavior,
@@ -110,6 +113,12 @@ export {
   type ChatShortcutEventLike,
   type ComposerShortcutCommand
 } from "./composer-shortcuts";
+
+export {
+  composerOwnsEscape,
+  isChatTabListenerActive,
+  shellOwnsEscape
+} from "./tab-visibility";
 
 export {
   applyEffortArgument,

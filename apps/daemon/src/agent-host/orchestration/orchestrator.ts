@@ -311,21 +311,6 @@ const HEAD_SAVE_EVENT_INTERVAL = 50;
  */
 const PENDING_TURN_GRACE_MS = 5 * 60_000;
 
-/**
- * How often the host-wide housekeeping sweep runs (S1 #5).
- *
- * `store.pruneAttachments()` with NO `threadId` is the only call that reaches
- * the raw-log ceiling and the cross-thread staging sweep — the per-thread form
- * the revert path uses deliberately skips both. Nothing else ever calls the
- * argument-less form, so without a schedule the 10 GiB ceiling can never fire
- * and a `.part` from an aborted upload is swept only if that one thread later
- * reverts.
- *
- * Hourly because the store's own age bounds are an hour (`.part`) and a day
- * (pending uploads): sweeping faster cannot collect anything sooner, and the
- * sweep walks every thread's log.
- */
-const HOUSEKEEPING_INTERVAL_MS = 60 * 60_000;
 
 /** Events that change `meta.json`'s own fields, so the head is rewritten. */
 const HEAD_WRITING_EVENTS: ReadonlySet<string> = new Set([
@@ -453,7 +438,6 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   const clock = options.clock ?? systemClock;
   const ids = options.ids ?? systemIdGen;
   const fold = options.fold ?? DEFAULT_FOLD_OPS;
-  let housekeepingHandle: unknown = null;
   const setTimer = options.setTimer ?? ((fn, ms) => setTimeout(fn, ms).unref());
   const clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle as NodeJS.Timeout));
   const buildEvent: BuildEvent = createEventBuilder({ clock, ids });
@@ -496,41 +480,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     });
   };
 
-  /**
-   * The host-wide sweep of S1 #5, on a timer because it has no event to hang
-   * off: it collects what NO thread owns any more (a `.part` from an upload
-   * whose connection died, a raw log for a thread that is gone) plus the
-   * cross-thread raw-log ceiling, none of which any single thread's activity
-   * can be trusted to trigger.
-   *
-   * Failure is never fatal and never logged at error: housekeeping that cannot
-   * run costs disk, not correctness.
-   */
-  const sweepHousekeeping = (): void => {
-    if (stopped) return;
-    void Promise.resolve()
-      .then(() => store.pruneAttachments())
-      .catch((error: unknown) => {
-        logger.warn("agent-host: housekeeping sweep failed", error);
-      });
-  };
-
-  const scheduleHousekeeping = (): void => {
-    if (stopped) return;
-    housekeepingHandle = setTimer(() => {
-      sweepHousekeeping();
-      scheduleHousekeeping();
-    }, HOUSEKEEPING_INTERVAL_MS);
-  };
-
   const openGate = (): void => {
     if (gateOpen) return;
     gateOpen = true;
     gate.resolve();
-    // Once, at boot — a host restarted often enough would otherwise never
-    // reach the first interval — and then on the interval.
-    sweepHousekeeping();
-    scheduleHousekeeping();
   };
 
   const failGate = (error: unknown): void => {
@@ -2952,10 +2905,6 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
 
   const runStop = async (): Promise<void> => {
     stopped = true;
-    if (housekeepingHandle !== null) {
-      clearTimer(housekeepingHandle);
-      housekeepingHandle = null;
-    }
     for (const runtime of runtimes.values()) {
       runtime.watchdog?.stop();
     }

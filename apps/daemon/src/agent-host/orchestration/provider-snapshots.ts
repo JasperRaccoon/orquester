@@ -41,6 +41,14 @@ export const MAX_WORKSPACE_SNAPSHOTS = 16;
 export interface ProviderProbe {
   id: AgentAdapterId;
   refresh(input?: { cwd?: string }): Promise<ProviderSnapshot>;
+  /**
+   * This probe's own ceiling, when {@link AGENT_HOST_DEADLINES.authProbeMs} is
+   * not enough (E9). A probe that has to **start a provider server** before it
+   * can read a catalogue needs a window covering the start as well as the
+   * read; every other probe keeps the tight auth window, so one slow provider
+   * never buys the rest a longer leash. Omitted ⇒ `authProbeMs`.
+   */
+  timeoutMs?: number;
 }
 
 export interface ProviderSnapshotRegistryOptions {
@@ -228,7 +236,7 @@ export function createProviderSnapshotRegistry(
     input?: { cwd?: string }
   ): Promise<ProviderSnapshot> =>
     withDeadline(() => probe.refresh(input), {
-      timeoutMs: AGENT_HOST_DEADLINES.authProbeMs,
+      timeoutMs: probe.timeoutMs ?? AGENT_HOST_DEADLINES.authProbeMs,
       label: `provider-snapshot:${probe.id}`
     });
 

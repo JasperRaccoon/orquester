@@ -21,6 +21,8 @@
  */
 
 import {
+  DEFAULT_INTERACTION_MODE,
+  HISTORICAL_RAW_SOURCE,
   isToolLifecycleItemType,
   slimActivityPayload,
   type AgentAdapterId,
@@ -42,6 +44,7 @@ import {
   reasoningSegmentBaseKeyFromEvent,
   segmentBaseKeyFromEvent,
   segmentMessageId,
+  historicalUserMessageId,
   messageStreamRoleOf,
   reasoningKindOfMessageId,
   toolOutputBufferKey,
@@ -147,6 +150,17 @@ interface ThreadState {
   session: ThreadSessionState;
   /** Stamped into every event's `metadata.adapterKey` (§5.1). */
   adapter?: AgentAdapterId;
+  /**
+   * Turns being REPLAYED from the provider's transcript (E6), keyed by turn
+   * id: the stamp its `turn.started` carried, the first user message it
+   * appended and the turn's answer. A historical turn's row is written once,
+   * already settled, at its `turn.completed` — so everything the row needs is
+   * accumulated here until then.
+   */
+  historicalTurns: Map<
+    string,
+    { startedAt: string; userMessageId?: string; assistantMessageId?: string }
+  >;
   messages: DeltaBufferSet;
   toolOutput: DeltaBufferSet;
   /** `${turnId}:${role}` → the open segment. */
@@ -231,6 +245,7 @@ function segmentKey(turnId: string, role: MessageStreamRole): string {
   return `${turnId}\u0000${role}`;
 }
 
+
 export function createIngestion(options: IngestionOptions): Ingestion {
   const clock = options.clock ?? defaultClock;
   const ids = options.idGen ?? defaultIdGen();
@@ -263,6 +278,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       projected: new Set(),
       messageTurn: new Map(),
       reasoningPartIndex: new Map(),
+      historicalTurns: new Map(),
       assistantPhaseByItemId: new Map(),
       messageKind: new Map(),
       plans: new Map(),
@@ -365,6 +381,38 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     activity: ThreadActivityItem
   ): void {
     emit(state, threadId, cause, activity.createdAt, "thread.activity-appended", { activity });
+  }
+
+  /**
+   * True for an event projected from the provider's OWN transcript
+   * (`AgentAdapter.projectHistory`, §4.2) rather than decoded from a live
+   * frame. It describes something that already happened, so it must not move
+   * the session, feed the liveness registry, mint a checkpoint or raise
+   * attention — only rebuild the timeline (E6).
+   */
+  function isHistorical(event: RuntimeEvent): boolean {
+    return event.raw?.source === HISTORICAL_RAW_SOURCE;
+  }
+
+  /**
+   * The text of a replayed message item. `data.text` wins over `detail`
+   * because an adapter may elide `detail` for the row label while keeping the
+   * whole message in `data` — Claude does exactly that
+   * (`adapters/claude/project-history.ts`), so reading `detail` would replay a
+   * truncated conversation.
+   */
+  function historicalItemText(payload: {
+    detail?: string;
+    data?: unknown;
+  }): string | undefined {
+    const data = payload.data;
+    if (typeof data === "object" && data !== null && !Array.isArray(data)) {
+      const text = (data as { text?: unknown }).text;
+      if (typeof text === "string" && text.trim().length > 0) {
+        return text;
+      }
+    }
+    return hasRenderableText(payload.detail) ? payload.detail : undefined;
   }
 
   /**
@@ -947,6 +995,13 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     const eventTurnId = event.turnId !== undefined ? String(event.turnId) : null;
     const isTerminalTurn = event.type === "turn.completed" || event.type === "turn.aborted";
 
+    // History is replayed through the same translator, but it is NOT live: it
+    // rebuilds the timeline and touches nothing else (E6).
+    if (isHistorical(event)) {
+      translateHistorical(threadId, state, event, now, eventTurnId);
+      return;
+    }
+
     // --- buffered content -------------------------------------------------
     if (event.type === "content.delta") {
       handleContentDelta(threadId, state, event, now, eventTurnId);
@@ -1015,6 +1070,10 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       }
       state.outputMeta.delete(key);
     }
+
+    // A LIVE `user_message` item is the provider echoing back the prompt the
+    // `/turn` command already appended (Codex does this, `items.ts` marks it
+    // `timelineBypass`), so it is never a row — only the replayed one is (E6).
 
     // --- item completions that close a message ----------------------------
     if (event.type === "item.completed" && eventTurnId !== null) {
@@ -1164,6 +1223,149 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     // Segment state and buffered text die with the session (§5.1).
     if (event.type === "session.exited") {
       clearThreadState(state);
+    }
+  }
+
+  /**
+   * Rebuild the timeline of a thread whose provider replays nothing onto its
+   * message stream (§4.5): every event here describes something that already
+   * happened.
+   *
+   * What it deliberately does NOT do, because a replayed row must never look
+   * live: no `thread.session-set` (the live session is untouched), no
+   * liveness, no placeholder checkpoint, no retitle, no buffering — history is
+   * complete text and arrives as finished `item.completed` rows.
+   */
+  function translateHistorical(
+    threadId: string,
+    state: ThreadState,
+    event: RuntimeEvent,
+    now: string,
+    eventTurnId: string | null
+  ): void {
+    if (event.type === "turn.started" && eventTurnId !== null) {
+      // Remembered, not written: the row is minted once, already settled, at
+      // `turn.completed`, so a half-replayed transcript leaves no running turn.
+      if (!state.historicalTurns.has(eventTurnId)) {
+        state.historicalTurns.set(eventTurnId, { startedAt: now });
+      }
+      return;
+    }
+
+    if (event.type === "turn.completed" || event.type === "turn.aborted") {
+      if (eventTurnId === null) {
+        return;
+      }
+      const turn = state.historicalTurns.get(eventTurnId);
+      state.historicalTurns.delete(eventTurnId);
+      const turnState =
+        event.type === "turn.aborted" ? "interrupted" : (event.payload.state ?? "completed");
+      emit(
+        state,
+        threadId,
+        event,
+        // The row's `requestedAt`/`startedAt` come from the envelope, so a
+        // replayed turn keeps the duration the provider recorded.
+        turn?.startedAt ?? now,
+        "thread.turn-start-requested",
+        {
+          turnId: eventTurnId,
+          messageId: turn?.userMessageId ?? "",
+          interactionMode: DEFAULT_INTERACTION_MODE,
+          settled: {
+            state: turnState === "cancelled" ? "interrupted" : turnState,
+            completedAt: now,
+            ...(event.payload.tokenUsage !== undefined
+              ? { tokenUsage: event.payload.tokenUsage }
+              : {}),
+            ...(turn?.assistantMessageId !== undefined
+              ? { assistantMessageId: turn.assistantMessageId }
+              : {})
+          }
+        }
+      );
+      return;
+    }
+
+    if (event.type !== "item.completed") {
+      // Everything else a projection emits — tool rows, plans, warnings —
+      // goes down the ordinary activity path below.
+      emitHistoricalActivities(threadId, state, event);
+      return;
+    }
+
+    const itemType = event.payload.itemType;
+    const text = historicalItemText(event.payload);
+
+    if (itemType === "user_message") {
+      if (text === undefined) {
+        return;
+      }
+      const turn = eventTurnId === null ? undefined : state.historicalTurns.get(eventTurnId);
+      // One user message per turn: a provider that echoes the prompt as more
+      // than one item must not produce a stack of identical bubbles.
+      if (turn?.userMessageId !== undefined) {
+        return;
+      }
+      const messageId = historicalUserMessageId(event);
+      if (turn !== undefined) {
+        turn.userMessageId = messageId;
+      }
+      emit(state, threadId, event, now, "thread.message-sent", {
+        messageId,
+        role: "user",
+        text,
+        // Complete by construction; history never streams.
+        streaming: false,
+        turnId: eventTurnId
+        // No attachments and no context: the bytes are long gone and the
+        // composer chips were never part of the provider's transcript.
+      });
+      return;
+    }
+
+    if (itemType === "assistant_message" || itemType === "reasoning") {
+      if (text === undefined) {
+        return;
+      }
+      const role = itemType === "reasoning" ? "reasoning" : "assistant";
+      const baseKey = String(event.itemId ?? event.eventId);
+      const messageId =
+        role === "reasoning"
+          ? segmentMessageId(`snapshot:${baseKey}`, 0, "reasoning")
+          : segmentMessageId(baseKey, 0, "assistant");
+      if (role === "assistant" && eventTurnId !== null) {
+        const turn = state.historicalTurns.get(eventTurnId);
+        if (turn !== undefined && turn.assistantMessageId === undefined) {
+          turn.assistantMessageId = messageId;
+        }
+      }
+      const kindFields =
+        role === "assistant"
+          ? { messageKind: assistantPhaseFromDetail(event.payload.detail) ?? "answer" }
+          : {};
+      emit(state, threadId, event, now, "thread.message-sent", {
+        messageId,
+        role,
+        text,
+        streaming: false,
+        turnId: eventTurnId,
+        ...kindFields
+      });
+      return;
+    }
+
+    // A tool-shaped item replays as the activity row it always was.
+    emitHistoricalActivities(threadId, state, event);
+  }
+
+  function emitHistoricalActivities(
+    threadId: string,
+    state: ThreadState,
+    event: RuntimeEvent
+  ): void {
+    for (const activity of runtimeEventToActivities(event)) {
+      emitActivity(state, threadId, event, maybeSlim(activity));
     }
   }
 
@@ -1383,8 +1585,11 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     const messageId =
       active ??
       segmentMessageId(String(event.itemId ?? event.turnId ?? event.eventId), 0, "assistant");
-    // A `detail` that IS the phase marker is metadata, not the message body.
-    const detail = detailIsPhaseMarker(event.payload.detail) ? undefined : event.payload.detail;
+    // A `detail` that IS the phase marker is metadata, not the message body,
+    // and `data.text` wins where an adapter elides `detail` for the label.
+    const detail = detailIsPhaseMarker(event.payload.detail)
+      ? undefined
+      : historicalItemText(event.payload);
     const streamed = state.projected.has(messageId) || state.messages.has(messageId);
     if (active === null && !streamed && !hasRenderableText(detail)) {
       // Nothing to complete: no stream ever opened and the completion is empty.
@@ -1483,6 +1688,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     state.projected.clear();
     state.messageTurn.clear();
     state.reasoningPartIndex.clear();
+    state.historicalTurns.clear();
     state.assistantPhaseByItemId.clear();
     state.messageKind.clear();
     state.plans.clear();

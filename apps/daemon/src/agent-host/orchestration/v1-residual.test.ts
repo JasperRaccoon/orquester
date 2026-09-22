@@ -151,31 +151,6 @@ describe("R5-1: a reconnect replay is slimmed like every other read", () => {
 });
 
 // ---------------------------------------------------------------------------
-// S1-5 — the host-wide sweep has a scheduler
-// ---------------------------------------------------------------------------
-
-describe("S1-5: the host-wide housekeeping sweep actually runs", () => {
-  it("sweeps at boot and on the interval, argument-less, and stops with the host", async () => {
-    const host = createTestHost();
-    await host.settle();
-    // The argument-less form is the ONLY one that reaches the cross-thread
-    // raw-log ceiling; a per-thread call does not.
-    const hostWide = (): number => host.store.pruneCalls.filter((call) => call === undefined).length;
-    assert.equal(hostWide(), 1, "the gate opening sweeps once");
-
-    host.timers.runDue(60 * 60_000);
-    await host.settle();
-    assert.equal(hostWide(), 2, "and again on the interval");
-
-    await host.stop();
-    const afterStop = hostWide();
-    host.timers.runDue(24 * 60 * 60_000);
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(hostWide(), afterStop, "a stopped host sweeps nothing further");
-  });
-});
-
-// ---------------------------------------------------------------------------
 // R2-7 — the refusal must precede the commit
 // ---------------------------------------------------------------------------
 

@@ -11,6 +11,7 @@
  */
 
 import type { ToolGroupSummaryKind, WorkLogEntry } from "../../../lib/agent-chat/contracts";
+import { skillMentionsInText } from "../composer/composer-menu";
 import {
   toolGroupSummaryIconName,
   type WorkEntryIconName
@@ -198,42 +199,56 @@ export interface MessageTextRun {
   skill?: string;
 }
 
-/**
- * A `$name` mention: at a word boundary, kebab/snake letters only.
- *
- * Deliberately narrow so `$PATH` in a shell snippet, `$5` in prose and
- * `foo$bar` are never mistaken for mentions — and the match is then checked
- * against the live skill catalog, because **no `isCommand` flag is persisted**
- * (§4.6.7): the text is the record and the chip is derived from it.
- */
-const SKILL_MENTION = /(^|[^\w$])\$([A-Za-z][\w-]*)/g;
+/** `.` and `-` are legal in a skill name and both are regex metacharacters. */
+function escapeForRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 /**
- * Splits a message into text and skill-mention runs.
+ * Splits a message into text and skill-mention runs, for re-chipping (§4.6.7).
  *
- * `skills` is the current per-cwd catalog; an unknown name stays plain text, so
- * a mention only reads as a chip while the skill it names actually exists.
+ * **What counts as a mention is decided entirely by the composer's own
+ * tokeniser** ({@link skillMentionsInText}) — the arbitration makes
+ * `composer/composer-menu.ts` the one slash/skill implementation, so this must
+ * not re-state its rules. It hands the text and the current per-cwd catalog to
+ * that tokeniser and only *locates* the names it came back with, so a mention
+ * renders as a chip in exactly the cases the composer would have treated as
+ * one: unknown names stay literal, the catalog match is case-insensitive while
+ * the typed spelling is preserved, `\p{Sc}` means a € or £ keyboard reaches
+ * skills too, and a name may contain dots and dashes.
+ *
+ * Longest-first alternation mirrors the tokeniser's greedy `[\w.-]+`: with both
+ * `my-skill` and `my-skill.v2` known, `$my-skill.v2` is one chip, not a chip
+ * plus a stray `.v2`.
+ *
  * Returns a single plain run when there is nothing to chip, so the common path
- * allocates one object.
- *
- * *T3: `packages/shared/src/composerInlineTokens.ts:100-127`.*
+ * neither scans nor allocates.
  */
 export function splitSkillMentions(text: string, skills: readonly string[]): MessageTextRun[] {
-  if (text.length === 0) return [{ text }];
-  if (skills.length === 0 || !text.includes("$")) return [{ text }];
-  const known = new Set(skills);
+  if (text.length === 0 || skills.length === 0) return [{ text }];
+  const names = skillMentionsInText(text, skills);
+  if (names.length === 0) return [{ text }];
+
+  const alternation = [...names]
+    .sort((a, b) => b.length - a.length)
+    .map((name) => escapeForRegExp(name))
+    .join("|");
+  // The same boundary the tokeniser uses: start-of-text or whitespace, then a
+  // currency symbol. The trailing guard stops a shorter name matching inside a
+  // longer one the tokeniser would have taken whole.
+  const pattern = new RegExp(`(^|\\s)(\\p{Sc})(${alternation})(?![\\w.-])`, "gu");
+
   const runs: MessageTextRun[] = [];
   let cursor = 0;
-  SKILL_MENTION.lastIndex = 0;
   let match: RegExpExecArray | null;
-  while ((match = SKILL_MENTION.exec(text)) !== null) {
+  while ((match = pattern.exec(text)) !== null) {
     const lead = match[1] ?? "";
-    const name = match[2] ?? "";
-    if (!known.has(name)) continue;
+    const symbol = match[2] ?? "";
+    const name = match[3] ?? "";
     const start = match.index + lead.length;
     if (start > cursor) runs.push({ text: text.slice(cursor, start) });
-    runs.push({ text: `$${name}`, skill: name });
-    cursor = start + name.length + 1;
+    runs.push({ text: `${symbol}${name}`, skill: name });
+    cursor = start + symbol.length + name.length;
   }
   if (runs.length === 0) return [{ text }];
   if (cursor < text.length) runs.push({ text: text.slice(cursor) });

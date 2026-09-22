@@ -16,7 +16,9 @@
 import { createStore, type StoreApi } from "zustand/vanilla";
 
 import type {
+  AdapterCapabilities,
   AgentAdapterId,
+  ProviderAuth,
   ProviderSnapshot,
   ProviderUsageLimitsUpdate
 } from "@orquester/api/agent-chat";
@@ -41,6 +43,91 @@ const INITIAL: ProvidersState = {
 };
 
 export type ProvidersStore = StoreApi<ProvidersState>;
+
+// ---------------------------------------------------------------------------
+// Wire validation
+// ---------------------------------------------------------------------------
+
+/**
+ * What a provider row degrades to when the host omits `capabilities`.
+ *
+ * Every value here withholds an affordance rather than offering one that would
+ * fail: no plan chip, no context meter, no in-session model switch, and
+ * `supportsConversationRollback: false` so "rewind to here" is not offered at
+ * all — which §6.3 prefers to offering it and failing at step 2 of §5.5.
+ */
+const FALLBACK_CAPABILITIES: AdapterCapabilities = {
+  sessionModelSwitch: "unsupported",
+  supportsConversationRollback: false,
+  showPlanModeToggle: false,
+  reportsContextWindow: false,
+  compaction: { type: "native" }
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const asArray = <T>(value: unknown): T[] => (Array.isArray(value) ? (value as T[]) : []);
+
+const isAuthStatus = (value: unknown): value is ProviderAuth["status"] =>
+  value === "authenticated" || value === "unauthenticated" || value === "unknown";
+
+/**
+ * Repair one provider row from the wire, or drop it.
+ *
+ * **A snapshot is not trusted input just because it came from our own host.**
+ * §8 is explicit that a surviving host runs *old code* after a deploy, so the
+ * client can be handed a snapshot shape it predates. Consumers read
+ * `provider?.capabilities.showPlanModeToggle` — the `?.` guards the provider,
+ * not the block — so one older row crashes the composer for every thread. This
+ * is the same "validate with a fallback, never let raw JSON reach typed code"
+ * rule AGENTS.md states for persisted state; a forward-compatible wire earns it
+ * for the same reason (R6 #11).
+ *
+ * Field-wise rather than zod, matching `panel-sizes.ts`: zod lives in
+ * `@orquester/config` and a provider row is a wire shape, not on-disk state.
+ */
+export function sanitizeProviderSnapshot(value: unknown): ProviderSnapshot | null {
+  if (!isRecord(value) || typeof value.id !== "string" || value.id.length === 0) {
+    return null;
+  }
+  const capabilities = isRecord(value.capabilities)
+    ? {
+        ...FALLBACK_CAPABILITIES,
+        ...(value.capabilities as Partial<AdapterCapabilities>),
+        // A present block still has to carry the two the UI branches on.
+        showPlanModeToggle: value.capabilities.showPlanModeToggle === true,
+        reportsContextWindow: value.capabilities.reportsContextWindow === true
+      }
+    : FALLBACK_CAPABILITIES;
+  // An unreadable auth block is `unknown`, never a sign-in verdict: guessing
+  // `unauthenticated` here would toast "sign in again" at a provider that is
+  // signed in perfectly well.
+  const auth: ProviderAuth = isRecord(value.auth) && isAuthStatus(value.auth.status)
+    ? { ...(value.auth as unknown as ProviderAuth), status: value.auth.status }
+    : { status: "unknown" };
+  const refIds = asArray<unknown>(value.refIds).filter(
+    (refId): refId is string => typeof refId === "string"
+  );
+  return {
+    ...(value as unknown as ProviderSnapshot),
+    // `refIds` keys the rate-limit fan-out and the composer's provider lookup;
+    // an empty one would silently orphan the row, so fall back to the id.
+    refIds: refIds.length > 0 ? refIds : [value.id],
+    auth,
+    models: asArray(value.models),
+    slashCommands: asArray(value.slashCommands),
+    skills: asArray(value.skills),
+    capabilities
+  } as ProviderSnapshot;
+}
+
+/** Repair a whole catalog, dropping only the rows that cannot be repaired. */
+export function sanitizeProviderSnapshots(value: unknown): ProviderSnapshot[] {
+  return asArray<unknown>(value)
+    .map(sanitizeProviderSnapshot)
+    .filter((provider): provider is ProviderSnapshot => provider !== null);
+}
 
 export const providersStore: ProvidersStore = createStore<ProvidersState>()(() => INITIAL);
 
@@ -73,16 +160,30 @@ export function setProviderSideEffects(next: ProviderSideEffects): void {
  * The auth message for a snapshot, or null when the provider is fine.
  *
  * §7.7: "`auth.status` with an error surfaces a toast pointing at Settings →
- * Accounts." Both an explicit error status and a plain unauthenticated
- * provider are that toast — the difference is only how the daemon learned it.
+ * Accounts."
+ *
+ * **This is one half of a value contract with the host, and the two halves
+ * have disagreed once already** (V1 §9, R8-M4). The host answers an
+ * `auth.status {error}` by marking the snapshot, and the ONLY two markings
+ * that mean "the credential is the problem" are:
+ *
+ *   - `auth.status: "unauthenticated"` — the probe reached a verdict, or a
+ *     turn-time failure was conclusive enough to claim one;
+ *   - `status: "error"` while auth is not `authenticated` — the snapshot
+ *     itself is broken and auth is implicated.
+ *
+ * `status: "degraded"` is deliberately **not** one of them: the Codex and
+ * OpenCode probes set it for reasons that have nothing to do with credentials
+ * (a missing binary, a version advisory), and widening this predicate to cover
+ * it would turn every such snapshot into a "sign in again" toast. If a host
+ * change ever makes an auth failure land as `degraded`, fix it on the host —
+ * not here.
  */
 export function authErrorMessage(provider: ProviderSnapshot): string | null {
   const label = provider.refIds[0] ?? provider.id;
   if (provider.auth.status === "unauthenticated") {
     return provider.auth.label ?? `${label} is not signed in. Open Settings → Accounts.`;
   }
-  // A provider whose snapshot carries an error while auth is unknown is the
-  // `auth.status {error}` case W1 routes onto the snapshot.
   if (provider.status === "error" && provider.auth.status !== "authenticated") {
     return provider.message ?? `${label} could not authenticate. Open Settings → Accounts.`;
   }
@@ -138,14 +239,16 @@ export function loadProviders(
   inFlight = transport
     .providers()
     .then((response) => {
+      // Every row is repaired before it reaches typed state (R6 #11).
+      const providers = sanitizeProviderSnapshots(response.providers);
       providersStore.setState({
-        providers: response.providers,
+        providers,
         hostInstanceId: response.hostInstanceId,
         loading: false,
         error: null,
         loadedAt: new Date().toISOString()
       });
-      publishAmbientFacts(response.providers);
+      publishAmbientFacts(providers);
     })
     .catch((error: unknown) => {
       providersStore.setState({
@@ -184,18 +287,20 @@ export async function refreshProvider(
   cwd?: string
 ): Promise<void> {
   const response = await transport.refreshProvider(adapterId, cwd ? { cwd } : {});
+  const refreshed = sanitizeProviderSnapshot(response.provider);
+  if (!refreshed) {
+    return;
+  }
   providersStore.setState((state) => ({
     // Append when the id is absent: an adapter that becomes available only
     // after the first load — the user installs an agent and hits Refresh —
     // was otherwise discarded silently (fix-wave Q2-12).
-    providers: state.providers.some((provider) => provider.id === response.provider.id)
-      ? state.providers.map((provider) =>
-          provider.id === response.provider.id ? response.provider : provider
-        )
-      : [...state.providers, response.provider],
+    providers: state.providers.some((provider) => provider.id === refreshed.id)
+      ? state.providers.map((provider) => (provider.id === refreshed.id ? refreshed : provider))
+      : [...state.providers, refreshed],
     loadedAt: new Date().toISOString()
   }));
-  publishAmbientFacts([response.provider]);
+  publishAmbientFacts([refreshed]);
 }
 
 /** Resolve the adapter serving a registry id (claude ← claude/claudex/claudemix). */

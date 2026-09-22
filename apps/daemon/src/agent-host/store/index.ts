@@ -149,7 +149,24 @@ export interface ThreadStoreOptions {
    * git; the `cwd` the service needs is read off the thread's head.
    */
   deleteThreadRefs?: (input: { threadId: string; cwd: string }) => Promise<void>;
+  /**
+   * How often the store sweeps host-wide (§3.1's raw-log ceiling, §5.1's
+   * pending/`.part` attachment TTLs). `0` disables it.
+   *
+   * The store schedules this ITSELF rather than waiting for a caller: every
+   * bound it enforces is a background one, and the only other `pruneAttachments`
+   * caller in the host passes a `threadId` (the revert path), which skips the
+   * host-wide branch entirely — so without this the ceiling was correct code
+   * that nothing ever ran.
+   */
+  sweepIntervalMs?: number;
+  /** Test seams so the sweep can be driven without sleeping (§9). */
+  setTimer?: (fn: () => void, ms: number) => unknown;
+  clearTimer?: (handle: unknown) => void;
 }
+
+/** Default cadence for the background sweep. */
+export const DEFAULT_SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 const defaultClock: Clock = {
   now: () => new Date(),
@@ -195,6 +212,18 @@ export interface AgentThreadStore extends ThreadStore {
    * row a "load full output" click asks for — it must still be servable.
    */
   readItem(threadId: string, itemId: string): Promise<ThreadItem | null>;
+  /**
+   * Run the host-wide sweep now: the raw-log ceiling plus every attachment
+   * TTL. Equivalent to `pruneAttachments()` with no arguments; exposed so the
+   * host can sweep once at boot (what accumulated while it was down) and so a
+   * test can drive it without waiting for the interval.
+   */
+  sweepNow(): Promise<void>;
+  /**
+   * Stop the background sweep. The timer is `unref`'d, so forgetting this
+   * never holds the process open; it exists so a host stop is deterministic.
+   */
+  close(): void;
 }
 
 export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore {
@@ -206,6 +235,18 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
 
   const threads = new Map<string, ThreadRuntime>();
   const pendingDir = path.join(rootDir, "pending-attachments");
+
+  const sweepIntervalMs = options.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS;
+  const setTimer =
+    options.setTimer ??
+    ((fn: () => void, ms: number) => {
+      const handle = setInterval(fn, ms);
+      handle.unref?.();
+      return handle;
+    });
+  const clearTimer =
+    options.clearTimer ?? ((handle: unknown) => clearInterval(handle as NodeJS.Timeout));
+  let sweepTimer: unknown = null;
 
   // --- receipts ------------------------------------------------------------
 
@@ -346,10 +387,13 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
         if (parsed !== null) {
           entry.seq = parsed.seq;
         } else {
-          // The tail does not decode; fall back to a full scan so the next
-          // append cannot reuse a sequence that is already on disk.
+          // The last line is genuinely corrupt (an unknown TYPE decodes fine).
+          // Fall back to a full scan, and then take the highest sequence the
+          // file mentions rather than the scan's: the scan stops AT the bad
+          // line, so trusting it would let the next append re-use a sequence
+          // that is already on disk (R1-8).
           const tail = await readLog(threadId);
-          entry.seq = tail.seq;
+          entry.seq = Math.max(tail.seq, await highestSeqOnDisk(threadId));
           entry.error ??= "events.ndjson has a line that does not decode";
         }
       }
@@ -378,6 +422,31 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
     return next;
   }
 
+  /**
+   * The highest `seq` any line of the log mentions, ignoring whether the line
+   * folds. A corrupt line still occupied a sequence; re-using it would corrupt
+   * the ordering the fold and `/events?after=` depend on, which is worse than
+   * skipping one.
+   */
+  async function highestSeqOnDisk(threadId: string): Promise<number> {
+    const contents = await readFileOrNull(threadEventsPath(rootDir, threadId));
+    if (contents === null) {
+      return 0;
+    }
+    let highest = 0;
+    for (const line of splitCompleteLines(contents).lines) {
+      try {
+        const seq = (JSON.parse(line) as { seq?: unknown }).seq;
+        if (typeof seq === "number" && Number.isInteger(seq) && seq > highest) {
+          highest = seq;
+        }
+      } catch {
+        continue;
+      }
+    }
+    return highest;
+  }
+
   function decodeLine(line: string): DomainEvent | null {
     let value: unknown;
     try {
@@ -389,7 +458,13 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
     return parsed === null ? null : (parsed as unknown as DomainEvent);
   }
 
-  /** Read the whole log, truncating at the first line that does not decode. */
+  /**
+   * Read the whole log, truncating at the first line that does not decode.
+   *
+   * An event type this build does not know is **not** such a line (§8): it
+   * decodes, it advances `seq`, and the fold ignores it. Only corrupt JSON, a
+   * broken envelope or a sequence that goes backwards truncates.
+   */
   async function readLog(threadId: string): Promise<ThreadTail> {
     const contents = await readFileOrNull(threadEventsPath(rootDir, threadId));
     if (contents === null) {
@@ -821,6 +896,21 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
       return pendingDir;
     },
 
+    async sweepNow(): Promise<void> {
+      await store.pruneAttachments();
+    },
+
+    close(): void {
+      if (sweepTimer !== null) {
+        clearTimer(sweepTimer);
+        sweepTimer = null;
+      }
+      for (const entry of threads.values()) {
+        entry.raw?.close();
+        entry.raw = null;
+      }
+    },
+
     async readItem(threadId: string, itemId: string): Promise<ThreadItem | null> {
       assertSafeThreadId(threadId);
       const tail = await readLog(threadId);
@@ -843,6 +933,14 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
       return null;
     }
   };
+
+  if (sweepIntervalMs > 0) {
+    sweepTimer = setTimer(() => {
+      // Best effort and never awaited by anything: a sweep that fails costs
+      // disk, never a turn.
+      void store.pruneAttachments().catch(() => undefined);
+    }, sweepIntervalMs);
+  }
 
   return store;
 }

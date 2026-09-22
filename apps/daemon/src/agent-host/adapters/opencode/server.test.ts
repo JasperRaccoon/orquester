@@ -1,25 +1,16 @@
 /**
- * Server-pool tests against a **scripted mock peer** (spec §9): a tiny Node
- * script written into a temp dir and launched through the *same*
- * `spawnProviderChild` path the real `opencode serve` uses. It prints the real
- * readiness line, serves `/global/health`, and can be told to misbehave.
- *
- * That means the spawn, the stdout scrape, the handshake deadline, the auth
- * header, the version gate and the refcounted lifecycle are all exercised
- * without an account, a network call or the real CLI.
- *
- * **Not covered here**, and deliberately said out loud rather than implied:
- * the peer spawns no grandchild, so nothing asserts `process.kill(-pid)`
- * reaches a whole process group — the reason `detached: true` is set. The
- * `OPENCODE_CONFIG_CONTENT` precedence is likewise unverified.
+ * Server-pool tests against the **scripted mock peer** of `testing/peer.ts`
+ * (spec §9), launched through the *same* `spawnProviderChild` path the real
+ * `opencode serve` uses. That means the spawn, the stdout scrape, the
+ * handshake deadline, the auth header, the version gate and the refcounted
+ * lifecycle are all exercised without an account, a network call or the real
+ * CLI. What the peer does and does not model is documented there.
  *
  * Nothing here waits on a timer: every assertion waits on a readiness line, a
  * health response or a child exit.
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -33,6 +24,7 @@ import {
 } from "./server.ts";
 import { basicAuthHeader } from "./http.ts";
 import { MINIMUM_OPENCODE_VERSION } from "./semver.ts";
+import { makePeer, type Peer } from "./testing/peer.ts";
 
 const silentLogger: AdapterLogger = {
   debug: () => undefined,
@@ -40,80 +32,6 @@ const silentLogger: AdapterLogger = {
   warn: () => undefined,
   error: () => undefined
 };
-
-/**
- * The mock peer. `MOCK_MODE` selects the misbehaviour:
- *   `ok`          — ready line, then a healthy server on the requested port
- *   `old`         — healthy, but a version below the §4.1 minimum
- *   `unhealthy`   — `{healthy:false}`
- *   `silent`      — binds nothing and prints nothing (handshake deadline)
- *   `die`         — exits 3 before printing anything
- *   `noisy`       — prints the `OPENCODE_SERVER_PASSWORD` warning FIRST
- */
-const PEER_SOURCE = `
-import { createServer } from "node:http";
-
-const mode = process.env.MOCK_MODE ?? "ok";
-const version = process.env.MOCK_VERSION ?? "${MINIMUM_OPENCODE_VERSION}";
-const password = process.env.OPENCODE_SERVER_PASSWORD;
-const portArg = process.argv.find((a) => a.startsWith("--port="));
-const hostArg = process.argv.find((a) => a.startsWith("--hostname="));
-const port = Number(portArg?.slice("--port=".length) ?? "0");
-const host = hostArg?.slice("--hostname=".length) ?? "127.0.0.1";
-
-if (mode === "die") {
-  process.stderr.write("mock peer: fatal error\\n");
-  process.exit(3);
-}
-if (mode === "silent") {
-  setInterval(() => {}, 1000);
-} else {
-  const server = createServer((req, res) => {
-    const auth = req.headers.authorization;
-    if (password !== undefined && auth !== "Basic " + Buffer.from("opencode:" + password).toString("base64")) {
-      res.writeHead(401).end();
-      return;
-    }
-    if (req.url?.startsWith("/global/health")) {
-      const body = mode === "unhealthy"
-        ? { healthy: false }
-        : { healthy: true, version: mode === "old" ? "1.10.0" : version };
-      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(body));
-      return;
-    }
-    res.writeHead(200, { "content-type": "application/json" }).end("{}");
-  });
-  server.listen(port, host, () => {
-    if (mode === "noisy") {
-      process.stdout.write("Warning: OPENCODE_SERVER_PASSWORD is not set; server is unsecured.\\n");
-    }
-    process.stdout.write("opencode server listening on http://" + host + ":" + server.address().port + "\\n");
-  });
-}
-`;
-
-interface Peer {
-  dir: string;
-  /** A shell shim named `opencode`, exactly as §9 describes the mock peer. */
-  bin: string;
-  cleanup: () => void;
-}
-
-function makePeer(): Peer {
-  const dir = mkdtempSync(join(tmpdir(), "orq-opencode-peer-"));
-  const script = join(dir, "peer.mjs");
-  writeFileSync(script, PEER_SOURCE, "utf8");
-  // The shim swallows the `serve` subcommand and forwards the flags, so the
-  // pool's real argv (`serve --hostname=… --port=…`) reaches the peer
-  // unchanged.
-  const bin = join(dir, "opencode");
-  writeFileSync(
-    bin,
-    `#!/bin/sh\nshift\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(script)} "$@"\n`,
-    { encoding: "utf8", mode: 0o755 }
-  );
-  return { dir, bin, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
-}
 
 function makePool(
   peer: Peer,

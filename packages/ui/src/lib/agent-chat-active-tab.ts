@@ -78,3 +78,35 @@ export function releaseActiveChatTab(sessionId: string): void {
     setActiveChatTab(null);
   }
 }
+
+/**
+ * A tab, as much of one as this decision needs: the arms that carry no
+ * `sessionId` (files, git, todo, browser, the overview) satisfy it by omission.
+ */
+export interface ActiveChatTabCandidate {
+  id: string;
+  type: string;
+  sessionId?: string | undefined;
+}
+
+/**
+ * Which chat tab the shell should publish, given a project's tabs and its
+ * active tab id.
+ *
+ * Lifted out of `MainView` because this — not the registry above — is where
+ * Q2-1/Q2-2 were: the registry only ever reports what it is told, so a wrong
+ * derivation here hands the keyboard to a thread the user cannot see. Three
+ * cases have to stay pinned: a **terminal** tab is active (a chat tab is
+ * mounted but hidden ⇒ `null`, not "the last chat tab"), the active id names
+ * no tab at all (mid-close ⇒ `null`), and a legacy `agent` terminal record,
+ * which is a PTY tab and never a chat one.
+ */
+export function activeChatSessionIdFor(
+  tabs: readonly ActiveChatTabCandidate[],
+  activeTabId: string | null | undefined
+): string | null {
+  if (!activeTabId) return null;
+  const active = tabs.find((tab) => tab.id === activeTabId);
+  if (!active || active.type !== "agent-chat") return null;
+  return active.sessionId ?? null;
+}

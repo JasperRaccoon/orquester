@@ -192,21 +192,70 @@ export function parseQuestions(value: unknown): UserInputQuestion[] {
  * Request ids are unique, so a terminal row stays final even when provider
  * sequences and host-generated activities arrive in a different order.
  *
- * `closed` is the fold's **tombstone set** (§5.1's "closes the request id
- * permanently"). Without it the closed sets are rebuilt from the retained
- * activity list alone, so once a `*.resolved` row aged out of the 500-row
- * window a replayed `*.requested` reopened a dead card and the provider
- * rejected the answer. The seed is what makes "permanently" true.
+ * **Tombstones are ORDER-AWARE.** A resolution closes the request that
+ * *precedes* it; a request that arrives *after* it is a different request and
+ * opens fresh. Both halves are load-bearing and each one is a shipped bug:
+ * - without the closing half, a `*.resolved` row that aged out of the 500-row
+ *   retention window stopped closing its request, so a replayed `*.requested`
+ *   reopened a dead card and the provider rejected the answer (R5 #4);
+ * - without the opening half, a provider that RECYCLES a request id had its
+ *   new request swallowed by the old tombstone. Codex mints
+ *   `codex-<threadId>-<n>` from a per-provider-session counter, but a thread
+ *   outlives its provider sessions: after a restart and a `thread/resume` the
+ *   counter restarted at 1 and a real file-change approval was deleted by a
+ *   resolution from minutes earlier — no card, no attention flag, composer
+ *   unblocked, and the provider blocked forever (E2E R2-1).
+ *
+ * Inside `activities` the list order decides, so a resolution simply removes
+ * whatever is open and a later row re-opens. `closed` covers the ids whose
+ * resolution is no longer IN the list; `closedAt` carries when that resolution
+ * happened, which is what lets a genuinely newer request through. A seed
+ * without stamps stays conservative and closes unconditionally.
  */
 export function derivePendingRequests(
   activities: readonly ThreadActivityItem[],
-  options?: { readonly closed?: ReadonlySet<string> }
+  options?: {
+    readonly closed?: ReadonlySet<string>;
+    readonly closedAt?: ReadonlyMap<string, string>;
+  }
 ): PendingRequests {
   const approvals = new Map<string, PendingApproval>();
   const userInputs = new Map<string, PendingUserInput>();
-  // Request ids are unique across both kinds, so one seed feeds both sets.
-  const closedApprovals = new Set<string>(options?.closed);
-  const closedUserInputs = new Set<string>(options?.closed);
+
+  /**
+   * The latest resolution seen for an id so far in THIS walk. Seeded
+   * tombstones (whose closing row is no longer in the list) are consulted as a
+   * fallback.
+   */
+  const resolvedAt = new Map<string, string>();
+
+  /**
+   * True when a tombstone covers this request row: a resolution for the same
+   * id happened at or after it, so the row is that resolution's own request —
+   * replayed, or seen out of order. A row stamped strictly later is a
+   * different request that merely reuses the id, and must open.
+   */
+  const isClosed = (requestId: string, createdAt: string): boolean => {
+    const inWalk = resolvedAt.get(requestId);
+    if (inWalk !== undefined) {
+      return createdAt <= inWalk;
+    }
+    if (options?.closed?.has(requestId) !== true) {
+      return false;
+    }
+    // A seed with no stamp carries no ordering, so it closes unconditionally —
+    // the conservative reading, and the one that predates the stamp map.
+    const seeded = options.closedAt?.get(requestId);
+    return seeded === undefined || createdAt <= seeded;
+  };
+
+  /** Record a resolution, keeping the latest stamp for a recycled id. */
+  const noteResolved = (requestId: string, createdAt: string): void => {
+    const known = resolvedAt.get(requestId);
+    if (known === undefined || createdAt > known) {
+      resolvedAt.set(requestId, createdAt);
+    }
+  };
 
   for (const activity of activities) {
     if (!REQUEST_ACTIVITY_KINDS.has(activity.activityKind)) {
@@ -220,7 +269,7 @@ export function derivePendingRequests(
 
     if (activity.activityKind === "approval.requested") {
       if (
-        closedApprovals.has(requestId) ||
+        isClosed(requestId, activity.createdAt) ||
         // A question, not an approval (§5.1), and a token refresh is not a
         // user-facing decision at all.
         payload.requestType === "tool_user_input" ||
@@ -254,7 +303,7 @@ export function derivePendingRequests(
         ...(options.length > 0 ? { options } : {})
       });
     } else if (activity.activityKind === "user-input.requested") {
-      if (closedUserInputs.has(requestId)) {
+      if (isClosed(requestId, activity.createdAt)) {
         continue;
       }
       const questions = parseQuestions(payload.questions);
@@ -272,14 +321,16 @@ export function derivePendingRequests(
       (activity.activityKind === "provider.approval.respond.failed" &&
         isStaleRequestFailure("provider.approval.respond.failed", payload))
     ) {
-      closedApprovals.add(requestId);
+      // Closes whatever is open for this id, and records WHEN, so a later row
+      // is judged by its stamp rather than its position (see the header).
+      noteResolved(requestId, activity.createdAt);
       approvals.delete(requestId);
     } else if (
       activity.activityKind === "user-input.resolved" ||
       (activity.activityKind === "provider.user-input.respond.failed" &&
         isStaleRequestFailure("provider.user-input.respond.failed", payload))
     ) {
-      closedUserInputs.add(requestId);
+      noteResolved(requestId, activity.createdAt);
       userInputs.delete(requestId);
     }
   }

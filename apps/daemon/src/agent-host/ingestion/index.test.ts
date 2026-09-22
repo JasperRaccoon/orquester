@@ -1538,7 +1538,7 @@ describe("Q1-9: per-item ingestion state is released as items finish", () => {
     await ingestion.ingest(
       runtimeEvent("task.started", { taskId: "task-1", description: "Audit the routes" })
     );
-    await ingestion.ingest(runtimeEvent("task.completed", { taskId: "task-1" }));
+    await ingestion.ingest(runtimeEvent("task.completed", { taskId: "task-1", status: "completed" }));
     await settle();
 
     const titles = sink
@@ -1553,7 +1553,7 @@ describe("Q1-9: per-item ingestion state is released as items finish", () => {
     // The entry's life ends with the completion it titled. Before this it was
     // cleared only when the WHOLE thread was forgotten, so a long session
     // accumulated one entry per subagent task — the residual Q1-9 left open.
-    await ingestion.ingest(runtimeEvent("task.completed", { taskId: "task-1" }));
+    await ingestion.ingest(runtimeEvent("task.completed", { taskId: "task-1", status: "completed" }));
     await settle();
     const after = sink
       .activities()

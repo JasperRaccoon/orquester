@@ -1,6 +1,8 @@
 import React from "react";
 import { createPortal } from "react-dom";
 import { cn } from "../../../lib/cn";
+import { subscribeActiveChatTab } from "../../../lib/agent-chat-active-tab";
+import { isChatTabListenerActive } from "./tab-visibility";
 
 /**
  * The composer's own anchored popover.
@@ -122,6 +124,22 @@ export function ComposerPopover({
     [updatePosition]
   );
 
+  // A tab switch closes it.
+  //
+  // The Escape gate below keeps a hidden tab's popover from stealing the key,
+  // but it cannot un-strand the panel: this portals to `document.body`, so a
+  // menu left open in one thread floats over the next one, outside the CSS
+  // class that hides its tab. Closing on any change of the visible chat tab
+  // settles that, and needs no session id — every caller of this popover
+  // lives inside a chat tab.
+  //
+  // `setOpenState`, not `close`: returning focus would pull it to a trigger in
+  // the tab the user just left.
+  React.useEffect(() => {
+    if (!open) return;
+    return subscribeActiveChatTab(() => setOpenState(false));
+  }, [open, setOpenState]);
+
   React.useEffect(() => {
     if (!open) return;
     const onPointerDown = (event: MouseEvent) => {
@@ -132,6 +150,14 @@ export function ComposerPopover({
     };
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      /*
+       * V1 §7: tab-gated like every other keyboard listener in agent-chat.
+       * A hidden tab keeps its subtree mounted, so an open popover there would
+       * swallow Escape (`stopPropagation` + `preventDefault` below) and the
+       * VISIBLE tab's turn would never be interrupted. The trigger lives in
+       * the composer shell, so a hidden tab's trigger has no layout box.
+       */
+      if (!isChatTabListenerActive(undefined, triggerRef.current)) return;
       // The composer's own Escape interrupts a turn; a menu takes it first.
       event.stopPropagation();
       event.preventDefault();

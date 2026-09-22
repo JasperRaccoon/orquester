@@ -129,6 +129,39 @@ export function providerCommandsForSlashMenu(
  * pointer instead of a turn that fails after the message is already committed.
  * Must be called on the SEND path, not only in the menu — it can be typed.
  */
+/**
+ * The `$skill` mentions in a piece of text, in order, deduped.
+ *
+ * §4.6.7: "`$skill` mentions are re-chipped from the stored text by the same
+ * tokeniser the composer uses. No `isCommand` flag is persisted." This is that
+ * tokeniser — the timeline re-runs it over a sent user message against the
+ * current per-cwd skill list so a mention renders as a chip rather than as raw
+ * `$name`, and the round trip stays one-way-derivable from the text.
+ *
+ * Only *known* names match: an unknown `$foo` stays literal, exactly as the
+ * send path leaves it (§4.6.8). `\p{Sc}` rather than a literal `$` for the
+ * same reason the composer's trigger uses it — a keyboard laid out for € or £
+ * reaches skills too.
+ *
+ * Restored here after W11's `slash-commands.logic.ts` was deleted in the
+ * fix-wave arbitration (R2-5); this module is the one slash/skill
+ * implementation, so the tokeniser belongs with it.
+ */
+export function skillMentionsInText(
+  text: string,
+  knownSkillNames: readonly string[]
+): string[] {
+  const known = new Set(knownSkillNames.map((name) => name.toLowerCase()));
+  const found: string[] = [];
+  for (const match of text.matchAll(/(?:^|\s)\p{Sc}([\w.-]+)/gu)) {
+    const name = match[1];
+    if (name && known.has(name.toLowerCase()) && !found.includes(name)) {
+      found.push(name);
+    }
+  }
+  return found;
+}
+
 export function blockedProviderCommandMessage(
   adapterId: string | undefined,
   text: string

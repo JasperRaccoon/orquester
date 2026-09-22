@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  activeChatSessionIdFor,
   activeChatTab,
   isActiveChatTab,
   releaseActiveChatTab,
@@ -57,4 +58,44 @@ test("a fast switch keeps the newcomer's claim when the old tab unmounts after i
   releaseActiveChatTab("a");
   assert.equal(activeChatTab(), "b");
   setActiveChatTab(null);
+});
+
+/*
+ * The call site (V1 §10, item 8): the registry above only reports what it is
+ * told, so Q2-1/Q2-2 are only really closed if the derivation feeding it is.
+ */
+
+const tabs = [
+  { id: "t1", type: "agent-chat" as const, sessionId: "s1" },
+  { id: "t2", type: "agent-chat" as const, sessionId: "s2" },
+  { id: "t3", type: "terminal" as const, sessionId: "s3" },
+  { id: "t4", type: "files" as const }
+];
+
+test("the active chat tab is the one showing, not merely one that is mounted", () => {
+  assert.equal(activeChatSessionIdFor(tabs, "t1"), "s1");
+  assert.equal(activeChatSessionIdFor(tabs, "t2"), "s2");
+});
+
+test("a terminal tab on screen means NO chat tab owns the keyboard", () => {
+  // The bug shape: every chat tab stays mounted, so "the last chat tab" would
+  // keep answering chords while the user is typing in a shell.
+  assert.equal(activeChatSessionIdFor(tabs, "t3"), null);
+  assert.equal(activeChatSessionIdFor(tabs, "t4"), null);
+});
+
+test("no active tab, or an id naming none, owns nothing", () => {
+  assert.equal(activeChatSessionIdFor(tabs, null), null);
+  assert.equal(activeChatSessionIdFor(tabs, undefined), null);
+  assert.equal(activeChatSessionIdFor(tabs, ""), null);
+  // Mid-close: the id outlives the tab for a render.
+  assert.equal(activeChatSessionIdFor(tabs, "gone"), null);
+  assert.equal(activeChatSessionIdFor([], "t1"), null);
+});
+
+test("a legacy `agent` terminal record is a PTY tab, never a chat tab", () => {
+  assert.equal(
+    activeChatSessionIdFor([{ id: "t5", type: "terminal", sessionId: "legacy" }], "t5"),
+    null
+  );
 });
