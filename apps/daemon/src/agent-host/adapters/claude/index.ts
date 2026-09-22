@@ -54,6 +54,7 @@ import {
   probeClaudeVersion,
   type ClaudeProbeResult
 } from "./probe.ts";
+import { projectClaudeHistory } from "./project-history.ts";
 import { ClaudeSession } from "./session.ts";
 import type { ClaudeScopedLimitNames } from "./usage.ts";
 
@@ -434,6 +435,15 @@ export async function createClaudeAdapterWith(
         return { threadId, turns: [] } satisfies ThreadSnapshot;
       }
       return session.readThread();
+    },
+
+    /**
+     * §E6: a resumed thread replays nothing onto the message stream, so its
+     * timeline is rebuilt from the provider's own transcript instead. Pure —
+     * the reading happened in `readThread`.
+     */
+    projectHistory(snapshot) {
+      return projectClaudeHistory(snapshot, { clock: context.clock, ids: context.ids });
     },
 
     async rollbackThread(threadId, numTurns) {

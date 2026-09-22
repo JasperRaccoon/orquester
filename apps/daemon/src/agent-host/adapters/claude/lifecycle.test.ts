@@ -22,6 +22,7 @@ import type {
   SDKUserMessage
 } from "@anthropic-ai/claude-agent-sdk";
 import type { RuntimeEvent } from "@orquester/api/agent-chat";
+import { HISTORICAL_RAW_SOURCE } from "@orquester/api/agent-chat";
 
 import type { AdapterContext, AgentAdapter } from "../../adapter.ts";
 import { resumeCursorFor } from "../../orchestration/resume.ts";
@@ -1473,5 +1474,84 @@ describe("claude adapter — fix-wave regressions", () => {
     const extra = options.extraArgs as Record<string, unknown> | undefined;
     assert.equal(extra?.verbose, null);
     assert.equal(extra?.["dangerously-skip-permissions"], undefined);
+  });
+});
+
+describe("claude adapter — a resumed thread has a timeline (E6)", () => {
+  const conversationId = "b46b654b-57bb-40e4-8c82-d3536bd06a28";
+  const transcript = [
+    userRow("turn-a", "what is the capital of France?"),
+    assistantRow("asst-a"),
+    userRow("turn-b", "and of Spain?"),
+    assistantRow("asst-b")
+  ];
+
+  it("reads the native transcript and projects it", async () => {
+    let reads = 0;
+    const harness = await makeHarness({
+      historyStdout: (method) => {
+        if (method === "getSessionMessages") {
+          reads += 1;
+          return JSON.stringify(transcript);
+        }
+        return "{}";
+      }
+    });
+    await harness.adapter.startSession({
+      ...START,
+      resumeCursor: { threadId: START.threadId, resume: conversationId }
+    });
+
+    // A resume replays NOTHING onto the stream, so the in-memory turns are
+    // empty and the snapshot has to come from the provider's own transcript.
+    assert.equal(
+      harness.events.some((event) => event.type === "turn.started"),
+      false
+    );
+    const snapshot = await harness.adapter.readThread(START.threadId);
+    assert.equal(reads, 1);
+    assert.deepEqual(
+      snapshot.turns.map((turn) => turn.id),
+      ["turn-a", "turn-b"]
+    );
+
+    const projected = harness.adapter.projectHistory!(snapshot);
+    assert.equal(projected.filter((event) => event.type === "turn.started").length, 2);
+    assert.equal(projected.filter((event) => event.type === "turn.completed").length, 2);
+    assert.ok(projected.every((event) => event.raw?.source === HISTORICAL_RAW_SOURCE));
+    const texts = projected
+      .filter(
+        (event): event is EventOf<"item.completed"> =>
+          event.type === "item.completed" && event.payload.itemType === "user_message"
+      )
+      .map((event) => (event.payload.data as { text: string }).text);
+    assert.deepEqual(texts, ["what is the capital of France?", "and of Spain?"]);
+  });
+
+  it("a session started fresh reads no transcript at all", async () => {
+    let reads = 0;
+    const harness = await makeHarness({
+      historyStdout: () => {
+        reads += 1;
+        return JSON.stringify(transcript);
+      }
+    });
+    await harness.adapter.startSession(START);
+    const snapshot = await harness.adapter.readThread(START.threadId);
+    // Nothing has been written under that fresh session id, so spawning a
+    // worker for it would be pure waste.
+    assert.equal(reads, 0);
+    assert.deepEqual(snapshot.turns, []);
+    assert.deepEqual(harness.adapter.projectHistory!(snapshot), []);
+  });
+
+  it("an unreadable transcript degrades to an empty timeline, never an error", async () => {
+    const harness = await makeHarness({ historyStdout: () => "not json at all" });
+    await harness.adapter.startSession({
+      ...START,
+      resumeCursor: { threadId: START.threadId, resume: conversationId }
+    });
+    const snapshot = await harness.adapter.readThread(START.threadId);
+    assert.deepEqual(snapshot.turns, []);
   });
 });
