@@ -18,9 +18,18 @@
  * restored steering message for a retained turn start. Any mismatch, any
  * missing boundary, or a compaction in between is a **hard error** telling the
  * user to start a new thread — refuse rather than guess.
+ *
+ * The cut itself is named by turn ID when the host supplies one
+ * ({@link planClaudeRollbackById}): a count over the host's turns and a count
+ * over this adapter's boundaries are counts of different lists — a resumed
+ * transcript has history turns no cursor recorded, a compaction writes rows
+ * that look like turn starts — and a count-based cut then lands on the wrong
+ * turn without refusing (fixtures/claude README observation 21).
  */
 
 import { isDeepStrictEqual } from "node:util";
+
+import type { ClaudeTurnBoundary } from "./cursor.ts";
 
 /** The `SessionMessage` shape this module needs, read structurally. */
 export interface ClaudeHistoryMessage {
@@ -229,6 +238,145 @@ export function planClaudeRollback(input: {
     retainedCount,
     retainedBoundaries: boundaries.slice(0, retainedCount),
     rollbackAt: retainedCount > 0 ? messages[firstRemoved - 1]?.uuid : undefined,
+    firstRemoved
+  };
+}
+
+/** A turn boundary the native history can place. */
+export interface PlacedClaudeTurnBoundary {
+  turnId: string;
+  uuid: string;
+  /** Index of `uuid` in the raw history. */
+  index: number;
+}
+
+/**
+ * Every turn boundary the native history can place, in transcript order.
+ *
+ * Two sources, merged:
+ *
+ * - the pairs this adapter recorded (`ClaudeNormalizer.turnBoundaries`,
+ *   carried across restarts by the cursor), kept only while the transcript
+ *   still holds their uuid — a pair whose uuid is gone is stale and names
+ *   nothing;
+ * - an identity pair for every human turn start that no recorded pair already
+ *   maps. Those are the turns of a resumed transcript that no cursor ever saw:
+ *   a projected history turn's id IS its uuid (`groupClaudeHistoryTurns`), so
+ *   this is what makes one rewindable.
+ *
+ * A recorded pair beats the identity reading of its uuid because the uuid may
+ * be a fork's: a rewind rewrites every uuid, and only the pair still says
+ * which of our turns that turn start is.
+ */
+export function mergeClaudeTurnBoundaries(
+  messages: readonly ClaudeHistoryMessage[],
+  known: readonly ClaudeTurnBoundary[]
+): PlacedClaudeTurnBoundary[] {
+  const indexByUuid = new Map<string, number>();
+  messages.forEach((message, index) => {
+    if (!indexByUuid.has(message.uuid)) {
+      indexByUuid.set(message.uuid, index);
+    }
+  });
+
+  const placed: PlacedClaudeTurnBoundary[] = [];
+  const mapped = new Set<string>();
+  for (const boundary of known) {
+    if (boundary.uuid === null) {
+      continue;
+    }
+    const index = indexByUuid.get(boundary.uuid);
+    if (index === undefined) {
+      // Stale: the transcript no longer holds this uuid.
+      continue;
+    }
+    placed.push({ turnId: boundary.turnId, uuid: boundary.uuid, index });
+    mapped.add(boundary.uuid);
+  }
+  messages.forEach((message, index) => {
+    if (
+      isClaudeHumanTurnStart(message) &&
+      !mapped.has(message.uuid) &&
+      indexByUuid.get(message.uuid) === index
+    ) {
+      placed.push({ turnId: message.uuid, uuid: message.uuid, index });
+    }
+  });
+  return placed.sort((a, b) => a.index - b.index);
+}
+
+export interface ClaudeRollbackByIdPlan {
+  /** Every boundary the history could place, in transcript order. */
+  boundaries: PlacedClaudeTurnBoundary[];
+  /** The boundaries kept: every one before the cut. Remapped onto the fork. */
+  retained: PlacedClaudeTurnBoundary[];
+  /** The boundaries the cut removes: the target and every one after it. */
+  dropped: PlacedClaudeTurnBoundary[];
+  /**
+   * The uuid to fork at — the entry just before the target's turn start.
+   * `undefined` means nothing of the conversation survives and the caller
+   * starts a fresh session instead (§4.5's full rollback).
+   */
+  rollbackAt: string | undefined;
+  /** Index of the first removed message — the target's turn start — in the raw history. */
+  firstRemoved: number;
+}
+
+/**
+ * Decide what a rewind to BEFORE `firstRemovedTurnId` removes, by id: the id
+ * is resolved to exactly one turn start in the native history through
+ * {@link mergeClaudeTurnBoundaries}, and the cut lands there whatever any
+ * count says. Throws the exact §4.5 refusal when it cannot: an id the history
+ * cannot place (or places twice) is `ROLLBACK_BOUNDARY_UNAVAILABLE`, an anchor
+ * a later compaction dropped is `ROLLBACK_COMPACTED` — both before any fork
+ * exists, so a doomed rewind leaves no orphan session on disk.
+ */
+export function planClaudeRollbackById(input: {
+  messages: readonly ClaudeHistoryMessage[];
+  /** The pairs the session recorded (`ClaudeNormalizer.turnBoundaries`). */
+  boundaries: readonly ClaudeTurnBoundary[];
+  /** `RollbackTarget.firstRemovedTurnId` — the first turn that goes. */
+  firstRemovedTurnId: string;
+  /** `ClaudeNormalizer.preservedMessageUuids`; `undefined` = no compaction seen. */
+  preservedUuids?: readonly string[] | undefined;
+}): ClaudeRollbackByIdPlan {
+  const { messages } = input;
+  if (messages.length === 0) {
+    throw new Error(ROLLBACK_HISTORY_UNAVAILABLE);
+  }
+
+  const boundaries = mergeClaudeTurnBoundaries(messages, input.boundaries);
+  const matches = boundaries.filter((boundary) => boundary.turnId === input.firstRemovedTurnId);
+  const target = matches.length === 1 ? matches[0] : undefined;
+  const firstRemoved =
+    target === undefined ? -1 : messages.findIndex((message) => message.uuid === target.uuid);
+  if (firstRemoved < 0) {
+    throw new Error(ROLLBACK_BOUNDARY_UNAVAILABLE);
+  }
+
+  // Nothing of the conversation precedes the cut: every turn goes, which is a
+  // fresh session, never a fork (§4.5).
+  if (!messages.slice(0, firstRemoved).some(isClaudeConversationMessage)) {
+    return { boundaries, retained: [], dropped: boundaries, rollbackAt: undefined, firstRemoved };
+  }
+
+  const rollbackAt = messages[firstRemoved - 1]!.uuid;
+  // A compaction between the anchor and now makes the anchor unreachable
+  // (§4.5 "or a compaction in between", fixtures README obs. 17).
+  if (
+    !isAnchorReachableAfterCompaction({
+      anchorUuid: rollbackAt,
+      preservedUuids: input.preservedUuids
+    })
+  ) {
+    throw new Error(ROLLBACK_COMPACTED);
+  }
+
+  return {
+    boundaries,
+    retained: boundaries.filter((boundary) => boundary.index < firstRemoved),
+    dropped: boundaries.filter((boundary) => boundary.index >= firstRemoved),
+    rollbackAt,
     firstRemoved
   };
 }

@@ -42,13 +42,17 @@ import type {
 } from "@orquester/api/agent-chat";
 import { SUPPORTED_ATTACHMENT_IMAGE_MIME_TYPES } from "@orquester/api/agent-chat";
 
-import type { AdapterContext } from "../../adapter.ts";
+import type { AdapterContext, RollbackTarget } from "../../adapter.ts";
 import { TURN_LIVENESS_WINDOWS, withDeadline } from "../../support/deadline.ts";
 import { StderrCapture } from "../../support/stderr.ts";
 import { FileTail, TAIL_MAX_READ_BYTES, TAIL_MAX_TOTAL_BYTES, resolveTildePath } from "../../support/tail-file.ts";
 import { createDeferred, type Deferred } from "./async-queue.ts";
 import { classifyRequestType, summarizeToolRequest, trimmedString } from "./classify.ts";
-import { buildClaudeResumeCursor, type ClaudeResumeCursor } from "./cursor.ts";
+import {
+  buildClaudeResumeCursor,
+  claudeTurnBoundariesFromCursor,
+  type ClaudeResumeCursor
+} from "./cursor.ts";
 import {
   claudeCanUseToolRoute,
   claudeRequestKey,
@@ -56,7 +60,7 @@ import {
   shouldShortCircuitToAllow
 } from "./decisions.ts";
 import type { ClaudeAdapterDeps } from "./deps.ts";
-import { createClaudeHistoryReader } from "./history.ts";
+import { createClaudeHistoryReader, type ClaudeHistoryReader } from "./history.ts";
 import { buildClaudeQueryOptions } from "./launch.ts";
 import { CLAUDE_OPTION_IDS, findModel, resolveEffortLevel, selectionStringOption } from "./models.ts";
 import {
@@ -73,6 +77,7 @@ import {
   groupClaudeHistoryTurns,
   isAnchorReachableAfterCompaction,
   planClaudeRollback,
+  planClaudeRollbackById,
   remapClaudeForkTurnBoundaries
 } from "./rollback.ts";
 import { dispatchableSkillNames, discoverClaudeSkills } from "./skills.ts";
@@ -212,6 +217,7 @@ export class ClaudeSession {
     if (options.resumeCursor?.turnStartMessageIds !== undefined) {
       this.normalizer.turnStartMessageIds.push(...options.resumeCursor.turnStartMessageIds);
     }
+    this.normalizer.turnBoundaries.push(...claudeTurnBoundariesFromCursor(options.resumeCursor));
     const now = options.context.clock.nowIso();
     this.record = {
       threadId: options.threadId,
@@ -1336,14 +1342,21 @@ export class ClaudeSession {
    * Compute the fork for a rollback of `numTurns` and return the cursor the
    * restarted session must use. Throws the §4.5 refusal when the boundary
    * cannot be established — refuse rather than guess.
+   *
+   * With a `target` the cut is resolved from its turn ID and `numTurns` is only
+   * compared against it ({@link planRollbackById}); without one — a caller that
+   * predates `RollbackTarget` — the count path below runs as it always has.
    */
-  async planRollback(numTurns: number): Promise<{
+  async planRollback(numTurns: number, target?: RollbackTarget): Promise<{
     cursor: ClaudeResumeCursor | undefined;
     retainedTurns: Array<{ id: string; items: unknown[] }>;
   }> {
     const sessionId = this.resumeSessionId;
     if (sessionId === undefined) {
       throw new Error(ROLLBACK_SESSION_UNAVAILABLE);
+    }
+    if (target !== undefined) {
+      return this.planRollbackById(sessionId, numTurns, target);
     }
     const boundaries = [...this.normalizer.turnStartMessageIds];
     // Rolling back EVERY turn short-circuits to a fresh session rather than a
@@ -1424,6 +1437,100 @@ export class ClaudeSession {
       }),
       retainedTurns
     };
+  }
+
+  /**
+   * The id path (§5.5, `RollbackTarget`). The host's `numTurns` is counted over
+   * its own fold, and that is not the list this session's boundaries count: a
+   * transcript resumed from the CLI has history turns no cursor recorded, and a
+   * compaction writes rows shaped like turn starts that the host never counted.
+   * A count-based cut then lands on the wrong turn WITHOUT refusing, so the id
+   * decides and a disagreeing count is only logged.
+   *
+   * The ids are the fold's turn ids, which for Claude are transcript uuids — a
+   * live turn's is the `SDKUserMessage.uuid` `sendTurn` stamps, a history
+   * turn's is its human row's uuid — until a fork rewrites them; the recorded
+   * pairs (`normalizer.turnBoundaries`) are what still resolve them then, and
+   * every fork re-pairs the turns it keeps (`remapClaudeForkTurnBoundaries`).
+   */
+  private async planRollbackById(
+    sessionId: string,
+    numTurns: number,
+    target: RollbackTarget
+  ): Promise<{
+    cursor: ClaudeResumeCursor | undefined;
+    retainedTurns: Array<{ id: string; items: unknown[] }>;
+  }> {
+    const history = this.historyReader();
+    const messages = await history.readMessages({ sessionId, cwd: this.options.cwd });
+    // Everything that can refuse — an id the transcript cannot place, an
+    // anchor a compaction dropped — refuses here, before any fork exists.
+    const plan = planClaudeRollbackById({
+      messages,
+      boundaries: this.normalizer.turnBoundaries,
+      firstRemovedTurnId: target.firstRemovedTurnId,
+      preservedUuids: this.normalizer.preservedMessageUuids
+    });
+    if (plan.dropped.length !== numTurns) {
+      this.options.context.logger.debug(
+        `claude: the rewind of thread ${this.threadId} cuts at turn ${target.firstRemovedTurnId}, which drops ${plan.dropped.length} turn(s) of the native history; the host counted ${numTurns}. The id wins.`,
+        {
+          droppedHere: plan.dropped.map((boundary) => boundary.turnId),
+          droppedByHost: target.droppedTurnIds
+        }
+      );
+    }
+
+    // Nothing of the conversation precedes the cut: a fresh session (§4.5).
+    if (plan.rollbackAt === undefined) {
+      return { cursor: undefined, retainedTurns: [] };
+    }
+
+    const fork = await history.fork({
+      sessionId,
+      upToMessageId: plan.rollbackAt,
+      cwd: this.options.cwd
+    });
+    const forkMessages = await history.readMessages({
+      sessionId: fork.sessionId,
+      cwd: this.options.cwd
+    });
+    const remapped = remapClaudeForkTurnBoundaries(
+      messages,
+      forkMessages,
+      plan.firstRemoved,
+      plan.retained.map((boundary) => boundary.uuid)
+    );
+    if (!remapped) {
+      throw new Error(ROLLBACK_FORK_MISALIGNED);
+    }
+
+    // The fork rewrote every uuid: each kept turn keeps its OWN id, paired with
+    // its fork uuid, so it stays rewindable by id in the forked session.
+    const retainedIds = new Set(plan.retained.map((boundary) => boundary.turnId));
+    return {
+      cursor: buildClaudeResumeCursor({
+        threadId: this.threadId,
+        sessionId: fork.sessionId,
+        turnStartMessageIds: remapped,
+        turnBoundaries: plan.retained.map((boundary, index) => ({
+          turnId: boundary.turnId,
+          uuid: remapped[index] ?? null
+        }))
+      }),
+      retainedTurns: this.normalizer.turns.filter((turn) => retainedIds.has(turn.id))
+    };
+  }
+
+  /** The native-history reader, under this thread's own config dir (§4.5). */
+  private historyReader(): ClaudeHistoryReader {
+    return createClaudeHistoryReader({
+      env: this.options.env,
+      cwd: this.options.cwd,
+      hostConfigDir: this.options.deps.hostConfigDir,
+      spawn: this.options.deps.spawn,
+      nodePath: this.options.deps.nodePath
+    });
   }
 
   /** Seed a restarted session with the turns a rollback kept. */
@@ -1581,7 +1688,8 @@ export class ClaudeSession {
     const cursor = buildClaudeResumeCursor({
       threadId: this.threadId,
       sessionId,
-      turnStartMessageIds: this.normalizer.turnStartMessageIds
+      turnStartMessageIds: this.normalizer.turnStartMessageIds,
+      turnBoundaries: this.normalizer.turnBoundaries
     });
     this.record = { ...this.record, resumeCursor: cursor };
     return cursor;
