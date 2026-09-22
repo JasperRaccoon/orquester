@@ -416,14 +416,11 @@ export function createProviderSnapshotRegistry(
 
   const store = (snapshot: ProviderSnapshot): boolean => {
     const previous = snapshots.get(snapshot.id);
-    // The identity this snapshot was produced under, recorded now so the cache
-    // it is written into can be correlated on the next boot.
-    const identity = identityOf(snapshot.id);
-    if (identity !== undefined) {
-      identities.set(snapshot.id, identity);
-    } else {
-      identities.delete(snapshot.id);
-    }
+    // NOTE: the cache identity is NOT resolved here. `store` is also the path
+    // `applyUsageLimits`/`applyAuthStatus` take, which run per turn, and
+    // resolving a binary against PATH on each would put a handful of stats on
+    // a hot path for a value that only a probe can change. `refreshOne` stamps
+    // it instead, right beside the probe that produced the snapshot.
     // An identical configuration short-circuits: no change event, no rewrite.
     // A PENDING previous is never "identical" in practice (a probe always
     // reaches an `installed` verdict), but the guard is explicit so a probe
@@ -465,6 +462,14 @@ export function createProviderSnapshotRegistry(
       throw new Error(`No adapter registered for '${adapterId}'.`);
     }
     const fresh = await probeOnce(probe, input);
+    // The identity this probe ran under, recorded before the store so the cache
+    // it writes can be correlated on the next boot (layer two).
+    const identity = identityOf(adapterId);
+    if (identity !== undefined) {
+      identities.set(adapterId, identity);
+    } else {
+      identities.delete(adapterId);
+    }
     const merged = mergeWorkspaceOverlay(snapshots.get(adapterId), fresh, input?.cwd);
     const changed = store(merged);
     return { snapshot: merged, changed };
