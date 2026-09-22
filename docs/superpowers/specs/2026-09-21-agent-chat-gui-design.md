@@ -958,6 +958,15 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   so the divergence is a constant a reader trips over rather than a silent edit. `settingSources`
   is as written; the committed fixtures were captured with `["project","local"]` only, because this
   host's user-level settings carry a hook that perturbs the capture.*
+  *Built: registry `args` (`--dangerously-skip-permissions`, `--effort …`, `--yolo`) are the
+  TERMINAL launcher's flags and never reach a chat launch (`apps/daemon/src/agent-host/main.ts`
+  builds its refId index without them), so neither the launch-args `extraArgs` nor the fold above
+  exists: `extraArgs` carries only what the adapter authors itself (`thinking-display`).
+  Permissions come only from `runtimeMode`; `full-access` = `bypassPermissions` +
+  `allowDangerouslySkipPermissions`; effort only from the model selection. While the host still
+  handed the registry row's argv to every start, every Claude-family chat ran `bypassPermissions`
+  whatever the permission chip said, and the row's `--effort max|high` — appended after the SDK's
+  own `--effort`, and the CLI keeps the last one — overruled the effort chip.*
 - **Env is one variable.** `CLAUDE_CONFIG_DIR` only, on top of the base env; `HOME` is **never**
   overridden, because relocating `HOME` also relocates the macOS keychain lookup and the CLI then
   reports "Not logged in". Orquester's managed-account home is therefore bound through
@@ -1091,6 +1100,12 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   One `codex app-server` child per thread, bound to a per-session scope; probes get their own
   short-lived one.
   *T3: `apps/server/src/provider/Layers/codexLaunchArgs.ts:12-15`; `apps/server/src/provider/Layers/CodexSessionRuntime.ts:1313-1346`; `apps/server/src/provider/Layers/CodexProvider.ts:369-373`; `apps/server/src/provider/Layers/CodexAdapter.ts:2317-2336`*
+  *Built: registry `args` (`--dangerously-skip-permissions`, `--effort …`, `--yolo`) are the
+  TERMINAL launcher's flags and never reach a chat launch (`apps/daemon/src/agent-host/main.ts`
+  builds its refId index without them), so there are no "user launch args" here: the spawn is
+  exactly `codex app-server` (`adapters/codex/session.ts`), which takes no `--yolo` anyway.
+  Permissions come only from `runtimeMode`, sent on `thread/start` (§4.4); effort only from the
+  model selection.*
 - **MCP rides `-c` config overrides, not a params field:**
   `-c mcp_servers.<name>.url=<endpoint>` and
   `-c '<name>.bearer_token_env_var="…"'` appended to argv with the token in env. Not needed for

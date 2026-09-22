@@ -15,9 +15,10 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import { agentChatDir } from "@orquester/config";
+import { REGISTRY, type RegistryEntryDef } from "@orquester/registry";
 
 import type { AdapterLogger } from "./adapter.ts";
-import { startAgentHost } from "./main.ts";
+import { buildRefIdIndex, startAgentHost } from "./main.ts";
 
 const quietLogger = (): AdapterLogger => ({
   debug: () => {},
@@ -74,5 +75,26 @@ describe("agent host boot — the store's host-wide sweep (S1 #5)", () => {
     } finally {
       await rm(appdir, { recursive: true, force: true, maxRetries: 3 });
     }
+  });
+});
+
+describe("agent host wiring — the registry refId index (§5.3)", () => {
+  it("carries the adapter and the bins, never the row's terminal args", () => {
+    // A registry row's `args` are the TERMINAL launcher's flags. Copied into
+    // this index they reached every chat launch: every Claude-family thread
+    // ran `bypassPermissions` whatever the permission chip said, and the
+    // row's `--effort` overruled the effort chip.
+    const rows = REGISTRY.agents as readonly RegistryEntryDef[];
+    const index = buildRefIdIndex();
+    for (const row of rows) {
+      if (!row.chat) continue;
+      const entry = index.get(row.id);
+      assert.ok(entry, `${row.id} is chat-capable, so it is indexed`);
+      assert.equal(entry.adapter, row.chat.adapter);
+      assert.equal("args" in entry, false, `${row.id}'s terminal args never enter the index`);
+    }
+    // Not vacuous: the rows the bug came from really do declare such flags.
+    const claude = rows.find((row) => row.id === "claude");
+    assert.ok(claude?.args?.includes("--dangerously-skip-permissions"));
   });
 });

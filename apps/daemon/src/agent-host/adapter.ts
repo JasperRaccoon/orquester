@@ -34,6 +34,10 @@ import type {
 // Operation inputs
 // ---------------------------------------------------------------------------
 
+/**
+ * Registry `args` are the terminal launcher's flags; a chat launch never sees
+ * them. Permissions come only from `runtimeMode`.
+ */
 export interface StartSessionInput {
   threadId: string;
   cwd: string;
@@ -51,14 +55,6 @@ export interface StartSessionInput {
   title?: string;
   modelSelection: ModelSelection;
   runtimeMode: RuntimeMode;
-  /**
-   * The registry entry's own launch args (claudex/claudemix proxy flags, a
-   * user's configured flags). Adapters that can fold a flag into their
-   * protocol — Claude's `--permission-mode` /
-   * `--dangerously-skip-permissions` — read them here; the rest ignore them.
-   * Empty when the entry declares none.
-   */
-  launchArgs?: readonly string[];
   /**
    * The adapter's own cursor from `meta.json`. `unknown` by contract — each
    * adapter owns its shape and it is the only thing persisted for resume. A

@@ -1858,18 +1858,19 @@ describe("claude adapter — fix-wave regressions", () => {
     assert.equal(typeof options.sessionId, "string");
   });
 
-  it("launchArgs reach the query and fold into the permission mode", async () => {
+  it("a supervised start launches supervised — no permission mode, no skip flag", async () => {
+    // The runtime mode is the only authority. The `claude` registry row's
+    // TERMINAL argv (`--dangerously-skip-permissions --effort max --verbose`)
+    // used to reach this start and was folded into `bypassPermissions`, so the
+    // permission chip did nothing.
     const harness = await makeHarness();
-    await harness.adapter.startSession({
-      ...START,
-      launchArgs: ["--dangerously-skip-permissions", "--verbose"]
-    });
+    await harness.adapter.startSession(START);
     const options = harness.queryOptions.at(-1)!;
-    assert.equal(options.permissionMode, "bypassPermissions");
-    assert.equal(options.allowDangerouslySkipPermissions, true);
-    const extra = options.extraArgs as Record<string, unknown> | undefined;
-    assert.equal(extra?.verbose, null);
-    assert.equal(extra?.["dangerously-skip-permissions"], undefined);
+    assert.equal(START.runtimeMode, "approval-required");
+    assert.equal(options.permissionMode, undefined);
+    assert.equal(options.allowDangerouslySkipPermissions, undefined);
+    // Only the flag the adapter authors itself; no terminal flag rides along.
+    assert.deepEqual(options.extraArgs, { "thinking-display": "summarized" });
   });
 });
 

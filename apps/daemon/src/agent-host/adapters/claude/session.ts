@@ -156,7 +156,6 @@ export interface ClaudeSessionOptions {
   onClosed: (session: ClaudeSession) => void;
   /** Marks the cached provider snapshot stale (§4.1). */
   onUsageLimitsStale?: () => void;
-  launchArgs?: readonly string[];
   autoCompactWindow?: number;
 }
 
@@ -275,7 +274,6 @@ export class ClaudeSession {
       ...(this.resumeSessionId === undefined
         ? { sessionId: this.options.context.ids.uuid() }
         : {}),
-      ...(this.options.launchArgs !== undefined ? { launchArgs: this.options.launchArgs } : {}),
       ...(this.options.autoCompactWindow !== undefined
         ? { autoCompactWindow: this.options.autoCompactWindow }
         : {})
