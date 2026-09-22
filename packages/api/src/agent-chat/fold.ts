@@ -20,6 +20,9 @@
  *   {@link AGENT_ACTIVITY_RETENTION_LIMIT}),
  *   plus every unresolved async question and any long-lived singleton row
  *   regardless of age;
+ * - a revert (§5.5) keeps the first `turnCount` STARTED turns, by turn ORDER
+ *   (`turns.ts`) — the checkpoint list decides only for a log that recorded no
+ *   started turn at all, the legacy fallback;
  * - a malformed line truncates the fold at that point rather than discarding
  *   the file (the reader's job — this fold only ever sees decoded events).
  *
@@ -46,6 +49,7 @@ import type {
 } from "./thread.ts";
 import { REQUEST_ACTIVITY_KINDS } from "./pending.ts";
 import { applySessionStatusToTurn, isSettledTurnState } from "./turn-state.ts";
+import { startedTurns } from "./turns.ts";
 
 /** §5.1: the fold retains this many activities per thread. */
 export const ACTIVITY_RETENTION_LIMIT = 500;
@@ -321,21 +325,46 @@ function foldCheckpoint(checkpoints: Checkpoint[], next: Checkpoint): Checkpoint
 }
 
 /**
- * The §5.5 second pass: a revert must never leave the thread showing fewer
- * turns than it reverted to, so up to `turnCount` user messages and up to
- * `turnCount` assistant messages are restored in `createdAt` order when the
- * turn-id pass retained fewer.
+ * The turn-less prompts the turn rows name through `Turn.userMessageId`,
+ * split by a revert: a live prompt is persisted before the provider mints its
+ * turn id, so the row it opened is its only link to that turn.
+ */
+interface RevertPromptClaims {
+  /** Named by a retained turn: kept by the first pass. */
+  retained: ReadonlySet<string>;
+  /** Named by a started turn the revert drops: never a fallback candidate. */
+  dropped: ReadonlySet<string>;
+}
+
+/**
+ * The §5.5 message passes, by turn ORDER. The first keeps a message whose
+ * `turnId` is retained, and a turn-less one a retained turn names as its
+ * `userMessageId`. The second pass: a revert must never leave the thread
+ * showing fewer turns than it reverted to, so up to `turnCount` user messages
+ * and up to `turnCount` assistant messages are restored in `createdAt` order
+ * when the first pass retained fewer.
+ *
+ * The second pass is for the turn-less messages NO turn claims — a `/compact`
+ * prompt its synthesised turn cannot name, a replayed history turn whose
+ * prompt came back `""`, a turn row that predates `userMessageId`. A prompt a
+ * dropped turn claims is never a candidate: the bound alone cannot keep it
+ * out when a retained turn simply has no prompt to restore.
  *
  * *T3: `projector.ts:209-277` (`retainThreadMessagesAfterRevert`).*
  */
 function retainMessagesAfterRevert(
   messages: readonly ThreadMessageItem[],
   retainedTurnIds: ReadonlySet<string>,
+  prompts: RevertPromptClaims,
   turnCount: number
 ): Set<string> {
   const retained = new Set<string>();
   for (const message of messages) {
-    if (message.turnId !== null && retainedTurnIds.has(message.turnId)) {
+    if (
+      message.turnId !== null
+        ? retainedTurnIds.has(message.turnId)
+        : prompts.retained.has(message.id)
+    ) {
       retained.add(message.id);
     }
   }
@@ -344,10 +373,11 @@ function retainMessagesAfterRevert(
     left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
 
   // The fallback pass. A message persisted before the provider minted its turn
-  // id carries `turnId: null` and is invisible to the pass above — without
-  // this a revert would leave the thread showing fewer turns than it reverted
-  // to, and the user's own prompts would vanish. Bounded at `turnCount` per
-  // role so it restores the turns that survived, never the ones it undid.
+  // id carries `turnId: null`, and unless a turn names it, it is invisible to
+  // the pass above — without this a revert would leave the thread showing
+  // fewer turns than it reverted to, and the user's own prompts would vanish.
+  // Bounded at `turnCount` per role so it restores the turns that survived,
+  // never the ones it undid.
   for (const role of ["user", "assistant"] as const) {
     const have = messages.filter(
       (message) => message.role === role && retained.has(message.id)
@@ -359,7 +389,9 @@ function retainMessagesAfterRevert(
         (message) =>
           message.role === role &&
           !retained.has(message.id) &&
-          (message.turnId === null || retainedTurnIds.has(message.turnId))
+          (message.turnId === null
+            ? !prompts.dropped.has(message.id)
+            : retainedTurnIds.has(message.turnId))
       )
       .slice()
       .sort(byCreatedAt)
@@ -934,12 +966,23 @@ function reduceTurnDiffCompleted(
 }
 
 /**
- * §5.5 truncation. By **retained turn id**, never by timestamp: keep the
- * checkpoints at or below the target, take their turn ids as the retained set,
- * then keep every message, activity and turn whose `turnId` is in that set.
- * Rows with `turnId: null` survive, and the fallback pass restores up to
- * `target` user and assistant messages so a revert never leaves the thread
- * showing fewer turns than it reverted to.
+ * §5.5 truncation, by turn ORDER. `turnCount` is the number of STARTED turns
+ * kept (`startedTurns`, `turns.ts`): their ids are the retained set, and every
+ * message, activity, turn row and checkpoint follows its `turnId` — never a
+ * timestamp. A turn-less prompt follows the turn that names it as its
+ * `userMessageId`. Activities with `turnId: null` survive, as does a
+ * turn-less checkpoint within the target count, and the fallback pass
+ * restores up to `target` user and assistant messages no turn claims, so a
+ * revert never leaves the thread showing fewer turns than it reverted to.
+ *
+ * The checkpoint list is not the numbering, which is where this departs from
+ * T3: it is sparse exactly where a rewind matters (a non-git project captures
+ * nothing, a failed capture skips a turn, a resumed history has no checkpoint
+ * for any turn it replayed), and an older host numbered it densely — the
+ * checkpoint counted 1 may belong to the 27th turn — so "the checkpoints at or
+ * below the target" retained the wrong turns. That rule survives only as the
+ * legacy fallback, for a log with no started turn at all (written before turns
+ * were recorded).
  *
  * *T3: `projector.ts:985-1030`.*
  */
@@ -948,22 +991,59 @@ function reduceReverted(
   event: Extract<DomainEvent, { type: "thread.reverted" }>
 ): Mutation {
   const target = event.payload.turnCount;
+  const started = startedTurns(state.turns);
+
+  const retainedTurnIds = new Set<string>();
+  if (started.length === 0 && state.checkpoints.length > 0) {
+    // Legacy: no turn row to order, so the checkpoints at or below the target
+    // name the retained turns, as they did for every log before turn order.
+    for (const checkpoint of state.checkpoints) {
+      if (checkpoint.turnId !== null && checkpoint.checkpointTurnCount <= target) {
+        retainedTurnIds.add(checkpoint.turnId);
+      }
+    }
+  } else {
+    // Clamped: a negative target keeps nothing, rather than `slice`'s
+    // count-from-the-end reading of it.
+    for (const turn of started.slice(0, Math.max(0, target))) {
+      retainedTurnIds.add(turn.turnId);
+    }
+  }
+
+  // A checkpoint goes with its turn — never with its count, which an older
+  // host assigned densely. Only a turn-less one is judged by its count.
   const checkpoints = state.checkpoints
-    .filter((entry) => entry.checkpointTurnCount <= target)
+    .filter((entry) =>
+      entry.turnId !== null
+        ? retainedTurnIds.has(entry.turnId)
+        : entry.checkpointTurnCount <= target
+    )
     .sort((left, right) => left.checkpointTurnCount - right.checkpointTurnCount)
     .slice(-CHECKPOINT_RETENTION_LIMIT);
 
-  const retainedTurnIds = new Set<string>();
-  for (const checkpoint of checkpoints) {
-    if (checkpoint.turnId !== null) {
-      retainedTurnIds.add(checkpoint.turnId);
+  // Only a STARTED turn's claim is judged: a row that never got an id (a send
+  // that failed before the provider answered) is neither retained nor dropped
+  // by turn order, so its prompt stays an ordinary fallback candidate.
+  const retainedPrompts = new Set<string>();
+  const droppedPrompts = new Set<string>();
+  for (const turn of state.turns) {
+    if (turn.turnId === null || turn.userMessageId === undefined) {
+      continue;
     }
+    (retainedTurnIds.has(turn.turnId) ? retainedPrompts : droppedPrompts).add(
+      turn.userMessageId
+    );
   }
 
   const messages = state.items.filter(
     (item): item is ThreadMessageItem => item.kind === "message"
   );
-  const retainedMessageIds = retainMessagesAfterRevert(messages, retainedTurnIds, target);
+  const retainedMessageIds = retainMessagesAfterRevert(
+    messages,
+    retainedTurnIds,
+    { retained: retainedPrompts, dropped: droppedPrompts },
+    target
+  );
 
   const items = state.items.filter((item) =>
     item.kind === "message"
@@ -974,28 +1054,35 @@ function reduceReverted(
     (item): item is ThreadActivityItem => item.kind === "activity"
   );
 
+  // The retained rows, in start order and whole — `userMessageId` included.
   let turns = state.turns.filter(
     (turn) => turn.turnId !== null && retainedTurnIds.has(turn.turnId)
   );
   // `latestTurn` is recomputed from the last surviving checkpoint (§5.5): if
   // that checkpoint has no turn row left, synthesise one so every ambient
-  // surface still reads a settled turn rather than nothing.
+  // surface still reads a settled turn rather than nothing. Only the legacy
+  // fallback gets here — a retained turn always keeps its own row — and a row
+  // that exists is never moved: with a sparse checkpoint list the last
+  // checkpoint is rarely the last turn, and moving its row to the end would
+  // reorder the started turns under every later rewind.
   const latestCheckpoint = checkpoints.length > 0 ? checkpoints[checkpoints.length - 1]! : null;
-  if (latestCheckpoint !== null && latestCheckpoint.turnId !== null) {
-    if (turns.length === 0 || turns[turns.length - 1]!.turnId !== latestCheckpoint.turnId) {
-      turns = [
-        ...turns.filter((turn) => turn.turnId !== latestCheckpoint.turnId),
-        {
-          turnId: latestCheckpoint.turnId,
-          state: latestCheckpoint.status === "error" ? "failed" : "completed",
-          turnCount: latestCheckpoint.checkpointTurnCount,
-          requestedAt: latestCheckpoint.completedAt,
-          startedAt: latestCheckpoint.completedAt,
-          completedAt: latestCheckpoint.completedAt,
-          assistantMessageId: latestCheckpoint.assistantMessageId
-        }
-      ];
-    }
+  if (
+    latestCheckpoint !== null &&
+    latestCheckpoint.turnId !== null &&
+    !turns.some((turn) => turn.turnId === latestCheckpoint.turnId)
+  ) {
+    turns = [
+      ...turns,
+      {
+        turnId: latestCheckpoint.turnId,
+        state: latestCheckpoint.status === "error" ? "failed" : "completed",
+        turnCount: latestCheckpoint.checkpointTurnCount,
+        requestedAt: latestCheckpoint.completedAt,
+        startedAt: latestCheckpoint.completedAt,
+        completedAt: latestCheckpoint.completedAt,
+        assistantMessageId: latestCheckpoint.assistantMessageId
+      }
+    ];
   }
 
   const head =
