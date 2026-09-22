@@ -36,12 +36,22 @@ interface RecordedRequest {
   body?: unknown;
 }
 
+type FakeMessage = { info: { id: string; role: string }; parts: unknown[] };
+
 class FakeOpenCode {
   readonly requests: RecordedRequest[] = [];
   readonly sessions = new Map<string, { id: string; directory: string; title?: string }>();
   statusMap: Record<string, { type: string }> = {};
-  messages: { info: { id: string; role: string }; parts: unknown[] }[] = [];
-  forkMessages: { info: { id: string; role: string }; parts: unknown[] }[] = [];
+  messages: FakeMessage[] = [];
+  forkMessages: FakeMessage[] = [];
+  /**
+   * When set, `POST /session/{id}/fork` forks like the real server (fixtures
+   * README observations 17 and 10): the new session holds the source's
+   * messages BEFORE `messageID`, in order, every id re-minted — into
+   * `sessionMessages`, which `GET …/message` reads before the two lists above.
+   */
+  faithfulForks = false;
+  readonly sessionMessages = new Map<string, FakeMessage[]>();
   children: { id: string }[] = [];
   commands: { name: string; description?: string; hints?: string[] }[] = [];
   permissionsOpen: unknown[] = [];
@@ -135,7 +145,7 @@ class FakeOpenCode {
         return json(this.children);
       }
       if (tail === "/message") {
-        return json(id.startsWith("ses_fork") ? this.forkMessages : this.messages);
+        return json(this.messagesOf(id));
       }
       if (tail.startsWith("/message/")) {
         const messageId = tail.slice("/message/".length);
@@ -147,11 +157,31 @@ class FakeOpenCode {
       if (tail === "/fork") {
         const forkId = `ses_fork_${this.nextSession += 1}`;
         this.sessions.set(forkId, { id: forkId, directory: "/repo" });
+        if (this.faithfulForks) {
+          const source = this.messagesOf(id);
+          const cut = source.findIndex(
+            (entry) => entry.info.id === (body as { messageID?: string } | undefined)?.messageID
+          );
+          this.sessionMessages.set(
+            forkId,
+            source.slice(0, cut < 0 ? source.length : cut).map((entry, index) => ({
+              ...entry,
+              info: { ...entry.info, id: `${forkId}-msg-${index + 1}` }
+            }))
+          );
+        }
         return json({ id: forkId, directory: "/repo" });
       }
     }
     return json({}, 404);
   };
+
+  messagesOf(sessionId: string): FakeMessage[] {
+    return (
+      this.sessionMessages.get(sessionId) ??
+      (sessionId.startsWith("ses_fork") ? this.forkMessages : this.messages)
+    );
+  }
 
   /** Push one verbatim SSE frame onto the stream. */
   push(event: unknown): void {
@@ -1003,6 +1033,163 @@ test("rollback refuses when the fork did not preserve the boundary", async () =>
   const before = session.sessionId;
   await assert.rejects(session.rollbackThread(1), /did not preserve the requested rewind/);
   assert.equal(session.sessionId, before, "a failed rollback must not re-point the thread");
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+/** Three exchanges as OpenCode stores them: each prompt, then its answer. */
+function threeExchanges(): FakeMessage[] {
+  return [
+    { info: { id: "msg_p1", role: "user" }, parts: [] },
+    { info: { id: "msg_a1", role: "assistant" }, parts: [] },
+    { info: { id: "msg_p2", role: "user" }, parts: [] },
+    { info: { id: "msg_a2", role: "assistant" }, parts: [] },
+    { info: { id: "msg_p3", role: "user" }, parts: [] },
+    { info: { id: "msg_a3", role: "assistant" }, parts: [] }
+  ];
+}
+
+test("rollback by turn ID forks at the NAMED turn's prompt, wherever the count points", async () => {
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  harness.fake.faithfulForks = true;
+  // A replayed turn is named by its assistant message (`toThreadSnapshot`).
+  // The host drops ONE turn by its count, but a third exchange it never saw
+  // (the session went on elsewhere) would put a count-based cut at msg_p3.
+  harness.fake.messages = threeExchanges();
+  const before = session.sessionId;
+  const snapshot = await session.rollbackThread(1, {
+    firstRemovedTurnId: "msg_a2",
+    droppedTurnIds: ["msg_a2"],
+    retainedTurnIds: ["msg_a1"]
+  });
+  const fork = harness.fake.find("POST", `/session/${before}/fork`);
+  assert.equal(
+    (fork?.body as { messageID: string }).messageID,
+    "msg_p2",
+    "the fork lands on the prompt that opens the named turn"
+  );
+  assert.notEqual(session.sessionId, before, "the fork becomes the thread's session");
+  assert.equal(snapshot.turns.length, 1, "exactly the first exchange survives");
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("a live turn is named by the prompt that opened it, so a rewind finds it again", async () => {
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  const sessionId = session.sessionId;
+  const turn = await session.sendTurn({
+    threadId: "thread-1",
+    input: "hi",
+    attachments: [],
+    interactionMode: "default"
+  });
+  const promptId = (harness.fake.find("POST", "/prompt_async")?.body as { messageID: string })
+    .messageID;
+  assert.equal(turn.turnId, promptId, "the turn id IS the OpenCode id of its opening prompt");
+  assert.equal(firstOfType(harness.events, "turn.started")?.turnId, promptId);
+  driveTurn(harness.fake, { sessionId, userMessageId: promptId });
+  harness.fake.push({
+    type: "session.status",
+    properties: { sessionID: sessionId, status: { type: "idle" } }
+  });
+  await waitFor(harness, "turn.completed");
+
+  // A turn that ran tools wrote several assistant messages; its id still
+  // names the one prompt that opened it.
+  harness.fake.faithfulForks = true;
+  harness.fake.messages = [
+    { info: { id: "msg_p0", role: "user" }, parts: [] },
+    { info: { id: "msg_a0", role: "assistant" }, parts: [] },
+    { info: { id: promptId, role: "user" }, parts: [] },
+    { info: { id: "msg_step_1", role: "assistant" }, parts: [] },
+    { info: { id: "msg_step_2", role: "assistant" }, parts: [] }
+  ];
+  await session.rollbackThread(1, {
+    firstRemovedTurnId: turn.turnId,
+    droppedTurnIds: [turn.turnId],
+    retainedTurnIds: ["msg_a0"]
+  });
+  const fork = harness.fake.find("POST", `/session/${sessionId}/fork`);
+  assert.equal((fork?.body as { messageID: string }).messageID, promptId);
+  assert.notEqual(session.sessionId, sessionId);
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("rollback refuses a turn ID the session no longer holds, before forking anything", async () => {
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  harness.fake.messages = threeExchanges();
+  const before = session.sessionId;
+  const requestsBefore = harness.fake.requests.length;
+  // Shaped like the ids live turns carried before they were named by their
+  // prompt: nothing in OpenCode answers to it.
+  const unknown = "opencode-turn-uuid-7";
+  await assert.rejects(
+    session.rollbackThread(1, {
+      firstRemovedTurnId: unknown,
+      droppedTurnIds: [unknown],
+      retainedTurnIds: ["msg_a1", "msg_a2"]
+    }),
+    /opencode: the turn to rewind to is no longer in this session/
+  );
+  assert.deepEqual(
+    harness.fake.requests.slice(requestsBefore).filter((request) => request.method !== "GET"),
+    [],
+    "no fork and no ruleset patch: an unresolvable id is never a count-based guess"
+  );
+  assert.equal(session.sessionId, before, "a refused rollback must not re-point the thread");
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("a second rewind finds a turn the first one kept, under the fork's re-minted ids", async () => {
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  harness.fake.faithfulForks = true;
+  harness.fake.messages = threeExchanges();
+
+  // Rewind 1 drops the third exchange; the fork re-mints every id it keeps.
+  await session.rollbackThread(1, {
+    firstRemovedTurnId: "msg_p3",
+    droppedTurnIds: ["msg_p3"],
+    retainedTurnIds: ["msg_p1", "msg_p2"]
+  });
+  const firstFork = session.sessionId;
+  const kept = harness.fake.messagesOf(firstFork);
+  assert.equal(kept.length, 4);
+  assert.ok(
+    kept.every((entry) => !entry.info.id.startsWith("msg_")),
+    "no pre-fork id survives the fork"
+  );
+
+  // Rewind 2 names msg_p2 as the fold still knows it.
+  await session.rollbackThread(1, {
+    firstRemovedTurnId: "msg_p2",
+    droppedTurnIds: ["msg_p2"],
+    retainedTurnIds: ["msg_p1"]
+  });
+  const second = harness.fake.find("POST", `/session/${firstFork}/fork`);
+  assert.equal(
+    (second?.body as { messageID: string }).messageID,
+    kept[2]!.info.id,
+    "translated to the first fork's spelling of msg_p2"
+  );
+  assert.equal(harness.fake.messagesOf(session.sessionId).length, 2, "one exchange left");
+
+  // A turn a rewind already cut stays cut.
+  const third = session.sessionId;
+  await assert.rejects(
+    session.rollbackThread(1, {
+      firstRemovedTurnId: "msg_p3",
+      droppedTurnIds: ["msg_p3"],
+      retainedTurnIds: ["msg_p1"]
+    }),
+    /opencode: the turn to rewind to is no longer in this session/
+  );
+  assert.equal(session.sessionId, third);
   await session.stop({ reason: "test", hostInitiated: true });
   harness.dispose();
 });
