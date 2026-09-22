@@ -265,6 +265,26 @@ describe("commands", () => {
 });
 
 describe("attachments", () => {
+  it("carries a chat upload's server-minted AttachmentRef verbatim (the host answers the ref itself)", () => {
+    const fromHost = {
+      type: "image" as const,
+      id: "att_01HXYZ",
+      name: "Screenshot.png",
+      mimeType: "image/png",
+      sizeBytes: 1234
+    };
+    assert.deepEqual(
+      attachmentRefFromUpload(fromHost, { name: "Screenshot.png", type: "image/png" }),
+      fromHost
+    );
+    // The terminal shape still derives the reference from the daemon-side path.
+    const fromTerminal = attachmentRefFromUpload(
+      { path: "/uploads/x/notes.txt", name: "notes.txt", size: 10 },
+      { name: "notes.txt", type: "text/plain" }
+    );
+    assert.equal(fromTerminal.id, "/uploads/x/notes.txt");
+  });
+
   it("turns an upload response into metadata only — never bytes, never a data URL", () => {
     assert.deepEqual(
       attachmentRefFromUpload({ path: "/a/b.png", name: "b.png", size: 12 }, {

@@ -297,15 +297,27 @@ export function createAgentChatTransport(transporter: Transporter): AgentChatTra
 }
 
 /**
- * The upload route answers `{path, name, size}`; the command wire takes
- * metadata only — `{id, name, mimeType, sizeBytes}`, never bytes and never a
- * data URL (§6.3). The daemon-side path IS the attachment reference, so it
- * becomes the id.
+ * The command wire takes metadata only — `{type, id, name, mimeType, sizeBytes}`,
+ * never bytes and never a data URL (§6.3).
+ *
+ * Two upload shapes reach this: a CHAT session's upload is streamed through
+ * the daemon to the agent host, which claims the file into the thread's
+ * attachment namespace, mints the id and answers the finished `AttachmentRef`
+ * itself (`agent-host/server/http-server.ts`, `sendJson(response, 200, ref)`)
+ * — the server's word is final, as in T3 (`packages/contracts/src/assets.ts`,
+ * the server-minted `attachmentId` the client carries verbatim). A TERMINAL
+ * session's upload answers `{path, name, size}`, and there the daemon-side
+ * path is the reference. Reading the terminal shape off a chat answer made
+ * every chat upload an attachment without an `id` ("attachments[0].id is
+ * required." on send, the chip gone) — 2026-09-22.
  */
 export function attachmentRefFromUpload(
-  response: SessionUploadResponse,
+  response: SessionUploadResponse | AttachmentRef,
   meta: AgentChatUploadMeta
 ): AttachmentRef {
+  if (isAttachmentRef(response)) {
+    return response;
+  }
   const mimeType = meta.type?.toLowerCase();
   const name = response.name || meta.name;
   if (mimeType && mimeType.startsWith("image/")) {
@@ -318,6 +330,17 @@ export function attachmentRefFromUpload(
     ...(mimeType ? { mimeType } : {}),
     sizeBytes: response.size
   };
+}
+
+function isAttachmentRef(value: unknown): value is AttachmentRef {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.id === "string" &&
+    record.id.length > 0 &&
+    (record.type === "image" || record.type === "file") &&
+    typeof record.name === "string"
+  );
 }
 
 // ---------------------------------------------------------------------------
