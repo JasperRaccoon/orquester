@@ -18,7 +18,7 @@ Spec: `docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md`. Every sectio
 |---|---|---|
 | `adapter.ts` | **F** | `AgentAdapter` (§4.1) — operations, capabilities, and the interface rules as doc comments; `AdapterContext`, `AdapterFactory`, `Clock`, `IdGen`. |
 | `services.ts` | **F** | The internal service interfaces the host packages code against: `ThreadStore`, `Ingestion`, `CheckpointService`, `LivenessRegistry`, `ProviderSnapshotRegistry`. |
-| `host-protocol.ts` | **F** | `AGENT_HOST_PROTOCOL_VERSION`, socket/token path helpers, the daemon↔host route table, the auth header, `newHostInstanceId()`. Imported by **both** sides. |
+| `host-protocol.ts` | **F** | `AGENT_HOST_PROTOCOL_VERSION`, socket/token path helpers, the daemon↔host route table, the auth header, `newHostInstanceId()`. Imported by **both** sides. Note `setThreadIdentity` (`POST /threads/:id/identity`): §3.4's account switch arrives here **already resolved** — the daemon owns the client-facing `POST /api/sessions/:id/account` because only it can apply the family and seeded-account gates and recompose the launch env. |
 | `adapters/index.ts` | **F** | The static `id → AdapterFactory` registry. Imports are static by rule (§8: no lazy `import()` under the host). |
 | `support/**` | **F** | Implemented, tested, dependency-free helpers every other package uses on day one. |
 | `main.ts`, `server/**`, `orchestration/**` | **W1** | The host process entry, its unix-socket HTTP server, the readiness gate, the per-thread command lock, the §3.3 reconcile, the §3.4 session-restart policy. |
@@ -65,3 +65,8 @@ would let the host exit with a child still running.
   `Ingestion.drain()` exist for exactly that.
 - `raw.ndjson` is **as sensitive as the repository** (§10): it records whatever the agent read.
   Redact before anything leaves the host.
+- **An identity change writes `launch.json` before the head, and starts nothing** (§3.4).
+  `buildEnv`/`resolveHome` in `main.ts` read the live launch config, so the order is what makes the
+  next session start pick the new account up; the restart itself is the ordinary ensure step on the
+  next `/turn`. `orchestrator.setIdentity` refuses unless the thread is idle, refuses OpenCode, and
+  refuses any move across the cliproxy boundary.

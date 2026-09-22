@@ -53,11 +53,14 @@ function projectHead(head: ThreadHead | null, event: DomainEvent): ThreadHead | 
     }
     case "thread.meta-updated": {
       if (head === null) return null;
-      const { title, modelSelection } = event.payload;
+      const { title, modelSelection, accountId, home } = event.payload;
       return {
         ...head,
         ...(title !== undefined ? { title } : {}),
-        ...(modelSelection !== undefined ? { modelSelection } : {})
+        ...(modelSelection !== undefined ? { modelSelection } : {}),
+        // §3.4's account switch, mirrored from the shared fold.
+        ...(accountId !== undefined ? { accountId } : {}),
+        ...(home !== undefined ? { home } : {})
       };
     }
     case "thread.runtime-mode-set":

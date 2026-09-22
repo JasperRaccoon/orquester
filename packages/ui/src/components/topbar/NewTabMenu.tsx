@@ -45,32 +45,20 @@ import {
   RUNTIME_MODE_LABELS,
   runtimeModeForAgent
 } from "../../lib/chat-prefs";
+// The launch chips and the composer's §3.4 account chip decide the same thing
+// — which family a launcher's accounts come from — so they share one map.
+import { isProxyLauncher, PROXY_ACCOUNT_FAMILY } from "../../lib/agent-chat/account-switch";
 import { useProviderSnapshot } from "../../lib/agent-chat/hooks";
 import { launchModelList, resolveLaunchModel } from "../../lib/launch-models";
 
 /** Past conversations listed inline per agent before the "…and N more" cutoff. */
 const MAX_INLINE_CONVERSATIONS = 10;
 
-/**
- * The proxy launchers pin *which provider family* their account chips come from:
- * routing through the managed proxy is by model name, so `claudex` picks a
- * seeded **Codex** account (its GPT/Kimi escape hatch) and `claudemix` picks a
- * seeded **Claude** account (the Fable main loop). The launcher's own id never
- * matches a managed account (`a.agent` is only `"claude"`/`"codex"`), so without
- * this remap the chips would never appear (spec §2/§5).
- */
-const PROXY_ACCOUNT_FAMILY: Record<string, "claude" | "codex"> = {
-  claudemix: "claude",
-  claudex: "codex"
-};
-
 /** Model chips for `claudex`: the curated picks, not the raw catalog dump. */
 const DEFAULT_PROXY_MODELS: string[] = [...CURATED_PROXY_MODEL_IDS];
 
 /** Provider label for the xAI OAuth models — the linked account IS the "key". */
 const XAI_PROVIDER_LABEL = "Grok account";
-
-const isProxyLauncher = (id: string): boolean => id in PROXY_ACCOUNT_FAMILY;
 
 /** The daemon strips this routing prefix before resolving a router model, so the
  *  UI must too (a stale per-account pick can still carry one). */

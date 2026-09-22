@@ -515,6 +515,31 @@ thread with no live session records the new mode and starts **nothing**: a mode 
 reason to boot a provider child, and spend an account's tokens on its startup, for a thread the
 user has not sent a message to.*
 
+*Built: **"account changed" is reachable from the composer's account chip**, and it follows the
+`/mode` rule exactly — it records the change and starts nothing, and the restart happens on the
+next `/turn`'s ensure step, carrying the cursor. Three things make it safe:*
+
+1. ***`launch.json` is rewritten BEFORE the head.*** *`main.ts`'s `buildEnv` and `resolveHome` both
+   prefer the persisted launch config over the head's account — they have to, it is the daemon's
+   resolved answer — so a head that moved first would name the new account while every relaunch
+   kept the old home's credentials. A failed append rolls the launch config back
+   (`orchestrator.ts` — `setIdentity`/`applyIdentity`).*
+2. ***It is refused unless the thread is idle*** *(`identitySwitchRefusal` in `session-policy.ts`):
+   no active or unsettled turn, not `starting`/`running`, no parked request, no queued turn, not
+   compacting, no live background work. The restart would otherwise kill work the user is watching,
+   and a parked approval belongs to a process about to be replaced. §7.4's chip mirrors the same
+   expression to gate itself. A session in **`error`** is deliberately still switchable — a stale
+   login is exactly when the user wants another account, and the switch starts nothing, so it earns
+   the same carve-out `/session/stop` and `/revert` have in §6.2.*
+3. ***The home KIND may never cross the cliproxy boundary, and OpenCode is excluded outright.*** *A
+   thread's home kind is a function of its registry entry, which never changes; and OpenCode runs
+   one server per project under the daemon's own identity (§3.2), so there is no per-thread account
+   to move. Both are 400 `INVALID_COMMAND`.*
+
+*The identity itself rides `thread.meta-updated` — the one writer of head-shaped metadata — plus a
+`session.identity-changed` activity, appended in the same decision. `binding.json` gains no new
+writer: `startSession` refreshes `providerInstanceId` when the restart happens, as it always did.*
+
 ## 4. Adapter layer
 
 ### 4.1 Interface
@@ -2375,6 +2400,16 @@ so a failed first turn leaves an empty thread the user retries into rather than 
 
 *T3: `packages/contracts/src/orchestration.ts:1270-1284` — `ThreadTurnStartBootstrap` (`createThread` / `prepareWorktree` / `runSetupScript`); differs: two calls here, tab record first*
 
+*Built: an existing thread's account is changed through **`POST /api/sessions/:id/account`**
+`{commandId, accountId}` → `{seq}`, which is a **lifecycle** route, not a §6.2 command — see the
+note at the end of §6.2 for why it cannot be one. It applies the same gates a create does (the
+registry entry's family, the seeded-account gate, the launch-env recompose, the Claude project
+trust) and then calls the host's `POST /threads/:id/identity`; on success the tab record moves
+(`ChatSessionManager.setAccount` → `session.updated`), so `sessions.json`, the tab badge and
+`liveAccountIds()` stay right. It answers the §6.2 codes — 400 `INVALID_COMMAND`, 404, 409
+`COMMAND_REJECTED`, 503 `HOST_UNAVAILABLE` — because the client folds it into the same
+command-rejection surfaces (`apps/daemon/src/agent-chat/{service.ts,proxy-routes.ts}`).*
+
 ### 6.2 Commands (new, POST, JSON, all carry `commandId`)
 
 | Route | Body | Effect |
@@ -2514,6 +2549,19 @@ therefore resolve deterministically, and no client can observe an event whose pr
 readable by a snapshot.
 
 *T3: `apps/server/src/orchestration/Layers/OrchestrationEngine.ts:416-417,438-447` — one queue, one worker fiber, all command handling serial; `:273-320` — append + project + receipt in one transaction; `:322-340` — events published only after commit*
+
+*Built: **the §3.4 account switch is deliberately NOT one of these commands.** Every name in
+`AGENT_CHAT_COMMAND_NAMES` is forwarded to the host **verbatim** — the daemon is a proxy, not a
+translator — and this one cannot be: only the daemon can validate the account against the registry
+entry's family, apply the seeded-account gate, recompose the whole launch environment
+(`resolveExtraEnv` + the entry's own env + the per-launcher env file) and prepare the new home.
+So it is the lifecycle route `POST /api/sessions/:id/account` (§6.1) and the host sees a separate,
+already-resolved `POST /threads/:id/identity`. It still carries a client-minted `commandId`, is
+serialised on the same per-thread command queue, is receipt-tracked by that id with the same
+conflict and previously-rejected rules, and answers the same `{seq}` and the same error codes —
+everything above applies to it except the "forwarded verbatim" part
+(`packages/api/src/agent-chat/wire.ts` — `agentChatRoutes.account`, `AccountCommandBody`, and its
+absence from `AGENT_CHAT_COMMAND_NAMES`).*
 
 ### 6.3 Reads
 
@@ -3026,9 +3074,16 @@ in the keybinding table, not per component.
 *Built: the runtime-mode picker's key is **`mod+shift+m`** — the conflict with the Attention
 Center's `Ctrl+Shift+A` is resolved there, once, as this paragraph requires; the whole table is one
 function, `resolveChatShortcut` (`packages/ui/src/lib/agent-chat/keybindings.logic.ts`), so a new
-binding is a new arm rather than a second listener. The account chip gets
-**no** shortcut: it is changed rarely, and every chord spent is one the terminal surfaces cannot
-have. `/effort <id>` is a narrow client-side bridge that writes the current `ModelSelection`'s
+binding is a new arm rather than a second listener. The account chip **is a picker** — §3.4's
+account switch, applied on the next message, with the menu saying so ("Applies to your next
+message. The conversation is kept.") — and it carries the `account` token so the one handler can
+address it, but it still gets **no chord**: it is changed rarely, and every chord spent is one the
+terminal surfaces cannot have. It is offered only while the thread is idle — the client half of
+§3.4's gate, `canSwitchChatAccount` in `lib/agent-chat/account-switch.ts`, mirroring the host's
+`identitySwitchRefusal` — and disabled otherwise with "Available when the agent is idle"; the
+daemon is authoritative and answers 409 to anything else. An OpenCode thread keeps the plain label
+it always had, because its server owns the identity and a control that could only refuse is worse
+than no control. `/effort <id>` is a narrow client-side bridge that writes the current `ModelSelection`'s
 effort option and sends nothing (§4.6.5). A paste that folds into a text attachment reports itself
 **inline in the composer** rather than as a toast, because a toast for something that already
 produced a visible chip is noise (`packages/ui/src/components/agent-chat/composer/`).*

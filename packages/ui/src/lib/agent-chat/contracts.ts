@@ -220,6 +220,17 @@ export interface WorkLogEntry {
     /** The summary met §5.6's wire cap; the whole one is a full-item read away. */
     summaryTruncated?: boolean;
   };
+  /**
+   * Present on the §3.4 account-switch marker. **Ids only**, like
+   * `agentSpawn`: the label resolves from the live account list at render
+   * time, because the host has none to write and a name frozen into the log
+   * goes stale the moment the account is renamed.
+   */
+  accountSwitch?: {
+    /** Empty string is the system identity, as everywhere else. */
+    accountId: string;
+    previousAccountId?: string;
+  };
 }
 
 /**
@@ -425,6 +436,13 @@ export interface AgentChatActions {
    */
   backgroundTool(input: { toolUseId?: string }): Promise<void>;
   setMode(input: { runtimeMode?: RuntimeMode; modelSelection?: ModelSelection }): Promise<void>;
+  /**
+   * `POST /api/sessions/:id/account` — §3.4's account switch, applied on the
+   * next message. `accountId` is a managed account of the thread's family or
+   * `SYSTEM_ACCOUNT_ID`. Offered only while the thread is idle
+   * (`canSwitchChatAccount`); the daemon refuses anything else with a 409.
+   */
+  setAccount(input: { accountId: string }): Promise<void>;
   stopSession(): Promise<void>;
   /** The existing `POST /api/sessions/:id/upload`; returns the attachment reference. */
   uploadAttachment(file: File | Blob, meta: { name: string; type?: string }): Promise<AttachmentRef>;

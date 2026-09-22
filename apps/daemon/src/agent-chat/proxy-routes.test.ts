@@ -69,6 +69,8 @@ interface Harness {
   seqs: Array<[string, number]>;
   restarts: number;
   providerBroadcasts: string[];
+  /** `[sessionId, accountId]` per §3.4 account switch reaching the service. */
+  accountSwitches: Array<[string, string]>;
   close(): Promise<void>;
 }
 
@@ -78,12 +80,28 @@ async function makeHarness(
 ): Promise<Harness> {
   const host = await makeFakeHost();
   const app = Fastify({ logger: false });
-  const harness: Partial<Harness> = { host, healthy: true, seqs: [], restarts: 0, providerBroadcasts: [] };
+  const harness: Partial<Harness> = {
+    host,
+    healthy: true,
+    seqs: [],
+    restarts: 0,
+    providerBroadcasts: [],
+    accountSwitches: []
+  };
   registerAgentChatRoutes(app, {
     client: new AgentHostClient({ socketPath: host.socketPath, token: () => "tok" }),
     isHostHealthy: () => harness.healthy === true,
     chatSession: (id) => sessions[id],
     noteSeq: (id, seq) => harness.seqs?.push([id, seq]),
+    switchAccount: async (id, body) => {
+      harness.accountSwitches?.push([id, body.accountId]);
+      if (body.accountId === "refused") {
+        throw Object.assign(new Error("That account cannot run this agent."), {
+          code: "INVALID_COMMAND"
+        });
+      }
+      return { seq: 7 };
+    },
     restartHost: async () => {
       harness.restarts = (harness.restarts ?? 0) + 1;
       return { hostInstanceId: "host-2", markedThreadIds: ["t1"] };
@@ -366,5 +384,53 @@ test("a stream refusal answers the host's envelope rather than an empty stream",
   const response = await h.app.inject({ method: "GET", url: agentChatRoutes.events("t1") });
   assert.equal(response.statusCode, 404);
   assert.equal(response.json().error.code, "THREAD_NOT_FOUND");
+  await h.close();
+});
+
+// --- §3.4 the account switch ----------------------------------------------
+
+test("the account route is daemon-owned: it never hits the host socket itself", async () => {
+  const h = await makeHarness({ t1: tab("t1") });
+  const response = await h.app.inject({
+    method: "POST",
+    url: agentChatRoutes.account("t1"),
+    payload: { commandId: "c1", accountId: "acc-2" }
+  });
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.json(), { seq: 7 });
+  assert.deepEqual(h.accountSwitches, [["t1", "acc-2"]]);
+  assert.deepEqual(h.host.requests, [], "the daemon calls the host itself, not by proxy");
+  await h.close();
+});
+
+test("a refused switch answers the §6.2 envelope with its own status", async () => {
+  const h = await makeHarness({ t1: tab("t1") });
+  const response = await h.app.inject({
+    method: "POST",
+    url: agentChatRoutes.account("t1"),
+    payload: { commandId: "c1", accountId: "refused" }
+  });
+  assert.equal(response.statusCode, 400);
+  assert.equal(response.json().error.code, "INVALID_COMMAND");
+  await h.close();
+});
+
+test("the account route is 404 for an unknown tab and 503 while the host is down", async () => {
+  const h = await makeHarness({ t1: tab("t1") });
+  const missing = await h.app.inject({
+    method: "POST",
+    url: agentChatRoutes.account("nope"),
+    payload: { commandId: "c1", accountId: "acc-2" }
+  });
+  assert.equal(missing.statusCode, 404);
+  h.healthy = false;
+  const down = await h.app.inject({
+    method: "POST",
+    url: agentChatRoutes.account("t1"),
+    payload: { commandId: "c1", accountId: "acc-2" }
+  });
+  assert.equal(down.statusCode, 503);
+  assert.equal(down.json().error.code, "HOST_UNAVAILABLE");
+  assert.deepEqual(h.accountSwitches, [], "nothing reached the service");
   await h.close();
 });

@@ -51,6 +51,8 @@ function representativeLog(): DomainEvent[] {
       runtimeMode: "approval-required"
     }),
     ev("thread.meta-updated", { title: "Renamed", modelSelection: { model: "opus" } }),
+    // §3.4's account switch rides the same event; both projections must carry it.
+    ev("thread.meta-updated", { accountId: "acc-2", home: "account" }),
     ev("thread.runtime-mode-set", { runtimeMode: "auto" }),
     ev("thread.message-sent", {
       messageId: "user:1",

@@ -17,6 +17,7 @@ import type { AgentAccount, SessionSummary } from "@orquester/api";
 import { overlayManagedAccountAuth } from "./provider-auth-overlay.ts";
 import {
   AGENT_CHAT_COMMAND_NAMES,
+  AGENT_CHAT_ERROR_CODES,
   agentChatRoutes,
   type AgentChatCommandName,
   type AgentChatErrorCode,
@@ -47,6 +48,13 @@ export interface AgentChatRouteDeps {
   chatSession(id: string): SessionSummary | undefined;
   /** Remember the sequence a client has been served to (§5.2 `lastSeq`). */
   noteSeq(id: string, seq: number): void;
+  /**
+   * §3.4's account switch. **Not** a proxied command: the body is not forwarded
+   * verbatim — the daemon resolves the account, recomposes the launch
+   * environment, prepares the home and only then calls the host, which is why
+   * this route exists here rather than in {@link AGENT_CHAT_COMMAND_NAMES}.
+   */
+  switchAccount(id: string, body: { commandId: string; accountId: string }): Promise<{ seq: number }>;
   /**
    * §6.3 `POST /api/agent-host/stop`: the host writes every continuation
    * marker for a running thread with a usable cursor, then drains and stops,
@@ -87,6 +95,27 @@ const HOST_UNAVAILABLE = chatError(
   "HOST_UNAVAILABLE",
   "The agent host is restarting. Retry the same commandId."
 );
+
+/** The §6.2 status for a code, so the account route answers like a command. */
+function statusForChatError(code: AgentChatErrorCode): number {
+  if (code === "INVALID_COMMAND") return 400;
+  if (code === "THREAD_NOT_FOUND") return 404;
+  if (code === "HOST_UNAVAILABLE") return 503;
+  return 409;
+}
+
+/**
+ * Map a `ChatSessionError`/host envelope code onto the closed §6.2 list. A
+ * daemon-side refusal that names no code is a 409 `COMMAND_REJECTED`, the same
+ * shape the client's command-rejection banner already understands.
+ */
+function accountSwitchErrorCode(error: unknown): AgentChatErrorCode {
+  const code = (error as { code?: unknown })?.code;
+  return typeof code === "string" &&
+    (AGENT_CHAT_ERROR_CODES as readonly string[]).includes(code)
+    ? (code as AgentChatErrorCode)
+    : "COMMAND_REJECTED";
+}
 
 const THREAD_NOT_FOUND = chatError("THREAD_NOT_FOUND", "No chat session with that id.");
 
@@ -138,6 +167,37 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
       }
     );
   }
+
+  // --- §3.4 the account switch (daemon-owned, not a proxied command) -------
+  app.post<{ Params: { id: string }; Body: { commandId?: unknown; accountId?: unknown } }>(
+    pattern(agentChatRoutes.account(":id")),
+    async (request, reply) => {
+      const { id } = request.params;
+      if (!deps.chatSession(id)) {
+        return reply.code(404).send(THREAD_NOT_FOUND);
+      }
+      if (!deps.isHostHealthy()) {
+        return reply.code(503).send(HOST_UNAVAILABLE);
+      }
+      const body = request.body ?? {};
+      try {
+        return await deps.switchAccount(id, {
+          commandId: String(body.commandId ?? ""),
+          accountId: String(body.accountId ?? "")
+        });
+      } catch (error) {
+        const code = accountSwitchErrorCode(error);
+        return reply
+          .code(statusForChatError(code))
+          .send(
+            chatError(
+              code,
+              error instanceof Error ? error.message : "Could not switch the account."
+            )
+          );
+      }
+    }
+  );
 
   // --- §6.3 reads ----------------------------------------------------------
 

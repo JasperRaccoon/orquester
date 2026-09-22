@@ -10,6 +10,8 @@
  * if you are about to add one, add it there instead.
  */
 
+import { IDENTITY_CHANGED_ACTIVITY_KIND } from "@orquester/api/agent-chat";
+
 import type { ToolGroupSummaryKind, WorkLogEntry } from "../../../lib/agent-chat/contracts";
 import { skillMentionsInText } from "../composer/composer-menu";
 import {
@@ -42,6 +44,17 @@ export function summaryKindIconName(kind: ToolGroupSummaryKind): WorkEntryIconNa
 /** The inline "the model you asked for was not the model that ran" notice (§7.3). */
 export function workEntryIsRerouteNotice(entry: WorkLogEntry): boolean {
   return entry.sourceActivityKind === "model.rerouted";
+}
+
+/**
+ * The §3.4 account switch marker — "from here on, another identity".
+ *
+ * Like the reroute notice it is a statement about *this point in the
+ * conversation* rather than an action the agent took, so it renders as an
+ * inline banded row and not as a tool call.
+ */
+export function workEntryIsIdentityChange(entry: WorkLogEntry): boolean {
+  return entry.sourceActivityKind === IDENTITY_CHANGED_ACTIVITY_KIND;
 }
 
 // ---------------------------------------------------------------------------

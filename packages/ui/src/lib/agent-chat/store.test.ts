@@ -15,7 +15,8 @@ import { AgentChatCommandError, type AgentChatTransport } from "./transport";
 import { activity, ev, head, message, resetBuilders, snapshot, stamp } from "./test-helpers";
 
 interface Posted {
-  name: AgentChatCommandName;
+  /** `"account"` is the daemon-owned §3.4 route, not a §6.2 command name. */
+  name: AgentChatCommandName | "account";
   body: Record<string, unknown>;
 }
 
@@ -43,6 +44,16 @@ function fakeTransport(): {
         throw failures.error;
       }
       posted.push({ name, body: body as unknown as Record<string, unknown> });
+      return { seq: posted.length };
+    },
+    // §3.4's account switch: a daemon-owned route, recorded under its own name
+    // so a test can assert it never travels as a §6.2 command.
+    async switchAccount(_sessionId, body) {
+      if (failures && failures.times > 0) {
+        failures.times -= 1;
+        throw failures.error;
+      }
+      posted.push({ name: "account", body: body as unknown as Record<string, unknown> });
       return { seq: posted.length };
     },
     async read() {
@@ -209,6 +220,33 @@ describe("commands", () => {
     await api.getState().actions.compact();
     assert.equal(fake.posted.length, 1);
     assert.equal(fake.posted[0]?.body.commandId, "id1", "the receipt makes the retry free");
+  });
+
+  it("setAccount posts the daemon-owned route with a minted commandId (§3.4)", async () => {
+    const { api, fake, state } = await store();
+    await api.getState().actions.setAccount({ accountId: "acc-2" });
+    assert.equal(fake.posted.length, 1);
+    assert.equal(fake.posted[0]?.name, "account", "never a §6.2 command");
+    assert.deepEqual(fake.posted[0]?.body, { commandId: "id1", accountId: "acc-2" });
+    // Applied on the next message: nothing optimistic, no row, no head edit.
+    assert.equal(state().slice.entries.length, 0);
+    assert.equal(state().slice.errorBanner, null);
+  });
+
+  it("setAccount retries HOST_UNAVAILABLE with the same id and banners a refusal", async () => {
+    const retrying = await store();
+    retrying.fake.fail(new AgentChatCommandError(503, "HOST_UNAVAILABLE", "restarting"), 2);
+    await retrying.api.getState().actions.setAccount({ accountId: "acc-2" });
+    assert.equal(retrying.fake.posted.length, 1);
+    assert.equal(retrying.fake.posted[0]?.body.commandId, "id1");
+
+    const refused = await store();
+    refused.fake.fail(
+      new AgentChatCommandError(409, "COMMAND_REJECTED", "Wait for the agent to finish."),
+      99
+    );
+    await assert.rejects(() => refused.api.getState().actions.setAccount({ accountId: "acc-2" }));
+    assert.equal(refused.state().slice.errorBanner, "Wait for the agent to finish.");
   });
 
   it("surfaces a non-retryable failure in the error banner", async () => {

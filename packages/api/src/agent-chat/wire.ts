@@ -56,6 +56,15 @@ export const agentChatRoutes = {
    */
   background: (sessionId: string): string => `${sessionBase(sessionId)}/background`,
   sessionStop: (sessionId: string): string => `${sessionBase(sessionId)}/session/stop`,
+  /**
+   * Switch the managed account an existing thread runs under (§3.4 "account
+   * changed"). Deliberately **not** a §6.2 command and deliberately absent
+   * from {@link AGENT_CHAT_COMMAND_NAMES}: every command there is forwarded to
+   * the host verbatim, and this one cannot be — only the daemon can recompose
+   * the launch environment, resolve the new home and prepare it, so the daemon
+   * owns the route and calls the host itself.
+   */
+  account: (sessionId: string): string => `${sessionBase(sessionId)}/account`,
 
   // §6.3 reads
   thread: (sessionId: string): string => `${sessionBase(sessionId)}/thread`,
@@ -213,6 +222,32 @@ export interface ModeCommandBody extends AgentChatCommandBase {
 
 /** Stop the provider child, keep the thread, its log and its cursor (§6.2). */
 export type SessionStopCommandBody = AgentChatCommandBase;
+
+/**
+ * `POST /api/sessions/:id/account` — the composer's account chip.
+ *
+ * Applied on the **next message**: the daemon recomposes the launch
+ * environment and records the new identity, and §3.4's ensure-session step
+ * restarts the provider child on the send path, carrying the resume cursor. It
+ * is not in {@link AgentChatCommandBodies} because it is not a proxied command
+ * (see `agentChatRoutes.account`), but it answers the same
+ * {@link CommandReceiptResponse} and the same {@link AgentChatErrorCode}s.
+ *
+ * `accountId` is a managed account of the thread's family, or
+ * `SYSTEM_ACCOUNT_ID` for the daemon user's own login.
+ */
+export interface AccountCommandBody extends AgentChatCommandBase {
+  accountId: string;
+}
+
+/**
+ * The activity kind the host appends beside the switch, so the timeline shows
+ * where the identity changed. `payload` is
+ * `{accountId, home, previousAccountId?}`; the client resolves the id to a
+ * label at render time, because a label is a client-side fact the log must not
+ * freeze.
+ */
+export const IDENTITY_CHANGED_ACTIVITY_KIND = "session.identity-changed";
 
 export type AgentChatCommandBody =
   | TurnCommandBody

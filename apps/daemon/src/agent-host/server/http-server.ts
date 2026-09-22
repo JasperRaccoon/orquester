@@ -36,7 +36,8 @@ import {
   AGENT_HOST_PROTOCOL_VERSION,
   agentHostRoutes,
   type AgentHostHealthResponse,
-  type CreateHostThreadRequest
+  type CreateHostThreadRequest,
+  type SetThreadIdentityRequest
 } from "../host-protocol.ts";
 import type { ThreadStore } from "../services.ts";
 import {
@@ -447,6 +448,16 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
         sendJson(response, 200, receipt);
         return;
       }
+    }
+
+    // §3.4's account switch. Not in `COMMAND_NAMES`: the daemon owns the
+    // client-facing route and calls this with an identity it has already
+    // resolved, so nothing here re-reads the accounts store.
+    if (rest === "/identity" && method === "POST") {
+      const body = (await readJsonBody(request)) as SetThreadIdentityRequest;
+      const receipt = await orchestrator.setIdentity(threadId, body);
+      sendJson(response, 200, receipt);
+      return;
     }
 
     if (rest === "/thread" && method === "GET") {

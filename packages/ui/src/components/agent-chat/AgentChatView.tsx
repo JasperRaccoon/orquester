@@ -8,6 +8,13 @@ import {
 import type { ThreadItem } from "@orquester/api/agent-chat";
 
 import { shortAccountLabel } from "../../lib/account-label";
+import {
+  buildChatAccountOptions,
+  canSwitchChatAccount,
+  chatAccountLabel,
+  chatAccountSelectionId,
+  chatAccountSwitchSupported
+} from "../../lib/agent-chat/account-switch";
 import { ApiError } from "../../lib/api-client";
 import { useApi } from "../../context/orquester-context";
 import { Modal, ModalCloseButton } from "../ui";
@@ -158,8 +165,12 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   const status = useAgentChatStatus(sessionId);
   const provider = useProviderSnapshot(session.refId);
   const agentAccounts = useAppStore((s) => s.agentAccounts);
+  // §3.4's account chip: a proxy launcher may only pin accounts SEEDED into
+  // the model proxy, the same rule the "+" menu's launch chips apply.
+  const cliproxy = useAppStore((s) => s.cliproxy);
   const setPreferredModelSelection = useAppStore((s) => s.setPreferredModelSelection);
   const setPreferredRuntimeMode = useAppStore((s) => s.setPreferredRuntimeMode);
+  const setPreferredAccount = useAppStore((s) => s.setPreferredAccount);
   // What the composer's pickers change becomes this device's preference for
   // the agent, so the next chat opens the same way (model, effort, thinking,
   // fast mode, permission mode). The thread itself still gets the command.
@@ -170,9 +181,22 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
         await actions.setMode(input);
         if (input.modelSelection) setPreferredModelSelection(session.refId, input.modelSelection);
         if (input.runtimeMode) setPreferredRuntimeMode(session.refId, input.runtimeMode);
+      },
+      // §3.4: the account the user moved this thread to becomes this device's
+      // preference for the agent, exactly as the model and mode picks do — but
+      // only once the switch was accepted.
+      setAccount: async (input: Parameters<typeof actions.setAccount>[0]) => {
+        await actions.setAccount(input);
+        setPreferredAccount(session.refId, input.accountId);
       }
     }),
-    [actions, session.refId, setPreferredModelSelection, setPreferredRuntimeMode]
+    [
+      actions,
+      session.refId,
+      setPreferredAccount,
+      setPreferredModelSelection,
+      setPreferredRuntimeMode
+    ]
   );
   const api = useApi();
 
@@ -430,11 +454,43 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
     return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [active, sessionId, actions]);
 
-  const accountLabel = session.accountId
-    ? (shortAccountLabel(
-        agentAccounts?.accounts.find((a) => a.id === session.accountId)?.label
-      ) ?? null)
-    : null;
+  // §3.4's account chip. The HEAD is the authority — the host records the
+  // switch there first — with the tab summary as the fallback for a thread
+  // whose snapshot has not landed yet.
+  const threadAccountId = slice.head?.accountId ?? session.accountId ?? "";
+  // OpenCode runs one server per project under its own identity (§3.2), so
+  // there is nothing to pick: the chip stays the label it always was.
+  const accountOptions = chatAccountSwitchSupported({
+    refId: session.refId,
+    adapterId: provider?.id
+  })
+    ? buildChatAccountOptions({
+        refId: session.refId,
+        accounts: agentAccounts?.accounts,
+        seededAccountIds: cliproxy?.accounts?.map((account) => account.id),
+        shortLabel: shortAccountLabel
+      })
+    : undefined;
+  // A thread on the system identity showed no chip before the picker existed;
+  // it shows one now, because "System" is a choice the user can move off.
+  const accountLabel =
+    accountOptions !== undefined || session.accountId
+      ? chatAccountLabel({
+          accountId: threadAccountId,
+          accounts: agentAccounts?.accounts,
+          shortLabel: shortAccountLabel
+        })
+      : null;
+  const accountSwitchEnabled =
+    !paintOnly &&
+    canSwitchChatAccount({
+      isTurnActive: turnActive,
+      hasPendingRequest: pending.totalCount > 0,
+      queuedCount: slice.queue.length,
+      reverting,
+      connection: slice.connection,
+      backgroundLive: session.backgroundLiveness != null
+    });
   const latestCheckpoint = slice.checkpoints.length
     ? slice.checkpoints[slice.checkpoints.length - 1]
     : null;
@@ -694,6 +750,9 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 interactionMode={slice.interactionMode}
                 showPlanModeToggle={provider?.capabilities?.showPlanModeToggle === true}
                 accountLabel={accountLabel}
+                accountOptions={accountOptions}
+                accountId={chatAccountSelectionId(threadAccountId)}
+                accountSwitchEnabled={accountSwitchEnabled}
                 isTurnActive={!paintOnly && turnActive}
                 hasPendingRequest={!paintOnly && pending.totalCount > 0}
                 queue={slice.queue}

@@ -358,3 +358,57 @@ test("create dispatches on the kind", async () => {
   assert.equal(chatCreates, 1);
   await assert.rejects(() => router.create({ kind: "shell", refId: "bash" } as CreateSessionRequest));
 });
+
+// --- §3.4 account switch ---------------------------------------------------
+
+test("setAccount moves the summary AND the persisted chat block together", () => {
+  let persists = 0;
+  const chat = chatManager(() => {
+    persists += 1;
+  });
+  seed(chat, "t1", 0);
+  const updates: SessionSummary[] = [];
+  chat.lifecycle.on("updated", (summary: SessionSummary) => updates.push(summary));
+  persists = 0;
+
+  const next = chat.setAccount("t1", { accountId: "acc-2", home: "account" });
+  assert.equal(next?.accountId, "acc-2");
+  assert.equal(updates.length, 1, "one `updated` broadcast, so every client reconciles");
+  assert.equal(updates[0].accountId, "acc-2");
+  assert.equal(persists, 1, "sessions.json is rewritten");
+
+  assert.deepEqual(chat.records()[0].chat, {
+    threadId: "t1",
+    accountId: "acc-2",
+    home: "account",
+    lastSeq: 0
+  });
+  // The tab badge and the idle-account refresher both read `summary.accountId`.
+  assert.deepEqual([...chat.liveAccountIds()], ["acc-2"]);
+});
+
+test("switching to the system identity drops the summary's account id", () => {
+  const chat = chatManager();
+  seed(chat, "t1", 0);
+  const next = chat.setAccount("t1", { accountId: "", home: "system" });
+  assert.equal(next?.accountId, undefined, "absent, never an empty string");
+  assert.deepEqual([...chat.liveAccountIds()], []);
+  assert.equal(chat.records()[0].chat?.home, "system");
+});
+
+test("setAccount is a no-op for an unchanged identity and for an unknown tab", () => {
+  let persists = 0;
+  const chat = chatManager(() => {
+    persists += 1;
+  });
+  seed(chat, "t1", 0);
+  persists = 0;
+  let updates = 0;
+  chat.lifecycle.on("updated", () => {
+    updates += 1;
+  });
+  assert.equal(chat.setAccount("t1", { accountId: "acc-1", home: "account" }), null);
+  assert.equal(chat.setAccount("nope", { accountId: "acc-2", home: "account" }), null);
+  assert.equal(updates, 0);
+  assert.equal(persists, 0);
+});

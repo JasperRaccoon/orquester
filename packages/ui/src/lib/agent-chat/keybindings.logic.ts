@@ -43,6 +43,7 @@ export type ComposerControlCommand =
   | "model"
   | "effort"
   | "mode"
+  | "account"
   | "plan"
   | "attach"
   | "send"
@@ -51,17 +52,21 @@ export type ComposerControlCommand =
 /**
  * Every token that a mounted composer actually carries.
  *
- * `account` and `compact` were in this union with **no DOM target**, so
+ * A token belongs here only once a control advertises it: `account` and
+ * `compact` were once in this union with **no DOM target**, so
  * `openControl("account")` was a silent no-op that read like a bug (fix-wave
- * R7-12) — the account chip deliberately carries no token (see
- * `ComposerChips.tsx`) and compaction is reached through the context meter,
- * not a composer control. A token belongs here only once a control advertises
- * it.
+ * R7-12). `account` is back because the chip became a picker (§3.4's account
+ * switch) and carries `data-composer-shortcut="account"` — but it gets **no
+ * chord**: §7.4's *Built:* note spends that argument already (it is changed
+ * rarely, and every chord spent is one the terminal surfaces cannot have), so
+ * the token exists only so the control is addressable, never bound.
+ * `compact` is still reached through the context meter, not a control.
  */
 export const COMPOSER_CONTROL_COMMANDS: readonly ComposerControlCommand[] = [
   "model",
   "effort",
   "mode",
+  "account",
   "plan",
   "attach",
   "send",

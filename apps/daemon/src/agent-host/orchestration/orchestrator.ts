@@ -23,6 +23,7 @@
 import {
   COMMANDS_ALLOWED_IN_ERROR_STATE,
   DEFAULT_RUNTIME_MODE,
+  IDENTITY_CHANGED_ACTIVITY_KIND,
   MAX_TURN_FILE_BYTES,
   MAX_TURN_IMAGE_BYTES,
   isHistoricalRuntimeEvent,
@@ -66,7 +67,8 @@ import {
   CONTINUATION_PROMPT,
   CONTINUATION_SEND_FAILED_MESSAGE,
   COMPACTION_FAILED_MESSAGE,
-  type CreateHostThreadRequest
+  type CreateHostThreadRequest,
+  type SetThreadIdentityRequest
 } from "../host-protocol.ts";
 import type {
   AppendableDomainEvent,
@@ -114,6 +116,7 @@ import {
 } from "./runtime-seams.ts";
 import {
   decideSessionRestart,
+  identitySwitchRefusal,
   modelSelectionEquals,
   type BoundSessionShape,
   type DesiredSessionShape
@@ -358,6 +361,15 @@ export interface Orchestrator {
    * replace it (§5.1). Only a title the USER typed is manual.
    */
   updateThread(threadId: string, input: { title?: string; seed?: boolean }): Promise<{ seq: number }>;
+  /**
+   * §3.4's account switch, applied on the thread's next message.
+   *
+   * Serialised on the thread's own command queue and receipt-tracked by
+   * `commandId`, exactly like a §6.2 command, but it starts **no** session: the
+   * `ensureSession` step on the next `/turn` sees the changed `accountKey`,
+   * restarts with reason `"account"` and carries the resume cursor.
+   */
+  setIdentity(threadId: string, request: SetThreadIdentityRequest): Promise<{ seq: number }>;
   deleteThread(threadId: string): Promise<void>;
 
   command(
@@ -2478,6 +2490,193 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       });
     });
 
+  /**
+   * §3.4's "account changed", for a thread that already exists.
+   *
+   * **`launch.json` is rewritten before the head is.** `main.ts`'s `buildEnv`
+   * and `resolveHome` both prefer the launch config over the head's account —
+   * they have to, it is the daemon's resolved answer — so a head that moved
+   * first would name the new account while every relaunch kept the old home's
+   * credentials, silently billing the wrong identity. If the append then fails
+   * the launch config is rolled back, because the reverse (a launch config
+   * ahead of the head) is the same bug mirrored.
+   *
+   * Nothing is started here: the next `/turn` runs `ensureSession`, which sees
+   * the changed `accountKey`, restarts with reason `"account"` and carries the
+   * resume cursor. A thread with no live session simply starts under the new
+   * identity — the same rule `/mode` follows.
+   */
+  const applyIdentity = async (
+    runtime: ThreadRuntime,
+    request: SetThreadIdentityRequest,
+    commandId: string
+  ): Promise<{ seq: number }> => {
+    const head = requireHead(runtime);
+    const accountId = typeof request.accountId === "string" ? request.accountId : undefined;
+    if (accountId === undefined) {
+      throw invalidCommand("accountId is required.");
+    }
+    const home = request.home;
+    if (home !== "system" && home !== "account" && home !== "cliproxy") {
+      throw invalidCommand("home must be system, account or cliproxy.");
+    }
+    if (home === "account" && accountId.length === 0) {
+      throw invalidCommand("An account home needs an account id.");
+    }
+    // One live session per thread, and OpenCode's is shared by every thread of
+    // the project and runs under the server's own identity (§3.2) — there is
+    // no per-thread account to move.
+    if (head.adapter === "opencode") {
+      throw invalidCommand("OpenCode threads always run under the server's own identity.");
+    }
+    // A thread's home KIND is a function of its registry entry, which never
+    // changes; crossing this boundary would also cross the resume cursor's
+    // home, and a cliproxy home does not share `projects/` with the rest.
+    if ((head.home === "cliproxy") !== (home === "cliproxy")) {
+      throw invalidCommand(
+        "This agent's launcher cannot move between the model proxy and a direct account."
+      );
+    }
+
+    if (accountId === head.accountId && home === head.home) {
+      // Unchanged: still a receipt and still a `{seq}`, so a retry of the same
+      // `commandId` is free — but no event, no activity and no restart.
+      const unchanged = await commit(runtime, [], { commandId, status: "accepted" });
+      return { seq: unchanged.seq };
+    }
+
+    const session = currentSession(runtime);
+    const pending = runtime.state.pending ?? { approvals: [], userInputs: [] };
+    const refusal = identitySwitchRefusal({
+      status: session.status,
+      activeTurnId: session.activeTurnId,
+      hasUnsettledTurn: turnIsActive(runtime),
+      pendingRequestCount: pending.approvals.length + pending.userInputs.length,
+      queuedTurnCount: runtime.queuedTurns.length,
+      compacting: runtime.compacting,
+      backgroundLive: liveness.liveness(runtime.id) !== null
+    });
+    if (refusal !== null) {
+      throw commandRejected(refusal);
+    }
+
+    const previousLaunch = runtime.launch;
+    const launch = launchConfigFromRequest(request);
+    try {
+      await launchConfigs.save(runtime.id, launch);
+    } catch (error) {
+      // Refused, not warned: an unwritten launch config means the next child
+      // launches under the OLD credentials while the user is told otherwise.
+      throw commandRejected(
+        `Could not record the new account for this thread: ${describeFailure(error)}`
+      );
+    }
+    runtime.launch = launch;
+
+    const occurredAt = clock.nowIso();
+    const previousAccountId = head.accountId;
+    try {
+      const result = await commit(
+        runtime,
+        [
+          buildEvent(
+            runtime.id,
+            "thread.meta-updated",
+            { accountId, home },
+            { commandId, occurredAt }
+          ),
+          buildEvent(
+            runtime.id,
+            "thread.activity-appended",
+            {
+              activity: makeActivity({
+                id: ids.eventId(),
+                tone: "info",
+                activityKind: IDENTITY_CHANGED_ACTIVITY_KIND,
+                summary: "Switched account",
+                payload: {
+                  accountId,
+                  home,
+                  ...(previousAccountId.length > 0 ? { previousAccountId } : {})
+                },
+                turnId: null,
+                createdAt: occurredAt
+              })
+            },
+            { occurredAt }
+          )
+        ],
+        { commandId, status: "accepted" }
+      );
+      await saveHeadNow(runtime);
+      return { seq: result.seq };
+    } catch (error) {
+      runtime.launch = previousLaunch;
+      if (previousLaunch !== null) {
+        await launchConfigs.save(runtime.id, previousLaunch).catch((writeError: unknown) => {
+          logger.warn(
+            `agent-host: failed to roll the launch config back for ${runtime.id}`,
+            writeError
+          );
+        });
+      }
+      throw error;
+    }
+  };
+
+  const setIdentity = async (
+    threadId: string,
+    request: SetThreadIdentityRequest
+  ): Promise<{ seq: number }> =>
+    whenReady(async () => {
+      const runtime = await loadRuntime(threadId);
+      return runtime.commands.run(async () => {
+        const body = requireBody(request);
+        const commandId = requireCommandId(body);
+        // Receipt first, exactly as `command` does: a receipt only ever proves
+        // that one command was handled.
+        const receipt = await store.getReceipt(commandId);
+        if (receipt) {
+          if (receipt.threadId !== threadId) {
+            throw new AgentChatCommandError(
+              "COMMAND_ID_CONFLICT",
+              `commandId '${commandId}' is already recorded against another thread.`,
+              { threadId: receipt.threadId }
+            );
+          }
+          if (receipt.status === "accepted") {
+            return { seq: receipt.seq };
+          }
+          throw replayRecordedRejection(
+            receipt.error ?? { code: "COMMAND_REJECTED", message: "Previously rejected." }
+          );
+        }
+        try {
+          return await applyIdentity(runtime, request, commandId);
+        } catch (error) {
+          if (isAgentChatCommandError(error) && error.recorded) {
+            await store
+              .putReceipt({
+                commandId,
+                threadId,
+                seq: runtime.state.seq,
+                status: "rejected",
+                acceptedAt: clock.nowIso(),
+                error: {
+                  code: error.code,
+                  message: error.message,
+                  ...(error.detail !== undefined ? { detail: error.detail } : {})
+                }
+              })
+              .catch((writeError: unknown) => {
+                logger.warn("agent-host: failed to record a rejected receipt", writeError);
+              });
+          }
+          throw error;
+        }
+      });
+    });
+
   const deleteThread = async (threadId: string): Promise<void> =>
     whenReady(async () => {
       const runtime = await loadRuntime(threadId);
@@ -3342,6 +3541,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     whenReady,
     createThread,
     updateThread,
+    setIdentity,
     deleteThread,
     command,
     readThread,

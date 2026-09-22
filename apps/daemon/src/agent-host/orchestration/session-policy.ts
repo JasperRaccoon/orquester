@@ -18,7 +18,8 @@ import type {
   AgentAdapterId,
   ModelSelection,
   ProviderSession,
-  RuntimeMode
+  RuntimeMode,
+  ThreadSessionStatus
 } from "@orquester/api/agent-chat";
 
 /** What the thread now wants, as the head records it. */
@@ -105,4 +106,62 @@ export function decideSessionRestart(input: {
     reasons,
     carryResumeCursor: !modelRestart
   };
+}
+
+// ---------------------------------------------------------------------------
+// §3.4 — switching the account of an EXISTING thread
+// ---------------------------------------------------------------------------
+
+/**
+ * Everything the identity gate reads, as data.
+ *
+ * The switch is applied on the next message: it rewrites the thread's launch
+ * configuration and its head, and `decideSessionRestart` then restarts the
+ * provider child on the send path with reason `"account"`. That is only safe
+ * while nothing is in flight — a restart under a running turn would kill work
+ * the user is watching, and a parked approval belongs to a provider process
+ * that is about to be replaced.
+ */
+export interface IdentitySwitchState {
+  /** The head's session status. */
+  status: ThreadSessionStatus;
+  activeTurnId: string | null;
+  /** A turn row that has not reached a settled state. */
+  hasUnsettledTurn: boolean;
+  /** Open approvals + open questions. */
+  pendingRequestCount: number;
+  /** `/turn`s parked behind a running compaction. */
+  queuedTurnCount: number;
+  compacting: boolean;
+  /** A background shell or task is still reporting. */
+  backgroundLive: boolean;
+}
+
+/**
+ * The refusal message for an account switch, or `null` when the thread is idle
+ * enough to take one. One expression, so the host's 409 and the composer's
+ * disabled chip can never disagree about what "idle" means.
+ */
+export function identitySwitchRefusal(state: IdentitySwitchState): string | null {
+  if (state.compacting) {
+    return "Wait for the context compaction to finish before switching accounts.";
+  }
+  if (
+    state.activeTurnId !== null ||
+    state.hasUnsettledTurn ||
+    state.status === "starting" ||
+    state.status === "running"
+  ) {
+    return "Wait for the agent to finish the current turn before switching accounts.";
+  }
+  if (state.pendingRequestCount > 0) {
+    return "Answer the agent's open request before switching accounts.";
+  }
+  if (state.queuedTurnCount > 0) {
+    return "Send or clear the queued messages before switching accounts.";
+  }
+  if (state.backgroundLive) {
+    return "Wait for the background work to finish before switching accounts.";
+  }
+  return null;
 }

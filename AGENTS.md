@@ -302,6 +302,7 @@ what a newer one wrote.
 | | |
 |---|---|
 | Commands (POST, JSON, every body carries a client-minted `commandId`) | `/api/sessions/:id/{turn,interrupt,approval,answer,dismiss,revert,compact,mode,session/stop}` → `{seq}` |
+| Daemon-owned, command-shaped (NOT proxied verbatim) | `POST /api/sessions/:id/account` `{commandId, accountId}` → `{seq}` — §3.4's account switch; see the gotcha below |
 | Reads | `GET /api/sessions/:id/thread` (whole snapshot) · `GET …/events?after=<seq>` (long-lived chunked **NDJSON**, `:hb` every 15 s — no new WebSocket) · `GET …/turns/:n/diff` · `GET …/items/:itemId` (unslimmed payload) · `GET …/attachments/:attachmentId` |
 | Host level | `GET /api/agent/providers` · `POST /api/agent/providers/:id/refresh` · `POST /api/agent-host/stop` |
 
@@ -504,6 +505,24 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   method is one debug line and the last known reading, never a `runtime.warning` and never a failed
   turn. `compactsAutomatically: false` is a *verdict* (Claude's `isAutoCompactEnabled`) and the
   popover then says "Auto-compaction is off."; an absent field means nobody asked.
+- **Switching a thread's account writes `launch.json` FIRST, and only while the thread is idle.**
+  The composer's account chip re-points an existing chat thread at another managed account
+  (`POST /api/sessions/:id/account` → the host's `POST /threads/:id/identity`), applied on the
+  **next message**: §3.4's ensure-session step sees the changed `accountKey`, restarts with reason
+  `"account"` and carries the resume cursor, so the conversation survives. Four invariants.
+  (1) **The launch config is rewritten before the head** — `main.ts`'s `buildEnv`/`resolveHome`
+  prefer `launch.homePath`/`launch.launchEnv` over the head's account (they must: it is the
+  daemon's resolved answer), so a head that moved first would claim the new identity while every
+  relaunch kept the old home's credentials; a failed append rolls it back. (2) **It is refused
+  unless nothing is in flight** — `identitySwitchRefusal` (`orchestration/session-policy.ts`) is
+  the one expression, mirrored client-side by `canSwitchChatAccount`
+  (`packages/ui/src/lib/agent-chat/account-switch.ts`) to gate the chip. (3) **The home KIND never
+  crosses the cliproxy boundary** — it is a function of the registry entry, which never changes,
+  and a cliproxy home does not share `projects/` with the rest. (4) **OpenCode is excluded**: one
+  server per project under the daemon's own identity, so there is no per-thread account to move.
+  The route is daemon-owned rather than a §6.2 command precisely because the body is **not**
+  forwarded verbatim — only the daemon can apply the family gate, the seeded-account gate and the
+  launch-env recompose. `binding.json` gains no new writer.
 - **A `/compact` is a visible phase, not "Working".** The first `system/status {status:
   "compacting"}` latches `thread.state.changed {state:"compacting"}` (the CLI sends six of them);
   the next non-compacting status ends the phase. `compact_result: "failed"` emits

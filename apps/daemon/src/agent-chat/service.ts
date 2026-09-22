@@ -19,13 +19,15 @@ import type {
   CreateSessionRequest,
   RegistryEntry,
   SessionSummary, AgentAccount } from "@orquester/api";
+import { SYSTEM_ACCOUNT_ID } from "@orquester/api";
 import type { AgentChatHome, RuntimePlatform } from "@orquester/config";
 import { agentHostSocketPath, agentHostTokenPath } from "@orquester/config";
 import {
   AGENT_HOST_HEALTH_INTERVAL_MS,
   agentHostRoutes,
   type AgentHostHealthResponse,
-  type CreateHostThreadRequest
+  type CreateHostThreadRequest,
+  type SetThreadIdentityRequest
 } from "../agent-host/host-protocol.ts";
 import { Transform, type Readable } from "node:stream";
 import { MAX_UPLOAD_BYTES } from "@orquester/api";
@@ -104,6 +106,16 @@ export interface AgentChatServiceOptions {
   sendAttachment(reply: FastifyReply, path: string): Promise<unknown>;
   /** Managed accounts + family defaults, for the §7.7 auth overlay (see `provider-auth-overlay.ts`). */
   listManagedAccounts?(): { accounts: AgentAccount[]; defaults?: Partial<Record<AgentAccount["agent"], string | null>> };
+  /**
+   * `index.ts`'s `seededAccountRefusal`, injected rather than imported so the
+   * service does not depend on the daemon entry point. A switch has to apply
+   * exactly the gate a create does, or a claudex tab could be re-pointed at an
+   * account the proxy has no auth file for and every later turn would 502.
+   */
+  seededAccountRefusal?(
+    input: { refId: string; accountId?: string },
+    model: string | undefined
+  ): { code: string; message: string } | null;
   logger?: {
     log?: (...a: unknown[]) => void;
     warn?: (...a: unknown[]) => void;
@@ -293,6 +305,7 @@ export class AgentChatService {
       isHostHealthy: () => this.supervisor.isHealthy(),
       chatSession: (id) => this.chat.get(id),
       noteSeq: (id, seq) => this.chat.noteSeq(id, seq),
+      switchAccount: (id, body) => this.switchAccount(id, body),
       restartHost: async () => {
         this.lastMarkedThreadIds = [];
         const hostInstanceId = await this.supervisor.restartNow();
@@ -437,6 +450,143 @@ export class AgentChatService {
       throw new ChatSessionError(error instanceof Error ? error.message : String(error));
     }
     return summary;
+  }
+
+  /**
+   * Re-point an existing chat thread at another managed account (§3.4's
+   * "account changed"), applied on the thread's **next message**.
+   *
+   * The order mirrors `createSession` for the same reason: everything that can
+   * refuse runs before anything is written, the launch environment is
+   * recomposed by the daemon (only it has the sources), the host records the
+   * new identity and rewrites `launch.json`, and only then does the tab record
+   * move. A host that refuses leaves the tab exactly as it was.
+   */
+  async switchAccount(
+    id: string,
+    input: { commandId: string; accountId: string }
+  ): Promise<{ seq: number }> {
+    const summary = this.chat.get(id);
+    if (!summary) {
+      throw new ChatSessionError("No chat session with that id.", "THREAD_NOT_FOUND");
+    }
+    const commandId = typeof input?.commandId === "string" ? input.commandId.trim() : "";
+    if (commandId.length === 0 || commandId.length > 200) {
+      throw new ChatSessionError("commandId is required.", "INVALID_COMMAND");
+    }
+    if (typeof input?.accountId !== "string" || input.accountId.trim().length === 0) {
+      throw new ChatSessionError("accountId is required.", "INVALID_COMMAND");
+    }
+    const requestedAccountId = input.accountId.trim();
+    const entry = this.opts.registryEntry(summary.refId);
+    if (!entry?.resolvedBin || !entry.enabled) {
+      throw new ChatSessionError(
+        `Registry entry "${summary.refId}" is not available.`,
+        "INVALID_COMMAND"
+      );
+    }
+    const adapter = entry.chat?.adapter;
+    if (!adapter) {
+      throw new ChatSessionError(`"${entry.name}" has no chat adapter.`, "INVALID_COMMAND");
+    }
+    // OpenCode runs ONE server per project under the daemon's own identity and
+    // refuses a non-system home (§3.2); there is no per-thread account to move.
+    if (adapter === "opencode") {
+      throw new ChatSessionError(
+        "OpenCode threads always run under the server's own identity.",
+        "INVALID_COMMAND"
+      );
+    }
+    // The family gate. `AgentAccountsService.resolveLaunchEnv` answers `null`
+    // for an account of the wrong family — which would SILENTLY launch the
+    // system identity — so a mismatched id is refused here rather than
+    // degraded there.
+    if (requestedAccountId !== SYSTEM_ACCOUNT_ID) {
+      const family = proxyAccountFamily(entry.id) ?? entry.id;
+      const managed = this.opts.listManagedAccounts?.().accounts ?? [];
+      const account = managed.find((candidate) => candidate.id === requestedAccountId);
+      if (!account || account.agent !== family) {
+        throw new ChatSessionError(
+          `That account cannot run "${entry.name}".`,
+          "INVALID_COMMAND"
+        );
+      }
+    }
+    const seededRefusal = this.opts.seededAccountRefusal?.(
+      { refId: entry.id, accountId: requestedAccountId },
+      summary.model
+    );
+    if (seededRefusal) {
+      throw new ChatSessionError(seededRefusal.message, "INVALID_COMMAND");
+    }
+    if (!this.supervisor.isHealthy()) {
+      throw new ChatSessionError("The agent host is not running.", "HOST_UNAVAILABLE");
+    }
+
+    let launch: ChatLaunchEnv | null = null;
+    try {
+      // ALWAYS explicit: an omitted id makes `resolveLaunchEnv` fall back to
+      // the family default, so "switch to System" would silently pick whatever
+      // account happens to be the default instead.
+      launch = await this.opts.resolveLaunchEnv(entry, {
+        accountId: requestedAccountId,
+        model: summary.model
+      });
+    } catch (error) {
+      throw error instanceof ChatSessionError
+        ? error
+        : new ChatSessionError(error instanceof Error ? error.message : String(error));
+    }
+
+    const accountId = launch?.accountId ?? "";
+    const home = resolveHomeKind(entry.id, accountId);
+    const launchEnv: Record<string, string> = { ...entry.env, ...(launch?.env ?? {}) };
+    const homePath = launchEnv[ACCOUNT_HOME_ENV_VAR[adapter]];
+    // The new home may never have been used for this project.
+    await this.prepareHome(adapter, launchEnv, summary.projectPath ?? "");
+
+    const body: SetThreadIdentityRequest = {
+      commandId,
+      accountId,
+      home,
+      launchEnv,
+      ...(launch?.unset?.length ? { unsetEnv: launch.unset } : {}),
+      ...(homePath ? { homePath } : {}),
+      ...(home === "cliproxy" ? { proxyRefId: entry.id } : {})
+    };
+    let receipt: { seq: number };
+    try {
+      const response = await this.client.json<{
+        seq?: number;
+        error?: { code: string; message: string };
+      }>("POST", agentHostRoutes.setThreadIdentity(id), body);
+      if (response.status === 404 && response.value?.error?.code === undefined) {
+        // A host that survived a deploy is still running the code it started
+        // from (§8) and has no identity route. It is replaced on the next
+        // drain-restart, so this is a retry, not a refusal.
+        throw new ChatSessionError(
+          "The agent host is still updating. Try again in a moment.",
+          "HOST_UNAVAILABLE"
+        );
+      }
+      if (response.status >= 400) {
+        throw new ChatSessionError(
+          response.value?.error?.message ?? "The agent host refused the account switch.",
+          response.value?.error?.code ?? "SESSION_UNAVAILABLE"
+        );
+      }
+      receipt = { seq: typeof response.value?.seq === "number" ? response.value.seq : 0 };
+    } catch (error) {
+      if (error instanceof ChatSessionError) throw error;
+      if (error instanceof HostUnavailableError) {
+        throw new ChatSessionError("The agent host is not running.", "HOST_UNAVAILABLE");
+      }
+      throw new ChatSessionError(error instanceof Error ? error.message : String(error));
+    }
+    // Only after the host accepted: `sessions.json`, the tab badge and
+    // `liveAccountIds()` must never name an identity the thread does not have.
+    this.chat.setAccount(id, { accountId, home });
+    return receipt;
   }
 
   /**
@@ -645,6 +795,21 @@ export class AgentChatService {
 export function resolveHomeKind(entryId: string, accountId: string): AgentChatHome {
   if (entryId === "claudex" || entryId === "claudemix") return "cliproxy";
   return accountId ? "account" : "system";
+}
+
+/**
+ * Which managed-account FAMILY a registry entry draws its accounts from.
+ *
+ * The proxy launchers route by model name, so `claudex` pins a seeded **Codex**
+ * account and `claudemix` a seeded **Claude** one; their own ids never match an
+ * `AgentAccount.agent`. Mirrors `PROXY_ACCOUNT_FAMILY` in the UI's `NewTabMenu`
+ * — the two decide the same thing for the same reason, one at launch and one at
+ * switch. Null for every other entry, which draws from its own id.
+ */
+export function proxyAccountFamily(entryId: string): "claude" | "codex" | null {
+  if (entryId === "claudemix") return "claude";
+  if (entryId === "claudex") return "codex";
+  return null;
 }
 
 /**

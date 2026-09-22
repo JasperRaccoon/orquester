@@ -190,6 +190,31 @@ export class ChatSessionManager {
     return closed;
   }
 
+  /**
+   * Re-point a tab at another managed account (§3.4's account switch).
+   *
+   * Both spellings move together on purpose: `summary.accountId` is what the
+   * tab badge and {@link liveAccountIds} read, and `chat.accountId`/`chat.home`
+   * are what `sessions.json` persists and what a daemon restart rebuilds the
+   * summary from. Writing one without the other survives until the next
+   * restart and then silently reverts.
+   */
+  setAccount(id: string, input: { accountId: string; home: AgentChatHome }): SessionSummary | null {
+    const session = this.sessions.get(id);
+    if (!session) return null;
+    if (session.chat.accountId === input.accountId && session.chat.home === input.home) {
+      return null;
+    }
+    session.chat.accountId = input.accountId;
+    session.chat.home = input.home;
+    // `undefined`, never `""`: the summary's account id is absent for the
+    // system identity, which is the shape every client already renders.
+    session.summary.accountId = input.accountId || undefined;
+    this.lifecycle.emit("updated", { ...session.summary });
+    this.options.requestPersist();
+    return { ...session.summary };
+  }
+
   /** Set one tab's order; used by the shared cross-kind reorder. */
   setOrder(id: string, order: number): boolean {
     const session = this.sessions.get(id);

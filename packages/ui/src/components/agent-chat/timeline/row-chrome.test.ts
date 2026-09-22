@@ -17,6 +17,7 @@ import {
   splitSkillMentions,
   summaryKindIconName,
   workEntryIsActiveTurnActivity,
+  workEntryIsIdentityChange,
   workEntryIsRerouteNotice
 } from "./row-chrome";
 
@@ -243,6 +244,12 @@ test("workEntryIsRerouteNotice and isToolOutputRow", () => {
   assert.ok(!workEntryIsRerouteNotice(entry({ sourceActivityKind: "tool.completed" })));
   assert.ok(isToolOutputRow(entry({ sourceActivityKind: "tool.output" })));
   assert.ok(!isToolOutputRow(entry({ sourceActivityKind: "tool.completed" })));
+});
+
+test("workEntryIsIdentityChange picks out the §3.4 account switch marker", () => {
+  assert.ok(workEntryIsIdentityChange(entry({ sourceActivityKind: "session.identity-changed" })));
+  assert.ok(!workEntryIsIdentityChange(entry({ sourceActivityKind: "model.rerouted" })));
+  assert.ok(!workEntryIsIdentityChange(entry({})));
 });
 
 test("summaryKindIconName maps the contract's five kinds", () => {

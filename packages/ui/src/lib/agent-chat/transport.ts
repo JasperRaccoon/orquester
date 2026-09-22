@@ -16,6 +16,7 @@
 import {
   agentChatCommandPath,
   agentChatRoutes,
+  type AccountCommandBody,
   type AgentChatCommandBodies,
   type AgentChatCommandName,
   type AgentChatErrorCode,
@@ -107,6 +108,17 @@ export interface AgentChatTransport {
     sessionId: string,
     name: TName,
     body: AgentChatCommandBodies[TName],
+    signal?: AbortSignal
+  ): Promise<CommandReceiptResponse>;
+  /**
+   * §3.4's account switch. A separate seam from {@link command} because the
+   * route is daemon-owned rather than proxied — it is not in
+   * `AGENT_CHAT_COMMAND_NAMES` — but it answers the same receipt and the same
+   * error envelope, so the store retries it on the same rules.
+   */
+  switchAccount(
+    sessionId: string,
+    body: AccountCommandBody,
     signal?: AbortSignal
   ): Promise<CommandReceiptResponse>;
   read(
@@ -241,6 +253,13 @@ export function createAgentChatTransport(transporter: Transporter): AgentChatTra
 
     command(sessionId, name, body, signal) {
       return send<CommandReceiptResponse>("POST", agentChatCommandPath(sessionId, name), {
+        body,
+        ...(signal === undefined ? {} : { signal })
+      });
+    },
+
+    switchAccount(sessionId, body, signal) {
+      return send<CommandReceiptResponse>("POST", agentChatRoutes.account(sessionId), {
         body,
         ...(signal === undefined ? {} : { signal })
       });

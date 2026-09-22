@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import {
   chatShortcutLabel,
   composerControlSelector,
+  COMPOSER_CONTROL_COMMANDS,
   COMPOSER_SHORTCUT_ATTRIBUTE,
   isOperableControl,
   resolveChatShortcut,
@@ -78,6 +79,33 @@ describe("the data-composer-shortcut convention", () => {
       composerControlSelector("mode"),
       `button[${COMPOSER_SHORTCUT_ATTRIBUTE}~="mode"]:not(:disabled)`
     );
+  });
+
+  it("the account chip is addressable but deliberately unbound (§7.4)", () => {
+    // It became a picker with §3.4's account switch, so the token is back — but
+    // it is changed rarely and every chord spent is one the terminal surfaces
+    // cannot have, so no arm of the table produces it and it has no label.
+    assert.ok(COMPOSER_CONTROL_COMMANDS.includes("account"));
+    assert.equal(
+      composerControlSelector("account"),
+      `button[${COMPOSER_SHORTCUT_ATTRIBUTE}~="account"]:not(:disabled)`
+    );
+    assert.equal(chatShortcutLabel({ kind: "control", command: "account" }, false), null);
+    for (const modifiers of [
+      { ctrlKey: true },
+      { metaKey: true },
+      { ctrlKey: true, shiftKey: true },
+      { metaKey: true, shiftKey: true }
+    ]) {
+      for (const pressed of ["a", "u", "n", "/", "e", "m"]) {
+        const resolved = resolveChatShortcut(key({ key: pressed, ...modifiers }));
+        assert.notDeepEqual(
+          resolved,
+          { kind: "control", command: "account" },
+          `${pressed} must not open the account chip`
+        );
+      }
+    }
   });
 
   it("refuses an inert or invisible control", () => {

@@ -77,6 +77,7 @@ export interface TestHost {
     threadId?: string;
     refId?: string;
     cwd?: string;
+    accountId?: string;
     home?: "system" | "account" | "cliproxy";
     /** §6.1 create-time resume, for the E5/E6 paths. */
     resume?: { home: "system" | "account" | "cliproxy"; conversationId: string };
@@ -200,7 +201,7 @@ export function createTestHost(options: TestHostOptions = {}): TestHost {
         cwd: input.cwd ?? "/work/project",
         title: "Test thread",
         refId: input.refId ?? adapter.id,
-        accountId: "acc1",
+        accountId: input.accountId ?? "acc1",
         home: input.home ?? "account",
         modelSelection: { model: "test-model" },
         runtimeMode: "approval-required",
