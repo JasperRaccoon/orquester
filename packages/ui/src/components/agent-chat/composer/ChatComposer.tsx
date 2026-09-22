@@ -17,6 +17,7 @@ import { useAppStore } from "../../../store/app";
 import { useAgentChatDraft } from "../../../lib/agent-chat/hooks";
 import type { ChatComposerProps } from "../contracts";
 import { AccountChip, ModelChip, OptionChip, PlanChip, RuntimeModeChip } from "./ComposerChips";
+import { imageOrdinal, imagePlaceholder, removeImagePlaceholder } from "./composer-images";
 import { ComposerAttachments, type StagedAttachment } from "./ComposerAttachments";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { ComposerTokenMenu } from "./ComposerTokenMenu";
@@ -404,8 +405,12 @@ export function ChatComposer({
         ? state
         : { ...state, attachments: [...state.attachments, entry] }
     );
+    // An image gets its `[Image #N]` at the caret, as the CLI does on paste,
+    // so the text can name it.
+    const ordinal = imageOrdinal(draftRef.current.attachments, entry.key);
+    if (ordinal !== null) insertText(imagePlaceholder(ordinal), "cursor");
     return true;
-  }, []);
+  }, [insertText]);
 
   /**
    * R8-m12: §7.8 suppresses autofocus **on mobile only** — "a keyboard on every
@@ -707,22 +712,40 @@ export function ChatComposer({
 
       setNotice(rejection);
       if (accepted.length === 0) return;
+      const attachments = [...draftRef.current.attachments, ...accepted.map(({ entry }) => entry)];
+      draftRef.current = { ...draftRef.current, attachments };
       setDraft((state) => ({
         ...state,
         attachments: [...state.attachments, ...accepted.map(({ entry }) => entry)]
       }));
+      // Every accepted image gets its `[Image #N]` at the caret, in order.
+      for (const { entry } of accepted) {
+        const ordinal = imageOrdinal(attachments, entry.key);
+        if (ordinal !== null) insertText(imagePlaceholder(ordinal), "cursor");
+      }
       for (const { entry, file } of accepted) {
         retryFilesRef.current.set(entry.key, file);
         void uploadOne(entry.key, file);
       }
     },
-    [uploadOne]
+    [insertText, uploadOne]
   );
 
   const removeAttachment = React.useCallback((key: string) => {
     retryFilesRef.current.delete(key);
+    // Its `[Image #N]` leaves with it and the later ones close the gap.
+    const ordinal = imageOrdinal(draftRef.current.attachments, key);
+    const next = {
+      text:
+        ordinal === null
+          ? draftRef.current.text
+          : removeImagePlaceholder(draftRef.current.text, ordinal),
+      attachments: draftRef.current.attachments.filter((entry) => entry.key !== key)
+    };
+    draftRef.current = { ...draftRef.current, ...next };
     setDraft((state) => ({
       ...state,
+      text: ordinal === null ? state.text : removeImagePlaceholder(state.text, ordinal),
       attachments: state.attachments.filter((entry) => entry.key !== key)
     }));
   }, []);

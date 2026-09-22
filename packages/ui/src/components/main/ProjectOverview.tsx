@@ -87,7 +87,9 @@ const QuickStartButton: React.FC<{ agent: RegistryEntry }> = ({ agent }) => {
 const ResumeRow: React.FC<{
   conversation: AgentConversationSummary;
   agentName: string;
-}> = ({ conversation, agentName }) => {
+  /** Called once the resumed tab has been requested (the empty chat closes itself). */
+  onPicked?: () => void;
+}> = ({ conversation, agentName, onPicked }) => {
   const openTab = useAppStore((s) => s.openTab);
   const setNotice = useAppStore((s) => s.setNotice);
   const chatPrefs = useAppStore((s) => s.chatPrefs);
@@ -124,6 +126,7 @@ const ResumeRow: React.FC<{
       }),
       agentName
     );
+    onPicked?.();
   };
 
   return (
@@ -156,6 +159,53 @@ const ResumeRow: React.FC<{
  * through the store's per-project cache; a missing cache entry (not an empty
  * array) is what "still loading" means here.
  */
+/**
+ * The resumable-conversation list on its own, so an EMPTY chat tab can offer
+ * it too: a fresh thread has nothing to show, and "resume" otherwise lives
+ * only in the project overview and the "+" menu (owner request, 2026-09-22).
+ * `onPicked` fires after the resumed tab is requested — the empty chat uses it
+ * to close itself, so the user is not left with two tabs.
+ */
+export const RecentConversationsList: React.FC<{
+  projectPath: string;
+  onPicked?: () => void;
+  /** Rendered when the scan finds nothing resumable. */
+  empty?: React.ReactNode;
+}> = ({ projectPath, onPicked, empty }) => {
+  const registry = useRegistry();
+  const loadAgentConversations = useAppStore((s) => s.loadAgentConversations);
+  const cached = useAppStore((s) => s.agentConversationsByProject[projectPath]);
+
+  React.useEffect(() => {
+    void loadAgentConversations(projectPath);
+  }, [projectPath, loadAgentConversations]);
+
+  const agents = registry.agents;
+  const resumable = React.useMemo(() => {
+    const byId = new Map<string, RegistryEntry>(agents.map((a) => [a.id, a]));
+    return (cached ?? []).filter((c) => {
+      const entry = byId.get(chatLaunchRefId(c));
+      return Boolean(entry?.enabled) && isChatResumableConversation(c);
+    });
+  }, [cached, agents]);
+  const agentName = (refId: string) => agents.find((a) => a.id === refId)?.name ?? refId;
+
+  return (
+    <div className="space-y-0.5">
+      {cached === undefined && Array.from({ length: 4 }, (_, i) => <SkeletonRow key={i} />)}
+      {cached !== undefined && resumable.length === 0 ? empty ?? null : null}
+      {resumable.map((conversation) => (
+        <ResumeRow
+          key={`${conversation.agentRefId}:${conversation.id}`}
+          conversation={conversation}
+          agentName={agentName(chatLaunchRefId(conversation))}
+          onPicked={onPicked}
+        />
+      ))}
+    </div>
+  );
+};
+
 export const ProjectOverview: React.FC<{ projectPath: string }> = ({ projectPath }) => {
   const registry = useRegistry();
   const loadAgentConversations = useAppStore((s) => s.loadAgentConversations);

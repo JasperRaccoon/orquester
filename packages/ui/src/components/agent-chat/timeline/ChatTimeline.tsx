@@ -11,6 +11,8 @@ import type { ChatTimelineProps, TimelineScrollPosition } from "../contracts";
 import { ChatIconButton, ScrollToBottomButton } from "../primitives";
 import { TimelineRowContext, type TimelineRowContextValue } from "./context";
 import { TimelineRow } from "./TimelineRow";
+import { RecentConversationsList } from "../../main/ProjectOverview";
+import { useAppStore } from "../../../store/app";
 import { findFirstVisibleIndex, offsetWithinRow, type RowMetric } from "./anchor";
 import { nextFollowState, shouldAnimateFollow } from "./follow";
 
@@ -103,6 +105,7 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
     scroll,
     onScrollPositionChange
   } = props;
+  const closeTab = useAppStore((s) => s.closeTab);
 
   const scrollerRef = React.useRef<HTMLDivElement>(null);
   const contentRef = React.useRef<HTMLDivElement>(null);
@@ -518,7 +521,26 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
             {rows.map((row) => (
               <TimelineRow key={row.id} row={row} enter={enterFlag(row.id)} />
             ))}
-            {rows.length === 0 ? (
+            {rows.length === 0 && agentId === undefined && projectPath && !readOnly ? (
+              // An empty thread offers the project's resumable conversations,
+              // exactly as the project overview does when no tab is open: a
+              // fresh tab is otherwise the one place "resume" is missing.
+              <div className="mx-auto w-full max-w-3xl px-1 py-6">
+                <p className="text-sm font-medium text-neutral-200">Recent conversations</p>
+                <p className="mb-3 mt-0.5 text-xs text-neutral-600">
+                  Pick one up where you left off, or just start typing below.
+                </p>
+                <RecentConversationsList
+                  projectPath={projectPath}
+                  onPicked={() => void closeTab(sessionId)}
+                  empty={
+                    <p className="py-6 text-center text-sm italic text-neutral-600">
+                      No conversations in this project yet.
+                    </p>
+                  }
+                />
+              </div>
+            ) : rows.length === 0 ? (
               <div className="mx-auto w-full max-w-3xl py-12 text-center text-sm italic text-neutral-600">
                 {agentId === undefined
                   ? "No messages yet."

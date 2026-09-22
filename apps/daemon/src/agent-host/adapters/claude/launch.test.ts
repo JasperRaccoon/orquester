@@ -35,6 +35,22 @@ import {
   toProviderModels
 } from "./models.ts";
 
+it("the default row is named after the model it resolves to", () => {
+  const named = toProviderModels([
+    { value: "default", resolvedModel: "claude-opus-5[1m]", displayName: "Default (recommended)" },
+    { value: "claude-opus-5[1m]", displayName: "Opus (1M context)" },
+    { value: "sonnet", resolvedModel: "claude-sonnet-5", displayName: "Sonnet" }
+  ]);
+  assert.equal(named[0]?.slug, "default", "the launch still sends the CLI's own choice");
+  assert.equal(named[0]?.name, "Default · Opus (1M context)");
+  assert.equal(named[0]?.shortName, "Default · Opus (1M context)");
+  // No sibling lists the resolved id: the id itself is better than nothing.
+  const bare = toProviderModels([
+    { value: "default", resolvedModel: "claude-opus-4-8[1m]", displayName: "Default (recommended)" }
+  ]);
+  assert.equal(bare[0]?.name, "Default · claude-opus-4-8[1m]");
+});
+
 const noopCanUseTool: CanUseTool = async () => ({ behavior: "allow", updatedInput: {} });
 
 const MODELS: ProviderModel[] = toProviderModels([

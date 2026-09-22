@@ -2,6 +2,7 @@ import React from "react";
 import { FileText, Image as ImageIcon, RotateCcw, X } from "lucide-react";
 import type { AttachmentRef } from "@orquester/api/agent-chat";
 
+import { imageOrdinal } from "./composer-images";
 import { cn } from "../../../lib/cn";
 import { ChatIconButton } from "../primitives";
 
@@ -52,6 +53,7 @@ export function ComposerAttachments({
     >
       {attachments.map((attachment) => {
         const isImage = attachment.mimeType.startsWith("image/");
+        const ordinal = isImage ? imageOrdinal(attachments, attachment.key) : null;
         const failed = attachment.status === "failed";
         return (
           <span
@@ -75,6 +77,9 @@ export function ComposerAttachments({
             <span className="relative shrink-0 text-neutral-500">
               {isImage ? <ImageIcon size={11} aria-hidden /> : <FileText size={11} aria-hidden />}
             </span>
+            {ordinal !== null ? (
+              <span className="relative shrink-0 font-mono text-[10px] text-neutral-500">#{ordinal}</span>
+            ) : null}
             <span className="relative truncate">{attachment.name}</span>
             {failed ? (
               <ChatIconButton

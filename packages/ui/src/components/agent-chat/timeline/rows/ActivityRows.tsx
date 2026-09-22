@@ -38,6 +38,7 @@ import { deriveAgentSpawnSummary } from "../../roster/spawn-summary";
 import { TimelineRowTimestamp } from "../timestamp";
 import { InlineDiff, looksLikeUnifiedDiff } from "./InlineDiff";
 import { WorkEntryIcon } from "./icons";
+import { ChatIconButton } from "../../primitives/ChatIconButton";
 
 type Row<K extends AgentChatTimelineRow["kind"]> = Extract<AgentChatTimelineRow, { kind: K }>;
 

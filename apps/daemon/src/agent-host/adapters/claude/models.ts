@@ -221,7 +221,26 @@ export function toProviderModels(models: unknown): ProviderModel[] {
       out.push(model);
     }
   }
-  return out;
+  return out.map((model) => nameDefaultAfterItsModel(model, out));
+}
+
+/**
+ * "Default (recommended)" says nothing about WHICH model that is, and the
+ * owner read it as Fable when the CLI resolves it to Opus. The row keeps the
+ * CLI's slug (`default`, so the launch still tracks the CLI's own choice) but
+ * reads as `Default · Opus (1M context)` — the name of the sibling the
+ * `resolvedModel` points at, or the resolved id itself when no sibling lists it.
+ */
+function nameDefaultAfterItsModel(model: ProviderModel, all: readonly ProviderModel[]): ProviderModel {
+  if (model.slug !== "default" || !model.subProvider) return model;
+  const resolved = model.subProvider;
+  const sibling = all.find(
+    (candidate) =>
+      candidate.slug !== "default" &&
+      (candidate.slug === resolved || candidate.subProvider === resolved)
+  );
+  const label = `Default · ${sibling?.shortName ?? sibling?.name ?? resolved}`;
+  return { ...model, name: label, shortName: label };
 }
 
 /**
