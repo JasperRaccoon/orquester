@@ -175,14 +175,24 @@ export interface AgentAdapter {
    *
    * A resume replays nothing onto the message stream (verified for Claude:
    * `replayUuids: []`), so without this the thread opens empty even though the
-   * provider has the whole conversation. Every event carries
-   * `raw.source = HISTORICAL_RAW_SOURCE`: it describes something that already
-   * happened, so a consumer must not let it raise attention, fire a push or
-   * move a live turn.
+   * provider has the whole conversation. `ThreadSnapshot.turns[].items` is
+   * opaque by contract — only the adapter knows its provider's shape — so only
+   * the adapter can project it. The host calls this once, at session start,
+   * for a thread that resumes from a cursor and has no items of its own.
+   *
+   * Every event carries `raw.source = HISTORICAL_RAW_SOURCE`: it describes
+   * something that already happened, so ingestion persists it while a consumer
+   * must not let it raise attention, fire a push or move a live turn.
+   *
+   * Shape the host expects per historical turn: one `turn.started`, the turn's
+   * `item.completed` rows (`user_message` / `assistant_message` with their
+   * final text, tool items under their tool-lifecycle item type), then one
+   * `turn.completed {state: "completed"}` whose `tokenUsage` is `unavailable`
+   * — history carries no live accounting.
    *
    * Pure and synchronous — the reading already happened in `readThread`.
-   * Optional: an adapter whose snapshot items are not projectable omits it and
-   * the host falls back to an empty timeline.
+   * Optional: an adapter that cannot project its own history omits it, and the
+   * host says so in the timeline rather than rendering an empty thread.
    */
   projectHistory?(snapshot: ThreadSnapshot): RuntimeEvent[];
   rollbackThread(threadId: string, numTurns: number): Promise<ThreadSnapshot>;
