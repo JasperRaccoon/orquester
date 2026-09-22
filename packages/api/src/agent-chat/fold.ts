@@ -205,7 +205,13 @@ function activitiesToDrop(activities: readonly ThreadActivityItem[]): Set<Thread
   const parentStart = parentRows.length - ACTIVITY_RETENTION_LIMIT;
   for (let index = 0; index < parentStart; index += 1) {
     const activity = parentRows[index]!;
-    if (retainedByQuestion.has(activity) || isAgentAnchorRow(activity)) continue;
+    if (
+      retainedByQuestion.has(activity) ||
+      isAgentAnchorRow(activity) ||
+      isCompactionMarkerRow(activity)
+    ) {
+      continue;
+    }
     drop.add(activity);
   }
 
@@ -246,6 +252,19 @@ function isAgentAnchorRow(activity: ThreadActivityItem): boolean {
     return false;
   }
   return asRecord(activity.payload)?.agentKind === "agent";
+}
+
+/**
+ * A compaction marker (§4.6.5, §7.3) is structure, not chatter: it is where
+ * the provider's memory of the conversation begins, which "rewind to here"
+ * reads to withhold the messages before it (§5.5) and the timeline reads to
+ * draw the divider. There is one per compaction, so keeping them all costs
+ * nothing — and a 500-row window on a busy thread evicted the marker within
+ * minutes, after which every pre-compaction message was offered for a rewind
+ * the adapter could only refuse.
+ */
+function isCompactionMarkerRow(activity: ThreadActivityItem): boolean {
+  return activity.activityKind === "context-compaction";
 }
 
 /** Rebuild `itemIndex` from an items array. */

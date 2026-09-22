@@ -187,6 +187,32 @@ export function isCompactCommandMessage(message: ThreadMessageItem): boolean {
 }
 
 /**
+ * A `user` row the provider's own transcript wrote and nobody typed: the
+ * Claude CLI records a slash command as `<command-name>…`, its output as
+ * `<local-command-stdout>…`, a subagent's completion as `<task-notification>…`,
+ * and a few notices as `<system-reminder>…` / `<local-command-caveat>…`. A
+ * resumed history projects them as user messages (they are user-role turn
+ * starts in the transcript), so they render as bubbles — but "rewind to here"
+ * would return one of them to the composer as the user's own prompt, which
+ * is never what a rewind means. Withheld, like the verbatim `/compact`.
+ */
+const PROVIDER_INTERNAL_USER_PREFIXES = [
+  "<command-name>",
+  "<local-command-stdout>",
+  "<local-command-caveat>",
+  "<task-notification>",
+  "<system-reminder>"
+] as const;
+
+export function isProviderInternalUserMessage(message: ThreadMessageItem): boolean {
+  if (message.role !== "user") {
+    return false;
+  }
+  const text = message.text.trimStart();
+  return PROVIDER_INTERNAL_USER_PREFIXES.some((prefix) => text.startsWith(prefix));
+}
+
+/**
  * A group qualifies only when a message in it is reasoning or demoted
  * commentary; a work row is excluded when it carries `agentSpawn` or
  * `questionAnswer`, is a compaction, or has `tone === "error"` (§7.3).
@@ -494,7 +520,9 @@ function isCompactedMarkerEntry(entry: TimelineEntry): boolean {
  *   none of its own, and a pending turn's prompt has no ordinal until the
  *   provider starts it;
  * - the verbatim `/compact` (§4.6.5(b)), which renders as the marker, never as
- *   a bubble;
+ *   a bubble, and a `user` row the provider's transcript wrote itself
+ *   (`isProviderInternalUserMessage`) — a command echo, a subagent's
+ *   notification — which a rewind would hand back as the user's own prompt;
  * - every message before the thread's LAST settled compaction: the provider
  *   no longer holds those messages, so the adapter would refuse the rollback
  *   (§4.5, §5.5). A compaction still running, or one that failed, dropped
@@ -529,7 +557,8 @@ function buildRevertTurnCountByUserMessageId(input: {
     if (
       entry.kind !== "message" ||
       entry.message.role !== "user" ||
-      isCompactCommandMessage(entry.message)
+      isCompactCommandMessage(entry.message) ||
+      isProviderInternalUserMessage(entry.message)
     ) {
       continue;
     }

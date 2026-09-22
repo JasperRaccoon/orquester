@@ -457,6 +457,46 @@ describe("rewind to here — numbered by turn order (§5.5)", () => {
     assert.deepEqual(revertCounts(rows), { u1: 0, c2: 2 });
   });
 
+  it("never offers it on a user row the provider's transcript wrote itself", () => {
+    // A resumed Claude history replays the CLI's own bookkeeping as user-role
+    // turn starts. Rewinding to one would put "<task-notification>…" in the
+    // composer as the user's prompt.
+    const internal = [
+      "<command-name>/compact</command-name>\n<command-message>compact</command-message>",
+      "  <local-command-stdout>Compacted </local-command-stdout>",
+      "<task-notification>\n<task-id>abc</task-id>\n</task-notification>",
+      "<local-command-caveat>Caveat: …</local-command-caveat>",
+      "<system-reminder>…</system-reminder>"
+    ];
+    const items = [
+      message("user", "go", { id: "u0", createdAt: stamp(0) }),
+      ...internal.map((text, index) =>
+        message("user", text, { id: `i${index}`, createdAt: stamp(index + 1) })
+      ),
+      // Text that merely MENTIONS a tag is the user's.
+      message("user", "why does <task-notification> show up?", { id: "u9", createdAt: stamp(9) })
+    ];
+    const rows = deriveTimelineRows(
+      baseInput(entriesFrom(items), {
+        supportsConversationRollback: true,
+        turns: [
+          turn("t0", "u0"),
+          ...internal.map((_, index) => turn(`ti${index}`, `i${index}`)),
+          turn("t9", "u9")
+        ]
+      })
+    );
+    assert.deepEqual(revertCounts(rows), {
+      u0: 0,
+      i0: undefined,
+      i1: undefined,
+      i2: undefined,
+      i3: undefined,
+      i4: undefined,
+      u9: 6
+    });
+  });
+
   it("gives a pending turn's prompt none until the provider starts it", () => {
     const entries = entriesFrom([
       message("user", "one", { id: "u1", createdAt: stamp(1) }),

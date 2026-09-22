@@ -645,6 +645,34 @@ test("activities are retained at the window, keeping an unresolved async questio
   assert.equal(state.pending.userInputs.length, 1);
 });
 
+test("a compaction marker never ages out of the window", () => {
+  reset();
+  // A busy thread writes 500 tool rows in minutes; the marker is where the
+  // provider's memory begins, and "rewind to here" withholds everything before
+  // it (§5.5) — evicted, every pre-compaction message was offered for a rewind
+  // the adapter could only refuse.
+  const events: DomainEvent[] = [created()];
+  events.push(
+    ev("thread.activity-appended", {
+      activity: activity(
+        "context-compaction",
+        { state: "compacted", beforeTokens: 100, afterTokens: 10 },
+        { id: "marker", turnId: "T-1" }
+      )
+    })
+  );
+  for (let i = 0; i < ACTIVITY_RETENTION_LIMIT + 50; i += 1) {
+    events.push(
+      ev("thread.activity-appended", {
+        activity: activity("tool.started", { toolUseId: `t${i}` }, { id: `noise-${i}` })
+      })
+    );
+  }
+  const state = fold(events);
+  assert.equal(state.activities.length, ACTIVITY_RETENTION_LIMIT + 1);
+  assert.equal(state.activities[0]?.id, "marker", "the marker is kept, ahead of the window");
+});
+
 test("messages are retained at their own window, independently of activities", () => {
   reset();
   const events: DomainEvent[] = [created()];
