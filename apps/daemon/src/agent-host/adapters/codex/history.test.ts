@@ -14,7 +14,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 
-import type { ThreadSnapshot } from "@orquester/api/agent-chat";
+import { HISTORICAL_RAW_SOURCE, type ThreadSnapshot } from "@orquester/api/agent-chat";
 
 import { CODEX_RAW_HISTORY, projectCodexHistory } from "./history.ts";
 import type { RuntimeEventDraft } from "./normalise.ts";
@@ -143,7 +143,9 @@ describe("codex history projection — replayed from fixture 07", () => {
     for (const event of events) {
       assert.equal(event.raw?.source, CODEX_RAW_HISTORY, event.type);
     }
-    assert.equal(CODEX_RAW_HISTORY, "codex.app-server.history");
+    // The marker is the SHARED one, not a Codex-private spelling: the fold
+    // must recognise history without knowing which provider wrote it.
+    assert.equal(CODEX_RAW_HISTORY, HISTORICAL_RAW_SOURCE);
   });
 
   it("emits nothing that could look like progress", () => {

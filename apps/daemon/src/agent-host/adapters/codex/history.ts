@@ -21,19 +21,19 @@ import type {
   ThreadSnapshot,
   TurnTokenUsage
 } from "@orquester/api/agent-chat";
-import { isToolLifecycleItemType } from "@orquester/api/agent-chat";
+import { HISTORICAL_RAW_SOURCE, isToolLifecycleItemType } from "@orquester/api/agent-chat";
 
 import type { CodexProtocol } from "./_generated/index.ts";
 import { classifyItem, type CodexThreadItem } from "./items.ts";
 import type { RuntimeEventDraft } from "./normalise.ts";
 
 /**
- * The marker that says "this frame is replayed history, not live traffic".
- *
- * *If W1's shared historical marker lands under a different spelling, this is
- * the single constant to retarget.*
+ * The marker that says "this frame is replayed history, not live traffic" —
+ * the SHARED one every adapter's projection carries, so a consumer tells
+ * history from live traffic without knowing which provider produced it.
+ * `method` still names the call the rows were read back from.
  */
-export const CODEX_RAW_HISTORY: RuntimeEventRaw["source"] = "codex.app-server.history";
+export const CODEX_RAW_HISTORY: RuntimeEventRaw["source"] = HISTORICAL_RAW_SOURCE;
 
 /**
  * A history turn claims no usage. The provider reports per-turn usage only on
