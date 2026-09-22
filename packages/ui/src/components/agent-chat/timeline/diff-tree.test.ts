@@ -200,8 +200,10 @@ test("a half-viewport gap does NOT re-arm follow", () => {
 });
 
 test("the follow scroll is animated only while working and motion is allowed", () => {
-  assert.ok(shouldAnimateFollow({ working: true, reducedMotion: false, firstPaint: false }));
-  assert.ok(!shouldAnimateFollow({ working: false, reducedMotion: false, firstPaint: false }));
-  assert.ok(!shouldAnimateFollow({ working: true, reducedMotion: true, firstPaint: false }));
-  assert.ok(!shouldAnimateFollow({ working: true, reducedMotion: false, firstPaint: true }));
+  // `settling` is exercised on its own in `follow.test.ts`.
+  const base = { working: true, reducedMotion: false, firstPaint: false, settling: false };
+  assert.ok(shouldAnimateFollow(base));
+  assert.ok(!shouldAnimateFollow({ ...base, working: false }));
+  assert.ok(!shouldAnimateFollow({ ...base, reducedMotion: true }));
+  assert.ok(!shouldAnimateFollow({ ...base, firstPaint: true }));
 });

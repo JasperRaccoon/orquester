@@ -51,18 +51,30 @@ export {
 } from "./reducer.logic";
 
 export {
+  cachedThreadState,
   createThreadStore,
   ensureThreadStore,
   peekThreadStore,
   releaseThreadStore,
   resetDismissedErrorBanners,
+  resetThreadRetention,
   resetThreadStores,
+  retainedThreadCount,
   retainThreadStore,
+  THREAD_SNAPSHOT_IDLE_TTL_MS,
   THREAD_STORE_DISPOSE_GRACE_MS,
   type AgentChatThreadState,
+  type RetainedThreadState,
   type ThreadStore,
   type ThreadStoreDeps
 } from "./store";
+
+export {
+  ThreadRetentionCache,
+  THREAD_SNAPSHOT_CACHE_MAX,
+  type RetainedThread,
+  type ThreadRetentionOptions
+} from "./retention";
 
 export {
   authErrorMessage,
