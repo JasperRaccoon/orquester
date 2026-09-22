@@ -16,6 +16,7 @@ import type {
   AttachmentRef,
   ComposerContextRecord,
   ModelSelection,
+  ProviderSessionStatus,
   RuntimeMode
 } from "./adapter-types.ts";
 import type {
@@ -97,6 +98,74 @@ export interface ThreadHead {
   continueAfterRestart?: ContinueAfterRestart;
   createdAt: string;
   updatedAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// Provider session binding (§3.3, §4.1 "Cursor per turn")
+// ---------------------------------------------------------------------------
+
+/**
+ * The durable per-thread binding between a thread and the provider session that
+ * serves it. **This — not `ThreadHead.session` — is the authority for the
+ * resume cursor.**
+ *
+ * Why it exists: `ThreadHead.session` is a projection of `thread.session-set`,
+ * and a `session-set` event names the whole block. One that omitted the cursor
+ * (a settle to `ready`, a stop) replaced the block wholesale, the head lost its
+ * cursor, and the next host to start that session — after a deploy's
+ * drain-restart — opened a FRESH provider session with no memory of the
+ * conversation (2026-09-22, thread c8979f6a). The fold now carries the cursor
+ * forward, but that is a belt: an event-sourced field can always be replaced by
+ * the next event that names it. The binding cannot, because nothing replaces it
+ * whole — every write is a field-wise
+ * {@link ProviderSessionBindingPatch} merge.
+ *
+ * *T3: `apps/server/src/persistence/ProviderSessionRuntime.ts:35-52` — the
+ * `provider_session_runtime` row, outside the event log; differs: Orquester has
+ * no database, so the row is a `binding.json` beside `meta.json`.*
+ */
+export interface ProviderSessionBinding {
+  threadId: string;
+  /** The adapter that owns the session this cursor belongs to. */
+  adapter: AgentAdapterId;
+  /**
+   * The registry entry the session launched from (`claude`, `claudex`, …).
+   * A cursor minted under one launcher can be unusable under another.
+   */
+  adapterKey: string | null;
+  runtimeMode: RuntimeMode | null;
+  /** The provider instance/home the cursor is valid in, when one is known. */
+  providerInstanceId: string | null;
+  status: ProviderSessionStatus;
+  /**
+   * The adapter-owned resume blob — the one field the whole binding exists
+   * for. `null` means "this thread has no resumable session", which is
+   * different from "unchanged" (see {@link ProviderSessionBindingPatch}).
+   */
+  resumeCursor: unknown;
+  providerThreadId: string | null;
+  lastSeenAt: string;
+}
+
+/**
+ * A field-wise patch. **`undefined` means unchanged; `null` means cleared.**
+ * That contract is the whole point: a caller that knows nothing about the
+ * cursor simply omits it and cannot erase it, and a caller that genuinely ends
+ * a session says so with `null`.
+ *
+ * *T3: `apps/server/src/provider/Layers/ProviderSessionDirectory.ts:142-145` —
+ * `resumeCursor: binding.resumeCursor !== undefined ? binding.resumeCursor :
+ * (existingRuntime?.resumeCursor ?? null)`, and `:118-138` for adapterKey /
+ * runtimeMode / providerInstanceId.*
+ */
+export interface ProviderSessionBindingPatch {
+  adapter?: AgentAdapterId;
+  adapterKey?: string | null;
+  runtimeMode?: RuntimeMode | null;
+  providerInstanceId?: string | null;
+  status?: ProviderSessionStatus;
+  resumeCursor?: unknown;
+  providerThreadId?: string | null;
 }
 
 // ---------------------------------------------------------------------------
