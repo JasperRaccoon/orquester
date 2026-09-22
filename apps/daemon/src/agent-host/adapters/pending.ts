@@ -36,28 +36,38 @@
  *    seed, is what closes the window.
  */
 
+/** The sentence's invariant tail — the part that does not vary by provider. */
+const PENDING_MESSAGE_SUFFIX = "provider status has not been checked in this session yet.";
+
 /** T3's exact sentence, per provider. *T3: `ClaudeProvider.ts:634`.* */
 export function pendingStatusMessage(label: string): string {
-  return `${label} provider status has not been checked in this session yet.`;
+  return `${label} ${PENDING_MESSAGE_SUFFIX}`;
 }
 
 /**
  * True for a snapshot that has never been probed in this host process.
  *
  * Derived rather than stored as its own flag: the snapshot crosses the socket
- * as `ProviderSnapshot` and a new field would have to be threaded through the
- * wire contract, the cache file and every client fold for a fact that these
- * two already carry between them. A real probe never produces this pair — it
- * always reaches at least `installed` and a version verdict.
+ * as `ProviderSnapshot`, and a new field would have to be threaded through the
+ * wire contract, the cache file and every client fold for a fact these four
+ * already carry between them.
+ *
+ * **The message is part of the test, not decoration.** `status:"unknown"` +
+ * `auth:{status:"unknown"}` + `installed:false` is also exactly what
+ * `opencode/snapshot.ts`'s `unusableSnapshot` produces for a host with no
+ * `opencode` on PATH — a real, probed verdict that must still be cached and
+ * still counts as probed. The sentence is what only a pending seed writes.
  */
 export function isPendingSnapshot(snapshot: {
   status: string;
   auth: { status: string };
   installed: boolean;
+  message?: string | undefined;
 }): boolean {
   return (
     snapshot.status === "unknown" &&
     snapshot.auth.status === "unknown" &&
-    snapshot.installed === false
+    snapshot.installed === false &&
+    snapshot.message?.endsWith(PENDING_MESSAGE_SUFFIX) === true
   );
 }

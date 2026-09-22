@@ -33,6 +33,15 @@ export const LAUNCH_MODEL_SEARCH_LIMIT = 40;
  * catalogue at all — the caller must not post a launch it knows will be
  * refused, and says so instead.
  *
+ * **A PENDING snapshot is an ordinary snapshot here** (host §3.2 layer one:
+ * `status:"unknown"`, `auth:{status:"unknown"}`, the adapter's bundled
+ * catalogue). It resolves like any other, and it must: the whole point of the
+ * pending seed is that a cold host is launchable the instant a client loads,
+ * and the host validates `modelSelection.model` against the live catalogue at
+ * thread creation anyway. Nothing here branches on `status` — "Still loading
+ * this agent's models" is reserved for a genuinely empty catalogue, which is
+ * the one case this function answers `null` for.
+ *
  * A remembered pick the catalogue no longer lists is **not** honoured: the
  * launch would fail at the provider rather than at the chip. That differs from
  * the proxy-launcher chips, which deliberately keep a stale pick visible (spec
