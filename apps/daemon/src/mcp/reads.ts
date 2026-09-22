@@ -54,7 +54,9 @@ export async function sendCommand(api: DaemonApi, sessionId: string, name: Agent
     try {
       res = await api.request("POST", path, { body: payload });
     } catch (error) {
-      last = new ToolError("HOST_UNAVAILABLE", `The daemon call failed: ${(error as Error).message}`);
+      // The exception text can carry a host path: log it here, never hand it to the caller.
+      console.error("[mcp] daemon call failed", error);
+      last = new ToolError("HOST_UNAVAILABLE", "The daemon call failed.");
       continue;
     }
     if (res.status < 400) return expectOk<{ seq: number }>(res, name);

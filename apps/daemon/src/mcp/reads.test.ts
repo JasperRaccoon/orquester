@@ -53,7 +53,18 @@ test("sendCommand retries HOST_UNAVAILABLE with the SAME commandId up to 3 times
   assert.equal(rejected.calls.length, 1);
 });
 
-test("sendCommand waits only between attempts, never after the last one", async () => {
+test("a thrown daemon call surfaces a fixed HOST_UNAVAILABLE message and logs the cause", async (t) => {
+  const logged = t.mock.method(console, "error", () => {});
+  const api = new FakeDaemonApi().on("POST", "/api/sessions/c1/turn", () => { throw new Error("EACCES /home/x/secret"); });
+  await assert.rejects(sendCommand(api, "c1", "turn", { input: "x" }, { retryDelayMs: () => 0 }),
+    (e: { code: string; message: string }) => e.code === "HOST_UNAVAILABLE" && e.message === "The daemon call failed.");
+  assert.equal(logged.mock.callCount(), 4);
+  assert.equal(logged.mock.calls[0].arguments[0], "[mcp] daemon call failed");
+  assert.match(String(logged.mock.calls[0].arguments[1]), /EACCES/);
+});
+
+test("sendCommand waits only between attempts, never after the last one", async (t) => {
+  t.mock.method(console, "error", () => {});
   const waits: number[] = [];
   const retryDelayMs = (attempt: number) => { waits.push(attempt); return 0; };
   const thrown = new FakeDaemonApi().on("POST", "/api/sessions/c1/turn", () => { throw new Error("socket hang up"); });

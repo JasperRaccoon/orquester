@@ -20,10 +20,11 @@ export function capText(text: string, maxChars: number): { text: string; truncat
 }
 
 /**
- * A successful tool result: the object as text AND as the same structuredContent, capped at
+ * A successful tool result: the object as text AND as structuredContent, capped at
  * MAX_RESULT_BYTES. Over budget is a last-resort shed (the tool should have bounded itself):
- * the object gains `truncated` + `truncationNote`, and when even that is too big only those two
- * fields remain.
+ * the object gains `truncated` + `truncationNote`. When even that is too big, the text keeps the
+ * capped JSON's leading bytes (cut on a character boundary, then "...") so the model still
+ * sees the start, and structuredContent keeps only those two fields.
  */
 export function ok(value: Record<string, unknown>): { content: [TextContent]; structuredContent: Record<string, unknown> } {
   const text = JSON.stringify(value);
@@ -32,8 +33,9 @@ export function ok(value: Record<string, unknown>): { content: [TextContent]; st
   const capped = { ...value, truncated: true, truncationNote };
   const cappedText = JSON.stringify(capped);
   if (Buffer.byteLength(cappedText, "utf8") <= MAX_RESULT_BYTES) return { content: [{ type: "text", text: cappedText }], structuredContent: capped };
-  const note = { truncated: true, truncationNote };
-  return { content: [{ type: "text", text: JSON.stringify(note) }], structuredContent: note };
+  // A cut through a multibyte character decodes to a trailing U+FFFD; drop it so the cut is a whole character.
+  const head = Buffer.from(cappedText, "utf8").subarray(0, MAX_RESULT_BYTES - 3).toString("utf8").replace(/\uFFFD+$/u, "");
+  return { content: [{ type: "text", text: `${head}...` }], structuredContent: { truncated: true, truncationNote } };
 }
 
 /** Map any thrown error to an isError result with a SAFE message (no path/stack leak). */
