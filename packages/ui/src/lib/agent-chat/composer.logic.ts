@@ -321,3 +321,39 @@ export function writePersistedDrafts(drafts: Record<string, ComposerDraft>): voi
     /* private window, blocked storage, quota — a draft is a convenience */
   }
 }
+
+// ---------------------------------------------------------------------------
+// `$skill` mentions (§4.6.7)
+// ---------------------------------------------------------------------------
+
+/**
+ * Re-chip a stored message's `$skill` mentions at render time.
+ *
+ * **Nothing about a command or a skill is persisted** (§4.6.7): the text *is*
+ * the record, and there is no `isCommand` flag on a message. So the timeline
+ * reconstructs the chips by running the composer's own tokeniser over the
+ * stored text against the skill list that is current for this cwd — which also
+ * means a skill that no longer exists renders as the plain text the user
+ * actually sent, rather than as a chip pointing at nothing.
+ *
+ * This lived in the second slash-command module that the fix wave deleted
+ * (R2-5) and was absorbed nowhere, which regressed R2-8 from "dead" to
+ * "absent". It belongs beside the composer's other text rules; W12's timeline
+ * is the reader.
+ *
+ * A mention is `$name` at a word boundary — the literal dollar sign only, not
+ * any currency symbol — and the result is de-duplicated in first-seen order.
+ *
+ * *T3: `packages/shared/src/composerInlineTokens.ts:100-127`.*
+ */
+export function skillMentionsInText(text: string, knownSkillNames: readonly string[]): string[] {
+  const known = new Set(knownSkillNames.map((name) => name.toLowerCase()));
+  const found: string[] = [];
+  for (const match of text.matchAll(/(?:^|\s)\$([\w.-]+)/gu)) {
+    const name = match[1];
+    if (name && known.has(name.toLowerCase()) && !found.includes(name)) {
+      found.push(name);
+    }
+  }
+  return found;
+}
