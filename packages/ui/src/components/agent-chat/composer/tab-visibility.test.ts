@@ -44,6 +44,7 @@ function everyEscapeShape(): Array<{
   isTextarea: boolean;
   isTurnActive: boolean;
   drillInOpen: boolean;
+  rewindPress: boolean;
 }> {
   const shapes = [];
   for (const defaultPrevented of [false, true]) {
@@ -51,15 +52,18 @@ function everyEscapeShape(): Array<{
       for (const isTextarea of [false, true]) {
         for (const isTurnActive of [false, true]) {
           for (const drillInOpen of [false, true]) {
-            // A textarea is by definition inside the shell.
-            if (isTextarea && !insideComposerShell) continue;
-            shapes.push({
-              defaultPrevented,
-              insideComposerShell,
-              isTextarea,
-              isTurnActive,
-              drillInOpen
-            });
+            for (const rewindPress of [false, true]) {
+              // A textarea is by definition inside the shell.
+              if (isTextarea && !insideComposerShell) continue;
+              shapes.push({
+                defaultPrevented,
+                insideComposerShell,
+                isTextarea,
+                isTurnActive,
+                drillInOpen,
+                rewindPress
+              });
+            }
           }
         }
       }
@@ -128,6 +132,18 @@ test("whoever ran first can stand the other down via defaultPrevented", () => {
     false
   );
   assert.equal(shellOwnsEscape({ ...handled, insideComposerShell: false }), false);
+});
+
+test("the shell's double-press rewind stays outside the composer shell", () => {
+  // Esc Esc inside the composer is the textarea's own sequence; the shell's
+  // arm may only ever claim the second press OUTSIDE it — so one Escape can
+  // never open the picker twice, or open it and interrupt.
+  const idle = { defaultPrevented: false, isTurnActive: false, drillInOpen: false, rewindPress: true };
+  assert.equal(shellOwnsEscape({ ...idle, insideComposerShell: false }), true);
+  assert.equal(shellOwnsEscape({ ...idle, insideComposerShell: true }), false);
+  assert.equal(shellOwnsEscape({ ...idle, insideComposerShell: false, defaultPrevented: true }), false);
+  // Without the press, an idle Escape outside the composer is nobody's.
+  assert.equal(shellOwnsEscape({ ...idle, insideComposerShell: false, rewindPress: false }), false);
 });
 
 test("Escape with no turn running never interrupts from the composer", () => {

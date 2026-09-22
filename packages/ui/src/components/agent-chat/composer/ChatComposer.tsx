@@ -16,8 +16,15 @@ import { cn } from "../../../lib/cn";
 import { useMediaQuery } from "../../../hooks/use-media-query";
 import { useAppStore } from "../../../store/app";
 import { useAgentChatDraft } from "../../../lib/agent-chat/hooks";
+import { createEscapeSequence, type EscapeSequence } from "../../../lib/agent-chat/rewind.logic";
 import type { ChatComposerProps } from "../contracts";
 import { AccountChip, ModelChip, OptionChip, PlanChip, RuntimeModeChip } from "./ComposerChips";
+import {
+  REWIND_ESCAPE_HINT,
+  REWIND_ESCAPE_HINT_MS,
+  RewindControl,
+  rewindPickerEnabled
+} from "./RewindControl";
 import { imageOrdinal, imagePlaceholder, removeImagePlaceholder } from "./composer-images";
 import { ComposerAttachments, type StagedAttachment } from "./ComposerAttachments";
 import {
@@ -179,6 +186,8 @@ export function ChatComposer({
   activePlan,
   actionableProposedPlan,
   reverting,
+  rewindTargets,
+  onRewind,
   actions,
   onHeightChange,
   onDraftAttachmentCountChange,
@@ -236,6 +245,19 @@ export function ChatComposer({
   const [notice, setNotice] = React.useState<string | null>(null);
   const [sending, setSending] = React.useState(false);
 
+  /**
+   * The CLI's double Escape — "press Esc twice to jump to a previous message"
+   * (§5.5) — counted on THIS composer's own sequence for the Escapes its
+   * textarea receives. The shell counts the ones landing outside the composer
+   * on a sequence of its own (`resolveChatEscape`), so one Escape can never
+   * advance both.
+   */
+  const escapeSequenceRef = React.useRef<EscapeSequence | null>(null);
+  if (escapeSequenceRef.current === null) escapeSequenceRef.current = createEscapeSequence();
+  const escapeSequence = escapeSequenceRef.current;
+  /** Clears the "Press Esc again…" hint; its own, so it never wipes another notice. */
+  const rewindHintTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+
   draftRef.current = draft;
 
   // ---------------------------------------------------------------------
@@ -265,6 +287,8 @@ export function ChatComposer({
     setNotice(null);
     setSending(false);
     setMenuDismissed(false);
+    // A half-finished double Escape belongs to the thread it was pressed in.
+    escapeSequenceRef.current?.reset();
   }, [sessionId]);
 
   /**
@@ -1019,6 +1043,52 @@ export function ChatComposer({
   }, [actions]);
 
   // ---------------------------------------------------------------------
+  // Esc Esc — the rewind picker (§5.5, the CLI's "jump to a previous message")
+  // ---------------------------------------------------------------------
+  /** The picker can act — the same gate its button renders with. */
+  const rewindEnabled = rewindPickerEnabled({
+    targetCount: rewindTargets.length,
+    isTurnActive,
+    reverting,
+    hasPendingRequest
+  });
+
+  /** Drop the "Press Esc again…" hint — only that hint, never another notice. */
+  const clearRewindHint = React.useCallback(() => {
+    if (rewindHintTimerRef.current !== null) {
+      clearTimeout(rewindHintTimerRef.current);
+      rewindHintTimerRef.current = null;
+    }
+    setNotice((current) => (current === REWIND_ESCAPE_HINT ? null : current));
+  }, []);
+
+  // The hint's timer never outlives the composer.
+  React.useEffect(
+    () => () => {
+      if (rewindHintTimerRef.current !== null) clearTimeout(rewindHintTimerRef.current);
+    },
+    []
+  );
+
+  /**
+   * One idle Escape in the textarea. The first of two says what a second one
+   * will do — and only when it will do it, so the hint never promises a picker
+   * that is disabled — and the second opens the picker through the same
+   * `openControl` the keybinding handler drives every control with.
+   */
+  const pressRewindEscape = (): void => {
+    if (escapeSequence.press(Date.now())) {
+      clearRewindHint();
+      if (rewindEnabled) openControl("rewind");
+      return;
+    }
+    if (!rewindEnabled) return;
+    if (rewindHintTimerRef.current !== null) clearTimeout(rewindHintTimerRef.current);
+    setNotice(REWIND_ESCAPE_HINT);
+    rewindHintTimerRef.current = setTimeout(clearRewindHint, REWIND_ESCAPE_HINT_MS);
+  };
+
+  // ---------------------------------------------------------------------
   // Keyboard
   // ---------------------------------------------------------------------
   React.useEffect(() => {
@@ -1099,6 +1169,9 @@ export function ChatComposer({
     // refuses on its own (tested there); this early return additionally keeps
     // Escape and the menu keys out of a live composition.
     if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+    // Esc Esc is two CONSECUTIVE Escapes: any other key in between starts the
+    // count over (and so does an Escape something else consumes, below).
+    if (event.key !== "Escape") escapeSequence.reset();
     if (showMenu) {
       const count = Math.max(1, menuItems.length);
       if (event.key === "ArrowDown") {
@@ -1121,17 +1194,28 @@ export function ChatComposer({
       }
       if (event.key === "Escape") {
         // The menu takes Escape before the turn does: closing a menu the user
-        // just opened must not also stop the agent.
+        // just opened must not also stop the agent — nor count as the first
+        // half of a rewind.
         event.preventDefault();
         event.stopPropagation();
         setMenuDismissed(true);
+        escapeSequence.reset();
         return;
       }
     }
 
     if (event.key === "Escape" && isTurnActive) {
       event.preventDefault();
+      // This Escape stopped the turn; it is nobody's first press.
+      escapeSequence.reset();
       interrupt();
+      return;
+    }
+    if (event.key === "Escape") {
+      // Idle, no menu: the CLI's double Escape opens the rewind picker. A
+      // held key's auto-repeat is one press, not two.
+      event.preventDefault();
+      if (!event.repeat) pressRewindEscape();
       return;
     }
     if (event.key !== "Enter") return;
@@ -1329,6 +1413,16 @@ export function ChatComposer({
               >
                 <Paperclip size={14} aria-hidden />
               </button>
+              {/* The rewind picker — the double Escape's destination (§5.5).
+                  Renders nothing while there is no message to go back to. */}
+              <RewindControl
+                targets={rewindTargets}
+                isTurnActive={isTurnActive}
+                reverting={reverting}
+                hasPendingRequest={hasPendingRequest}
+                onRewind={onRewind}
+                returnFocusTo={() => textareaRef.current}
+              />
 
               <ModelChip
                 models={models}

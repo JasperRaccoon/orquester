@@ -5,6 +5,13 @@ import type { AttachmentRef } from "@orquester/api";
 
 import { cn } from "../../../../lib/cn";
 import type { AgentChatTimelineRow } from "../../../../lib/agent-chat/contracts";
+import { ComposerPopover } from "../../composer/ComposerPopover";
+import {
+  REWIND_BUSY_TITLE,
+  REWIND_DISABLED_EXPLAINS_ITSELF,
+  RewindConfirmPanel,
+  rewindDroppedTurnCount
+} from "../../composer/RewindControl";
 import { ChatIconButton, CopyButton, DisclosureChevron, ShimmerText } from "../../primitives";
 import { useTimelineRowContext } from "../context";
 import { ChatMarkdown } from "../markdown/ChatMarkdown";
@@ -96,6 +103,73 @@ function MessageBodyText({ text }: { text: string }): React.ReactElement {
 // ---------------------------------------------------------------------------
 
 /**
+ * "Rewind to here" (§5.5, T3's "Edit from here").
+ *
+ * A micro icon in the hover-revealed meta row that opens a confirm anchored to
+ * itself — never a modal: the confirm names what the rewind removes and that
+ * files stay as they are, and Rewind is focused so Enter confirms. Disabled,
+ * and saying why, while a turn runs or a revert is already in flight; the host
+ * would refuse the first and the second is rewriting the very history the
+ * button points at.
+ *
+ * *T3: `MessagesTimeline.tsx` `RevertUserMessageButton` (disabled while
+ * working or reverting) and `ChatView.tsx`'s "Edit from here?" dialog.*
+ */
+function RewindToHereButton({
+  messageId,
+  text,
+  revertTurnCount,
+  onOpenChange
+}: {
+  messageId: string;
+  text: string;
+  revertTurnCount: number;
+  onOpenChange: (open: boolean) => void;
+}): React.ReactElement {
+  const ctx = useTimelineRowContext();
+  const busy = ctx.revertBusy;
+  return (
+    <ComposerPopover
+      label="Rewind to here"
+      align="end"
+      width="w-80"
+      onOpenChange={onOpenChange}
+      renderTrigger={(triggerProps) => (
+        <ChatIconButton
+          {...triggerProps}
+          size="micro"
+          label="Rewind to here"
+          title={busy ? REWIND_BUSY_TITLE : "Rewind to here"}
+          disabled={busy}
+          // Still answers the pointer, so the title can say why it is disabled.
+          className={REWIND_DISABLED_EXPLAINS_ITSELF}
+        >
+          <Undo2 size={12} strokeWidth={1.8} aria-hidden />
+        </ChatIconButton>
+      )}
+    >
+      {(close) => (
+        <RewindConfirmPanel
+          text={text}
+          // The turns kept are `revertTurnCount`; everything the thread has
+          // started since — this message's own turn included — goes.
+          droppedTurnCount={rewindDroppedTurnCount({
+            startedTurnCount: ctx.startedTurnCount,
+            targetTurnCount: revertTurnCount
+          })}
+          busy={busy}
+          onBack={close}
+          onConfirm={() => {
+            close();
+            ctx.onRevert({ messageId, targetTurnCount: revertTurnCount });
+          }}
+        />
+      )}
+    </ComposerPopover>
+  );
+}
+
+/**
  * The only filled bubble in the timeline (§5.1 of the design reference).
  *
  * Right-aligned, capped at 80 %, no border, no avatar and no name label — the
@@ -109,6 +183,9 @@ export const UserMessageRow = React.memo(function UserMessageRow({
 }): React.ReactElement {
   const ctx = useTimelineRowContext();
   const [expanded, setExpanded] = React.useState(false);
+  // The meta row is hover-revealed; while the rewind confirm is open it stays
+  // shown, so the button the popover is anchored to does not fade out under it.
+  const [rewindOpen, setRewindOpen] = React.useState(false);
   const text = row.message.text;
   const clamp = shouldClampUserMessage(text) && !expanded;
   const attachments = row.message.attachments ?? [];
@@ -137,20 +214,22 @@ export const UserMessageRow = React.memo(function UserMessageRow({
           </button>
         ) : null}
       </div>
-      <div className="ac-reveal ac-tabular flex w-full max-w-[80%] items-center justify-end gap-2 pe-1 text-xs">
+      <div
+        className="ac-reveal ac-tabular flex w-full max-w-[80%] items-center justify-end gap-2 pe-1 text-xs"
+        data-visible={rewindOpen ? "true" : undefined}
+      >
         <span className="text-neutral-500" title={formatRowTimestampTooltip(row.createdAt)}>
           {formatRowTimestamp(row.createdAt)}
         </span>
         {/* The rewind affordance is only offered where the adapter supports a
             conversation rollback, and never in the read-only drill-in. */}
         {!ctx.readOnly && ctx.canRevert && typeof revertTurnCount === "number" ? (
-          <ChatIconButton
-            size="micro"
-            label="Rewind the conversation to here"
-            onClick={() => ctx.onRevert(revertTurnCount)}
-          >
-            <Undo2 size={12} strokeWidth={1.8} aria-hidden />
-          </ChatIconButton>
+          <RewindToHereButton
+            messageId={row.message.id}
+            text={text}
+            revertTurnCount={revertTurnCount}
+            onOpenChange={setRewindOpen}
+          />
         ) : null}
         {text.length > 0 ? <CopyButton size="micro" value={text} label="Copy message" /> : null}
       </div>

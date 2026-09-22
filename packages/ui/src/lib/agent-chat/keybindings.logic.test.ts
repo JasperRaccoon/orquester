@@ -108,6 +108,43 @@ describe("the data-composer-shortcut convention", () => {
     }
   });
 
+  it("the rewind picker is addressable, but Esc Esc is a sequence, never a chord (§5.5)", () => {
+    // The token is what lets both Escape handlers open the picker through
+    // `openControl("rewind")`; the double press itself is counted by those
+    // handlers (`createEscapeSequence`), so the table must never produce it.
+    assert.ok(COMPOSER_CONTROL_COMMANDS.includes("rewind"));
+    assert.equal(
+      composerControlSelector("rewind"),
+      `button[${COMPOSER_SHORTCUT_ATTRIBUTE}~="rewind"]:not(:disabled)`
+    );
+    assert.equal(chatShortcutLabel({ kind: "control", command: "rewind" }, false), null);
+    assert.equal(chatShortcutLabel({ kind: "control", command: "rewind" }, true), null);
+    // Escape keeps meaning "interrupt" in the table — whatever the modifiers,
+    // it is never the rewind control.
+    for (const modifiers of [{}, { shiftKey: true }, { ctrlKey: true }, { metaKey: true }]) {
+      assert.notDeepEqual(
+        resolveChatShortcut(key({ key: "Escape", ...modifiers })),
+        { kind: "control", command: "rewind" },
+        `Escape with ${JSON.stringify(modifiers)} must not resolve to the rewind control`
+      );
+    }
+    assert.deepEqual(resolveChatShortcut(key({ key: "Escape" })), { kind: "interrupt" });
+    for (const modifiers of [
+      { ctrlKey: true },
+      { metaKey: true },
+      { ctrlKey: true, shiftKey: true },
+      { metaKey: true, shiftKey: true }
+    ]) {
+      for (const pressed of ["r", "z", "u", "/", "e", "m", "Escape", "Backspace"]) {
+        assert.notDeepEqual(
+          resolveChatShortcut(key({ key: pressed, ...modifiers })),
+          { kind: "control", command: "rewind" },
+          `${pressed} must not open the rewind picker`
+        );
+      }
+    }
+  });
+
   it("refuses an inert or invisible control", () => {
     assert.equal(isOperableControl({}), true);
     assert.equal(isOperableControl({ hasAttribute: () => true }), false);
