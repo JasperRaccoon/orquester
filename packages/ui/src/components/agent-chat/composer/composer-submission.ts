@@ -16,6 +16,7 @@ import {
   SUPPORTED_ATTACHMENT_IMAGE_MIME_TYPES
 } from "@orquester/api/agent-chat";
 import type { AttachmentRef } from "@orquester/api/agent-chat";
+import { parseStandaloneComposerSlashCommand } from "./composer-trigger";
 import type { FollowUpBehavior } from "../../../lib/agent-chat/queue.logic";
 
 // ---------------------------------------------------------------------------
@@ -50,6 +51,13 @@ export type ComposerSubmissionIntent = "foreground" | "alternate";
  * **Mobile never sends on Enter** (§7.8): the on-screen Return inserts a
  * newline and the send button is the only send. That is the first branch on
  * purpose — no modifier and no setting can talk past it.
+ *
+ * **An IME composition never sends** either. While a candidate window is open
+ * Enter *commits the candidate* and fires `keydown` with `isComposing: true`;
+ * acting on it sends a half-converted prompt and swallows the candidate. Some
+ * engines report `keyCode === 229` for the same state instead, so both are
+ * checked. It lives here rather than only at the call site so the rule is
+ * testable and cannot be deleted without a failing test.
  */
 export function composerSubmissionIntentForEnter(input: {
   isMobileViewport: boolean;
@@ -58,7 +66,12 @@ export function composerSubmissionIntentForEnter(input: {
   isRunning: boolean;
   sendShortcut?: SendShortcut;
   prompt?: string;
+  /** `event.nativeEvent.isComposing` — an IME candidate window is open. */
+  isComposing?: boolean;
+  /** The pre-`isComposing` fallback some engines still report. */
+  keyCode?: number;
 }): ComposerSubmissionIntent | null {
+  if (input.isComposing === true || input.keyCode === 229) return null;
   const requiresModifier =
     input.sendShortcut === "mod-enter" ||
     (input.sendShortcut === "mod-enter-multiline" && /[\r\n]/.test(input.prompt ?? ""));
@@ -351,4 +364,40 @@ export function resolvePlanFollowUpSubmission(input: {
     interactionMode: "default",
     action: "implement"
   };
+}
+
+// ---------------------------------------------------------------------------
+// The submit-path guards (V1: R7-3 and R2-3 had no honest test)
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether `submit` bails before dispatching anything.
+ *
+ * **The plan is resolved BEFORE this runs.** An empty draft is exactly the
+ * input "Implement" is defined on — the plan supplies the text — so guarding
+ * on emptiness alone made the enabled Implement button a silent no-op (R7-3).
+ */
+export function submitIsNoOp(input: {
+  hasSendableContent: boolean;
+  hasActionablePlan: boolean;
+}): boolean {
+  return !input.hasSendableContent && !input.hasActionablePlan;
+}
+
+/**
+ * Whether a standalone `/plan` or `/default` is swallowed client-side.
+ *
+ * §4.6.5(a) scopes it to providers that show the toggle. With the toggle
+ * hidden (OpenCode, Grok) the draft is ordinary text and goes to the wire —
+ * OpenCode genuinely dispatches `/plan` natively, and swallowing it left the
+ * user with a cleared composer and nothing happening (R2-3).
+ */
+export function swallowsStandalonePlanCommand(input: {
+  text: string;
+  showPlanModeToggle: boolean;
+  attachmentCount: number;
+}): "plan" | "default" | null {
+  if (!input.showPlanModeToggle) return null;
+  if (input.attachmentCount > 0) return null;
+  return parseStandaloneComposerSlashCommand(input.text);
 }

@@ -317,6 +317,10 @@ type Mutation = {
  *
  * Events with `seq <= state.seq` are dropped — that is what makes the
  * overlapping snapshot/replay/live windows of §6.6 safe.
+ *
+ * An event whose `type` this build does not know folds to a no-op and still
+ * advances `seq` (§8): the log outlives a rollback, so a newer host's event
+ * type must be inert here, never fatal and never a reason to stop folding.
  */
 export function applyDomainEvent(
   state: ThreadFoldState,
@@ -526,6 +530,15 @@ function reduce(state: ThreadFoldState, event: DomainEvent): Mutation {
     case "thread.approval-response-requested":
     case "thread.user-input-response-requested":
     case "thread.checkpoint-revert-requested":
+      return {};
+
+    default:
+      // Unreachable for the closed union — `event` is `never` here, which is
+      // the compiler proving every arm above is handled. It IS reachable at
+      // runtime: §8 puts the thread log outside every rollback, so a log may
+      // hold an event type a NEWER host wrote. Such an event folds to a no-op
+      // and still advances the sequence, rather than truncating the thread.
+      void (event as never);
       return {};
   }
 }
