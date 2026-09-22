@@ -1,0 +1,33 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { FsSandboxError } from "@orquester/config/fs";
+import { ToolError } from "./errors.ts";
+import { ok, toSafeToolError, capText, MAX_RESULT_BYTES } from "./result.ts";
+
+test("ok returns the object as text and structuredContent", () => {
+  const r = ok({ sessions: [] });
+  assert.equal(r.content[0].text, JSON.stringify({ sessions: [] }));
+  assert.deepEqual(r.structuredContent, { sessions: [] });
+});
+
+test("ok caps oversized text and says so", () => {
+  const r = ok({ text: "x".repeat(MAX_RESULT_BYTES + 100) });
+  assert.ok(Buffer.byteLength(r.content[0].text, "utf8") <= MAX_RESULT_BYTES);
+  assert.equal((r.structuredContent as { truncated?: boolean }).truncated, true);
+});
+
+test("ToolError surfaces code and message; sandbox errors never echo the path; unknown errors are generic", () => {
+  const a = toSafeToolError(new ToolError("SESSION_NOT_FOUND", "No session abc", { id: "abc" }));
+  assert.equal(a.isError, true); assert.equal(a.content[0].text, "SESSION_NOT_FOUND: No session abc");
+  assert.deepEqual(a.structuredContent, { code: "SESSION_NOT_FOUND", message: "No session abc", detail: { id: "abc" } });
+  const b = toSafeToolError(new FsSandboxError("Path is outside the sandbox: /etc/shadow"));
+  assert.ok(!b.content[0].text.includes("/etc/shadow")); assert.equal(b.structuredContent.code, "PATH_NOT_ALLOWED");
+  const c = toSafeToolError(new Error("ENOENT /home/alice/.ssh/id_rsa"));
+  assert.ok(!c.content[0].text.includes("/home/alice")); assert.equal(c.structuredContent.code, "INTERNAL");
+});
+
+test("capText cuts on a character boundary and flags it", () => {
+  assert.deepEqual(capText("hello", 10), { text: "hello", truncated: false });
+  const r = capText("héllo wörld", 5);
+  assert.equal(r.truncated, true); assert.equal(r.text.length, 5);
+});

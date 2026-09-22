@@ -119,9 +119,6 @@ import { listArchiveEntries } from "./archive";
 import { ParquetRequestError, readParquetWindow } from "./parquet";
 import { resolveZipTool, spawnDirZip } from "./zip";
 import { FsSearchError, listProjectFiles, searchProjectFiles } from "./search";
-import { TerminalControl } from "./mcp/terminal-control.ts";
-import { TodoTools } from "./mcp/todo-tools.ts";
-import { FsTools } from "./mcp/fs-tools.ts";
 import { registerMcp } from "./mcp/server.ts";
 import {
   UploadTooLargeError,
@@ -4624,24 +4621,10 @@ export function createServer(
     });
   }
 
-  // Terminal-control MCP — HTTP-only. The unix socket is unauthenticated, so full
-  // terminal drive must never be reachable there; register /mcp only on remote.
+  // MCP — HTTP-only. The unix socket is unauthenticated, so the agent control
+  // surface must never be reachable there; register /mcp only on remote.
   if (options.mode === "remote") {
-    const control = new TerminalControl({
-      sessions: services.sessions,
-      registry: services.registry,
-      workspacesDir: resolved.workspacesDir,
-      fsRoot: resolved.fsRoot,
-      listWorkspaces: () => listWorkspaces(resolved.workspacesDir, resolved.workspacesMetaFile),
-      listProjects: (workspace) =>
-        listProjects(resolved.workspacesDir, workspace, resolved.workspacesMetaFile),
-    });
-    registerMcp(app, {
-      control,
-      todos: new TodoTools({ todos, workspacesDir: resolved.workspacesDir }),
-      files: new FsTools({ fsRoot: resolved.fsRoot }),
-      getUsage: (force) => usage.snapshot(force),
-    });
+    registerMcp(app, {});
   }
 
   // Serve the static web client build for everything outside the API, with an

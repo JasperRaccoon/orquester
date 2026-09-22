@@ -2,7 +2,7 @@ import { open, opendir, stat } from "node:fs/promises";
 import type { Dirent } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { assertInsideFsRoot, FsSandboxError } from "@orquester/config/fs";
-import { ToolError } from "./terminal-control.ts";
+import { ToolError } from "./errors.ts";
 
 export const MAX_FS_ENTRIES = 500;
 export const DEFAULT_READ_BYTES = 64 * 1024;
@@ -72,12 +72,12 @@ export class FsTools {
     } catch (error) {
       const code = codeOf(error);
       if (code === "ENOENT") {
-        throw new ToolError("Directory not found.");
+        throw new ToolError("INVALID_ARGUMENT", "Directory not found.");
       }
       if (code === "ENOTDIR") {
-        throw new ToolError("Path is not a directory. Use read_file instead.");
+        throw new ToolError("INVALID_ARGUMENT", "Path is not a directory. Use read_file instead.");
       }
-      throw new ToolError("Unable to list directory.");
+      throw new ToolError("INVALID_ARGUMENT", "Unable to list directory.");
     }
 
     dirents.sort((a, b) => a.name.localeCompare(b.name));
@@ -103,22 +103,22 @@ export class FsTools {
     } catch (error) {
       const code = codeOf(error);
       if (code === "ENOENT" || code === "ENOTDIR") {
-        throw new ToolError("File not found.");
+        throw new ToolError("INVALID_ARGUMENT", "File not found.");
       }
-      throw new ToolError("Unable to read file.");
+      throw new ToolError("INVALID_ARGUMENT", "Unable to read file.");
     }
 
     if (fileStat.isDirectory()) {
-      throw new ToolError("Path is a directory. Use list_files instead.");
+      throw new ToolError("INVALID_ARGUMENT", "Path is a directory. Use list_files instead.");
     }
     if (!fileStat.isFile()) {
-      throw new ToolError("Path is not a regular file.");
+      throw new ToolError("INVALID_ARGUMENT", "Path is not a regular file.");
     }
 
     const offset = normalizeOffset(opts?.offset);
     const maxBytes = normalizeMaxBytes(opts?.maxBytes);
     const file = await open(safe, "r").catch(() => {
-      throw new ToolError("Unable to read file.");
+      throw new ToolError("INVALID_ARGUMENT", "Unable to read file.");
     });
     try {
       await assertTextFile(file, fileStat.size);
@@ -180,6 +180,6 @@ async function assertTextFile(file: Awaited<ReturnType<typeof open>>, size: numb
   const buffer = Buffer.allocUnsafe(sniffLength);
   const { bytesRead } = await file.read(buffer, 0, sniffLength, 0);
   if (buffer.subarray(0, bytesRead).includes(0)) {
-    throw new ToolError("Refusing to read binary file.");
+    throw new ToolError("INVALID_ARGUMENT", "Refusing to read binary file.");
   }
 }

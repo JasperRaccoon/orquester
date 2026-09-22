@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { TodoListManager } from "../todos.ts";
 import { TodoTools } from "./todo-tools.ts";
-import { TabNotFound, ToolError } from "./terminal-control.ts";
+import { ToolError } from "./errors.ts";
 
 async function makeTools() {
   const root = await mkdtemp(join(tmpdir(), "todo-tools-"));
@@ -37,14 +37,15 @@ test("project scope create/list stores by joined project path and omits refKey",
   assert.deepEqual(tools.list({ workspace: "w", project: "p" }), [created]);
 });
 
-test("invalid names and missing directories reject as TabNotFound before creating todos", async () => {
+test("invalid names and missing directories reject as PROJECT_NOT_FOUND before creating todos", async () => {
   const { root, todos, tools } = await makeTools();
   await mkdir(join(root, "escape"), { recursive: true });
+  const projectNotFound = (err: unknown) => err instanceof ToolError && err.code === "PROJECT_NOT_FOUND";
 
-  await assert.rejects(() => tools.create({ workspace: "../w" }, "bad"), TabNotFound);
-  await assert.rejects(() => tools.create({ workspace: "w", project: "../escape" }, "bad"), TabNotFound);
-  await assert.rejects(() => tools.create({ workspace: "missing" }, "bad"), TabNotFound);
-  await assert.rejects(() => tools.create({ workspace: "w", project: "missing" }, "bad"), TabNotFound);
+  await assert.rejects(() => tools.create({ workspace: "../w" }, "bad"), projectNotFound);
+  await assert.rejects(() => tools.create({ workspace: "w", project: "../escape" }, "bad"), projectNotFound);
+  await assert.rejects(() => tools.create({ workspace: "missing" }, "bad"), projectNotFound);
+  await assert.rejects(() => tools.create({ workspace: "w", project: "missing" }, "bad"), projectNotFound);
   assert.equal(todos.list("workspace", "w").length, 0);
   assert.equal(todos.list("project", join(root, "w", "p")).length, 0);
   assert.equal(todos.list("project", join(root, "escape")).length, 0);
