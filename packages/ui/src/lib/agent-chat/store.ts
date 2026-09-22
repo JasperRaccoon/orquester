@@ -623,6 +623,11 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       return "ready";
     };
 
+    /**
+     * The single writer of this thread's persisted draft (`localStorage`, key
+     * `orquester:agent-chat-drafts`). Empty drafts are dropped from storage by
+     * `writePersistedDrafts`, so clearing is spelled as saving an empty draft.
+     */
     const setDraft = (draft: ComposerDraft): void => {
       update((state) => (state.draft === draft ? state : { ...state, draft }));
       const all = readPersistedDrafts();
@@ -633,23 +638,26 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
     /**
      * Return a message's content to the composer.
      *
-     * **There is one visible draft, and the composer owns it.** When a
+     * **There is one visible draft, and a mounted composer owns it.** When a
      * composer is mounted for this session (W13's `composer-bridge` handle) the
-     * text goes straight into it at the caret; the store's own draft is the
-     * fallback for the window where the tab is not mounted yet — a queued
-     * message returned by an interrupt while the user is on another tab must
-     * not be lost. Keeping two live drafts would let them disagree.
+     * text goes straight into it at the caret, and the composer's own
+     * `saveDraft` persists it from there; with no composer mounted the text
+     * merges into the persisted draft below, where the next mount loads it. A
+     * queued message returned by an interrupt while the user is on another
+     * tab must not be lost, and two live drafts would disagree.
      */
     const appendToDraft = (message: QueuedComposerMessage): void => {
       const handle = composerHandle(sessionId);
       if (handle) {
         insertComposerText(sessionId, message.text, "append");
-        // Attachments go back as CHIPS, not into the store's fallback draft
-        // (fix-wave R7-5). The fallback is drained exactly once, on composer
-        // mount, so anything parked here while a composer is already mounted is
-        // never picked up: the file the user queued vanishes between Stop and
-        // the next send. Only what the composer refuses (the attachment budget,
-        // the turn's size bounds) falls back, where the next mount finds it.
+        // Attachments go back as CHIPS, not into the persisted draft
+        // (fix-wave R7-5). A mounted composer owns the draft and saves its own
+        // whole draft back, so anything parked here behind its back is invisible
+        // until its next mount and is overwritten by its next save: the file the
+        // user queued would seem to vanish between Stop and the next send. Only
+        // what the composer REFUSES (the attachment budget, the turn's size
+        // bounds) falls back here — it is not in the tray either way, and on a
+        // thread whose composer is closed the next mount finds it.
         const refused = message.attachments.filter(
           (attachment) => !stageComposerAttachment(sessionId, attachment)
         );
@@ -920,17 +928,15 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       },
 
       /**
-       * Take the fallback draft and reset it in one step (W13 drains this on
-       * composer mount). Take-and-clear rather than read-then-clear: the draft
-       * is persisted, so leaving it behind would re-apply the same text on the
-       * next open.
+       * Persist what the composer has not sent, for this thread (§7.4).
+       *
+       * The composer calls this on every change (debounced) and synchronously
+       * before it unmounts or swaps threads, so the draft outlives the
+       * component: switching to a project whose tabs unmount this one, or
+       * reloading the page, must not cost a half-typed message.
        */
-      takeDraft() {
-        const draft = get().draft;
-        if (draft !== EMPTY_DRAFT) {
-          setDraft(EMPTY_DRAFT);
-        }
-        return draft;
+      saveDraft(draft) {
+        setDraft(draft);
       },
       dismissErrorBanner() {
         // §7.3: a dismissal is remembered per `(threadId, message)` for the

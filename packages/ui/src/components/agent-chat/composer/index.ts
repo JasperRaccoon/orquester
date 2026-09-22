@@ -100,6 +100,19 @@ export {
 } from "./composer-submission";
 
 export {
+  composerDraftToPersist,
+  createDraftPersistScheduler,
+  DRAFT_PERSIST_DELAY_MS,
+  EMPTY_PERSISTED_DRAFT,
+  loadComposerDraft,
+  persistableAttachmentRefs,
+  persistedDraftsEqual,
+  type DraftPersistScheduler,
+  type LoadedComposerDraft,
+  type PersistableAttachment
+} from "./composer-draft";
+
+export {
   COMPOSER_RESTING_EXPANSION_MIN_PX,
   isComposerCollapsedMobile,
   resolveComposerTimelineInset

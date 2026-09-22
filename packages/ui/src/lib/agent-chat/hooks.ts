@@ -345,13 +345,13 @@ export function useProviderSnapshots(): ProviderSnapshot[] {
 }
 
 /**
- * The store's **fallback** draft for a thread.
+ * The thread's **persisted** draft, and the actions that write it.
  *
- * The composer owns the live draft (W13's `ChatComposer` plus its
- * `composer-bridge` handle); this one only holds what was returned to a thread
- * whose composer is not mounted — a queued message drained by an interrupt
- * while the user is on another tab — plus any attachments that came back with
- * it. A mounted composer should drain it once on mount.
+ * This is the durable copy of everything unsent: W13's `ChatComposer` loads it
+ * on mount and on a thread swap, and saves it back on every change, so a
+ * half-typed message outlives the component. It is also where a queued message
+ * returned by an interrupt lands while no composer is mounted — the next mount
+ * finds it there.
  */
 export function useAgentChatDraft(sessionId: string): {
   draft: AgentChatThreadState["draft"];

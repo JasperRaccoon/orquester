@@ -5,6 +5,7 @@ import { flushSync } from "react-dom";
 import { Paperclip, Wand2 } from "lucide-react";
 import type {
   AttachmentRef,
+  ComposerContextRecord,
   InteractionMode,
   ModelSelection,
   SelectProviderOptionDescriptor
@@ -19,6 +20,14 @@ import type { ChatComposerProps } from "../contracts";
 import { AccountChip, ModelChip, OptionChip, PlanChip, RuntimeModeChip } from "./ComposerChips";
 import { imageOrdinal, imagePlaceholder, removeImagePlaceholder } from "./composer-images";
 import { ComposerAttachments, type StagedAttachment } from "./ComposerAttachments";
+import {
+  composerDraftToPersist,
+  createDraftPersistScheduler,
+  EMPTY_PERSISTED_DRAFT,
+  loadComposerDraft,
+  persistedDraftsEqual,
+  type DraftPersistScheduler
+} from "./composer-draft";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { ComposerTokenMenu } from "./ComposerTokenMenu";
 import { registerComposerHandle } from "./composer-bridge";
@@ -68,7 +77,13 @@ import {
 } from "./composer-trigger";
 import { useComposerPathSearch } from "./use-composer-path-search";
 
-/** What survives a tab switch: everything the user has not sent yet. */
+/**
+ * The **live** draft: what is on screen, including uploads still in flight.
+ *
+ * The copy that survives this component is the thread store's persisted one
+ * (`ComposerDraft`); this one is loaded from it and written back to it — see
+ * "The draft is the store's" below.
+ */
 interface DraftState {
   text: string;
   attachments: StagedAttachment[];
@@ -173,8 +188,12 @@ export function ChatComposer({
     (state) => state.sessions.find((session) => session.id === sessionId)?.cwd ?? null
   );
   const root = searchRoot ?? sessionCwd;
-  // The store's fallback draft, drained once on mount (see the effect below).
-  const { actions: storeDraftActions } = useAgentChatDraft(sessionId);
+  /**
+   * The thread store's persisted draft — the durable copy of everything the
+   * user has not sent yet, and the only one that outlives this component.
+   * Read on mount and on a thread swap, written back on every change.
+   */
+  const { draft: storeDraft, actions: storeDraftActions } = useAgentChatDraft(sessionId);
   /**
    * The per-device composer preferences, read live from the app store.
    *
@@ -188,8 +207,17 @@ export function ChatComposer({
   const shellRef = React.useRef<HTMLDivElement>(null);
   const textareaRef = React.useRef<HTMLTextAreaElement>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
-  const draftsRef = React.useRef(new Map<string, DraftState>());
   const draftRef = React.useRef<DraftState>(EMPTY_DRAFT);
+  const storeDraftRef = React.useRef(storeDraft);
+  storeDraftRef.current = storeDraft;
+  /**
+   * The context records a persisted draft carried in (§4.1). The composer has
+   * no context UI, so they ride along untouched — loaded with the draft,
+   * persisted with it, cleared with it — rather than being dropped on the
+   * floor the moment a draft is picked up.
+   */
+  const carriedContextRef = React.useRef<ComposerContextRecord[]>([]);
+  const persistRef = React.useRef<DraftPersistScheduler | null>(null);
   const insetRef = React.useRef(0);
   const restingRef = React.useRef(true);
   const retryFilesRef = React.useRef(new Map<string, File>());
@@ -208,24 +236,90 @@ export function ChatComposer({
   draftRef.current = draft;
 
   // ---------------------------------------------------------------------
-  // Per-tab drafts (§7.1)
+  // The draft is the store's (§7.1, §7.4)
   // ---------------------------------------------------------------------
-  // One `AgentChatView` serves every chat tab in a project, so this component's
-  // identity survives a tab switch and the draft has to be swapped by hand —
-  // otherwise switching tabs would hand thread B thread A's message.
-  const previousSessionRef = React.useRef(sessionId);
+  // One `AgentChatView` serves every chat tab in a PROJECT, so a tab switch
+  // inside a project keeps this component mounted and only `sessionId`
+  // changes — but focusing a session of another project swaps the whole tab
+  // set and unmounts it, and a reload destroys it outright. A draft held in
+  // component state (as a hand-swapped per-tab map once was) is lost to both.
+  //
+  // So the thread store's persisted draft is the owner: this loads it on mount
+  // and on every thread swap, and the two effects below write it back. The
+  // load deliberately does NOT go through `stageAttachment` — that one also
+  // writes an `[Image #N]` placeholder at the caret, and the text being
+  // restored already contains the placeholders the user saw.
+  const previousSessionRef = React.useRef<string | null>(null);
   React.useLayoutEffect(() => {
-    const previous = previousSessionRef.current;
-    if (previous === sessionId) return;
-    draftsRef.current.set(previous, draftRef.current);
+    if (previousSessionRef.current === sessionId) return;
     previousSessionRef.current = sessionId;
-    const next = draftsRef.current.get(sessionId) ?? EMPTY_DRAFT;
+    const loaded = loadComposerDraft(storeDraftRef.current);
+    carriedContextRef.current = loaded.context;
+    const next: DraftState = { text: loaded.text, attachments: loaded.attachments };
+    draftRef.current = next;
     setDraft(next);
     setCursor(next.text.length);
     setNotice(null);
     setSending(false);
     setMenuDismissed(false);
   }, [sessionId]);
+
+  /**
+   * One scheduler per thread, and its cleanup is the flush.
+   *
+   * The cleanup closes over the OUTGOING thread's actions, which is what makes
+   * a swap safe: React runs every cleanup for a commit before any new effect,
+   * so the tail of thread A is written to thread A even though `sessionId`
+   * already names B. `pagehide`/`visibilitychange` cover what React never sees
+   * at all — a reload or a backgrounded tab runs no cleanup.
+   */
+  React.useEffect(() => {
+    const scheduler = createDraftPersistScheduler((draft) => storeDraftActions.saveDraft(draft));
+    persistRef.current = scheduler;
+    const flush = (): void => scheduler.flush();
+    const flushIfHidden = (): void => {
+      if (document.visibilityState === "hidden") scheduler.flush();
+    };
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", flushIfHidden);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", flushIfHidden);
+      scheduler.flush();
+      if (persistRef.current === scheduler) persistRef.current = null;
+    };
+  }, [sessionId, storeDraftActions]);
+
+  /**
+   * Every change to the live draft schedules a write.
+   *
+   * Keyed on the local draft alone — never on the store's — so a write can
+   * never feed back into a load: this component reads the persisted draft at
+   * mount and at a thread swap, and at no other time. The equality check keeps
+   * the mount itself (which loads, then renders, then lands here with exactly
+   * what it read) from writing anything back.
+   */
+  React.useEffect(() => {
+    const scheduler = persistRef.current;
+    if (!scheduler) return;
+    const next = composerDraftToPersist({
+      text: draft.text,
+      attachments: draft.attachments,
+      context: carriedContextRef.current
+    });
+    if (persistedDraftsEqual(next, storeDraftRef.current)) {
+      scheduler.cancel();
+      return;
+    }
+    scheduler.schedule(next);
+  }, [draft]);
+
+  /** Clear or overwrite the persisted draft now, ahead of the debounce. */
+  const persistNow = React.useCallback((text: string, attachments: StagedAttachment[]) => {
+    persistRef.current?.write(
+      composerDraftToPersist({ text, attachments, context: carriedContextRef.current })
+    );
+  }, []);
 
   // ---------------------------------------------------------------------
   // Height publishing (§7.4)
@@ -436,33 +530,6 @@ export function ChatComposer({
       }),
     [focusAtEnd, insertText, openControl, sessionId, stageAttachment]
   );
-
-  /**
-   * Drain the store's **fallback** draft once per thread (§7.4).
-   *
-   * That draft is where a queued message returned by an interrupt lands while
-   * this tab's composer was not mounted — and, because the bridge only carries
-   * text, it is also where the *attachments* of a returned message land even
-   * when a composer **is** mounted. Without this drain those files are held by
-   * the store and never become chips, so the user sees the text come back
-   * without its attachments.
-   *
-   * `takeDraft` is take-and-clear: the store draft is persisted, so a read that
-   * left it behind would re-apply the same text on the next open. It runs
-   * after the handle is registered, so anything the drain itself routes back
-   * through the bridge finds a live composer.
-   */
-  React.useEffect(() => {
-    const drained = storeDraftActions.takeDraft();
-    if (drained.text.trim().length > 0) {
-      insertText(drained.text, "append");
-    }
-    for (const attachment of drained.attachments) {
-      stageAttachment(attachment);
-    }
-    // Keyed on the thread only: one drain per tab, not one per action identity.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId]);
 
   // ---------------------------------------------------------------------
   // Provider catalog, scoped to this thread's cwd (§4.6.4)
@@ -826,6 +893,10 @@ export function ChatComposer({
       if (standalone) {
         setPlanMode(standalone);
         setDraft((state) => ({ ...state, text: "" }));
+        // Immediately, not on the debounce: a command that never became a
+        // message must not come back on the next mount. (`swallowsStandalone…`
+        // already guarantees the tray is empty.)
+        persistNow("", []);
         applyCaret(0);
         return;
       }
@@ -880,6 +951,11 @@ export function ChatComposer({
       });
 
       setDraft(EMPTY_DRAFT);
+      // The persisted draft is cleared NOW rather than on the debounce: a
+      // reload between the send and the next window would otherwise resurrect
+      // a message that is already on its way (§7.4).
+      carriedContextRef.current = [];
+      persistRef.current?.write(EMPTY_PERSISTED_DRAFT);
       applyCaret(0);
       setNotice(null);
       // The retry map holds the original `File` objects; a sent draft can no
@@ -912,6 +988,7 @@ export function ChatComposer({
       interactionMode,
       isTurnActive,
       chatPrefs.followUpBehavior,
+      persistNow,
       reverting,
       runSend,
       sendDisabledReason,
