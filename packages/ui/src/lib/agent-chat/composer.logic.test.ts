@@ -13,8 +13,7 @@ import {
   nextPastedTextFileName,
   parsePersistedDrafts,
   PASTED_TEXT_ATTACHMENT_THRESHOLD_BYTES,
-  pastedTextDisposition,
-  skillMentionsInText
+  pastedTextDisposition
 } from "./composer.logic";
 
 describe("composerSubmissionIntentForEnter", () => {
@@ -174,37 +173,5 @@ describe("persisted drafts", () => {
   it("knows an empty draft", () => {
     assert.equal(draftIsEmpty({ text: "  ", attachments: [], context: [] }), true);
     assert.equal(draftIsEmpty({ text: "x", attachments: [], context: [] }), false);
-  });
-});
-
-describe("R2-8 — `$skill` mentions are re-chippable from the stored text", () => {
-  const known = ["deploy", "code-review", "v2.plan"];
-
-  it("finds a known skill at the start of the text and after a space", () => {
-    assert.deepEqual(skillMentionsInText("$deploy please", known), ["deploy"]);
-    assert.deepEqual(skillMentionsInText("run $code-review now", known), ["code-review"]);
-  });
-
-  it("ignores a skill the current cwd does not have", () => {
-    // Rendering a chip for a skill that no longer exists would point at
-    // nothing; the plain text the user sent is the honest fallback.
-    assert.deepEqual(skillMentionsInText("$gone please", known), []);
-  });
-
-  it("does not match mid-word, or a bare currency symbol", () => {
-    assert.deepEqual(skillMentionsInText("costs us$deploy", known), []);
-    assert.deepEqual(skillMentionsInText("€deploy", known), []);
-    assert.deepEqual(skillMentionsInText("$ deploy", known), []);
-  });
-
-  it("matches case-insensitively but keeps each distinct spelling, in first-seen order", () => {
-    // De-duplication is by the spelling **as written**, not by the skill: the
-    // renderer chips the text it was given, so collapsing `$Deploy` and
-    // `$deploy` to one entry would leave the second occurrence un-chipped.
-    assert.deepEqual(skillMentionsInText("$v2.plan then $Deploy then $deploy then $Deploy", known), [
-      "v2.plan",
-      "Deploy",
-      "deploy"
-    ]);
   });
 });
