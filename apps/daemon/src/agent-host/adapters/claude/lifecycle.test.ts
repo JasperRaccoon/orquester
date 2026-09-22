@@ -12,6 +12,9 @@
 
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { appendFile, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import * as nodePath from "node:path";
 import { describe, it } from "node:test";
 
 import type {
@@ -31,6 +34,7 @@ import { AsyncEventQueue, createDeferred } from "./async-queue.ts";
 import type { ClaudeAdapterDeps } from "./deps.ts";
 import { countingIds } from "./fixtures.ts";
 import { createClaudeAdapterWith } from "./index.ts";
+import { BACKGROUND_SHELL_TAIL_INTERVAL_MS } from "./session.ts";
 
 // ---------------------------------------------------------------------------
 // The scripted peer
@@ -1553,5 +1557,203 @@ describe("claude adapter — a resumed thread has a timeline (E6)", () => {
     });
     const snapshot = await harness.adapter.readThread(START.threadId);
     assert.deepEqual(snapshot.turns, []);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Background shells
+// ---------------------------------------------------------------------------
+
+const SHELL_TASK = "bvf4wz8g5";
+const SHELL_TOOL_USE = "toolu_01St";
+
+function bashToolUse(command: string): SDKMessage {
+  return {
+    type: "stream_event",
+    uuid: "u-bash",
+    session_id: "sess-1",
+    parent_tool_use_id: null,
+    event: {
+      type: "content_block_start",
+      index: 0,
+      content_block: {
+        type: "tool_use",
+        id: SHELL_TOOL_USE,
+        name: "Bash",
+        input: { command, description: "Run the suites", run_in_background: true }
+      }
+    }
+  } as unknown as SDKMessage;
+}
+
+function backgroundTaskStarted(): SDKMessage {
+  return {
+    type: "system",
+    subtype: "task_started",
+    task_id: SHELL_TASK,
+    tool_use_id: SHELL_TOOL_USE,
+    description: "Run the suites",
+    is_backgrounded: true,
+    task_type: "local_bash",
+    session_id: "sess-1",
+    uuid: "u-task"
+  } as unknown as SDKMessage;
+}
+
+function launchPlaceholder(outputFile: string): SDKMessage {
+  return {
+    type: "user",
+    uuid: "u-launch",
+    session_id: "sess-1",
+    parent_tool_use_id: null,
+    message: {
+      role: "user",
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: SHELL_TOOL_USE,
+          is_error: false,
+          content: `Command running in background with ID: ${SHELL_TASK}. Output is being written to: ${outputFile}. You will be notified when it completes. To check interim output, use Read on that file path.`
+        }
+      ]
+    }
+  } as unknown as SDKMessage;
+}
+
+/** Fire the most recently scheduled tail poll. */
+function firePendingTail(harness: Harness): void {
+  for (let index = harness.timers.length - 1; index >= 0; index -= 1) {
+    const entry = harness.timers[index]!;
+    if (entry.ms === BACKGROUND_SHELL_TAIL_INTERVAL_MS) {
+      entry.fn();
+      return;
+    }
+  }
+  throw new Error("no background-shell tail poll was scheduled");
+}
+
+describe("claude adapter — background shells", () => {
+  it("tails the CLI's output file and drains it BEFORE the completion bookend", async () => {
+    const dir = await mkdtemp(nodePath.join(tmpdir(), "orq-bgshell-"));
+    try {
+      const outputFile = nodePath.join(dir, `${SHELL_TASK}.output`);
+      await writeFile(outputFile, "", "utf8");
+
+      const harness = await makeHarness();
+      await harness.adapter.startSession(START);
+      const peer = harness.peers[0]!;
+      await harness.adapter.sendTurn({
+        threadId: START.threadId,
+        input: "run the suites in the background",
+        attachments: [],
+        interactionMode: "default"
+      });
+      await peer.nextTurn();
+
+      peer.emit(bashToolUse("pnpm -r test"));
+      peer.emit(backgroundTaskStarted());
+      const started = await harness.waitFor("task.started");
+      assert.equal(started.payload.isBackgrounded, true);
+      await harness.drain();
+      const item = harness.events.find(
+        (event) => event.type === "item.started" && event.itemId === `bgshell:${SHELL_TASK}`
+      );
+      assert.ok(item, "the shell gets its own row, or the drill-in has nothing to show");
+
+      peer.emit(launchPlaceholder(outputFile));
+      await harness.drain();
+
+      // The file grows between polls; each poll ships only what was appended.
+      await appendFile(outputFile, "ok 1 - first\n", "utf8");
+      let seen = harness.events.length;
+      firePendingTail(harness);
+      const first = await harness.waitFor("content.delta", seen);
+      assert.equal(first.itemId, `bgshell:${SHELL_TASK}`);
+      assert.equal(first.agentId, SHELL_TASK);
+      assert.equal(first.payload.streamKind, "command_output");
+      assert.equal(first.payload.delta, "ok 1 - first\n");
+
+      await appendFile(outputFile, "ok 2 - second\n", "utf8");
+      seen = harness.events.length;
+      firePendingTail(harness);
+      const second = await harness.waitFor("content.delta", seen);
+      assert.equal(second.payload.delta, "ok 2 - second\n", "only the appended bytes");
+
+      // The last lines land after the final poll and before the notification:
+      // without the drain they would arrive after `item.completed`, which is
+      // where ingestion closes the item's output buffer, and be lost.
+      await appendFile(outputFile, "# pass 2\n", "utf8");
+      seen = harness.events.length;
+      peer.emit({
+        type: "system",
+        subtype: "task_notification",
+        task_id: SHELL_TASK,
+        tool_use_id: SHELL_TOOL_USE,
+        status: "completed",
+        output_file: outputFile,
+        summary: 'Background command "Run the suites" completed (exit code 0)',
+        session_id: "sess-1",
+        uuid: "u-note"
+      } as unknown as SDKMessage);
+      const completed = await harness.waitFor("task.completed", seen);
+      assert.equal(completed.payload.exitCode, 0);
+
+      const tail = harness.events.slice(seen);
+      const types = tail.map((event) => event.type);
+      const lastDelta = types.lastIndexOf("content.delta");
+      const itemDone = types.indexOf("item.completed");
+      assert.ok(lastDelta >= 0, `expected a drained delta, saw ${types.join(", ")}`);
+      assert.ok(itemDone > lastDelta, `the drain must precede the item's bookend: ${types.join(", ")}`);
+      assert.ok(types.indexOf("task.completed") > itemDone);
+      const drained = tail.find(
+        (event): event is EventOf<"content.delta"> =>
+          event.type === "content.delta" && event.itemId === `bgshell:${SHELL_TASK}`
+      );
+      assert.equal(drained?.payload.delta, "# pass 2\n");
+
+      // The tail is over: a later poll adds nothing, even if the file grows.
+      await appendFile(outputFile, "late\n", "utf8");
+      const after = harness.events.length;
+      firePendingTail(harness);
+      await harness.drain();
+      assert.deepEqual(harness.events.slice(after), []);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("an unreadable output file says so once and stops, rather than polling forever", async () => {
+    const dir = await mkdtemp(nodePath.join(tmpdir(), "orq-bgshell-"));
+    try {
+      const missing = nodePath.join(dir, "never-created.output");
+      const harness = await makeHarness();
+      await harness.adapter.startSession(START);
+      const peer = harness.peers[0]!;
+      await harness.adapter.sendTurn({
+        threadId: START.threadId,
+        input: "run it",
+        attachments: [],
+        interactionMode: "default"
+      });
+      await peer.nextTurn();
+      peer.emit(bashToolUse("pnpm -r test"));
+      peer.emit(backgroundTaskStarted());
+      await harness.waitFor("task.started");
+      peer.emit(launchPlaceholder(missing));
+      await harness.drain();
+
+      const seen = harness.events.length;
+      firePendingTail(harness);
+      const notice = await harness.waitFor("content.delta", seen);
+      assert.ok(notice.payload.delta.includes("ENOENT"), notice.payload.delta);
+      assert.ok(notice.payload.delta.includes(missing));
+
+      const after = harness.events.length;
+      firePendingTail(harness);
+      await harness.drain();
+      assert.deepEqual(harness.events.slice(after), [], "one notice, never a stream of them");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

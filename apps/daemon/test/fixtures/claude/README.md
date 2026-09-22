@@ -211,14 +211,17 @@ Other notes on this group:
   {"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b2udciqxi","task_type":"local_bash","description":"Sleep 20 seconds then print slept"}],…}
   ```
   Spec §4.2 lists no event for this; T3 consumes it at `ClaudeAdapter.ts` `case "background_tasks_changed"`.
-  It is the only frame that reports the **whole** live background set, so it is the natural source
-  for reconciling a roster after a gap.
+  It is the only frame that reports the **whole** live background set — but it is a **level**, and
+  it must NOT be correlated with the `task_started`/`task_notification` edges. See observation 18.
 - The subagent's own narration arrives on the main stream stamped
   `parent_tool_use_id: "toolu_018p31…"` — on `assistant` messages **and** on a leading `user`
   message that is plain `text`, not a `tool_result`. §4.5's "subagent narration is dropped from the
   parent transcript while its tool blocks are kept" is a T3 *policy*, not something the provider does.
 - `task_notification.output_file` points at a path under the CLI's own tmp tree, outside `cwd` and
-  outside `fsRoot`. If the UI ever offers to open it, that read cannot go through `/api/fs/*`.
+  outside `fsRoot`. If the UI ever offers to open it, that read cannot go through `/api/fs/*`. It
+  is `~`-abbreviated **in this capture only** because the capture's `TMPDIR` sat under `HOME`; in
+  production the daemon sets `TMPDIR=/var/lib/orquester/tmp` and the path arrives absolute. A
+  consumer must handle both (observation 18).
 
 ### 5. `system/init` is emitted **once per turn**, not once per session
 
@@ -255,6 +258,21 @@ value this CLI emitted is `"requesting"`:
 T3's mapping turns every one of these into a `session.state.changed {state:"running"}`. At ~3 per
 turn that is pure noise on the event bus; the ingestion layer (§5.1) must dedupe by state or the
 adapter must only emit on a change.
+
+`12-compact.ndjson` shows the **other** shape, the one a `/compact` turn produces, and a live
+thread (2026-09-22) shows it six times in a row:
+```json
+{"type":"system","subtype":"status","status":"compacting","uuid":"…","session_id":"…"}
+{"type":"system","subtype":"status","status":null,"compact_result":"success","uuid":"…","session_id":"…"}
+```
+`SDKStatusMessage` is `{status: 'compacting' | 'requesting' | null, compact_result?: 'success' |
+'failed', compact_error?: string}`. Mapped to `running` alone, the client shows a generic
+"Working" for the 10.3 s (much longer on a real thread) that the CLI spends rewriting the
+conversation. The adapter therefore latches the FIRST `compacting` into a
+`thread.state.changed {state:"compacting"}` and ends the phase on the next non-compacting status:
+`compact_result: "failed"` becomes `compaction-failed` **plus a warning** — a failed compaction
+emits **no `compact_boundary` at all**, so that status frame is the only notice the user will ever
+get. A success is silent here because the boundary follows with the real before/after counts.
 
 **`system/thinking_tokens`** — 23 occurrences, several per second during extended thinking:
 ```json
@@ -610,6 +628,60 @@ two different encodings of the same reset. The frame has **no percentage**: it c
   markers are the `input` we push and the `result` that ends it. Turn identity is entirely
   host-side, which is why §4.5's "stamp `uuid: turnId` on the `SDKUserMessage`" is not an
   optimisation but the only mechanism available.
+
+### 18. Background shells: `is_backgrounded`, the level signal, and where the output actually goes
+
+Observed on a **live** thread (2026-09-22), not in these captures — `07-subagent-task.ndjson`
+predates `is_backgrounded` and its `task_started` carries no such field. Three things the adapter
+now depends on:
+
+**a. `is_backgrounded` is the foreground/background discriminator, and it is per task.**
+
+```json
+{"type":"system","subtype":"task_started","task_id":"brnajdlv7","tool_use_id":"toolu_014o…","is_backgrounded":false,"task_type":"local_bash",…}
+{"type":"system","subtype":"task_started","task_id":"bvf4wz8g5","tool_use_id":"toolu_01St…","is_backgrounded":true,"task_type":"local_bash",…}
+```
+
+**Every ordinary Bash call raises a `local_bash` task**, not just a `run_in_background` one — the
+foreground ones simply carry `is_backgrounded: false`. Surfacing those as tasks made every `ls`
+flash a roster row that read like a subagent (owner report, 2026-09-22). A foreground `local_bash`
+is the blocking tool call's own row and is not surfaced at all; a later
+`task_updated {patch: {is_backgrounded: true}}` (the user's Ctrl+B) promotes it, and *that* is
+where its roster life begins. `ambient` / `skip_transcript` tasks are likewise not activity — the
+SDK says so outright. An **absent** field is not `false`: a capture from an older CLI (like 07)
+must keep behaving as before.
+
+**b. `background_tasks_changed` is a LEVEL. Do not correlate it with the edges.** The SDK doc is
+explicit: *"Ordering relative to the bookends for the same transition is unspecified (in practice
+the level precedes them) and the payload carries ids only, so do not correlate it with the edge
+stream."* The live thread proves why:
+
+```json
+{"type":"system","subtype":"background_tasks_changed","tasks":[],…}                      ← first
+{"type":"system","subtype":"task_updated","task_id":"bvf4wz8g5","patch":{"status":"completed","end_time":…}}
+{"type":"system","subtype":"task_notification","task_id":"bvf4wz8g5","status":"completed","summary":"Background command \"…\" completed (exit code 0)",…}
+```
+
+Closing a live task on its absence from the level wrote `task.completed {status:"stopped"}` a
+moment before the real completion, and the roster fold keeps the FIRST terminal status — so a shell
+that finished cleanly read as interrupted forever. The level is still good for two things: naming a
+task before its start edge (so the `task_started` that follows already has its linkage) and
+clearing liveness promptly. Neither is a roster event. T3 ignores the level entirely
+(`ClaudeAdapter.ts:3945-3959`).
+
+**c. A background command's output is never on the SDK channel.** The launching Bash call's
+`tool_result` is a placeholder naming a file:
+
+```json
+{"tool_use_id":"toolu_01St…","type":"tool_result","content":"Command running in background with ID: bvf4wz8g5. Output is being written to: /var/lib/orquester/tmp/claude-999/-var-lib-…/tasks/bvf4wz8g5.output. You will be notified when it completes. To check interim output, use Read on that file path.","is_error":false}
+```
+
+That line is the **only** place the path appears while the command runs — `task_notification`
+reports `output_file` when it is already over (and `""` for a foreground task, which must not
+overwrite what the launch line said). The adapter parses the path out of that text and the session
+tails the file; without it the shell's drill-in read "This agent has not reported anything yet" for
+the whole run. `task_notification.summary` carries the exit code as `(exit code N)` — the only
+place the CLI reports it.
 
 ## Re-capturing
 

@@ -3139,6 +3139,19 @@ Background tasks (`agentKind: "background"`) list in the same roster with a dist
 **live background row is never collapsed behind "N more" and never fades**: it outlives the turn
 that started it, so it stays on screen until it ends or is stopped.
 
+*Built: "background task" needs one more qualifier on Claude, because **every** Bash call raises a
+`local_bash` task — a foreground one simply carries `is_backgrounded: false`, and surfacing those
+put a roster row on screen for every `ls`. Only a detached task is surfaced (the SDK's
+`is_backgrounded`, promoted later by `task_updated {patch:{is_backgrounded:true}}` when the user
+hits Ctrl+B); `ambient`/`skip_transcript` tasks are not activity at all. `task.started` carries
+`isBackgrounded` and `task.completed` carries `exitCode` so the row can say so. A surfaced shell
+additionally owns a `command_execution` item (`itemId: "bgshell:<taskId>"`, `agentId: <taskId>`)
+whose `command_output` deltas are **tailed off a file**: the CLI writes a background command's
+output to its own tmp tree rather than streaming it, so a drill-in with no tail reads "has not
+reported anything yet" for the whole run. `background_tasks_changed` is deliberately NOT used to
+close rows — it is a level signal whose ordering against the bookends is unspecified, and
+correlating it made a clean shell read as interrupted (fixtures README observation 18).*
+
 Stopping is T3's, not the row's. Once a turn settles the composer's stop button is gone, so while
 `backgroundLiveness` is non-null and no turn is working, a banner sits in the notice stack above the
 composer (§7.5) at activity priority: "N agents working" — or "Background work" when the live

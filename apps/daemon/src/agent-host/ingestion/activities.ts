@@ -635,28 +635,58 @@ export function runtimeEventToActivities(
     }
 
     case "thread.state.changed": {
-      // Only a compaction boundary is a timeline fact; every other thread
-      // state is already carried by the session status.
-      if (event.payload.state !== "compacted") {
-        return [];
+      // Only a compaction is a timeline fact; every other thread state is
+      // already carried by the session status. All three of its phases are
+      // ONE activity kind — the client renders on `payload.state`, so the
+      // in-flight row and its outcome stay the same row shape.
+      const { beforeTokens, afterTokens, error } = event.payload;
+      const requestId =
+        event.requestId !== undefined ? { requestId: event.requestId } : {};
+      switch (event.payload.state) {
+        case "compacting":
+          return [
+            makeActivity(event, {
+              id: event.eventId,
+              tone: "info",
+              activityKind: "context-compaction",
+              summary: "Compacting context",
+              payload: { state: event.payload.state, ...requestId }
+            })
+          ];
+        case "compaction-failed":
+          return [
+            makeActivity(event, {
+              id: event.eventId,
+              tone: "error",
+              activityKind: "context-compaction",
+              summary: "Context compaction failed",
+              payload: {
+                state: event.payload.state,
+                ...(error !== undefined ? { error } : {}),
+                ...requestId
+              }
+            })
+          ];
+        case "compacted":
+          return [
+            makeActivity(event, {
+              id: event.eventId,
+              tone: "info",
+              activityKind: "context-compaction",
+              // differs from T3, which bakes the token counts into the label
+              // server-side: §7.3 formats them client-side from these fields.
+              summary: "Context compacted",
+              payload: {
+                state: event.payload.state,
+                ...(beforeTokens !== undefined ? { beforeTokens } : {}),
+                ...(afterTokens !== undefined ? { afterTokens } : {}),
+                ...requestId
+              }
+            })
+          ];
+        default:
+          return [];
       }
-      const { beforeTokens, afterTokens } = event.payload;
-      return [
-        makeActivity(event, {
-          id: event.eventId,
-          tone: "info",
-          activityKind: "context-compaction",
-          // differs from T3, which bakes the token counts into the label
-          // server-side: §7.3 formats them client-side from these fields.
-          summary: "Context compacted",
-          payload: {
-            state: event.payload.state,
-            ...(beforeTokens !== undefined ? { beforeTokens } : {}),
-            ...(afterTokens !== undefined ? { afterTokens } : {}),
-            ...(event.requestId !== undefined ? { requestId: event.requestId } : {})
-          }
-        })
-      ];
     }
 
     case "thread.token-usage.updated": {

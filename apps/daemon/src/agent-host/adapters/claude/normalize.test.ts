@@ -15,7 +15,11 @@ import { describe, it } from "node:test";
 import type { RuntimeEvent } from "@orquester/api/agent-chat";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 
-import { ClaudeNormalizer, readPreservedUuids } from "./normalize.ts";
+import {
+  ClaudeNormalizer,
+  readPreservedUuids,
+  type BackgroundShellChange
+} from "./normalize.ts";
 import {
   countingIds,
   eventTypes,
@@ -184,7 +188,27 @@ describe("claude normaliser — fixture replay", () => {
     assert.ok(completed.length >= 1);
     assert.ok(completed.some((event) => event.payload.status === "completed"));
     // The background Bash is a separate task type.
-    assert.ok(started.some((event) => event.payload.taskType === "local_bash"));
+    const shell = started.find((event) => event.payload.taskType === "local_bash");
+    assert.ok(shell);
+    // This capture predates `is_backgrounded`; the field is absent, not false,
+    // and an absent field must never read as "foreground" (which would hide
+    // the row this capture proves exists).
+    assert.equal(shell.payload.isBackgrounded, undefined);
+
+    // The shell's own drill-in surface: one `command_execution` item under the
+    // task's id, carrying the command the CLI never streams.
+    const shellItem = allOf(events, "item.started").find(
+      (event) => event.itemId === `bgshell:${shell.payload.taskId}`
+    );
+    assert.ok(shellItem, "a background shell with no item shows 'nothing reported yet'");
+    assert.equal(shellItem.agentId, shell.payload.taskId);
+    assert.equal(shellItem.payload.detail, "sleep 20 && echo slept");
+    assert.deepEqual(shellItem.payload.data, {
+      toolName: "Bash",
+      input: { command: "sleep 20 && echo slept", description: "Sleep 20 seconds then print slept" },
+      background: true
+    });
+
     // The turn knows it had subagents.
     assert.ok(allOf(events, "turn.completed").some((e) => e.payload.tokenUsage?.hasSubagents));
   });
@@ -259,6 +283,11 @@ describe("claude normaliser — fixture replay", () => {
     assert.equal(compacted.length, 1);
     assert.equal(compacted[0]!.payload.beforeTokens, 34995);
     assert.equal(compacted[0]!.payload.afterTokens, 873);
+    // The capture's `status: "compacting"` frame opens the phase first, so the
+    // client shows "Compacting" rather than a generic "Working" for the 10.3 s
+    // the CLI spends rewriting the conversation.
+    const threadStates = allOf(events, "thread.state.changed").map((event) => event.payload.state);
+    assert.deepEqual(threadStates, ["compacting", "compacted"]);
     // `terminal_reason` is absent on the compaction result: it must not be
     // classified from it.
     const states = allOf(events, "turn.completed").map((event) => event.payload.state);
@@ -743,5 +772,529 @@ describe("claude normaliser — a text block streamed behind a thinking block is
         (event.payload as { streamKind?: string }).streamKind === "assistant_text"
     );
     assert.equal(deltas.length, 1, "the streamed text is not re-emitted from the snapshot");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The compaction phase
+// ---------------------------------------------------------------------------
+
+function feedable(options?: {
+  onBackgroundShell?: (change: BackgroundShellChange) => void;
+  onLiveTasksChanged?: (live: ReadonlySet<string>) => void;
+}): {
+  normalizer: ClaudeNormalizer;
+  feed: (message: unknown) => RuntimeEvent[];
+} {
+  const normalizer = new ClaudeNormalizer({
+    threadId: "t",
+    clock: fixedClock(),
+    ids: countingIds(),
+    ...(options?.onBackgroundShell !== undefined
+      ? { onBackgroundShell: options.onBackgroundShell }
+      : {}),
+    ...(options?.onLiveTasksChanged !== undefined
+      ? { onLiveTasksChanged: options.onLiveTasksChanged }
+      : {})
+  });
+  return {
+    normalizer,
+    feed: (message: unknown) => normalizer.handleMessage(message as SDKMessage)
+  };
+}
+
+function statusFrame(extra: Record<string, unknown>): Record<string, unknown> {
+  return { type: "system", subtype: "status", uuid: "u", session_id: "s", ...extra };
+}
+
+describe("claude normaliser — a compaction is a visible phase, not generic 'working'", () => {
+  it("opens the phase on the FIRST compacting status and never re-opens it", () => {
+    const { feed } = feedable();
+    const first = feed(statusFrame({ status: "compacting" }));
+    const opened = first.filter(
+      (event) => event.type === "thread.state.changed" && event.payload.state === "compacting"
+    );
+    assert.equal(opened.length, 1, "the client learns the CLI is compacting, not merely running");
+    assert.ok(
+      first.some((event) => event.type === "session.state.changed"),
+      "the session is still reported running"
+    );
+    // The live capture sends six of these per compaction.
+    for (let i = 0; i < 5; i += 1) {
+      assert.deepEqual(
+        feed(statusFrame({ status: "compacting" })),
+        [],
+        "a repeat compacting frame changes nothing"
+      );
+    }
+  });
+
+  it("a failed compaction ends the phase with the provider's own reason and warns", () => {
+    const { feed } = feedable();
+    feed(statusFrame({ status: "compacting" }));
+    const settled = feed(
+      statusFrame({ status: null, compact_result: "failed", compact_error: "Not enough context." })
+    );
+    const failed = settled.find(
+      (event) => event.type === "thread.state.changed" && event.payload.state === "compaction-failed"
+    );
+    assert.ok(failed);
+    assert.equal(
+      failed.type === "thread.state.changed" ? failed.payload.error : undefined,
+      "Not enough context."
+    );
+    const warning = settled.find((event) => event.type === "runtime.warning");
+    assert.ok(warning, "and the user is told, not just the fold");
+    assert.equal(
+      warning.type === "runtime.warning" ? warning.payload.message : undefined,
+      "Not enough context."
+    );
+  });
+
+  it("a failed compaction with no reason falls back to a fixed sentence", () => {
+    const { feed } = feedable();
+    feed(statusFrame({ status: "compacting" }));
+    const settled = feed(statusFrame({ status: null, compact_result: "failed" }));
+    const failed = settled.find(
+      (event) => event.type === "thread.state.changed" && event.payload.state === "compaction-failed"
+    );
+    assert.equal(
+      failed?.type === "thread.state.changed" ? failed.payload.error : undefined,
+      "Context compaction failed."
+    );
+  });
+
+  it("a successful compaction adds nothing: the boundary already reports it", () => {
+    const { feed } = feedable();
+    feed(statusFrame({ status: "compacting" }));
+    const settled = feed(statusFrame({ status: null, compact_result: "success" }));
+    assert.deepEqual(
+      settled.filter((event) => event.type === "thread.state.changed"),
+      []
+    );
+    assert.deepEqual(
+      settled.filter((event) => event.type === "runtime.warning"),
+      []
+    );
+  });
+
+  it("a SECOND compaction later in the same session opens the phase again", () => {
+    const { feed } = feedable();
+    feed(statusFrame({ status: "compacting" }));
+    feed(statusFrame({ status: null, compact_result: "success" }));
+    feed({
+      type: "system",
+      subtype: "compact_boundary",
+      uuid: "u",
+      session_id: "s",
+      compact_metadata: { trigger: "manual", pre_tokens: 10, post_tokens: 2 }
+    });
+    // A fresh turn's ordinary status must not be mistaken for the end of a
+    // compaction that already ended.
+    feed(statusFrame({ status: "requesting" }));
+    const again = feed(statusFrame({ status: "compacting" }));
+    assert.equal(
+      again.filter(
+        (event) => event.type === "thread.state.changed" && event.payload.state === "compacting"
+      ).length,
+      1
+    );
+  });
+
+  it("the latch does not survive the session: closeLiveTasks resets it", () => {
+    const { normalizer, feed } = feedable();
+    feed(statusFrame({ status: "compacting" }));
+    normalizer.closeLiveTasks();
+    const again = feed(statusFrame({ status: "compacting" }));
+    assert.equal(
+      again.filter(
+        (event) => event.type === "thread.state.changed" && event.payload.state === "compacting"
+      ).length,
+      1
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Background shells
+// ---------------------------------------------------------------------------
+
+const BASH_TOOL_USE_ID = "toolu_bg1";
+const SHELL_TASK_ID = "bvf4wz8g5";
+
+/** The `content_block_start` that registers the launching Bash call. */
+function bashLaunchFrame(input: Record<string, unknown>): Record<string, unknown> {
+  return {
+    type: "stream_event",
+    uuid: "u",
+    session_id: "s",
+    parent_tool_use_id: null,
+    event: {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "tool_use", id: BASH_TOOL_USE_ID, name: "Bash", input }
+    }
+  };
+}
+
+function taskStartedFrame(extra: Record<string, unknown>): Record<string, unknown> {
+  return {
+    type: "system",
+    subtype: "task_started",
+    task_id: SHELL_TASK_ID,
+    tool_use_id: BASH_TOOL_USE_ID,
+    description: "Run the daemon and api suites",
+    task_type: "local_bash",
+    uuid: "u",
+    session_id: "s",
+    ...extra
+  };
+}
+
+function launchToolResultFrame(text: string): Record<string, unknown> {
+  return {
+    type: "user",
+    uuid: "u",
+    session_id: "s",
+    parent_tool_use_id: null,
+    message: {
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: BASH_TOOL_USE_ID, content: text, is_error: false }]
+    }
+  };
+}
+
+function notificationFrame(extra: Record<string, unknown>): Record<string, unknown> {
+  return {
+    type: "system",
+    subtype: "task_notification",
+    task_id: SHELL_TASK_ID,
+    tool_use_id: BASH_TOOL_USE_ID,
+    status: "completed",
+    output_file: "/var/lib/orquester/tmp/claude-999/x/tasks/bvf4wz8g5.output",
+    summary: 'Background command "Run the daemon and api suites" completed (exit code 0)',
+    uuid: "u",
+    session_id: "s",
+    ...extra
+  };
+}
+
+function payloadOf(event: RuntimeEvent | undefined): Record<string, unknown> {
+  assert.ok(event, "expected an event");
+  return event.payload as Record<string, unknown>;
+}
+
+describe("claude normaliser — a FOREGROUND Bash is a tool row, never a roster row", () => {
+  it("is not surfaced at all: no task rows, no liveness, no shell item", () => {
+    const live: Array<readonly string[]> = [];
+    const { normalizer, feed } = feedable({
+      onLiveTasksChanged: (ids) => live.push([...ids])
+    });
+    normalizer.beginTurn({ turnId: "turn-1" });
+    feed(bashLaunchFrame({ command: "pnpm check", description: "Typecheck" }));
+
+    const started = feed(taskStartedFrame({ is_backgrounded: false }));
+    assert.deepEqual(
+      started.filter((event) => event.type === "task.started"),
+      [],
+      "a blocking Bash call is already its own tool row"
+    );
+    assert.deepEqual(
+      started.filter((event) => event.type === "item.started"),
+      []
+    );
+    assert.equal(normalizer.liveTasks().size, 0, "and it is not background work");
+    assert.deepEqual(live, [], "so the liveness set never moved");
+
+    // Its bookend is just as invisible: the roster must not learn about it on
+    // the way out either.
+    const done = feed(notificationFrame({ output_file: "", summary: "Typecheck" }));
+    assert.deepEqual(
+      done.filter((event) => event.type === "task.completed"),
+      []
+    );
+  });
+
+  it("a later move to the background PROMOTES it: task.started, its shell item, then the update", () => {
+    const { normalizer, feed } = feedable();
+    normalizer.beginTurn({ turnId: "turn-1" });
+    feed(bashLaunchFrame({ command: "pnpm test", description: "Run the suites" }));
+    feed(taskStartedFrame({ is_backgrounded: false }));
+
+    const promoted = feed({
+      type: "system",
+      subtype: "task_updated",
+      task_id: SHELL_TASK_ID,
+      patch: { is_backgrounded: true },
+      uuid: "u",
+      session_id: "s"
+    });
+    const types = promoted.map((event) => event.type);
+    assert.deepEqual(types, ["task.started", "item.started", "task.updated"], JSON.stringify(types));
+
+    const start = payloadOf(promoted[0]);
+    assert.equal(start.taskId, SHELL_TASK_ID);
+    assert.equal(start.isBackgrounded, true);
+    assert.equal(start.description, "Run the daemon and api suites");
+    assert.equal(start.taskType, "local_bash", "the linkage rides the row, as on every task row");
+    assert.equal(start.toolUseId, BASH_TOOL_USE_ID);
+    assert.equal(normalizer.liveTasks().has(SHELL_TASK_ID), true);
+    assert.equal(payloadOf(promoted[2]).isBackgrounded, true);
+  });
+});
+
+describe("claude normaliser — a background shell carries its command and its output", () => {
+  it("surfaces the task and opens a command_execution item attributed to it", () => {
+    const { normalizer, feed } = feedable();
+    normalizer.beginTurn({ turnId: "turn-1" });
+    feed(
+      bashLaunchFrame({
+        command: "pnpm -r test\n# second line never reaches the row",
+        description: "Run the daemon and api suites",
+        run_in_background: true
+      })
+    );
+    const started = feed(taskStartedFrame({ is_backgrounded: true }));
+
+    const task = started.find((event) => event.type === "task.started");
+    assert.equal(payloadOf(task).isBackgrounded, true);
+
+    const item = started.find((event) => event.type === "item.started");
+    assert.ok(item, "the drill-in needs an item, or it reads 'has not reported anything yet'");
+    assert.equal(item.itemId, `bgshell:${SHELL_TASK_ID}`);
+    assert.equal(item.agentId, SHELL_TASK_ID);
+    assert.equal(item.turnId, "turn-1");
+    const payload = payloadOf(item);
+    assert.equal(payload.itemType, "command_execution");
+    assert.equal(payload.status, "inProgress");
+    assert.equal(payload.title, "Background shell");
+    assert.equal(payload.detail, "pnpm -r test", "the first line of the command, never the whole script");
+    assert.equal(payload.agentId, SHELL_TASK_ID);
+    assert.deepEqual(payload.data, {
+      toolName: "Bash",
+      input: {
+        command: "pnpm -r test\n# second line never reaches the row",
+        description: "Run the daemon and api suites"
+      },
+      background: true
+    });
+  });
+
+  it("parses the output file out of the launch tool_result and asks the session to tail it", () => {
+    const changes: BackgroundShellChange[] = [];
+    const { normalizer, feed } = feedable({ onBackgroundShell: (change) => changes.push(change) });
+    normalizer.beginTurn({ turnId: "turn-1" });
+    feed(bashLaunchFrame({ command: "pnpm test", run_in_background: true }));
+    feed(taskStartedFrame({ is_backgrounded: true }));
+
+    feed(
+      launchToolResultFrame(
+        `Command running in background with ID: ${SHELL_TASK_ID}. Output is being written to: /var/lib/orquester/tmp/claude-999/-var-lib-orquester/1ea82399/tasks/${SHELL_TASK_ID}.output. You will be notified when it completes. To check interim output, use Read on that file path.`
+      )
+    );
+    assert.deepEqual(changes, [
+      {
+        kind: "tail",
+        taskId: SHELL_TASK_ID,
+        outputFile: `/var/lib/orquester/tmp/claude-999/-var-lib-orquester/1ea82399/tasks/${SHELL_TASK_ID}.output`
+      }
+    ]);
+
+    // And the path rides the linkage from then on.
+    const progressed = feed({
+      type: "system",
+      subtype: "task_updated",
+      task_id: SHELL_TASK_ID,
+      patch: { status: "running" },
+      uuid: "u",
+      session_id: "s"
+    });
+    assert.equal(
+      payloadOf(progressed.find((event) => event.type === "task.updated")).outputFile,
+      `/var/lib/orquester/tmp/claude-999/-var-lib-orquester/1ea82399/tasks/${SHELL_TASK_ID}.output`
+    );
+  });
+
+  it("keeps a ~-abbreviated path verbatim — resolving it is the session's job", () => {
+    const changes: BackgroundShellChange[] = [];
+    const { normalizer, feed } = feedable({ onBackgroundShell: (change) => changes.push(change) });
+    normalizer.beginTurn({ turnId: "turn-1" });
+    feed(bashLaunchFrame({ command: "sleep 20", run_in_background: true }));
+    feed(taskStartedFrame({ is_backgrounded: true }));
+    feed(
+      launchToolResultFrame(
+        `Command running in background with ID: ${SHELL_TASK_ID}. Output is being written to: ~/tmp/claude-999/x/tasks/${SHELL_TASK_ID}.output. You will be notified when it completes.`
+      )
+    );
+    assert.equal(changes[0]?.kind, "tail");
+    assert.equal(
+      changes[0]?.kind === "tail" ? changes[0].outputFile : undefined,
+      `~/tmp/claude-999/x/tasks/${SHELL_TASK_ID}.output`
+    );
+  });
+
+  it("emits a delta under the shell's own item and agent", () => {
+    const { normalizer, feed } = feedable();
+    normalizer.beginTurn({ turnId: "turn-1" });
+    feed(bashLaunchFrame({ command: "pnpm test", run_in_background: true }));
+    feed(taskStartedFrame({ is_backgrounded: true }));
+
+    const [delta, ...rest] = normalizer.backgroundShellOutput(SHELL_TASK_ID, "ok 1 - a\n");
+    assert.deepEqual(rest, []);
+    assert.ok(delta);
+    assert.equal(delta.type, "content.delta");
+    assert.equal(delta.itemId, `bgshell:${SHELL_TASK_ID}`);
+    assert.equal(delta.agentId, SHELL_TASK_ID);
+    assert.equal(delta.turnId, "turn-1");
+    assert.deepEqual(delta.payload, { streamKind: "command_output", delta: "ok 1 - a\n" });
+    assert.deepEqual(normalizer.backgroundShellOutput(SHELL_TASK_ID, ""), [], "nothing is not a delta");
+  });
+
+  it("closes the item BEFORE the task row and carries the exit code on both", () => {
+    const changes: BackgroundShellChange[] = [];
+    const { normalizer, feed } = feedable({ onBackgroundShell: (change) => changes.push(change) });
+    normalizer.beginTurn({ turnId: "turn-1" });
+    feed(bashLaunchFrame({ command: "pnpm test", run_in_background: true }));
+    feed(taskStartedFrame({ is_backgrounded: true }));
+
+    const done = feed(notificationFrame({}));
+    const order = done
+      .filter((event) => event.type === "item.completed" || event.type === "task.completed")
+      .map((event) => event.type);
+    assert.deepEqual(
+      order,
+      ["item.completed", "task.completed"],
+      "ingestion closes the output buffer on item.completed, so the item settles first"
+    );
+    const item = payloadOf(done.find((event) => event.type === "item.completed"));
+    assert.equal(item.status, "completed");
+    assert.deepEqual((item.data as { exitCode?: unknown }).exitCode, 0);
+    const task = payloadOf(done.find((event) => event.type === "task.completed"));
+    assert.equal(task.status, "completed");
+    assert.equal(task.exitCode, 0);
+    assert.deepEqual(changes, [{ kind: "stop", taskId: SHELL_TASK_ID }]);
+  });
+
+  it("a non-zero exit fails the item even when the notification says completed", () => {
+    const { normalizer, feed } = feedable();
+    normalizer.beginTurn({ turnId: "turn-1" });
+    feed(bashLaunchFrame({ command: "pnpm test", run_in_background: true }));
+    feed(taskStartedFrame({ is_backgrounded: true }));
+    const done = feed(
+      notificationFrame({
+        summary: 'Background command "Run the daemon and api suites" completed (exit code 2)'
+      })
+    );
+    const item = payloadOf(done.find((event) => event.type === "item.completed"));
+    assert.equal(item.status, "failed");
+    assert.equal((item.data as { exitCode?: unknown }).exitCode, 2);
+    assert.equal(payloadOf(done.find((event) => event.type === "task.completed")).exitCode, 2);
+  });
+
+  it("an unknown exit code leaves the item's verdict to the notification", () => {
+    const { normalizer, feed } = feedable();
+    normalizer.beginTurn({ turnId: "turn-1" });
+    feed(bashLaunchFrame({ command: "pnpm test", run_in_background: true }));
+    feed(taskStartedFrame({ is_backgrounded: true }));
+    const done = feed(notificationFrame({ status: "failed", summary: "Background command died" }));
+    const item = payloadOf(done.find((event) => event.type === "item.completed"));
+    assert.equal(item.status, "failed");
+    assert.equal((item.data as { exitCode?: unknown }).exitCode, undefined);
+    assert.equal(payloadOf(done.find((event) => event.type === "task.completed")).exitCode, undefined);
+  });
+
+  it("an ambient or skip_transcript task is never surfaced", () => {
+    for (const flag of ["ambient", "skip_transcript"] as const) {
+      const { normalizer, feed } = feedable();
+      normalizer.beginTurn({ turnId: "turn-1" });
+      const started = feed(
+        taskStartedFrame({ [flag]: true, is_backgrounded: true, task_type: "local_agent" })
+      );
+      assert.deepEqual(
+        started.filter((event) => event.type === "task.started"),
+        [],
+        `${flag} is housekeeping, not activity`
+      );
+      assert.equal(normalizer.liveTasks().size, 0, flag);
+    }
+  });
+
+  it("closeLiveTasks fails the open shell item and stops its tail", () => {
+    const changes: BackgroundShellChange[] = [];
+    const { normalizer, feed } = feedable({ onBackgroundShell: (change) => changes.push(change) });
+    normalizer.beginTurn({ turnId: "turn-1" });
+    feed(bashLaunchFrame({ command: "pnpm test", run_in_background: true }));
+    feed(taskStartedFrame({ is_backgrounded: true }));
+    changes.length = 0;
+
+    const closed = normalizer.closeLiveTasks();
+    const types = closed.map((event) => event.type);
+    assert.deepEqual(types, ["item.completed", "task.completed"], JSON.stringify(types));
+    const item = payloadOf(closed[0]);
+    assert.equal(item.status, "failed");
+    assert.equal(item.detail, "stopped with the session");
+    assert.equal(payloadOf(closed[1]).status, "stopped");
+    assert.deepEqual(changes, [{ kind: "stop", taskId: SHELL_TASK_ID }]);
+  });
+});
+
+describe("claude normaliser — background_tasks_changed is a LEVEL, not an edge", () => {
+  it("never invents a terminal status for a task missing from the snapshot", () => {
+    const live: Array<readonly string[]> = [];
+    const { normalizer, feed } = feedable({ onLiveTasksChanged: (ids) => live.push([...ids]) });
+    normalizer.beginTurn({ turnId: "turn-1" });
+    feed(bashLaunchFrame({ command: "pnpm test", run_in_background: true }));
+    feed(taskStartedFrame({ is_backgrounded: true }));
+    assert.deepEqual(live.at(-1), [SHELL_TASK_ID]);
+
+    // In the live capture this empty level arrives BEFORE the completion
+    // bookends. Closing the task here wrote a "Task stopped" row that the
+    // roster fold then kept forever.
+    const level = feed({
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [],
+      uuid: "u",
+      session_id: "s"
+    });
+    assert.deepEqual(
+      level.filter((event) => event.type === "task.completed"),
+      [],
+      "the level carries ids only; it may not be correlated with the edge stream"
+    );
+    assert.deepEqual(level, [], "and it is not a roster event at all");
+    assert.equal(normalizer.liveTasks().size, 0, "but liveness clears, so Monitoring goes away");
+    assert.deepEqual(live.at(-1), []);
+
+    // The real bookend still lands, with the real status.
+    const done = feed(notificationFrame({}));
+    assert.equal(payloadOf(done.find((event) => event.type === "task.completed")).status, "completed");
+  });
+
+  it("still registers a task it names first, and leaves orphan notifications alone", () => {
+    const { feed } = feedable();
+    feed({
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [{ task_id: "orphan-1", task_type: "local_bash", description: "Sleep then print" }],
+      uuid: "u",
+      session_id: "s"
+    });
+    // A resumed CLI reports the work it adopted, with no `task_started` of
+    // ours behind it. That row must still reach the roster.
+    const done = feed({
+      type: "system",
+      subtype: "task_notification",
+      task_id: "orphan-1",
+      status: "stopped",
+      output_file: "",
+      summary: "Orphaned by a previous Claude Code process exit",
+      uuid: "u",
+      session_id: "s"
+    });
+    const completed = done.find((event) => event.type === "task.completed");
+    assert.ok(completed, "an orphan notification is the only row that task will ever have");
+    assert.equal(payloadOf(completed).status, "stopped");
+    assert.equal(payloadOf(completed).title, "Sleep then print", "with what the level knew of it");
   });
 });

@@ -428,6 +428,36 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   the host pid in `protectedPids` and registers it as an extra tree **root** (`extraRootPids`), so
   a runaway provider child stays killable from Settings → System even though the host runs in a
   tmux service session `panePids()` excludes.
+- **Background shells (Claude): only detached ones are surfaced, and their output is TAILED from a
+  file.** Every ordinary Bash call raises a `local_bash` task, so `is_backgrounded` — not the task
+  type — is the discriminator: a `false` one is the blocking tool call's own row and gets no
+  `task.started`, no `task.completed` and no liveness (surfacing it flashed a roster row, reading
+  like a subagent, for every foreground command). A later `task_updated {patch:{is_backgrounded:
+  true}}` (Ctrl+B) **promotes** it — `task.started` first, then the update — and that is where its
+  roster life begins; `ambient`/`skip_transcript` tasks are never surfaced at all. An **absent**
+  field is not `false` (older CLIs, and fixture `07`). A surfaced shell also gets its own
+  `command_execution` item, `itemId: "bgshell:<taskId>"`, `agentId: <taskId>`, because **the CLI
+  streams a background command's output nowhere** — it writes it to a file under its own `TMPDIR`
+  and names that file **only** in the launching call's placeholder `tool_result`
+  (`task_notification.output_file` arrives when it is already over, and is `""` for a foreground
+  task). The normaliser parses that path and hands it to the session
+  (`onBackgroundShell`); the session tails it with `support/tail-file.ts` — appended bytes only,
+  UTF-8 safe across reads, ≤64 KiB per read and **≤1 MiB per shell**, then one truncation notice
+  naming the file — and each read becomes `content.delta {streamKind:"command_output"}` on that
+  item. Two ordering rules are load-bearing: the message loop **drains the tail before** a
+  `task_notification` (or a settling `task_updated`) is normalised, because `item.completed` is
+  where ingestion closes the item's output buffer; and `background_tasks_changed` is a **level**
+  signal that must never be correlated with the edges — closing a task on its absence wrote a
+  "Task stopped" row just before the real completion, and the roster fold keeps the first terminal
+  status, so a clean shell read as interrupted forever. The level may still name unknown tasks and
+  clear liveness, but it is not a roster event (fixtures README observation 18).
+- **A `/compact` is a visible phase, not "Working".** The first `system/status {status:
+  "compacting"}` latches `thread.state.changed {state:"compacting"}` (the CLI sends six of them);
+  the next non-compacting status ends the phase. `compact_result: "failed"` emits
+  `{state:"compaction-failed", error}` **and** a `runtime.warning` — a failed compaction produces
+  no `compact_boundary`, so that frame is the only notice there will ever be. A success is silent
+  there because the boundary follows with the real before/after counts. Ingestion turns all three
+  into one `context-compaction` activity kind and the client renders on `payload.state`.
 
 Start here: `apps/daemon/src/agent-host/README.md` (module map + package ownership).
 

@@ -14,12 +14,14 @@
  */
 
 import { promises as fs } from "node:fs";
+import { homedir } from "node:os";
 
 import type {
   CanUseTool,
   PermissionResult,
   PermissionUpdate,
   Query,
+  SDKMessage,
   SDKUserMessage,
   UserDialogRequest,
   UserDialogResult
@@ -43,6 +45,7 @@ import { SUPPORTED_ATTACHMENT_IMAGE_MIME_TYPES } from "@orquester/api/agent-chat
 import type { AdapterContext } from "../../adapter.ts";
 import { TURN_LIVENESS_WINDOWS, withDeadline } from "../../support/deadline.ts";
 import { StderrCapture } from "../../support/stderr.ts";
+import { FileTail, TAIL_MAX_READ_BYTES, TAIL_MAX_TOTAL_BYTES, resolveTildePath } from "../../support/tail-file.ts";
 import { createDeferred, type Deferred } from "./async-queue.ts";
 import { classifyRequestType, summarizeToolRequest, trimmedString } from "./classify.ts";
 import { buildClaudeResumeCursor, type ClaudeResumeCursor } from "./cursor.ts";
@@ -56,7 +59,11 @@ import type { ClaudeAdapterDeps } from "./deps.ts";
 import { createClaudeHistoryReader } from "./history.ts";
 import { buildClaudeQueryOptions } from "./launch.ts";
 import { CLAUDE_OPTION_IDS, findModel, resolveEffortLevel, selectionStringOption } from "./models.ts";
-import { ClaudeNormalizer, extractExitPlanModePlan } from "./normalize.ts";
+import {
+  ClaudeNormalizer,
+  extractExitPlanModePlan,
+  type BackgroundShellChange
+} from "./normalize.ts";
 import { PromptQueue } from "./prompt-queue.ts";
 import { buildAskUserQuestionReply, parseAskUserQuestionInput } from "./questions.ts";
 import {
@@ -81,6 +88,31 @@ export const EXIT_PLAN_MODE_DENY_MESSAGE =
 
 /** The literal turn a `/compact` compaction sends (§4.1 `compaction`). */
 export const COMPACT_COMMAND = "/compact";
+
+/**
+ * How often a background shell's output file is re-read. The CLI streams that
+ * output nowhere — it writes it to a file and tells the model to `Read` it —
+ * so this poll is the only way the chat can show a running command's output.
+ * 750 ms is a compromise: fast enough to read as live, slow enough that a
+ * chatty command costs a handful of `stat`s a second.
+ */
+export const BACKGROUND_SHELL_TAIL_INTERVAL_MS = 750;
+
+/**
+ * A file read that has not answered in this long is treated as failed, like
+ * every other wait on a child (§3.1). A stuck FUSE/NFS mount must not hold the
+ * message loop, which is what the final drain awaits.
+ */
+export const BACKGROUND_SHELL_TAIL_READ_DEADLINE_MS = 5_000;
+
+/** The final drain's bound: the per-shell cap divided by one read, plus one. */
+const BACKGROUND_SHELL_DRAIN_MAX_READS = Math.ceil(TAIL_MAX_TOTAL_BYTES / TAIL_MAX_READ_BYTES) + 1;
+
+interface BackgroundShellTail {
+  tail: FileTail;
+  timer: NodeJS.Timeout | number | undefined;
+  stopped: boolean;
+}
 
 const IMAGE_MIME_TYPES = new Set<string>(SUPPORTED_ATTACHMENT_IMAGE_MIME_TYPES);
 
@@ -140,6 +172,8 @@ export class ClaudeSession {
   private streamDone: Promise<void> | undefined;
   private turnSettled: Deferred<void> | undefined;
   private watchdog: NodeJS.Timeout | number | undefined;
+  /** One live tail per background shell, keyed by task id. */
+  private readonly backgroundShells = new Map<string, BackgroundShellTail>();
   private lastActivityMs = 0;
   private hasOpenTool = false;
   private basePermissionMode: NonNullable<
@@ -164,6 +198,7 @@ export class ClaudeSession {
       clock: options.context.clock,
       ids: options.context.ids,
       onRawFrame: (frame) => options.context.logRawFrame(options.threadId, frame),
+      onBackgroundShell: (change) => this.onBackgroundShell(change),
       ...(options.onUsageLimitsStale !== undefined
         ? { onUsageLimitsStale: options.onUsageLimitsStale }
         : {})
@@ -341,6 +376,14 @@ export class ClaudeSession {
         if (this.closed) {
           continue;
         }
+        // A shell's last lines are written before its completion frame, but the
+        // poll that would read them is 750 ms away. Drain here, BEFORE the
+        // frame is normalised: `item.completed` is where ingestion closes the
+        // item's tool-output buffer, so anything emitted after it is lost.
+        const settling = backgroundShellSettlingTaskId(message);
+        if (settling !== undefined) {
+          await this.drainBackgroundShell(settling);
+        }
         try {
           this.emit(this.normalizer.handleMessage(message));
         } catch (error) {
@@ -394,6 +437,127 @@ export class ClaudeSession {
     });
   }
 
+  // -------------------------------------------------------------------------
+  // Background shells (§4.5)
+  // -------------------------------------------------------------------------
+
+  private onBackgroundShell(change: BackgroundShellChange): void {
+    if (change.kind === "stop") {
+      this.stopBackgroundShell(change.taskId);
+      return;
+    }
+    if (this.closed || this.backgroundShells.has(change.taskId)) {
+      return;
+    }
+    // The CLI abbreviates the path against ITS home, which is the managed
+    // account home this session launched with — not the daemon user's.
+    const path = resolveTildePath(
+      change.outputFile,
+      this.options.env.HOME ?? this.options.env.USERPROFILE ?? homedir()
+    );
+    const entry: BackgroundShellTail = {
+      tail: new FileTail({ path }),
+      timer: undefined,
+      stopped: false
+    };
+    this.backgroundShells.set(change.taskId, entry);
+    this.scheduleBackgroundShellPoll(change.taskId, entry);
+  }
+
+  private scheduleBackgroundShellPoll(taskId: string, entry: BackgroundShellTail): void {
+    if (entry.stopped || this.closed) {
+      return;
+    }
+    entry.timer = this.options.deps.setTimer(() => {
+      entry.timer = undefined;
+      this.pollBackgroundShell(taskId).catch((error: unknown) => {
+        // The host installs no `unhandledRejection` handler; a throw from a
+        // timer callback would take it down.
+        this.options.context.logger.error("claude: a background-shell tail failed", error);
+      });
+    }, BACKGROUND_SHELL_TAIL_INTERVAL_MS);
+  }
+
+  private async pollBackgroundShell(taskId: string): Promise<void> {
+    const entry = this.backgroundShells.get(taskId);
+    if (entry === undefined || entry.stopped || this.closed) {
+      return;
+    }
+    const done = await this.readBackgroundShell(taskId, entry);
+    if (done) {
+      this.stopBackgroundShell(taskId);
+      return;
+    }
+    this.scheduleBackgroundShellPoll(taskId, entry);
+  }
+
+  /** One bounded read, emitted as a delta. Answers "is this tail over?". */
+  private async readBackgroundShell(
+    taskId: string,
+    entry: BackgroundShellTail
+  ): Promise<boolean> {
+    let result: { text: string; done: boolean };
+    try {
+      result = await withDeadline(entry.tail.read(), {
+        label: "claude/background-shell-tail",
+        timeoutMs: BACKGROUND_SHELL_TAIL_READ_DEADLINE_MS
+      });
+    } catch (error) {
+      this.options.context.logger.warn(
+        `claude: reading a background shell's output timed out: ${errorMessage(error)}`
+      );
+      return true;
+    }
+    if (result.text.length > 0) {
+      this.emit(this.normalizer.backgroundShellOutput(taskId, result.text));
+    }
+    return result.done;
+  }
+
+  /**
+   * Read whatever is left before a shell's completion frame is normalised.
+   * Bounded twice: by the tail's own per-shell cap and by an explicit read
+   * count, so a file being appended to as fast as we read cannot hold the
+   * message loop open.
+   */
+  private async drainBackgroundShell(taskId: string): Promise<void> {
+    const entry = this.backgroundShells.get(taskId);
+    if (entry === undefined || entry.stopped) {
+      return;
+    }
+    if (entry.timer !== undefined) {
+      this.options.deps.clearTimer(entry.timer);
+      entry.timer = undefined;
+    }
+    for (let read = 0; read < BACKGROUND_SHELL_DRAIN_MAX_READS; read += 1) {
+      const before = entry.tail.bytesRead;
+      const done = await this.readBackgroundShell(taskId, entry);
+      if (done || entry.tail.bytesRead === before) {
+        break;
+      }
+    }
+    this.stopBackgroundShell(taskId);
+  }
+
+  private stopBackgroundShell(taskId: string): void {
+    const entry = this.backgroundShells.get(taskId);
+    if (entry === undefined) {
+      return;
+    }
+    entry.stopped = true;
+    if (entry.timer !== undefined) {
+      this.options.deps.clearTimer(entry.timer);
+      entry.timer = undefined;
+    }
+    this.backgroundShells.delete(taskId);
+  }
+
+  private stopAllBackgroundShells(): void {
+    for (const taskId of [...this.backgroundShells.keys()]) {
+      this.stopBackgroundShell(taskId);
+    }
+  }
+
   private onStderr(data: string): void {
     for (const line of this.stderr.push(data)) {
       if (line.class === "drop") {
@@ -433,6 +597,10 @@ export class ClaudeSession {
     this.clearWatchdog();
 
     this.emit(this.cancelPendingRequests());
+    // Nothing is tailed past the session: `closeLiveTasks` below closes each
+    // shell's item, and a poll that outlived its session would emit into a
+    // thread whose turn is already settled.
+    this.stopAllBackgroundShells();
     this.closeQuery();
     this.promptQueue.close();
 
@@ -1439,6 +1607,34 @@ function errorMessage(error: unknown): string {
     return error.message;
   }
   return typeof error === "string" ? error : JSON.stringify(error);
+}
+
+/**
+ * The task id whose tail must be drained before this frame is handed to the
+ * normaliser: a completion notification, or a `task_updated` that settles the
+ * task. Read off the raw frame rather than the normalised event, because the
+ * drain has to happen BEFORE normalisation.
+ */
+function backgroundShellSettlingTaskId(message: SDKMessage): string | undefined {
+  const frame = message as {
+    type?: unknown;
+    subtype?: unknown;
+    task_id?: unknown;
+    patch?: { status?: unknown };
+  };
+  if (frame.type !== "system" || typeof frame.task_id !== "string") {
+    return undefined;
+  }
+  if (frame.subtype === "task_notification") {
+    return frame.task_id;
+  }
+  if (frame.subtype === "task_updated") {
+    const status = frame.patch?.status;
+    return status === "completed" || status === "failed" || status === "killed"
+      ? frame.task_id
+      : undefined;
+  }
+  return undefined;
 }
 
 /** A stream that ended because we interrupted it is not a failure. */

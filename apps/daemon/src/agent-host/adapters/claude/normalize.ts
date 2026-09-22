@@ -111,6 +111,22 @@ interface TaskAgentState {
   model?: string;
   effort?: string;
   outputFile?: string;
+  /** The provider's own `is_backgrounded`, once it has said. */
+  isBackgrounded?: boolean;
+  /** The command the launching Bash call ran, for the shell's own item. */
+  command?: string;
+  /** True once `task.started` has been emitted for this task. */
+  surfaced?: boolean;
+  /**
+   * True when this adapter DECIDED not to surface the task: a foreground
+   * `local_bash` (which is already the blocking tool call's own row), or an
+   * `ambient`/`skip_transcript` housekeeping task. Distinct from "not surfaced
+   * yet": a task first seen on `background_tasks_changed` is neither, so an
+   * orphan notification for it still reaches the roster (§4.5).
+   */
+  suppressed?: boolean;
+  /** Set while this shell's `command_execution` item is open. */
+  shellItemOpen?: boolean;
 }
 
 /** The `TaskCreate`/`TaskUpdate` step list — NOT `TodoWrite` on this CLI. */
@@ -171,6 +187,79 @@ export interface NormalizerOptions {
   onUsageLimitsStale?: () => void;
   /** Called whenever the set of live task ids changes (§3.1 background liveness). */
   onLiveTasksChanged?: (liveTaskIds: ReadonlySet<string>) => void;
+  /**
+   * Called when a background shell starts writing to a file the session should
+   * tail, and again when that tail must stop. The normaliser never touches the
+   * filesystem: it reads the path out of the CLI's own tool_result text and
+   * hands it over (§4.5 "background shells").
+   */
+  onBackgroundShell?: (change: BackgroundShellChange) => void;
+}
+
+/** What {@link NormalizerOptions.onBackgroundShell} reports. */
+export type BackgroundShellChange =
+  | { kind: "tail"; taskId: string; outputFile: string }
+  | { kind: "stop"; taskId: string };
+
+/**
+ * The item id a background shell's rows carry. Deliberately namespaced: it is
+ * synthesised by this adapter, not a provider id, and it must never collide
+ * with a `toolu_*` block id.
+ */
+export function backgroundShellItemId(taskId: string): string {
+  return `bgshell:${taskId}`;
+}
+
+/** At most this much of the command rides the shell item's one-line detail. */
+const BACKGROUND_SHELL_DETAIL_MAX = 120;
+
+/**
+ * The tool_result the CLI writes when a `run_in_background` Bash starts. It is
+ * the ONLY place the output file's path is reported while the command runs —
+ * `task_notification.output_file` arrives when it is already over.
+ */
+const BACKGROUND_SHELL_LAUNCH_RE =
+  /Command running in background with ID:\s*([^\s.]+)\.?\s*Output is being written to:\s*([\s\S]+)/;
+
+/** `Background command "…" completed (exit code 2)` — the only exit code the CLI reports. */
+const BACKGROUND_SHELL_EXIT_CODE_RE = /\(exit code\s+(-?\d+)\)/;
+
+export function parseBackgroundShellLaunch(
+  text: string
+): { taskId: string; outputFile: string } | undefined {
+  const match = BACKGROUND_SHELL_LAUNCH_RE.exec(text);
+  if (!match) {
+    return undefined;
+  }
+  const taskId = match[1] ?? "";
+  let rest = match[2] ?? "";
+  const sentenceEnd = rest.indexOf(". You will be notified");
+  if (sentenceEnd >= 0) {
+    rest = rest.slice(0, sentenceEnd);
+  } else {
+    const whitespace = rest.search(/\s/);
+    if (whitespace >= 0) {
+      rest = rest.slice(0, whitespace);
+    }
+    rest = rest.replace(/\.$/, "");
+  }
+  const outputFile = rest.trim();
+  if (taskId.length === 0 || outputFile.length === 0) {
+    return undefined;
+  }
+  return { taskId, outputFile };
+}
+
+export function parseBackgroundShellExitCode(summary: unknown): number | undefined {
+  if (typeof summary !== "string") {
+    return undefined;
+  }
+  const match = BACKGROUND_SHELL_EXIT_CODE_RE.exec(summary);
+  if (!match) {
+    return undefined;
+  }
+  const code = Number.parseInt(match[1] ?? "", 10);
+  return Number.isFinite(code) ? code : undefined;
 }
 
 const MAX_PENDING_TASK_MODELS = 64;
@@ -217,6 +306,12 @@ export class ClaudeNormalizer {
   private threadStartedEmitted = false;
   private lastSessionState: RuntimeSessionState | undefined;
   private lastSessionStateReason: string | undefined;
+  /**
+   * True between the first `status: "compacting"` frame and the status that
+   * ends it (or its boundary). A latch, because the CLI sends the same frame
+   * six times per compaction and the phase must open once.
+   */
+  private compacting = false;
 
   private readonly inFlightTools = new Map<number, ToolInFlight>();
   private readonly taskAgents = new Map<string, TaskAgentState>();
@@ -310,6 +405,9 @@ export class ClaudeNormalizer {
   // -------------------------------------------------------------------------
 
   sessionStarted(resume: unknown, message?: string): RuntimeEvent {
+    // A new provider session starts un-compacting: the phase belongs to the
+    // CLI process that opened it.
+    this.compacting = false;
     return {
       ...this.base(),
       type: "session.started",
@@ -683,16 +781,52 @@ export class ClaudeNormalizer {
     // Frames of a subagent that was never named have nowhere to go once the
     // turn is over; they must not outlive it.
     this.dropPendingNested();
+    // A session that is going away is not compacting either.
+    this.compacting = false;
     const events: RuntimeEvent[] = [];
+    const closed = this.liveTaskIds.size > 0;
+    const raw: RuntimeEventRaw = {
+      source: RAW_SDK_MESSAGE,
+      method: "claude/session/closed",
+      payload: { reason: "session closed" }
+    };
     for (const taskId of [...this.liveTaskIds]) {
       this.liveTaskIds.delete(taskId);
+      const agent = this.taskAgents.get(taskId);
+      if (agent !== undefined) {
+        // A running state never outlives its process (§3.1): the shell's own
+        // item is closed first, exactly as on a real notification.
+        events.push(
+          ...this.closeBackgroundShellItem(agent, {
+            status: "failed",
+            detail: BACKGROUND_SHELL_STOPPED_DETAIL,
+            raw
+          })
+        );
+        this.options.onBackgroundShell?.({ kind: "stop", taskId });
+      }
       events.push({
         ...this.base({ turnId: this.activeTurnId }),
         type: "task.completed",
         payload: { taskId, status: "stopped", ...this.taskLinkageFor(taskId) }
       });
     }
-    if (events.length > 0) {
+    // A shell whose task already left the liveness set (the level signal
+    // clears it early) may still have an open item; nothing else will close it.
+    for (const agent of this.taskAgents.values()) {
+      if (agent.shellItemOpen !== true) {
+        continue;
+      }
+      events.push(
+        ...this.closeBackgroundShellItem(agent, {
+          status: "failed",
+          detail: BACKGROUND_SHELL_STOPPED_DETAIL,
+          raw
+        })
+      );
+      this.options.onBackgroundShell?.({ kind: "stop", taskId: agent.taskId });
+    }
+    if (closed) {
       this.options.onLiveTasksChanged?.(this.liveTaskIds);
     }
     return events;
@@ -1261,6 +1395,12 @@ export class ClaudeNormalizer {
       const text = extractTextContent(block.content);
       const isError = block.is_error === true;
 
+      // A `run_in_background` Bash answers with a placeholder naming the file
+      // the CLI writes the command's output to. It is the only frame that
+      // carries that path while the command is still running, so the tail
+      // starts from here (§4.5). The normaliser never opens the file itself.
+      this.noteBackgroundShellLaunch(text);
+
       const found = [...this.inFlightTools.entries()].find(
         ([, tool]) => tool.itemId === toolUseId
       );
@@ -1360,6 +1500,39 @@ export class ClaudeNormalizer {
     }
 
     return events;
+  }
+
+  /**
+   * Remember (and hand over) the output file a background shell just named.
+   * Silent for every other tool_result.
+   */
+  private noteBackgroundShellLaunch(text: string): void {
+    if (text.length === 0) {
+      return;
+    }
+    const launch = parseBackgroundShellLaunch(text);
+    if (launch === undefined) {
+      return;
+    }
+    const agent = this.taskAgents.get(launch.taskId);
+    if (agent === undefined) {
+      // The path is worth keeping even if the start edge has not arrived: the
+      // linkage on every later row carries it.
+      this.taskAgents.set(launch.taskId, {
+        taskId: launch.taskId,
+        outputFile: launch.outputFile
+      });
+    } else {
+      agent.outputFile = launch.outputFile;
+      if (agent.suppressed === true) {
+        return;
+      }
+    }
+    this.options.onBackgroundShell?.({
+      kind: "tail",
+      taskId: launch.taskId,
+      outputFile: launch.outputFile
+    });
   }
 
   private toolDeniedEvent(input: {
@@ -1613,15 +1786,53 @@ export class ClaudeNormalizer {
         return this.handleInit(message, raw);
 
       case "status": {
-        // ~3 per turn, with `requesting` the only value this CLI sends
-        // (fixtures README observation 6). Deduped on the derived state, so
-        // the bus does not carry one event per frame. `compacting` maps to
-        // `running` too: `waiting` is derived from an unresolved request and
-        // is never emitted (§4.2).
-        return this.sessionStateChanged("running", `status:${message.status ?? "active"}`);
+        // ~3 per turn (fixtures README observation 6). Deduped on the derived
+        // state, so the bus does not carry one event per frame. Every status
+        // maps to session `running` — `waiting` is derived from an unresolved
+        // request and is never emitted (§4.2) — but `compacting` ALSO opens a
+        // thread phase, because a `/compact` turn spends minutes with no
+        // assistant output and a generic "Working" is a lie the user cannot
+        // read (fixtures README observation 6).
+        const events = this.sessionStateChanged(
+          "running",
+          `status:${message.status ?? "active"}`
+        );
+        if (message.status === "compacting") {
+          if (!this.compacting) {
+            this.compacting = true;
+            events.push({
+              ...this.base({ turnId: this.activeTurnId, raw }),
+              type: "thread.state.changed",
+              payload: { state: "compacting" }
+            });
+          }
+          return events;
+        }
+        if (this.compacting) {
+          // The phase ends on the first NON-compacting status. A success is
+          // silent here: `compact_boundary` follows and reports the real
+          // before/after counts. A failure has no boundary at all, so this is
+          // the only place the user can learn it did not happen.
+          this.compacting = false;
+          if (message.compact_result === "failed") {
+            const reason =
+              trimmedString((message as { compact_error?: unknown }).compact_error) ??
+              "Context compaction failed.";
+            events.push({
+              ...this.base({ turnId: this.activeTurnId, raw }),
+              type: "thread.state.changed",
+              payload: { state: "compaction-failed", error: reason }
+            });
+            events.push(this.warning(reason, message));
+          }
+        }
+        return events;
       }
 
       case "compact_boundary": {
+        // The boundary is the other end of the phase the `compacting` status
+        // opened; a compaction that reached a boundary succeeded.
+        this.compacting = false;
         const turn = this.turnState;
         if (turn) {
           turn.latestAssistantUsage = undefined;
@@ -1901,6 +2112,19 @@ export class ClaudeNormalizer {
       trimmedString(rawEffort) ??
       (typeof rawEffort === "number" && Number.isFinite(rawEffort) ? String(rawEffort) : undefined);
 
+    const isBackgrounded =
+      typeof message.is_backgrounded === "boolean" ? message.is_backgrounded : undefined;
+    // A `run_in_background: false` Bash is the blocking tool call's own row —
+    // surfacing it flashed a roster row for EVERY foreground command, reading
+    // like a subagent (owner report, 2026-09-22). Housekeeping tasks are not
+    // activity at all and the SDK says so outright.
+    const housekeeping = message.ambient === true || message.skip_transcript === true;
+    const foregroundShell =
+      isBackgrounded === false &&
+      message.task_type !== undefined &&
+      isBackgroundTaskType(message.task_type);
+    const suppressed = housekeeping || foregroundShell;
+
     this.taskAgents.set(message.task_id, {
       taskId: message.task_id,
       ...(message.tool_use_id !== undefined ? { toolUseId: message.tool_use_id } : {}),
@@ -1914,25 +2138,165 @@ export class ClaudeNormalizer {
       ...(message.workflow_name !== undefined ? { workflowName: message.workflow_name } : {}),
       ...(owningAgentId !== undefined ? { owningAgentId } : {}),
       ...(model !== undefined ? { model } : {}),
-      ...(effort !== undefined ? { effort } : {})
+      ...(effort !== undefined ? { effort } : {}),
+      ...(isBackgrounded !== undefined ? { isBackgrounded } : {}),
+      // Remembered even while suppressed: a Ctrl+B promotion later needs the
+      // command, and by then the launching tool may be long gone.
+      ...(trimmedString(launchInput?.command) !== undefined
+        ? { command: trimmedString(launchInput?.command) }
+        : {}),
+      ...(housekeeping ? { suppressed: true } : {}),
+      ...(foregroundShell ? { suppressed: true } : {})
     });
-    this.liveTaskIds.add(message.task_id);
+
+    const events = this.flushPendingNested();
+    if (suppressed) {
+      return events;
+    }
+    events.push(...this.surfaceTask(message.task_id, raw));
+    return events;
+  }
+
+  /**
+   * Put a task on the roster: `task.started`, the liveness set, and — for a
+   * shell — the `command_execution` item its drill-in renders. Called from
+   * `task_started` and, for a promoted foreground shell, from `task_updated`.
+   */
+  private surfaceTask(taskId: string, raw: RuntimeEventRaw): RuntimeEvent[] {
+    const agent = this.taskAgents.get(taskId);
+    if (agent === undefined || agent.surfaced === true) {
+      return [];
+    }
+    agent.surfaced = true;
+    agent.suppressed = false;
+    this.liveTaskIds.add(taskId);
     this.options.onLiveTasksChanged?.(this.liveTaskIds);
 
-    return [
-      ...this.flushPendingNested(),
+    const events: RuntimeEvent[] = [
       {
         ...this.base({
           turnId: this.activeTurnId,
-          ...(owningAgentId !== undefined ? { agentId: owningAgentId } : {}),
+          ...(agent.owningAgentId !== undefined ? { agentId: agent.owningAgentId } : {}),
           raw
         }),
         type: "task.started",
         payload: {
-          taskId: message.task_id,
-          ...(message.description !== undefined ? { description: message.description } : {}),
-          ...this.taskLinkageFor(message.task_id)
+          taskId,
+          ...(agent.description !== undefined ? { description: agent.description } : {}),
+          ...(agent.isBackgrounded !== undefined ? { isBackgrounded: agent.isBackgrounded } : {}),
+          ...this.taskLinkageFor(taskId)
         }
+      }
+    ];
+    if (agent.taskType !== undefined && isBackgroundTaskType(agent.taskType)) {
+      events.push(this.openBackgroundShellItem(agent, raw));
+    }
+    return events;
+  }
+
+  /**
+   * The shell's own tool row. The CLI streams a background command's output
+   * nowhere — it writes it to a file — so without this the drill-in reads
+   * "This agent has not reported anything yet" for the whole run.
+   */
+  private openBackgroundShellItem(agent: TaskAgentState, raw: RuntimeEventRaw): RuntimeEvent {
+    agent.shellItemOpen = true;
+    const itemId = backgroundShellItemId(agent.taskId);
+    const detail = backgroundShellDetail(agent.command);
+    return {
+      ...this.base({
+        turnId: this.activeTurnId,
+        itemId,
+        providerItemId: itemId,
+        agentId: agent.taskId,
+        raw
+      }),
+      type: "item.started",
+      payload: {
+        itemType: "command_execution",
+        status: "inProgress",
+        title: BACKGROUND_SHELL_TITLE,
+        ...(detail !== undefined ? { detail } : {}),
+        agentId: agent.taskId,
+        data: {
+          toolName: "Bash",
+          input: {
+            ...(agent.command !== undefined ? { command: agent.command } : {}),
+            ...(agent.description !== undefined ? { description: agent.description } : {})
+          },
+          background: true
+        }
+      }
+    };
+  }
+
+  /** The shell item's bookend. `exitCode` rides `data`, beside the input. */
+  private closeBackgroundShellItem(
+    agent: TaskAgentState,
+    input: {
+      status: RuntimeItemStatus;
+      detail?: string;
+      exitCode?: number;
+      raw: RuntimeEventRaw;
+    }
+  ): RuntimeEvent[] {
+    if (agent.shellItemOpen !== true) {
+      return [];
+    }
+    agent.shellItemOpen = false;
+    const itemId = backgroundShellItemId(agent.taskId);
+    const detail = input.detail ?? backgroundShellDetail(agent.command);
+    return [
+      {
+        ...this.base({
+          turnId: this.activeTurnId,
+          itemId,
+          providerItemId: itemId,
+          agentId: agent.taskId,
+          raw: input.raw
+        }),
+        type: "item.completed",
+        payload: {
+          itemType: "command_execution",
+          status: input.status,
+          title: BACKGROUND_SHELL_TITLE,
+          ...(detail !== undefined ? { detail } : {}),
+          agentId: agent.taskId,
+          data: {
+            toolName: "Bash",
+            input: {
+              ...(agent.command !== undefined ? { command: agent.command } : {}),
+              ...(agent.description !== undefined ? { description: agent.description } : {})
+            },
+            background: true,
+            ...(input.exitCode !== undefined ? { exitCode: input.exitCode } : {})
+          }
+        }
+      }
+    ];
+  }
+
+  /**
+   * One chunk of a background shell's output file, as an ordinary
+   * `command_output` delta on the shell's own item. Built here, not in the
+   * session, so the base envelope (item id, agent id, turn) stays in one
+   * place (§4.5).
+   */
+  backgroundShellOutput(taskId: string, delta: string): RuntimeEvent[] {
+    if (delta.length === 0) {
+      return [];
+    }
+    const itemId = backgroundShellItemId(taskId);
+    return [
+      {
+        ...this.base({
+          turnId: this.activeTurnId,
+          itemId,
+          providerItemId: itemId,
+          agentId: taskId
+        }),
+        type: "content.delta",
+        payload: { streamKind: "command_output", delta }
       }
     ];
   }
@@ -1980,6 +2344,22 @@ export class ClaudeNormalizer {
     raw: RuntimeEventRaw
   ): RuntimeEvent[] {
     const patch = message.patch;
+    const agent = this.taskAgents.get(message.task_id);
+    const events: RuntimeEvent[] = [];
+    if (agent !== undefined && patch.is_backgrounded !== undefined) {
+      agent.isBackgrounded = patch.is_backgrounded;
+      if (patch.is_backgrounded && agent.surfaced !== true && agent.suppressed === true) {
+        // The user pressed Ctrl+B (or ran `background`) on a foreground shell.
+        // It becomes background work at exactly this moment, so its whole
+        // roster life starts here — the start row first, then this update.
+        events.push(...this.surfaceTask(message.task_id, raw));
+      }
+    }
+    if (agent?.suppressed === true) {
+      // Never surfaced, and not being promoted: it stays the blocking tool
+      // call's own row and owns nothing on the roster.
+      return events;
+    }
     const status =
       patch.status !== undefined ? CLAUDE_TASK_PATCH_STATUS[patch.status] : undefined;
     if (status === "completed" || status === "failed" || status === "cancelled") {
@@ -1996,45 +2376,68 @@ export class ClaudeNormalizer {
     // carries the identity forward from its own map, which is what §4.2's
     // "linkage repeated on every row" actually requires of us.
     const linkage = this.taskLinkageFor(message.task_id);
-    return [
-      {
-        ...this.base({
-          turnId: this.activeTurnId,
-          ...(linkage.agentId !== undefined ? { agentId: linkage.agentId } : {}),
-          raw
-        }),
-        type: "task.updated",
-        payload: {
-          taskId: message.task_id,
-          ...(status !== undefined ? { status } : {}),
-          ...(patch.description !== undefined ? { description: patch.description } : {}),
-          ...(patch.error !== undefined ? { error: patch.error } : {}),
-          ...(endedAt !== undefined ? { endedAt } : {}),
-          ...(patch.is_backgrounded !== undefined
-            ? { isBackgrounded: patch.is_backgrounded }
-            : {}),
-          ...linkage
-        }
+    events.push({
+      ...this.base({
+        turnId: this.activeTurnId,
+        ...(linkage.agentId !== undefined ? { agentId: linkage.agentId } : {}),
+        raw
+      }),
+      type: "task.updated",
+      payload: {
+        taskId: message.task_id,
+        ...(status !== undefined ? { status } : {}),
+        ...(patch.description !== undefined ? { description: patch.description } : {}),
+        ...(patch.error !== undefined ? { error: patch.error } : {}),
+        ...(endedAt !== undefined ? { endedAt } : {}),
+        ...(patch.is_backgrounded !== undefined
+          ? { isBackgrounded: patch.is_backgrounded }
+          : {}),
+        ...linkage
       }
-    ];
+    });
+    return events;
   }
 
   private handleTaskNotification(
     message: Extract<SDKMessage, { type: "system"; subtype: "task_notification" }>,
     raw: RuntimeEventRaw
   ): RuntimeEvent[] {
+    const agent = this.taskAgents.get(message.task_id);
+    if (agent && trimmedString(message.output_file) !== undefined) {
+      // A foreground task reports `output_file: ""`; an empty string must not
+      // overwrite the real path the launch tool_result already gave us.
+      agent.outputFile = message.output_file;
+    }
+    if (agent?.suppressed === true) {
+      // A foreground shell's bookend. It was never on the roster; it does not
+      // leave it either.
+      return [];
+    }
     if (this.liveTaskIds.delete(message.task_id)) {
       this.options.onLiveTasksChanged?.(this.liveTaskIds);
-    }
-    const agent = this.taskAgents.get(message.task_id);
-    if (agent && typeof message.output_file === "string") {
-      agent.outputFile = message.output_file;
     }
     const events = this.emitThreadTokenUsage(
       this.taskProgressTokenUsage(message.usage),
       "claude/system/task_notification",
       message
     );
+    const exitCode = parseBackgroundShellExitCode(message.summary);
+    if (agent !== undefined) {
+      // The item settles BEFORE the task row: ingestion flushes the item's
+      // tool-output buffer on `item.completed`, so anything the session drained
+      // out of the output file must already be behind it.
+      events.push(
+        ...this.closeBackgroundShellItem(agent, {
+          status:
+            message.status === "completed" && (exitCode === undefined || exitCode === 0)
+              ? "completed"
+              : "failed",
+          ...(exitCode !== undefined ? { exitCode } : {}),
+          raw
+        })
+      );
+      this.options.onBackgroundShell?.({ kind: "stop", taskId: message.task_id });
+    }
     const usage = normalizeTaskUsage(message.usage);
     const linkage = this.taskLinkageFor(message.task_id);
     events.push({
@@ -2049,6 +2452,7 @@ export class ClaudeNormalizer {
         status: message.status,
         ...(message.summary !== undefined ? { summary: message.summary } : {}),
         ...(usage !== undefined ? { usage } : {}),
+        ...(exitCode !== undefined ? { exitCode } : {}),
         ...linkage
       }
     });
@@ -2056,15 +2460,27 @@ export class ClaudeNormalizer {
   }
 
   /**
-   * The only frame that reports the **whole** live background set, which makes
-   * it the natural source for reconciling the roster after a gap
-   * (fixtures README observation 4). A live background task missing from the
-   * snapshot is closed `stopped`; a new one is registered so the `task_started`
-   * that follows already has its linkage.
+   * A **level** signal: the whole live background set, re-sent whenever
+   * membership changes. It is deliberately NOT correlated with the
+   * `task_started`/`task_notification` edges — the SDK says so outright
+   * ("Ordering relative to the bookends for the same transition is
+   * unspecified … the payload carries ids only, so do not correlate it with
+   * the edge stream", fixtures README observation 18), and the live capture
+   * proves it: the empty level for a finished shell arrives BEFORE its
+   * `task_updated`/`task_notification`. Closing the task here wrote a "Task
+   * stopped" row a moment before the real "Task completed", and the roster
+   * fold keeps the FIRST terminal status — so the shell read as interrupted
+   * forever (owner report, 2026-09-22). T3 ignores the level entirely
+   * (`ClaudeAdapter.ts:3945-3959`).
+   *
+   * What it is still good for: naming a task before its start edge (so the
+   * `task_started` that follows already has its linkage), and clearing
+   * liveness promptly so the "Monitoring" banner goes away. Neither is a
+   * roster event, so this returns nothing.
    */
   private handleBackgroundTasksChanged(
     message: Extract<SDKMessage, { type: "system"; subtype: "background_tasks_changed" }>,
-    raw: RuntimeEventRaw
+    _raw: RuntimeEventRaw
   ): RuntimeEvent[] {
     const present = new Set<string>();
     for (const task of message.tasks) {
@@ -2078,7 +2494,6 @@ export class ClaudeNormalizer {
       });
     }
 
-    const events: RuntimeEvent[] = [];
     let changed = false;
     for (const taskId of [...this.liveTaskIds]) {
       if (present.has(taskId)) {
@@ -2092,16 +2507,11 @@ export class ClaudeNormalizer {
       }
       this.liveTaskIds.delete(taskId);
       changed = true;
-      events.push({
-        ...this.base({ turnId: this.activeTurnId, raw }),
-        type: "task.completed",
-        payload: { taskId, status: "stopped", ...this.taskLinkageFor(taskId) }
-      });
     }
     if (changed) {
       this.options.onLiveTasksChanged?.(this.liveTaskIds);
     }
-    return events;
+    return [];
   }
 
   private taskLinkageFor(taskId: string): TaskAgentLinkage {
@@ -2666,6 +3076,24 @@ export function extractExitPlanModePlan(
 }
 
 /** Task types that are watch loops or shells rather than agents. */
+/** The shell item's fixed title; the command itself rides `detail`. */
+const BACKGROUND_SHELL_TITLE = "Background shell";
+const BACKGROUND_SHELL_STOPPED_DETAIL = "stopped with the session";
+
+/** One line of the command, bounded — the row is fixed-height (§7.6). */
+function backgroundShellDetail(command: string | undefined): string | undefined {
+  if (command === undefined) {
+    return undefined;
+  }
+  const firstLine = command.split("\n", 1)[0]?.trim() ?? "";
+  if (firstLine.length === 0) {
+    return undefined;
+  }
+  return firstLine.length > BACKGROUND_SHELL_DETAIL_MAX
+    ? `${firstLine.slice(0, BACKGROUND_SHELL_DETAIL_MAX - 1)}…`
+    : firstLine;
+}
+
 function isBackgroundTaskType(taskType: string): boolean {
   return taskType === "local_bash" || taskType === "shell" || taskType.startsWith("monitor");
 }
