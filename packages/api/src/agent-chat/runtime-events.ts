@@ -114,7 +114,16 @@ export type RuntimeThreadState =
   | "idle"
   | "archived"
   | "closed"
+  /**
+   * A context compaction is in flight: the provider is rewriting the
+   * conversation and no assistant text is coming until it settles. Emitted
+   * once per compaction (Claude's `status: "compacting"` frames are
+   * deduplicated at the adapter); `compacted` or `compaction-failed` ends it.
+   */
+  | "compacting"
   | "compacted"
+  /** The compaction did not happen; the conversation is unchanged. `error` says why. */
+  | "compaction-failed"
   | "error";
 
 /**
@@ -537,6 +546,8 @@ export interface ThreadStateChangedPayload {
   /** Set on `compacted`, from the provider's compaction boundary. */
   beforeTokens?: number;
   afterTokens?: number;
+  /** Set on `compaction-failed`: the provider's own reason, already user-facing. */
+  error?: string;
 }
 
 export interface ThreadMetadataUpdatedPayload {
@@ -687,6 +698,14 @@ export interface UserInputResolvedPayload {
 export interface TaskStartedPayload extends TaskAgentLinkage {
   taskId: string;
   description?: string;
+  /**
+   * Whether the task runs detached from the tool call that launched it (a
+   * `run_in_background` Bash, a Ctrl+B'd command, a resumed subagent). A
+   * foreground task blocks its tool call and is that tool's row, not a roster
+   * row: an adapter that can tell the two apart surfaces only the detached
+   * ones. Absent when the provider does not say.
+   */
+  isBackgrounded?: boolean;
 }
 
 export interface TaskProgressPayload extends TaskAgentLinkage {
@@ -718,6 +737,8 @@ export interface TaskCompletedPayload extends TaskAgentLinkage {
   status: RuntimeTaskCompletedStatus;
   summary?: string;
   usage?: RuntimeTaskUsage;
+  /** A background shell's exit code, when the provider reports one. */
+  exitCode?: number;
 }
 
 export interface HookStartedPayload {

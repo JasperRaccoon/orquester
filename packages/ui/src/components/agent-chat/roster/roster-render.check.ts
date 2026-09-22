@@ -76,6 +76,8 @@ function agent(id: string, overrides: Partial<RuntimeSubagent> = {}): RuntimeSub
     result: null,
     error: null,
     outputFile: null,
+    exitCode: null,
+    isBackgrounded: null,
     parentAgentId: null,
     agentIndex: null,
     phaseIndex: null,

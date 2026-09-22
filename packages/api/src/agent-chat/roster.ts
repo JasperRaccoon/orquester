@@ -210,6 +210,8 @@ function getOrCreate(
     result: null,
     error: null,
     outputFile: null,
+    exitCode: null,
+    isBackgrounded: typeof payload.isBackgrounded === "boolean" ? payload.isBackgrounded : null,
     parentAgentId: asString(payload.parentAgentId) ?? null,
     agentIndex: asCount(payload.agentIndex) ?? null,
     phaseIndex: asCount(payload.phaseIndex) ?? null,
@@ -272,6 +274,16 @@ function fillMetadata(agent: MutableAgent, payload: Record<string, unknown>): vo
   }
   const outputFile = asString(payload.outputFile);
   if (outputFile) agent.outputFile = outputFile;
+  // Sticky upwards: a task that was moved to the background (Ctrl+B) stays
+  // background; a later row that omits the flag never demotes it.
+  if (payload.isBackgrounded === true) agent.isBackgrounded = true;
+  else if (payload.isBackgrounded === false && agent.isBackgrounded === null) {
+    agent.isBackgrounded = false;
+  }
+  const exitCode = payload.exitCode;
+  if (typeof exitCode === "number" && Number.isInteger(exitCode) && exitCode >= 0) {
+    agent.exitCode = exitCode;
+  }
   if (Array.isArray(payload.phases)) {
     const phases: TaskWorkflowPhase[] = [];
     for (const entry of payload.phases) {

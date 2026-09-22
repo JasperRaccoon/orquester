@@ -34,6 +34,8 @@ const agent = (
   result: null,
   error: null,
   outputFile: null,
+  exitCode: null,
+  isBackgrounded: null,
   parentAgentId: null,
   agentIndex: null,
   phaseIndex: null,

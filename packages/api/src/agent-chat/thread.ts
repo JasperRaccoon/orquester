@@ -487,6 +487,17 @@ export interface RuntimeSubagent {
   result: string | null;
   error: string | null;
   outputFile: string | null;
+  /**
+   * A background shell's exit code once it settled; `null` for agents and for
+   * a shell still running or one whose provider never said.
+   */
+  exitCode: number | null;
+  /**
+   * Whether the task ran detached from its launching tool call (§7.6). `null`
+   * when the provider never said — an older row, or an adapter without the
+   * notion.
+   */
+  isBackgrounded: boolean | null;
   parentAgentId: string | null;
   agentIndex: number | null;
   phaseIndex: number | null;
