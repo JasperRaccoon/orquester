@@ -522,7 +522,10 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
         // nothing to select), so without this nothing an agent says can be
         // dragged or long-pressed and copied. Toggle rows opt back out with
         // their own `select-none`, as before.
-        className="ac-scroll-thin ac-fade-top min-h-0 flex-1 select-text overflow-y-auto overflow-x-hidden px-3 sm:px-5"
+        className={cn(
+          "ac-scroll-thin ac-fade-top min-h-0 flex-1 select-text overflow-x-hidden px-3 sm:px-5",
+          showEmptyPanel ? "overflow-y-hidden" : "overflow-y-auto"
+        )}
       >
         {/* One provider for the whole list, not one per row: the value is
             already memoised, and a provider per row would be N context nodes
@@ -530,7 +533,10 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
         <TimelineRowContext.Provider value={context}>
           <div
             ref={contentRef}
-            className={cn("ac-rows flex flex-col", showEmptyPanel && "min-h-full")}
+            // `h-full` (not `min-h-full`) when the panel shows: a min-height
+            // lets the column grow with the list and the whole timeline scrolls
+            // the title away; a fixed height is what makes ONLY the list scroll.
+            className={cn("ac-rows flex flex-col", showEmptyPanel && "h-full")}
           >
             <div className="h-3 shrink-0 sm:h-4" aria-hidden />
             {rows.map((row) => (
@@ -556,7 +562,7 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
                 </div>
                 <p className="shrink-0 text-sm font-medium text-neutral-200">Recent conversations</p>
                 <p className="mb-2 mt-0.5 shrink-0 text-xs text-neutral-600">
-                  The last {EMPTY_PANEL_LIMIT} for this project. Pick one up, or just start typing below.
+                  This project&apos;s {emptyPanelAgentName} conversations, newest first. Pick one up, or just start typing below.
                 </p>
                 <div className="ac-scroll-thin min-h-0 flex-1 overflow-y-auto pr-1">
                   <RecentConversationsList

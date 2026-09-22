@@ -182,28 +182,41 @@ export const RecentConversationsList: React.FC<{
   const registry = useRegistry();
   const loadAgentConversations = useAppStore((s) => s.loadAgentConversations);
   const cached = useAppStore((s) => s.agentConversationsByProject[projectPath]);
+  const missing = cached === undefined;
 
+  // Re-run whenever the cache is MISSING, not only on mount: every session
+  // open/close in the project drops the key (so a fresh transcript shows up),
+  // and a list that only loaded once then sat on its skeleton forever —
+  // switching between empty chat tabs is exactly that sequence.
   React.useEffect(() => {
-    void loadAgentConversations(projectPath);
-  }, [projectPath, loadAgentConversations]);
+    if (missing) void loadAgentConversations(projectPath);
+  }, [projectPath, missing, loadAgentConversations]);
+
+  // Client-side paging over the scan: `limit` rows first, "load more" appends
+  // another page. Reset when the project or the provider filter changes.
+  const [shown, setShown] = React.useState(limit ?? Number.POSITIVE_INFINITY);
+  React.useEffect(() => {
+    setShown(limit ?? Number.POSITIVE_INFINITY);
+  }, [projectPath, adapter, limit]);
 
   const agents = registry.agents;
   const resumable = React.useMemo(() => {
     const byId = new Map<string, RegistryEntry>(agents.map((a) => [a.id, a]));
-    const rows = (cached ?? []).filter((c) => {
+    return (cached ?? []).filter((c) => {
       const entry = byId.get(chatLaunchRefId(c));
       if (!entry?.enabled || !isChatResumableConversation(c)) return false;
       return adapter === undefined || entry.chat?.adapter === adapter;
     });
-    return limit === undefined ? rows : rows.slice(0, limit);
-  }, [cached, agents, adapter, limit]);
+  }, [cached, agents, adapter]);
+  const visible = resumable.slice(0, shown);
+  const hidden = resumable.length - visible.length;
   const agentName = (refId: string) => agents.find((a) => a.id === refId)?.name ?? refId;
 
   return (
     <div className="space-y-0.5">
       {cached === undefined && Array.from({ length: 4 }, (_, i) => <SkeletonRow key={i} />)}
       {cached !== undefined && resumable.length === 0 ? empty ?? null : null}
-      {resumable.map((conversation) => (
+      {visible.map((conversation) => (
         <ResumeRow
           key={`${conversation.agentRefId}:${conversation.id}`}
           conversation={conversation}
@@ -211,6 +224,15 @@ export const RecentConversationsList: React.FC<{
           onPicked={onPicked}
         />
       ))}
+      {hidden > 0 && limit !== undefined ? (
+        <button
+          type="button"
+          onClick={() => setShown((count) => count + limit)}
+          className="mt-1 flex w-full items-center justify-center rounded-lg border border-neutral-800 px-3 py-2 text-[12px] text-neutral-400 transition-colors hover:border-neutral-700 hover:bg-neutral-900 hover:text-neutral-200"
+        >
+          Load more conversations ({hidden} more)
+        </button>
+      ) : null}
     </div>
   );
 };
