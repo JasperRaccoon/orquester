@@ -18,6 +18,8 @@ import {
   resolveFollowUpDisposition,
   resolvePlanFollowUpSubmission,
   stagedAttachmentKeyForRef,
+  submitIsNoOp,
+  swallowsStandalonePlanCommand,
   uploadsBlockSend,
   type StagedAttachmentLike
 } from "./composer-submission.ts";
@@ -396,17 +398,77 @@ test("R7-3: an empty draft with an actionable plan still produces a submission",
 });
 
 test("Q2-5: Enter during an IME composition is not a send", () => {
-  // The composer returns before the Enter arm when `isComposing` is set; the
-  // intent resolver itself is unchanged, so this pins the inputs it is given.
+  // Deleting the guard makes this fail: the same input differs only by
+  // `isComposing`, and the composing one must resolve to null.
   const base = {
     isMobileViewport: false,
     shiftKey: false,
     modifierKey: false,
     isRunning: false
   } as const;
-  // What the composer computes for a NON-composing Enter.
   assert.equal(composerSubmissionIntentForEnter(base), "foreground");
-  // …and the guard means the resolver is never consulted while composing,
-  // which is the only correct behaviour: a candidate-commit Enter must not
-  // send a half-converted prompt.
+  assert.equal(composerSubmissionIntentForEnter({ ...base, isComposing: true }), null);
+});
+
+test("Q2-5: the keyCode 229 fallback is honoured for engines without isComposing", () => {
+  const base = {
+    isMobileViewport: false,
+    shiftKey: false,
+    modifierKey: false,
+    isRunning: false
+  } as const;
+  assert.equal(composerSubmissionIntentForEnter({ ...base, keyCode: 229 }), null);
+  // A normal Enter carries keyCode 13 and must still send.
+  assert.equal(composerSubmissionIntentForEnter({ ...base, keyCode: 13 }), "foreground");
+});
+
+test("Q2-5: a composition beats every other send path, including mod+Enter steering", () => {
+  assert.equal(
+    composerSubmissionIntentForEnter({
+      isMobileViewport: false,
+      shiftKey: false,
+      modifierKey: true,
+      isRunning: true,
+      isComposing: true
+    }),
+    null
+  );
+});
+
+test("R7-3: an empty draft with an actionable plan is NOT a no-op submit", () => {
+  // The bug: `if (!sendable) return;` ran before the plan was resolved, so the
+  // enabled Implement button did nothing. Deleting the `hasActionablePlan`
+  // term makes this fail.
+  assert.equal(submitIsNoOp({ hasSendableContent: false, hasActionablePlan: true }), false);
+  assert.equal(submitIsNoOp({ hasSendableContent: false, hasActionablePlan: false }), true);
+  assert.equal(submitIsNoOp({ hasSendableContent: true, hasActionablePlan: false }), false);
+});
+
+test("R2-3: /plan is swallowed only where the toggle is shown", () => {
+  const base = { text: "/plan", attachmentCount: 0 };
+  assert.equal(swallowsStandalonePlanCommand({ ...base, showPlanModeToggle: true }), "plan");
+  // OpenCode/Grok: the toggle is hidden, so it goes to the wire as text.
+  assert.equal(swallowsStandalonePlanCommand({ ...base, showPlanModeToggle: false }), null);
+});
+
+test("R2-3: /default follows the same gate, and an attachment defeats both", () => {
+  assert.equal(
+    swallowsStandalonePlanCommand({ text: "/default", attachmentCount: 0, showPlanModeToggle: true }),
+    "default"
+  );
+  assert.equal(
+    swallowsStandalonePlanCommand({ text: "/plan", attachmentCount: 1, showPlanModeToggle: true }),
+    null
+  );
+});
+
+test("R2-3: only a STANDALONE command is swallowed", () => {
+  assert.equal(
+    swallowsStandalonePlanCommand({
+      text: "/plan the migration",
+      attachmentCount: 0,
+      showPlanModeToggle: true
+    }),
+    null
+  );
 });

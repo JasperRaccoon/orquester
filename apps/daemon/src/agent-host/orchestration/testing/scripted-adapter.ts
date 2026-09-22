@@ -34,6 +34,7 @@ export interface ScriptedCall {
     | "respondToUserInput"
     | "compact"
     | "readThread"
+    | "projectHistory"
     | "rollbackThread"
     | "stopSession"
     | "stopAll"
@@ -44,6 +45,10 @@ export interface ScriptedCall {
 
 export interface ScriptedAdapterOptions {
   id?: AgentAdapterId;
+  /** The `readThread` result a resume replays (E6). */
+  history?: ThreadSnapshot;
+  /** Omit to model an adapter with no `projectHistory` at all. */
+  projectHistory?: (snapshot: ThreadSnapshot) => RuntimeEvent[];
   capabilities?: Partial<AdapterCapabilities>;
   /** Fail the next `startSession` with this error, then clear it. */
   failStartSession?: Error | null;
@@ -228,8 +233,17 @@ export function createScriptedAdapter(options: ScriptedAdapterOptions = {}): Scr
 
     async readThread(threadId: string): Promise<ThreadSnapshot> {
       calls.push({ kind: "readThread", threadId });
-      return { threadId, turns: [] };
+      return options.history ?? { threadId, turns: [] };
     },
+
+    ...(options.projectHistory
+      ? {
+          projectHistory(snapshot: ThreadSnapshot): RuntimeEvent[] {
+            calls.push({ kind: "projectHistory", detail: snapshot });
+            return options.projectHistory!(snapshot);
+          }
+        }
+      : {}),
 
     async rollbackThread(threadId: string, numTurns: number): Promise<ThreadSnapshot> {
       calls.push({ kind: "rollbackThread", threadId, detail: numTurns });

@@ -284,6 +284,13 @@ export interface AdapterCapabilities {
   promptlessTurnContinuation?: boolean;
   /** Absent means true; Grok is false (§5.5 step 2 refuses before any write). */
   supportsConversationRollback?: boolean;
+  /**
+   * The provider can resume a conversation that is already open elsewhere by
+   * **forking** it (Claude's `forkSession`), so two tabs never advance one
+   * cursor. Absent means it cannot: §6.1 then refuses the resume rather than
+   * silently opening a fresh thread the user believes is their old one.
+   */
+  supportsSessionFork?: boolean;
   /** Claude, Codex true; OpenCode, Grok false. Gates the composer chip (§7.4). */
   showPlanModeToggle: boolean;
   /**
