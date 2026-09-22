@@ -159,6 +159,46 @@ describe("E6: a replayed transcript rebuilds the timeline", () => {
     assert.ok(text.some((entry) => entry.startsWith("assistant:")));
   });
 
+  it("claude: a replayed compaction summary is a marker row, not a giant user bubble", async () => {
+    const summary =
+      "This session is being continued from a previous conversation.\n\n1. Fixed the composer.";
+    const snapshot: ThreadSnapshot = {
+      threadId: THREAD_ID,
+      turns: [
+        {
+          id: "turn-1",
+          items: [
+            {
+              type: "user",
+              uuid: "sum-1",
+              isCompactSummary: true,
+              message: { role: "user", content: summary }
+            },
+            {
+              type: "assistant",
+              uuid: "a1",
+              message: { role: "assistant", content: [{ type: "text", text: "Carrying on." }] }
+            }
+          ]
+        }
+      ]
+    };
+    const { sink } = await replay(
+      projectClaudeHistory(snapshot, { ids: counterIdGen("ce"), clock: new FakeClock() })
+    );
+    assert.deepEqual(
+      roleText(sink.events()).filter((entry) => entry.startsWith("user:")),
+      [],
+      "the user never wrote this"
+    );
+    const marker = sink
+      .activities()
+      .map((event) => event.payload.activity)
+      .find((activity) => activity.activityKind === "context-compaction");
+    assert.ok(marker, "the compaction is still on the timeline");
+    assert.equal((marker.payload as { summary?: string }).summary, summary);
+  });
+
   it("codex: user and assistant items both become messages", async () => {
     const snapshot: ThreadSnapshot = {
       threadId: THREAD_ID,

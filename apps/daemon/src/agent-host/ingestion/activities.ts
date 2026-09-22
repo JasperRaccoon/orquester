@@ -639,7 +639,7 @@ export function runtimeEventToActivities(
       // already carried by the session status. All three of its phases are
       // ONE activity kind — the client renders on `payload.state`, so the
       // in-flight row and its outcome stay the same row shape.
-      const { beforeTokens, afterTokens, error } = event.payload;
+      const { beforeTokens, afterTokens, error, summary } = event.payload;
       const requestId =
         event.requestId !== undefined ? { requestId: event.requestId } : {};
       switch (event.payload.state) {
@@ -680,6 +680,11 @@ export function runtimeEventToActivities(
                 state: event.payload.state,
                 ...(beforeTokens !== undefined ? { beforeTokens } : {}),
                 ...(afterTokens !== undefined ? { afterTokens } : {}),
+                // NOT truncated here, unlike a task's summary: this is the
+                // agent's whole memory of everything the compaction dropped,
+                // and the only copy of it. §5.6's wire cap still applies on
+                // the way out, and `GET …/items/:itemId` serves the rest.
+                ...(summary !== undefined ? { summary } : {}),
                 ...requestId
               }
             })

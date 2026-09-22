@@ -159,6 +159,25 @@ test("every string is capped at 16 KiB and the row flagged truncated", () => {
   assert.equal(slim.truncated, true);
 });
 
+test("a compaction summary survives slimming, capped and flagged", () => {
+  // The marker reveals the provider's summary (§7.3), so `summary` must be a
+  // field slimming keeps: it is top-level, and only `data` is rebuilt from an
+  // allow-list. A real one runs to ~18 KB, so it meets the same 16 KiB wire
+  // cap as every other string, and `truncated` points the row at
+  // `GET …/items/:itemId` for the rest.
+  const short = "Summary of everything before this point.";
+  assert.equal(
+    record(slimActivityPayload({ state: "compacted", summary: short })).summary,
+    short,
+    "a summary that fits is untouched"
+  );
+  const huge = "s".repeat(SLIM_MAX_STRING_BYTES + 2_000);
+  const slim = record(slimActivityPayload({ state: "compacted", summary: huge }));
+  const summary = slim.summary as string;
+  assert.equal(byteLength(summary), SLIM_MAX_STRING_BYTES + byteLength("…"));
+  assert.equal(slim.truncated, true);
+});
+
 /** The cap is stated in BYTES, so the test measures bytes. */
 function byteLength(value: string): number {
   return new TextEncoder().encode(value).length;

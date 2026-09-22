@@ -453,6 +453,13 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   row from the PARENT timeline, and applying it again inside the agent's own view is how every
   drill-in read "This agent has not reported anything yet". Streamed `tool.output` chunks ride
   `payload.delta` and become the entry's `detail`, untrimmed, for `joinLifecycleDetails` to fold.
+  (5) **Message segments are keyed per agent** — `(turnId, agentId | none, role)` in
+  `ingestion/index.ts`, with the owner baked into the message id (`ownedBaseKey`) and stamped on
+  every `thread.message-sent` of an agent-owned segment: a subagent narrates inside the PARENT's
+  turn, so a turn+role key put its prose in the parent's own bubble and let its first visible word
+  close the parent's thinking block. `splitThreadItems(items, ownerAgentId)` is the client mirror
+  — the parent's view drops agent-owned messages, the drill-in keeps its own — and the Claude
+  normaliser projects a nested `thinking` block as the agent's reasoning row, which it used to drop.
 - **Background shells (Claude): only detached ones are surfaced, and their output is TAILED from a
   file.** Every ordinary Bash call raises a `local_bash` task, so `is_backgrounded` — not the task
   type — is the discriminator: a `false` one is the blocking tool call's own row and gets no
@@ -504,6 +511,14 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   no `compact_boundary`, so that frame is the only notice there will ever be. A success is silent
   there because the boundary follows with the real before/after counts. Ingestion turns all three
   into one `context-compaction` activity kind and the client renders on `payload.state`.
+  **The marker also carries the CLI's own summary and reveals it behind a "Show summary" toggle**
+  (collapsed by default, like `ctrl+o`): the boundary's `compacted` event is HELD for exactly one
+  frame so the synthetic `user` frame that follows it — `isSynthetic: true`, a plain-string body,
+  `uuid == compact_metadata.preserved_messages.anchor_uuid` — rides it as `summary` instead of
+  becoming an 18 KB "user message" nobody typed (any other frame, a turn end or a closing session
+  releases the marker unchanged); `project-history.ts` maps the transcript's `isCompactSummary`
+  row to the same marker on resume, and §5.6's 16 KiB wire cap + `truncated` point the row at
+  `GET …/items/:itemId` for the rest.
 
 Start here: `apps/daemon/src/agent-host/README.md` (module map + package ownership).
 

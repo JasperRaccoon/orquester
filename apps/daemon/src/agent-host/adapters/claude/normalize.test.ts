@@ -1702,5 +1702,288 @@ describe("claude normaliser — the context meter is the MAIN agent's, never a s
     for (const row of allOf(settled, "thread.token-usage.updated")) {
       assert.equal(row.payload.usage.maxTokens, 200_000);
     }
+// ---------------------------------------------------------------------------
+// A subagent's prose and reasoning belong to its drill-in
+// ---------------------------------------------------------------------------
+
+describe("claude normaliser — a subagent's thinking is its own, not the parent's", () => {
+  /**
+   * Frames quoted from a live 2.1.278 thread (2026-09-22, thread df121813,
+   * raw.ndjson lines 2158 and 2166): the CLI forwards a subagent's narration
+   * as COMPLETE `assistant` messages carrying `parent_tool_use_id`,
+   * `subagent_type` and `task_description` — text blocks and `thinking`
+   * blocks alike. The thinking ones were dropped on the floor: that thread
+   * held 50 nested thinking blocks and persisted none of them.
+   */
+  function nestedAgent(): {
+    normalizer: ClaudeNormalizer;
+    feed: (message: unknown) => RuntimeEvent[];
+  } {
+    const normalizer = new ClaudeNormalizer({
+      threadId: "t",
+      clock: fixedClock(),
+      ids: countingIds()
+    });
+    normalizer.beginTurn({ turnId: "turn-1" });
+    const feed = (message: unknown): RuntimeEvent[] =>
+      normalizer.handleMessage(message as SDKMessage);
+    feed({
+      type: "system",
+      subtype: "task_started",
+      task_id: "task-1",
+      tool_use_id: "toolu_01Qxuz9M5tRG9F866QNUQNuP",
+      task_type: "local_agent",
+      subagent_type: "general-purpose",
+      description: "Persist composer draft across unmount",
+      uuid: "u0",
+      session_id: "s"
+    });
+    return { normalizer, feed };
+  }
+
+  function nestedAssistant(content: unknown[]): Record<string, unknown> {
+    return {
+      type: "assistant",
+      parent_tool_use_id: "toolu_01Qxuz9M5tRG9F866QNUQNuP",
+      subagent_type: "general-purpose",
+      task_description: "Persist composer draft across unmount",
+      uuid: "u1",
+      session_id: "s",
+      message: {
+        id: "msg_011CfJsDz939kZ35rjjx92a8",
+        role: "assistant",
+        model: "claude-opus-5",
+        content
+      }
+    };
+  }
+
+  it("projects a nested thinking block as the agent's own reasoning row", () => {
+    const { feed } = nestedAgent();
+    const events = feed(
+      nestedAssistant([
+        {
+          type: "thinking",
+          thinking: "I'll run the typecheck first and read through the relevant files.",
+          signature: "CAISmwQKpgEIEhgCKkCW"
+        }
+      ])
+    );
+    const started = events.filter(
+      (event) =>
+        event.type === "item.started" &&
+        (event.payload as { itemType?: string }).itemType === "reasoning"
+    );
+    assert.equal(started.length, 1, "one reasoning row per nested thinking block");
+    assert.equal(started[0]!.agentId, "task-1");
+    const delta = events.find(
+      (event) =>
+        event.type === "content.delta" &&
+        (event.payload as { streamKind?: string }).streamKind === "reasoning_summary_text"
+    );
+    assert.ok(delta, "the reasoning text reaches the drill-in");
+    assert.equal(delta.agentId, "task-1");
+    assert.equal(
+      (delta.payload as { delta: string }).delta,
+      "I'll run the typecheck first and read through the relevant files."
+    );
+    const completed = events.filter(
+      (event) =>
+        event.type === "item.completed" &&
+        (event.payload as { itemType?: string }).itemType === "reasoning"
+    );
+    assert.equal(completed.length, 1);
+    assert.equal(completed[0]!.agentId, "task-1");
+    assert.equal(completed[0]!.itemId, started[0]!.itemId, "the block is one item, start to finish");
+    assert.ok(
+      events.every((event) => event.agentId === "task-1"),
+      "nothing a subagent thinks is attributed to the parent"
+    );
+  });
+
+  it("keeps the agent's text and its thinking on separate items", () => {
+    const { feed } = nestedAgent();
+    const events = feed(
+      nestedAssistant([
+        { type: "thinking", thinking: "Check the store first." },
+        { type: "text", text: "I'll start with the setup, then read the relevant code." }
+      ])
+    );
+    const itemsByKind = new Map<string, Set<string>>();
+    for (const event of events) {
+      if (event.type !== "item.started") continue;
+      const itemType = (event.payload as { itemType?: string }).itemType ?? "";
+      const seen = itemsByKind.get(itemType) ?? new Set<string>();
+      seen.add(event.itemId ?? "");
+      itemsByKind.set(itemType, seen);
+    }
+    assert.equal(itemsByKind.get("reasoning")?.size, 1);
+    assert.equal(itemsByKind.get("assistant_message")?.size, 1);
+    assert.notDeepEqual(
+      [...(itemsByKind.get("reasoning") ?? [])],
+      [...(itemsByKind.get("assistant_message") ?? [])],
+      "thinking and prose are two rows, never one"
+    );
+  });
+
+  it("a nested stream_event never touches the parent's text block", () => {
+    const { feed } = nestedAgent();
+    const stream = (event: Record<string, unknown>, parent: string | null): RuntimeEvent[] =>
+      feed({ type: "stream_event", event, uuid: "u", session_id: "s", parent_tool_use_id: parent });
+    stream(
+      { type: "message_start", message: { id: "msg_parent", role: "assistant", content: [], usage: {} } },
+      null
+    );
+    stream({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }, null);
+    stream({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Parent " } }, null);
+    // The subagent's stream, at the same content index as the parent's open
+    // block. Dropped whole: the complete nested frame carries the text.
+    const nested = [
+      stream(
+        { type: "message_start", message: { id: "msg_child", role: "assistant", content: [], usage: {} } },
+        "toolu_01Qxuz9M5tRG9F866QNUQNuP"
+      ),
+      stream(
+        { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+        "toolu_01Qxuz9M5tRG9F866QNUQNuP"
+      ),
+      stream(
+        { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Child " } },
+        "toolu_01Qxuz9M5tRG9F866QNUQNuP"
+      ),
+      stream({ type: "content_block_stop", index: 0 }, "toolu_01Qxuz9M5tRG9F866QNUQNuP")
+    ].flat();
+    assert.deepEqual(nested, [], "a nested stream frame produces nothing at all");
+    const after = stream(
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "again." } },
+      null
+    );
+    const parentDeltas = after.filter((event) => event.type === "content.delta");
+    assert.equal(parentDeltas.length, 1, "the parent's block is still open and still its own");
+    assert.equal(parentDeltas[0]!.agentId, undefined);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The compaction summary
+// ---------------------------------------------------------------------------
+
+describe("claude normaliser — the compaction marker carries the CLI's summary", () => {
+  const BOUNDARY = {
+    type: "system",
+    subtype: "compact_boundary",
+    session_id: "s",
+    uuid: "f0c1c1a4-b94d-4fd8-8408-69993038b8f3",
+    compact_metadata: {
+      trigger: "manual",
+      pre_tokens: 34995,
+      post_tokens: 873,
+      preserved_segment: { anchor_uuid: "63734266-3933-4b91-b49c-bcd6f2566349" },
+      preserved_messages: {
+        anchor_uuid: "63734266-3933-4b91-b49c-bcd6f2566349",
+        all_uuids: ["803f7bad-6727-4953-9d2b-1809aa4fe973"]
+      }
+    }
+  };
+  const SUMMARY_TEXT =
+    "This session is being continued from a previous conversation that ran out of context. " +
+    "The summary below covers the earlier portion of the conversation.\n\n" +
+    "1. We fixed the composer draft.\n\nContinue the conversation from where it left off.";
+  const SUMMARY_FRAME = {
+    type: "user",
+    message: { role: "user", content: SUMMARY_TEXT },
+    session_id: "s",
+    parent_tool_use_id: null,
+    uuid: "63734266-3933-4b91-b49c-bcd6f2566349",
+    timestamp: "2026-09-21T01:45:59.587Z",
+    isReplay: false,
+    isSynthetic: true
+  };
+
+  function compactionOf(
+    events: readonly RuntimeEvent[]
+  ): { state: string; summary?: string } | undefined {
+    const event = events.find(
+      (candidate) =>
+        candidate.type === "thread.state.changed" &&
+        (candidate.payload as { state?: string }).state === "compacted"
+    );
+    return event?.payload as { state: string; summary?: string } | undefined;
+  }
+
+  it("holds the boundary until the synthetic summary that follows it", () => {
+    const { feed } = feedable();
+    const atBoundary = feed(BOUNDARY);
+    assert.deepEqual(
+      atBoundary.filter((event) => event.type === "thread.state.changed"),
+      [],
+      "the marker waits one frame for the summary the CLI is about to send"
+    );
+    const atSummary = feed(SUMMARY_FRAME);
+    const compacted = compactionOf(atSummary);
+    assert.equal(compacted?.state, "compacted");
+    assert.equal(compacted?.summary, SUMMARY_TEXT);
+    assert.deepEqual(
+      atSummary.filter((event) => event.type === "content.delta"),
+      [],
+      "and the summary is never a user message: it is the marker's own body"
+    );
+  });
+
+  it("flushes the marker unchanged when the next frame is something else", () => {
+    const { feed } = feedable();
+    feed(BOUNDARY);
+    const next = feed({
+      type: "system",
+      subtype: "status",
+      status: "requesting",
+      uuid: "u",
+      session_id: "s"
+    });
+    const compacted = compactionOf(next);
+    assert.equal(compacted?.state, "compacted");
+    assert.equal(compacted?.summary, undefined);
+    assert.ok(
+      next.findIndex((event) => event.type === "thread.state.changed") <
+        next.findIndex((event) => event.type === "session.state.changed"),
+      "the held marker keeps its place in front of the frame that flushed it"
+    );
+  });
+
+  it("a synthetic frame that is not this boundary's anchor stays a normal frame", () => {
+    const { feed } = feedable();
+    feed(BOUNDARY);
+    const other = feed({ ...SUMMARY_FRAME, uuid: "some-other-uuid" });
+    assert.equal(compactionOf(other)?.summary, undefined, "the anchor is the join, not the shape");
+  });
+
+  it("leaves the `<local-command-stdout>` replay frame exactly as it was", () => {
+    const { feed } = feedable();
+    feed(BOUNDARY);
+    feed(SUMMARY_FRAME);
+    const replay = feed({
+      type: "user",
+      message: { role: "user", content: "<local-command-stdout>Compacted </local-command-stdout>" },
+      session_id: "s",
+      parent_tool_use_id: null,
+      uuid: "65dbb734-da8c-4e5c-8f36-9ac4c6211206",
+      isReplay: true
+    });
+    assert.deepEqual(replay, [], "it was never a row and still is not");
+  });
+
+  it("12: the real capture's marker carries the real summary", () => {
+    const { events } = replayClaudeFixture("12-compact.ndjson");
+    const compacted = events.filter(
+      (event) =>
+        event.type === "thread.state.changed" &&
+        (event.payload as { state?: string }).state === "compacted"
+    );
+    assert.equal(compacted.length, 1);
+    const summary = (compacted[0]!.payload as { summary?: string }).summary;
+    assert.ok(
+      summary?.startsWith("This session is being continued from a previous conversation"),
+      "the CLI's own summary, verbatim"
+    );
   });
 });

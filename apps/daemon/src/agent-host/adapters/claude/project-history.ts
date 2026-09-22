@@ -104,6 +104,34 @@ function contentBlocks(content: unknown): Array<Record<string, unknown>> {
   );
 }
 
+/**
+ * The summary text of a transcript row the CLI marked `isCompactSummary`, or
+ * `undefined` for every other row. The flag lives on the ROW, not inside
+ * `message` — it is the transcript's own bookkeeping, and it is the only
+ * marker a compaction leaves behind in native history (the boundary message
+ * is not a conversation row and `groupClaudeHistoryTurns` drops it).
+ */
+export function compactSummaryText(item: unknown): string | undefined {
+  if (item === null || typeof item !== "object") {
+    return undefined;
+  }
+  const record = item as { isCompactSummary?: unknown; message?: unknown };
+  if (record.isCompactSummary !== true) {
+    return undefined;
+  }
+  const body = record.message;
+  const content = body !== null && typeof body === "object"
+    ? (body as { content?: unknown }).content
+    : undefined;
+  if (typeof content === "string") {
+    return content.trim().length > 0 ? content : undefined;
+  }
+  // A block array is not the shape this CLI writes, but a summary is too
+  // important to drop over a shape change: take its text.
+  const text = extractTextContent(content);
+  return text.trim().length > 0 ? text : undefined;
+}
+
 function elide(text: string): string {
   const flat = text.replace(/\s+/g, " ").trim();
   return flat.length > MAX_DETAIL_CHARS ? `${flat.slice(0, MAX_DETAIL_CHARS - 1)}…` : flat;
@@ -143,6 +171,22 @@ export function projectClaudeHistory(
     let model: string | undefined;
 
     for (const item of turn.items) {
+      // A compaction summary is not a prompt. The CLI marks its own row
+      // `isCompactSummary` and gives it the shape of a user message, so the
+      // projection used to replay an 18 KB "user message" nobody typed, at
+      // the top of the resumed thread. It is the same marker the live stream
+      // produces from `compact_boundary` + the synthetic frame — here the
+      // boundary is long gone, so the summary alone carries it.
+      const summary = compactSummaryText(item);
+      if (summary !== undefined) {
+        turnEvents.push({
+          ...base(),
+          type: "thread.state.changed",
+          payload: { state: "compacted", summary },
+          raw: raw(item)
+        });
+        continue;
+      }
       const message = readHistoryMessage(item);
       if (message === undefined) {
         continue;

@@ -63,8 +63,22 @@ export function segmentMessageId(
     : `${prefix}${baseKey}:segment:${segmentIndex}`;
 }
 
+/**
+ * The base key a message's id is built from — **namespaced by its owner**.
+ *
+ * A subagent's blocks arrive on the parent's stream, inside the parent's turn,
+ * and an adapter may name no item at all (the id then falls back to the turn
+ * id). Without the owner in the key, the agent's message and the parent's
+ * would be the same id and the fold would concatenate a subagent's prose into
+ * the parent's bubble.
+ */
 export function segmentBaseKeyFromEvent(event: RuntimeEvent): string {
-  return String(event.itemId ?? event.turnId ?? event.eventId);
+  return ownedBaseKey(String(event.itemId ?? event.turnId ?? event.eventId), event.agentId);
+}
+
+/** The one place a base key is namespaced by its owning subagent. */
+export function ownedBaseKey(baseKey: string, agentId: string | undefined): string {
+  return agentId !== undefined && agentId.length > 0 ? `agent:${agentId}:${baseKey}` : baseKey;
 }
 
 /**

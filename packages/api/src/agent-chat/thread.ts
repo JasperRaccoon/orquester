@@ -279,6 +279,13 @@ export interface ThreadActivityPayloadFields {
     workflowId: string | null;
     agentTaskIds: string[];
   };
+  /**
+   * A one-line provider summary on a task row — and, on a `context-compaction`
+   * row, the whole summary the provider wrote in place of what it dropped
+   * (§7.3, revealed behind the marker's own toggle). Subject to the same
+   * §5.6 wire cap as every other string, which is what `truncated` reports.
+   */
+  summary?: string;
   /** True when the full payload was truncated and `GET …/items/:itemId` has more. */
   truncated?: boolean;
 }

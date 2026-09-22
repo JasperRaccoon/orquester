@@ -228,6 +228,17 @@ Other notes on this group:
   `parent_tool_use_id: "toolu_018p31…"` — on `assistant` messages **and** on a leading `user`
   message that is plain `text`, not a `tool_result`. §4.5's "subagent narration is dropped from the
   parent transcript while its tool blocks are kept" is a T3 *policy*, not something the provider does.
+- **A subagent is never STREAMED, and its `thinking` is forwarded like its prose.** Every nested
+  frame is a COMPLETE `assistant`/`user` message (a live 2.1.278 thread: 882 nested `tool_use`
+  blocks, 179 nested `assistant` frames, **0** nested `stream_event`s), and those frames carry
+  `text`, `tool_use` **and `thinking`** blocks — with `subagent_type` and `task_description` at the
+  top level, which is the join for a resumed agent. The same thread held 50 nested `thinking`
+  blocks; an adapter that reads only `text` drops every one of them, and the agent's drill-in shows
+  the tools with none of the reasoning that chose them. Nested stream frames are therefore dropped
+  whole by the adapter rather than half-handled: every piece of a normaliser's stream bookkeeping
+  (the current `message_start` id, text blocks keyed by content index, in-flight tools keyed by
+  index) belongs to the parent's message, and a subagent's indexes restart at 0 just like the
+  parent's.
 - `task_notification.output_file` points at a path under the CLI's own tmp tree, outside `cwd` and
   outside `fsRoot`. If the UI ever offers to open it, that read cannot go through `/api/fs/*`. It
   is `~`-abbreviated **in this capture only** because the capture's `TMPDIR` sat under `HOME`; in
@@ -734,6 +745,36 @@ Three things the context meter (§7.6) depends on:
 An older CLI rejects the control request outright. It is a display refresh, so a rejection, a
 timeout or an SDK with no such method is a debug line and the last known reading, never a
 `runtime.warning` and never a failed turn.
+### 20. The compaction summary is a synthetic `user` frame, and it is the marker's body
+
+`12-compact.ndjson`, lines 47–49 — the three frames a successful `/compact` produces, in this
+order and with nothing between them:
+
+```json
+{"type":"system","subtype":"compact_boundary","uuid":"f0c1c1a4-…","compact_metadata":{"trigger":"manual","pre_tokens":34995,"post_tokens":873,"preserved_segment":{"anchor_uuid":"63734266-…"},"preserved_messages":{"anchor_uuid":"63734266-…","all_uuids":["803f7bad-…"]}}}
+{"type":"user","message":{"role":"user","content":"This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n…\nContinue the conversation from where it left off…"},"parent_tool_use_id":null,"uuid":"63734266-…","isReplay":false,"isSynthetic":true}
+{"type":"user","message":{"role":"user","content":"<local-command-stdout>Compacted </local-command-stdout>"},"uuid":"65dbb734-…","isReplay":true}
+```
+
+Four things the adapter depends on:
+
+- **The summary's `uuid` IS the boundary's `compact_metadata.preserved_messages.anchor_uuid`.**
+  That is the only honest join between the two frames — `isSynthetic` alone does not say *which*
+  compaction, and the preamble sentence is free text a user may paste. The adapter therefore
+  HOLDS the boundary's `thread.state.changed {state:"compacted"}` for exactly one frame and
+  releases it with `summary` when the next frame is that anchor; anything else (a `result`, a
+  turn end, a closing session) releases it unchanged. The anchor match falls back to the preamble
+  only for a boundary that named no anchor.
+- **Its `content` is a plain string, not a block array** (observation 7 again), and on a real
+  thread it is ~18 KB of markdown — the CLI's whole memory of everything it dropped. It must not
+  become a user message: the timeline showed it as an 18 KB bubble the user never typed.
+- **`isSynthetic: true` + `isReplay: false`** distinguish it from the `<local-command-stdout>`
+  frame that follows (`isReplay: true`, still not a row). `SDKUserMessage.isSynthetic` is on the
+  wire; `isCompactSummary` is **not** — that one exists only in the CLI's own transcript file, and
+  is what `project-history.ts` keys on when a resumed thread replays the same summary out of
+  native history.
+- A **failed** compaction produces none of this: no boundary, no summary, only the
+  `status {compact_result:"failed"}` frame (observation 6).
 
 ## Re-capturing
 

@@ -21,26 +21,62 @@ type Row<K extends AgentChatTimelineRow["kind"]> = Extract<AgentChatTimelineRow,
  * failure and the user has to be able to tell that from a successful one —
  * and `compacting` never projects a row at all (it is the live placeholder's
  * label; see `rows.logic.ts`).
+ *
+ * A successful marker also **carries the provider's summary**, and this row is
+ * the only place it can be read: after a compaction it is the agent's entire
+ * memory of the conversation above, and everything else is gone. Collapsed by
+ * default, exactly as the CLI's own `ctrl+o` keeps it — the marker is a
+ * divider, not a wall of text — and rendered as markdown, because that is what
+ * the provider wrote. A summary long enough to have met §5.6's wire cap says
+ * so and offers the full read (`GET …/items/:itemId`, the same path a
+ * truncated tool output uses).
  */
 export const CompactionRow = React.memo(function CompactionRow({
   row
 }: {
   row: Row<"context-compaction">;
 }): React.ReactElement {
+  const ctx = useTimelineRowContext();
   const label = compactionLabel(row);
   const failed = row.failed === true;
+  const summary = failed ? undefined : row.summary;
+  const expanded = ctx.isExpanded(row.id);
   return (
     <div className={cn("text-xs", failed ? "text-danger" : "text-neutral-500")}>
       <div role="separator" aria-label={label} className="ac-hairline py-1">
         <span className="flex shrink-0 items-center gap-1.5">
           <Minimize2 size={12} strokeWidth={1.8} aria-hidden />
           {label}
+          {summary !== undefined ? (
+            <button
+              type="button"
+              aria-expanded={expanded}
+              onClick={() => ctx.setExpanded(row.id, !expanded)}
+              className="rounded px-1 text-[11px] text-neutral-500 underline-offset-2 transition-colors hover:text-neutral-200 hover:underline focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
+            >
+              {expanded ? "Hide summary" : "Show summary"}
+            </button>
+          ) : null}
         </span>
       </div>
       {failed && row.detail ? (
         <p className="select-text whitespace-pre-wrap px-1 pb-0.5 text-center leading-relaxed">
           {row.detail}
         </p>
+      ) : null}
+      {summary !== undefined && expanded ? (
+        <div className="mb-1 rounded-lg border border-neutral-800 bg-neutral-900/60 px-3 py-2">
+          <ChatMarkdown text={summary} onOpenFile={ctx.onOpenFile} />
+          {row.summaryTruncated === true ? (
+            <button
+              type="button"
+              onClick={() => ctx.onLoadFullOutput(row.id)}
+              className="mt-2 rounded text-[11px] text-neutral-500 transition-colors hover:text-neutral-100 focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
+            >
+              Load the full summary
+            </button>
+          ) : null}
+        </div>
       ) : null}
     </div>
   );

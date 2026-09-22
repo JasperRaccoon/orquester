@@ -1404,6 +1404,16 @@ describe("claude adapter — fix-wave regressions", () => {
       session_id: sessionId,
       uuid: "u-compact"
     } as unknown as SDKMessage);
+    // The marker is held for exactly one frame so the CLI's summary can ride
+    // it, so the next frame is what releases it. The preserved-uuid
+    // bookkeeping the rewind reads happened at the boundary itself.
+    peer.emit({
+      type: "system",
+      subtype: "status",
+      status: "requesting",
+      session_id: sessionId,
+      uuid: "u-after-compact"
+    } as unknown as SDKMessage);
     await harness.waitFor("thread.state.changed");
 
     await assert.rejects(

@@ -222,6 +222,24 @@ describe("token usage and compaction (§5.1)", () => {
     assert.equal(payloadOf(opening).beforeTokens, undefined);
   });
 
+  it("carries the provider's summary, whole, so the marker can reveal it", () => {
+    const summary = "This session is being continued from a previous conversation.\n\n1. Fixed X.";
+    const [row] = runtimeEventToActivities(
+      runtimeEvent("thread.state.changed", {
+        state: "compacted",
+        beforeTokens: 120_000,
+        afterTokens: 18_000,
+        summary
+      })
+    );
+    assert.ok(row);
+    assert.equal(
+      payloadOf(row).summary,
+      summary,
+      "untruncated on disk: the wire cap is the slimmer's job, and `GET …/items/:itemId` serves this"
+    );
+  });
+
   it("a failed compaction is an error row carrying the provider's own reason", () => {
     const [row, ...rest] = runtimeEventToActivities(
       runtimeEvent("thread.state.changed", {

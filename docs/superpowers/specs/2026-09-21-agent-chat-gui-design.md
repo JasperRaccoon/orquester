@@ -2880,6 +2880,18 @@ into `fsRoot` from a render path. And there is no "load earlier" header: a threa
 phase gets its own activity row rather than being folded into reasoning, because it is the only
 narration that CLI emits between tool calls.*
 
+*Built: the compaction marker also carries the provider's own **summary** and reveals it behind a
+"Show summary" / "Hide summary" toggle on the hairline itself, collapsed by default (the CLI's
+`ctrl+o`) and rendered as markdown. After a compaction that summary is the agent's entire memory of
+everything above the marker, and Claude delivers it as a synthetic `user` frame right behind
+`compact_boundary` — so without this it either vanished or, worse, rendered as an 18 KB message the
+user never typed. It rides `thread.state.changed {state:"compacted", summary}` and the
+`context-compaction` activity's `payload.summary`; §5.6's 16 KiB string cap still applies on the
+wire, and a capped one offers the full read through `GET …/items/:itemId`
+(`packages/ui/src/components/agent-chat/timeline/rows/StructureRows.tsx`,
+`apps/daemon/src/agent-host/adapters/claude/normalize.ts`). A **failed** compaction has no summary:
+nothing was dropped.*
+
 **Activity-group boundaries are mechanical, and the rules matter more than the styling.** A group
 starts at the first reasoning row or plain tool row of a turn and runs until any of: a non-grouping
 entry, a turn-id change, or a row the user has collapsed out. Assistant and user messages are not

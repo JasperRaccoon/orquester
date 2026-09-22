@@ -323,6 +323,14 @@ export class ClaudeNormalizer {
    * six times per compaction and the phase must open once.
    */
   private compacting = false;
+  /**
+   * A `compact_boundary`'s events, held for exactly ONE frame so the
+   * synthetic summary the CLI sends next can ride the marker
+   * (`releasePendingCompaction`). `anchorUuid` is
+   * `compact_metadata.preserved_messages.anchor_uuid` — the summary frame's
+   * own uuid, and the only honest join between the two frames.
+   */
+  private pendingCompaction: { events: RuntimeEvent[]; anchorUuid?: string } | undefined;
 
   private readonly inFlightTools = new Map<number, ToolInFlight>();
   private readonly taskAgents = new Map<string, TaskAgentState>();
@@ -705,7 +713,8 @@ export class ClaudeNormalizer {
     errorMessage?: string,
     result?: SDKResultMessage
   ): RuntimeEvent[] {
-    const events: RuntimeEvent[] = [];
+    // A turn that ends is the end of the wait: no summary is coming.
+    const events: RuntimeEvent[] = [...this.releasePendingCompaction()];
 
     const resultContextWindow = maxContextWindowFromModelUsage(result?.modelUsage);
     // `modelUsage[*].contextWindow` is the model's NOMINAL window, and the max
@@ -810,9 +819,10 @@ export class ClaudeNormalizer {
     // Frames of a subagent that was never named have nowhere to go once the
     // turn is over; they must not outlive it.
     this.dropPendingNested();
-    // A session that is going away is not compacting either.
+    // A session that is going away is not compacting either — and a boundary
+    // still waiting for its summary must be released, never dropped.
     this.compacting = false;
-    const events: RuntimeEvent[] = [];
+    const events: RuntimeEvent[] = [...this.releasePendingCompaction()];
     const closed = this.liveTaskIds.size > 0;
     const raw: RuntimeEventRaw = {
       source: RAW_SDK_MESSAGE,
@@ -873,7 +883,17 @@ export class ClaudeNormalizer {
     this.options.onRawFrame?.(message);
 
     const events: RuntimeEvent[] = [];
+    // A compaction boundary is held for exactly one frame, because the
+    // summary the CLI is about to send belongs on its marker (see
+    // `pendingCompaction`). This frame either IS that summary, or it releases
+    // the marker ahead of itself.
+    const summary = this.compactionSummaryOf(message);
     events.push(...this.ensureThreadId(message));
+    if (summary !== undefined) {
+      events.push(...this.releasePendingCompaction(summary));
+      return events;
+    }
+    events.push(...this.releasePendingCompaction());
 
     const rawType = (message as { type?: unknown }).type;
     if (typeof rawType === "string" && UNDECLARED_TOP_LEVEL_TYPES.has(rawType)) {
@@ -970,6 +990,66 @@ export class ClaudeNormalizer {
   // Thread identity
   // -------------------------------------------------------------------------
 
+  /**
+   * The text of the synthetic summary frame this boundary is waiting for, or
+   * `undefined` for every other frame.
+   *
+   * The CLI writes the compaction's summary as a top-level `user` message
+   * with `isSynthetic: true` and a **plain string** body — no block array —
+   * stamped with the boundary's own `preserved_messages.anchor_uuid`
+   * (fixtures README observation 19). The anchor is the join; the preamble
+   * match is only the fallback for a boundary that named no anchor, because
+   * a user is perfectly entitled to paste that sentence themselves.
+   */
+  private compactionSummaryOf(message: SDKMessage): string | undefined {
+    const pending = this.pendingCompaction;
+    if (pending === undefined) {
+      return undefined;
+    }
+    const frame = message as {
+      type?: unknown;
+      isSynthetic?: unknown;
+      uuid?: unknown;
+      parent_tool_use_id?: unknown;
+      message?: { content?: unknown };
+    };
+    if (frame.type !== "user" || frame.isSynthetic !== true) {
+      return undefined;
+    }
+    if (frame.parent_tool_use_id !== null && frame.parent_tool_use_id !== undefined) {
+      return undefined;
+    }
+    const content = frame.message?.content;
+    if (typeof content !== "string" || content.trim().length === 0) {
+      return undefined;
+    }
+    if (pending.anchorUuid !== undefined) {
+      return frame.uuid === pending.anchorUuid ? content : undefined;
+    }
+    return content.startsWith(COMPACT_SUMMARY_PREAMBLE) ? content : undefined;
+  }
+
+  /**
+   * Emit a held compaction marker, with the summary when one was found. Every
+   * exit from the one-frame hold goes through here: the next stream frame,
+   * a turn end and a closing session alike, so the marker can never be lost.
+   */
+  private releasePendingCompaction(summary?: string): RuntimeEvent[] {
+    const pending = this.pendingCompaction;
+    if (pending === undefined) {
+      return [];
+    }
+    this.pendingCompaction = undefined;
+    if (summary === undefined) {
+      return pending.events;
+    }
+    return pending.events.map((event) =>
+      event.type === "thread.state.changed" && event.payload.state === "compacted"
+        ? { ...event, payload: { ...event.payload, summary } }
+        : event
+    );
+  }
+
   private ensureThreadId(message: SDKMessage): RuntimeEvent[] {
     const sessionId = (message as { session_id?: unknown }).session_id;
     if (typeof sessionId !== "string" || sessionId.length === 0) {
@@ -1009,30 +1089,27 @@ export class ClaudeNormalizer {
     const event = message.event;
     const parentToolUseId = message.parent_tool_use_id ?? undefined;
 
-    // Subagent-owned narration must not write into the parent transcript: the
-    // SDK forwards a subagent's tool_use/tool_result blocks and the wrapping
-    // text/thinking deltas, and emitting them interleaves N subagents'
-    // narration into the chat. Their results reach the UI through `task.*`;
-    // their tool blocks are kept and attributed (§4.5).
+    // A NESTED stream frame is dropped whole. Every piece of state this
+    // method keeps — `currentStreamMessageId`, `assistantTextBlocks` keyed by
+    // `(messageId, index)`, `inFlightTools` keyed by the bare content index —
+    // belongs to the PARENT's message, and a subagent's indexes restart at 0
+    // just like the parent's: a nested `content_block_stop {index: 0}` closed
+    // the parent's open text block, and a nested text block opened a parent
+    // bubble keyed `?:0`. Nothing is lost by dropping them, because the CLI
+    // does not stream a subagent at all — it forwards its narration as
+    // COMPLETE `assistant`/`user` messages carrying `parent_tool_use_id`
+    // (a live 2.1.278 thread: 882 nested tool_use blocks, 0 nested
+    // stream_events), which `nestedAssistantEvents` attributes to the owning
+    // task. See the comment in `handleAssistantMessage`.
     if (parentToolUseId !== undefined) {
-      const dropStart =
-        event.type === "content_block_start" &&
-        event.content_block.type !== "tool_use" &&
-        event.content_block.type !== "server_tool_use" &&
-        event.content_block.type !== "mcp_tool_use";
-      const dropDelta =
-        event.type === "content_block_delta" &&
-        (event.delta.type === "text_delta" || event.delta.type === "thinking_delta");
-      if (dropStart || dropDelta) {
-        return events;
-      }
+      return events;
     }
 
     if (event.type === "message_start") {
       // The join key for the per-block `assistant` frames that follow.
       const started = (event as { message?: { id?: unknown } }).message;
       const turn = this.turnState;
-      if (parentToolUseId === undefined && turn && typeof started?.id === "string") {
+      if (turn && typeof started?.id === "string") {
         turn.currentStreamMessageId = started.id;
         if (!turn.streamedBlocks.has(started.id)) {
           turn.streamedBlocks.set(started.id, []);
@@ -1042,9 +1119,6 @@ export class ClaudeNormalizer {
     }
 
     if (event.type === "message_delta") {
-      if (parentToolUseId !== undefined) {
-        return events;
-      }
       const snapshot = normalizeActiveTokenUsage(
         (event as { usage?: unknown }).usage,
         this.lastKnownContextWindow,
@@ -1229,8 +1303,10 @@ export class ClaudeNormalizer {
       { type: "content_block_start" }
     >
   ): RuntimeEvent[] {
+    // Only the parent's own stream reaches here: `handleStreamEvent` drops
+    // every frame carrying a `parent_tool_use_id`.
     const block = event.content_block;
-    if (message.parent_tool_use_id == null && this.turnState?.currentStreamMessageId) {
+    if (this.turnState?.currentStreamMessageId) {
       const turn = this.turnState;
       const list = turn.streamedBlocks.get(turn.currentStreamMessageId!) ?? [];
       list.push({ index: event.index, type: typeof block.type === "string" ? block.type : "unknown" });
@@ -1238,7 +1314,7 @@ export class ClaudeNormalizer {
     }
     if (block.type === "text") {
       const entry = this.ensureAssistantTextBlock(
-        message.parent_tool_use_id == null ? (this.turnState?.currentStreamMessageId ?? null) : null,
+        this.turnState?.currentStreamMessageId ?? null,
         event.index,
         {
           fallbackText: typeof (block as { text?: unknown }).text === "string" ? block.text : ""
@@ -1919,7 +1995,18 @@ export class ClaudeNormalizer {
             ...(snapshot?.usedTokens !== undefined ? { afterTokens: snapshot.usedTokens } : {})
           }
         });
-        return events;
+        // HELD, not emitted: the CLI sends the summary it just wrote as the
+        // very next frame, and it belongs on this marker rather than in the
+        // timeline as an 18 KB "user message" nobody typed. One frame of
+        // latency, released by whatever comes next (`releasePendingCompaction`).
+        const anchorUuid = compactionAnchorUuid(
+          (message as { compact_metadata?: unknown }).compact_metadata
+        );
+        this.pendingCompaction = {
+          events,
+          ...(anchorUuid !== undefined ? { anchorUuid } : {})
+        };
+        return [];
       }
 
       case "hook_started":
@@ -2724,41 +2811,78 @@ export class ClaudeNormalizer {
       } else if (block.type === "text" && typeof block.text === "string" && block.text.trim().length > 0) {
         // The subagent's prose (its final answer, mostly): one settled message
         // row in its drill-in.
-        const itemId = this.ids.messageId("msg");
-        const base = {
-          turnId: this.activeTurnId,
-          itemId,
-          ...(owningTaskId !== undefined ? { agentId: owningTaskId } : {}),
-          raw
-        };
         events.push(
-          {
-            ...this.base(base),
-            type: "item.started",
-            payload: {
-              itemType: "assistant_message",
-              status: "inProgress",
-              ...(owningTaskId !== undefined ? { agentId: owningTaskId } : {})
-            }
-          },
-          {
-            ...this.base(base),
-            type: "content.delta",
-            payload: { streamKind: "assistant_text", delta: block.text, contentIndex: 0 }
-          },
-          {
-            ...this.base(base),
-            type: "item.completed",
-            payload: {
-              itemType: "assistant_message",
-              status: "completed",
-              ...(owningTaskId !== undefined ? { agentId: owningTaskId } : {})
-            }
-          }
+          ...this.nestedMessageEvents({
+            itemType: "assistant_message",
+            streamKind: "assistant_text",
+            text: block.text,
+            owningTaskId,
+            raw
+          })
+        );
+      } else if (
+        block.type === "thinking" &&
+        typeof block.thinking === "string" &&
+        block.thinking.trim().length > 0
+      ) {
+        // A subagent thinks on the parent's stream too, and its thinking is
+        // forwarded the same way its prose is — as a complete block on a
+        // nested `assistant` frame. Dropping it silently is how a drill-in
+        // came to show a roster row's tools with none of the reasoning that
+        // chose them (one live thread: 50 nested thinking blocks, 0
+        // persisted). Claude never returns the raw chain of thought, so this
+        // is the summary — the same stream kind the parent's `thinking_delta`
+        // uses, which is what makes it one reasoning row rather than two.
+        events.push(
+          ...this.nestedMessageEvents({
+            itemType: "reasoning",
+            streamKind: "reasoning_summary_text",
+            text: block.thinking,
+            owningTaskId,
+            raw
+          })
         );
       }
     }
     return events;
+  }
+
+  /**
+   * One complete nested block as a settled message row owned by its agent:
+   * `item.started` → `content.delta` → `item.completed`, every one of them
+   * carrying the `agentId`. Ingestion keys its message segments by
+   * `(turn, owner, role)`, so this opens and closes the AGENT's segment and
+   * never the parent's — and because the delta arrives before the
+   * completion, the completion finalises a streamed block rather than
+   * writing a second, snapshot-only row.
+   */
+  private nestedMessageEvents(input: {
+    itemType: Extract<CanonicalItemType, "assistant_message" | "reasoning">;
+    streamKind: Extract<RuntimeContentStreamKind, "assistant_text" | "reasoning_summary_text">;
+    text: string;
+    owningTaskId: string | undefined;
+    raw: RuntimeEventRaw;
+  }): RuntimeEvent[] {
+    const itemId = this.ids.messageId("msg");
+    const agent = input.owningTaskId !== undefined ? { agentId: input.owningTaskId } : {};
+    const base = { turnId: this.activeTurnId, itemId, ...agent, raw: input.raw };
+    return [
+      {
+        ...this.base(base),
+        type: "item.started",
+        payload: { itemType: input.itemType, status: "inProgress", ...agent }
+      },
+      {
+        ...this.base(base),
+        type: "content.delta",
+        payload: { streamKind: input.streamKind, delta: input.text, contentIndex: 0 }
+      },
+      {
+        ...this.base(base),
+        type: "item.completed",
+        payload: { itemType: input.itemType, status: "completed", ...agent }
+      }
+    ];
   }
 
   private agentIdForParentToolUse(parentToolUseId: string | undefined): string | undefined {
@@ -3068,6 +3192,35 @@ function readToolUseResult(message: SDKMessage): Record<string, unknown> | undef
   return result !== null && typeof result === "object" && !Array.isArray(result)
     ? (result as Record<string, unknown>)
     : undefined;
+}
+
+/**
+ * The opening sentence of the CLI's own compaction summary. Only ever used
+ * when a boundary named no `anchor_uuid` — the anchor is the real join.
+ */
+export const COMPACT_SUMMARY_PREAMBLE =
+  "This session is being continued from a previous conversation that ran out of context.";
+
+/**
+ * `compact_metadata.preserved_messages.anchor_uuid`, falling back to
+ * `preserved_segment.anchor_uuid` — the same uuid in every capture, but the
+ * two blocks are written independently and either may be absent.
+ */
+export function compactionAnchorUuid(compactMetadata: unknown): string | undefined {
+  if (compactMetadata === null || typeof compactMetadata !== "object") {
+    return undefined;
+  }
+  const record = compactMetadata as { preserved_messages?: unknown; preserved_segment?: unknown };
+  for (const block of [record.preserved_messages, record.preserved_segment]) {
+    if (block === null || typeof block !== "object") {
+      continue;
+    }
+    const anchor = trimmedString((block as { anchor_uuid?: unknown }).anchor_uuid);
+    if (anchor !== undefined) {
+      return anchor;
+    }
+  }
+  return undefined;
 }
 
 /**

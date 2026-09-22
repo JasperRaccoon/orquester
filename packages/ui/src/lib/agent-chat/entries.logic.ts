@@ -295,11 +295,23 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
   }
 
   if (isCompactionActivity(activity)) {
-    const error = asTrimmedString(asRecord(activity.payload)?.error);
+    const compactionPayload = asRecord(activity.payload);
+    const error = asTrimmedString(compactionPayload?.error);
+    // The provider's summary of everything the compaction dropped. Not
+    // trimmed into a `detail`: it is markdown, it is pages long, and the
+    // marker reveals it whole behind its own toggle.
+    const summary =
+      typeof compactionPayload?.summary === "string" && compactionPayload.summary.trim().length > 0
+        ? compactionPayload.summary
+        : undefined;
     entry.compaction = {
       state: compactionMarkerState(activity),
       ...compactionTokens(activity),
-      ...(error ? { error } : {})
+      ...(error ? { error } : {}),
+      ...(summary !== undefined ? { summary } : {}),
+      ...(summary !== undefined && compactionPayload?.truncated === true
+        ? { summaryTruncated: true }
+        : {})
     };
   }
 
@@ -710,11 +722,20 @@ export interface SplitThreadItems {
 const isMessage = (item: ThreadItem): item is ThreadMessageItem => item.kind === "message";
 
 /**
- * Split the fold's items into the three source arrays the timeline merges,
- * dropping anything stamped with an `agentId` from the parent's view (§7.2).
- * The per-agent drill-in uses {@link itemsForAgent} instead.
+ * Split the fold's items into the three source arrays the timeline merges.
+ *
+ * A message stamped with an `agentId` belongs to that subagent, not to the
+ * thread, so the parent's view drops it (§7.2) — but its own drill-in is the
+ * one place it must appear, exactly as `deriveWorkLogEntries`'
+ * `ownerAgentId` does for activity rows. Dropping it there too is how a
+ * drill-in showed an agent's tool calls with none of the words that chose
+ * them. Pass the drill-in's own agent id to keep its messages; the parent
+ * passes nothing. The item list itself is filtered by {@link itemsForAgent}.
  */
-export function splitThreadItems(items: readonly ThreadItem[]): SplitThreadItems {
+export function splitThreadItems(
+  items: readonly ThreadItem[],
+  ownerAgentId?: string
+): SplitThreadItems {
   const messages: ThreadMessageItem[] = [];
   const activities: ThreadActivityItem[] = [];
   const plansById = new Map<string, ProposedPlanEntry>();
@@ -722,7 +743,8 @@ export function splitThreadItems(items: readonly ThreadItem[]): SplitThreadItems
 
   for (const item of items) {
     if (isMessage(item)) {
-      if (item.agentId !== undefined && item.agentId.length > 0) {
+      const owner = item.agentId !== undefined && item.agentId.length > 0 ? item.agentId : undefined;
+      if (owner !== ownerAgentId) {
         continue;
       }
       messages.push(item);
@@ -1048,7 +1070,7 @@ export function deriveTimelineEntriesFromItems(
   if (previous !== null && previous.items === items && previous.ownerAgentId === ownerAgentId) {
     return previous;
   }
-  const split = splitThreadItems(items);
+  const split = splitThreadItems(items, ownerAgentId);
   const activities =
     previous !== null && sameByIdentity(previous.activities, split.activities)
       ? previous.activities
