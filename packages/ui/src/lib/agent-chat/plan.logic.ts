@@ -18,6 +18,7 @@
  */
 
 import type { ThreadActivityItem } from "@orquester/api/agent-chat";
+import { buildPlanImplementationPrompt } from "@orquester/api/agent-chat";
 
 import type { ActivePlanState } from "./contracts";
 import { PLAN_IMPLEMENTATION_PROMPT_PREFIX, type ProposedPlanEntry } from "./entries.logic";
@@ -189,10 +190,11 @@ export function normalizePlanMarkdownForExport(planMarkdown: string): string {
   return `${planMarkdown.trimEnd()}\n`;
 }
 
-/** *T3: `proposedPlan.ts:75-77`.* */
-export function buildPlanImplementationPrompt(planMarkdown: string): string {
-  return `${PLAN_IMPLEMENTATION_PROMPT_PREFIX}${planMarkdown.trim()}`;
-}
+/**
+ * The prefix plus the trimmed plan — one copy in `@orquester/api/agent-chat`,
+ * shared with the MCP's `implement_plan`. *T3: `proposedPlan.ts:75-77`.*
+ */
+export { buildPlanImplementationPrompt };
 
 /**
  * The composer's split button:

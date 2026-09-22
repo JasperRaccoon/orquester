@@ -16,6 +16,7 @@ export * from "./thread.ts";
 export * from "./wire.ts";
 export * from "./fold.ts";
 export * from "./pending.ts";
+export * from "./plan.ts";
 export * from "./roster.ts";
 export * from "./slim.ts";
 export * from "./turn-state.ts";
