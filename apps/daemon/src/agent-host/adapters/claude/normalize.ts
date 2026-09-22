@@ -132,6 +132,19 @@ export interface ClaudeTurnState {
   synthetic: boolean;
   items: unknown[];
   assistantTextBlocks: Map<number, AssistantTextBlockState>;
+  /**
+   * The content blocks each API message streamed, in stream order, keyed by
+   * the `message_start` id. The CLI then emits one complete `assistant`
+   * frame PER BLOCK, each carrying `content: [thatBlock]` — so a block's
+   * position in its frame is always 0, never its stream index. The k-th
+   * per-block frame for a message is its k-th streamed block; this is the
+   * join (`backfillAssistantTextFromSnapshot`).
+   */
+  streamedBlocks: Map<string, Array<{ index: number; type: string }>>;
+  /** Id of the message currently streaming (`message_start`), for `streamedBlocks`. */
+  currentStreamMessageId: string | null;
+  /** How many per-block frames of each message have been matched so far. */
+  snapshotBlockCursor: Map<string, number>;
   assistantTextBlockOrder: AssistantTextBlockState[];
   capturedProposedPlanKeys: Set<string>;
   latestAssistantUsage: unknown;
@@ -540,6 +553,9 @@ export class ClaudeNormalizer {
       items: [],
       assistantTextBlocks: new Map(),
       assistantTextBlockOrder: [],
+      streamedBlocks: new Map(),
+      currentStreamMessageId: null,
+      snapshotBlockCursor: new Map(),
       capturedProposedPlanKeys: new Set(),
       latestAssistantUsage: undefined,
       compactedSinceLatestAssistantUsage: false,
@@ -849,6 +865,19 @@ export class ClaudeNormalizer {
       }
     }
 
+    if (event.type === "message_start") {
+      // The join key for the per-block `assistant` frames that follow.
+      const started = (event as { message?: { id?: unknown } }).message;
+      const turn = this.turnState;
+      if (parentToolUseId === undefined && turn && typeof started?.id === "string") {
+        turn.currentStreamMessageId = started.id;
+        if (!turn.streamedBlocks.has(started.id)) {
+          turn.streamedBlocks.set(started.id, []);
+        }
+      }
+      return events;
+    }
+
     if (event.type === "message_delta") {
       if (parentToolUseId !== undefined) {
         return events;
@@ -1032,6 +1061,12 @@ export class ClaudeNormalizer {
     >
   ): RuntimeEvent[] {
     const block = event.content_block;
+    if (message.parent_tool_use_id == null && this.turnState?.currentStreamMessageId) {
+      const turn = this.turnState;
+      const list = turn.streamedBlocks.get(turn.currentStreamMessageId!) ?? [];
+      list.push({ index: event.index, type: typeof block.type === "string" ? block.type : "unknown" });
+      turn.streamedBlocks.set(turn.currentStreamMessageId!, list);
+    }
     if (block.type === "text") {
       const entry = this.ensureAssistantTextBlock(event.index, {
         fallbackText: typeof (block as { text?: unknown }).text === "string" ? block.text : ""
@@ -1473,8 +1508,42 @@ export class ClaudeNormalizer {
       return [];
     }
     const events: RuntimeEvent[] = [];
+    // A per-block frame (`content: [one block]`, the CLI's streaming shape)
+    // names its block by the message's stream order, not by array position:
+    // a text block that streamed at index 1 behind a thinking block arrived
+    // here at index 0, matched nothing, and was created AGAIN — the same
+    // paragraph rendered twice, only on turns that opened with reasoning
+    // (owner report, 2026-09-22). A full snapshot (several blocks) still maps
+    // by array position, which IS the stream index there.
+    const messageId = (message.message as { id?: unknown } | undefined)?.id;
+    const streamed =
+      typeof messageId === "string" ? turn.streamedBlocks.get(messageId) : undefined;
+    const perBlockFrame = content.length === 1 && streamed !== undefined && streamed.length > 0;
     let index = 0;
     for (const entry of content) {
+      let streamIndex = index;
+      if (perBlockFrame && typeof messageId === "string") {
+        const cursor = turn.snapshotBlockCursor.get(messageId) ?? 0;
+        turn.snapshotBlockCursor.set(messageId, cursor + 1);
+        const candidate = streamed[cursor];
+        const blockType =
+          entry !== null && typeof entry === "object"
+            ? (entry as { type?: unknown }).type
+            : undefined;
+        if (candidate !== undefined && candidate.type === blockType) {
+          streamIndex = candidate.index;
+        } else {
+          // Out of step (a frame we never saw stream): take the first
+          // streamed block of this type that no text state occupies yet, so a
+          // desync degrades to the old behaviour rather than to a duplicate.
+          const fallback = streamed.find(
+            (streamedBlock) =>
+              streamedBlock.type === blockType &&
+              (blockType !== "text" || !turn.assistantTextBlocks.get(streamedBlock.index)?.streamClosed)
+          );
+          if (fallback !== undefined) streamIndex = fallback.index;
+        }
+      }
       if (entry === null || typeof entry !== "object") {
         index += 1;
         continue;
@@ -1484,7 +1553,7 @@ export class ClaudeNormalizer {
         index += 1;
         continue;
       }
-      const created = this.ensureAssistantTextBlock(index, { fallbackText: block.text });
+      const created = this.ensureAssistantTextBlock(streamIndex, { fallbackText: block.text });
       if (created) {
         events.push(...created.events);
       }

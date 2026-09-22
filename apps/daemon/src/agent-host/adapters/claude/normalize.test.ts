@@ -690,3 +690,58 @@ describe("claude normaliser — a RESUMED subagent keeps its old parent_tool_use
     assert.equal(completed?.agentId, "task-r", "later frames resolve through the remembered alias");
   });
 });
+
+describe("claude normaliser — a text block streamed behind a thinking block is not duplicated", () => {
+  it("matches the CLI's per-block assistant frame to its streamed block by order, not array index", () => {
+    const normalizer = new ClaudeNormalizer({
+      threadId: "t",
+      clock: fixedClock(),
+      ids: countingIds()
+    });
+    normalizer.beginTurn({ turnId: "turn-1" });
+    const stream = (event: Record<string, unknown>): RuntimeEvent[] =>
+      normalizer.handleMessage({
+        type: "stream_event",
+        event,
+        uuid: "u",
+        session_id: "s",
+        parent_tool_use_id: null
+      } as unknown as SDKMessage);
+    const all: RuntimeEvent[] = [];
+    all.push(
+      ...stream({ type: "message_start", message: { id: "msg_1", role: "assistant", content: [], usage: {} } }),
+      ...stream({ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } }),
+      ...stream({ type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "hmm" } }),
+      ...stream({ type: "content_block_stop", index: 0 }),
+      ...stream({ type: "content_block_start", index: 1, content_block: { type: "text", text: "" } }),
+      ...stream({ type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "Voy a arreglar la cabecera." } }),
+      ...stream({ type: "content_block_stop", index: 1 })
+    );
+    // The CLI then emits ONE complete `assistant` frame PER block, sharing
+    // message.id, each with `content: [thatBlock]` — the text block sits at
+    // array index 0 although it streamed at index 1.
+    const snapshot = (content: unknown[]): RuntimeEvent[] =>
+      normalizer.handleMessage({
+        type: "assistant",
+        uuid: "u",
+        session_id: "s",
+        parent_tool_use_id: null,
+        message: { id: "msg_1", role: "assistant", model: "claude-opus-5", content, stop_reason: null }
+      } as unknown as SDKMessage);
+    all.push(...snapshot([{ type: "thinking", thinking: "hmm" }]));
+    all.push(...snapshot([{ type: "text", text: "Voy a arreglar la cabecera." }]));
+
+    const started = all.filter(
+      (event) =>
+        event.type === "item.started" &&
+        (event.payload as { itemType?: string }).itemType === "assistant_message"
+    );
+    assert.equal(started.length, 1, "one assistant text item, not one per frame");
+    const deltas = all.filter(
+      (event) =>
+        event.type === "content.delta" &&
+        (event.payload as { streamKind?: string }).streamKind === "assistant_text"
+    );
+    assert.equal(deltas.length, 1, "the streamed text is not re-emitted from the snapshot");
+  });
+});
