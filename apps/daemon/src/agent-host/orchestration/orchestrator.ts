@@ -64,6 +64,7 @@ import type { AdapterLogger, AgentAdapter } from "../adapter.ts";
 import {
   CONTINUATION_FAILED_MESSAGE,
   CONTINUATION_PROMPT,
+  CONTINUATION_SEND_FAILED_MESSAGE,
   COMPACTION_FAILED_MESSAGE,
   type CreateHostThreadRequest
 } from "../host-protocol.ts";
@@ -3146,9 +3147,18 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     // `starting` both reach disk BEFORE any send, so a host that dies between
     // resuming and sending is recovered by the next boot rather than looking
     // like a settled thread (*T3: `serverRuntimeStartup.ts:655-690`*).
-    await writeMarker(runtime, { turnId, prepared: true });
-    await upsertBinding(runtime, { status: "starting" });
-    await persistSession(runtime, { ...session, status: "starting", activeTurnId: null });
+    try {
+      await writeMarker(runtime, { turnId, prepared: true });
+      await upsertBinding(runtime, { status: "starting" });
+      await persistSession(runtime, { ...session, status: "starting", activeTurnId: null });
+    } catch (error) {
+      // A prepare that cannot reach disk must not be followed by a send: the
+      // turn would then be running with nothing durable saying so
+      // (*T3: `serverRuntimeStartup.ts:684-693`*).
+      logger.warn(`agent-host: failed to prepare the continuation of ${threadId}`, error);
+      await settleAsError(runtime, CONTINUATION_FAILED_MESSAGE);
+      return;
+    }
 
     // 3. Forked: the loop only prepares the continuation (§3.3).
     void runEffect(runtime, async () => {
@@ -3183,7 +3193,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         await writeMarker(runtime, undefined);
       } catch (error) {
         logger.warn(`agent-host: failed to continue ${threadId} after a restart`, error);
-        await settleAsError(runtime, CONTINUATION_FAILED_MESSAGE);
+        // A continuation that was ATTEMPTED and failed says so; the orphan
+        // message above is for a thread that was never eligible (§3.3 step 4).
+        await settleAsError(runtime, CONTINUATION_SEND_FAILED_MESSAGE);
       }
     });
   };

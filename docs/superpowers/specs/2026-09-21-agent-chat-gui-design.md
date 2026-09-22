@@ -332,6 +332,44 @@ first, so an adopted host is not reconciled against itself.
    `errorMessage: "The agent did not survive a restart. Send a new message to continue."` and
    emit `runtime.error`. Never leave a running state without a live process behind it.
 
+*Built: step 2 resumes from the **binding's** cursor
+(`threads/<id>/binding.json`), falling back to the head's — see "The resume
+cursor is not event-sourced" below. Step 4 uses two messages rather than one,
+as T3 does: a thread that was never eligible (no cursor, closed tab, a project
+that opted out, a marker for another turn) settles with the sentence above,
+while a continuation that was **attempted** and failed settles with `"Could not
+continue this thread after the server restart. Send a new message to
+continue."` — the user is told the thread could not be picked up, not that it
+was never eligible. Both clear the marker and leave the cursor alone, so the
+thread is still resumable by hand.*
+
+**The resume cursor is not event-sourced.** It lives in a per-thread
+`binding.json` beside `meta.json` that is only ever written field-wise through
+one `upsertSessionBinding`, whose `undefined` means "unchanged" and whose `null`
+means "cleared". `thread.session-set` names the whole session block, so an event
+that omitted the cursor replaced it with nothing: the head lost it and the next
+host — after the §3.1 drain-restart — opened a FRESH provider session that
+remembered nothing (2026-09-22, thread c8979f6a). The fold still carries the
+cursor forward and `session-set` still carries it on the wire, for old logs and
+old clients, but no code path depends on it surviving there. Rollback boundary
+(§8): a thread with no `binding.json`, or one that does not decode, falls back
+to the head's cursor.
+
+*T3: `apps/server/src/persistence/ProviderSessionRuntime.ts:35-52` — the
+`provider_session_runtime` row, outside the event log (`packages/contracts/src/orchestration.ts:599-609`
+has no `resumeCursor` on the session object); `apps/server/src/provider/Layers/ProviderSessionDirectory.ts:118-145`
+— the field-wise upsert and its `undefined`/`null` contract; `apps/server/src/provider/Layers/ProviderService.ts:1053-1076`
+— `upsertSessionBinding`; `:1104-1129` — the `turn.completed`/`turn.aborted` hook that saves Claude's
+new boundary before a client can checkpoint the turn; `:1441-1471` + `:2150-2173` — the read-back,
+`input.resumeCursor ?? persistedBinding.resumeCursor`*
+
+*Built: T3 keeps the continuation marker in that same row's `runtimePayload`.
+Here it stays on the head, where `continueAfterRestart` already is: the head is
+not purely event-sourced in this codebase — no domain event carries that field,
+it reaches disk only through an explicit `saveHead`, and the head projection
+carries it forward untouched. Splitting it across two files would buy nothing
+and add a second ordering to get wrong.*
+
 *T3: `apps/server/src/serverRuntimeStartup.ts:655-690` — the prepare step writes the marker and flips the projection to `starting` before anything else; `:694-716` — the continuation send, promptless where `promptlessTurnContinuation`, else `SERVER_UPDATE_CONTINUATION_PROMPT`; `:347-348` — that prompt is the same literal; `:717-741` — clear on success, settle as error on failure; `:345-346` + `:588-648` — `settleAsError` writes the binding `stopped` and dispatches the session to `error` with `activeTurnId: null`*
 
 **The marker is a turn id, not a boolean, and it is written twice.** It records *which* turn was
@@ -1822,6 +1860,23 @@ type ThreadHead = {
   continueAfterRestart?: { turnId: string; prepared?: boolean };   // §3.3: a turn id, never a flag
   createdAt: string; updatedAt: string;
 };
+```
+
+*Built: `session.resumeCursor` is a MIRROR, kept for old logs and old clients.
+The authority is `threads/<id>/binding.json` (§3.3), which is not part of the
+event log and is only ever merged field-wise:*
+
+```ts
+type ProviderSessionBinding = {          // threads/<threadId>/binding.json
+  threadId: string; adapter: AgentAdapter["id"];
+  adapterKey: string|null;               // the registry id the session launched from
+  runtimeMode: RuntimeMode|null; providerInstanceId: string|null;
+  status: "starting"|"ready"|"running"|"stopped"|"error";
+  resumeCursor: unknown;                 // null = no resumable session
+  providerThreadId: string|null; lastSeenAt: string;
+};
+// the ONLY writer; undefined = unchanged, null = cleared
+upsertSessionBinding({ threadId, adapter, patch: Partial<ProviderSessionBinding> }): Promise<…>
 ```
 
 *T3: `packages/contracts/src/orchestration.ts:599-609` — `OrchestrationSession {threadId, status: idle|starting|running|ready|interrupted|stopped|error, providerName, providerInstanceId?, runtimeMode, activeTurnId, lastError, updatedAt}`; `apps/server/src/persistence/ProviderSessionRuntime.ts:36-53` — the resume cursor is a `Schema.NullOr(Schema.Unknown)` blob each adapter writes and parses itself; differs: T3 has no `turnCount` on the head at all — it recomputes it as the maximum `checkpointTurnCount` over the thread's checkpoints, and drops the `interrupted` session status this design folds into `stopped`*
