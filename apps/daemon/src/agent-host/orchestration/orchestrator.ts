@@ -38,6 +38,8 @@ import {
   type PendingApproval,
   type PendingUserInput,
   type ProviderSession,
+  type ProviderSessionBinding,
+  type ProviderSessionBindingPatch,
   type ProviderSnapshot,
   type RuntimeEvent,
   type RuntimeMode,
@@ -62,6 +64,7 @@ import type { AdapterLogger, AgentAdapter } from "../adapter.ts";
 import {
   CONTINUATION_FAILED_MESSAGE,
   CONTINUATION_PROMPT,
+  CONTINUATION_SEND_FAILED_MESSAGE,
   COMPACTION_FAILED_MESSAGE,
   type CreateHostThreadRequest
 } from "../host-protocol.ts";
@@ -79,6 +82,7 @@ import {
   CheckpointTurnRangeError
 } from "../checkpoints/index.ts";
 import { slimActivityEvent } from "../ingestion/coalesce.ts";
+import { bindingResumeCursor } from "../store/binding.ts";
 import { projectSnapshotActivities } from "../ingestion/index.ts";
 import { AGENT_HOST_DEADLINES, withDeadline } from "../support/deadline.ts";
 import { createEventBuilder, describeFailure, makeActivity, type BuildEvent } from "./events.ts";
@@ -255,6 +259,12 @@ interface ThreadRuntime {
    * it lives in `meta.json` and is merged back onto every projected head.
    */
   continueAfterRestart: ThreadHead["continueAfterRestart"];
+  /**
+   * `binding.json` — the durable provider-session binding (§3.3, §4.1) and the
+   * AUTHORITY for the resume cursor. `null` until the thread has one; the head's
+   * cursor is the fallback for a thread written before bindings existed (§8).
+   */
+  binding: ProviderSessionBinding | null;
   eventsSinceHeadSave: number;
   compacting: boolean;
   queuedTurns: QueuedTurn[];
@@ -565,6 +575,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     const tail = await store.readAll(threadId);
     const state = fold.foldAll(tail.events);
     const persistedHead = await store.loadHead(threadId).catch(() => null);
+    const binding = await store.loadBinding(threadId).catch(() => null);
     const launch = await launchConfigs.load(threadId).catch(() => null);
     const runtime: ThreadRuntime = {
       id: threadId,
@@ -573,6 +584,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       captures: createSerialQueue(),
       state,
       continueAfterRestart: persistedHead?.continueAfterRestart,
+      binding,
       eventsSinceHeadSave: 0,
       compacting: false,
       queuedTurns: [],
@@ -585,7 +597,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       // A resumed thread with no timeline of its own still owes its history —
       // including after a host restart, when nothing replayed it the first time.
       historyPending:
-        (state.items ?? []).length === 0 && state.head?.session.resumeCursor !== undefined,
+        (state.items ?? []).length === 0 &&
+        (bindingResumeCursor(binding) ?? state.head?.session.resumeCursor) !== undefined,
       revertedTo: tail.events.reduce<number | null>(
         (target, event) =>
           event.type === "thread.reverted" ? event.payload.turnCount : target,
@@ -789,6 +802,54 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     runtime.state.head?.session ?? { status: "idle", activeTurnId: null };
 
   // -------------------------------------------------------------------------
+  // The provider session binding (§3.3, §4.1) — the cursor's real home
+  // -------------------------------------------------------------------------
+
+  /**
+   * The ONE way this process writes the binding. Field-wise by construction:
+   * whatever the patch omits is left exactly as it was persisted, so a caller
+   * that knows nothing about the cursor cannot erase it — which is precisely
+   * what `thread.session-set` did to the head.
+   *
+   * Never throws: a binding that cannot be written costs at worst one resume
+   * (the head's carried-forward cursor is still there), and failing a turn over
+   * it would be strictly worse.
+   *
+   * *T3: `ProviderService.ts:1053-1076` (`upsertSessionBinding`).*
+   */
+  const upsertBinding = async (
+    runtime: ThreadRuntime,
+    patch: ProviderSessionBindingPatch
+  ): Promise<void> => {
+    const adapter = runtime.state.head?.adapter ?? runtime.binding?.adapter;
+    if (adapter === undefined) return;
+    try {
+      runtime.binding = await store.upsertSessionBinding({
+        threadId: runtime.id,
+        adapter,
+        patch
+      });
+    } catch (error) {
+      logger.warn(`agent-host: failed to persist the session binding for ${runtime.id}`, error);
+    }
+  };
+
+  /**
+   * The cursor to resume from: the binding's, else the head's.
+   *
+   * The fallback is the §8 rollback boundary in one expression — a thread
+   * written before `binding.json` existed, or one whose binding could not be
+   * read, still resumes from what `meta.json` recorded. It is also why nothing
+   * here ever writes `resumeCursor: null`: a binding that says "no cursor" and
+   * a binding that has not learned one yet must not be told apart by the read
+   * path, or a status-only write would strand a thread that has a head cursor.
+   *
+   * *T3: `ProviderService.ts:1462-1466` — `input.resumeCursor ?? persistedBinding.resumeCursor`.*
+   */
+  const persistedResumeCursor = (runtime: ThreadRuntime, head: ThreadHead): unknown =>
+    bindingResumeCursor(runtime.binding) ?? head.session.resumeCursor;
+
+  // -------------------------------------------------------------------------
   // Session lifecycle (§3.4 + §4.1 lazy recovery)
   // -------------------------------------------------------------------------
 
@@ -858,15 +919,23 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         logger.warn("agent-host: failed to stop session before restart", error);
       }
       const cursor = decision.carryResumeCursor
-        ? (bound.session.resumeCursor ?? head.session.resumeCursor)
+        ? (bound.session.resumeCursor ?? persistedResumeCursor(runtime, head))
         : undefined;
       return startSession(runtime, head, desired, cursor, pendingTurnStart);
     }
 
     await stopStaleSessions(runtime, head.adapter);
     // Lazy recovery (§4.1): a crashed, OOM-killed or restarted session is
-    // indistinguishable from a fresh one — start from the persisted cursor.
-    return startSession(runtime, head, desired, head.session.resumeCursor, pendingTurnStart);
+    // indistinguishable from a fresh one — start from the persisted cursor,
+    // which comes off the BINDING (§3.3): the head's copy is a projection an
+    // event can replace, the binding's is only ever merged field-wise.
+    return startSession(
+      runtime,
+      head,
+      desired,
+      persistedResumeCursor(runtime, head),
+      pendingTurnStart
+    );
   };
 
   const startSession = async (
@@ -912,6 +981,22 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       ...(resumeCursor !== undefined ? { resumeCursor } : {})
     });
     runtime.bound = { ...desired, session };
+    // The binding is written BEFORE the session is announced and before any
+    // history replay: a host that dies between the provider handing back a
+    // cursor and `thread.session-set` landing must still find that cursor on
+    // the next boot (§3.3).
+    await upsertBinding(runtime, {
+      adapter: head.adapter,
+      adapterKey: head.refId,
+      runtimeMode: head.runtimeMode,
+      providerInstanceId: `${head.home}:${head.accountId}`,
+      status: session.status,
+      ...(session.resumeCursor !== undefined
+        ? { resumeCursor: session.resumeCursor }
+        : resumeCursor !== undefined
+          ? { resumeCursor }
+          : {})
+    });
     // E6: a resumed thread whose log is empty must show the conversation it is
     // resuming. Before the session is announced, not after — otherwise the
     // first live frames interleave with history and the timeline is scrambled.
@@ -1240,7 +1325,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           }
         };
       }
-      // §4.1 "Cursor per turn": persisted every time, not only when it changed.
+      // §4.1 "Cursor per turn": persisted every time, not only when it changed
+      // — into the binding first, because that is the copy a restart reads.
+      await upsertBinding(runtime, {
+        status: "running",
+        ...(result.resumeCursor !== undefined ? { resumeCursor: result.resumeCursor } : {})
+      });
       await persistSession(runtime, {
         ...currentSession(runtime),
         status: "running",
@@ -2318,6 +2408,19 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       runtime.historyPending = resumeCursor !== undefined;
       await saveHeadNow(runtime);
       if (resumeCursor !== undefined) {
+        // §6.1 create-time resume: the binding is seeded here, not at the first
+        // session start, so a host that dies before the eager start still has
+        // the cursor the tab was opened with.
+        await upsertBinding(runtime, {
+          adapter: adapterId,
+          adapterKey: request.refId,
+          runtimeMode,
+          providerInstanceId: `${home}:${request.accountId}`,
+          status: "stopped",
+          resumeCursor
+        });
+      }
+      if (resumeCursor !== undefined) {
         // E2E R2-2: open the session NOW rather than on the first turn. History
         // can only be read through a live provider session, so a lazy start
         // left a resumed tab blank until the user typed — and then replayed the
@@ -2847,6 +2950,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
               // mint a checkpoint later (§5.4).
               void captureBaseline(runtime, event.turnId ?? null);
             } else if (event.type === "turn.completed" || event.type === "turn.aborted") {
+              persistCursorAtTurnEnd(runtime);
               captureTurnEnd(runtime, event.turnId ?? null);
               // A replayed turn is the past: its questions were settled when it
               // happened, and there is no live provider to strand.
@@ -2891,15 +2995,43 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     }
   };
 
-  /** Claude refreshes its cursor mid-turn; keep the bound copy current. */
+  /**
+   * Claude refreshes its cursor mid-turn; keep the bound copy current — and the
+   * binding with it. The bound copy is process state and dies with the host;
+   * the binding is the only thing the next one can read.
+   */
   const trackSessionCursor = (runtime: ThreadRuntime, event: RuntimeEvent): void => {
+    if (event.type === "thread.started") {
+      void upsertBinding(runtime, { providerThreadId: event.payload.providerThreadId });
+      return;
+    }
     if (event.type !== "session.started") return;
     const resume = event.payload.resume;
-    if (resume === undefined || !runtime.bound) return;
+    if (resume === undefined) return;
+    void upsertBinding(runtime, { resumeCursor: resume });
+    if (!runtime.bound) return;
     runtime.bound = {
       ...runtime.bound,
       session: { ...runtime.bound.session, resumeCursor: resume }
     };
+  };
+
+  /**
+   * A turn ending is the other moment a provider's native boundary moves, and
+   * for a turn the host did not dispatch (a background turn, a continuation)
+   * there is no `sendTurn` result to record it from. Read the adapter's live
+   * session and save the cursor before anything can checkpoint the turn.
+   *
+   * *T3: `ProviderService.ts:1104-1129` — the same hook on
+   * `turn.completed` / `turn.aborted`.*
+   */
+  const persistCursorAtTurnEnd = (runtime: ThreadRuntime): void => {
+    const head = runtime.state.head;
+    if (!head) return;
+    const adapter = options.adapters.get(head.adapter);
+    const session = adapter?.listSessions().find((entry) => entry.threadId === runtime.id);
+    if (session?.resumeCursor === undefined) return;
+    void upsertBinding(runtime, { resumeCursor: session.resumeCursor });
   };
 
   /** The sink `createIngestion` writes translated domain events into. */
@@ -2944,7 +3076,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         const { session } = head;
         // Only threads that are running with a usable cursor (§3.3).
         if (session.status !== "running" || session.activeTurnId === null) continue;
-        if (session.resumeCursor === undefined || session.resumeCursor === null) continue;
+        // The cursor is read from the BINDING (§3.3): a marker is only ever
+        // written for a thread that really can be resumed, and the head's copy
+        // is a projection that an event may already have replaced.
+        if (persistedResumeCursor(runtime, head) === undefined) continue;
         // …and only where the project opted in. Continuation is opt-in per
         // project over a host-wide default that is OFF, so a marker written
         // for an opted-out thread would make the next boot resume it — the
@@ -2974,6 +3109,11 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
 
   const settleAsError = async (runtime: ThreadRuntime, message: string): Promise<void> => {
     await writeMarker(runtime, undefined);
+    // The binding follows the session (`status`), never the cursor: a thread
+    // that could not be continued is still resumable by hand from the same
+    // cursor, so clearing it here would throw away the conversation the user
+    // is about to send into (*T3: `serverRuntimeStartup.ts:588-604`*).
+    await upsertBinding(runtime, { status: "stopped" });
     await persistSession(runtime, {
       ...currentSession(runtime),
       status: "error",
@@ -3079,7 +3219,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       marker !== undefined &&
       (session.activeTurnId === null || marker.turnId === session.activeTurnId);
     const optIn = (await options.continuationEnabled?.(head.projectPath)) === true;
-    const hasCursor = session.resumeCursor !== undefined && session.resumeCursor !== null;
+    const hasCursor = persistedResumeCursor(runtime, head) !== undefined;
     const continuable =
       !closed &&
       hasCursor &&
@@ -3100,8 +3240,22 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       await settleAsError(runtime, CONTINUATION_FAILED_MESSAGE);
       return;
     }
-    await persistSession(runtime, { ...session, status: "starting", activeTurnId: null });
-    await writeMarker(runtime, { turnId, prepared: true });
+    // Durable first, dispatched second: the marker and the binding's
+    // `starting` both reach disk BEFORE any send, so a host that dies between
+    // resuming and sending is recovered by the next boot rather than looking
+    // like a settled thread (*T3: `serverRuntimeStartup.ts:655-690`*).
+    try {
+      await writeMarker(runtime, { turnId, prepared: true });
+      await upsertBinding(runtime, { status: "starting" });
+      await persistSession(runtime, { ...session, status: "starting", activeTurnId: null });
+    } catch (error) {
+      // A prepare that cannot reach disk must not be followed by a send: the
+      // turn would then be running with nothing durable saying so
+      // (*T3: `serverRuntimeStartup.ts:684-693`*).
+      logger.warn(`agent-host: failed to prepare the continuation of ${threadId}`, error);
+      await settleAsError(runtime, CONTINUATION_FAILED_MESSAGE);
+      return;
+    }
 
     // 3. Forked: the loop only prepares the continuation (§3.3).
     void runEffect(runtime, async () => {
@@ -3118,6 +3272,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           interactionMode: "default",
           ...(promptless ? { continuation: true } : {})
         });
+        await upsertBinding(runtime, {
+          status: "running",
+          ...(result.resumeCursor !== undefined ? { resumeCursor: result.resumeCursor } : {})
+        });
         await persistSession(runtime, {
           ...currentSession(runtime),
           status: "running",
@@ -3132,7 +3290,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         await writeMarker(runtime, undefined);
       } catch (error) {
         logger.warn(`agent-host: failed to continue ${threadId} after a restart`, error);
-        await settleAsError(runtime, CONTINUATION_FAILED_MESSAGE);
+        // A continuation that was ATTEMPTED and failed says so; the orphan
+        // message above is for a thread that was never eligible (§3.3 step 4).
+        await settleAsError(runtime, CONTINUATION_SEND_FAILED_MESSAGE);
       }
     });
   };

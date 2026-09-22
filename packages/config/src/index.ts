@@ -844,6 +844,41 @@ export function parseAgentThreadHead(value: unknown): AgentThreadHead | null {
   return parsed.success ? parsed.data : null;
 }
 
+/**
+ * `binding.json` — the durable provider-session binding beside `meta.json`
+ * (§3.3, §4.1). Mirrors `ProviderSessionBinding` in `@orquester/api`.
+ *
+ * It is deliberately NOT part of the event log: a `thread.session-set` names
+ * the whole session block, so an event that omits the cursor can erase it. This
+ * file is only ever merged field-wise, so nothing can.
+ *
+ * Same rollback boundary as the head: optional fields only, and a file that
+ * does not decode means "no binding" (fall back to the head's cursor), never an
+ * error.
+ */
+export const agentProviderSessionBindingSchema = z.object({
+  version: z.literal(1).default(1),
+  threadId: z.string().min(1),
+  adapter: agentAdapterIdSchema,
+  adapterKey: z.string().nullable().default(null),
+  runtimeMode: agentRuntimeModeSchema.nullable().default(null),
+  providerInstanceId: z.string().nullable().default(null),
+  status: z.enum(["starting", "ready", "running", "stopped", "error"]).default("stopped"),
+  /** Adapter-owned blob. `null` is "no resumable session", never "unknown". */
+  resumeCursor: z.unknown().optional(),
+  providerThreadId: z.string().nullable().default(null),
+  lastSeenAt: z.string()
+});
+export type AgentProviderSessionBinding = z.infer<typeof agentProviderSessionBindingSchema>;
+
+/** A binding that does not decode is treated as absent (§8), never as an error. */
+export function parseAgentProviderSessionBinding(
+  value: unknown
+): AgentProviderSessionBinding | null {
+  const parsed = agentProviderSessionBindingSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
 export const agentCommandReceiptStatusSchema = z.enum(["accepted", "rejected"]);
 
 /**

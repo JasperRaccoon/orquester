@@ -16,6 +16,8 @@ import type {
   CheckpointStatus,
   CommandReceipt,
   DomainEvent,
+  ProviderSessionBinding,
+  ProviderSessionBindingPatch,
   ProviderSnapshot,
   RuntimeEvent,
   ThreadHead,
@@ -97,6 +99,25 @@ export interface ThreadStore {
 
   /** Atomic (tmp + rename). Called every 50 events and on turn end (§5.1). */
   saveHead(head: ThreadHead): Promise<void>;
+
+  /**
+   * `binding.json`, or null when the thread has none or it does not decode
+   * (§8: a missing binding means "use the head's cursor").
+   */
+  loadBinding(threadId: string): Promise<ProviderSessionBinding | null>;
+
+  /**
+   * The ONE writer of the provider-session binding, and the reason the resume
+   * cursor cannot be lost: every write is field-wise, `undefined` means
+   * unchanged and `null` means cleared (§3.3, §4.1). Returns the merged
+   * binding as it was persisted.
+   */
+  upsertSessionBinding(input: {
+    threadId: string;
+    /** Used only when there is no binding yet — a binding always names one. */
+    adapter: AgentAdapterId;
+    patch: ProviderSessionBindingPatch;
+  }): Promise<ProviderSessionBinding>;
 
   /** Every thread id with a directory on disk. */
   listThreads(): Promise<string[]>;
