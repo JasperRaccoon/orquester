@@ -145,6 +145,8 @@ export interface RosterMainRowProps {
   ping?: boolean;
   statusLabel: string;
   activityLabel: string | null;
+  /** Present while a drill-in is open: the row becomes the way back. */
+  onOpen?: (() => void) | undefined;
   startedAt: string | null;
   endedAt: string | null;
   live: boolean;
@@ -166,10 +168,21 @@ export function RosterMainRow({
   startedAt,
   endedAt,
   live,
-  metrics
+  metrics,
+  onOpen
 }: RosterMainRowProps): React.ReactElement {
+  const Tag = onOpen ? "button" : "div";
   return (
-    <div className={cn(ROW_GRID, "cursor-default")} data-roster-main="true">
+    <Tag
+      {...(onOpen ? { type: "button" as const, onClick: onOpen } : {})}
+      className={cn(
+        ROW_GRID,
+        onOpen
+          ? "cursor-pointer rounded-md text-left transition-colors hover:bg-neutral-800/40 focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500"
+          : "cursor-default"
+      )}
+      data-roster-main="true"
+    >
       <span className="col-start-1 row-start-1 flex items-center">
         <StatusDot tone={tone} size="xs" pulse={pulse} ping={ping} label={statusLabel} />
       </span>
@@ -185,6 +198,6 @@ export function RosterMainRow({
       <span className={cn(ACTIVITY_LINE, "text-neutral-500")}>{activityLabel ?? statusLabel}</span>
       <span className={METRICS_LINE}>{metrics.join(" · ")}</span>
       <span className="sr-only">{statusLabel}</span>
-    </div>
+    </Tag>
   );
 }

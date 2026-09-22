@@ -1,6 +1,10 @@
 import React from "react";
 
-import { DEFAULT_RUNTIME_MODE, SETTLED_TURN_STATES } from "@orquester/api/agent-chat";
+import {
+  DEFAULT_RUNTIME_MODE,
+  SETTLED_TURN_STATES,
+  TERMINAL_SUBAGENT_STATUSES
+} from "@orquester/api/agent-chat";
 import type { ThreadItem } from "@orquester/api/agent-chat";
 
 import { shortAccountLabel } from "../../lib/account-label";
@@ -206,6 +210,29 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   // A drill-in belongs to one thread; carrying it across a switch would open a
   // stranger's agent. The hold is exactly the window where that could happen.
   React.useEffect(() => setDrillInAgentId(null), [sessionId]);
+  // Auto-return: an agent that SETTLES (finishes, fails, is stopped) while its
+  // drill-in is open hands the view back to the thread — the parent is where
+  // the result lands. Only a live→settled transition observed here does it,
+  // so deliberately opening an already-finished agent stays open.
+  const drilledStatus = drillInAgentId
+    ? (roster.agents.find((agent) => agent.id === drillInAgentId)?.status ?? null)
+    : null;
+  const drilledWasLive = React.useRef(false);
+  React.useEffect(() => {
+    if (drillInAgentId === null || drilledStatus === null) {
+      drilledWasLive.current = false;
+      return;
+    }
+    const settled = TERMINAL_SUBAGENT_STATUSES.has(drilledStatus);
+    if (!settled) {
+      drilledWasLive.current = true;
+      return;
+    }
+    if (drilledWasLive.current) {
+      drilledWasLive.current = false;
+      setDrillInAgentId(null);
+    }
+  }, [drillInAgentId, drilledStatus]);
   // The child's rows and its roster row come from `useAgentChatDrillIn`, which
   // AgentDrillIn calls itself: one projection off this thread's slice, sharing
   // the parent's memoisation instead of a second one beside it.
@@ -659,6 +686,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                   expanded={rosterExpanded}
                   onExpandedChange={setRosterExpanded}
                   onOpenAgent={setDrillInAgentId}
+                  onOpenMain={() => setDrillInAgentId(null)}
                   main={rosterMain}
                   activeAgentId={drillInAgentId}
                 />

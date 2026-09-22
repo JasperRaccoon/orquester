@@ -1357,6 +1357,15 @@ export class ClaudeNormalizer {
         }
       }
       this.lastAssistantUuid = message.uuid;
+      // The subagent's own activity. The CLI forwards a subagent's tool_use /
+      // tool_result blocks (and its final text) as COMPLETE `assistant` /
+      // `user` messages with `parent_tool_use_id` — never as stream events
+      // (a live 2.1.278 thread: 882 nested tool_use blocks, 0 nested
+      // stream_events). Only the stream path built tool items, so a drill-in
+      // read "This agent has not reported anything yet" while the roster
+      // counted its tools. Every block here is attributed to the owning task
+      // so it renders in that agent's drill-in and never in the parent's.
+      events.push(...this.nestedAssistantEvents(message, parentToolUseId, owningTaskId));
       return events;
     }
 
@@ -2004,6 +2013,105 @@ export class ClaudeNormalizer {
       ...(agent.workflowName !== undefined ? { workflowName: agent.workflowName } : {}),
       ...(agent.outputFile !== undefined ? { outputFile: agent.outputFile } : {})
     };
+  }
+
+  /** Keys for nested tools in `inFlightTools`: negative, so they never collide with a stream index. */
+  private nestedToolSeq = 0;
+
+  private nestedAssistantEvents(
+    message: Extract<SDKMessage, { type: "assistant" }>,
+    parentToolUseId: string,
+    owningTaskId: string | undefined
+  ): RuntimeEvent[] {
+    const events: RuntimeEvent[] = [];
+    const content: unknown = (message.message as { content?: unknown } | undefined)?.content;
+    if (!Array.isArray(content)) {
+      return events;
+    }
+    const raw = { source: RAW_SDK_MESSAGE, method: "claude/assistant", payload: message };
+    for (const entry of content) {
+      if (entry === null || typeof entry !== "object") continue;
+      const block = entry as Record<string, unknown>;
+      if (block.type === "tool_use" && typeof block.id === "string" && typeof block.name === "string") {
+        const toolName = block.name;
+        const toolInput =
+          block.input !== null && typeof block.input === "object"
+            ? (block.input as Record<string, unknown>)
+            : {};
+        const itemType = classifyToolItemType(toolName, toolInput);
+        const tool: ToolInFlight = {
+          itemId: block.id,
+          itemType,
+          toolName,
+          title: titleForTool(itemType),
+          detail: summarizeToolRequest(toolName, toolInput),
+          input: toolInput,
+          partialInputJson: "",
+          lastEmittedInputFingerprint: toolInputFingerprint(toolInput),
+          ...(owningTaskId !== undefined ? { agentId: owningTaskId } : {}),
+          parentToolUseId
+        };
+        // Registered under a synthetic key so the nested `user` tool_result
+        // completes it through the ordinary lookup by itemId.
+        this.nestedToolSeq -= 1;
+        this.inFlightTools.set(this.nestedToolSeq, tool);
+        events.push({
+          ...this.base({
+            turnId: this.activeTurnId,
+            itemId: tool.itemId,
+            providerItemId: tool.itemId,
+            ...(tool.agentId !== undefined ? { agentId: tool.agentId } : {}),
+            raw
+          }),
+          type: "item.started",
+          payload: {
+            itemType: tool.itemType,
+            status: "inProgress",
+            title: tool.title,
+            ...(tool.detail !== undefined ? { detail: tool.detail } : {}),
+            ...(tool.agentId !== undefined ? { agentId: tool.agentId } : {}),
+            parentToolUseId,
+            data: { toolName: tool.toolName, input: toolInput }
+          }
+        });
+      } else if (block.type === "text" && typeof block.text === "string" && block.text.trim().length > 0) {
+        // The subagent's prose (its final answer, mostly): one settled message
+        // row in its drill-in.
+        const itemId = this.ids.messageId("msg");
+        const base = {
+          turnId: this.activeTurnId,
+          itemId,
+          ...(owningTaskId !== undefined ? { agentId: owningTaskId } : {}),
+          raw
+        };
+        events.push(
+          {
+            ...this.base(base),
+            type: "item.started",
+            payload: {
+              itemType: "assistant_message",
+              status: "inProgress",
+              ...(owningTaskId !== undefined ? { agentId: owningTaskId } : {})
+            }
+          },
+          {
+            ...this.base(base),
+            type: "content.delta",
+            payload: { streamKind: "assistant_text", delta: block.text, contentIndex: 0 }
+          },
+          {
+            ...this.base(base),
+            type: "item.completed",
+            payload: {
+              itemType: "assistant_message",
+              status: "completed",
+              ...(owningTaskId !== undefined ? { agentId: owningTaskId } : {})
+            }
+          }
+        );
+      }
+    }
+    return events;
   }
 
   private agentIdForParentToolUse(parentToolUseId: string | undefined): string | undefined {

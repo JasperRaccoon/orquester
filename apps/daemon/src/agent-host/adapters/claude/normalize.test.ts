@@ -565,3 +565,66 @@ describe("claude normaliser — compaction bookkeeping", () => {
     assert.equal(readPreservedUuids(undefined), undefined);
   });
 });
+
+describe("claude normaliser — subagent activity arrives as complete nested messages", () => {
+  it("turns a subagent's tool_use/tool_result and text into items owned by its task", () => {
+    const normalizer = new ClaudeNormalizer({
+      threadId: "t",
+      clock: fixedClock(),
+      ids: countingIds()
+    });
+    const feed = (message: unknown): RuntimeEvent[] =>
+      normalizer.handleMessage(message as SDKMessage);
+    feed({
+      type: "system",
+      subtype: "task_started",
+      task_id: "task-1",
+      tool_use_id: "toolu_parent",
+      task_type: "local_agent",
+      description: "Audit the workflows",
+      uuid: "u0",
+      session_id: "s"
+    });
+    const started = feed({
+      type: "assistant",
+      parent_tool_use_id: "toolu_parent",
+      uuid: "u1",
+      session_id: "s",
+      message: {
+        role: "assistant",
+        model: "claude-opus-5",
+        content: [{ type: "tool_use", id: "toolu_child", name: "Bash", input: { command: "ls" } }]
+      }
+    });
+    const startedItem = started.find((event) => event.type === "item.started");
+    assert.ok(startedItem, "a nested tool_use opens an item");
+    assert.equal(startedItem.itemId, "toolu_child");
+    assert.equal(startedItem.agentId, "task-1", "attributed to the owning task, never the parent");
+    assert.equal((startedItem.payload as { itemType: string }).itemType, "command_execution");
+
+    const completed = feed({
+      type: "user",
+      parent_tool_use_id: "toolu_parent",
+      uuid: "u2",
+      session_id: "s",
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_child", content: "a.txt" }] }
+    });
+    const completedItem = completed.find(
+      (event) => event.type === "item.completed" && event.itemId === "toolu_child"
+    );
+    assert.ok(completedItem, "the nested tool_result completes it");
+    assert.equal(completedItem.agentId, "task-1");
+    assert.equal((completedItem.payload as { status: string }).status, "completed");
+
+    const prose = feed({
+      type: "assistant",
+      parent_tool_use_id: "toolu_parent",
+      uuid: "u3",
+      session_id: "s",
+      message: { role: "assistant", model: "claude-opus-5", content: [{ type: "text", text: "Done: 3 issues." }] }
+    });
+    const text = prose.find((event) => event.type === "content.delta");
+    assert.equal((text?.payload as { delta: string } | undefined)?.delta, "Done: 3 issues.");
+    assert.ok(prose.every((event) => event.agentId === "task-1"), "the subagent's prose stays in its drill-in");
+  });
+});

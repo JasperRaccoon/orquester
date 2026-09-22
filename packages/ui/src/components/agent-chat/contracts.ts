@@ -245,6 +245,8 @@ export interface AgentRosterProps {
   expanded: boolean;
   onExpandedChange: (expanded: boolean) => void;
   onOpenAgent: (agentId: string) => void;
+  /** The `main` row was clicked: leave the drill-in and show the thread again. */
+  onOpenMain?: () => void;
   /** The parent thread's own row. Omit it and no main row renders. */
   main?: AgentRosterMainRow | null;
   /** The drilled-in agent, so its row reads as the open one. */

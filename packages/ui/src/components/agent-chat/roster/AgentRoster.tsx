@@ -121,6 +121,7 @@ export function AgentRoster({
   expanded,
   onExpandedChange,
   onOpenAgent,
+  onOpenMain,
   main = null,
   activeAgentId = null
 }: AgentRosterProps): React.ReactElement | null {
@@ -163,6 +164,9 @@ export function AgentRoster({
             endedAt={main.turnEndedAt ?? null}
             live={main.turnActive}
             metrics={mainRowMetrics(main)}
+            // Clickable only while an agent is open: on the main view the row
+            // is a status line, and a button that does nothing is worse.
+            onOpen={activeAgentId !== null ? onOpenMain : undefined}
           />
         ) : null}
 

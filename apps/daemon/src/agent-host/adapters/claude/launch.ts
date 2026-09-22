@@ -242,6 +242,10 @@ export function buildClaudeQueryOptions(
       ? { sessionId: input.sessionId }
       : {}),
     includePartialMessages: true,
+    // A model-written one-liner per `task_progress` ("Analyzing the auth
+    // module…") for the roster's activity line; forks the subagent's cache,
+    // so the cost is small. SDK 0.3.278 `agentProgressSummaries`.
+    agentProgressSummaries: true,
     canUseTool: input.canUseTool,
     ...(input.onUserDialog !== undefined
       ? { onUserDialog: input.onUserDialog, supportedDialogKinds: ["resume_return"] }
