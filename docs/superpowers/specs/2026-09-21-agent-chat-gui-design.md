@@ -2445,8 +2445,15 @@ turn is active, `waiting` with attention while a request is pending, `idle` with
 attention stamp on turn end. Three new events: `agentChat.turn {id, turnId, state, tokenUsage?}`,
 `agentChat.pending {id, requestId, kind: "approval"|"question", title, open: boolean}` and the
 coarse `agent.providers.changed` that a snapshot refresh raises (§4.6.4, §6.3). Nothing
-higher-rate rides the bus. The push gate in `index.ts` and the Attention Center filter in
-`agent-sessions.ts` widen from `"agent"` to include `"agent-chat"`.
+higher-rate rides the bus. The push gate in `index.ts` and the Attention Center filter widen from `"agent"` to include
+`"agent-chat"`.
+
+*Built: there is no `agent-sessions.ts` — the Attention Center's filter is client-side, and the
+widening is `isAgentLike()` in `packages/ui/src/lib/session-kind.ts`, the one predicate every
+kind-branching surface calls. The daemon's push gate is widened as written
+(`apps/daemon/src/index.ts`), though in practice a chat tab raises no bell and no managed-hook
+event: its pushes come from the protocol path in `apps/daemon/src/agent-chat/summary.ts`. The gate
+is widened anyway so a future chat-side `session.activity` emission is not silently swallowed.*
 
 `SessionSummary` gains six derived fields for chat sessions — this list is the contract §7.1 and
 §7.7 read, and no surface may invent a name for one of them — so that every surface already
