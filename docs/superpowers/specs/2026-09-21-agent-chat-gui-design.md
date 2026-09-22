@@ -3002,6 +3002,17 @@ silently half-applied.
 
 *T3: `docs/internals/server-updates.md:16-31` — the commit boundary: migrations, dependencies, HTTP bound and every long-running root parked before `prepared`; "A listener alone does not prove the runtime is ready to commit"; a failed or timed-out trial returns to the old version; `apps/server/src/serviceLauncher.ts:33` — `PREPARED_TIMEOUT_MS = 120_000`; `:34` — `TERMINATE_GRACE_MS = 5_000` before the old child is killed*
 
+*Built: the handover is **drain-then-replace**, not trial-then-commit. T3 starts the replacement,
+waits for its `prepared` and keeps the old version if it never comes; here both hosts would have to
+bind the same `agent-host.sock`, so a trial is not expressible. The restart is therefore deferred
+until no thread has an active turn, the old host is asked to `/stop` (which writes every
+continuation marker), and the supervisor then **waits for the socket to stop answering** before
+spawning the replacement — killing the tmux session milliseconds after `/stop` answers strands a
+teardown that needs seconds, and OpenCode's server is spawned `detached: true`, so it would survive
+the kill holding its port while the new host started a second one for the same project. A
+replacement that never reaches readiness latches `error` and is retried with backoff rather than
+being silently half-applied (`apps/daemon/src/agent-chat/supervisor.ts`).*
+
 **A restarted host is not a reconnect.** The host carries an instance id that changes on every
 start; it is returned on `GET /api/agent/providers` and stamped on the `synchronized` frame of
 `/events` (§6.3). A client that reconnects to a different instance id re-reads the thread instead
@@ -3160,6 +3171,45 @@ and are skipped otherwise, so the suite never needs an account or a network.
 
 *T3: `apps/server/src/provider/Drivers/ClaudeExecutable.ts:45-60` — why a bare command name or an npm launcher shim cannot be handed to the SDK; `apps/server/src/provider/Layers/ClaudeAdapter.ts:4916` — the resolved path passed as `pathToClaudeCodeExecutable`*
 
+- **Codex's sandbox cannot run on this host, and the failure is surfaced rather than hidden.**
+  `codex app-server` sandboxes `apply_patch` with bubblewrap, which fails here with
+  `bwrap: loopback: Failed RTM_NEWADDR` (the VPS kernel/container does not give the daemon user an
+  unprivileged network namespace). In `approval-required` and `auto-accept-edits` a Codex thread
+  therefore cannot write files on this box: the patch is approved and then fails inside the
+  sandbox. `full-access` (`danger-full-access`) works, because it does not sandbox. The adapter
+  reports the sandbox error as it arrives instead of translating it into something friendlier — a
+  thread that silently declines to edit files is worse than one that says why.
+
+- **A chat launch auto-accepts Claude's project-trust dialog, confined to the project.** §6.4
+  records the mechanism; the accepted risk is that opening a chat tab on a project enables that
+  project's `.claude/settings.json` hooks — arbitrary shell, run as the daemon user, which holds
+  scoped passwordless sudo — without the dialog the CLI would have shown. The path is the
+  request's `projectPath` after `realpath` + `assertInsideFsRoot`, never its `cwd`, and a
+  `projectPath` outside the sandbox gets no grant at all; but inside the sandbox the grant is real
+  and it outlives the tab, because it is written into the home's own `~/.claude.json`.
+
+- **Grok's settings reach the CLI through an overlay, because its config file is shared.**
+  Grok needs `[features] support_permission = true` (without it every approval self-resolves,
+  §4.3) and `auto_update = false` (the CLI upgraded itself 1.0.3 → 1.0.34 mid-session). On a
+  managed account home `<GROK_HOME>/config.toml` is a **symlink** to the daemon user's own
+  `~/.grok/config.toml`, so writing it reconfigures Grok host-wide for every terminal tab and
+  every account — which happened twice during this build. The host therefore writes a per-thread
+  overlay and points `GROK_CONFIG_PATH` at it, and nothing under a shared home is written. The
+  accepted risk is that the overlay is a second place Grok's configuration lives: a user editing
+  `~/.grok/config.toml` will not see those two keys there, and a future CLI that stops honouring
+  `GROK_CONFIG_PATH` silently returns the thread to self-resolving approvals.
+
+- **A chat thread inherits the home's MCP servers, and their processes outlive everything.**
+  Nothing strips the servers a home configures: Grok boots every server in `~/.claude.json` on
+  `session/new` (~157 tools, ~3 s) and Codex boots whatever `~/.codex/config.toml` names. That is
+  exactly what a terminal launch of the same agent under the same home does today, and a chat
+  thread that silently had fewer tools than the terminal tab beside it would be the worse surprise.
+  The cost is recorded: a provider CLI spawns its MCP servers itself, so they are children of the
+  *provider* child, not of the daemon. One observed server survived the agent host, the daemon and
+  thread deletion, reparented to init holding a fixed loopback port — and, being outside the
+  daemon's process tree, it is not a legal kill target in Settings → System either.
+
+
 - **Old host code after deploy** until drain; a protocol version bump forces the drain-restart
   as soon as turns settle. The events written by the newer host stay readable by the older one
   or the rollback is not a rollback (§8).
@@ -3171,6 +3221,16 @@ and are skipped otherwise, so the suite never needs an account or a network.
   provider child stays a legal kill target (§3.1).
 
 *T3: `apps/server/src/provider/Layers/ProviderSessionReaper.ts:17-18` — differs: 30 min inactivity, 5 min sweep; `:36-118` — the sweep skips a thread with an active turn or live background work*
+
+*Built: the trade is sharper than written, because a chat thread's process tree is not one process.
+A Claude thread is one CLI; an OpenCode **project** is one shared server plus its sessions; a Grok
+or Codex thread is a child that itself spawns the home's MCP servers (above). So the bound is not
+"one process per open tab" but "one process tree per open tab, whose leaves the daemon did not
+spawn and cannot reap". The mitigation is unchanged and is still visibility, not policy: the host
+pid and every provider child are in the process tree Settings → System shows, the agent host is
+registered as an extra tree **root** so its descendants are legal kill targets even though it runs
+in a tmux service session (`apps/daemon/src/system-status.ts`, `extraRootPids`), and the host pid
+itself stays protected.*
 
 - **Background work outlives the turn, and closing a tab kills it.** Subagent fleets and watch
   loops keep running inside a provider process after the turn settles (§3.1). Closing the tab
