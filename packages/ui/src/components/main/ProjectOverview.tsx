@@ -46,6 +46,8 @@ const QuickStartButton: React.FC<{ agent: RegistryEntry }> = ({ agent }) => {
   const setNotice = useAppStore((s) => s.setNotice);
   const chatPrefs = useAppStore((s) => s.chatPrefs);
   const model = useLaunchModel(agent.id);
+  const launchSelectionFor = useAppStore((s) => s.launchSelectionFor);
+  const refId = agent.id;
 
   return (
     <button
@@ -67,7 +69,7 @@ const QuickStartButton: React.FC<{ agent: RegistryEntry }> = ({ agent }) => {
             refId: agent.id,
             title: agent.name,
             chat: {
-              modelSelection: { model },
+              modelSelection: launchSelectionFor(refId, model),
               runtimeMode: runtimeModeForAgent(chatPrefs, agent.id)
             }
           }),
@@ -96,6 +98,7 @@ const ResumeRow: React.FC<{
   const preferredAccountByAgent = useAppStore((s) => s.preferredAccountByAgent);
   const refId = chatLaunchRefId(conversation);
   const model = useLaunchModel(refId);
+  const launchSelectionFor = useAppStore((s) => s.launchSelectionFor);
 
   const resume = () => {
     if (!model) {
@@ -118,7 +121,7 @@ const ResumeRow: React.FC<{
         accountId,
         chat: {
           accountId,
-          modelSelection: { model },
+          modelSelection: launchSelectionFor(refId, model),
           runtimeMode: runtimeModeForAgent(chatPrefs, refId),
           resume: { home: conversation.home ?? "system", conversationId: conversation.id }
         }

@@ -150,6 +150,22 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   const status = useAgentChatStatus(sessionId);
   const provider = useProviderSnapshot(session.refId);
   const agentAccounts = useAppStore((s) => s.agentAccounts);
+  const setPreferredModelSelection = useAppStore((s) => s.setPreferredModelSelection);
+  const setPreferredRuntimeMode = useAppStore((s) => s.setPreferredRuntimeMode);
+  // What the composer's pickers change becomes this device's preference for
+  // the agent, so the next chat opens the same way (model, effort, thinking,
+  // fast mode, permission mode). The thread itself still gets the command.
+  const composerActions = React.useMemo(
+    () => ({
+      ...actions,
+      setMode: async (input: Parameters<typeof actions.setMode>[0]) => {
+        await actions.setMode(input);
+        if (input.modelSelection) setPreferredModelSelection(session.refId, input.modelSelection);
+        if (input.runtimeMode) setPreferredRuntimeMode(session.refId, input.runtimeMode);
+      }
+    }),
+    [actions, session.refId, setPreferredModelSelection, setPreferredRuntimeMode]
+  );
   const api = useApi();
 
   // --- the §7.1 paint hold -------------------------------------------------
@@ -620,7 +636,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 onDraftAttachmentCountChange={setComposerAttachments}
                 reverting={reverting}
                 active={active}
-                actions={actions}
+                actions={composerActions}
                 onHeightChange={setComposerHeight}
                 // `/compact` is offered only where there is something to
                 // compact (§4.6.7): an empty thread would earn a refusal.

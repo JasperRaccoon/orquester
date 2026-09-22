@@ -229,6 +229,7 @@ const AgentRow: React.FC<{ agent: RegistryEntry; projectPath?: string }> = ({
   const setPreferredAccount = useAppStore((s) => s.setPreferredAccount);
   const preferredModel = useAppStore((s) => s.preferredModelByAgent[agent.id]);
   const setPreferredModel = useAppStore((s) => s.setPreferredModel);
+  const launchSelectionFor = useAppStore((s) => s.launchSelectionFor);
   const setNotice = useAppStore((s) => s.setNotice);
   const chatPrefs = useAppStore((s) => s.chatPrefs);
   const setPreferredRuntimeMode = useAppStore((s) => s.setPreferredRuntimeMode);
@@ -382,7 +383,7 @@ const AgentRow: React.FC<{ agent: RegistryEntry; projectPath?: string }> = ({
   const chatFields: CreateAgentChatSessionFields | null = launchModel
     ? {
         accountId: launchAccountId,
-        modelSelection: { model: launchModel },
+        modelSelection: launchSelectionFor(agent.id, launchModel),
         runtimeMode
       }
     : null;

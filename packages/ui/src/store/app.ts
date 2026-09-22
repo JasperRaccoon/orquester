@@ -19,7 +19,14 @@ import {
 } from "../lib/auth";
 import { loadViewModes, saveViewModes, type ViewMode } from "../lib/view-mode";
 import { loadPreferredAccounts, savePreferredAccounts } from "../lib/preferred-account";
-import { loadPreferredModels, savePreferredModels } from "../lib/preferred-model";
+import {
+  launchModelSelection,
+  loadPreferredModelSelections,
+  loadPreferredModels,
+  savePreferredModelSelections,
+  savePreferredModels
+} from "../lib/preferred-model";
+import type { ModelSelection } from "@orquester/api/agent-chat";
 import { loadChatPrefs, saveChatPrefs, type ChatPrefs } from "../lib/chat-prefs";
 import {
   hasUnseenCompletion,
@@ -792,6 +799,8 @@ export interface AppState {
   preferredAccountByAgent: Record<string, string>;
   /** Last backing model chosen per agent (claudex/claudemix) in the launcher (client-local, persisted). */
   preferredModelByAgent: Record<string, string>;
+  /** The last full model selection (model + options) per agent, from the composer's pickers too. */
+  preferredModelSelectionByAgent: Record<string, ModelSelection>;
   /**
    * Agent-chat composer + launcher preferences, per device (chat spec §7.4,
    * §4.6.7): steer-vs-queue, skills under `/`, and the last permission mode
@@ -1004,6 +1013,10 @@ export interface AppState {
   setViewMode: (mode: ViewMode) => void;
   setPreferredAccount: (agent: string, accountId: string) => void;
   setPreferredModel: (agent: string, model: string) => void;
+  /** Remember model AND options; also updates `preferredModelByAgent`. */
+  setPreferredModelSelection: (agent: string, selection: ModelSelection) => void;
+  /** The selection a launch of `model` for `agent` should carry (remembered options ride along). */
+  launchSelectionFor: (agent: string, model: string) => ModelSelection;
   /** Patch the per-device agent-chat preferences and persist them. */
   setChatPrefs: (patch: Partial<ChatPrefs>) => void;
   /** Remember the permission mode a launcher row will start this agent in. */
@@ -1120,6 +1133,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   viewModeByProject: loadViewModes(),
   preferredAccountByAgent: loadPreferredAccounts(),
   preferredModelByAgent: loadPreferredModels(),
+  preferredModelSelectionByAgent: loadPreferredModelSelections(),
   chatPrefs: loadChatPrefs(),
   threadVisits: loadThreadVisits(),
   terminalFontSize: loadTerminalFontSize(),
@@ -2776,6 +2790,19 @@ export const useAppStore = create<AppState>((set, get) => ({
       return { chatPrefs };
     }),
 
+  setPreferredModelSelection: (agent, selection) =>
+    set((state) => {
+      const preferredModelByAgent = { ...state.preferredModelByAgent, [agent]: selection.model };
+      const preferredModelSelectionByAgent = {
+        ...state.preferredModelSelectionByAgent,
+        [agent]: { model: selection.model, ...(selection.options ? { options: selection.options } : {}) }
+      };
+      savePreferredModels(preferredModelByAgent);
+      savePreferredModelSelections(preferredModelSelectionByAgent);
+      return { preferredModelByAgent, preferredModelSelectionByAgent };
+    }),
+  launchSelectionFor: (agent, model) =>
+    launchModelSelection(model, get().preferredModelSelectionByAgent[agent]),
   setPreferredModel: (agent, model) =>
     set((state) => {
       const preferredModelByAgent = { ...state.preferredModelByAgent, [agent]: model };
