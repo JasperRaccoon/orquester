@@ -997,7 +997,7 @@ export class ClaudeNormalizer {
    * The CLI writes the compaction's summary as a top-level `user` message
    * with `isSynthetic: true` and a **plain string** body — no block array —
    * stamped with the boundary's own `preserved_messages.anchor_uuid`
-   * (fixtures README observation 19). The anchor is the join; the preamble
+   * (fixtures README observation 20). The anchor is the join; the preamble
    * match is only the fallback for a boundary that named no anchor, because
    * a user is perfectly entitled to paste that sentence themselves.
    */

@@ -1702,6 +1702,9 @@ describe("claude normaliser — the context meter is the MAIN agent's, never a s
     for (const row of allOf(settled, "thread.token-usage.updated")) {
       assert.equal(row.payload.usage.maxTokens, 200_000);
     }
+  });
+});
+
 // ---------------------------------------------------------------------------
 // A subagent's prose and reasoning belong to its drill-in
 // ---------------------------------------------------------------------------
