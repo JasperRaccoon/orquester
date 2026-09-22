@@ -52,6 +52,7 @@ import type {
 import { join } from "node:path";
 
 import { MAX_TURN_INPUT_CHARS } from "@orquester/api/agent-chat";
+import { projectGrokHistory } from "./history.ts";
 import { GROK_EXTRA_ENV } from "./launch.ts";
 import { COMPACT_SLASH_COMMAND, probeGrok, probeSkills } from "./probe.ts";
 import { GrokSession, parseGrokResumeCursor } from "./session.ts";
@@ -337,6 +338,25 @@ class GrokAdapter implements AgentAdapter {
    * carrying the provider's own prompt id and stop reason. §4.1 calls the
    * items opaque, and that is exactly what they are here.
    */
+  /**
+   * E6: rebuild a timeline for a thread whose history the host has never seen
+   * — a §6.1 resume of somebody else's conversation, or one whose
+   * `events.ndjson` predates this host.
+   *
+   * Grok has no transcript RPC; the only source is what `session/load`
+   * replays, which is **partial by construction** (README 10: capture `02`
+   * produced 39 events, replay returned 5). So this restores the shape of the
+   * conversation and never claims to be the transcript, and every projected
+   * turn reports `tokenUsage: unavailable`. A thread with nothing replayed
+   * projects `[]` and the host renders its own info activity.
+   */
+  projectHistory(snapshot: ThreadSnapshot): RuntimeEvent[] {
+    return projectGrokHistory(snapshot, {
+      threadId: snapshot.threadId,
+      stamp: () => ({ eventId: this.context.ids.eventId(), createdAt: this.context.clock.nowIso() })
+    });
+  }
+
   async readThread(threadId: string): Promise<ThreadSnapshot> {
     const session = this.requireSession(threadId);
     return await Promise.resolve({ threadId: session.threadId, turns: session.turns });

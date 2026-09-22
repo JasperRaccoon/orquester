@@ -82,7 +82,17 @@ export interface SystemStatusOptions {
    * infrastructure that happens to sit in the daemon's own tree. Read at kill
    * time (not construction): the set changes as things respawn.
    */
-  protectedPids?: () => Iterable<number>;
+  protectedPids?: () => Iterable<number | { pid: number; label: string }>;
+  /**
+   * Extra tree ROOTS to descend from, beyond this process and the `orq-*` tmux
+   * panes — today the agent host (chat design spec §3.1 "Kill guard"). It runs
+   * in the `orqsvc-agent-host` service session, which `panePids()` deliberately
+   * excludes, so without this neither it nor any provider child it spawned
+   * descends from a root and the spec's "provider children remain legal kill
+   * targets" would be false on every tmux host. The host pid itself stays in
+   * `protectedPids`; only its descendants become reachable.
+   */
+  extraRootPids?: () => Iterable<number>;
   /** Injectable clock + sleep (tests drive the CPU resample path through these). */
   now?: () => number;
   sleep?: (ms: number) => Promise<unknown>;
@@ -615,12 +625,20 @@ export class SystemStatusService {
    * Pids that are never a legitimate target, read fresh on each kill.
    * Best-effort: a throwing supplier must not turn a kill into a 500.
    */
-  private protectedPids(): Set<number> {
+  private protectedPids(): Map<number, string> {
+    const out = new Map<number, string>();
     try {
-      return new Set(this.options.protectedPids?.() ?? []);
+      for (const entry of this.options.protectedPids?.() ?? []) {
+        if (typeof entry === "number") {
+          out.set(entry, "the model proxy that backs claudex/claudemix sessions");
+        } else {
+          out.set(entry.pid, entry.label);
+        }
+      }
     } catch {
-      return new Set();
+      return new Map();
     }
+    return out;
   }
 
   /**
@@ -661,11 +679,15 @@ export class SystemStatusService {
     // model proxy when tmux is absent. Under tmux it isn't in our tree at all,
     // so the guard is a no-op there.
     const protectedPids = this.protectedPids();
-    if (protectedPids.has(pid)) {
+    // Name what was refused: the set now holds more than the model proxy (the
+    // agent host joined it), and "cannot stop the model proxy" was a lie for
+    // every other member.
+    const protectedLabel = protectedPids.get(pid);
+    if (protectedLabel !== undefined) {
       return {
         ok: false,
         code: "PROCESS_PROTECTED",
-        error: "Cannot stop the model proxy that backs claudex/claudemix sessions."
+        error: `Cannot stop ${protectedLabel}.`
       };
     }
 
@@ -825,6 +847,18 @@ export class SystemStatusService {
       for (const pid of pids) {
         roots.set(pid, known.has(sessionId) ? sessionId : undefined);
       }
+    }
+    // Service-session infrastructure whose CHILDREN are legal targets even
+    // though its own pane is excluded from the scan — the agent host and every
+    // provider child it spawns (chat design spec §3.1 "Kill guard": "provider
+    // children remain legal kill targets"). The host pid itself is refused by
+    // `protectedPids`, which runs before the tree check.
+    try {
+      for (const pid of this.options.extraRootPids?.() ?? []) {
+        if (Number.isInteger(pid) && pid > 0 && !roots.has(pid)) roots.set(pid, undefined);
+      }
+    } catch {
+      // A throwing supplier must not blank the root set.
     }
     return roots;
   }

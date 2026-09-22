@@ -2162,6 +2162,23 @@ sitting at `ready` with nothing pending and nothing running is `idle`+finished, 
 changed no files leaves no turn row to read — without this branch, a thread that finishes and is
 torn down quickly shows nothing at all instead of "finished".
 
+**Amendment (implementation, 2026-09-21): the `error` rung resolves to `idle` + a `finished`
+attention.** There is no fourth `SessionActivityState` — the spec's own "`session.activity` keeps
+its three states" rules one out — so a failed thread lands in the Attention Center's *Finished*
+bucket and its push carries the "finished" copy. It keeps the two properties the rung exists for:
+a failure still outranks lingering background liveness, and it still raises an attention the user
+sees. A surface that wants to say "failed" reads `chatSessionStatus === "error"` or
+`latestTurn.state === "failed"` off the summary, exactly as it reads `backgroundLiveness` to say
+"Monitoring". Distinct push copy for a failure is a follow-up.
+
+**Amendment (implementation): the trust grant is confined to `projectPath`.** A chat launch
+auto-accepts Claude's project-trust dialog for the thread's project (a never-seen directory is
+untrusted, and its `.claude/settings.json`, hooks and skills are then silently ignored). The
+granted path is the request's `projectPath` after `realpath` + `assertInsideFsRoot`, never its
+`cwd`: Claude's trust dialog gates hook execution, so an unconfined path would let a client
+permanently enable arbitrary shell for the daemon user. A `projectPath` outside the sandbox gets
+no grant and the launch proceeds.
+
 *T3: `packages/shared/src/agentAwareness.ts:76-113` — the ladder and both race fallbacks, with the comments recording the bugs they fix; `apps/server/src/orchestration/Layers/ProjectionPipeline.ts:161-204` — pending user input folded from the activity log by open `requestId`; `:582-599` — both flags recomputed as `count > 0`; `apps/web/src/components/Sidebar.logic.ts:847-863` — running, then error ("a failed session outranks lingering background liveness"), then `working`, then `monitoring`; `:1067-1087` — Monitoring is painted like Working with `pulse: false`; `:524-535` — `Monitoring` ranks below `Plan Ready`; differs: T3 has a Monitoring pill state of its own, while `session.activity` here keeps three states and the label is read off `backgroundLiveness`*
 
 ### 6.5 Desktop

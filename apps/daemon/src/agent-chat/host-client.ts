@@ -23,6 +23,13 @@ import {
 export const HOST_REQUEST_TIMEOUT_MS = 20_000;
 
 /**
+ * Ceiling on a buffered (`json()`) host response. Generous — a whole thread
+ * snapshot is a legitimate multi-megabyte read — but finite, because the body
+ * is concatenated in daemon memory and nothing else bounds it.
+ */
+export const HOST_RESPONSE_LIMIT_BYTES = 64 * 1024 * 1024;
+
+/**
  * The host is not answering: no socket, connection refused, or the request
  * timed out. Every route maps this to 503 `HOST_UNAVAILABLE` (§6.2) — the one
  * error the client is told to retry with the same `commandId`.
@@ -155,7 +162,15 @@ export class AgentHostClient {
         );
       }
       if (init.body instanceof Readable) {
-        init.body.on("error", fail);
+        // A body error can fire AFTER the headers came back (the host answers
+        // as soon as it starts reading), and `fail` no-ops once settled — so
+        // destroy the request explicitly or the half-written upload stays open
+        // until the host's own timeout. Covers both an aborting client and the
+        // §6.3 byte cap tripping mid-stream.
+        init.body.on("error", (error) => {
+          req.destroy(error instanceof Error ? error : new Error(String(error)));
+          fail(error);
+        });
         init.body.pipe(req);
       } else if (init.body !== undefined) {
         req.end(init.body);
@@ -179,9 +194,21 @@ export class AgentHostClient {
       timeoutMs: init.timeoutMs
     });
     const chunks: Buffer[] = [];
+    let received = 0;
     try {
       for await (const chunk of stream.body) {
-        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string));
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
+        received += buffer.length;
+        // A bounded call must stay bounded in memory too: `GET …/thread` is a
+        // whole snapshot and is unbounded by construction, so a runaway host
+        // could otherwise push the daemon into an OOM one read at a time.
+        if (received > HOST_RESPONSE_LIMIT_BYTES) {
+          stream.abort();
+          throw new HostUnavailableError(
+            `agent host response exceeded ${HOST_RESPONSE_LIMIT_BYTES} bytes`
+          );
+        }
+        chunks.push(buffer);
       }
     } catch (error) {
       stream.abort();

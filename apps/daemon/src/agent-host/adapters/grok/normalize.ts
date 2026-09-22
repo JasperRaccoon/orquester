@@ -23,6 +23,7 @@
 import type {
   ApprovalDecision,
   CanonicalRequestType,
+  ProviderThreadTurnSnapshot,
   RuntimeEvent,
   RuntimeEventRaw,
   RuntimeEventRawSource,
@@ -43,6 +44,7 @@ import type {
   XaiSessionUpdate,
   XaiUsage
 } from "./acp/_generated/xai.ts";
+import { GrokHistoryCollector } from "./history.ts";
 import {
   nextPlanModeActive,
   planMarkdownFromToolCall,
@@ -151,6 +153,13 @@ export class GrokNormalizer {
   private activeAssistantItemId: string | undefined;
   private assistantUpdatesOpen = false;
 
+  /**
+   * What `session/load` replayed. Collected rather than emitted (see
+   * {@link handleSessionUpdate}) so a thread whose timeline the host has never
+   * seen can still be reconstructed through `projectHistory` (E6).
+   */
+  private readonly history = new GrokHistoryCollector();
+
   private readonly tools = new Map<string, ToolTrack>();
   private readonly tasks = new Map<string, BackgroundTrack>();
   private readonly hooks = new Map<string, string>();
@@ -214,6 +223,11 @@ export class GrokNormalizer {
     return this.selfResolvedInteractions > 0 && this.openedRequests === 0;
   }
 
+  /** Every turn `session/load` replayed, as opaque `ThreadSnapshot` items. */
+  historyTurns(): ProviderThreadTurnSnapshot[] {
+    return this.history.snapshotTurns();
+  }
+
   /** The best usage block seen for the current turn, from any source. */
   turnUsage(): XaiUsage | undefined {
     return this.lastTurnUsage ?? this.lastResponseUsage;
@@ -261,6 +275,7 @@ export class GrokNormalizer {
    */
   handleSessionUpdate(params: SessionNotification): RuntimeEvent[] {
     if (isReplayFrame(params._meta)) {
+      this.history.observeAcpUpdate(params.update as Record<string, unknown>);
       return [];
     }
     const contextSize = contextTokensOf(params._meta);
@@ -615,7 +630,9 @@ export class GrokNormalizer {
       ];
     }
     if (isReplayFrame(envelope?._meta)) {
-      // Replay is history we already hold; see handleSessionUpdate.
+      // Replay is history the HOST already holds for a thread it has seen;
+      // for one it has not, `projectHistory` rebuilds it from here.
+      this.history.observeXaiUpdate(update as Record<string, unknown>);
       this.absorbReplayUsage(update);
       return [];
     }

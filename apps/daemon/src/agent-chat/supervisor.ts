@@ -41,6 +41,30 @@ export const RESPAWN_BACKOFF_MAX_MS = 60_000;
 /** After this many consecutive failed respawns the supervisor latches `error`. */
 export const MAX_RESPAWNS = 5;
 
+/**
+ * Consecutive unreachable probes before the supervisor kills and respawns.
+ *
+ * One miss is not evidence of death: the probe has a 5 s timeout, and a host
+ * whose event loop is busy with a large cold fold or a big `readThread` answers
+ * nothing. Restarting on that takes down every live turn (§8: "Restarting the
+ * host interrupts live work"), which is precisely what the drain rule exists to
+ * avoid. cliproxy restarts on the first miss, but it has no in-flight user work
+ * to lose.
+ */
+export const UNREACHABLE_PROBES_BEFORE_RESTART = 2;
+
+/** …and more patience when the last good health reported an active turn. */
+export const UNREACHABLE_PROBES_BEFORE_RESTART_BUSY = 4;
+
+/**
+ * How long the daemon waits for a stopped host to actually exit before killing
+ * its tmux session. Matches T3's `TERMINATE_GRACE_MS`: `/stop` returns once the
+ * continuation markers are written, but the teardown that follows (four
+ * adapters at a 2 s kill grace each, sequential) needs seconds.
+ */
+export const HOST_EXIT_GRACE_MS = 5_000;
+export const HOST_EXIT_POLL_MS = 100;
+
 export type AgentHostState =
   /** Never started, or intentionally stopped. */
   | "stopped"
@@ -94,6 +118,15 @@ export interface SupervisorAdapters {
   spawnDirect(bin: string, args: string[], env: Record<string, string>): DirectHostHandle;
   now(): number;
   sleep(ms: number): Promise<void>;
+  /**
+   * The host reported a NEW `providersRevision` — its own background /
+   * session-start refresh changed a snapshot (§4.6.4). The daemon raises the
+   * coarse `agent.providers.changed` from here; without it only the explicit
+   * `POST /api/agent/providers/:id/refresh` ever reaches the bus, and a client
+   * keeps a stale catalog after a CLI upgrade or an expired login until a page
+   * reload.
+   */
+  onProvidersRevision?(): void;
   logger?: { log?: (...a: unknown[]) => void; warn?: (...a: unknown[]) => void; error?: (...a: unknown[]) => void };
 }
 
@@ -113,6 +146,8 @@ export interface SupervisorOptions {
   adapters: SupervisorAdapters;
   /** Deadline on a replacement host reaching readiness (§8). */
   preparedTimeoutMs?: number;
+  /** Grace for a stopped host to exit before its session is killed. */
+  exitGraceMs?: number;
 }
 
 export interface AgentHostStatus {
@@ -138,6 +173,8 @@ export class AgentHostSupervisor {
   private pendingVersionRestart = false;
   private respawnAttempts = 0;
   private nextRespawnAt = 0;
+  /** Consecutive unreachable probes; cleared by any healthy adoption. */
+  private missedProbes = 0;
   /**
    * True once `init()` has run. Distinguishes "never started" from "a spawn
    * failed and the state is `stopped`" — without it the health interval would
@@ -291,6 +328,26 @@ export class AgentHostSupervisor {
         return;
       }
 
+      // A host whose event loop is blocked past the 5 s probe timeout — a large
+      // cold fold, a big `readThread`, the box under load — looks exactly like
+      // a dead one. Killing it on the FIRST miss takes down every live chat
+      // turn (and, before the grace above, leaked a detached OpenCode server on
+      // the way out). Require consecutive misses, and never count a miss while
+      // the last good health reported an active turn: that is positive evidence
+      // the host had work, so give it the full window.
+      this.missedProbes++;
+      const required =
+        (this.health?.activeTurnThreadIds.length ?? 0) > 0
+          ? UNREACHABLE_PROBES_BEFORE_RESTART_BUSY
+          : UNREACHABLE_PROBES_BEFORE_RESTART;
+      if (this.missedProbes < required) {
+        this.log(
+          "warn",
+          `agent host did not answer (${this.missedProbes}/${required}); not restarting yet`
+        );
+        return;
+      }
+
       if (this.opts.adapters.now() < this.nextRespawnAt) return; // still backing off
       this.respawnAttempts++;
       const ready = await this.spawnAndWait(true);
@@ -322,7 +379,12 @@ export class AgentHostSupervisor {
    */
   handleTurnSettled(): void {
     if (!this.pendingVersionRestart || this.state !== "healthy") return;
-    void this.transition(() => this.restartIfDrained());
+    // Fire-and-forget: `transition()` only catches its own QUEUE copy, so the
+    // returned promise must be caught here or an unhandled rejection takes the
+    // daemon down (Node ≥15 throws, and nothing installs a handler).
+    this.transition(() => this.restartIfDrained()).catch((error) =>
+      this.log("error", "agent host drain-restart failed", error)
+    );
   }
 
   /**
@@ -349,9 +411,27 @@ export class AgentHostSupervisor {
     return this.directHandle?.pid ?? this.health?.pid ?? null;
   }
 
+  /**
+   * Restart only once the host is genuinely drained — decided on a FRESH probe,
+   * never on `this.health`.
+   *
+   * `handleTurnSettled()` fires whenever *any* thread's turn settles, so the
+   * cached snapshot can be up to a health interval (15 s) old: probe at T shows
+   * no active turn, thread A starts one at T+2 s, thread B settles at T+4 s —
+   * and the stale empty list would let the restart kill the host with A's turn
+   * live. Readiness and drain are decided on a fresh report, never a cached one
+   * (§8, T3 `server-updates.md`). The mirror case only costs a delay.
+   */
   private async restartIfDrained(): Promise<void> {
     if (!this.pendingVersionRestart) return;
-    if ((this.health?.activeTurnThreadIds.length ?? 0) > 0) return;
+    const probed = await this.safeProbe();
+    if (!probed.ok) return; // not healthy right now — the health tick owns it
+    this.adopt(probed.health);
+    if (probed.health.protocolVersion !== AGENT_HOST_PROTOCOL_VERSION) {
+      this.pendingVersionRestart = true; // `adopt` clears it only on a match
+    }
+    if (!this.pendingVersionRestart) return;
+    if (probed.health.activeTurnThreadIds.length > 0) return;
     await this.drainAndRestart();
   }
 
@@ -373,6 +453,17 @@ export class AgentHostSupervisor {
       } catch (error) {
         this.log("warn", "agent host stop request failed; restarting anyway", error);
       }
+      // `/stop` answers as soon as the continuation markers are written; the
+      // host's real teardown (server close → `adapter.stopAll()` → orchestrator
+      // drain → final head save) then runs asynchronously and needs SECONDS —
+      // `DEFAULT_KILL_GRACE_MS` is 2 s per child, sequential over four
+      // adapters. Killing the tmux session milliseconds later strands that
+      // teardown, and OpenCode's server is spawned `detached: true`, i.e. in
+      // its own process group, so it SURVIVES the kill holding its port and
+      // sessions while the replacement host starts a second one per project.
+      // Wait for the socket to stop answering, bounded by the same grace T3's
+      // launcher uses before killing an old child (`TERMINATE_GRACE_MS`).
+      await this.awaitHostExit();
     }
     this.pendingVersionRestart = false;
     const ready = await this.spawnAndWait(true);
@@ -383,14 +474,57 @@ export class AgentHostSupervisor {
   }
 
   /**
-   * Regenerate the token (no host is alive at this point, which is the only
-   * time §3.1 allows it), spawn, and poll READINESS — not the socket.
+   * Poll the socket until the old host stops answering, bounded by
+   * {@link HOST_EXIT_GRACE_MS}. Returns true when it is gone.
+   */
+  private async awaitHostExit(): Promise<boolean> {
+    const deadline = this.opts.adapters.now() + (this.opts.exitGraceMs ?? HOST_EXIT_GRACE_MS);
+    for (;;) {
+      const probed = await this.safeProbe();
+      // Anything that is no longer a healthy answer means the listener is down
+      // (or already replaced); either way the socket is free to rebind.
+      if (!probed.ok) return true;
+      if (this.opts.adapters.now() >= deadline) {
+        this.log("warn", "agent host did not exit within the drain grace; killing it");
+        return false;
+      }
+      await this.opts.adapters.sleep(HOST_EXIT_POLL_MS);
+    }
+  }
+
+  /**
+   * Regenerate the token (only ever after the previous host is gone — §3.1's
+   * "regenerated only when no host is alive"), spawn, and poll READINESS — not
+   * the socket.
    */
   private async spawnAndWait(killFirst: boolean): Promise<boolean> {
     this.setState("starting", null);
     this.health = null;
-    this.token = await this.regenerateToken();
-    await this.spawn(killFirst);
+    // Both of these throw on ordinary operational failures — a full disk on the
+    // token write, and `tmux new-session` exiting non-zero because a kill raced
+    // the respawn ("duplicate session: orqsvc-agent-host"), the cwd vanished,
+    // or the tmux socket died. Neither may escape: these run behind a bare
+    // `void` from the 15 s health interval, Node ≥15 throws on an unhandled
+    // rejection, and the daemon registers no handler — so one wedged respawn
+    // would take the whole daemon down with every live terminal on it. The
+    // contract is "latch error and retry", never "exit".
+    try {
+      // The token is regenerated AFTER the kill, immediately before the new
+      // session: §3.1 says "regenerated only when no host is alive", and
+      // rewriting it while the old host still answers would leave the daemon
+      // unable to authenticate to the host it is waiting on.
+      await this.spawn(killFirst, async () => {
+        this.token = await this.regenerateToken();
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      // `stopped`, not `error`: a duplicate-session or a transient tmux failure
+      // must stay retryable. `checkHealth` counts the attempt and latches
+      // `error` only at MAX_RESPAWNS, which is the documented cap.
+      this.setState("stopped", `agent host spawn failed: ${reason}`);
+      this.log("error", "agent host spawn failed", error);
+      return false;
+    }
     const probed = await this.probeUntilReady();
     if (probed.ok) {
       this.adopt(probed.health);
@@ -404,7 +538,7 @@ export class AgentHostSupervisor {
     return false;
   }
 
-  private async spawn(killFirst: boolean): Promise<void> {
+  private async spawn(killFirst: boolean, beforeStart: () => Promise<void>): Promise<void> {
     const args = [
       "--import",
       "tsx",
@@ -417,6 +551,7 @@ export class AgentHostSupervisor {
       if (killFirst) {
         await tmux.killServiceSession(AGENT_HOST_SERVICE_SESSION).catch(() => undefined);
       }
+      await beforeStart();
       await tmux.newServiceSession({
         name: AGENT_HOST_SERVICE_SESSION,
         cwd: this.opts.cwd,
@@ -429,6 +564,7 @@ export class AgentHostSupervisor {
     // No-tmux hosts (Windows, stock macOS dev): a direct child that dies with
     // the daemon (§3.1). The §3.3 reconcile recovers on the next boot.
     this.directHandle?.kill();
+    await beforeStart();
     this.directHandle = this.opts.adapters.spawnDirect(this.opts.nodeBin, args, this.opts.env);
   }
 
@@ -460,9 +596,27 @@ export class AgentHostSupervisor {
   }
 
   private adopt(health: AgentHostHealthResponse): void {
+    // A moved revision means the host refreshed a provider snapshot on its own
+    // (§4.6.4). A host restart resets the counter, and the instance id changing
+    // is itself a "re-read everything" signal, so only compare within one
+    // instance.
+    const sameInstance = this.health?.hostInstanceId === health.hostInstanceId;
+    const previousRevision = sameInstance ? this.health?.providersRevision : undefined;
+    if (
+      typeof health.providersRevision === "number" &&
+      typeof previousRevision === "number" &&
+      health.providersRevision !== previousRevision
+    ) {
+      try {
+        this.opts.adapters.onProvidersRevision?.();
+      } catch {
+        /* a listener must never break supervision */
+      }
+    }
     this.health = health;
     this.respawnAttempts = 0;
     this.nextRespawnAt = 0;
+    this.missedProbes = 0;
     if (health.protocolVersion === AGENT_HOST_PROTOCOL_VERSION) {
       this.pendingVersionRestart = false;
     }
