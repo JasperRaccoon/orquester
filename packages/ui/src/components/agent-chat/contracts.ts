@@ -82,6 +82,13 @@ export interface ChatTimelineProps {
    * to the ones this adapter can pick up.
    */
   agentRefId?: string;
+  /**
+   * The thread's stream is synchronized and its rows are the real ones. The
+   * empty-thread panel is gated on it: while a thread is still (re)connecting
+   * it has no rows either, and the panel must not flash over a thread that is
+   * anything but empty.
+   */
+  threadReady?: boolean;
   /** See `TimelineRowContextValue.canBackgroundTasks`; absent means no. */
   canBackgroundTasks?: boolean;
   /** The user's Ctrl+B on one running tool call (`/background`). */
@@ -251,6 +258,9 @@ export interface AgentRosterProps {
   main?: AgentRosterMainRow | null;
   /** The drilled-in agent, so its row reads as the open one. */
   activeAgentId?: string | null;
+  /** Folded to its one-line summary (the rows hidden); persisted per device. */
+  collapsed?: boolean;
+  onCollapsedChange?: (collapsed: boolean) => void;
 }
 
 export interface AgentDrillInProps {

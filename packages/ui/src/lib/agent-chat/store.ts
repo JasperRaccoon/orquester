@@ -1057,7 +1057,14 @@ const registry = new Map<string, RegistryEntry>();
  * re-mounts an effect in development; a zero grace would close and re-open
  * every stream on every mount.
  */
-export const THREAD_STORE_DISPOSE_GRACE_MS = 2_000;
+// 15 minutes, not 2 seconds: with 2 s every tab switch longer than a blink
+// disposed the slice and the stream, and coming back meant "Connecting…", a
+// full snapshot fetch and a re-fold (1–3 s on a long thread, plus the
+// empty-thread panel flashing meanwhile). A hidden tab now stays warm — its
+// stream open, its fold in memory — so switching back is instant. The cost is
+// one live stream and one fold per recently-viewed tab; a tab closed for
+// good is released through `releaseThreadStore` as before.
+export const THREAD_STORE_DISPOSE_GRACE_MS = 15 * 60_000;
 
 function scheduleDispose(sessionId: string, entry: RegistryEntry): void {
   if (entry.disposeTimer !== null) {

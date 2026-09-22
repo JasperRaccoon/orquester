@@ -41,6 +41,9 @@ import { proposedPlanTitle, shouldShowPlanFollowUpPrompt } from "../../lib/agent
 import { useAppStore } from "../../store/app";
 import { AgentDrillIn } from "./roster/AgentDrillIn";
 import { AgentRoster } from "./roster/AgentRoster";
+
+/** Per-device: the roster folded to its summary line. */
+const ROSTER_COLLAPSED_KEY = "orquester.chat.roster-collapsed";
 import { ChatBannerDock } from "./banners/ChatBannerDock";
 import { ChatComposer } from "./composer/ChatComposer";
 import { ChatErrorBoundary } from "./ChatErrorBoundary";
@@ -239,6 +242,23 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
 
   // --- roster collapse state (§7.6) ----------------------------------------
   const [rosterExpanded, setRosterExpanded] = React.useState(false);
+  // Folded roster: one summary line instead of the rows. Per device — it is
+  // how this person likes the space split, not thread state.
+  const [rosterCollapsed, setRosterCollapsed] = React.useState<boolean>(() => {
+    try {
+      return localStorage.getItem(ROSTER_COLLAPSED_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const updateRosterCollapsed = React.useCallback((collapsed: boolean) => {
+    setRosterCollapsed(collapsed);
+    try {
+      localStorage.setItem(ROSTER_COLLAPSED_KEY, collapsed ? "1" : "0");
+    } catch {
+      /* storage unavailable */
+    }
+  }, []);
   React.useEffect(() => setRosterExpanded(false), [sessionId]);
 
   // --- the remembered reading position (§7.2) ------------------------------
@@ -559,6 +579,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               onLoadFullOutput={paintOnly ? noop : loadFullOutput}
               onOpenAgent={paintOnly ? noop : setDrillInAgentId}
               agentRefId={session.refId}
+              threadReady={!paintOnly && status.connection === "synchronized"}
               onSendQueuedNow={paintOnly ? noop : (id) => dispatch(() => actions.sendQueuedNow(id))}
               // The user's Ctrl+B (§4.5): offered on a running command only
               // where the provider can honour it.
@@ -591,6 +612,13 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
             ref={setOverlay}
             className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex flex-col pt-1.5 sm:pt-2"
           >
+            {/* The band the overlay sits on: solid under the status line,
+                composer and roster, fading out just above, so a transcript the
+                user scrolled up past never reads through the composer. */}
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-x-0 -top-8 bottom-0 -z-10 bg-gradient-to-t from-neutral-950 via-neutral-950 via-[calc(100%-2rem)] to-transparent"
+            />
             <div className="pointer-events-auto mx-auto w-full min-w-0 max-w-3xl px-3 sm:px-5">
               <ChatStatusLine
                 sessionId={sessionId}
@@ -684,6 +712,8 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                   agents={roster.agents}
                   panel={roster.panel}
                   expanded={rosterExpanded}
+                  collapsed={rosterCollapsed}
+                  onCollapsedChange={updateRosterCollapsed}
                   onExpandedChange={setRosterExpanded}
                   onOpenAgent={setDrillInAgentId}
                   onOpenMain={() => setDrillInAgentId(null)}

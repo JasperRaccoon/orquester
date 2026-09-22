@@ -123,7 +123,9 @@ export function AgentRoster({
   onOpenAgent,
   onOpenMain,
   main = null,
-  activeAgentId = null
+  activeAgentId = null,
+  collapsed = false,
+  onCollapsedChange
 }: AgentRosterProps): React.ReactElement | null {
   const phase = useFinishedRowsPhase(main?.turnActive ?? false);
   // Without a `main` row there is no turn signal, so there is nothing to fade
@@ -139,7 +141,7 @@ export function AgentRoster({
 
   const visuals = main ? mainRowVisuals(main) : null;
   const workingCount = panel.runningCount + panel.waitingCount || selection.liveCount;
-  const showFooter = selection.hiddenCount > 0 || expanded || workingCount > 0;
+  const showFooter = selection.hiddenCount > 0 || expanded || workingCount > 0 || Boolean(onCollapsedChange);
 
   return (
     <section
@@ -151,6 +153,7 @@ export function AgentRoster({
           than ~4.5 rows. The second bound is the mobile one — `vh` is the
           *layout* viewport, so with the soft keyboard up 40vh would be most of
           what the user can actually see. */}
+      {collapsed ? null : (
       <div className="ac-scroll-thin flex max-h-[min(40vh,18rem)] min-h-0 flex-col gap-1 overflow-y-auto px-1.5 py-1">
         {main && visuals ? (
           <RosterMainRow
@@ -189,10 +192,29 @@ export function AgentRoster({
           />
         ))}
       </div>
+      )}
 
       {showFooter ? (
         <footer className="flex h-6 shrink-0 items-center gap-2 px-2 font-mono text-[11px] text-neutral-500">
-          {selection.hiddenCount > 0 || expanded ? (
+          {onCollapsedChange ? (
+            <button
+              type="button"
+              onClick={() => onCollapsedChange(!collapsed)}
+              aria-expanded={!collapsed}
+              title={collapsed ? "Show the agents" : "Hide the agents"}
+              className={cn(
+                "ac-press -ml-1 inline-flex items-center gap-1 rounded px-1 py-0.5",
+                "hover:bg-neutral-800/40 hover:text-neutral-300 focus:outline-none",
+                "focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500"
+              )}
+            >
+              {collapsed ? <ChevronUp size={12} aria-hidden /> : <ChevronDown size={12} aria-hidden />}
+              <span className="ac-tabular">
+                {collapsed ? `${agents.length} agent${agents.length === 1 ? "" : "s"}` : "Agents"}
+              </span>
+            </button>
+          ) : null}
+          {!collapsed && (selection.hiddenCount > 0 || expanded) ? (
             <button
               type="button"
               onClick={() => onExpandedChange(!expanded)}

@@ -104,6 +104,7 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
     onDismissErrorBanner,
     agentId,
     agentRefId,
+    threadReady = false,
     readOnly,
     roster,
     skills,
@@ -117,7 +118,12 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
   const emptyPanelAdapter = emptyPanelEntry?.chat?.adapter;
   const emptyPanelAgentName = emptyPanelEntry?.name ?? agentRefId ?? "Agent";
   const showEmptyPanel =
-    rows.length === 0 && agentId === undefined && Boolean(projectPath) && !readOnly && Boolean(agentRefId);
+    threadReady &&
+    rows.length === 0 &&
+    agentId === undefined &&
+    Boolean(projectPath) &&
+    !readOnly &&
+    Boolean(agentRefId);
 
   const scrollerRef = React.useRef<HTMLDivElement>(null);
   const contentRef = React.useRef<HTMLDivElement>(null);
@@ -429,16 +435,37 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
     requestAnimationFrame(() => {
       firstPaintRef.current = false;
     });
+    hadRowsRef.current = rows.length > 0;
+    instantUntilRef.current = 0;
     // Only on a thread switch: a rows change must not re-run the restore.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, agentId]);
 
+  // The thread's rows usually arrive AFTER mount (a snapshot fetch and a fold,
+  // 1–3 s on a long thread), when `firstPaint` is long over — so the first
+  // real content used to glide down to the end in a visible animation. The
+  // first arrival of rows, and the layout settling right after it, is
+  // treated as first paint: the thread opens already at its end.
+  const hadRowsRef = React.useRef(false);
+  const instantUntilRef = React.useRef(0);
+  const animateNow = React.useCallback(
+    (firstPaint: boolean) =>
+      Date.now() < instantUntilRef.current
+        ? false
+        : shouldAnimateFollow({ working, reducedMotion, firstPaint }),
+    [working, reducedMotion]
+  );
+
   // Re-pin on new rows. `bottomInset` is deliberately NOT a dependency — the
   // composer growing must never move the messages the user is reading (§7.3).
   React.useLayoutEffect(() => {
+    if (!hadRowsRef.current && rows.length > 0) {
+      hadRowsRef.current = true;
+      instantUntilRef.current = Date.now() + 600;
+    }
     if (!follow) return;
-    scrollToEnd(shouldAnimateFollow({ working, reducedMotion, firstPaint: firstPaintRef.current }));
-  }, [rows, follow, scrollToEnd, working, reducedMotion]);
+    scrollToEnd(animateNow(firstPaintRef.current));
+  }, [rows, follow, scrollToEnd, animateNow]);
 
   // Re-pin on row GROWTH and layout: a streamed paragraph grows a row that is
   // already mounted, which no render of ours observes.
@@ -447,11 +474,11 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
     if (!node || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(() => {
       if (!follow) return;
-      scrollToEnd(shouldAnimateFollow({ working, reducedMotion, firstPaint: false }));
+      scrollToEnd(animateNow(false));
     });
     observer.observe(node);
     return () => observer.disconnect();
-  }, [follow, reducedMotion, scrollToEnd, working]);
+  }, [follow, scrollToEnd, animateNow]);
 
   const reArmFollow = React.useCallback(() => {
     onFollowChange(true);
