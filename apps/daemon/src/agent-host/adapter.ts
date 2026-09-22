@@ -167,6 +167,14 @@ export interface AgentAdapter {
     answers: Record<string, unknown>
   ): Promise<void>;
   compact(threadId: string): Promise<void>;
+  /**
+   * Move one running tool call (`toolUseId`) or every foreground task to the
+   * background, so the turn continues while the command keeps running — the
+   * user's Ctrl+B. Present only when `capabilities.supportsBackgroundTasks`;
+   * the host refuses the `/background` command otherwise. Resolves `false`
+   * when the provider had nothing to move.
+   */
+  backgroundTasks?(threadId: string, toolUseId?: string): Promise<boolean>;
   readThread(threadId: string): Promise<ThreadSnapshot>;
 
   /**

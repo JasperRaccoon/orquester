@@ -97,6 +97,7 @@ export const agentHostRoutes = {
   dismiss: (threadId: string): string => `${thread(threadId)}/dismiss`,
   revert: (threadId: string): string => `${thread(threadId)}/revert`,
   compact: (threadId: string): string => `${thread(threadId)}/compact`,
+  background: (threadId: string): string => `${thread(threadId)}/background`,
   mode: (threadId: string): string => `${thread(threadId)}/mode`,
   sessionStop: (threadId: string): string => `${thread(threadId)}/session/stop`,
 

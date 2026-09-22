@@ -1,5 +1,5 @@
 import React from "react";
-import { X } from "lucide-react";
+import { ArrowDownToLine, X } from "lucide-react";
 
 import type { RuntimeSubagent } from "@orquester/api";
 
@@ -406,21 +406,48 @@ export const WorkLiveRow = React.memo(function WorkLiveRow({
   if (row.entry.agentSpawn) return <AgentSpawnRow entry={row.entry} active={row.active} />;
   const label = liveWorkEntryLabel(row.entry, row.active, ctx.workspaceRoot);
   const failed = workEntryDisplayIndicatesToolFailure(row.entry);
+  // The user's Ctrl+B: a running command, on a provider that can move it. The
+  // button is a SIBLING of the toggle, never nested in it (a button inside a
+  // button is invalid HTML and the click would toggle the group as well).
+  const backgroundToolUseId =
+    ctx.canBackgroundTasks &&
+    row.active &&
+    !failed &&
+    row.entry.itemType === "command_execution" &&
+    row.entry.toolLifecycleStatus === "inProgress" &&
+    row.entry.toolCallId
+      ? row.entry.toolCallId
+      : null;
   return (
-    <button
-      type="button"
-      aria-expanded={row.expanded}
-      aria-label={failed ? `${label}, tool call failed` : undefined}
-      onClick={() => ctx.setExpanded(row.groupId, !row.expanded)}
-      className="flex min-h-6 w-full max-w-full cursor-pointer items-center rounded-md text-left focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500"
-    >
-      <LiveActivityLine
-        label={label}
-        iconName={workEntryIconName(row.entry)}
-        live={row.active && !failed}
-        failed={failed}
-      />
-    </button>
+    <div className="group/live-row flex min-h-6 w-full max-w-full items-center gap-1">
+      <button
+        type="button"
+        aria-expanded={row.expanded}
+        aria-label={failed ? `${label}, tool call failed` : undefined}
+        onClick={() => ctx.setExpanded(row.groupId, !row.expanded)}
+        className="flex min-h-6 min-w-0 flex-1 cursor-pointer items-center rounded-md text-left focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500"
+      >
+        <LiveActivityLine
+          label={label}
+          iconName={workEntryIconName(row.entry)}
+          live={row.active && !failed}
+          failed={failed}
+        />
+      </button>
+      {backgroundToolUseId !== null ? (
+        <ChatIconButton
+          size="micro"
+          label="Run in background — the agent continues while it runs"
+          className="opacity-0 transition-opacity focus-visible:opacity-100 group-hover/live-row:opacity-100"
+          onClick={(event) => {
+            event.stopPropagation();
+            ctx.onBackgroundTool(backgroundToolUseId);
+          }}
+        >
+          <ArrowDownToLine size={13} strokeWidth={1.8} aria-hidden />
+        </ChatIconButton>
+      ) : null}
+    </div>
   );
 });
 

@@ -298,5 +298,6 @@ export const COMMAND_NAMES: ReadonlySet<AgentChatCommandName> = new Set<AgentCha
   "revert",
   "compact",
   "mode",
+  "background",
   "session/stop"
 ]);

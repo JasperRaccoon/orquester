@@ -35,6 +35,7 @@ const HOST_COMMAND_ROUTE: Record<AgentChatCommandName, (threadId: string) => str
   revert: agentHostRoutes.revert,
   compact: agentHostRoutes.compact,
   mode: agentHostRoutes.mode,
+  background: agentHostRoutes.background,
   "session/stop": agentHostRoutes.sessionStop
 };
 

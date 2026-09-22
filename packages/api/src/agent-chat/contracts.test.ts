@@ -199,7 +199,7 @@ test("route builders produce the §6 paths and encode their segments", () => {
   assert.equal(agentChatRoutes.providers, "/api/agent/providers");
   assert.equal(agentChatRoutes.hostStop, "/api/agent-host/stop");
 
-  assert.equal(AGENT_CHAT_COMMAND_NAMES.length, 9);
+  assert.equal(AGENT_CHAT_COMMAND_NAMES.length, 10);
   for (const name of AGENT_CHAT_COMMAND_NAMES) {
     assert.ok(agentChatCommandPath("s1", name).startsWith("/api/sessions/s1/"));
   }

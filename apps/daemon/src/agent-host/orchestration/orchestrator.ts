@@ -1884,6 +1884,70 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       case "compact":
         return decideCompaction(runtime, commandId, COMPACT_COMMAND_TEXT);
 
+      case "background": {
+        // The user's Ctrl+B (§4.5). Refused, not ignored, where the provider
+        // cannot do it — the button is gated on the same capability, so a
+        // refusal here means a stale client, and it should hear so.
+        const adapter = options.adapters.get(head.adapter);
+        if (!adapter?.backgroundTasks || adapter.capabilities.supportsBackgroundTasks !== true) {
+          throw commandRejected(`${head.adapter} cannot move a running command to the background.`);
+        }
+        if (session.activeTurnId === null) {
+          throw commandRejected("Nothing is running.");
+        }
+        const toolUseId =
+          typeof body.toolUseId === "string" && body.toolUseId.length > 0
+            ? body.toolUseId
+            : undefined;
+        const createdAt = clock.nowIso();
+        return {
+          events: [
+            buildEvent(
+              runtime.id,
+              "thread.activity-appended",
+              {
+                activity: makeActivity({
+                  id: `background:${commandId}`,
+                  tone: "info",
+                  activityKind: "background.requested",
+                  summary: toolUseId ? "Moved the command to the background" : "Moved running work to the background",
+                  payload: toolUseId ? { toolUseId } : {},
+                  turnId: session.activeTurnId,
+                  createdAt
+                })
+              },
+              { commandId, occurredAt: createdAt }
+            )
+          ],
+          effect: async () => {
+            if (!adapter.hasSession(runtime.id)) {
+              await appendActivity(runtime, {
+                kind: "provider.background.failed",
+                summary: "Could not move the command to the background",
+                detail: "No active provider session is bound to this thread."
+              });
+              return;
+            }
+            try {
+              const moved = await adapter.backgroundTasks!(runtime.id, toolUseId);
+              if (!moved) {
+                await appendActivity(runtime, {
+                  kind: "provider.background.failed",
+                  summary: "Nothing to move to the background",
+                  detail: "The command had already finished."
+                });
+              }
+            } catch (error) {
+              await appendActivity(runtime, {
+                kind: "provider.background.failed",
+                summary: "Could not move the command to the background",
+                detail: describeFailure(error)
+              });
+            }
+          }
+        };
+      }
+
       case "mode": {
         const runtimeMode: RuntimeMode | undefined =
           body.runtimeMode === undefined ? undefined : parseRuntimeMode(body.runtimeMode);

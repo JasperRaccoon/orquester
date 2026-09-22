@@ -91,6 +91,8 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
     onOpenAgent,
     onSendQueuedNow,
     onReturnQueuedToComposer,
+    canBackgroundTasks = false,
+    onBackgroundTool,
     errorBanner,
     onDismissErrorBanner,
     agentId,
@@ -194,9 +196,12 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
       onLoadFullOutput,
       onOpenAgent,
       onSendQueuedNow: effectiveReadOnly ? NOOP_STRING : onSendQueuedNow,
-      onReturnQueuedToComposer: effectiveReadOnly ? NOOP_STRING : onReturnQueuedToComposer
+      onReturnQueuedToComposer: effectiveReadOnly ? NOOP_STRING : onReturnQueuedToComposer,
+      canBackgroundTasks: !effectiveReadOnly && canBackgroundTasks && onBackgroundTool !== undefined,
+      onBackgroundTool: effectiveReadOnly || !onBackgroundTool ? NOOP_STRING : onBackgroundTool
     }),
     [
+      canBackgroundTasks,
       canRevert,
       disclosureSets,
       disclosures,
@@ -206,6 +211,7 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
       onOpenFile,
       onOpenTurnDiff,
       onRevert,
+      onBackgroundTool,
       onReturnQueuedToComposer,
       onSendQueuedNow,
       patchList,

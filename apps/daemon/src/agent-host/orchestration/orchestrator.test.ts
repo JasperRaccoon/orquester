@@ -1020,6 +1020,53 @@ describe("orchestrator — queue while the session is down (§3.4)", () => {
   });
 });
 
+describe("orchestrator — moving a running command to the background (Ctrl+B)", () => {
+  it("hands the tool-use id to a capable adapter and records the request as an activity", async () => {
+    const claude = createScriptedAdapter({ id: "claude", capabilities: { supportsBackgroundTasks: true } });
+    const host = createTestHost({ adapters: { claude } });
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "run it" });
+    await host.settle();
+
+    const receipt = await host.orchestrator.command(threadId, "background", {
+      commandId: cmd(),
+      toolUseId: "toolu_01"
+    });
+    await host.settle();
+    assert.ok(receipt.seq > 0);
+    const call = host.adapter.calls.find((entry) => entry.kind === "backgroundTasks");
+    assert.deepEqual(call?.detail, { toolUseId: "toolu_01" });
+    const requested = activityEvents(host).find((row) => row.activityKind === "background.requested");
+    assert.ok(requested, "the user's request is a timeline activity");
+    assert.equal(
+      activityEvents(host).some((row) => row.activityKind === "provider.background.failed"),
+      false
+    );
+    await host.stop();
+  });
+
+  it("is refused where the provider cannot do it, and when nothing is running", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "run it" });
+    await host.settle();
+    await assert.rejects(
+      host.orchestrator.command(threadId, "background", { commandId: cmd() }),
+      /cannot move a running command/
+    );
+
+    const claude = createScriptedAdapter({ id: "claude", capabilities: { supportsBackgroundTasks: true } });
+    const idle = createTestHost({ adapters: { claude } });
+    const idleThread = await idle.createThread();
+    await assert.rejects(
+      idle.orchestrator.command(idleThread, "background", { commandId: cmd() }),
+      /Nothing is running/
+    );
+    await host.stop();
+    await idle.stop();
+  });
+});
+
 describe("orchestrator — answering a question (§6.2)", () => {
   it("answers a message-mode (Codex async) question as a steered message, never over RPC", async () => {
     const host = createTestHost();

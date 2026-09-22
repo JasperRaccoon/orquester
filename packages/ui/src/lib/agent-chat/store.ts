@@ -636,6 +636,10 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         await command("compact", {});
       },
 
+      async backgroundTool(input) {
+        await command("background", input.toolUseId ? { toolUseId: input.toolUseId } : {});
+      },
+
       async setMode(input) {
         await command("mode", {
           ...(input.runtimeMode ? { runtimeMode: input.runtimeMode as RuntimeMode } : {}),

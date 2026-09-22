@@ -76,6 +76,10 @@ export interface ChatTimelineProps {
   onOpenAgent: (agentId: string) => void;
   onSendQueuedNow: (queuedId: string) => void;
   onReturnQueuedToComposer: (queuedId: string) => void;
+  /** See `TimelineRowContextValue.canBackgroundTasks`; absent means no. */
+  canBackgroundTasks?: boolean;
+  /** The user's Ctrl+B on one running tool call (`/background`). */
+  onBackgroundTool?: (toolUseId: string) => void;
   /** Overlaid, never a row: it must not change the list's content height (§7.3). */
   errorBanner: string | null;
   onDismissErrorBanner: () => void;

@@ -54,7 +54,10 @@ export const CLAUDE_CAPABILITIES: AdapterCapabilities = {
   supportsConversationRollback: true,
   showPlanModeToggle: true,
   reportsContextWindow: true,
-  compaction: { type: "slash-command", command: "/compact" }
+  compaction: { type: "slash-command", command: "/compact" },
+  // `query.backgroundTasks(toolUseId?)`: "the control-request equivalent of
+  // pressing Ctrl+B in the terminal" (SDK 0.3.278 `sdk.d.ts`).
+  supportsBackgroundTasks: true
 };
 
 export interface ClaudeProbeResult {

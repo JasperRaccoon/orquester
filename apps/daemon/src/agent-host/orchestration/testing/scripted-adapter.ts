@@ -33,6 +33,7 @@ export interface ScriptedCall {
     | "respondToApproval"
     | "respondToUserInput"
     | "compact"
+    | "backgroundTasks"
     | "readThread"
     | "projectHistory"
     | "rollbackThread"
@@ -229,6 +230,10 @@ export function createScriptedAdapter(options: ScriptedAdapterOptions = {}): Scr
       calls.push({ kind: "compact", threadId });
       const failure = take("failCompact");
       if (failure) throw failure;
+    },
+    async backgroundTasks(threadId: string, toolUseId?: string): Promise<boolean> {
+      calls.push({ kind: "backgroundTasks", threadId, detail: { toolUseId } });
+      return true;
     },
 
     async readThread(threadId: string): Promise<ThreadSnapshot> {

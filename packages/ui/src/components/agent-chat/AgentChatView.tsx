@@ -516,6 +516,14 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               onLoadFullOutput={paintOnly ? noop : loadFullOutput}
               onOpenAgent={paintOnly ? noop : setDrillInAgentId}
               onSendQueuedNow={paintOnly ? noop : (id) => dispatch(() => actions.sendQueuedNow(id))}
+              // The user's Ctrl+B (§4.5): offered on a running command only
+              // where the provider can honour it.
+              canBackgroundTasks={
+                !paintOnly && provider?.capabilities?.supportsBackgroundTasks === true
+              }
+              onBackgroundTool={
+                paintOnly ? noop : (toolUseId) => dispatch(() => actions.backgroundTool({ toolUseId }))
+              }
               // A straight pass-through: the store's action already puts the
               // message's text back in the draft and its attachments back as
               // chips (`appendToDraft`), so wrapping it would insert twice.

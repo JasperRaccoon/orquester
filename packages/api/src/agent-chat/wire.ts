@@ -48,6 +48,13 @@ export const agentChatRoutes = {
   revert: (sessionId: string): string => `${sessionBase(sessionId)}/revert`,
   compact: (sessionId: string): string => `${sessionBase(sessionId)}/compact`,
   mode: (sessionId: string): string => `${sessionBase(sessionId)}/mode`,
+  /**
+   * Move a running tool call (or every foreground one) to the background — the
+   * GUI's Ctrl+B. Only a provider whose capabilities carry
+   * `supportsBackgroundTasks` accepts it (Claude, via the SDK's
+   * `backgroundTasks` control).
+   */
+  background: (sessionId: string): string => `${sessionBase(sessionId)}/background`,
   sessionStop: (sessionId: string): string => `${sessionBase(sessionId)}/session/stop`,
 
   // §6.3 reads
@@ -83,9 +90,10 @@ export type AgentChatCommandName =
   | "revert"
   | "compact"
   | "mode"
+  | "background"
   | "session/stop";
 
-/** The nine §6.2 command names, in table order. */
+/** The ten §6.2 command names, in table order. */
 export const AGENT_CHAT_COMMAND_NAMES = [
   "turn",
   "interrupt",
@@ -95,6 +103,7 @@ export const AGENT_CHAT_COMMAND_NAMES = [
   "revert",
   "compact",
   "mode",
+  "background",
   "session/stop"
 ] as const satisfies readonly AgentChatCommandName[];
 
@@ -187,6 +196,15 @@ export interface RevertCommandBody extends AgentChatCommandBase {
 
 export type CompactCommandBody = AgentChatCommandBase;
 
+/**
+ * `/background`: `toolUseId` names the one running call to move (the
+ * `toolUseId` on its activity row); absent moves every foreground task, which
+ * is exactly what Ctrl+B does in the terminal.
+ */
+export interface BackgroundCommandBody extends AgentChatCommandBase {
+  toolUseId?: string;
+}
+
 /** Applied per §3.4 — the ensure-session step runs on the send path. */
 export interface ModeCommandBody extends AgentChatCommandBase {
   runtimeMode?: RuntimeMode;
@@ -205,6 +223,7 @@ export type AgentChatCommandBody =
   | RevertCommandBody
   | CompactCommandBody
   | ModeCommandBody
+  | BackgroundCommandBody
   | SessionStopCommandBody;
 
 /** Maps each command name to its body type. */
@@ -217,6 +236,7 @@ export interface AgentChatCommandBodies {
   revert: RevertCommandBody;
   compact: CompactCommandBody;
   mode: ModeCommandBody;
+  background: BackgroundCommandBody;
   "session/stop": SessionStopCommandBody;
 }
 

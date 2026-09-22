@@ -303,6 +303,13 @@ export interface AdapterCapabilities {
    */
   reportsContextWindow: boolean;
   compaction: ProviderCompaction;
+  /**
+   * The provider can move a running tool call to the background on the user's
+   * request (the `/background` command — Ctrl+B in the Claude terminal, the
+   * SDK's `backgroundTasks` control). Absent means no: the live tool row then
+   * offers no such button.
+   */
+  supportsBackgroundTasks?: boolean;
 }
 
 // ---------------------------------------------------------------------------

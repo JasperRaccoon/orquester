@@ -938,6 +938,26 @@ export class ClaudeSession {
    * T3 does the same by construction: its `interruptTurn` **is**
    * `stopSessionInternal` (`ClaudeAdapter.ts:5289-5297`), i.e. unconditional.
    */
+  /**
+   * The user's Ctrl+B: move the running foreground call(s) to the background.
+   * The CLI answers each blocked tool call with a "running in the background"
+   * result and the turn continues; the task then shows up in
+   * `background_tasks_changed` / `task_started` (`local_bash`) and the roster
+   * lists it as a background row. Nothing to move resolves `false`.
+   */
+  async backgroundTasks(toolUseId?: string): Promise<boolean> {
+    if (this.closed || this.query === undefined) {
+      throw new Error("No live Claude session to background work in.");
+    }
+    if (this.normalizer.turnState === undefined) {
+      return false;
+    }
+    return (await withDeadline(this.query.backgroundTasks(toolUseId), {
+      label: "claude/background_tasks",
+      timeoutMs: this.options.deps.deadlines.cancelMs
+    })) as boolean;
+  }
+
   async interruptTurn(turnId?: string): Promise<void> {
     if (this.closed) {
       return;

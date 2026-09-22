@@ -366,6 +366,12 @@ export interface AgentChatActions {
   /** `/revert`. Conversation only — files are never restored (§5.5). */
   revert(input: { targetTurnCount: number }): Promise<void>;
   compact(): Promise<void>;
+  /**
+   * `/background` — the user's Ctrl+B: move one running tool call (or every
+   * foreground one) to the background so the turn continues. Offered only
+   * where the provider's capabilities carry `supportsBackgroundTasks`.
+   */
+  backgroundTool(input: { toolUseId?: string }): Promise<void>;
   setMode(input: { runtimeMode?: RuntimeMode; modelSelection?: ModelSelection }): Promise<void>;
   stopSession(): Promise<void>;
   /** The existing `POST /api/sessions/:id/upload`; returns the attachment reference. */

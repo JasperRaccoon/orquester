@@ -52,6 +52,13 @@ export interface TimelineRowContextValue {
   onOpenAgent: (agentId: string) => void;
   onSendQueuedNow: (queuedId: string) => void;
   onReturnQueuedToComposer: (queuedId: string) => void;
+  /**
+   * The provider can move a running command to the background on request
+   * (`supportsBackgroundTasks`); the live command row then offers the button.
+   */
+  canBackgroundTasks: boolean;
+  /** The user's Ctrl+B on one running tool call. */
+  onBackgroundTool: (toolUseId: string) => void;
 }
 
 const NOOP = (): void => {};
@@ -85,7 +92,9 @@ const FALLBACK: TimelineRowContextValue = {
   onLoadFullOutput: NOOP,
   onOpenAgent: NOOP,
   onSendQueuedNow: NOOP,
-  onReturnQueuedToComposer: NOOP
+  onReturnQueuedToComposer: NOOP,
+  canBackgroundTasks: false,
+  onBackgroundTool: NOOP,
 };
 
 export const TimelineRowContext = React.createContext<TimelineRowContextValue>(FALLBACK);
