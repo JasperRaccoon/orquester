@@ -281,6 +281,9 @@ child and dies with it; the boot reconcile recovers.
   agent/
     threads/<sessionId>/
       meta.json        ThreadHead; atomic rewrite every 50 events and on every head-shaped change
+      binding.json     the durable provider-session binding: the RESUME CURSOR's real home, plus
+                       adapterKey/runtimeMode/providerInstanceId/status. Never replaced whole —
+                       merged field-wise (undefined = unchanged, null = cleared). See the gotchas.
       events.ndjson    append-only DOMAIN events, per-thread monotonic `seq` — the durable record
       raw.ndjson       untranslated provider frames, REDACTED, rotated 10 MiB x 10, 14 days
       attachments/<id>.<ext>
@@ -338,6 +341,18 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   overlay pointed at by **`GROK_CONFIG_PATH`**. Claude's project-trust write goes to a real
   `~/.claude.json` and must stay atomic (`writeFileAtomic`, mode forced 0600) and confined to a
   realpath'd `projectPath` inside `fsRoot` — never to the request's `cwd`.
+- **The resume cursor lives in `binding.json`, not in the event log.** `thread.session-set`
+  names the WHOLE session block, so an event that omitted `resumeCursor` — a turn settling to
+  `ready`, a stop — replaced it with nothing; the head lost the cursor and the next host, after a
+  drain-restart, opened a **fresh** provider session that remembered nothing. The authority is now
+  `threads/<id>/binding.json` (`apps/daemon/src/agent-host/store/binding.ts`), the Orquester
+  spelling of T3's `provider_session_runtime` row. **It has exactly one writer,
+  `ThreadStore.upsertSessionBinding`, and every write is field-wise: `undefined` means *unchanged*,
+  `null` means *cleared*.** Never add a "replace the binding" call, and never write
+  `resumeCursor: null` on a path that merely does not know the cursor — that is what the omission
+  is for. Reads go through `persistedResumeCursor` (binding, else head), and the head's copy plus
+  the fold's carry-forward stay as the §8 rollback fallback for threads written before the file
+  existed. The `continueAfterRestart` marker deliberately stays on the head, where it already was.
 - **`HISTORICAL_RAW_SOURCE`** (`"history.replay"`) tags every event projected out of a provider's
   *native* history on resume. A replayed row is the past: it claims no token usage and its turns
   are already settled. Anything that treats a raw frame as live must check it.
