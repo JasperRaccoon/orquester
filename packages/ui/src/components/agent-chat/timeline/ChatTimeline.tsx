@@ -13,7 +13,15 @@ import { TimelineRowContext, type TimelineRowContextValue } from "./context";
 import { TimelineRow } from "./TimelineRow";
 
 import { findFirstVisibleIndex, offsetWithinRow, type RowMetric } from "./anchor";
-import { nextFollowState, shouldAnimateFollow } from "./follow";
+import {
+  armSettleLatch,
+  isSettling,
+  nextFollowState,
+  shouldAnimateFollow,
+  tickSettleLatch,
+  timelineListIdentity,
+  type TimelineSettleLatch
+} from "./follow";
 
 /**
  * How long a scroll settles before its position is written into the §7.2 LRU.
@@ -391,9 +399,81 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
     []
   );
 
-  // Restore the remembered reading position on mount and on every thread
-  // switch. A thread that was left at the end is re-pinned to the end rather
-  // than to its old pixel offset, because its content has grown since.
+  // -------------------------------------------------------------------------
+  // The settle latch
+  // -------------------------------------------------------------------------
+
+  /**
+   * A **named two-frame latch**, not a time window.
+   *
+   * While it holds, every follow scroll for this list is instant: two frames
+   * covers the fresh-data layout pass and the initial end pin, which is
+   * exactly the window in which something would otherwise be seen to travel.
+   * It is armed on a list-identity change and on the first page of rows an
+   * identity receives, and it is matched on the identity, so a latch armed for
+   * the thread the user just left can never affect the one they arrived at.
+   *
+   * Held in a ref: the decision is read at call time inside a scroll handler,
+   * and re-rendering the whole timeline twice per switch to publish a boolean
+   * nothing paints would be strictly worse.
+   *
+   * *T3: `MessagesTimeline.tsx:555-567, :618-631` (`settlingListIdentity`).*
+   */
+  const listIdentity = timelineListIdentity(sessionId, agentId);
+  const settleRef = React.useRef<TimelineSettleLatch>(armSettleLatch(listIdentity));
+  const settleFrames = React.useRef<number[]>([]);
+
+  const cancelSettleFrames = React.useCallback(() => {
+    for (const handle of settleFrames.current) cancelAnimationFrame(handle);
+    settleFrames.current = [];
+  }, []);
+
+  const armSettling = React.useCallback(
+    (identity: string) => {
+      cancelSettleFrames();
+      settleRef.current = armSettleLatch(identity);
+      const first = requestAnimationFrame(() => {
+        settleRef.current = tickSettleLatch(settleRef.current);
+        const second = requestAnimationFrame(() => {
+          settleRef.current = tickSettleLatch(settleRef.current);
+          settleFrames.current = [];
+        });
+        settleFrames.current = [second];
+      });
+      settleFrames.current = [first];
+    },
+    [cancelSettleFrames]
+  );
+
+  React.useEffect(() => cancelSettleFrames, [cancelSettleFrames]);
+
+  const animateNow = React.useCallback(
+    (firstPaint: boolean) =>
+      shouldAnimateFollow({
+        working,
+        reducedMotion,
+        firstPaint,
+        settling: isSettling(settleRef.current, listIdentity)
+      }),
+    [working, reducedMotion, listIdentity]
+  );
+
+  /** Whether this list has ever had rows, per identity. */
+  const hadRowsRef = React.useRef(rows.length > 0);
+
+  /**
+   * **The list mounts at its end.**
+   *
+   * A layout effect, so the pin happens after layout and *before* the browser
+   * paints: a thread opens already scrolled to the bottom rather than at the
+   * top and then travelling. A remembered non-end position is the only case
+   * that restores an offset instead — an absent or at-end remembered position
+   * goes straight to the end, because the content has grown since.
+   *
+   * *T3: `MessagesTimeline.tsx:1287` — `initialScrollAtEnd={… &&
+   * rememberedPosition?.atEnd !== false}`, with `positionedThreadKey`
+   * initialised (`:548-551`) so no restore scroll runs in that case.*
+   */
   React.useLayoutEffect(() => {
     const node = scrollerRef.current;
     if (!node) return;
@@ -425,36 +505,26 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
       firstPaintRef.current = false;
     });
     hadRowsRef.current = rows.length > 0;
-    instantUntilRef.current = 0;
+    armSettling(listIdentity);
     // Only on a thread switch: a rows change must not re-run the restore.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, agentId]);
 
-  // The thread's rows usually arrive AFTER mount (a snapshot fetch and a fold,
-  // 1–3 s on a long thread), when `firstPaint` is long over — so the first
-  // real content used to glide down to the end in a visible animation. The
-  // first arrival of rows, and the layout settling right after it, is
-  // treated as first paint: the thread opens already at its end.
-  const hadRowsRef = React.useRef(false);
-  const instantUntilRef = React.useRef(0);
-  const animateNow = React.useCallback(
-    (firstPaint: boolean) =>
-      Date.now() < instantUntilRef.current
-        ? false
-        : shouldAnimateFollow({ working, reducedMotion, firstPaint }),
-    [working, reducedMotion]
-  );
-
   // Re-pin on new rows. `bottomInset` is deliberately NOT a dependency — the
   // composer growing must never move the messages the user is reading (§7.3).
   React.useLayoutEffect(() => {
+    // A cold thread's rows arrive AFTER mount (a snapshot fetch and a fold,
+    // 1–3 s on a long thread) — that landing is this list's fresh-data layout
+    // pass, T3's `initialScrollAtEnd` moment, so it re-arms the latch and the
+    // first end pin snaps rather than gliding. (A *warm* remount already has
+    // its rows at first render and was pinned by the layout effect above.)
     if (!hadRowsRef.current && rows.length > 0) {
       hadRowsRef.current = true;
-      instantUntilRef.current = Date.now() + 600;
+      armSettling(listIdentity);
     }
     if (!follow) return;
     scrollToEnd(animateNow(firstPaintRef.current));
-  }, [rows, follow, scrollToEnd, animateNow]);
+  }, [rows, follow, scrollToEnd, animateNow, armSettling, listIdentity]);
 
   // Re-pin on row GROWTH and layout: a streamed paragraph grows a row that is
   // already mounted, which no render of ours observes.

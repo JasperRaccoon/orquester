@@ -10,7 +10,11 @@ import { describe, it } from "node:test";
 
 import type { DomainEvent } from "@orquester/api/agent-chat";
 
-import { CONTINUATION_FAILED_MESSAGE, CONTINUATION_PROMPT } from "../host-protocol.ts";
+import {
+  CONTINUATION_FAILED_MESSAGE,
+  CONTINUATION_PROMPT,
+  CONTINUATION_SEND_FAILED_MESSAGE
+} from "../host-protocol.ts";
 import {
   createScriptedAdapter,
   createTestHost,
@@ -281,6 +285,94 @@ describe("reconcile (§3.3)", () => {
     await next.settle();
     assert.equal(next.adapter.calls.filter((call) => call.kind === "sendTurn").length, 0);
     assert.equal(headOf(store, threadId).session.status, "error");
+    await next.stop();
+  });
+
+  it("writes the prepared marker and the binding BEFORE the continuation is sent", async () => {
+    const { store, threadId, first } = await threadInFlight();
+    await first.stop();
+
+    const next = createTestHost({ store, continuationEnabled: () => true });
+    // What the world looked like at the instant the provider was asked. §3.3:
+    // "the second write is what makes recovery survive a host that dies
+    // BETWEEN resuming and sending".
+    const snapshot = (label: string) => ({
+      label,
+      marker: store.heads.get(threadId)?.continueAfterRestart,
+      bindingStatus: store.bindings.get(threadId)?.status,
+      headStatus: store.heads.get(threadId)?.session.status
+    });
+    const observed: Array<ReturnType<typeof snapshot>> = [];
+    const start = next.adapter.startSession.bind(next.adapter);
+    next.adapter.startSession = async (input) => {
+      observed.push(snapshot("startSession"));
+      return start(input);
+    };
+    const send = next.adapter.sendTurn.bind(next.adapter);
+    next.adapter.sendTurn = async (input) => {
+      observed.push(snapshot("sendTurn"));
+      return send(input);
+    };
+    await next.orchestrator.reconcile();
+    await next.settle();
+
+    assert.deepEqual(
+      observed.map((entry) => entry.label),
+      ["startSession", "sendTurn"]
+    );
+    // Both writes are on disk before the provider is touched at all.
+    assert.deepEqual(observed[0]?.marker, { turnId: "turn-1", prepared: true });
+    assert.equal(observed[0]?.bindingStatus, "starting");
+    assert.equal(observed[0]?.headStatus, "starting");
+    // And the marker is still there when the continuation is actually sent —
+    // a host dying in THIS window must be recovered by the next boot.
+    assert.deepEqual(observed[1]?.marker, { turnId: "turn-1", prepared: true });
+    await next.stop();
+  });
+
+  it("a continuation that fails says so, and clears its marker", async () => {
+    const { store, threadId, first } = await threadInFlight();
+    await first.stop();
+
+    const next = createTestHost({ store, continuationEnabled: () => true });
+    next.adapter.failNext("failSendTurn", new Error("provider refused"));
+    await next.orchestrator.reconcile();
+    await next.settle();
+
+    const head = headOf(store, threadId);
+    assert.equal(head.session.status, "error");
+    assert.equal(head.session.activeTurnId, null);
+    // The ATTEMPTED-and-failed copy, not the never-eligible one.
+    assert.equal(head.session.lastError, CONTINUATION_SEND_FAILED_MESSAGE);
+    assert.equal(head.continueAfterRestart, undefined);
+    assert.equal(store.bindings.get(threadId)?.status, "stopped");
+    // The cursor survives the failure: the user sends again into the SAME
+    // conversation rather than a fresh one.
+    assert.deepEqual(store.bindings.get(threadId)?.resumeCursor, { cursor: "turn-1" });
+    await next.stop();
+  });
+
+  it("a prepare that cannot reach disk settles instead of sending", async () => {
+    const { store, threadId, first } = await threadInFlight();
+    await first.stop();
+
+    const next = createTestHost({ store, continuationEnabled: () => true });
+    const append = store.append.bind(store);
+    let failed = false;
+    store.append = async (input) => {
+      if (!failed && input.threadId === threadId) {
+        failed = true;
+        throw new Error("disk is full");
+      }
+      return append(input);
+    };
+    await next.orchestrator.reconcile();
+    await next.settle();
+
+    assert.equal(next.adapter.calls.filter((call) => call.kind === "sendTurn").length, 0);
+    assert.equal(headOf(store, threadId).session.lastError, CONTINUATION_FAILED_MESSAGE);
+    assert.equal(headOf(store, threadId).continueAfterRestart, undefined);
+    store.append = append;
     await next.stop();
   });
 

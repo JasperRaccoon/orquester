@@ -35,6 +35,7 @@ import type {
 } from "@orquester/api/agent-chat";
 
 import { AGENT_HOST_DEADLINES } from "../../support/deadline.ts";
+import { pendingStatusMessage } from "../pending.ts";
 import type { OpenCodeClient } from "./http.ts";
 import {
   openCodeRoutes,
@@ -340,6 +341,41 @@ export function unusableSnapshot(input: {
         : `OpenCode is not installed. Orquester requires v${MINIMUM_OPENCODE_VERSION} or newer.`),
     auth: { status: "unknown" },
     checkedAt: input.checkedAt,
+    models: [],
+    slashCommands: [...SYNTHESISED_COMMANDS],
+    skills: [],
+    capabilities: OPENCODE_CAPABILITIES
+  };
+}
+
+/**
+ * The §3.2 PENDING snapshot: what `GET /providers` answers for OpenCode before
+ * any probe has run in this host process. Synchronous, no I/O.
+ *
+ * *T3: `apps/server/src/provider/makeManagedServerProvider.ts:69-73` —
+ * `initialSnapshot(settings)`, seeded at construction before any probe.*
+ *
+ * **`models` is empty by construction.** OpenCode's catalog is `GET /provider`
+ * on a running `opencode serve` — 4.3 MB and 378 models on the capture host,
+ * entirely dependent on which providers the user has connected. There is
+ * nothing honest to bundle. OpenCode's window is closed by layer two (the
+ * correlated disk cache) and layer three (the forced boot probe), not here;
+ * this seed exists so the provider is **present** in `GET /providers` — a row
+ * that says "not checked yet" rather than a provider the client believes does
+ * not exist.
+ */
+export function pendingSnapshot(checkedAt: string): ProviderSnapshot {
+  return {
+    id: "opencode",
+    refIds: [...OPENCODE_REF_IDS],
+    installed: false,
+    version: null,
+    // Never `"error"`: an unlooked-at provider must not raise the client's
+    // "sign in again" toast (`adapters/pending.ts`).
+    status: "unknown",
+    message: pendingStatusMessage("OpenCode"),
+    auth: { status: "unknown" },
+    checkedAt,
     models: [],
     slashCommands: [...SYNTHESISED_COMMANDS],
     skills: [],

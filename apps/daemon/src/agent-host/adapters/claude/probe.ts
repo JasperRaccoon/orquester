@@ -27,6 +27,7 @@ import type {
 
 import { AGENT_HOST_DEADLINES, withDeadline } from "../../support/deadline.ts";
 import type { ClaudeAdapterDeps } from "./deps.ts";
+import { pendingStatusMessage } from "../pending.ts";
 import { buildClaudeProbeOptions } from "./launch.ts";
 import {
   FALLBACK_CLAUDE_MODELS,
@@ -286,13 +287,37 @@ export interface BuildSnapshotInput {
   workspaceSnapshots?: WorkspaceSnapshot[];
 }
 
+/**
+ * §7.7: **`unknown` is not `unauthenticated`.**
+ *
+ * T3's Claude driver emits `auth: {status:"unknown"}` on *every* failure and
+ * ambiguity path — disabled, version probe failed, timed out, capabilities
+ * missing, no credentials found, still pending — and `"authenticated"` only
+ * when the initialization result positively yields credentials
+ * (`ClaudeProvider.ts:452,478,496,520,552,582-587,617,632`). `unauthenticated`
+ * is reserved for drivers that can *prove* it from a credential file or an
+ * explicit not-logged-in answer: Codex's `account/read` with
+ * `requiresOpenaiAuth` (`CodexProvider.ts:553`) and Grok's `models` output
+ * saying it is logged out (`GrokProvider.ts:491`).
+ *
+ * The Claude SDK's init result is NOT such a proof. `claude` initialises fine
+ * under an API-key/Bedrock environment, and under a first-party login whose
+ * account block the CLI simply does not return; reading that silence as a
+ * verdict is what made the client toast "claude needs signing in again" at a
+ * host whose managed accounts were all valid — the bug
+ * `agent-chat/provider-auth-overlay.ts` was written to paper over. The overlay
+ * stays (it repairs the same claim arriving from an older host), but the probe
+ * no longer manufactures the claim in the first place.
+ */
 export function buildClaudeAuth(probe: ClaudeProbeResult | undefined): ProviderAuth {
   if (!probe) {
     return { status: "unknown" };
   }
   if (probe.email === undefined && probe.subscriptionType === undefined) {
+    // Ambiguous, never a verdict: the init succeeded but told us nothing about
+    // the account.
     return {
-      status: "unauthenticated",
+      status: "unknown",
       ...(probe.apiProvider !== undefined ? { type: probe.apiProvider } : {})
     };
   }
@@ -361,6 +386,41 @@ export function buildClaudeSnapshot(input: BuildSnapshotInput): {
   };
 
   return { snapshot, scopedLimitNames: usage?.names ?? {} };
+}
+
+/**
+ * The §3.2 PENDING snapshot: what `GET /providers` answers for Claude before
+ * any probe has run in this host process. Synchronous, no I/O.
+ *
+ * *T3: `apps/server/src/provider/Layers/ClaudeProvider.ts:595-640`
+ * (`makePendingClaudeProvider`) — `installed:false`, `version:null`,
+ * `auth:{status:"unknown"}`, the "has not been checked in this session yet"
+ * message, and the full bundled model catalog so the provider is launchable
+ * from the first millisecond.*
+ *
+ * `status` is `"unknown"` rather than T3's `"warning"` (no such member here) —
+ * and deliberately **not** `"error"`, which would make the client raise the
+ * "sign in again" toast for a provider nobody has looked at yet.
+ */
+export function pendingClaudeSnapshot(checkedAt: string): ProviderSnapshot {
+  return {
+    id: "claude",
+    refIds: [...CLAUDE_REF_IDS],
+    installed: false,
+    version: null,
+    status: "unknown",
+    message: pendingStatusMessage("Claude"),
+    auth: { status: "unknown" },
+    checkedAt,
+    // The bundled catalog, exactly as T3 seeds `BUNDLED_CLAUDE_MODEL_CATALOG`:
+    // a pending snapshot with no model is still unlaunchable.
+    models: [...FALLBACK_CLAUDE_MODELS],
+    // `/compact` is a host route with no CLI equivalent (§4.6.3), so it exists
+    // whether or not the CLI has been asked anything.
+    slashCommands: withSynthesisedCommands([]),
+    skills: [],
+    capabilities: CLAUDE_CAPABILITIES
+  };
 }
 
 /**

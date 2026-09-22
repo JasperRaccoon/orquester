@@ -26,6 +26,7 @@ import type {
 
 import { AGENT_HOST_DEADLINES, withDeadline } from "../../support/deadline.ts";
 import type { CodexProtocol } from "./_generated/index.ts";
+import { pendingStatusMessage } from "../pending.ts";
 import { CODEX_ADAPTER_CAPABILITIES, CODEX_REF_IDS } from "./capabilities.ts";
 import type { CodexPeer } from "./protocol.ts";
 import { usageWindowsFromRateLimits } from "./usage.ts";
@@ -206,6 +207,41 @@ export async function probeCodex(input: CodexProbeInput): Promise<ProviderSnapsh
   };
 }
 
+/**
+ * The §3.2 PENDING snapshot: what `GET /providers` answers for Codex before
+ * any probe has run in this host process. Synchronous, no I/O.
+ *
+ * *T3: `apps/server/src/provider/makeManagedServerProvider.ts:69-73` —
+ * `initialSnapshot(settings)`, seeded at construction before any probe.*
+ *
+ * **`models` is empty, and that is not a gap in this layer.** Codex's catalog
+ * exists only behind `model/list` on a running `codex app-server`; there is no
+ * manifest to bundle and inventing dated slugs would be worse than nothing —
+ * a launch names a model the installed CLI may not serve. What closes Codex's
+ * window is layer two (the correlated disk cache, so every boot after the
+ * first is instant) and layer three (the forced boot probe, seconds rather
+ * than five minutes). The command catalog is static, so it is seeded.
+ */
+export function pendingCodexSnapshot(nowIso: string): ProviderSnapshot {
+  return {
+    id: "codex",
+    refIds: [...CODEX_REF_IDS],
+    installed: false,
+    version: null,
+    // Never `"error"`: an unlooked-at provider must not raise the client's
+    // "sign in again" toast (`adapters/pending.ts`).
+    status: "unknown",
+    message: pendingStatusMessage("Codex"),
+    auth: { status: "unknown" },
+    checkedAt: nowIso,
+    models: [],
+    slashCommands: [...CODEX_SLASH_COMMANDS],
+    commandCatalogNote: CODEX_COMMAND_CATALOG_NOTE,
+    skills: [],
+    capabilities: CODEX_ADAPTER_CAPABILITIES
+  };
+}
+
 /** The snapshot for a host where `codex` is not on PATH at all. */
 export function uninstalledCodexSnapshot(nowIso: string, message?: string): ProviderSnapshot {
   return {
@@ -228,7 +264,14 @@ export function uninstalledCodexSnapshot(nowIso: string, message?: string): Prov
 // Pieces
 // ---------------------------------------------------------------------------
 
-function toProviderAuth(account: CodexProtocol.v2.GetAccountResponse | undefined): ProviderAuth {
+/**
+ * §7.7: `unauthenticated` only on PROOF — here, `account/read` answering with
+ * no account AND `requiresOpenaiAuth`. An unreadable answer, or one that
+ * simply has no account while the CLI does not require an OpenAI login, is
+ * `unknown`. *T3: `CodexProvider.ts:540-558`.* Exported for the shared
+ * auth-mapping test.
+ */
+export function toProviderAuth(account: CodexProtocol.v2.GetAccountResponse | undefined): ProviderAuth {
   if (account === undefined) {
     return { status: "unknown" };
   }

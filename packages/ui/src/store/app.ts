@@ -31,8 +31,8 @@ import { loadChatPrefs, saveChatPrefs, type ChatPrefs } from "../lib/chat-prefs"
 import {
   hasUnseenCompletion,
   loadThreadVisits,
+  markThreadRead,
   markThreadUnread,
-  markThreadVisited,
   saveThreadVisits,
   type ThreadVisits
 } from "../lib/thread-visits";
@@ -73,7 +73,8 @@ import { mergeProviderUsageWindows } from "../components/topbar/usage-format";
 import { isAgentLikeSession } from "../lib/session-kind";
 import {
   rememberAgentAuthDismissal,
-  shouldRaiseAgentAuthNotice
+  shouldRaiseAgentAuthNotice,
+  type AgentAuthNotice
 } from "../lib/agent-auth-notice";
 import { ProjectSetupError } from "../lib/project-setup-error";
 import { invalidateProjectIndex } from "../lib/project-index";
@@ -603,6 +604,15 @@ function upsertSession(sessions: SessionSummary[], next: SessionSummary): Sessio
   return copy;
 }
 
+/**
+ * Record a visit to a chat thread the user is **currently looking at** (§7.7).
+ * The rule — stamp the turn's completion, never `now()` — lives in
+ * `lib/thread-visits.ts`; this is only the `SessionSummary` adapter.
+ */
+function visitChatThread(visits: ThreadVisits, session: SessionSummary): ThreadVisits {
+  return markThreadRead(visits, session.id, session.latestTurn?.completedAt);
+}
+
 function upsertBrowser(browsers: BrowserSummary[], browser: BrowserSummary): BrowserSummary[] {
   const at = browsers.findIndex((b) => b.id === browser.id);
   if (at === -1) return [...browsers, browser];
@@ -755,12 +765,7 @@ export interface AppState {
    * provider stays signed out, so without this a dismissal never sticks.
    */
   dismissedAgentAuthErrors: string[];
-  agentAuthError: {
-    sessionId: string;
-    /** The registry entry's display name, e.g. "Claude Code". */
-    agentName: string;
-    message: string;
-  } | null;
+  agentAuthError: AgentAuthNotice | null;
   /**
    * Provider rate-limit windows harvested from the chat streams'
    * `account.rate-limits.updated` (§7.7), merged **by window id** per agent so a
@@ -979,7 +984,7 @@ export interface AppState {
   /** Dismiss the transient refused-resume notice. */
   dismissResumeError: () => void;
   /** Raise the chat provider auth-error toast (§7.7). Replaces any current one. */
-  reportAgentAuthError: (error: { sessionId: string; agentName: string; message: string }) => void;
+  reportAgentAuthError: (error: AgentAuthNotice) => void;
   /** Dismiss the chat provider auth-error toast. */
   dismissAgentAuthError: () => void;
   /**
@@ -2732,7 +2737,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       const session = state.sessions.find((s) => s.id === id);
       const threadVisits =
         session && session.kind === "agent-chat"
-          ? markThreadVisited(state.threadVisits, id, new Date().toISOString())
+          ? visitChatThread(state.threadVisits, session)
           : state.threadVisits;
       if (threadVisits !== state.threadVisits) {
         saveThreadVisits(threadVisits);
@@ -3168,12 +3173,31 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
       // Seed the activity snapshot the daemon ships on the summary (running
       // sessions only); server "session.activity" events keep it fresh after.
-      set((state) => ({
-        sessions: upsertSession(state.sessions, summary),
-        ...(summary.activity
-          ? { activityById: { ...state.activityById, [summary.id]: summary.activity } }
-          : {})
-      }));
+      set((state) => {
+        // A completion that lands WHILE the user is on the tab is already read
+        // (§7.7, T3 `ChatView.tsx:2108-2125` — the effect keyed on
+        // `latestTurn.completedAt`, not just on mount). Without this, only the
+        // activation stamps, so finishing a turn in front of the user left the
+        // tab marked unread.
+        const key = state.currentProject?.path ?? state.currentWorkspace ?? null;
+        const looking =
+          key !== null &&
+          state.activeTabByProject[key] === summary.id &&
+          summary.kind === "agent-chat";
+        const threadVisits = looking
+          ? visitChatThread(state.threadVisits, summary)
+          : state.threadVisits;
+        if (threadVisits !== state.threadVisits) {
+          saveThreadVisits(threadVisits);
+        }
+        return {
+          sessions: upsertSession(state.sessions, summary),
+          threadVisits,
+          ...(summary.activity
+            ? { activityById: { ...state.activityById, [summary.id]: summary.activity } }
+            : {})
+        };
+      });
     } else if (event.type === "session.closed") {
       const { id } = event.payload as { id: string };
       set((state) => removeSession(state, id));
@@ -3194,10 +3218,15 @@ export const useAppStore = create<AppState>((set, get) => ({
 setProviderSideEffects({
   onRateLimits: (agentRefId, update) =>
     useAppStore.getState().applyProviderRateLimits(agentRefId, update),
-  onAuthError: ({ adapterId, agentName, message }) =>
-    useAppStore
-      .getState()
-      .reportAgentAuthError({ sessionId: `provider:${adapterId}`, agentName, message })
+  onAuthError: ({ adapterId, agentName, message, tone, providerStatus, authStatus }) =>
+    useAppStore.getState().reportAgentAuthError({
+      sessionId: `provider:${adapterId}`,
+      agentName,
+      message,
+      tone,
+      providerStatus,
+      authStatus
+    })
 });
 
 /** First remaining tab id for a context (session, then browser, then file, then git, then to-do). */

@@ -39,13 +39,17 @@ import {
   AGENT_RECEIPTS_RING_SIZE,
   createDefaultAgentReceiptsFile,
   parseAgentDomainEvent,
+  parseAgentProviderSessionBinding,
   parseAgentReceiptsFile,
   parseAgentThreadHead
 } from "@orquester/config";
 import type {
+  AgentAdapterId,
   AttachmentRef,
   CommandReceipt,
   DomainEvent,
+  ProviderSessionBinding,
+  ProviderSessionBindingPatch,
   ThreadHead,
   ThreadItem
 } from "@orquester/api/agent-chat";
@@ -76,6 +80,7 @@ import {
   parseThreadSegmentFromAttachmentId,
   toSafeThreadAttachmentSegment
 } from "./attachments.ts";
+import { BINDING_FILE_NAME, mergeSessionBinding } from "./binding.ts";
 import { atomicWriteFile, readFileOrNull, readLastCompleteLine, splitCompleteLines } from "./files.ts";
 import { applyEventToHead } from "./head.ts";
 import { RawFrameLog, pruneRawLogDirectory } from "./raw-log.ts";
@@ -94,6 +99,8 @@ const threadMetaPath = (rootDir: string, threadId: string): string =>
   path.join(threadDir(rootDir, threadId), "meta.json");
 const threadEventsPath = (rootDir: string, threadId: string): string =>
   path.join(threadDir(rootDir, threadId), "events.ndjson");
+const threadBindingPath = (rootDir: string, threadId: string): string =>
+  path.join(threadDir(rootDir, threadId), BINDING_FILE_NAME);
 const threadRawPath = (rootDir: string, threadId: string): string =>
   path.join(threadDir(rootDir, threadId), "raw.ndjson");
 const threadAttachmentsDir = (rootDir: string, threadId: string): string =>
@@ -183,6 +190,11 @@ interface ThreadRuntime {
   /** Highest sequence known to be on disk. */
   seq: number;
   head: ThreadHead | null;
+  /**
+   * `binding.json`, cached after the first read. `undefined` means "not read
+   * yet"; `null` means "read, and this thread has none".
+   */
+  binding: ProviderSessionBinding | null | undefined;
   eventsSinceHeadSave: number;
   /** The per-thread write queue: every mutation chains onto it. */
   queue: Promise<unknown>;
@@ -315,6 +327,7 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
       entry = {
         seq: 0,
         head: null,
+        binding: undefined,
         eventsSinceHeadSave: 0,
         queue: Promise.resolve(),
         raw: null,
@@ -495,6 +508,55 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
     await atomicWriteFile(
       threadMetaPath(rootDir, head.id),
       `${JSON.stringify(head, null, 2)}\n`
+    );
+  }
+
+  // --- provider session binding (§3.3, §4.1) -------------------------------
+
+  /**
+   * Read `binding.json` once per thread and cache it. An unreadable or
+   * undecodable file is `null` — "this thread has no binding", which the
+   * orchestrator reads as "fall back to the head's cursor" (§8). It never
+   * marks the thread `error`: a lost binding costs one resume, a lost thread
+   * costs the conversation.
+   */
+  async function readBinding(threadId: string): Promise<ProviderSessionBinding | null> {
+    const entry = runtime(threadId);
+    if (entry.binding !== undefined) {
+      return entry.binding;
+    }
+    let binding: ProviderSessionBinding | null = null;
+    try {
+      const raw = await readFileOrNull(threadBindingPath(rootDir, threadId));
+      if (raw !== null) {
+        const parsed = parseAgentProviderSessionBinding(JSON.parse(raw));
+        binding =
+          parsed === null
+            ? null
+            : ({
+                threadId: parsed.threadId,
+                adapter: parsed.adapter,
+                adapterKey: parsed.adapterKey,
+                runtimeMode: parsed.runtimeMode,
+                providerInstanceId: parsed.providerInstanceId,
+                status: parsed.status,
+                resumeCursor: parsed.resumeCursor ?? null,
+                providerThreadId: parsed.providerThreadId,
+                lastSeenAt: parsed.lastSeenAt
+              } satisfies ProviderSessionBinding);
+      }
+    } catch {
+      binding = null;
+    }
+    entry.binding = binding;
+    return binding;
+  }
+
+  async function writeBinding(binding: ProviderSessionBinding): Promise<void> {
+    await fsp.mkdir(threadDir(rootDir, binding.threadId), { recursive: true });
+    await atomicWriteFile(
+      threadBindingPath(rootDir, binding.threadId),
+      `${JSON.stringify({ version: 1, ...binding }, null, 2)}\n`
     );
   }
 
@@ -701,6 +763,39 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
       });
     },
 
+    async loadBinding(threadId: string): Promise<ProviderSessionBinding | null> {
+      assertSafeThreadId(threadId);
+      return readBinding(threadId);
+    },
+
+    /**
+     * Field-wise, on the thread's own write queue, so two concurrent writers
+     * cannot lose each other's fields (§3.3). `undefined` keeps what is
+     * stored; `null` clears it. There is no "replace the binding" call, by
+     * construction — that is what erased the cursor from the head.
+     */
+    async upsertSessionBinding(input: {
+      threadId: string;
+      adapter: AgentAdapterId;
+      patch: ProviderSessionBindingPatch;
+    }): Promise<ProviderSessionBinding> {
+      assertSafeThreadId(input.threadId);
+      return enqueue(input.threadId, async () => {
+        const entry = runtime(input.threadId);
+        const existing = await readBinding(input.threadId);
+        const merged = mergeSessionBinding({
+          threadId: input.threadId,
+          existing,
+          patch: input.patch,
+          fallbackAdapter: input.adapter,
+          now: clock.nowIso()
+        });
+        await writeBinding(merged);
+        entry.binding = merged;
+        return merged;
+      });
+    },
+
     async listThreads(): Promise<string[]> {
       try {
         const entries = await fsp.readdir(threadsDir(rootDir), { withFileTypes: true });
@@ -734,6 +829,7 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
         }
         entry.raw?.close();
         entry.raw = null;
+        entry.binding = undefined;
         await fsp.rm(threadDir(rootDir, threadId), { recursive: true, force: true });
         threads.delete(threadId);
         loaded.delete(threadId);

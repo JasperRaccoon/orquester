@@ -288,6 +288,24 @@ export function createScriptedAdapter(options: ScriptedAdapterOptions = {}): Scr
         skills: [],
         capabilities
       };
+    },
+
+    /** §3.2 layer one: the synchronous, never-`error` pending seed. */
+    pendingSnapshot(checkedAt: string): ProviderSnapshot {
+      return {
+        id,
+        refIds: [id],
+        installed: false,
+        version: null,
+        status: "unknown",
+        message: `${id} provider status has not been checked in this session yet.`,
+        auth: { status: "unknown" },
+        checkedAt,
+        models: [],
+        slashCommands: [],
+        skills: [],
+        capabilities
+      };
     }
   };
 

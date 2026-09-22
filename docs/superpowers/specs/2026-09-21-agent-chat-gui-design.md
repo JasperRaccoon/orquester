@@ -312,6 +312,58 @@ for a version, longer for an auth check that may touch disk or network.
 
 *T3: `apps/server/src/provider/makeManagedServerProvider.ts:248-283` — the interval loop, re-reading its interval each tick and racing a settings change against the sleep; `:64` + `:174-179` — refreshes serialised by a one-permit semaphore; `:129-152` — identical settings return the cache without probing; `:207-221` + `:264-271` — the demand gate; `packages/contracts/src/settings.ts:921` + `:1150-1153` — a 5-minute default, user-configurable; `apps/server/src/provider/providerStatusCache.ts:108-123` — the per-instance on-disk snapshot, with identity carried inside the file because "the filename alone is not trusted as a routing key"; `apps/server/src/provider/providerSnapshot.ts:23-25` — 4 s generic and 10 s auth probe timeouts*
 
+*Built: **a fresh host never answers `GET /providers` with `[]`, in three
+layers.** As first shipped, the registry started empty and only the 5-minute
+interval filled it, so after the 2026-09-22 deploy every launcher on vps-a/vps-b
+read "Still loading this agent's models" for five minutes and no chat could
+open. T3 never has that window, and its three mechanisms are adopted whole
+(`apps/daemon/src/agent-host/orchestration/provider-snapshots.ts`):*
+
+1. ***A pending seed, synchronously at construction** — before `load()` and
+   before any probe, the registry stores one snapshot per adapter from
+   `ADAPTER_PENDING_SNAPSHOTS` (`adapters/pending.ts`, and a `pendingSnapshot()`
+   on `AgentAdapter` so a new adapter cannot forget it). It carries
+   `status:"unknown"` (T3's `"warning"` has no member here), `auth:{status:
+   "unknown"}`, the sentence "… provider status has not been checked in this
+   session yet.", and **the best catalogue the adapter can name without I/O**:
+   Claude's bundled family aliases (`FALLBACK_CLAUDE_MODELS` — `default`,
+   `opus`, `sonnet`, `haiku`, `fable`) and Grok's two, so those launchers work
+   on a cold host. Codex and OpenCode read their catalogues off a live server
+   and answer `[]`; their row exists (the provider is listed, not missing) and
+   layers two and three close their window. **Never `status:"error"`** — that
+   would make §7.7's toast fire for a provider nobody has looked at. A pending
+   row is never persisted and never hydrated.
+   *T3: `makeManagedServerProvider.ts:69-73`; `Layers/ClaudeProvider.ts:595-640`.*
+2. ***The disk cache is correlated, not merely keyed.** The cache file is v2:
+   each row is `{identity, snapshot}` where identity is `{adapterId,
+   hostProtocolVersion, binPath, version}`. A row hydrates only when its
+   adapter id agrees in all three places (map key, identity, snapshot), the
+   protocol version matches, and the `binPath` still resolves to the same
+   executable — so a cache written before an `npm install -g` moved the binary
+   is discarded rather than rendered. A v1 identity-less payload is discarded
+   outright. A correlated row **overrides** the pending seed.
+   *T3: `Layers/ProviderRegistry.ts:292-352` — "old identity-less payloads are
+   discarded"; `:743-751` — "on-disk state wins where present and pending
+   fallbacks fill the gaps"; `providerStatusCache.ts:115-160`.*
+3. ***The registry forces one probe of every provider at boot itself**
+   (`startBootRefresh()`), called by `main.ts` **after** `host.openGate()` and
+   **never awaited**: the socket is already bound and readiness already
+   announced, so a probe's deadline can never delay either. Serialised through
+   the same one-permit chain, and idempotent. The 5-minute interval is now only
+   a top-up and stays demand-gated on a live watcher; the first-watcher priming
+   that was the stopgap is kept purely as a no-op fallback for a registry
+   nobody kicked.*
+   *T3: `makeManagedServerProvider.ts:280-284` —
+   `applySnapshot(initialSettings, {forceRefresh: true})` under
+   `Effect.forkScoped`.*
+
+*Client side nothing branches on `status`: `resolveLaunchModel`
+(`packages/ui/src/lib/launch-models.ts`) takes `Pick<ProviderSnapshot,
+"models">`, so a pending snapshot with a catalogue is launchable exactly like
+any other (the host validates `modelSelection.model` at thread creation), and
+"Still loading this agent's models" is reserved for a genuinely empty
+catalogue.*
+
 New runtime dependencies for the daemon package: `@anthropic-ai/claude-agent-sdk`,
 `@opencode-ai/sdk`. Both are plain npm packages.
 
@@ -331,6 +383,44 @@ first, so an adopted host is not reconciled against itself.
 4. Clear the marker on success. If resume fails, settle the turn as `failed` with
    `errorMessage: "The agent did not survive a restart. Send a new message to continue."` and
    emit `runtime.error`. Never leave a running state without a live process behind it.
+
+*Built: step 2 resumes from the **binding's** cursor
+(`threads/<id>/binding.json`), falling back to the head's — see "The resume
+cursor is not event-sourced" below. Step 4 uses two messages rather than one,
+as T3 does: a thread that was never eligible (no cursor, closed tab, a project
+that opted out, a marker for another turn) settles with the sentence above,
+while a continuation that was **attempted** and failed settles with `"Could not
+continue this thread after the server restart. Send a new message to
+continue."` — the user is told the thread could not be picked up, not that it
+was never eligible. Both clear the marker and leave the cursor alone, so the
+thread is still resumable by hand.*
+
+**The resume cursor is not event-sourced.** It lives in a per-thread
+`binding.json` beside `meta.json` that is only ever written field-wise through
+one `upsertSessionBinding`, whose `undefined` means "unchanged" and whose `null`
+means "cleared". `thread.session-set` names the whole session block, so an event
+that omitted the cursor replaced it with nothing: the head lost it and the next
+host — after the §3.1 drain-restart — opened a FRESH provider session that
+remembered nothing (2026-09-22, thread c8979f6a). The fold still carries the
+cursor forward and `session-set` still carries it on the wire, for old logs and
+old clients, but no code path depends on it surviving there. Rollback boundary
+(§8): a thread with no `binding.json`, or one that does not decode, falls back
+to the head's cursor.
+
+*T3: `apps/server/src/persistence/ProviderSessionRuntime.ts:35-52` — the
+`provider_session_runtime` row, outside the event log (`packages/contracts/src/orchestration.ts:599-609`
+has no `resumeCursor` on the session object); `apps/server/src/provider/Layers/ProviderSessionDirectory.ts:118-145`
+— the field-wise upsert and its `undefined`/`null` contract; `apps/server/src/provider/Layers/ProviderService.ts:1053-1076`
+— `upsertSessionBinding`; `:1104-1129` — the `turn.completed`/`turn.aborted` hook that saves Claude's
+new boundary before a client can checkpoint the turn; `:1441-1471` + `:2150-2173` — the read-back,
+`input.resumeCursor ?? persistedBinding.resumeCursor`*
+
+*Built: T3 keeps the continuation marker in that same row's `runtimePayload`.
+Here it stays on the head, where `continueAfterRestart` already is: the head is
+not purely event-sourced in this codebase — no domain event carries that field,
+it reaches disk only through an explicit `saveHead`, and the head projection
+carries it forward untouched. Splitting it across two files would buy nothing
+and add a second ordering to get wrong.*
 
 *T3: `apps/server/src/serverRuntimeStartup.ts:655-690` — the prepare step writes the marker and flips the projection to `starting` before anything else; `:694-716` — the continuation send, promptless where `promptlessTurnContinuation`, else `SERVER_UPDATE_CONTINUATION_PROMPT`; `:347-348` — that prompt is the same literal; `:717-741` — clear on success, settle as error on failure; `:345-346` + `:588-648` — `settleAsError` writes the binding `stopped` and dispatches the session to `error` with `activeTurnId: null`*
 
@@ -545,6 +635,26 @@ against the installed binary (`apps/daemon/src/agent-host/adapters/claude/models
 CLI's effort list never names it. (2) The refresh takes an optional account `home`: run without
 one the probe answers under the **host** identity, and the account chip, label, email and usage
 bars then describe the daemon user's login rather than the thread's account.*
+
+*Built: `refresh()` has a **synchronous sibling, `pendingSnapshot(checkedAt)`**
+— the §3.2 layer-one seed. It produces the same `ProviderSnapshot` shape with
+no I/O at all: `installed:false`, `version:null`, `status:"unknown"`,
+`auth:{status:"unknown"}`, the "… has not been checked in this session yet."
+message, and the best catalogue the adapter can name without asking the CLI.
+That last part is where T3's bundled manifest survives in this codebase after
+change (1) above dropped it as the live source: `FALLBACK_CLAUDE_MODELS` keeps
+the model **family aliases** (`default`/`opus`/`sonnet`/`haiku`/`fable`, never
+T3's dated slugs, which go stale against the installed binary) purely as the
+pre-probe and probe-failed fallback that the live list replaces wholesale.
+Grok ships `FALLBACK_GROK_MODELS`; Codex and OpenCode enumerate nothing
+statically and answer `[]`. It is a hard rule that a pending snapshot is never
+`status:"error"` — §7.7's toast reads `error` with non-authenticated auth as
+"sign in again", and a provider nobody has probed has not failed to
+authenticate. `adapters/pending.ts` carries both rules and `pending.test.ts`
+asserts them across every adapter at once.
+*T3: `apps/server/src/provider/Layers/ClaudeProvider.ts:595-640`
+(`makePendingClaudeProvider`); `makeManagedServerProvider.ts:69-73`
+(`initialSnapshot`).**
 
 The snapshot's sub-shapes are contracts the client binds to, so pin them here:
 
@@ -1824,6 +1934,23 @@ type ThreadHead = {
 };
 ```
 
+*Built: `session.resumeCursor` is a MIRROR, kept for old logs and old clients.
+The authority is `threads/<id>/binding.json` (§3.3), which is not part of the
+event log and is only ever merged field-wise:*
+
+```ts
+type ProviderSessionBinding = {          // threads/<threadId>/binding.json
+  threadId: string; adapter: AgentAdapter["id"];
+  adapterKey: string|null;               // the registry id the session launched from
+  runtimeMode: RuntimeMode|null; providerInstanceId: string|null;
+  status: "starting"|"ready"|"running"|"stopped"|"error";
+  resumeCursor: unknown;                 // null = no resumable session
+  providerThreadId: string|null; lastSeenAt: string;
+};
+// the ONLY writer; undefined = unchanged, null = cleared
+upsertSessionBinding({ threadId, adapter, patch: Partial<ProviderSessionBinding> }): Promise<…>
+```
+
 *T3: `packages/contracts/src/orchestration.ts:599-609` — `OrchestrationSession {threadId, status: idle|starting|running|ready|interrupted|stopped|error, providerName, providerInstanceId?, runtimeMode, activeTurnId, lastError, updatedAt}`; `apps/server/src/persistence/ProviderSessionRuntime.ts:36-53` — the resume cursor is a `Schema.NullOr(Schema.Unknown)` blob each adapter writes and parses itself; differs: T3 has no `turnCount` on the head at all — it recomputes it as the maximum `checkpointTurnCount` over the thread's checkpoints, and drops the `interrupted` session status this design folds into `stopped`*
 
 The projected timeline is a fold over `events.ndjson`. Items are one of two shapes:
@@ -2288,6 +2415,45 @@ rejected with `COMMAND_REJECTED`: the question was already answered, and the que
 
 *T3: `apps/server/src/orchestration/decider.ts:1753-1796` — both invariant errors and the `thread.activity-appended` the command decides to*
 
+*Built: **`responseMode` is a first-class field on the pending request**, not something each
+consumer re-derives from the raw payload (`PendingUserInput.responseMode` in
+`packages/api/src/agent-chat/thread.ts`, promoted by `derivePendingRequests`; `dismissible` stays
+`responseMode === "message"`, derived and never independently authored). Four behaviours branch on
+it and must never disagree — T3 `providerRuntime.ts:496` with the same four consumers:*
+
+*1. **dismiss legality** (`decider.ts:1769-1775`): only a message-mode question may be closed
+   without an answer;*
+*2. the **terminal-turn cleanup** (`ProviderRuntimeIngestion.ts:2330-2360`): when a turn ends with
+   a question still open, only the NON-message ones are force-resolved with a "User input
+   dismissed" activity — a message-mode question may outlive its turn and still accept a later
+   user message. Orquester did not have this rung of the rule at all; it is now
+   `settleStrandedQuestions` on `turn.completed`/`turn.aborted` in the orchestrator's runtime-event
+   loop, which is why `PendingUserInput` also carries the `turnId` that scopes it. Historical
+   (replayed) turn events are excluded: a replayed turn is the past and has no live provider to
+   strand;*
+*3. **settle eligibility** (`decider.ts:500-511`) — Orquester has no settle/snooze command, so this
+   consumer has no counterpart here and nothing to keep in sync;*
+*4. the **turn-pause gate** (`ProviderRuntimeIngestion.ts:2076-2079`): an async question never
+   parks the turn, already true of the mandatory flush point in
+   `apps/daemon/src/agent-host/ingestion/index.ts`. A message-mode question does still put the
+   THREAD in `waiting` on the §6.4 ladder, exactly as T3's sidebar reads it as `input` — that is
+   the row's status, not the turn's state, and the turn state machine (`turn-state.ts`) is driven
+   by session status alone and never by a pending request.*
+
+*Built: **the message-mode answer is committed as ONE decision.** T3 commits the resolved activity
+and the turn/steer with a single `decideCommandSequence([activity.append, turn.start])`
+(`decider.ts:1629-1702`) so the card cannot close without the message being committed, nor the
+reverse. Here that is one `events` array on one orchestrator decision — `responseRequested`, the
+`user-input.resolved` activity (deterministic id `async-answer:<requestId>`) and the
+`thread.message-sent` reach `append` together or not at all — with the steer as the decision's only
+effect. The reply text **echoes each question before its answer** (`"<question>\n<answer>"`, joined
+by blank lines), and a question's attachments follow as `Attached file: <name> (<id>)` lines and
+ride the message as real attachment refs. The echo is not decoration: the provider parked no
+request, so the agent receives this as an ordinary user turn and has nothing but the text to tell
+it which question was answered — the previous shape dropped the question whenever there was exactly
+one, which reads as a bare "yes" arriving from nowhere in a resumed transcript. The message id is
+the deterministic `async-answer:<requestId>` too, so a replayed command cannot mint a duplicate.*
+
 `/session/stop` stops the provider child and leaves the thread, its log and its resume cursor
 intact; the next `/turn` re-adopts it through lazy recovery (§4.1). Without it a session wedged in
 `starting` or `error` would be unrecoverable, because §6.2 answers 409 to every command against a
@@ -2497,6 +2663,19 @@ sees. A surface that wants to say "failed" reads `chatSessionStatus === "error"`
 `latestTurn.state === "failed"` off the summary, exactly as it reads `backgroundLiveness` to say
 "Monitoring". Distinct push copy for a failure is a follow-up.
 
+*Built: the ladder carries a **`plan-ready` rung** between `running` and
+`background-working` (`apps/daemon/src/agent-chat/activity-ladder.ts`). An actionable proposed
+plan on a settled turn — `hasActionableProposedPlan`, no pending user input, `latestTurn` started
+and completed, session not `running` — resolves to `waiting` + `needs-input`, and its push is a
+third structural type, `plan-ready` ("has a plan ready"), rather than a `needs-input` with
+different words: nothing is blocked on an answer and the work is not finished either. It is
+ordered exactly as T3's pill is (`Sidebar.logic.ts:1049-1066`): it **outranks background
+working/monitoring** — the plan needs a decision, liveness merely reports — and sits below
+approval, question and error. Differs from T3 in one clause: T3 also requires `interactionMode ===
+"plan"`, which is not on `AgentChatSessionSummaryFields` and would be the wrong test anyway —
+`hasActionableProposedPlan` already means "the LATEST plan is unimplemented" (R6-3), and a thread
+switched out of plan mode after proposing still owes the user that decision.*
+
 **Amendment (implementation): the trust grant is confined to `projectPath`.** A chat launch
 auto-accepts Claude's project-trust dialog for the thread's project (a never-seen directory is
 untrusted, and its `.claude/settings.json`, hooks and skills are then silently ignored). The
@@ -2512,6 +2691,16 @@ no grant and the launch proceeds.
 The desktop's local transport reaches `/events?after=` through the same bridge that carries
 chunked terminal output today; commands are ordinary bridged requests. Nothing in the chat UI
 depends on WebSockets.
+
+*Built: `?after=` is not only the reconnect cursor — it is also how a **remount** catches up. A
+thread whose live stream was released keeps a retained snapshot (§7.2), and the next mount opens
+`/events?after=<retained seq>` rather than re-reading the thread body, so returning to a
+recently-viewed tab costs the deltas it missed instead of a full snapshot and a re-fold. The
+cursor needs no new failure mode: `readThread(threadId, afterSeq)` already answers a full
+`snapshot` frame whenever the cursor is unusable — above the head, too large a range, a truncated
+log — and a changed `hostInstanceId` is resync-not-resume as before
+(`apps/daemon/src/agent-host/orchestration/orchestrator.ts`, `resumeCursorFor` in
+`packages/ui/src/lib/agent-chat/stream.logic.ts`).*
 
 ### 6.6 Multi-client convergence
 
@@ -2608,11 +2797,49 @@ reasoning blocks, and the scroll offset inside each expanded tool output — so 
 restores the reading position *and* the shape of the page under it.
 *T3: `apps/web/src/components/chat/timelineScrollAnchoring.ts:110-125` — `RememberedTimelinePosition` and its five disclosure sets; `:127-141` — delete-then-set LRU, evicting past 100 entries*
 
+*Built: "dropped on tab close" is split in two, as T3 splits it. The **live subscription** — the
+stream and the slice that folds it — is released as soon as its last consumer leaves (a short
+grace only, for React's StrictMode double-mount and the §7.1 paint hold:
+`THREAD_STORE_DISPOSE_GRACE_MS` is 2 s). What survives it is a **value-only retained snapshot** —
+the folded state plus the sequence it was folded to — held in memory for a 5-minute *idle* TTL
+(`THREAD_SNAPSHOT_IDLE_TTL_MS`, `packages/ui/src/lib/agent-chat/retention.ts`). A remount takes
+that value, paints it before anything is fetched, and opens its stream with `after=<retained seq>`
+(§6.5). `cachedThreadState` keeps a retained `synchronized` connection **as-is**, so no sync label
+flashes over a timeline that is already on screen and correct; anything else falls back to the
+cold-start path. The in-flight command flags (`reverting`, `stopping`) and the thread-level error
+banner are dropped with the generation that owned them; the queue, drafts, disclosures and scroll
+position survive. Every write is guarded by an **owner token** minted per live generation, so a
+teardown that lands after a newer store has claimed the same thread cannot clobber the newer
+cache. The alternative first shipped here — holding the live stream open for fifteen minutes per
+recently-viewed tab — bought the same instant repaint at the cost of one live connection and one
+live fold per tab, and is gone.
+*T3: `packages/client-runtime/src/state/threadRetention.ts:1-3` — `THREAD_SNAPSHOT_IDLE_TTL_MS = 5 * 60_000`, "keep recent thread snapshots for back navigation; live subscriptions end when the last detail consumer leaves"; `packages/client-runtime/src/state/threads.ts:917-950` — the resume family at that idle TTL beside the state family at `setIdleTTL(0)`, and `Stream.concat(Stream.succeed(cachedThreadState(resume.snapshot.state)), live)`; `:161-176` — `cachedThreadState` keeping a retained "live" status; `:186-228` — the cached sequence seeding `afterSequence`; `:188-189, 228, 255, 274, 293, 418` — the owner guard.*
+
 ### 7.3 Timeline
 
 Plain scroll container with `content-visibility: auto`; no virtualizer until a profile calls for
 one.
 *T3: `apps/web/src/components/chat/MessagesTimeline.tsx:1279-1358` — `LegendList` with `getItemType` pools and `recycleItems` deliberately off on the main list. differs: with threads bounded at one tab's history and no recycling benefit to reclaim, we start with a plain container and adopt a virtualizer only on evidence*
+
+**The list mounts at its end, and only streamed growth ever glides.** The end pin happens in a
+layout effect — after layout, before the browser paints — so a thread opens already at its bottom
+rather than at the top and then travelling; a remembered position that is *not* at the end is the
+only case that restores an offset instead. Smooth scrolling is reserved for a paragraph landing
+inside an already-open thread: a thread switch, the arrival of a list's first page of rows, the
+pre-first-paint window and `prefers-reduced-motion` all keep the instant variant. What makes the
+switch instant is a **named two-frame latch** keyed on the list identity — two frames covers the
+fresh-data layout pass and the initial end pin — not a wall-clock window, which is both too long
+(a turn streaming into a thread opened half a second ago jumps instead of gliding) and too short
+(a slow first fold lands after it expires and glides down in front of the user). The latch is
+matched on the identity, so one armed for the thread just left cannot affect the one arrived at,
+and the subagent drill-in counts as its own identity because it mounts a second timeline for the
+same session id while the parent's is still mounted (§7.6).
+*T3: `apps/web/src/components/chat/MessagesTimeline.tsx:1287` — `initialScrollAtEnd={citationRequest === null && rememberedPosition?.atEnd !== false}`, with `positionedThreadKey` initialised at `:548-551` so no restore scroll runs in that case; `:389-395` — `TIMELINE_MAINTAIN_SCROLL_AT_END_SMOOTH`, "thread switches and layout settles keep the instant variant so nothing visibly travels"; `:555-567, :618-631` — `settlingListIdentity` and its two-frame `requestAnimationFrame` clear; `:1294-1304` — `isWorking && !prefersReducedMotion && settlingListIdentity === null` picks the smooth variant.*
+*Built: the rules are pure and live in `packages/ui/src/components/agent-chat/timeline/follow.ts`
+(`shouldAnimateFollow`, `armSettleLatch`/`tickSettleLatch`/`isSettling`,
+`timelineListIdentity`); `ChatTimeline` holds the latch in a ref, because the decision is read at
+call time inside a scroll handler and re-rendering the whole timeline twice per switch to publish
+a boolean nothing paints would be strictly worse.*
 
 Row kinds and behaviour:
 
@@ -2964,6 +3191,40 @@ Settings usage overview by window id. `auth.status` with an error surfaces a toa
 Settings → Accounts. When an open chat tab's stream (§6.3) delivers `thread.turn-diff-completed`,
 the client refreshes the git tab for that project; no new bus event is introduced for it (§6.4).
 
+*Built: **`unknown` is not `unauthenticated`.** T3's Claude driver emits `auth: {status:"unknown"}`
+on every failure and ambiguity path — disabled, version probe failed, timed out, capabilities
+missing, no credentials found, still pending (`ClaudeProvider.ts:452,478,496,520,552,617,632`) —
+and `"authenticated"` only when the initialization result positively yields credentials (`:582-587`).
+`unauthenticated` is reserved for a driver that can PROVE it from a credential answer:
+`CodexProvider.ts:553` (`account/read` with `requiresOpenaiAuth`) and `GrokProvider.ts:491` (the
+CLI printed that it is not logged in). Orquester's Claude probe used to read a silent init result
+— one that succeeded but carried no `account` block — as a logged-out verdict, which is wrong:
+`claude` initialises fine under an API-key/Bedrock environment and under a first-party login whose
+account block the CLI simply does not return. That claim is what made the client toast "claude
+needs signing in again" at a host whose managed accounts were all valid, the bug
+`apps/daemon/src/agent-chat/provider-auth-overlay.ts` was written to paper over. The overlay stays
+— it still repairs the same claim arriving from an older surviving host — but the probe no longer
+manufactures it (`buildClaudeAuth`). Codex, Grok and OpenCode already followed the rule;
+`apps/daemon/src/agent-host/adapters/auth-status.test.ts` pins all four.*
+
+*Built: **the toast's alarming copy is gated on proof, and its dismissal is keyed on the whole
+verdict.** T3 shows "Not authenticated" only for `auth.status === "unauthenticated"` — `unknown`
+reads as "Available" (`providerStatus.ts:44-79`) — and the "<provider> is unauthenticated" banner
+title only when `status === "error"` AND `auth.status === "unauthenticated"`
+(`ProviderStatusBanner.tsx:78-81`). `authErrorNotice` in
+`packages/ui/src/lib/agent-chat/providers.ts` now returns a `tone`: `"sign-in"` (the "needs signing
+in again" title, Settings → Accounts) only for `unauthenticated`, and T3's neutral `"status"` copy
+for a snapshot that merely failed — and that arm additionally requires `installed`, because an
+absent CLI is a Settings → Agents problem with no credential to fix. **Differs from the plain
+reading of T3's rule in one place, deliberately:** an `unknown` + `status: "error"` snapshot still
+raises an ambient notice rather than nothing at all, because that is exactly what a turn-time
+`auth.status {error}` produces (`provider-snapshots.ts` applyAuthStatus stores `error` + `unknown`
+rather than claiming a verdict the probe has not reached) and dropping it would silence a real,
+provider-reported failure. It just no longer tells the user to re-authenticate. The remembered
+dismissal is keyed on `[adapterId, status, auth.status, message]`, T3's own banner key
+(`ProviderStatusBanner.tsx:20-23`), so the same result never re-toasts while a verdict that MOVED
+still gets through (`packages/ui/src/lib/agent-auth-notice.ts`).*
+
 **A thread's title is client-seeded and host-owned thereafter.** There is no title-generation
 service, and none is introduced. The client seeds the title at creation from the first message —
 plain text, context references stripped, truncated — falling back to the first attachment's name
@@ -2981,6 +3242,25 @@ outcomes: act-now (approval), in-motion (working) and broken (failed); resting i
 Unread is separate: the latest turn's `completedAt` is newer than this client's last visit to that
 tab. A "mark unread" action is just a last-visit stamp set one millisecond before that completion.
 *T3: `apps/web/src/components/Sidebar.logic.ts:805-818` — the five-state, three-colour model; `:835-864` — `resolveSidebarThreadStatus` and its precedence, including "A failed session outranks lingering background liveness"; `:635-644` — `hasUnseenCompletion`; `:1010-1099` — `resolveThreadStatusPill`, the label/colour/pulse table (only Working and Connecting pulse); `:820-833` — `shouldRecedeSidebarThread`; `apps/web/src/uiStateStore.ts:250-296` — `markThreadVisited` / `markThreadUnread`*
+
+*Built: the visit is stamped at the latest turn's **`completedAt`, never `now()`** — T3
+`ChatView.tsx:2108-2125`, and the difference is the whole behaviour: stamping the clock marks as
+read a completion that has not arrived yet, so a turn finishing a second after the user glanced at
+the tab is silently swallowed, while stamping the completion clears exactly the one on screen and
+lets a later one raise its own mark (`markThreadVisited` is monotonic). T3 does this from an effect
+keyed on `latestTurn.completedAt`, which fires on mount AND on every later completion; Orquester's
+chat tabs stay warm while hidden, so the equivalent lives in the store: `activateTab` stamps, and
+the `session.updated` handler re-stamps when the summary belongs to the tab the user is currently
+on (`markThreadRead` in `packages/ui/src/lib/thread-visits.ts`, `visitChatThread` in
+`store/app.ts`). "Mark unread" is on both the tab-strip and the sidebar-row menus. The mark refines
+the daemon's signal and never replaces it: `shouldRecedeSidebarThread` dims an "Opened Agents" row
+that wants nothing from the user (working/monitoring always, ready/approval only once read, input
+never, the selected row never — `resolveSidebarThreadStatus` +
+`shouldRecedeSidebarThread` in `packages/ui/src/lib/agent-chat/status.logic.ts`), and the status
+dot drops its pulse for a `finished` attention this client has already read while keeping its
+colour. Two differences from T3, both because Orquester has no snooze and no settle: the `isWoke`
+input is always false and is not plumbed, and T3's `failed` recede bucket is folded into `ready`
+(T3 recedes them identically).*
 
 ### 7.8 Mobile
 

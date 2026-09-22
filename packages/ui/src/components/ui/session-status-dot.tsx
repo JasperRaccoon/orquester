@@ -30,8 +30,20 @@ export const SessionStatusDot: React.FC<{
    * `activity.state` by the daemon and needs nothing here.
    */
   backgroundLiveness?: AgentChatBackgroundLiveness | null;
+  /**
+   * This client has not looked at the thread since its latest turn finished
+   * (§7.7). **Refines the daemon's signal, never replaces it:** the daemon
+   * owns `attention`/`needsAttentionAt` and decides *whether* a thread is
+   * finished; unread is per-device and decides only how loudly a finished one
+   * is drawn. A finished-and-read thread keeps its colour and drops the pulse,
+   * so "act now" is reserved for what the user has genuinely not seen.
+   *
+   * Only passed by surfaces that have the mark; everywhere else the dot
+   * behaves exactly as before.
+   */
+  unread?: boolean;
   className?: string;
-}> = ({ sessionId, status, backgroundLiveness, className }) => {
+}> = ({ sessionId, status, backgroundLiveness, unread, className }) => {
   const activity = useSessionActivity(sessionId);
   if (status === "exited") {
     return (
@@ -50,12 +62,18 @@ export const SessionStatusDot: React.FC<{
   // finished (§6.4). Anything with an attention stamp or a non-idle state
   // outranks it.
   const monitoring = backgroundLiveness === "monitoring" && state === "idle" && attention === null;
+  // A "finished" the user has already read still shows as finished — it just
+  // stops asking for attention. `unread === undefined` means the caller has no
+  // mark to offer, which must never dim anything.
+  const readFinished = attention === "finished" && unread === false;
   const label = monitoring
     ? "Monitoring"
     : attention === "needs-input"
       ? "Needs your input"
       : attention === "finished"
-        ? "Finished"
+        ? readFinished
+          ? "Finished (read)"
+          : "Finished"
         : attention === "bell"
           ? "Waiting for you"
           : state === "working"
@@ -72,8 +90,12 @@ export const SessionStatusDot: React.FC<{
         state === "working" || state === "waiting" || monitoring
           ? "fill-warn text-warn"
           : "fill-ok-vivid text-ok-vivid",
-        // Monitoring is deliberately NOT pulsed: the pulse means "act now".
-        !monitoring && (attention !== null || state === "waiting") && "animate-pulse",
+        // Monitoring is deliberately NOT pulsed: the pulse means "act now" —
+        // and neither is a finished turn this client has already read.
+        !monitoring &&
+          !readFinished &&
+          (attention !== null || state === "waiting") &&
+          "animate-pulse",
         className
       )}
     />

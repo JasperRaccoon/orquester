@@ -244,15 +244,35 @@ function nameDefaultAfterItsModel(model: ProviderModel, all: readonly ProviderMo
 }
 
 /**
- * Used only when the probe failed outright, so the model chip is not empty on
- * a host whose CLI is momentarily unreachable. Deliberately tiny: the real
- * list always comes from the CLI.
+ * The **bundled fallback catalog**: the model families every recent Claude CLI
+ * accepts, used when there is no live list — either the probe failed outright,
+ * or it has not run yet (the pending snapshot of §3.2 layer one,
+ * `adapters/pending.ts`).
+ *
+ * Ported from T3 Code (MIT): `apps/server/src/provider/model-manifest.json`
+ * (`providers.claudeAgent.models`) via
+ * `apps/server/src/provider/Layers/ClaudeProvider.ts:595-640`, where
+ * `makePendingClaudeProvider` seeds `BUNDLED_CLAUDE_MODEL_CATALOG` so a
+ * never-probed provider is still launchable. Only the **family aliases** are
+ * carried over, not T3's dated slugs (`claude-opus-4-8`, …): a dated slug goes
+ * stale against the installed binary within weeks, while `opus`/`sonnet` are
+ * the spellings the CLI has always resolved for itself.
+ *
+ * It is a fallback and nothing else. **The live probe replaces it wholesale**
+ * — `buildClaudeSnapshot` uses it only when `toProviderModels()` came back
+ * empty — so a model family this list has not heard of is never hidden by it,
+ * and the per-model capability flags (`supportedEffortLevels`, fast mode,
+ * adaptive thinking) that only the CLI can answer stay `null` here rather than
+ * being guessed. `resolveEffortLevel`/`resolveBooleanOption` already pass a
+ * user's option through unvalidated for a model with no descriptors, so a
+ * launch off this list keeps every option the CLI would accept.
  */
 export const FALLBACK_CLAUDE_MODELS: readonly ProviderModel[] = [
   { slug: "default", name: "Default (recommended)", isDefault: true, capabilities: null },
   { slug: "opus", name: "Opus", capabilities: null },
   { slug: "sonnet", name: "Sonnet", capabilities: null },
-  { slug: "haiku", name: "Haiku", capabilities: null }
+  { slug: "haiku", name: "Haiku", capabilities: null },
+  { slug: "fable", name: "Fable", capabilities: null }
 ];
 
 // ---------------------------------------------------------------------------

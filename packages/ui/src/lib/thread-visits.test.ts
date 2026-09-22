@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   THREAD_VISITS_LIMIT,
   hasUnseenCompletion,
+  markThreadRead,
   markThreadUnread,
   markThreadVisited,
   sanitizeThreadVisits
@@ -29,6 +30,37 @@ test("the visit map is capped, newest first", () => {
   // The ten oldest went.
   assert.equal(visits.s0, undefined);
   assert.equal(visits[`s${THREAD_VISITS_LIMIT + 9}`] !== undefined, true);
+});
+
+test("reading a thread stamps the TURN'S COMPLETION, never the clock", () => {
+  // *T3: `ChatView.tsx:2108-2125`.* Stamping `now()` would mark as read a
+  // completion that has not arrived yet, so a turn finishing a second after
+  // the user glanced at the tab would be swallowed. Stamping the completion
+  // clears exactly the one on screen.
+  assert.deepEqual(markThreadRead({}, "a", T1), { a: T1 });
+  assert.equal(hasUnseenCompletion(T1, markThreadRead({}, "a", T1).a), false);
+
+  // A LATER completion, arriving while the same tab is still open, is unread
+  // until its own read stamps it — the monotonic mark does not cover it.
+  const read = markThreadRead({}, "a", T0);
+  assert.equal(hasUnseenCompletion(T1, read.a), true);
+  assert.equal(hasUnseenCompletion(T1, markThreadRead(read, "a", T1).a), false);
+});
+
+test("a thread whose latest turn never completed has nothing to read", () => {
+  const visits = { a: T0 };
+  assert.equal(markThreadRead(visits, "a", null), visits, "same object, no write");
+  assert.equal(markThreadRead(visits, "a", undefined), visits);
+  assert.equal(markThreadRead(visits, "a", "garbage"), visits);
+});
+
+test("mark-unread survives a later read of the SAME completion", () => {
+  // The inverse pair: unread stamps `completedAt - 1ms`, so a re-read of that
+  // same completion is what clears it — and nothing else does, because
+  // `markThreadVisited` refuses to move a stamp backwards.
+  const unread = markThreadUnread({ a: T1 }, "a", T1);
+  assert.equal(hasUnseenCompletion(T1, unread.a), true);
+  assert.equal(hasUnseenCompletion(T1, markThreadRead(unread, "a", T1).a), false);
 });
 
 test("visits are monotonic: an older stamp never moves the mark back", () => {

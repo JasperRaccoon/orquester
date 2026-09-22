@@ -147,7 +147,34 @@ let boundTransport: AgentChatTransport | null = null;
  */
 export interface ProviderSideEffects {
   onRateLimits?(agentRefId: string, update: ProviderUsageLimitsUpdate): void;
-  onAuthError?(error: { agentName: string; message: string; adapterId: AgentAdapterId }): void;
+  onAuthError?(error: {
+    agentName: string;
+    message: string;
+    adapterId: AgentAdapterId;
+    tone: ProviderNoticeTone;
+    providerStatus: ProviderSnapshot["status"];
+    authStatus: ProviderAuth["status"];
+  }): void;
+}
+
+/**
+ * Which copy the ambient notice gets.
+ *
+ * `"sign-in"` is T3's alarming title — "<provider> is unauthenticated" — and
+ * it is reserved for a snapshot that can PROVE the credential is the problem.
+ * `"status"` is T3's neutral title, "<provider> provider status", for a
+ * snapshot that merely failed.
+ *
+ * *T3: `ProviderStatusBanner.tsx:78-81`.*
+ */
+export type ProviderNoticeTone = "sign-in" | "status";
+
+export interface ProviderAuthNotice {
+  message: string;
+  tone: ProviderNoticeTone;
+  /** Part of the dismissal key, so the same verdict never re-toasts. */
+  providerStatus: ProviderSnapshot["status"];
+  authStatus: ProviderAuth["status"];
 }
 
 let sideEffects: ProviderSideEffects = {};
@@ -163,31 +190,51 @@ export function setProviderSideEffects(next: ProviderSideEffects): void {
  * Accounts."
  *
  * **This is one half of a value contract with the host, and the two halves
- * have disagreed once already** (V1 §9, R8-M4). The host answers an
- * `auth.status {error}` by marking the snapshot, and the ONLY two markings
- * that mean "the credential is the problem" are:
+ * have disagreed once already** (V1 §9, R8-M4).
  *
- *   - `auth.status: "unauthenticated"` — the probe reached a verdict, or a
- *     turn-time failure was conclusive enough to claim one;
- *   - `status: "error"` while auth is not `authenticated` — the snapshot
- *     itself is broken and auth is implicated.
+ * **`unknown` is NOT `unauthenticated`** (§7.7, T3 `providerStatus.ts:44-79`
+ * and `ProviderStatusBanner.tsx:9-32,78-81`). Only a snapshot that can *prove*
+ * the credential is the problem — `auth.status: "unauthenticated"`, which
+ * Codex reads off `account/read` and Grok off an explicit "not logged in", and
+ * which the Claude probe deliberately no longer manufactures from a silent
+ * init result — earns the "needs signing in again" copy. Everything else is an
+ * ambiguity, and telling a user to re-authenticate an account that is signed
+ * in perfectly well is worse than saying nothing.
  *
- * `status: "degraded"` is deliberately **not** one of them: the Codex and
- * OpenCode probes set it for reasons that have nothing to do with credentials
- * (a missing binary, a version advisory), and widening this predicate to cover
- * it would turn every such snapshot into a "sign in again" toast. If a host
- * change ever makes an auth failure land as `degraded`, fix it on the host —
- * not here.
+ * A snapshot that merely FAILED still gets an ambient notice, but with T3's
+ * neutral copy and only while the CLI is actually installed: an uninstalled
+ * provider is a Settings → Agents problem, not a credential one, and
+ * `status: "degraded"` is not here at all (the Codex and OpenCode probes set it
+ * for version advisories that have nothing to do with credentials).
  */
-export function authErrorMessage(provider: ProviderSnapshot): string | null {
+export function authErrorNotice(provider: ProviderSnapshot): ProviderAuthNotice | null {
   const label = provider.refIds[0] ?? provider.id;
+  const key = { providerStatus: provider.status, authStatus: provider.auth.status } as const;
   if (provider.auth.status === "unauthenticated") {
-    return provider.auth.label ?? `${label} is not signed in. Open Settings → Accounts.`;
+    return {
+      ...key,
+      tone: "sign-in",
+      message:
+        provider.auth.label ?? `${label} is not signed in. Open Settings → Accounts.`
+    };
   }
-  if (provider.status === "error" && provider.auth.status !== "authenticated") {
-    return provider.message ?? `${label} could not authenticate. Open Settings → Accounts.`;
+  if (
+    provider.status === "error" &&
+    provider.auth.status !== "authenticated" &&
+    provider.installed
+  ) {
+    return {
+      ...key,
+      tone: "status",
+      message: provider.message ?? `${label} is unavailable.`
+    };
   }
   return null;
+}
+
+/** The notice's copy, or null when the provider is fine. */
+export function authErrorMessage(provider: ProviderSnapshot): string | null {
+  return authErrorNotice(provider)?.message ?? null;
 }
 
 /** Fan a fresh snapshot out to the ambient surfaces of §7.7. Never throws. */
@@ -201,17 +248,19 @@ function publishAmbientFacts(providers: readonly ProviderSnapshot[]): void {
           sideEffects.onRateLimits?.(refId, { windows: provider.usageLimits.windows });
         }
       }
-      const message = authErrorMessage(provider);
-      if (message === null) {
+      const notice = authErrorNotice(provider);
+      if (notice === null) {
         continue;
       }
       // Raised on every read; the app store remembers dismissals per
-      // `(provider, message)` and drops a repeat, so this stays a plain
-      // publish with one memory rather than two that can disagree (Q2-11).
+      // `(adapterId, status, auth.status, message)` — T3's own banner key
+      // (`ProviderStatusBanner.tsx:20-23`) — and drops a repeat, so this stays
+      // a plain publish with one memory rather than two that can disagree
+      // (Q2-11).
       sideEffects.onAuthError?.({
         adapterId: provider.id,
         agentName: provider.refIds[0] ?? provider.id,
-        message
+        ...notice
       });
     } catch {
       // An ambient surface must never be able to blank the provider catalog.

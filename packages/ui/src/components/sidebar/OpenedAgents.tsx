@@ -1,7 +1,12 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Bot, ChevronDown, ChevronRight } from "lucide-react";
+import { Bot, ChevronDown, ChevronRight, Dot } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { SessionStatusDot } from "../ui/session-status-dot";
+import { ContextMenu } from "../ui/context-menu";
+import {
+  resolveSidebarThreadStatus,
+  shouldRecedeSidebarThread
+} from "../../lib/agent-chat/status.logic";
 import { getRegistryIcon } from "../../icons";
 import { useApi } from "../../context/orquester-context";
 import { useIsDesktop } from "../../hooks";
@@ -16,7 +21,7 @@ import {
   loadOpenedAgentsCollapsed,
   saveOpenedAgentsCollapsed
 } from "../../lib/opened-agents";
-import { useAppStore } from "../../store/app";
+import { useAppStore, useThreadUnread } from "../../store/app";
 import {
   attentionKey,
   focusAgentSession,
@@ -28,38 +33,100 @@ import {
   type AgentSessionEntry
 } from "../attention";
 
+/**
+ * Sidebar rows **recede** when they want nothing from you (§7.7).
+ *
+ * *T3: `Sidebar.logic.ts:820-833`.* The rule itself lives in `status.logic.ts`;
+ * this supplies the row's three inputs and paints the result. `isUnread` is the
+ * per-device "finished since you last looked" signal, which is what keeps a
+ * settled agent loud until it has been read — the daemon's `needsAttentionAt`
+ * still drives the status dot and the Attention Center, and this refines that
+ * rather than replacing it.
+ */
 const AgentRow: React.FC<{ entry: AgentSessionEntry; showWorkspace: boolean }> = ({
   entry,
   showWorkspace
-}) => (
-  <button
-    type="button"
-    onClick={() => focusAgentSession(entry)}
-    className={cn(
-      "flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm text-neutral-300",
-      "transition-colors hover:bg-neutral-800 hover:text-neutral-100"
-    )}
-  >
-    <span className="flex h-4 w-4 shrink-0 items-center justify-center text-neutral-500">
-      {getRegistryIcon(entry.session.kind, entry.session.refId, 14)}
-    </span>
-    <span className="min-w-0 flex-1 truncate">{entry.session.title}</span>
-    {/* Just the checkout dir — the group header already names the repo. The
-        workspace prefix appears only when the group spans several workspaces
-        (`showWorkspace`), where the bare dir would be ambiguous. `shrink` (not
-        `shrink-0`) so a long name yields to the title instead of crushing it;
-        `min-w-0` is what lets it truncate. */}
-    <span className="min-w-0 shrink truncate text-[10px] text-neutral-500">
-      {showWorkspace && entry.project.workspace ? `${entry.project.workspace}/` : ""}
-      {entry.project.name}
-    </span>
-    <SessionStatusDot
-      sessionId={entry.session.id}
-      status={entry.session.status}
-      backgroundLiveness={entry.session.backgroundLiveness}
-    />
-  </button>
-);
+}) => {
+  const markTabUnread = useAppStore((s) => s.markTabUnread);
+  const unread = useThreadUnread(entry.session.id);
+  const selected = useAppStore(
+    (s) => s.activeTabByProject[entry.session.projectPath] === entry.session.id
+  );
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+
+  const recede =
+    entry.session.kind === "agent-chat" &&
+    shouldRecedeSidebarThread({
+      status: resolveSidebarThreadStatus(entry.session),
+      isUnread: unread,
+      isSelected: selected
+    });
+
+  // Offered only where there is a turn to have missed — the same rule the tab
+  // strip's menu uses.
+  const canMarkUnread =
+    entry.session.kind === "agent-chat" && Boolean(entry.session.latestTurn?.completedAt);
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => focusAgentSession(entry)}
+        onContextMenu={(event) => {
+          if (!canMarkUnread) return;
+          event.preventDefault();
+          setMenu({ x: event.clientX, y: event.clientY });
+        }}
+        className={cn(
+          "flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm text-neutral-300",
+          "transition-[background-color,color,opacity] hover:bg-neutral-800 hover:text-neutral-100",
+          recede ? "opacity-60 hover:opacity-100" : "opacity-100"
+        )}
+      >
+        <span className="flex h-4 w-4 shrink-0 items-center justify-center text-neutral-500">
+          {getRegistryIcon(entry.session.kind, entry.session.refId, 14)}
+        </span>
+        <span className="min-w-0 flex-1 truncate">{entry.session.title}</span>
+        {unread && (
+          <span
+            aria-label="Unread"
+            title="Finished since you last looked"
+            className="h-1.5 w-1.5 shrink-0 rounded-full bg-neutral-300"
+          />
+        )}
+        {/* Just the checkout dir — the group header already names the repo. The
+            workspace prefix appears only when the group spans several workspaces
+            (`showWorkspace`), where the bare dir would be ambiguous. `shrink` (not
+            `shrink-0`) so a long name yields to the title instead of crushing it;
+            `min-w-0` is what lets it truncate. */}
+        <span className="min-w-0 shrink truncate text-[10px] text-neutral-500">
+          {showWorkspace && entry.project.workspace ? `${entry.project.workspace}/` : ""}
+          {entry.project.name}
+        </span>
+        <SessionStatusDot
+          sessionId={entry.session.id}
+          status={entry.session.status}
+          backgroundLiveness={entry.session.backgroundLiveness}
+          unread={unread}
+        />
+      </button>
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={[
+            {
+              label: "Mark unread",
+              icon: <Dot size={13} />,
+              onClick: () => markTabUnread(entry.session.id)
+            }
+          ]}
+          onClose={() => setMenu(null)}
+        />
+      )}
+    </>
+  );
+};
 
 const AgentGroup: React.FC<{
   title: string;

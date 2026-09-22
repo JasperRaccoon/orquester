@@ -15,6 +15,13 @@ const VAPID_SUBJECT = "mailto:orquester@example.com";
 /** Minimum gap between attention pushes for the SAME session (avoids bell spam). */
 const DEBOUNCE_MS = 30_000;
 
+/** The sentence fragment each structural push type reads as in the title. */
+const STRUCTURAL_PUSH_VERB = {
+  "needs-input": "needs your input",
+  finished: "finished",
+  "plan-ready": "has a plan ready"
+} as const;
+
 interface Logger {
   error(...args: unknown[]): void;
 }
@@ -189,9 +196,17 @@ export class PushService {
     await this.notify(session, "bell", "needs your attention");
   }
 
-  /** Structural push from agent-hook transitions ("needs-input" | "finished"). */
-  async notifyStructural(session: SessionSummary, type: "needs-input" | "finished"): Promise<void> {
-    await this.notify(session, type, type === "finished" ? "finished" : "needs your input");
+  /**
+   * Structural push from agent-hook transitions and from the chat activity
+   * ladder. `plan-ready` is its own kind, not a `needs-input` with different
+   * copy: a finished turn that left a plan on the table is neither blocked on
+   * an answer nor finished with the work.
+   */
+  async notifyStructural(
+    session: SessionSummary,
+    type: "needs-input" | "finished" | "plan-ready"
+  ): Promise<void> {
+    await this.notify(session, type, STRUCTURAL_PUSH_VERB[type]);
   }
 
   private async notify(session: SessionSummary, type: string, verb: string): Promise<void> {

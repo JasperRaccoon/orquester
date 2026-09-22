@@ -281,6 +281,9 @@ child and dies with it; the boot reconcile recovers.
   agent/
     threads/<sessionId>/
       meta.json        ThreadHead; atomic rewrite every 50 events and on every head-shaped change
+      binding.json     the durable provider-session binding: the RESUME CURSOR's real home, plus
+                       adapterKey/runtimeMode/providerInstanceId/status. Never replaced whole —
+                       merged field-wise (undefined = unchanged, null = cleared). See the gotchas.
       events.ndjson    append-only DOMAIN events, per-thread monotonic `seq` — the durable record
       raw.ndjson       untranslated provider frames, REDACTED, rotated 10 MiB x 10, 14 days
       attachments/<id>.<ext>
@@ -338,6 +341,18 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   overlay pointed at by **`GROK_CONFIG_PATH`**. Claude's project-trust write goes to a real
   `~/.claude.json` and must stay atomic (`writeFileAtomic`, mode forced 0600) and confined to a
   realpath'd `projectPath` inside `fsRoot` — never to the request's `cwd`.
+- **The resume cursor lives in `binding.json`, not in the event log.** `thread.session-set`
+  names the WHOLE session block, so an event that omitted `resumeCursor` — a turn settling to
+  `ready`, a stop — replaced it with nothing; the head lost the cursor and the next host, after a
+  drain-restart, opened a **fresh** provider session that remembered nothing. The authority is now
+  `threads/<id>/binding.json` (`apps/daemon/src/agent-host/store/binding.ts`), the Orquester
+  spelling of T3's `provider_session_runtime` row. **It has exactly one writer,
+  `ThreadStore.upsertSessionBinding`, and every write is field-wise: `undefined` means *unchanged*,
+  `null` means *cleared*.** Never add a "replace the binding" call, and never write
+  `resumeCursor: null` on a path that merely does not know the cursor — that is what the omission
+  is for. Reads go through `persistedResumeCursor` (binding, else head), and the head's copy plus
+  the fold's carry-forward stay as the §8 rollback fallback for threads written before the file
+  existed. The `continueAfterRestart` marker deliberately stays on the head, where it already was.
 - **`HISTORICAL_RAW_SOURCE`** (`"history.replay"`) tags every event projected out of a provider's
   *native* history on resume. A replayed row is the past: it claims no token usage and its turns
   are already settled. Anything that treats a raw frame as live must check it.
@@ -355,16 +370,54 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   started from in `/health` (`support/code-stamp.ts` reads `.git/HEAD` without the git binary) and
   the daemon compares it with its own at boot, so a code-only deploy replaces the host as soon as
   no turn is active. An unreadable stamp on either side never restarts anything.
-- **A fresh host must not answer `GET /providers` with `[]` for five minutes.** The snapshot
-  registry probes on demand (its first watcher) and on an interval; the first watcher primes every
-  provider it has no cached snapshot for at once, otherwise every launcher shows "Still loading
-  this agent's models" until the interval fires. `POST /api/agent/providers/:id/refresh` is the
-  manual escape hatch.
+- **A fresh host must not answer `GET /providers` with `[]` for five minutes.** Three layers, all
+  in `agent-host/orchestration/provider-snapshots.ts`, ported from T3 (`makeManagedServerProvider`
+  + `ProviderRegistry`). **(1) A pending seed, synchronously at construction** — before the cache
+  is read and before any probe, every adapter's `pendingSnapshot()`
+  (`agent-host/adapters/pending.ts`, wired through `ADAPTER_PENDING_SNAPSHOTS`) supplies a row with
+  `status:"unknown"`, `auth:{status:"unknown"}`, "… has not been checked in this session yet." and
+  the best catalogue it can name without I/O (Claude's `FALLBACK_CLAUDE_MODELS` family aliases,
+  Grok's two; Codex/OpenCode read theirs off a live server and honestly answer `[]`). A pending row
+  is **never `status:"error"`** — that spelling makes the client raise "sign in again" for a
+  provider nobody has looked at — and is never persisted or hydrated. **(2) The disk cache is
+  correlated, not just keyed**: `provider-snapshots.json` is v2, each row `{identity, snapshot}`
+  with `{adapterId, hostProtocolVersion, binPath, version}` inside the file, and a row hydrates
+  only when the adapter id agrees in all three places, the protocol version matches and the CLI is
+  still at the same path — so a cache written before an `npm install -g` moved the binary is
+  discarded rather than rendered. A correlated row overrides the pending seed; a v1 identity-less
+  payload is dropped. **(3) The registry forces a probe of every provider at boot itself**
+  (`startBootRefresh()`), called from `main.ts` after `host.openGate()` and never awaited — a probe
+  must never delay readiness. The 5-minute interval is only a top-up and stays gated on a live
+  watcher; the old first-watcher priming survives as a no-op fallback.
+  `POST /api/agent/providers/:id/refresh` is the manual escape hatch. Client side nothing branches
+  on `status`: `resolveLaunchModel` takes only `models`, so a pending snapshot **with** a catalogue
+  is launchable and "Still loading this agent's models" means the catalogue is genuinely empty.
 - **The provider probe runs under the daemon user's own login.** `auth.status` from the host
   therefore describes the system home, which may be stale while every managed account is fine.
   The daemon overlays it on the way out (`agent-chat/provider-auth-overlay.ts`): a family with at
   least one managed account not flagged `needsReauth` is reported authenticated through it, so the
   "sign in again" toast fires only when nothing of that family is signed in.
+- **`auth.status: "unknown"` is NOT `"unauthenticated"`.** `unauthenticated` is a *verdict* and may
+  only be written where the adapter can prove it — Codex's `account/read` answering
+  `requiresOpenaiAuth`, Grok's CLI printing that it is not logged in. Every other failure, timeout
+  or silence is `unknown`: a Claude init that merely lacks an `account` block is NOT proof (the CLI
+  initialises fine under API-key/Bedrock envs and under logins whose account block it does not
+  return), and reading it as one made the client toast "claude needs signing in again" at a host
+  whose managed accounts were all valid. Client-side, only `unauthenticated` earns the sign-in
+  copy; an errored-but-`unknown` snapshot still surfaces, with neutral copy, and only while the CLI
+  is installed. The remembered dismissal is keyed on `[adapterId, status, auth.status, message]`, so
+  the same verdict never re-toasts but a moved one does
+  (`adapters/*/probe.ts`, `packages/ui/src/lib/agent-chat/providers.ts`, `lib/agent-auth-notice.ts`).
+- **`responseMode` decides four behaviours and they must never disagree.** It rides
+  `PendingUserInput` as a first-class field (`dismissible` is derived from it, never authored):
+  `/dismiss` is legal only for `"message"`; the terminal-turn cleanup force-resolves only the
+  NON-message requests of the turn that just ended (a message-mode question may outlive its turn
+  and still accept a later user message); an async question never parks the turn at ingestion's
+  flush point. A message-mode answer commits its `user-input.resolved` activity and its
+  `thread.message-sent` in **one** orchestrator decision with the steer as the only effect — the
+  card must not be able to close without the message, or the reverse — and its text echoes each
+  question before its answer so the agent, which sees an ordinary user turn, can tell what was
+  answered.
 - **`raw.ndjson` is as sensitive as the repository it watched** — it records whatever the agent
   read, and Grok's `_x.ai/mcp/servers_updated` carries the host's real MCP credentials. Redaction
   runs before anything is written, and before any stderr excerpt leaves the host.

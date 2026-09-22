@@ -205,9 +205,26 @@ export interface CreateHostThreadRequest {
  */
 export const CONTINUATION_PROMPT = "Continue where you left off.";
 
-/** §3.3 step 4 — settled, not continued, when a resume fails. */
+/**
+ * §3.3 — the ORPHAN settle: a running thread the restart found with nothing
+ * behind it and no way to continue it (no cursor, a closed tab, a project that
+ * opted out, a marker from another turn).
+ *
+ * *T3: `serverRuntimeStartup.ts:345-346` — `ORPHANED_PROVIDER_SESSION_ERROR`.*
+ */
 export const CONTINUATION_FAILED_MESSAGE =
   "The agent did not survive a restart. Send a new message to continue.";
+
+/**
+ * §3.3 step 4 — a continuation that WAS attempted and failed. Distinct from
+ * {@link CONTINUATION_FAILED_MESSAGE} on purpose: the user is told the thread
+ * could not be picked up, not that it was never eligible.
+ *
+ * *T3: `serverRuntimeStartup.ts:723-725` — the literal settled on a failed
+ * continuation exit.*
+ */
+export const CONTINUATION_SEND_FAILED_MESSAGE =
+  "Could not continue this thread after the server restart. Send a new message to continue.";
 
 /** §3.4 — a queued message whose compaction failed is never silently dropped. */
 export const COMPACTION_FAILED_MESSAGE =

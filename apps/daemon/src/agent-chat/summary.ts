@@ -36,7 +36,11 @@ import type {
 } from "@orquester/api/agent-chat";
 import { SETTLED_TURN_STATES } from "@orquester/api/agent-chat";
 import { agentHostExtraRoutes, type AgentHostPendingRequest } from "../agent-host/server/index.ts";
-import { pushTypeForFields, resolveChatActivity } from "./activity-ladder.ts";
+import {
+  pushTypeForFields,
+  resolveChatActivity,
+  type ChatPushType
+} from "./activity-ladder.ts";
 import type { ChatSessionManager } from "./chat-sessions.ts";
 import { AgentHostClient } from "./host-client.ts";
 
@@ -55,7 +59,7 @@ export interface SummaryBroadcaster {
 }
 
 export interface SummaryPush {
-  notifyStructural(session: SessionSummary, type: "needs-input" | "finished"): Promise<void>;
+  notifyStructural(session: SessionSummary, type: ChatPushType): Promise<void>;
 }
 
 export interface AgentChatSummaryOptions {

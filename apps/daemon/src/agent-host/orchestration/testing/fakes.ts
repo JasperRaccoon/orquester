@@ -15,6 +15,8 @@ import type {
   CommandReceipt,
   DomainEvent,
   RuntimeEvent,
+  ProviderSessionBinding,
+  ProviderSessionBindingPatch,
   ThreadHead,
   AttachmentRef,
   AgentAdapterId
@@ -32,6 +34,7 @@ import type {
   TurnDiffSummary
 } from "../../services.ts";
 import type { AdapterLogger } from "../../adapter.ts";
+import { mergeSessionBinding } from "../../store/binding.ts";
 
 // ---------------------------------------------------------------------------
 // ThreadStore
@@ -47,6 +50,8 @@ export interface FakeThreadStore extends ThreadStore {
   /** Every event ever appended, per thread. */
   readonly logs: Map<string, DomainEvent[]>;
   readonly heads: Map<string, ThreadHead>;
+  /** `binding.json`, per thread (§3.3). Survives a `createTestHost` restart. */
+  readonly bindings: Map<string, ProviderSessionBinding>;
   readonly receipts: Map<string, CommandReceipt>;
   readonly rawFrames: Array<{ threadId: string; frame: unknown }>;
   /** Cut the log at `index`, as a malformed line would (§5.1). */
@@ -57,6 +62,7 @@ export interface FakeThreadStore extends ThreadStore {
 export function createFakeThreadStore(): FakeThreadStore {
   const logs = new Map<string, DomainEvent[]>();
   const heads = new Map<string, ThreadHead>();
+  const bindings = new Map<string, ProviderSessionBinding>();
   const receipts = new Map<string, CommandReceipt>();
   const attachments = new Map<string, string>();
   const rawFrames: Array<{ threadId: string; frame: unknown }> = [];
@@ -65,6 +71,7 @@ export function createFakeThreadStore(): FakeThreadStore {
   const store = {
     logs,
     heads,
+    bindings,
     receipts,
     rawFrames,
     pruneCalls,
@@ -120,6 +127,27 @@ export function createFakeThreadStore(): FakeThreadStore {
       heads.set(head.id, { ...head });
     },
 
+    async loadBinding(threadId: string): Promise<ProviderSessionBinding | null> {
+      const binding = bindings.get(threadId);
+      return binding === undefined ? null : { ...binding };
+    },
+
+    async upsertSessionBinding(input: {
+      threadId: string;
+      adapter: AgentAdapterId;
+      patch: ProviderSessionBindingPatch;
+    }): Promise<ProviderSessionBinding> {
+      const merged = mergeSessionBinding({
+        threadId: input.threadId,
+        existing: bindings.get(input.threadId) ?? null,
+        patch: input.patch,
+        fallbackAdapter: input.adapter,
+        now: new Date(0).toISOString()
+      });
+      bindings.set(input.threadId, merged);
+      return { ...merged };
+    },
+
     async listThreads(): Promise<string[]> {
       return [...new Set([...logs.keys(), ...heads.keys()])];
     },
@@ -127,6 +155,7 @@ export function createFakeThreadStore(): FakeThreadStore {
     async deleteThread(threadId: string): Promise<void> {
       logs.delete(threadId);
       heads.delete(threadId);
+      bindings.delete(threadId);
       truncated.delete(threadId);
       for (const [id, commandId] of [...receipts]) {
         if (commandId.threadId === threadId) receipts.delete(id);

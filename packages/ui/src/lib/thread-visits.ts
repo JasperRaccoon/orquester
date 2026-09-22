@@ -96,6 +96,33 @@ export function markThreadVisited(
 }
 
 /**
+ * Mark a tab **read**: stamp the last visit at the latest turn's `completedAt`.
+ *
+ * The exact inverse of {@link markThreadUnread}, and the counterpart T3 calls
+ * from its chat view (`ChatView.tsx:2108-2125`). The stamp is the completion,
+ * **not `now()`** — stamping the clock marks as read a completion that has not
+ * arrived yet, so a turn finishing a second after the user glanced at the tab
+ * is silently swallowed. Stamping the completion clears exactly the one on
+ * screen, and {@link markThreadVisited}'s monotonicity means a later one still
+ * raises its own mark.
+ *
+ * A thread whose latest turn never completed has nothing to have been read, so
+ * nothing is written — which is also what keeps "never visited counts as read"
+ * (see {@link hasUnseenCompletion}) true for a thread that has never finished a
+ * turn.
+ */
+export function markThreadRead(
+  visits: ThreadVisits,
+  sessionId: string,
+  latestTurnCompletedAt: string | null | undefined
+): ThreadVisits {
+  if (!latestTurnCompletedAt) {
+    return visits;
+  }
+  return markThreadVisited(visits, sessionId, latestTurnCompletedAt);
+}
+
+/**
  * Mark a tab unread: stamp the last visit **one millisecond before** the latest
  * turn completed, which is exactly what makes {@link hasUnseenCompletion} true
  * again without inventing a second flag to keep in sync with it.

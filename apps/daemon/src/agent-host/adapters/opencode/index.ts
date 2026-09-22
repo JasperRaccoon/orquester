@@ -69,6 +69,7 @@ import {
   buildSnapshot,
   keepNonEmpty,
   loadOpenCodeInventory,
+  pendingSnapshot,
   retainWorkspaceSnapshots,
   unusableSnapshot,
   type OpenCodeInventory
@@ -112,6 +113,11 @@ interface CachedSnapshot {
 class OpenCodeAdapterImpl implements AgentAdapter {
   readonly id = ADAPTER_ID;
   readonly capabilities: AdapterCapabilities = OPENCODE_CAPABILITIES;
+
+  /** §3.2 layer one. Synchronous, no I/O — see `adapters/pending.ts`. */
+  pendingSnapshot(checkedAt: string): ProviderSnapshot {
+    return pendingSnapshot(checkedAt);
+  }
 
   private readonly ctx: AdapterContext;
   private readonly pool: OpenCodeServerPool;
@@ -725,3 +731,6 @@ export const createOpenCodeAdapter: AdapterFactory = async (
 };
 
 export { OpenCodeAdapterImpl };
+
+/** §3.2 layer one — the pending seed the snapshot registry reads at construction. */
+export { pendingSnapshot as pendingOpenCodeSnapshot } from "./snapshot.ts";
