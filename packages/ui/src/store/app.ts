@@ -73,7 +73,8 @@ import { mergeProviderUsageWindows } from "../components/topbar/usage-format";
 import { isAgentLikeSession } from "../lib/session-kind";
 import {
   rememberAgentAuthDismissal,
-  shouldRaiseAgentAuthNotice
+  shouldRaiseAgentAuthNotice,
+  type AgentAuthNotice
 } from "../lib/agent-auth-notice";
 import { ProjectSetupError } from "../lib/project-setup-error";
 import { invalidateProjectIndex } from "../lib/project-index";
@@ -755,12 +756,7 @@ export interface AppState {
    * provider stays signed out, so without this a dismissal never sticks.
    */
   dismissedAgentAuthErrors: string[];
-  agentAuthError: {
-    sessionId: string;
-    /** The registry entry's display name, e.g. "Claude Code". */
-    agentName: string;
-    message: string;
-  } | null;
+  agentAuthError: AgentAuthNotice | null;
   /**
    * Provider rate-limit windows harvested from the chat streams'
    * `account.rate-limits.updated` (§7.7), merged **by window id** per agent so a
@@ -979,7 +975,7 @@ export interface AppState {
   /** Dismiss the transient refused-resume notice. */
   dismissResumeError: () => void;
   /** Raise the chat provider auth-error toast (§7.7). Replaces any current one. */
-  reportAgentAuthError: (error: { sessionId: string; agentName: string; message: string }) => void;
+  reportAgentAuthError: (error: AgentAuthNotice) => void;
   /** Dismiss the chat provider auth-error toast. */
   dismissAgentAuthError: () => void;
   /**
@@ -3194,10 +3190,15 @@ export const useAppStore = create<AppState>((set, get) => ({
 setProviderSideEffects({
   onRateLimits: (agentRefId, update) =>
     useAppStore.getState().applyProviderRateLimits(agentRefId, update),
-  onAuthError: ({ adapterId, agentName, message }) =>
-    useAppStore
-      .getState()
-      .reportAgentAuthError({ sessionId: `provider:${adapterId}`, agentName, message })
+  onAuthError: ({ adapterId, agentName, message, tone, providerStatus, authStatus }) =>
+    useAppStore.getState().reportAgentAuthError({
+      sessionId: `provider:${adapterId}`,
+      agentName,
+      message,
+      tone,
+      providerStatus,
+      authStatus
+    })
 });
 
 /** First remaining tab id for a context (session, then browser, then file, then git, then to-do). */

@@ -310,11 +310,18 @@ export function derivePendingRequests(
       if (questions.length === 0) {
         continue;
       }
+      // `responseMode` is promoted onto the entry (§6.2): the four behaviours
+      // that branch on it — dismiss legality, the terminal-turn cleanup,
+      // settle eligibility and the turn-pause gate — read one field rather
+      // than each re-deriving it from the raw payload.
+      const responseMode = payload.responseMode === "message" ? ("message" as const) : undefined;
       userInputs.set(requestId, {
         requestId,
         createdAt: activity.createdAt,
         questions,
-        dismissible: payload.responseMode === "message"
+        ...(responseMode !== undefined ? { responseMode } : {}),
+        dismissible: responseMode === "message",
+        turnId: activity.turnId
       });
     } else if (
       activity.activityKind === "approval.resolved" ||

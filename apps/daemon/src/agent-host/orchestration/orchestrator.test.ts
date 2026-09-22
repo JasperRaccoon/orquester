@@ -56,7 +56,7 @@ async function openApproval(
 async function openQuestion(
   host: TestHost,
   requestId: string,
-  options: { dismissible: boolean },
+  options: { dismissible: boolean; turnId?: string | null },
   threadId = "thread-1"
 ): Promise<void> {
   await host.orchestrator.ingestionSink(threadId, [
@@ -77,7 +77,7 @@ async function openQuestion(
             ...(options.dismissible ? { responseMode: "message" } : {}),
             dismissible: options.dismissible
           },
-          turnId: null,
+          turnId: options.turnId ?? null,
           createdAt: host.clock.nowIso(),
           updatedAt: host.clock.nowIso()
         }
@@ -1091,17 +1091,140 @@ describe("orchestrator — answering a question (§6.2)", () => {
     );
     const turns = host.adapter.calls.filter((call) => call.kind === "sendTurn");
     assert.equal(turns.length, turnsBefore + 1, "the answer is delivered as a turn/steer");
-    assert.equal((turns.at(-1)?.detail as { input: string }).input, "main");
+    // Every question is ECHOED before its answer (T3 `decider.ts:1642-1660`):
+    // the provider parked no request, so the agent receives this as an
+    // ordinary user turn and has nothing but the text to tell it what was
+    // answered. A bare "main" reads as arriving from nowhere.
+    assert.equal((turns.at(-1)?.detail as { input: string }).input, "Which branch?\nmain");
     const log = host.store.logs.get(threadId) ?? [];
     const message = log.find(
       (event): event is Extract<DomainEvent, { type: "thread.message-sent" }> =>
-        event.type === "thread.message-sent" && event.payload.text === "main"
+        event.type === "thread.message-sent" && event.payload.text === "Which branch?\nmain"
     );
     assert.ok(message, "the answer is a user message row");
     const resolved = activityEvents(host).find(
       (row) => row.activityKind === "user-input.resolved" && row.id === "async-answer:codex-async:t:1"
     );
     assert.ok(resolved, "the card closes through the same activity a dismissal writes");
+    await host.stop();
+  });
+
+  it("commits the resolution and the message as ONE append — the card cannot close alone", async () => {
+    // T3 `decider.ts:1683-1702` commits both with a single
+    // `decideCommandSequence([activity.append, turn.start])`. Here that is one
+    // `events` array on one decision: they share a commandId and land in the
+    // log with no other event between them, so no observer can ever see a
+    // closed card with no message (or the reverse).
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await host.settle();
+    await openQuestion(host, "codex-async:t:9", { dismissible: true });
+    await host.settle();
+
+    const commandId = cmd();
+    await host.orchestrator.command(threadId, "answer", {
+      commandId,
+      requestId: "codex-async:t:9",
+      answers: { "Which branch?": "main" }
+    });
+    await host.settle();
+
+    const log = host.store.logs.get(threadId) ?? [];
+    const resolvedAt = log.findIndex(
+      (event) =>
+        event.type === "thread.activity-appended" &&
+        (event.payload as { activity: { id: string } }).activity.id ===
+          "async-answer:codex-async:t:9"
+    );
+    const messageAt = log.findIndex(
+      (event) => event.type === "thread.message-sent" && event.commandId === commandId
+    );
+    assert.ok(resolvedAt >= 0 && messageAt >= 0, "both rows were written");
+    assert.equal(messageAt, resolvedAt + 1, "adjacent: nothing can be interleaved between them");
+    assert.equal(
+      log[resolvedAt]?.commandId,
+      commandId,
+      "one command sequence, so one commandId across the pair"
+    );
+    // Deterministic message id, like the activity's (T3 mints
+    // `async-answer:<requestId>` for both).
+    assert.equal(
+      (log[messageAt]?.payload as { messageId: string }).messageId,
+      "async-answer:codex-async:t:9"
+    );
+    await host.stop();
+  });
+
+  it("force-resolves a STRANDED native question when its turn ends — never a message-mode one", async () => {
+    // T3 `ProviderRuntimeIngestion.ts:2330-2360`. A terminal turn cannot accept
+    // native-callback answers: the provider's request died with the turn, so a
+    // card left open would keep the thread `waiting` and the composer blocked
+    // forever. A message-mode question may outlive its turn by design and must
+    // survive.
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    const consumed = host.orchestrator.consume(host.adapter);
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await host.settle();
+    const turnId = host.orchestrator.summary(threadId)?.latestTurn?.turnId ?? null;
+    assert.ok(turnId, "the turn row exists to scope the cleanup by");
+
+    await openQuestion(host, "native-strand", { dismissible: false, turnId });
+    await openQuestion(host, "async-survivor", { dismissible: true, turnId });
+    await host.settle();
+    assert.equal(host.orchestrator.summary(threadId)?.hasPendingUserInput, true);
+
+    host.adapter.emit({
+      eventId: "turn-end-1",
+      threadId,
+      turnId,
+      createdAt: host.clock.nowIso(),
+      type: "turn.completed",
+      payload: {}
+    } as unknown as RuntimeEvent);
+    await host.settle();
+
+    const open = new Set(
+      (host.orchestrator.summary(threadId)?.pendingRequests ?? []).map((entry) => entry.requestId)
+    );
+    const dismissed = activityEvents(host).filter(
+      (row) => row.activityKind === "user-input.resolved" && row.summary === "User input dismissed"
+    );
+    assert.deepEqual(
+      dismissed.map((row) => (row.payload as { requestId: string }).requestId),
+      ["native-strand"],
+      "only the blocked native callback is swept"
+    );
+    assert.equal(open.has("async-survivor"), true, "the async question outlives its turn");
+
+    host.adapter.close();
+    await consumed;
+    await host.stop();
+  });
+
+  it("refuses to dismiss a native-callback question, and allows it for a message-mode one", async () => {
+    // T3 `decider.ts:1769-1775`: dropping a question silently is legal only
+    // for `responseMode: "message"`. A native callback leaves the provider
+    // blocked until it gets a reply, so it still needs an answer or an
+    // interrupted turn.
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await openQuestion(host, "native-1", { dismissible: false });
+    await host.settle();
+    await assert.rejects(
+      host.orchestrator.command(threadId, "dismiss", { commandId: cmd(), requestId: "native-1" }),
+      /needs an answer/
+    );
+
+    await openQuestion(host, "async-1", { dismissible: true });
+    await host.settle();
+    const receipt = await host.orchestrator.command(threadId, "dismiss", {
+      commandId: cmd(),
+      requestId: "async-1"
+    });
+    assert.ok(receipt.seq > 0);
     await host.stop();
   });
 

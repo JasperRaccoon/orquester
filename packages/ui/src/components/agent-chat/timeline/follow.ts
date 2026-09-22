@@ -51,15 +51,93 @@ export function nextFollowState(metrics: TimelineScrollMetrics): boolean {
 /**
  * Whether a smooth scroll should be used for this follow step.
  *
+ * **Smooth is reserved for streamed growth inside an already-open thread.**
  * Streamed text lands a paragraph at a time; a smooth scroll turns each landing
- * into a short glide instead of a jump. Thread switches, layout settles and a
- * reduced-motion preference all keep the instant variant so nothing visibly
- * travels. *T3: `MessagesTimeline.tsx:1294-1304`.*
+ * into a short glide instead of a jump. A thread switch, a list that has just
+ * received its first page of rows, the pre-first-paint window and a
+ * reduced-motion preference all keep the instant variant, so nothing ever
+ * visibly travels on the way *into* a thread.
+ *
+ * *T3: `MessagesTimeline.tsx:1294-1304` — `isWorking && !prefersReducedMotion
+ * && settlingListIdentity === null` picks `…_SMOOTH`, everything else the
+ * instant `TIMELINE_MAINTAIN_SCROLL_AT_END` (`:389-395`).*
  */
 export function shouldAnimateFollow(input: {
   working: boolean;
   reducedMotion: boolean;
   firstPaint: boolean;
+  /** The two-frame latch below — true while this list identity is settling. */
+  settling: boolean;
 }): boolean {
-  return input.working && !input.reducedMotion && !input.firstPaint;
+  return input.working && !input.reducedMotion && !input.firstPaint && !input.settling;
+}
+
+// ---------------------------------------------------------------------------
+// The settle latch
+// ---------------------------------------------------------------------------
+
+/**
+ * How many animation frames a freshly identified list stays "settling".
+ *
+ * *T3: `MessagesTimeline.tsx:618-631` — "Two frames covers the fresh-data
+ * layout pass and the initial end pin."*
+ */
+export const TIMELINE_SETTLE_FRAMES = 2;
+
+/**
+ * The named latch that keeps a list-identity change instant.
+ *
+ * It replaces a time-based "be instant for the next 600 ms" window, which was
+ * both too long (a turn streaming into a thread opened 500 ms ago jumped
+ * instead of gliding) and too short (a slow first fold landed after it
+ * expired and glided down in front of the user). Frames, not milliseconds:
+ * what has to be covered is *the fresh-data layout pass and the initial end
+ * pin*, and those are frames by construction.
+ *
+ * *T3: `MessagesTimeline.tsx:555-567, :618-631` (`settlingListIdentity`).*
+ */
+export interface TimelineSettleLatch {
+  /** The list identity that is settling, or `null` when nothing is. */
+  readonly identity: string | null;
+  /** Frames still to elapse before it clears. */
+  readonly frames: number;
+}
+
+export const IDLE_SETTLE_LATCH: TimelineSettleLatch = { identity: null, frames: 0 };
+
+/**
+ * One list's identity.
+ *
+ * The drill-in mounts a *second* timeline for the same session id while the
+ * parent's is still mounted (§7.6), so the agent id is part of the identity —
+ * otherwise opening a drill-in would not count as a switch and its first end
+ * pin would glide.
+ */
+export function timelineListIdentity(sessionId: string, agentId?: string | null): string {
+  return `${sessionId}\u0000${agentId ?? ""}`;
+}
+
+/** Arm the latch for an identity. */
+export function armSettleLatch(identity: string): TimelineSettleLatch {
+  return { identity, frames: TIMELINE_SETTLE_FRAMES };
+}
+
+/** One frame elapsed. The latch clears on the last one. */
+export function tickSettleLatch(latch: TimelineSettleLatch): TimelineSettleLatch {
+  if (latch.identity === null) {
+    return latch;
+  }
+  const frames = latch.frames - 1;
+  return frames > 0 ? { identity: latch.identity, frames } : IDLE_SETTLE_LATCH;
+}
+
+/**
+ * Whether *this* list is settling.
+ *
+ * Matched on the identity rather than on "is anything settling", so a latch
+ * armed for the thread the user just left can never make the incoming
+ * thread's follow instant — or, worse, outlive it and make it jump.
+ */
+export function isSettling(latch: TimelineSettleLatch, identity: string): boolean {
+  return latch.identity === identity && latch.frames > 0;
 }
