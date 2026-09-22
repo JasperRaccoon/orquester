@@ -17,8 +17,7 @@ import type {
   CreateAgentChatSessionFields,
   CreateSessionRequest,
   RegistryEntry,
-  SessionSummary
-} from "@orquester/api";
+  SessionSummary, AgentAccount } from "@orquester/api";
 import type { AgentChatHome, RuntimePlatform } from "@orquester/config";
 import { agentHostSocketPath, agentHostTokenPath } from "@orquester/config";
 import {
@@ -102,6 +101,8 @@ export interface AgentChatServiceOptions {
    * the other download routes.
    */
   sendAttachment(reply: FastifyReply, path: string): Promise<unknown>;
+  /** Managed accounts + family defaults, for the §7.7 auth overlay (see `provider-auth-overlay.ts`). */
+  listManagedAccounts?(): { accounts: AgentAccount[]; defaults?: Partial<Record<AgentAccount["agent"], string | null>> };
   logger?: {
     log?: (...a: unknown[]) => void;
     warn?: (...a: unknown[]) => void;
@@ -299,6 +300,9 @@ export class AgentChatService {
         ),
       attachmentPath: (sessionId, attachmentId) => this.attachmentPath(sessionId, attachmentId),
       sendAttachment: (reply, path) => this.opts.sendAttachment(reply, path),
+      ...(this.opts.listManagedAccounts
+        ? { managedAccounts: () => this.opts.listManagedAccounts!() }
+        : {}),
       logger: this.opts.logger
     };
   }

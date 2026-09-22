@@ -123,15 +123,65 @@ describe("provider snapshot registry (§3.2, §6.3)", () => {
       assert.equal(probe.calls, 0, "no watcher, no probe");
 
       const release = registry.addWatcher();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(probe.calls, 1, "the first watcher primes the empty registry at once");
       timers.runDue(6_000);
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
-      assert.equal(probe.calls, 1);
+      assert.equal(probe.calls, 2, "then the interval keeps it fresh");
 
       release();
       timers.runDue(20_000);
       await new Promise((resolve) => setImmediate(resolve));
-      assert.equal(probe.calls, 1, "the loop stops once nothing is watching");
+      assert.equal(probe.calls, 2, "the loop stops once nothing is watching");
+    });
+  });
+
+  it("a watcher on an empty registry probes immediately, before the first interval", async () => {
+    await withRegistry(async ({ registry, probe, timers }) => {
+      assert.deepEqual(registry.all(), [], "nothing cached on a fresh host");
+      const release = registry.addWatcher();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(probe.calls, 1, "primed without any timer firing");
+      assert.equal(registry.all().length, 1);
+      // A second watcher does not prime again: the snapshot is now held.
+      const release2 = registry.addWatcher();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(probe.calls, 1);
+      timers.runDue(0);
+      release();
+      release2();
+    });
+  });
+
+  it("a watcher on a registry warmed from the cache does not re-probe at once", async () => {
+    await withRegistry(async ({ registry, probe, timers, stateDir }) => {
+      await registry.refresh("claude");
+      await registry.flush();
+      assert.equal(probe.calls, 1);
+      const reloaded = createProviderSnapshotRegistry({
+        probes: [{ id: "claude", refresh: async () => { probe.calls += 1; return probe.next; } }],
+        stateDir,
+        logger: createRecordingLogger(),
+        clock: createTestClock(0),
+        intervalMs: 1_000,
+        setTimer: (fn, ms) => timers.setTimer(fn, ms),
+        clearTimer: (handle) => timers.clearTimer(handle)
+      });
+      try {
+        await reloaded.load();
+        assert.equal(reloaded.all().length, 1, "served from the cache");
+        const release = reloaded.addWatcher();
+        await new Promise((resolve) => setImmediate(resolve));
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(probe.calls, 1, "the cache satisfies the first read; the interval refreshes it");
+        release();
+      } finally {
+        reloaded.stop();
+        await reloaded.flush();
+      }
     });
   });
 

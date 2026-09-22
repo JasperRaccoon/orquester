@@ -446,6 +446,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     push,
     registryEntry: (refId) => registry.get(refId),
     resolveLaunchEnv: (entry, ctx) => resolveAgentLaunchEnv(entry, ctx),
+    // §7.7: "sign in again" only when NO account of the family is valid — the
+    // host probes under the daemon user's own login, which may well be stale
+    // while every managed account is fine.
+    listManagedAccounts: () => agentAccounts.list(),
     systemClaudeConfigFile: () =>
       env.CLAUDE_CONFIG_DIR
         ? join(env.CLAUDE_CONFIG_DIR, ".claude.json")

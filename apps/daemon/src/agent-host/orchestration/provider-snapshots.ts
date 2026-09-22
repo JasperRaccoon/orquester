@@ -178,6 +178,7 @@ export function createProviderSnapshotRegistry(
 
   let changeCount = 0;
   let watchers = 0;
+  let primed = false;
   let timerHandle: unknown = null;
   let stopped = false;
   let persistChain: Promise<unknown> = Promise.resolve();
@@ -449,6 +450,16 @@ export function createProviderSnapshotRegistry(
 
     addWatcher(): () => void {
       watchers += 1;
+      // A fresh host — no cache file yet, or a provider the cache never held —
+      // must not answer `[]` until the first interval elapses: the client shows
+      // "Still loading this agent's models" for five minutes and no chat can
+      // open (vps-a/vps-b, first boot after the 2026-09-22 deploy). The first
+      // watcher primes every missing snapshot at once; the interval then keeps
+      // them fresh as before.
+      if (!primed && ADAPTER_IDS.some((id) => probes.has(id) && !snapshots.has(id))) {
+        primed = true;
+        void refreshAllNow();
+      }
       scheduleNext();
       let released = false;
       return () => {

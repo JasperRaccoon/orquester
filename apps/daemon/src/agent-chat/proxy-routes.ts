@@ -13,7 +13,8 @@
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import type { SessionSummary } from "@orquester/api";
+import type { AgentAccount, SessionSummary } from "@orquester/api";
+import { overlayManagedAccountAuth } from "./provider-auth-overlay.ts";
 import {
   AGENT_CHAT_COMMAND_NAMES,
   agentChatRoutes,
@@ -59,6 +60,12 @@ export interface AgentChatRouteDeps {
    * broadcasts — a no-op refresh must not wake every client.
    */
   onProvidersChanged(adapterId: string): void;
+  /**
+   * The managed accounts, for the §7.7 auth overlay on every provider snapshot
+   * that leaves the daemon: a probe run under the host identity must not
+   * report "sign in again" while a managed account of that family is valid.
+   */
+  managedAccounts?(): { accounts: AgentAccount[]; defaults?: Partial<Record<AgentAccount["agent"], string | null>> };
   /** §6.3 read-back: the host resolves an attachment id to an absolute path. */
   attachmentPath(sessionId: string, attachmentId: string): Promise<string | null>;
   /** Stream that file to the client (`index.ts` owns the download headers). */
@@ -209,7 +216,11 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
 
   app.get(agentChatRoutes.providers, async (_request, reply) => {
     if (!deps.isHostHealthy()) return reply.code(503).send(HOST_UNAVAILABLE);
-    return forwardJson(deps, reply, "GET", agentHostRoutes.providers);
+    const value = await forwardJson(deps, reply, "GET", agentHostRoutes.providers);
+    if (isRecord(value) && Array.isArray(value.providers)) {
+      return { ...value, providers: value.providers.map((p) => overlayAuth(deps, p)) };
+    }
+    return value;
   });
 
   app.post<{ Params: { id: string } }>(
@@ -225,6 +236,9 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
       );
       if (value && typeof value === "object" && (value as { changed?: unknown }).changed === true) {
         deps.onProvidersChanged(request.params.id);
+      }
+      if (isRecord(value) && isRecord(value.provider)) {
+        return { ...value, provider: overlayAuth(deps, value.provider) };
       }
       return value;
     }
@@ -291,6 +305,26 @@ function withQuery(path: string, query: Record<string, string | undefined>): str
  * including its error envelope — so the client sees exactly one description of
  * a failure, whichever layer produced it (§6.2).
  */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** The §7.7 overlay, applied only to a value shaped like a provider snapshot. */
+function overlayAuth(deps: AgentChatRouteDeps, provider: unknown): unknown {
+  if (!deps.managedAccounts || !isRecord(provider)) return provider;
+  const auth = provider.auth;
+  if (typeof provider.id !== "string" || typeof provider.status !== "string" || !isRecord(auth)) {
+    return provider;
+  }
+  if (typeof auth.status !== "string") return provider;
+  const { accounts, defaults } = deps.managedAccounts();
+  return overlayManagedAccountAuth(
+    provider as { id: string; status: string; message?: string; auth: { status: string } },
+    accounts,
+    defaults
+  );
+}
+
 async function forwardJson(
   deps: AgentChatRouteDeps,
   reply: FastifyReply,
