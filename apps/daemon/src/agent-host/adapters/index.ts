@@ -6,19 +6,44 @@
  * surviving host must never load changed source after a deploy.
  */
 
-import type { AgentAdapterId } from "@orquester/api/agent-chat";
+import type { AgentAdapterId, ProviderSnapshot } from "@orquester/api/agent-chat";
 
 import type { AdapterFactory } from "../adapter.ts";
-import { createClaudeAdapter } from "./claude/index.ts";
-import { createCodexAdapter } from "./codex/index.ts";
-import { OPENCODE_SNAPSHOT_TIMEOUT_MS, createOpenCodeAdapter } from "./opencode/index.ts";
-import { createGrokAdapter } from "./grok/index.ts";
+import { createClaudeAdapter, pendingClaudeSnapshot } from "./claude/index.ts";
+import { createCodexAdapter, pendingCodexSnapshot } from "./codex/index.ts";
+import {
+  OPENCODE_SNAPSHOT_TIMEOUT_MS,
+  createOpenCodeAdapter,
+  pendingOpenCodeSnapshot
+} from "./opencode/index.ts";
+import { createGrokAdapter, pendingGrokSnapshot } from "./grok/index.ts";
 
 export const ADAPTER_FACTORIES: Readonly<Record<AgentAdapterId, AdapterFactory>> = {
   claude: createClaudeAdapter,
   codex: createCodexAdapter,
   opencode: createOpenCodeAdapter,
   grok: createGrokAdapter
+};
+
+/**
+ * The §3.2 PENDING snapshot per adapter, as a **module-level function** rather
+ * than a method: the snapshot registry seeds itself at construction, which is
+ * before any adapter has been acquired (adapters are built inside the host's
+ * `ready` promise, the registry is built before it). Same shape the adapter's
+ * own `pendingSnapshot()` returns — the two spellings share one implementation
+ * so they cannot drift.
+ *
+ * *T3: `apps/server/src/provider/makeManagedServerProvider.ts:69-73` —
+ * `initialSnapshot(settings)` is likewise an input to the provider's
+ * construction, not something read off a built provider.*
+ */
+export const ADAPTER_PENDING_SNAPSHOTS: Readonly<
+  Record<AgentAdapterId, (checkedAt: string) => ProviderSnapshot>
+> = {
+  claude: pendingClaudeSnapshot,
+  codex: pendingCodexSnapshot,
+  opencode: pendingOpenCodeSnapshot,
+  grok: pendingGrokSnapshot
 };
 
 /** Every adapter id, in the order Settings and the launch picker show them. */

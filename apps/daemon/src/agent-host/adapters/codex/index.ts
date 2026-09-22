@@ -43,6 +43,7 @@ import {
   MINIMUM_CODEX_VERSION,
   codexVersionFromUserAgent,
   meetsMinimumVersion,
+  pendingCodexSnapshot,
   probeCodex,
   uninstalledCodexSnapshot
 } from "./probe.ts";
@@ -386,7 +387,9 @@ export const createCodexAdapter: AdapterFactory = async (
 
     refreshSnapshot(input?: { cwd?: string }): Promise<ProviderSnapshot> {
       return getSnapshot({ ...(input?.cwd !== undefined ? { cwd: input.cwd } : {}), force: true });
-    }
+    },
+
+    pendingSnapshot: pendingCodexSnapshot
   };
 
   // Honour host shutdown: every child is owned by its session's scope, and
@@ -480,4 +483,6 @@ export const MAX_WORKSPACE_SNAPSHOTS = 16;
 
 export { CODEX_ADAPTER_CAPABILITIES } from "./capabilities.ts";
 export { MINIMUM_CODEX_VERSION, codexVersionFromUserAgent, meetsMinimumVersion } from "./probe.ts";
+/** §3.2 layer one — the pending seed the snapshot registry reads at construction. */
+export { pendingCodexSnapshot } from "./probe.ts";
 export type { CodexResumeCursor };

@@ -12,6 +12,34 @@
  * Snapshots refresh on a slow interval, **not per request**: computed on
  * demand, cached, re-probed in the background every few minutes, and only while
  * something is actually watching provider status.
+ *
+ * **A fresh host answers `GET /providers` immediately, in three layers** —
+ * T3's design, adopted whole after a deploy left every launcher showing "Still
+ * loading this agent's models" for five minutes:
+ *
+ * 1. **A pending seed, synchronously at construction**, before any probe and
+ *    before the cache file is read: one snapshot per adapter carrying
+ *    `status:"unknown"`, `auth:{status:"unknown"}` and the best catalog the
+ *    adapter can name without I/O. *T3:
+ *    `makeManagedServerProvider.ts:69-73` (`initialSnapshot(settings)`);
+ *    `Layers/ClaudeProvider.ts:595-640` (`makePendingClaudeProvider`).*
+ * 2. **The on-disk cache, hydrated at boot with an identity correlation
+ *    check**: an entry is used only when the identity written beside it still
+ *    matches this host and this binary, and a correlated entry **overrides**
+ *    the pending seed. *T3: `Layers/ProviderRegistry.ts:292-352` — "old
+ *    identity-less payloads are discarded"; `:743-751` — the pending
+ *    fallbacks merge UNDER the cached ones; `providerStatusCache.ts:115-160`
+ *    — identity lives inside the file because "the filename alone is not
+ *    trusted as a routing key".*
+ * 3. **A forced probe of every provider kicked by the registry itself at
+ *    boot**, off the startup critical path, serialised like every other
+ *    refresh. *T3: `makeManagedServerProvider.ts:280-284` —
+ *    `applySnapshot(initialSettings, {forceRefresh: true})` under
+ *    `Effect.forkScoped`.* The 5-minute interval
+ *    ({@link PROVIDER_SNAPSHOT_REFRESH_INTERVAL_MS}) is only a top-up, and
+ *    stays demand-gated on a live watcher. *T3:
+ *    `packages/contracts/src/settings.ts:921` — the 5-minute default;
+ *    `makeManagedServerProvider.ts:214-222` — `hasProviderStatusDemand`.*
  */
 
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
@@ -28,7 +56,9 @@ import type {
 import type { AdapterLogger } from "../adapter.ts";
 import type { ProviderSnapshotRegistry } from "../services.ts";
 import { AGENT_HOST_DEADLINES, withDeadline } from "../support/deadline.ts";
-import { ADAPTER_IDS, isAgentAdapterId } from "../adapters/index.ts";
+import { ADAPTER_IDS, ADAPTER_PENDING_SNAPSHOTS, isAgentAdapterId } from "../adapters/index.ts";
+import { isPendingSnapshot } from "../adapters/pending.ts";
+import { AGENT_HOST_PROTOCOL_VERSION } from "../host-protocol.ts";
 import type { Clock } from "./runtime-seams.ts";
 import { systemClock } from "./runtime-seams.ts";
 
@@ -49,7 +79,57 @@ export interface ProviderProbe {
    * never buys the rest a longer leash. Omitted ⇒ `authProbeMs`.
    */
   timeoutMs?: number;
+  /**
+   * The §3.2 PENDING snapshot for this adapter: what the registry seeds itself
+   * with at construction, before `load()` and before any probe. Synchronous by
+   * contract — it runs while the host is still wiring itself up.
+   *
+   * Omitted ⇒ this provider simply has no row until its first probe, which is
+   * the pre-adoption behaviour. Every real adapter supplies one via
+   * {@link ADAPTER_PENDING_SNAPSHOTS}.
+   */
+  pending?: (checkedAt: string) => ProviderSnapshot;
+  /**
+   * What the cached snapshot on disk is CORRELATED against (layer two).
+   *
+   * The identity is written beside the snapshot and re-read at boot; an entry
+   * whose identity no longer matches is discarded rather than rendered, so a
+   * payload written by another host, another protocol version, or against a
+   * CLI that has since moved never reaches the client. Cheap and synchronous —
+   * at most a PATH resolution.
+   *
+   * *T3: `providerStatusCache.ts:115-160` — "Cache contents must still carry
+   * matching `instanceId` + `driver` identity before hydration. The filename
+   * alone is not trusted as a routing key."*
+   */
+  identity?: () => ProviderCacheIdentity;
 }
+
+/**
+ * The correlation stamp written next to each cached snapshot.
+ *
+ * `binPath` is the CLI the snapshot describes: a `npm install -g` that moves
+ * the binary, or a launcher whose bin disappeared, invalidates the cache the
+ * same boot rather than showing a version and a model list belonging to a
+ * binary that is no longer there. `version` is the CLI version the probe read,
+ * kept for diagnosis and for the (rare) case where the path is stable across a
+ * reinstall.
+ */
+export interface ProviderCacheIdentity {
+  /** The CLI this snapshot was probed against, absolute, or `null` for none. */
+  binPath?: string | null;
+  /** The CLI version the probe read, when it read one. */
+  version?: string | null;
+}
+
+/** The identity as it is persisted — adapter + protocol + probe identity. */
+interface PersistedIdentity extends ProviderCacheIdentity {
+  adapterId: AgentAdapterId;
+  hostProtocolVersion: number;
+}
+
+/** The current on-disk cache format. v1 carried no identity and is discarded. */
+export const PROVIDER_SNAPSHOT_CACHE_VERSION = 2;
 
 export interface ProviderSnapshotRegistryOptions {
   probes: ProviderProbe[];
@@ -75,8 +155,19 @@ export interface ManagedProviderSnapshotRegistry extends ProviderSnapshotRegistr
   applyAuthStatus(adapterId: AgentAdapterId, event: RuntimeEvent): void;
   /** Ref-counted demand: the background loop only runs while something watches. */
   addWatcher(): () => void;
-  /** Load the persisted cache. Never throws — a bad file is simply ignored. */
+  /**
+   * Layer two: load the persisted cache over the pending seed, keeping only
+   * entries whose identity still correlates with this host. Never throws — a
+   * bad, foreign or identity-less file is simply ignored.
+   */
   load(): Promise<void>;
+  /**
+   * Layer three: kick one forced probe of every provider. **Fire-and-forget** —
+   * it returns immediately and must never be awaited on a startup path, since
+   * a probe's deadline is seconds and readiness must not wait on it.
+   * Idempotent; a second call while the first pass runs does nothing.
+   */
+  startBootRefresh(): void;
   /**
    * Like {@link ProviderSnapshotRegistry.refresh}, but also says whether
    * anything actually changed — `agent.providers.changed` is gated on it
@@ -104,13 +195,34 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** One cached row as it sits on disk: identity first, snapshot second. */
+interface CachedEntry {
+  identity: PersistedIdentity;
+  snapshot: ProviderSnapshot;
+}
+
+function normaliseIdentityField(value: unknown): string | null | undefined {
+  if (value === null) return null;
+  return typeof value === "string" ? value : undefined;
+}
+
 /**
  * The cache file is read back field-wise with a fallback, never trusted raw —
  * an old bundle's payload outlives a deploy (AGENTS.md) and §8 makes the host's
  * own state outlive a rollback.
+ *
+ * A row survives parsing only with an identity block, and only when the
+ * adapter id appears in **three** places that agree: the map key, the
+ * identity's own `adapterId`, and the snapshot's `id`. Anything else — a v1
+ * payload with no identity at all, a protocol version from another deploy, a
+ * hand-edited file — is dropped here and the boot probe of layer three
+ * repopulates it.
+ *
+ * *T3: `Layers/ProviderRegistry.ts:292-352` — "old identity-less payloads are
+ * discarded and the awaited refresh below repopulates the cache".*
  */
-function parseCachedSnapshots(raw: unknown): Map<AgentAdapterId, ProviderSnapshot> {
-  const parsed = new Map<AgentAdapterId, ProviderSnapshot>();
+function parseCachedSnapshots(raw: unknown): Map<AgentAdapterId, CachedEntry> {
+  const parsed = new Map<AgentAdapterId, CachedEntry>();
   if (!isRecord(raw)) {
     return parsed;
   }
@@ -118,21 +230,60 @@ function parseCachedSnapshots(raw: unknown): Map<AgentAdapterId, ProviderSnapsho
   if (!isRecord(providers)) {
     return parsed;
   }
-  for (const [key, value] of Object.entries(providers)) {
-    if (!isAgentAdapterId(key) || !isRecord(value)) {
+  for (const [key, row] of Object.entries(providers)) {
+    if (!isAgentAdapterId(key) || !isRecord(row)) {
       continue;
     }
-    // Identity lives INSIDE the file: the filename (here, the key) alone is not
-    // trusted as a routing key.
-    if (value.id !== key) {
+    const identity = row.identity;
+    const snapshot = row.snapshot;
+    if (!isRecord(identity) || !isRecord(snapshot)) {
+      // v1 wrote the bare snapshot under the key and carried no identity.
       continue;
     }
-    if (typeof value.installed !== "boolean" || !isRecord(value.capabilities)) {
+    // Identity lives INSIDE the file: the key alone is not a routing key.
+    if (identity.adapterId !== key || snapshot.id !== key) {
       continue;
     }
-    parsed.set(key, value as unknown as ProviderSnapshot);
+    if (identity.hostProtocolVersion !== AGENT_HOST_PROTOCOL_VERSION) {
+      continue;
+    }
+    if (typeof snapshot.installed !== "boolean" || !isRecord(snapshot.capabilities)) {
+      continue;
+    }
+    parsed.set(key, {
+      identity: {
+        adapterId: key,
+        hostProtocolVersion: AGENT_HOST_PROTOCOL_VERSION,
+        binPath: normaliseIdentityField(identity.binPath),
+        version: normaliseIdentityField(identity.version)
+      },
+      snapshot: snapshot as unknown as ProviderSnapshot
+    });
   }
   return parsed;
+}
+
+/**
+ * Is a cached row still describing THIS host's installation?
+ *
+ * Only a field both sides actually know is compared: a `binPath` the current
+ * probe cannot name (no identity resolver, or a resolver that answered
+ * `undefined`) is not evidence of a mismatch and must not throw away a good
+ * cache. A `null` on both sides — "no such binary, then and now" — correlates.
+ *
+ * *T3: `Layers/ProviderRegistry.ts:330-346` (`isCachedProviderCorrelated`).*
+ */
+function isCachedEntryCorrelated(
+  cached: PersistedIdentity,
+  current: ProviderCacheIdentity | undefined
+): boolean {
+  if (current === undefined) {
+    return true;
+  }
+  if (current.binPath !== undefined && cached.binPath !== undefined) {
+    return current.binPath === cached.binPath;
+  }
+  return true;
 }
 
 function mergeUsageWindows(
@@ -170,6 +321,34 @@ export function createProviderSnapshotRegistry(
   );
   const snapshots = new Map<AgentAdapterId, ProviderSnapshot>();
   const listeners = new Set<(adapterId: AgentAdapterId) => void>();
+  /** The identity each stored snapshot was produced under (layer two). */
+  const identities = new Map<AgentAdapterId, ProviderCacheIdentity>();
+
+  const identityOf = (adapterId: AgentAdapterId): ProviderCacheIdentity | undefined => {
+    const probe = probes.get(adapterId);
+    if (probe?.identity === undefined) {
+      return undefined;
+    }
+    try {
+      return probe.identity();
+    } catch (error) {
+      // An identity that cannot be read is "unknown", never a mismatch: it must
+      // not be able to throw away a good cache or fail a refresh.
+      options.logger.warn(`provider identity failed for ${adapterId}`, error);
+      return undefined;
+    }
+  };
+
+  // ---- layer 1: the pending seed, before load() and before any probe -------
+  // *T3: `makeManagedServerProvider.ts:69-73` — `initialSnapshot(settings)` is
+  // resolved at construction; the provider is never snapshot-less.*
+  // Seeded WITHOUT notifying or persisting: nothing has changed, nobody has
+  // subscribed yet, and writing a pending row to disk would let it be hydrated
+  // as if it were a probe result on the next boot.
+  for (const probe of options.probes) {
+    if (probe.pending === undefined) continue;
+    snapshots.set(probe.id, probe.pending(clock.nowIso()));
+  }
 
   // One permit, so two clients opening Settings cannot run two probes.
   let refreshChain: Promise<unknown> = Promise.resolve();
@@ -178,6 +357,12 @@ export function createProviderSnapshotRegistry(
 
   let changeCount = 0;
   let watchers = 0;
+  /**
+   * Adapters holding something better than a pending seed — a correlated
+   * cached snapshot or a live probe result. The watcher's priming (below) is a
+   * no-op once every probe is in here.
+   */
+  const probed = new Set<AgentAdapterId>();
   let primed = false;
   let timerHandle: unknown = null;
   let stopped = false;
@@ -196,11 +381,28 @@ export function createProviderSnapshotRegistry(
   const persist = (): void => {
     persistChain = persistChain
       .then(async () => {
-        const providers: Record<string, ProviderSnapshot> = {};
+        const providers: Record<string, { identity: PersistedIdentity; snapshot: ProviderSnapshot }> =
+          {};
         for (const [id, snapshot] of snapshots) {
-          providers[id] = snapshot;
+          // A pending seed is NOT cacheable: it is the absence of a probe, and
+          // hydrating it next boot would masquerade as one.
+          if (isPendingSnapshot(snapshot)) continue;
+          const identity = identities.get(id) ?? {};
+          providers[id] = {
+            identity: {
+              adapterId: id,
+              hostProtocolVersion: AGENT_HOST_PROTOCOL_VERSION,
+              ...(identity.binPath !== undefined ? { binPath: identity.binPath } : {}),
+              version: snapshot.version
+            },
+            snapshot
+          };
         }
-        const body = JSON.stringify({ version: 1, providers }, null, 2);
+        const body = JSON.stringify(
+          { version: PROVIDER_SNAPSHOT_CACHE_VERSION, providers },
+          null,
+          2
+        );
         await mkdir(dirname(cachePath), { recursive: true });
         const tmp = `${cachePath}.tmp`;
         await writeFile(tmp, body, { encoding: "utf8", mode: 0o600 });
@@ -214,12 +416,25 @@ export function createProviderSnapshotRegistry(
 
   const store = (snapshot: ProviderSnapshot): boolean => {
     const previous = snapshots.get(snapshot.id);
+    // The identity this snapshot was produced under, recorded now so the cache
+    // it is written into can be correlated on the next boot.
+    const identity = identityOf(snapshot.id);
+    if (identity !== undefined) {
+      identities.set(snapshot.id, identity);
+    } else {
+      identities.delete(snapshot.id);
+    }
     // An identical configuration short-circuits: no change event, no rewrite.
-    if (snapshotsEqual(previous, snapshot)) {
+    // A PENDING previous is never "identical" in practice (a probe always
+    // reaches an `installed` verdict), but the guard is explicit so a probe
+    // that somehow answers the pending shape still counts as the first real
+    // result rather than being swallowed.
+    if (!isPendingSnapshot(previous ?? snapshot) && snapshotsEqual(previous, snapshot)) {
       snapshots.set(snapshot.id, snapshot);
       return false;
     }
     snapshots.set(snapshot.id, snapshot);
+    probed.add(snapshot.id);
     changeCount += 1;
     persist();
     notify(snapshot.id);
@@ -450,13 +665,14 @@ export function createProviderSnapshotRegistry(
 
     addWatcher(): () => void {
       watchers += 1;
-      // A fresh host — no cache file yet, or a provider the cache never held —
-      // must not answer `[]` until the first interval elapses: the client shows
-      // "Still loading this agent's models" for five minutes and no chat can
-      // open (vps-a/vps-b, first boot after the 2026-09-22 deploy). The first
-      // watcher primes every missing snapshot at once; the interval then keeps
-      // them fresh as before.
-      if (!primed && ADAPTER_IDS.some((id) => probes.has(id) && !snapshots.has(id))) {
+      // The pre-adoption stopgap, kept as a **belt-and-braces no-op**: with
+      // layers one to three in place every provider already holds either a
+      // correlated cached snapshot or a live probe result by the time a client
+      // subscribes, so `probed` is full and this does nothing. It still fires
+      // on the one path that skips `startBootRefresh()` — a host built without
+      // it, as several unit tests are — rather than leaving a provider with
+      // nothing but its pending seed until the interval elapses.
+      if (!primed && ADAPTER_IDS.some((id) => probes.has(id) && !probed.has(id))) {
         primed = true;
         void refreshAllNow();
       }
@@ -473,15 +689,81 @@ export function createProviderSnapshotRegistry(
       };
     },
 
+    /**
+     * Layer two: hydrate the on-disk cache over the pending seed.
+     *
+     * A cached entry is used **only when it correlates** with this host's
+     * current identity for that adapter; an uncorrelated one is dropped and
+     * the boot probe repopulates it. A correlated entry overrides the pending
+     * seed — that direction is the whole point: "on-disk state wins where
+     * present and pending fallbacks fill the gaps".
+     *
+     * *T3: `Layers/ProviderRegistry.ts:292-352` and `:743-751`.*
+     *
+     * Never throws, and never persists: hydration is a read.
+     */
     async load(): Promise<void> {
+      let entries: Map<AgentAdapterId, CachedEntry>;
       try {
         const raw = await readFile(cachePath, "utf8");
-        for (const [id, snapshot] of parseCachedSnapshots(JSON.parse(raw) as unknown)) {
-          snapshots.set(id, snapshot);
-        }
+        entries = parseCachedSnapshots(JSON.parse(raw) as unknown);
       } catch {
         // No cache, or an unreadable one: the first live probe fills it.
+        return;
       }
+      for (const [id, entry] of entries) {
+        if (!probes.has(id)) {
+          // A snapshot for an adapter this host does not serve.
+          continue;
+        }
+        const current = identityOf(id);
+        if (!isCachedEntryCorrelated(entry.identity, current)) {
+          options.logger.warn("provider status cache identity mismatch, ignoring", {
+            adapterId: id,
+            cachedBinPath: entry.identity.binPath ?? null,
+            binPath: current?.binPath ?? null
+          });
+          continue;
+        }
+        if (isPendingSnapshot(entry.snapshot)) {
+          // Defensive: a pending row is never written, and hydrating one would
+          // claim a probe that never happened.
+          continue;
+        }
+        snapshots.set(id, entry.snapshot);
+        identities.set(id, {
+          ...(entry.identity.binPath !== undefined ? { binPath: entry.identity.binPath } : {}),
+          ...(entry.identity.version !== undefined ? { version: entry.identity.version } : {})
+        });
+        probed.add(id);
+      }
+    },
+
+    /**
+     * Layer three: force one probe of every provider, now, off the critical
+     * path.
+     *
+     * Fire-and-forget by contract — the caller must never await it. The HTTP
+     * socket is already bound and the readiness gate is already open when this
+     * runs; a probe that hangs for its whole deadline must not be able to keep
+     * a client waiting for `GET /providers`, which answers from the pending
+     * seed meanwhile.
+     *
+     * Serialised through the same one-permit chain as every other refresh, so
+     * it cannot race a client's manual `POST …/refresh`, and idempotent: a
+     * second call while the first pass is running does nothing.
+     *
+     * *T3: `makeManagedServerProvider.ts:280-284` —
+     * `applySnapshot(initialSettings, {forceRefresh: true})` under
+     * `Effect.forkScoped`, i.e. forked by the provider itself at construction
+     * rather than waited on by whatever builds it.*
+     */
+    startBootRefresh(): void {
+      if (stopped || primed) {
+        return;
+      }
+      primed = true;
+      void refreshAllNow();
     },
 
     refreshAllNow,
