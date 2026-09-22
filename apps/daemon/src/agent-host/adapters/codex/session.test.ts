@@ -23,7 +23,8 @@ import {
   createFakeContext,
   waitUntil,
   writeMockCodexServer,
-  type MockConfig
+  type MockConfig,
+  type MockTurnScript
 } from "./testing.ts";
 
 /**
@@ -214,6 +215,44 @@ describe("codex session — start, turn, stop", () => {
       { type: "text", text: "look", text_elements: [] },
       { type: "localImage", path: "/attachments/thread-1/att-1" }
     ]);
+    await r.stop();
+  });
+
+  it("only reloads MCP config before a turn once a server has announced itself", async () => {
+    // R3 finding 10: an MCP server added to `config.toml` mid-session is not
+    // picked up until the thread restarts, so the turn is preceded by a
+    // `config/mcpServer/reload`. It is gated on the one live signal that MCP
+    // is configured at all — paying a round trip before EVERY turn on the
+    // (common) host with no MCP servers is what the gate exists to avoid.
+    const r = rig({ turns: [{ kind: "text", text: "a" }] });
+    await r.session.start();
+
+    await r.session.sendTurn({ input: "one", attachments: [], interactionMode: "default" });
+    await r.events.waitForType("turn.completed");
+    assert.equal(
+      sentFrames(r.received(), "config/mcpServer/reload").length,
+      0,
+      "no MCP server has ever reported: the reload must not be sent"
+    );
+
+    r.session.injectNotificationForTest("mcpServer/startupStatus/updated", {
+      server: "demo",
+      status: { type: "ready" }
+    });
+    await r.session.sendTurn({ input: "two", attachments: [], interactionMode: "default" });
+    await r.events.waitForType("turn.completed");
+
+    const reloads = sentFrames(r.received(), "config/mcpServer/reload");
+    assert.equal(reloads.length, 1);
+    // And it really precedes the turn it belongs to — a reload that lands
+    // after `turn/start` configures the NEXT turn, not this one.
+    const frames = r.received().filter((frame) => frame.method !== undefined);
+    const reloadIndex = frames.findIndex((frame) => frame.method === "config/mcpServer/reload");
+    const secondTurnIndex = frames.reduce(
+      (last, frame, index) => (frame.method === "turn/start" ? index : last),
+      -1
+    );
+    assert.ok(reloadIndex !== -1 && reloadIndex < secondTurnIndex);
     await r.stop();
   });
 });
@@ -635,6 +674,55 @@ describe("codex session — interrupt ordering", () => {
     await r.stop();
   });
 
+  it("a turn/interrupt failure that is NOT the benign race REJECTS", async () => {
+    // V1: the catch swallowed the whole `CodexRpcError` class, so every
+    // failure looked like a successful Stop. `-32600` is this server's
+    // catch-all — a malformed `turn/interrupt` of OURS lands on it too
+    // (`13-error-envelopes.ndjson` case (c)) — so only the message separates
+    // "already settled" from "the interrupt did not happen". Rejecting is what
+    // the host turns into `provider.turn.interrupt.failed`.
+    const r = rig({
+      turns: [{ kind: "silent" }],
+      interruptError: { code: -32600, message: "Invalid request: missing field `turnId`" }
+    });
+    await r.session.start();
+    await r.session.sendTurn({ input: "x", attachments: [], interactionMode: "default" });
+    await r.events.waitForType("turn.started");
+
+    await assert.rejects(
+      () => r.session.interruptTurn(),
+      /missing field/,
+      "a failed interrupt must surface, not be reported to the user as a Stop"
+    );
+
+    // And the turn is still the active one: the model never stopped, so
+    // clearing it would strand a running turn the UI can no longer Stop.
+    const summary = r.session.summary();
+    assert.equal(summary.status, "running");
+    assert.ok(summary.activeTurnId !== undefined);
+    await r.stop();
+  });
+
+  it("still swallows the benign \"no active turn\" race and clears the stale turn", async () => {
+    // The other half of the same branch (Q1 finding 3): the turn settled
+    // underneath us, the user's Stop got what they asked for, and the session
+    // must not stay `running` for ever.
+    const r = rig({
+      turns: [{ kind: "silent" }],
+      interruptError: { code: -32600, message: "no active turn to interrupt" }
+    });
+    await r.session.start();
+    await r.session.sendTurn({ input: "x", attachments: [], interactionMode: "default" });
+    await r.events.waitForType("turn.started");
+
+    await r.session.interruptTurn();
+
+    const summary = r.session.summary();
+    assert.equal(summary.status, "ready");
+    assert.equal(summary.activeTurnId, undefined);
+    await r.stop();
+  });
+
   it("interrupting when no turn is active does nothing at all", async () => {
     const r = rig({ turns: [{ kind: "text", text: "a" }] });
     await r.session.start();
@@ -713,6 +801,40 @@ describe("codex session — interrupt ordering", () => {
     await r.session.interruptTurn();
     const resolved = await r.events.waitForType("user-input.resolved");
     assert.deepEqual((resolved.payload as { answers: unknown }).answers, {});
+    await r.stop();
+  });
+});
+
+describe("codex session — a live turn's children are interrupted first (R3 finding 4)", () => {
+  it("interrupts every child BEFORE the parent's own turn/interrupt", async () => {
+    // Collab children are full threads on the same connection, so interrupting
+    // only the parent leaves the fleet running and spending tokens. Order is
+    // load-bearing (§4.5 "Interrupt, in order"): the parent's interrupt can
+    // settle the turn and tear down the bookkeeping that names the children.
+    const r = rig({
+      turns: [{ kind: "spawn-child", childThreadId: "child-1", keepParentRunning: true }]
+    });
+    await r.session.start();
+    const turn = await r.session.sendTurn({
+      input: "spawn",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await r.events.waitForType("task.started");
+    await waitUntil(
+      () => r.session.liveChildTurnsForTest.length === 1,
+      "the child turn was registered"
+    );
+    assert.equal(r.session.currentTurnId, turn.turnId, "the parent turn is still live");
+
+    await r.session.interruptTurn(turn.turnId);
+
+    const interrupts = sentFrames(r.received(), "turn/interrupt");
+    const childIndex = interrupts.findIndex((params) => params.threadId === "child-1");
+    const parentIndex = interrupts.findIndex((params) => params.turnId === turn.turnId);
+    assert.ok(childIndex !== -1, "the child turn was never interrupted on the wire");
+    assert.ok(parentIndex !== -1, "the parent turn was never interrupted on the wire");
+    assert.ok(childIndex < parentIndex, "children first, then the parent");
     await r.stop();
   });
 });
@@ -939,6 +1061,65 @@ describe("codex session — spawn and handshake failures", () => {
     const r = rig({ exitAfterMs: 1, hangOnInitialize: true });
     await assert.rejects(() => r.session.start());
     await waitUntil(() => r.events.types().includes("session.exited"), "session.exited");
+    await r.stop();
+  });
+});
+
+describe("codex session — request ids are unique across a thread's SESSIONS (R2-1)", () => {
+  it("a second session of the same thread never reuses the first's request ids", async () => {
+    // A thread outlives its provider sessions (host restart → `thread/resume`),
+    // but the request counter restarts at 1 with each one. Spelled
+    // `codex-<threadId>-<n>`, the first approval of session two was identical
+    // to the first approval of session one — which the host had already
+    // resolved and TOMBSTONED — so the new card was swallowed and the turn
+    // hung on a prompt the user never saw (E2E round 2).
+    //
+    // One shared context across both sessions, exactly as the host has one
+    // adapter context for every session it opens.
+    const { context } = createFakeContext();
+
+    const openApproval = async (script: MockTurnScript): Promise<string> => {
+      const r = rig({ turns: [script] }, { context });
+      await r.session.start();
+      await r.session.sendTurn({ input: "go", attachments: [], interactionMode: "default" });
+      const opened = await r.events.waitForType("request.opened");
+      await r.stop();
+      return String(opened.requestId);
+    };
+
+    const first = await openApproval({ kind: "command-approval", command: "rm -rf /tmp/x" });
+    const second = await openApproval({
+      kind: "file-change-approval",
+      path: "/tmp/a.ts",
+      diff: "+x\n"
+    });
+
+    assert.notEqual(second, first, "a resolved id from a dead session must never come back");
+    // Both still name the thread, so a raw log stays greppable.
+    assert.ok(first.startsWith("codex-thread-1-"));
+    assert.ok(second.startsWith("codex-thread-1-"));
+  });
+
+  it("ids stay unique WITHIN a session too", async () => {
+    const r = rig({
+      turns: [
+        { kind: "command-approval", command: "one" },
+        { kind: "command-approval", command: "two" }
+      ]
+    });
+    await r.session.start();
+    await r.session.sendTurn({ input: "a", attachments: [], interactionMode: "default" });
+    const one = await r.events.waitForType("request.opened");
+    await r.session.respondToApproval(String(one.requestId), "accept");
+    await r.events.waitForType("turn.completed");
+
+    await r.session.sendTurn({ input: "b", attachments: [], interactionMode: "default" });
+    await waitUntil(
+      () => r.events.events.filter((event) => event.type === "request.opened").length === 2,
+      "the second approval"
+    );
+    const opened = r.events.events.filter((event) => event.type === "request.opened");
+    assert.notEqual(String(opened[1]!.requestId), String(opened[0]!.requestId));
     await r.stop();
   });
 });

@@ -81,8 +81,8 @@ import {
 import {
   CodexPeer,
   CodexRequestRefusal,
-  CodexRpcError,
   describeError,
+  isNoActiveTurnError,
   type CodexServerRequest
 } from "./protocol.ts";
 import { CodexUsageTracker } from "./usage.ts";
@@ -216,6 +216,18 @@ export class CodexSession {
   private exitHandled = false;
   private closedPromise: Promise<void> | null = null;
   private requestSeq = 0;
+  /**
+   * Unique per PROVIDER SESSION (E2E round 2, R2-1).
+   *
+   * A request id must be unique for the lifetime of the THREAD, not of the
+   * connection: a thread outlives its provider sessions (a host restart, then
+   * `thread/resume`), while the counter restarts at 1 with every new session.
+   * Without this epoch the first approval of session two is spelled exactly
+   * like the first approval of session one — which the host has already
+   * resolved and tombstoned — so the new card was swallowed and the turn hung
+   * on a prompt the user never saw.
+   */
+  private readonly requestEpoch: string;
   private livenessTimer: NodeJS.Timeout | null = null;
   private lastActivityAt = Date.now();
   /**
@@ -232,6 +244,8 @@ export class CodexSession {
     this.threadId = options.threadId;
     this.modelSelection = options.modelSelection;
     this.runtimeMode = options.runtimeMode;
+    // Through the `IdGen` seam, so a captured event log stays byte-stable.
+    this.requestEpoch = options.context.ids.uuid();
     this.normaliser = new CodexNormaliser({
       usage: this.usage,
       ownThreadId: () => this.providerThreadId
@@ -283,6 +297,17 @@ export class CodexSession {
    */
   injectNotificationForTest(method: ServerNotificationMethod, params: unknown): void {
     this.handleNotification(method, params);
+  }
+
+  /**
+   * The live collab children, as `[childThreadId, childTurnId]`.
+   *
+   * Read-only, and test-only in practice: a child registers itself from a
+   * `turn/started` on its OWN thread id, which raises no event of ours, so a
+   * test driving the real wire has nothing else to wait on.
+   */
+  get liveChildTurnsForTest(): [string, string][] {
+    return this.normaliser.liveChildTurns();
   }
 
   /**
@@ -570,11 +595,19 @@ export class CodexSession {
         "turn/interrupt"
       );
     } catch (error) {
-      if (error instanceof CodexRpcError) {
-        // "no active turn to interrupt" — the turn settled underneath us.
-        // Not a failure: the user's Stop achieved what they asked for. Clear
-        // the stale id so the session does not stay `running` for ever
-        // (Q1 finding 3).
+      // ONLY "no active turn to interrupt" is benign — the turn settled
+      // underneath us, so the user's Stop achieved what they asked for. Clear
+      // the stale id so the session does not stay `running` for ever (Q1
+      // finding 3).
+      //
+      // Every other rejection is rethrown for the host to append as
+      // `provider.turn.interrupt.failed`. Swallowing the whole `CodexRpcError`
+      // class (as this did) reports a real failure as a successful Stop and
+      // marks the turn settled while the model keeps running and spending —
+      // and `-32600` is this server's catch-all, so a malformed
+      // `turn/interrupt` of OURS arrives under the very same code
+      // (`13-error-envelopes.ndjson` case (c)).
+      if (isNoActiveTurnError(error)) {
         if (this.activeTurnId === active) {
           this.activeTurnId = null;
           this.normaliser.noteTurnSettled();
@@ -1593,9 +1626,16 @@ export class CodexSession {
     return option.value;
   }
 
+  /**
+   * A request id unique across every session this THREAD ever had (R2-1).
+   *
+   * The epoch is what carries that: the counter alone restarts at 1 with each
+   * new provider session, and the host's resolved-request tombstones outlive
+   * the session.
+   */
   private nextRequestId(): string {
     this.requestSeq += 1;
-    return `codex-${this.threadId}-${this.requestSeq}`;
+    return `codex-${this.threadId}-${this.requestEpoch}-${this.requestSeq}`;
   }
 
   private requirePeer(): CodexPeer {
