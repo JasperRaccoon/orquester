@@ -12,12 +12,18 @@
 import assert from "node:assert/strict";
 import { createElement, type ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { AgentPanelModel, Checkpoint, RuntimeSubagent } from "@orquester/api/agent-chat";
+import type {
+  AgentPanelModel,
+  Checkpoint,
+  RuntimeSubagent,
+  ThreadItem
+} from "@orquester/api/agent-chat";
 import {
   OrquesterProvider,
   type OrquesterProviderProps
 } from "../../../context/orquester-context";
 import { AgentRoster } from "./AgentRoster";
+import { backgroundShellRows } from "./background-shell";
 import { AgentDrillIn } from "./AgentDrillIn";
 import { ChatStatusLine } from "../status/ChatStatusLine";
 import { ContextMeterPanel } from "../status/ContextMeter";
@@ -257,6 +263,184 @@ const unknownAgent = render(
 assert.ok(
   unknownAgent.includes("no longer in the thread"),
   "a row the roster dropped says so instead of rendering a blank header"
+);
+
+// ---------------------------------------------------------------------------
+// A background shell: the roster row, and the drill-in that shows its output
+// ---------------------------------------------------------------------------
+
+function shell(overrides: Partial<RuntimeSubagent> = {}): RuntimeSubagent {
+  return agent("task-bg-1", {
+    agentKind: "background",
+    title: "run the suite",
+    // The launching agent's model rides the task payload; the row must never
+    // show it, because that is what made a shell read as a subagent.
+    model: "fable-5-1",
+    effort: "1m",
+    ...overrides
+  });
+}
+
+const shellRow = render(
+  createElement(AgentRoster, {
+    sessionId: "s1",
+    agents: [shell()],
+    panel: emptyPanel,
+    expanded: false,
+    onExpandedChange: () => {},
+    onOpenAgent: () => {}
+  })
+);
+assert.ok(shellRow.includes('data-agent-kind="background"'), "the row is stamped as a shell");
+assert.ok(shellRow.includes(">shell<"), "the role-chip slot says what kind of row this is");
+assert.ok(shellRow.includes("background shell"), "the metrics line names the row");
+assert.ok(!shellRow.includes("fable-5-1"), "and never the launching agent's model");
+assert.ok(!shellRow.includes("— tok"), "nor a token slot a shell can never fill");
+assert.ok(shellRow.includes(">Running<"), "a live shell is running, not 'Working'");
+
+const exitedRow = render(
+  createElement(AgentRoster, {
+    sessionId: "s1",
+    agents: [shell({ status: "completed", exitCode: 0, completedAt: "2026-09-21T10:00:30.000Z" })],
+    panel: emptyPanel,
+    expanded: false,
+    onExpandedChange: () => {},
+    onOpenAgent: () => {}
+  })
+);
+assert.ok(exitedRow.includes("Exited with code 0"), "a settled shell leads with its exit code");
+assert.ok(exitedRow.includes("background shell · exit 0"), "which the metrics line repeats");
+
+const failedRow = render(
+  createElement(AgentRoster, {
+    sessionId: "s1",
+    agents: [shell({ status: "failed", exitCode: 127 })],
+    panel: emptyPanel,
+    expanded: false,
+    onExpandedChange: () => {},
+    onOpenAgent: () => {}
+  })
+);
+assert.ok(failedRow.includes("Failed · exit 127"));
+
+// The drill-in: the command and its output are on screen without a click.
+const TOOL_USE_ID = "bgshell:task-bg-1";
+let shellItemSeq = 0;
+function shellItem(activityKind: string, payload: Record<string, unknown>): ThreadItem {
+  shellItemSeq += 1;
+  const createdAt = new Date(Date.UTC(2026, 8, 21, 10, 0, shellItemSeq)).toISOString();
+  return {
+    kind: "activity",
+    id: `bg${shellItemSeq}`,
+    tone: "tool",
+    activityKind,
+    summary: "Background shell",
+    payload,
+    turnId: "turn-1",
+    createdAt,
+    updatedAt: createdAt,
+    agentId: "task-bg-1"
+  } as ThreadItem;
+}
+
+const shellItems: ThreadItem[] = [
+  shellItem("tool.started", {
+    toolUseId: TOOL_USE_ID,
+    itemType: "command_execution",
+    title: "Background shell",
+    detail: "pnpm test --watch",
+    status: "running",
+    data: {
+      toolName: "Bash",
+      input: { command: "pnpm test --watch", description: "run the suite" },
+      background: true
+    }
+  }),
+  shellItem("tool.output", {
+    toolUseId: TOOL_USE_ID,
+    streamKind: "command_output",
+    delta: "PASS src/a.test.ts\n"
+  })
+];
+
+const shellDrillIn = render(
+  createElement(AgentDrillIn, {
+    sessionId: "s1",
+    agentId: "task-bg-1",
+    agent: shell(),
+    roster: [shell()],
+    rows: backgroundShellRows(shellItems, "task-bg-1"),
+    onBack: () => {}
+  })
+);
+assert.ok(shellDrillIn.includes("run the suite"), "the header names the shell's description");
+assert.ok(
+  shellDrillIn.includes("background shell"),
+  "and its metrics line says what it is, not what model ran it"
+);
+assert.ok(!shellDrillIn.includes("fable-5-1"));
+assert.ok(
+  shellDrillIn.includes(">Running<") && !shellDrillIn.includes(">Working<"),
+  "the header's state chip speaks the shell's language, exactly as its roster row does"
+);
+assert.ok(
+  shellDrillIn.includes("lucide-terminal"),
+  "and the breadcrumb keeps the terminal glyph"
+);
+
+const exitedDrillIn = render(
+  createElement(AgentDrillIn, {
+    sessionId: "s1",
+    agentId: "task-bg-1",
+    agent: shell({ status: "completed", exitCode: 0, completedAt: "2026-09-21T10:00:30.000Z" }),
+    roster: [shell({ status: "completed", exitCode: 0 })],
+    rows: backgroundShellRows(shellItems, "task-bg-1"),
+    onBack: () => {}
+  })
+);
+assert.ok(exitedDrillIn.includes("Exited with code 0"));
+assert.ok(exitedDrillIn.includes("background shell · exit 0"));
+assert.ok(
+  exitedDrillIn.includes("run the suite"),
+  "a settled shell still leads with what it was asked to do"
+);
+assert.ok(
+  shellDrillIn.includes('data-background-shell="true"'),
+  "the command row knows it is a shell's row"
+);
+assert.ok(
+  shellDrillIn.includes("pnpm test --watch"),
+  "the command is on screen, in the monospace block"
+);
+assert.ok(
+  shellDrillIn.includes("PASS src/a.test.ts"),
+  "and so is what the shell has printed — without a click"
+);
+assert.ok(
+  shellDrillIn.includes('data-shell-output="true"') && shellDrillIn.includes("max-h-[60vh]"),
+  "the output pane gets the room a drill-in's whole content deserves"
+);
+assert.ok(
+  !shellDrillIn.includes("max-h-64"),
+  "and not the short cap a tool row inside a conversation gets"
+);
+
+// Nothing printed yet: the copy is a shell's, not a subagent's.
+const silentShell = render(
+  createElement(AgentDrillIn, {
+    sessionId: "s1",
+    agentId: "task-bg-1",
+    agent: shell(),
+    roster: [shell()],
+    rows: [],
+    onBack: () => {}
+  })
+);
+assert.ok(silentShell.includes("No output yet."));
+assert.ok(!silentShell.includes("has not reported anything yet"));
+assert.ok(
+  drillIn.includes("This agent has not reported anything yet."),
+  "an agent with no items keeps its own copy"
 );
 
 // ---------------------------------------------------------------------------

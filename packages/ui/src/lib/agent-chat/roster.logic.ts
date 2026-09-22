@@ -58,12 +58,60 @@ export function rosterRowLook(status: RuntimeSubagentStatus): RosterRowLook {
 }
 
 /**
+ * A **background shell's** second line (§7.6).
+ *
+ * A shell is not a subagent and must not be described like one: the agent
+ * precedence below would print the provider's own sentence — `Background
+ * command "pnpm test" completed (exit code 0)` — which reads exactly like a
+ * subagent's result and is what made a shell row indistinguishable from an
+ * agent row. A shell has two facts worth a line: it is running, or it stopped
+ * with an exit code.
+ *
+ * Never `null`: the line always says something, because "nothing reported yet"
+ * is not a state a shell can be in — it either runs or it does not.
+ */
+export function backgroundShellActivityText(
+  shell: Pick<RuntimeSubagent, "status" | "progress" | "exitCode">
+): string {
+  const exit = typeof shell.exitCode === "number" ? shell.exitCode : null;
+  switch (shell.status) {
+    case "pending":
+    case "running":
+    case "waiting": {
+      // A provider that says what the shell is doing is more specific than the
+      // state word, and a shell that was moved to the background mid-run keeps
+      // whatever the launching tool had reported.
+      const progress = shell.progress?.trim();
+      return progress !== undefined && progress.length > 0 ? progress : "Running";
+    }
+    case "completed":
+      return exit === null ? "Exited" : `Exited with code ${exit}`;
+    case "failed":
+      return exit === null ? "Failed" : `Failed · exit ${exit}`;
+    case "cancelled":
+    case "interrupted":
+      return "Stopped";
+    case "idle":
+      return "Idle";
+    default: {
+      const exhaustive: never = shell.status;
+      void exhaustive;
+      return "Running";
+    }
+  }
+}
+
+/**
  * The row's second line: prefer live `progress`, then the last tool, then
- * result/error **while live**, and reverse that order once settled.
+ * result/error **while live**, and reverse that order once settled — unless
+ * the row is a background shell, which has its own two-fact line above.
  *
  * *T3: `AgentsPanel.tsx:120-137`.*
  */
 export function agentActivityText(agent: RuntimeSubagent): string | null {
+  if (agent.agentKind === "background") {
+    return backgroundShellActivityText(agent);
+  }
   const live = isActiveSubagentStatus(agent.status);
   // While live the *result* precedes the error — a child that has already
   // produced something is described by it, and an error on a row that is still

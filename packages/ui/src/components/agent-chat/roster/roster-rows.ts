@@ -80,6 +80,20 @@ export function isFinishedRow(agent: Pick<RuntimeSubagent, "status">): boolean {
   return isTerminalSubagentStatus(agent.status);
 }
 
+/**
+ * A shell row — a command the agent ran in the background, listed in the same
+ * roster (§7.6, the deliberate difference from T3).
+ *
+ * Deliberately **status-blind**, unlike {@link isLiveBackgroundRow}: the
+ * exemption from the collapse is about a row that outlives its turn, while
+ * this is about what the row *is*. A finished shell is still a shell, and it
+ * must keep the terminal glyph, the "shell" chip and its exit code while it
+ * fades.
+ */
+export function isBackgroundShellRow(agent: Pick<RuntimeSubagent, "agentKind">): boolean {
+  return agent.agentKind === "background";
+}
+
 /** A background task that is still running — the row exempt from both rules. */
 export function isLiveBackgroundRow(
   agent: Pick<RuntimeSubagent, "agentKind" | "status">

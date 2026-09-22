@@ -104,33 +104,65 @@ export function LiveActivityLine({
 // The expanded body of a single tool call
 // ---------------------------------------------------------------------------
 
+/** How close to the end still counts as "reading the tail" (px). */
+const FOLLOW_OUTPUT_BAND = 24;
+
 function ToolOutput({
   id,
   text,
-  ctx
+  ctx,
+  shell = false
 }: {
   id: string;
   text: string;
   ctx: TimelineRowContextValue;
+  /**
+   * The background-shell drill-in, where this pane is the whole view: it gets
+   * room (60vh instead of a capped 16rem) and follows the output as it
+   * streams, which a tool row inside a conversation must never do.
+   */
+  shell?: boolean;
 }): React.ReactElement {
   const ref = React.useRef<HTMLPreElement>(null);
   const remembered = ctx.toolOutputOffset(id);
+  /** Whether the user is still at the end. Follow is theirs to disarm. */
+  const atEndRef = React.useRef(true);
 
   // The scroll offset inside an expanded tool output is part of the remembered
   // page shape (§7.2), so returning to a tab restores where you were reading
   // inside the output, not just which rows were open.
   React.useLayoutEffect(() => {
     const node = ref.current;
-    if (node && remembered > 0) node.scrollTop = remembered;
+    if (node && remembered > 0) {
+      node.scrollTop = remembered;
+      atEndRef.current = false;
+    }
     // Restore once per mount; later scrolls are the user's.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
+  // Follow-to-bottom, and only while the user is already there: scrolling up
+  // to read something that went past must not be undone by the next chunk.
+  React.useLayoutEffect(() => {
+    const node = ref.current;
+    if (!shell || !node || !atEndRef.current) return;
+    node.scrollTop = node.scrollHeight;
+  }, [shell, text]);
+
   return (
     <pre
       ref={ref}
-      onScroll={(event) => ctx.setToolOutputOffset(id, event.currentTarget.scrollTop)}
-      className="ac-scroll-thin max-h-64 cursor-text select-text overflow-auto whitespace-pre-wrap break-words font-mono text-[length:var(--font-size-code,0.6875rem)] leading-relaxed text-neutral-400"
+      onScroll={(event) => {
+        const node = event.currentTarget;
+        atEndRef.current =
+          node.scrollHeight - node.scrollTop - node.clientHeight <= FOLLOW_OUTPUT_BAND;
+        ctx.setToolOutputOffset(id, node.scrollTop);
+      }}
+      {...(shell ? { "data-shell-output": "true" } : {})}
+      className={cn(
+        "ac-scroll-thin cursor-text select-text overflow-auto whitespace-pre-wrap break-words font-mono text-[length:var(--font-size-code,0.6875rem)] leading-relaxed text-neutral-400",
+        shell ? "max-h-[60vh]" : "max-h-64"
+      )}
     >
       {text}
     </pre>
@@ -255,6 +287,10 @@ export const ToolEntryRow = React.memo(function ToolEntryRow({
     detail.length > 0 ||
     changedFiles.length > 0;
 
+  // The shell's own command row, inside its drill-in: its output pane is the
+  // content of that view, not a detail folded under a label (§7.6).
+  const shellRow = ctx.backgroundShell && entry.itemType === "command_execution";
+
   // §7.3's row-tone table, and nothing beyond it: a warning gets the warn
   // colour, a SEVERE failure the destructive one, and every other row —
   // including a tool that exited non-zero — stays muted.
@@ -270,6 +306,7 @@ export const ToolEntryRow = React.memo(function ToolEntryRow({
   return (
     <div
       data-activity-id={entry.id}
+      {...(shellRow ? { "data-background-shell": "true" } : {})}
       {...(canExpand
         ? {
             role: "button" as const,
@@ -342,7 +379,7 @@ export const ToolEntryRow = React.memo(function ToolEntryRow({
           {diff !== null ? (
             <InlineDiff diff={diff} workspaceRoot={ctx.workspaceRoot} onOpenFile={ctx.onOpenFile} />
           ) : detail.length > 0 ? (
-            <ToolOutput id={entry.id} text={detail} ctx={ctx} />
+            <ToolOutput id={entry.id} text={detail} ctx={ctx} shell={shellRow} />
           ) : null}
           {diff === null && changedFiles.length > 0 ? (
             <div className={cn("flex flex-col gap-0.5", (command.length > 0 || detail.length > 0) && "mt-2")}>

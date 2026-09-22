@@ -59,6 +59,14 @@ export interface TimelineRowContextValue {
   canBackgroundTasks: boolean;
   /** The user's Ctrl+B on one running tool call. */
   onBackgroundTool: (toolUseId: string) => void;
+  /**
+   * This timeline is a background shell's drill-in (§7.6), where the shell's
+   * command and its output ARE the view. A tool row's output pane is capped
+   * short everywhere else because it is one line of a conversation; here it is
+   * the content, so the shell variant gives it room and follows it as it
+   * streams. Never true in the parent timeline.
+   */
+  backgroundShell: boolean;
 }
 
 const NOOP = (): void => {};
@@ -95,6 +103,7 @@ const FALLBACK: TimelineRowContextValue = {
   onReturnQueuedToComposer: NOOP,
   canBackgroundTasks: false,
   onBackgroundTool: NOOP,
+  backgroundShell: false
 };
 
 export const TimelineRowContext = React.createContext<TimelineRowContextValue>(FALLBACK);

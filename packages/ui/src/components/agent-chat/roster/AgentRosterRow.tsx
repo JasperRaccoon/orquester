@@ -21,7 +21,7 @@ import { cn } from "../../../lib/cn";
 import { ElapsedTicker, StatusDot } from "../primitives";
 import type { ChatTone } from "../primitives/tone";
 import { agentActivityText, rosterRoleChip, rosterRowMetrics } from "./format";
-import { rosterRowTicks, rosterStatusVisual } from "./roster-rows";
+import { isBackgroundShellRow, rosterRowTicks, rosterStatusVisual } from "./roster-rows";
 
 /** The grid every roster row shares. Changing this changes all of them. */
 const ROW_GRID = cn(
@@ -56,14 +56,21 @@ export function AgentRosterRow({
   const activity = agentActivityText(agent);
   const role = rosterRoleChip(agent);
   const metrics = rosterRowMetrics(agent);
-  const background = agent.agentKind === "background";
+  // A shell keeps the terminal glyph, but the glyph alone was too quiet: the
+  // "shell" chip and the "background shell" metrics line are what make the row
+  // read as a command rather than as a subagent (§7.6).
+  const background = isBackgroundShellRow(agent);
   const Icon = background ? Terminal : Bot;
 
   return (
     <button
       type="button"
       onClick={() => onOpen(agent.id)}
-      aria-label={`${agent.title} — ${statusLabel}`}
+      aria-label={
+        background
+          ? `${agent.title} — background shell, ${activity ?? statusLabel}`
+          : `${agent.title} — ${statusLabel}`
+      }
       data-agent-id={agent.id}
       data-status={agent.status}
       data-agent-kind={agent.agentKind}

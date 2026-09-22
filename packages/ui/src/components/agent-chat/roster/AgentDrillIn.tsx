@@ -27,6 +27,13 @@
  * provider reports a task but no per-agent items, the timeline says so rather
  * than this view inventing lineage.
  *
+ * **A background shell is the one exception** (§7.6). Its rows are projected
+ * here, by `background-shell.ts`, because the shared projection applies the
+ * quiet-timeline filter a second time inside the child's own view and drops
+ * every row the shell owns — the drill-in then claimed the shell had reported
+ * nothing while it was printing. They also open themselves: a shell's output
+ * is the reason its row was clicked.
+ *
  * Escape is **not** bound here: the app has one window-level key listener
  * (AGENTS.md), and the view that owns the drill-in state owns the key that
  * closes it. This component's own affordance is the breadcrumb's Back.
@@ -39,14 +46,17 @@
 
 import React from "react";
 import { ArrowLeft, Bot, Terminal } from "lucide-react";
+import type { ThreadItem } from "@orquester/api/agent-chat";
 import { cn } from "../../../lib/cn";
 import type { DisclosureState } from "../../../lib/agent-chat/contracts";
 import { useAgentChatDrillIn } from "../../../lib/agent-chat/hooks";
+import { peekThreadStore } from "../../../lib/agent-chat/store";
 import type { AgentDrillInProps } from "../contracts";
 import { ChatTimeline } from "../timeline/ChatTimeline";
 import { ElapsedTicker, StatusDot } from "../primitives";
+import { backgroundShellDisclosureIds, backgroundShellRows } from "./background-shell";
 import { agentActivityText, rosterRowMetrics } from "./format";
-import { rosterRowTicks, rosterStatusVisual } from "./roster-rows";
+import { isBackgroundShellRow, rosterRowTicks, rosterStatusVisual } from "./roster-rows";
 
 const EMPTY_DISCLOSURES: DisclosureState = {
   expandedTurnIds: [],
@@ -56,7 +66,33 @@ const EMPTY_DISCLOSURES: DisclosureState = {
   toolOutputOffsets: {}
 };
 
+const EMPTY_ITEMS: readonly ThreadItem[] = [];
+
+const EMPTY_ROW_IDS: readonly string[] = [];
+
 const noop = (): void => {};
+
+/**
+ * The thread's own items, live.
+ *
+ * Only a background shell needs them: its rows come from this component's own
+ * projection (see `background-shell.ts`), not from the shared drill-in one.
+ * `peekThreadStore` never creates a slice — `useAgentChatDrillIn` has already
+ * ensured it during this same render, and a host without one (a static render
+ * check) simply reads as an empty thread.
+ */
+function useThreadItems(sessionId: string, enabled: boolean): readonly ThreadItem[] {
+  const store = enabled ? peekThreadStore(sessionId) : null;
+  const subscribe = React.useCallback(
+    (onChange: () => void) => (store === null ? noop : store.subscribe(onChange)),
+    [store]
+  );
+  const read = React.useCallback(
+    () => (store === null ? EMPTY_ITEMS : store.getState().slice.entries),
+    [store]
+  );
+  return React.useSyncExternalStore(subscribe, read, read);
+}
 
 export function AgentDrillIn({
   sessionId,
@@ -68,23 +104,76 @@ export function AgentDrillIn({
   projectPath
 }: AgentDrillInProps): React.ReactElement {
   const live = useAgentChatDrillIn(sessionId, agentId);
+  const agent = agentOverride ?? live.agent;
+  const background = agent !== null && isBackgroundShellRow(agent);
+
+  // A shell's own rows are projected here rather than by the shared drill-in
+  // hook, which applies the quiet-timeline filter a second time and drops
+  // them. See `background-shell.ts`.
+  const items = useThreadItems(sessionId, background);
+  const shellRows = React.useMemo(
+    () => (background ? backgroundShellRows(items, agentId) : null),
+    [background, items, agentId]
+  );
   // The hook is the source; the props are an override for a host that already
   // holds the projection (and for tests, which have no store).
-  const rows = rowsOverride ?? live.rows;
-  const agent = agentOverride ?? live.agent;
+  const rows = rowsOverride ?? shellRows ?? live.rows;
 
   const [disclosures, setDisclosures] = React.useState<DisclosureState>(EMPTY_DISCLOSURES);
-  const onDisclosureChange = React.useCallback((patch: Partial<DisclosureState>) => {
-    setDisclosures((current) => ({ ...current, ...patch }));
-  }, []);
+
+  // A shell's rows open THEMSELVES: the output is the whole reason the row was
+  // clicked, and one more click to reach it is the bug this fixes. Seeded by
+  // derivation rather than by an effect, so a row is open on the very first
+  // paint — a chunk that arrives before an effect could run must not flash a
+  // collapsed row — and so the opening survives a remount.
+  const shellRowIds = React.useMemo(
+    () => (background ? backgroundShellDisclosureIds(rows) : EMPTY_ROW_IDS),
+    [background, rows]
+  );
+  /** Default-open rows the user closed; they stay closed as output keeps coming. */
+  const [collapsedShellRowIds, setCollapsedShellRowIds] =
+    React.useState<readonly string[]>(EMPTY_ROW_IDS);
+
+  const onDisclosureChange = React.useCallback(
+    (patch: Partial<DisclosureState>) => {
+      const groups = patch.expandedGroupIds;
+      if (groups !== undefined && shellRowIds.length > 0) {
+        // The timeline patches the WHOLE list, so a default-open id missing
+        // from it is one the user just collapsed — and one that reappears was
+        // re-opened.
+        setCollapsedShellRowIds(shellRowIds.filter((id) => !groups.includes(id)));
+      }
+      setDisclosures((current) => ({ ...current, ...patch }));
+    },
+    [shellRowIds]
+  );
+
+  const timelineDisclosures = React.useMemo<DisclosureState>(() => {
+    const open = shellRowIds.filter(
+      (id) => !collapsedShellRowIds.includes(id) && !disclosures.expandedGroupIds.includes(id)
+    );
+    return open.length === 0
+      ? disclosures
+      : { ...disclosures, expandedGroupIds: [...disclosures.expandedGroupIds, ...open] };
+  }, [collapsedShellRowIds, disclosures, shellRowIds]);
 
   const visuals = agent ? rosterStatusVisual(agent.status) : null;
-  const background = agent?.agentKind === "background";
   const Icon = background ? Terminal : Bot;
   // The agent's prompt is the task description the provider reported: the
   // live/settled precedence of the roster's own activity line, so a settled
-  // child leads with its outcome here too.
-  const prompt = agent ? agentActivityText(agent) : null;
+  // child leads with its outcome here too. A shell's description is its title
+  // (the Bash call's own `description`), and the header already carries its
+  // state twice — the status chip and the metrics line — so the prompt block
+  // is the one place the full, untruncated description can live.
+  const description = background ? (agent?.title.trim() ?? "") : "";
+  const activity = agent ? agentActivityText(agent) : null;
+  const prompt =
+    background && description.length > 0 && description !== agentId ? description : activity;
+  // The chip reads the shell's own state word — "Running", "Exited with code
+  // 0" — rather than the agent vocabulary ("Working", "Completed"), which is
+  // the same string its roster row shows. The DOT keeps the status colour and
+  // the pulse: those are the roster's semantics and do not change for a shell.
+  const statusText = (background ? activity : null) ?? visuals?.label ?? "";
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-neutral-950" data-agent-drill-in={agentId}>
@@ -111,8 +200,8 @@ export function AgentDrillIn({
         </nav>
         {agent && visuals ? (
           <span className="ml-auto flex shrink-0 items-center gap-2 font-mono text-[11px] text-neutral-500">
-            <StatusDot tone={visuals.tone} size="xs" pulse={visuals.pulse} label={visuals.label} />
-            <span>{visuals.label}</span>
+            <StatusDot tone={visuals.tone} size="xs" pulse={visuals.pulse} label={statusText} />
+            <span>{statusText}</span>
             <ElapsedTicker
               startedAt={agent.startedAt}
               endedAt={agent.completedAt}
@@ -155,7 +244,7 @@ export function AgentDrillIn({
         rows={rows}
         follow
         onFollowChange={noop}
-        disclosures={disclosures}
+        disclosures={timelineDisclosures}
         onDisclosureChange={onDisclosureChange}
         bottomInset={0}
         canRevert={false}
