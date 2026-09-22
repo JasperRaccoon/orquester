@@ -31,6 +31,9 @@ import {
   type ModelSelection,
   type RuntimeMode,
   type RuntimeSubagent,
+  type ThreadActivityItem,
+  type ThreadItem,
+  type ThreadMessageItem,
   type ThreadTokenUsage
 } from "@orquester/api/agent-chat";
 
@@ -175,7 +178,10 @@ export interface AgentChatThreadState {
    * so a consumer can tell one proposal from the next without diffing markdown.
    */
   actionableProposedPlan: { id: string; planMarkdown: string; turnId: string | null } | null;
-  /** True while a `/revert` is in flight; §7.5's one reason the composer goes inert. */
+  /**
+   * True while a `/revert` is in flight — for `rewindTo`, until the host has
+   * answered it on the stream; §7.5's one reason the composer goes inert.
+   */
   reverting: boolean;
   /** The composer's persisted draft for this thread. */
   draft: ComposerDraft;
@@ -303,6 +309,85 @@ function retainableFrom(state: InternalState): RetainedThread<RetainedThreadStat
 }
 
 // ---------------------------------------------------------------------------
+// Rewind (§5.5, §7.5)
+// ---------------------------------------------------------------------------
+
+/**
+ * How long {@link AgentChatActions.rewindTo} holds the composer inert waiting
+ * for the host to answer a `/revert`. A rollback is a provider fork — Claude
+ * re-reads its native history, in a child process when the account home
+ * differs — so it gets minutes, not seconds; but never forever. Past this the
+ * composer comes back and the thread still converges from the stream whenever
+ * the host finishes.
+ */
+export const REWIND_TIMEOUT_MS = 120_000;
+
+/** What §5.5 step 6 appends, as an `error` activity, for any failed rewind. */
+const REVERT_FAILED_ACTIVITY_KIND = "checkpoint.revert.failed";
+
+const REWIND_TARGET_UNAVAILABLE = "The message to rewind to is no longer available.";
+const REWIND_IN_PROGRESS = "A rewind is already in progress.";
+const REWIND_TIMED_OUT =
+  "The rewind is taking too long; the thread will update when the host finishes.";
+
+type RewindProgress =
+  | { kind: "pending" }
+  | { kind: "rewound" }
+  | { kind: "failed"; reason: string };
+
+function isRevertFailure(item: ThreadItem): item is ThreadActivityItem {
+  return item.kind === "activity" && item.activityKind === REVERT_FAILED_ACTIVITY_KIND;
+}
+
+/** Every rewind failure already on the thread — only a NEW one answers ours. */
+function revertFailureIds(entries: readonly ThreadItem[]): Set<string> {
+  return new Set(entries.filter(isRevertFailure).map((item) => item.id));
+}
+
+/** The host's reason (`payload.detail`), else the row's own summary. */
+function revertFailureReason(activity: ThreadActivityItem): string {
+  const payload = activity.payload;
+  const detail =
+    typeof payload === "object" && payload !== null
+      ? (payload as { detail?: unknown }).detail
+      : undefined;
+  if (typeof detail === "string" && detail.trim().length > 0) {
+    return detail.trim();
+  }
+  return activity.summary.trim().length > 0 ? activity.summary : "The rewind failed.";
+}
+
+/**
+ * Where a rewind stands, read off the thread alone. The host answers a
+ * `/revert` with `{seq}` long before the rollback runs (§6.2), so the command
+ * settling proves nothing: the outcome is the truncation — `thread.reverted`,
+ * or a snapshot, removing the message — or a new `checkpoint.revert.failed`
+ * row. A message that is gone wins over a failure row: the user asked for it
+ * to go, and the thread no longer holds it either way.
+ */
+function rewindProgress(
+  entries: readonly ThreadItem[],
+  messageId: string,
+  knownFailureIds: ReadonlySet<string>
+): RewindProgress {
+  let messagePresent = false;
+  let failure: ThreadActivityItem | null = null;
+  for (const item of entries) {
+    if (item.kind === "message") {
+      messagePresent ||= item.id === messageId;
+    } else if (isRevertFailure(item) && !knownFailureIds.has(item.id)) {
+      failure = item;
+    }
+  }
+  if (!messagePresent) {
+    return { kind: "rewound" };
+  }
+  return failure === null
+    ? { kind: "pending" }
+    : { kind: "failed", reason: revertFailureReason(failure) };
+}
+
+// ---------------------------------------------------------------------------
 // Projection
 // ---------------------------------------------------------------------------
 
@@ -408,6 +493,9 @@ function project(state: InternalState): InternalState {
       isCompacting,
       activeTurnStartedAt: latestTurn?.startedAt ?? latestTurn?.requestedAt ?? null,
       checkpoints: slice.checkpoints,
+      // "Rewind to here" is numbered by turn order (§5.5). The fold keeps this
+      // array's identity across streamed tokens, so the fast path survives.
+      turns: slice.turns,
       // The adapter capability, not "a head exists": stamping `revertTurnCount`
       // on a provider that cannot roll back leaves an affordance that only a
       // second gate in the view saves (fix-wave R7-12). `null` while the
@@ -522,8 +610,14 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
   /** Decided inside a zustand updater, acted on after `set` returns (Q2-9). */
   let resyncWanted = false;
   let unsubscribeProviders: (() => void) | null = null;
+  /**
+   * Told when this generation is destroyed. A wait on the stream — the rewind
+   * waiting for its truncation — must not outlive the stream it waits on: no
+   * frame will ever reach a closed store.
+   */
+  const destroyListeners = new Set<() => void>();
 
-  const store = createStore<InternalState>()((set, get) => {
+  const store = createStore<InternalState>()((set, get, storeApi) => {
     const update = (mutate: (state: InternalState) => InternalState): void => {
       set((state) => {
         const next = mutate(state);
@@ -692,6 +786,68 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       });
     };
 
+    /**
+     * Settle once the host has answered a `/revert`: resolve when `messageId`
+     * is gone from the thread, reject on a NEW `checkpoint.revert.failed` row
+     * (its reason is the error) or after {@link REWIND_TIMEOUT_MS}.
+     *
+     * The thread is read once synchronously before subscribing: the stream can
+     * fold the truncation before the command's own response lands, and a
+     * subscription only hears what happens after it. A destroyed generation
+     * resolves at once — its stream is gone, so nothing could ever answer.
+     */
+    const waitForRewind = (
+      messageId: string,
+      knownFailureIds: ReadonlySet<string>
+    ): Promise<void> =>
+      new Promise<void>((resolve, reject) => {
+        let settled = false;
+        let unsubscribe: (() => void) | null = null;
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        const onDestroy = (): void => finish(null);
+        const finish = (failure: Error | null): void => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          unsubscribe?.();
+          destroyListeners.delete(onDestroy);
+          if (timer !== null) {
+            clearTimeout(timer);
+          }
+          if (failure === null) {
+            resolve();
+          } else {
+            reject(failure);
+          }
+        };
+        const evaluate = (entries: readonly ThreadItem[]): void => {
+          const progress = rewindProgress(entries, messageId, knownFailureIds);
+          if (progress.kind === "rewound") {
+            finish(null);
+          } else if (progress.kind === "failed") {
+            finish(new Error(progress.reason));
+          }
+        };
+
+        if (closed) {
+          finish(null);
+          return;
+        }
+        evaluate(get().slice.entries);
+        if (settled) {
+          return;
+        }
+        unsubscribe = storeApi.subscribe((state, previous) => {
+          if (state.slice.entries !== previous.slice.entries) {
+            evaluate(state.slice.entries);
+          }
+        });
+        destroyListeners.add(onDestroy);
+        timer = setTimeout(() => finish(new Error(REWIND_TIMED_OUT)), REWIND_TIMEOUT_MS);
+        timer.unref?.();
+      });
+
     const actions: AgentChatActions = {
       async sendTurn(input) {
         await command("turn", {
@@ -771,10 +927,56 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       },
 
       async rewindTo(input) {
-        // Contract stub: the full flow (wait for the truncation, return the
-        // message to the composer) lands with the rewind work; until then a
-        // rewind is the bare revert.
-        await actions.revert({ targetTurnCount: input.targetTurnCount });
+        // One at a time. A second rewind racing the first would post a second
+        // `/revert`, and the one truncation would then hand the same message
+        // back to the composer twice.
+        if (get().reverting) {
+          throw new Error(REWIND_IN_PROGRESS);
+        }
+        const entries = get().slice.entries;
+        const target = entries.find(
+          (item): item is ThreadMessageItem =>
+            item.kind === "message" && item.role === "user" && item.id === input.messageId
+        );
+        if (target === undefined) {
+          throw new Error(REWIND_TARGET_UNAVAILABLE);
+        }
+        // Taken BEFORE the command: the truncation that proves the rewind
+        // worked is the very fold that removes the message.
+        const rewound = {
+          text: target.text,
+          attachments: [...(target.attachments ?? [])],
+          context: [...(target.context ?? [])]
+        };
+        const knownFailureIds = revertFailureIds(entries);
+        // §7.5: inert for the WHOLE rewind, not just the post. The host answers
+        // `{seq}` long before it has rewritten anything, and a turn sent in
+        // between lands against history that is about to stop existing.
+        update((state) => ({ ...state, reverting: true }));
+        try {
+          await command("revert", { targetTurnCount: input.targetTurnCount });
+          await waitForRewind(input.messageId, knownFailureIds);
+        } finally {
+          update((state) => ({ ...state, reverting: false }));
+        }
+        // The message goes back for editing, as the CLI's own rewind does —
+        // through the same path a queued message takes, so a mounted composer
+        // gets the text and re-staged chips (the host keeps an unreferenced
+        // attachment for a grace period, so they stay valid) and an unmounted
+        // one finds it in the persisted draft. A generation destroyed
+        // mid-wait lands here too: the outcome can no longer be observed, and
+        // a copy of a message that survived is one delete away where a
+        // rewound one the user asked back would be lost for good. After
+        // `reverting` clears, not inside the `try`: an inert composer cannot
+        // take the caret.
+        appendToDraft({
+          id: newId(),
+          ...rewound,
+          interactionMode: get().slice.interactionMode,
+          queuedAfterToolActivityId: null,
+          holdUntilUserAction: false,
+          queuedAt: now()
+        });
       },
 
       async compact() {
@@ -1194,6 +1396,12 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
     if (options?.retain !== false) {
       retention.retain(sessionId, retentionOwner, retainableFrom(store.getState()));
     }
+    // A wait on the stream settles now rather than at its timeout: no frame
+    // will ever reach this generation again.
+    for (const listener of [...destroyListeners]) {
+      listener();
+    }
+    destroyListeners.clear();
   };
 
   return store;

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
 
+import type { Turn } from "@orquester/api/agent-chat";
+
 import type { AgentChatTimelineRow, WorkLogEntry } from "./contracts";
 import {
   deriveTimelineEntriesFromItems,
@@ -41,6 +43,28 @@ const entriesFrom = (items: Parameters<typeof deriveTimelineEntriesFromItems>[0]
   deriveTimelineEntriesFromItems(items, EMPTY_TIMELINE_PROJECTION).entries;
 
 const kinds = (rows: readonly AgentChatTimelineRow[]) => rows.map((row) => row.kind);
+
+/** A fold turn row: started once the provider minted its id, pending before. */
+const turn = (turnId: string | null, userMessageId?: string): Turn => ({
+  turnId,
+  state: turnId === null ? "pending" : "completed",
+  turnCount: null,
+  requestedAt: stamp(0),
+  startedAt: turnId === null ? null : stamp(0),
+  completedAt: turnId === null ? null : stamp(0),
+  assistantMessageId: null,
+  ...(userMessageId !== undefined ? { userMessageId } : {})
+});
+
+/** Every rendered user bubble's `revertTurnCount`, by message id. */
+const revertCounts = (rows: readonly AgentChatTimelineRow[]): Record<string, number | undefined> =>
+  Object.fromEntries(
+    rows.flatMap((row) =>
+      row.kind === "message" && row.message.role === "user"
+        ? [[row.message.id, row.revertTurnCount] as const]
+        : []
+    )
+  );
 
 describe("activity-group boundaries", () => {
   it("only reasoning messages and plain tool rows are grouping entries", () => {
@@ -308,32 +332,233 @@ describe("compaction and changed-files rows", () => {
   });
 
   it("offers rewind only where the adapter supports rollback", () => {
-    const assistant = message("assistant", "done", { id: "am1", turnId: "t1", createdAt: stamp(2) });
-    const checkpoints = [
-      {
-        turnId: "t1",
-        checkpointTurnCount: 2,
-        checkpointRef: "refs/x",
-        status: "ready" as const,
-        files: [],
-        assistantMessageId: "am1",
-        completedAt: stamp(3)
-      }
+    const items = [
+      message("user", "go", { id: "um1", createdAt: stamp(1) }),
+      message("assistant", "done", { id: "am1", turnId: "t1", createdAt: stamp(2) })
     ];
-    const items = [message("user", "go", { id: "um1", createdAt: stamp(1) }), assistant];
-    const without = deriveTimelineRows(
-      baseInput(entriesFrom(items), { checkpoints, supportsConversationRollback: false })
-    );
-    const userRow = without.find((row) => row.kind === "message" && row.message.role === "user");
-    assert.ok(userRow && userRow.kind === "message");
-    assert.equal(userRow.revertTurnCount, undefined);
+    const turns = [turn("t1", "um1")];
 
-    const with_ = deriveTimelineRows(
-      baseInput(entriesFrom(items), { checkpoints, supportsConversationRollback: true })
+    const without = deriveTimelineRows(
+      baseInput(entriesFrom(items), { turns, supportsConversationRollback: false })
     );
-    const userRow2 = with_.find((row) => row.kind === "message" && row.message.role === "user");
-    assert.ok(userRow2 && userRow2.kind === "message");
-    assert.equal(userRow2.revertTurnCount, 1);
+    assert.deepEqual(revertCounts(without), { um1: undefined });
+
+    // No checkpoint anywhere — a non-git project — and the affordance is
+    // there anyway: it is numbered by turn order, never by the checkpoints.
+    const with_ = deriveTimelineRows(
+      baseInput(entriesFrom(items), { turns, supportsConversationRollback: true })
+    );
+    assert.deepEqual(revertCounts(with_), { um1: 0 });
+  });
+
+  it("no longer reads the rewind off the checkpoint list", () => {
+    // The old rule: a checkpoint keyed to the assistant reply after a user
+    // message numbered that message. With no turn naming the prompt there is
+    // nothing to rewind to, whatever the checkpoints say.
+    const rows = deriveTimelineRows(
+      baseInput(
+        entriesFrom([
+          message("user", "go", { id: "um1", createdAt: stamp(1) }),
+          message("assistant", "done", { id: "am1", turnId: "t1", createdAt: stamp(2) })
+        ]),
+        {
+          supportsConversationRollback: true,
+          turns: [turn("t1")],
+          checkpoints: [
+            {
+              turnId: "t1",
+              checkpointTurnCount: 2,
+              checkpointRef: "refs/x",
+              status: "ready",
+              files: [],
+              assistantMessageId: "am1",
+              completedAt: stamp(3)
+            }
+          ]
+        }
+      )
+    );
+    assert.deepEqual(revertCounts(rows), { um1: undefined });
+  });
+});
+
+describe("rewind to here — numbered by turn order (§5.5)", () => {
+  const threeTurns = () => [
+    message("user", "one", { id: "u1", createdAt: stamp(1) }),
+    message("assistant", "a", { id: "a1", turnId: "t1", createdAt: stamp(2) }),
+    message("user", "two", { id: "u2", createdAt: stamp(3) }),
+    message("assistant", "b", { id: "a2", turnId: "t2", createdAt: stamp(4) }),
+    message("user", "three", { id: "u3", createdAt: stamp(5) }),
+    message("assistant", "c", { id: "a3", turnId: "t3", createdAt: stamp(6) })
+  ];
+
+  it("is the index of the turn a message opened, among the started turns", () => {
+    const rows = deriveTimelineRows(
+      baseInput(entriesFrom(threeTurns()), {
+        supportsConversationRollback: true,
+        turns: [turn("t1", "u1"), turn("t2", "u2"), turn("t3", "u3")]
+      })
+    );
+    // Turns KEPT: rewinding to a message drops its own turn and every later one.
+    assert.deepEqual(revertCounts(rows), { u1: 0, u2: 1, u3: 2 });
+  });
+
+  it("counts a promptless turn in its place, and a replayed duplicate once", () => {
+    const rows = deriveTimelineRows(
+      baseInput(entriesFrom(threeTurns()), {
+        supportsConversationRollback: true,
+        turns: [
+          turn("t1", "u1"),
+          // A continuation after a restart: a real turn, no prompt of its own.
+          turn("tx"),
+          turn("t2", "u2"),
+          turn("t2", "u2"),
+          turn("t3", "u3")
+        ]
+      })
+    );
+    assert.deepEqual(revertCounts(rows), { u1: 0, u2: 2, u3: 3 });
+  });
+
+  it("withholds it from a message that opened no turn", () => {
+    const rows = deriveTimelineRows(
+      baseInput(
+        entriesFrom([
+          message("user", "go", { id: "u1", createdAt: stamp(1) }),
+          // A steer rides the running turn and has no turn of its own.
+          message("user", "also this", { id: "steer", turnId: "t1", createdAt: stamp(2) }),
+          message("assistant", "ok", { id: "a1", turnId: "t1", createdAt: stamp(3) }),
+          // A resumed history turn whose prompt the projection could not name.
+          message("user", "from history", { id: "u2", createdAt: stamp(4) }),
+          message("assistant", "old", { id: "a2", turnId: "t2", createdAt: stamp(5) })
+        ]),
+        { supportsConversationRollback: true, turns: [turn("t1", "u1"), turn("t2")] }
+      )
+    );
+    assert.deepEqual(revertCounts(rows), { u1: 0, steer: undefined, u2: undefined });
+  });
+
+  it("never offers it on the verbatim /compact, which renders as no bubble at all", () => {
+    const attachment = { type: "file" as const, id: "/att/a", name: "a", sizeBytes: 1 };
+    const rows = deriveTimelineRows(
+      baseInput(
+        entriesFrom([
+          message("user", "go", { id: "u1", createdAt: stamp(1) }),
+          message("user", "/compact", { id: "c1", createdAt: stamp(2) }),
+          // With an attachment it is not the command — an ordinary prompt.
+          message("user", "/compact", { id: "c2", createdAt: stamp(3), attachments: [attachment] })
+        ]),
+        {
+          supportsConversationRollback: true,
+          turns: [turn("t1", "u1"), turn("t2", "c1"), turn("t3", "c2")]
+        }
+      )
+    );
+    assert.deepEqual(revertCounts(rows), { u1: 0, c2: 2 });
+  });
+
+  it("gives a pending turn's prompt none until the provider starts it", () => {
+    const entries = entriesFrom([
+      message("user", "one", { id: "u1", createdAt: stamp(1) }),
+      message("assistant", "a", { id: "a1", turnId: "t1", createdAt: stamp(2) }),
+      message("user", "two", { id: "u2", createdAt: stamp(3) })
+    ]);
+    const pending = deriveTimelineRowsWithState(
+      baseInput(entries, {
+        supportsConversationRollback: true,
+        turns: [turn("t1", "u1"), turn(null, "u2")]
+      })
+    );
+    assert.deepEqual(revertCounts(pending.rows), { u1: 0, u2: undefined });
+
+    // Nothing in the timeline moves when the provider mints the id — only the
+    // turns do — so the streaming fast path must not hand back the old rows.
+    const started = deriveTimelineRowsWithState(
+      baseInput(entries, {
+        supportsConversationRollback: true,
+        turns: [turn("t1", "u1"), turn("t2", "u2")]
+      }),
+      pending
+    );
+    assert.deepEqual(revertCounts(started.rows), { u1: 0, u2: 1 });
+  });
+
+  it("withholds every message before the last settled compaction, and only those", () => {
+    const rows = deriveTimelineRows(
+      baseInput(
+        entriesFrom([
+          message("user", "one", { id: "u1", createdAt: stamp(1) }),
+          message("assistant", "a", { id: "a1", turnId: "t1", createdAt: stamp(2) }),
+          message("user", "two", { id: "u2", createdAt: stamp(3) }),
+          activity(
+            "context-compaction",
+            { state: "compacted", beforeTokens: 900, afterTokens: 90 },
+            { tone: "info", summary: "Context compacted", createdAt: stamp(4) }
+          ),
+          message("user", "three", { id: "u3", createdAt: stamp(5) }),
+          message("assistant", "c", { id: "a3", turnId: "t3", createdAt: stamp(6) })
+        ]),
+        {
+          supportsConversationRollback: true,
+          turns: [turn("t1", "u1"), turn("t2", "u2"), turn("t3", "u3")]
+        }
+      )
+    );
+    // The provider no longer holds u1 and u2, so the adapter would refuse.
+    assert.deepEqual(revertCounts(rows), { u1: undefined, u2: undefined, u3: 2 });
+  });
+
+  it("treats the legacy settled marker as a compaction too", () => {
+    const rows = deriveTimelineRows(
+      baseInput(
+        entriesFrom([
+          message("user", "one", { id: "u1", createdAt: stamp(1) }),
+          activity("thread.state.changed", { state: "compacted" }, { createdAt: stamp(2) }),
+          message("user", "two", { id: "u2", createdAt: stamp(3) })
+        ]),
+        { supportsConversationRollback: true, turns: [turn("t1", "u1"), turn("t2", "u2")] }
+      )
+    );
+    assert.deepEqual(revertCounts(rows), { u1: undefined, u2: 1 });
+  });
+
+  it("is not withheld by a compaction that failed or is still running — neither dropped anything", () => {
+    const rows = deriveTimelineRows(
+      baseInput(
+        entriesFrom([
+          message("user", "one", { id: "u1", createdAt: stamp(1) }),
+          activity("context-compaction", { state: "compaction-failed", error: "quota" }, {
+            tone: "error",
+            summary: "Context compaction failed",
+            createdAt: stamp(2)
+          }),
+          message("user", "two", { id: "u2", createdAt: stamp(3) }),
+          activity("context-compaction", { state: "compacting" }, {
+            tone: "info",
+            summary: "Compacting context",
+            createdAt: stamp(4)
+          })
+        ]),
+        { supportsConversationRollback: true, turns: [turn("t1", "u1"), turn("t2", "u2")] }
+      )
+    );
+    assert.deepEqual(revertCounts(rows), { u1: 0, u2: 1 });
+  });
+
+  it("offers none in the drill-in, which rolls back no turn of its own", () => {
+    const entries = entriesFrom(threeTurns());
+    const turns = [turn("t1", "u1"), turn("t2", "u2"), turn("t3", "u3")];
+    // The capability off, as `useAgentChatDrillIn` passes it…
+    assert.deepEqual(revertCounts(deriveTimelineRows(baseInput(entries, { turns }))), {
+      u1: undefined,
+      u2: undefined,
+      u3: undefined
+    });
+    // …and no turns at all, which is what it hands in besides.
+    assert.deepEqual(
+      revertCounts(deriveTimelineRows(baseInput(entries, { supportsConversationRollback: true }))),
+      { u1: undefined, u2: undefined, u3: undefined }
+    );
   });
 });
 
