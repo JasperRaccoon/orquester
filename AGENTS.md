@@ -353,6 +353,15 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   is for. Reads go through `persistedResumeCursor` (binding, else head), and the head's copy plus
   the fold's carry-forward stay as the §8 rollback fallback for threads written before the file
   existed. The `continueAfterRestart` marker deliberately stays on the head, where it already was.
+- **A Claude turn is many API messages, and every message restarts its content indexes at 0.**
+  Anything in the Claude normaliser that remembers a streamed block by its bare `index` for the
+  whole turn is wrong: the text block of the message after the next tool round-trip has the same
+  index as the first one, and the fold appends streamed text by item id — so a long turn's final
+  summary once rendered inside the turn's opening bubble, and the user read "the agent said
+  nothing". Assistant text block state is keyed by `(message.id, index)` (`textBlockKey`), and the
+  CLI's complete per-block `assistant` frames carry the stream's `message_start` id, which is how
+  a snapshot finds its streamed block. `inFlightTools` is keyed by index only because a tool block
+  is deleted the moment its result arrives.
 - **`HISTORICAL_RAW_SOURCE`** (`"history.replay"`) tags every event projected out of a provider's
   *native* history on resume. A replayed row is the past: it claims no token usage and its turns
   are already settled. Anything that treats a raw frame as live must check it.

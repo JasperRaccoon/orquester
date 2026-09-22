@@ -592,6 +592,14 @@ two different encodings of the same reset. The frame has **no percentage**: it c
   `content_block_delta:input_json_delta` is by far the highest-volume frame (315 of 728 stream
   events) — it is the tool-input being typed out, and batching it (§5.6) is what keeps the
   timeline cheap.
+- **Content indexes restart at 0 with every API message, and a turn has many of them.** One
+  `message_start` per tool round-trip; each message's `content_block_*` indexes start again at 0
+  (a thinking block at 0, the text at 1, the tool_use at 2, …). Any per-turn bookkeeping keyed on
+  the bare index therefore joins a later message's text to an earlier message's block — which is
+  exactly how a long turn's final summary once landed inside its opening bubble (live thread
+  8b9a20c2: four messages' worth of text under one item id). The normaliser keys assistant text
+  block state by `(message.id, index)`; the complete per-block `assistant` frames carry the same
+  `message.id` as the stream's `message_start`, which is the join.
 - **`compact_metadata` is richer than `beforeTokens`/`afterTokens`:**
   ```json
   {"trigger":"manual","pre_tokens":34995,"post_tokens":873,"cumulative_dropped_tokens":34122,"duration_ms":10330,"preserved_segment":{"head_uuid":"803f7bad-…","anchor_uuid":"63734266-…","tail_uuid":"803f7bad-…"},"preserved_messages":{"anchor_uuid":"63734266-…","uuids":["803f7bad-…"],"all_uuids":["803f7bad-…"]}}

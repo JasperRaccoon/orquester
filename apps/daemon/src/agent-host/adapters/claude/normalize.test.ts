@@ -745,3 +745,139 @@ describe("claude normaliser — a text block streamed behind a thinking block is
     assert.equal(deltas.length, 1, "the streamed text is not re-emitted from the snapshot");
   });
 });
+
+describe("claude normaliser — every API message of a turn keeps its own assistant text item", () => {
+  type Frame = Record<string, unknown>;
+  function makeNormalizer(): {
+    normalizer: ClaudeNormalizer;
+    stream: (event: Frame) => RuntimeEvent[];
+    snapshot: (messageId: string, content: unknown[]) => RuntimeEvent[];
+  } {
+    const normalizer = new ClaudeNormalizer({
+      threadId: "t",
+      clock: fixedClock(),
+      ids: countingIds()
+    });
+    normalizer.beginTurn({ turnId: "turn-1" });
+    const stream = (event: Frame): RuntimeEvent[] =>
+      normalizer.handleMessage({
+        type: "stream_event",
+        event,
+        uuid: "u",
+        session_id: "s",
+        parent_tool_use_id: null
+      } as unknown as SDKMessage);
+    const snapshot = (messageId: string, content: unknown[]): RuntimeEvent[] =>
+      normalizer.handleMessage({
+        type: "assistant",
+        uuid: "u",
+        session_id: "s",
+        parent_tool_use_id: null,
+        message: { id: messageId, role: "assistant", model: "claude-opus-5", content, stop_reason: null }
+      } as unknown as SDKMessage);
+    return { normalizer, stream, snapshot };
+  }
+
+  /** One API message: optional thinking at index 0, then text at the next index, then the per-block frames. */
+  function streamMessage(
+    ctx: ReturnType<typeof makeNormalizer>,
+    messageId: string,
+    text: string,
+    options: { thinking: boolean }
+  ): RuntimeEvent[] {
+    const all: RuntimeEvent[] = [];
+    all.push(...ctx.stream({ type: "message_start", message: { id: messageId, role: "assistant", content: [], usage: {} } }));
+    let index = 0;
+    if (options.thinking) {
+      all.push(
+        ...ctx.stream({ type: "content_block_start", index, content_block: { type: "thinking", thinking: "" } }),
+        ...ctx.stream({ type: "content_block_delta", index, delta: { type: "thinking_delta", thinking: "hmm" } }),
+        ...ctx.stream({ type: "content_block_stop", index })
+      );
+      index += 1;
+    }
+    all.push(
+      ...ctx.stream({ type: "content_block_start", index, content_block: { type: "text", text: "" } }),
+      ...ctx.stream({ type: "content_block_delta", index, delta: { type: "text_delta", text } }),
+      ...ctx.stream({ type: "content_block_stop", index }),
+      ...ctx.stream({ type: "message_stop" })
+    );
+    if (options.thinking) {
+      all.push(...ctx.snapshot(messageId, [{ type: "thinking", thinking: "hmm" }]));
+    }
+    all.push(...ctx.snapshot(messageId, [{ type: "text", text }]));
+    return all;
+  }
+
+  function assistantItems(events: readonly RuntimeEvent[]): {
+    started: string[];
+    completed: string[];
+    deltasByItem: Map<string, string>;
+  } {
+    const started = events
+      .filter(
+        (event) =>
+          event.type === "item.started" &&
+          (event.payload as { itemType?: string }).itemType === "assistant_message"
+      )
+      .map((event) => event.itemId ?? "");
+    const completed = events
+      .filter(
+        (event) =>
+          event.type === "item.completed" &&
+          (event.payload as { itemType?: string }).itemType === "assistant_message"
+      )
+      .map((event) => event.itemId ?? "");
+    const deltasByItem = new Map<string, string>();
+    for (const event of events) {
+      if (
+        event.type === "content.delta" &&
+        (event.payload as { streamKind?: string }).streamKind === "assistant_text"
+      ) {
+        const key = event.itemId ?? "";
+        deltasByItem.set(key, `${deltasByItem.get(key) ?? ""}${(event.payload as { delta: string }).delta}`);
+      }
+    }
+    return { started, completed, deltasByItem };
+  }
+
+  it("a second message whose text streams behind a thinking block again is a NEW item, not an append", () => {
+    // The owner's report: after a long turn the final summary "was not
+    // there". It was — appended to the turn's FIRST bubble, because text
+    // block state was keyed by content index for the whole turn and every
+    // API message restarts its indexes at 0 (live thread 8b9a20c2, seq
+    // 710/862/873/882: one item id for four messages' worth of text).
+    const ctx = makeNormalizer();
+    const all: RuntimeEvent[] = [];
+    all.push(...streamMessage(ctx, "msg_1", "Voy a mirarlo.", { thinking: true }));
+    // A tool round-trip in between is what makes it a second API message.
+    all.push(...streamMessage(ctx, "msg_2", "Diagnóstico cerrado.", { thinking: true }));
+
+    const items = assistantItems(all);
+    assert.equal(items.started.length, 2, "one assistant item per API message");
+    assert.notEqual(items.started[0], items.started[1]);
+    assert.deepEqual(
+      [...items.deltasByItem.entries()],
+      [
+        [items.started[0], "Voy a mirarlo."],
+        [items.started[1], "Diagnóstico cerrado."]
+      ],
+      "each message's text lands on its own item, in order"
+    );
+    assert.deepEqual(items.completed, items.started, "both items complete, each once");
+  });
+
+  it("holds without thinking too: two messages with text at index 0 are two items", () => {
+    const ctx = makeNormalizer();
+    const all: RuntimeEvent[] = [];
+    all.push(...streamMessage(ctx, "msg_1", "First.", { thinking: false }));
+    all.push(...streamMessage(ctx, "msg_2", "Second.", { thinking: false }));
+    const items = assistantItems(all);
+    assert.equal(items.started.length, 2);
+    assert.deepEqual(
+      [...items.deltasByItem.values()],
+      ["First.", "Second."],
+      "no text is re-emitted from a snapshot and none is merged"
+    );
+  });
+});

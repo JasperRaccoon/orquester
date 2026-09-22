@@ -131,7 +131,16 @@ export interface ClaudeTurnState {
    */
   synthetic: boolean;
   items: unknown[];
-  assistantTextBlocks: Map<number, AssistantTextBlockState>;
+  /**
+   * Keyed by {@link textBlockKey}: the API message the block belongs to PLUS
+   * its content index. A Claude "turn" spans one API message per tool
+   * round-trip and every message restarts its indexes at 0, so an index-only
+   * key handed a later message's text block the FIRST message's item — the
+   * fold appends streamed text by item id, and a long turn's final summary
+   * ended up inside its opening bubble, far above where the user was looking
+   * (live thread 8b9a20c2, seq 710/862/873/882 share one item id).
+   */
+  assistantTextBlocks: Map<string, AssistantTextBlockState>;
   /**
    * The content blocks each API message streamed, in stream order, keyed by
    * the `message_start` id. The CLI then emits one complete `assistant`
@@ -902,7 +911,10 @@ export class ClaudeNormalizer {
     }
 
     if (event.type === "content_block_stop") {
-      const block = this.turnState?.assistantTextBlocks.get(event.index);
+      const turn = this.turnState;
+      const block = turn?.assistantTextBlocks.get(
+        textBlockKey(turn.currentStreamMessageId, event.index)
+      );
       if (block) {
         block.streamClosed = true;
         return this.completeAssistantTextBlock(block, {
@@ -953,7 +965,10 @@ export class ClaudeNormalizer {
         });
         return events;
       }
-      const block = this.ensureAssistantTextBlock(event.index);
+      const block = this.ensureAssistantTextBlock(
+        this.turnState.currentStreamMessageId,
+        event.index
+      );
       if (block) {
         block.state.emittedTextDelta = true;
         events.push(...block.events);
@@ -1068,9 +1083,13 @@ export class ClaudeNormalizer {
       turn.streamedBlocks.set(turn.currentStreamMessageId!, list);
     }
     if (block.type === "text") {
-      const entry = this.ensureAssistantTextBlock(event.index, {
-        fallbackText: typeof (block as { text?: unknown }).text === "string" ? block.text : ""
-      });
+      const entry = this.ensureAssistantTextBlock(
+        message.parent_tool_use_id == null ? (this.turnState?.currentStreamMessageId ?? null) : null,
+        event.index,
+        {
+          fallbackText: typeof (block as { text?: unknown }).text === "string" ? block.text : ""
+        }
+      );
       return entry?.events ?? [];
     }
     if (
@@ -1139,6 +1158,7 @@ export class ClaudeNormalizer {
   // -------------------------------------------------------------------------
 
   private ensureAssistantTextBlock(
+    messageId: string | null,
     index: number,
     options?: { fallbackText?: string }
   ): { state: AssistantTextBlockState; events: RuntimeEvent[] } | undefined {
@@ -1146,7 +1166,8 @@ export class ClaudeNormalizer {
     if (!turn) {
       return undefined;
     }
-    const existing = turn.assistantTextBlocks.get(index);
+    const key = textBlockKey(messageId, index);
+    const existing = turn.assistantTextBlocks.get(key);
     if (existing) {
       if (options?.fallbackText !== undefined && options.fallbackText.length > 0) {
         existing.fallbackText = options.fallbackText;
@@ -1161,7 +1182,7 @@ export class ClaudeNormalizer {
       streamClosed: false,
       completionEmitted: false
     };
-    turn.assistantTextBlocks.set(index, state);
+    turn.assistantTextBlocks.set(key, state);
     turn.assistantTextBlockOrder.push(state);
     return {
       state,
@@ -1519,6 +1540,10 @@ export class ClaudeNormalizer {
     const streamed =
       typeof messageId === "string" ? turn.streamedBlocks.get(messageId) : undefined;
     const perBlockFrame = content.length === 1 && streamed !== undefined && streamed.length > 0;
+    // The frame's own id is the join key. A frame with no id at all (not a
+    // shape this CLI emits) falls back to the message that is streaming.
+    const blockMessageId =
+      typeof messageId === "string" ? messageId : turn.currentStreamMessageId;
     let index = 0;
     for (const entry of content) {
       let streamIndex = index;
@@ -1539,7 +1564,9 @@ export class ClaudeNormalizer {
           const fallback = streamed.find(
             (streamedBlock) =>
               streamedBlock.type === blockType &&
-              (blockType !== "text" || !turn.assistantTextBlocks.get(streamedBlock.index)?.streamClosed)
+              (blockType !== "text" ||
+                !turn.assistantTextBlocks.get(textBlockKey(blockMessageId, streamedBlock.index))
+                  ?.streamClosed)
           );
           if (fallback !== undefined) streamIndex = fallback.index;
         }
@@ -1553,7 +1580,9 @@ export class ClaudeNormalizer {
         index += 1;
         continue;
       }
-      const created = this.ensureAssistantTextBlock(streamIndex, { fallbackText: block.text });
+      const created = this.ensureAssistantTextBlock(blockMessageId, streamIndex, {
+        fallbackText: block.text
+      });
       if (created) {
         events.push(...created.events);
       }
@@ -2666,6 +2695,11 @@ export function extractExitPlanModePlan(
 }
 
 /** Task types that are watch loops or shells rather than agents. */
+/** `assistantTextBlocks` key: the owning API message, then the content index. */
+function textBlockKey(messageId: string | null | undefined, index: number): string {
+  return `${messageId ?? "?"}:${index}`;
+}
+
 function isBackgroundTaskType(taskType: string): boolean {
   return taskType === "local_bash" || taskType === "shell" || taskType.startsWith("monitor");
 }
