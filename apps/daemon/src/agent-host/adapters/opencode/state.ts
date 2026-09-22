@@ -135,9 +135,9 @@ export function accumulateStepUsage(
   accumulator: OpenCodeTurnTokenUsageAccumulator,
   part: OpenCodeStepUsage,
   costUsd?: number
-): void {
+): boolean {
   if (accumulator.partIds.has(part.id)) {
-    return;
+    return false;
   }
   accumulator.partIds.add(part.id);
   const tokens = part.tokens;
@@ -151,6 +151,28 @@ export function accumulateStepUsage(
   if (typeof costUsd === "number" && Number.isFinite(costUsd)) {
     accumulator.costUsd += costUsd;
   }
+  return true;
+}
+
+/**
+ * One step's own total — the size of the context that model call carried, and
+ * therefore the context meter's numerator (§7.6).
+ *
+ * `tokens.total` is present on every step in 1.18.5 (fixtures README
+ * observation 23) and equals the parts summed; the sum is the guard for a
+ * future step that omits it.
+ */
+export function stepTotalTokens(tokens: OpenCodeTokens): number {
+  if (typeof tokens.total === "number" && Number.isFinite(tokens.total) && tokens.total > 0) {
+    return Math.round(tokens.total);
+  }
+  const total =
+    (tokens.input ?? 0) +
+    (tokens.output ?? 0) +
+    (tokens.reasoning ?? 0) +
+    (tokens.cache?.read ?? 0) +
+    (tokens.cache?.write ?? 0);
+  return Number.isFinite(total) && total > 0 ? Math.round(total) : 0;
 }
 
 /**
@@ -301,6 +323,20 @@ export interface OpenCodeSessionState {
   messageRoleById: Map<string, OpenCodeMessageRole>;
   turnTokenUsage?: OpenCodeTurnTokenUsageAccumulator;
 
+  /**
+   * The thread model's `limit.context` from the server's provider catalogue.
+   * Absent for a model the catalogue does not describe, in which case the
+   * meter degrades to a bare count rather than inventing a denominator (§7.6).
+   */
+  contextMaxTokens?: number;
+  /**
+   * Every owned `step-finish` total, summed across the thread — §7.6's "total
+   * processed". Deliberately NOT reset with the per-turn accumulator, and
+   * deliberately never fed by a child session's steps: those are a different
+   * session's spend.
+   */
+  processedTokens: number;
+
   pendingPermissions: Map<string, OpenCodePermissionRequest>;
   pendingQuestions: Map<string, OpenCodeQuestionRequest>;
   resolvedRequestIds: Set<string>;
@@ -329,12 +365,15 @@ export function createSessionState(input: {
   openCodeSessionId: string;
   directory: string;
   runtimeMode: RuntimeMode;
+  contextMaxTokens?: number;
 }): OpenCodeSessionState {
   return {
     threadId: input.threadId,
     openCodeSessionId: input.openCodeSessionId,
     directory: input.directory,
     runtimeMode: input.runtimeMode,
+    ...(input.contextMaxTokens !== undefined ? { contextMaxTokens: input.contextMaxTokens } : {}),
+    processedTokens: 0,
     relatedSessionIds: new Set([input.openCodeSessionId]),
     childAgents: new Map(),
     reconcileIdleStatus: false,

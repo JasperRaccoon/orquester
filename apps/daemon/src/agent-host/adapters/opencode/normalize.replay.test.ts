@@ -33,6 +33,8 @@ import {
   isHandledEventType,
   type OpenCodeRawEvent
 } from "./protocol.ts";
+import type { ProviderListResponse } from "./routes.ts";
+import { modelContextLimits } from "./snapshot.ts";
 import { createSessionState, makeTurnTokenUsageAccumulator } from "./state.ts";
 
 const FIXTURE_DIR = join(
@@ -101,6 +103,8 @@ function replay(
   options: {
     sessionId?: string;
     runtimeMode?: "approval-required" | "full-access";
+    /** What the server's `limit.context` resolved to for the thread's model. */
+    contextMaxTokens?: number;
   } = {}
 ): Replay {
   const records = readFixture(name);
@@ -109,7 +113,10 @@ function replay(
     threadId: "thread-1",
     openCodeSessionId: parent,
     directory: "/repo",
-    runtimeMode: options.runtimeMode ?? "approval-required"
+    runtimeMode: options.runtimeMode ?? "approval-required",
+    ...(options.contextMaxTokens !== undefined
+      ? { contextMaxTokens: options.contextMaxTokens }
+      : {})
   });
 
   let counter = 0;
@@ -836,4 +843,74 @@ test("14: a SIGTERM mid-turn leaves the capture with no farewell frame to decode
     eventsOfType(events, "session.exited"),
     []
   );
+});
+
+// ---------------------------------------------------------------------------
+// The context meter (§7.6)
+// ---------------------------------------------------------------------------
+
+test("03: every owned step-finish reports the window it carried", () => {
+  const { events } = replay("03-permission-ask-reply-once.ndjson", {
+    contextMaxTokens: 1_000_000
+  });
+  const meter = eventsOfType(events, "thread.token-usage.updated");
+  // The capture's two owned steps: tokens.total 38 543 then 38 490.
+  assert.deepEqual(
+    meter.map((event) => event.payload.usage.usedTokens),
+    [38_543, 38_490],
+    "the numerator is the step's own total, not a running sum"
+  );
+  for (const row of meter) {
+    assert.equal(row.payload.usage.maxTokens, 1_000_000);
+    assert.equal(row.payload.usage.compactsAutomatically, true);
+  }
+  assert.equal(
+    meter.at(-1)?.payload.usage.totalProcessedTokens,
+    38_543 + 38_490,
+    "the thread's running sum is what 'total processed' means"
+  );
+});
+
+test("03: a model the catalogue never described degrades to a bare count", () => {
+  const { events } = replay("03-permission-ask-reply-once.ndjson");
+  const meter = eventsOfType(events, "thread.token-usage.updated");
+  assert.ok(meter.length > 0, "the count is still reported");
+  for (const row of meter) {
+    assert.equal(row.payload.usage.maxTokens, undefined, "never a ring against a guess");
+  }
+});
+
+test("01: the committed /provider capture yields the meter's denominators", () => {
+  // The catalogue read lives in `snapshot.ts`, but its input is this capture,
+  // so the assertion belongs beside the other fixture-driven ones.
+  const providers = readFixture("01-server-start-and-snapshot.ndjson")
+    .filter((record) => record.kind === "http")
+    .map((record) => record.data as HttpRecord)
+    .find((http) => http.method === "GET" && http.path === "/provider")
+    ?.responseBody as ProviderListResponse | undefined;
+  assert.ok(providers, "fixture 01 captures GET /provider");
+
+  const limits = modelContextLimits(providers);
+  assert.ok(limits.size > 0);
+  assert.equal(limits.get("anthropic/claude-sonnet-4-6"), 1_000_000);
+  assert.equal(
+    limits.get("anthropic/not-a-model"),
+    undefined,
+    "an unknown model has no window, and the meter degrades rather than guessing"
+  );
+});
+
+test("12: a child session's step-finish tokens never reach the parent's meter", () => {
+  const { events } = replay("12-two-sessions-one-server-and-a-child-session.ndjson", {
+    sessionId: "ses_f3dfd4e50ffe7r6H3Rf8jBDXUl",
+    contextMaxTokens: 400_000
+  });
+  const used = eventsOfType(events, "thread.token-usage.updated").map(
+    (event) => event.payload.usage.usedTokens
+  );
+  assert.deepEqual(used, [43_803, 43_950], "only the parent's own two steps");
+  // The child `ses_f3dfd3d8…` spent 3 538 and 3 585 on the same server; those
+  // are a different session's spend (fixtures README observation 19).
+  assert.ok(!used.includes(3_538));
+  assert.ok(!used.includes(3_585));
 });

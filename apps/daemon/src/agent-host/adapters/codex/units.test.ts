@@ -141,7 +141,13 @@ describe("item classification — typed on the generated discriminants", () => {
 });
 
 describe("token usage — the delta is two reported totals, not a sum of `last`", () => {
-  const usageNotification = (turnId: string, total: number, input: number, output: number) => ({
+  const usageNotification = (
+    turnId: string,
+    total: number,
+    input: number,
+    output: number,
+    last?: { totalTokens: number; reasoningOutputTokens?: number }
+  ) => ({
     threadId: "t",
     turnId,
     tokenUsage: {
@@ -154,22 +160,52 @@ describe("token usage — the delta is two reported totals, not a sum of `last`"
         reasoningOutputTokens: 0
       },
       last: {
-        totalTokens: 1,
+        totalTokens: last?.totalTokens ?? 1,
         inputTokens: 1,
         cachedInputTokens: 0,
         cacheWriteInputTokens: 0,
         outputTokens: 0,
-        reasoningOutputTokens: 0
+        reasoningOutputTokens: last?.reasoningOutputTokens ?? 0
       },
       modelContextWindow: 258_400
     }
   });
 
-  it("reports the thread total and the context window for the meter", () => {
+  it("measures the window against the LAST model call, not the thread total", () => {
     const usage = new CodexUsageTracker();
-    const snapshot = usage.observe(usageNotification("turn-1", 1000, 900, 100));
-    assert.equal(snapshot.usedTokens, 1000);
+    // `total` is the whole thread's spend and grows without bound; the context
+    // is what the most recent call actually carried, minus the reasoning it
+    // emitted (which the server drops from the next request) — the same
+    // arithmetic Codex's own TUI does.
+    const snapshot = usage.observe(
+      usageNotification("turn-1", 1_000_000, 900_000, 100_000, {
+        totalTokens: 120_000,
+        reasoningOutputTokens: 4_000
+      })
+    );
+    assert.equal(snapshot.usedTokens, 116_000);
     assert.equal(snapshot.maxTokens, 258_400);
+    assert.equal(snapshot.totalProcessedTokens, 1_000_000, "the thread total is the processed figure");
+    assert.equal(snapshot.compactsAutomatically, true);
+  });
+
+  it("never reports a negative window and drops a processed total below the used one", () => {
+    const usage = new CodexUsageTracker();
+    const snapshot = usage.observe(
+      usageNotification("turn-1", 500, 400, 100, { totalTokens: 500, reasoningOutputTokens: 900 })
+    );
+    assert.equal(snapshot.usedTokens, 0);
+    assert.equal(snapshot.totalProcessedTokens, 500);
+
+    const equal = usage.observe(
+      usageNotification("turn-2", 500, 400, 100, { totalTokens: 500, reasoningOutputTokens: 0 })
+    );
+    assert.equal(equal.usedTokens, 500);
+    assert.equal(
+      equal.totalProcessedTokens,
+      undefined,
+      "a processed total that is not more than the used one says nothing"
+    );
   });
 
   it("the turn delta is the last observed total minus the one at turn start", () => {

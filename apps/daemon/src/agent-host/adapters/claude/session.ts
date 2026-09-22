@@ -168,6 +168,8 @@ export class ClaudeSession {
   private query: Query | undefined;
   private record: ProviderSession;
   private closed = false;
+  /** One debug line per session for an unavailable context-usage request. */
+  private contextUsageUnavailableLogged = false;
   private hostInitiatedStop = false;
   private streamDone: Promise<void> | undefined;
   private turnSettled: Deferred<void> | undefined;
@@ -356,7 +358,51 @@ export class ClaudeSession {
         : {})
     };
     this.emit(this.normalizer.sessionStateChanged("ready", "session:started"));
+    // The meter's denominator used to arrive only with the FIRST `result`
+    // (`modelUsage[*].contextWindow`), so the opening turn of every session
+    // showed a bare token count and no percentage. Asking the CLI once the
+    // handshake is done fixes that, and it is never awaited: readiness must
+    // not wait on a display refresh.
+    void this.refreshContextUsage(undefined);
     return this.session;
+  }
+
+  /**
+   * Ask the CLI for its own `/context` accounting and fold the answer into the
+   * meter (§7.6).
+   *
+   * Deliberately best-effort in every direction: an older CLI rejects the
+   * control request, an SDK that predates it has no method at all, and a busy
+   * one may not answer inside the deadline. None of those is a turn failure
+   * and none of them earns a `runtime.warning` row — the meter simply keeps
+   * the last reading the stream produced. One debug line per session says so,
+   * so a host that never gets an answer is diagnosable without being noisy.
+   */
+  private async refreshContextUsage(turnId: string | undefined): Promise<void> {
+    const query = this.query;
+    if (query === undefined || this.closed) {
+      return;
+    }
+    let response: unknown;
+    try {
+      response = await withDeadline(query.getContextUsage({ detail: "summary" }), {
+        label: "claude/context-usage",
+        timeoutMs: this.options.deps.deadlines.contextUsageMs
+      });
+    } catch (error) {
+      if (!this.contextUsageUnavailableLogged) {
+        this.contextUsageUnavailableLogged = true;
+        this.options.context.logger.debug(
+          "claude: the context-usage control request is unavailable on this CLI",
+          { threadId: this.threadId, error: errorMessage(error) }
+        );
+      }
+      return;
+    }
+    if (this.closed) {
+      return;
+    }
+    this.emit(this.normalizer.applyContextUsage(response, turnId));
   }
 
   // -------------------------------------------------------------------------
@@ -384,6 +430,15 @@ export class ClaudeSession {
         if (settling !== undefined) {
           await this.drainBackgroundShell(settling);
         }
+        // The two moments the window genuinely moved: a turn just ended, and a
+        // compaction just rewrote the transcript. The turn id is read BEFORE
+        // the frame settles the turn, so the refresh's answer — which lands
+        // after an await — is attributed to the turn it was asked for and
+        // never to a turn the user started in the meantime.
+        const refreshesContextWindow = movesContextWindow(message);
+        const meterTurnId = refreshesContextWindow
+          ? this.normalizer.turnState?.turnId
+          : undefined;
         try {
           this.emit(this.normalizer.handleMessage(message));
         } catch (error) {
@@ -394,6 +449,12 @@ export class ClaudeSession {
               message
             )
           ]);
+        }
+        if (refreshesContextWindow) {
+          // The boundary's own `post_tokens` row has already gone out above;
+          // this refines it with the CLI's own accounting a moment later, and
+          // never blocks the loop.
+          void this.refreshContextUsage(meterTurnId);
         }
         this.noteActivity();
       }
@@ -1635,6 +1696,20 @@ function backgroundShellSettlingTaskId(message: SDKMessage): string | undefined 
       : undefined;
   }
   return undefined;
+}
+
+/**
+ * The frames after which the context window has genuinely moved, and which
+ * therefore earn an authoritative `getContextUsage` refresh: a settled turn
+ * and a completed compaction. Everything else is covered by the stream's own
+ * `message_delta` usage.
+ */
+function movesContextWindow(message: SDKMessage): boolean {
+  const frame = message as { type?: unknown; subtype?: unknown };
+  return (
+    frame.type === "result" ||
+    (frame.type === "system" && frame.subtype === "compact_boundary")
+  );
 }
 
 /** A stream that ended because we interrupted it is not a failure. */

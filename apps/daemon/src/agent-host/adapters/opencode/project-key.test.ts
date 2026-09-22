@@ -132,7 +132,10 @@ test("E9: a cwd-less refresh never starts a server either", async () => {
   const adapter = await createOpenCodeAdapter(probeCtx());
   const snapshot = await adapter.refreshSnapshot();
   assert.equal(snapshot.id, "opencode");
-  assert.equal(snapshot.capabilities.reportsContextWindow, false);
+  // The capabilities ride even a failed snapshot. `reportsContextWindow` is
+  // the reality correction of §4.5: 1.18.5 reports both the numerator
+  // (`step-finish.tokens.total`) and the denominator (`limit.context`).
+  assert.equal(snapshot.capabilities.reportsContextWindow, true);
   await adapter.stopAll();
 });
 

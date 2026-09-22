@@ -36,7 +36,12 @@ export interface ClaudeAdapterDeps {
    * The §3.1 windows, so a test asserts an expired deadline's behaviour
    * without waiting one out — §9's "nothing waits on a timer".
    */
-  deadlines: { handshakeMs: number; cancelMs: number; compactMs: number };
+  deadlines: {
+    handshakeMs: number;
+    cancelMs: number;
+    compactMs: number;
+    contextUsageMs: number;
+  };
 }
 
 /**
@@ -48,6 +53,15 @@ export interface ClaudeAdapterDeps {
  */
 export const CLAUDE_COMPACT_DEADLINE_MS = 10 * 60_000;
 
+/**
+ * `getContextUsage({detail:"summary"})` is answered from the last response's
+ * usage and local estimates, with no token-count API call, and measured 650 ms
+ * in the capture (fixtures/claude README observation 25). Five seconds is
+ * therefore generous — and it is a *refresh of a display*, so an expiry is
+ * simply "no better number this time", never a turn failure.
+ */
+export const CLAUDE_CONTEXT_USAGE_DEADLINE_MS = 5_000;
+
 export function defaultClaudeAdapterDeps(): ClaudeAdapterDeps {
   return {
     query: sdkQuery,
@@ -55,7 +69,8 @@ export function defaultClaudeAdapterDeps(): ClaudeAdapterDeps {
     deadlines: {
       handshakeMs: AGENT_HOST_DEADLINES.handshakeMs,
       cancelMs: AGENT_HOST_DEADLINES.cancelMs,
-      compactMs: CLAUDE_COMPACT_DEADLINE_MS
+      compactMs: CLAUDE_COMPACT_DEADLINE_MS,
+      contextUsageMs: CLAUDE_CONTEXT_USAGE_DEADLINE_MS
     },
     setTimer: (fn, ms) => setTimeout(fn, ms),
     clearTimer: (handle) => {

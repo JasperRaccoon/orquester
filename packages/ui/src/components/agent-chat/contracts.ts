@@ -304,6 +304,12 @@ export interface ChatStatusLineProps {
   totalProcessedTokens: number | null;
   /** False ⇒ the meter degrades to a bare total, never zeros (§7.6). */
   reportsContextWindow: boolean;
+  /**
+   * `thread.token-usage.updated {usage.compactsAutomatically}`. `false` is a
+   * provider verdict and changes the popover's sentence; `null`/omitted means
+   * nobody asked (§7.6).
+   */
+  compactsAutomatically?: boolean | null;
   activePlan: ActivePlanState | null;
   /** Always present: §4.6.3 synthesises `/compact` on all four adapters. */
   onCompact: () => void;

@@ -640,6 +640,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 autoCompactAtTokens={slice.contextWindow?.autoCompactAtTokens ?? null}
                 totalProcessedTokens={slice.contextWindow?.totalProcessedTokens ?? null}
                 reportsContextWindow={status.reportsContextWindow}
+                compactsAutomatically={slice.contextWindow?.compactsAutomatically ?? null}
                 activePlan={paintOnly ? null : activePlan}
                 onCompact={paintOnly ? noop : () => dispatch(() => actions.compact())}
                 latestCheckpoint={latestCheckpoint}

@@ -28,7 +28,10 @@ interface ReplayRun {
 }
 
 /** Fold one capture's agent frames through a fresh normaliser. */
-function replay(file: string, options: { turnId?: string } = {}): ReplayRun {
+function replay(
+  file: string,
+  options: { turnId?: string; contextWindow?: number } = {}
+): ReplayRun {
   let counter = 0;
   const turnId = options.turnId ?? "turn-1";
   const normalizer = new GrokNormalizer(
@@ -50,6 +53,9 @@ function replay(file: string, options: { turnId?: string } = {}): ReplayRun {
     },
     "session-1"
   );
+  // What the session does after the handshake resolves
+  // `modelState.availableModels[]._meta.totalContextTokens`.
+  normalizer.setContextWindow(options.contextWindow);
   normalizer.beginTurn();
 
   const events: RuntimeEvent[] = [];
@@ -132,6 +138,27 @@ test("02 plain prompt: the running context size becomes thread.token-usage.updat
   assert.ok(usage.length > 0, "the spec says Grok reports no usage; the CLI does");
   assert.ok((usage.at(-1)?.payload.usage.usedTokens ?? 0) > 1_000);
   assert.equal(normalizer.contextSize, usage.at(-1)?.payload.usage.usedTokens);
+});
+
+test("02 plain prompt: EVERY chunk-driven meter row carries the window, not just the session's", () => {
+  const { events, normalizer } = replay("02-prompt-plain-text.ndjson", { contextWindow: 500_000 });
+  const usage = only(events, "thread.token-usage.updated");
+  assert.ok(usage.length > 1, "the capture streams many chunks, each with a running total");
+  assert.equal(normalizer.contextWindowTokens, 500_000);
+  // The client keeps only the LATEST `context-window.updated` row, so one
+  // window-less row in the middle of a turn blanks the ring until the next
+  // session-level emission — the flicker this pins shut.
+  for (const row of usage) {
+    assert.equal(row.payload.usage.maxTokens, 500_000, "a chunk row is a full reading, never a partial one");
+    assert.equal(row.payload.usage.compactsAutomatically, true);
+  }
+});
+
+test("a window nobody resolved is omitted rather than invented", () => {
+  const { events } = replay("02-prompt-plain-text.ndjson");
+  for (const row of only(events, "thread.token-usage.updated")) {
+    assert.equal(row.payload.usage.maxTokens, undefined);
+  }
 });
 
 test("02 plain prompt: the RPC result carries the turn's usage and its cost", () => {

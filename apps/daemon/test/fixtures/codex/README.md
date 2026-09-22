@@ -302,6 +302,14 @@ the sum of the `last` values.
 `turn.completed {tokenUsage?}` must be stamped by the adapter from the last observed usage
 notification, exactly as T3 does.
 
+**The context meter's numerator is `last`, not `total`** (§7.6). `total` is the thread's
+cumulative spend across every turn and grows without bound — measuring it against
+`modelContextWindow` made a long thread read 100 % while its actual context was a fraction of the
+window. Codex's own TUI computes `last.total_tokens − last.reasoning_output_tokens`: reasoning
+output is billed but dropped from the next request, so it never occupies the window. `total` is
+still the honest answer for §7.6's *total processed across the thread*. In fixture 15's last
+notification that is `22 132 − 0 = 22 132` used of `258 400`, with `130 371` processed.
+
 ## 7. `thread/rollback` is dead on every thread this CLI creates
 
 `12-…`. The thread reports `historyMode: "paginated"`, and:

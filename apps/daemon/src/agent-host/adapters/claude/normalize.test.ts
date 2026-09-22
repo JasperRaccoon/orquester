@@ -1463,3 +1463,244 @@ describe("claude normaliser — a task keeps its own description through progres
     assert.equal(payload.description, "Reading b.txt", "the live activity still rides `description`");
   });
 });
+
+describe("claude normaliser — the context meter is the MAIN agent's, never a subagent's", () => {
+  const makeNormalizer = (): ClaudeNormalizer =>
+    new ClaudeNormalizer({ threadId: "t", clock: fixedClock(), ids: countingIds() });
+
+  const system = (normalizer: ClaudeNormalizer, extra: Record<string, unknown>): RuntimeEvent[] =>
+    normalizer.handleMessage({
+      type: "system",
+      uuid: `u-${String(Math.random()).slice(2)}`,
+      session_id: "s",
+      ...extra
+    } as unknown as SDKMessage);
+
+  it("a subagent's task_progress usage never moves the thread meter", () => {
+    const normalizer = makeNormalizer();
+    normalizer.beginTurn({ turnId: "turn-1" });
+    system(normalizer, {
+      subtype: "task_started",
+      task_id: "a1",
+      tool_use_id: "toolu_1",
+      description: "Audit the workflows",
+      subagent_type: "Explore",
+      task_type: "local_agent"
+    });
+    const progress = system(normalizer, {
+      subtype: "task_progress",
+      task_id: "a1",
+      tool_use_id: "toolu_1",
+      description: "Reading b.txt",
+      usage: { total_tokens: 182_721, tool_uses: 9, duration_ms: 50 }
+    });
+    assert.deepEqual(
+      allOf(progress, "thread.token-usage.updated"),
+      [],
+      "a subagent's cumulative total is roster data, not the thread's context size"
+    );
+    // The roster row still carries it.
+    const row = progress.find((event) => event.type === "task.progress");
+    assert.equal((row?.payload as { usage?: { totalTokens?: number } }).usage?.totalTokens, 182_721);
+
+    const notification = system(normalizer, {
+      subtype: "task_notification",
+      task_id: "a1",
+      tool_use_id: "toolu_1",
+      status: "completed",
+      output_file: "",
+      summary: "done",
+      usage: { total_tokens: 210_419, tool_uses: 12, duration_ms: 90 }
+    });
+    assert.deepEqual(allOf(notification, "thread.token-usage.updated"), []);
+  });
+
+  it("a nested stream frame's message_delta usage never moves the thread meter", () => {
+    const normalizer = makeNormalizer();
+    normalizer.beginTurn({ turnId: "turn-1" });
+    const nested = normalizer.handleMessage({
+      type: "stream_event",
+      parent_tool_use_id: "toolu_1",
+      uuid: "u1",
+      session_id: "s",
+      event: {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn" },
+        usage: { input_tokens: 120_000, output_tokens: 900 }
+      }
+    } as unknown as SDKMessage);
+    assert.deepEqual(allOf(nested, "thread.token-usage.updated"), []);
+
+    const own = normalizer.handleMessage({
+      type: "stream_event",
+      parent_tool_use_id: null,
+      uuid: "u2",
+      session_id: "s",
+      event: {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn" },
+        usage: { input_tokens: 4_000, output_tokens: 100 }
+      }
+    } as unknown as SDKMessage);
+    const emitted = allOf(own, "thread.token-usage.updated");
+    assert.equal(emitted.length, 1, "the main agent's own delta still reports");
+    assert.equal(emitted[0]?.payload.usage.usedTokens, 4_100);
+  });
+
+  it("a result with no assistant usage keeps the last known reading, never result.usage", () => {
+    const normalizer = makeNormalizer();
+    normalizer.beginTurn({ turnId: "turn-1" });
+    normalizer.handleMessage({
+      type: "stream_event",
+      parent_tool_use_id: null,
+      uuid: "u1",
+      session_id: "s",
+      event: {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn" },
+        usage: { input_tokens: 4_000, output_tokens: 100 }
+      }
+    } as unknown as SDKMessage);
+
+    const settled = normalizer.completeTurn("completed", undefined, {
+      type: "result",
+      subtype: "success",
+      // The whole-turn rollup: main-loop-only and per-turn, never a context size.
+      usage: { input_tokens: 900_000, output_tokens: 12_000 },
+      modelUsage: {
+        "claude-opus-4-8[1m]": {
+          inputTokens: 900_000,
+          outputTokens: 12_000,
+          cacheReadInputTokens: 40_000,
+          cacheCreationInputTokens: 8_000,
+          contextWindow: 1_000_000
+        }
+      }
+    } as never);
+
+    const emitted = allOf(settled, "thread.token-usage.updated");
+    // `usedTokens` is unchanged, so the dedupe may swallow the row entirely;
+    // what must never happen is a jump to the turn rollup.
+    for (const event of emitted) {
+      assert.notEqual(event.payload.usage.usedTokens, 912_000);
+    }
+    const turn = settled.find((event) => event.type === "turn.completed");
+    assert.ok(turn, "the turn still settles");
+  });
+
+  it("totalProcessedTokens is the cumulative modelUsage sum, not result.usage", () => {
+    const normalizer = makeNormalizer();
+    normalizer.beginTurn({ turnId: "turn-1" });
+    normalizer.handleMessage({
+      type: "stream_event",
+      parent_tool_use_id: null,
+      uuid: "u1",
+      session_id: "s",
+      event: {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn" },
+        usage: { input_tokens: 4_000, output_tokens: 100 }
+      }
+    } as unknown as SDKMessage);
+    const settled = normalizer.completeTurn("completed", undefined, {
+      type: "result",
+      subtype: "success",
+      usage: { input_tokens: 5_000, output_tokens: 100 },
+      modelUsage: {
+        "claude-opus-4-8[1m]": {
+          inputTokens: 40_000,
+          outputTokens: 2_000,
+          cacheReadInputTokens: 300_000,
+          cacheCreationInputTokens: 50_000,
+          contextWindow: 1_000_000
+        },
+        "claude-haiku-4-5": {
+          inputTokens: 1_000,
+          outputTokens: 100,
+          cacheReadInputTokens: 0,
+          cacheCreationInputTokens: 0,
+          contextWindow: 200_000
+        }
+      }
+    } as never);
+    const emitted = allOf(settled, "thread.token-usage.updated").at(-1);
+    assert.ok(emitted);
+    assert.equal(emitted.payload.usage.totalProcessedTokens, 393_100);
+    assert.equal(emitted.payload.usage.maxTokens, 1_000_000);
+  });
+
+  it("folds an authoritative getContextUsage response through the same dedupe", () => {
+    const normalizer = makeNormalizer();
+    const response = {
+      categories: [{ name: "Free space", tokens: 1, kind: "free" }],
+      totalTokens: 15_868,
+      maxTokens: 1_000_000,
+      rawMaxTokens: 1_000_000,
+      autoCompactThreshold: 967_000,
+      isAutoCompactEnabled: true
+    };
+    const first = allOf(normalizer.applyContextUsage(response, "turn-1"), "thread.token-usage.updated");
+    assert.equal(first.length, 1);
+    assert.equal(first[0]?.turnId, "turn-1", "the row keeps the turn it was requested for");
+    assert.equal(first[0]?.payload.usage.usedTokens, 15_868);
+    assert.equal(first[0]?.payload.usage.maxTokens, 1_000_000);
+    assert.equal(first[0]?.payload.usage.autoCompactAtTokens, 967_000);
+    assert.equal(first[0]?.payload.usage.compactsAutomatically, true);
+    assert.deepEqual(normalizer.applyContextUsage(response, "turn-1"), [], "the same reading is not re-emitted");
+    const off = allOf(
+      normalizer.applyContextUsage({ ...response, isAutoCompactEnabled: false }, undefined),
+      "thread.token-usage.updated"
+    );
+    assert.equal(off.length, 1, "only the auto-compaction verdict moved, and that is a change");
+    assert.equal(off[0]?.payload.usage.compactsAutomatically, false);
+    assert.equal(off[0]?.turnId, undefined);
+  });
+
+  it("a result's nominal per-model window never overwrites the authoritative one", () => {
+    const normalizer = makeNormalizer();
+    // The CLI measures its own percentage against a 200k compaction window
+    // even though the model's nominal window is 1M.
+    normalizer.applyContextUsage(
+      {
+        categories: [],
+        totalTokens: 15_868,
+        maxTokens: 1_000_000,
+        rawMaxTokens: 200_000,
+        isAutoCompactEnabled: true
+      },
+      undefined
+    );
+    assert.equal(normalizer.lastKnownContextWindow, 200_000);
+
+    normalizer.beginTurn({ turnId: "turn-1" });
+    normalizer.handleMessage({
+      type: "stream_event",
+      parent_tool_use_id: null,
+      uuid: "u1",
+      session_id: "s",
+      event: {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn" },
+        usage: { input_tokens: 20_000, output_tokens: 100 }
+      }
+    } as unknown as SDKMessage);
+    const settled = normalizer.completeTurn("completed", undefined, {
+      type: "result",
+      subtype: "success",
+      usage: { input_tokens: 20_000, output_tokens: 100 },
+      modelUsage: {
+        "claude-opus-4-8[1m]": {
+          inputTokens: 20_000,
+          outputTokens: 100,
+          cacheReadInputTokens: 0,
+          cacheCreationInputTokens: 0,
+          contextWindow: 1_000_000
+        }
+      }
+    } as never);
+    assert.equal(normalizer.lastKnownContextWindow, 200_000);
+    for (const row of allOf(settled, "thread.token-usage.updated")) {
+      assert.equal(row.payload.usage.maxTokens, 200_000);
+    }
+  });
+});

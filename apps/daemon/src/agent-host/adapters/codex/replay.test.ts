@@ -317,12 +317,27 @@ describe("codex replay — 01 initialize, thread start, one text turn", () => {
     assert.ok((payload.tokenUsage?.inputTokens ?? 0) > 0);
   });
 
-  it("reports the context window on thread.token-usage.updated", () => {
+  it("reports the LAST model call against the context window, not the thread total", () => {
     const usage = events.filter((event) => event.type === "thread.token-usage.updated");
     assert.ok(usage.length > 0);
-    const last = usage.at(-1)!.payload as { usage: { usedTokens: number; maxTokens?: number } };
-    assert.ok(last.usage.usedTokens > 0);
-    assert.equal(typeof last.usage.maxTokens, "number");
+    const last = usage.at(-1)!.payload as {
+      usage: {
+        usedTokens: number;
+        maxTokens?: number;
+        totalProcessedTokens?: number;
+        compactsAutomatically?: boolean;
+      };
+    };
+    // The capture's final notification: last {totalTokens:14316,
+    // reasoningOutputTokens:9}, total {totalTokens:14316}, window 258 400.
+    assert.equal(last.usage.usedTokens, 14_307);
+    assert.equal(last.usage.maxTokens, 258_400);
+    assert.equal(
+      last.usage.totalProcessedTokens,
+      14_316,
+      "the thread total is the processed figure, never the meter's numerator"
+    );
+    assert.equal(last.usage.compactsAutomatically, true);
   });
 
   it("classifies the reasoning item even though it carries no text", () => {
