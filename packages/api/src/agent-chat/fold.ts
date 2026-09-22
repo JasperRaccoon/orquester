@@ -481,14 +481,19 @@ function reduce(state: ThreadFoldState, event: DomainEvent): Mutation {
 
     case "thread.turn-start-requested": {
       const payload = event.payload;
+      // A turn replayed from the provider's transcript arrives already over,
+      // and must never be settled from session status the way a live turn is
+      // — that would settle whatever turn is actually running (E6).
+      const settled = payload.settled;
       const turn: Turn = {
         turnId: payload.turnId,
-        state: payload.turnId === null ? "pending" : "running",
+        state: settled?.state ?? (payload.turnId === null ? "pending" : "running"),
         turnCount: null,
         requestedAt: event.occurredAt,
         startedAt: payload.turnId === null ? null : event.occurredAt,
-        completedAt: null,
-        assistantMessageId: null,
+        completedAt: settled?.completedAt ?? null,
+        assistantMessageId: settled?.assistantMessageId ?? null,
+        ...(settled?.tokenUsage !== undefined ? { tokenUsage: settled.tokenUsage } : {}),
         interactionMode: payload.interactionMode,
         ...(payload.modelSelection?.model !== undefined
           ? { model: payload.modelSelection.model }
