@@ -290,7 +290,12 @@ export class GrokSession {
    * session must not grow this without limit.
    */
   get turns(): RecordedTurn[] {
-    return this.recordedTurns.map((turn) => ({ id: turn.id, items: [...turn.items] }));
+    // The replayed history first — it is the older half of the conversation —
+    // then the turns this process ran itself.
+    return [
+      ...this.normalizer.historyTurns(),
+      ...this.recordedTurns.map((turn) => ({ id: turn.id, items: [...turn.items] }))
+    ];
   }
 
   private planHost(): PlanPathHost {
@@ -919,6 +924,9 @@ export class GrokSession {
       id: turn.turnId,
       items: [
         {
+          // `observed_turn`: this process streamed the turn's events already,
+          // so `projectHistory` must NOT project it again (history.ts).
+          kind: "observed_turn" as const,
           providerPromptId: turn.providerPromptId ?? null,
           stopReason: outcome.stopReason,
           ...(outcome.cancellationCategory === undefined
