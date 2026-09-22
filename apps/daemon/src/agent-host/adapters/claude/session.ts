@@ -149,6 +149,8 @@ export class ClaudeSession {
   private currentEffort: string | undefined;
   /** The native session id to resume from — updated on every assistant message. */
   private resumeSessionId: string | undefined;
+  /** True when this session was started from a cursor, i.e. it has a past. */
+  private readonly startedFromCursor: boolean;
   private resumeSessionAt: string | undefined;
 
   constructor(options: ClaudeSessionOptions) {
@@ -168,6 +170,7 @@ export class ClaudeSession {
     });
     this.normalizer.scopedLimitNames = options.scopedLimitNames;
     this.resumeSessionId = options.resumeCursor?.resume;
+    this.startedFromCursor = options.resumeCursor?.resume !== undefined;
     this.resumeSessionAt = options.resumeCursor?.resumeSessionAt;
     if (options.resumeCursor?.turnStartMessageIds !== undefined) {
       this.normalizer.turnStartMessageIds.push(...options.resumeCursor.turnStartMessageIds);
@@ -1045,7 +1048,10 @@ export class ClaudeSession {
       };
     }
     const sessionId = this.resumeSessionId;
-    if (sessionId === undefined) {
+    // Only a RESUMED session has history the stream never showed us. A session
+    // started fresh has written nothing yet, so reading it would spawn a
+    // worker for a transcript that does not exist.
+    if (sessionId === undefined || !this.startedFromCursor) {
       return { threadId: this.threadId, turns: [] };
     }
     try {
