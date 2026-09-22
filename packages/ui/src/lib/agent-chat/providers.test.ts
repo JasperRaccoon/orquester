@@ -10,6 +10,7 @@ import type { AdapterCapabilities, ProviderSnapshot } from "@orquester/api/agent
 
 import {
   authErrorMessage,
+  authErrorNotice,
   loadProviders,
   providerForRefId,
   providersStore,
@@ -57,16 +58,39 @@ beforeEach(() => {
   resetProvidersStore();
 });
 
-describe("authErrorMessage", () => {
-  it("names an unauthenticated provider", () => {
-    assert.match(authErrorMessage(provider({ auth: { status: "unauthenticated" } })) ?? "", /not signed in/);
+describe("authErrorNotice — `unknown` is not `unauthenticated` (§7.7, T3 §7)", () => {
+  it("names an unauthenticated provider, and earns the SIGN-IN copy", () => {
+    const notice = authErrorNotice(provider({ auth: { status: "unauthenticated" } }));
+    assert.match(notice?.message ?? "", /not signed in/);
+    assert.equal(notice?.tone, "sign-in");
   });
 
-  it("names an `auth.status {error}` snapshot too", () => {
-    const message = authErrorMessage(
+  it("gives `status: error` + `unauthenticated` the alarming tone as well", () => {
+    // T3 `ProviderStatusBanner.tsx:78-81`: the "<provider> is unauthenticated"
+    // title is `status === "error" && auth.status === "unauthenticated"`.
+    const notice = authErrorNotice(
+      provider({ status: "error", auth: { status: "unauthenticated" }, message: "401" })
+    );
+    assert.equal(notice?.tone, "sign-in");
+  });
+
+  it("never tells an `unknown` provider to sign in — it gets the NEUTRAL tone", () => {
+    const notice = authErrorNotice(
       provider({ status: "error", auth: { status: "unknown" }, message: "token expired" })
     );
-    assert.equal(message, "token expired");
+    assert.equal(notice?.message, "token expired");
+    assert.equal(notice?.tone, "status", "an ambiguity is never a credential verdict");
+  });
+
+  it("says nothing at all for an `unknown` provider that merely is not installed", () => {
+    // Settings → Agents, not Settings → Accounts: an absent CLI has no
+    // credential to fix, and a toast pointing at accounts is pure noise.
+    assert.equal(
+      authErrorNotice(
+        provider({ installed: false, status: "error", auth: { status: "unknown" }, message: "not installed" })
+      ),
+      null
+    );
   });
 
   it("is silent for a healthy provider, and for an errored one that IS signed in", () => {
@@ -75,6 +99,14 @@ describe("authErrorMessage", () => {
       authErrorMessage(provider({ status: "error", auth: { status: "authenticated" } })),
       null
     );
+  });
+
+  it("carries the two snapshot columns the dismissal key spans", () => {
+    const notice = authErrorNotice(
+      provider({ status: "error", auth: { status: "unauthenticated" } })
+    );
+    assert.equal(notice?.providerStatus, "error");
+    assert.equal(notice?.authStatus, "unauthenticated");
   });
 });
 
@@ -165,8 +197,8 @@ describe("R8-M4 hop 3 — the values the host actually writes reach the toast", 
    * cases pin the client half to the two markings the host writes, and — just
    * as importantly — to the one it writes for non-credential trouble.
    */
-  const raise = (): Array<{ adapterId: string; agentName: string; message: string }> => {
-    const raised: Array<{ adapterId: string; agentName: string; message: string }> = [];
+  const raise = (): Array<{ adapterId: string; agentName: string; message: string; tone: string }> => {
+    const raised: Array<{ adapterId: string; agentName: string; message: string; tone: string }> = [];
     setProviderSideEffects({ onAuthError: (error) => raised.push(error) });
     return raised;
   };
@@ -185,11 +217,18 @@ describe("R8-M4 hop 3 — the values the host actually writes reach the toast", 
       { force: true }
     );
     assert.deepEqual(raised, [
-      { adapterId: "codex", agentName: "codex", message: "Codex sign-in expired." }
+      {
+        adapterId: "codex",
+        agentName: "codex",
+        message: "Codex sign-in expired.",
+        tone: "sign-in",
+        providerStatus: "error",
+        authStatus: "unauthenticated"
+      }
     ]);
   });
 
-  it("toasts end-to-end when the host writes `status: error` with auth unresolved", async () => {
+  it("still surfaces `status: error` with auth unresolved — but never as a sign-in demand", async () => {
     const raised = raise();
     await loadProviders(
       transportServing([
@@ -198,7 +237,14 @@ describe("R8-M4 hop 3 — the values the host actually writes reach the toast", 
       { force: true }
     );
     assert.deepEqual(raised, [
-      { adapterId: "claude", agentName: "claude", message: "401 from the API" }
+      {
+        adapterId: "claude",
+        agentName: "claude",
+        message: "401 from the API",
+        tone: "status",
+        providerStatus: "error",
+        authStatus: "unknown"
+      }
     ]);
   });
 

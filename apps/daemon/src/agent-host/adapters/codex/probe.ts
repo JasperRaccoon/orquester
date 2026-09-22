@@ -228,7 +228,14 @@ export function uninstalledCodexSnapshot(nowIso: string, message?: string): Prov
 // Pieces
 // ---------------------------------------------------------------------------
 
-function toProviderAuth(account: CodexProtocol.v2.GetAccountResponse | undefined): ProviderAuth {
+/**
+ * §7.7: `unauthenticated` only on PROOF — here, `account/read` answering with
+ * no account AND `requiresOpenaiAuth`. An unreadable answer, or one that
+ * simply has no account while the CLI does not require an OpenAI login, is
+ * `unknown`. *T3: `CodexProvider.ts:540-558`.* Exported for the shared
+ * auth-mapping test.
+ */
+export function toProviderAuth(account: CodexProtocol.v2.GetAccountResponse | undefined): ProviderAuth {
   if (account === undefined) {
     return { status: "unknown" };
   }

@@ -39,6 +39,39 @@ test("the same message on a different provider still gets through", () => {
   );
 });
 
+test("the key spans [adapterId, status, auth.status, message] (T3's banner key)", () => {
+  // *T3: `ProviderStatusBanner.tsx:20-23`.* A snapshot whose status or auth
+  // verdict MOVED is a different result and must re-toast; a snapshot that
+  // merely arrived again is the same one and must not.
+  const errored = {
+    sessionId: "provider:claude",
+    message: "401 from the API",
+    providerStatus: "error",
+    authStatus: "unknown"
+  };
+  const dismissed = rememberAgentAuthDismissal(errored, []);
+  assert.equal(
+    shouldRaiseAgentAuthNotice(errored, dismissed),
+    false,
+    "the same result never re-toasts"
+  );
+  assert.equal(
+    shouldRaiseAgentAuthNotice({ ...errored, authStatus: "unauthenticated" }, dismissed),
+    true,
+    "an ambiguity turning into a verdict is new news"
+  );
+  assert.equal(
+    shouldRaiseAgentAuthNotice({ ...errored, providerStatus: "degraded" }, dismissed),
+    true
+  );
+});
+
+test("a notice from an older bundle, carrying no columns, still keys and dismisses", () => {
+  const legacy = { sessionId: "provider:codex", message: "Session expired." };
+  const dismissed = rememberAgentAuthDismissal(legacy, []);
+  assert.equal(shouldRaiseAgentAuthNotice(legacy, dismissed), false);
+});
+
 test("the key cannot be forged by a message containing the separator", () => {
   // A NUL separator, so a message can never spell another provider's key.
   assert.notEqual(

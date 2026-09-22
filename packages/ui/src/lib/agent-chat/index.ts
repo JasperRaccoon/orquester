@@ -66,6 +66,7 @@ export {
 
 export {
   authErrorMessage,
+  authErrorNotice,
   loadProviders,
   notifyProvidersChanged,
   providerForRefId,
@@ -75,7 +76,9 @@ export {
   setProviderSideEffects,
   type ProvidersState,
   type ProvidersStore,
-  type ProviderSideEffects
+  type ProviderSideEffects,
+  type ProviderAuthNotice,
+  type ProviderNoticeTone
 } from "./providers";
 
 export * from "./entries.logic";
