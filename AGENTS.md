@@ -399,6 +399,15 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   (`startBootRefresh()`), called from `main.ts` after `host.openGate()` and never awaited — a probe
   must never delay readiness. The 5-minute interval is only a top-up and stays gated on a live
   watcher; the old first-watcher priming survives as a no-op fallback.
+  **A moved or updated CLI binary re-probes on the next read**: the identity also carries a cheap
+  `realpath` + `stat` of the resolved bin (`binRealPath`/`binMtimeMs`/`binSizeBytes` — the native
+  installer's `~/.local/bin/claude` is a *symlink*, so an update moves its target and never its
+  path), every `GET /providers` compares it (rate-limited per adapter) and a mismatch kicks ONE
+  background refresh through the same one-permit chain while the current snapshot is still served;
+  and **an install/update from the registry asks the host to refresh** that entry's `chat.adapter`
+  (`AgentChatService.onRegistryEntryChanged`, fired from the daemon's `registry.changed` listener
+  on `installing → idle` or on a version that moved — fire-and-forget, debounced per adapter, and
+  the `changed:true` answer publishes `agent.providers.changed` exactly as the manual route does).
   `POST /api/agent/providers/:id/refresh` is the manual escape hatch. Client side nothing branches
   on `status`: `resolveLaunchModel` takes only `models`, so a pending snapshot **with** a catalogue
   is launchable and "Still loading this agent's models" means the catalogue is genuinely empty.

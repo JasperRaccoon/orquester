@@ -14,6 +14,7 @@ import {
   AgentChatService,
   isUsableConversationId,
   proxyAccountFamily,
+  PROVIDER_REFRESH_DEBOUNCE_MS,
   resolveHomeKind
 } from "./service.ts";
 import { ChatSessionError } from "./chat-sessions.ts";
@@ -44,6 +45,8 @@ interface Fixture {
   accounts: AgentAccount[];
   /** What the injected seeded-account gate answers. */
   seededRefusal: { code: string; message: string } | null;
+  /** Adapter ids the daemon asked the host to re-probe, in order. */
+  refreshes: string[];
   cleanup(): Promise<void>;
 }
 
@@ -78,7 +81,8 @@ const OPENCODE: RegistryEntry = {
 
 async function makeFixture(
   entry: RegistryEntry,
-  launch: { env: Record<string, string>; unset?: string[]; accountId?: string } | null
+  launch: { env: Record<string, string>; unset?: string[]; accountId?: string } | null,
+  options: { now?: () => number } = {}
 ): Promise<Fixture> {
   const appdir = await mkdtemp(join(tmpdir(), "orq-chat-service-"));
   // The REAL paths, so boot adoption probes the fake host rather than deciding
@@ -97,6 +101,7 @@ async function makeFixture(
     launchFor: () => launch,
     accounts: [],
     seededRefusal: null,
+    refreshes: [],
     service: null as unknown as AgentChatService,
     cleanup: async () => {
       await new Promise<void>((resolve) => host.close(() => resolve()));
@@ -120,6 +125,14 @@ async function makeFixture(
             startedAt: "2026-09-21T00:00:00.000Z"
           })
         );
+        return;
+      }
+      const refresh = /^\/providers\/([^/]+)\/refresh$/.exec(req.url ?? "");
+      if (refresh && req.method === "POST") {
+        state.refreshes.push(decodeURIComponent(refresh[1] ?? ""));
+        res
+          .writeHead(200, { "content-type": "application/json" })
+          .end(JSON.stringify({ changed: true }));
         return;
       }
       if (req.url === "/threads" && req.method === "POST") {
@@ -178,6 +191,7 @@ async function makeFixture(
     },
     sendAttachment: async (reply) => reply,
     nodeBin: "/usr/bin/node",
+    ...(options.now ? { now: options.now } : {}),
     sleep: async () => undefined,
     // A test must never start an agent host process.
     spawnDirect: () => {
@@ -599,6 +613,82 @@ test("the proxy launchers draw their accounts from the mapped family", () => {
   assert.equal(proxyAccountFamily("claudex"), "codex");
   assert.equal(proxyAccountFamily("claudemix"), "claude");
   assert.equal(proxyAccountFamily("claude"), null);
+});
+
+// §3.2 — the daemon is the one process that knows an install just happened.
+//
+// The incident: `claude` was updated from Settings → Agents (2.1.278 → 2.1.280,
+// which resolves the `opus` alias to a different model) and a chat opened
+// afterwards still offered the old alias, because the host's snapshot was the
+// one probed under the old binary and nothing told it the CLI had changed.
+
+test("an install/update asks the host to re-probe the provider that entry maps to", async () => {
+  let nowMs = 1_000_000;
+  const f = await makeFixture(CLAUDEX, null, { now: () => nowMs });
+
+  // A first sighting is not a change: the host probes every provider at boot.
+  f.service.onRegistryEntryChanged({ ...CLAUDEX, version: "2.1.278" });
+  await f.service.drainProviderRefreshes();
+  assert.deepEqual(f.refreshes, [], "boot state is not an update");
+
+  // `RegistryService.runManaged`: installing → idle (bin re-resolved, version
+  // cleared and re-detection kicked).
+  f.service.onRegistryEntryChanged({
+    ...CLAUDEX,
+    version: "2.1.278",
+    installState: "installing"
+  });
+  f.service.onRegistryEntryChanged({ ...CLAUDEX, version: undefined, installState: "idle" });
+  await f.service.drainProviderRefreshes();
+  assert.deepEqual(
+    f.refreshes,
+    ["claude"],
+    "claudex nudges the claude adapter its launcher runs"
+  );
+
+  // The version detection that follows is the same event twice: debounced.
+  f.service.onRegistryEntryChanged({ ...CLAUDEX, version: "2.1.280" });
+  await f.service.drainProviderRefreshes();
+  assert.deepEqual(f.refreshes, ["claude"]);
+  await f.cleanup();
+});
+
+test("a version that moved refreshes once, and a flapping detector cannot loop", async () => {
+  let nowMs = 1_000_000;
+  const f = await makeFixture(CLAUDEX, null, { now: () => nowMs });
+
+  f.service.onRegistryEntryChanged({ ...CLAUDEX, version: "2.1.278" });
+  await f.service.drainProviderRefreshes();
+  assert.deepEqual(f.refreshes, []);
+
+  // A CLI updated outside the registry — the detector reads a new version.
+  f.service.onRegistryEntryChanged({ ...CLAUDEX, version: "2.1.280" });
+  await f.service.drainProviderRefreshes();
+  assert.deepEqual(f.refreshes, ["claude"]);
+
+  // Flapping inside the window costs nothing.
+  for (const version of ["2.1.278", "2.1.280", "2.1.278"]) {
+    f.service.onRegistryEntryChanged({ ...CLAUDEX, version });
+  }
+  await f.service.drainProviderRefreshes();
+  assert.deepEqual(f.refreshes, ["claude"], "the window holds the next nudge off");
+
+  // Past the window a real change is heard again.
+  nowMs += PROVIDER_REFRESH_DEBOUNCE_MS;
+  f.service.onRegistryEntryChanged({ ...CLAUDEX, version: "2.1.281" });
+  await f.service.drainProviderRefreshes();
+  assert.deepEqual(f.refreshes, ["claude", "claude"]);
+  await f.cleanup();
+});
+
+test("an entry with no chat adapter never nudges a provider", async () => {
+  const f = await makeFixture(CLAUDEX, null);
+  const detectOnly: RegistryEntry = { ...CLAUDEX, id: "deepseek", chat: undefined };
+  f.service.onRegistryEntryChanged({ ...detectOnly, version: "1.0.0" });
+  f.service.onRegistryEntryChanged({ ...detectOnly, version: "1.1.0", installState: "idle" });
+  await f.service.drainProviderRefreshes();
+  assert.deepEqual(f.refreshes, []);
+  await f.cleanup();
 });
 
 test("resolveHomeKind and the conversation-id shape check", () => {
