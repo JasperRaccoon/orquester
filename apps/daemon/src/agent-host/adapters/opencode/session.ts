@@ -1864,15 +1864,7 @@ export class OpenCodeThreadSession {
       openCodeRoutes.messages(this.state.openCodeSessionId),
       { timeoutMs: AGENT_HOST_DEADLINES.sessionOpenMs }
     );
-    return {
-      threadId: this.state.threadId,
-      turns: (Array.isArray(messages) ? messages : [])
-        .filter((entry) => entry?.info?.role === "assistant")
-        .map((entry) => ({
-          id: entry.info.id,
-          items: [entry.info, ...((entry.parts ?? []) as OpenCodePart[])] as unknown[]
-        }))
-    };
+    return toThreadSnapshot(this.state.threadId, Array.isArray(messages) ? messages : []);
   }
 
   /**
@@ -1991,6 +1983,68 @@ function makeCancellation(turnId: string | undefined): OpenCodeCancellation {
       }
     }
   };
+}
+
+/**
+ * `GET /session/:id/message` → the §4.1 snapshot.
+ *
+ * A **turn is keyed on the assistant message**, because that is the unit
+ * `rollbackThread` counts: `numTurns` means exchanges, and keying on every
+ * message would make `rollback(2)` remove one exchange instead of two.
+ *
+ * Each turn's `items` additionally carry the **user message that prompted it**
+ * — `parentID` links them, and OpenCode can answer one prompt with several
+ * assistant messages, so the prompt is attached to the first of them only. A
+ * trailing prompt with no answer yet becomes a turn of its own, or replaying
+ * the history would silently lose the last thing the user said.
+ *
+ * `items` is `unknown[]` by contract; `history.ts` is the only reader that
+ * knows this shape.
+ */
+export function toThreadSnapshot(
+  threadId: string,
+  messages: readonly OpenCodeMessageWithParts[]
+): ThreadSnapshot {
+  const byId = new Map<string, OpenCodeMessageWithParts>();
+  for (const entry of messages) {
+    if (typeof entry?.info?.id === "string") {
+      byId.set(entry.info.id, entry);
+    }
+  }
+
+  const turns: ThreadSnapshot["turns"] = [];
+  const answeredPrompts = new Set<string>();
+  const claimedPrompts = new Set<string>();
+
+  for (const entry of messages) {
+    if (entry?.info?.role !== "assistant") {
+      continue;
+    }
+    const parentId = entry.info.parentID;
+    const items: unknown[] = [];
+    if (typeof parentId === "string") {
+      answeredPrompts.add(parentId);
+      const prompt = byId.get(parentId);
+      // Only the FIRST assistant message of a prompt carries it, so a
+      // multi-message answer does not replay the user's text twice.
+      if (prompt !== undefined && !claimedPrompts.has(parentId)) {
+        claimedPrompts.add(parentId);
+        items.push(prompt.info, ...((prompt.parts ?? []) as OpenCodePart[]));
+      }
+    }
+    items.push(entry.info, ...((entry.parts ?? []) as OpenCodePart[]));
+    turns.push({ id: entry.info.id, items });
+  }
+
+  const last = messages.at(-1);
+  if (last?.info?.role === "user" && !answeredPrompts.has(last.info.id)) {
+    turns.push({
+      id: last.info.id,
+      items: [last.info, ...((last.parts ?? []) as OpenCodePart[])]
+    });
+  }
+
+  return { threadId, turns };
 }
 
 /**
