@@ -1527,3 +1527,85 @@ describe("ordering", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Q1-9 residual — the two per-item maps `forget` alone could not bound
+// ---------------------------------------------------------------------------
+
+describe("Q1-9: per-item ingestion state is released as items finish", () => {
+  it("frees a task title once the task it names has completed", async () => {
+    const { ingestion, sink } = harness();
+    await ingestion.ingest(
+      runtimeEvent("task.started", { taskId: "task-1", description: "Audit the routes" })
+    );
+    await ingestion.ingest(runtimeEvent("task.completed", { taskId: "task-1", status: "completed" }));
+    await settle();
+
+    const titles = sink
+      .activities()
+      .filter((event) => event.payload.activity.activityKind === "task.completed")
+      .map((event) => (event.payload.activity.payload as { title?: string }).title);
+    assert.ok(
+      titles.some((title) => title === "Audit the routes"),
+      "the completion is titled from the remembered description"
+    );
+
+    // The entry's life ends with the completion it titled. Before this it was
+    // cleared only when the WHOLE thread was forgotten, so a long session
+    // accumulated one entry per subagent task — the residual Q1-9 left open.
+    await ingestion.ingest(runtimeEvent("task.completed", { taskId: "task-1", status: "completed" }));
+    await settle();
+    const after = sink
+      .activities()
+      .filter((event) => event.payload.activity.activityKind === "task.completed")
+      .map((event) => (event.payload.activity.payload as { title?: string }).title);
+    assert.equal(
+      after.filter((title) => title === "Audit the routes").length,
+      1,
+      "a second completion for the same id is no longer titled — the title was released"
+    );
+  });
+
+  it("drains a tool-output buffer at item completion, then releases its metadata", async () => {
+    const { ingestion, sink } = harness();
+    await ingestion.ingest(
+      runtimeEvent(
+        "item.started",
+        { itemType: "command_execution", status: "inProgress", title: "ls" },
+        { turnId: "turn-1", itemId: "item-1" }
+      )
+    );
+    // Below both batching thresholds, so nothing has been emitted yet.
+    await ingestion.ingest(
+      runtimeEvent(
+        "content.delta",
+        { streamKind: "command_output", delta: "one line\n" },
+        { turnId: "turn-1", itemId: "item-1" }
+      )
+    );
+    assert.equal(
+      sink.activities().filter((e) => e.payload.activity.activityKind === "tool.output").length,
+      0,
+      "still buffered"
+    );
+
+    await ingestion.ingest(
+      runtimeEvent(
+        "item.completed",
+        { itemType: "command_execution", status: "completed", title: "ls" },
+        { turnId: "turn-1", itemId: "item-1" }
+      )
+    );
+    await settle();
+
+    // The metadata map is keyed by item, so a completed item's entry is dead
+    // weight — one record per tool call, for the life of the thread. It can
+    // only be dropped after the buffer is drained, because the emitter reads
+    // it; this is the observable edge of that ordering.
+    const outputs = sink
+      .activities()
+      .filter((event) => event.payload.activity.activityKind === "tool.output");
+    assert.equal(outputs.length, 1, "the trailing chunk is flushed, not discarded with the meta");
+    assert.match(JSON.stringify(outputs[0]?.payload.activity.payload), /one line/);
+  });
+});

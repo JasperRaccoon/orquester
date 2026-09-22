@@ -15,7 +15,9 @@
  * and does not block it. The CLI decides.
  */
 
-import type { AttachmentRef } from "@orquester/api/agent-chat";
+import type { AgentAdapterId, AttachmentRef } from "@orquester/api/agent-chat";
+
+import { GROK_BLOCKED_COMMAND_MESSAGE, isBlockedGrokCommand } from "../adapters/grok/index.ts";
 
 /** The literal a compaction turn is persisted as (§4.6.5(b)). */
 export const COMPACT_COMMAND_TEXT = "/compact";
@@ -52,4 +54,30 @@ export function isSlashInvocation(text: string): boolean {
  */
 export function providerInputFor(text: string): string {
   return text;
+}
+
+/**
+ * The refusal message for a provider command the host blocks, or null.
+ *
+ * §4.6.5(c)/§4.6.6: Grok's `/always-approve` is the only one — a provider-side
+ * permission change would desynchronise the host's runtime mode, and on that
+ * CLI it is additionally a no-op.
+ *
+ * The refusal belongs HERE, on `decide("turn")`, not only in the adapter: by
+ * the time `sendTurn` throws, the user message is already committed and the
+ * user sees their own `/always-approve` bubble followed by a failure, with no
+ * way to take it back (R2 #7). The adapter keeps its own check as the backstop
+ * for anything that reaches it another way.
+ *
+ * Keyed on the adapter so the rule stays where a reader looks for it, rather
+ * than the orchestrator growing a provider branch.
+ */
+export function blockedProviderCommandMessage(
+  adapterId: AgentAdapterId,
+  text: string
+): string | null {
+  if (adapterId === "grok" && isBlockedGrokCommand(text)) {
+    return GROK_BLOCKED_COMMAND_MESSAGE;
+  }
+  return null;
 }

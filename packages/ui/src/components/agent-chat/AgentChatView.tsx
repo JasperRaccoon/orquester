@@ -32,6 +32,7 @@ import { isDefaultThreadTitle } from "../../lib/session-kind";
 import { isActiveChatTab, releaseActiveChatTab } from "../../lib/agent-chat-active-tab";
 import { anotherLayerOwnsTheKeyboard } from "../attention/GlobalShortcutListener";
 import { deriveThreadTitleSeed } from "../../lib/agent-chat/title.logic";
+import { resolveChatEscape } from "./escape-action";
 import { proposedPlanTitle, shouldShowPlanFollowUpPrompt } from "../../lib/agent-chat/plan.logic";
 import { useAppStore } from "../../store/app";
 import { AgentDrillIn } from "./roster/AgentDrillIn";
@@ -289,8 +290,13 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   // thread can never leave plan mode.
   //
   // The thread-side half of §7.4's gate lives here (nothing pending, still in
-  // plan mode, the turn has settled); the composer adds the one condition it
-  // owns, an empty attachment tray.
+  // plan mode, the turn has settled); the last term — an empty attachment tray
+  // — is the composer's, because the draft is state inside it. It publishes
+  // the count back (`onDraftAttachmentCountChange`) so the **docked banner**,
+  // which lives up here, obeys the same rule as the primary action: staging a
+  // file while a plan is proposed must not leave a "Plan ready" banner over a
+  // composer whose only button is Send.
+  const [composerAttachments, setComposerAttachments] = React.useState(0);
   const planFollowUp =
     !paintOnly &&
     shouldShowPlanFollowUpPrompt({
@@ -298,7 +304,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
       interactionMode: slice.interactionMode,
       latestTurnSettled: !turnActive,
       hasActionableProposedPlan: actionableProposedPlan !== null,
-      hasComposerAttachments: false
+      hasComposerAttachments: composerAttachments > 0
     })
       ? actionableProposedPlan
       : null;
@@ -308,17 +314,21 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   // Both are advertised by the shared keybinding table, and both used to work
   // only while focus happened to be inside the chat subtree: click a tool row
   // to expand it and `document.activeElement` becomes `<body>`, after which a
-  // React handler on our root never fires again.
+  // React handler on our root never fires again. So it is a `window` listener.
   //
-  // So it is a `window` listener — but a *scoped* one. Three gates, in the
-  // order they can go wrong:
-  //   1. this tab is the one on screen (every tab stays mounted, so without
-  //      this an Escape stops an agent in a tab the user cannot see);
-  //   2. no blocking layer owns the screen — the same set the app's global
-  //      shortcut listener stands down for;
-  //   3. focus is not inside this thread's composer, which owns Escape itself
-  //      and gives its open token menu first refusal. Ours is the "focus is
-  //      anywhere else" case, so the two can never both fire.
+  // **Escape is shared with the composer by SCOPE, never by order.** Two
+  // capture-phase `window` listeners exist for this key and exactly one may
+  // act: two on the same node cannot be ordered — a listener whose effect deps
+  // change (the composer's include `queue`) re-registers and moves to the back
+  // of the list — so whichever ran first won, which meant two interrupts when
+  // both fired and a stopped turn instead of a closed drill-in when the
+  // composer went first. This one therefore owns every Escape whose target is
+  // OUTSIDE the composer shell, and the composer's `composerOwnsEscape` owns
+  // the inside; that is why `insideComposer` is one of the gates below, and
+  // why both sides also bail on `defaultPrevented`.
+  //
+  // Every rule lives in `resolveChatEscape`, which is pure and tested; this
+  // keeps only the three lines that touch the event.
   const escapeState = React.useRef({ drillInAgentId, turnActive });
   escapeState.current = { drillInAgentId, turnActive };
   React.useEffect(() => {
@@ -326,33 +336,31 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
       return;
     }
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || event.defaultPrevented) {
-        return;
-      }
-      if (!isActiveChatTab(sessionId) || anotherLayerOwnsTheKeyboard()) {
-        return;
-      }
       const target = event.target as Element | null;
-      if (
-        typeof target?.closest === "function" &&
-        target.closest(`[data-agent-chat-composer-shell="${CSS.escape(sessionId)}"]`)
-      ) {
+      const state = escapeState.current;
+      const action = resolveChatEscape({
+        key: event.key,
+        defaultPrevented: event.defaultPrevented,
+        isActiveTab: isActiveChatTab(sessionId),
+        blockingLayerOpen: anotherLayerOwnsTheKeyboard(),
+        insideComposer:
+          typeof target?.closest === "function" &&
+          target.closest(`[data-agent-chat-composer-shell="${CSS.escape(sessionId)}"]`) !== null,
+        drillInOpen: state.drillInAgentId !== null,
+        turnActive: state.turnActive
+      });
+      if (action === "ignore") {
         return;
       }
-      const state = escapeState.current;
-      if (state.drillInAgentId) {
-        event.preventDefault();
-        event.stopPropagation();
+      event.preventDefault();
+      event.stopPropagation();
+      if (action === "close-drill-in") {
         setDrillInAgentId(null);
         return;
       }
-      if (state.turnActive) {
-        event.preventDefault();
-        event.stopPropagation();
-        void actions.interrupt().catch(() => {
-          // The thread's own error banner already carries the reason.
-        });
-      }
+      void actions.interrupt().catch(() => {
+        // The thread's own error banner already carries the reason.
+      });
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
@@ -562,9 +570,11 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 backgroundLiveness={paintOnly ? null : roster.backgroundLiveness}
                 liveAgentCount={paintOnly ? 0 : roster.panel.liveCount}
                 stopping={!paintOnly && roster.stopping}
-                actionableProposedPlan={
-                  !paintOnly && session.hasActionableProposedPlan === true
-                }
+                // The dock shows the banner on exactly the decision the
+                // composer acts on — not on the summary flag alone, which
+                // stays true through a running turn, an open question and a
+                // staged attachment.
+                actionableProposedPlan={planFollowUp !== null}
                 onApprove={paintOnly ? noop : (input) => dispatch(() => actions.respondApproval(input))}
                 onAnswer={paintOnly ? noop : (input) => dispatch(() => actions.answerQuestion(input))}
                 onDismiss={
@@ -580,11 +590,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 uploadAttachment={actions.uploadAttachment}
                 active={active}
                 entries={paintOnly ? undefined : slice.entries}
-                planTitle={
-                  actionableProposedPlan
-                    ? proposedPlanTitle(actionableProposedPlan.planMarkdown)
-                    : null
-                }
+                planTitle={planFollowUp ? proposedPlanTitle(planFollowUp.planMarkdown) : null}
               />
             </div>
             <div className="pointer-events-auto mx-auto w-full min-w-0 max-w-3xl px-3 sm:px-5">
@@ -601,6 +607,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 queue={slice.queue}
                 activePlan={paintOnly ? null : activePlan}
                 actionableProposedPlan={planFollowUp}
+                onDraftAttachmentCountChange={setComposerAttachments}
                 reverting={reverting}
                 active={active}
                 actions={actions}

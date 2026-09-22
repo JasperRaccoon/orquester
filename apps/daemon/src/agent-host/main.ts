@@ -45,7 +45,7 @@ import { REGISTRY, type RegistryEntryDef } from "@orquester/registry";
 import type { AccountHome, AgentAdapterId, ProviderSnapshot } from "@orquester/api/agent-chat";
 
 import type { AdapterContext, AdapterLogger, AgentAdapter } from "./adapter.ts";
-import { ADAPTER_IDS, adapterFactory } from "./adapters/index.ts";
+import { ADAPTER_IDS, SNAPSHOT_TIMEOUTS_MS, adapterFactory } from "./adapters/index.ts";
 import { createCheckpointService } from "./checkpoints/index.ts";
 import type { AgentHostStopResponse } from "@orquester/api/agent-chat";
 import { newHostInstanceId } from "./host-protocol.ts";
@@ -382,6 +382,10 @@ export async function startAgentHost(
   const snapshots: ManagedProviderSnapshotRegistry = createProviderSnapshotRegistry({
     probes: ADAPTER_IDS.map((id) => ({
       id,
+      // E9: an adapter whose catalogue lives behind a server it must start
+      // first needs a window covering the start too. Data, per adapter — every
+      // other probe keeps the tight auth window.
+      ...(SNAPSHOT_TIMEOUTS_MS[id] !== undefined ? { timeoutMs: SNAPSHOT_TIMEOUTS_MS[id] } : {}),
       refresh: async (input?: { cwd?: string }): Promise<ProviderSnapshot> => {
         const adapter = adapters.get(id);
         if (!adapter) {
@@ -524,6 +528,10 @@ export async function startAgentHost(
     await host.stop().catch((error: unknown) => {
       logger.warn("agent-host: orchestrator stop failed", error);
     });
+    // Last: the store's sweep timer and its open raw-log handles. The timer is
+    // `unref`'d, so this is about a deterministic stop rather than about the
+    // process exiting — a sweep must not start while the log writers close.
+    store.close();
     await Promise.allSettled(consumers);
   };
 
@@ -544,6 +552,17 @@ export async function startAgentHost(
     }
     // §3.3 runs before the gate opens, and never blocks or fails startup.
     await host.reconcile();
+    // One sweep after adoption, before the gate: the store's own interval is
+    // 6 h, so without this a host that is restarted more often than that never
+    // collects anything at all — and what it has to collect (a `.part` from an
+    // upload whose connection died with the last process, a raw log for a
+    // thread that is gone) is exactly what accumulates WHILE it is down.
+    // After adoption, so a thread the reconcile just adopted still counts as
+    // live and its raw log is not a sweep target.
+    void store.sweepNow().catch((error: unknown) => {
+      // Housekeeping that cannot run costs disk, not correctness.
+      logger.warn("agent-host: the boot sweep failed", error);
+    });
     host.openGate();
     logger.info(`agent-host ready on ${socketPath}`, {
       hostInstanceId,

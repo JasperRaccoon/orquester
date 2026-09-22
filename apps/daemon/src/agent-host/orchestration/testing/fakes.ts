@@ -38,6 +38,12 @@ import type { AdapterLogger } from "../../adapter.ts";
 // ---------------------------------------------------------------------------
 
 export interface FakeThreadStore extends ThreadStore {
+  /**
+   * Every `pruneAttachments` call, in order. An entry that is `undefined` is
+   * the argument-less host-wide sweep — the only form that reaches the
+   * cross-thread raw-log ceiling (S1 #5).
+   */
+  readonly pruneCalls: Array<{ threadId?: string; now?: Date } | undefined>;
   /** Every event ever appended, per thread. */
   readonly logs: Map<string, DomainEvent[]>;
   readonly heads: Map<string, ThreadHead>;
@@ -54,12 +60,14 @@ export function createFakeThreadStore(): FakeThreadStore {
   const receipts = new Map<string, CommandReceipt>();
   const attachments = new Map<string, string>();
   const rawFrames: Array<{ threadId: string; frame: unknown }> = [];
+  const pruneCalls: Array<{ threadId?: string; now?: Date } | undefined> = [];
   const truncated = new Map<string, number>();
   const store = {
     logs,
     heads,
     receipts,
     rawFrames,
+    pruneCalls,
     headSaves: 0,
 
     truncateAt(threadId: string, index: number): void {
@@ -153,7 +161,9 @@ export function createFakeThreadStore(): FakeThreadStore {
       return path;
     },
 
-    async pruneAttachments(): Promise<void> {},
+    async pruneAttachments(input?: { threadId?: string; now?: Date }): Promise<void> {
+      pruneCalls.push(input);
+    },
 
     logRawFrame(threadId: string, frame: unknown): void {
       rawFrames.push({ threadId, frame });

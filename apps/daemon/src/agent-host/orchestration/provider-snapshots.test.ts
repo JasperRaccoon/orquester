@@ -226,3 +226,69 @@ describe("provider snapshot registry (§3.2, §6.3)", () => {
     });
   });
 });
+
+/**
+ * The client's own gate, restated (`agent-chat/providers.ts`'s
+ * `authErrorMessage` in the UI package). That package is not a daemon
+ * dependency, so this is the one honest way to pin the CONTRACT rather than the
+ * producer: the fix wave shipped both halves and they disagreed, and both
+ * sides' tests passed because each asserted only its own half.
+ */
+function clientWouldToast(snapshot: ProviderSnapshot): boolean {
+  if (snapshot.auth.status === "unauthenticated") return true;
+  return snapshot.status === "error" && snapshot.auth.status !== "authenticated";
+}
+
+describe("R8-M4: an auth.status error is written in the shape the toast reads", () => {
+  it("stores `error`, not `degraded`, so the client actually raises it", async () => {
+    await withRegistry(async ({ registry, probe }) => {
+      probe.next = snapshotFor("claude");
+      await registry.refresh("claude");
+      assert.equal(clientWouldToast(registry.get("claude")!), false, "a healthy provider is quiet");
+
+      registry.applyAuthStatus?.("claude", {
+        eventId: "auth-1",
+        threadId: "thread-1",
+        createdAt: "1970-01-01T00:00:01.000Z",
+        type: "auth.status",
+        payload: { error: "Session expired, run /login" }
+      } as unknown as RuntimeEvent);
+
+      const after = registry.get("claude")!;
+      // `degraded` is what this wrote before, and it is NOT the toast's input:
+      // the probes set `degraded` for reasons that have nothing to do with auth,
+      // so the client deliberately ignores it.
+      assert.equal(after.status, "error");
+      assert.equal(after.auth.status, "unknown");
+      assert.equal(after.message, "Session expired, run /login");
+      assert.equal(clientWouldToast(after), true, "the whole point of the chain");
+    });
+  });
+
+  it("clears back to ready on a clean auth.status", async () => {
+    await withRegistry(async ({ registry }) => {
+      await registry.refresh("claude");
+      registry.applyAuthStatus?.("claude", {
+        eventId: "auth-1",
+        threadId: "thread-1",
+        createdAt: "1970-01-01T00:00:01.000Z",
+        type: "auth.status",
+        payload: { error: "Session expired" }
+      } as unknown as RuntimeEvent);
+      assert.equal(registry.get("claude")?.status, "error");
+
+      registry.applyAuthStatus?.("claude", {
+        eventId: "auth-2",
+        threadId: "thread-1",
+        createdAt: "1970-01-01T00:00:02.000Z",
+        type: "auth.status",
+        payload: {}
+      } as unknown as RuntimeEvent);
+
+      const cleared = registry.get("claude")!;
+      assert.equal(cleared.status, "ready");
+      assert.equal(cleared.message, undefined);
+      assert.equal(clientWouldToast(cleared), false);
+    });
+  });
+});

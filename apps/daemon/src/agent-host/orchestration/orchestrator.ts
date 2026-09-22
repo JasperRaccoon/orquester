@@ -78,6 +78,7 @@ import {
   CheckpointRefUnavailableError,
   CheckpointTurnRangeError
 } from "../checkpoints/index.ts";
+import { slimActivityEvent } from "../ingestion/coalesce.ts";
 import { projectSnapshotActivities } from "../ingestion/index.ts";
 import { AGENT_HOST_DEADLINES, withDeadline } from "../support/deadline.ts";
 import { createEventBuilder, describeFailure, makeActivity, type BuildEvent } from "./events.ts";
@@ -113,7 +114,12 @@ import {
   type BoundSessionShape,
   type DesiredSessionShape
 } from "./session-policy.ts";
-import { COMPACT_COMMAND_TEXT, isHostNativeCompact, providerInputFor } from "./slash.ts";
+import {
+  blockedProviderCommandMessage,
+  COMPACT_COMMAND_TEXT,
+  isHostNativeCompact,
+  providerInputFor
+} from "./slash.ts";
 import { createTurnWatchdog, stalledTurnMessage, type TurnWatchdog } from "./turn-watchdog.ts";
 import { checkMinimumVersion, MINIMUM_CLI_VERSIONS } from "./version-gate.ts";
 import {
@@ -304,6 +310,7 @@ const HEAD_SAVE_EVENT_INTERVAL = 50;
  * the provider.
  */
 const PENDING_TURN_GRACE_MS = 5 * 60_000;
+
 
 /** Events that change `meta.json`'s own fields, so the head is rewritten. */
 const HEAD_WRITING_EVENTS: ReadonlySet<string> = new Set([
@@ -508,8 +515,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
    *
    * So the in-flight promise is memoised **synchronously**, before the first
    * await — the same shape `ProviderSnapshotRegistry.ensureWorkspaceSnapshot`
-   * uses. The entry is dropped only on failure, so a transient read error does
-   * not poison the thread for the life of the host.
+   * uses. The entry is dropped in a `finally`, on success and failure alike:
+   * the resolved runtime is in `runtimes` by then, and a transient read error
+   * must not poison the thread for the life of the host.
    */
   const loadRuntime = (threadId: string): Promise<ThreadRuntime> => {
     const existing = runtimes.get(threadId);
@@ -522,6 +530,21 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     }
     const load = buildRuntime(threadId)
       .then((runtime) => {
+        // `deleteThread` evicts the in-flight entry as its last act, so an
+        // entry that is no longer ours means the thread was deleted while this
+        // read was in flight. Caching it now would resurrect a runtime whose
+        // store directory is gone — the class V1 §10 #5 names. The caller still
+        // gets its object; it is simply not published.
+        //
+        // Defensive, deliberately: `deleteThread` holds the runtime in
+        // `runtimes` across all of its awaits, so today every concurrent
+        // `loadRuntime` hits the cache and no load is actually in flight at the
+        // eviction — which is also why this has no test that could fail without
+        // it. It costs one comparison and closes the class if that ordering
+        // ever changes.
+        if (loadingRuntimes.get(threadId) !== load) {
+          return runtime;
+        }
         runtimes.set(threadId, runtime);
         return runtime;
       })
@@ -867,6 +890,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     const launchArgs = options.launchArgsForRefId?.(head.refId) ?? [];
     const session = await adapter.startSession({
       threadId: runtime.id,
+      // R4-6: the PROJECT ROOT, not the thread's `cwd`. OpenCode pools one
+      // `opencode serve` per project (§3.2) and keys that pool on this field;
+      // it is optional on the seam, so omitting it silently keys the pool on
+      // `cwd` and a thread opened on a subdirectory spawns a second server for
+      // the same checkout. `tsc` cannot catch the omission — the test does.
+      projectPath: head.projectPath,
       cwd: head.cwd,
       home,
       title: head.title,
@@ -912,6 +941,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   ): Promise<void> => {
     if (!runtime.historyPending) return;
     runtime.historyPending = false;
+    const head = requireHead(runtime);
     if (!adapter.projectHistory) {
       await appendActivity(runtime, {
         kind: "runtime.warning",
@@ -927,7 +957,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         timeoutMs: AGENT_HOST_DEADLINES.sessionOpenMs,
         label: `history:${adapter.id}`
       });
-      const events = adapter.projectHistory(snapshot);
+      const events = stampHistoryTimes(adapter.projectHistory(snapshot), head.createdAt);
       for (const event of events) {
         if (!isHistoricalRuntimeEvent(event)) {
           logger.warn("agent-host: a projected history event was not marked historical", {
@@ -1523,6 +1553,13 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         if (input.length === 0 && attachments.length === 0) {
           throw invalidCommand("A turn needs input or at least one attachment.");
         }
+        // R2-7: refuse BEFORE anything is committed. The adapter throws for the
+        // same text, but that happens in the turn effect — after the user's
+        // message is on disk and rendered, which is the bug.
+        const blocked = blockedProviderCommandMessage(head.adapter, input);
+        if (blocked !== null) {
+          throw invalidCommand(blocked);
+        }
         // §4.6.5(b): the same host path as the `/compact` command, including
         // its refusal and queueing rules.
         if (isHostNativeCompact({ text: input, attachments })) {
@@ -2024,6 +2061,24 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       await runtime.commands.run(() => commit(runtime, events));
       runtime.historyPending = resumeCursor !== undefined;
       await saveHeadNow(runtime);
+      if (resumeCursor !== undefined) {
+        // E2E R2-2: open the session NOW rather than on the first turn. History
+        // can only be read through a live provider session, so a lazy start
+        // left a resumed tab blank until the user typed — and then replayed the
+        // old conversation UNDER the new prompt, because the `/turn` had
+        // already committed its message. Queued on `effects`, so it neither
+        // delays this response nor races a later turn's session start.
+        void runtime.effects
+          .run(() => ensureSession(runtime))
+          .catch((error: unknown) => {
+            // A resume that cannot open its session is reported by the turn
+            // that needs it; opening early is an optimisation, not a contract.
+            logger.info("agent-host: eager resume session did not open", {
+              threadId,
+              error: describeFailure(error)
+            });
+          });
+      }
       return requireHead(runtime);
     });
 
@@ -2179,20 +2234,31 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       return null;
     }
     let bytes = 0;
+    const replay: DomainEvent[] = [];
     for (const event of tail.events) {
       if (event.type === "thread.created" || event.type === "thread.reverted") {
         // A recreated thread, or a revert truncation below `after`.
         return null;
       }
+      // R5-1: a replay is a READ, so §5.6 slimming applies to it exactly as it
+      // does to the snapshot and the live stream — this is the third arm of
+      // the same choke point. Without it a reconnect ships the full persisted
+      // payload (a 32 KiB `tool.completed` went out at ~33 KB) and, worse,
+      // arrives with `truncated` unset, so the client can never offer "load
+      // full output" for a row it received on this path.
+      const slimmed = slimActivityEvent(event);
       // Row count alone is not a bound: a handful of events with large tool
       // payloads decode to far more than their number suggests, which is why
-      // the byte budget is measured before the replay is used.
-      bytes += serializedSize(event);
+      // the byte budget is measured before the replay is used. Measured on the
+      // SLIMMED row, because the budget bounds what goes on the wire — sizing
+      // the persisted payload would force a snapshot for a range that fits.
+      bytes += serializedSize(slimmed);
       if (bytes > AGENT_CHAT_REPLAY_PAYLOAD_BUDGET_BYTES) {
         return null;
       }
+      replay.push(slimmed);
     }
-    return tail.events;
+    return replay;
   };
 
   const readItem = async (threadId: string, itemId: string): Promise<ThreadItem | null> =>
@@ -2984,6 +3050,38 @@ const sizeCache = new WeakMap<object, number>();
  * An event's serialized size is measured once and cached by identity, since one
  * event object is shared by every stream watching that thread (§6.3).
  */
+/**
+ * Give every projected history row a time that sorts BEFORE the thread's own
+ * first row (E2E R2-2).
+ *
+ * An adapter that reads a real timestamp out of its transcript keeps it — that
+ * is the honest answer and the only one that survives a sort. An adapter that
+ * stamps `now` (all of them did at first) would otherwise render a year-old
+ * conversation as having happened after the prompt the user just typed, so
+ * those rows are laid out on a monotonic ramp of one millisecond each, ending
+ * just before the thread was created. Order within the projection is the
+ * adapter's, and is preserved either way.
+ *
+ * A stamp that is merely unparseable is treated as missing, not as a reason to
+ * drop the row: history that renders at an approximate time beats no history.
+ */
+export function stampHistoryTimes<TEvent extends { createdAt?: string }>(
+  events: readonly TEvent[],
+  createdAt: string
+): TEvent[] {
+  const anchorMs = Date.parse(createdAt);
+  if (!Number.isFinite(anchorMs)) {
+    return [...events];
+  }
+  return events.map((event, index) => {
+    const ownMs = event.createdAt === undefined ? NaN : Date.parse(event.createdAt);
+    if (Number.isFinite(ownMs) && ownMs < anchorMs) {
+      return event;
+    }
+    return { ...event, createdAt: new Date(anchorMs - (events.length - index)).toISOString() };
+  });
+}
+
 export function serializedSize(value: object): number {
   const cached = sizeCache.get(value);
   if (cached !== undefined) {

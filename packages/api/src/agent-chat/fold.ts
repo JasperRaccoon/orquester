@@ -74,8 +74,16 @@ export interface ThreadFoldState {
   /** Derived from the activity fold, never stored separately (§5.1). */
   pending: PendingRequests;
   roster: RuntimeSubagent[];
-  /** Request ids permanently closed by a `*.resolved` row (the tombstone set). */
+  /** Request ids closed by a `*.resolved` row (the tombstone set). */
   closedRequestIds: Set<string>;
+  /**
+   * When each tombstoned request was resolved, so a tombstone can be applied
+   * in order: it closes the request that PRECEDES it, while a request stamped
+   * later is a different one and opens fresh (a provider may recycle an id —
+   * E2E R2-1). Optional so a state built by an older constructor still folds;
+   * without a stamp the tombstone closes unconditionally, as it used to.
+   */
+  closedRequestAt?: Map<string, string>;
   /** Highest `seq` applied. */
   seq: number;
   /** True once `thread.deleted` has been applied. */
@@ -96,6 +104,7 @@ export function createEmptyThreadState(): ThreadFoldState {
     pending: EMPTY_PENDING,
     roster: [],
     closedRequestIds: new Set(),
+    closedRequestAt: new Map(),
     seq: 0,
     deleted: false
   };
@@ -371,14 +380,20 @@ function commit(
   // The tombstone set is updated BEFORE pending is derived from it: a
   // `*.resolved` row must close its request in the same step it arrives, and
   // it must keep closing it after retention drops it (§5.1).
-  const closedRequestIds =
+  const closed =
     mutation.rederivePending === true
-      ? closedIdsFrom(mutation.activities ?? state.activities, state.closedRequestIds)
-      : state.closedRequestIds;
+      ? closedIdsFrom(
+          mutation.activities ?? state.activities,
+          state.closedRequestIds,
+          state.closedRequestAt
+        )
+      : { ids: state.closedRequestIds, at: state.closedRequestAt };
+  const closedRequestIds = closed.ids;
+  const closedRequestAt = closed.at;
 
   const pending =
     mutation.rederivePending === true || retentionDropped
-      ? derivePendingRequests(activities, { closed: closedRequestIds })
+      ? derivePendingRequests(activities, { closed: closedRequestIds, closedAt: closedRequestAt })
       : state.pending;
   const roster =
     mutation.rederiveRoster === true || sessionLiveChanged || retentionDropped
@@ -401,26 +416,28 @@ function commit(
     pending,
     roster,
     closedRequestIds,
+    ...(closedRequestAt !== undefined ? { closedRequestAt } : {}),
     seq: event.seq,
     deleted: mutation.deleted ?? state.deleted
   };
 }
 
 /**
- * The tombstone set (§5.1). Ids only ever accumulate within a fold: a
- * `*.requested` row arriving out of order can never reopen a closed request,
- * and neither can one arriving after the closing row has aged out of the
- * retention window — which is exactly why the set exists beside the activity
- * list rather than being re-derived from it. It is unioned with what was
- * already closed and never shrinks, including across a revert: a truncated
- * request is gone from the timeline anyway, and resurrecting its card would
- * be the one failure this set is named for.
+ * The tombstone set (§5.1), with the stamp that makes it order-aware.
+ *
+ * Ids accumulate and never shrink, including across a revert, so a request
+ * whose closing row has aged out of the retention window stays closed (R5 #4).
+ * The stamp is what keeps that from swallowing a *newer* request that happens
+ * to reuse the id (E2E R2-1): the tombstone closes rows at or before the
+ * resolution it records, and a row stamped later opens as its own request.
  */
 function closedIdsFrom(
   activities: readonly ThreadActivityItem[],
-  previous: ReadonlySet<string>
-): Set<string> {
-  const closed = new Set(previous);
+  previous: ReadonlySet<string>,
+  previousAt: ReadonlyMap<string, string> | undefined
+): { ids: Set<string>; at: Map<string, string> } {
+  const ids = new Set(previous);
+  const at = new Map(previousAt ?? []);
   for (const activity of activities) {
     if (
       activity.activityKind !== "approval.resolved" &&
@@ -429,11 +446,18 @@ function closedIdsFrom(
       continue;
     }
     const requestId = asRecord(activity.payload)?.requestId;
-    if (typeof requestId === "string" && requestId.length > 0) {
-      closed.add(requestId);
+    if (typeof requestId !== "string" || requestId.length === 0) {
+      continue;
+    }
+    ids.add(requestId);
+    // The LATEST resolution wins: a recycled id resolved twice must not have
+    // its second request suppressed by the first resolution's stamp.
+    const known = at.get(requestId);
+    if (known === undefined || activity.createdAt > known) {
+      at.set(requestId, activity.createdAt);
     }
   }
-  return closed;
+  return { ids, at };
 }
 
 function reduce(state: ThreadFoldState, event: DomainEvent): Mutation {

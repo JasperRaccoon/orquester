@@ -37,6 +37,8 @@ function shellPlanFollowUp(input: {
   pendingUserInputCount: number;
   interactionMode: "default" | "plan";
   latestTurnSettled: boolean;
+  /** Published back by the composer — the draft is state in there. */
+  composerAttachments?: number;
 }): { planMarkdown: string } | null {
   const latest = findLatestProposedPlan(input.plans, input.latestTurnId);
   const actionable = hasActionableProposedPlan(latest) ? { planMarkdown: latest!.planMarkdown } : null;
@@ -45,10 +47,22 @@ function shellPlanFollowUp(input: {
     interactionMode: input.interactionMode,
     latestTurnSettled: input.latestTurnSettled,
     hasActionableProposedPlan: actionable !== null,
-    hasComposerAttachments: false
+    hasComposerAttachments: (input.composerAttachments ?? 0) > 0
   })
     ? actionable
     : null;
+}
+
+/**
+ * The composer's own re-application of the same clause, from its local draft —
+ * belt and braces against the frame between a file landing in the tray and the
+ * shell's re-render.
+ */
+function composerPlanFollowUp(
+  fromShell: { planMarkdown: string } | null,
+  attachmentCount: number
+): { planMarkdown: string } | null {
+  return attachmentCount > 0 ? null : fromShell;
 }
 
 const settledPlanMode = {
@@ -104,4 +118,32 @@ test("the current turn's proposal wins over an older one", () => {
 test("the banner can name the plan it is about", () => {
   // The dock's description slot was permanently empty before.
   assert.equal(proposedPlanTitle("# Ship it\n\n- step"), "Ship it");
+});
+
+/*
+ * §7.3's last condition, "the composer holds no attachments" (R7-2 residual:
+ * it was hard-coded `false` in the shell and never applied in the composer).
+ */
+
+test("a staged attachment withdraws the plan follow-up from both sides", () => {
+  // Why it is not cosmetic: `submit` resolves the follow-up BEFORE its
+  // emptiness guard, so an ungated Implement on a draft that is empty except
+  // for files would send the plan prompt, leave plan mode, and carry the
+  // attachments into a message the user never composed.
+  assert.equal(shellPlanFollowUp({ ...settledPlanMode, composerAttachments: 1 }), null);
+  assert.equal(composerPlanFollowUp({ planMarkdown: "# Ship it" }, 1), null);
+});
+
+test("removing the last attachment brings it back", () => {
+  assert.deepEqual(shellPlanFollowUp({ ...settledPlanMode, composerAttachments: 0 }), {
+    planMarkdown: "# Ship it\n\n- step"
+  });
+  assert.deepEqual(composerPlanFollowUp({ planMarkdown: "# Ship it" }, 0), {
+    planMarkdown: "# Ship it"
+  });
+});
+
+test("the composer never resurrects a follow-up the shell withheld", () => {
+  // The shell owns every other term; an empty tray is not a second opinion.
+  assert.equal(composerPlanFollowUp(null, 0), null);
 });

@@ -15,7 +15,7 @@ import { ResizeHandle } from "../ui";
 import { useIsDesktop } from "../../hooks";
 import { GRID_MIN_COL_PX, GRID_MIN_ROW_PX, type GridTracks } from "../../lib/panel-sizes";
 import { AgentChatView } from "../agent-chat";
-import { setActiveChatTab } from "../../lib/agent-chat-active-tab";
+import { activeChatSessionIdFor, setActiveChatTab } from "../../lib/agent-chat-active-tab";
 import {
   isSessionTab,
   tabSession,
@@ -100,10 +100,10 @@ export const MainView: React.FC = () => {
   // `window`/`document` keyboard listeners; without this they would all act on
   // one chord and dispatch turns and answers to threads the user cannot see.
   // This is the one layer that knows, so it is the one layer that says.
-  const activeChatSessionId = React.useMemo(() => {
-    const activeTab = tabs.find((tab) => tab.id === activeId);
-    return activeTab?.type === "agent-chat" ? activeTab.sessionId : null;
-  }, [tabs, activeId]);
+  const activeChatSessionId = React.useMemo(
+    () => activeChatSessionIdFor(tabs, activeId),
+    [tabs, activeId]
+  );
   React.useEffect(() => {
     setActiveChatTab(activeChatSessionId);
   }, [activeChatSessionId]);
