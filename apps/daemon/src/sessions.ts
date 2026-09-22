@@ -18,7 +18,7 @@ import {
   tmuxName,
   tmuxVersionOk
 } from "./tmux";
-import { renderText } from "./mcp/text.ts";
+import { renderText } from "./terminal-text.ts";
 import { ActivityTracker, type ActivityCause } from "./ansi-activity.ts";
 import { classifyAgentEvent } from "./agent-status.ts";
 

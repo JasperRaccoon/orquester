@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { FsSandboxError } from "@orquester/config/fs";
-import { ToolError } from "./terminal-control.ts";
+import { ToolError } from "./errors.ts";
 import { DEFAULT_READ_BYTES, FsTools, MAX_FS_ENTRIES, MAX_READ_BYTES } from "./fs-tools.ts";
 
 async function makeRoot(t: TestContext) {

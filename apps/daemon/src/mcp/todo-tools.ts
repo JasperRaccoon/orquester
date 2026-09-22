@@ -3,7 +3,7 @@ import { join } from "node:path";
 import type { TodoScope } from "@orquester/api";
 import { isValidName, type TodoRecord } from "@orquester/config";
 import { TodoError, type TodoListManager } from "../todos.ts";
-import { TabNotFound, ToolError } from "./terminal-control.ts";
+import { ToolError } from "./errors.ts";
 
 export type TodoProjection = {
   id: string;
@@ -111,7 +111,7 @@ function availableItems(tasks: TaskLine[]): string {
 }
 
 function todoNotFound(id: string): ToolError {
-  return new ToolError(`No todo with id ${id}.`);
+  return new ToolError("INVALID_ARGUMENT", `No todo with id ${id}.`);
 }
 
 function rethrowTodoError(id: string, error: unknown): never {
@@ -119,7 +119,7 @@ function rethrowTodoError(id: string, error: unknown): never {
     throw todoNotFound(id);
   }
   if (error instanceof TodoError) {
-    throw new ToolError(error.message);
+    throw new ToolError("INVALID_ARGUMENT", error.message);
   }
   throw error;
 }
@@ -167,7 +167,7 @@ export class TodoTools {
     const lines = splitBodyLines(todo.body);
     const tasks = taskLines(lines);
     if (tasks.length === 0) {
-      throw new ToolError("No task items in todo.");
+      throw new ToolError("INVALID_ARGUMENT", "No task items in todo.");
     }
 
     const task = this.resolveTask(tasks, item);
@@ -183,15 +183,15 @@ export class TodoTools {
 
   private resolveScope(sel: TodoSelector): ResolvedScope {
     if (!isValidName(sel.workspace)) {
-      throw new TabNotFound("Invalid workspace name.");
+      throw new ToolError("PROJECT_NOT_FOUND", "Invalid workspace name.");
     }
     if (sel.project !== undefined && !isValidName(sel.project)) {
-      throw new TabNotFound("Invalid workspace/project name.");
+      throw new ToolError("PROJECT_NOT_FOUND", "Invalid workspace/project name.");
     }
 
     const workspacePath = join(this.deps.workspacesDir, sel.workspace);
     if (!statSafe(workspacePath)?.isDirectory()) {
-      throw new TabNotFound(`No workspace "${sel.workspace}".`);
+      throw new ToolError("PROJECT_NOT_FOUND", `No workspace "${sel.workspace}".`);
     }
     if (sel.project === undefined) {
       return { scope: "workspace", refKey: sel.workspace };
@@ -199,7 +199,7 @@ export class TodoTools {
 
     const projectPath = join(workspacePath, sel.project);
     if (!statSafe(projectPath)?.isDirectory()) {
-      throw new TabNotFound(`No project "${sel.project}" in "${sel.workspace}".`);
+      throw new ToolError("PROJECT_NOT_FOUND", `No project "${sel.project}" in "${sel.workspace}".`);
     }
     return { scope: "project", refKey: projectPath };
   }
@@ -207,22 +207,22 @@ export class TodoTools {
   private resolveTask(tasks: TaskLine[], item: string | number): TaskLine {
     if (typeof item === "number") {
       if (!Number.isInteger(item) || item < 1 || item > tasks.length) {
-        throw new ToolError(`No task item at index ${item}. Available items: ${availableItems(tasks)}.`);
+        throw new ToolError("INVALID_ARGUMENT", `No task item at index ${item}. Available items: ${availableItems(tasks)}.`);
       }
       return tasks[item - 1];
     }
 
     const needle = item.trim();
     if (!needle) {
-      throw new ToolError(`Task item text is required. Available items: ${availableItems(tasks)}.`);
+      throw new ToolError("INVALID_ARGUMENT", `Task item text is required. Available items: ${availableItems(tasks)}.`);
     }
 
     const matches = tasks.filter((task) => task.item.toLowerCase() === needle.toLowerCase());
     if (matches.length === 0) {
-      throw new ToolError(`No task item matching "${item}". Available items: ${availableItems(tasks)}.`);
+      throw new ToolError("INVALID_ARGUMENT", `No task item matching "${item}". Available items: ${availableItems(tasks)}.`);
     }
     if (matches.length > 1) {
-      throw new ToolError(`Task item "${item}" is ambiguous; use index. Available items: ${availableItems(tasks)}.`);
+      throw new ToolError("INVALID_ARGUMENT", `Task item "${item}" is ambiguous; use index. Available items: ${availableItems(tasks)}.`);
     }
     return matches[0];
   }

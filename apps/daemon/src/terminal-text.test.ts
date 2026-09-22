@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { stripAnsi, stripFaint, trimTrailingBlankLines, tailLines, cap, renderText, SCREEN_ROWS, MAX_TEXT } from "./text.ts";
+import { stripAnsi, stripFaint, trimTrailingBlankLines, tailLines, cap, renderText, SCREEN_ROWS, MAX_TEXT } from "./terminal-text.ts";
 
 test("stripAnsi removes CSI, private CSI, and OSC", () => {
   assert.equal(stripAnsi("a\x1b[31mb\x1b[0mc"), "abc");
