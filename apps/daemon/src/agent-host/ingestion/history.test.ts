@@ -220,7 +220,7 @@ describe("E6: a replayed transcript rebuilds the timeline", () => {
     assert.ok(text.includes("assistant:All green."));
   });
 
-  it("grok: its replay marker is recognised even though it keeps its live source", async () => {
+  it("grok: every replayed event carries the shared historical source", async () => {
     const snapshot: ThreadSnapshot = {
       threadId: THREAD_ID,
       turns: [
@@ -239,11 +239,14 @@ describe("E6: a replayed transcript rebuilds the timeline", () => {
       stamp: () => ({ eventId: `ge${++n}`, createdAt: "2026-09-21T10:00:00.000Z" })
     });
     assert.ok(events.length > 0);
-    // The compatibility shim this test exists to pin: grok marks the replay on
-    // `raw.method`, not `raw.source`. If W9 moves to the shared constant this
-    // assertion is what says the shim may go.
+    // grok once marked the replay on `raw.method` alone, which ingestion had
+    // to special-case or its whole transcript would have been ingested as
+    // LIVE. It now carries the shared source, so the special case is gone —
+    // this pins the contract that let it go.
+    for (const event of events) {
+      assert.equal(event.raw?.source, HISTORICAL_RAW_SOURCE);
+    }
     assert.equal(events[0]?.raw?.method, GROK_HISTORY_RAW_METHOD);
-    assert.notEqual(events[0]?.raw?.source, HISTORICAL_RAW_SOURCE);
 
     const { sink, liveness } = await replay(events);
     assert.deepEqual(roleText(sink.events()), ["user:what changed?", "assistant:Three files."]);

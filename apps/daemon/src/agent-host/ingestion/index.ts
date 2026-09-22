@@ -245,21 +245,6 @@ function segmentKey(turnId: string, role: MessageStreamRole): string {
   return `${turnId}\u0000${role}`;
 }
 
-/**
- * Grok's replay marker, recognised alongside {@link HISTORICAL_RAW_SOURCE}.
- *
- * COMPATIBILITY SHIM. §4.2's contract is that every replayed event carries
- * `raw.source = HISTORICAL_RAW_SOURCE`; `projectGrokHistory` instead keeps its
- * live `acp.grok.extension` source and marks the replay on `raw.method`
- * (`adapters/grok/history.ts:GROK_HISTORY_RAW_METHOD`). Without this its whole
- * transcript would be ingested as LIVE — moving session status, feeding the
- * liveness registry and settling whatever turn is actually running.
- *
- * The value is spelled here rather than imported because ingestion must not
- * depend on an adapter. Delete it once W9 emits the shared constant; the test
- * beside it pins the literal so the two cannot drift silently.
- */
-const GROK_REPLAY_RAW_METHOD = "_x.ai/session/update#replay";
 
 export function createIngestion(options: IngestionOptions): Ingestion {
   const clock = options.clock ?? defaultClock;
@@ -406,11 +391,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
    * attention — only rebuild the timeline (E6).
    */
   function isHistorical(event: RuntimeEvent): boolean {
-    const raw = event.raw;
-    if (raw === undefined) {
-      return false;
-    }
-    return raw.source === HISTORICAL_RAW_SOURCE || raw.method === GROK_REPLAY_RAW_METHOD;
+    return event.raw?.source === HISTORICAL_RAW_SOURCE;
   }
 
   /**
