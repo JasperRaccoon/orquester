@@ -136,10 +136,17 @@ const requestIdOf = (activity: ThreadActivityItem): string | null => {
  * ids of every `*.resolved` row still in `items` are re-tombstoned — without
  * that, a replayed `*.requested` arriving after the snapshot (which the
  * overlapping windows of §6.6 make legal) would reopen an answered card.
+ *
+ * WHEN each one resolved is recorded beside the id, because the tombstone is
+ * order-aware: it closes a request at or before the resolution, while a
+ * request stamped later is a different one that merely reuses the id (a
+ * provider may recycle ids — E2E R2-1). Without the stamps the seed falls back
+ * to closing unconditionally and a recycled id is swallowed.
  */
 export function foldStateFromSnapshot(snapshot: ThreadSnapshotPayload): ThreadFoldState {
   const itemIndex = new Map<string, number>();
   const closedRequestIds = new Set<string>();
+  const closedRequestAt = new Map<string, string>();
   // The activity subset, same objects and same order — W2's fold keeps it
   // beside `items` because every derivation over it is activity-only.
   const activities: ThreadActivityItem[] = [];
@@ -151,6 +158,10 @@ export function foldStateFromSnapshot(snapshot: ThreadSnapshotPayload): ThreadFo
         const requestId = requestIdOf(item);
         if (requestId !== null) {
           closedRequestIds.add(requestId);
+          const known = closedRequestAt.get(requestId);
+          if (known === undefined || item.createdAt > known) {
+            closedRequestAt.set(requestId, item.createdAt);
+          }
         }
       }
     }
@@ -165,6 +176,7 @@ export function foldStateFromSnapshot(snapshot: ThreadSnapshotPayload): ThreadFo
     pending: snapshot.pending,
     roster: snapshot.roster,
     closedRequestIds,
+    closedRequestAt,
     seq: snapshot.seq,
     deleted: false
   };
