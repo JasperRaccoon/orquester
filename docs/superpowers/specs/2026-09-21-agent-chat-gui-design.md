@@ -730,7 +730,7 @@ card renders without the original request.
 ### 4.4 Permission modes
 
 `RuntimeMode = "approval-required" | "auto-accept-edits" | "auto" | "full-access"`, default
-`approval-required`. Mapped at launch:
+`full-access`. Mapped at launch:
 
 | Mode | Claude | Codex | OpenCode | Grok |
 |---|---|---|---|---|
@@ -739,7 +739,12 @@ card renders without the original request.
 | Auto | `permissionMode: auto` | `on-request`, `workspace-write`, reviewer `auto_review` | falls back to Supervised | `--permission-mode auto` |
 | Full access | `bypassPermissions` + `allowDangerouslySkipPermissions`; `canUseTool` short-circuits | `never`, `danger-full-access`, reviewer `user` | `*`→allow, `external_directory`→allow | `--always-approve` |
 
-*T3: `packages/contracts/src/orchestration.ts:128-135` — the four modes (differs: T3's `DEFAULT_RUNTIME_MODE` is `full-access`, `:135`; Orquester defaults to `approval-required`). Claude `apps/server/src/provider/Layers/ClaudeAdapter.ts:4878-4882` (the map — note `approval-required` is deliberately **absent**, so `permissionMode` stays undefined and gating is entirely `canUseTool`), `:4939-4942` (`allowDangerouslySkipPermissions` iff `bypassPermissions`), `:4704-4711` (full-access short-circuit). Codex `apps/server/src/provider/Layers/CodexSessionRuntime.ts:509-542` (`runtimeModeToThreadConfig`, all three axes) and `:562-580` (a **second, per-turn** sandbox policy with a different spelling: `readOnly`/`workspaceWrite`/`dangerFullAccess`). OpenCode `apps/server/src/provider/opencodeRuntime.ts:508-545` (`buildOpenCodePermissionRules`). Grok `apps/server/src/provider/acp/GrokAcpSupport.ts:33-46` (`grokAcpSpawnArgs`).*
+*T3: `packages/contracts/src/orchestration.ts:128-135` — the four modes (T3's `DEFAULT_RUNTIME_MODE` is `full-access`, `:135`, and so is Orquester's). Claude `apps/server/src/provider/Layers/ClaudeAdapter.ts:4878-4882` (the map — note `approval-required` is deliberately **absent**, so `permissionMode` stays undefined and gating is entirely `canUseTool`), `:4939-4942` (`allowDangerouslySkipPermissions` iff `bypassPermissions`), `:4704-4711` (full-access short-circuit). Codex `apps/server/src/provider/Layers/CodexSessionRuntime.ts:509-542` (`runtimeModeToThreadConfig`, all three axes) and `:562-580` (a **second, per-turn** sandbox policy with a different spelling: `readOnly`/`workspaceWrite`/`dangerFullAccess`). OpenCode `apps/server/src/provider/opencodeRuntime.ts:508-545` (`buildOpenCodePermissionRules`). Grok `apps/server/src/provider/acp/GrokAcpSupport.ts:33-46` (`grokAcpSpawnArgs`).*
+
+*Built: the default was `approval-required` through the build and was changed to `full-access`
+on the owner's instruction after landing: every terminal launcher in the catalog already ran with
+`--dangerously-skip-permissions` / `--yolo`, so a chat tab that opened supervised was a regression
+from the tab it replaced. The per-agent chip memory (`runtimeModeByAgent`) still narrows it.*
 
 *Built: the Grok argv is as written — `--permission-mode` is a global option and precedes `agent`,
 `--always-approve` belongs to `agent` and follows it — but `acceptEdits` is a **no-op** for the ACP

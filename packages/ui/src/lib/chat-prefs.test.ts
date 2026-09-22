@@ -38,10 +38,10 @@ test("only known permission modes survive the per-agent map", () => {
   assert.deepEqual(prefs.runtimeModeByAgent, { claude: "full-access" });
 });
 
-test("an agent with no remembered mode gets the supervised default", () => {
+test("an agent with no remembered mode gets the full-access default", () => {
   const prefs = sanitizeChatPrefs({ runtimeModeByAgent: { claude: "auto" } });
   assert.equal(runtimeModeForAgent(prefs, "claude"), "auto");
-  assert.equal(runtimeModeForAgent(prefs, "codex"), "approval-required");
+  assert.equal(runtimeModeForAgent(prefs, "codex"), "full-access");
 });
 
 test("every permission mode has a chip label", () => {

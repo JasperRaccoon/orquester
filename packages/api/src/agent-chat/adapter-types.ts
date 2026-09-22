@@ -26,9 +26,8 @@ export type AgentAdapterId = "claude" | "codex" | "opencode" | "grok";
  * Permission mode, expressed as launch configuration by every provider — which
  * is why changing it restarts the session (§3.4).
  *
- * *T3: `packages/contracts/src/orchestration.ts:128-134`; differs: T3's
- * `DEFAULT_RUNTIME_MODE` is `full-access`, Orquester defaults to
- * `approval-required`.*
+ * *T3: `packages/contracts/src/orchestration.ts:128-135` — the same four modes
+ * and the same `full-access` default.*
  */
 export type RuntimeMode = "approval-required" | "auto-accept-edits" | "auto" | "full-access";
 
@@ -42,8 +41,13 @@ export const RUNTIME_MODES: readonly RuntimeMode[] = [
   "full-access"
 ] as const;
 
-/** §4.4. */
-export const DEFAULT_RUNTIME_MODE: RuntimeMode = "approval-required";
+/**
+ * §4.4. `full-access` matches both T3 and what every terminal launcher in the
+ * catalog always did (`--dangerously-skip-permissions`, `--yolo`): a chat tab
+ * must not be more restrictive than the tab it replaced. The launcher chips
+ * remember a narrower pick per agent (`runtimeModeByAgent`).
+ */
+export const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
 
 /**
  * Plan mode is a PER-TURN field and never restarts anything (§3.4). It is

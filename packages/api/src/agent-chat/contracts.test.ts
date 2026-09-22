@@ -178,8 +178,9 @@ test("the input bounds are stated once and are the spec's numbers", () => {
 });
 
 test("the defaults differ from T3's where the spec says they do", () => {
-  // T3's DEFAULT_RUNTIME_MODE is "full-access"; ours is deliberately not.
-  assert.equal(DEFAULT_RUNTIME_MODE, "approval-required");
+  // The runtime mode default is T3's own: full access, the same posture the
+  // terminal launchers always had (`--dangerously-skip-permissions`, `--yolo`).
+  assert.equal(DEFAULT_RUNTIME_MODE, "full-access");
   assert.equal(DEFAULT_INTERACTION_MODE, "default");
   assert.deepEqual(RUNTIME_MODES, [
     "approval-required",
