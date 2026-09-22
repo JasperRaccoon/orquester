@@ -76,7 +76,7 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
  * every frame and would lose the per-agent turn grouping.
  */
 function DrillInTimeline(props: ChatTimelineProps & { agentId: string }): React.ReactElement {
-  const { rows } = useAgentChatDrillIn(props.sessionId, props.agentId);
+  const { rows } = useAgentChatDrillIn(props.sessionId, props.agentId, props.disclosures);
   // The projection is the source of truth; the prop is the fallback for a
   // caller that already resolved the child's rows another way, so a surface
   // that has rows never renders the empty state because the hook has none.

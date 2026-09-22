@@ -291,3 +291,41 @@ describe("deriveTimelineEntriesFromItems", () => {
     assert.equal(projection.proposedPlans[0]?.implementedAt, stamp(2));
   });
 });
+
+describe("drill-in ownership and streamed output", () => {
+  it("keeps the rows the drill-in's own agent owns and still drops every other agent's", () => {
+    const mine = activity("tool.completed", { toolUseId: "t1", itemType: "command_execution", agentId: "ag1" });
+    const theirs = activity("tool.completed", { toolUseId: "t2", itemType: "command_execution", agentId: "ag2" });
+    const parent = activity("tool.completed", { toolUseId: "t3", itemType: "command_execution" });
+    assert.deepEqual(
+      deriveWorkLogEntries([mine, theirs, parent]).map((entry) => entry.id),
+      [parent.id],
+      "the parent timeline stays quiet"
+    );
+    assert.deepEqual(
+      deriveWorkLogEntries([mine, theirs, parent], { ownerAgentId: "ag1" }).map((entry) => entry.id),
+      [mine.id, parent.id],
+      "inside ag1's own view its rows are the point"
+    );
+  });
+
+  it("a tool.output chunk becomes the entry's detail, untrimmed", () => {
+    const chunk = activity("tool.output", { toolUseId: "t1", streamKind: "command_output", delta: "  two\n" });
+    assert.equal(workLogEntryFromActivity(chunk).detail, "  two\n");
+  });
+
+  it("the projection recomputes its work entries when the owner changes, and reuses them otherwise", () => {
+    const mine = activity("tool.completed", { toolUseId: "t1", itemType: "command_execution", agentId: "ag1" });
+    const items = [mine];
+    const parentView = deriveTimelineEntriesFromItems(items);
+    assert.equal(parentView.workEntries.length, 0);
+    const drill = deriveTimelineEntriesFromItems(items, parentView, { ownerAgentId: "ag1" });
+    assert.equal(drill.workEntries.length, 1);
+    assert.equal(drill.ownerAgentId, "ag1");
+    assert.equal(
+      deriveTimelineEntriesFromItems(items, drill, { ownerAgentId: "ag1" }),
+      drill,
+      "same items and owner reuse the projection"
+    );
+  });
+});

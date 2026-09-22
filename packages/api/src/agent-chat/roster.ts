@@ -280,8 +280,9 @@ function fillMetadata(agent: MutableAgent, payload: Record<string, unknown>): vo
   else if (payload.isBackgrounded === false && agent.isBackgrounded === null) {
     agent.isBackgrounded = false;
   }
+  // Any integer: a shell killed by a signal reports a negative code.
   const exitCode = payload.exitCode;
-  if (typeof exitCode === "number" && Number.isInteger(exitCode) && exitCode >= 0) {
+  if (typeof exitCode === "number" && Number.isInteger(exitCode)) {
     agent.exitCode = exitCode;
   }
   if (Array.isArray(payload.phases)) {
@@ -359,6 +360,14 @@ const TASK_COMPLETED_STATUS: ReadonlyMap<string, RuntimeSubagentStatus> = new Ma
   ["stopped", "interrupted"]
 ]);
 
+/** The rows that repeat the task linkage (§4.2) and so may name the launching call. */
+const TASK_ROW_KINDS: ReadonlySet<string> = new Set([
+  "task.started",
+  "task.progress",
+  "task.updated",
+  "task.completed"
+]);
+
 const KNOWN_STATUSES: ReadonlySet<string> = new Set<RuntimeTaskStatus>([
   "pending",
   "running",
@@ -391,6 +400,10 @@ export function foldSubagentActivities(
   options?: { readonly sessionLive?: boolean }
 ): RuntimeSubagent[] {
   const agents = new Map<string, MutableAgent>();
+  // The launching tool call of each task's LATEST run. A resumed subagent
+  // keeps its task id but is launched by a new tool call, and that is the
+  // only thing that tells a genuine resume apart from a late start row.
+  const lastToolUseIdByTask = new Map<string, string>();
 
   for (const activity of activities) {
     const payload = asRecord(activity.payload);
@@ -410,11 +423,26 @@ export function foldSubagentActivities(
         // reopen the run. Guard on the status itself, not activationCount: a
         // task first seen via a terminal `task.updated` has zero activations
         // but is still settled.
+        //
+        // EXCEPT a resume. Claude resumes a subagent under the SAME task id
+        // (owner incident 2026-09-22: two agents cut by a rate limit, resumed,
+        // one of them finished — and the roster read "failed" for both until
+        // the tab was closed, because the first terminal write had won). The
+        // resume's start row names a NEW launching tool call, a late delivery
+        // of the old run names the old one, so a changed `toolUseId` reopens
+        // the row as a new activation and an unchanged one does not.
+        const toolUseId = asString(payload.toolUseId);
+        const previousToolUseId = lastToolUseIdByTask.get(taskId);
+        const resumed =
+          isTerminal(agent.status) &&
+          toolUseId !== undefined &&
+          previousToolUseId !== undefined &&
+          toolUseId !== previousToolUseId;
         if (agent.activationCount === 0 && !isTerminal(agent.status)) {
           agent.activationCount = 1;
           agent.startedAt = agent.startedAt ?? at;
           agent.status = "running";
-        } else if (agent.status === "idle") {
+        } else if (agent.status === "idle" || resumed) {
           applyStatus(agent, "running", at);
         }
         const description = taskDescription(payload);
@@ -537,6 +565,12 @@ export function foldSubagentActivities(
       }
       default:
         break;
+    }
+
+    if (TASK_ROW_KINDS.has(activity.activityKind)) {
+      const taskId = asString(payload.taskId);
+      const toolUseId = asString(payload.toolUseId);
+      if (taskId && toolUseId) lastToolUseIdByTask.set(taskId, toolUseId);
     }
   }
 

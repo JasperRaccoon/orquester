@@ -92,6 +92,58 @@ test("completion before start stays terminal; a late start only fills metadata",
   assert.equal(agent.error, "boom");
 });
 
+test("a start row with a NEW launching call after a terminal state is a resume and reopens the run", () => {
+  resetActivityIds();
+  const agents = foldSubagentActivities([
+    activity("task.started", agentTask("t1", { title: "Audit", toolUseId: "toolu_1" })),
+    activity("task.completed", agentTask("t1", { status: "failed", summary: "rate limited", toolUseId: "toolu_1" })),
+    // The resume: same task id, a new tool call, registered in the background.
+    activity("task.started", agentTask("t1", { title: "Audit", toolUseId: "toolu_2", isBackgrounded: true })),
+    activity("task.progress", agentTask("t1", { description: "Reading", summary: "Reading the file", toolUseId: "toolu_2" }))
+  ]);
+  const agent = byId(agents, "t1");
+  assert.equal(agent.status, "running", "the resumed run is live again");
+  assert.equal(agent.activationCount, 2, "a resume is a second activation");
+  assert.equal(agent.error, null, "the old run's failure does not label the new run");
+  assert.equal(agent.completedAt, null);
+  assert.equal(agent.progress, "Reading the file");
+
+  const settled = foldSubagentActivities([
+    activity("task.started", agentTask("t1", { title: "Audit", toolUseId: "toolu_1" })),
+    activity("task.completed", agentTask("t1", { status: "failed", summary: "rate limited", toolUseId: "toolu_1" })),
+    activity("task.started", agentTask("t1", { title: "Audit", toolUseId: "toolu_2", isBackgrounded: true })),
+    activity("task.completed", agentTask("t1", { status: "completed", summary: "Done.", toolUseId: "toolu_2" }))
+  ]);
+  const done = byId(settled, "t1");
+  assert.equal(done.status, "completed", "the resumed run's completion is not a duplicate terminal write");
+  assert.equal(done.result, "Done.");
+  assert.equal(done.error, null);
+});
+
+test("a start row that names the SAME launching call after a terminal state is a late delivery", () => {
+  resetActivityIds();
+  const agents = foldSubagentActivities([
+    activity("task.started", agentTask("t1", { title: "Audit", toolUseId: "toolu_1" })),
+    activity("task.completed", agentTask("t1", { status: "failed", summary: "boom", toolUseId: "toolu_1" })),
+    activity("task.started", agentTask("t1", { title: "Audit", toolUseId: "toolu_1" }))
+  ]);
+  const agent = byId(agents, "t1");
+  assert.equal(agent.status, "failed");
+  assert.equal(agent.activationCount, 1);
+  assert.equal(agent.error, "boom");
+});
+
+test("a shell's exit code folds as any integer", () => {
+  resetActivityIds();
+  const agents = foldSubagentActivities([
+    activity("task.started", { taskId: "s1", agentKind: "background", taskType: "local_bash", isBackgrounded: true }),
+    activity("task.completed", { taskId: "s1", agentKind: "background", status: "failed", exitCode: -9 })
+  ]);
+  const shell = byId(agents, "s1");
+  assert.equal(shell.exitCode, -9);
+  assert.equal(shell.isBackgrounded, true);
+});
+
 test("duplicate terminal events are idempotent: timestamps do not slide", () => {
   resetActivityIds();
   const agents = foldSubagentActivities([

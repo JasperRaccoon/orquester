@@ -37,7 +37,8 @@ import type {
   UseAgentChatRoster,
   UseAgentChatStatus,
   UseAgentChatThread,
-  UseProviderSnapshot
+  UseProviderSnapshot,
+  DisclosureState
 } from "./contracts";
 import {
   deriveTimelineEntriesFromItems,
@@ -234,7 +235,13 @@ export function turnStartedAt(
  */
 export function useAgentChatDrillIn(
   sessionId: string,
-  agentId: string | null
+  agentId: string | null,
+  /**
+   * The drill-in's own disclosure state. Group toggles honour it; turn folds
+   * start OPEN — the child's rows are the reason the view was opened, and a
+   * fold keyed on the parent's turns would hide them behind one more click.
+   */
+  disclosures?: Pick<DisclosureState, "expandedGroupIds" | "expandedTurnIds"> | null
 ): { rows: AgentChatTimelineRow[]; agent: RuntimeSubagent | null } {
   const store = useThreadStore(sessionId);
   const entries = useThreadState(store, (state) => state.slice.entries);
@@ -259,13 +266,29 @@ export function useAgentChatDrillIn(
     const previous = held.agentId === agentId ? held : null;
     const timeline = deriveTimelineEntriesFromItems(
       itemsForAgent(entries, agentId),
-      previous?.timeline ?? null
+      previous?.timeline ?? null,
+      // The agent's own rows are agent-internal to the parent, not to itself.
+      { ownerAgentId: agentId }
     );
+    const expandedTurnIds = new Set<string>(disclosures?.expandedTurnIds ?? []);
+    for (const entry of timeline.entries) {
+      const turnId =
+        entry.kind === "message"
+          ? entry.message.turnId
+          : entry.kind === "work"
+            ? entry.entry.turnId
+            : null;
+      if (typeof turnId === "string" && turnId.length > 0) {
+        expandedTurnIds.add(turnId);
+      }
+    }
     const rows = deriveTimelineRowsWithState(
       {
         timelineEntries: timeline.entries,
         isWorking: false,
         activeTurnStartedAt: null,
+        expandedTurnIds,
+        expandedWorkGroupIds: new Set(disclosures?.expandedGroupIds ?? []),
         // A child timeline offers no rewind: §5.5 rolls back the thread, and
         // a subagent has no turn of the thread's own to roll back to.
         supportsConversationRollback: false
@@ -278,7 +301,7 @@ export function useAgentChatDrillIn(
       rows: stable.result,
       agent: roster.find((candidate) => candidate.id === agentId) ?? null
     };
-  }, [agentId, entries, roster]);
+  }, [agentId, entries, roster, disclosures]);
 }
 
 // ---------------------------------------------------------------------------

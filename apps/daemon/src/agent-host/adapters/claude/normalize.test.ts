@@ -1433,3 +1433,33 @@ describe("claude normaliser — background_tasks_changed is a LEVEL, not an edge
     assert.equal(payloadOf(completed).title, "Sleep then print", "with what the level knew of it");
   });
 });
+
+describe("claude normaliser — a task keeps its own description through progress frames", () => {
+  it("does not retitle a task from its progress frames' live-activity description", () => {
+    const normalizer = new ClaudeNormalizer({ threadId: "t", clock: fixedClock(), ids: countingIds() });
+    normalizer.beginTurn({ turnId: "turn-1" });
+    const system = (frame: Record<string, unknown>): RuntimeEvent[] =>
+      normalizer.handleMessage({ type: "system", uuid: "u", session_id: "s", ...frame } as unknown as SDKMessage);
+    system({
+      subtype: "task_started",
+      task_id: "a1",
+      tool_use_id: "toolu_1",
+      description: "Audit the workflows",
+      subagent_type: "Explore",
+      task_type: "local_agent",
+      is_backgrounded: false
+    });
+    const progress = system({
+      subtype: "task_progress",
+      task_id: "a1",
+      tool_use_id: "toolu_1",
+      description: "Reading b.txt",
+      usage: { total_tokens: 10, tool_uses: 1, duration_ms: 5 }
+    });
+    const row = progress.find((event) => event.type === "task.progress");
+    assert.ok(row);
+    const payload = row.payload as { title?: string; description?: string };
+    assert.equal(payload.title, "Audit the workflows", "the linkage title is the task's own description");
+    assert.equal(payload.description, "Reading b.txt", "the live activity still rides `description`");
+  });
+});

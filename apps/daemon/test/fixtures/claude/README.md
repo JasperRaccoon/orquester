@@ -204,6 +204,17 @@ expect the provider to supply it.
 
 Other notes on this group:
 
+- **`task_progress.description` is the agent's live activity, not the task's name** — "Running
+  Check if b.txt exists…", "Reading b.txt" above; a live 2.1.278 thread showed "Editing
+  packages/ui/…/AgentDrillIn.tsx", "Grepping compaction contracts…". Only `task_started` names the
+  task (`"Read b.txt first word"`). The adapter therefore never lets a progress frame overwrite a
+  known description — it fills one only for a task that has none (a resumed subagent's
+  `task_started` may carry no description) — because the description is the linkage `title` and
+  every roster row was being retitled with whatever its agent was doing last.
+- **A resumed subagent keeps its `task_id` and gets a NEW `tool_use_id`** (`task_started` again,
+  `is_backgrounded: true`, same `task_id`, different `tool_use_id`). The roster fold reopens a
+  terminal row only on that changed `tool_use_id`; a start row that names the old call after a
+  terminal state is still the late/out-of-order delivery T3 guards against.
 - `task_type` is `local_agent` for a subagent and **`local_bash`** for a backgrounded Bash — that
   is the discriminator behind §4.2's `agentKind: agent | background`.
 - A background Bash emits `system/background_tasks_changed` **before** its `task_started`:

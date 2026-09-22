@@ -103,7 +103,8 @@ export function AgentDrillIn({
   roster,
   projectPath
 }: AgentDrillInProps): React.ReactElement {
-  const live = useAgentChatDrillIn(sessionId, agentId);
+  const [disclosures, setDisclosures] = React.useState<DisclosureState>(EMPTY_DISCLOSURES);
+  const live = useAgentChatDrillIn(sessionId, agentId, disclosures);
   const agent = agentOverride ?? live.agent;
   const background = agent !== null && isBackgroundShellRow(agent);
 
@@ -118,8 +119,6 @@ export function AgentDrillIn({
   // The hook is the source; the props are an override for a host that already
   // holds the projection (and for tests, which have no store).
   const rows = rowsOverride ?? shellRows ?? live.rows;
-
-  const [disclosures, setDisclosures] = React.useState<DisclosureState>(EMPTY_DISCLOSURES);
 
   // A shell's rows open THEMSELVES: the output is the whole reason the row was
   // clicked, and one more click to reach it is the bug this fixes. Seeded by

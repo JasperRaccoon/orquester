@@ -185,7 +185,18 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
     sourceActivityKind: activity.activityKind
   };
 
-  if (detail) {
+  // A streamed output chunk rides `delta`, not `detail`, and it is NOT
+  // trimmed: a command's output is its whitespace, and `joinLifecycleDetails`
+  // concatenates the chunks verbatim onto the row that owns the call.
+  const outputChunk =
+    activity.activityKind === "tool.output" &&
+    typeof payload?.delta === "string" &&
+    payload.delta.length > 0
+      ? payload.delta
+      : undefined;
+  if (outputChunk !== undefined) {
+    entry.detail = outputChunk;
+  } else if (detail) {
     entry.detail = detail;
   } else if (
     activity.activityKind === "runtime.error" ||
@@ -439,8 +450,26 @@ export function compactionTokens(activity: ThreadActivityItem): {
  *
  * *T3: `session-logic.ts:453-513`.*
  */
+export interface DeriveWorkLogOptions {
+  /**
+   * The drill-in's own agent (§7.6): its rows are agent-internal to the
+   * PARENT timeline and must stay out of it, but inside the agent's own view
+   * they are the whole point. Without this the drill-in applied the parent's
+   * quiet-timeline filter a second time and showed nothing.
+   */
+  readonly ownerAgentId?: string;
+}
+
+function ownedByAgent(activity: ThreadActivityItem, agentId: string | undefined): boolean {
+  if (agentId === undefined) {
+    return false;
+  }
+  return activity.agentId === agentId || asRecord(activity.payload)?.agentId === agentId;
+}
+
 export function deriveWorkLogEntries(
-  activities: readonly ThreadActivityItem[]
+  activities: readonly ThreadActivityItem[],
+  options?: DeriveWorkLogOptions
 ): WorkLogEntry[] {
   // A launch tool and its task lifecycle describe the same run. Only hide the
   // launch row once its tool-use id has an agent row to replace it.
@@ -473,7 +502,7 @@ export function deriveWorkLogEntries(
     if (isPlanBoundaryToolActivity(activity)) {
       continue;
     }
-    if (isAgentInternalActivity(activity)) {
+    if (isAgentInternalActivity(activity) && !ownedByAgent(activity, options?.ownerAgentId)) {
       continue;
     }
     const entry = derivedWorkLogEntry(activity);
@@ -967,6 +996,8 @@ export function deriveTimelineEntriesWithState(
 export interface ThreadTimelineProjection extends TimelineEntriesProjection {
   readonly items: readonly ThreadItem[];
   readonly activities: readonly ThreadActivityItem[];
+  /** Set on a drill-in projection; part of the work-entries memo key. */
+  readonly ownerAgentId?: string;
 }
 
 function sameByIdentity<T>(left: readonly T[], right: readonly T[]): boolean {
@@ -1010,9 +1041,11 @@ function samePlans(left: readonly ProposedPlanEntry[], right: readonly ProposedP
  */
 export function deriveTimelineEntriesFromItems(
   items: readonly ThreadItem[],
-  previous: ThreadTimelineProjection | null = null
+  previous: ThreadTimelineProjection | null = null,
+  options?: DeriveWorkLogOptions
 ): ThreadTimelineProjection {
-  if (previous !== null && previous.items === items) {
+  const ownerAgentId = options?.ownerAgentId;
+  if (previous !== null && previous.items === items && previous.ownerAgentId === ownerAgentId) {
     return previous;
   }
   const split = splitThreadItems(items);
@@ -1021,7 +1054,9 @@ export function deriveTimelineEntriesFromItems(
       ? previous.activities
       : split.activities;
   const workEntries =
-    activities === previous?.activities ? previous.workEntries : deriveWorkLogEntries(activities);
+    activities === previous?.activities && previous.ownerAgentId === ownerAgentId
+      ? previous.workEntries
+      : deriveWorkLogEntries(activities, options);
   const proposedPlans =
     previous !== null && samePlans(previous.proposedPlans, split.proposedPlans)
       ? previous.proposedPlans
@@ -1032,7 +1067,12 @@ export function deriveTimelineEntriesFromItems(
     workEntries,
     previous
   );
-  return { ...projection, items, activities };
+  return {
+    ...projection,
+    items,
+    activities,
+    ...(ownerAgentId !== undefined ? { ownerAgentId } : {})
+  };
 }
 
 export const EMPTY_TIMELINE_PROJECTION: ThreadTimelineProjection = {

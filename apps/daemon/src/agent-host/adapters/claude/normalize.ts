@@ -2335,10 +2335,17 @@ export class ClaudeNormalizer {
     raw: RuntimeEventRaw
   ): RuntimeEvent[] {
     const progressAgent = this.taskAgents.get(message.task_id);
-    if (progressAgent !== undefined && trimmedString(message.description) !== undefined) {
+    if (progressAgent !== undefined && progressAgent.description === undefined) {
       // A resumed subagent's `task_started` may carry no description; its
-      // first progress does, and that is the join a nested frame needs.
-      progressAgent.description = trimmedString(message.description);
+      // first progress does, and that is the join a nested frame needs. ONLY
+      // then: a progress frame's `description` is the agent's live activity
+      // ("Reading b.txt", fixtures README obs. 4), not the task's name, and
+      // letting it overwrite a known description retitled every roster row
+      // with whatever its agent was doing last.
+      const described = trimmedString(message.description);
+      if (described !== undefined) {
+        progressAgent.description = described;
+      }
     }
     const events = this.emitThreadTokenUsage(
       this.taskProgressTokenUsage(message.usage),

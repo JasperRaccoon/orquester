@@ -2048,9 +2048,16 @@ age, so a chatty turn cannot scroll a still-open question out of the pending set
 
 *T3: `apps/server/src/orchestration/projector.ts:59-87` — `MAX_THREAD_MESSAGES = 2_000`, `MAX_THREAD_CHECKPOINTS = 500` and `retainThreadActivities`' 500-row window with pending-question retention*
 
-*Built: the retention keeps the last 500 activities plus every unresolved async question, and
-**nothing else** — the "any long-lived singleton row regardless of age" clause has no Orquester
-row behind it. T3's counterpart retains its `WORKTREE_SETUP_ACTIVITY_KIND`, a worktree-setup
+*Built: the retention keeps the last 500 **parent-visible** activities plus every unresolved async
+question and every agent's launch/terminal row (`task.started` / `task.completed` stamped
+`agentKind: "agent"`), and **nothing else** — the "any long-lived singleton row regardless of age"
+clause has no Orquester row behind it. Agent-owned rows (`agentId` set: a subagent's own tool calls,
+a background shell's output) sit outside that window with their own, per-agent window of 200 and a
+2 000-row ceiling across agents (`AGENT_ACTIVITY_RETENTION_LIMIT`, `AGENT_ACTIVITY_TOTAL_LIMIT`):
+this design forwards a subagent's tool rows into the parent's log for the drill-in, which T3 does
+not, and counting them against the parent's 500 evicted the parent's own rows — and the agents'
+launch rows, which re-anchored every agent's timeline row on whatever progress tick survived, at
+the bottom of the conversation (owner incident 2026-09-22). T3's counterpart retains its `WORKTREE_SETUP_ACTIVITY_KIND`, a worktree-setup
 record this design has no analogue for (per-thread worktrees are a §2 non-goal), so the clause is
 an artefact of the port rather than a requirement
 (`packages/api/src/agent-chat/fold.ts`, `activitiesToDrop`). Also: `meta.json` is rewritten every

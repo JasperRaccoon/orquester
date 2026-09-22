@@ -8,6 +8,7 @@ import test from "node:test";
 
 import {
   ACTIVITY_RETENTION_LIMIT,
+  AGENT_ACTIVITY_RETENTION_LIMIT,
   MESSAGE_RETENTION_LIMIT,
   applyDomainEvent,
   createEmptyThreadState,
@@ -845,4 +846,33 @@ test("fold — the resume cursor outlives a session block that omits it (kept ac
     state = foldThread([created, withCursor, settled, replaced]);
     assert.deepEqual(state.head?.session.resumeCursor, { resume: "new", turnCount: 1 });
     assert.equal(state.head?.session.providerThreadId, "new");
+});
+
+test("retention: an agent's rows have their own window and its anchors never age out", () => {
+  reset();
+  const events: DomainEvent[] = [created()];
+  const anchor = activity("task.started", agentTask("ag1", { toolUseId: "toolu_1" }));
+  events.push(ev("thread.activity-appended", { activity: anchor }));
+  for (let index = 0; index < 300; index += 1) {
+    events.push(
+      ev("thread.activity-appended", {
+        activity: { ...activity("tool.completed", { toolUseId: `t${index}` }), agentId: "ag1" }
+      })
+    );
+  }
+  for (let index = 0; index < ACTIVITY_RETENTION_LIMIT + 20; index += 1) {
+    events.push(ev("thread.activity-appended", { activity: activity("tool.completed", { toolUseId: `p${index}` }) }));
+  }
+  const state = fold(events);
+  const parentRows = state.activities.filter((row) => row.agentId === undefined);
+  const ownedRows = state.activities.filter((row) => row.agentId === "ag1");
+  assert.equal(ownedRows.length, AGENT_ACTIVITY_RETENTION_LIMIT, "the agent keeps its newest rows only");
+  assert.equal(ownedRows[0]?.payload && (ownedRows[0].payload as { toolUseId: string }).toolUseId, "t100");
+  assert.equal(
+    parentRows.length,
+    ACTIVITY_RETENTION_LIMIT + 1,
+    "the parent window is not consumed by the agent's rows, and the launch row survives"
+  );
+  assert.ok(parentRows.some((row) => row.id === anchor.id), "the agent's launch row is never evicted");
+  assert.equal((parentRows[1]?.payload as { toolUseId: string }).toolUseId, "p20");
 });

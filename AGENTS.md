@@ -437,6 +437,22 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   the host pid in `protectedPids` and registers it as an extra tree **root** (`extraRootPids`), so
   a runaway provider child stays killable from Settings → System even though the host runs in a
   tmux service session `panePids()` excludes.
+- **Agent rows must survive resumes and retention, and a drill-in must not filter itself away.**
+  Four rules that fell out of one owner incident (two subagents cut by a rate limit, resumed,
+  finished — and the chat still showed them as "terminated" at the bottom of the timeline):
+  (1) Claude resumes a subagent under the SAME task id with a NEW launching `tool_use_id`, so the
+  roster fold (`packages/api/src/agent-chat/roster.ts`) reopens a terminal row on a changed
+  `toolUseId` and only then — an unchanged one is a late delivery and must not reopen anything.
+  (2) `task_progress.description` is the agent's live activity, never its name: the normaliser
+  fills a task's description from progress only when it has none. (3) Retention has two windows
+  (`fold.ts`): the parent's last 500 rows, from which an agent's `task.started`/`task.completed`
+  are exempt because they anchor its timeline row, and a per-agent window (200, 2 000 across
+  agents) for the rows an agent owns — those render only in its drill-in and were evicting the
+  parent's rows and the anchors within minutes. (4) The drill-in derives its rows with
+  `{ ownerAgentId }` (`entries.logic.ts`): §7.2's quiet-timeline filter drops every agent-owned
+  row from the PARENT timeline, and applying it again inside the agent's own view is how every
+  drill-in read "This agent has not reported anything yet". Streamed `tool.output` chunks ride
+  `payload.delta` and become the entry's `detail`, untrimmed, for `joinLifecycleDetails` to fold.
 - **Background shells (Claude): only detached ones are surfaced, and their output is TAILED from a
   file.** Every ordinary Bash call raises a `local_bash` task, so `is_backgrounded` — not the task
   type — is the discriminator: a `false` one is the blocking tool call's own row and gets no

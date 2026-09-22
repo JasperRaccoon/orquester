@@ -15,7 +15,9 @@
  *   body and non-empty text replaces it;
  * - a turn is settled **by session status**, not by `turn.completed`, so a
  *   late checkpoint or diff never extends the recorded duration;
- * - the fold retains the last {@link ACTIVITY_RETENTION_LIMIT} activities,
+ * - the fold retains the last {@link ACTIVITY_RETENTION_LIMIT} parent-visible
+ *   activities (agent-owned rows have their own window, see
+ *   {@link AGENT_ACTIVITY_RETENTION_LIMIT}),
  *   plus every unresolved async question and any long-lived singleton row
  *   regardless of age;
  * - a malformed line truncates the fold at that point rather than discarding
@@ -47,6 +49,19 @@ import { applySessionStatusToTurn, isSettledTurnState } from "./turn-state.ts";
 
 /** §5.1: the fold retains this many activities per thread. */
 export const ACTIVITY_RETENTION_LIMIT = 500;
+/**
+ * Rows an agent owns (`agentId` set: a subagent's own tool calls, a shell's
+ * output) are retained PER AGENT, outside the parent window — they render
+ * only in that agent's drill-in, and counting them against the parent's 500
+ * evicted the parent's own rows within minutes on a subagent-heavy thread.
+ * The launch and terminal rows of an agent (`task.started` / `task.completed`
+ * with `agentKind: "agent"`) are never evicted: they anchor the agent's row in
+ * the timeline, and an anchor that ages out re-anchors the row on whatever
+ * progress tick survived — at the bottom of the conversation, days later.
+ */
+export const AGENT_ACTIVITY_RETENTION_LIMIT = 200;
+/** Across every agent, so a thousand short-lived shells still bound memory. */
+export const AGENT_ACTIVITY_TOTAL_LIMIT = 2_000;
 /** §5.1 (T3 `projector.ts:59-60`): message and checkpoint retention. */
 export const MESSAGE_RETENTION_LIMIT = 2_000;
 export const CHECKPOINT_RETENTION_LIMIT = 500;
@@ -153,29 +168,80 @@ function asRecord(value: unknown): Record<string, unknown> | null {
  * *T3: `projector.ts:63-87` (`retainThreadActivities`).*
  */
 function activitiesToDrop(activities: readonly ThreadActivityItem[]): Set<ThreadActivityItem> {
-  const recentStart = activities.length - ACTIVITY_RETENTION_LIMIT;
-  if (recentStart <= 0) {
+  if (activities.length <= ACTIVITY_RETENTION_LIMIT) {
     return new Set();
   }
   const pendingById = new Map<string, ThreadActivityItem>();
+  const parentRows: ThreadActivityItem[] = [];
+  const agentRows = new Map<string, ThreadActivityItem[]>();
   for (const activity of activities) {
     const payload = asRecord(activity.payload);
     const requestId = payload?.requestId;
-    if (typeof requestId !== "string") continue;
-    if (activity.activityKind === "user-input.requested" && payload?.responseMode === "message") {
-      pendingById.set(requestId, activity);
-    } else if (activity.activityKind === "user-input.resolved") {
-      pendingById.delete(requestId);
+    if (typeof requestId === "string") {
+      if (activity.activityKind === "user-input.requested" && payload?.responseMode === "message") {
+        pendingById.set(requestId, activity);
+      } else if (activity.activityKind === "user-input.resolved") {
+        pendingById.delete(requestId);
+      }
+    }
+    const owner = typeof activity.agentId === "string" && activity.agentId.length > 0 ? activity.agentId : null;
+    if (owner === null) {
+      parentRows.push(activity);
+    } else {
+      const rows = agentRows.get(owner);
+      if (rows) rows.push(activity);
+      else agentRows.set(owner, [activity]);
     }
   }
   const retainedByQuestion = new Set(pendingById.values());
   const drop = new Set<ThreadActivityItem>();
-  for (let index = 0; index < recentStart; index += 1) {
-    const activity = activities[index]!;
-    if (retainedByQuestion.has(activity)) continue;
+
+  // The parent window: the last ACTIVITY_RETENTION_LIMIT rows the parent
+  // timeline renders, plus every open async question and every agent anchor.
+  const parentStart = parentRows.length - ACTIVITY_RETENTION_LIMIT;
+  for (let index = 0; index < parentStart; index += 1) {
+    const activity = parentRows[index]!;
+    if (retainedByQuestion.has(activity) || isAgentAnchorRow(activity)) continue;
     drop.add(activity);
   }
+
+  // Each agent's window, then the ceiling across all of them (oldest first).
+  const survivingAgentRows: ThreadActivityItem[] = [];
+  for (const rows of agentRows.values()) {
+    const start = rows.length - AGENT_ACTIVITY_RETENTION_LIMIT;
+    for (let index = 0; index < rows.length; index += 1) {
+      const activity = rows[index]!;
+      if (index < start && !isAgentAnchorRow(activity)) {
+        drop.add(activity);
+      } else {
+        survivingAgentRows.push(activity);
+      }
+    }
+  }
+  if (survivingAgentRows.length > AGENT_ACTIVITY_TOTAL_LIMIT) {
+    survivingAgentRows.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+    const excess = survivingAgentRows.length - AGENT_ACTIVITY_TOTAL_LIMIT;
+    let dropped = 0;
+    for (const activity of survivingAgentRows) {
+      if (dropped === excess) break;
+      if (isAgentAnchorRow(activity)) continue;
+      drop.add(activity);
+      dropped += 1;
+    }
+  }
   return drop;
+}
+
+/**
+ * The rows that anchor an agent's presence — its launch and its terminal
+ * state — as stamped by the host (`agentKind: "agent"`). Background shells
+ * and watch loops are not anchors: their rows are ordinary work-log rows.
+ */
+function isAgentAnchorRow(activity: ThreadActivityItem): boolean {
+  if (activity.activityKind !== "task.started" && activity.activityKind !== "task.completed") {
+    return false;
+  }
+  return asRecord(activity.payload)?.agentKind === "agent";
 }
 
 /** Rebuild `itemIndex` from an items array. */
@@ -205,6 +271,11 @@ function applyRetention(
 
   const dropActivities = overActivities ? activitiesToDrop(activities) : new Set<ThreadActivityItem>();
   let messagesToDrop = overMessages ? messageCount - MESSAGE_RETENTION_LIMIT : 0;
+  if (dropActivities.size === 0 && messagesToDrop === 0) {
+    // Over the trigger but nothing to evict (agent-owned rows sit outside the
+    // parent window): keep the arrays, so a streamed token still shares them.
+    return { items, activities, itemIndex: null };
+  }
   const dropMessages = new Set<ThreadItem>();
   if (messagesToDrop > 0) {
     for (const item of items) {
