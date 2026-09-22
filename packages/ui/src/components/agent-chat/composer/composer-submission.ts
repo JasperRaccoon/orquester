@@ -9,10 +9,12 @@
  */
 
 import {
+  buildPlanImplementationPrompt,
   MAX_TURN_ATTACHMENTS,
   MAX_TURN_FILE_BYTES,
   MAX_TURN_IMAGE_BYTES,
   MAX_TURN_INPUT_CHARS,
+  PLAN_IMPLEMENTATION_PROMPT_PREFIX,
   SUPPORTED_ATTACHMENT_IMAGE_MIME_TYPES
 } from "@orquester/api/agent-chat";
 import type { AttachmentRef } from "@orquester/api/agent-chat";
@@ -328,12 +330,13 @@ export function hasSendableContent(input: {
 // The plan follow-up (§7.5, §7.4 primary actions)
 // ---------------------------------------------------------------------------
 
-/** Prefix of the message sent when the user approves a plan. *T3: `proposedPlan.ts:74`.* */
-export const PLAN_IMPLEMENTATION_PROMPT_PREFIX = "PLEASE IMPLEMENT THIS PLAN:\n";
-
-export function buildPlanImplementationPrompt(planMarkdown: string): string {
-  return `${PLAN_IMPLEMENTATION_PROMPT_PREFIX}${planMarkdown.trim()}`;
-}
+/**
+ * Prefix of the message sent when the user approves a plan, and the message
+ * itself: one spelling in `@orquester/api/agent-chat`, shared with the host and
+ * the MCP. Re-exported so existing imports from this module keep working.
+ * *T3: `proposedPlan.ts:74-77`.*
+ */
+export { buildPlanImplementationPrompt, PLAN_IMPLEMENTATION_PROMPT_PREFIX };
 
 /** The plan's own title — its first markdown heading — or `null`. */
 export function proposedPlanTitle(planMarkdown: string): string | null {
