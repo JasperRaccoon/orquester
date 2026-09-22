@@ -125,6 +125,12 @@ export interface MockConfig {
   turns?: MockTurnScript[];
   /** Turn ids handed back by `thread/turns/list`, newest first. */
   historyTurnIds?: string[];
+  /**
+   * Page `thread/turns/list` like the real server: at most this many turns
+   * (fewer when the request's `limit` is smaller) and a `nextCursor` while
+   * history remains. Unset, every list answers the whole history in one page.
+   */
+  turnsPageSize?: number;
   /** Everything the mock received, appended as NDJSON. */
   logPath: string;
 }
@@ -478,9 +484,19 @@ function handle(frame) {
       activeTurnId = null;
       return;
     }
-    case "thread/turns/list":
-      send({ id, result: { data: historyTurnIds.map((tid) => ({ ...turnObject(tid, "completed"), items: [{ type: "agentMessage", id: "i-" + tid, text: tid, phase: "final_answer", memoryCitation: null, delivery: null, questions: null }], itemsView: "full" })), nextCursor: null, backwardsCursor: null } });
+    case "thread/turns/list": {
+      const all = historyTurnIds.map((tid) => ({ ...turnObject(tid, "completed"), items: [{ type: "agentMessage", id: "i-" + tid, text: tid, phase: "final_answer", memoryCitation: null, delivery: null, questions: null }], itemsView: "full" }));
+      if (typeof config.turnsPageSize !== "number") {
+        send({ id, result: { data: all, nextCursor: null, backwardsCursor: null } });
+        return;
+      }
+      // The cursor is opaque to the client; here it is the next offset.
+      const start = typeof params.cursor === "string" ? Number(params.cursor) : 0;
+      const size = typeof params.limit === "number" ? Math.min(params.limit, config.turnsPageSize) : config.turnsPageSize;
+      const end = Math.min(all.length, start + size);
+      send({ id, result: { data: all.slice(start, end), nextCursor: end < all.length ? String(end) : null, backwardsCursor: null } });
       return;
+    }
     case "thread/revert":
       send({ id, result: { thread: threadObject(), turnsBackwardsCursor: null, itemsBackwardsCursor: null } });
       send({ method: "thread/reverted", params: { threadId } });

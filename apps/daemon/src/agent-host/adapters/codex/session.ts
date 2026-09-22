@@ -38,7 +38,7 @@ import type {
   UserInputQuestion
 } from "@orquester/api/agent-chat";
 
-import type { AdapterContext } from "../../adapter.ts";
+import type { AdapterContext, RollbackTarget } from "../../adapter.ts";
 import { isUsableConversationId } from "../../orchestration/resume.ts";
 import { AGENT_HOST_DEADLINES, TURN_LIVENESS_WINDOWS, withDeadline } from "../../support/deadline.ts";
 import {
@@ -756,31 +756,57 @@ export class CodexSession {
   }
 
   /**
-   * Roll the conversation back by `numTurns` (§5.5).
+   * Roll the conversation back (§5.5).
    *
    * `thread/rollback {numTurns}` is **dead** on every thread this CLI creates
    * (`-32600 "paginated threads do not support thread/rollback"`, plus a
    * deprecation notice). The working path is `thread/turns/list` →
-   * `thread/revert {beforeTurnId}` (fixtures README observation 7).
+   * `thread/revert {beforeTurnId}` (fixtures README observation 7), and
+   * `beforeTurnId` is the first turn that goes: "excluded from the replacement
+   * history, together with every later turn".
+   *
+   * With `target` that turn is the one the host NAMED, and `numTurns` is not
+   * consulted. The fold's turn ids are Codex's own — `turn/started`'s
+   * `turn.id` live, `thread/turns/list`'s on a replay — while `numTurns` is
+   * counted over the fold, so a thread whose own list is longer or shorter
+   * (compaction runs as a whole extra turn, observation 8; a resume replays
+   * only the newest page) would take a count-based cut in the wrong place
+   * without refusing. The list is paged newest-first only as far back as that
+   * turn, and an id it does not hold is a refusal, never a guess. Without
+   * `target` (a caller that predates it) the cut is the `numTurns`-th newest.
    *
    * Neither endpoint touches the working tree — "This only changes persisted
    * conversation history" — so §5.5's checkpoint restore stays Orquester's job.
    */
-  async rollbackThread(numTurns: number): Promise<ThreadSnapshot> {
+  async rollbackThread(numTurns: number, target?: RollbackTarget): Promise<ThreadSnapshot> {
     const peer = this.requirePeer();
     const providerThreadId = this.requireProviderThreadId();
 
-    // Newest-first, so the turn to revert *before* is the `numTurns`-th one.
-    const turns = await this.listTurns(numTurns + 1);
-    const boundary = turns[numTurns - 1];
-    if (boundary === undefined) {
-      throw new Error(
-        `codex: cannot roll back ${numTurns} turn(s); the thread has ${turns.length}`
-      );
+    let beforeTurnId: string;
+    if (target !== undefined) {
+      const wanted = target.firstRemovedTurnId;
+      const turns = await this.listTurns(Number.POSITIVE_INFINITY, {
+        until: (turn) => turn.id === wanted,
+        withItems: false
+      });
+      if (!turns.some((turn) => turn.id === wanted)) {
+        throw new Error("codex: the turn to rewind to is no longer in this thread");
+      }
+      beforeTurnId = wanted;
+    } else {
+      // Newest-first, so the turn to revert *before* is the `numTurns`-th one.
+      const turns = await this.listTurns(numTurns + 1);
+      const boundary = turns[numTurns - 1];
+      if (boundary === undefined) {
+        throw new Error(
+          `codex: cannot roll back ${numTurns} turn(s); the thread has ${turns.length}`
+        );
+      }
+      beforeTurnId = boundary.id;
     }
 
     await this.bounded(
-      () => peer.request("thread/revert", { threadId: providerThreadId, beforeTurnId: boundary.id }),
+      () => peer.request("thread/revert", { threadId: providerThreadId, beforeTurnId }),
       this.deadline("sessionOpenMs"),
       "thread/revert"
     );
@@ -881,24 +907,40 @@ export class CodexSession {
     this.announceThread(started.thread.id);
   }
 
-  private async listTurns(limit = 50): Promise<CodexProtocol.v2.Turn[]> {
+  /**
+   * Page `thread/turns/list` newest-first — the server's default direction —
+   * until `limit` turns are in hand, the history runs out, or `until` matched
+   * a turn on the page just read (a rewind's id lookup reads back only as far
+   * as its turn). Never more than `MAX_TURN_PAGES` pages.
+   *
+   * `withItems: false` leaves `itemsView` out, so the server answers its
+   * default `summary` view (fixture 12): the ids without every item's payload.
+   */
+  private async listTurns(
+    limit = TURNS_PAGE_SIZE,
+    options: { until?: (turn: CodexProtocol.v2.Turn) => boolean; withItems?: boolean } = {}
+  ): Promise<CodexProtocol.v2.Turn[]> {
     const peer = this.requirePeer();
     const providerThreadId = this.requireProviderThreadId();
+    const withItems = options.withItems ?? true;
     const turns: CodexProtocol.v2.Turn[] = [];
     let cursor: string | null = null;
-    for (let page = 0; page < 20 && turns.length < limit; page += 1) {
+    for (let page = 0; page < MAX_TURN_PAGES && turns.length < limit; page += 1) {
       const response: CodexProtocol.v2.ThreadTurnsListResponse = await this.bounded(
         () =>
           peer.request("thread/turns/list", {
             threadId: providerThreadId,
-            limit: Math.min(50, limit - turns.length),
+            limit: Math.min(TURNS_PAGE_SIZE, limit - turns.length),
             ...(cursor !== null ? { cursor } : {}),
-            itemsView: "full"
+            ...(withItems ? { itemsView: "full" as const } : {})
           }),
         this.deadline("sessionOpenMs"),
         "thread/turns/list"
       );
       turns.push(...response.data);
+      if (options.until !== undefined && response.data.some(options.until)) {
+        break;
+      }
       cursor = response.nextCursor;
       if (cursor === null) {
         break;
@@ -1677,6 +1719,13 @@ export class CodexSession {
 }
 
 const HOST_CLIENT_VERSION = "1";
+
+/**
+ * `thread/turns/list` paging: 50 turns a page, 20 pages at most — a thousand
+ * turns, which bounds even a rewind's lookup of a turn it never finds.
+ */
+const TURNS_PAGE_SIZE = 50;
+const MAX_TURN_PAGES = 20;
 
 // ---------------------------------------------------------------------------
 // Question filtering (§4.5 "Two question paths")

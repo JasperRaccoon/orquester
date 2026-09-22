@@ -45,6 +45,7 @@ import type {
   AdapterContext,
   AdapterFactory,
   AgentAdapter,
+  RollbackTarget,
   SendTurnInput,
   SendTurnResult,
   StartSessionInput
@@ -407,9 +408,14 @@ class GrokAdapter implements AgentAdapter {
    * validation error, then always refused — a provider that cannot roll back
    * its conversation must reject the operation rather than half-perform it
    * (§10), and the refusal happens at step 2 of §5.5, before anything on disk
-   * or in the provider is touched.
+   * or in the provider is touched. A `target` changes nothing: there is no
+   * turn to find.
    */
-  async rollbackThread(threadId: string, numTurns: number): Promise<ThreadSnapshot> {
+  async rollbackThread(
+    threadId: string,
+    numTurns: number,
+    _target?: RollbackTarget
+  ): Promise<ThreadSnapshot> {
     this.requireSession(threadId);
     if (!Number.isInteger(numTurns) || numTurns < 1) {
       throw new Error("grok: numTurns must be an integer >= 1");
