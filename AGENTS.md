@@ -27,9 +27,10 @@ deploys to a VPS. `CLAUDE.md` is a thin pointer to this file.
 ## What Orquester is
 
 Orquester is a **local-first coding orchestrator**: a single Node **daemon** owns and manages
-long-lived terminal and coding-agent sessions (bash/zsh, Claude Code, Codex, Gemini, …) running
-in real PTYs, plus a file browser and editor. Clients are thin. It ships two clients over one
-shared React UI:
+long-lived terminal sessions (bash/zsh) running in real PTYs, plus a file browser and editor, and
+a supervised **agent host** that drives coding agents (Claude Code, Codex, OpenCode, Grok) over
+their machine protocols and renders them as a native **chat GUI** rather than a TUI in a pane.
+Clients are thin. It ships two clients over one shared React UI:
 
 - an **Electron desktop app** that embeds the daemon in-process over a Unix socket, and
 - a **Vite web client** that is a thin remote client to a daemon running on a VPS, reached over
@@ -40,8 +41,10 @@ one person"* — single user. Because the daemon owns the PTYs (via **tmux** whe
 sessions survive client disconnects, page reloads, and **daemon restarts**.
 
 **Features:** workspaces → projects → tabs (workspaces/projects are just directories); many
-concurrent persistent terminal/agent sessions per project; an installable agent registry
-(`claude`, `codex`, `gemini`, `opencode`, `grok`, `cline`, `deepcode`, `kimi`, Antigravity's `agy`
+concurrent persistent terminal sessions per project; **agent tabs are chat tabs** — an agent runs
+in the agent host over its own protocol and the client renders messages, reasoning, tool calls,
+diffs, approvals, questions and subagents as structured rows (see "Agent chat GUI" below); an
+installable agent registry (`claude`, `claudex`, `claudemix`, `codex`, `opencode`, `grok`
 — npm or vendor installers; `deepseek` is detect-only, its npm package no longer exists) with live
 version detection; detection + "Open on…" for shells/IDEs/explorers/browsers; xterm.js terminals with
 WebSocket-multiplexed PTY streaming, scrollback replay and resize; a CodeMirror file editor;
@@ -64,7 +67,7 @@ seven **colour schemes** × light/dark/system/dynamic; a Settings **usage overvi
 per-window quota bars and a per-device reset-time format (countdown / clock / both);
 **browser tabs (Design Mode)** — a server-side headless Chromium per
 project streamed as an interactive tab over a `/ws-browser` channel, with an element picker that
-delivers HTML/CSS/screenshot payloads into agent PTYs, and embedded Chrome DevTools (the browser's own version-matched frontend proxied by the daemon — right-dock split on desktop, full-screen on mobile); and an installable **PWA** web client
+delivers HTML/CSS/screenshot payloads into an agent's composer or PTY, and embedded Chrome DevTools (the browser's own version-matched frontend proxied by the daemon — right-dock split on desktop, full-screen on mobile); and an installable **PWA** web client
 (service worker + Web Push notifications on agent-session bells).
 
 ---
@@ -250,6 +253,116 @@ near-instant and tmux sessions survive it.
   `Transporter` (`HttpTransporter` + a shared multiplexed `WsSessionChannel` with auto-reconnect
   and re-subscribe). Terminals use xterm's **DOM renderer** (WebGL garbles on resize/hidden-tab
   reveal); since the PTY lives in the daemon, unmounting a terminal never kills the session.
+
+### Agent chat GUI (`apps/daemon/src/agent-host`, `apps/daemon/src/agent-chat`, `packages/ui/src/components/agent-chat`)
+
+An **agent tab is a chat tab**, not a TUI in a pane. `SessionKind` is
+`"shell" | "agent" | "agent-chat"`; `"agent"` survives only for legacy terminal records that still
+have a live `orq-*` tmux session. Design spec:
+`docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md` — it is authoritative, cites T3 Code
+under every derived statement, and carries a `*Built: …*` line wherever the implementation
+deliberately departs from a sentence.
+
+**The agent host is a separate process.** `apps/daemon/src/agent-host/main.ts`, run with tsx like
+the daemon, spawned by the daemon into a **tmux service session `orqsvc-agent-host`** exactly as
+cliproxy is. That is the whole point: `deploy/orquester.service` uses `KillMode=process`, so a
+deploy signals only the node process and the host — with every provider child and every in-flight
+turn — survives it. It hosts the four adapters, owns every provider child, owns the per-thread
+event logs, and serves HTTP over a unix socket at `<appdir>/daemon/agent-host.sock`, authenticated
+by the 0600 `<appdir>/daemon/agent-host.token` (regenerated only when no host is alive, so
+adoption survives a daemon restart). The daemon side — supervision, adoption, the route proxy, the
+tab records — is `apps/daemon/src/agent-chat/**`. On a no-tmux host the host is a plain daemon
+child and dies with it; the boot reconcile recovers.
+
+**Appdir layout** (paths from `@orquester/config`, `agentChat*`/`agentHost*`):
+
+```
+<appdir>/daemon/
+  agent/
+    threads/<sessionId>/
+      meta.json        ThreadHead; atomic rewrite every 50 events and on every head-shaped change
+      events.ndjson    append-only DOMAIN events, per-thread monotonic `seq` — the durable record
+      raw.ndjson       untranslated provider frames, REDACTED, rotated 10 MiB x 10, 14 days
+      attachments/<id>.<ext>
+    receipts.json      commandId -> {seq, status}, a ring of 500 (idempotency)
+  agent-host.sock      the host's control socket (named pipe on Windows)
+  agent-host.token     0600 shared secret, daemon <-> host
+```
+
+A thread id **equals** its session id. `sessions.json` stays tab metadata only (`kind:"agent-chat"`
+plus an optional `chat` block) and is parsed entry-wise tolerantly; the host is the source of truth
+for thread state. `events.ndjson` is outside every deploy rollback — an older host must still fold
+what a newer one wrote.
+
+**Routes** (all proxied by the daemon onto the socket; bearer auth on HTTP, unchanged):
+
+| | |
+|---|---|
+| Commands (POST, JSON, every body carries a client-minted `commandId`) | `/api/sessions/:id/{turn,interrupt,approval,answer,dismiss,revert,compact,mode,session/stop}` → `{seq}` |
+| Reads | `GET /api/sessions/:id/thread` (whole snapshot) · `GET …/events?after=<seq>` (long-lived chunked **NDJSON**, `:hb` every 15 s — no new WebSocket) · `GET …/turns/:n/diff` · `GET …/items/:itemId` (unslimmed payload) · `GET …/attachments/:attachmentId` |
+| Host level | `GET /api/agent/providers` · `POST /api/agent/providers/:id/refresh` · `POST /api/agent-host/stop` |
+
+Everything is built in one place — `agentChatRoutes` in `packages/api/src/agent-chat/wire.ts`; use
+it rather than spelling a path. `POST /api/sessions {kind:"agent-chat"}` creates the tab **first**,
+then the thread; a bad `resume` is a 400 `RESUME_UNAVAILABLE` there and nowhere else.
+
+**The four adapters** (`agent-host/adapters/<id>/`), one live session per thread:
+
+| Adapter | Process | Protocol |
+|---|---|---|
+| `claude` (also `claudex`/`claudemix`, Claude + cliproxy env) | one CLI per thread, owned by the SDK | `@anthropic-ai/claude-agent-sdk` streaming input, `pathToClaudeCodeExecutable` = the registry bin |
+| `codex` | one `codex app-server` per thread | hand-written NDJSON JSON-RPC over stdio (**no `jsonrpc` field**), bindings generated under `adapters/codex/_generated/` |
+| `opencode` | one `opencode serve` **per project**, shared by its threads | HTTP + SSE via `@opencode-ai/sdk` |
+| `grok` | one `grok agent stdio` per thread | hand-written ACP client + `x.ai/*` extensions (`adapters/grok/acp/`) |
+
+Every adapter normalises into one closed `RuntimeEvent` union (`@orquester/api/agent-chat`); the
+host translates those into ~14 persisted **domain** events; the client folds those into the
+timeline. An unmapped provider message is a `satisfies never` typecheck error and a
+`runtime.warning` at runtime — never a silent drop, and never the end of a turn.
+
+**Tests and fixtures.** `pnpm test` (root) → `pnpm -r --if-present test` → `node --import tsx
+--test $(find src -name '*.test.ts')` per package. Replay tests live **under `src/`** (the daemon's
+test glob only walks `src`) and read recorded real-CLI captures from
+`apps/daemon/test/fixtures/{claude,codex,opencode,grok}/`, each with a `capturedWith` provenance
+block and a `README.md` of protocol observations that is required reading before touching its
+adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
+`Ingestion.drain()`, or on an event. Filtered runs while developing:
+`pnpm --filter @orquester/daemon test`, `pnpm --filter @orquester/ui test`.
+
+**Gotchas that bite:**
+
+- **Never write through a symlinked account home.** `<GROK_HOME>/config.toml` on a managed account
+  home is a **symlink** to the daemon user's own `~/.grok/config.toml`; writing it reconfigured
+  Grok host-wide, for every terminal tab and every account, twice during the build. Grok's
+  `[features] support_permission = true` + `auto_update = false` therefore ride a per-thread
+  overlay pointed at by **`GROK_CONFIG_PATH`**. Claude's project-trust write goes to a real
+  `~/.claude.json` and must stay atomic (`writeFileAtomic`, mode forced 0600) and confined to a
+  realpath'd `projectPath` inside `fsRoot` — never to the request's `cwd`.
+- **`HISTORICAL_RAW_SOURCE`** (`"history.replay"`) tags every event projected out of a provider's
+  *native* history on resume. A replayed row is the past: it claims no token usage and its turns
+  are already settled. Anything that treats a raw frame as live must check it.
+- **One `opencode serve` per project, not per thread** — safe only while chat threads register
+  nothing thread-scoped into that server and every automatic approval is a **one-shot** grant.
+  OpenCode's `always` is directory-wide across every session of that server; an `always` from a
+  full-access thread silently widens a supervised one. Both are invariants, not preferences.
+- **Code is highlighted with Lezer, never Shiki.** The production CSP is `script-src 'self'` with
+  no `'wasm-unsafe-eval'` and `/etc/caddy/Caddyfile` is reconciled by hand, so a WASM highlighter
+  fails silently after a deploy. `@codemirror/language-data`'s parsers are already in the bundle.
+  Markdown is `react-markdown` + `remark-gfm`, never an HTML string.
+- **No lazy dynamic `import()` anywhere under `agent-host/`.** A surviving host runs old code until
+  its drain-restart; loading changed source into it is a correctness bug.
+- **`raw.ndjson` is as sensitive as the repository it watched** — it records whatever the agent
+  read, and Grok's `_x.ai/mcp/servers_updated` carries the host's real MCP credentials. Redaction
+  runs before anything is written, and before any stderr excerpt leaves the host.
+- **A running state never outlives its process.** Before `session.exited` the adapter settles the
+  in-flight turn, closes every live task `stopped` and fails every parked request. Every wait on a
+  child has a deadline (`support/deadline.ts`), and an expired one kills the child.
+- **The agent host is a protected kill target but its children are not.** `system-status.ts` takes
+  the host pid in `protectedPids` and registers it as an extra tree **root** (`extraRootPids`), so
+  a runaway provider child stays killable from Settings → System even though the host runs in a
+  tmux service session `panePids()` excludes.
+
+Start here: `apps/daemon/src/agent-host/README.md` (module map + package ownership).
 
 ### Key runtime flows
 
@@ -459,8 +572,11 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
     (`migrateLegacyOpenRouter`) into an `openrouter` provider + `routerKeys.openrouter`, copying
     `state.openRouterKeyVerifiedAt` into `keyVerifiedAt`. Both legacy fields stay **written at
     rest** one release for rollback safety (precedent 914ec27) — new code writes the mirror and
-    never reads it. The `claudex.env` Fable slot and the managed kimi agent are gated on
-    `routerKimiAvailable()` (some keyed provider serving name/alias `kimi-k3`), not on OpenRouter.
+    never reads it. The `claudex.env` Fable slot is gated on `routerKimiAvailable()` (some keyed
+    provider serving name/alias `kimi-k3`), not on OpenRouter. *(The managed `kimi` agent row it
+    also gated is gone: `kimi`, `gemini`, `agy`, `cline` and `deepcode` were dropped from the
+    catalog when agent tabs became chat tabs — a row with no `chat` adapter cannot open one.
+    `deepseek` stays, detect-only and chat-less.)*
   - **Grok is a third MANAGED ACCOUNT family (`agent: "grok"`) — same pipeline as
     claude/codex.** Accounts live in the agent-accounts store (`agent-accounts/grok/<id>/home`,
     credential = the grok CLI's native `auth.json`, the `"<issuer>::<client>"` keyed map);
@@ -783,4 +899,9 @@ password secrecy + patching remain the real mitigations. It costs two loosened u
 | Browser tabs (Design Mode) | `apps/daemon/src/browsers.ts`, `apps/daemon/src/browser-pick.ts`, `packages/ui/src/components/browser/` |
 | Git hosting accounts (GitHub/Bitbucket) | `apps/daemon/src/accounts.ts`, `apps/daemon/src/providers/`, `packages/ui/src/components/settings/SettingsModal.tsx` |
 | Model proxy + router providers + xAI (Grok) account | `apps/daemon/src/cliproxy.ts`, `apps/daemon/src/cliproxy-files.ts`, `apps/daemon/src/cliproxy-secrets.ts`, `apps/daemon/src/cliproxy-xai.ts`, router/xai schemas in `packages/config/src/index.ts`, `packages/ui/src/components/settings/ModelProxySettings.tsx` |
+| Agent chat: the host process, adapters, store, checkpoints | `apps/daemon/src/agent-host/README.md` (module map), `…/main.ts`, `…/adapters/<id>/`, `…/store/`, `…/checkpoints/` |
+| Agent chat: daemon side (supervision, route proxy, tab records) | `apps/daemon/src/agent-chat/{supervisor.ts,proxy-routes.ts,service.ts,session-router.ts,home-prep.ts}` |
+| Agent chat: wire contracts, runtime/domain events, fold | `packages/api/src/agent-chat/{wire.ts,runtime-events.ts,domain-events.ts,fold.ts,slim.ts,roster.ts}` |
+| Agent chat: client state, transport, timeline, composer, roster | `packages/ui/src/lib/agent-chat/`, `packages/ui/src/components/agent-chat/` |
+| Agent chat: protocol fixtures (read the per-provider `README.md`) | `apps/daemon/test/fixtures/{claude,codex,opencode,grok}/` |
 | Deployment | `deploy/` + `docs/superpowers/specs|plans/2026-06-19-remote-*.md` |
