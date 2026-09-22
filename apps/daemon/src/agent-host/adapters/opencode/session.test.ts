@@ -1239,3 +1239,120 @@ test("answers are keyed by question id, header or text, in that order", () => {
   );
   assert.deepEqual(toQuestionAnswers(request, {}), [[], []]);
 });
+
+// ---------------------------------------------------------------------------
+// Q1 #21 — the ancestry probe is capped, and released
+// ---------------------------------------------------------------------------
+
+/**
+ * The server is per **project** (§3.2), so this thread's `GET /event` also
+ * carries every co-tenant thread's frames. T3 could retry an unresolved
+ * `*.asked` ancestry walk forever because its server was per *thread* and a
+ * foreign frame could not arrive; here it can, and an uncapped chain meant one
+ * live poll per foreign ask for the rest of the session's life, with a map key
+ * that was never released.
+ */
+
+function probeCount(harness: Harness, sessionId: string): number {
+  return harness.fake.requests.filter(
+    (request) => request.method === "GET" && request.path === `/session/${sessionId}`
+  ).length;
+}
+
+/** The chain is driven by real backoff timers, so these tests watch the clock. */
+async function settle(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Make one session id unreadable, **before** the session starts: the client is
+ * built with whatever `fetchImpl` the fake holds at that moment.
+ */
+function failReadsOf(harness: Harness, sessionId: string): void {
+  const inner = harness.fake.fetchImpl;
+  Object.defineProperty(harness.fake, "fetchImpl", {
+    configurable: true,
+    value: (async (input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1]) => {
+      const path = new URL(String(input)).pathname;
+      // A 500, deliberately: a 404 is a definitive "not here" and ends the
+      // walk, while this is the transient shape that earns a retry.
+      if (path === `/session/${sessionId}`) {
+        harness.fake.requests.push({ method: init?.method ?? "GET", path });
+        return new Response("boom", { status: 500 });
+      }
+      return await inner(input, init);
+    }) as typeof fetch
+  });
+}
+
+test("Q1 #21: a co-tenant thread's ask is probed ONCE, not polled forever", async () => {
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  // A session that exists on this shared server and has no parent: the walk
+  // completes at a root that is not ours, which is a definitive answer.
+  harness.fake.sessions.set("ses_cotenant", { id: "ses_cotenant", directory: "/repo" });
+
+  harness.fake.push({
+    type: "permission.asked",
+    properties: {
+      id: "per_foreign",
+      sessionID: "ses_cotenant",
+      permission: "bash",
+      patterns: ["echo hi"]
+    }
+  });
+  await settle(400);
+
+  assert.equal(probeCount(harness, "ses_cotenant"), 1, "a walked foreign root is not retried");
+  // And it never became this thread's card.
+  assert.deepEqual(eventsOfType(harness.events, "request.opened"), []);
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("Q1 #21: an unreadable session is retried, but the chain is CAPPED", async () => {
+  const harness = makeHarness();
+  failReadsOf(harness, "ses_unreadable");
+  const session = await startSession(harness);
+
+  // A non-`asked` request frame takes the SHORT cap, so the whole chain — with
+  // its 250 ms to 4 s backoff — finishes inside this test rather than in 25 s.
+  harness.fake.push({
+    type: "permission.replied",
+    properties: { requestID: "per_unreadable", sessionID: "ses_unreadable", reply: "once" }
+  });
+  await settle(9_000);
+
+  const probes = probeCount(harness, "ses_unreadable");
+  assert.ok(probes > 1, `the unknown outcome is retried (saw ${probes})`);
+  assert.ok(probes <= 5, `the chain is capped (saw ${probes})`);
+
+  // Capped means STOPPED, not merely slowed: nothing more arrives afterwards.
+  await settle(1_500);
+  assert.equal(probeCount(harness, "ses_unreadable"), probes);
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("Q1 #21: closing the thread abandons an in-flight ancestry chain", async () => {
+  const harness = makeHarness();
+  failReadsOf(harness, "ses_gone");
+  const session = await startSession(harness);
+
+  harness.fake.push({
+    type: "permission.asked",
+    properties: { id: "per_gone", sessionID: "ses_gone", permission: "bash", patterns: ["x"] }
+  });
+  await settle(300);
+  const beforeClose = probeCount(harness, "ses_gone");
+  assert.ok(beforeClose >= 1);
+
+  await session.stop({ reason: "test", hostInitiated: true });
+  await settle(1_500);
+  assert.equal(
+    probeCount(harness, "ses_gone"),
+    beforeClose,
+    "a closed session must not keep polling the provider"
+  );
+  harness.dispose();
+});

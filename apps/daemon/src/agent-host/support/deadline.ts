@@ -121,7 +121,22 @@ export const AGENT_HOST_DEADLINES = {
   /** A generic provider probe (version). */
   probeMs: 4_000,
   /** An auth probe, which may touch disk or the network. */
-  authProbeMs: 10_000
+  authProbeMs: 10_000,
+  /**
+   * The ceiling for a provider snapshot that may have to **start a server
+   * before it can read anything** (E9).
+   *
+   * OpenCode's catalogue lives behind a per-project `opencode serve`, so a
+   * first snapshot is two phases — spawn to readiness ({@link handshakeMs} +
+   * {@link healthMs}), then the catalogue reads (each already bounded, the
+   * longest {@link authProbeMs}). Budgeting both under the 10 s auth window is
+   * what made every cold probe fail: measured 10 435 ms, answered 500, and the
+   * user's first visit to Settings showed no OpenCode at all. This is a
+   * ceiling, not a target — a warm probe still returns in ~20 ms, and each
+   * inner phase keeps its own tighter deadline, so a hang is still caught by
+   * the phase that hangs rather than by this.
+   */
+  coldSnapshotMs: 45_000
 } as const;
 
 /**
