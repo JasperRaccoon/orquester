@@ -316,14 +316,16 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   // to expand it and `document.activeElement` becomes `<body>`, after which a
   // React handler on our root never fires again. So it is a `window` listener.
   //
-  // **This is the tab's ONE Escape owner.** It was briefly two — the composer
-  // grew a window-level interrupt arm for the same key — and two capture-phase
-  // listeners on the same node cannot be ordered: a listener whose effect deps
-  // change (a queue mutation, a turn transition) re-registers and moves to the
-  // back of the list. Whichever ran first won, so with a drill-in open Escape
-  // stopped the turn instead of going back. The composer now keeps Escape only
-  // on its own textarea, where its open token menu gets first refusal — which
-  // is why focus inside the composer is one of the gates below.
+  // **Escape is shared with the composer by SCOPE, never by order.** Two
+  // capture-phase `window` listeners exist for this key and exactly one may
+  // act: two on the same node cannot be ordered — a listener whose effect deps
+  // change (the composer's include `queue`) re-registers and moves to the back
+  // of the list — so whichever ran first won, which meant two interrupts when
+  // both fired and a stopped turn instead of a closed drill-in when the
+  // composer went first. This one therefore owns every Escape whose target is
+  // OUTSIDE the composer shell, and the composer's `composerOwnsEscape` owns
+  // the inside; that is why `insideComposer` is one of the gates below, and
+  // why both sides also bail on `defaultPrevented`.
   //
   // Every rule lives in `resolveChatEscape`, which is pure and tested; this
   // keeps only the three lines that touch the event.

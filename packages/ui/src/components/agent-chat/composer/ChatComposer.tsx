@@ -36,7 +36,7 @@ import {
   resolveSelectedModel
 } from "./composer-model";
 import { isComposerCollapsedMobile, resolveComposerTimelineInset } from "./composer-inset";
-import { isChatTabListenerActive } from "./tab-visibility";
+import { composerOwnsEscape, isChatTabListenerActive } from "./tab-visibility";
 import {
   findComposerShortcutTarget,
   resolveChatShortcut,
@@ -54,13 +54,14 @@ import {
   proposedPlanTitle,
   resolveFollowUpDisposition,
   resolvePlanFollowUpSubmission,
+  submitIsNoOp,
+  swallowsStandalonePlanCommand,
   uploadsBlockSend
 } from "./composer-submission";
 import {
   detectComposerTrigger,
   extendReplacementRangeForTrailingSpace,
   isTriggerAtPromptStart,
-  parseStandaloneComposerSlashCommand,
   replaceTextRange,
   type ComposerTrigger
 } from "./composer-trigger";
@@ -794,10 +795,12 @@ export function ChatComposer({
       // §4.6.5(a): swallowed client-side ONLY where the toggle exists. On
       // OpenCode/Grok the provider may dispatch `/plan` natively, so with the
       // toggle hidden the draft is ordinary text and goes to the wire.
-      const standalone = showPlanModeToggle
-        ? parseStandaloneComposerSlashCommand(text)
-        : null;
-      if (standalone && draft.attachments.length === 0) {
+      const standalone = swallowsStandalonePlanCommand({
+        text,
+        showPlanModeToggle,
+        attachmentCount: draft.attachments.length
+      });
+      if (standalone) {
         setPlanMode(standalone);
         setDraft((state) => ({ ...state, text: "" }));
         applyCaret(0);
@@ -815,7 +818,9 @@ export function ChatComposer({
           })
         : null;
 
-      if (!sendable && plan === null) return;
+      if (submitIsNoOp({ hasSendableContent: sendable, hasActionablePlan: plan !== null })) {
+        return;
+      }
       if (sendDisabledReason) {
         setNotice(sendDisabledReason);
         return;
@@ -931,22 +936,46 @@ export function ChatComposer({
         return;
       }
       /*
-       * `interrupt` and `scroll-to-end` are NOT this listener's.
+       * Escape is SHARED with the shell, by scope — never by order.
        *
-       * R7-7 (Escape must stop a turn from anywhere in the thread, not only
-       * with the textarea focused) is answered by the shell's own window
-       * listener — `AgentChatView`'s `resolveChatEscape` — which is the tab's
-       * single Escape owner. Two capture-phase listeners on `window` for one
-       * key cannot be ordered: this effect's deps include `queue`, so it
-       * re-registers on every queue mutation and moves behind the shell's.
-       * Whichever fired first won, and with a drill-in open that meant Escape
-       * stopped the turn instead of going back.
+       * Two capture-phase `window` listeners exist for this key and exactly
+       * one may act. They cannot be ordered: this effect's deps include
+       * `queue`, so it re-registers on every queue mutation and changes place
+       * with the shell's, and `stopPropagation()` does not silence a sibling
+       * on the same node. Whichever ran first won — two interrupts when both
+       * fired, and a stopped turn instead of a closed drill-in when this one
+       * went first.
        *
-       * The textarea keeps Escape (see `onTextareaKeyDown`), where an open
-       * token menu gets first refusal; the shell stands down for any event
-       * whose target is inside this composer. `scroll-to-end` stays the
-       * timeline's.
+       * So the scopes are disjoint and target-based: the shell
+       * (`resolveChatEscape`) owns every Escape whose target is OUTSIDE this
+       * composer shell — that is the one that leaves a drill-in — and this arm
+       * owns the inside, minus the textarea, whose own handler gives an open
+       * token menu first refusal. `scroll-to-end` stays the timeline's.
        */
+      if (shortcut.kind === "interrupt") {
+        // V1 §10.1: the shell registers a second window Escape listener. It
+        // owns everything OUTSIDE this composer shell; we own inside it, minus
+        // the textarea (whose own handler gives the token menu first refusal).
+        // `stopPropagation` cannot silence a sibling on the same node, so both
+        // sides gate on `defaultPrevented` and on disjoint scopes — otherwise
+        // one Escape sent two interrupts.
+        const target = event.target;
+        const insideComposerShell =
+          target instanceof Node && shellRef.current?.contains(target) === true;
+        if (
+          !composerOwnsEscape({
+            defaultPrevented: event.defaultPrevented,
+            insideComposerShell,
+            isTextarea: target === textareaRef.current,
+            isTurnActive
+          })
+        ) {
+          return;
+        }
+        event.preventDefault();
+        interrupt();
+        return;
+      }
       if (shortcut.kind !== "control") return;
       // Only swallow the chord when a control actually answers to it, so a
       // composer without a plan toggle leaves its key to whoever wants it.
@@ -963,8 +992,9 @@ export function ChatComposer({
     if (isPasteAsTextShortcut(event, isApplePlatform())) bypassPasteRef.current = true;
     // An IME candidate window is open: Enter COMMITS the candidate and Escape
     // CANCELS the composition. Acting on either here sends a half-converted
-    // prompt or kills the composition. `keyCode === 229` is the pre-
-    // `isComposing` fallback some engines still report for the same state.
+    // prompt or kills the composition. `composerSubmissionIntentForEnter` also
+    // refuses on its own (tested there); this early return additionally keeps
+    // Escape and the menu keys out of a live composition.
     if (event.nativeEvent.isComposing || event.keyCode === 229) return;
     if (showMenu) {
       const count = Math.max(1, menuItems.length);
@@ -1009,7 +1039,9 @@ export function ChatComposer({
       modifierKey: event.metaKey || event.ctrlKey,
       isRunning: isTurnActive,
       sendShortcut: SEND_SHORTCUT,
-      prompt: draft.text
+      prompt: draft.text,
+      isComposing: event.nativeEvent.isComposing,
+      keyCode: event.keyCode
     });
     if (intent === null) return;
     event.preventDefault();

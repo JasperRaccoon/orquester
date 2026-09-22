@@ -160,11 +160,29 @@ test("an UNKNOWN name stays plain text — the catalog decides, not the syntax",
 });
 
 test("shell and currency `$` are never mistaken for mentions", () => {
-  // `$PATH` is not in the catalog; `$5` and `a$review` are not mentions at all.
+  // `$PATH` is not in the catalog; `$5` and `a$review` are not at a boundary.
   assert.deepEqual(splitSkillMentions("echo $PATH", SKILLS), [{ text: "echo $PATH" }]);
   assert.deepEqual(splitSkillMentions("costs $5", SKILLS), [{ text: "costs $5" }]);
   assert.deepEqual(splitSkillMentions("a$review", SKILLS), [{ text: "a$review" }]);
   assert.deepEqual(splitSkillMentions("$$review", SKILLS), [{ text: "$$review" }]);
+});
+
+test("the composer's tokeniser decides, so its rules reach the timeline verbatim", () => {
+  // These three are W13's semantics, not ours: any currency symbol triggers a
+  // mention, the catalog match is case-insensitive while the typed spelling is
+  // kept, and a dotted name is taken whole.
+  assert.deepEqual(splitSkillMentions("run €review", SKILLS), [
+    { text: "run " },
+    { text: "€review", skill: "review" }
+  ]);
+  assert.deepEqual(splitSkillMentions("$Review it", SKILLS), [
+    { text: "$Review", skill: "Review" },
+    { text: " it" }
+  ]);
+  assert.deepEqual(splitSkillMentions("$my-skill.v2 now", ["my-skill", "my-skill.v2"]), [
+    { text: "$my-skill.v2", skill: "my-skill.v2" },
+    { text: " now" }
+  ]);
 });
 
 test("text with no `$` at all allocates exactly one run", () => {

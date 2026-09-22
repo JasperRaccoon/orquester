@@ -8,13 +8,16 @@
  * the three lines that touch the event; every rule about *whether* to act is
  * here.
  *
- * **The chat shell is the single Escape owner for a tab.** Two capture-phase
- * `window` listeners for the same key cannot be ordered reliably — a listener
- * whose effect deps change (a queue mutation, a turn transition) re-registers
- * and moves to the back of the list — so whichever fired first won, and with a
- * drill-in open that meant Escape stopped the turn instead of leaving the child
- * view. The composer keeps Escape only on its own textarea, where its open
- * token menu gets first refusal.
+ * **The shell and the composer share Escape by scope, never by order.** Two
+ * capture-phase `window` listeners for the same key cannot be ordered reliably
+ * — one whose effect deps change (the composer's include `queue`) re-registers
+ * and moves to the back of the list — so whichever fired first won: two
+ * interrupts when both acted, and a stopped turn instead of a closed drill-in
+ * when the composer went first. The scopes are therefore disjoint and
+ * target-based. This half covers every Escape landing OUTSIDE the thread's
+ * composer shell; `composerOwnsEscape` (`composer/tab-visibility.ts`) covers
+ * the inside, minus the textarea, where an open token menu gets first refusal.
+ * `insideComposer` below is this side of that contract.
  */
 
 export type ChatEscapeAction = "close-drill-in" | "interrupt" | "ignore";

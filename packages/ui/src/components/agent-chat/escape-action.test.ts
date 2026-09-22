@@ -57,7 +57,7 @@ test("a blocking layer keeps the key: Escape closes the modal, not the thread", 
   );
 });
 
-test("focus inside the composer leaves Escape to it, so its token menu gets first refusal", () => {
+test("focus inside the composer belongs to the composer's own arm, not this one", () => {
   assert.equal(
     resolveChatEscape({ ...base, insideComposer: true, turnActive: true }),
     "ignore"
