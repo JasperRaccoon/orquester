@@ -1,7 +1,6 @@
 import { SYSTEM_ACCOUNT_ID, type AgentAccountsResponse, type RegistryResponse, type SessionSummary } from "@orquester/api";
-import { agentChatRoutes } from "@orquester/api/agent-chat";
+import { agentChatRoutes, SETTLED_TURN_STATES as TURN_SETTLED_STATES, startedTurns } from "@orquester/api/agent-chat";
 import type { AccountHomeKind, AdapterCapabilities, AgentAdapterId, AgentProvidersResponse, ApprovalDecision, ApprovalOption, LatestTurnSummary, ProviderOptionSelection, ProviderRequestKind, RuntimeMode, RuntimeSubagent, ThreadActivityItem, ThreadItem, ThreadSessionStatus, ThreadSnapshotPayload, ThreadTokenUsage, Turn, UserInputQuestion } from "@orquester/api/agent-chat";
-import { startedTurns } from "@orquester/api/agent-chat";
 import { resolveChatActivity, type ChatActivityRung } from "../agent-chat/activity-ladder.ts";
 import { projectNamesFor, type ProjectRef } from "./addressing.ts";
 import type { DaemonApi } from "./daemon-api.ts";
@@ -9,8 +8,9 @@ import { readThread, requireChatSession } from "./reads.ts";
 import { capText } from "./result.ts";
 
 export const VIEW_TEXT_CAP = 16_384;
-export const SETTLED_TURN_STATES: ReadonlySet<string> = new Set(["completed", "failed", "interrupted", "cancelled"]);
-/** §4.3's default four, in the GUI's order (`banner-model.ts`). */
+/** completed | failed | interrupted | cancelled — the fold's own set (`thread.ts`), typed for callers holding a plain string. */
+export const SETTLED_TURN_STATES: ReadonlySet<string> = TURN_SETTLED_STATES;
+/** §4.3's default four with the GUI's labels (`banner-model.ts` `DEFAULT_APPROVAL_OPTIONS`), listed approve-first as spec §6.2 does. */
 export const DEFAULT_APPROVAL_DECISIONS: readonly ApprovalOption[] = [
   { decision: "accept", label: "Approve" },
   { decision: "acceptForSession", label: "Always allow this session" },
@@ -144,9 +144,10 @@ export function planView(snap: ThreadSnapshotPayload, s: SessionSummary): PlanVi
   for (let i = snap.items.length - 1; i >= 0; i -= 1) {
     const item = snap.items[i]!;
     if (item.kind === "activity" && item.activityKind === "turn.proposed.completed") {
-      const p = item.payload as { planId?: string; planMarkdown?: string };
-      const md = capText(p.planMarkdown ?? "", VIEW_TEXT_CAP);
-      return { planId: p.planId ?? item.id, markdown: md.text, truncated: md.truncated, actionable: s.hasActionableProposedPlan === true };
+      const p = (item.payload ?? {}) as { planId?: unknown; planMarkdown?: unknown; truncated?: unknown };
+      const md = capText(typeof p.planMarkdown === "string" ? p.planMarkdown : "", VIEW_TEXT_CAP);
+      // The snapshot is slimmed on the wire (§5.6): a plan over 16 KiB of UTF-8 arrives already cut, `truncated` on its payload.
+      return { planId: typeof p.planId === "string" ? p.planId : item.id, markdown: md.text, truncated: md.truncated || p.truncated === true, actionable: s.hasActionableProposedPlan === true };
     }
   }
   return null;
@@ -184,13 +185,15 @@ export function lastReply(snap: ThreadSnapshotPayload): SessionDetail["lastReply
 function latestContextWindow(items: readonly ThreadItem[]): SessionDetail["chat"]["contextWindow"] | undefined {
   for (let i = items.length - 1; i >= 0; i -= 1) {
     const item = items[i]!;
-    if (item.kind === "activity" && item.activityKind === "context-window.updated") {
-      const u = item.payload as ThreadTokenUsage;
-      const cw: NonNullable<SessionDetail["chat"]["contextWindow"]> = { usedTokens: u.usedTokens };
-      if (typeof u.maxTokens === "number" && u.maxTokens > 0) { cw.maxTokens = u.maxTokens; cw.percentUsed = Math.round((u.usedTokens / u.maxTokens) * 100); }
-      if (typeof u.compactsAutomatically === "boolean") cw.compactsAutomatically = u.compactsAutomatically;
-      return cw;
-    }
+    if (item.kind !== "activity" || item.activityKind !== "context-window.updated") continue;
+    const u = (item.payload ?? {}) as Partial<Record<keyof ThreadTokenUsage, unknown>>;
+    // A row without a usable reading reaches the snapshot on purpose and every reader walks past it, as the GUI's
+    // meter does (`isResolvableContextWindowActivity`, agent-host/ingestion/coalesce.ts).
+    if (typeof u.usedTokens !== "number" || !Number.isFinite(u.usedTokens) || u.usedTokens < 0) continue;
+    const cw: NonNullable<SessionDetail["chat"]["contextWindow"]> = { usedTokens: u.usedTokens };
+    if (typeof u.maxTokens === "number" && u.maxTokens > 0) { cw.maxTokens = u.maxTokens; cw.percentUsed = Math.round((u.usedTokens / u.maxTokens) * 100); }
+    if (typeof u.compactsAutomatically === "boolean") cw.compactsAutomatically = u.compactsAutomatically;
+    return cw;
   }
   return undefined;
 }
@@ -211,7 +214,8 @@ export function sessionDetail(s: SessionSummary, snap: ThreadSnapshotPayload, ct
     model: head.modelSelection.model, options: optionsObject(head.modelSelection.options), runtimeMode: head.runtimeMode, home: head.home,
     // Turns are numbered by START ORDER (turns.ts), never by the sparse checkpoint list — this is the number revert_session/get_turn_diff speak in.
     activeTurnId: head.session.activeTurnId, turnCount: startedTurns(snap.turns).length, continueAfterRestart: head.continueAfterRestart !== undefined,
-    supports: { planMode: caps?.showPlanModeToggle ?? false, rollback: caps?.supportsConversationRollback ?? false, compaction: caps?.compaction !== undefined, backgroundTasks: caps?.supportsBackgroundTasks ?? false }
+    // An absent `supportsConversationRollback` means true (AdapterCapabilities), as the GUI reads it.
+    supports: { planMode: caps?.showPlanModeToggle ?? false, rollback: caps !== undefined && caps.supportsConversationRollback !== false, compaction: caps?.compaction !== undefined, backgroundTasks: caps?.supportsBackgroundTasks ?? false }
   };
   const label = head.accountId ? ctx.accountLabelById.get(head.accountId) : "System";
   if (label) chat.accountLabel = label;

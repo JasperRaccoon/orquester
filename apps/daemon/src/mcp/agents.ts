@@ -65,7 +65,8 @@ export async function loadAgents(api: DaemonApi, opts?: { includeLegacyModels?: 
       id: entry.id, name: entry.name, adapter, enabled: entry.enabled, installed: snapshot?.installed ?? false, version: entry.version ?? snapshot?.version ?? null,
       status: snapshot?.status ?? "unknown", auth: snapshot ? { status: snapshot.auth.status, ...(snapshot.auth.label ? { label: snapshot.auth.label } : {}), ...(snapshot.auth.email ? { email: snapshot.auth.email } : {}) } : { status: "unknown" },
       models, effortOptionId: EFFORT_OPTION_IDS[adapter], runtimeModes: RUNTIME_MODES, defaultRuntimeMode: DEFAULT_RUNTIME_MODE,
-      supports: { planMode: caps?.showPlanModeToggle ?? false, rollback: caps?.supportsConversationRollback ?? false, compaction: caps?.compaction !== undefined, backgroundTasks: caps?.supportsBackgroundTasks ?? false, contextWindow: caps?.reportsContextWindow ?? false },
+      // An absent `supportsConversationRollback` means true (AdapterCapabilities), as the GUI reads it.
+      supports: { planMode: caps?.showPlanModeToggle ?? false, rollback: caps !== undefined && caps.supportsConversationRollback !== false, compaction: caps?.compaction !== undefined, backgroundTasks: caps?.supportsBackgroundTasks ?? false, contextWindow: caps?.reportsContextWindow ?? false },
       accounts: [{ id: "system", label: "System", email: null, plan: null, needsReauth: false, isDefault: false }, ...familyAccounts.map((a) => ({ id: a.id, label: a.label, email: a.email, plan: a.plan, needsReauth: a.needsReauth, isDefault: a.id === defaultAccountId }))],
       defaultAccountId
     };

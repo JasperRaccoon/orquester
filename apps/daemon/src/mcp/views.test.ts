@@ -107,3 +107,22 @@ test("buildViewContext reads registry, accounts and providers and tolerates a fa
   assert.equal(c.capabilitiesByAdapter.size, 0);
   assert.equal(c.workspacesDir, "/w");
 });
+
+test("supports.rollback follows the AdapterCapabilities contract: absent means true, false means false, no snapshot means false", () => {
+  const caps = { sessionModelSwitch: "in-session", showPlanModeToggle: true, reportsContextWindow: true, compaction: { type: "native" } } as const;
+  const withCaps = (c: typeof caps & { supportsConversationRollback?: boolean }): ViewContext => ({ ...ctx, capabilitiesByAdapter: new Map([["claude", c]]) });
+  assert.equal(sessionDetail(chatSummary(), snapshot(), withCaps(caps)).chat.supports.rollback, true);
+  assert.equal(sessionDetail(chatSummary(), snapshot(), withCaps({ ...caps, supportsConversationRollback: false })).chat.supports.rollback, false);
+  assert.equal(sessionDetail(chatSummary(), snapshot(), { ...ctx, capabilitiesByAdapter: new Map() }).chat.supports.rollback, false);
+});
+
+test("the context meter skips a row without a usable reading, as the host's snapshot drop rule expects", () => {
+  const snap = snapshot({ items: [activity("context-window.updated", { usedTokens: 50_000, maxTokens: 200_000 }), activity("context-window.updated", { maxTokens: 200_000 })] });
+  assert.deepEqual(sessionDetail(chatSummary(), snap, ctx).chat.contextWindow, { usedTokens: 50_000, maxTokens: 200_000, percentUsed: 25 });
+  assert.equal(sessionDetail(chatSummary(), snapshot({ items: [activity("context-window.updated", null)] }), ctx).chat.contextWindow, undefined);
+});
+
+test("planView reports a plan the snapshot's wire slimming already cut as truncated", () => {
+  const snap = snapshot({ items: [activity("turn.proposed.completed", { planId: "p", planMarkdown: "計画…", truncated: true })] });
+  assert.deepEqual(planView(snap, chatSummary()), { planId: "p", markdown: "計画…", truncated: true, actionable: false });
+});

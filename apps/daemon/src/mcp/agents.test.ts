@@ -99,3 +99,10 @@ test("validateAccountId accepts system and family accounts, refuses the rest wit
   assert.throws(() => validateAccountId(agents[0], "acc-2"), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /acc-1/.test(e.message));
   assert.throws(() => validateAccountId(agents[1], "acc-3"), (e: { message: string }) => /seeded/.test(e.message));
 });
+
+test("supports.rollback follows the AdapterCapabilities contract: an absent flag means true, false means false", async () => {
+  const caps = { sessionModelSwitch: "in-session", showPlanModeToggle: true, reportsContextWindow: true, compaction: { type: "native" } };
+  const withCaps = (capabilities: Record<string, unknown>) => api().on("GET", "/api/agent/providers", { status: 200, body: { hostInstanceId: "h1", providers: [{ ...providers.providers[0], capabilities }] } });
+  assert.equal((await loadAgents(withCaps(caps)))[0].supports.rollback, true);
+  assert.equal((await loadAgents(withCaps({ ...caps, supportsConversationRollback: false })))[0].supports.rollback, false);
+});
