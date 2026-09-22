@@ -22,6 +22,7 @@ Spec: `docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md`. Every sectio
 | `adapters/index.ts` | **F** | The static `id → AdapterFactory` registry. Imports are static by rule (§8: no lazy `import()` under the host). |
 | `support/**` | **F** | Implemented, tested, dependency-free helpers every other package uses on day one. |
 | `main.ts`, `server/**`, `orchestration/**` | **W1** | The host process entry, its unix-socket HTTP server, the readiness gate, the per-thread command lock, the §3.3 reconcile, the §3.4 session-restart policy. |
+| `orchestration/provider-snapshots.ts` | **W1** | The §3.2 snapshot registry: the pending seed, the correlated on-disk cache, `startBootRefresh()`, the watcher-gated 5-minute top-up — **and the per-read bin-identity check**, one `realpath` + `stat` of the resolved bin (rate-limited per adapter) that kicks one background refresh when the CLI moved under the host. Nothing here ever spawns the CLI to decide that. |
 | `store/**` | **W2** | `ThreadStore` (§5.1): the NDJSON logs, the atomic head, the **provider-session binding** (`binding.ts` — the resume cursor's durable home, merged field-wise), the receipts ring, attachments. Also the shared fold implementations in `@orquester/api`'s `agent-chat` module. |
 | `ingestion/**` | **W3** | `Ingestion` (§5.1 rules, §5.6 batching/coalescing/slimming). The runtime→domain hop. |
 | `checkpoints/**` | **W4** | `CheckpointService` (§5.4, §5.5): the hidden per-turn git refs, the diff read, revert pruning. |

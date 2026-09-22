@@ -55,6 +55,25 @@ import {
  */
 const CONVERSATION_ID = /^[\w.][\w.\-/]*$/;
 
+/**
+ * How long one adapter is left alone after a registry-driven provider refresh.
+ *
+ * An install, an update and the version re-detection that follows are three
+ * separate registry events for the same binary; the window collapses them into
+ * one probe and makes a flapping detector unable to loop. It is only ever a
+ * *nudge* — the host re-probes a moved binary on its next read anyway
+ * (`orchestration/provider-snapshots.ts`), so a dropped nudge costs latency,
+ * never correctness.
+ */
+export const PROVIDER_REFRESH_DEBOUNCE_MS = 10_000;
+
+/**
+ * Deadline on the refresh hop. Wider than the host's own 10 s auth probe so a
+ * provider that must start a server first (OpenCode) still fits, and finite
+ * because nothing else bounds a fire-and-forget call.
+ */
+const PROVIDER_REFRESH_DEADLINE_MS = 30_000;
+
 /** One launch-env contribution, mirroring `index.ts`'s `LaunchEnv`. */
 export interface ChatLaunchEnv {
   env: Record<string, string>;
@@ -285,6 +304,125 @@ export class AgentChatService {
   /** Pids `/api/system/processes/kill` must refuse (§3.1 "Kill guard"). */
   protectedPids(): number[] {
     return this.supervisor.protectedPids();
+  }
+
+  // --- §3.2 the registry moved a CLI under the host ------------------------
+
+  /** The version each chat-capable registry entry was last seen at. */
+  private readonly registryVersions = new Map<string, string>();
+  /** The install state each chat-capable entry was last seen in. */
+  private readonly registryInstallStates = new Map<string, RegistryEntry["installState"]>();
+  /** When each adapter was last nudged, on the injected clock. */
+  private readonly providerRefreshAt = new Map<AgentAdapterId, number>();
+  /** In-flight nudges — the idempotence guard AND the §9 drain seam. */
+  private readonly providerRefreshInFlight = new Map<AgentAdapterId, Promise<void>>();
+
+  /**
+   * A registry entry changed — ask the host to re-probe the provider it maps to.
+   *
+   * The incident: `claude` was updated from Settings → Agents (2.1.278 →
+   * 2.1.280, which resolves the `opus` alias to a different model) and a chat
+   * opened afterwards still offered the old alias, because the host's snapshot
+   * was the one probed under the old binary and **nothing told it the CLI had
+   * changed**. The daemon is the one process that knows an install just
+   * happened, so it says so.
+   *
+   * Two arms, one debounce:
+   * - the install/update itself, as `installState` settles from `installing`
+   *   back to `idle` — the moment `RegistryService.runManaged` has re-resolved
+   *   the bin and kicked its own version detection;
+   * - a version that MOVED for an entry with a chat adapter, which also covers
+   *   a CLI updated outside the registry entirely.
+   *
+   * A first sighting is never a change: the host's own boot probe already owns
+   * boot. `claudex`/`claudemix` need no special case — their catalog rows carry
+   * `chat.adapter: "claude"`, so they nudge the same provider the launcher runs.
+   */
+  onRegistryEntryChanged(entry: RegistryEntry): void {
+    const adapter = entry.chat?.adapter;
+    if (!adapter) {
+      // §5.3: a row with no chat adapter has no provider to refresh.
+      return;
+    }
+    const previousState = this.registryInstallStates.get(entry.id);
+    this.registryInstallStates.set(entry.id, entry.installState);
+    const previousVersion = this.registryVersions.get(entry.id);
+    // `undefined` is "not detected yet" — `runManaged` clears the version
+    // before re-detecting it — and must never be read as a change, nor forget
+    // the version we knew.
+    if (entry.version !== undefined) {
+      this.registryVersions.set(entry.id, entry.version);
+    }
+
+    const installed = previousState === "installing" && entry.installState === "idle";
+    const moved =
+      entry.version !== undefined &&
+      previousVersion !== undefined &&
+      previousVersion !== entry.version;
+    if (!installed && !moved) {
+      return;
+    }
+    this.refreshProvider(
+      adapter,
+      installed ? `${entry.id} install/update finished` : `${entry.id} version moved`
+    );
+  }
+
+  /**
+   * Nudge the host to re-probe one provider. **Fire-and-forget**: it is never
+   * awaited by the route that triggered it, and a failure is logged and dropped
+   * — an install response must never fail because the host was busy.
+   *
+   * A refresh that actually changed something publishes the same coarse
+   * `agent.providers.changed` the manual `POST /api/agent/providers/:id/refresh`
+   * does, so an open client re-reads §6.3 exactly as it does today. (The host
+   * also bumps `providersRevision`, which the supervisor's health poll turns
+   * into the same event — this only makes it immediate.)
+   */
+  refreshProvider(adapterId: AgentAdapterId, reason: string): void {
+    if (this.providerRefreshInFlight.has(adapterId)) {
+      return;
+    }
+    if (!this.supervisor.isHealthy()) {
+      // Every host route answers 503 now, and a host that comes up later probes
+      // every provider at boot anyway.
+      return;
+    }
+    const now = (this.opts.now ?? Date.now)();
+    const last = this.providerRefreshAt.get(adapterId);
+    if (last !== undefined && now - last < PROVIDER_REFRESH_DEBOUNCE_MS) {
+      return;
+    }
+    this.providerRefreshAt.set(adapterId, now);
+    const task = this.client
+      .json<{ changed?: boolean }>(
+        "POST",
+        agentHostRoutes.providerRefresh(adapterId),
+        {},
+        { timeoutMs: PROVIDER_REFRESH_DEADLINE_MS }
+      )
+      .then((response) => {
+        if (response.value?.changed === true) {
+          this.summary.publishProvidersChanged({ adapterId });
+        }
+      })
+      .catch((error: unknown) => {
+        this.opts.logger?.warn?.(
+          `agent host provider refresh failed for ${adapterId} (${reason})`,
+          error
+        );
+      })
+      .finally(() => {
+        this.providerRefreshInFlight.delete(adapterId);
+      });
+    this.providerRefreshInFlight.set(adapterId, task);
+  }
+
+  /** Await every in-flight provider nudge. The §9 drain seam a test waits on. */
+  async drainProviderRefreshes(): Promise<void> {
+    while (this.providerRefreshInFlight.size > 0) {
+      await Promise.all([...this.providerRefreshInFlight.values()]).catch(() => undefined);
+    }
   }
 
   routeDeps(): AgentChatRouteDeps {

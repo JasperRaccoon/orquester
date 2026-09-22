@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -10,7 +10,10 @@ import type {
   RuntimeEvent
 } from "@orquester/api/agent-chat";
 
-import { createProviderSnapshotRegistry } from "./provider-snapshots.ts";
+import {
+  createProviderSnapshotRegistry,
+  PROVIDER_BIN_CHECK_INTERVAL_MS
+} from "./provider-snapshots.ts";
 import { createRecordingLogger, createTestClock, createTestTimers } from "./testing/fakes.ts";
 
 function snapshotFor(id: AgentAdapterId, overrides: Partial<ProviderSnapshot> = {}): ProviderSnapshot {
@@ -46,6 +49,9 @@ interface CacheFile {
         hostProtocolVersion: number;
         binPath?: string | null;
         version?: string | null;
+        binRealPath?: string | null;
+        binMtimeMs?: number | null;
+        binSizeBytes?: number | null;
       };
       snapshot: ProviderSnapshot;
     }
@@ -637,6 +643,207 @@ describe("§3.2 boot: pending seed, correlated cache, forced boot probe", () => 
       await registry.refreshAllNow();
       assert.ok(probe.calls >= 1, "the stopgap is kept as a fallback");
       release();
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §3.2 — a MOVED binary re-probes itself on the next read
+// ---------------------------------------------------------------------------
+
+/**
+ * The owner incident: `claude` was updated from Settings → Agents from 2.1.278
+ * to 2.1.280 (which resolves the `opus` alias to a newer model) and a chat
+ * opened two hours later still offered the OLD alias, because the host's
+ * in-memory snapshot was the one probed under 2.1.278 and nothing ever told it
+ * the CLI had changed. The registry-resolved bin is the native installer's
+ * SYMLINK (`~/.local/bin/claude` → `~/.local/share/claude/versions/<v>`), so
+ * `binPath` alone never moves — only what it points at does, which is exactly
+ * why the identity has to carry the stat and not just the path.
+ */
+describe("§3.2: a moved CLI binary re-probes itself on the next read", () => {
+  const pendingClaudeSnapshot = (checkedAt: string): ProviderSnapshot =>
+    snapshotFor("claude", {
+      installed: false,
+      version: null,
+      status: "unknown",
+      message: "Claude provider status has not been checked in this session yet.",
+      auth: { status: "unknown" },
+      checkedAt,
+      models: [{ slug: "opus", name: "Opus", isDefault: true, capabilities: null }]
+    });
+
+  interface BinHarness {
+    registry: ReturnType<typeof createProviderSnapshotRegistry>;
+    probe: { calls: number; next: ProviderSnapshot };
+    clock: ReturnType<typeof createTestClock>;
+    stateDir: string;
+    /** The stable path the probe resolves — a symlink, as on the real host. */
+    binPath: string;
+    /** Point the symlink at another installed version; answers the target. */
+    installVersion(version: string): Promise<string>;
+  }
+
+  async function withMovableBin<T>(run: (input: BinHarness) => Promise<T>): Promise<T> {
+    const stateDir = await mkdtemp(join(tmpdir(), "provider-moved-bin-"));
+    const binPath = join(stateDir, "bin", "claude");
+    await mkdir(join(stateDir, "bin"), { recursive: true });
+    const installVersion = async (version: string): Promise<string> => {
+      const dir = join(stateDir, "versions", version);
+      await mkdir(dir, { recursive: true });
+      const target = join(dir, "claude");
+      // The size differs per version, so a filesystem with a coarse mtime still
+      // sees a different binary.
+      await writeFile(target, `#!/bin/sh\necho ${version}${"x".repeat(version.length)}\n`);
+      await rm(binPath, { force: true });
+      await symlink(target, binPath);
+      return target;
+    };
+    await installVersion("2.1.278");
+    const probe = { calls: 0, next: snapshotFor("claude", { version: "2.1.278" }) };
+    const clock = createTestClock(0);
+    const registry = createProviderSnapshotRegistry({
+      probes: [
+        {
+          id: "claude",
+          pending: pendingClaudeSnapshot,
+          identity: () => ({ binPath }),
+          refresh: async () => {
+            probe.calls += 1;
+            return probe.next;
+          }
+        }
+      ],
+      stateDir,
+      logger: createRecordingLogger(),
+      clock,
+      intervalMs: 1_000,
+      setTimer: () => null,
+      clearTimer: () => undefined
+    });
+    try {
+      return await run({ registry, probe, clock, stateDir, binPath, installVersion });
+    } finally {
+      registry.stop();
+      await registry.flush();
+      await rm(stateDir, { recursive: true, force: true, maxRetries: 3 });
+    }
+  }
+
+  /** Resolves on the next snapshot change — never on elapsed time (§9). */
+  function nextChange(registry: ReturnType<typeof createProviderSnapshotRegistry>): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const off = registry.onChange(() => {
+        off();
+        resolve();
+      });
+    });
+  }
+
+  it("a read schedules exactly ONE background refresh, and the rate limit holds the next off", async () => {
+    await withMovableBin(async ({ registry, probe, clock, installVersion }) => {
+      await registry.refresh("claude");
+      assert.equal(probe.calls, 1);
+
+      // A read with the binary untouched must cost nothing.
+      registry.all();
+      registry.all();
+      assert.equal(probe.calls, 1, "an unchanged binary never schedules a refresh");
+
+      // The update: the symlink now points at a different install.
+      await installVersion("2.1.280");
+      probe.next = snapshotFor("claude", { version: "2.1.280" });
+
+      // Still inside the rate-limit window opened by the reads above: a busy
+      // client polling `/providers` cannot turn every poll into a stat.
+      registry.all();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(probe.calls, 1, "a read within the window is not even stat'ed");
+
+      clock.advance(PROVIDER_BIN_CHECK_INTERVAL_MS);
+      const changed = nextChange(registry);
+      const served = registry.all();
+      assert.equal(
+        served[0]?.version,
+        "2.1.278",
+        "the current snapshot is served meanwhile; a read never awaits the refresh"
+      );
+      // Idempotent: a busy client polling `/providers` gets one refresh, not one
+      // per request.
+      registry.all();
+      registry.all();
+      await changed;
+      assert.equal(probe.calls, 2, "exactly one background refresh");
+      assert.equal(registry.get("claude")?.version, "2.1.280");
+
+      // A THIRD install inside the rate-limit window is not even stat'ed.
+      await installVersion("2.1.281");
+      probe.next = snapshotFor("claude", { version: "2.1.281" });
+      registry.all();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(probe.calls, 2, "a second read within the window schedules none");
+
+      // Past the window it is picked up.
+      clock.advance(PROVIDER_BIN_CHECK_INTERVAL_MS);
+      const again = nextChange(registry);
+      registry.all();
+      await again;
+      assert.equal(probe.calls, 3);
+      assert.equal(registry.get("claude")?.version, "2.1.281");
+    });
+  });
+
+  it("the refreshed snapshot is cached under the NEW bin identity", async () => {
+    await withMovableBin(async ({ registry, probe, stateDir, binPath, installVersion }) => {
+      await registry.refresh("claude");
+      await registry.flush();
+      const before = JSON.parse(
+        await readFile(join(stateDir, "provider-snapshots.json"), "utf8")
+      ) as CacheFile;
+      assert.equal(before.providers.claude?.identity.binPath, binPath);
+      const firstReal = before.providers.claude?.identity.binRealPath;
+      assert.ok(firstReal, "the stat identity is written beside the snapshot");
+
+      const target = await installVersion("2.1.280");
+      probe.next = snapshotFor("claude", { version: "2.1.280" });
+      const changed = nextChange(registry);
+      registry.all();
+      await changed;
+      await registry.flush();
+
+      const after = JSON.parse(
+        await readFile(join(stateDir, "provider-snapshots.json"), "utf8")
+      ) as CacheFile;
+      assert.equal(after.providers.claude?.identity.binPath, binPath, "the symlink never moved");
+      assert.equal(after.providers.claude?.identity.binRealPath, target, "what it points at did");
+      assert.notEqual(after.providers.claude?.identity.binRealPath, firstReal);
+      assert.equal(after.providers.claude?.snapshot.version, "2.1.280");
+    });
+  });
+
+  it("the disk cache refuses to hydrate a row whose bin identity moved", async () => {
+    await withMovableBin(async ({ registry, stateDir, binPath, installVersion }) => {
+      // A cache written while the symlink still pointed at the old install …
+      await writeCache(stateDir, {
+        claude: {
+          identity: {
+            adapterId: "claude",
+            hostProtocolVersion: 1,
+            binPath,
+            binRealPath: join(stateDir, "versions", "2.1.278", "claude"),
+            binMtimeMs: 1,
+            binSizeBytes: 1
+          },
+          snapshot: snapshotFor("claude", { version: "2.1.278" })
+        }
+      });
+      // … and an update that moved it since.
+      await installVersion("2.1.280");
+
+      await registry.load();
+      const after = registry.get("claude")!;
+      assert.equal(after.status, "unknown", "the stale payload never reaches a client");
+      assert.equal(after.version, null);
     });
   });
 });

@@ -40,8 +40,23 @@
  *    stays demand-gated on a live watcher. *T3:
  *    `packages/contracts/src/settings.ts:921` — the 5-minute default;
  *    `makeManagedServerProvider.ts:214-222` — `hasProviderStatusDemand`.*
+ *
+ * **And a fourth rule, for a host that is no longer fresh: a CLI that moves
+ * under a running host re-probes itself on the next read.** The three layers
+ * above all answer "what do we serve before the first probe"; none of them
+ * notices that the binary the last probe described has since been replaced.
+ * It happened for real — `claude` updated from Settings → Agents from 2.1.278
+ * to 2.1.280, which resolves the `opus` alias to a different model, and a chat
+ * opened two hours later still offered the old one. Every read now compares a
+ * cheap `realpath` + `stat` of the resolved bin against the identity the stored
+ * snapshot was taken under ({@link PROVIDER_BIN_CHECK_INTERVAL_MS}); a mismatch
+ * kicks one background refresh and the current snapshot is served meanwhile.
+ * The daemon nudges the same route after an install/update it ran itself
+ * (`agent-chat/service.ts`'s `onRegistryEntryChanged`), so the common case does
+ * not even wait for a read.
  */
 
+import { realpathSync, statSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
@@ -64,6 +79,18 @@ import { systemClock } from "./runtime-seams.ts";
 
 /** T3's default is five minutes and user-configurable; Orquester pins it. */
 export const PROVIDER_SNAPSHOT_REFRESH_INTERVAL_MS = 5 * 60_000;
+
+/**
+ * How often, at most, a READ may stat an adapter's bin to notice that the CLI
+ * moved under the host.
+ *
+ * The check itself is one `realpath` + one `stat` of an already-resolved path —
+ * cheap enough to sit on `GET /providers`, which is what makes a moved binary
+ * self-healing without a watcher, a timer or a client that knows to ask. It is
+ * still rate-limited per adapter: a client polling provider status must not be
+ * able to turn every poll into filesystem traffic.
+ */
+export const PROVIDER_BIN_CHECK_INTERVAL_MS = 5_000;
 
 /** At most this many per-cwd overlays are retained per provider (§4.6.4). */
 export const MAX_WORKSPACE_SNAPSHOTS = 16;
@@ -106,7 +133,8 @@ export interface ProviderProbe {
 }
 
 /**
- * The correlation stamp written next to each cached snapshot.
+ * The correlation stamp written next to each cached snapshot — and, since the
+ * 2.1.278→2.1.280 incident, the thing a live read compares against too.
  *
  * `binPath` is the CLI the snapshot describes: a `npm install -g` that moves
  * the binary, or a launcher whose bin disappeared, invalidates the cache the
@@ -114,12 +142,83 @@ export interface ProviderProbe {
  * binary that is no longer there. `version` is the CLI version the probe read,
  * kept for diagnosis and for the (rare) case where the path is stable across a
  * reinstall.
+ *
+ * **`binPath` alone is not enough.** The native Claude installer resolves as a
+ * SYMLINK (`~/.local/bin/claude` → `~/.local/share/claude/versions/<v>`), so an
+ * update moves the symlink's target and leaves the path the probe resolved
+ * exactly where it was. The stat fields are what actually move: `binRealPath`
+ * catches the native installer and every other "repoint the link" updater,
+ * `binMtimeMs`/`binSizeBytes` catch an updater that rewrites the file in place.
+ * All three come from one `realpath` + one `stat` — **never** from spawning the
+ * CLI.
  */
 export interface ProviderCacheIdentity {
   /** The CLI this snapshot was probed against, absolute, or `null` for none. */
   binPath?: string | null;
   /** The CLI version the probe read, when it read one. */
   version?: string | null;
+  /** `realpath(binPath)` — where the resolved bin actually pointed. */
+  binRealPath?: string | null;
+  /** `mtimeMs` of the real file, truncated to whole milliseconds. */
+  binMtimeMs?: number | null;
+  /** Size of the real file in bytes. */
+  binSizeBytes?: number | null;
+}
+
+/** The identity fields a live read and the disk cache both correlate on. */
+const BIN_IDENTITY_FIELDS = ["binPath", "binRealPath", "binMtimeMs", "binSizeBytes"] as const;
+
+/**
+ * Do two identities describe the SAME installed binary?
+ *
+ * Only a field **both** sides actually know is compared: a value the current
+ * probe cannot name (no identity resolver, an unreadable path) is not evidence
+ * of a mismatch and must never throw away a good cache or kick a probe. A
+ * `null` on both sides — "no such binary, then and now" — correlates.
+ *
+ * `version` is deliberately NOT compared: the cached row stamps the version the
+ * probe read, which the current side cannot know without spawning the CLI —
+ * exactly what this check exists to avoid.
+ *
+ * *T3: `Layers/ProviderRegistry.ts:330-346` (`isCachedProviderCorrelated`).*
+ */
+function sameBinIdentity(left: ProviderCacheIdentity, right: ProviderCacheIdentity): boolean {
+  for (const field of BIN_IDENTITY_FIELDS) {
+    const a = left[field];
+    const b = right[field];
+    if (a !== undefined && b !== undefined && a !== b) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * What a `realpath` + `stat` of the resolved bin can say about it. Synchronous
+ * and deliberately tiny — it runs on the `GET /providers` path.
+ *
+ * Three answers, and the difference matters:
+ * - `binPath === undefined` (the probe has no identity resolver) ⇒ `{}`, i.e.
+ *   nothing is known and nothing can mismatch.
+ * - `binPath === null` (the PATH walk found no binary) ⇒ the stat fields are
+ *   `null`: "no binary" is a real, comparable fact.
+ * - an unreadable path (a race with an installer mid-rename) ⇒ `{}` again.
+ *   Unknown is never a mismatch; the next read looks again.
+ */
+function statBinIdentity(binPath: string | null | undefined): ProviderCacheIdentity {
+  if (binPath === undefined) {
+    return {};
+  }
+  if (binPath === null) {
+    return { binRealPath: null, binMtimeMs: null, binSizeBytes: null };
+  }
+  try {
+    const binRealPath = realpathSync(binPath);
+    const stats = statSync(binRealPath);
+    return { binRealPath, binMtimeMs: Math.trunc(stats.mtimeMs), binSizeBytes: stats.size };
+  } catch {
+    return {};
+  }
 }
 
 /** The identity as it is persisted — adapter + protocol + probe identity. */
@@ -206,6 +305,21 @@ function normaliseIdentityField(value: unknown): string | null | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+function normaliseIdentityNumber(value: unknown): number | null | undefined {
+  if (value === null) return null;
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/** Only the fields that are actually known, so `undefined` keeps meaning "unknown". */
+function knownIdentityFields(identity: ProviderCacheIdentity): ProviderCacheIdentity {
+  return {
+    ...(identity.binPath !== undefined ? { binPath: identity.binPath } : {}),
+    ...(identity.binRealPath !== undefined ? { binRealPath: identity.binRealPath } : {}),
+    ...(identity.binMtimeMs !== undefined ? { binMtimeMs: identity.binMtimeMs } : {}),
+    ...(identity.binSizeBytes !== undefined ? { binSizeBytes: identity.binSizeBytes } : {})
+  };
+}
+
 /**
  * The cache file is read back field-wise with a fallback, never trusted raw —
  * an old bundle's payload outlives a deploy (AGENTS.md) and §8 makes the host's
@@ -255,7 +369,12 @@ function parseCachedSnapshots(raw: unknown): Map<AgentAdapterId, CachedEntry> {
         adapterId: key,
         hostProtocolVersion: AGENT_HOST_PROTOCOL_VERSION,
         binPath: normaliseIdentityField(identity.binPath),
-        version: normaliseIdentityField(identity.version)
+        version: normaliseIdentityField(identity.version),
+        // A row written before the stat fields existed simply leaves them
+        // `undefined` — unknown, and therefore never a mismatch.
+        binRealPath: normaliseIdentityField(identity.binRealPath),
+        binMtimeMs: normaliseIdentityNumber(identity.binMtimeMs),
+        binSizeBytes: normaliseIdentityNumber(identity.binSizeBytes)
       },
       snapshot: snapshot as unknown as ProviderSnapshot
     });
@@ -266,24 +385,16 @@ function parseCachedSnapshots(raw: unknown): Map<AgentAdapterId, CachedEntry> {
 /**
  * Is a cached row still describing THIS host's installation?
  *
- * Only a field both sides actually know is compared: a `binPath` the current
- * probe cannot name (no identity resolver, or a resolver that answered
- * `undefined`) is not evidence of a mismatch and must not throw away a good
- * cache. A `null` on both sides — "no such binary, then and now" — correlates.
- *
- * *T3: `Layers/ProviderRegistry.ts:330-346` (`isCachedProviderCorrelated`).*
+ * The same comparison a live read makes ({@link sameBinIdentity}), so a cache
+ * written before an update moved the CLI — the symlink repointed, the file
+ * rewritten — is discarded rather than rendered, and the boot probe of layer
+ * three repopulates it.
  */
 function isCachedEntryCorrelated(
   cached: PersistedIdentity,
   current: ProviderCacheIdentity | undefined
 ): boolean {
-  if (current === undefined) {
-    return true;
-  }
-  if (current.binPath !== undefined && cached.binPath !== undefined) {
-    return current.binPath === cached.binPath;
-  }
-  return true;
+  return current === undefined ? true : sameBinIdentity(cached, current);
 }
 
 function mergeUsageWindows(
@@ -330,7 +441,10 @@ export function createProviderSnapshotRegistry(
       return undefined;
     }
     try {
-      return probe.identity();
+      // The probe names the resolved path (a PATH walk); the stat says which
+      // binary that path is pointing at right now. Neither spawns anything.
+      const identity = probe.identity();
+      return { ...identity, ...statBinIdentity(identity.binPath) };
     } catch (error) {
       // An identity that cannot be read is "unknown", never a mismatch: it must
       // not be able to throw away a good cache or fail a refresh.
@@ -392,7 +506,7 @@ export function createProviderSnapshotRegistry(
             identity: {
               adapterId: id,
               hostProtocolVersion: AGENT_HOST_PROTOCOL_VERSION,
-              ...(identity.binPath !== undefined ? { binPath: identity.binPath } : {}),
+              ...knownIdentityFields(identity),
               version: snapshot.version
             },
             snapshot
@@ -556,14 +670,88 @@ export function createProviderSnapshotRegistry(
     }
   };
 
+  // ---- the moved-binary check, on every read -------------------------------
+  /** When each adapter's bin was last stat'ed, on the injected clock. */
+  const lastBinCheckAt = new Map<AgentAdapterId, number>();
+  /** Adapters with a bin-change refresh already in flight (idempotence). */
+  const binRefreshQueued = new Set<AgentAdapterId>();
+
+  /**
+   * Has this adapter's CLI moved since the snapshot we are about to serve was
+   * probed? If so, kick **one** background refresh and serve the current
+   * snapshot anyway.
+   *
+   * The incident this closes: an update from Settings → Agents repointed
+   * `~/.local/bin/claude` at a new version and the host kept serving the
+   * catalogue it probed two hours earlier, so a new chat offered a model alias
+   * the installed CLI no longer resolved that way. Nothing told the host the
+   * binary had changed — now the read itself does.
+   *
+   * Four rules hold it in place:
+   * - **Never awaited.** A read returns what it holds; the refresh lands later
+   *   and reaches the client through the change listener → `providersRevision`
+   *   → `agent.providers.changed`, exactly as the manual refresh route does.
+   * - **One at a time**, through the same one-permit chain the interval uses,
+   *   so it can never race a client's `POST …/refresh`.
+   * - **Rate-limited per adapter** ({@link PROVIDER_BIN_CHECK_INTERVAL_MS}), so
+   *   a client polling `/providers` cannot turn reads into filesystem traffic.
+   * - **Unknown is never a mismatch** — see {@link sameBinIdentity}.
+   *
+   * The interval tick needs no separate check: it re-probes every adapter and
+   * re-stamps the identity as it goes.
+   */
+  const checkBinIdentity = (adapterId: AgentAdapterId): void => {
+    if (stopped || binRefreshQueued.has(adapterId)) {
+      return;
+    }
+    // Nothing probed yet: there is no identity to compare against, and layer
+    // three's boot probe is already on its way.
+    const stored = identities.get(adapterId);
+    if (stored === undefined) {
+      return;
+    }
+    const now = clock.now().getTime();
+    const last = lastBinCheckAt.get(adapterId);
+    if (last !== undefined && now - last < PROVIDER_BIN_CHECK_INTERVAL_MS) {
+      return;
+    }
+    lastBinCheckAt.set(adapterId, now);
+    const current = identityOf(adapterId);
+    if (current === undefined || sameBinIdentity(stored, current)) {
+      return;
+    }
+    options.logger.info(`provider CLI changed under the host, re-probing ${adapterId}`, {
+      adapterId,
+      binPath: current.binPath ?? null,
+      was: stored.binRealPath ?? stored.binPath ?? null,
+      now: current.binRealPath ?? current.binPath ?? null
+    });
+    binRefreshQueued.add(adapterId);
+    void serialise(() => refreshOne(adapterId))
+      .catch((error: unknown) => {
+        options.logger.warn(`provider snapshot refresh failed for ${adapterId}`, error);
+      })
+      .finally(() => {
+        binRefreshQueued.delete(adapterId);
+      });
+  };
+
+  const checkBinIdentities = (): void => {
+    for (const adapterId of probes.keys()) {
+      checkBinIdentity(adapterId);
+    }
+  };
+
   return {
     all(): ProviderSnapshot[] {
+      checkBinIdentities();
       return ADAPTER_IDS.map((id) => snapshots.get(id)).filter(
         (snapshot): snapshot is ProviderSnapshot => snapshot !== undefined
       );
     },
 
     get(adapterId: AgentAdapterId): ProviderSnapshot | null {
+      checkBinIdentity(adapterId);
       return snapshots.get(adapterId) ?? null;
     },
 
@@ -736,8 +924,12 @@ export function createProviderSnapshotRegistry(
           continue;
         }
         snapshots.set(id, entry.snapshot);
+        // The identity the CACHED snapshot was produced under, not the one just
+        // read: `identities` means "what this snapshot describes", and the
+        // correlation above already proved the two agree on everything both
+        // sides know.
         identities.set(id, {
-          ...(entry.identity.binPath !== undefined ? { binPath: entry.identity.binPath } : {}),
+          ...knownIdentityFields(entry.identity),
           ...(entry.identity.version !== undefined ? { version: entry.identity.version } : {})
         });
         probed.add(id);

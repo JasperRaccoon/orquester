@@ -537,7 +537,15 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     broadcaster.publish("projects", "project.git.changed", { path, status } satisfies GitStatusChangedPayload)
   );
   // Stream registry changes (install/update status, detected versions) to clients.
-  registry.events.on("changed", (entry) => broadcaster.publish("registry", "registry.changed", entry));
+  // The same event is the ONLY place the daemon learns that an install/update
+  // finished or that an agent's version moved, so it is also where the agent
+  // host is told to re-probe that provider — otherwise a CLI updated from
+  // Settings → Agents leaves the host serving the catalog it probed under the
+  // old binary (chat design spec §3.2; fire-and-forget, debounced per adapter).
+  registry.events.on("changed", (entry: RegistryEntry) => {
+    broadcaster.publish("registry", "registry.changed", entry);
+    agentChat.onRegistryEntryChanged(entry);
+  });
   agentAccounts.events.on("changed", (payload) => broadcaster.publish("agent-accounts", "agent-accounts.changed", payload));
   const claudeAccountSource = (home?: string) =>
     createClaudeSource({ userhome: resolved.vars.userhome, now: () => Date.now(), claudeHome: home, logger: console });
