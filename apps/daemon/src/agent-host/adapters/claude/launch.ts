@@ -2,8 +2,12 @@
  * Claude adapter — the SDK launch configuration (spec §4.4, §4.5 "Launch").
  *
  * Ported from T3 Code (MIT):
- * `apps/server/src/provider/Layers/ClaudeAdapter.ts:4834-4965` (the whole
- * `Options` object, the extraArgs strip and the folded permission mode).
+ * `apps/server/src/provider/Layers/ClaudeAdapter.ts:4913-4965` (the whole
+ * `Options` object). T3's launch-arg strip and folded permission mode
+ * (`:4834-4838`, `:4886-4891`) are deliberately NOT ported: a registry row's
+ * `args` are the terminal launcher's flags and never reach a chat launch, so
+ * the permission mode is the runtime mode's alone and `effort` the model
+ * selection's alone.
  *
  * This module is pure so every row of §4.4's Claude column is a test
  * (`launch.test.ts`) rather than something only a live CLI could show.
@@ -80,57 +84,6 @@ export const CLAUDE_NEVER_SET_OPTIONS = [
  */
 export const CLAUDE_SESSION_ALLOWED_DESPITE_SPEC = ["stderr"] as const;
 
-/**
- * A user's launch args, tokenised into SDK `extraArgs`. `permission-mode` and
- * `dangerously-skip-permissions` are **removed** and folded into
- * `permissionMode` instead, because the CLI resolves both inputs together and
- * argv order would otherwise decide which wins.
- */
-export function parseClaudeLaunchArgs(args: readonly string[]): {
-  extraArgs: Record<string, string | null>;
-  permissionMode?: string;
-  skipPermissions: boolean;
-} {
-  const extraArgs: Record<string, string | null> = {};
-  let permissionMode: string | undefined;
-  let skipPermissions = false;
-
-  for (let index = 0; index < args.length; index += 1) {
-    const token = args[index]!;
-    if (!token.startsWith("--")) {
-      continue;
-    }
-    const body = token.slice(2);
-    const eq = body.indexOf("=");
-    const name = eq >= 0 ? body.slice(0, eq) : body;
-    let value: string | null = eq >= 0 ? body.slice(eq + 1) : null;
-    if (eq < 0) {
-      const next = args[index + 1];
-      if (next !== undefined && !next.startsWith("--")) {
-        value = next;
-        index += 1;
-      }
-    }
-    if (name === "permission-mode") {
-      if (value !== null) {
-        permissionMode = value;
-      }
-      continue;
-    }
-    if (name === "dangerously-skip-permissions") {
-      skipPermissions = value === null || value === "true";
-      continue;
-    }
-    extraArgs[name] = value;
-  }
-
-  return {
-    extraArgs,
-    ...(permissionMode !== undefined ? { permissionMode } : {}),
-    skipPermissions
-  };
-}
-
 export interface BuildClaudeQueryOptionsInput {
   cwd: string;
   /** The registry-resolved `claude`, never the SDK's bundled copy (§10). */
@@ -152,8 +105,6 @@ export interface BuildClaudeQueryOptionsInput {
   /** A transcript uuid to resume at, set only by a rollback. */
   resumeSessionAt?: string;
   sessionId?: string;
-  /** The user's launch args, if the host ever supplies them. */
-  launchArgs?: readonly string[];
   /** cliproxy's `autoCompactWindow`, when the launcher env carries one. */
   autoCompactWindow?: number;
 }
@@ -161,8 +112,9 @@ export interface BuildClaudeQueryOptionsInput {
 export interface BuiltClaudeQueryOptions {
   options: ClaudeQueryOptions;
   /**
-   * The session's base permission mode, restored after a plan turn. It is the
-   * SDK's own union because a user launch arg may name any of them.
+   * The session's base permission mode, restored after a plan turn: the
+   * runtime mode's (§4.4), or `"default"` where Supervised leaves it unset.
+   * Typed as the SDK's own union because `setPermissionMode` takes that.
    */
   basePermissionMode: NonNullable<ClaudeQueryOptions["permissionMode"]>;
   effort: "low" | "medium" | "high" | "xhigh" | "max" | undefined;
@@ -172,7 +124,6 @@ export interface BuiltClaudeQueryOptions {
 export function buildClaudeQueryOptions(
   input: BuildClaudeQueryOptionsInput
 ): BuiltClaudeQueryOptions {
-  const parsed = parseClaudeLaunchArgs(input.launchArgs ?? []);
   const model = findModel(input.models, input.modelSelection?.model);
   const modelSlug = input.modelSelection?.model?.trim();
   const effort = resolveEffortLevel(input.modelSelection, model);
@@ -184,19 +135,15 @@ export function buildClaudeQueryOptions(
     CLAUDE_OPTION_IDS.ultracode
   );
 
-  // A permission launch arg is folded into the mode rather than passed
-  // through: the CLI resolves both inputs together, so argv order must never
-  // let the user's flag win by accident.
-  const permissionMode =
-    (parsed.permissionMode as ClaudeQueryOptions["permissionMode"] | undefined) ??
-    (parsed.skipPermissions
-      ? ("bypassPermissions" as const)
-      : RUNTIME_MODE_TO_PERMISSION_MODE[input.runtimeMode]);
+  // The runtime mode is the ONLY authority (§4.4). A registry row's
+  // `--dangerously-skip-permissions` is the terminal launcher's and never
+  // reaches this function; `full-access` keeps its meaning through the
+  // `bypassPermissions` + `allowDangerouslySkipPermissions` pair below.
+  const permissionMode = RUNTIME_MODE_TO_PERMISSION_MODE[input.runtimeMode];
 
   // Summaries are what §4.2's `reasoning_summary_text` carries; Claude never
   // returns the raw chain of thought.
-  const wantsThinkingSummaries =
-    thinking !== false && parsed.extraArgs["thinking-display"] !== "omitted";
+  const wantsThinkingSummaries = thinking !== false;
 
   const settings: Record<string, unknown> = {
     ...(typeof thinking === "boolean" ? { alwaysThinkingEnabled: thinking } : {}),
@@ -211,8 +158,11 @@ export function buildClaudeQueryOptions(
   };
   const effectiveEffort = ultracode === true ? ("xhigh" as const) : effort;
 
-  const extraArgs = { ...parsed.extraArgs };
-  if (wantsThinkingSummaries && extraArgs["thinking-display"] === undefined) {
+  // Only flags the adapter authors itself. `effort` rides the SDK's own option
+  // above: the SDK appends `extraArgs` after its own flags and the CLI keeps
+  // the LAST `--effort`, so a second one here would overrule the chip.
+  const extraArgs: Record<string, string | null> = {};
+  if (wantsThinkingSummaries) {
     extraArgs["thinking-display"] = "summarized";
   }
 

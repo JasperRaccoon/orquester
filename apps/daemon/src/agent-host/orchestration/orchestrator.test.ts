@@ -1691,13 +1691,19 @@ describe("orchestrator — the ingestion hooks (§5.1, §5.4)", () => {
     await host.stop();
   });
 
-  it("hands the registry entry's launch args to startSession", async () => {
+  it("startSession receives no launch args", async () => {
+    // Registry `args` are the TERMINAL launcher's flags
+    // (`--dangerously-skip-permissions`, `--effort …`, `--yolo`); a chat
+    // launch never sees them. Permissions come only from `runtimeMode`.
     const host = createTestHost();
     const threadId = await host.createThread();
     await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
     await host.settle();
-    // The harness declares none, so the field is absent rather than empty.
-    assert.equal(host.adapter.lastStart?.launchArgs, undefined);
+    const start = host.adapter.lastStart;
+    assert.ok(start !== null, "the turn started a session");
+    // No key carrying argv under any spelling — the mode is the only lever.
+    assert.deepEqual(Object.keys(start).filter((key) => /args$/i.test(key)), []);
+    assert.equal(start.runtimeMode, "approval-required");
     await host.stop();
   });
 });

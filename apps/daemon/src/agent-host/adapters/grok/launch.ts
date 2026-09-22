@@ -251,6 +251,21 @@ export function grokReasoningEffort(selection: ModelSelection | undefined): stri
  *   because it costs nothing and a later release may widen the overlay; the
  *   adapter's real defence is reading `agentVersion` on every handshake.
  *
+ * **Deliberately NOT here: `[ui] permission_mode`.** The user's own config
+ * may say `permission_mode = "always-approve"` (this host's does), so pinning
+ * the mode per thread was the obvious move — and the overlay cannot carry it.
+ * Verified against grok 1.0.34 (2026-09-22): the key is `[ui]
+ * permission_mode`, its values `default` / `ask` / `auto` / `always-approve`
+ * (the CLI's own config reference; `acceptEdits` is a `--permission-mode`
+ * value, not a config one), but a `GROK_CONFIG_PATH` / `GROK_CONFIG` overlay
+ * keeps only `models`, `features`, a narrowed `toolset` and
+ * `shell_environment_policy` and drops every other table. `grok inspect
+ * --json` reports an overlay of `[features]` + `[cli]` + `[ui]` as `sections:
+ * features`, and one of `[ui]` + `[models]` as `sections: models`. A `[ui]`
+ * line would pin nothing, so the mode rides argv instead ({@link
+ * grokSpawnArgs}: every runtime mode names itself there) — the CLI-flag tier,
+ * which the CLI documents as overriding config for that process.
+ *
  * **Why an overlay and not the account home.** The previous revision patched
  * `<accountHome>/config.toml`. On this host that path is a SYMLINK:
  *

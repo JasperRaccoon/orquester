@@ -9,6 +9,8 @@ import { mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { RUNTIME_MODES } from "@orquester/api/agent-chat";
+
 import {
   GROK_EXTRA_ENV,
   GROK_PRODUCT_SLUG,
@@ -16,6 +18,7 @@ import {
   compareVersions,
   GROK_CONFIG_PATH_ENV,
   grokReasoningEffort,
+  grokSpawnArgs,
   hasReasoningEffortPreference,
   meetsMinimumGrokVersion,
   parseGrokVersion,
@@ -124,6 +127,26 @@ test("the overlay carries the setting the approvals surface depends on", () => {
   assert.match(rendered, /\[features\]\nsupport_permission = true/);
   assert.match(rendered, /\[cli\]\nauto_update = false/);
   assert.equal(GROK_CONFIG_PATH_ENV, "GROK_CONFIG_PATH");
+});
+
+test("no runtime mode pins the permission mode in the overlay — it rides argv", () => {
+  // The CLI drops every overlay table outside its allowlist (`models`,
+  // `features`, a narrowed `toolset`, `shell_environment_policy`). Measured on
+  // grok 1.0.34: `grok inspect --json` reports an overlay carrying
+  // `[features]` + `[cli]` + `[ui]` as `sections: features`. A
+  // `[ui] permission_mode` line here would pin nothing, so every mode names
+  // itself on the command line instead — the flag tier, above the user's own
+  // `[ui] permission_mode` (this host's says "always-approve").
+  const rendered = renderGrokOverlayConfig();
+  assert.doesNotMatch(rendered, /^\[ui\]$/m);
+  assert.doesNotMatch(rendered, /permission_mode/);
+  for (const mode of RUNTIME_MODES) {
+    const args = grokSpawnArgs(mode);
+    const named =
+      (args[0] === "--permission-mode" && typeof args[1] === "string") ||
+      args.includes("--always-approve");
+    assert.ok(named, `${mode} must name its permission mode in argv`);
+  }
 });
 
 test("the overlay is written into a host-owned dir and its path returned", async () => {

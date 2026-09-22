@@ -124,8 +124,6 @@ export interface CodexSessionOptions {
   /** Absolute, already expanded — nothing shell-expands an env value (§3.1). */
   codexHome?: string;
   bin: string;
-  /** Tokenised user launch args, appended after `app-server`. */
-  launchArgs?: readonly string[];
   env: Record<string, string>;
   runtimeMode: RuntimeMode;
   modelSelection: ModelSelection;
@@ -319,7 +317,10 @@ export class CodexSession {
   async start(): Promise<ProviderSession> {
     const child = spawnProviderChild({
       command: this.options.bin,
-      args: ["app-server", ...(this.options.launchArgs ?? [])],
+      // Exactly `app-server`. The registry row's `--yolo` is the terminal
+      // CLI's flag (`app-server` does not take it); the runtime mode rides
+      // `thread/start` (§4.4).
+      args: ["app-server"],
       env: this.options.env,
       cwd: this.options.cwd
     });

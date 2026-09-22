@@ -211,12 +211,6 @@ export interface OrchestratorOptions {
   /** A tab the user closed: settled on the next boot, never continued (§3.3). */
   isThreadClosed?(threadId: string): boolean | Promise<boolean>;
   /**
-   * The registry entry's own launch args, handed to `startSession` so an
-   * adapter that folds a flag into its protocol (Claude's `--permission-mode`)
-   * sees what the entry declares.
-   */
-  launchArgsForRefId?(refId: string): readonly string[];
-  /**
    * Where the §6.1 `launchEnv`/`unsetEnv`/`homePath`/`proxyRefId` are kept. The
    * daemon sends them once, at create; a session may be started much later by
    * lazy recovery or by the reconcile, so they must survive a host restart.
@@ -980,7 +974,6 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       accountId: head.accountId,
       home: head.home
     });
-    const launchArgs = options.launchArgsForRefId?.(head.refId) ?? [];
     const session = await adapter.startSession({
       threadId: runtime.id,
       // R4-6: the PROJECT ROOT, not the thread's `cwd`. OpenCode pools one
@@ -994,7 +987,6 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       title: head.title,
       modelSelection: head.modelSelection,
       runtimeMode: head.runtimeMode,
-      ...(launchArgs.length > 0 ? { launchArgs } : {}),
       ...(resumeCursor !== undefined ? { resumeCursor } : {})
     });
     runtime.bound = { ...desired, session };
