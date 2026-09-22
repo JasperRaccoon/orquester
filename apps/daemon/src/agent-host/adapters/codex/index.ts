@@ -48,7 +48,7 @@ import {
   probeCodex,
   uninstalledCodexSnapshot
 } from "./probe.ts";
-import { CodexSession, type CodexResumeCursor } from "./session.ts";
+import { CodexSession, codexIngestsAttachment, type CodexResumeCursor } from "./session.ts";
 import type { RuntimeEventDraft } from "./normalise.ts";
 import type { RuntimeEvent } from "@orquester/api/agent-chat";
 
@@ -394,7 +394,9 @@ export const createCodexAdapter: AdapterFactory = async (
       return getSnapshot({ ...(input?.cwd !== undefined ? { cwd: input.cwd } : {}), force: true });
     },
 
-    pendingSnapshot: pendingCodexSnapshot
+    pendingSnapshot: pendingCodexSnapshot,
+
+    ingestsAttachment: codexIngestsAttachment
   };
 
   // Honour host shutdown: every child is owned by its session's scope, and

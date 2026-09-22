@@ -167,6 +167,14 @@ interface LiveTask {
   agentPath?: string;
 }
 
+/**
+ * §4.1/§4.5: Codex ingests images natively — by PATH, as a `localImage` input
+ * item, never base64. Every other attachment reaches it as the host's
+ * `Attached file: <name> (<absolute path>)` line at the end of the text.
+ */
+export const codexIngestsAttachment = (attachment: AttachmentRef): boolean =>
+  attachment.type === "image";
+
 export class CodexSession {
   readonly threadId: string;
 
@@ -450,9 +458,10 @@ export class CodexSession {
       });
     }
     for (const attachment of input.attachments) {
-      // Images by PATH, never base64 (§4.5). Everything else is already
-      // flattened into the prompt text by the host.
-      if (attachment.type !== "image") {
+      // Images by PATH, never base64 (§4.5). The host hands this adapter only
+      // what `codexIngestsAttachment` accepts; every other attachment is
+      // already an `Attached file:` line in the text item above (§4.1).
+      if (!codexIngestsAttachment(attachment)) {
         continue;
       }
       const path = await this.options.context.resolveAttachmentPath(this.threadId, attachment.id);

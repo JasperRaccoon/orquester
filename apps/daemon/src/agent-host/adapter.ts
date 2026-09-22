@@ -70,9 +70,23 @@ export interface StartSessionInput {
 
 export interface SendTurnInput {
   threadId: string;
-  /** One flat string, already trimmed and bounds-checked by the host (§4.1). */
+  /**
+   * One flat string: the text, already trimmed and bounds-checked by the host
+   * (§4.1), followed by one `Attached file: <name> (<absolute path>)` line per
+   * attachment this adapter does NOT ingest natively
+   * ({@link AgentAdapter.ingestsAttachment}). The lines always come AFTER the
+   * text, behind a blank line, so a typed `/command` still opens the input
+   * (§4.6.9); a file-only turn is the lines alone. The lines add at most
+   * `ATTACHMENT_LINES_MAX_CHARS` (`orchestration/attachment-lines.ts`) to a
+   * turn's `MAX_TURN_INPUT_CHARS` of text.
+   */
   input: string;
-  /** References only, resolved by the host against the thread's attachments dir. */
+  /**
+   * Only the attachments this adapter ingests natively — references, resolved
+   * by the host against the thread's attachments dir, each carrying the
+   * `sizeBytes` the host STAT'd. Every other attachment is already a path line
+   * in `input`, so an adapter never prints a path of its own.
+   */
   attachments: AttachmentRef[];
   modelSelection?: ModelSelection;
   interactionMode: InteractionMode;
@@ -279,6 +293,24 @@ export interface AgentAdapter {
    * reachable from an adapter reference, and so a new adapter cannot forget it.
    */
   pendingSnapshot(checkedAt: string): ProviderSnapshot;
+
+  /**
+   * Whether this adapter hands `attachment` to its provider NATIVELY — inline
+   * image bytes (Claude), a `localImage` path item (Codex), a `file` part
+   * (OpenCode) — rather than as the host's
+   * `Attached file: <name> (<absolute path>)` line (§4.1).
+   *
+   * The host partitions every turn's attachments on it in the turn effect:
+   * `true` rides {@link SendTurnInput.attachments}, anything else becomes a
+   * path line appended to {@link SendTurnInput.input}, so a PDF, a CSV or a
+   * paste turned into `pasted-text.txt` always reaches the agent — even on a
+   * provider that ingests nothing (Grok answers `false` for everything).
+   *
+   * **Required, synchronous and pure**: no I/O and no session state, judged
+   * on the ref alone — whose `sizeBytes` is the size the host STAT'd, never
+   * the one the client declared.
+   */
+  ingestsAttachment(attachment: AttachmentRef): boolean;
 
   /** The adapter's canonical event stream. One consumer: the host's ingestion. */
   readonly events: AsyncIterable<RuntimeEvent>;

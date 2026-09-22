@@ -17,6 +17,7 @@ import type {
   AdapterCapabilities,
   AgentAdapterId,
   ApprovalDecision,
+  AttachmentRef,
   ProviderSession,
   ProviderSnapshot,
   RuntimeEvent,
@@ -64,6 +65,11 @@ export interface ScriptedAdapterOptions {
   failInterrupt?: Error | null;
   failApproval?: Error | null;
   version?: string | null;
+  /**
+   * The adapter's §4.1 `ingestsAttachment`. Defaults to ingesting nothing, so
+   * every attachment reaches `sendTurn` as a path line in `input`.
+   */
+  ingestsAttachment?: (attachment: AttachmentRef) => boolean;
 }
 
 export interface ScriptedAdapter extends AgentAdapter {
@@ -142,6 +148,7 @@ export function createScriptedAdapter(options: ScriptedAdapterOptions = {}): Scr
     calls,
     turnIds,
     events,
+    ingestsAttachment: options.ingestsAttachment ?? (() => false),
 
     get lastStart() {
       return lastStart;

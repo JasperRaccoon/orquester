@@ -663,7 +663,6 @@ export class GrokSession {
    */
   async sendTurn(input: {
     text: string;
-    attachments?: ReadonlyArray<{ id: string; name: string; path: string; mimeType?: string }>;
     modelSelection?: ModelSelection;
     interactionMode: "default" | "plan";
   }): Promise<{ turnId: string; resumeCursor: GrokResumeCursor }> {
@@ -717,19 +716,14 @@ export class GrokSession {
       }
       await this.applyInteractionMode(input.interactionMode);
 
-      // Attachments reach the agent as PATHS, not bytes:
-      // `agentCapabilities.promptCapabilities.image` is **false** on this CLI,
-      // so T3's "Grok ingests images only" path would be sending a content
-      // block the agent has said it cannot take. A path line is something the
-      // agent's own `read_file` tool can act on.
-      const attachmentLines = (input.attachments ?? []).map(
-        (attachment) => `- ${attachment.name}: ${attachment.path}`
-      );
-      const text =
-        attachmentLines.length === 0
-          ? input.text
-          : `${input.text}\n\nAttached files:\n${attachmentLines.join("\n")}`;
-      const prompt = [{ type: "text" as const, text }];
+      // Attachments reach the agent as PATHS, not bytes, and they are already
+      // in `input.text`: `agentCapabilities.promptCapabilities.image` is
+      // **false** on this CLI, so T3's "Grok ingests images only" path would
+      // be sending a content block the agent has said it cannot take — the
+      // adapter ingests nothing natively and the host appends one
+      // `Attached file: <name> (<absolute path>)` line per file (§4.1), which
+      // the agent's own `read_file` tool can act on.
+      const prompt = [{ type: "text" as const, text: input.text }];
       const promise = this.peer().request<PromptResponse>(
         "session/prompt",
         { sessionId: this.acpSessionId, prompt },

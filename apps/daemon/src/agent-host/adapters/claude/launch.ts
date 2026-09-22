@@ -251,9 +251,10 @@ export function buildClaudeQueryOptions(
       ? { onUserDialog: input.onUserDialog, supportedDialogKinds: ["resume_return"] }
       : {}),
     env: input.env,
-    // The attachments grant lets the agent read a pasted image at the path the
-    // turn text names, without an approval prompt. It is a leaf directory
-    // holding only attachment files.
+    // The attachments grant lets the agent read every attachment it does not
+    // get inline — a PDF, a CSV, a pasted-text file — at the absolute path the
+    // host's `Attached file:` line in the turn text names (§4.1), without an
+    // approval prompt. It is a leaf directory holding only attachment files.
     additionalDirectories: [input.cwd, input.attachmentsDir],
     // No SDK-registered MCP server: the daemon's terminal-shaped `/mcp` server
     // is out of scope (§2). `strictMcpConfig` stays unset so the user's own

@@ -121,6 +121,20 @@ interface BackgroundShellTail {
 
 const IMAGE_MIME_TYPES = new Set<string>(SUPPORTED_ATTACHMENT_IMAGE_MIME_TYPES);
 
+/**
+ * §4.1: Claude ingests an attachment natively — as an inline base64 image
+ * block — only when it is an image of a mime the API accepts. Everything else
+ * (a PDF, a CSV, a pasted-text file, an image of any other mime) reaches the
+ * agent as the host's `Attached file: <name> (<absolute path>)` line instead,
+ * which the attachments-dir grant (`launch.ts`) lets it `Read` without an
+ * approval prompt. Pure; judged on the ref alone.
+ */
+export function claudeIngestsAttachment(
+  attachment: AttachmentRef
+): attachment is Extract<AttachmentRef, { type: "image" }> {
+  return attachment.type === "image" && IMAGE_MIME_TYPES.has(attachment.mimeType);
+}
+
 interface PendingApproval {
   requestId: string;
   requestType: CanonicalRequestType;
@@ -1639,13 +1653,11 @@ export class ClaudeSession {
     }
 
     for (const attachment of input.attachments) {
-      // Claude ingests images only; a generic file reaches the agent through
-      // the path line the host puts in the prompt.
-      if (attachment.type !== "image") {
+      // The host hands this adapter only what `claudeIngestsAttachment`
+      // accepts; every other attachment is already an `Attached file:` line
+      // at the end of `input.text` (§4.1), which the final text block carries.
+      if (!claudeIngestsAttachment(attachment)) {
         continue;
-      }
-      if (!IMAGE_MIME_TYPES.has(attachment.mimeType)) {
-        throw new Error(`Unsupported Claude image attachment type '${attachment.mimeType}'.`);
       }
       const path = await this.options.context.resolveAttachmentPath(this.threadId, attachment.id);
       const bytes = await fs.readFile(path);
