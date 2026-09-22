@@ -256,28 +256,57 @@ export function createFakeIngestion(input: {
 // ---------------------------------------------------------------------------
 
 export interface FakeCheckpointService extends CheckpointService {
-  readonly pruned: Array<{ threadId: string; targetTurnCount: number }>;
+  /** Every `pruneAbove`, in order; `droppedTurnCounts` is `[]` when none was named. */
+  readonly pruned: Array<{
+    threadId: string;
+    targetTurnCount: number;
+    droppedTurnCounts: number[];
+  }>;
   readonly deleted: string[];
   /** Thread ids a baseline was requested for, in order. */
   readonly baselines: string[];
+  /**
+   * Every `captureBaseline` request as the host made it, in order — the turn it
+   * precedes and the count it named (§5.5: checkpoints count turns by order).
+   */
+  readonly baselineRequests: Array<{
+    threadId: string;
+    turnId?: string | null;
+    turnCount?: number;
+  }>;
+  /** Every `captureTurnEnd` request, in order, with the ordinal the host named. */
+  readonly turnEndRequests: Array<{
+    threadId: string;
+    turnId: string | null;
+    turnCount?: number;
+  }>;
   /** Set to model a project that is not a git repo (§5.4 skips silently). */
   nonGit: boolean;
   /** Adapters whose rollback is refused (§5.5 step 2). Grok by default. */
   rollbackUnsupported: Set<AgentAdapterId>;
   diff: string;
+  /**
+   * The derived counter: what a capture falls back to when the host names no
+   * `turnCount`. A named count wins and advances this to at least itself, the
+   * way the real service's "highest existing + 1" would.
+   */
   turnCount: number;
   /** Override what `captureBaseline` answers; `null` models a non-git project. */
   baseline?: CaptureResult | null;
 }
 
 export function createFakeCheckpointService(): FakeCheckpointService {
-  const pruned: Array<{ threadId: string; targetTurnCount: number }> = [];
+  const pruned: FakeCheckpointService["pruned"] = [];
   const deleted: string[] = [];
   const baselines: string[] = [];
+  const baselineRequests: FakeCheckpointService["baselineRequests"] = [];
+  const turnEndRequests: FakeCheckpointService["turnEndRequests"] = [];
   const fake: FakeCheckpointService = {
     pruned,
     deleted,
     baselines,
+    baselineRequests,
+    turnEndRequests,
     nonGit: false,
     rollbackUnsupported: new Set<AgentAdapterId>(["grok"]),
     diff: "",
@@ -288,14 +317,24 @@ export function createFakeCheckpointService(): FakeCheckpointService {
      * `ready`, which is what the real service does from a thread's second turn
      * onwards. Set `fake.baseline = null` to model a non-git project.
      */
-    async captureBaseline(input: { threadId: string }): Promise<CaptureResult | null> {
+    async captureBaseline(input: {
+      threadId: string;
+      turnId?: string | null;
+      turnCount?: number;
+    }): Promise<CaptureResult | null> {
       // Recorded so a test can assert WHEN the baseline was taken, not just
       // what it answered — the §5.4 ordering is the thing under test.
       baselines.push(input.threadId);
+      baselineRequests.push({
+        threadId: input.threadId,
+        ...(input.turnId !== undefined ? { turnId: input.turnId } : {}),
+        ...(input.turnCount !== undefined ? { turnCount: input.turnCount } : {})
+      });
+      const turnCount = input.turnCount ?? fake.turnCount;
       return fake.baseline === undefined
         ? {
-            turnCount: fake.turnCount,
-            ref: `refs/orquester/checkpoints/${input.threadId}/turn/${fake.turnCount}`,
+            turnCount,
+            ref: `refs/orquester/checkpoints/${input.threadId}/turn/${turnCount}`,
             status: "ready"
           }
         : fake.baseline;
@@ -305,13 +344,21 @@ export function createFakeCheckpointService(): FakeCheckpointService {
       cwd: string;
       turnId: string | null;
       assistantMessageId: string | null;
+      turnCount?: number;
     }): Promise<TurnDiffSummary | null> {
-      fake.turnCount += 1;
+      turnEndRequests.push({
+        threadId: input.threadId,
+        turnId: input.turnId,
+        ...(input.turnCount !== undefined ? { turnCount: input.turnCount } : {})
+      });
+      // The turn's ordinal when the host names it; the counter otherwise.
+      const turnCount = input.turnCount ?? fake.turnCount + 1;
+      fake.turnCount = Math.max(fake.turnCount, turnCount);
       const files: CheckpointFile[] = [];
       const status: CheckpointStatus = "ready";
       return {
-        turnCount: fake.turnCount,
-        ref: `refs/orquester/checkpoints/${input.threadId}/turn/${fake.turnCount}`,
+        turnCount,
+        ref: `refs/orquester/checkpoints/${input.threadId}/turn/${turnCount}`,
         status,
         turnId: input.turnId,
         files,
@@ -323,7 +370,11 @@ export function createFakeCheckpointService(): FakeCheckpointService {
       return fake.diff;
     },
     async pruneAbove(input): Promise<void> {
-      pruned.push({ threadId: input.threadId, targetTurnCount: input.targetTurnCount });
+      pruned.push({
+        threadId: input.threadId,
+        targetTurnCount: input.targetTurnCount,
+        droppedTurnCounts: [...(input.droppedTurnCounts ?? [])]
+      });
     },
     async deleteThreadRefs(input): Promise<void> {
       deleted.push(input.threadId);

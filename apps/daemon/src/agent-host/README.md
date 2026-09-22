@@ -66,6 +66,16 @@ would let the host exit with a child still running.
   `Ingestion.drain()` exist for exactly that.
 - `raw.ndjson` is **as sensitive as the repository** (§10): it records whatever the agent read.
   Redact before anything leaves the host.
+- **Checkpoints and reverts count turns by ORDER; the checkpoint list is no longer the counter**
+  (§5.4, §5.5). A turn's number is its position among the started turns — `startedTurns` /
+  `turnOrdinal` in `@orquester/api`'s `agent-chat/turns.ts`, the same function the client's
+  "rewind to here" uses. `/revert` validates `targetTurnCount` against it, names the cut to the
+  adapter by turn id (`RollbackTarget`) and prunes the dropped turns' own checkpoint counts as well
+  as everything above the target (older threads carry dense counts). Checkpoints are numbered by
+  it too — the turn with ordinal N has its baseline at `turn/<N-1>` and its completion at
+  `turn/<N>` — so ref numbers are sparse wherever git was absent, a capture failed or history was
+  resumed, and that is expected. The late-capture guard a revert arms (`revertedTo`) is lifted by
+  the next `turn.started`, or a genuinely new turn (`target + 1`) would be dropped with it.
 - **An identity change writes `launch.json` before the head, and starts nothing** (§3.4).
   `buildEnv`/`resolveHome` in `main.ts` read the live launch config, so the order is what makes the
   next session start pick the new account up; the restart itself is the ordinary ensure step on the

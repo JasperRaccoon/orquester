@@ -57,6 +57,71 @@ async function pushActivity(
   ]);
 }
 
+/**
+ * A settled turn with its completion checkpoint, the way a real thread gets
+ * one: the prompt and the `/turn` command's pending row, the provider's id
+ * adopted by a `running` session, `ready`, then the checkpoint.
+ */
+async function seedCheckpointedTurn(
+  host: TestHost,
+  threadId: string,
+  turnId: string,
+  turnCount: number
+): Promise<void> {
+  const at = host.clock.nowIso();
+  const envelope = {
+    threadId,
+    occurredAt: at,
+    commandId: null,
+    causationEventId: null,
+    metadata: {}
+  };
+  const messageId = `user:${turnId}`;
+  const events: Parameters<TestHost["orchestrator"]["ingestionSink"]>[1] = [
+    {
+      ...envelope,
+      eventId: `${turnId}:message`,
+      type: "thread.message-sent",
+      payload: { messageId, role: "user", text: turnId, streaming: false, turnId: null }
+    },
+    {
+      ...envelope,
+      eventId: `${turnId}:start`,
+      type: "thread.turn-start-requested",
+      payload: { turnId: null, messageId, interactionMode: "default" }
+    },
+    {
+      ...envelope,
+      eventId: `${turnId}:running`,
+      type: "thread.session-set",
+      payload: { session: { status: "running", activeTurnId: turnId } }
+    },
+    {
+      ...envelope,
+      eventId: `${turnId}:ready`,
+      type: "thread.session-set",
+      payload: { session: { status: "ready", activeTurnId: null } }
+    },
+    {
+      ...envelope,
+      eventId: `${turnId}:checkpoint`,
+      type: "thread.turn-diff-completed",
+      payload: {
+        turnCount,
+        turnId,
+        ref: `refs/orquester/checkpoints/x/turn/${turnCount}`,
+        status: "ready",
+        files: [],
+        assistantMessageId: null,
+        completedAt: at
+      }
+    }
+  ];
+  for (const event of events) {
+    await host.orchestrator.ingestionSink(threadId, [event]);
+  }
+}
+
 describe("Q1-1: one runtime per thread under concurrent first-touches", () => {
   it("a subscription taken while the thread is cold still receives events", async () => {
     const host = createTestHost();
@@ -468,27 +533,10 @@ describe("E8: a capture for a reverted turn never resurrects the head", () => {
   it("drops a turn-diff whose turn count is above the revert target", async () => {
     const host = createTestHost();
     const threadId = await host.createThread();
+    // Three started turns, each with its checkpoint: turns count by ORDER
+    // (§5.5), so a rewind to 2 needs two turns to keep.
     for (const turnCount of [1, 2, 3]) {
-      await host.orchestrator.ingestionSink(threadId, [
-        {
-          eventId: `cp${turnCount}`,
-          threadId,
-          type: "thread.turn-diff-completed",
-          payload: {
-            turnCount,
-            turnId: `turn-${turnCount}`,
-            ref: `refs/orquester/checkpoints/x/turn/${turnCount}`,
-            status: "ready",
-            files: [],
-            assistantMessageId: null,
-            completedAt: host.clock.nowIso()
-          },
-          occurredAt: host.clock.nowIso(),
-          commandId: null,
-          causationEventId: null,
-          metadata: {}
-        }
-      ]);
+      await seedCheckpointedTurn(host, threadId, `turn-${turnCount}`, turnCount);
     }
     await host.settle();
     await host.orchestrator.command(threadId, "revert", { commandId: cmd(), targetTurnCount: 2 });
@@ -500,7 +548,9 @@ describe("E8: a capture for a reverted turn never resurrects the head", () => {
     };
     assert.equal(before.thread.head.turnCount, 2);
 
-    // The in-flight turn's capture lands after the revert.
+    // The in-flight turn's capture lands after the revert — with no
+    // `turn.started` since it, so the guard is still armed. The fold cannot
+    // place the turn, so the capture falls back to the derived counter.
     host.checkpoints.turnCount = 3;
     const consumed = host.orchestrator.consume(host.adapter);
     host.adapter.emit({
