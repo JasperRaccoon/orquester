@@ -650,7 +650,24 @@ function reduceSessionSet(
   state: ThreadFoldState,
   event: Extract<DomainEvent, { type: "thread.session-set" }>
 ): Mutation {
-  const session = event.payload.session;
+  // The resume cursor and the provider thread id OUTLIVE any one session
+  // block: a `session-set` that names neither (a turn settling to `ready`, a
+  // stop) must not erase what the start recorded. It did: the block was
+  // replaced whole, the head lost its cursor, and the next host to start the
+  // session — after a deploy's drain-restart — opened a FRESH provider
+  // session with no memory of the conversation (2026-09-22, thread
+  // c8979f6a). Only an explicit new value replaces the old one.
+  const previous = state.head?.session;
+  const incoming = event.payload.session;
+  const session = {
+    ...incoming,
+    ...(incoming.resumeCursor === undefined && previous?.resumeCursor !== undefined
+      ? { resumeCursor: previous.resumeCursor }
+      : {}),
+    ...(incoming.providerThreadId === undefined && previous?.providerThreadId !== undefined
+      ? { providerThreadId: previous.providerThreadId }
+      : {})
+  };
   const head = state.head === null ? null : { ...state.head, session };
   // The provider's final numbers for the turn this event settles (E10). They
   // are stamped BEFORE settlement so `applySessionStatusToTurn`'s

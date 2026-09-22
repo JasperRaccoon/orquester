@@ -775,3 +775,74 @@ test("foldThread equals a left reduce of applyDomainEvent", () => {
   }
   assert.deepEqual(toThreadSnapshot(foldThread(events)), toThreadSnapshot(manual));
 });
+
+test("fold — the resume cursor outlives a session block that omits it (kept across a settle, replaced only explicitly)", () => {
+    const base = {
+      threadId: "t",
+      seq: 0,
+      occurredAt: "2026-09-22T05:00:00.000Z"
+    };
+    const created: DomainEvent = {
+      ...base,
+      seq: 1,
+      type: "thread.created",
+      payload: {
+        head: {
+          id: "t",
+          projectPath: "/p",
+          cwd: "/p",
+          title: "t",
+          adapter: "claude",
+          refId: "claude",
+          accountId: "",
+          home: "system",
+          modelSelection: { model: "default" },
+          runtimeMode: "full-access",
+          session: { status: "idle", activeTurnId: null },
+          turnCount: 0,
+          seq: 1,
+          createdAt: base.occurredAt,
+          updatedAt: base.occurredAt
+        }
+      }
+    } as unknown as DomainEvent;
+    const withCursor: DomainEvent = {
+      ...base,
+      seq: 2,
+      type: "thread.session-set",
+      payload: {
+        session: {
+          status: "starting",
+          activeTurnId: null,
+          providerThreadId: "e5914086",
+          resumeCursor: { resume: "e5914086", turnCount: 0 }
+        }
+      }
+    } as unknown as DomainEvent;
+    const settled: DomainEvent = {
+      ...base,
+      seq: 3,
+      type: "thread.session-set",
+      payload: { session: { status: "ready", activeTurnId: null } }
+    } as unknown as DomainEvent;
+    const replaced: DomainEvent = {
+      ...base,
+      seq: 4,
+      type: "thread.session-set",
+      payload: {
+        session: {
+          status: "starting",
+          activeTurnId: null,
+          providerThreadId: "new",
+          resumeCursor: { resume: "new", turnCount: 1 }
+        }
+      }
+    } as unknown as DomainEvent;
+    let state = foldThread([created, withCursor, settled]);
+    assert.deepEqual(state.head?.session.resumeCursor, { resume: "e5914086", turnCount: 0 });
+    assert.equal(state.head?.session.providerThreadId, "e5914086");
+    assert.equal(state.head?.session.status, "ready");
+    state = foldThread([created, withCursor, settled, replaced]);
+    assert.deepEqual(state.head?.session.resumeCursor, { resume: "new", turnCount: 1 });
+    assert.equal(state.head?.session.providerThreadId, "new");
+});

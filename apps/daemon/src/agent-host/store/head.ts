@@ -62,8 +62,26 @@ function projectHead(head: ThreadHead | null, event: DomainEvent): ThreadHead | 
     }
     case "thread.runtime-mode-set":
       return head === null ? null : { ...head, runtimeMode: event.payload.runtimeMode };
-    case "thread.session-set":
-      return head === null ? null : { ...head, session: event.payload.session };
+    case "thread.session-set": {
+      if (head === null) return null;
+      // Mirror of the shared fold (`packages/api/src/agent-chat/fold.ts`): the
+      // resume cursor and provider thread id carry forward unless the event
+      // names new ones, so a settle never strips what the start recorded.
+      const incoming = event.payload.session;
+      const previous = head.session;
+      return {
+        ...head,
+        session: {
+          ...incoming,
+          ...(incoming.resumeCursor === undefined && previous.resumeCursor !== undefined
+            ? { resumeCursor: previous.resumeCursor }
+            : {}),
+          ...(incoming.providerThreadId === undefined && previous.providerThreadId !== undefined
+            ? { providerThreadId: previous.providerThreadId }
+            : {})
+        }
+      };
+    }
     case "thread.turn-diff-completed":
       return head === null || head.turnCount >= event.payload.turnCount
         ? head
