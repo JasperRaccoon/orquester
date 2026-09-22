@@ -84,6 +84,9 @@ interface AssistantTextBlockState {
   completionEmitted: boolean;
 }
 
+/** Cap on buffered nested frames awaiting an owner (see `pendingNested`). */
+const MAX_PENDING_NESTED_FRAMES = 600;
+
 interface ToolInFlight {
   itemId: string;
   itemType: CanonicalItemType;
@@ -661,6 +664,9 @@ export class ClaudeNormalizer {
 
   /** Every live task closed `stopped`, for a session that is going away (§3.1). */
   closeLiveTasks(): RuntimeEvent[] {
+    // Frames of a subagent that was never named have nowhere to go once the
+    // turn is over; they must not outlive it.
+    this.dropPendingNested();
     const events: RuntimeEvent[] = [];
     for (const taskId of [...this.liveTaskIds]) {
       this.liveTaskIds.delete(taskId);
@@ -1183,6 +1189,19 @@ export class ClaudeNormalizer {
     message: Extract<SDKMessage, { type: "user" }>
   ): RuntimeEvent[] {
     const events: RuntimeEvent[] = [];
+    const nestedParent = message.parent_tool_use_id ?? undefined;
+    if (nestedParent !== undefined) {
+      // A subagent's tool_result. Its owner must be known before the result
+      // can complete the (attributed) item; otherwise it waits with the rest.
+      const owner = this.resolveNestedOwner(
+        nestedParent,
+        message as { task_description?: unknown; subagent_type?: unknown }
+      );
+      if (owner === undefined) {
+        this.bufferNested(nestedParent, message);
+        return events;
+      }
+    }
     if (this.turnState) {
       this.turnState.items.push(message.message);
     }
@@ -1346,7 +1365,10 @@ export class ClaudeNormalizer {
       // A subagent's own conversation, not the parent's. Its snapshot model is
       // the authoritative API model the subagent ran on, so it refines the
       // seeded launch-time value.
-      const owningTaskId = this.agentIdForParentToolUse(parentToolUseId);
+      const owningTaskId = this.resolveNestedOwner(
+        parentToolUseId,
+        message as { task_description?: unknown; subagent_type?: unknown }
+      );
       const snapshotModel = trimmedString(message.message?.model);
       if (snapshotModel !== undefined) {
         const agent = owningTaskId !== undefined ? this.taskAgents.get(owningTaskId) : undefined;
@@ -1357,6 +1379,10 @@ export class ClaudeNormalizer {
         }
       }
       this.lastAssistantUuid = message.uuid;
+      if (owningTaskId === undefined) {
+        this.bufferNested(parentToolUseId, message);
+        return events;
+      }
       // The subagent's own activity. The CLI forwards a subagent's tool_use /
       // tool_result blocks (and its final text) as COMPLETE `assistant` /
       // `user` messages with `parent_tool_use_id` — never as stream events
@@ -1809,7 +1835,11 @@ export class ClaudeNormalizer {
     this.taskAgents.set(message.task_id, {
       taskId: message.task_id,
       ...(message.tool_use_id !== undefined ? { toolUseId: message.tool_use_id } : {}),
-      ...(message.description !== undefined ? { description: message.description } : {}),
+      ...(message.description !== undefined
+        ? { description: message.description }
+        : trimmedString(launchInput?.description) !== undefined
+          ? { description: trimmedString(launchInput?.description) }
+          : {}),
       ...(message.subagent_type !== undefined ? { subagentType: message.subagent_type } : {}),
       ...(message.task_type !== undefined ? { taskType: message.task_type } : {}),
       ...(message.workflow_name !== undefined ? { workflowName: message.workflow_name } : {}),
@@ -1821,6 +1851,7 @@ export class ClaudeNormalizer {
     this.options.onLiveTasksChanged?.(this.liveTaskIds);
 
     return [
+      ...this.flushPendingNested(),
       {
         ...this.base({
           turnId: this.activeTurnId,
@@ -1841,6 +1872,12 @@ export class ClaudeNormalizer {
     message: Extract<SDKMessage, { type: "system"; subtype: "task_progress" }>,
     raw: RuntimeEventRaw
   ): RuntimeEvent[] {
+    const progressAgent = this.taskAgents.get(message.task_id);
+    if (progressAgent !== undefined && trimmedString(message.description) !== undefined) {
+      // A resumed subagent's `task_started` may carry no description; its
+      // first progress does, and that is the join a nested frame needs.
+      progressAgent.description = trimmedString(message.description);
+    }
     const events = this.emitThreadTokenUsage(
       this.taskProgressTokenUsage(message.usage),
       "claude/system/task_progress",
@@ -1865,6 +1902,7 @@ export class ClaudeNormalizer {
         ...(message.subagent_type !== undefined ? { role: message.subagent_type } : {})
       }
     });
+    events.push(...this.flushPendingNested());
     return events;
   }
 
@@ -2017,6 +2055,82 @@ export class ClaudeNormalizer {
 
   /** Keys for nested tools in `inFlightTools`: negative, so they never collide with a stream index. */
   private nestedToolSeq = 0;
+
+  /**
+   * A RESUMED subagent (the `Agent` tool's `resume`) keeps the
+   * `parent_tool_use_id` of the session that first launched it, so its nested
+   * frames never match the new `task_started.tool_use_id`. Every nested frame
+   * does carry `task_description`, and so does the task once `task_started`
+   * (or its first `task_progress`) named it — that is the join. Resolved once
+   * per parent id and remembered here.
+   */
+  private readonly nestedParentAliases = new Map<string, string>();
+  /**
+   * Nested frames whose owner is not known YET (the description arrives on a
+   * later `task_progress`), per parent id, in arrival order. Never released
+   * into the parent's timeline: an unattributed subagent frame reads as the
+   * parent's own work, which is exactly the bug this exists for. Replayed the
+   * moment the owner is known; dropped when the turn ends.
+   */
+  private readonly pendingNested = new Map<string, SDKMessage[]>();
+  private pendingNestedCount = 0;
+
+  private resolveNestedOwner(
+    parentToolUseId: string,
+    frame: { task_description?: unknown; subagent_type?: unknown }
+  ): string | undefined {
+    const direct = this.agentIdForParentToolUse(parentToolUseId);
+    if (direct !== undefined) return direct;
+    const alias = this.nestedParentAliases.get(parentToolUseId);
+    if (alias !== undefined) return alias;
+    const description = trimmedString(frame.task_description);
+    if (description === undefined) return undefined;
+    const bound = new Set(this.nestedParentAliases.values());
+    const candidates = [...this.taskAgents.values()].filter(
+      (agent) => agent.description === description && this.liveTaskIds.has(agent.taskId)
+    );
+    const pick = candidates.find((agent) => !bound.has(agent.taskId)) ?? candidates[0];
+    if (pick === undefined) return undefined;
+    this.nestedParentAliases.set(parentToolUseId, pick.taskId);
+    return pick.taskId;
+  }
+
+  private bufferNested(parentToolUseId: string, message: SDKMessage): void {
+    if (this.pendingNestedCount >= MAX_PENDING_NESTED_FRAMES) {
+      // Bounded: a subagent nobody ever names cannot grow the host without
+      // limit. The oldest parent's frames go first.
+      const oldest = this.pendingNested.keys().next();
+      if (!oldest.done) {
+        this.pendingNestedCount -= this.pendingNested.get(oldest.value)?.length ?? 0;
+        this.pendingNested.delete(oldest.value);
+      }
+    }
+    const list = this.pendingNested.get(parentToolUseId) ?? [];
+    list.push(message);
+    this.pendingNested.set(parentToolUseId, list);
+    this.pendingNestedCount += 1;
+  }
+
+  /** Replay every buffered nested frame whose owner can now be resolved. */
+  private flushPendingNested(): RuntimeEvent[] {
+    const events: RuntimeEvent[] = [];
+    for (const [parentToolUseId, frames] of [...this.pendingNested.entries()]) {
+      const first = frames[0] as { task_description?: unknown; subagent_type?: unknown } | undefined;
+      if (first === undefined) continue;
+      if (this.resolveNestedOwner(parentToolUseId, first) === undefined) continue;
+      this.pendingNested.delete(parentToolUseId);
+      this.pendingNestedCount -= frames.length;
+      for (const frame of frames) {
+        events.push(...this.handleMessage(frame));
+      }
+    }
+    return events;
+  }
+
+  private dropPendingNested(): void {
+    this.pendingNested.clear();
+    this.pendingNestedCount = 0;
+  }
 
   private nestedAssistantEvents(
     message: Extract<SDKMessage, { type: "assistant" }>,

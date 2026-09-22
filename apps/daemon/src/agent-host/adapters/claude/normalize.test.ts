@@ -628,3 +628,65 @@ describe("claude normaliser — subagent activity arrives as complete nested mes
     assert.ok(prose.every((event) => event.agentId === "task-1"), "the subagent's prose stays in its drill-in");
   });
 });
+
+describe("claude normaliser — a RESUMED subagent keeps its old parent_tool_use_id", () => {
+  it("holds its frames until a task carries the same description, then attributes them", () => {
+    const normalizer = new ClaudeNormalizer({
+      threadId: "t",
+      clock: fixedClock(),
+      ids: countingIds()
+    });
+    const feed = (message: unknown): RuntimeEvent[] =>
+      normalizer.handleMessage(message as SDKMessage);
+    // The new session's task_started names a NEW tool_use and no description.
+    feed({
+      type: "system",
+      subtype: "task_started",
+      task_id: "task-r",
+      tool_use_id: "toolu_new",
+      task_type: "local_agent",
+      uuid: "u0",
+      session_id: "s"
+    });
+    // The resumed agent's frames name the ORIGINAL session's tool_use.
+    const early = feed({
+      type: "assistant",
+      parent_tool_use_id: "toolu_old",
+      subagent_type: "general-purpose",
+      task_description: "Audit PM sheet Vas Raquel",
+      uuid: "u1",
+      session_id: "s",
+      message: {
+        role: "assistant",
+        model: "claude-opus-5",
+        content: [{ type: "tool_use", id: "toolu_child", name: "Bash", input: { command: "ls" } }]
+      }
+    });
+    assert.deepEqual(early, [], "unattributable frames are held, never shown as the parent's work");
+    const flushed = feed({
+      type: "system",
+      subtype: "task_progress",
+      task_id: "task-r",
+      tool_use_id: "toolu_new",
+      description: "Audit PM sheet Vas Raquel",
+      subagent_type: "general-purpose",
+      usage: { total_tokens: 10, tool_uses: 1, duration_ms: 5 },
+      last_tool_name: "Bash",
+      uuid: "u2",
+      session_id: "s"
+    });
+    const started = flushed.find((event) => event.type === "item.started" && event.itemId === "toolu_child");
+    assert.ok(started, "the held frame is replayed once the description names the task");
+    assert.equal(started.agentId, "task-r");
+    const done = feed({
+      type: "user",
+      parent_tool_use_id: "toolu_old",
+      task_description: "Audit PM sheet Vas Raquel",
+      uuid: "u3",
+      session_id: "s",
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_child", content: "ok" }] }
+    });
+    const completed = done.find((event) => event.type === "item.completed" && event.itemId === "toolu_child");
+    assert.equal(completed?.agentId, "task-r", "later frames resolve through the remembered alias");
+  });
+});
