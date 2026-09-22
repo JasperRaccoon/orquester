@@ -470,6 +470,33 @@
   animation: ac-banner-in var(--ac-dur-fast) var(--ac-ease-out) both;
 }
 
+/*
+ * The card at the BOTTOM of the dock is attached to the composer: the dock
+ * pulls itself 17px behind the composer's top edge (T3 `ComposerBanner.tsx:55`,
+ * `:111`), so that card carries the overlap as extra bottom padding — its row
+ * stays above the composer and only padding tucks behind it. T3 does the same
+ * (`pb-[calc(var(--chat-composer-attachment-overlap)+var(--composer-banner-padding-block))]`).
+ * Attribute + class outranks the density's `py-*` utility whatever the sheet
+ * order. Note the enter/exit keyframes leave a `transform` on the card, which
+ * is a stacking context: the composer's wrapper is positioned above the dock's
+ * (`AgentChatView`) so a card entering, resting or leaving is always BEHIND it.
+ */
+.ac-banner-attached > [data-density] {
+  padding-bottom: calc(1rem + 1px + var(--ac-banner-pad-block, 0.25rem));
+}
+
+[data-density="compact"] {
+  --ac-banner-pad-block: 0.25rem;
+}
+
+[data-density="default"] {
+  --ac-banner-pad-block: 0.375rem;
+}
+
+[data-density="spacious"] {
+  --ac-banner-pad-block: 0.75rem;
+}
+
 /* Keep the exiting banner mounted for `--ac-dur-banner` and set
    `pointer-events: none` on it, or a click can land on a card that is already
    half-way behind the composer. */

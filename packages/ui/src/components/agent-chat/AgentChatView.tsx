@@ -652,7 +652,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 when empty): on this always-present wrapper it dragged the
                 composer 17px up over the status line on every idle thread.
                 (D's reference §1.5, T3 `ComposerBanner.tsx:55`.) */}
-            <div className="pointer-events-auto mx-auto w-full min-w-0 max-w-3xl px-3 sm:px-5">
+            <div className="pointer-events-auto relative z-0 mx-auto w-full min-w-0 max-w-3xl px-3 sm:px-5">
               <ChatBannerDock
                 sessionId={sessionId}
                 approvals={paintOnly ? NO_APPROVALS : pending.approvals}
@@ -684,7 +684,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 planTitle={planFollowUp ? proposedPlanTitle(planFollowUp.planMarkdown) : null}
               />
             </div>
-            <div className="pointer-events-auto mx-auto w-full min-w-0 max-w-3xl px-3 sm:px-5">
+            <div className="pointer-events-auto relative z-10 mx-auto w-full min-w-0 max-w-3xl px-3 sm:px-5">
               <ChatComposer
                 sessionId={sessionId}
                 provider={provider}

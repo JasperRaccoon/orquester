@@ -18,6 +18,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { PendingApproval, PendingUserInput } from "@orquester/api/agent-chat";
 
 import { ApprovalCard } from "./ApprovalCard";
+import { ChatBannerDock } from "./ChatBannerDock";
 import { QuestionCard } from "./QuestionCard";
 
 function render(element: ReactElement): string {
@@ -296,6 +297,81 @@ const questionProps = {
     assert.match(button, /disabled/, `every control must be disabled while responding: ${button}`);
   }
   assert.match(html, /Submitting…/);
+}
+
+// ---------------------------------------------------------------------------
+// The dock's attachment to the composer
+// ---------------------------------------------------------------------------
+//
+// The dock pulls itself 17px behind the composer, so exactly ONE card — the
+// bottom-most — must carry that overlap as padding (`ac-banner-attached`), or
+// its row is cut by the composer's top edge (owner report, 2026-09-22: the
+// "N agents working" bar sat on the composer). And the stack's "N more" toggle
+// must sit above the notices, never at the bottom where the pull would hide it.
+
+const noop = (): void => {};
+const dockProps = {
+  sessionId: "s-dock",
+  approvals: [] as PendingApproval[],
+  userInputs: [] as PendingUserInput[],
+  respondingRequestIds: [] as string[],
+  backgroundLiveness: "working" as const,
+  liveAgentCount: 4,
+  stopping: false,
+  actionableProposedPlan: false,
+  onApprove: noop,
+  onAnswer: noop,
+  onDismiss: noop,
+  onStopBackgroundWork: noop,
+  onCarryTextToDraft: noop
+};
+
+function attachedWrappers(html: string): string[] {
+  return html.match(/<div class="[^"]*ac-banner-attached[^"]*">/g) ?? [];
+}
+
+{
+  // Liveness alone: the liveness card is the bottom-most and carries the tuck.
+  const html = render(createElement(ChatBannerDock, dockProps));
+  assert.match(html, /4 agents working/);
+  assert.equal(attachedWrappers(html).length, 1, "exactly one card is attached to the composer");
+  const attachedAt = html.indexOf("ac-banner-attached");
+  assert.ok(attachedAt < html.indexOf("4 agents working"), "the attached wrapper holds the liveness card");
+}
+
+{
+  // A primary card takes the bottom: it is the attached one, the notice is not.
+  const html = render(createElement(ChatBannerDock, { ...dockProps, approvals: [approval] }));
+  const wrappers = attachedWrappers(html);
+  assert.equal(wrappers.length, 1, "only the bottom-most card is attached");
+  const attachedAt = html.indexOf("ac-banner-attached");
+  assert.ok(
+    attachedAt > html.indexOf("4 agents working"),
+    "the liveness notice above the primary card is not attached"
+  );
+  assert.ok(attachedAt < html.indexOf("rm -rf /tmp/build"), "the approval card is the attached one");
+}
+
+{
+  // Two more notices: the toggle precedes every card, the front card is attached.
+  const html = render(
+    createElement(ChatBannerDock, {
+      ...dockProps,
+      notices: [
+        { id: "n-1", variant: "warning" as const, title: "First notice" },
+        { id: "n-2", variant: "info" as const, title: "Second notice" }
+      ]
+    })
+  );
+  assert.match(html, /2 more/);
+  assert.ok(html.indexOf("2 more") < html.indexOf("First notice"), "the toggle sits above the stack");
+  assert.ok(html.indexOf("2 more") < html.indexOf("4 agents working"), "the toggle sits above the front card");
+  assert.equal(attachedWrappers(html).length, 1, "exactly one attached card with a stack");
+  assert.ok(
+    html.indexOf("ac-banner-attached") < html.indexOf("4 agents working") &&
+      html.indexOf("ac-banner-attached") > html.indexOf("Second notice"),
+    "the front (activity) card is the bottom-most and attached; the stack sits above it"
+  );
 }
 
 console.log("banner-render.check.ts: ok");

@@ -311,6 +311,12 @@ export function ChatBannerDock({
 
   const frontItem = stackItems[0];
   const restItems = stackItems.slice(1);
+  // The card the composer's top edge overlaps carries the tuck as padding
+  // (`ac-banner-attached`, see `agent-chat.css`): the primary card when there
+  // is one, else the front notice. It is always a CARD — the stack's toggle
+  // sits above the notices, never at the bottom, so it can never be the
+  // element pulled behind the composer.
+  const primaryAttached = card !== null;
 
   return (
     <div
@@ -318,22 +324,14 @@ export function ChatBannerDock({
       // `-mb-[calc(1rem+1px)]` is the 17px pull behind the composer (T3
       // `ComposerBanner.tsx:55`). It sits here, on the element that is absent
       // when there is nothing to show, so an empty dock displaces nothing.
-      className="pointer-events-auto -mb-[calc(1rem+1px)] flex w-full min-w-0 flex-col gap-px px-[1.375rem]"
+      // The horizontal inset is the composer box's own inset (8px, 16px from
+      // `sm:`) plus its 22px corner radius, so a card's straight sides meet the
+      // box's FLAT top edge and disappear behind it — an inset smaller than the
+      // radius left them notching into the rounded corners.
+      className="pointer-events-auto -mb-[calc(1rem+1px)] flex w-full min-w-0 flex-col gap-px px-[1.875rem] pt-1 sm:px-[2.375rem]"
     >
-      {frontItem ? <div className={CARD_BACKDROP}>{frontItem.render}</div> : null}
       {restItems.length > 0 ? (
         <>
-          <div className="ac-stack" data-open={stackExpanded ? "true" : "false"}>
-            <div className="ac-stack-panel">
-              <div className="ac-stack-items flex flex-col gap-px">
-                {restItems.map((item) => (
-                  <div key={item.id} className={CARD_BACKDROP}>
-                    {item.render}
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
           <button
             type="button"
             aria-expanded={stackExpanded}
@@ -346,10 +344,31 @@ export function ChatBannerDock({
           >
             {stackExpanded ? "Show less" : `${restItems.length} more`}
           </button>
+          <div className="ac-stack" data-open={stackExpanded ? "true" : "false"}>
+            <div className="ac-stack-panel">
+              <div className="ac-stack-items flex flex-col gap-px">
+                {restItems.map((item) => (
+                  <div key={item.id} className={CARD_BACKDROP}>
+                    {item.render}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
         </>
       ) : null}
+      {frontItem ? (
+        <div className={cn(CARD_BACKDROP, !primaryAttached && "ac-banner-attached")}>
+          {frontItem.render}
+        </div>
+      ) : null}
 
-      <div className={cn(card === null ? "hidden" : CARD_BACKDROP, cardLeaving && "ac-banner-exit")}>
+      <div
+        className={cn(
+          card === null ? "hidden" : cn(CARD_BACKDROP, "ac-banner-attached"),
+          cardLeaving && "ac-banner-exit"
+        )}
+      >
       {card === "approval" && approval ? (
         <ApprovalCard
           key={approval.requestId}
