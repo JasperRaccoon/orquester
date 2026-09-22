@@ -19,20 +19,73 @@ async function scratch(): Promise<string> {
   return root;
 }
 
-/** A minimal claude transcript: one user line is all `claudeTitle` needs. */
-async function writeClaudeTranscript(home: string, projectPath: string, id: string, text: string): Promise<void> {
-  const dir = join(home, "projects", projectPath.replace(/[/\\]/g, "-"));
+/**
+ * A minimal claude transcript: one user line is all `claudeTitle` needs. It
+ * lands in the dir the CLI names after `projectPath` — every UTF-16 unit
+ * outside [A-Za-z0-9] becomes "-" — unless a test passes the literal name it
+ * pins (the tests below that care about the naming always do).
+ */
+async function writeClaudeTranscript(
+  home: string,
+  projectPath: string,
+  id: string,
+  text: string,
+  dirName = projectPath.replace(/[^a-zA-Z0-9]/g, "-")
+): Promise<void> {
+  const dir = join(home, "projects", dirName);
   await mkdir(dir, { recursive: true });
   await writeFile(
     join(dir, `${id}.jsonl`),
     `${JSON.stringify({
       type: "user",
+      cwd: projectPath,
       timestamp: "2026-01-01T00:00:00.000Z",
       message: { content: text }
     })}\n`,
     "utf8"
   );
 }
+
+test("claude history is read from the dir the CLI names after the project path", async () => {
+  const root = await scratch();
+  const home = process.env.CLAUDE_CONFIG_DIR as string;
+  // The first two are the dirs the CLI really wrote for these projects on a
+  // deployed host (spaces used to be kept, so both listed nothing); the third
+  // is hand-derived: every UTF-16 unit outside [A-Za-z0-9] becomes "-".
+  const cases = [
+    ["vas", "/var/lib/orquester/workspaces/BITBUCKET/VAS SAAS", "-var-lib-orquester-workspaces-BITBUCKET-VAS-SAAS"],
+    ["waymur", "/var/lib/orquester/workspaces/MARIA YEREMKO/WAYMUR WEB", "-var-lib-orquester-workspaces-MARIA-YEREMKO-WAYMUR-WEB"],
+    ["punct", "/home/dev/my.app_v2 (copia)/ñandú", "-home-dev-my-app-v2--copia---and-"]
+  ] as const;
+  for (const [id, projectPath, dirName] of cases) {
+    await writeClaudeTranscript(home, projectPath, id, "hola", dirName);
+  }
+
+  for (const [id, projectPath] of cases) {
+    const rows = await listAgentConversations(projectPath);
+    assert.deepEqual(rows.map((row) => row.id), [id], projectPath);
+  }
+
+  await rm(root, { recursive: true, force: true });
+});
+
+test("a claude dir name over 200 chars is matched by its prefix and the transcript's cwd", async () => {
+  const root = await scratch();
+  const home = process.env.CLAUDE_CONFIG_DIR as string;
+  const projectPath = `/var/lib/orquester/workspaces/acme/${"x".repeat(200)}`;
+  const otherPath = `${projectPath}-other`;
+  // Past 200 chars the CLI keeps the first 200 (`-var-lib-orquester-workspaces-acme-`
+  // is 35 of them) and appends "-<hash of the path>" — Bun's hash in the
+  // compiled CLI, so no reader can recompute it. Both paths share the prefix.
+  const prefix = `-var-lib-orquester-workspaces-acme-${"x".repeat(165)}`;
+  await writeClaudeTranscript(home, projectPath, "mine", "hola", `${prefix}-1dz4k7q`);
+  await writeClaudeTranscript(home, otherPath, "theirs", "hola", `${prefix}-9w0e2rb`);
+
+  const rows = await listAgentConversations(projectPath);
+  assert.deepEqual(rows.map((row) => row.id), ["mine"]);
+
+  await rm(root, { recursive: true, force: true });
+});
 
 test("every conversation is attributed to the home it was read from", async () => {
   const root = await scratch();
