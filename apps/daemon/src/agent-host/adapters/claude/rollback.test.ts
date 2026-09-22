@@ -39,6 +39,15 @@ const user = (uuid: string, text: string): ClaudeHistoryMessage => ({
   message: { role: "user", content: [{ type: "text", text }] }
 });
 
+/** The CLI's own compaction summary row: user-shaped, flagged on the row. */
+const summary = (uuid: string, text: string): ClaudeHistoryMessage => ({
+  type: "user",
+  uuid,
+  parent_tool_use_id: null,
+  isCompactSummary: true,
+  message: { role: "user", content: text }
+});
+
 const toolResult = (uuid: string, id: string): ClaudeHistoryMessage => ({
   type: "user",
   uuid,
@@ -192,6 +201,58 @@ describe("claude rollback — fork remapping", () => {
       true
     );
   });
+
+  it("with the transcript at hand, the last compaction summary's position decides", () => {
+    // [h1 a1] compacted → summary s, then [h2 a2] written afterwards. The live
+    // boundary preserved only `a1`; the rows after the summary are not in that
+    // list and never could be — reading the list as the whole reachable set
+    // refused every rewind after a live /compact.
+    const transcript = [
+      user("h1", "first"),
+      assistant("a1", "ok"),
+      summary("s", "This session is being continued…"),
+      user("h2", "second"),
+      assistant("a2", "ok")
+    ];
+    const preservedUuids = ["a1"];
+    // At or after the summary: reachable whatever the list says.
+    assert.equal(
+      isAnchorReachableAfterCompaction({ anchorUuid: "a2", preservedUuids, messages: transcript }),
+      true
+    );
+    assert.equal(
+      isAnchorReachableAfterCompaction({ anchorUuid: "s", preservedUuids, messages: transcript }),
+      true
+    );
+    // Before it: only a preserved row.
+    assert.equal(
+      isAnchorReachableAfterCompaction({ anchorUuid: "a1", preservedUuids, messages: transcript }),
+      true
+    );
+    assert.equal(
+      isAnchorReachableAfterCompaction({ anchorUuid: "h1", preservedUuids, messages: transcript }),
+      false
+    );
+    // Before it with no list at all (resumed after the compaction): refused,
+    // not guessed.
+    assert.equal(
+      isAnchorReachableAfterCompaction({
+        anchorUuid: "a1",
+        preservedUuids: undefined,
+        messages: transcript
+      }),
+      false
+    );
+    // A transcript with no flagged summary falls back to the list alone.
+    assert.equal(
+      isAnchorReachableAfterCompaction({
+        anchorUuid: "a2",
+        preservedUuids,
+        messages: transcript.filter((message) => message.uuid !== "s")
+      }),
+      false
+    );
+  });
 });
 
 describe("claude rollback — by turn id", () => {
@@ -285,6 +346,51 @@ describe("claude rollback — by turn id", () => {
       preservedUuids
     });
     assert.equal(plan.rollbackAt, "a2");
+  });
+
+  it("a turn written after a live compaction rewinds although the list never named it", () => {
+    // The owner's case: /compact, then two more turns, then "rewind to the
+    // last one". `preserved_messages.all_uuids` lists pre-compaction rows only.
+    const compacted = [
+      user("h1", "first"),
+      assistant("a1", "ok"),
+      summary("s", "This session is being continued…"),
+      user("h2", "second"),
+      assistant("a2", "ok"),
+      user("h3", "third"),
+      assistant("a3", "ok")
+    ];
+    const plan = planClaudeRollbackById({
+      messages: compacted,
+      boundaries: [
+        { turnId: "turn-2", uuid: "h2" },
+        { turnId: "turn-3", uuid: "h3" }
+      ],
+      firstRemovedTurnId: "turn-3",
+      preservedUuids: ["a1"]
+    });
+    assert.equal(plan.rollbackAt, "a2");
+    // The first turn after the compaction anchors ON the summary — still fine.
+    const toFirst = planClaudeRollbackById({
+      messages: compacted,
+      boundaries: [{ turnId: "turn-2", uuid: "h2" }],
+      firstRemovedTurnId: "turn-2",
+      preservedUuids: ["a1"]
+    });
+    assert.equal(toFirst.rollbackAt, "s");
+    // A turn before the compaction whose anchor the list does not preserve is
+    // gone: h1's anchor is a0, and only a1 survived.
+    const twoBefore = [user("h0", "zeroth"), assistant("a0", "ok"), ...compacted];
+    assert.throws(
+      () =>
+        planClaudeRollbackById({
+          messages: twoBefore,
+          boundaries: [],
+          firstRemovedTurnId: "h1",
+          preservedUuids: ["a1"]
+        }),
+      { message: ROLLBACK_COMPACTED }
+    );
   });
 
   it("drops a pair whose uuid the transcript no longer holds, so its id is refused", () => {

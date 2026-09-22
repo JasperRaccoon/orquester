@@ -1404,7 +1404,8 @@ export class ClaudeSession {
     if (
       !isAnchorReachableAfterCompaction({
         anchorUuid: plan.rollbackAt,
-        preservedUuids: this.normalizer.preservedMessageUuids
+        preservedUuids: this.normalizer.preservedMessageUuids,
+        messages
       })
     ) {
       throw new Error(ROLLBACK_COMPACTED);

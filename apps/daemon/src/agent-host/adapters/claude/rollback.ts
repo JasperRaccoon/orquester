@@ -366,7 +366,8 @@ export function planClaudeRollbackById(input: {
   if (
     !isAnchorReachableAfterCompaction({
       anchorUuid: rollbackAt,
-      preservedUuids: input.preservedUuids
+      preservedUuids: input.preservedUuids,
+      messages
     })
   ) {
     throw new Error(ROLLBACK_COMPACTED);
@@ -382,15 +383,48 @@ export function planClaudeRollbackById(input: {
 }
 
 /**
- * A compaction between the anchor and now makes a rollback unreachable, and
- * `compact_metadata.preserved_messages.all_uuids` names exactly the uuids that
- * survived — so the adapter can say so precisely instead of failing the
- * deep-equal scan later (fixtures/claude README observation 17).
+ * A compaction between the anchor and now makes a rollback unreachable — the
+ * CLI no longer holds the messages the rewind would restore (§4.5 "or a
+ * compaction in between", fixtures/claude README observation 17).
+ *
+ * Decided by POSITION in the transcript whenever it is at hand: the CLI writes
+ * its summary as a `user` row flagged `isCompactSummary`, and everything from
+ * that row onwards is the context the session runs on, so an anchor at or after
+ * the LAST summary is reachable whatever `preserved_messages.all_uuids` says —
+ * that list names the pre-compaction rows that were kept, never the rows
+ * written afterwards, and reading it as the whole set of reachable anchors made
+ * every rewind after a live `/compact` refuse with "compacted". An anchor
+ * before the last summary is reachable only when that list preserves it; with
+ * no list at all (a session resumed after the compaction, whose boundary frame
+ * this process never saw) it is refused rather than guessed. Without a
+ * transcript, or on a transcript whose summary is not flagged, the list alone
+ * decides as it always did.
  */
 export function isAnchorReachableAfterCompaction(input: {
   anchorUuid: string;
   preservedUuids: readonly string[] | undefined;
+  /** The transcript, to place the anchor relative to the last compaction summary. */
+  messages?: readonly ClaudeHistoryMessage[] | undefined;
 }): boolean {
+  const messages = input.messages;
+  if (messages !== undefined) {
+    let lastSummary = -1;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (messages[index]!.isCompactSummary === true) {
+        lastSummary = index;
+        break;
+      }
+    }
+    if (lastSummary !== -1) {
+      const anchorIndex = messages.findIndex((message) => message.uuid === input.anchorUuid);
+      if (anchorIndex === -1 || anchorIndex >= lastSummary) {
+        // Not before the compaction (an anchor the transcript cannot place at
+        // all fails later, precisely, as a missing boundary).
+        return true;
+      }
+      return input.preservedUuids?.includes(input.anchorUuid) === true;
+    }
+  }
   if (input.preservedUuids === undefined || input.preservedUuids.length === 0) {
     return true;
   }

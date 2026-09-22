@@ -816,6 +816,19 @@ The id resolves to exactly one turn start in the transcript, or the rewind refus
 "turn boundary is unavailable" text before any fork exists; a count that disagrees with it is
 logged at debug and otherwise ignored.
 
+**"Compacted in between" is decided by position, not by the preserved list alone.** Observation
+17's `preserved_messages.all_uuids` names the pre-compaction rows the CLI kept in context; the
+rows it writes *after* the boundary are never in that list and never could be. Read as "the set of
+reachable anchors" it refused every rewind after a live `/compact` — the owner's own thread, where
+`/compact` was followed by two more turns, could not rewind to either. The transcript is read at
+rewind time anyway, and the CLI writes its summary as a `user` row flagged `isCompactSummary` (a
+real transcript here: boundary row 9800 `system/compact_boundary`, summary row 9801), so the rule is:
+an anchor at or after the **last** summary row is reachable; one before it is reachable only when
+the list preserves it, and refused when this process never saw the boundary frame (a session
+resumed after the compaction) rather than guessed. On a transcript whose summary is not flagged the
+list alone decides, as before. Note that the boundary row *in the transcript* carried no
+`compact_metadata` blocks at all in the 2.1.280 capture above — the metadata rides the live frame.
+
 ## Re-capturing
 
 Nothing here is generated; re-capturing means driving the real CLI again. Keep the format above,
