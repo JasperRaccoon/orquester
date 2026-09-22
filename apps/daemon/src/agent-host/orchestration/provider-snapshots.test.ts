@@ -35,6 +35,41 @@ function snapshotFor(id: AgentAdapterId, overrides: Partial<ProviderSnapshot> = 
   };
 }
 
+/** The v2 cache file's shape, as the tests read and write it. */
+interface CacheFile {
+  version: number;
+  providers: Record<
+    string,
+    {
+      identity: {
+        adapterId: string;
+        hostProtocolVersion: number;
+        binPath?: string | null;
+        version?: string | null;
+      };
+      snapshot: ProviderSnapshot;
+    }
+  >;
+}
+
+function identityFor(
+  id: AgentAdapterId,
+  overrides: Partial<CacheFile["providers"][string]["identity"]> = {}
+): CacheFile["providers"][string]["identity"] {
+  return { adapterId: id, hostProtocolVersion: 1, binPath: `/usr/bin/${id}`, ...overrides };
+}
+
+async function writeCache(
+  stateDir: string,
+  providers: CacheFile["providers"],
+  version = 2
+): Promise<void> {
+  await writeFile(
+    join(stateDir, "provider-snapshots.json"),
+    JSON.stringify({ version, providers })
+  );
+}
+
 async function withRegistry<T>(
   run: (input: {
     registry: ReturnType<typeof createProviderSnapshotRegistry>;
@@ -241,14 +276,17 @@ describe("provider snapshot registry (§3.2, §6.3)", () => {
       await registry.flush();
       const raw = JSON.parse(
         await readFile(join(stateDir, "provider-snapshots.json"), "utf8")
-      ) as { providers: Record<string, ProviderSnapshot> };
-      assert.equal(raw.providers.claude?.id, "claude");
+      ) as CacheFile;
+      assert.equal(raw.version, 2);
+      assert.equal(raw.providers.claude?.snapshot.id, "claude");
+      // Identity lives INSIDE the file, next to the payload it stamps.
+      assert.equal(raw.providers.claude?.identity.adapterId, "claude");
+      assert.equal(raw.providers.claude?.identity.hostProtocolVersion, 1);
 
       // The filename alone is not trusted as a routing key.
-      await writeFile(
-        join(stateDir, "provider-snapshots.json"),
-        JSON.stringify({ version: 1, providers: { claude: { ...snapshotFor("claude"), id: "codex" } } })
-      );
+      await writeCache(stateDir, {
+        claude: { identity: identityFor("claude"), snapshot: snapshotFor("codex") }
+      });
       const reloaded = createProviderSnapshotRegistry({
         probes: [],
         stateDir,
@@ -339,6 +377,266 @@ describe("R8-M4: an auth.status error is written in the shape the toast reads", 
       assert.equal(cleared.status, "ready");
       assert.equal(cleared.message, undefined);
       assert.equal(clientWouldToast(cleared), false);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §3.2 — a fresh host never answers `GET /providers` with `[]`
+// ---------------------------------------------------------------------------
+
+/**
+ * The three layers, each pinned where it can fail on its own.
+ *
+ * *T3: `makeManagedServerProvider.ts:69-73` (the pending seed), `:280-284`
+ * (the forced boot probe), `Layers/ProviderRegistry.ts:292-352` + `:743-751`
+ * (the correlated cache hydrated over the seed).*
+ */
+describe("§3.2 boot: pending seed, correlated cache, forced boot probe", () => {
+  const pendingClaude = (checkedAt: string): ProviderSnapshot =>
+    snapshotFor("claude", {
+      installed: false,
+      version: null,
+      status: "unknown",
+      message: "Claude provider status has not been checked in this session yet.",
+      auth: { status: "unknown" },
+      checkedAt,
+      models: [{ slug: "opus", name: "Opus", isDefault: true, capabilities: null }]
+    });
+
+  interface Harness {
+    registry: ReturnType<typeof createProviderSnapshotRegistry>;
+    probe: {
+      calls: number;
+      next: ProviderSnapshot;
+      gate?: { promise: Promise<void>; open(): void } | undefined;
+    };
+    stateDir: string;
+  }
+
+  async function withSeeded<T>(
+    run: (input: Harness) => Promise<T>,
+    options: { binPath?: string | null; stateDir?: string; pending?: boolean } = {}
+  ): Promise<T> {
+    const stateDir = options.stateDir ?? (await mkdtemp(join(tmpdir(), "provider-pending-")));
+    const probe: Harness["probe"] = { calls: 0, next: snapshotFor("claude") };
+    const registry = createProviderSnapshotRegistry({
+      probes: [
+        {
+          id: "claude",
+          ...(options.pending === false ? {} : { pending: pendingClaude }),
+          identity: () => ({
+            binPath: options.binPath === undefined ? "/usr/bin/claude" : options.binPath
+          }),
+          refresh: async () => {
+            probe.calls += 1;
+            if (probe.gate) await probe.gate.promise;
+            return probe.next;
+          }
+        }
+      ],
+      stateDir,
+      logger: createRecordingLogger(),
+      clock: createTestClock(0),
+      intervalMs: 1_000,
+      setTimer: () => null,
+      clearTimer: () => undefined
+    });
+    try {
+      return await run({ registry, probe, stateDir });
+    } finally {
+      registry.stop();
+      await registry.flush();
+      if (options.stateDir === undefined) {
+        await rm(stateDir, { recursive: true, force: true, maxRetries: 3 });
+      }
+    }
+  }
+
+  it("layer 1: seeds a pending snapshot at construction, before load() and before any probe", async () => {
+    await withSeeded(async ({ registry, probe }) => {
+      // Nothing was awaited between construction and this line.
+      const seeded = registry.get("claude");
+      assert.ok(seeded, "GET /providers must never answer []");
+      assert.equal(probe.calls, 0, "the seed costs no probe");
+      assert.equal(seeded.status, "unknown");
+      assert.equal(seeded.auth.status, "unknown");
+      assert.equal(seeded.installed, false);
+      assert.match(seeded.message ?? "", /has not been checked in this session yet/);
+      // The whole point: a pending row is still LAUNCHABLE.
+      assert.equal(seeded.models.length, 1);
+      assert.deepEqual(
+        registry.all().map((row) => row.id),
+        ["claude"]
+      );
+    });
+  });
+
+  it("layer 1: a pending snapshot never raises the client's auth toast", async () => {
+    await withSeeded(async ({ registry }) => {
+      assert.equal(clientWouldToast(registry.get("claude")!), false);
+    });
+  });
+
+  it("layer 1: a pending seed is never written to the cache file", async () => {
+    await withSeeded(async ({ registry, stateDir }) => {
+      await registry.flush();
+      await assert.rejects(readFile(join(stateDir, "provider-snapshots.json"), "utf8"));
+    });
+  });
+
+  it("layer 2: a correlated cached snapshot overrides the pending seed", async () => {
+    const stateDir = await mkdtemp(join(tmpdir(), "provider-pending-"));
+    try {
+      await writeCache(stateDir, {
+        claude: {
+          identity: identityFor("claude", { binPath: "/usr/bin/claude" }),
+          snapshot: snapshotFor("claude", { version: "2.1.210" })
+        }
+      });
+      await withSeeded(
+        async ({ registry, probe }) => {
+          assert.equal(registry.get("claude")?.status, "unknown", "pending before load()");
+          await registry.load();
+          const hydrated = registry.get("claude")!;
+          assert.equal(hydrated.status, "ready", "on-disk state wins where present");
+          assert.equal(hydrated.version, "2.1.210");
+          assert.equal(probe.calls, 0, "hydration is a read");
+        },
+        { stateDir, binPath: "/usr/bin/claude" }
+      );
+    } finally {
+      await rm(stateDir, { recursive: true, force: true, maxRetries: 3 });
+    }
+  });
+
+  it("layer 2: an uncorrelated cached snapshot is discarded and the pending seed stands", async () => {
+    const stateDir = await mkdtemp(join(tmpdir(), "provider-pending-"));
+    try {
+      // The binary moved under us — an `npm install -g` into a different prefix.
+      await writeCache(stateDir, {
+        claude: {
+          identity: identityFor("claude", { binPath: "/old/prefix/bin/claude" }),
+          snapshot: snapshotFor("claude", { version: "1.0.0" })
+        }
+      });
+      await withSeeded(
+        async ({ registry }) => {
+          await registry.load();
+          const after = registry.get("claude")!;
+          assert.equal(after.status, "unknown", "the stale payload never reaches a client");
+          assert.equal(after.version, null);
+        },
+        { stateDir, binPath: "/new/prefix/bin/claude" }
+      );
+    } finally {
+      await rm(stateDir, { recursive: true, force: true, maxRetries: 3 });
+    }
+  });
+
+  it("layer 2: a v1 identity-less payload is discarded", async () => {
+    const stateDir = await mkdtemp(join(tmpdir(), "provider-pending-"));
+    try {
+      await writeFile(
+        join(stateDir, "provider-snapshots.json"),
+        JSON.stringify({ version: 1, providers: { claude: snapshotFor("claude") } })
+      );
+      await withSeeded(
+        async ({ registry }) => {
+          await registry.load();
+          assert.equal(registry.get("claude")?.status, "unknown");
+        },
+        { stateDir }
+      );
+    } finally {
+      await rm(stateDir, { recursive: true, force: true, maxRetries: 3 });
+    }
+  });
+
+  it("layer 2: a payload from another protocol version is discarded", async () => {
+    const stateDir = await mkdtemp(join(tmpdir(), "provider-pending-"));
+    try {
+      await writeCache(stateDir, {
+        claude: {
+          identity: identityFor("claude", { hostProtocolVersion: 99 }),
+          snapshot: snapshotFor("claude")
+        }
+      });
+      await withSeeded(
+        async ({ registry }) => {
+          await registry.load();
+          assert.equal(registry.get("claude")?.status, "unknown");
+        },
+        { stateDir }
+      );
+    } finally {
+      await rm(stateDir, { recursive: true, force: true, maxRetries: 3 });
+    }
+  });
+
+  it("layer 3: startBootRefresh probes every provider, returns synchronously, and is idempotent", async () => {
+    await withSeeded(async ({ registry, probe }) => {
+      let gateOpen = (): void => undefined;
+      probe.gate = {
+        promise: new Promise<void>((resolve) => {
+          gateOpen = resolve;
+        }),
+        open: () => gateOpen()
+      };
+
+      registry.startBootRefresh();
+      // Fire-and-forget: it returned without awaiting the (still-blocked) probe.
+      assert.equal(registry.get("claude")?.status, "unknown", "the seed serves meanwhile");
+
+      // A second call while the first pass runs does nothing.
+      registry.startBootRefresh();
+
+      probe.next = snapshotFor("claude", { version: "2.1.210" });
+      probe.gate.open();
+      probe.gate = undefined;
+      await registry.refreshAllNow();
+      await registry.flush();
+
+      assert.equal(registry.get("claude")?.status, "ready");
+      assert.equal(registry.get("claude")?.version, "2.1.210");
+      assert.equal(probe.calls, 2, "one boot pass plus the explicit one above");
+    });
+  });
+
+  it("layer 3: the boot probe's result is written to the cache WITH its identity", async () => {
+    await withSeeded(async ({ registry, stateDir }) => {
+      registry.startBootRefresh();
+      await registry.refreshAllNow();
+      await registry.flush();
+      const raw = JSON.parse(
+        await readFile(join(stateDir, "provider-snapshots.json"), "utf8")
+      ) as CacheFile;
+      assert.equal(raw.providers.claude?.identity.binPath, "/usr/bin/claude");
+      assert.equal(raw.providers.claude?.identity.adapterId, "claude");
+      assert.equal(raw.providers.claude?.snapshot.status, "ready");
+    });
+  });
+
+  it("the first watcher's priming is a no-op once the boot probe has run", async () => {
+    await withSeeded(async ({ registry, probe }) => {
+      registry.startBootRefresh();
+      await registry.refreshAllNow();
+      const after = probe.calls;
+      const release = registry.addWatcher();
+      await registry.refreshAllNow();
+      // The watcher itself added no extra pass; only the explicit one above.
+      assert.equal(probe.calls, after + 1);
+      release();
+    });
+  });
+
+  it("the first watcher still primes a registry nobody kicked at boot", async () => {
+    await withSeeded(async ({ registry, probe }) => {
+      assert.equal(probe.calls, 0);
+      const release = registry.addWatcher();
+      await registry.refreshAllNow();
+      assert.ok(probe.calls >= 1, "the stopgap is kept as a fallback");
+      release();
     });
   });
 });

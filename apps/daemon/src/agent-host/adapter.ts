@@ -226,6 +226,31 @@ export interface AgentAdapter {
    */
   refreshSnapshot(input?: { cwd?: string; home?: AccountHome }): Promise<ProviderSnapshot>;
 
+  /**
+   * The PENDING snapshot (§3.2): what this provider looks like before anything
+   * has been probed in this host process. **Synchronous and free of I/O** — it
+   * is what the snapshot registry seeds itself with at construction, before
+   * the disk cache is read and before any adapter has been acquired, so
+   * `GET /api/agent/providers` is never `[]`.
+   *
+   * *T3: `apps/server/src/provider/makeManagedServerProvider.ts:69-73`
+   * (`initialSnapshot(settings)`) and
+   * `apps/server/src/provider/Layers/ClaudeProvider.ts:595-640`
+   * (`makePendingClaudeProvider`).*
+   *
+   * Two invariants, both in `adapters/pending.ts`: it must never be
+   * `status:"error"` (that would raise the client's "sign in again" toast for
+   * a provider nobody has looked at), and it must carry the best model catalog
+   * the adapter can name without probing — a snapshot with no model is still
+   * unlaunchable.
+   *
+   * The registry never calls this on an adapter instance (it has none at
+   * construction time); it reads the same module-level function through
+   * `ADAPTER_PENDING_SNAPSHOTS`. The method exists so the pending shape is
+   * reachable from an adapter reference, and so a new adapter cannot forget it.
+   */
+  pendingSnapshot(checkedAt: string): ProviderSnapshot;
+
   /** The adapter's canonical event stream. One consumer: the host's ingestion. */
   readonly events: AsyncIterable<RuntimeEvent>;
 }

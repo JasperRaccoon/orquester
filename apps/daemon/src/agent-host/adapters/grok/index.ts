@@ -54,7 +54,13 @@ import { join } from "node:path";
 import { MAX_TURN_INPUT_CHARS } from "@orquester/api/agent-chat";
 import { projectGrokHistory } from "./history.ts";
 import { GROK_EXTRA_ENV } from "./launch.ts";
-import { COMPACT_SLASH_COMMAND, probeGrok, probeSkills } from "./probe.ts";
+import { pendingStatusMessage } from "../pending.ts";
+import {
+  COMPACT_SLASH_COMMAND,
+  FALLBACK_GROK_MODELS,
+  probeGrok,
+  probeSkills
+} from "./probe.ts";
 import { GrokSession, parseGrokResumeCursor } from "./session.ts";
 
 /** The registry ids this adapter serves. */
@@ -83,6 +89,35 @@ export const GROK_CAPABILITIES: AdapterCapabilities = {
   compaction: { type: "slash-command", command: "/compact" }
 };
 
+/**
+ * The §3.2 PENDING snapshot: what `GET /providers` answers for Grok before any
+ * probe has run in this host process. Synchronous, no I/O.
+ *
+ * *T3: `apps/server/src/provider/makeManagedServerProvider.ts:69-73` —
+ * `initialSnapshot(settings)`; `Layers/ClaudeProvider.ts:595-640` — the pending
+ * shape (`installed:false`, `auth:{status:"unknown"}`, the "has not been
+ * checked in this session yet" message) **plus a bundled catalog**.
+ *
+ * `status` is `"unknown"`, never `"error"`: an unlooked-at provider must not
+ * raise the client's "sign in again" toast (`adapters/pending.ts`).
+ */
+export function pendingGrokSnapshot(checkedAt: string): ProviderSnapshot {
+  return {
+    id: ADAPTER_ID,
+    refIds: [...GROK_REF_IDS],
+    installed: false,
+    version: null,
+    status: "unknown",
+    message: pendingStatusMessage("Grok"),
+    auth: { status: "unknown" },
+    checkedAt,
+    models: [...FALLBACK_GROK_MODELS],
+    slashCommands: [COMPACT_SLASH_COMMAND],
+    skills: [],
+    capabilities: GROK_CAPABILITIES
+  };
+}
+
 /** At most this many per-cwd overlays are retained (§4.6.4). */
 const MAX_WORKSPACE_SNAPSHOTS = 16;
 
@@ -97,6 +132,11 @@ const PROBE_SYSTEM_HOME: AccountHome = { kind: "system", path: "" };
 class GrokAdapter implements AgentAdapter {
   readonly id = ADAPTER_ID;
   readonly capabilities = GROK_CAPABILITIES;
+
+  /** §3.2 layer one. Synchronous, no I/O — see `adapters/pending.ts`. */
+  pendingSnapshot(checkedAt: string): ProviderSnapshot {
+    return pendingGrokSnapshot(checkedAt);
+  }
 
   private readonly context: AdapterContext;
   private readonly sessions = new Map<string, GrokSession>();

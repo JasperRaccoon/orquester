@@ -108,6 +108,23 @@ describe("authErrorNotice — `unknown` is not `unauthenticated` (§7.7, T3 §7)
     assert.equal(notice?.providerStatus, "error");
     assert.equal(notice?.authStatus, "unauthenticated");
   });
+
+  it("is silent for a PENDING snapshot — nobody has looked at that provider yet", () => {
+    // Host §3.2 layer one seeds every provider with this shape at construction
+    // so `GET /providers` is never `[]`. It claims no verdict, so it must not
+    // read as "sign in again": `status` is `unknown`, deliberately never
+    // `error`, and `auth.status` is `unknown`, never `unauthenticated`.
+    const pending = provider({
+      installed: false,
+      version: null,
+      status: "unknown",
+      auth: { status: "unknown" },
+      message: "Claude provider status has not been checked in this session yet.",
+      models: [{ slug: "default", name: "Default", isDefault: true, capabilities: null }]
+    });
+    assert.equal(authErrorNotice(pending), null);
+    assert.equal(authErrorMessage(pending), null);
+  });
 });
 
 describe("Q2-11 — auth errors are published for the sink to de-duplicate", () => {

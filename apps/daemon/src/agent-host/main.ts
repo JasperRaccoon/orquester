@@ -46,7 +46,12 @@ import { REGISTRY, type RegistryEntryDef } from "@orquester/registry";
 import type { AccountHome, AgentAdapterId, ProviderSnapshot } from "@orquester/api/agent-chat";
 
 import type { AdapterContext, AdapterLogger, AgentAdapter } from "./adapter.ts";
-import { ADAPTER_IDS, SNAPSHOT_TIMEOUTS_MS, adapterFactory } from "./adapters/index.ts";
+import {
+  ADAPTER_IDS,
+  ADAPTER_PENDING_SNAPSHOTS,
+  SNAPSHOT_TIMEOUTS_MS,
+  adapterFactory
+} from "./adapters/index.ts";
 import { createCheckpointService } from "./checkpoints/index.ts";
 import type { AgentHostStopResponse } from "@orquester/api/agent-chat";
 import { newHostInstanceId } from "./host-protocol.ts";
@@ -380,6 +385,24 @@ export async function startAgentHost(
   });
 
   // ---- provider snapshots ------------------------------------------------
+  /**
+   * The CLI a provider's cached snapshot was probed against (§3.2 layer two).
+   * Resolved against the SESSION path, exactly as a launch resolves it, so a
+   * cache written before an `npm install -g` moved the binary is discarded
+   * rather than rendered. A plain PATH walk — cheap enough to run at boot and
+   * on every store.
+   */
+  const probeBinPath = (id: AgentAdapterId): string | null => {
+    for (const entry of refIds.values()) {
+      if (entry.adapter !== id) continue;
+      for (const bin of entry.bins) {
+        const resolved = resolveBinOnPath(bin, sessionPath);
+        if (resolved) return resolved;
+      }
+    }
+    return null;
+  };
+
   const snapshots: ManagedProviderSnapshotRegistry = createProviderSnapshotRegistry({
     probes: ADAPTER_IDS.map((id) => ({
       id,
@@ -387,6 +410,12 @@ export async function startAgentHost(
       // first needs a window covering the start too. Data, per adapter — every
       // other probe keeps the tight auth window.
       ...(SNAPSHOT_TIMEOUTS_MS[id] !== undefined ? { timeoutMs: SNAPSHOT_TIMEOUTS_MS[id] } : {}),
+      // §3.2 layer one: the synchronous seed the registry holds from
+      // construction, so `GET /providers` is never `[]`. Read from the module
+      // rather than from `adapters.get(id)` — no adapter exists yet here.
+      pending: ADAPTER_PENDING_SNAPSHOTS[id],
+      // §3.2 layer two: what the on-disk cache is correlated against.
+      identity: () => ({ binPath: probeBinPath(id) }),
       refresh: async (input?: { cwd?: string }): Promise<ProviderSnapshot> => {
         const adapter = adapters.get(id);
         if (!adapter) {
@@ -568,6 +597,14 @@ export async function startAgentHost(
       logger.warn("agent-host: the boot sweep failed", error);
     });
     host.openGate();
+    // §3.2 layer three, AFTER the gate and never awaited: the registry forces
+    // one probe of every provider itself, so a fresh host converges on real
+    // catalogues in seconds instead of waiting out the 5-minute interval or a
+    // client subscribing. Readiness has already been announced above — a probe
+    // must never be able to delay it.
+    // *T3: `makeManagedServerProvider.ts:280-284` — the forced refresh is
+    // forked by the provider at construction, not awaited by its builder.*
+    snapshots.startBootRefresh();
     logger.info(`agent-host ready on ${socketPath}`, {
       hostInstanceId,
       adapters: [...adapters.keys()]

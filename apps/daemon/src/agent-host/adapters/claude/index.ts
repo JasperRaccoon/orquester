@@ -50,6 +50,7 @@ import {
   CLAUDE_PROBE_CACHE_MS,
   CLAUDE_REF_IDS,
   mergeWorkspaceSnapshot,
+  pendingClaudeSnapshot,
   probeClaudeCapabilities,
   probeClaudeVersion,
   type ClaudeProbeResult
@@ -498,6 +499,8 @@ export async function createClaudeAdapterWith(
 
     refreshSnapshot,
 
+    pendingSnapshot: pendingClaudeSnapshot,
+
     get events(): AsyncIterable<RuntimeEvent> {
       return events;
     }
@@ -507,3 +510,5 @@ export async function createClaudeAdapterWith(
 }
 
 export { CLAUDE_REF_IDS, CLAUDE_CAPABILITIES };
+/** §3.2 layer one — the pending seed the snapshot registry reads at construction. */
+export { pendingClaudeSnapshot } from "./probe.ts";

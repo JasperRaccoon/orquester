@@ -193,7 +193,14 @@ export class ClaudeSession {
   // -------------------------------------------------------------------------
 
   get session(): ProviderSession {
-    return { ...this.record };
+    // Recomputed, not handed out as last recorded: Claude's session id moves
+    // whenever the SDK re-inits (a compaction forks it) and every turn adds a
+    // start message id, but nothing writes `record.resumeCursor` between
+    // `sendTurn` calls. The host reads this on `turn.completed` to persist the
+    // new native boundary for a turn it did not dispatch itself — a background
+    // turn has no `sendTurn` result at all (*T3: `ProviderService.ts:1104-1129`*).
+    const cursor = this.currentCursor();
+    return { ...this.record, ...(cursor !== undefined ? { resumeCursor: cursor } : {}) };
   }
 
   get isAlive(): boolean {

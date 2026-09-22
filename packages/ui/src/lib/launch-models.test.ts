@@ -63,6 +63,65 @@ test("no catalogue yields null, so the caller can refuse instead of posting", ()
   assert.equal(resolveLaunchModel({ snapshot: null, preferred: "x" }), null);
 });
 
+/* ── a PENDING snapshot (host §3.2 layer one) ───────────────────────────── */
+
+/**
+ * What the host seeds itself with at construction, before any probe:
+ * `status:"unknown"`, `auth:{status:"unknown"}`, `installed:false`, and the
+ * adapter's bundled catalogue. `GET /api/agent/providers` answers this from
+ * the first millisecond so a cold host is launchable — the bug being fixed is
+ * a client that showed "Still loading this agent's models" for five minutes.
+ */
+const pendingClaude = {
+  models: [
+    model("default", { name: "Default (recommended)", isDefault: true }),
+    model("opus", { name: "Opus" }),
+    model("sonnet", { name: "Sonnet" }),
+    model("haiku", { name: "Haiku" }),
+    model("fable", { name: "Fable" })
+  ]
+};
+
+test("a pending snapshot with a bundled catalogue is launchable", () => {
+  // The host validates the model at thread creation, so a bundled family alias
+  // is a legitimate launch — and it is the difference between a one-click
+  // launcher that works on a cold host and one that refuses for minutes.
+  assert.equal(resolveLaunchModel({ snapshot: pendingClaude }), "default");
+});
+
+test("a remembered pick still wins inside a pending catalogue", () => {
+  assert.equal(
+    resolveLaunchModel({ snapshot: pendingClaude, preferred: "sonnet" }),
+    "sonnet"
+  );
+});
+
+test("a pending snapshot with NO catalogue is the only 'still loading' case", () => {
+  // Codex and OpenCode read their catalogues off a live server and have
+  // nothing honest to bundle; their pending row exists (so the provider is
+  // listed) but names no model, and the caller must say so rather than post a
+  // launch the host will refuse.
+  assert.equal(resolveLaunchModel({ snapshot: { models: [] } }), null);
+});
+
+test("resolution never branches on the snapshot's status", () => {
+  // `resolveLaunchModel` takes `Pick<ProviderSnapshot, "models">` on purpose:
+  // there is no way for a future change to gate a launch on `status` without
+  // widening this signature, which is the point.
+  const byModelsAlone = resolveLaunchModel({ snapshot: { models: pendingClaude.models } });
+  assert.equal(byModelsAlone, "default");
+});
+
+test("the pending catalogue renders as chips without a search", () => {
+  const list = launchModelList({ models: pendingClaude.models, selected: "default" });
+  assert.equal(list.searchable, false, "five families is not a wall");
+  assert.equal(list.hidden, 0);
+  assert.deepEqual(
+    list.shown.map((choice) => choice.slug),
+    ["default", "opus", "sonnet", "haiku", "fable"]
+  );
+});
+
 /* ── the picker ─────────────────────────────────────────────────────────── */
 
 const big = Array.from({ length: 378 }, (_, i) =>

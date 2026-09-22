@@ -27,6 +27,7 @@ import type {
 
 import { AGENT_HOST_DEADLINES, withDeadline } from "../../support/deadline.ts";
 import type { ClaudeAdapterDeps } from "./deps.ts";
+import { pendingStatusMessage } from "../pending.ts";
 import { buildClaudeProbeOptions } from "./launch.ts";
 import {
   FALLBACK_CLAUDE_MODELS,
@@ -385,6 +386,41 @@ export function buildClaudeSnapshot(input: BuildSnapshotInput): {
   };
 
   return { snapshot, scopedLimitNames: usage?.names ?? {} };
+}
+
+/**
+ * The §3.2 PENDING snapshot: what `GET /providers` answers for Claude before
+ * any probe has run in this host process. Synchronous, no I/O.
+ *
+ * *T3: `apps/server/src/provider/Layers/ClaudeProvider.ts:595-640`
+ * (`makePendingClaudeProvider`) — `installed:false`, `version:null`,
+ * `auth:{status:"unknown"}`, the "has not been checked in this session yet"
+ * message, and the full bundled model catalog so the provider is launchable
+ * from the first millisecond.*
+ *
+ * `status` is `"unknown"` rather than T3's `"warning"` (no such member here) —
+ * and deliberately **not** `"error"`, which would make the client raise the
+ * "sign in again" toast for a provider nobody has looked at yet.
+ */
+export function pendingClaudeSnapshot(checkedAt: string): ProviderSnapshot {
+  return {
+    id: "claude",
+    refIds: [...CLAUDE_REF_IDS],
+    installed: false,
+    version: null,
+    status: "unknown",
+    message: pendingStatusMessage("Claude"),
+    auth: { status: "unknown" },
+    checkedAt,
+    // The bundled catalog, exactly as T3 seeds `BUNDLED_CLAUDE_MODEL_CATALOG`:
+    // a pending snapshot with no model is still unlaunchable.
+    models: [...FALLBACK_CLAUDE_MODELS],
+    // `/compact` is a host route with no CLI equivalent (§4.6.3), so it exists
+    // whether or not the CLI has been asked anything.
+    slashCommands: withSynthesisedCommands([]),
+    skills: [],
+    capabilities: CLAUDE_CAPABILITIES
+  };
 }
 
 /**
