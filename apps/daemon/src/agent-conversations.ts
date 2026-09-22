@@ -35,6 +35,12 @@ const CLAUDE_TITLE_LINES = 40;
 const CLAUDE_MAX_FILES = 500;
 
 /**
+ * Longest transcript dir name the claude CLI writes verbatim; a longer one is
+ * cut to this and suffixed "-<hash of the path>" (see `claudeProjectDirs`).
+ */
+const CLAUDE_DIR_NAME_MAX = 200;
+
+/**
  * Codex organizes transcripts by DATE, not project, so listing one project
  * means opening every file's first line. Bounded to the most recent N files
  * (newest date dirs first) to keep the endpoint fast on a long-lived host.
@@ -200,14 +206,19 @@ async function agentHomeRoots(daemonDir?: string): Promise<AgentHomeRoots> {
 // ---------------------------------------------------------------------------
 
 /**
- * One `.jsonl` transcript per session, in a directory named after the
- * project's absolute path with every separator replaced by `-`. `updatedAt` is
- * the file's mtime: the format has no last-activity field.
+ * One `.jsonl` transcript per session, in a directory the CLI names after the
+ * project's absolute path (`claudeProjectDirs`). `updatedAt` is the file's
+ * mtime: the format has no last-activity field.
  */
 async function listClaude(projectPath: string, roots: readonly AgentHomeRoot[]): Promise<AgentConversationSummary[]> {
-  const slug = projectPath.replace(/[/\\]/g, "-");
+  const candidates: RootedPath[] = [];
+  for (const root of roots) {
+    for (const path of await claudeProjectDirs(join(root.dir, "projects"), projectPath)) {
+      candidates.push({ path, root });
+    }
+  }
   const files: RootedPath[] = [];
-  for (const dir of await distinctDirs(roots.map((root) => ({ path: join(root.dir, "projects", slug), root })))) {
+  for (const dir of await distinctDirs(candidates)) {
     const entries = await readdir(dir.path, { withFileTypes: true }).catch(() => []);
     for (const entry of entries) {
       if (!entry.isDirectory() && entry.name.endsWith(".jsonl")) {
@@ -235,6 +246,66 @@ async function listClaude(projectPath: string, roots: readonly AgentHomeRoot[]):
     return summary;
   });
   return rows.filter(isDefined);
+}
+
+/**
+ * The CLI's own name for a project's transcript dir (the Agent SDK's
+ * `sanitizePath`): every UTF-16 unit outside [A-Za-z0-9] becomes "-". A space,
+ * a dot or an accent is a dash too — `…/VAS SAAS` is `…-VAS-SAAS` — so
+ * replacing only the separators listed nothing for any such project.
+ */
+function claudeDirName(path: string): string {
+  return path.replace(/[^a-zA-Z0-9]/g, "-");
+}
+
+/**
+ * The dirs under `projectsDir` that may hold `projectPath`'s transcripts, found
+ * the way the SDK finds them. A name within CLAUDE_DIR_NAME_MAX is exact. A
+ * longer one ends in a hash the Bun-compiled CLI computes differently from the
+ * Node SDK, so it is matched on its prefix instead — and, since two long paths
+ * can share that prefix, kept only when one of its transcripts started here.
+ */
+async function claudeProjectDirs(projectsDir: string, projectPath: string): Promise<string[]> {
+  const name = claudeDirName(projectPath);
+  if (name.length <= CLAUDE_DIR_NAME_MAX) {
+    return [join(projectsDir, name)];
+  }
+  const prefix = `${name.slice(0, CLAUDE_DIR_NAME_MAX)}-`;
+  const dirs = (await subdirNames(projectsDir))
+    .filter((entry) => entry.startsWith(prefix))
+    .map((entry) => join(projectsDir, entry));
+  const owned = await mapBounded(dirs, READ_CONCURRENCY, (dir) => claudeDirStartedIn(dir, name));
+  return dirs.filter((_, index) => owned[index]);
+}
+
+/** Whether any transcript in `dir` started in a path the CLI also names `name`. */
+async function claudeDirStartedIn(dir: string, name: string): Promise<boolean> {
+  const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    if (entry.isDirectory() || !entry.name.endsWith(".jsonl")) {
+      continue;
+    }
+    const cwd = await claudeTranscriptCwd(join(dir, entry.name)).catch(() => undefined);
+    if (cwd !== undefined && claudeDirName(cwd) === name) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** The first `cwd` within a transcript's title-scan head: where its session started. */
+async function claudeTranscriptCwd(path: string): Promise<string | undefined> {
+  let scanned = 0;
+  for await (const line of fileLines(path)) {
+    if (++scanned > CLAUDE_TITLE_LINES) {
+      break;
+    }
+    const cwd = asString(parseJson(line)?.cwd);
+    if (cwd) {
+      return cwd;
+    }
+  }
+  return undefined;
 }
 
 /**
