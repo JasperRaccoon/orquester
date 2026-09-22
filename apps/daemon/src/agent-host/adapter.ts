@@ -168,6 +168,23 @@ export interface AgentAdapter {
   ): Promise<void>;
   compact(threadId: string): Promise<void>;
   readThread(threadId: string): Promise<ThreadSnapshot>;
+
+  /**
+   * Project a {@link ThreadSnapshot} — the provider's OWN transcript — into the
+   * §4.2 event union, so a resumed thread has a timeline.
+   *
+   * A resume replays nothing onto the message stream (verified for Claude:
+   * `replayUuids: []`), so without this the thread opens empty even though the
+   * provider has the whole conversation. Every event carries
+   * `raw.source = HISTORICAL_RAW_SOURCE`: it describes something that already
+   * happened, so a consumer must not let it raise attention, fire a push or
+   * move a live turn.
+   *
+   * Pure and synchronous — the reading already happened in `readThread`.
+   * Optional: an adapter whose snapshot items are not projectable omits it and
+   * the host falls back to an empty timeline.
+   */
+  projectHistory?(snapshot: ThreadSnapshot): RuntimeEvent[];
   rollbackThread(threadId: string, numTurns: number): Promise<ThreadSnapshot>;
 
   listSessions(): ProviderSession[];
