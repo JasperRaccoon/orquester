@@ -11,6 +11,7 @@ import * as path from "node:path";
 import test from "node:test";
 
 import type { AttachmentRef, DomainEvent, ThreadHead } from "@orquester/api/agent-chat";
+import { foldThread } from "@orquester/api/agent-chat";
 
 // The store's layout under its own `rootDir` (`@orquester/config`'s helpers
 // take the APPDIR; `rootDir` is already `<appdir>/daemon/agent`).
@@ -23,7 +24,12 @@ const attachmentsDirOf = (root: string, id: string): string =>
 const receiptsPathOf = (root: string): string => path.join(root, "receipts.json");
 
 import type { AppendableDomainEvent, Clock, IdGen } from "../services.ts";
-import { HEAD_CHECKPOINT_EVENTS, createThreadStore, isSafeThreadId } from "./index.ts";
+import {
+  DEFAULT_SWEEP_INTERVAL_MS,
+  HEAD_CHECKPOINT_EVENTS,
+  createThreadStore,
+  isSafeThreadId
+} from "./index.ts";
 
 /**
  * The sweep reads REAL file mtimes, so its clock has to move relative to now
@@ -207,6 +213,135 @@ test("a torn trailing line is truncated on load, never fatal", async () => {
   // And the next append lands at 3, not on top of the fragment.
   const appended = await reopened.append({ threadId: "t1", events: [message("t1", "m2")] });
   assert.equal(appended.seq, 3);
+});
+
+test("an event type from a NEWER host folds inertly and never truncates (R1-8, §8)", async () => {
+  // §8: the thread log is outside every rollback — events appended by a newer
+  // host stay on disk and the older host must still fold them. A closed type
+  // enum made a new event type indistinguishable from a malformed line, so an
+  // older host silently dropped the whole tail after it.
+  const rootDir = await tempRoot();
+  const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  await store.append({ threadId: "t1", events: [created(), message("t1", "m1")] });
+  await store.drain();
+
+  // A future build appends a type this build has never heard of, then carries
+  // on writing events this build DOES know.
+  const future = {
+    seq: 3,
+    eventId: "e-future",
+    threadId: "t1",
+    type: "thread.snoozed",
+    payload: { until: "2027-01-01T00:00:00.000Z", nested: { anything: true } },
+    occurredAt: "2026-01-01T00:00:03.000Z",
+    commandId: null,
+    causationEventId: null,
+    metadata: {}
+  };
+  const after = {
+    seq: 4,
+    eventId: "e-after",
+    threadId: "t1",
+    type: "thread.message-sent",
+    payload: {
+      messageId: "m2",
+      role: "user",
+      text: "written after the unknown event",
+      streaming: false,
+      turnId: null
+    },
+    occurredAt: "2026-01-01T00:00:04.000Z",
+    commandId: null,
+    causationEventId: null,
+    metadata: {}
+  };
+  await fs.appendFile(
+    eventsPathOf(rootDir, "t1"),
+    `${JSON.stringify(future)}\n${JSON.stringify(after)}\n`
+  );
+
+  const reopened = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  const tail = await reopened.readAll("t1");
+  assert.equal(tail.truncated, false, "an unknown type is decodable, not malformed");
+  assert.deepEqual(tail.events.map((event) => event.seq), [1, 2, 3, 4]);
+  assert.equal(tail.seq, 4);
+  assert.equal(reopened.threadError("t1"), null, "a future event does not mark the thread error");
+
+  // The events after it still reach the fold.
+  const state = foldThread(tail.events);
+  assert.ok(
+    state.items.some((item) => item.id === "m2"),
+    "the tail after an unknown event must still fold"
+  );
+  // …and the unknown event itself changes nothing but the sequence floor.
+  assert.equal(state.seq, 4);
+  assert.equal(state.head?.seq, 4);
+
+  // The next append continues the sequence rather than re-using 3 or 4.
+  const appended = await reopened.append({ threadId: "t1", events: [message("t1", "m3")] });
+  assert.equal(appended.seq, 5);
+});
+
+test("an unknown type as the LAST line still seeds seq, so no append re-uses it", async () => {
+  // The seq-reuse half of R1-8: when the undecodable line was the last one,
+  // `entry.seq` was seeded from the TRUNCATED scan (line N-1) while `append`
+  // stamped `++entry.seq` regardless — permanently corrupting the ordering
+  // that the fold and `/events?after=` depend on.
+  const rootDir = await tempRoot();
+  const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  await store.append({ threadId: "t1", events: [created(), message("t1", "m1")] });
+  await store.drain();
+
+  await fs.appendFile(
+    eventsPathOf(rootDir, "t1"),
+    `${JSON.stringify({
+      seq: 3,
+      eventId: "e-future",
+      threadId: "t1",
+      type: "thread.pinned",
+      payload: {},
+      occurredAt: "2026-01-01T00:00:03.000Z",
+      commandId: null,
+      causationEventId: null,
+      metadata: {}
+    })}\n`
+  );
+
+  const reopened = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  const appended = await reopened.append({ threadId: "t1", events: [message("t1", "m2")] });
+  assert.equal(appended.seq, 4, "the sequence must continue past the unknown event");
+
+  const onDisk = (await fs.readFile(eventsPathOf(rootDir, "t1"), "utf8"))
+    .split("\n")
+    .filter((line) => line.length > 0)
+    .map((line) => (JSON.parse(line) as { seq: number }).seq);
+  assert.deepEqual(onDisk, [1, 2, 3, 4], "no sequence is re-used");
+  assert.equal((await reopened.readAll("t1")).truncated, false);
+});
+
+test("genuinely malformed lines still truncate — §5.1's rule is unchanged", async () => {
+  const rootDir = await tempRoot();
+  const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  await store.append({ threadId: "t1", events: [created()] });
+  await store.drain();
+
+  // Not JSON at all, and a JSON object missing the envelope's own fields:
+  // both are corruption, not a newer build.
+  for (const bad of ['{"seq":2,"type":', JSON.stringify({ seq: 2, type: "thread.deleted" })]) {
+    const rootDir2 = await tempRoot();
+    const s2 = createThreadStore({ rootDir: rootDir2, clock: fixedClock(), idGen: countingIds() });
+    await s2.append({ threadId: "t1", events: [created()] });
+    await s2.drain();
+    await fs.appendFile(eventsPathOf(rootDir2, "t1"), `${bad}\n`);
+    const reopened = createThreadStore({
+      rootDir: rootDir2,
+      clock: fixedClock(),
+      idGen: countingIds()
+    });
+    const tail = await reopened.readAll("t1");
+    assert.equal(tail.truncated, true, bad);
+    assert.equal(tail.events.length, 1, bad);
+  }
 });
 
 test("a malformed middle line truncates the fold at that point", async () => {
@@ -787,4 +922,110 @@ test("the host-wide raw-log ceiling runs on the sweep schedule", async () => {
 
   await store.pruneAttachments({ now: hoursFromNow(0) });
   await assert.rejects(fs.stat(rung), "the sweep must reach raw logs, not just attachments");
+});
+
+// --- S1-5 residual: the sweep needs a production scheduler ------------------
+
+test("the store schedules its own host-wide sweep", async () => {
+  // V1 residual on S1-5: the ceiling was hoisted correctly but the only
+  // production caller passes a threadId (`orchestrator.ts` revert path), which
+  // skips the host-wide branch — so nothing ever ran it. The store now owns
+  // the cadence itself.
+  const rootDir = await tempRoot();
+  const timers: Array<{ fn: () => void; ms: number }> = [];
+  const store = createThreadStore({
+    rootDir,
+    // A REAL clock: the sweep compares against real file mtimes, so a fixture
+    // date in the past makes everything look like it is from the future.
+    clock: { now: () => new Date(), nowIso: () => new Date().toISOString() },
+    idGen: countingIds(),
+    sweepIntervalMs: 60_000,
+    setTimer: (fn, ms) => {
+      timers.push({ fn, ms });
+      return timers.length;
+    },
+    clearTimer: () => undefined
+  });
+  assert.equal(timers.length, 1, "a sweep is scheduled at construction");
+  assert.equal(timers[0]?.ms, 60_000);
+
+  await store.append({ threadId: "t1", events: [created()] });
+  await store.drain();
+
+  // A stale rotated rung that only the ARGUMENT-LESS sweep collects.
+  const rung = path.join(rootDir, "threads", "t1", "raw.ndjson.1");
+  await fs.writeFile(rung, "old\n");
+  const ancient = (Date.now() - 30 * 24 * 60 * 60 * 1000) / 1000;
+  await fs.utimes(rung, ancient, ancient);
+
+  // A per-thread prune must NOT collect it — that is the gap V1 found.
+  await store.pruneAttachments({ threadId: "t1", now: hoursFromNow(0) });
+  await fs.stat(rung);
+
+  // Firing the scheduled callback does.
+  timers[0]!.fn();
+  await store.drain();
+  // The timer body is fire-and-forget, so wait for the sweep it started.
+  await store.sweepNow();
+  await assert.rejects(fs.stat(rung), "the scheduled sweep must reach raw logs");
+
+  store.close();
+});
+
+test("sweepIntervalMs 0 disables the scheduler, and close() stops it", async () => {
+  const rootDir = await tempRoot();
+  const timers: Array<() => void> = [];
+  let cleared = 0;
+  const off = createThreadStore({
+    rootDir,
+    clock: fixedClock(),
+    idGen: countingIds(),
+    sweepIntervalMs: 0,
+    setTimer: (fn) => {
+      timers.push(fn);
+      return timers.length;
+    },
+    clearTimer: () => {
+      cleared += 1;
+    }
+  });
+  assert.equal(timers.length, 0, "0 means no background sweep");
+  off.close();
+  assert.equal(cleared, 0, "nothing to clear");
+
+  const on = createThreadStore({
+    rootDir,
+    clock: fixedClock(),
+    idGen: countingIds(),
+    sweepIntervalMs: 1_000,
+    setTimer: (fn) => {
+      timers.push(fn);
+      return timers.length;
+    },
+    clearTimer: () => {
+      cleared += 1;
+    }
+  });
+  assert.equal(timers.length, 1);
+  on.close();
+  assert.equal(cleared, 1, "close() stops the scheduled sweep");
+  on.close();
+  assert.equal(cleared, 1, "close() is idempotent");
+});
+
+test("the default cadence is used when none is given", async () => {
+  const rootDir = await tempRoot();
+  const seen: number[] = [];
+  const store = createThreadStore({
+    rootDir,
+    clock: fixedClock(),
+    idGen: countingIds(),
+    setTimer: (_fn, ms) => {
+      seen.push(ms);
+      return 1;
+    },
+    clearTimer: () => undefined
+  });
+  assert.deepEqual(seen, [DEFAULT_SWEEP_INTERVAL_MS]);
+  store.close();
 });

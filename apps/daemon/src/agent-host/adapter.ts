@@ -37,6 +37,16 @@ import type {
 export interface StartSessionInput {
   threadId: string;
   cwd: string;
+  /**
+   * The PROJECT ROOT the daemon validated — the `<workspacesDir>/<ws>/<project>`
+   * dir the tab belongs to, never a subdirectory.
+   *
+   * Any per-project pooling keys on **this**, not on `cwd`: OpenCode runs one
+   * `opencode serve` per project (§3.2), and a thread opened on a subdirectory
+   * would otherwise spawn a second server for the same checkout. Optional so
+   * an adapter can still fall back to `cwd`.
+   */
+  projectPath?: string;
   home: AccountHome;
   title?: string;
   modelSelection: ModelSelection;
@@ -158,6 +168,33 @@ export interface AgentAdapter {
   ): Promise<void>;
   compact(threadId: string): Promise<void>;
   readThread(threadId: string): Promise<ThreadSnapshot>;
+
+  /**
+   * Project a {@link ThreadSnapshot} — the provider's OWN transcript — into the
+   * §4.2 event union, so a resumed thread has a timeline.
+   *
+   * A resume replays nothing onto the message stream (verified for Claude:
+   * `replayUuids: []`), so without this the thread opens empty even though the
+   * provider has the whole conversation. `ThreadSnapshot.turns[].items` is
+   * opaque by contract — only the adapter knows its provider's shape — so only
+   * the adapter can project it. The host calls this once, at session start,
+   * for a thread that resumes from a cursor and has no items of its own.
+   *
+   * Every event carries `raw.source = HISTORICAL_RAW_SOURCE`: it describes
+   * something that already happened, so ingestion persists it while a consumer
+   * must not let it raise attention, fire a push or move a live turn.
+   *
+   * Shape the host expects per historical turn: one `turn.started`, the turn's
+   * `item.completed` rows (`user_message` / `assistant_message` with their
+   * final text, tool items under their tool-lifecycle item type), then one
+   * `turn.completed {state: "completed"}` whose `tokenUsage` is `unavailable`
+   * — history carries no live accounting.
+   *
+   * Pure and synchronous — the reading already happened in `readThread`.
+   * Optional: an adapter that cannot project its own history omits it, and the
+   * host says so in the timeline rather than rendering an empty thread.
+   */
+  projectHistory?(snapshot: ThreadSnapshot): RuntimeEvent[];
   rollbackThread(threadId: string, numTurns: number): Promise<ThreadSnapshot>;
 
   listSessions(): ProviderSession[];
@@ -235,6 +272,8 @@ export interface AdapterContext {
   buildEnv(input: {
     threadId: string;
     home: AccountHome;
+    /** The project root, for a child shared by a project rather than a thread. */
+    projectPath?: string;
     extraEnv?: Readonly<Record<string, string | undefined>>;
   }): Record<string, string>;
   /**

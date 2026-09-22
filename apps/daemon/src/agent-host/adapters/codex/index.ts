@@ -37,6 +37,7 @@ import { AGENT_HOST_DEADLINES, withDeadline } from "../../support/deadline.ts";
 import { spawnProviderChild } from "../../support/spawn.ts";
 import { CODEX_ADAPTER_CAPABILITIES } from "./capabilities.ts";
 import { AsyncEventQueue } from "./event-queue.ts";
+import { projectCodexHistory } from "./history.ts";
 import { CodexPeer } from "./protocol.ts";
 import {
   MINIMUM_CODEX_VERSION,
@@ -348,6 +349,15 @@ export const createCodexAdapter: AdapterFactory = async (
 
     rollbackThread(threadId: string, numTurns: number): Promise<ThreadSnapshot> {
       return requireSession(threadId).rollbackThread(numTurns);
+    },
+
+    /**
+     * §7.3's timeline for a resumed thread (E2E finding E6). Stamped here, as
+     * every other event is, so the ids and clock come from the one seam a test
+     * can make deterministic.
+     */
+    projectHistory(snapshot: ThreadSnapshot): RuntimeEvent[] {
+      return projectCodexHistory(snapshot).map((draft) => stamp(snapshot.threadId, draft));
     },
 
     listSessions(): ProviderSession[] {

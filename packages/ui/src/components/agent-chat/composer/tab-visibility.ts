@@ -33,3 +33,57 @@ export function isChatTabListenerActive(
   if (!root) return false;
   return root.getClientRects().length > 0;
 }
+
+// ---------------------------------------------------------------------------
+// Escape ownership (V1 §10.1)
+// ---------------------------------------------------------------------------
+
+/**
+ * Who handles an Escape that reached a `window` capture listener.
+ *
+ * **Two listeners exist and exactly one of them may act.** The shell
+ * (`AgentChatView`) owns Escape everywhere *outside* this thread's composer
+ * shell — it leaves an open drill-in, else interrupts. The composer owns it
+ * *inside* the shell, because the textarea has to give an open token menu
+ * first refusal before the turn is stopped.
+ *
+ * The two rules are complements by construction: the shell bails when
+ * `target.closest('[data-agent-chat-composer-shell=…]')` matches, and this
+ * returns true only when it does. `defaultPrevented` is the belt on top —
+ * `stopPropagation()` does **not** silence a sibling listener on the same
+ * node, so whichever runs first must be able to tell the other to stand down.
+ *
+ * Without this, one Escape fired two `actions.interrupt()` calls: two POSTs,
+ * two `commandId`s and a redundant queue drain.
+ */
+export function composerOwnsEscape(input: {
+  /** The other listener already acted on this event. */
+  defaultPrevented: boolean;
+  /** The event target is inside THIS thread's composer shell. */
+  insideComposerShell: boolean;
+  /** The target is the textarea, which handles Escape on its own. */
+  isTextarea: boolean;
+  isTurnActive: boolean;
+}): boolean {
+  if (input.defaultPrevented) return false;
+  if (!input.isTurnActive) return false;
+  // The textarea's own handler runs first and owns the menu-vs-interrupt call.
+  if (input.isTextarea) return false;
+  return input.insideComposerShell;
+}
+
+/**
+ * The shell's half, stated here so the disjointness is testable in one place.
+ * `AgentChatView` implements exactly this; if it ever drifts, the test that
+ * asserts the two never both return true is what catches it.
+ */
+export function shellOwnsEscape(input: {
+  defaultPrevented: boolean;
+  insideComposerShell: boolean;
+  isTurnActive: boolean;
+  drillInOpen: boolean;
+}): boolean {
+  if (input.defaultPrevented) return false;
+  if (input.insideComposerShell) return false;
+  return input.drillInOpen || input.isTurnActive;
+}

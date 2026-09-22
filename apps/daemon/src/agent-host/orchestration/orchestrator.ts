@@ -23,7 +23,11 @@
 import {
   COMMANDS_ALLOWED_IN_ERROR_STATE,
   DEFAULT_RUNTIME_MODE,
+  MAX_TURN_FILE_BYTES,
+  MAX_TURN_IMAGE_BYTES,
+  isHistoricalRuntimeEvent,
   SETTLED_TURN_STATES,
+  slimActivityPayload,
   type AgentAdapterId,
   type AgentChatCommandName,
   type AgentChatSessionSummaryFields,
@@ -52,6 +56,8 @@ import {
 
 import type { AccountHome } from "@orquester/api/agent-chat";
 
+import { stat } from "node:fs/promises";
+
 import type { AdapterLogger, AgentAdapter } from "../adapter.ts";
 import {
   CONTINUATION_FAILED_MESSAGE,
@@ -73,6 +79,7 @@ import {
   CheckpointTurnRangeError
 } from "../checkpoints/index.ts";
 import { projectSnapshotActivities } from "../ingestion/index.ts";
+import { AGENT_HOST_DEADLINES, withDeadline } from "../support/deadline.ts";
 import { createEventBuilder, describeFailure, makeActivity, type BuildEvent } from "./events.ts";
 import {
   AgentChatCommandError,
@@ -144,6 +151,10 @@ export interface ResolvedLaunch {
  */
 /** The snapshot registry, plus the change flag `agent.providers.changed` needs. */
 export type HostProviderSnapshotRegistry = ProviderSnapshotRegistry & {
+  /** §7.7: an `auth.status {error}` from a turn must reach the snapshot. */
+  applyAuthStatus?(adapterId: AgentAdapterId, event: RuntimeEvent): void;
+  /** Monotonic; lets the daemon notice a host-triggered change (§6.4). */
+  changeCount?(): number;
   refreshDetailed?(
     adapterId: AgentAdapterId,
     input?: { cwd?: string }
@@ -258,6 +269,25 @@ interface ThreadRuntime {
   /** The §6.1 launcher env, loaded once with the thread. */
   launch: ThreadLaunchConfig | null;
   /**
+   * E6: this thread resumes a conversation and has nothing of its own yet, so
+   * the provider's history is still owed.
+   *
+   * Decided when the thread is loaded or created — NOT at session start: by
+   * then the `/turn` that triggered the start has already appended its user
+   * message, and an items-based test would never fire.
+   */
+  historyPending: boolean;
+  /**
+   * Target of the most recent `thread.reverted`, or null.
+   *
+   * A capture that lands after a revert belongs to a turn the revert
+   * truncated, and appending it raises `head.turnCount` past the target —
+   * visibly undoing the rewind and leaving a checkpoint row with no turn. It
+   * cannot be derived from the fold: after the revert the head's count and the
+   * highest surviving checkpoint are equal again.
+   */
+  revertedTo: number | null;
+  /**
    * Set once `captureBaseline` answers `null` — a non-git project skips
    * checkpoints silently (§5.4), and no placeholder may be written for it.
    */
@@ -266,6 +296,14 @@ interface ThreadRuntime {
 }
 
 const HEAD_SAVE_EVENT_INTERVAL = 50;
+
+/**
+ * §3.4's "bounded grace window" on a queued turn start. A `pending` turn older
+ * than this on a host that is only now starting belongs to a send that never
+ * happened; anything shorter would settle a turn that is merely slow to reach
+ * the provider.
+ */
+const PENDING_TURN_GRACE_MS = 5 * 60_000;
 
 /** Events that change `meta.json`'s own fields, so the head is rewritten. */
 const HEAD_WRITING_EVENTS: ReadonlySet<string> = new Set([
@@ -317,6 +355,13 @@ export interface Orchestrator {
   subscribe(threadId: string, subscription: ThreadSubscription): Promise<() => void>;
 
   providers(): ProviderSnapshot[];
+  /**
+   * Monotonic counter of snapshot changes. The daemon polls it to publish
+   * `agent.providers.changed` for a change the HOST noticed on its own — a CLI
+   * upgraded underneath it, a login gone stale — which no client request would
+   * otherwise reveal.
+   */
+  providersChangeCount(): number;
   refreshProvider(
     adapterId: AgentAdapterId,
     input?: { cwd?: string }
@@ -393,6 +438,18 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   const { store, ingestion, checkpoints, liveness, snapshots, logger } = options;
 
   const runtimes = new Map<string, ThreadRuntime>();
+  /**
+   * §6.1 / E5: which thread owns a provider conversation.
+   *
+   * Two tabs resuming one provider thread would advance one cursor from two
+   * processes — the invariant §3.1 spends a whole paragraph on. The provider's
+   * own id is only knowable once a session announces it (`thread.started`), so
+   * the map is fed from there and cleared when the thread stops or is deleted.
+   * In memory only: after a host restart nothing is live, which is correct.
+   */
+  const providerThreadOwners = new Map<string, string>();
+  /** In-flight `loadRuntime` calls, memoised so two never build two runtimes. */
+  const loadingRuntimes = new Map<string, Promise<ThreadRuntime>>();
   const gate: Deferred<void> = createDeferred<void>();
   const gateQueue = createSerialQueue();
   let gateOpen = false;
@@ -438,11 +495,44 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     return adapter;
   };
 
-  const loadRuntime = async (threadId: string): Promise<ThreadRuntime> => {
+  /**
+   * One runtime per thread, even under concurrent first-touches.
+   *
+   * The normal tab-open flow issues `GET …/thread` and `GET …/events`
+   * together, and the stream's `subscribe` runs concurrently with the read. If
+   * both miss the cache and both build a runtime, the second `runtimes.set`
+   * discards the first — and with it the `subscribers` set the stream just
+   * registered on, so that tab renders its snapshot and never updates again.
+   * The loser's command queue is also no longer the serialising one, which
+   * lets two `commit()`s interleave on one thread.
+   *
+   * So the in-flight promise is memoised **synchronously**, before the first
+   * await — the same shape `ProviderSnapshotRegistry.ensureWorkspaceSnapshot`
+   * uses. The entry is dropped only on failure, so a transient read error does
+   * not poison the thread for the life of the host.
+   */
+  const loadRuntime = (threadId: string): Promise<ThreadRuntime> => {
     const existing = runtimes.get(threadId);
     if (existing) {
-      return existing;
+      return Promise.resolve(existing);
     }
+    const inFlight = loadingRuntimes.get(threadId);
+    if (inFlight) {
+      return inFlight;
+    }
+    const load = buildRuntime(threadId)
+      .then((runtime) => {
+        runtimes.set(threadId, runtime);
+        return runtime;
+      })
+      .finally(() => {
+        loadingRuntimes.delete(threadId);
+      });
+    loadingRuntimes.set(threadId, load);
+    return load;
+  };
+
+  const buildRuntime = async (threadId: string): Promise<ThreadRuntime> => {
     const tail = await store.readAll(threadId);
     const state = fold.foldAll(tail.events);
     const persistedHead = await store.loadHead(threadId).catch(() => null);
@@ -462,6 +552,15 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       subscribers: new Set(),
       parseError: store.threadError?.(threadId) ?? null,
       launch,
+      // A resumed thread with no timeline of its own still owes its history —
+      // including after a host restart, when nothing replayed it the first time.
+      historyPending:
+        (state.items ?? []).length === 0 && state.head?.session.resumeCursor !== undefined,
+      revertedTo: tail.events.reduce<number | null>(
+        (target, event) =>
+          event.type === "thread.reverted" ? event.payload.turnCount : target,
+        null
+      ),
       titleManual: tail.events.some(
         (event) =>
           event.type === "thread.meta-updated" &&
@@ -471,7 +570,6 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       checkpointsUnavailable: false,
       deleted: state.deleted
     };
-    runtimes.set(threadId, runtime);
     return runtime;
   };
 
@@ -612,11 +710,49 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     ]);
   };
 
+  /**
+   * §5.1: between a `/turn` command and the provider's first `turn.started` the
+   * turn exists as a **pending row**, and that row is *adopted* when the id
+   * arrives — never settled. A `ready` session state published in that window
+   * settles it (`settledTurnStateForSessionStatus("ready") === "completed"`),
+   * so one user message grows two turn rows and every ambient surface reads
+   * `completed` milliseconds after the user pressed send.
+   *
+   * `startSession` already maps its own `ready` to `starting` for exactly this
+   * reason; this applies the same rule to every writer, including the events
+   * ingestion translates from the adapter's own `session.state.changed`.
+   */
+  const coerceSessionForPendingTurn = (
+    runtime: ThreadRuntime,
+    session: ThreadSessionState
+  ): ThreadSessionState => {
+    if (session.status !== "ready" || session.activeTurnId !== null) {
+      return session;
+    }
+    const hasUnstartedTurn = (runtime.state.turns ?? []).some(
+      (turn) => turn.state === "pending" && turn.startedAt === null
+    );
+    return hasUnstartedTurn ? { ...session, status: "starting" } : session;
+  };
+
+  const sessionStateEquals = (left: ThreadSessionState, right: ThreadSessionState): boolean =>
+    left.status === right.status &&
+    left.activeTurnId === right.activeTurnId &&
+    (left.lastError ?? null) === (right.lastError ?? null) &&
+    (left.providerThreadId ?? null) === (right.providerThreadId ?? null) &&
+    left.resumeCursor === right.resumeCursor;
+
   const persistSession = async (
     runtime: ThreadRuntime,
     session: ThreadSessionState
   ): Promise<void> => {
-    await append(runtime, [buildEvent(runtime.id, "thread.session-set", { session })]);
+    const next = coerceSessionForPendingTurn(runtime, session);
+    // An unchanged republish is pure noise on every open stream, and it is the
+    // republish — not a real transition — that produced the phantom row above.
+    if (sessionStateEquals(currentSession(runtime), next)) {
+      return;
+    }
+    await append(runtime, [buildEvent(runtime.id, "thread.session-set", { session: next })]);
   };
 
   const currentSession = (runtime: ThreadRuntime): ThreadSessionState =>
@@ -740,6 +876,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       ...(resumeCursor !== undefined ? { resumeCursor } : {})
     });
     runtime.bound = { ...desired, session };
+    // E6: a resumed thread whose log is empty must show the conversation it is
+    // resuming. Before the session is announced, not after — otherwise the
+    // first live frames interleave with history and the timeline is scrambled.
+    if (resumeCursor !== undefined) {
+      await projectHistoryIfEmpty(runtime, adapter);
+    }
     await persistSession(runtime, {
       status: mapSessionStatus(session.status, pendingTurnStart),
       activeTurnId: session.activeTurnId ?? null,
@@ -753,6 +895,57 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     // Forked off the session start so it never delays a turn (§4.6.4).
     snapshots.ensureWorkspaceSnapshot(head.adapter, head.cwd);
     return session;
+  };
+
+  /**
+   * Replay the provider's own history into the thread, once, for a thread that
+   * resumes from a cursor and has nothing of its own (§4.1 `readThread`).
+   *
+   * Everything it produces is stamped {@link HISTORICAL_RAW_SOURCE}, so it is
+   * persisted and rendered but ignored by anything that reacts to new work.
+   * Failure is never fatal: a thread that cannot show its history is still a
+   * usable thread, so the reason lands as one activity row.
+   */
+  const projectHistoryIfEmpty = async (
+    runtime: ThreadRuntime,
+    adapter: AgentAdapter
+  ): Promise<void> => {
+    if (!runtime.historyPending) return;
+    runtime.historyPending = false;
+    if (!adapter.projectHistory) {
+      await appendActivity(runtime, {
+        kind: "runtime.warning",
+        tone: "info",
+        summary: "History not available for this provider",
+        detail:
+          "This conversation was resumed, but the agent cannot replay what was said before. New messages appear here as usual."
+      });
+      return;
+    }
+    try {
+      const snapshot = await withDeadline(() => adapter.readThread(runtime.id), {
+        timeoutMs: AGENT_HOST_DEADLINES.sessionOpenMs,
+        label: `history:${adapter.id}`
+      });
+      const events = adapter.projectHistory(snapshot);
+      for (const event of events) {
+        if (!isHistoricalRuntimeEvent(event)) {
+          logger.warn("agent-host: a projected history event was not marked historical", {
+            threadId: runtime.id,
+            type: event.type
+          });
+        }
+        await ingestion.ingest(event);
+      }
+      await ingestion.flushThread(runtime.id);
+    } catch (error) {
+      await appendActivity(runtime, {
+        kind: "runtime.warning",
+        tone: "info",
+        summary: "History not available for this provider",
+        detail: describeFailure(error)
+      });
+    }
   };
 
   /**
@@ -852,6 +1045,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       }
     }
     runtime.bound = null;
+    releaseProviderThreads(runtime.id);
     liveness.clear(runtime.id);
     await ingestion.flushThread(runtime.id).catch(() => undefined);
   };
@@ -968,11 +1162,23 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       });
       watchdogFor(runtime);
     } catch (error) {
+      const detail = describeFailure(error);
       await appendActivity(runtime, {
         kind: "provider.turn.start.failed",
         summary: "Provider turn start failed",
-        detail: describeFailure(error),
+        detail,
         requestId: turn.messageId
+      });
+      // `ensureSession` persisted `starting` for the pending turn start. The
+      // provider produced no frames, so nothing else will ever settle it: left
+      // alone the tab spins on "starting" forever, `/compact` is refused by its
+      // `status === "starting"` guard and the error-state recovery carve-out
+      // (`/session/stop`, `/revert`) does not apply either.
+      await persistSession(runtime, {
+        ...currentSession(runtime),
+        status: "error",
+        activeTurnId: null,
+        lastError: detail
       });
     }
   };
@@ -1144,6 +1350,36 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     }
   };
 
+  /**
+   * §6.3: "the bounds are checked against the file the host stat'd, not against
+   * what the client claimed". The upload hop checks the stat against the
+   * *declared* mime and the command hop checks the *declared* size, so neither
+   * alone closes the gap — this is the one place both are known.
+   */
+  const assertAttachmentWithinBounds = async (
+    threadId: string,
+    attachment: AttachmentRef
+  ): Promise<void> => {
+    let path: string;
+    try {
+      path = await store.resolveAttachment(threadId, attachment.id);
+    } catch {
+      throw invalidCommand(`Attachment '${attachment.name}' is not available.`);
+    }
+    let sizeBytes: number;
+    try {
+      sizeBytes = (await stat(path)).size;
+    } catch {
+      throw invalidCommand(`Attachment '${attachment.name}' is not available.`);
+    }
+    const limit = attachment.type === "image" ? MAX_TURN_IMAGE_BYTES : MAX_TURN_FILE_BYTES;
+    if (sizeBytes > limit) {
+      throw invalidCommand(
+        `Attachment '${attachment.name}' is ${sizeBytes} bytes, over the ${limit}-byte limit.`
+      );
+    }
+  };
+
   const maxCheckpointTurnCount = (runtime: ThreadRuntime): number =>
     (runtime.state.checkpoints ?? []).reduce(
       (max, checkpoint) => Math.max(max, checkpoint.checkpointTurnCount),
@@ -1166,6 +1402,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       await append(runtime, [
         buildEvent(runtime.id, "thread.reverted", { turnCount: targetTurnCount })
       ]);
+      runtime.revertedTo = targetTurnCount;
       await store.pruneAttachments({ threadId: runtime.id }).catch(() => undefined);
     } catch (error) {
       // Any failure is appended as an activity with tone `error`, not raised as
@@ -1338,6 +1575,17 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           );
         }
 
+        // The upload cap keyed on the mime the CLIENT declared at upload time,
+        // and the command bounds key on the size it declares here — so a
+        // 40 MiB file uploaded as `application/octet-stream` could be sent as a
+        // 1 KB "image". §6.3's rule is that the bounds hold against the file
+        // the host STAT'd, so the resolve path re-checks it.
+        const verifyAttachments = async (): Promise<void> => {
+          for (const attachment of attachments) {
+            await assertAttachmentWithinBounds(runtime.id, attachment);
+          }
+        };
+
         const queuedTurn: QueuedTurn = {
           messageId,
           input,
@@ -1356,7 +1604,20 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
               runtime.queuedTurns.push(queuedTurn);
               return;
             }
-            void runEffect(runtime, () => sendTurnEffect(runtime, queuedTurn));
+            void runEffect(runtime, async () => {
+              try {
+                await verifyAttachments();
+              } catch (error) {
+                await appendActivity(runtime, {
+                  kind: "provider.turn.start.failed",
+                  summary: "Attachment rejected",
+                  detail: describeFailure(error),
+                  requestId: queuedTurn.messageId
+                });
+                return;
+              }
+              await sendTurnEffect(runtime, queuedTurn);
+            });
           }
         };
       }
@@ -1691,6 +1952,27 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
 
       let resumeCursor: unknown;
       if (request.resume !== undefined) {
+        // E5: the conversation may already be open in another tab. Resuming it
+        // there too would advance one provider cursor from two processes, and
+        // what the user actually saw was a silent FRESH thread that remembered
+        // nothing. Refuse by name unless the adapter can fork it.
+        const owner = ownerOfProviderThread(request.resume.conversationId);
+        if (owner !== null && owner !== threadId) {
+          const canFork =
+            options.adapters.get(adapterId)?.capabilities.supportsSessionFork === true;
+          if (!canFork) {
+            const ownerTitle = headOf(runtimes.get(owner)!)?.title ?? owner;
+            throw new AgentChatCommandError(
+              "COMMAND_REJECTED",
+              `That conversation is already open in "${ownerTitle}". Close that tab first, or open a new conversation.`,
+              { code: "RESUME_UNAVAILABLE", ownerThreadId: owner }
+            );
+          }
+          logger.info("agent-host: forking a conversation already open elsewhere", {
+            threadId,
+            ownerThreadId: owner
+          });
+        }
         // §6.1: refused at creation rather than opening a fresh thread the user
         // believes is their old one. The only route that answers this code.
         if (!isUsableConversationId(request.resume.conversationId)) {
@@ -1740,6 +2022,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         logger.warn(`agent-host: failed to persist the launch config for ${threadId}`, error);
       });
       await runtime.commands.run(() => commit(runtime, events));
+      runtime.historyPending = resumeCursor !== undefined;
       await saveHeadNow(runtime);
       return requireHead(runtime);
     });
@@ -1809,10 +2092,16 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       }
       await store.deleteThread(threadId);
       runtime.deleted = true;
-      for (const subscriber of [...runtime.subscribers]) {
-        void subscriber;
-      }
+      // The `thread.deleted` event above is the last frame every open stream
+      // gets; detach them so a stream that outlives this call cannot be
+      // published into, and free the per-thread ingestion state — nothing else
+      // ever tells ingestion a thread is gone.
+      runtime.subscribers.clear();
+      runtime.watchdog?.stop();
+      await ingestion.forget(threadId);
+      releaseProviderThreads(threadId);
       runtimes.delete(threadId);
+      loadingRuntimes.delete(threadId);
     });
 
   // -------------------------------------------------------------------------
@@ -1829,9 +2118,17 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         payload.items.filter((item): item is ThreadActivityItem => item.kind === "activity")
       ).map((activity) => activity.id)
     );
-    const items = payload.items.filter(
-      (item) => item.kind !== "activity" || kept.has(item.id)
-    );
+    // §5.6: the full payload is persisted and slimmed on the way to the wire.
+    // This is the snapshot half of the choke point (`stream.ts` is the live
+    // half); `GET …/items/:itemId` stays unslimmed and is what "load full
+    // output" reads.
+    const items = payload.items
+      .filter((item) => item.kind !== "activity" || kept.has(item.id))
+      .map((item) => {
+        if (item.kind !== "activity") return item;
+        const slimmed = slimActivityPayload(item.payload);
+        return slimmed === item.payload ? item : { ...item, payload: slimmed };
+      });
     const head =
       runtime.continueAfterRestart === undefined
         ? payload.head
@@ -1984,16 +2281,17 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           title: questionTitle(question)
         }))
       ],
-      hasActionableProposedPlan: (runtime.state.items ?? []).some(
-        (item) => item.kind === "activity" && item.activityKind === "turn.proposed.completed"
-      ),
+      hasActionableProposedPlan: hasActionableProposedPlan(runtime),
       backgroundLiveness: liveness.liveness(threadId),
       latestTurn: latest
         ? {
             turnId: latest.turnId,
             state: latest.state,
             startedAt: latest.startedAt,
-            completedAt: latest.completedAt
+            completedAt: latest.completedAt,
+            // Forwarded so the daemon can carry it on `agentChat.turn` (§6.4)
+            // without a second read; absent until the fold stamps it.
+            ...(latest.tokenUsage !== undefined ? { tokenUsage: latest.tokenUsage } : {})
           }
         : null,
       chatSessionStatus: head.session.status
@@ -2063,19 +2361,27 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   const onAccountEvent = (event: RuntimeEvent): void => {
     const adapterId = adapterForThread(event.threadId);
     if (!adapterId) return;
+    // Two different facts arrive on this hook: a rate-limit window and an auth
+    // failure. `applyUsageLimits` ignores everything but the former, so the
+    // latter needs its own sink or it is dropped on the floor and §7.7's toast
+    // never fires.
     snapshots.applyUsageLimits(adapterId, event);
+    snapshots.applyAuthStatus?.(adapterId, event);
   };
 
   const subscribe = async (
     threadId: string,
     subscription: ThreadSubscription
-  ): Promise<() => void> => {
-    const runtime = await loadRuntime(threadId);
-    runtime.subscribers.add(subscription);
-    return () => {
-      runtime.subscribers.delete(subscription);
-    };
-  };
+  ): Promise<() => void> =>
+    // Through the gate like every other entry point: a stream that loaded a
+    // runtime before the gate opened would race the §3.3 reconcile for it.
+    whenReady(async () => {
+      const runtime = await loadRuntime(threadId);
+      runtime.subscribers.add(subscription);
+      return () => {
+        runtime.subscribers.delete(subscription);
+      };
+    });
 
   // -------------------------------------------------------------------------
   // Checkpoints (§5.4) — driven off the runtime turn boundary
@@ -2151,6 +2457,19 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           activeTurnId: currentSession(runtime).activeTurnId
         });
         if (!summary) return;
+        // A capture that lands after a revert belongs to a turn the revert
+        // truncated; appending it raises `head.turnCount` past the target and
+        // visibly undoes the rewind (the checkpoint list keeps a row with no
+        // matching turn).
+        const revertedTo = runtime.revertedTo;
+        if (revertedTo !== null && summary.turnCount > revertedTo) {
+          logger.info("agent-host: dropping a checkpoint for a reverted turn", {
+            threadId: runtime.id,
+            turnCount: summary.turnCount,
+            revertedTo
+          });
+          return;
+        }
         await append(runtime, [
           buildEvent(runtime.id, "thread.turn-diff-completed", {
             turnCount: summary.turnCount,
@@ -2188,6 +2507,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
               runtime.bound = null;
             }
             trackSessionCursor(runtime, event);
+            if (event.type === "thread.started") {
+              providerThreadOwners.set(event.payload.providerThreadId, event.threadId);
+            }
           }
           // `auth.status` and `account.rate-limits.updated` are not thread
           // facts: ingestion hands them to `onAccountEvent`, which routes them
@@ -2217,6 +2539,31 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     }
   };
 
+  /** The thread that currently owns a provider conversation, if any is live. */
+  const ownerOfProviderThread = (providerThreadId: string): string | null => {
+    const owner = providerThreadOwners.get(providerThreadId);
+    if (owner === undefined) return null;
+    // An owner whose session is gone no longer owns anything.
+    const runtime = runtimes.get(owner);
+    const head = runtime ? headOf(runtime) : null;
+    const live =
+      head !== null &&
+      head.session.status !== "stopped" &&
+      head.session.status !== "idle" &&
+      (options.adapters.get(head.adapter)?.hasSession(owner) ?? false);
+    if (!live) {
+      providerThreadOwners.delete(providerThreadId);
+      return null;
+    }
+    return owner;
+  };
+
+  const releaseProviderThreads = (threadId: string): void => {
+    for (const [providerThreadId, owner] of [...providerThreadOwners]) {
+      if (owner === threadId) providerThreadOwners.delete(providerThreadId);
+    }
+  };
+
   /** Claude refreshes its cursor mid-turn; keep the bound copy current. */
   const trackSessionCursor = (runtime: ThreadRuntime, event: RuntimeEvent): void => {
     if (event.type !== "session.started") return;
@@ -2235,7 +2582,17 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   ): Promise<void> => {
     if (events.length === 0) return;
     const runtime = runtimes.get(threadId) ?? (await loadRuntime(threadId));
-    await append(runtime, events);
+    // The pending-turn rule is the host's, not any one writer's: an adapter
+    // that reports `ready` while a turn start is in flight must not settle the
+    // row the command opened.
+    const guarded = events.map((event) => {
+      if (event.type !== "thread.session-set") return event;
+      const session = coerceSessionForPendingTurn(runtime, event.payload.session);
+      return session === event.payload.session
+        ? event
+        : { ...event, payload: { ...event.payload, session } };
+    });
+    await append(runtime, guarded);
   };
 
   // -------------------------------------------------------------------------
@@ -2261,6 +2618,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         // Only threads that are running with a usable cursor (§3.3).
         if (session.status !== "running" || session.activeTurnId === null) continue;
         if (session.resumeCursor === undefined || session.resumeCursor === null) continue;
+        // …and only where the project opted in. Continuation is opt-in per
+        // project over a host-wide default that is OFF, so a marker written
+        // for an opted-out thread would make the next boot resume it — the
+        // reconcile trusts a marker on its own, exactly because the stop path
+        // is supposed to be the place that filter is applied.
+        if ((await options.continuationEnabled?.(head.projectPath)) !== true) continue;
         await writeMarker(runtime, { turnId: session.activeTurnId });
         marked.push(threadId);
       } catch (error) {
@@ -2294,6 +2657,37 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       kind: "runtime.error",
       summary: "Session did not survive a restart",
       detail: message
+    });
+  };
+
+  /**
+   * A `pending` turn belongs to a `/turn` whose effect never ran — the host
+   * died between the commit and the send. Nothing on the live path settles it
+   * (the provider produced no frames at all), so the reconcile does, bounded
+   * by {@link PENDING_TURN_GRACE_MS} so a turn that is merely slow to start on
+   * a live session is left alone.
+   */
+  const settleStalePendingTurns = async (runtime: ThreadRuntime): Promise<void> => {
+    const head = headOf(runtime);
+    if (!head) return;
+    const now = clock.now().getTime();
+    const stale = (runtime.state.turns ?? []).some((turn) => {
+      if (turn.state !== "pending") return false;
+      const requestedAt = Date.parse(turn.requestedAt);
+      return !Number.isFinite(requestedAt) || now - requestedAt > PENDING_TURN_GRACE_MS;
+    });
+    if (!stale) return;
+    await appendActivity(runtime, {
+      kind: "provider.turn.start.failed",
+      summary: "Queued message was not sent",
+      detail: CONTINUATION_FAILED_MESSAGE
+    });
+    // Settling is by session status (§5.1): `stopped` folds the pending turn
+    // to `interrupted` without claiming the session itself failed.
+    await persistSession(runtime, {
+      ...currentSession(runtime),
+      status: "stopped",
+      activeTurnId: null
     });
   };
 
@@ -2342,8 +2736,16 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     if (!orphaned) {
       // Threads without an active turn are not resumed eagerly; the first
       // `sendTurn` re-adopts them (lazy recovery, §4.1).
+      await settleStalePendingTurns(runtime);
       return;
     }
+
+    // §3.4's bounded grace window. A `/turn` commits its message and its
+    // pending turn row BEFORE the effect runs, so a host that dies in that
+    // window leaves a `pending` turn with an idle head: not "orphaned" by the
+    // filter above, but `deriveLatestTurn` reports it forever and the status
+    // line shows the thread working with nothing behind it.
+    await settleStalePendingTurns(runtime);
 
     const closed = runtime.deleted || (await options.isThreadClosed?.(threadId)) === true;
     const markerMatches =
@@ -2395,6 +2797,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           activeTurnId: result.turnId,
           ...(result.resumeCursor !== undefined ? { resumeCursor: result.resumeCursor } : {})
         });
+        // The continuation is the one send that bypasses `sendTurnEffect`, and
+        // a turn resumed from a cursor is the case most likely to wedge — arm
+        // the §3.1 watchdog for it too, or it has no liveness bound at all.
+        watchdogFor(runtime);
         // 4. Clear the marker on success.
         await writeMarker(runtime, undefined);
       } catch (error) {
@@ -2423,7 +2829,15 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     }
   };
 
-  const stop = async (): Promise<void> => {
+  let stopping: Promise<void> | null = null;
+  const stop = (): Promise<void> => {
+    // A second caller awaits the first rather than returning to a half-stopped
+    // host.
+    stopping ??= runStop();
+    return stopping;
+  };
+
+  const runStop = async (): Promise<void> => {
     stopped = true;
     for (const runtime of runtimes.values()) {
       runtime.watchdog?.stop();
@@ -2455,6 +2869,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     onAccountEvent,
     adapterForThread,
     providers: () => snapshots.all(),
+    providersChangeCount: () => snapshots.changeCount?.() ?? 0,
     refreshProvider: async (adapterId, input) => {
       if (snapshots.refreshDetailed) {
         const { snapshot, changed } = await snapshots.refreshDetailed(adapterId, input);
@@ -2501,6 +2916,47 @@ export interface HostThreadSummary extends AgentChatSessionSummaryFields {
     kind: "approval" | "question";
     title: string;
   }>;
+}
+
+/**
+ * The prefix the client puts on the turn it sends when the user clicks
+ * Implement. Mirrors `PLAN_IMPLEMENTATION_PROMPT_PREFIX` in
+ * `packages/ui/src/lib/agent-chat/entries.logic.ts`; the host cannot import
+ * from the UI package, so the literal is pinned here and in a test.
+ */
+export const PLAN_IMPLEMENTATION_PROMPT_PREFIX = "PLEASE IMPLEMENT THIS PLAN:\n";
+
+/**
+ * §6.4 / §7.3: `hasActionableProposedPlan` is `implementedAt === null` for the
+ * **latest** proposed plan — not "a plan was ever proposed". Without the
+ * second half the flag is sticky-true for as long as that one row survives
+ * retention, so every surface reading it shows a permanent "Plan Ready" and
+ * §6.4's ranking puts it above Monitoring forever.
+ */
+function hasActionableProposedPlan(runtime: ThreadRuntime): boolean {
+  const items = runtime.state.items ?? [];
+  let latestPlanIndex = -1;
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index]!;
+    if (item.kind === "activity" && item.activityKind === "turn.proposed.completed") {
+      latestPlanIndex = index;
+      break;
+    }
+  }
+  if (latestPlanIndex < 0) {
+    return false;
+  }
+  for (let index = latestPlanIndex + 1; index < items.length; index += 1) {
+    const item = items[index]!;
+    if (
+      item.kind === "message" &&
+      item.role === "user" &&
+      item.text.startsWith(PLAN_IMPLEMENTATION_PROMPT_PREFIX)
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 const REQUEST_KIND_TITLES: Readonly<Record<string, string>> = {

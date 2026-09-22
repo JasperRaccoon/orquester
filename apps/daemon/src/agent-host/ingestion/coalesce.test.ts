@@ -116,6 +116,26 @@ describe("dropSupersededToolUpdatedActivities (§5.6 snapshot drop)", () => {
   });
 });
 
+/**
+ * The §5.6 cap is measured in **UTF-8 bytes**, not UTF-16 code units (R5 #16),
+ * and the slimmer appends a one-character elision marker and never splits a
+ * surrogate pair. So the invariant that holds for EVERY input is on
+ * `byteLength`; a `.length` bound only happens to hold for ASCII.
+ */
+function assertCapped(value: string): void {
+  const limit = SLIM_MAX_STRING_BYTES + Buffer.byteLength("\u2026");
+  assert.ok(
+    Buffer.byteLength(value) <= limit,
+    `capped string was ${Buffer.byteLength(value)} bytes, limit ${limit}`
+  );
+  assert.ok(
+    value.endsWith("\u2026"),
+    "the elision marker is what the UI renders as truncated"
+  );
+  // A split surrogate pair would make the string unencodable downstream.
+  assert.equal(value, Buffer.from(value, "utf8").toString("utf8"));
+}
+
 describe("the §5.6 read projection is the single choke point (R5 #1)", () => {
   it("slims a row on its way out, and stamps truncated", () => {
     const huge = "x".repeat(SLIM_MAX_STRING_BYTES + 1000);
@@ -124,13 +144,30 @@ describe("the §5.6 read projection is the single choke point (R5 #1)", () => {
     ]);
     assert.ok(row);
     const payload = row.payload as { detail: string; truncated?: boolean };
-    // The cap plus the one-character elision marker W2's slimmer appends.
-    assert.ok(
-      payload.detail.length <= SLIM_MAX_STRING_BYTES + 1,
-      `detail was ${payload.detail.length}`
-    );
-    assert.ok(payload.detail.endsWith("\u2026"));
+    assertCapped(payload.detail);
     assert.equal(payload.truncated, true, "'load full output' needs this flag");
+  });
+
+  it("caps by BYTES, not code units, for multi-byte and astral text", () => {
+    // 4 UTF-8 bytes per emoji (a surrogate PAIR, so 2 code units): 8 000 of
+    // them are 32 KB on the wire but only 16 000 code units, which a
+    // `.length` check would wave straight through a 16 KB cap.
+    const [emojiRow] = projectSnapshotActivities([
+      activity("d1", "tool.completed", {
+        toolUseId: "c1",
+        detail: "\u{1F600}".repeat(8000)
+      })
+    ]);
+    assertCapped((emojiRow!.payload as { detail: string }).detail);
+
+    // 3 bytes per CJK character — the ~4x overshoot R5 #16 measured.
+    const [cjkRow] = projectSnapshotActivities([
+      activity("d2", "tool.completed", {
+        toolUseId: "c2",
+        detail: "\u6f22".repeat(SLIM_MAX_STRING_BYTES)
+      })
+    ]);
+    assertCapped((cjkRow!.payload as { detail: string }).detail);
   });
 
   it("returns a small row by REFERENCE, so the client's memoisation holds", () => {
@@ -148,7 +185,7 @@ describe("the §5.6 read projection is the single choke point (R5 #1)", () => {
     const slimmed = slimActivityEvent(event);
     assert.notEqual(slimmed, event);
     const payload = slimmed.payload.activity.payload as { detail: string };
-    assert.ok(payload.detail.length <= SLIM_MAX_STRING_BYTES + 1);
+    assertCapped(payload.detail);
 
     const other = { type: "thread.session-set", payload: { session: { status: "ready" } } };
     assert.equal(slimActivityEvent(other), other);

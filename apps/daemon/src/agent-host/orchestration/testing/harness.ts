@@ -11,7 +11,12 @@
  * seams. No test that uses it needs a timeout to pass.
  */
 
-import type { AgentAdapterId, DomainEvent, ProviderSnapshot } from "@orquester/api/agent-chat";
+import type {
+  AgentAdapterId,
+  DomainEvent,
+  ProviderSnapshot,
+  RuntimeEvent
+} from "@orquester/api/agent-chat";
 
 import type { ProviderSnapshotRegistry } from "../../services.ts";
 import { createLivenessRegistry } from "../liveness.ts";
@@ -58,7 +63,10 @@ export interface TestHost {
   store: FakeThreadStore;
   ingestion: FakeIngestion;
   checkpoints: FakeCheckpointService;
-  snapshots: ProviderSnapshotRegistry & { set(snapshot: ProviderSnapshot): void };
+  snapshots: ProviderSnapshotRegistry & {
+    set(snapshot: ProviderSnapshot): void;
+    applyAuthStatus?(adapterId: AgentAdapterId, event: RuntimeEvent): void;
+  };
   logger: RecordingLogger;
   launchConfigs: LaunchConfigStore & { readonly entries: Map<string, ThreadLaunchConfig> };
   clock: TestClock;
@@ -70,6 +78,8 @@ export interface TestHost {
     refId?: string;
     cwd?: string;
     home?: "system" | "account" | "cliproxy";
+    /** §6.1 create-time resume, for the E5/E6 paths. */
+    resume?: { home: "system" | "account" | "cliproxy"; conversationId: string };
     launchEnv?: Record<string, string>;
     unsetEnv?: string[];
     homePath?: string;
@@ -81,6 +91,7 @@ export interface TestHost {
 
 function createStubSnapshotRegistry(): ProviderSnapshotRegistry & {
   set(snapshot: ProviderSnapshot): void;
+  applyAuthStatus?(adapterId: AgentAdapterId, event: RuntimeEvent): void;
 } {
   const snapshots = new Map<AgentAdapterId, ProviderSnapshot>();
   const listeners = new Set<(adapterId: AgentAdapterId) => void>();
@@ -193,6 +204,7 @@ export function createTestHost(options: TestHostOptions = {}): TestHost {
         home: input.home ?? "account",
         modelSelection: { model: "test-model" },
         runtimeMode: "approval-required",
+        ...(input.resume ? { resume: input.resume } : {}),
         ...(input.launchEnv ? { launchEnv: input.launchEnv } : {}),
         ...(input.unsetEnv ? { unsetEnv: input.unsetEnv } : {}),
         ...(input.homePath ? { homePath: input.homePath } : {}),

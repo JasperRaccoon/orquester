@@ -50,12 +50,13 @@ import {
   GROK_EXTRA_ENV,
   autoApprovesEdits,
   autoApprovesEverything,
-  ensureGrokManagedConfig,
+  GROK_CONFIG_PATH_ENV,
   grokConfigAdvisory,
   grokSpawnArgs,
   meetsMinimumGrokVersion,
   resolveGrokModelUpdate,
-  versionGateMessage
+  versionGateMessage,
+  writeGrokOverlayConfig
 } from "./launch.ts";
 import { GrokNormalizer, XAI_RAW_SOURCE, ACP_RAW_SOURCE, type GrokTurnOutcome } from "./normalize.ts";
 import {
@@ -68,7 +69,37 @@ import {
 } from "./permissions.ts";
 import { XAI_EMPTY_PLAN_MARKDOWN, XAI_EXIT_PLAN_FEEDBACK, type PlanPathHost } from "./plan.ts";
 import { answersToXaiResponse } from "./questions.ts";
+import { parsePromptResultUsage } from "./usage.ts";
 import { agentVersionOf, contextWindowFromModelState, modelStateOf, promptIdOf } from "./xai-meta.ts";
+
+/**
+ * Every method this adapter registers a handler for, in the spelling it
+ * registers. Exported so `acp/_generated/catalog.test.ts` can assert that each
+ * one exists in the generated catalog: a typo would otherwise register a
+ * handler that can never fire, silently (R4 #19).
+ *
+ * Extension names are listed in their BARE spelling —
+ * `AcpPeer.registerExtension*` registers both.
+ */
+export const GROK_REGISTERED_METHODS: readonly string[] = [
+  "session/update",
+  "session/request_permission",
+  XAI_EXTENSION_NOTIFICATIONS.session_notification,
+  XAI_EXTENSION_NOTIFICATIONS.session_update,
+  XAI_EXTENSION_NOTIFICATIONS.task_backgrounded,
+  XAI_EXTENSION_NOTIFICATIONS.prompt_complete,
+  XAI_EXTENSION_NOTIFICATIONS.queue_changed,
+  XAI_EXTENSION_NOTIFICATIONS.settings_update,
+  XAI_EXTENSION_NOTIFICATIONS.announcements_update,
+  XAI_EXTENSION_NOTIFICATIONS.sessions_changed,
+  XAI_EXTENSION_NOTIFICATIONS.mcp_init_progress,
+  XAI_EXTENSION_NOTIFICATIONS.mcp_initialized,
+  XAI_EXTENSION_NOTIFICATIONS.mcp_servers_updated,
+  XAI_EXTENSION_NOTIFICATIONS.models_update,
+  XAI_EXTENSION_NOTIFICATIONS.mcp_server_status,
+  XAI_EXTENSION_REQUESTS.ask_user_question,
+  XAI_EXTENSION_REQUESTS.exit_plan_mode
+];
 
 /** How many settled turns `readThread` remembers. */
 const MAX_RECORDED_TURNS = 200;
@@ -116,6 +147,14 @@ export interface GrokSessionOptions {
     error(message: string, detail?: unknown): void;
   };
   homeDirs?: readonly string[];
+  /** A host-owned directory for this thread's config overlay. */
+  overlayDir: string;
+  /**
+   * The child is gone and this session is finished. Without it a crashed child
+   * leaves a dead session in the adapter's map, so `hasSession` stays true and
+   * `listSessions()` keeps reporting it to the §3.3 reconcile (Q1 #30).
+   */
+  onClosed?(threadId: string): void;
 }
 
 interface PendingApproval {
@@ -136,7 +175,13 @@ interface RecordedTurn {
 
 interface ActiveTurn {
   readonly turnId: string;
-  readonly epoch: number;
+  /**
+   * The generation of the prompt that is allowed to settle this turn.
+   * **Mutable on purpose**: a steer supersedes the in-flight prompt, so the
+   * turn must move to the new generation or the CANCELLED prompt settles it
+   * and the steered answer is discarded (R4 #1 / Q1 #4).
+   */
+  epoch: number;
   /** Resolved once the provider's own prompt id is known. */
   providerPromptId?: string;
   settled: boolean;
@@ -172,8 +217,7 @@ export class GrokSession {
   private activeTurn: ActiveTurn | null = null;
   private readonly recordedTurns: RecordedTurn[] = [];
   private epoch = 0;
-  /** The provider prompt ids we have not yet matched to a turn. */
-  private readonly unclaimedPromptIds: Array<{ id: string; text: string }> = [];
+
 
   /** A serial queue: one mutating command at a time per thread (§3.1). */
   private lock: Promise<unknown> = Promise.resolve();
@@ -246,7 +290,12 @@ export class GrokSession {
    * session must not grow this without limit.
    */
   get turns(): RecordedTurn[] {
-    return this.recordedTurns.map((turn) => ({ id: turn.id, items: [...turn.items] }));
+    // The replayed history first — it is the older half of the conversation —
+    // then the turns this process ran itself.
+    return [
+      ...this.normalizer.historyTurns(),
+      ...this.recordedTurns.map((turn) => ({ id: turn.id, items: [...turn.items] }))
+    ];
   }
 
   private planHost(): PlanPathHost {
@@ -266,28 +315,25 @@ export class GrokSession {
   // ------------------------------------------------------------------ start
 
   async start(): Promise<void> {
-    // The approvals surface of §4.3 silently never fires without this, and the
-    // user gets an agent that approves itself while the UI says "supervised".
-    if (this.options.home.kind === "account") {
-      const outcome = await ensureGrokManagedConfig(this.options.home.path);
-      if (outcome === "failed") {
-        this.emitEvent(
-          this.normalizer.event("runtime.warning", { message: grokConfigAdvisory() })
-        );
-      }
-    } else {
-      this.emitEvent(
-        this.normalizer.event("runtime.warning", {
-          message: grokConfigAdvisory(),
-          detail: { home: this.options.home.kind }
-        })
-      );
+    // The approvals surface of §4.3 silently never fires without
+    // `[features] support_permission = true`, and the user then gets an agent
+    // that approves itself while the UI says "supervised". It reaches the CLI
+    // as a `GROK_CONFIG_PATH` **overlay** the host owns outright — never as a
+    // key patched into the account home, whose `config.toml` is a symlink to
+    // the user's global config on this host (R4 #4).
+    const overlay = await writeGrokOverlayConfig(this.options.overlayDir);
+    if (overlay === null) {
+      this.emitEvent(this.normalizer.event("runtime.warning", { message: grokConfigAdvisory() }));
     }
 
     const connection = AcpConnection.spawn({
       command: this.options.command,
       args: grokSpawnArgs(this.options.runtimeMode),
-      env: { ...this.options.env, ...GROK_EXTRA_ENV },
+      env: {
+        ...this.options.env,
+        ...GROK_EXTRA_ENV,
+        ...(overlay === null ? {} : { [GROK_CONFIG_PATH_ENV]: overlay })
+      },
       cwd: this.options.cwd,
       clientInfo: this.options.clientInfo,
       homeDirs: this.options.homeDirs,
@@ -393,6 +439,7 @@ export class GrokSession {
     const peer = connection.peer;
 
     peer.onNotification("session/update", (params) => {
+      this.notePromptId(promptIdOf((params as { _meta?: unknown })._meta));
       this.emitAll(this.normalizer.handleSessionUpdate(params as SessionNotification));
     });
 
@@ -621,12 +668,22 @@ export class GrokSession {
       const epoch = this.epoch;
 
       if (steering) {
+        // Move the turn to this generation BEFORE the cancel goes out. The
+        // superseded prompt will answer `stopReason:"cancelled"` within
+        // milliseconds; without this it still matches `turn.epoch` and ends
+        // the turn, and the steered prompt's real result is then dropped
+        // because `activeTurn` is already null.
+        this.activeTurn!.epoch = epoch;
+        this.activeTurn!.providerPromptId = undefined;
         await this.settlePendingAsCancelled();
         try {
           this.peer().notify("session/cancel", { sessionId: this.acpSessionId });
         } catch {
           // A cancel that cannot be written is not a reason to drop the turn.
         }
+        // Re-open the assistant stream: `endTurn()` may have closed it, and a
+        // closed stream silently drops every chunk the steered prompt streams.
+        this.normalizer.beginTurn();
       } else {
         this.activeTurn = { turnId, epoch, settled: false, interrupted: false };
         this.normalizer.clearPlanFallback();
@@ -672,7 +729,7 @@ export class GrokSession {
         // it (§3.1). A fixed timeout here would cancel real work.
         { timeoutMs: 0 }
       );
-      this.trackPrompt(turnId, epoch, text, promise);
+      this.trackPrompt(turnId, epoch, promise);
 
       return {
         turnId,
@@ -681,17 +738,28 @@ export class GrokSession {
     });
   }
 
-  private trackPrompt(turnId: string, epoch: number, text: string, promise: Promise<PromptResponse>): void {
-    this.claimPromptId(turnId, text);
+  private trackPrompt(turnId: string, epoch: number, promise: Promise<PromptResponse>): void {
     void promise.then(
       (response) => {
         void this.serialize(async () => {
           await Promise.resolve();
+          // The RPC result is the RICHEST source (README 18): it is the only
+          // one carrying both the usage block and the resulting context size,
+          // so it wins over the `turn_completed` notification that races it.
+          const fromResult = parsePromptResultUsage(response._meta);
           this.settleTurn(turnId, epoch, {
             stopReason: response.stopReason ?? null,
-            usage: this.normalizer.turnUsage(),
-            ...(promptIdOf(response._meta) === undefined ? {} : {}),
-            ...extractResultMeta(response)
+            // No `prompt_complete` arrived (a locally handled slash command
+            // produces none, README 18), so the hook the CLI fires on a
+            // decline is the only discriminant left (R4 #9).
+            ...(this.activeTurn?.outcome?.cancellationCategory === undefined &&
+            this.normalizer.sawPermissionDenied
+              ? { cancellationCategory: "PermissionRejected" }
+              : {}),
+            usage: fromResult.usage ?? this.normalizer.turnUsage(),
+            ...(fromResult.contextTokens === undefined
+              ? {}
+              : { contextTokens: fromResult.contextTokens })
           });
         });
       },
@@ -700,6 +768,14 @@ export class GrokSession {
           await Promise.resolve();
           if (this.activeTurn?.interrupted === true) {
             // A cancelled prompt rejects; the interrupt already settled it.
+            return;
+          }
+          if (this.stopped) {
+            // A host-initiated stop kills the child, which rejects the parked
+            // prompt. `stop()` has already settled the turn and nulled
+            // `activeTurn`, so without this guard a clean user Stop emits a
+            // spurious `runtime.error` AFTER `session.exited` — breaking
+            // §4.1's "everything is settled before session.exited" (Q1 #22).
             return;
           }
           this.settleTurn(
@@ -720,38 +796,38 @@ export class GrokSession {
   }
 
   /**
-   * Resolve the provider's own prompt id for a turn. `_x.ai/queue/changed`
-   * names it within ~5 ms of the send in every capture and carries the prompt
-   * TEXT, which is the only thing we can match on — `session/prompt` returns
-   * nothing until the turn is over.
+   * Resolve the provider's own prompt id for the active turn.
+   *
+   * Keyed on `_meta.promptId`, which **every** `session/update` carries
+   * (README 19) — not on the prompt TEXT. The text key was wrong twice: it ran
+   * synchronously at send time, before `_x.ai/queue/changed` arrives ~5 ms
+   * later, so it almost always missed; and after a steer the active turn
+   * already held an id, so the steered prompt's id was never claimed at all
+   * (R4 #12). The FIRST id seen for a turn wins, so a steer keeps reporting
+   * the prompt that actually produced the answer.
    */
-  private claimPromptId(turnId: string, text: string): void {
-    const index = this.unclaimedPromptIds.findIndex((entry) => entry.text === text);
-    if (index >= 0) {
-      const [entry] = this.unclaimedPromptIds.splice(index, 1);
-      if (this.activeTurn?.turnId === turnId) {
-        this.activeTurn.providerPromptId = entry.id;
-      }
+  private notePromptId(promptId: string | undefined): void {
+    if (promptId === undefined || promptId.length === 0) {
+      return;
     }
+    const turn = this.activeTurn;
+    if (turn === null || turn.settled || turn.providerPromptId !== undefined) {
+      return;
+    }
+    turn.providerPromptId = promptId;
   }
 
   private onQueueChanged(params: unknown): void {
-    const record = params as { entries?: ReadonlyArray<{ id?: unknown; text?: unknown }> } | null;
-    for (const entry of record?.entries ?? []) {
-      if (typeof entry.id !== "string" || typeof entry.text !== "string") {
-        continue;
-      }
-      if (this.activeTurn !== null && this.activeTurn.providerPromptId === undefined) {
-        this.activeTurn.providerPromptId = entry.id;
-        continue;
-      }
-      if (!this.unclaimedPromptIds.some((known) => known.id === entry.id)) {
-        this.unclaimedPromptIds.push({ id: entry.id, text: entry.text });
-        // Bounded: a queue that grows must not grow our memory with it.
-        if (this.unclaimedPromptIds.length > 16) {
-          this.unclaimedPromptIds.shift();
-        }
-      }
+    const record = params as
+      | { entries?: ReadonlyArray<{ id?: unknown }>; runningPromptId?: unknown }
+      | null;
+    if (typeof record?.runningPromptId === "string") {
+      this.notePromptId(record.runningPromptId);
+      return;
+    }
+    const first = record?.entries?.[0]?.id;
+    if (typeof first === "string") {
+      this.notePromptId(first);
     }
   }
 
@@ -848,6 +924,9 @@ export class GrokSession {
       id: turn.turnId,
       items: [
         {
+          // `observed_turn`: this process streamed the turn's events already,
+          // so `projectHistory` must NOT project it again (history.ts).
+          kind: "observed_turn" as const,
           providerPromptId: turn.providerPromptId ?? null,
           stopReason: outcome.stopReason,
           ...(outcome.cancellationCategory === undefined
@@ -878,6 +957,16 @@ export class GrokSession {
   async interrupt(turnId?: string): Promise<void> {
     const turn = this.activeTurn;
     if (turn === null || turn.settled) {
+      // §6.2: Stop is SESSION-scoped when the client names no turn. A thread
+      // whose turn already settled can still be showing a live background
+      // shell or subagent — that is precisely when §7.6 keeps the Stop button
+      // up — so an early return here leaves the work running and the client's
+      // `stopping` flag stuck, because `backgroundLiveness` never drops to
+      // null (R6 #1). Only a turn-scoped Stop naming a turn that is not the
+      // active one is a genuine no-op.
+      if (turnId === undefined) {
+        await this.stopSessionScopedWork();
+      }
       return;
     }
     if (turnId !== undefined && turn.turnId !== turnId) {
@@ -898,6 +987,33 @@ export class GrokSession {
         cancellationCategory: "MidTurnAbort",
         usage: this.normalizer.turnUsage()
       });
+    });
+  }
+
+  /**
+   * The §6.2 session-scoped stop, with no turn to settle: release anything the
+   * user could still be waiting on, tell the agent to stop whatever it is
+   * running, and close every live background task so the roster empties and
+   * `backgroundLiveness` clears.
+   *
+   * `session/cancel` is the only lever that reaches Grok's background work —
+   * the tasks are children of the CLI process and it exposes no per-task kill
+   * to the client (the model kills its own through `KillTask`). The session
+   * itself stays up: the user pressed Stop, not Close.
+   */
+  private async stopSessionScopedWork(): Promise<void> {
+    if (this.stopped) {
+      return;
+    }
+    await this.serialize(async () => {
+      await this.settlePendingAsCancelled();
+      try {
+        this.peer().notify("session/cancel", { sessionId: this.acpSessionId });
+      } catch {
+        // Nothing to cancel on a dead transport.
+      }
+      this.emitAll(this.normalizer.stopBackgroundTasks());
+      this.emitAll(this.normalizer.failOpenTools("Stopped."));
     });
   }
 
@@ -1019,11 +1135,13 @@ export class GrokSession {
     if (this.stopped && this.hostInitiatedStop) {
       // Already settled by `stop()`.
       this.emitExited(reason, stderrTail, true);
+      this.options.onClosed?.(this.threadId);
       return;
     }
     this.stopped = true;
     this.settleEverythingForExit(reason, stderrTail);
     this.emitExited(reason, stderrTail, false);
+    this.options.onClosed?.(this.threadId);
   }
 
   /**
@@ -1138,15 +1256,6 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
     resolve = settle;
   });
   return { promise, resolve };
-}
-
-function extractResultMeta(response: PromptResponse): Partial<GrokTurnOutcome> {
-  const meta = response._meta as Record<string, unknown> | undefined | null;
-  if (meta === undefined || meta === null) {
-    return {};
-  }
-  const total = meta["totalTokens"];
-  return typeof total === "number" && total > 0 ? { contextTokens: total } : {};
 }
 
 function currentModelIdOf(modelState: unknown): string | undefined {

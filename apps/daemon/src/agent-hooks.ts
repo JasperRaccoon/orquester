@@ -109,7 +109,7 @@ exit 0
  * newly created files (or always, with `preserveExistingMode: false`, for the
  * executable hook script whose mode must stay 0755).
  */
-async function writeFileAtomic(
+export async function writeFileAtomic(
   path: string,
   content: string,
   defaultMode: number,

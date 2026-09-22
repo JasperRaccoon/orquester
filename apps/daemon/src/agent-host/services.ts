@@ -191,6 +191,7 @@ export interface Ingestion {
 
   /** Flush everything. The drain seam every test waits on instead of sleeping (§9). */
   drain(): Promise<void>;
+
 }
 
 // ---------------------------------------------------------------------------

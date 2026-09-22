@@ -21,6 +21,7 @@
  * | `server.ts` | The ref-counted per-project server pool |
  * | `snapshot.ts` | `GET /provider` → models + auth + commands + skills |
  * | `cli-inventory.ts` | The machine-level CLI catalogue, for a cwd-less probe |
+ * | `history.ts` | A `readThread` snapshot replayed as runtime events (E6) |
  * | `smoke.ts` | A manual one-turn drive against the real CLI (`ORQ_AGENT_SMOKE=1`) |
  *
  * **`StartSessionInput.home` is deliberately not honoured.** The server is
@@ -62,6 +63,7 @@ import { OpenCodeThreadSession } from "./session.ts";
 import { OpenCodeServerPool, type OpenCodeServerHandle } from "./server.ts";
 import { meetsMinimumOpenCodeVersion, parseSemver } from "./semver.ts";
 import { loadInventoryFromCli } from "./cli-inventory.ts";
+import { projectOpenCodeHistory } from "./history.ts";
 import {
   OPENCODE_CAPABILITIES,
   buildSnapshot,
@@ -123,7 +125,16 @@ class OpenCodeAdapterImpl implements AgentAdapter {
       buildEnv: ({ projectDir }) =>
         ctx.buildEnv({
           // The server is shared by a project's threads, so it is stamped with
-          // the project rather than any one thread's session id.
+          // the project rather than any one thread's session id. The host
+          // resolves the project's launcher env from `projectPath`; the
+          // `project:<dir>` thread id is the older convention it still
+          // honours, kept here so this works either way.
+          //
+          // `projectPath` is passed through a SPREAD on purpose: the field is
+          // additive on `AdapterContext.buildEnv` and lands with W1's change,
+          // and a spread is not subject to excess-property checking — so this
+          // compiles against both shapes and needs no follow-up edit.
+          ...{ projectPath: projectDir },
           threadId: `project:${projectDir}`,
           home: { kind: "system", path: process.env.HOME ?? "/" }
         }),
@@ -571,6 +582,24 @@ class OpenCodeAdapterImpl implements AgentAdapter {
 
   async readThread(threadId: string): Promise<ThreadSnapshot> {
     return await this.require(threadId).readThread();
+  }
+
+  /**
+   * E6: replay a conversation this host never saw.
+   *
+   * A thread adopted from an upstream `ses_…` has no `events.ndjson` behind
+   * it — the transcript lives only in OpenCode's own store, which
+   * `readThread` already reads. Pure and synchronous: the snapshot is the
+   * only input, so the host decides when to call it and pays no I/O here.
+   *
+   * Optional on `AgentAdapter` and not yet declared there (W1 owns the seam),
+   * so it is a plain public method; nothing breaks when the declaration lands.
+   */
+  projectHistory(snapshot: ThreadSnapshot): RuntimeEvent[] {
+    return projectOpenCodeHistory(snapshot, {
+      eventId: () => this.ctx.ids.eventId(),
+      nowIso: () => this.ctx.clock.nowIso()
+    });
   }
 
   /**

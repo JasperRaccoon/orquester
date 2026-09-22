@@ -308,6 +308,36 @@ export function requestTypeFromToolKind(kind: string | undefined): CanonicalRequ
   }
 }
 
+/**
+ * `_meta["x.ai/tool"].kind` → the ACP `ToolKind` vocabulary the two maps above
+ * are written against.
+ *
+ * Grok's own kinds are finer-grained, and the first `tool_call` frame of a
+ * call carries **no ACP `kind` at all** — only the vendor block — so without
+ * this a file write arrives as `dynamic_tool_call` and renders as a generic
+ * tool row instead of a file change. Observed live against 1.0.34 while
+ * running the smoke script.
+ */
+export function acpKindFromVendorKind(kind: string | undefined): string | undefined {
+  switch (kind) {
+    case "execute":
+      return "execute";
+    case "write":
+    case "edit":
+      return "edit";
+    case "search":
+      return "search";
+    case "read":
+      return "read";
+    case "list":
+      // No ACP kind means a listing; `other` keeps it a dynamic tool row,
+      // which is what it is.
+      return "other";
+    default:
+      return undefined;
+  }
+}
+
 /** Trimmed, or undefined when blank. */
 export function normalizeToolKind(kind: unknown): string | undefined {
   return typeof kind === "string" && kind.trim().length > 0 ? kind.trim() : undefined;

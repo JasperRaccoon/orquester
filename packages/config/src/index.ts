@@ -735,7 +735,20 @@ export const sessionRecordSchema = z.object({
 
 export const sessionsConfigSchema = z.object({
   version: z.literal(1).default(1),
-  sessions: z.array(sessionRecordSchema).default([])
+  sessions: z.array(sessionRecordSchema).default([]),
+  /**
+   * Agent-chat threads whose tab is gone but whose host-side delete has not
+   * been acknowledged (chat spec §6.1's cascade).
+   *
+   * The delete is one hop over the host socket, and the host can be down at the
+   * moment the user closes a tab. Without this the `thread.deleted` event is
+   * never written, and §3.3's reconcile then finds an orphan with a cursor and
+   * a continuation marker and RESUMES it — a provider child and tokens spent
+   * for a tab nobody is looking at. Queued here so the retry survives the
+   * daemon restart that is most likely to happen in between, and replayed the
+   * moment a host is adopted.
+   */
+  pendingThreadDeletes: z.array(z.string().min(1)).default([])
 });
 
 export type SessionRecord = z.infer<typeof sessionRecordSchema>;
@@ -914,6 +927,11 @@ export const agentDomainEventTypeSchema = z.enum([
 ]);
 export type AgentDomainEventType = z.infer<typeof agentDomainEventTypeSchema>;
 
+/** True for a type THIS build knows how to fold. */
+export function isKnownAgentDomainEventType(type: string): type is AgentDomainEventType {
+  return agentDomainEventTypeSchema.options.includes(type as AgentDomainEventType);
+}
+
 export const agentDomainEventMetadataSchema = z
   .object({
     providerTurnId: z.string().optional(),
@@ -924,11 +942,26 @@ export const agentDomainEventMetadataSchema = z
   })
   .passthrough();
 
+/**
+ * **`type` is an open string, deliberately (§8).** The thread log is outside
+ * every rollback: events appended by a NEWER host stay on disk and the older
+ * host must still fold them. A closed enum here made an event type this build
+ * has never heard of indistinguishable from a corrupt line, so an older host
+ * silently dropped the entire tail of the log after it — items, activities,
+ * checkpoints, the roster — and, when that event was the last line, seeded its
+ * sequence behind it and re-used a `seq` already on disk.
+ *
+ * So: the ENVELOPE is validated (it is what a reader needs to order, filter and
+ * replay), the type is not constrained, and a type this build does not know
+ * folds to a no-op that still advances `seq`. Truncation is reserved for
+ * genuinely malformed JSON or a missing envelope field (§5.1).
+ * {@link isKnownAgentDomainEventType} is how a caller tells the two apart.
+ */
 export const agentDomainEventEnvelopeSchema = z.object({
   seq: z.number().int().positive(),
   eventId: z.string().min(1),
   threadId: z.string().min(1),
-  type: agentDomainEventTypeSchema,
+  type: z.string().min(1),
   payload: z.unknown(),
   occurredAt: z.string(),
   commandId: z.string().nullable().default(null),
@@ -940,6 +973,10 @@ export type AgentDomainEventEnvelope = z.infer<typeof agentDomainEventEnvelopeSc
 /**
  * Returns null rather than throwing: a malformed line TRUNCATES the fold at
  * that point (spec §5.1), it never discards the file and never fails the host.
+ *
+ * An unknown `type` is NOT malformed — it decodes, and the fold ignores it
+ * (§8). Only a line that is not JSON, or whose envelope fields are missing or
+ * the wrong shape, comes back null.
  */
 export function parseAgentDomainEvent(value: unknown): AgentDomainEventEnvelope | null {
   const parsed = agentDomainEventEnvelopeSchema.safeParse(value);
@@ -989,7 +1026,11 @@ export function createDefaultSessionsConfig(): SessionsConfig {
  */
 export function parseSessionsConfig(value: unknown): SessionsConfig {
   const outer = z
-    .object({ version: z.literal(1).default(1), sessions: z.array(z.unknown()).default([]) })
+    .object({
+      version: z.literal(1).default(1),
+      sessions: z.array(z.unknown()).default([]),
+      pendingThreadDeletes: z.array(z.unknown()).default([])
+    })
     .parse(value);
   const sessions: SessionRecord[] = [];
   for (const entry of outer.sessions) {
@@ -998,7 +1039,12 @@ export function parseSessionsConfig(value: unknown): SessionsConfig {
       sessions.push(parsed.data);
     }
   }
-  return { version: 1, sessions };
+  // Entry-wise tolerant too: a malformed id drops that one retry, never the
+  // whole queue (and never the index).
+  const pendingThreadDeletes = outer.pendingThreadDeletes.filter(
+    (id): id is string => typeof id === "string" && id.length > 0
+  );
+  return { version: 1, sessions, pendingThreadDeletes };
 }
 
 // todos.json — the daemon's index of synced to-do lists. One record per list;

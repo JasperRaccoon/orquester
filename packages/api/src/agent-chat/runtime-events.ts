@@ -21,7 +21,29 @@
  *
  * *T3: `packages/contracts/src/providerRuntime.ts:23-34`.*
  */
+/**
+ * The marker every event **projected from a provider's own transcript** carries
+ * (`AgentAdapter.projectHistory`), as opposed to one decoded from a live frame.
+ *
+ * A resumed thread replays nothing onto its message stream, so its timeline is
+ * rebuilt from native history instead — and a consumer must be able to tell the
+ * two apart: a historical event describes something that already happened, so
+ * it never raises attention, never fires a push and never moves a live turn.
+ *
+ * Referred to by name, never spelled inline, so the literal is one edit.
+ */
+export const HISTORICAL_RAW_SOURCE = "history.replay";
+
 export type RuntimeEventRawSource =
+  /**
+   * Not a provider frame: an event the HOST synthesised from an adapter's own
+   * `readThread` when a resumed thread had no items of its own (§4.1). It is
+   * persisted like any other so the timeline can render, but it describes the
+   * past — so anything that reacts to *new* work (W10's summary/push gate, the
+   * §5.4 checkpoint baseline) must ignore it. Test with
+   * {@link isHistoricalRuntimeEvent}, never by spelling the literal.
+   */
+  | typeof HISTORICAL_RAW_SOURCE
   | "claude.sdk.message"
   | "claude.sdk.permission"
   | "codex.app-server.notification"
@@ -29,6 +51,16 @@ export type RuntimeEventRawSource =
   | "opencode.sdk.event"
   | "acp.jsonrpc"
   | `acp.${string}.extension`;
+
+/**
+ * True for an event the host replayed out of a provider's own history rather
+ * than observing live. Such an event is real — it is what the conversation
+ * contained — but it is not news: it must not raise attention, fire a push, or
+ * move a checkpoint.
+ */
+export function isHistoricalRuntimeEvent(event: { raw?: { source: string } }): boolean {
+  return event.raw?.source === HISTORICAL_RAW_SOURCE;
+}
 
 /** The untranslated provider frame an event was decoded from (§4.2). */
 export interface RuntimeEventRaw {

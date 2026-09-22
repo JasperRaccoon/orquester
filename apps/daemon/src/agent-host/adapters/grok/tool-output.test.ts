@@ -7,6 +7,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  acpKindFromVendorKind,
   TOOL_CALL_CONTENT_MAX_CHARS,
   TOOL_CALL_CONTENT_TRUNCATION_MARKER,
   TOOL_CALL_RAW_BYTES_MAX,
@@ -209,4 +210,18 @@ test("the command comes from rawInput, then argv, then the title's backticks", (
   assert.equal(extractToolCommand({ executable: "git", args: ["status"] }, undefined), "git status");
   assert.equal(extractToolCommand({}, "Write `/tmp/a.txt`"), "/tmp/a.txt");
   assert.equal(extractToolCommand(undefined, "Terminal"), undefined);
+});
+
+test("the vendor tool kind leads, because ACP's is absent on the first frame", () => {
+  // A `write` used to land on `dynamic_tool_call` and render as a generic tool
+  // row rather than a file change — seen live against 1.0.34.
+  assert.equal(itemTypeFromToolKind(acpKindFromVendorKind("write")), "file_change");
+  assert.equal(itemTypeFromToolKind(acpKindFromVendorKind("edit")), "file_change");
+  assert.equal(itemTypeFromToolKind(acpKindFromVendorKind("execute")), "command_execution");
+  assert.equal(itemTypeFromToolKind(acpKindFromVendorKind("search")), "web_search");
+  assert.equal(itemTypeFromToolKind(acpKindFromVendorKind("read")), "dynamic_tool_call");
+  assert.equal(itemTypeFromToolKind(acpKindFromVendorKind("list")), "dynamic_tool_call");
+  // An unknown vendor kind falls through to whatever ACP said.
+  assert.equal(acpKindFromVendorKind("enter_plan"), undefined);
+  assert.equal(acpKindFromVendorKind(undefined), undefined);
 });

@@ -22,7 +22,7 @@ import { randomBytes } from "node:crypto";
 import { accessSync, constants as fsConstants, statSync } from "node:fs";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { delimiter, isAbsolute, join, resolve as resolvePath } from "node:path";
+import { delimiter, isAbsolute, join, resolve as resolvePath, sep } from "node:path";
 
 import {
   agentChatDir,
@@ -33,7 +33,13 @@ import {
   continueThreadsForProject,
   createDefaultAppConfig,
   daemonConfigDir,
-  parseAppConfig
+  daemonConfigPath,
+  expandVars,
+  parseAppConfig,
+  parseDaemonConfig,
+  parseSessionsConfig,
+  resolveDaemonPaths,
+  sessionsIndexPath
 } from "@orquester/config";
 import { REGISTRY, type RegistryEntryDef } from "@orquester/registry";
 import type { AccountHome, AgentAdapterId, ProviderSnapshot } from "@orquester/api/agent-chat";
@@ -272,6 +278,35 @@ export async function startAgentHost(
         ) ?? null)
       : null;
 
+  /**
+   * Exact secrets this host injects into children, masked wherever they could
+   * surface (a CLI echoing its resolved config on stderr, an error message).
+   * The cliproxy `ANTHROPIC_AUTH_TOKEN` is a bare hex string that matches no
+   * credential shape, so nothing but the literal catches it.
+   */
+  const hostInjectedSecrets: string[] = [];
+  const noteInjectedSecret = (value: string | undefined): void => {
+    if (value !== undefined && value.length >= 8 && !hostInjectedSecrets.includes(value)) {
+      hostInjectedSecrets.push(value);
+    }
+  };
+
+  /**
+   * §4.6.4's optional refresh `cwd` becomes a spawn cwd and a
+   * `<cwd>/.claude/skills` readdir, so it is confined to the workspaces root
+   * the way every other path-taking route on this daemon is.
+   */
+  const workspacesRoot = await resolveWorkspacesRoot(appdir, homeDir, env);
+  const isAllowedCwd = (candidate: string): boolean => {
+    if (workspacesRoot === null) {
+      // The daemon's config could not be read, so there is no root to confine
+      // to; refusing every per-cwd refresh would be worse than today.
+      return true;
+    }
+    const resolved = resolvePath(candidate);
+    return resolved === workspacesRoot || resolved.startsWith(`${workspacesRoot}${sep}`);
+  };
+
   const shutdown = new AbortController();
 
   // ---- adapters (acquired BEFORE the gate opens, §3.1) -------------------
@@ -285,13 +320,20 @@ export async function startAgentHost(
       store.resolveAttachment(threadId, attachmentId),
     attachmentsDir: (threadId) => agentChatThreadAttachmentsDir(appdir, threadId),
     logRawFrame: (threadId, frame) => store.logRawFrame(threadId, frame),
-    buildEnv: ({ threadId, home, extraEnv }) => {
+    buildEnv: ({ threadId, home, projectPath, extraEnv }) => {
       // The §6.1 launcher env the daemon composed for this thread: the registry
       // entry's own env (which already carries `<appdir>/daemon/env/<id>.env`)
       // under every `resolveExtraEnv` contributor. It layers OVER the adapter's
       // own extras, exactly as the terminal wrapper's `export` wins over
       // `tmux -e`.
-      const launch = orchestrator?.launchConfig(threadId) ?? projectLaunchConfig(threadId);
+      // A child shared by a project (OpenCode's server, §3.2) names the project
+      // rather than a thread, so it resolves the project's launcher env.
+      const launch =
+        orchestrator?.launchConfig(threadId) ??
+        (projectPath !== undefined
+          ? (orchestrator?.launchConfigForCwd(projectPath) ?? null)
+          : null) ??
+        projectLaunchConfig(threadId);
       const accountHomeDir = launch?.homePath ?? (home.kind !== "system" ? home.path : undefined);
       const env = buildProviderEnv({
         adapter,
@@ -312,6 +354,13 @@ export async function startAgentHost(
       // must not carry, and they are removed after everything else is layered.
       for (const name of launch?.unsetEnv ?? []) {
         delete env[name];
+      }
+      // Remember what we handed out so the redactor can mask it by value.
+      noteInjectedSecret(env.ANTHROPIC_AUTH_TOKEN);
+      for (const [key, value] of Object.entries(env)) {
+        if (/(_API_KEY|_TOKEN)$/.test(key)) {
+          noteInjectedSecret(value);
+        }
       }
       return env;
     },
@@ -412,6 +461,7 @@ export async function startAgentHost(
       return { kind: "system", path: launch?.homePath ?? homeDir };
     },
     continuationEnabled: (projectPath) => continuationEnabledFor(appdir, projectPath, env),
+    isThreadClosed: (threadId) => isThreadClosedFor(appdir, threadId),
     launchArgsForRefId: (refId) => refIds.get(refId)?.args ?? [],
     launchConfigs,
     clock,
@@ -430,6 +480,11 @@ export async function startAgentHost(
     socketPath,
     tmpDir,
     startedAt,
+    // Everything that leaves the host as a message goes through the same
+    // redaction the stderr path uses (§3.1).
+    homeDirs: [homeDir],
+    secretLiterals: hostInjectedSecrets,
+    isAllowedCwd,
     onStop: async (): Promise<AgentHostStopResponse> => {
       // The intentional stop of §3.3: write every continuation marker for a
       // running thread with a usable cursor, then drain and stop.
@@ -511,6 +566,57 @@ export async function startAgentHost(
 }
 
 /**
+ * §3.3: "archived and deleted threads are settled, never continued".
+ *
+ * The daemon's `deleteThread` is fire-and-forget over the socket, so a tab
+ * closed while the host is **down** never gets a `thread.deleted` event — the
+ * log alone cannot tell the difference between "closed" and "orphaned", and
+ * resuming it spends tokens on a tab that no longer exists. The daemon's own
+ * tab index is the authority, so the host reads it.
+ *
+ * An unreadable index answers `false`: never settle a live thread because a
+ * file could not be read.
+ */
+async function isThreadClosedFor(appdir: string, threadId: string): Promise<boolean> {
+  try {
+    const raw = await readFile(sessionsIndexPath(appdir), "utf8");
+    const sessions = parseSessionsConfig(JSON.parse(raw) as unknown);
+    return !sessions.sessions.some(
+      (session) => session.id === threadId && session.kind === "agent-chat"
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The workspaces root every chat `cwd` lives under — `daemon.json`'s
+ * `workspacesDir`, expanded. Read once at startup; `null` when the config
+ * cannot be read, which leaves the guard open rather than breaking refreshes
+ * on a host whose daemon config is missing.
+ */
+async function resolveWorkspacesRoot(
+  appdir: string,
+  homeDir: string,
+  env: NodeJS.ProcessEnv
+): Promise<string | null> {
+  try {
+    const raw = await readFile(daemonConfigPath(appdir), "utf8");
+    const config = parseDaemonConfig(JSON.parse(raw) as unknown);
+    const paths = resolveDaemonPaths({
+      homeDir,
+      platform: process.platform === "win32" ? "win32" : "linux",
+      cwd: appdir,
+      appdir,
+      env: env as Record<string, string | undefined>
+    });
+    return resolvePath(expandVars(config.workspacesDir, paths.vars));
+  } catch {
+    return null;
+  }
+}
+
+/**
  * §3.3: continuation is opt-in **per project** over a host-wide default that is
  * **off**, because "pick up where you left off" is wrong for a project where a
  * turn was halfway through a destructive operation.
@@ -557,8 +663,14 @@ if (isProcessEntry()) {
         if (stopping) return;
         stopping = true;
         // The same 3 s hard-exit backstop the daemon uses: a stream that
-        // refuses to drain must never stall the stop, and provider children
-        // parented to tmux survive regardless.
+        // refuses to drain must never stall the stop.
+        //
+        // Note what it costs. Provider children are children of THIS process
+        // (the tmux pane's), not of the tmux server, so a backstop exit
+        // orphans any child `stop()` had not reaped — and a `detached` one
+        // (OpenCode's per-project server) escapes the process group entirely.
+        // That is why the daemon must give the host a grace window before it
+        // kills the host's tmux session, rather than assuming tmux owns them.
         const force = setTimeout(() => process.exit(0), 3_000);
         force.unref();
         void host

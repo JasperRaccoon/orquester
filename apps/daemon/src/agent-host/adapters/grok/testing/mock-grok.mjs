@@ -291,6 +291,61 @@ async function runPrompt(id, params) {
     return;
   }
 
+  if (scenario === "steer") {
+    if (promptSeq === 1) {
+      notify("session/update", {
+        sessionId,
+        update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "one" } },
+        _meta: { totalTokens: 1700, promptId }
+      });
+      // Answers only once the client cancels — exactly what
+      // `05-cancel-with-pending-permission.ndjson` records.
+      await waitFor(() => cancelled);
+      notify("_x.ai/session/prompt_complete", {
+        sessionId,
+        promptId,
+        stopReason: "cancelled",
+        cancellationCategory: "MidTurnAbort"
+      });
+      result(id, { stopReason: "cancelled", _meta: { sessionId, promptId } });
+      return;
+    }
+    notify("session/update", {
+      sessionId,
+      update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "DONE" } },
+      _meta: { totalTokens: 2100, promptId }
+    });
+    notify("_x.ai/session/prompt_complete", { sessionId, promptId, stopReason: "end_turn" });
+    result(id, {
+      stopReason: "end_turn",
+      _meta: {
+        sessionId,
+        promptId,
+        totalTokens: 2100,
+        usage: { inputTokens: 40, outputTokens: 4, totalTokens: 44, costUsdTicks: 2_000_000 }
+      }
+    });
+    return;
+  }
+
+  if (scenario === "background") {
+    // A turn that settles while a background shell keeps running — the state
+    // §7.6 keeps the Stop button up for, with no active turn to interrupt.
+    notify("_x.ai/task_backgrounded", {
+      sessionId,
+      update: {
+        sessionUpdate: "task_backgrounded",
+        tool_call_id: "call-bg-1",
+        task_id: "task-bg-1",
+        command: "sleep 600",
+        description: "Start sleep 600 in background"
+      }
+    });
+    notify("_x.ai/session/prompt_complete", { sessionId, promptId, stopReason: "end_turn" });
+    result(id, { stopReason: "end_turn", _meta: { sessionId, promptId } });
+    return;
+  }
+
   if (scenario === "slow") {
     // Answers only after a cancel arrives; otherwise it runs forever, which
     // is what the liveness watchdog is for.

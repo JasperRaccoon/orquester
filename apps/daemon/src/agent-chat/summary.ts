@@ -257,7 +257,20 @@ export class AgentChatSummaryService {
 
     this.publishTurnTransition(threadId, previous?.fields.latestTurn ?? null, fields.latestTurn ?? null);
 
-    // Push only on a NEW attention, never on every tick that keeps it raised.
+    // Push only on a NEW attention, never on every tick that keeps it raised —
+    // and never on the FIRST observation of a thread.
+    //
+    // `previous === undefined` means the daemon is *discovering* this thread's
+    // state, not watching it change: after a restart (every deploy) the first
+    // poll reads a long-settled turn as a brand-new "finished" attention and
+    // would push one notification per open chat tab for work the user saw hours
+    // ago. The in-memory 30 s debounce resets with the process, so it is no
+    // backstop. Seed the baseline silently; push only on a transition we
+    // actually observed. Same guard covers re-adoption after `forget()` or a
+    // host handover.
+    if (previous === undefined) {
+      return;
+    }
     if (!attentionChanged || resolution.attention === null) {
       return;
     }
@@ -393,17 +406,48 @@ export function sanitizeFields(value: unknown): AgentChatSessionSummaryFields {
     fields.latestTurn = null;
   } else if (row.latestTurn && typeof row.latestTurn === "object") {
     const turn = row.latestTurn as Record<string, unknown>;
-    if (typeof turn.state === "string") {
+    // MEMBERSHIP, not just type: a bogus `state` string falls through
+    // `SETTLED_TURN_STATES.has(...)` as *not settled*, so `onTurnSettled` would
+    // never fire and the §3.1 version drain-restart would stall a deploy's
+    // handover with no diagnostic at all.
+    if (isTurnState(turn.state)) {
       fields.latestTurn = {
         turnId: typeof turn.turnId === "string" ? turn.turnId : null,
-        state: turn.state as TurnState,
+        state: turn.state,
         startedAt: typeof turn.startedAt === "string" ? turn.startedAt : null,
         completedAt: typeof turn.completedAt === "string" ? turn.completedAt : null
       };
     }
   }
-  if (typeof row.chatSessionStatus === "string") {
-    fields.chatSessionStatus = row.chatSessionStatus as ThreadSessionStatus;
+  if (isThreadSessionStatus(row.chatSessionStatus)) {
+    fields.chatSessionStatus = row.chatSessionStatus;
   }
   return fields;
+}
+
+/** `TurnState` = `"pending" | "running"` plus the four `RuntimeTurnState`s. */
+const TURN_STATES: ReadonlySet<string> = new Set<TurnState>([
+  "pending",
+  "running",
+  "completed",
+  "failed",
+  "interrupted",
+  "cancelled"
+]);
+
+const THREAD_SESSION_STATUSES: ReadonlySet<string> = new Set<ThreadSessionStatus>([
+  "idle",
+  "starting",
+  "ready",
+  "running",
+  "stopped",
+  "error"
+]);
+
+function isTurnState(value: unknown): value is TurnState {
+  return typeof value === "string" && TURN_STATES.has(value);
+}
+
+function isThreadSessionStatus(value: unknown): value is ThreadSessionStatus {
+  return typeof value === "string" && THREAD_SESSION_STATUSES.has(value);
 }

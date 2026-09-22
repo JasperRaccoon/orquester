@@ -40,6 +40,14 @@ Decisions already taken with the user:
 | Background work | A live background row is never collapsed or faded in the roster. Stopping is T3's single Stop — the session interrupt — not a per-task command. |
 | Naming | Where T3 already names a field, event or status, this design uses T3's name. |
 
+*Built: every decision above survived implementation. Two **names** could not. `RuntimeMode` (the
+permission mode) collides with the client-platform `RuntimeMode` `@orquester/api` already
+exported, so it is `RuntimeMode` at `@orquester/api/agent-chat` and `AgentRuntimeMode` at
+`@orquester/api` — the same type, two spellings. And the thread head's session status rides
+`SessionSummary` as `chatSessionStatus`, because `status` was already the PTY status
+(`packages/api/src/agent-chat/adapter-types.ts`, `packages/api/src/index.ts`). The four default
+approval buttons are unchanged; what a button *sends* on Codex is not — see §4.3.*
+
 ## 2. Non-goals
 
 - Per-thread git worktrees (natural follow-up; see §10).
@@ -184,6 +192,12 @@ message.
 
 *T3: `apps/server/src/provider/Layers/GrokAdapter.ts:94-101` — 10 min turn / 30 min active-tool defaults and why; `:507-510` — `hasLivenessPause` (pending approvals, pending user input, in-flight updates); `:729-777` — `settleStalledTurn` re-checks the pause immediately before cancelling; `:778-812` — the watchdog sleeps on the remaining window and wakes on activity*
 
+*Built: the watchdog is **host-side and runs for all four adapters**
+(`apps/daemon/src/agent-host/orchestration/turn-watchdog.ts`), where T3 keeps it inside its Grok
+adapter — a wedged Codex or OpenCode turn is the same failure and deserves the same bound. A turn
+the watchdog stalls settles `failed` **and** puts the session in `error`, so the next `/turn` takes
+the §4.1 lazy-recovery path instead of steering into a child that stopped answering.*
+
 **Background liveness outlives the turn.** Subagent fleets, background shells and watch loops
 keep running inside the provider process after the turn that launched them has settled. The host
 tracks, per thread and in memory only, which task ids are still live from the same task events
@@ -216,6 +230,14 @@ child, so any path the host injects is already absolute. Managed hooks are **not
 chat sessions; the protocol replaces them.
 
 *T3: `apps/server/src/provider/ProviderInstanceEnvironment.ts:5-22` — differs: T3 layers per-instance vars **over** a spread of `process.env`; the host builds the map from nothing because the daemon's own environment holds cliproxy and push secrets; `:14-19` — "Child processes do not apply shell expansion to environment values", so only home-dir vars are expanded and everything else is verbatim; `docs/internals/providers.md:25-31` — the launch environment removes ambient vendor credentials so an instance cannot silently use another account or billing project; `apps/server/src/provider/antigravityAuthSupport.ts:64-80` + `:212-225` — the denylist pattern: strip every credential/config key from the inherited env, then re-add only the configured one*
+
+*Built: no hook script is installed for a chat session — but `ORQUESTER_SESSION_ID` still is (it is
+in the list above), and a managed account home's user-level `settings.json` already carries
+Orquester's **terminal** hooks, so those hooks fire carrying a chat session id.
+`POST /api/sessions/:id/agent-event` therefore **accepts and ignores** an event for a chat session
+rather than answering 404: the protocol is the only activity source for a chat thread, and a 404
+would make a working hook look broken to the user's agent
+(`apps/daemon/src/agent-chat/session-router.ts`).*
 
 **Kill guard.** `apps/daemon/src/system-status.ts` adds the host pid to the protected set via
 the same `protectedPids` hook cliproxy uses. Provider children remain legal kill targets.
@@ -271,6 +293,13 @@ unrecognised frame; for OpenCode the check runs both on `opencode --version` and
 own health response, because an already-running server can be older than the binary on PATH.
 
 *T3: `apps/server/src/provider/opencodeRuntime.ts:42` + `:143-177` — `MINIMUM_OPENCODE_VERSION` enforced against the health response; `apps/server/src/provider/Layers/OpenCodeProvider.ts:472-494` — the same gate on the CLI version*
+
+*Built: the host's `MINIMUM_CLI_VERSIONS`
+(`apps/daemon/src/agent-host/orchestration/version-gate.ts`) carries **only** OpenCode's
+`1.14.19`; `claude`, `codex` and `grok` are `null`. Those three declare the version they were
+validated against in their own adapter and surface drift as a `versionAdvisory` warning rather
+than a refused session — a floor invented for a CLI upstream never pinned would refuse sessions on
+installations that work.*
 
 **Provider snapshots refresh on a slow interval, not per request.** The snapshot of §4.1 is
 computed on demand, cached, and re-probed in the background every few minutes; refreshes are
@@ -334,6 +363,11 @@ again.
 
 *T3: `apps/server/src/serverRuntimeStartup.ts:494-502` + `:578-586` — `continueThreadsAfterServerUpdate` resolved through `resolveProjectSettings` per project; `packages/contracts/src/settings.ts:1071-1074` — default `false`; `apps/server/src/provider/Layers/ProviderService.ts:2299-2321` — the same per-project resolution on the stop path*
 
+*Built: the preference lives in the daemon-owned `app.json`, and the **host reads it there itself**
+at reconcile rather than being told by the daemon. Reconcile runs before the daemon has necessarily
+adopted the host — that is the whole point of §3.3 — so a continuation that had to wait for the
+daemon to hand it a setting would either stall or silently take the default.*
+
 **Reconcile never blocks or fails host startup.** Each continuation is forked; the loop only
 prepares it. A thread whose directory binding cannot be read, whose projection dispatch fails, or
 whose continuation throws is logged and settled individually, and a failure of the whole pass is
@@ -383,6 +417,13 @@ message again to continue." — a queued message is never silently dropped and n
 conversation that was not compacted. §6.2 carries only the HTTP surface of this rule.
 
 *T3: `apps/server/src/orchestration/Layers/ProviderCommandReactor.ts:1414-1427` — compaction refused while `starting`/`running` or already compacting; `:1467-1476` — turn starts arriving during compaction pushed onto the per-thread queue; `:327-370` — ordered replay, one awaited at a time, re-queued on dispatch failure; `:1450-1461` + `:306-324` — the queue drained into "Queued message was not sent" activities on failure; differs: our copy is "Context compaction failed. Send this message again to continue."*
+
+*Built: the queues are per thread and there are **two** of them plus a git queue — one for commands
+and one for turns — so a `/mode`, `/approval` or `/answer` arriving during a compaction is not
+parked behind a queued turn (`apps/daemon/src/agent-host/orchestration/`). And `/mode` against a
+thread with no live session records the new mode and starts **nothing**: a mode change is not a
+reason to boot a provider child, and spend an account's tokens on its startup, for a thread the
+user has not sent a message to.*
 
 ## 4. Adapter layer
 
@@ -457,6 +498,9 @@ Rules of the interface, enforced by the orchestration layer so no adapter can fo
   also refreshes it on every assistant message.
 - **Steering.** `sendTurn` while a turn is active reuses the active turn id and injects into the
   running loop. It is neither an error nor a second turn.
+  *Built: a steering send appends **only** the user message — no second
+  `thread.turn-start-requested` — so the turn's recorded start, its checkpoint baseline and its
+  duration stay those of the turn being steered.*
 - **Settle before interrupt.** Every pending approval and user-input request is resolved with
   `cancel` and emitted as `request.resolved` / `user-input.resolved` before `interruptTurn` or
   `stopSession` reaches the provider.
@@ -493,6 +537,15 @@ refresh, the same pattern as T3's `model-manifest.json`.
 
 *T3: `apps/server/src/provider/Services/ServerProvider.ts:6-25` — `getSnapshot`/`refresh`/`streamChanges`/`applyUsageLimits`; `packages/contracts/src/server.ts:188-238` — the one `ServerProvider` snapshot carrying installed/version/status/auth/models/slashCommands/skills/usageLimits/versionAdvisory; `apps/server/src/provider/Layers/ClaudeProvider.ts:331-400` — never-yielding prompt probe; `apps/server/src/provider/Layers/GrokProvider.ts:342-364` — initialize-only ACP probe; `apps/server/src/provider/Layers/OpenCodeProvider.ts:258-289, 543-567` — models and login from one `GET /provider`; `apps/server/src/provider/ModelManifest.ts:36, 39-43` — bundled manifest plus a 1 h TTL remote refresh*
 
+*Built: two changes. (1) There is **no bundled Claude manifest and no remote refresh**. The model
+list comes from the live CLI — `initializationResult().models` on an open session,
+`supportedModels()` on the probe — which is free, needs no network of our own and cannot go stale
+against the installed binary (`apps/daemon/src/agent-host/adapters/claude/models.ts`).
+`ultracode` is re-offered as its own boolean descriptor gated on `xhigh` support, because the
+CLI's effort list never names it. (2) The refresh takes an optional account `home`: run without
+one the probe answers under the **host** identity, and the account chip, label, email and usage
+bars then describe the daemon user's login rather than the thread's account.*
+
 The snapshot's sub-shapes are contracts the client binds to, so pin them here:
 
 - `auth`: `{status: "authenticated"|"unauthenticated"|"unknown", type?, label?, email?}`.
@@ -520,6 +573,11 @@ The snapshot's sub-shapes are contracts the client binds to, so pin them here:
   gap rather than hiding the model.
 
 *T3: `packages/contracts/src/server.ts:61-67` — auth; `:69-82` — model; `:88-93` — slash command; `:95-116` — skill incl. `userInvocationOnly`/`userInvocable`; `:118-123` — per-cwd workspace snapshot; `:158-166` — version advisory; `packages/contracts/src/model.ts:7-53, 90-94, 125-128` — option descriptors and selections; `packages/contracts/src/providerUsageLimits.ts:20-27, 49-61, 69-72` — usage windows, `unavailable`, and the sparse merge-by-`id` update; `apps/server/src/provider/opencodeRuntime.ts:42, 161-176` — `MINIMUM_OPENCODE_VERSION`; `apps/server/src/provider/ClaudeModelCatalog.ts:150-185` — model version gating and its message*
+
+*Built: with the Claude catalogue coming from the live CLI there is no per-model version window
+left to explain — a model the installed CLI does not support is simply not listed. The "explain
+the gap rather than hide the model" rule therefore survives only on the **whole-CLI** gate
+(`apps/daemon/src/agent-host/orchestration/version-gate.ts`).*
 
 Slash commands and skills are additionally **per-cwd** for Claude, Grok and OpenCode: the
 snapshot carries a narrower `workspaceSnapshots[{cwd, checkedAt, slashCommands, skills}]`
@@ -560,6 +618,18 @@ runtime.
 *T3 schema: `packages/contracts/src/providerRuntime.ts:1177-1228` — the 49-member union; payloads at `:219-222` (session.started), `:230-234` + enum `:54-61` (session.state.changed), `:237-241` (session.exited), `:244-246` (thread.started), `:249-254` + enum `:64-72` (thread.state.changed), `:257-260` (thread.metadata.updated), `:263-285` (thread.token-usage.updated), `:313-316` (turn.started), `:325-346` (TurnTokenUsage) + `:348-356` (turn.completed), `:359-362` (turn.aborted), `:365-375` + `:77` (turn.plan.updated), `:377-385` (turn.proposed.*), `:387-390` (turn.diff.updated), `:432-449` + `:80` + `:123-135` (item lifecycle, status, CanonicalItemType), `:451-456` + `:83-92` (content.delta), `:459-472` + `:137-150` (request.*, CanonicalRequestType), `:482-502` (user-input.*), `:561-572` (classifyTaskAgentKind) + `:580-618` (task linkage) + `:623-682` + `:630-640` (task.*, RuntimeTaskStatus), `:682-704` (hook.*), `:707-715` (tool.progress), `:796-801` (tool.denied), `:724-728` (auth.status), `:740-742` + `packages/contracts/src/providerUsageLimits.ts:20-27, 69-72` (account.rate-limits.updated), `:757-761` (model.rerouted), `:804-814` + `:97-104` (runtime.warning/error).*
 *T3 emit sites: Claude `apps/server/src/provider/Layers/ClaudeAdapter.ts:2555` (token usage), `:2660-2853` (turn.completed), `:2912-2964` (assistant_text), `:1725-1731` (reasoning_summary_text), `:3170-3331` (tool results → command_output/file_change_output), `:3620-3706` (session/thread state, hooks), `:3707-3873` (tasks), `:4081-4142` (rate limits), `:4145-4198` (the demux switch). Codex `apps/server/src/provider/Layers/CodexAdapter.ts:1304-2223` (notification → event mapping), `:1589` (token usage), `:1664-1672` (turn.diff.updated), `:1721, 1769` (turn.proposed.*), `:633-663` (item classification). OpenCode `apps/server/src/provider/Layers/OpenCodeAdapter.ts:2294-2660` (the SSE switch: `session.updated`, `session.compacted`, `message.updated`, `message.part.delta/updated/removed`, `permission.asked/replied`, `question.asked/replied/rejected`, `todo.updated` → `turn.plan.updated`, `session.status`, `session.error`). Grok `apps/server/src/provider/acp/AcpRuntimeModel.ts:795-884` (`session/update` variants) and `apps/server/src/provider/acp/AcpCoreRuntimeEvents.ts:37-50, 137` (normalised → runtime events).*
 
+*Built: three corrections the real CLIs forced. (1) `RuntimeSessionState` still has no `waiting`
+arm and the UI still derives `waiting` from an open request — but Codex **does** emit
+`thread/status/changed.activeFlags: ["waitingOnApproval"]`, so an adapter must tolerate the flag
+rather than report it as an unmapped frame
+(`apps/daemon/src/agent-host/adapters/codex/normalise.ts`). (2) The `hook.*` group has **no
+producer**: Claude's filesystem hooks run, but the SDK stream carries no `hook_*` messages at all,
+so nothing in the timeline is fed by that group on any provider. (3) `RuntimeEventRawSource`
+gained one member the adapters mint themselves, `HISTORICAL_RAW_SOURCE` (`"history.replay"`),
+which tags every event projected out of a provider's **native history** so nothing downstream
+mistakes a replayed row for live traffic and no historical turn claims token usage
+(`packages/api/src/agent-chat/runtime-events.ts`).*
+
 Task rows repeat their whole linkage block on **every** row, not just `task.started`, so a client
 fold can rebuild an agent whose start row aged out. `agentKind` is stamped by the host at
 ingestion (not trusted from the provider) with the rule: a task launched from inside a subagent
@@ -568,6 +638,15 @@ patch (`killed`→`cancelled`, `paused`→`idle` normalised at the adapter); `ta
 narrows to `completed|failed|stopped`.
 
 *T3: `packages/contracts/src/providerRuntime.ts:574-618` — "repeated on progress and terminal rows … so client folds can reconstruct an agent"; `:552-572` — `classifyTaskAgentKind`; `:656-669` — the `task.updated` normalisation note; `:672-679` — `task.completed`*
+
+*Built: no CLI actually repeats the linkage. Claude's `task_updated` carries `{task_id, patch}` and
+nothing else, so the **adapter** carries each task's identity forward and re-stamps the whole
+bundle on every `task.*` runtime event it emits
+(`apps/daemon/src/agent-host/adapters/claude/normalize.ts`). The rule above is therefore a contract
+the adapters honour rather than an observation about the providers — which is exactly what lets the
+fold keep relying on it. The Claude tools that drive it are `TaskCreate` / `TaskUpdate` (decimal
+string ids) and `Agent`, **not** `TodoWrite` and `Task`: a fold keyed on the old names produces
+nothing.*
 
 Deliberately excluded: `thread.realtime.*`, `mcp.status.updated`, `tool.summary`,
 `config.warning`, `deprecation.notice`, `account.updated`, `mcp.oauth.completed`,
@@ -607,6 +686,19 @@ provider that distinguishes them is told which, and the agent reads a decline as
 way" and a cancel as "stop this".
 
 *T3: `apps/web/src/components/chat/ComposerPendingApprovalActions.tsx:23-28` — `DEFAULT_APPROVAL_OPTIONS`, all four user-visible; `apps/server/src/provider/Layers/ClaudeAdapter.ts:4817-4823` — the same deny carrying "User cancelled…" versus "User declined…"; `apps/server/src/provider/Layers/CodexSessionRuntime.ts:397-402` — Codex's own elicitation options also lead with Cancel and Decline*
+
+*Built: both halves of this paragraph moved. (1) Codex downgrades `acceptAlways` to
+`acceptForSession` only when the server proposed nothing better: a command approval that carries a
+proposed execpolicy amendment is answered
+`{acceptWithExecpolicyAmendment: {execpolicy_amendment}}`, which is what "always allow" actually
+means on that CLI, while the file-change enum has no amendment arm and always downgrades
+(`apps/daemon/src/agent-host/adapters/codex/decisions.ts`). (2) Grok **does** advertise options —
+`allow_always` arrives as `options[0]` on a real `session/request_permission` — so `acceptAlways`
+maps onto it instead of being emulated by a local operation hash, and nothing ever treats
+`options[0]` as a default. Grok asks for permission **at all** only when
+`[features] support_permission = true` reaches the CLI; without it the agent self-resolves every
+approval and `session/request_permission` never fires. 4.5 Grok says how the host guarantees that
+setting without touching the user's config.*
 
 The full per-provider decision mapping:
 
@@ -649,6 +741,15 @@ card renders without the original request.
 
 *T3: `packages/contracts/src/orchestration.ts:128-135` — the four modes (differs: T3's `DEFAULT_RUNTIME_MODE` is `full-access`, `:135`; Orquester defaults to `approval-required`). Claude `apps/server/src/provider/Layers/ClaudeAdapter.ts:4878-4882` (the map — note `approval-required` is deliberately **absent**, so `permissionMode` stays undefined and gating is entirely `canUseTool`), `:4939-4942` (`allowDangerouslySkipPermissions` iff `bypassPermissions`), `:4704-4711` (full-access short-circuit). Codex `apps/server/src/provider/Layers/CodexSessionRuntime.ts:509-542` (`runtimeModeToThreadConfig`, all three axes) and `:562-580` (a **second, per-turn** sandbox policy with a different spelling: `readOnly`/`workspaceWrite`/`dangerFullAccess`). OpenCode `apps/server/src/provider/opencodeRuntime.ts:508-545` (`buildOpenCodePermissionRules`). Grok `apps/server/src/provider/acp/GrokAcpSupport.ts:33-46` (`grokAcpSpawnArgs`).*
 
+*Built: the Grok argv is as written — `--permission-mode` is a global option and precedes `agent`,
+`--always-approve` belongs to `agent` and follows it — but `acceptEdits` is a **no-op** for the ACP
+edit gate. Measured against a real file write: `default` asks, `auto` does not,
+`agent --always-approve` does not, and `acceptEdits` still asks. The flag is still sent (it is what
+the CLI documents and a later release may honour) and the mode's promise is kept by the adapter
+answering edit-flavoured approvals itself (`autoApprovesEdits` in
+`apps/daemon/src/agent-host/adapters/grok/launch.ts`). Without that compensation the mode would be
+a label for nothing.*
+
 Two structural consequences. First, **a RuntimeMode change restarts the session** (§3.4) because
 every provider expresses the mode as launch configuration: Claude's `canUseTool` closes over the
 start-time mode, Codex sends it on `thread/start`, Grok in argv. OpenCode is the one that could
@@ -676,6 +777,14 @@ OpenCode `agent: "plan"` (no proposal event); Grok none. The toggle is shown onl
 
 *T3: `apps/server/src/provider/Layers/ClaudeAdapter.ts:5187-5201` (per-turn `setPermissionMode`), `:4683-4703` (`ExitPlanMode` captured then always denied); `apps/server/src/provider/Layers/CodexSessionRuntime.ts:583-606` (`collaborationMode` carries its own model, `reasoning_effort` and `developer_instructions`) with the sandbox untouched at `:611-666`; `apps/server/src/provider/Layers/OpenCodeAdapter.ts:3207`; `apps/server/src/provider/Layers/ClaudeProvider.ts:57`, `apps/server/src/provider/Layers/CodexProvider.ts:68`, `apps/server/src/provider/Layers/OpenCodeProvider.ts:34`, `apps/server/src/provider/Layers/GrokProvider.ts:51` — the four `showInteractionModeToggle` values*
 
+*Built: Codex's `collaborationMode` is **sticky thread state**, not a per-turn field — leaving plan
+mode requires an explicit `{mode:"default"}` — so the adapter sends the collaboration mode on
+**every** turn including the default one, alongside `developer_instructions: null`
+(`apps/daemon/src/agent-host/adapters/codex/modes.ts`). And Grok's plan mode is **declared**, not
+inferred: the CLI marks the tool with `_meta["x.ai/tool"].kind`, which makes §4.5's `plan.md` path
+matcher a fallback rather than the primary detector
+(`apps/daemon/src/agent-host/adapters/grok/plan.ts`).*
+
 ### 4.5 Per-provider must-knows
 
 This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) adds the rest.
@@ -701,6 +810,14 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   `executable`, `strictMcpConfig`, `maxThinkingTokens`. There are no SDK hooks — the `hook.*`
   events are the *user's own* configured hooks reported back as `system` messages.
   *T3: `apps/server/src/provider/Layers/ClaudeAdapter.ts:4913-4965` — the whole options object; `:4834-4838` — the extraArgs strip; `:4886-4891` — the folded permission mode; `:4892-4900` — `settings`; `:4905-4912` — `additionalDirectories`; `apps/server/src/provider/ClaudeModelCatalog.ts:233-250` — the model-id suffix; `:4993-4998` — `query({prompt, options})`*
+  *Built: `stderr` **is** set, although the list above forbids it. §3.1 requires every child's
+  stderr to be captured, classified and redacted, and the SDK callback is the only access to it —
+  the §3.1 requirement wins over the §4.5 list. The list is kept verbatim in
+  `CLAUDE_NEVER_SET_OPTIONS` with the one exception named separately in
+  `CLAUDE_SESSION_ALLOWED_DESPITE_SPEC` (`apps/daemon/src/agent-host/adapters/claude/launch.ts`),
+  so the divergence is a constant a reader trips over rather than a silent edit. `settingSources`
+  is as written; the committed fixtures were captured with `["project","local"]` only, because this
+  host's user-level settings carry a hook that perturbs the capture.*
 - **Env is one variable.** `CLAUDE_CONFIG_DIR` only, on top of the base env; `HOME` is **never**
   overridden, because relocating `HOME` also relocates the macOS keychain lookup and the CLI then
   reports "Not logged in". Orquester's managed-account home is therefore bound through
@@ -724,6 +841,18 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   telling the model to stop and wait — plan mode is a client-owned card, never the SDK's gate.
   `full-access` short-circuits to allow with no event.
   *T3: `apps/server/src/provider/Layers/ClaudeAdapter.ts:4663-4824` (the callback), `:4463-4471` (the id-is-the-text rule and its issue link), `:4584-4590` (the answer shape), `:4683-4703` (ExitPlanMode), `:4704-4711` (full access)*
+  *Built: `canUseTool` is **not** the whole approval surface. The CLI gates first, and silently:
+  `echo hi`, `ls` and `Read` never reach the callback, and a `sleep 120 && …` was denied by the CLI
+  itself with a `<tool_use_error>` tool result nobody authorised. In `acceptEdits` **and**
+  `bypassPermissions` the callback is never called at all, even for `rm -f`; only
+  `approval-required` ever produces an approval card. The timeline therefore renders a tool result
+  that is a CLI denial as a denial — tone `error`, "denied by the CLI" — even though no
+  `request.*` event exists for it (`apps/daemon/src/agent-host/adapters/claude/classify.ts`,
+  `…/normalize.ts`). Two more shapes the callback forced: options carry a `requestId` that
+  **must** key the pending-approvals map, because the SDK redelivers a request on reinitialize; and
+  `ExitPlanMode` carries a `planFilePath`, which rides an additive optional field of the same name
+  on `turn.proposed.completed` rather than being smuggled into `planMarkdown` — the path lives
+  under `CLAUDE_CONFIG_DIR`, outside `fsRoot`, so it is a label and never a link.*
 - **Model and plan switch live, mode does not.** `query.setModel(apiModelId)` on a changed model
   (also refreshing the per-turn effort), `query.setPermissionMode("plan")` / back to the session's
   base mode per turn. A RuntimeMode change restarts (§4.4).
@@ -735,6 +864,15 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   `interrupted`. For Claude, Stop and interrupt are the same operation and the next turn needs
   lazy recovery from the cursor.
   *T3: `apps/server/src/provider/Layers/ClaudeAdapter.ts:5289-5297` (with the in-source reason), `:4262-4369` (teardown)*
+  *Built: Stop is `query.interrupt()` **first** and a process kill second, not the process kill this
+  paragraph prescribes. The `interrupt_receipt_v1` receipt is the fact the rationale above lacked:
+  an empty `still_queued` means the CLI took the interrupt, so the host waits for the turn to
+  settle and **keeps the session** (no CLI reboot per Stop); a non-empty receipt, an RPC failure or
+  a turn that does not settle closes the query exactly as written here. A **session-scoped** Stop
+  (no `turnId`, §6.2) always closes the query, because that is the only reach to the CLI's own
+  background work (`apps/daemon/src/agent-host/adapters/claude/session.ts`). Related invariant the
+  SDK imposes: breaking out of `for await (… of query)` closes the query and kills the session, so
+  the adapter never does.*
 - **Rollback is a native fork with a hard failure mode.** Rolling back *every* turn short-circuits
   to a fresh session rather than a fork. Otherwise: read native history through the SDK's
   `getSessionMessages` — run **in a child process** when `CLAUDE_CONFIG_DIR` differs from the
@@ -746,6 +884,13 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   compaction in between is a hard error telling the user to start a new thread — refuse rather
   than guess.
   *T3: `apps/server/src/provider/Layers/ClaudeAdapter.ts:5306-5486` (rollback), `:5316-5327` (full-rollback restart path), `:5337-5393` (the child-process history worker and its reason), `:180-225` (`remapClaudeForkTurnBoundaries`), `:5422-5433, 5453-5468` (the hard failures)*
+  *Built: as written, with one observation that makes it load-bearing — a resume replays **nothing**
+  onto the message stream (`replayUuids: []`), so `readThread` and rollback genuinely have to read
+  the native history out-of-band, and a resumed thread renders from that projection tagged
+  `HISTORICAL_RAW_SOURCE` (§4.2). Two more frame shapes the history and demux paths must survive:
+  `user.message.content` is sometimes a plain **string** (post-compaction frames), so `content.map`
+  throws on a long thread; and `command_lifecycle` is a top-level message type absent from the
+  SDK's exported union. `system/init` is emitted once **per turn**, not once per session.*
 - **Steering.** A `sendTurn` during a live turn reuses the turn id; a stale *synthetic* turn
   (auto-opened by background assistant output between prompts) is auto-closed first so it cannot
   block the user's next turn.
@@ -758,6 +903,9 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   meter plus `turn.completed.tokenUsage`, `complete` when input and output totals are both
   present, `partial` otherwise, `unavailable` when the turn produced none.
   *T3: `apps/server/src/provider/Layers/ClaudeAdapter.ts:2555` (thread usage), `:820, 855, 878, 885` (the three `usageStatus` arms), `:3483-3504` (`result` → usage + turn.completed)*
+  *Built: as written. Two result shapes to tolerate: `result.subtype: "success"` can carry
+  `is_error: true` with an `api_error_status`, and `terminal_reason` is absent on a compaction
+  result. An interrupt yields `aborted_streaming`.*
 - **Probe.** Auth, slash commands and usage all come from **one** never-yielding `query()`: the
   prompt async-generator never yields, so the CLI finishes local init IPC and never calls the API;
   then `await q.initializationResult()` gives `account.{email, subscriptionType, tokenSource,
@@ -857,6 +1005,16 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   notifications. Item classification is a **substring heuristic over a de-camel-cased type name**,
   not a switch — another one not to copy verbatim.
   *T3: `apps/server/src/provider/Layers/CodexSessionRuntime.ts:2352-2370` (generic registration), `:779, 833-875` (the four stateful ones); `apps/server/src/provider/Layers/CodexAdapter.ts:1304-2223` (the mapping), `:633-663` (`toCanonicalItemType`)*
+  *Built: the RPC shapes differ from the sentence above in three ways worth pinning.
+  `thread/start` and `thread/resume` answer `{thread:{…}}` plus the whole resolved config, not
+  `{threadId}`, and `turn/start` answers `{turn:{…}}`. Every request error is `-32600` — never
+  classify a Codex failure by code — and the `error` **notification** carries `willRetry`, which is
+  what separates a `runtime.warning` from a `runtime.error`. `configWarning`, `guardianWarning` and
+  `deprecationNotice` all land as `runtime.warning`. `thread.started` is emitted once, and there is
+  no `turn.aborted` producer on this adapter: an interrupted Codex turn settles through
+  `turn.completed {state:"interrupted"}`. A Codex `cancel` ends the turn as `status:"interrupted"`
+  with `items: []`, so a fold that trusts `turn.items` erases the turn — the fold must not
+  (`apps/daemon/src/agent-host/adapters/codex/normalise.ts`, `…/session.ts`).*
 - **Two question paths.** The RPC path (`item/tool/requestUserInput`) filters **hard**: a question
   is dropped unless it has id, header, prompt **and** at least one option whose label *and*
   description are both non-empty, and `multiSelect` is hard-coded `false`; if every question is
@@ -866,10 +1024,22 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   (`codex-async:<threadId>:<itemId>`) — the answer goes back as an ordinary turn, not a JSON-RPC
   response.
   *T3: `apps/server/src/provider/Layers/CodexAdapter.ts:885-910` (the filter), `:1691-1711` (the async path)*
+  *Built: the RPC path is implemented with the field names the CLI actually uses —
+  `requestUserInput` carries `question`, not `prompt`, its options are `{label, description}` with
+  **no `value`** (so an answer goes back as the option's *label*), and it additionally carries
+  `isOther`, `isSecret` and `isBlocking`, which the question card renders as a free-text option and
+  a masked field (§7.5). `availableDecisions` is a presentation hint, not a whitelist. The second,
+  reply-less **async** path is **not implemented**: it was never observed in any capture of this
+  CLI, and a synthetic request id for a path that does not exist would be a card nobody can close
+  (`apps/daemon/src/agent-host/adapters/codex/session.ts`).*
 - **Token usage.** `thread/tokenUsage/updated` carries *cumulative thread* totals, so the adapter
   keeps a baseline and diffs per turn, clamping cache subsets into `inputTokens`; a turn with no
   observed delta settles `unavailable`, an interrupted one `partial`.
   *T3: `apps/server/src/provider/Layers/CodexAdapter.ts:538-617` (accumulate + complete), `:1589` (thread usage), `:2417-2444` (stamped on turn.completed/aborted)*
+  *Built: no baseline arithmetic. `thread/tokenUsage/updated` already carries `last` — the per-call
+  delta — and `modelContextWindow`, so the adapter reports the delta the provider gives it instead
+  of diffing cumulative totals it would have to keep a baseline for; `turn/completed` carries no
+  usage at all (`apps/daemon/src/agent-host/adapters/codex/usage.ts`).*
 - **Interrupt, in order.** (1) settle pending approvals as `cancel`; (2) settle pending
   user-inputs; (3) interrupt every live **child** turn first, bounded at 3 s per child and 10 s
   overall, concurrency 8 — collab children are full threads and interrupting only the parent
@@ -885,12 +1055,22 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   *T3: `packages/effect-codex-app-server/src/protocol.ts:100-115` (line framing), `:455-474` (request/notify write only `{id, method, params}`)*
 - **Compaction is native:** `thread/compact/start {threadId}`.
   *T3: `apps/server/src/provider/Layers/CodexSessionRuntime.ts:2497-2500`; `apps/server/src/provider/Layers/CodexAdapter.ts:2729`*
+  *Built: `thread/compact/start` is the call, but compaction surfaces as a **whole extra turn**
+  signalled by a `contextCompaction` item — `thread/compacted` never fires on this CLI, so nothing
+  may wait on it. There is also a `thread/reverted` notification, which the adapter handles rather
+  than warning about (`apps/daemon/src/agent-host/adapters/codex/normalise.ts`).*
 - **Rollback has two code paths.** Legacy threads take `thread/rollback {threadId, numTurns}`;
   **paginated** threads do not support the count-based endpoint, so the adapter reads the thread
   (`thread/turns/list`, cursor loop, a raw call not in the generated meta) and issues
   `thread/revert {threadId, beforeTurnId}` at the computed boundary. An implementation that knows
   only `thread/rollback` fails silently on newer histories.
   *T3: `apps/server/src/provider/Layers/CodexSessionRuntime.ts:1215-1288`*
+  *Built: there is only **one** path. `thread/rollback` is dead on every thread this CLI creates —
+  it answers `-32600 "paginated threads do not support thread/rollback"` — so rollback is always
+  `thread/turns/list` (cursor loop) → `thread/revert {threadId, beforeTurnId}`. The adapter never
+  calls the count-based endpoint at all (`apps/daemon/src/agent-host/adapters/codex/session.ts`,
+  `…/history.ts`). `thread/turns/list` is also how a resumed thread is re-hydrated: `thread/resume`
+  hands back `turns: []` by design.*
 - **stderr becomes events.** Lines matching Codex's log format are parsed and re-emitted, with a
   benign-snippet denylist (`state db missing rollout path for thread`,
   `record_discrepancy … falling_back`) so routine noise never surfaces.
@@ -908,6 +1088,13 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   it as its own child made threads hang "working" forever. Unknown child methods default to "pass
   to parent", not "drop" — two shipped bugs came from a catch-all.
   *T3: `apps/server/src/provider/Layers/CodexSessionRuntime.ts:1622-1636, 1080-1131`*
+  *Built: three more behaviours this adapter carries. A resume that fails falls back to a fresh
+  `thread/start` **unconditionally**, with a `runtime.warning` naming the lost context — refusing
+  the session instead would leave a tab that can never be used again. `tool.denied` is derived from
+  a tool that was declined without a request ever having been opened, since the CLI gates some
+  calls itself. And `developer_instructions: null` is sent explicitly (§4.4). Unverified because no
+  capture produced them: `item/permissions/requestApproval`, `item/tool/call`,
+  `account/chatgptAuthTokens/refresh` and `attestation/generate` — all answered, none exercised.*
 
 #### OpenCode
 
@@ -924,6 +1111,12 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   their providers. Shutdown is SIGTERM to the **process group** (`process.kill(-pid)`), 1 s, then
   SIGKILL.
   *T3: `apps/server/src/provider/opencodeRuntime.ts:667-714` (spawn + env with the clobber rationale at `:704-711`), `:81, 290-299, 751-772` (readiness), `:42-49, 143-179` (health + minimum version), `:657-663` (basic auth), `:728-745` (group kill), `:837-841` (drain-but-discard)*
+  *Built: `--port 0` does **not** give an ephemeral port — this CLI binds the well-known 4096 when
+  it is free — so the adapter probes a free port itself and passes it explicitly
+  (`apps/daemon/src/agent-host/adapters/opencode/server.ts`). Auth is `Basic
+  base64("opencode:<password>")` exactly, and `/global/health` sits behind the same gate, so the
+  version check is an authenticated call. A malformed session id answers **500**, and a bad model
+  is accepted with 204 and then fails asynchronously with three `session.error` frames.*
 - **There is no cwd on the process.** The working directory travels per request as the client-level
   `directory`, which becomes header `x-opencode-directory` (rewritten to `?directory=` on
   GET/HEAD). That is what lets the per-project server of §3.2 serve every thread in a project; the
@@ -967,17 +1160,36 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   part clears `text` but **keeps `emittedText`**. `message.part.delta` (only when `field ===
   "text"`) is genuinely incremental and appends instead of diffing.
   *T3: `apps/server/src/provider/Layers/OpenCodeAdapter.ts:633-656` (merge + resolve), `:1617-1644` (emit), `:2476-2483` (non-text update), `:2410-2445` (`message.part.delta`)*
+  *Built: text streaming is **both**, not one or the other. A part opens as a
+  `message.part.updated` with `text: ""`, then N `message.part.delta {field:"text"}` frames carry
+  the authoritative incremental text, then a closing full snapshot arrives with `time.end`. The
+  snapshot-diffing merge above is still required (it is what makes the closing frame idempotent),
+  and the deltas are still appended. One trap: `field: "text"` deltas arrive for **`reasoning`**
+  parts too, so the content stream kind must be taken from the *part's* `type`, never from the
+  delta's `field` (`apps/daemon/src/agent-host/adapters/opencode/normalize.ts`).*
 - **Permissions.** The ruleset (§4.4) is written on create, on resume-in-place, after a cwd fork
   and after a rollback fork — a plain `PATCH /session/{id}`, no server restart. Asks arrive as
   `permission.asked` and are answered on `POST /permission/{requestID}/reply {reply}` — *not* the
   `/session/:id/permissions/:permissionID` route that also exists in the SDK. Questions are the
   parallel `question.asked` / `POST /question/{id}/reply` pair.
   *T3: `apps/server/src/provider/Layers/OpenCodeAdapter.ts:2901-2947` (ruleset write points), `:3762-3769` (the reply route), `:2535-2560` (the ask/reply events)*
+  *Built: `permission.asked` additionally carries `always` — the pattern the server would persist —
+  and `tool: {messageID, callID}`. That `always` grant is **directory-wide across every session of
+  one server** (§3.2's second invariant, confirmed against the real server), which is why an
+  automatic approval is only ever sent `once`. An aborted turn leaves its permission request open
+  in `GET /permission`, so settling before interrupt (§4.1) is correctness here, not tidiness. And
+  under the supervised ruleset the `task` tool's own permission ask stalls a subagent turn
+  indefinitely — a known gap, surfaced rather than hidden.*
 - **Child-session event routing.** Parent-session events pass; **child-session events pass only if
   they are permission or question events**, behind an ancestry-resolution retry loop (250 ms→5 s
   backoff; asked-events retry forever, terminal events give up after 5). This is the whole reason
   the OpenCode roster is thinner than Claude's.
   *T3: `apps/server/src/provider/Layers/OpenCodeAdapter.ts:2215-2265`*
+  *Built: the OpenCode roster is **not** thin. A child session emits 38 frames across 8 event
+  types, all observable, so the adapter turns a child session into a `task.*` row set and stamps
+  its own work with `agentId` — §7.6's roster shows what the provider actually reports while
+  §7.2's re-homing keeps it out of the parent timeline. The ancestry-resolution retry loop above is
+  kept (`apps/daemon/src/agent-host/adapters/opencode/normalize.ts`).*
 - **Token usage** is accumulated per message part (`input + cache.read + cache.write` into input,
   `output + reasoning` into output) and settles `complete` only when the turn completed *and*
   every step resolved; otherwise `partial`, or `unavailable` when no part carried tokens.
@@ -992,6 +1204,10 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   semaphore, a **10-minute** timeout, and an explicit refusal while a turn is active. The
   follow-up `session.compacted` event becomes `thread.state.changed {compacted}`.
   *T3: `apps/server/src/provider/Layers/OpenCodeAdapter.ts:3537-3599` (with the refusal at `:3568-3574`), `:2314-2328`*
+  *Built: the explicit refusal while a turn is active is **ours**. The server does not refuse a
+  `summarize` mid-turn; it accepts it and rewrites the conversation the turn is reading. §3.4's
+  "compaction refuses rather than queues" is therefore enforced by the adapter, not observed from
+  the provider (`apps/daemon/src/agent-host/adapters/opencode/session.ts`).*
 - **Rollback forks, deliberately not `session.revert`** — native revert also rewrites workspace
   files, and this design keeps file restore out of a revert (§5.5). The fork is verified to have
   kept exactly the expected message count and errors otherwise, then the ruleset is re-applied and
@@ -1020,6 +1236,18 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   but never written: it only picks the ACP auth method id (`xai.api_key` vs `cached_token`).
   `GROK_HOME` is not set by the adapter — Orquester sets it per §3.1 to bind the managed account.
   *T3: `apps/server/src/provider/acp/GrokAcpSupport.ts:33-46` (argv), `:48-63` (env), `:14-18, 65-69` (auth method)*
+  *Built: one file is added to that launch. Grok's `[features] support_permission = true` — without
+  which the agent self-resolves every approval and `session/request_permission` never fires (§4.3)
+  — and `auto_update = false` must reach the CLI, and the obvious place to put them is a **trap**:
+  on a managed account home `<GROK_HOME>/config.toml` is a **symlink** to the daemon user's own
+  `~/.grok/config.toml`, so writing it reconfigures Grok host-wide, for every terminal tab and
+  every account, from one chat launch (it happened twice during the build). The host therefore
+  writes a per-thread overlay and points `GROK_CONFIG_PATH` at it; nothing under a shared home is
+  written (`apps/daemon/src/agent-host/adapters/grok/launch.ts`,
+  `apps/daemon/src/agent-chat/home-prep.ts`). `auto_update` matters because the CLI upgraded
+  itself 1.0.3 → 1.0.34 mid-session: the version is read from `initialize._meta.agentVersion` on
+  **every** handshake and never cached per host, and `meetsMinimumGrokVersion(null)` is
+  deliberately permissive for the window before the first handshake answers.*
 - **Handshake.** `initialize {protocolVersion: 1, clientCapabilities, clientInfo}`, then
   **unconditionally** `authenticate {methodId}` — the agent's own advertised `authMethods` are not
   consulted. Grok declares **no client capabilities**: `fs.readTextFile/writeTextFile: false`,
@@ -1034,6 +1262,15 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   clock, and after 2 s idle a **synthetic** `LoadSessionResponse` is fabricated from
   `initialize._meta`; 90 s overall.
   *T3: `apps/server/src/provider/acp/AcpSessionRuntime.ts:755-880` (the three branches), `:791-796` (load payload), `:804-864` (the replay-idle race); `apps/server/src/provider/acp/AcpRuntimeModel.ts:709-758` (the synthetic response)*
+  *Built: `session/load` answers in ~266 ms in practice, and the replay arrives as
+  **`_x.ai/session/update`** — a method name T3 does not register at all, so an adapter that only
+  knows `session/update` silently loses the whole replayed history (and the usage rows in it).
+  `sessionCapabilities.resume` is declared. `session/new` boots **every** MCP server the home has
+  configured (~157 tools, ~3 s, discovered from `~/.claude.json` through the Claude-compat path);
+  a chat thread deliberately inherits exactly what a terminal tab under the same home would — see
+  §10. Concurrent prompts are **queued** by the CLI, not steered into the running turn, and there
+  is an `_x.ai/task_backgrounded` notification
+  (`apps/daemon/src/agent-host/adapters/grok/history.ts`, `…/normalize.ts`).*
 - **Every x.ai extension method, in both spellings.** Each exists bare (`x.ai/…`) and
   underscore-prefixed (`_x.ai/…`), and params may additionally arrive **wrapped** as
   `{method, params}` — register both names and unwrap.
@@ -1106,10 +1343,24 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   turn. Interrupt is also turn-scoped: a Stop naming a turn that is no longer active returns
   immediately.
   *T3: `apps/server/src/provider/Layers/GrokAdapter.ts:2015-2075`; `packages/effect-acp/src/_generated/schema.gen.ts:7782`*
+  *Built: as written, with one consequence the UI must live with: a **rejected tool** also ends the
+  turn as `stopReason: "cancelled"`, indistinguishable from a user Stop except through the
+  `permission_denied` hook event. A 116 s window of total ACP silence was observed mid-turn on a
+  trivial prompt, which is why §3.1's 10-minute watchdog is a floor and not a generosity.*
 - **Grok emits no token usage at all** — no `thread.token-usage.updated`, no
   `turn.completed.tokenUsage`. The context meter and per-turn cost are simply absent on Grok
   (`reportsContextWindow: false`), and the status line must degrade rather than show zeros.
   *T3: verified by absence — no `tokenUsage`/`usageStatus` emitter in `apps/server/src/provider/Layers/GrokAdapter.ts` or `apps/server/src/provider/acp/AcpCoreRuntimeEvents.ts`; cf. `packages/contracts/src/server.ts:200-201`*
+  ***Built: this is wrong for the shipped CLI and the adapter does the opposite.*** Grok 1.0.34
+  emits usage in four places: `_meta.totalTokens` on every streamed chunk, a complete per-turn
+  block with `costUsdTicks` on the `session/prompt` result, the same `usage` object repeated on
+  `_x.ai/session_notification turn_completed`, and per-model-call usage on `response_completed`.
+  The context window is `initialize._meta.modelState.availableModels[]._meta.totalContextTokens`
+  (500 000). So Grok's capabilities declare **`reportsContextWindow: true`**, the status line shows
+  a real meter and a real per-turn cost, and `TurnTokenUsage` is populated
+  (`apps/daemon/src/agent-host/adapters/grok/usage.ts`, `…/index.ts`). The sentence above stays on
+  record because it was true of the build T3 was written against — and because it is the clearest
+  example of why §10's "protocols move" rule exists.*
 - **No rollback.** `supportsConversationRollback: false`; `rollbackThread` always fails.
   Compaction is the slash command `/compact`.
   *T3: `apps/server/src/provider/Layers/GrokAdapter.ts:2190-2192`, `:2142-2157`*
@@ -1124,10 +1375,19 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   `userInvocable: false` skills are kept but marked disabled — with typed probe errors so a
   failure never caches an empty catalogue.
   *T3: `apps/server/src/provider/Layers/GrokProvider.ts:247-285` (`parseGrokModelsCliOutput`), `:315-340` (the two filtered commands), `:342-364` (the initialize-only probe and its comment), `:486-492` (verdict precedence); `apps/server/src/provider/Drivers/GrokSkills.ts:45-92`*
+  *Built: the probe is as written, but `initialize` advertises only **7** commands while the CLI's
+  real catalogue is **69** — the slash surface is built from the full catalogue, not from the
+  handshake's short list (§4.6). Not captured and therefore unverified: an unauthenticated failure
+  and `stopReason: "rate_limit"`.*
 - **Lifecycle.** One `grok agent stdio` child **per thread**, kept alive indefinitely, with a
   per-thread semaphore and a documented lock-ordering rule: never hold the prompt-lifecycle lock
   and the thread lock together.
   *T3: `apps/server/src/provider/Layers/GrokAdapter.ts:998, 1786-1787`*
+  *Built: one addition to the redaction of §3.1. `_x.ai/mcp/servers_updated` carries the host's
+  real MCP credentials in each server's `env` map, so `raw.ndjson` redaction runs over raw ACP
+  frames too and knows about `env` maps structurally, not only about token-shaped strings
+  (`apps/daemon/src/agent-host/adapters/grok/acp/redact.ts`,
+  `apps/daemon/src/agent-host/store/raw-log.ts`).*
 
 ### 4.6 Slash commands and skills
 
@@ -1656,6 +1916,16 @@ age, so a chatty turn cannot scroll a still-open question out of the pending set
 
 *T3: `apps/server/src/orchestration/projector.ts:59-87` — `MAX_THREAD_MESSAGES = 2_000`, `MAX_THREAD_CHECKPOINTS = 500` and `retainThreadActivities`' 500-row window with pending-question retention*
 
+*Built: the retention keeps the last 500 activities plus every unresolved async question, and
+**nothing else** — the "any long-lived singleton row regardless of age" clause has no Orquester
+row behind it. T3's counterpart retains its `WORKTREE_SETUP_ACTIVITY_KIND`, a worktree-setup
+record this design has no analogue for (per-thread worktrees are a §2 non-goal), so the clause is
+an artefact of the port rather than a requirement
+(`packages/api/src/agent-chat/fold.ts`, `activitiesToDrop`). Also: `meta.json` is rewritten every
+50 events **and on every head-shaped change**, not only on turn end — a head the stream can serve
+is worth more than the write it saves
+(`apps/daemon/src/agent-host/orchestration/orchestrator.ts`).*
+
 A thread directory that fails to parse marks that thread `error` with the parse message; it
 never affects other threads or host startup. A malformed line inside `events.ndjson` truncates the
 fold at that point rather than discarding the file.
@@ -1765,6 +2035,14 @@ is capped at 10 MB.
 
 *T3: `apps/server/src/vcs/VcsProcess.ts:56-63` — `DEFAULT_TIMEOUT_MS = 30_000`, `DEFAULT_MAX_OUTPUT_BYTES = 1_000_000`, `VCS_PROCESS_CONCURRENCY = 8`; `:118-119`, `:205-227` — the semaphore and the capture-only retry; `apps/server/src/vcs/GitVcsDriver.ts:385` — `CHECKPOINT_DIFF_MAX_OUTPUT_BYTES = 10_000_000`*
 
+*Built: the retry is decided by an explicit `retryTransient` flag on each git invocation rather
+than by matching the operation's name, so a new capture-path command cannot silently lose the
+retry by being spelled differently. Every git child additionally runs with `LC_ALL=C` (a localised
+`git` translates the porcelain the parser reads) and `GIT_TERMINAL_PROMPT=0` (a repository with an
+HTTPS remote must never block a checkpoint on a credential prompt), and `--numstat -z` output is
+sorted by **byte order**, not by locale collation, so a checkpoint's file list is byte-stable on
+any machine (`apps/daemon/src/agent-host/checkpoints/service.ts`).*
+
 Lifecycle:
 
 - On `turn.started`: capture the baseline at `turn/<turnCount>` if absent, where `turnCount` is the
@@ -1786,6 +2064,11 @@ Lifecycle:
 - Cap: at most 200 checkpoint refs per thread; older ones are pruned oldest-first.
 
 *T3: `apps/server/src/orchestration/Layers/CheckpointReactor.ts:461-510` — baseline capture keyed on the max `checkpointTurnCount`; `:393-457` — active-turn guard, non-placeholder skip, placeholder turn-count reuse; `:259-332` — missing-baseline handling and the `--numstat` file list; `:337-390` — the `thread.turn.diff.complete` dispatch and the `checkpoint.captured` activity; `:150-180` — `checkpoint.capture.failed`; `apps/server/src/orchestration/projector.ts:934-944` — a `missing` placeholder never clobbers a captured `ready` checkpoint. Differs: T3 deletes checkpoint refs only on revert — nothing deletes them when a thread is deleted — and caps checkpoints at 500 in the read model (`apps/server/src/orchestration/projector.ts:60`) rather than pruning refs on disk*
+
+*Built: ref deletion — on prune, on revert and on thread delete — is **batched** into one
+`git update-ref --stdin` instead of one process per ref. Two hundred refs is two hundred process
+spawns under a permit pool of eight, which turns deleting a thread into a visible stall
+(`apps/daemon/src/agent-host/checkpoints/service.ts`).*
 
 Diff read: `GET …/turns/:n/diff` runs
 `git diff --patch --no-color --no-ext-diff --no-textconv <baseline>^{commit} <post>^{commit}` on
@@ -1821,6 +2104,15 @@ order if the first pass retained fewer, so a revert never leaves the thread show
 than it reverted to. `latestTurn` is recomputed from the last surviving checkpoint.
 
 *T3: `apps/server/src/orchestration/projector.ts:985-1030` — the `thread.reverted` fold; `:209-277` — `retainThreadMessagesAfterRevert` including the turn-less fallback passes; `:280-294` — activities and plans are kept when `turnId === null` or retained*
+
+*Built: the implementation follows T3 exactly, which is narrower than the sentence above for
+**messages**. An activity or turn row with `turnId: null` does survive unconditionally; a
+**message** with `turnId: null` survives only through the bounded second pass — up to `target`
+user and up to `target` assistant messages in `createdAt` order — never as a blanket rule. An
+unbounded "every turn-less message survives" would resurrect the prompts of the turns the revert
+just undid, because a message persisted before its provider turn id was minted looks identical
+whichever side of the target it fell on (`packages/api/src/agent-chat/fold.ts`,
+`retainMessagesAfterRevert`).*
 
 Attachments referenced only by truncated messages are unlinked after the revert commits, not
 during it: the retained path set is recomputed from the surviving messages and from any answered
@@ -1876,6 +2168,13 @@ the structure, not in one long string:
 
 *T3: `apps/server/src/orchestration/ActivityPayloadProjection.ts:190-207` — `MCP_ITEM_KEPT_FIELDS`; `:164-188` — `summarizeToolTextOutput` (84 chars / `"N lines"`); `:24-81` — `collectChangedFiles` with the 12-path / depth-4 bounds; `:425-500` — the allowlist rebuild and the status re-stamp; `:645-689` — `projectThreadDetailSnapshot` / `projectActivityEvent`, the single choke point every read passes through. Differs: T3 has no route that serves the unslimmed payload at all — the full value is only ever read back out of its own store*
 
+*Built: `changedFiles` is promoted to the **top level** of the slimmed payload rather than left
+inside `data`. It is one of the allow-listed fields §7.2's presentation resolver reads, and a
+resolver that has to reach into `data` for one of its own inputs is a resolver that will one day
+read an unslimmed shape by accident (`packages/api/src/agent-chat/slim.ts`). The 16 KB string cap
+is measured in **UTF-8 bytes**, never splitting a surrogate pair, and returns the input by
+identity when it already fits.*
+
 
 ## 6. Routes and stream
 
@@ -1921,6 +2220,13 @@ opening a fresh thread the user believes is their old one. This is the only rout
 code; no §6.2 command does.
 
 *T3: `packages/contracts/src/orchestration.ts:1208-1226` — `thread.meta.update` carries `title` / `regenerateTitle` / `modelSelection` with a filter refusing title+regenerate together; `:1111-1115` — `thread.delete`; `:1117-1121` — `thread.archive`, differs: no archive state here*
+
+*Built: `PUT` takes `title` and nothing else — there is no `regenerateTitle` path on the route, in
+the host or in any client surface, so the mutual-exclusion rule has nothing to enforce
+(`apps/daemon/src/agent-host/server/http-server.ts`). A title is generated once, client-side, from
+the thread's first user message (`packages/ui/src/lib/agent-chat/title.logic.ts`); T3 then
+improves it with a separate model call, which this design does not do. Regeneration is a follow-up,
+and the rule above is what it must honour when it lands.*
 
 Thread creation is two calls (create the tab, then `/turn`), not one. T3 folds thread creation,
 worktree preparation and the first turn into a single `bootstrap` field on `thread.turn.start` so
@@ -2100,6 +2406,14 @@ thread's attachments dir, which already carries the `?token=` carve-out a native
 
 *T3: `packages/contracts/src/orchestration.ts:165-168` — `PROVIDER_SEND_TURN_MAX_{INPUT_CHARS,ATTACHMENTS,IMAGE_BYTES,FILE_BYTES}`; `:302-372` — `ChatAttachment` carries metadata only, with an explicit unknown-type catch-all; `apps/server/src/orchestration/Normalizer.ts:168-231` — size re-validated against the stat'd file and pending uploads claimed by copy, not hard link, because "an agent editing the delivered file in place must not mutate the retry source"; `apps/server/src/attachmentStore.ts:24-26` — pending uploads TTL; `packages/contracts/src/assets.ts:85-117` — differs: T3 mints short-lived signed URLs so bytes never touch the RPC socket; our upload/download routes are already plain HTTP*
 
+*Built: reading an attachment back is **not** `GET /api/fs/download` — that route is confined to
+`fsRoot` by `assertInsideFsRoot`, and a thread's attachments live under
+`<appdir>/daemon/agent/threads/<id>/attachments`, outside it, so it would refuse every one of them.
+It is `GET /api/sessions/:id/attachments/:attachmentId`: the host resolves the id (it owns the
+namespace and its traversal guard) and the daemon streams the file, carrying the same `?token=`
+carve-out a native `<a download>` needs (`apps/daemon/src/agent-chat/proxy-routes.ts`,
+`agentChatRoutes.attachment`).*
+
 **Provider snapshots.** Each adapter's snapshot carries, besides §4.1's
 `{installed, version, auth, models[], slashCommands[], skills[], usageLimits, versionAdvisory,
 workspaceSnapshots?}`, the adapter's
@@ -2131,8 +2445,15 @@ turn is active, `waiting` with attention while a request is pending, `idle` with
 attention stamp on turn end. Three new events: `agentChat.turn {id, turnId, state, tokenUsage?}`,
 `agentChat.pending {id, requestId, kind: "approval"|"question", title, open: boolean}` and the
 coarse `agent.providers.changed` that a snapshot refresh raises (§4.6.4, §6.3). Nothing
-higher-rate rides the bus. The push gate in `index.ts` and the Attention Center filter in
-`agent-sessions.ts` widen from `"agent"` to include `"agent-chat"`.
+higher-rate rides the bus. The push gate in `index.ts` and the Attention Center filter widen from `"agent"` to include
+`"agent-chat"`.
+
+*Built: there is no `agent-sessions.ts` — the Attention Center's filter is client-side, and the
+widening is `isAgentLike()` in `packages/ui/src/lib/session-kind.ts`, the one predicate every
+kind-branching surface calls. The daemon's push gate is widened as written
+(`apps/daemon/src/index.ts`), though in practice a chat tab raises no bell and no managed-hook
+event: its pushes come from the protocol path in `apps/daemon/src/agent-chat/summary.ts`. The gate
+is widened anyway so a future chat-side `session.activity` emission is not silently swallowed.*
 
 `SessionSummary` gains six derived fields for chat sessions — this list is the contract §7.1 and
 §7.7 read, and no surface may invent a name for one of them — so that every surface already
@@ -2161,6 +2482,23 @@ still-running turns by session status and that write races `turn.completed`. And
 sitting at `ready` with nothing pending and nothing running is `idle`+finished, because a turn that
 changed no files leaves no turn row to read — without this branch, a thread that finishes and is
 torn down quickly shows nothing at all instead of "finished".
+
+**Amendment (implementation, 2026-09-21): the `error` rung resolves to `idle` + a `finished`
+attention.** There is no fourth `SessionActivityState` — the spec's own "`session.activity` keeps
+its three states" rules one out — so a failed thread lands in the Attention Center's *Finished*
+bucket and its push carries the "finished" copy. It keeps the two properties the rung exists for:
+a failure still outranks lingering background liveness, and it still raises an attention the user
+sees. A surface that wants to say "failed" reads `chatSessionStatus === "error"` or
+`latestTurn.state === "failed"` off the summary, exactly as it reads `backgroundLiveness` to say
+"Monitoring". Distinct push copy for a failure is a follow-up.
+
+**Amendment (implementation): the trust grant is confined to `projectPath`.** A chat launch
+auto-accepts Claude's project-trust dialog for the thread's project (a never-seen directory is
+untrusted, and its `.claude/settings.json`, hooks and skills are then silently ignored). The
+granted path is the request's `projectPath` after `realpath` + `assertInsideFsRoot`, never its
+`cwd`: Claude's trust dialog gates hook execution, so an unconfined path would let a client
+permanently enable arbitrary shell for the daemon user. A `projectPath` outside the sandbox gets
+no grant and the launch proceeds.
 
 *T3: `packages/shared/src/agentAwareness.ts:76-113` — the ladder and both race fallbacks, with the comments recording the bugs they fix; `apps/server/src/orchestration/Layers/ProjectionPipeline.ts:161-204` — pending user input folded from the activity log by open `requestId`; `:582-599` — both flags recomputed as `count > 0`; `apps/web/src/components/Sidebar.logic.ts:847-863` — running, then error ("a failed session outranks lingering background liveness"), then `working`, then `monitoring`; `:1067-1087` — Monitoring is painted like Working with `pulse: false`; `:524-535` — `Monitoring` ranks below `Plan Ready`; differs: T3 has a Monitoring pill state of its own, while `session.activity` here keeps three states and the label is read off `backgroundLiveness`*
 
@@ -2293,6 +2631,16 @@ Row kinds and behaviour:
   "send now" and "return to composer".
 *T3: `apps/web/src/components/chat/MessagesTimeline.logic.ts:329-442` — the twelve projected row kinds (`activity-group`, `work`, `work-live`, `work-toggle`, `turn-fold`, `context-compaction`, `message`, `assistant-meta`, `proposed-plan`, `working`, `thinking`, `worktree-setup`, `queued-message`); `apps/web/src/components/chat/MessagesTimeline.tsx:2510-2543` — `WorkingTimelineRow`, one span for every label "so the setup-to-working handoff swaps text in place instead of remounting the row"; `:3320-3348` — `WorkGroupToggleTimelineRow` ("+N more"); `:1860-1879` — `ContextCompactionTimelineRow`, a `role="separator"` hairline with a label. differs: T3 bakes the before/after token counts into that label server-side (`apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts:863-868`) and the row never reads the numbers; we carry `beforeTokens`/`afterTokens` on `thread.state.changed` and format client-side. differs: T3 has no rerouted-model UI at all — `model.rerouted` exists only in the contracts (`packages/contracts/src/providerRuntime.ts:757-762, 1127-1132`) and is never rendered; ours is a new inline notice row*
 
+*Built: three row kinds landed narrower than written. A user message's attachments render as named
+**chips**, not thumbnails — the attachment bytes route of §6.3 exists but the timeline does not
+fetch it, so nothing decodes a 10 MiB image into a bubble on a phone. The plan proposal card offers
+**copy and download only**; there is no "save into the workspace" action, which would be a write
+into `fsRoot` from a render path. And there is no "load earlier" header: a thread is sent whole
+(§2), so there is nothing earlier to load
+(`packages/ui/src/components/agent-chat/timeline/`). One kind landed wider: Codex's `commentary`
+phase gets its own activity row rather than being folded into reasoning, because it is the only
+narration that CLI emits between tool calls.*
+
 **Activity-group boundaries are mechanical, and the rules matter more than the styling.** A group
 starts at the first reasoning row or plain tool row of a turn and runs until any of: a non-grouping
 entry, a turn-id change, or a row the user has collapsed out. Assistant and user messages are not
@@ -2337,6 +2685,12 @@ draft text it **refines**, sending that text and staying in plan mode. The propo
 the turn that implements it, not by the click.
 *T3: `apps/web/src/components/chat/ProposedPlanCard.tsx:36-259` — copy / download / save-to-workspace only, no approve button; `apps/web/src/components/ChatView.logic.ts:951-965` — `shouldShowPlanFollowUpPrompt`; `apps/web/src/components/chat/ComposerPlanFollowUpBanner.tsx:1-20`; `apps/web/src/components/chat/ComposerPrimaryActions.tsx:161-216` — "Refine" vs the "Implement" split button; `apps/web/src/proposedPlan.ts:73-96` — `PLAN_IMPLEMENTATION_PROMPT_PREFIX` and `resolvePlanFollowUpSubmission`; `apps/web/src/session-logic.ts:383-387` — `hasActionableProposedPlan` is `implementedAt === null`*
 
+*Built: the composer's primary action is a **plain** "Implement" button, not a split button. T3's
+menu offers "implement in a new thread", which needs a thread-creation path from inside the
+composer that this design does not have (§6.1 creates a tab first, then turns) — a disabled menu
+item is worse than no menu (`packages/ui/src/components/agent-chat/composer/
+ComposerPrimaryActions.tsx`). "Refine" and the fixed implementation prefix are as written.*
+
 **The plan checklist is a composer surface, not a timeline row.** `turn.plan.updated` folds into one
 active plan state — current step, completed count, total — displayed beside the status line, with the
 last plan of any turn retained so a follow-up message does not blank the checklist.
@@ -2363,6 +2717,13 @@ the message settles, the rendered HTML goes into a size-aware LRU and is served 
 that streamed keeps the line renderer after settling, because swapping to cached HTML would clear a
 live selection.
 *T3: `apps/web/src/lib/syntaxHighlighting.ts:10-16` — `PREFERRED_HIGHLIGHTER = "shiki-wasm"` and the first-caller-wins singleton note; differs: Lezer instead of Shiki, for the CSP reason above — the line-mounted streaming renderer and the settled-HTML LRU below are kept as T3 has them; `apps/web/src/components/ChatMarkdown.tsx:1039-1073` — `preserveLines={isStreaming || hasStreamed}` and the selection comment; `:1084-1135` — `codeToHast` + `HighlightedCodeLines`; `:338-357, 1117-1126` — the settled-HTML LRU (500 entries / 50 MB), written only when not streaming*
+
+*Built: the highlighter uses a **static light/dark token palette** rather than deriving colours
+from the active colour scheme. Lezer's `highlightTree` needs a `HighlightStyle` built ahead of
+parsing, and rebuilding one per scheme × mode on every theme change would re-highlight every cached
+block; a code block reads as code in all seven schemes either way. A block over `MAX_TURN_INPUT_CHARS`
+(120 000) is rendered unhighlighted — the parse is the cost, and nobody reads a 120 000-character
+block's colours (`packages/ui/src/components/agent-chat/timeline/markdown/highlight-core.ts`).*
 
 Live-follow is a render-visible flag — not a ref — re-armed only inside a 40 px band at the bottom
 of the content, measured as `contentLength - scroll - scrollLength`. A "near end" heuristic that
@@ -2410,6 +2771,16 @@ bindings follow T3's: `Ctrl/Cmd+Shift+A` for the runtime-mode picker is already 
 Attention Center on this host, so the mode picker gets its own key and the conflict is resolved once,
 in the keybinding table, not per component.
 *T3: `apps/web/src/components/chat/ChatComposer.tsx:5880-5901` — `openControl`; `:1116`, `apps/web/src/components/chat/TraitsPicker.tsx:622`, `apps/web/src/components/BranchToolbar.tsx:211-214`, `apps/web/src/components/chat/CompactComposerControlsMenu.tsx:44-46` — the attribute sites, including multi-token values when an overflow menu absorbs two controls; `packages/shared/src/keybindings.ts:44-55` — `composer.stash` (`mod+s`), `thread.steerQueuedMessage` (`mod+shift+enter`), `composer.mode` (`mod+shift+a`), `composer.effort`, `composer.host`*
+
+*Built: the runtime-mode picker's key is **`mod+shift+m`** — the conflict with the Attention
+Center's `Ctrl+Shift+A` is resolved there, once, as this paragraph requires; the whole table is one
+function, `resolveChatShortcut` (`packages/ui/src/lib/agent-chat/keybindings.logic.ts`), so a new
+binding is a new arm rather than a second listener. The account chip gets
+**no** shortcut: it is changed rarely, and every chord spent is one the terminal surfaces cannot
+have. `/effort <id>` is a narrow client-side bridge that writes the current `ModelSelection`'s
+effort option and sends nothing (§4.6.5). A paste that folds into a text attachment reports itself
+**inline in the composer** rather than as a toast, because a toast for something that already
+produced a visible chip is noise (`packages/ui/src/components/agent-chat/composer/`).*
 
 **The queued-message model.** This is the client's own queue of messages it has not dispatched
 yet, and it is a different thing from the host-side queue that holds already-posted `/turn`s behind
@@ -2466,6 +2837,14 @@ since the numbers they refer to are off screen. "Dismiss" is offered only when t
 `responseMode: "message"` — and posts `/dismiss` (§6.2); a native callback blocks the provider and
 must be answered.
 *T3: `apps/web/src/pendingUserInput.ts:160-191` — `derivePendingUserInputProgress` (`activeQuestion`, `answeredQuestionCount`, `isLastQuestion`, `canAdvance`, `isComplete`); `:42-68` — `resolvePendingUserInputAnswer`, custom-beats-options, array for multi-select, attachments-alone → `""`; `apps/web/src/components/chat/ComposerPendingUserInputPanel.tsx:75-82` — the collapse-keyed-by-question-id comment; `:118-135` — the 200 ms auto-advance with optimistic selection; `:137-166` — the digit handler and its collapsed opt-out; `packages/client-runtime/src/pendingRequests.ts:21-27, 171` — `dismissible` = `responseMode === "message"`*
+
+*Built: the question card owns its **Submit** button and its custom-answer field outright, rather
+than handing them to the composer's primary action. A question and a draft are two different
+intents sharing one text input, and the 200 ms optimistic advance above makes "which one does
+Enter send?" genuinely ambiguous — an explicit Submit on the card removes the question
+(`packages/ui/src/components/agent-chat/banners/`). Codex's `isSecret` renders as a masked field
+and its `isOther` as the free-text option, and an answer goes back as the option's **label**,
+since that CLI's options carry no `value` (§4.5 Codex).*
 
 Focus stays in the composer throughout. An approval is never a modal and never steals focus; the
 user can keep typing while it sits there. The composer goes `inert` for exactly one reason — while a
@@ -2562,6 +2941,16 @@ drill-in refuses the write outright, and the timeline's `mod+J` additionally req
 own scroller to have a layout box. Several surfaces could trip on this, not just those two.
 *T3: `apps/web/src/components/AgentsPanel.tsx:139-140` — `/** Flat, non-interactive agent status line. No unfold. */`; `:550-567` — every row renders, with no "+N more" and no removal of finished rows; only the fold's silent 100-row cap bounds it; `:313-317` — a workflow section "keeps that shape as it settles so completion never yanks rows out from under the user"; `apps/web/src/components/chat/MessagesTimeline.tsx:4654-4660` — the closest T3 equivalent of a drill-in, an "Open Agents panel ›" link into a right-panel surface. differs on three counts: T3's roster is a right-panel surface rather than a dock under the composer; its rows are not clickable and there is no per-agent timeline, no `agentId` filter and no breadcrumb; and it neither collapses nor removes settled rows. Our collapse-past-five, fade-on-turn-end and the live-background exemption from both are new, so they must not fight the "never reshuffle what stays visible" rule above, and the drill-in is new surface with no precedent to lean on*
 
+*Built: the five-row rule applies to **ungrouped** rows only. A workflow group — a spawn batch
+rendered as one section — keeps its whole membership, because collapsing half a batch behind
+"N more" breaks T3's "a workflow section keeps that shape as it settles" rule that the paragraph
+above adopts. "Past five" is the first five rows **in spawn order**, not by rank: a roster that
+re-sorts as statuses change moves rows under the pointer. An `idle` row is settled but **not**
+finished — it does not fade out, because a resumable child is still there to click. Reopening a
+thread that settled while the tab was closed starts every row at `removed` rather than replaying
+a fade nobody was watching. And there is no workflow-script viewer
+(`packages/ui/src/components/agent-chat/roster/`).*
+
 ### 7.7 Other surfaces
 
 Status dots, the Attention Center, push notifications and the command palette work from
@@ -2604,6 +2993,12 @@ only thing allowed to move focus. One breakpoint governs all of this; T3 runs th
 where the sidebar is a sheet while the composer is still in desktop mode.
 *T3: `apps/web/src/components/chat/ChatComposer.tsx:2102-2103` — `isComposerCollapsedMobile`; `apps/web/src/composer-logic.ts:37` — the mobile Enter suppression inside `composerSubmissionIntentForEnter`; `apps/web/src/components/chat/ChatComposer.tsx:3711-3750, 3802` — `blurMobileComposerAfterSend`; `apps/web/src/components/ChatView.tsx:5743-5768` — autofocus suppression on mobile; `apps/web/src/components/chat/ChatComposer.tsx:6200-6271` — the mobile-collapsed question layout and its focus-moving "Write custom answer" button; `apps/web/src/hooks/useMediaQuery.ts:3-11` and `apps/web/src/rightPanelLayout.ts:1` — the 640 / 768 / 980 split we deliberately do not copy*
 
+*Built: only the **question** banner gets a compact variant; the approval banner renders the same
+row at every width. This matches T3, whose approval branch is taken before any mobile check, and
+the row survives a 360 px viewport — title, Decline, Approve and the overflow menu — because the
+title does not truncate. A compact approval is a follow-up, not a regression
+(`packages/ui/src/components/agent-chat/banners/banner-model.ts`).*
+
 
 ## 8. Deployment
 
@@ -2626,6 +3021,17 @@ on failure the old host is left running and the deploy is reported as not switch
 silently half-applied.
 
 *T3: `docs/internals/server-updates.md:16-31` — the commit boundary: migrations, dependencies, HTTP bound and every long-running root parked before `prepared`; "A listener alone does not prove the runtime is ready to commit"; a failed or timed-out trial returns to the old version; `apps/server/src/serviceLauncher.ts:33` — `PREPARED_TIMEOUT_MS = 120_000`; `:34` — `TERMINATE_GRACE_MS = 5_000` before the old child is killed*
+
+*Built: the handover is **drain-then-replace**, not trial-then-commit. T3 starts the replacement,
+waits for its `prepared` and keeps the old version if it never comes; here both hosts would have to
+bind the same `agent-host.sock`, so a trial is not expressible. The restart is therefore deferred
+until no thread has an active turn, the old host is asked to `/stop` (which writes every
+continuation marker), and the supervisor then **waits for the socket to stop answering** before
+spawning the replacement — killing the tmux session milliseconds after `/stop` answers strands a
+teardown that needs seconds, and OpenCode's server is spawned `detached: true`, so it would survive
+the kill holding its port while the new host started a second one for the same project. A
+replacement that never reaches readiness latches `error` and is retried with backoff rather than
+being silently half-applied (`apps/daemon/src/agent-chat/supervisor.ts`).*
 
 **A restarted host is not a reconnect.** The host carries an instance id that changes on every
 start; it is returned on `GET /api/agent/providers` and stamped on the `synchronized` frame of
@@ -2785,6 +3191,45 @@ and are skipped otherwise, so the suite never needs an account or a network.
 
 *T3: `apps/server/src/provider/Drivers/ClaudeExecutable.ts:45-60` — why a bare command name or an npm launcher shim cannot be handed to the SDK; `apps/server/src/provider/Layers/ClaudeAdapter.ts:4916` — the resolved path passed as `pathToClaudeCodeExecutable`*
 
+- **Codex's sandbox cannot run on this host, and the failure is surfaced rather than hidden.**
+  `codex app-server` sandboxes `apply_patch` with bubblewrap, which fails here with
+  `bwrap: loopback: Failed RTM_NEWADDR` (the VPS kernel/container does not give the daemon user an
+  unprivileged network namespace). In `approval-required` and `auto-accept-edits` a Codex thread
+  therefore cannot write files on this box: the patch is approved and then fails inside the
+  sandbox. `full-access` (`danger-full-access`) works, because it does not sandbox. The adapter
+  reports the sandbox error as it arrives instead of translating it into something friendlier — a
+  thread that silently declines to edit files is worse than one that says why.
+
+- **A chat launch auto-accepts Claude's project-trust dialog, confined to the project.** §6.4
+  records the mechanism; the accepted risk is that opening a chat tab on a project enables that
+  project's `.claude/settings.json` hooks — arbitrary shell, run as the daemon user, which holds
+  scoped passwordless sudo — without the dialog the CLI would have shown. The path is the
+  request's `projectPath` after `realpath` + `assertInsideFsRoot`, never its `cwd`, and a
+  `projectPath` outside the sandbox gets no grant at all; but inside the sandbox the grant is real
+  and it outlives the tab, because it is written into the home's own `~/.claude.json`.
+
+- **Grok's settings reach the CLI through an overlay, because its config file is shared.**
+  Grok needs `[features] support_permission = true` (without it every approval self-resolves,
+  §4.3) and `auto_update = false` (the CLI upgraded itself 1.0.3 → 1.0.34 mid-session). On a
+  managed account home `<GROK_HOME>/config.toml` is a **symlink** to the daemon user's own
+  `~/.grok/config.toml`, so writing it reconfigures Grok host-wide for every terminal tab and
+  every account — which happened twice during this build. The host therefore writes a per-thread
+  overlay and points `GROK_CONFIG_PATH` at it, and nothing under a shared home is written. The
+  accepted risk is that the overlay is a second place Grok's configuration lives: a user editing
+  `~/.grok/config.toml` will not see those two keys there, and a future CLI that stops honouring
+  `GROK_CONFIG_PATH` silently returns the thread to self-resolving approvals.
+
+- **A chat thread inherits the home's MCP servers, and their processes outlive everything.**
+  Nothing strips the servers a home configures: Grok boots every server in `~/.claude.json` on
+  `session/new` (~157 tools, ~3 s) and Codex boots whatever `~/.codex/config.toml` names. That is
+  exactly what a terminal launch of the same agent under the same home does today, and a chat
+  thread that silently had fewer tools than the terminal tab beside it would be the worse surprise.
+  The cost is recorded: a provider CLI spawns its MCP servers itself, so they are children of the
+  *provider* child, not of the daemon. One observed server survived the agent host, the daemon and
+  thread deletion, reparented to init holding a fixed loopback port — and, being outside the
+  daemon's process tree, it is not a legal kill target in Settings → System either.
+
+
 - **Old host code after deploy** until drain; a protocol version bump forces the drain-restart
   as soon as turns settle. The events written by the newer host stay readable by the older one
   or the rollback is not a rollback (§8).
@@ -2796,6 +3241,16 @@ and are skipped otherwise, so the suite never needs an account or a network.
   provider child stays a legal kill target (§3.1).
 
 *T3: `apps/server/src/provider/Layers/ProviderSessionReaper.ts:17-18` — differs: 30 min inactivity, 5 min sweep; `:36-118` — the sweep skips a thread with an active turn or live background work*
+
+*Built: the trade is sharper than written, because a chat thread's process tree is not one process.
+A Claude thread is one CLI; an OpenCode **project** is one shared server plus its sessions; a Grok
+or Codex thread is a child that itself spawns the home's MCP servers (above). So the bound is not
+"one process per open tab" but "one process tree per open tab, whose leaves the daemon did not
+spawn and cannot reap". The mitigation is unchanged and is still visibility, not policy: the host
+pid and every provider child are in the process tree Settings → System shows, the agent host is
+registered as an extra tree **root** so its descendants are legal kill targets even though it runs
+in a tmux service session (`apps/daemon/src/system-status.ts`, `extraRootPids`), and the host pid
+itself stays protected.*
 
 - **Background work outlives the turn, and closing a tab kills it.** Subagent fleets and watch
   loops keep running inside a provider process after the turn settles (§3.1). Closing the tab

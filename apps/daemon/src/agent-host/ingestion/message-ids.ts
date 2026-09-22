@@ -111,6 +111,22 @@ export function proposedPlanActivityId(planId: string): string {
   return `proposed-plan:${planId}`;
 }
 
+export const USER_MESSAGE_ID_PREFIX = "user:";
+
+/**
+ * A REPLAYED user prompt's message id (E6). The live path never mints one —
+ * `/turn` appends the user message itself — so this namespace exists purely
+ * for history, and is derived from the provider's own item id so replaying
+ * the same transcript twice rewrites the row rather than duplicating it.
+ */
+export function historicalUserMessageId(event: {
+  itemId?: string;
+  turnId?: string;
+  eventId: string;
+}): string {
+  return `${USER_MESSAGE_ID_PREFIX}${String(event.itemId ?? event.turnId ?? event.eventId)}`;
+}
+
 /** Command/file-change output deltas are buffered per item id (§5.6). */
 export function toolOutputBufferKey(threadId: string, itemId: string): string {
   return `tool-output:${threadId}:${itemId}`;

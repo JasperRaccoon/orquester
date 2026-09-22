@@ -250,15 +250,38 @@ describe("reconcile (§3.3)", () => {
     await next.stop();
   });
 
-  it("an intentional stop writes a marker for every running thread and clears it on abort", async () => {
+  it("an intentional stop marks only a project that opted in, and clears on abort", async () => {
+    const opted = createTestHost({ continuationEnabled: () => true });
+    const threadId = await opted.createThread();
+    await opted.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "long job" });
+    await opted.settle();
+
+    const marked = await opted.orchestrator.markThreadsForContinuation();
+    assert.deepEqual(marked, [threadId]);
+    assert.deepEqual(headOf(opted.store, threadId).continueAfterRestart, { turnId: "turn-1" });
+
+    await opted.orchestrator.clearContinuationMarkers(marked);
+    assert.equal(headOf(opted.store, threadId).continueAfterRestart, undefined);
+    await opted.stop();
+  });
+
+  it("an intentional stop does NOT mark a project that opted out", async () => {
+    // §3.3: continuation is opt-in per project over a host-wide default that
+    // is off. The reconcile trusts a marker on its own, so writing one for an
+    // opted-out thread is what would resume it — and spend tokens on a turn
+    // that may have been halfway through something destructive.
     const { store, threadId, first } = await threadInFlight();
     const marked = await first.orchestrator.markThreadsForContinuation();
-    assert.deepEqual(marked, [threadId]);
-    assert.deepEqual(headOf(store, threadId).continueAfterRestart, { turnId: "turn-1" });
-
-    await first.orchestrator.clearContinuationMarkers(marked);
+    assert.deepEqual(marked, []);
     assert.equal(headOf(store, threadId).continueAfterRestart, undefined);
     await first.stop();
+
+    const next = createTestHost({ store, continuationEnabled: () => false });
+    await next.orchestrator.reconcile();
+    await next.settle();
+    assert.equal(next.adapter.calls.filter((call) => call.kind === "sendTurn").length, 0);
+    assert.equal(headOf(store, threadId).session.status, "error");
+    await next.stop();
   });
 
   it("a marker from an older turn is ignored rather than replaying the wrong work", async () => {

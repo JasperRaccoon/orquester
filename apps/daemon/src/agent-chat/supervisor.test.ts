@@ -7,6 +7,8 @@ import { AGENT_HOST_PROTOCOL_VERSION, AGENT_HOST_SERVICE_SESSION } from "../agen
 import {
   AgentHostSupervisor,
   MAX_RESPAWNS,
+  UNREACHABLE_PROBES_BEFORE_RESTART,
+  UNREACHABLE_PROBES_BEFORE_RESTART_BUSY,
   buildAgentHostEnv,
   type ProbeOutcome,
   type SupervisorTmux
@@ -25,10 +27,27 @@ interface Harness {
   tokenPath: string;
   /** Advance the injected clock past a backoff window. */
   advance(ms: number): void;
+  /** Flip to make the next spawn throw, as a real tmux failure does. */
+  spawnThrows: boolean;
+  /** Overrides the queued probe answer when it returns something. */
+  probeHook?: () => ProbeOutcome | undefined;
+  /** Ordered record of probe / kill / spawn. */
+  order: string[];
+  /** The token file's content at the moment the new session was created. */
+  tokenAtSpawn: string | null;
+  /** How many times `onProvidersRevision` fired. */
+  providerRevisions: number;
   cleanup(): Promise<void>;
 }
 
-const healthy = (overrides: Partial<{ version: number; active: string[]; instance: string }> = {}): ProbeOutcome => ({
+const healthy = (
+  overrides: Partial<{
+    version: number;
+    active: string[];
+    instance: string;
+    providersRevision: number;
+  }> = {}
+): ProbeOutcome => ({
   ok: true,
   health: {
     ok: true,
@@ -37,13 +56,29 @@ const healthy = (overrides: Partial<{ version: number; active: string[]; instanc
     liveThreadIds: [],
     activeTurnThreadIds: overrides.active ?? [],
     pid: 4242,
-    startedAt: "2026-09-21T00:00:00.000Z"
+    startedAt: "2026-09-21T00:00:00.000Z",
+    ...(overrides.providersRevision === undefined
+      ? {}
+      : { providersRevision: overrides.providersRevision })
   }
 });
 
+/**
+ * Reality for a version-mismatch restart: the old host keeps answering the
+ * mismatched version (it is the same process) until the replacement is
+ * spawned, and the replacement answers the current version. A fixed queue
+ * cannot model that, because the supervisor now probes more than once.
+ */
+function mismatchUntilReplaced(h: Harness, active: string[] = []): () => ProbeOutcome | undefined {
+  return () =>
+    h.spawns.length === 0
+      ? healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1, active })
+      : healthy({ instance: "host-2" });
+}
+
 async function makeHarness(
   probes: ProbeOutcome[],
-  opts: { tmux?: boolean; seedToken?: string } = {}
+  opts: { tmux?: boolean; seedToken?: string; spawnThrows?: boolean } = {}
 ): Promise<Harness> {
   const dir = await mkdtemp(join(tmpdir(), "orq-agent-host-"));
   const tokenPath = join(dir, "agent-host.token");
@@ -57,12 +92,19 @@ async function makeHarness(
     stopRequests: 0,
     tokenPath,
     supervisor: null as unknown as AgentHostSupervisor,
+    spawnThrows: opts.spawnThrows === true,
+    order: [],
+    tokenAtSpawn: null,
+    providerRevisions: 0,
     advance: (ms) => {
       clock += ms;
     },
     cleanup: () => rm(dir, { recursive: true, force: true })
   };
   let sessionExists = opts.tmux === true && opts.seedToken !== undefined;
+  // Record whether the kill-first branch actually ran, rather than hardcoding
+  // `false`: that branch is the one that produces the duplicate-session throw.
+  let killedSinceSpawn = false;
   const tmux: SupervisorTmux | null =
     opts.tmux === false
       ? null
@@ -70,10 +112,19 @@ async function makeHarness(
           hasServiceSession: async (name) => name === AGENT_HOST_SERVICE_SESSION && sessionExists,
           killServiceSession: async () => {
             sessionExists = false;
+            killedSinceSpawn = true;
+            harness.order.push("kill");
           },
           newServiceSession: async ({ args }) => {
+            if (harness.spawnThrows) throw new Error("duplicate session: orqsvc-agent-host");
             sessionExists = true;
-            harness.spawns.push({ killFirst: false, args });
+            harness.tokenAtSpawn = await readFile(tokenPath, "utf8").then(
+              (raw) => raw.trim(),
+              () => null
+            );
+            harness.order.push("spawn");
+            harness.spawns.push({ killFirst: killedSinceSpawn, args });
+            killedSinceSpawn = false;
           }
         };
   harness.supervisor = new AgentHostSupervisor({
@@ -84,14 +135,25 @@ async function makeHarness(
     nodeBin: "/usr/bin/node",
     mainPath: "/opt/orquester/apps/daemon/src/agent-host/main.ts",
     preparedTimeoutMs: 50,
+    exitGraceMs: 500,
     adapters: {
-      probe: async () => (harness.probes.length > 1 ? harness.probes.shift()! : harness.probes[0]),
+      probe: async () => {
+        harness.order.push("probe");
+        const hooked = harness.probeHook?.();
+        if (hooked) return hooked;
+        return harness.probes.length > 1 ? harness.probes.shift()! : harness.probes[0];
+      },
+      onProvidersRevision: () => {
+        harness.providerRevisions++;
+      },
       requestStop: async () => {
         harness.stopRequests++;
       },
       tmux,
       spawnDirect: (_bin, args) => {
-        harness.spawns.push({ killFirst: false, args });
+        if (harness.spawnThrows) throw new Error("spawn failed");
+        harness.spawns.push({ killFirst: killedSinceSpawn, args });
+        killedSinceSpawn = false;
         return { kill: () => undefined, pid: 9191 };
       },
       // An injected clock: the readiness deadline and the respawn backoff are
@@ -116,10 +178,8 @@ test("case 2: healthy + same protocol version adopts without spawning", async ()
 });
 
 test("case 3: a version mismatch adopts first, then restarts once drained", async () => {
-  const h = await makeHarness(
-    [healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1 }), healthy({ instance: "host-2" })],
-    { seedToken: "tok", tmux: true }
-  );
+  const h = await makeHarness([], { seedToken: "tok", tmux: true });
+  h.probeHook = mismatchUntilReplaced(h);
   await h.supervisor.init();
   assert.equal(h.stopRequests, 1, "the old host writes its continuation markers first");
   assert.equal(h.spawns.length, 1, "a replacement is spawned");
@@ -130,10 +190,8 @@ test("case 3: a version mismatch adopts first, then restarts once drained", asyn
 });
 
 test("case 3: a version mismatch with an ACTIVE turn adopts and waits", async () => {
-  const h = await makeHarness(
-    [healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1, active: ["thread-1"] })],
-    { seedToken: "tok", tmux: true }
-  );
+  const h = await makeHarness([], { seedToken: "tok", tmux: true });
+  h.probeHook = mismatchUntilReplaced(h, ["thread-1"]);
   await h.supervisor.init();
   assert.equal(h.supervisor.status().state, "healthy", "the in-flight turn keeps running");
   assert.equal(h.spawns.length, 0, "no restart while a thread has an active turn");
@@ -142,14 +200,16 @@ test("case 3: a version mismatch with an ACTIVE turn adopts and waits", async ()
 });
 
 test("a settled turn reopens the drain window without waiting for the health tick", async () => {
-  const h = await makeHarness(
-    [healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1, active: ["thread-1"] })],
-    { seedToken: "tok", tmux: true }
-  );
+  const h = await makeHarness([], { seedToken: "tok", tmux: true });
+  let active: string[] = ["thread-1"];
+  h.probeHook = () =>
+    h.spawns.length === 0
+      ? healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1, active })
+      : healthy({ instance: "host-2" });
   await h.supervisor.init();
   assert.equal(h.spawns.length, 0);
   // The turn settles: the next health snapshot has no active turn.
-  h.probes = [healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1 }), healthy({ instance: "host-2" })];
+  active = [];
   await h.supervisor.checkHealth();
   assert.equal(h.stopRequests, 1, "the old host writes its continuation markers");
   assert.equal(h.spawns.length, 1);
@@ -220,7 +280,8 @@ test("health supervision respawns a dead host and latches error after the cap", 
   await h.supervisor.init();
   assert.equal(h.supervisor.status().state, "healthy");
   h.probes = [{ ok: false, reachable: false }];
-  for (let i = 0; i < MAX_RESPAWNS; i++) {
+  // Each respawn attempt now needs UNREACHABLE_PROBES_BEFORE_RESTART misses.
+  for (let i = 0; i < MAX_RESPAWNS * (UNREACHABLE_PROBES_BEFORE_RESTART + 1); i++) {
     h.advance(120_000); // past the bounded backoff window
     await h.supervisor.checkHealth();
   }
@@ -254,6 +315,253 @@ test("the no-tmux fallback spawns a direct child and protects its pid", async ()
   await h.supervisor.init();
   assert.equal(h.spawns.length, 1);
   assert.ok(h.supervisor.protectedPids().includes(9191));
+  await h.cleanup();
+});
+
+test("a throwing tmux spawn NEVER rejects out of checkHealth (it would kill the daemon)", async () => {
+  // `checkHealth` runs behind a bare `void` on a 15 s interval. `transition()`
+  // catches only its own queue copy, so a rejection here is unhandled — and
+  // Node ≥15 exits the process on one, dropping every live terminal WebSocket
+  // and `/events` stream. "duplicate session: orqsvc-agent-host" is the common
+  // trigger: a kill racing the respawn.
+  const h = await makeHarness([healthy()], { seedToken: "tok", tmux: true });
+  await h.supervisor.init();
+  assert.equal(h.supervisor.status().state, "healthy");
+
+  const rejections: unknown[] = [];
+  const onRejection = (reason: unknown): void => {
+    rejections.push(reason);
+  };
+  process.on("unhandledRejection", onRejection);
+  try {
+    h.probes = [{ ok: false, reachable: false }];
+    h.spawnThrows = true;
+    h.advance(120_000);
+    await h.supervisor.checkHealth(); // miss 1 of 2 — no spawn yet
+    h.advance(120_000);
+    // Exactly how the interval calls it — the returned promise is discarded.
+    void h.supervisor.checkHealth();
+    // Let the microtask queue and one macrotask turn drain, which is when an
+    // unhandled rejection would be reported.
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(rejections, [], "a spawn failure must never reject out of checkHealth");
+  } finally {
+    process.off("unhandledRejection", onRejection);
+  }
+  // The `void`ed call is still in flight; a second call queues behind it, so
+  // awaiting that proves the first settled — no sleeping on a guess.
+  h.advance(120_000);
+  await h.supervisor.checkHealth();
+  // And it stays RETRYABLE — not latched — so the next tick tries again.
+  assert.equal(h.supervisor.status().state, "stopped");
+  assert.match(String(h.supervisor.status().reason), /spawn failed/);
+  h.spawnThrows = false;
+  h.probes = [healthy({ instance: "host-2" })];
+  h.advance(120_000);
+  await h.supervisor.checkHealth();
+  assert.equal(h.supervisor.status().state, "healthy");
+  await h.cleanup();
+});
+
+test("a spawn that throws during boot adoption leaves the supervisor retryable", async () => {
+  const h = await makeHarness([{ ok: false, reachable: false }], { tmux: true, spawnThrows: true });
+  await h.supervisor.init();
+  assert.equal(h.supervisor.status().state, "stopped");
+  assert.equal(h.supervisor.isHealthy(), false);
+  await h.cleanup();
+});
+
+test("handleTurnSettled never rejects either", async () => {
+  const h = await makeHarness([healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1 })], {
+    seedToken: "tok",
+    tmux: true
+  });
+  h.spawnThrows = true;
+  await h.supervisor.init();
+  const rejections: unknown[] = [];
+  const onRejection = (reason: unknown): void => {
+    rejections.push(reason);
+  };
+  process.on("unhandledRejection", onRejection);
+  try {
+    h.supervisor.handleTurnSettled();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(rejections, []);
+  } finally {
+    process.off("unhandledRejection", onRejection);
+  }
+  await h.cleanup();
+});
+
+test("a leftover service session is killed before the respawn", async () => {
+  // The branch that produces the duplicate-session throw above; the harness
+  // used to hardcode `killFirst: false`, so it was never exercised.
+  const h = await makeHarness([{ ok: false, reachable: false }, healthy()], {
+    seedToken: "tok",
+    tmux: true
+  });
+  await h.supervisor.init();
+  assert.equal(h.spawns.length, 1);
+  assert.equal(h.spawns[0].killFirst, true, "a wedged host must not hold the socket");
+  await h.cleanup();
+});
+
+test("a fresh spawn with no leftover session does NOT kill first", async () => {
+  const h = await makeHarness([{ ok: false, reachable: false }, healthy()], { tmux: true });
+  await h.supervisor.init();
+  assert.equal(h.spawns.length, 1);
+  assert.equal(h.spawns[0].killFirst, false);
+  await h.cleanup();
+});
+
+test("the drain-restart re-probes: a stale 'no active turn' never kills a live turn", async () => {
+  // `handleTurnSettled` fires on ANY thread's turn settling, so the cached
+  // health can be up to a 15 s interval old: probe at T shows no active turn,
+  // thread A starts one at T+2 s, thread B settles at T+4 s — and the stale
+  // empty list would kill the host with A's turn live.
+  const h = await makeHarness([healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1 })], {
+    seedToken: "tok",
+    tmux: true
+  });
+  await h.supervisor.init();
+  // Boot adopted with an empty list; the host is busy NOW.
+  h.probes = [healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1, active: ["thread-A"] })];
+  const spawnsAfterInit = h.spawns.length;
+  h.supervisor.handleTurnSettled();
+  // `checkHealth` queues behind the fire-and-forget transition, so awaiting it
+  // proves that transition finished — no sleeping on a guess.
+  await h.supervisor.checkHealth();
+  assert.equal(h.spawns.length, spawnsAfterInit, "a fresh probe showed a live turn — no restart");
+  assert.equal(h.supervisor.status().pendingVersionRestart, true, "the restart is still owed");
+  await h.cleanup();
+});
+
+test("one missed probe does NOT kill a healthy-but-busy host", async () => {
+  // A host whose event loop is blocked past the 5 s probe timeout — a large
+  // cold fold, a big readThread — looks exactly like a dead one. Restarting on
+  // the first miss takes down every live turn.
+  const h = await makeHarness([healthy()], { seedToken: "tok", tmux: true });
+  await h.supervisor.init();
+  h.probes = [{ ok: false, reachable: false }];
+  h.advance(120_000);
+  await h.supervisor.checkHealth();
+  assert.equal(h.spawns.length, 0, "the first miss is not evidence of death");
+  h.advance(120_000);
+  await h.supervisor.checkHealth();
+  assert.equal(h.spawns.length, 1, "two consecutive misses do restart it");
+  await h.cleanup();
+});
+
+test("a busy host gets MORE patience before it is killed", async () => {
+  const h = await makeHarness([healthy({ active: ["thread-A"] })], { seedToken: "tok", tmux: true });
+  await h.supervisor.init();
+  h.probes = [{ ok: false, reachable: false }];
+  for (let i = 0; i < UNREACHABLE_PROBES_BEFORE_RESTART; i++) {
+    h.advance(120_000);
+    await h.supervisor.checkHealth();
+  }
+  assert.equal(h.spawns.length, 0, "the last good health reported an active turn");
+  for (let i = UNREACHABLE_PROBES_BEFORE_RESTART; i < UNREACHABLE_PROBES_BEFORE_RESTART_BUSY; i++) {
+    h.advance(120_000);
+    await h.supervisor.checkHealth();
+  }
+  assert.equal(h.spawns.length, 1);
+  await h.cleanup();
+});
+
+test("a single answered probe clears the missed-probe streak", async () => {
+  const h = await makeHarness([healthy()], { seedToken: "tok", tmux: true });
+  await h.supervisor.init();
+  h.probes = [{ ok: false, reachable: false }];
+  h.advance(120_000);
+  await h.supervisor.checkHealth();
+  h.probes = [healthy()];
+  h.advance(120_000);
+  await h.supervisor.checkHealth();
+  h.probes = [{ ok: false, reachable: false }];
+  h.advance(120_000);
+  await h.supervisor.checkHealth();
+  assert.equal(h.spawns.length, 0, "the streak restarted, so this is miss 1 of 2");
+  await h.cleanup();
+});
+
+test("the old host is given a grace window to exit before its session is killed", async () => {
+  // `/stop` answers once the continuation markers are written; the real
+  // teardown (four adapters × a 2 s kill grace) then runs asynchronously, and
+  // OpenCode's server is `detached: true` — it survives a kill of the process
+  // group and leaks one per project.
+  const h = await makeHarness([], { seedToken: "tok", tmux: true });
+  // Before the stop it answers v+1; after it, twice more, then it goes quiet
+  // and the replacement answers.
+  let stillUp = 2;
+  h.probeHook = () => {
+    if (h.spawns.length > 0) return healthy({ instance: "host-2" });
+    if (h.stopRequests === 0) return healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1 });
+    return stillUp-- > 0
+      ? healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1 })
+      : { ok: false, reachable: false };
+  };
+  await h.supervisor.init();
+  assert.equal(h.stopRequests, 1);
+  assert.ok(stillUp <= 0, "the supervisor polled until the socket went quiet");
+  assert.equal(h.spawns.length, 1);
+  await h.cleanup();
+});
+
+test("the grace window is bounded — a host that never exits is killed anyway", async () => {
+  const h = await makeHarness([], { seedToken: "tok", tmux: true });
+  // Always answers healthy: it never exits.
+  h.probeHook = () =>
+    h.spawns.length === 0
+      ? healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1 })
+      : healthy({ instance: "host-2" });
+  await h.supervisor.init();
+  assert.equal(h.spawns.length, 1, "the bounded grace lapsed and the restart proceeded");
+  await h.cleanup();
+});
+
+test("the token is regenerated AFTER the old session is killed, never before", async () => {
+  // §3.1: "regenerated only when no host is alive". Rewriting it while the old
+  // host still answers leaves the daemon unable to authenticate to the host it
+  // is waiting on.
+  const h = await makeHarness([{ ok: false, reachable: false }, healthy()], {
+    seedToken: "tok",
+    tmux: true
+  });
+  await h.supervisor.init();
+  assert.deepEqual(
+    h.order.filter((step) => step !== "probe"),
+    ["kill", "spawn"],
+    "the leftover session is killed before anything else"
+  );
+  assert.notEqual(h.tokenAtSpawn, "tok", "the new host starts with a freshly minted token");
+  assert.equal(h.tokenAtSpawn, h.supervisor.currentToken());
+  await h.cleanup();
+});
+
+test("a moved providersRevision raises agent.providers.changed", async () => {
+  // §4.6.4: the host's OWN session-start / background refresh must broadcast
+  // too, not just the explicit refresh route.
+  const h = await makeHarness([healthy({ providersRevision: 1 })], { seedToken: "tok", tmux: true });
+  await h.supervisor.init();
+  assert.equal(h.providerRevisions, 0, "the first sighting is not a change");
+  h.probes = [healthy({ providersRevision: 1 })];
+  await h.supervisor.checkHealth();
+  assert.equal(h.providerRevisions, 0, "an unchanged revision is not an event");
+  h.probes = [healthy({ providersRevision: 2 })];
+  await h.supervisor.checkHealth();
+  assert.equal(h.providerRevisions, 1);
+  await h.cleanup();
+});
+
+test("an older host with no providersRevision never raises the event", async () => {
+  const h = await makeHarness([healthy()], { seedToken: "tok", tmux: true });
+  await h.supervisor.init();
+  h.probes = [healthy()];
+  await h.supervisor.checkHealth();
+  assert.equal(h.providerRevisions, 0);
   await h.cleanup();
 });
 

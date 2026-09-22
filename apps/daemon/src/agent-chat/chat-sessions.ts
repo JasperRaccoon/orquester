@@ -112,6 +112,13 @@ export class ChatSessionManager {
       // every surface reading a SessionSummary keeps its shape.
       cols: 0,
       rows: 0,
+      // `status` is the TAB's liveness, not the thread's. It stays `running`
+      // for as long as the tab exists — including while the thread's session is
+      // in `error`, which is a recoverable state the user retries into with
+      // `/session/stop` or a new turn. `exited` would make every client drop
+      // the tab. The thread's own state is `chatSessionStatus` (§6.4), and the
+      // ladder already surfaces an error as `activity` — which is what the tab
+      // strip and the Attention Center colour a chat row from.
       status: "running",
       order: input.order,
       createdAt: input.createdAt ?? new Date().toISOString()
@@ -134,12 +141,42 @@ export class ChatSessionManager {
     return { ...session.summary };
   }
 
+  /**
+   * Threads whose tab is gone but whose host-side delete has not been
+   * acknowledged. Persisted with the index so the retry survives a restart.
+   */
+  private readonly pendingDeletes = new Set<string>();
+
   /** Forget the tab. The host-side thread delete is the caller's job (§6.1). */
   close(id: string): boolean {
     if (!this.sessions.delete(id)) return false;
+    // Queue the cascade BEFORE the tab is forgotten is announced: if the host
+    // is down right now, §3.3's reconcile would otherwise find an orphan with a
+    // cursor and a continuation marker and resume it — a provider child and
+    // tokens spent for a tab nobody is looking at.
+    this.pendingDeletes.add(id);
     this.lifecycle.emit("closed", { id });
     this.options.requestPersist();
     return true;
+  }
+
+  /** The unacknowledged deletes, for persistence and for replay on adoption. */
+  pendingThreadDeletes(): string[] {
+    return [...this.pendingDeletes];
+  }
+
+  /** The host confirmed (or definitively 404'd) the delete: stop retrying. */
+  resolveThreadDelete(id: string): void {
+    if (this.pendingDeletes.delete(id)) {
+      this.options.requestPersist();
+    }
+  }
+
+  /** Restore the queue from the index on boot. */
+  adoptPendingDeletes(ids: readonly string[]): void {
+    for (const id of ids) {
+      if (typeof id === "string" && id) this.pendingDeletes.add(id);
+    }
   }
 
   closeByProjectPrefix(prefix: string): string[] {

@@ -128,6 +128,13 @@ export interface SessionIndexContributor {
   adopt(records: readonly SessionRecord[]): void;
   /** True when this id belongs to the contributor (so reattach skips it). */
   owns(record: SessionRecord): boolean;
+  /**
+   * Side-table the contributor keeps in the same file: agent-chat threads whose
+   * tab is closed but whose host-side delete is not acknowledged yet. Persisted
+   * here because the retry must survive a daemon restart.
+   */
+  pendingThreadDeletes?(): string[];
+  adoptPendingThreadDeletes?(ids: readonly string[]): void;
 }
 
 /**
@@ -810,6 +817,7 @@ export class SessionManager implements ISessionManager {
     // them to their contributor and keep their ids in `known` so the orphan
     // reap below never mistakes one for an unclaimed pane.
     const contributed = index.sessions.filter((record) => this.options.indexContributor?.owns(record));
+    this.options.indexContributor?.adoptPendingThreadDeletes?.(index.pendingThreadDeletes);
     if (contributed.length > 0) {
       this.options.indexContributor?.adopt(contributed);
     }
@@ -934,7 +942,11 @@ export class SessionManager implements ISessionManager {
     } catch (error) {
       console.error("Failed to collect agent-chat session records", error);
     }
-    await writeSessionsIndex(this.indexPath, sessions);
+    await writeSessionsIndex(
+      this.indexPath,
+      sessions,
+      this.options.indexContributor?.pendingThreadDeletes?.() ?? []
+    );
   }
 }
 
@@ -968,13 +980,21 @@ export async function drainSessionIndexWrites(indexPath?: string): Promise<void>
   await Promise.all(pending.map((p) => p?.catch(() => undefined)));
 }
 
-async function writeSessionsIndex(indexPath: string, sessions: SessionRecord[]): Promise<void> {
+async function writeSessionsIndex(
+  indexPath: string,
+  sessions: SessionRecord[],
+  pendingThreadDeletes: string[] = []
+): Promise<void> {
   const previous = sessionIndexWrites.get(indexPath) ?? Promise.resolve();
   const run = previous.then(async () => {
     const tmpPath = `${indexPath}.${process.pid}.${randomUUID()}.tmp`;
     try {
       await mkdir(dirname(indexPath), { recursive: true });
-      await writeFile(tmpPath, `${JSON.stringify({ version: 1, sessions }, null, 2)}\n`, "utf8");
+      await writeFile(
+        tmpPath,
+        `${JSON.stringify({ version: 1, sessions, pendingThreadDeletes }, null, 2)}\n`,
+        "utf8"
+      );
       await rename(tmpPath, indexPath);
     } catch (error) {
       console.error("Failed to persist sessions index", error);
@@ -1351,6 +1371,7 @@ export class LocalSessionManager implements ISessionManager {
       const raw = await readFile(this.indexPath, "utf8");
       const index = parseSessionsConfig(JSON.parse(raw));
       contributor.adopt(index.sessions.filter((record) => contributor.owns(record)));
+      contributor.adoptPendingThreadDeletes?.(index.pendingThreadDeletes);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
         console.error("Failed to read sessions index for agent-chat tabs", error);
@@ -1376,6 +1397,6 @@ export class LocalSessionManager implements ISessionManager {
       return;
     }
     // Same atomic, uniquely-named, serialised write as the tmux backend.
-    void writeSessionsIndex(indexPath, records);
+    void writeSessionsIndex(indexPath, records, contributor.pendingThreadDeletes?.() ?? []);
   }
 }

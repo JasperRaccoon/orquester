@@ -114,3 +114,33 @@ test("the committed captures are already redacted, and stay that way through the
     }
   }
 });
+
+test("an MCP env given as an OBJECT MAP is masked too", () => {
+  // R4 #13: Grok's ACP frames use `[{name, value}]`, but `~/.claude.json` —
+  // which Grok reads through its Claude-compat layer — stores the same thing
+  // as an object map, and only the array spelling was recognised.
+  const redacted = JSON.stringify(
+    redactAcpFrame({
+      method: "_x.ai/mcp/servers_updated",
+      params: {
+        mcpServers: [
+          {
+            name: "jira-cloud",
+            env: { JIRA_API_TOKEN: "ATATT3xFfGF0abcdefghijklmnop", JIRA_HOST: "example.atlassian.net" }
+          }
+        ]
+      }
+    })
+  );
+  assert.equal(redacted.includes("ATATT3xFfGF0abcdefghijklmnop"), false);
+  assert.equal(redacted.includes("example.atlassian.net"), false);
+  assert.match(redacted, /JIRA_API_TOKEN/, "the key survives, the value does not");
+});
+
+test("`environment` and `envVars` are env containers too", () => {
+  const redacted = redactAcpFrame({
+    servers: [{ environment: { SECRET: "s3cr3t-value" } }, { envVars: [{ name: "K", value: "v" }] }]
+  }) as { servers: Array<Record<string, unknown>> };
+  assert.equal(JSON.stringify(redacted).includes("s3cr3t-value"), false);
+  assert.equal(JSON.stringify(redacted).includes('"v"'), false);
+});
