@@ -41,6 +41,7 @@ import { proposedPlanTitle, shouldShowPlanFollowUpPrompt } from "../../lib/agent
 import { useAppStore } from "../../store/app";
 import { AgentDrillIn } from "./roster/AgentDrillIn";
 import { AgentRoster } from "./roster/AgentRoster";
+import { EmptyThreadPanel } from "./EmptyThreadPanel";
 
 /** Per-device: the roster folded to its summary line. */
 const ROSTER_COLLAPSED_KEY = "orquester.chat.roster-collapsed";
@@ -578,8 +579,17 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               onOpenFile={paintOnly ? noop : openFile}
               onLoadFullOutput={paintOnly ? noop : loadFullOutput}
               onOpenAgent={paintOnly ? noop : setDrillInAgentId}
-              agentRefId={session.refId}
               threadReady={!paintOnly && status.connection === "synchronized"}
+              emptyThreadPanel={
+                projectPath ? (
+                  <EmptyThreadPanel
+                    sessionId={sessionId}
+                    projectPath={projectPath}
+                    agentRefId={session.refId}
+                    bottomInset={bottomInset}
+                  />
+                ) : undefined
+              }
               onSendQueuedNow={paintOnly ? noop : (id) => dispatch(() => actions.sendQueuedNow(id))}
               // The user's Ctrl+B (§4.5): offered on a running command only
               // where the provider can honour it.

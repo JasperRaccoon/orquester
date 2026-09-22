@@ -11,13 +11,7 @@ import type { ChatTimelineProps, TimelineScrollPosition } from "../contracts";
 import { ChatIconButton, ScrollToBottomButton } from "../primitives";
 import { TimelineRowContext, type TimelineRowContextValue } from "./context";
 import { TimelineRow } from "./TimelineRow";
-import { RecentConversationsList } from "../../main/ProjectOverview";
-import { useRegistry } from "../../../hooks";
-import { getRegistryIcon } from "../../../icons";
 
-/** Newest-first rows the empty-thread panel lists; the rest stay in the overview. */
-const EMPTY_PANEL_LIMIT = 10;
-import { useAppStore } from "../../../store/app";
 import { findFirstVisibleIndex, offsetWithinRow, type RowMetric } from "./anchor";
 import { nextFollowState, shouldAnimateFollow } from "./follow";
 
@@ -103,8 +97,8 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
     errorBanner,
     onDismissErrorBanner,
     agentId,
-    agentRefId,
     threadReady = false,
+    emptyThreadPanel,
     readOnly,
     roster,
     skills,
@@ -112,18 +106,13 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
     scroll,
     onScrollPositionChange
   } = props;
-  const closeTab = useAppStore((s) => s.closeTab);
-  const registry = useRegistry();
-  const emptyPanelEntry = agentRefId ? registry.agents.find((a) => a.id === agentRefId) : undefined;
-  const emptyPanelAdapter = emptyPanelEntry?.chat?.adapter;
-  const emptyPanelAgentName = emptyPanelEntry?.name ?? agentRefId ?? "Agent";
   const showEmptyPanel =
     threadReady &&
     rows.length === 0 &&
     agentId === undefined &&
-    Boolean(projectPath) &&
     !readOnly &&
-    Boolean(agentRefId);
+    emptyThreadPanel !== undefined &&
+    emptyThreadPanel !== null;
 
   const scrollerRef = React.useRef<HTMLDivElement>(null);
   const contentRef = React.useRef<HTMLDivElement>(null);
@@ -570,42 +559,10 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
               <TimelineRow key={row.id} row={row} enter={enterFlag(row.id)} />
             ))}
             {showEmptyPanel ? (
-              // An empty thread offers the project's resumable conversations
-              // for THIS provider, as the project overview does when no tab is
-              // open. The panel fits the visible area: the title stays put and
-              // only the list scrolls (the timeline scroller itself never has
-              // to). The bottom spacer keeps it above the docked composer.
-              <div
-                className="mx-auto flex w-full max-w-3xl flex-1 flex-col px-1 pt-4"
-                style={{ minHeight: 0 }}
-              >
-                <div className="mb-5 flex shrink-0 items-center justify-center gap-3">
-                  <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-neutral-900 text-neutral-200">
-                    {getRegistryIcon("agent", agentRefId ?? "", 22)}
-                  </span>
-                  <h2 className="text-xl font-semibold tracking-tight text-neutral-100">
-                    {emptyPanelAgentName}
-                  </h2>
-                </div>
-                <p className="shrink-0 text-sm font-medium text-neutral-200">Recent conversations</p>
-                <p className="mb-2 mt-0.5 shrink-0 text-xs text-neutral-600">
-                  This project&apos;s {emptyPanelAgentName} conversations, newest first. Pick one up, or just start typing below.
-                </p>
-                <div className="ac-scroll-thin min-h-0 flex-1 overflow-y-auto pr-1">
-                  <RecentConversationsList
-                    projectPath={projectPath ?? ""}
-                    adapter={emptyPanelAdapter}
-                    limit={EMPTY_PANEL_LIMIT}
-                    onPicked={() => void closeTab(sessionId)}
-                    empty={
-                      <p className="py-6 text-center text-sm italic text-neutral-600">
-                        No {emptyPanelAgentName} conversations in this project yet.
-                      </p>
-                    }
-                  />
-                </div>
-                <div aria-hidden className="shrink-0" style={{ height: bottomInset + 12 }} />
-              </div>
+              // An empty thread shows the provider's resumable conversations
+              // (`EmptyThreadPanel`, built by the view). The wrapper fits the
+              // visible area so only the panel's own list scrolls.
+              emptyThreadPanel
             ) : rows.length === 0 ? (
               <div className="mx-auto w-full max-w-3xl py-12 text-center text-sm italic text-neutral-600">
                 {agentId === undefined

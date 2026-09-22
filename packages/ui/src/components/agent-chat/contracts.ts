@@ -1,3 +1,4 @@
+import type React from "react";
 /**
  * Agent chat — component prop contracts (spec §7.1, §7.3–§7.6).
  *
@@ -77,11 +78,12 @@ export interface ChatTimelineProps {
   onSendQueuedNow: (queuedId: string) => void;
   onReturnQueuedToComposer: (queuedId: string) => void;
   /**
-   * The registry id the thread launched from, for the empty-thread panel: it
-   * names the provider in the title and filters the resumable conversations
-   * to the ones this adapter can pick up.
+   * What an EMPTY, synchronized thread shows instead of "No messages yet."
+   * (the provider's resumable conversations, built by the view so the
+   * timeline never imports the registry or its icons). Absent means the plain
+   * placeholder.
    */
-  agentRefId?: string;
+  emptyThreadPanel?: React.ReactNode;
   /**
    * The thread's stream is synchronized and its rows are the real ones. The
    * empty-thread panel is gated on it: while a thread is still (re)connecting
