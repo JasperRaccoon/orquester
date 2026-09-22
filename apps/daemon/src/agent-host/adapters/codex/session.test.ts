@@ -839,6 +839,48 @@ describe("codex session — a live turn's children are interrupted first (R3 fin
   });
 });
 
+describe("codex session — hasSubagents is per TURN (Q1 finding 19)", () => {
+  it("reports true for the turn that had subagents and false for the next", async () => {
+    // `knownAgentPaths` is pruned only by a terminal `subAgentActivity`, which
+    // a turn whose fleet is still running never sends. Left alone it makes
+    // every later turn claim subagents; cleared at interrupt time instead it
+    // reports false for the very turn that HAD them. It is cleared after
+    // `usage.completeTurn` reads it — the one moment the answer is final.
+    const r = rig({
+      turns: [
+        { kind: "spawn-child", childThreadId: "child-1" },
+        { kind: "text", text: "plain" }
+      ]
+    });
+    await r.session.start();
+
+    await r.session.sendTurn({ input: "spawn", attachments: [], interactionMode: "default" });
+    const withAgents = await r.events.waitForType("turn.completed");
+    assert.equal(
+      (withAgents.payload as { tokenUsage?: { hasSubagents?: boolean } }).tokenUsage?.hasSubagents,
+      true
+    );
+
+    await waitUntil(() => r.session.currentTurnId === null, "the first turn settled");
+    await r.session.sendTurn({ input: "plain", attachments: [], interactionMode: "default" });
+    await waitUntil(
+      () => r.events.events.filter((event) => event.type === "turn.completed").length === 2,
+      "the second turn.completed"
+    );
+    const [, plain] = r.events.events.filter((event) => event.type === "turn.completed");
+    assert.equal(
+      (plain!.payload as { tokenUsage?: { hasSubagents?: boolean } }).tokenUsage?.hasSubagents,
+      false,
+      "the next turn must start from an empty set"
+    );
+
+    // And the clear did NOT take the child bookkeeping with it: §6.2's Stop
+    // still has something to reach the fleet with (R6).
+    assert.deepEqual(r.session.liveChildTurnsForTest, [["child-1", "child-1-turn"]]);
+    await r.stop();
+  });
+});
+
 describe("codex session — session-scoped Stop with no running turn (R6)", () => {
   it("stops the background fleet instead of returning a no-op", async () => {
     const r = rig({ turns: [{ kind: "spawn-child", childThreadId: "child-1" }] });

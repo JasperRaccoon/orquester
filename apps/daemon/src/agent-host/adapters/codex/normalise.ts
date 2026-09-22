@@ -129,6 +129,28 @@ export class CodexNormaliser {
     this.childTurns.clear();
   }
 
+  /**
+   * Forget the agents a SETTLED turn started, once its usage has been read
+   * (Q1 finding 19, W1's report).
+   *
+   * `knownAgentPaths` answers one question — "did *this* turn have subagents?"
+   * — and is otherwise pruned only by a terminal `subAgentActivity`, which a
+   * turn whose fleet was interrupted, wedged or simply still running never
+   * sends. Left alone it makes `hasSubagents` true for every later turn in the
+   * session; cleared at interrupt time instead, it reports `false` for the very
+   * turn that HAD the subagents. So it is cleared here: after the read, at the
+   * only moment the answer is final.
+   *
+   * Deliberately NOT {@link forgetAgents}: `childTurns` must outlive its parent
+   * turn. A collab child keeps working after `turn/completed` (§3.1 "background
+   * work outlives the turn"), and it is the only thing §6.2's session-scoped
+   * Stop has left to reach the fleet with (R6). Clearing it here silently
+   * un-fixes that blocker — verified by watching its regression test fail.
+   */
+  forgetTurnAgents(): void {
+    this.knownAgentPaths.clear();
+  }
+
   /** Item ids still `inProgress`, used to close them when a child dies. */
   openItemIds(): string[] {
     return [...this.openItems.keys()];
@@ -307,6 +329,9 @@ export class CodexNormaliser {
           interrupted,
           hasSubagents: this.knownAgentPaths.size > 0
         });
+        // AFTER the read, never before: the answer belongs to the turn that is
+        // settling, and the next turn must start from an empty set.
+        this.forgetTurnAgents();
         const errorMessage = p.turn.error?.message ?? this.lastTurnError ?? undefined;
         if (this.activeTurnId === p.turn.id) {
           this.activeTurnId = null;
