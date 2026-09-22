@@ -1911,6 +1911,16 @@ age, so a chatty turn cannot scroll a still-open question out of the pending set
 
 *T3: `apps/server/src/orchestration/projector.ts:59-87` — `MAX_THREAD_MESSAGES = 2_000`, `MAX_THREAD_CHECKPOINTS = 500` and `retainThreadActivities`' 500-row window with pending-question retention*
 
+*Built: the retention keeps the last 500 activities plus every unresolved async question, and
+**nothing else** — the "any long-lived singleton row regardless of age" clause has no Orquester
+row behind it. T3's counterpart retains its `WORKTREE_SETUP_ACTIVITY_KIND`, a worktree-setup
+record this design has no analogue for (per-thread worktrees are a §2 non-goal), so the clause is
+an artefact of the port rather than a requirement
+(`packages/api/src/agent-chat/fold.ts`, `activitiesToDrop`). Also: `meta.json` is rewritten every
+50 events **and on every head-shaped change**, not only on turn end — a head the stream can serve
+is worth more than the write it saves
+(`apps/daemon/src/agent-host/orchestration/orchestrator.ts`).*
+
 A thread directory that fails to parse marks that thread `error` with the parse message; it
 never affects other threads or host startup. A malformed line inside `events.ndjson` truncates the
 fold at that point rather than discarding the file.
@@ -2020,6 +2030,14 @@ is capped at 10 MB.
 
 *T3: `apps/server/src/vcs/VcsProcess.ts:56-63` — `DEFAULT_TIMEOUT_MS = 30_000`, `DEFAULT_MAX_OUTPUT_BYTES = 1_000_000`, `VCS_PROCESS_CONCURRENCY = 8`; `:118-119`, `:205-227` — the semaphore and the capture-only retry; `apps/server/src/vcs/GitVcsDriver.ts:385` — `CHECKPOINT_DIFF_MAX_OUTPUT_BYTES = 10_000_000`*
 
+*Built: the retry is decided by an explicit `retryTransient` flag on each git invocation rather
+than by matching the operation's name, so a new capture-path command cannot silently lose the
+retry by being spelled differently. Every git child additionally runs with `LC_ALL=C` (a localised
+`git` translates the porcelain the parser reads) and `GIT_TERMINAL_PROMPT=0` (a repository with an
+HTTPS remote must never block a checkpoint on a credential prompt), and `--numstat -z` output is
+sorted by **byte order**, not by locale collation, so a checkpoint's file list is byte-stable on
+any machine (`apps/daemon/src/agent-host/checkpoints/service.ts`).*
+
 Lifecycle:
 
 - On `turn.started`: capture the baseline at `turn/<turnCount>` if absent, where `turnCount` is the
@@ -2041,6 +2059,11 @@ Lifecycle:
 - Cap: at most 200 checkpoint refs per thread; older ones are pruned oldest-first.
 
 *T3: `apps/server/src/orchestration/Layers/CheckpointReactor.ts:461-510` — baseline capture keyed on the max `checkpointTurnCount`; `:393-457` — active-turn guard, non-placeholder skip, placeholder turn-count reuse; `:259-332` — missing-baseline handling and the `--numstat` file list; `:337-390` — the `thread.turn.diff.complete` dispatch and the `checkpoint.captured` activity; `:150-180` — `checkpoint.capture.failed`; `apps/server/src/orchestration/projector.ts:934-944` — a `missing` placeholder never clobbers a captured `ready` checkpoint. Differs: T3 deletes checkpoint refs only on revert — nothing deletes them when a thread is deleted — and caps checkpoints at 500 in the read model (`apps/server/src/orchestration/projector.ts:60`) rather than pruning refs on disk*
+
+*Built: ref deletion — on prune, on revert and on thread delete — is **batched** into one
+`git update-ref --stdin` instead of one process per ref. Two hundred refs is two hundred process
+spawns under a permit pool of eight, which turns deleting a thread into a visible stall
+(`apps/daemon/src/agent-host/checkpoints/service.ts`).*
 
 Diff read: `GET …/turns/:n/diff` runs
 `git diff --patch --no-color --no-ext-diff --no-textconv <baseline>^{commit} <post>^{commit}` on
@@ -2076,6 +2099,15 @@ order if the first pass retained fewer, so a revert never leaves the thread show
 than it reverted to. `latestTurn` is recomputed from the last surviving checkpoint.
 
 *T3: `apps/server/src/orchestration/projector.ts:985-1030` — the `thread.reverted` fold; `:209-277` — `retainThreadMessagesAfterRevert` including the turn-less fallback passes; `:280-294` — activities and plans are kept when `turnId === null` or retained*
+
+*Built: the implementation follows T3 exactly, which is narrower than the sentence above for
+**messages**. An activity or turn row with `turnId: null` does survive unconditionally; a
+**message** with `turnId: null` survives only through the bounded second pass — up to `target`
+user and up to `target` assistant messages in `createdAt` order — never as a blanket rule. An
+unbounded "every turn-less message survives" would resurrect the prompts of the turns the revert
+just undid, because a message persisted before its provider turn id was minted looks identical
+whichever side of the target it fell on (`packages/api/src/agent-chat/fold.ts`,
+`retainMessagesAfterRevert`).*
 
 Attachments referenced only by truncated messages are unlinked after the revert commits, not
 during it: the retained path set is recomputed from the surviving messages and from any answered
@@ -2131,6 +2163,13 @@ the structure, not in one long string:
 
 *T3: `apps/server/src/orchestration/ActivityPayloadProjection.ts:190-207` — `MCP_ITEM_KEPT_FIELDS`; `:164-188` — `summarizeToolTextOutput` (84 chars / `"N lines"`); `:24-81` — `collectChangedFiles` with the 12-path / depth-4 bounds; `:425-500` — the allowlist rebuild and the status re-stamp; `:645-689` — `projectThreadDetailSnapshot` / `projectActivityEvent`, the single choke point every read passes through. Differs: T3 has no route that serves the unslimmed payload at all — the full value is only ever read back out of its own store*
 
+*Built: `changedFiles` is promoted to the **top level** of the slimmed payload rather than left
+inside `data`. It is one of the allow-listed fields §7.2's presentation resolver reads, and a
+resolver that has to reach into `data` for one of its own inputs is a resolver that will one day
+read an unslimmed shape by accident (`packages/api/src/agent-chat/slim.ts`). The 16 KB string cap
+is measured in **UTF-8 bytes**, never splitting a surrogate pair, and returns the input by
+identity when it already fits.*
+
 
 ## 6. Routes and stream
 
@@ -2176,6 +2215,13 @@ opening a fresh thread the user believes is their old one. This is the only rout
 code; no §6.2 command does.
 
 *T3: `packages/contracts/src/orchestration.ts:1208-1226` — `thread.meta.update` carries `title` / `regenerateTitle` / `modelSelection` with a filter refusing title+regenerate together; `:1111-1115` — `thread.delete`; `:1117-1121` — `thread.archive`, differs: no archive state here*
+
+*Built: `PUT` takes `title` and nothing else — there is no `regenerateTitle` path on the route, in
+the host or in any client surface, so the mutual-exclusion rule has nothing to enforce
+(`apps/daemon/src/agent-host/server/http-server.ts`). A title is generated once, client-side, from
+the thread's first user message (`packages/ui/src/lib/agent-chat/title.logic.ts`); T3 then
+improves it with a separate model call, which this design does not do. Regeneration is a follow-up,
+and the rule above is what it must honour when it lands.*
 
 Thread creation is two calls (create the tab, then `/turn`), not one. T3 folds thread creation,
 worktree preparation and the first turn into a single `bootstrap` field on `thread.turn.start` so
@@ -2354,6 +2400,14 @@ file the host reaps on its own schedule. Reading one back is `GET /api/fs/downlo
 thread's attachments dir, which already carries the `?token=` carve-out a native download needs.
 
 *T3: `packages/contracts/src/orchestration.ts:165-168` — `PROVIDER_SEND_TURN_MAX_{INPUT_CHARS,ATTACHMENTS,IMAGE_BYTES,FILE_BYTES}`; `:302-372` — `ChatAttachment` carries metadata only, with an explicit unknown-type catch-all; `apps/server/src/orchestration/Normalizer.ts:168-231` — size re-validated against the stat'd file and pending uploads claimed by copy, not hard link, because "an agent editing the delivered file in place must not mutate the retry source"; `apps/server/src/attachmentStore.ts:24-26` — pending uploads TTL; `packages/contracts/src/assets.ts:85-117` — differs: T3 mints short-lived signed URLs so bytes never touch the RPC socket; our upload/download routes are already plain HTTP*
+
+*Built: reading an attachment back is **not** `GET /api/fs/download` — that route is confined to
+`fsRoot` by `assertInsideFsRoot`, and a thread's attachments live under
+`<appdir>/daemon/agent/threads/<id>/attachments`, outside it, so it would refuse every one of them.
+It is `GET /api/sessions/:id/attachments/:attachmentId`: the host resolves the id (it owns the
+namespace and its traversal guard) and the daemon streams the file, carrying the same `?token=`
+carve-out a native `<a download>` needs (`apps/daemon/src/agent-chat/proxy-routes.ts`,
+`agentChatRoutes.attachment`).*
 
 **Provider snapshots.** Each adapter's snapshot carries, besides §4.1's
 `{installed, version, auth, models[], slashCommands[], skills[], usageLimits, versionAdvisory,
@@ -2565,6 +2619,16 @@ Row kinds and behaviour:
   "send now" and "return to composer".
 *T3: `apps/web/src/components/chat/MessagesTimeline.logic.ts:329-442` — the twelve projected row kinds (`activity-group`, `work`, `work-live`, `work-toggle`, `turn-fold`, `context-compaction`, `message`, `assistant-meta`, `proposed-plan`, `working`, `thinking`, `worktree-setup`, `queued-message`); `apps/web/src/components/chat/MessagesTimeline.tsx:2510-2543` — `WorkingTimelineRow`, one span for every label "so the setup-to-working handoff swaps text in place instead of remounting the row"; `:3320-3348` — `WorkGroupToggleTimelineRow` ("+N more"); `:1860-1879` — `ContextCompactionTimelineRow`, a `role="separator"` hairline with a label. differs: T3 bakes the before/after token counts into that label server-side (`apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts:863-868`) and the row never reads the numbers; we carry `beforeTokens`/`afterTokens` on `thread.state.changed` and format client-side. differs: T3 has no rerouted-model UI at all — `model.rerouted` exists only in the contracts (`packages/contracts/src/providerRuntime.ts:757-762, 1127-1132`) and is never rendered; ours is a new inline notice row*
 
+*Built: three row kinds landed narrower than written. A user message's attachments render as named
+**chips**, not thumbnails — the attachment bytes route of §6.3 exists but the timeline does not
+fetch it, so nothing decodes a 10 MiB image into a bubble on a phone. The plan proposal card offers
+**copy and download only**; there is no "save into the workspace" action, which would be a write
+into `fsRoot` from a render path. And there is no "load earlier" header: a thread is sent whole
+(§2), so there is nothing earlier to load
+(`packages/ui/src/components/agent-chat/timeline/`). One kind landed wider: Codex's `commentary`
+phase gets its own activity row rather than being folded into reasoning, because it is the only
+narration that CLI emits between tool calls.*
+
 **Activity-group boundaries are mechanical, and the rules matter more than the styling.** A group
 starts at the first reasoning row or plain tool row of a turn and runs until any of: a non-grouping
 entry, a turn-id change, or a row the user has collapsed out. Assistant and user messages are not
@@ -2609,6 +2673,12 @@ draft text it **refines**, sending that text and staying in plan mode. The propo
 the turn that implements it, not by the click.
 *T3: `apps/web/src/components/chat/ProposedPlanCard.tsx:36-259` — copy / download / save-to-workspace only, no approve button; `apps/web/src/components/ChatView.logic.ts:951-965` — `shouldShowPlanFollowUpPrompt`; `apps/web/src/components/chat/ComposerPlanFollowUpBanner.tsx:1-20`; `apps/web/src/components/chat/ComposerPrimaryActions.tsx:161-216` — "Refine" vs the "Implement" split button; `apps/web/src/proposedPlan.ts:73-96` — `PLAN_IMPLEMENTATION_PROMPT_PREFIX` and `resolvePlanFollowUpSubmission`; `apps/web/src/session-logic.ts:383-387` — `hasActionableProposedPlan` is `implementedAt === null`*
 
+*Built: the composer's primary action is a **plain** "Implement" button, not a split button. T3's
+menu offers "implement in a new thread", which needs a thread-creation path from inside the
+composer that this design does not have (§6.1 creates a tab first, then turns) — a disabled menu
+item is worse than no menu (`packages/ui/src/components/agent-chat/composer/
+ComposerPrimaryActions.tsx`). "Refine" and the fixed implementation prefix are as written.*
+
 **The plan checklist is a composer surface, not a timeline row.** `turn.plan.updated` folds into one
 active plan state — current step, completed count, total — displayed beside the status line, with the
 last plan of any turn retained so a follow-up message does not blank the checklist.
@@ -2635,6 +2705,13 @@ the message settles, the rendered HTML goes into a size-aware LRU and is served 
 that streamed keeps the line renderer after settling, because swapping to cached HTML would clear a
 live selection.
 *T3: `apps/web/src/lib/syntaxHighlighting.ts:10-16` — `PREFERRED_HIGHLIGHTER = "shiki-wasm"` and the first-caller-wins singleton note; differs: Lezer instead of Shiki, for the CSP reason above — the line-mounted streaming renderer and the settled-HTML LRU below are kept as T3 has them; `apps/web/src/components/ChatMarkdown.tsx:1039-1073` — `preserveLines={isStreaming || hasStreamed}` and the selection comment; `:1084-1135` — `codeToHast` + `HighlightedCodeLines`; `:338-357, 1117-1126` — the settled-HTML LRU (500 entries / 50 MB), written only when not streaming*
+
+*Built: the highlighter uses a **static light/dark token palette** rather than deriving colours
+from the active colour scheme. Lezer's `highlightTree` needs a `HighlightStyle` built ahead of
+parsing, and rebuilding one per scheme × mode on every theme change would re-highlight every cached
+block; a code block reads as code in all seven schemes either way. A block over `MAX_TURN_INPUT_CHARS`
+(120 000) is rendered unhighlighted — the parse is the cost, and nobody reads a 120 000-character
+block's colours (`packages/ui/src/components/agent-chat/timeline/markdown/highlight-core.ts`).*
 
 Live-follow is a render-visible flag — not a ref — re-armed only inside a 40 px band at the bottom
 of the content, measured as `contentLength - scroll - scrollLength`. A "near end" heuristic that
@@ -2682,6 +2759,16 @@ bindings follow T3's: `Ctrl/Cmd+Shift+A` for the runtime-mode picker is already 
 Attention Center on this host, so the mode picker gets its own key and the conflict is resolved once,
 in the keybinding table, not per component.
 *T3: `apps/web/src/components/chat/ChatComposer.tsx:5880-5901` — `openControl`; `:1116`, `apps/web/src/components/chat/TraitsPicker.tsx:622`, `apps/web/src/components/BranchToolbar.tsx:211-214`, `apps/web/src/components/chat/CompactComposerControlsMenu.tsx:44-46` — the attribute sites, including multi-token values when an overflow menu absorbs two controls; `packages/shared/src/keybindings.ts:44-55` — `composer.stash` (`mod+s`), `thread.steerQueuedMessage` (`mod+shift+enter`), `composer.mode` (`mod+shift+a`), `composer.effort`, `composer.host`*
+
+*Built: the runtime-mode picker's key is **`mod+shift+m`** — the conflict with the Attention
+Center's `Ctrl+Shift+A` is resolved there, once, as this paragraph requires; the whole table is one
+function, `resolveChatShortcut` (`packages/ui/src/lib/agent-chat/keybindings.logic.ts`), so a new
+binding is a new arm rather than a second listener. The account chip gets
+**no** shortcut: it is changed rarely, and every chord spent is one the terminal surfaces cannot
+have. `/effort <id>` is a narrow client-side bridge that writes the current `ModelSelection`'s
+effort option and sends nothing (§4.6.5). A paste that folds into a text attachment reports itself
+**inline in the composer** rather than as a toast, because a toast for something that already
+produced a visible chip is noise (`packages/ui/src/components/agent-chat/composer/`).*
 
 **The queued-message model.** This is the client's own queue of messages it has not dispatched
 yet, and it is a different thing from the host-side queue that holds already-posted `/turn`s behind
@@ -2738,6 +2825,14 @@ since the numbers they refer to are off screen. "Dismiss" is offered only when t
 `responseMode: "message"` — and posts `/dismiss` (§6.2); a native callback blocks the provider and
 must be answered.
 *T3: `apps/web/src/pendingUserInput.ts:160-191` — `derivePendingUserInputProgress` (`activeQuestion`, `answeredQuestionCount`, `isLastQuestion`, `canAdvance`, `isComplete`); `:42-68` — `resolvePendingUserInputAnswer`, custom-beats-options, array for multi-select, attachments-alone → `""`; `apps/web/src/components/chat/ComposerPendingUserInputPanel.tsx:75-82` — the collapse-keyed-by-question-id comment; `:118-135` — the 200 ms auto-advance with optimistic selection; `:137-166` — the digit handler and its collapsed opt-out; `packages/client-runtime/src/pendingRequests.ts:21-27, 171` — `dismissible` = `responseMode === "message"`*
+
+*Built: the question card owns its **Submit** button and its custom-answer field outright, rather
+than handing them to the composer's primary action. A question and a draft are two different
+intents sharing one text input, and the 200 ms optimistic advance above makes "which one does
+Enter send?" genuinely ambiguous — an explicit Submit on the card removes the question
+(`packages/ui/src/components/agent-chat/banners/`). Codex's `isSecret` renders as a masked field
+and its `isOther` as the free-text option, and an answer goes back as the option's **label**,
+since that CLI's options carry no `value` (§4.5 Codex).*
 
 Focus stays in the composer throughout. An approval is never a modal and never steals focus; the
 user can keep typing while it sits there. The composer goes `inert` for exactly one reason — while a
@@ -2826,6 +2921,16 @@ stay mounted so the parent can be steered while watching a child, and the child 
 commands. On OpenCode and Grok the roster shows whatever their protocols report and nothing more.
 *T3: `apps/web/src/components/AgentsPanel.tsx:139-140` — `/** Flat, non-interactive agent status line. No unfold. */`; `:550-567` — every row renders, with no "+N more" and no removal of finished rows; only the fold's silent 100-row cap bounds it; `:313-317` — a workflow section "keeps that shape as it settles so completion never yanks rows out from under the user"; `apps/web/src/components/chat/MessagesTimeline.tsx:4654-4660` — the closest T3 equivalent of a drill-in, an "Open Agents panel ›" link into a right-panel surface. differs on three counts: T3's roster is a right-panel surface rather than a dock under the composer; its rows are not clickable and there is no per-agent timeline, no `agentId` filter and no breadcrumb; and it neither collapses nor removes settled rows. Our collapse-past-five, fade-on-turn-end and the live-background exemption from both are new, so they must not fight the "never reshuffle what stays visible" rule above, and the drill-in is new surface with no precedent to lean on*
 
+*Built: the five-row rule applies to **ungrouped** rows only. A workflow group — a spawn batch
+rendered as one section — keeps its whole membership, because collapsing half a batch behind
+"N more" breaks T3's "a workflow section keeps that shape as it settles" rule that the paragraph
+above adopts. "Past five" is the first five rows **in spawn order**, not by rank: a roster that
+re-sorts as statuses change moves rows under the pointer. An `idle` row is settled but **not**
+finished — it does not fade out, because a resumable child is still there to click. Reopening a
+thread that settled while the tab was closed starts every row at `removed` rather than replaying
+a fade nobody was watching. And there is no workflow-script viewer
+(`packages/ui/src/components/agent-chat/roster/`).*
+
 ### 7.7 Other surfaces
 
 Status dots, the Attention Center, push notifications and the command palette work from
@@ -2867,6 +2972,12 @@ question banners get a compact variant with an explicit "write a custom answer" 
 only thing allowed to move focus. One breakpoint governs all of this; T3 runs three and has a band
 where the sidebar is a sheet while the composer is still in desktop mode.
 *T3: `apps/web/src/components/chat/ChatComposer.tsx:2102-2103` — `isComposerCollapsedMobile`; `apps/web/src/composer-logic.ts:37` — the mobile Enter suppression inside `composerSubmissionIntentForEnter`; `apps/web/src/components/chat/ChatComposer.tsx:3711-3750, 3802` — `blurMobileComposerAfterSend`; `apps/web/src/components/ChatView.tsx:5743-5768` — autofocus suppression on mobile; `apps/web/src/components/chat/ChatComposer.tsx:6200-6271` — the mobile-collapsed question layout and its focus-moving "Write custom answer" button; `apps/web/src/hooks/useMediaQuery.ts:3-11` and `apps/web/src/rightPanelLayout.ts:1` — the 640 / 768 / 980 split we deliberately do not copy*
+
+*Built: only the **question** banner gets a compact variant; the approval banner renders the same
+row at every width. This matches T3, whose approval branch is taken before any mobile check, and
+the row survives a 360 px viewport — title, Decline, Approve and the overflow menu — because the
+title does not truncate. A compact approval is a follow-up, not a regression
+(`packages/ui/src/components/agent-chat/banners/banner-model.ts`).*
 
 
 ## 8. Deployment
