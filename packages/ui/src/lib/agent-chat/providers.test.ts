@@ -156,3 +156,154 @@ describe("rate limits", () => {
     ]);
   });
 });
+
+describe("R8-M4 hop 3 — the values the host actually writes reach the toast", () => {
+  /**
+   * V1 §9 found the two halves of this contract disagreeing: the host marked an
+   * `auth.status {error}` one way and the client tested for another, so the
+   * toast could never fire in production while both suites stayed green. These
+   * cases pin the client half to the two markings the host writes, and — just
+   * as importantly — to the one it writes for non-credential trouble.
+   */
+  const raise = (): Array<{ adapterId: string; agentName: string; message: string }> => {
+    const raised: Array<{ adapterId: string; agentName: string; message: string }> = [];
+    setProviderSideEffects({ onAuthError: (error) => raised.push(error) });
+    return raised;
+  };
+
+  it("toasts end-to-end when the host writes `auth: unauthenticated`", async () => {
+    const raised = raise();
+    await loadProviders(
+      transportServing([
+        provider({
+          id: "codex",
+          refIds: ["codex"],
+          status: "error",
+          auth: { status: "unauthenticated", label: "Codex sign-in expired." }
+        })
+      ]),
+      { force: true }
+    );
+    assert.deepEqual(raised, [
+      { adapterId: "codex", agentName: "codex", message: "Codex sign-in expired." }
+    ]);
+  });
+
+  it("toasts end-to-end when the host writes `status: error` with auth unresolved", async () => {
+    const raised = raise();
+    await loadProviders(
+      transportServing([
+        provider({ status: "error", auth: { status: "unknown" }, message: "401 from the API" })
+      ]),
+      { force: true }
+    );
+    assert.deepEqual(raised, [
+      { adapterId: "claude", agentName: "claude", message: "401 from the API" }
+    ]);
+  });
+
+  it("stays silent for `status: degraded`, which is not a credential verdict", async () => {
+    // The Codex and OpenCode probes set `degraded` for a missing binary or a
+    // version advisory. Widening the predicate to cover it would turn every
+    // such snapshot into a "sign in again" toast — the failure mode this row
+    // must never trade for the one it fixed.
+    const raised = raise();
+    await loadProviders(
+      transportServing([
+        provider({
+          status: "degraded",
+          auth: { status: "unknown" },
+          message: "codex is 2 minor versions behind"
+        })
+      ]),
+      { force: true }
+    );
+    assert.deepEqual(raised, []);
+  });
+
+  it("reports a refresh's auth error too, not just the catalog read", async () => {
+    await loadProviders(transportServing([provider()]), { force: true });
+    const raised = raise();
+    await refreshProvider(
+      transportServing([provider()], provider({ auth: { status: "unauthenticated" } })),
+      "claude"
+    );
+    assert.equal(raised.length, 1);
+    assert.match(raised[0]!.message, /not signed in/);
+  });
+});
+
+describe("R6 #11 — a provider row from an older host is repaired, never trusted", () => {
+  /**
+   * §8: a host that survived a deploy runs OLD code, so the wire can hand this
+   * client a snapshot shape it predates. Consumers read
+   * `provider?.capabilities.showPlanModeToggle` — the `?.` guards the provider,
+   * not the block — so one such row used to crash the composer for every thread.
+   */
+  const load = async (rows: unknown[]): Promise<ProviderSnapshot[]> => {
+    await loadProviders(
+      {
+        async providers() {
+          return { providers: rows, hostInstanceId: "h1" };
+        }
+      } as unknown as AgentChatTransport,
+      { force: true }
+    );
+    return providersStore.getState().providers;
+  };
+
+  it("defaults a missing `capabilities` block to the withholding shape", async () => {
+    const [row] = await load([
+      { id: "claude", refIds: ["claude"], status: "ready", auth: { status: "authenticated" } }
+    ]);
+    assert.ok(row, "the row survives rather than being dropped");
+    assert.equal(row.capabilities.showPlanModeToggle, false);
+    assert.equal(row.capabilities.reportsContextWindow, false);
+    assert.equal(row.capabilities.supportsConversationRollback, false);
+    assert.equal(row.capabilities.sessionModelSwitch, "unsupported");
+  });
+
+  it("keeps what a partial `capabilities` block does carry", async () => {
+    const [row] = await load([
+      {
+        id: "claude",
+        refIds: ["claude"],
+        capabilities: { sessionModelSwitch: "in-session", showPlanModeToggle: true }
+      }
+    ]);
+    assert.equal(row?.capabilities.sessionModelSwitch, "in-session");
+    assert.equal(row?.capabilities.showPlanModeToggle, true);
+    // Absent from the older block, so it withholds rather than guesses.
+    assert.equal(row?.capabilities.reportsContextWindow, false);
+  });
+
+  it("defaults the list fields so `.map` on them cannot throw", async () => {
+    const [row] = await load([{ id: "grok", capabilities }]);
+    assert.deepEqual(row?.models, []);
+    assert.deepEqual(row?.slashCommands, []);
+    assert.deepEqual(row?.skills, []);
+    // An empty `refIds` would orphan the row from every lookup and from the
+    // rate-limit fan-out, so it falls back to the adapter id.
+    assert.deepEqual(row?.refIds, ["grok"]);
+  });
+
+  it("repairs a missing `auth` block into `unknown` rather than toasting or crashing", async () => {
+    const raised: string[] = [];
+    setProviderSideEffects({ onAuthError: ({ message }) => raised.push(message) });
+    const [row] = await load([{ id: "claude", refIds: ["claude"], status: "ready", capabilities }]);
+    assert.equal(row?.auth.status, "unknown");
+    assert.deepEqual(raised, [], "an unreadable auth block is not a sign-in verdict");
+  });
+
+  it("drops only the rows that cannot be repaired, keeping the rest of the catalog", async () => {
+    const rows = await load([
+      null,
+      { refIds: ["claude"] },
+      { id: "codex", refIds: ["codex"], capabilities }
+    ]);
+    assert.deepEqual(
+      rows.map((row) => row.id),
+      ["codex"]
+    );
+  });
+});

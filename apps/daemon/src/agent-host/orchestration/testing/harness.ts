@@ -78,6 +78,8 @@ export interface TestHost {
     refId?: string;
     cwd?: string;
     home?: "system" | "account" | "cliproxy";
+    /** §6.1 create-time resume, for the E5/E6 paths. */
+    resume?: { home: "system" | "account" | "cliproxy"; conversationId: string };
     launchEnv?: Record<string, string>;
     unsetEnv?: string[];
     homePath?: string;
@@ -202,6 +204,7 @@ export function createTestHost(options: TestHostOptions = {}): TestHost {
         home: input.home ?? "account",
         modelSelection: { model: "test-model" },
         runtimeMode: "approval-required",
+        ...(input.resume ? { resume: input.resume } : {}),
         ...(input.launchEnv ? { launchEnv: input.launchEnv } : {}),
         ...(input.unsetEnv ? { unsetEnv: input.unsetEnv } : {}),
         ...(input.homePath ? { homePath: input.homePath } : {}),

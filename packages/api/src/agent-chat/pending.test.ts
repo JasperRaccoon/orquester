@@ -34,16 +34,31 @@ test("tracks open approvals and removes resolved ones", () => {
   );
 });
 
-test("a resolved row is a tombstone: a later requested row cannot reopen it", () => {
+test("a REPLAY of a resolved request cannot reopen it", () => {
+  // A replay is the same row delivered twice, so it carries the SAME stamp as
+  // the original — which is how it is told apart from a provider recycling the
+  // id for a genuinely new request (E2E R2-1).
   resetActivityIds();
-  const pending = derivePendingRequests([
-    activity("approval.resolved", { requestId: "r1", decision: "decline" }),
-    activity("approval.requested", { requestId: "r1", requestType: "command_execution_approval" })
-  ]);
+  const requested = activity(
+    "approval.requested",
+    { requestId: "r1", requestType: "command_execution_approval" },
+    { createdAt: "2026-01-01T00:00:01.000Z" }
+  );
+  const resolved = activity(
+    "approval.resolved",
+    { requestId: "r1", decision: "decline" },
+    { createdAt: "2026-01-01T00:00:02.000Z" }
+  );
+  // Out-of-order delivery: the resolution is seen first, then the request it
+  // closed. The seed is what carries the ordering across that.
+  const pending = derivePendingRequests([resolved, requested], {
+    closed: new Set(["r1"]),
+    closedAt: new Map([["r1", resolved.createdAt]])
+  });
   assert.deepEqual(pending.approvals, []);
 });
 
-test("a dismissal's user-input.resolved row closes the question permanently", () => {
+test("a dismissal's user-input.resolved row closes the question it answered", () => {
   resetActivityIds();
   const question = {
     requestId: "q1",
@@ -52,11 +67,17 @@ test("a dismissal's user-input.resolved row closes the question permanently", ()
       { id: "Pick one", header: "h", question: "Pick one", options: [{ label: "a" }] }
     ]
   };
+  const requested = activity("user-input.requested", question, {
+    createdAt: "2026-01-01T00:00:01.000Z"
+  });
   const pending = derivePendingRequests([
-    activity("user-input.requested", question),
-    activity("user-input.resolved", { requestId: "q1", answers: {} }),
-    // An out-of-order redelivery of the same request.
-    activity("user-input.requested", question)
+    requested,
+    activity("user-input.resolved", { requestId: "q1", answers: {} }, {
+      createdAt: "2026-01-01T00:00:02.000Z"
+    }),
+    // The same row redelivered — same stamp, so it is the question that was
+    // already dismissed, not a new one.
+    requested
   ]);
   assert.deepEqual(pending.userInputs, []);
 });
@@ -229,4 +250,108 @@ test("rows with no requestId, and non-request kinds, are ignored", () => {
     activity("approval.requested", "not an object")
   ]);
   assert.deepEqual(pending, { approvals: [], userInputs: [] });
+});
+
+// --- R2-1: a recycled requestId must not be swallowed by an old tombstone ---
+
+test("a request that arrives AFTER a resolution with the same id opens fresh", () => {
+  // E2E round 2, R2-1 (blocker): Codex mints `codex-<threadId>-<n>` with a
+  // per-provider-session counter, but a THREAD outlives its provider sessions.
+  // After a daemon restart + thread/resume the counter restarted at 1, so a
+  // brand-new file-change approval reused the id of an approval resolved
+  // minutes earlier. The old tombstone deleted the new request: no card, no
+  // attention flag, composer unblocked, and the provider blocked forever.
+  resetActivityIds();
+  const pending = derivePendingRequests([
+    activity("approval.requested", {
+      requestId: "codex-T-1",
+      requestKind: "command",
+      requestType: "command_execution_approval"
+    }),
+    activity("approval.resolved", { requestId: "codex-T-1", decision: "accept" }),
+    activity("approval.requested", {
+      requestId: "codex-T-1",
+      requestKind: "file-change",
+      requestType: "file_change_approval",
+      detail: "/w/p/r2-card.txt"
+    })
+  ]);
+  assert.deepEqual(
+    pending.approvals.map((entry) => [entry.requestId, entry.requestKind]),
+    [["codex-T-1", "file-change"]],
+    "the later request is a different request and must render"
+  );
+});
+
+test("a resolution still closes the request that PRECEDES it", () => {
+  resetActivityIds();
+  const pending = derivePendingRequests([
+    activity("approval.requested", { requestId: "r1", requestType: "permission_approval" }),
+    activity("approval.resolved", { requestId: "r1", decision: "accept" })
+  ]);
+  assert.deepEqual(pending.approvals, []);
+});
+
+test("a recycled question id opens fresh too", () => {
+  resetActivityIds();
+  const question = (header: string) => ({
+    requestId: "q-1",
+    responseMode: "message",
+    questions: [{ id: "a", header, question: "q", options: [{ label: "yes" }] }]
+  });
+  const pending = derivePendingRequests([
+    activity("user-input.requested", question("first")),
+    activity("user-input.resolved", { requestId: "q-1", answers: {} }),
+    activity("user-input.requested", question("second"))
+  ]);
+  assert.equal(pending.userInputs.length, 1);
+  assert.equal(pending.userInputs[0]?.questions[0]?.header, "second");
+});
+
+test("a seeded tombstone closes only requests at or before its stamp", () => {
+  // The R5 #4 guarantee (an aged-out resolution keeps its request closed) has
+  // to survive R2-1's fix, so the seed carries WHEN the resolution happened.
+  resetActivityIds();
+  const older = derivePendingRequests(
+    [
+      activity(
+        "approval.requested",
+        { requestId: "r1", requestType: "permission_approval" },
+        { createdAt: "2026-01-01T00:00:01.000Z" }
+      )
+    ],
+    {
+      closed: new Set(["r1"]),
+      closedAt: new Map([["r1", "2026-01-01T00:00:05.000Z"]])
+    }
+  );
+  assert.deepEqual(older.approvals, [], "a request older than the tombstone stays closed");
+
+  resetActivityIds();
+  const newer = derivePendingRequests(
+    [
+      activity(
+        "approval.requested",
+        { requestId: "r1", requestType: "permission_approval" },
+        { createdAt: "2026-01-01T00:00:09.000Z" }
+      )
+    ],
+    {
+      closed: new Set(["r1"]),
+      closedAt: new Map([["r1", "2026-01-01T00:00:05.000Z"]])
+    }
+  );
+  assert.equal(newer.approvals.length, 1, "a request newer than the tombstone opens");
+});
+
+test("a seed with no stamps stays conservative", () => {
+  // A state built by a constructor that predates the stamp map: without
+  // ordering information the tombstone still closes, which is the R5 #4
+  // behaviour and never resurrects a dead card.
+  resetActivityIds();
+  const pending = derivePendingRequests(
+    [activity("approval.requested", { requestId: "r1", requestType: "permission_approval" })],
+    { closed: new Set(["r1"]) }
+  );
+  assert.deepEqual(pending.approvals, []);
 });

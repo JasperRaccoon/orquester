@@ -25,19 +25,22 @@
  * is being shown.
  */
 
-import type {
-  ProviderThreadTurnSnapshot,
-  RuntimeEvent,
-  RuntimeEventRaw,
-  ThreadSnapshot
+import {
+  HISTORICAL_RAW_SOURCE,
+  type ProviderThreadTurnSnapshot,
+  type RuntimeEvent,
+  type RuntimeEventRaw,
+  type ThreadSnapshot
 } from "@orquester/api/agent-chat";
 
-import { XAI_RAW_SOURCE } from "./normalize.ts";
-
 /**
- * The method stamped on every projected event's `raw`. It names the replay
- * channel rather than the live one, so a reader can tell a reconstructed row
- * from a row that was actually observed.
+ * The method stamped on every projected event's `raw`. The SOURCE is
+ * `HISTORICAL_RAW_SOURCE`, which is what a consumer keys on to know the event
+ * describes something that already happened — so it never raises attention,
+ * never fires a push and never moves a live turn. The method is kept alongside
+ * it because it names *which* provider channel the row was reconstructed from,
+ * which is the only way to tell a Grok projection from any other once the
+ * source is shared.
  */
 export const GROK_HISTORY_RAW_METHOD = "_x.ai/session/update#replay";
 
@@ -110,9 +113,9 @@ function projectTurn(turn: ProviderThreadTurnSnapshot, deps: ProjectHistoryDeps)
   }
 
   const raw: RuntimeEventRaw = {
-    source: XAI_RAW_SOURCE,
+    source: HISTORICAL_RAW_SOURCE,
     method: GROK_HISTORY_RAW_METHOD,
-    payload: { turnId: turn.id, historical: true }
+    payload: { turnId: turn.id }
   };
   const events: RuntimeEvent[] = [];
   const event = (type: RuntimeEvent["type"], payload: unknown, itemId?: string): RuntimeEvent => {

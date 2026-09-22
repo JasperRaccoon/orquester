@@ -327,7 +327,8 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
         liveThreadIds: orchestrator.liveThreadIds(),
         activeTurnThreadIds: orchestrator.activeTurnThreadIds(),
         pid: options.pid ?? process.pid,
-        startedAt: options.startedAt
+        startedAt: options.startedAt,
+        providersRevision: orchestrator.providersChangeCount()
       };
       sendJson(response, 200, body);
       return;

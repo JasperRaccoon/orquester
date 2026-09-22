@@ -36,7 +36,7 @@ import {
   resolveSelectedModel
 } from "./composer-model";
 import { isComposerCollapsedMobile, resolveComposerTimelineInset } from "./composer-inset";
-import { isChatTabListenerActive } from "./tab-visibility";
+import { composerOwnsEscape, isChatTabListenerActive } from "./tab-visibility";
 import {
   findComposerShortcutTarget,
   resolveChatShortcut,
@@ -54,13 +54,14 @@ import {
   proposedPlanTitle,
   resolveFollowUpDisposition,
   resolvePlanFollowUpSubmission,
+  submitIsNoOp,
+  swallowsStandalonePlanCommand,
   uploadsBlockSend
 } from "./composer-submission";
 import {
   detectComposerTrigger,
   extendReplacementRangeForTrailingSpace,
   isTriggerAtPromptStart,
-  parseStandaloneComposerSlashCommand,
   replaceTextRange,
   type ComposerTrigger
 } from "./composer-trigger";
@@ -772,10 +773,12 @@ export function ChatComposer({
       // §4.6.5(a): swallowed client-side ONLY where the toggle exists. On
       // OpenCode/Grok the provider may dispatch `/plan` natively, so with the
       // toggle hidden the draft is ordinary text and goes to the wire.
-      const standalone = showPlanModeToggle
-        ? parseStandaloneComposerSlashCommand(text)
-        : null;
-      if (standalone && draft.attachments.length === 0) {
+      const standalone = swallowsStandalonePlanCommand({
+        text,
+        showPlanModeToggle,
+        attachmentCount: draft.attachments.length
+      });
+      if (standalone) {
         setPlanMode(standalone);
         setDraft((state) => ({ ...state, text: "" }));
         applyCaret(0);
@@ -793,7 +796,9 @@ export function ChatComposer({
           })
         : null;
 
-      if (!sendable && plan === null) return;
+      if (submitIsNoOp({ hasSendableContent: sendable, hasActionablePlan: plan !== null })) {
+        return;
+      }
       if (sendDisabledReason) {
         setNotice(sendDisabledReason);
         return;
@@ -917,8 +922,25 @@ export function ChatComposer({
        * `scroll-to-end` stays the timeline's.
        */
       if (shortcut.kind === "interrupt") {
-        if (!isTurnActive) return;
-        if (event.target === textareaRef.current) return;
+        // V1 §10.1: the shell registers a second window Escape listener. It
+        // owns everything OUTSIDE this composer shell; we own inside it, minus
+        // the textarea (whose own handler gives the token menu first refusal).
+        // `stopPropagation` cannot silence a sibling on the same node, so both
+        // sides gate on `defaultPrevented` and on disjoint scopes — otherwise
+        // one Escape sent two interrupts.
+        const target = event.target;
+        const insideComposerShell =
+          target instanceof Node && shellRef.current?.contains(target) === true;
+        if (
+          !composerOwnsEscape({
+            defaultPrevented: event.defaultPrevented,
+            insideComposerShell,
+            isTextarea: target === textareaRef.current,
+            isTurnActive
+          })
+        ) {
+          return;
+        }
         event.preventDefault();
         interrupt();
         return;
@@ -939,8 +961,9 @@ export function ChatComposer({
     if (isPasteAsTextShortcut(event, isApplePlatform())) bypassPasteRef.current = true;
     // An IME candidate window is open: Enter COMMITS the candidate and Escape
     // CANCELS the composition. Acting on either here sends a half-converted
-    // prompt or kills the composition. `keyCode === 229` is the pre-
-    // `isComposing` fallback some engines still report for the same state.
+    // prompt or kills the composition. `composerSubmissionIntentForEnter` also
+    // refuses on its own (tested there); this early return additionally keeps
+    // Escape and the menu keys out of a live composition.
     if (event.nativeEvent.isComposing || event.keyCode === 229) return;
     if (showMenu) {
       const count = Math.max(1, menuItems.length);
@@ -985,7 +1008,9 @@ export function ChatComposer({
       modifierKey: event.metaKey || event.ctrlKey,
       isRunning: isTurnActive,
       sendShortcut: SEND_SHORTCUT,
-      prompt: draft.text
+      prompt: draft.text,
+      isComposing: event.nativeEvent.isComposing,
+      keyCode: event.keyCode
     });
     if (intent === null) return;
     event.preventDefault();

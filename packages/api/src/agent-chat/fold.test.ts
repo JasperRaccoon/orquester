@@ -392,14 +392,13 @@ test("a tombstoned request stays closed after its resolution ages out of retenti
   // `*.requested` reopened a dead approval card and the provider rejected the
   // answer.
   reset();
+  const openedRow = activity("approval.requested", {
+    requestId: "R1",
+    requestType: "command_execution_approval"
+  });
   const events: DomainEvent[] = [
     created(),
-    ev("thread.activity-appended", {
-      activity: activity("approval.requested", {
-        requestId: "R1",
-        requestType: "command_execution_approval"
-      })
-    }),
+    ev("thread.activity-appended", { activity: openedRow }),
     ev("thread.activity-appended", {
       activity: activity("approval.resolved", { requestId: "R1", decision: "accept" })
     })
@@ -418,16 +417,13 @@ test("a tombstoned request stays closed after its resolution ages out of retenti
     "the closing row really has aged out"
   );
 
+  // A REPLAY of the original request: same row, same stamp. The tombstone
+  // outlived the closing row, so it still closes this.
   state = applyDomainEvent(
     state,
-    ev("thread.activity-appended", {
-      activity: activity("approval.requested", {
-        requestId: "R1",
-        requestType: "command_execution_approval"
-      })
-    })
+    ev("thread.activity-appended", { activity: openedRow })
   );
-  assert.deepEqual(state.pending.approvals, [], "a tombstoned request can never reopen");
+  assert.deepEqual(state.pending.approvals, [], "a replayed request stays closed");
 });
 
 test("an aged-out user-input resolution keeps its question closed too", () => {
@@ -438,9 +434,10 @@ test("an aged-out user-input resolution keeps its question closed too", () => {
     // from retention, so its closing row can genuinely age out.
     questions: [{ id: "a", header: "h", question: "q", options: [{ label: "yes" }] }]
   };
+  const askedRow = activity("user-input.requested", question);
   const events: DomainEvent[] = [
     created(),
-    ev("thread.activity-appended", { activity: activity("user-input.requested", question) }),
+    ev("thread.activity-appended", { activity: askedRow }),
     ev("thread.activity-appended", {
       activity: activity("user-input.resolved", { requestId: "Q1", answers: {} })
     })
@@ -453,11 +450,50 @@ test("an aged-out user-input resolution keeps its question closed too", () => {
     );
   }
   let state = fold(events);
+  state = applyDomainEvent(state, ev("thread.activity-appended", { activity: askedRow }));
+  assert.deepEqual(state.pending.userInputs, []);
+});
+
+test("a RECYCLED request id opens a fresh card even across retention (R2-1)", () => {
+  // The other side of the same rule: a provider that reuses an id for a
+  // genuinely new request must not have it swallowed by the old tombstone.
+  reset();
+  const events: DomainEvent[] = [
+    created(),
+    ev("thread.activity-appended", {
+      activity: activity("approval.requested", {
+        requestId: "codex-T-1",
+        requestType: "command_execution_approval"
+      })
+    }),
+    ev("thread.activity-appended", {
+      activity: activity("approval.resolved", { requestId: "codex-T-1", decision: "accept" })
+    })
+  ];
+  for (let i = 0; i < ACTIVITY_RETENTION_LIMIT + 10; i += 1) {
+    events.push(
+      ev("thread.activity-appended", {
+        activity: activity("tool.started", { toolUseId: `t${i}` }, { id: `noise-${i}` })
+      })
+    );
+  }
+  let state = fold(events);
   state = applyDomainEvent(
     state,
-    ev("thread.activity-appended", { activity: activity("user-input.requested", question) })
+    ev("thread.activity-appended", {
+      activity: activity("approval.requested", {
+        requestId: "codex-T-1",
+        requestKind: "file-change",
+        requestType: "file_change_approval",
+        detail: "/w/p/r2-card.txt"
+      })
+    })
   );
-  assert.deepEqual(state.pending.userInputs, []);
+  assert.deepEqual(
+    state.pending.approvals.map((entry) => [entry.requestId, entry.requestKind]),
+    [["codex-T-1", "file-change"]],
+    "a new request stamped after the tombstone must render"
+  );
 });
 
 test("retention that drops a request row re-derives pending on that very event", () => {

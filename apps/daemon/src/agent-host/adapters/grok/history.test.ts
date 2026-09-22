@@ -12,7 +12,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import type { RuntimeEvent, ThreadSnapshot } from "@orquester/api/agent-chat";
+import { HISTORICAL_RAW_SOURCE, type RuntimeEvent, type ThreadSnapshot } from "@orquester/api/agent-chat";
 
 import { agentFrames, readCapture, type JsonRpcFrame } from "./fixtures.ts";
 import {
@@ -147,16 +147,58 @@ test("a projected turn never claims token usage it cannot account for", () => {
 });
 
 test("every projected event is stamped as replayed history, not live traffic", () => {
+  // The shared marker is what a consumer keys on: a historical event never
+  // raises attention, never fires a push and never moves a live turn.
   const snapshot = historyFromCapture("06-session-load-replay.ndjson");
-  for (const event of projectGrokHistory(snapshot, { threadId: "t1", ...stamps() })) {
-    assert.equal(event.raw?.method, GROK_HISTORY_RAW_METHOD);
-    assert.equal(event.raw?.source, "acp.grok.extension");
-    assert.deepEqual(event.raw?.payload, {
-      turnId: "f8f85d1b-e6be-4e6c-9073-5ae82cd1b299",
-      historical: true
-    });
+  const events = projectGrokHistory(snapshot, { threadId: "t1", ...stamps() });
+  assert.ok(events.length > 0);
+  for (const event of events) {
+    assert.equal(event.raw?.source, HISTORICAL_RAW_SOURCE);
+    assert.equal(event.raw?.method, GROK_HISTORY_RAW_METHOD, "which channel it was rebuilt from");
+    assert.deepEqual(event.raw?.payload, { turnId: "f8f85d1b-e6be-4e6c-9073-5ae82cd1b299" });
   }
 });
+
+test("a LIVE event never carries the historical marker", () => {
+  // The two must stay distinguishable: everything the normaliser emits from a
+  // real frame keeps its own ACP/vendor source.
+  const snapshot = historyFromCapture("06-session-load-replay.ndjson");
+  const historical = new Set(
+    projectGrokHistory(snapshot, { threadId: "t1", ...stamps() }).map((event) => event.raw?.source)
+  );
+  assert.deepEqual([...historical], [HISTORICAL_RAW_SOURCE]);
+
+  const normalizer = new GrokNormalizer(
+    {
+      threadId: "t1",
+      stamp: stamps().stamp,
+      uuid: () => "u",
+      activeTurnId: () => "turn-1",
+      planHost: { platform: "linux", env: {} }
+    },
+    "session-1"
+  );
+  normalizer.beginTurn();
+  const live: RuntimeEvent[] = [];
+  for (const frame of agentFrames(readCapture("02-prompt-plain-text.ndjson"))) {
+    route2(normalizer, frame, live);
+  }
+  assert.ok(live.length > 0);
+  assert.equal(
+    live.some((event) => event.raw?.source === HISTORICAL_RAW_SOURCE),
+    false
+  );
+});
+
+function route2(normalizer: GrokNormalizer, frame: JsonRpcFrame, out: RuntimeEvent[]): void {
+  if (frame.method === "session/update") {
+    out.push(...normalizer.handleSessionUpdate(frame.params as SessionNotification));
+    return;
+  }
+  if (frame.method === "_x.ai/session/update" || frame.method === "_x.ai/session_notification") {
+    out.push(...normalizer.handleXaiNotification(frame.method, frame.params));
+  }
+}
 
 test("event ids are unique across the whole projection", () => {
   const snapshot = historyFromCapture("06-session-load-replay.ndjson");

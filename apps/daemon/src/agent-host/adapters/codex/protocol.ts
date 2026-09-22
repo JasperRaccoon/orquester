@@ -89,6 +89,30 @@ export class CodexRpcError extends Error {
   }
 }
 
+/**
+ * Does this rejection mean "there was nothing left to interrupt"?
+ *
+ * `turn/interrupt` answers a turn that settled underneath us — and a turn id
+ * the server never knew — with a hard `-32600 "no active turn to interrupt"`
+ * (fixtures README obs. 5; `13-error-envelopes.ndjson` case (f)). That is a
+ * benign race: the user's Stop got what they asked for.
+ *
+ * It must be matched on the MESSAGE, never on the code alone. `-32600` is the
+ * app-server's catch-all `Invalid request`, and the very same method answers a
+ * malformed call with it too — case (c) is
+ * `turn/interrupt` → `-32600 "Invalid request: missing field \`turnId\`"`.
+ * Treating the whole code as benign would report our own protocol bug to the
+ * user as a successful Stop and quietly mark the turn settled while the model
+ * kept running.
+ */
+export function isNoActiveTurnError(error: unknown): boolean {
+  if (!(error instanceof CodexRpcError)) {
+    return false;
+  }
+  const message = error.message.toLowerCase();
+  return message.includes("no active turn") || message.includes("unknown turn");
+}
+
 /** Raised on every pending request when the transport is torn down. */
 export class CodexTransportClosedError extends Error {
   constructor(reason: string) {

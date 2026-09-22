@@ -31,7 +31,8 @@ import type {
   CheckpointStatus,
   ThreadActivityItem,
   ThreadMessageRole,
-  ThreadSessionState
+  ThreadSessionState,
+  TurnState
 } from "./thread.ts";
 
 // ---------------------------------------------------------------------------
@@ -136,6 +137,27 @@ export interface ThreadTurnStartRequestedPayload {
   modelSelection?: ModelSelection;
   /** §3.3 recovery. Validated against `promptlessTurnContinuation` (§4.1). */
   continuation?: boolean;
+  /**
+   * A turn REPLAYED from the provider's own transcript
+   * (`AgentAdapter.projectHistory`), which is already over.
+   *
+   * Every live turn is settled by the fold from session status (§5.1), and a
+   * historical turn must not touch session status at all — it describes
+   * something that already happened, so letting it move the live session
+   * would settle whatever turn is actually running. So the settlement rides
+   * the event that creates the row: the fold builds it settled rather than
+   * `running`, and nothing else in the thread moves.
+   *
+   * *Added additively for the E6 history replay; an older build renders the
+   * row as `running`, a newer build tolerates its absence (§8).*
+   */
+  settled?: {
+    state: TurnState;
+    tokenUsage?: TurnTokenUsage;
+    completedAt: string;
+    /** The turn's answer, for the §5.5 "rewind to here" anchor. */
+    assistantMessageId?: string;
+  };
 }
 
 export interface ThreadTurnInterruptRequestedPayload {
