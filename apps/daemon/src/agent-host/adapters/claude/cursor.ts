@@ -7,11 +7,20 @@
  * starts a fresh session rather than refusing to open.
  *
  * Claude's shape is `{threadId, resume, resumeSessionAt?, turnCount,
- * turnStartMessageIds[]}`. `turnStartMessageIds` is the whole basis of
- * rollback: every turn stamps its own `turnId` as the `SDKUserMessage.uuid`,
+ * turnStartMessageIds[], turnBoundaries[]}`. The boundaries are the whole basis
+ * of rollback: every turn stamps its own `turnId` as the `SDKUserMessage.uuid`,
  * so the native transcript id equals our turn id and a fork can be anchored on
  * it (fixtures/claude README observation 8 confirms a client-supplied uuid is
  * a valid `resumeSessionAt` anchor).
+ *
+ * `turnBoundaries` pairs each of our turn ids with the transcript uuid its turn
+ * starts at (a synthetic turn — background output between prompts — starts at
+ * the assistant message that opened it). For a turn `sendTurn` opened the two
+ * are equal until the first rewind: a fork rewrites every uuid, so only the
+ * pair still says which turn a fork uuid starts — and a rewind names its cut
+ * by turn id (fixtures/claude README observation 21).
+ * `turnStartMessageIds` is the legacy positional list of the same uuids; it is
+ * still written, because an older host reads nothing else.
  */
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -40,6 +49,16 @@ export function isResumeId(value: unknown): value is string {
   return !value.split("/").includes("..");
 }
 
+/**
+ * One turn boundary: OUR turn id — the fold's, the one a `RollbackTarget`
+ * names — and the native transcript uuid that turn starts at. `uuid: null` =
+ * the turn is known but where it starts is not.
+ */
+export interface ClaudeTurnBoundary {
+  turnId: string;
+  uuid: string | null;
+}
+
 export interface ClaudeResumeCursor {
   /** Our thread id, so a cursor copied onto the wrong thread is rejected. */
   threadId?: string;
@@ -49,8 +68,18 @@ export interface ClaudeResumeCursor {
   resumeSessionAt?: string;
   /** How many turns the cursor covers. */
   turnCount?: number;
-  /** One native message uuid per turn start, in order. `null` = unknown. */
+  /**
+   * One native message uuid per turn start, in order. `null` = unknown. The
+   * legacy positional list: an older host reads only this.
+   */
   turnStartMessageIds?: Array<string | null>;
+  /**
+   * The same boundaries paired with the turn ids they start, in start order,
+   * re-paired onto the fork's uuids by every rewind. Absent from a cursor
+   * written before the pairs existed — {@link claudeTurnBoundariesFromCursor}
+   * derives them from the legacy list then.
+   */
+  turnBoundaries?: ClaudeTurnBoundary[];
 }
 
 export function isUuid(value: unknown): value is string {
@@ -104,14 +133,59 @@ export function readClaudeResumeCursor(
   const turnStartMessageIds = Array.isArray(rawIds)
     ? rawIds.map((entry) => (typeof entry === "string" && entry.length > 0 ? entry : null))
     : undefined;
+  const turnBoundaries = readTurnBoundaries(record.turnBoundaries);
 
   return {
     ...(threadId !== undefined ? { threadId } : {}),
     resume,
     ...(resumeSessionAt !== undefined ? { resumeSessionAt } : {}),
     ...(turnCount !== undefined ? { turnCount } : {}),
-    ...(turnStartMessageIds !== undefined ? { turnStartMessageIds } : {})
+    ...(turnStartMessageIds !== undefined ? { turnStartMessageIds } : {}),
+    ...(turnBoundaries !== undefined ? { turnBoundaries } : {})
   };
+}
+
+/**
+ * `turnBoundaries`, validated field-wise. An entry without a non-empty string
+ * `turnId` names no turn and is dropped; a `uuid` that is not a non-empty
+ * string becomes `null` — the turn is known, where it starts is not — exactly
+ * as the legacy list treats its own entries. A field that is not an array is
+ * absent, so the session falls back to the legacy list.
+ */
+function readTurnBoundaries(value: unknown): ClaudeTurnBoundary[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const boundaries: ClaudeTurnBoundary[] = [];
+  for (const entry of value) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      continue;
+    }
+    const { turnId, uuid } = entry as { turnId?: unknown; uuid?: unknown };
+    if (typeof turnId !== "string" || turnId.length === 0) {
+      continue;
+    }
+    boundaries.push({ turnId, uuid: typeof uuid === "string" && uuid.length > 0 ? uuid : null });
+  }
+  return boundaries;
+}
+
+/**
+ * The pairs a session starts from: the cursor's own `turnBoundaries` when it
+ * carries them, else identity pairs over the legacy `turnStartMessageIds` — a
+ * cursor written before the pairs existed recorded only uuids, and for a turn
+ * this adapter started the uuid IS the turn id. A `null` there pairs with
+ * nothing and is skipped; the legacy positional list keeps it.
+ */
+export function claudeTurnBoundariesFromCursor(
+  cursor: ClaudeResumeCursor | undefined
+): ClaudeTurnBoundary[] {
+  if (cursor?.turnBoundaries !== undefined) {
+    return cursor.turnBoundaries.map(({ turnId, uuid }) => ({ turnId, uuid }));
+  }
+  return (cursor?.turnStartMessageIds ?? []).flatMap((uuid) =>
+    uuid === null ? [] : [{ turnId: uuid, uuid }]
+  );
 }
 
 export function buildClaudeResumeCursor(input: {
@@ -119,12 +193,16 @@ export function buildClaudeResumeCursor(input: {
   sessionId: string;
   resumeSessionAt?: string;
   turnStartMessageIds: ReadonlyArray<string | null>;
+  turnBoundaries?: ReadonlyArray<ClaudeTurnBoundary>;
 }): ClaudeResumeCursor {
   return {
     threadId: input.threadId,
     resume: input.sessionId,
     ...(input.resumeSessionAt !== undefined ? { resumeSessionAt: input.resumeSessionAt } : {}),
     turnCount: input.turnStartMessageIds.length,
-    turnStartMessageIds: [...input.turnStartMessageIds]
+    turnStartMessageIds: [...input.turnStartMessageIds],
+    ...(input.turnBoundaries !== undefined
+      ? { turnBoundaries: input.turnBoundaries.map(({ turnId, uuid }) => ({ turnId, uuid })) }
+      : {})
   };
 }

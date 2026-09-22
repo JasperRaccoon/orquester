@@ -55,6 +55,7 @@ import {
   trimmedString,
   tryParseJsonRecord
 } from "./classify.ts";
+import type { ClaudeTurnBoundary } from "./cursor.ts";
 import {
   claudeTotalProcessedTokens,
   compactBoundarySnapshot,
@@ -366,6 +367,13 @@ export class ClaudeNormalizer {
   readonly turns: Array<{ id: string; items: unknown[] }> = [];
   /** One native message uuid per turn start, in order — the rollback anchors. */
   readonly turnStartMessageIds: Array<string | null> = [];
+  /**
+   * The same boundaries paired with the turn ids they start, pushed in step
+   * with {@link turnStartMessageIds}. A rewind names its cut by turn id
+   * (`RollbackTarget`), and after a fork the uuid no longer equals the turn id —
+   * the fork rewrites every uuid — so only the pair can resolve it.
+   */
+  readonly turnBoundaries: ClaudeTurnBoundary[] = [];
 
   constructor(options: NormalizerOptions) {
     this.threadId = options.threadId;
@@ -689,7 +697,9 @@ export class ClaudeNormalizer {
       announcedUsageLimitKeys: new Set()
     };
     this.turnState = turn;
-    this.turnStartMessageIds.push(input.anchorUuid ?? input.turnId);
+    const anchorUuid = input.anchorUuid ?? input.turnId;
+    this.turnStartMessageIds.push(anchorUuid);
+    this.turnBoundaries.push({ turnId: input.turnId, uuid: anchorUuid });
     const events: RuntimeEvent[] = [
       {
         ...this.base({ turnId: input.turnId }),
