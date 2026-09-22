@@ -9,12 +9,75 @@ import {
   latestContextWindowActivity,
   markUnreadVisitStamp,
   nextVisitStamp,
-  resolveActivityLabel
+  resolveActivityLabel,
+  resolveSidebarThreadStatus,
+  shouldRecedeSidebarThread
 } from "./status.logic";
 import { activity, resetBuilders, stamp } from "./test-helpers";
 
 beforeEach(() => {
   resetBuilders();
+});
+
+describe("recede (T3 `Sidebar.logic.ts:820-833`)", () => {
+  const recede = (
+    status: Parameters<typeof shouldRecedeSidebarThread>[0]["status"],
+    extra: { isUnread?: boolean; isSelected?: boolean } = {}
+  ): boolean =>
+    shouldRecedeSidebarThread({
+      status,
+      isUnread: extra.isUnread ?? false,
+      isSelected: extra.isSelected ?? false
+    });
+
+  it("never recedes a row something is blocked on", () => {
+    assert.equal(recede("input"), false);
+    assert.equal(recede("input", { isUnread: false, isSelected: false }), false);
+  });
+
+  it("never recedes the selected row, whatever it is doing", () => {
+    for (const status of ["approval", "input", "working", "monitoring", "ready"] as const) {
+      assert.equal(recede(status, { isSelected: true }), false, status);
+    }
+  });
+
+  it("always recedes a busy row — a working agent wants nothing from you", () => {
+    assert.equal(recede("working", { isUnread: true }), true);
+    assert.equal(recede("monitoring", { isUnread: true }), true);
+  });
+
+  it("recedes ready and approval only once there is nothing unseen about them", () => {
+    assert.equal(recede("ready"), true);
+    assert.equal(recede("approval"), true);
+    assert.equal(recede("ready", { isUnread: true }), false);
+    assert.equal(recede("approval", { isUnread: true }), false);
+  });
+
+  it("buckets a row from its summary fields, approvals first", () => {
+    assert.equal(
+      resolveSidebarThreadStatus({ hasPendingApprovals: true, hasPendingUserInput: true }),
+      "approval"
+    );
+    assert.equal(resolveSidebarThreadStatus({ hasPendingUserInput: true }), "input");
+    assert.equal(resolveSidebarThreadStatus({ chatSessionStatus: "running" }), "working");
+    assert.equal(resolveSidebarThreadStatus({ chatSessionStatus: "starting" }), "working");
+    assert.equal(resolveSidebarThreadStatus({ backgroundLiveness: "working" }), "working");
+    assert.equal(resolveSidebarThreadStatus({ backgroundLiveness: "monitoring" }), "monitoring");
+    assert.equal(resolveSidebarThreadStatus({ chatSessionStatus: "ready" }), "ready");
+    assert.equal(resolveSidebarThreadStatus({}), "ready");
+  });
+
+  it("a question outranks lingering background work, so the row stays loud", () => {
+    assert.equal(
+      recede(
+        resolveSidebarThreadStatus({
+          hasPendingUserInput: true,
+          backgroundLiveness: "working"
+        })
+      ),
+      false
+    );
+  });
 });
 
 describe("unread", () => {

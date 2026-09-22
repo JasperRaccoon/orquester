@@ -76,6 +76,67 @@ export function markUnreadVisitStamp(latestTurnCompletedAt: string | null | unde
   return new Date(completed - 1).toISOString();
 }
 
+// ---------------------------------------------------------------------------
+// Recede (§7.7)
+// ---------------------------------------------------------------------------
+
+/**
+ * The bucket a sidebar row reads as, for the recede rule only.
+ *
+ * *T3: `Sidebar.logic.ts:812-819` (`SidebarThreadStatus`).* Deliberately NOT
+ * the activity ladder: the ladder is the daemon's and this surface re-derives
+ * none of it. This says what the row is *doing*, which is the only thing
+ * receding needs — whether it needs the user's eyes is the separate unread
+ * signal.
+ */
+export type SidebarThreadStatus = "approval" | "input" | "working" | "monitoring" | "ready";
+
+/**
+ * *T3: `Sidebar.logic.ts:836-859` (`resolveSidebarThreadStatus`), minus its
+ * `failed` bucket* — T3 recedes `failed` exactly like `ready`, so folding the
+ * two changes no behaviour here and keeps this from looking like a second
+ * ladder.
+ */
+export function resolveSidebarThreadStatus(row: {
+  hasPendingApprovals?: boolean;
+  hasPendingUserInput?: boolean;
+  chatSessionStatus?: ThreadSessionStatus | null;
+  backgroundLiveness?: BackgroundLiveness | null;
+}): SidebarThreadStatus {
+  if (row.hasPendingApprovals) return "approval";
+  if (row.hasPendingUserInput) return "input";
+  if (row.chatSessionStatus === "running" || row.chatSessionStatus === "starting") {
+    return "working";
+  }
+  if (row.backgroundLiveness === "working") return "working";
+  if (row.backgroundLiveness === "monitoring") return "monitoring";
+  return "ready";
+}
+
+/**
+ * Whether a sidebar row should **recede** — render dimmed, so the rows that
+ * want something stay loud. Inbox-zero, not decoration.
+ *
+ * *T3: `Sidebar.logic.ts:820-833` (`shouldRecedeSidebarThread`).*
+ *
+ * - the selected row never recedes;
+ * - `input` never recedes: something is blocked on the user;
+ * - `working` / `monitoring` always recede — an agent that is busy wants
+ *   nothing from you;
+ * - `ready` and `approval` recede only when there is nothing unseen about
+ *   them. (T3 also un-recedes a row whose snooze just woke; Orquester has no
+ *   snooze, so that input is always false here.)
+ */
+export function shouldRecedeSidebarThread(input: {
+  status: SidebarThreadStatus;
+  isUnread: boolean;
+  isSelected: boolean;
+}): boolean {
+  if (input.isSelected || input.status === "input") return false;
+  if (input.status === "working" || input.status === "monitoring") return true;
+  return !input.isUnread;
+}
+
 /** A visit stamp only ever moves forward. *T3: `uiStateStore.ts:250-270`.* */
 export function nextVisitStamp(previous: string | null | undefined, visitedAt: string): string | null {
   const next = Date.parse(visitedAt);
