@@ -212,9 +212,16 @@ export function insertIntoDraftAtCaret(
 // ---------------------------------------------------------------------------
 
 /**
- * A composer draft. Unlike a queued message — a live intent held in memory —
- * a draft is worth persisting per thread, so it survives a tab switch and a
- * reload.
+ * A composer draft: what the user has typed, attached and not sent.
+ *
+ * Unlike a queued message — a live intent held in memory (§7.4) — this is
+ * persisted per thread, and the mounted composer writes it on every change
+ * (debounced) so it genuinely survives what the component does not: a tab
+ * switch, a switch to a project whose tabs unmount it, and a reload.
+ *
+ * `attachments` are references whose bytes are already on the daemon; an
+ * upload still in flight is identified by a `File` no storage can carry, so it
+ * is dropped rather than half-persisted.
  */
 export interface ComposerDraft {
   text: string;

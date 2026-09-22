@@ -437,21 +437,24 @@ export interface AgentChatActions {
   rememberScroll(position: Partial<RememberedTimelinePosition>): void;
   dismissErrorBanner(): void;
   /**
-   * Take the store's **fallback** draft and reset it, atomically.
+   * Persist what the composer has not sent (§7.4).
    *
-   * The composer owns the one visible draft; this is only what landed while no
-   * composer was mounted — a queued message returned by an interrupt while the
-   * user was on another tab — plus the attachments that came back with it,
-   * which `appendToDraft` parks here even when a composer *is* mounted,
-   * because the bridge only carries text.
+   * **This store's draft is the one durable copy of an unsent message.** A
+   * mounted composer loads it on mount and writes back through here on every
+   * change (debounced, flushed on unmount), which is what carries a half-typed
+   * message across a tab switch to another project — where the composer is
+   * unmounted outright — and across a reload. `appendToDraft` merges into the
+   * same draft for the window when no composer is mounted at all, so a queued
+   * message returned by an interrupt is found by the next mount.
    *
-   * A mounted composer drains it once on mount. It must be take-and-clear
-   * rather than read-then-clear: the draft is persisted, so a read that left
-   * it behind would re-apply the same text on the next open.
+   * Empty drafts are dropped from storage rather than stored, so a send that
+   * clears the composer must reach this immediately: a write held back by the
+   * debounce would let a reload resurrect a message that was already sent.
    *
-   * *Added by W13; `contracts.ts` stays additive-only.*
+   * *Added by W13 (as `takeDraft`) and turned into a save when the composer
+   * became the owner of nothing; `contracts.ts` stays additive-only.*
    */
-  takeDraft(): ComposerDraft;
+  saveDraft(draft: ComposerDraft): void;
   /** Re-read the thread (a host instance change, or a user retry). */
   refresh(): Promise<void>;
 }

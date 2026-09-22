@@ -343,11 +343,12 @@ describe("Q2-7 — a snapshot invalidates the cached projections", () => {
 
 describe("R7-5 — a returned queued message gives its attachments back as chips", () => {
   /**
-   * The store's own draft is drained exactly **once**, on composer mount. So
-   * parking a returned attachment there while a composer is already mounted
-   * loses the file for good: the user hits Stop, the message comes back, and
-   * the thing they attached is simply gone. Only what the composer refuses may
-   * fall back, where the next mount finds it.
+   * A mounted composer OWNS the draft: it loads the persisted one on mount and
+   * writes its own back on every change. So parking a returned attachment
+   * there while a composer is already mounted shows the user nothing until its
+   * next mount — the user hits Stop, the message comes back, and the thing
+   * they attached is simply not in the tray. Only what the composer refuses
+   * may fall back, where the next mount finds it.
    */
   const attachment = (id: string): AttachmentRef => ({
     type: "file",

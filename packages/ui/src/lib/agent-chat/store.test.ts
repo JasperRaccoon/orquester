@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { beforeEach, describe, it } from "node:test";
+import { after, beforeEach, describe, it } from "node:test";
 
 import type {
   AgentChatCommandName,
@@ -78,13 +78,13 @@ function fakeTransport(): {
 
 const flush = (): Promise<void> => new Promise((resolve) => queueMicrotask(resolve));
 
-async function store(): Promise<{
+async function store(sessionId = "s1"): Promise<{
   api: ReturnType<typeof createThreadStore>;
   fake: ReturnType<typeof fakeTransport>;
   state: () => AgentChatThreadState;
 }> {
   const fake = fakeTransport();
-  const api = createThreadStore("s1", {
+  const api = createThreadStore(sessionId, {
     transport: fake.transport,
     newId: (() => {
       let n = 0;
@@ -396,5 +396,100 @@ describe("client-local view state", () => {
     api.getState().actions.rememberScroll({ atEnd: true });
     assert.equal(state().slice.follow, true);
     assert.equal(state().slice.scroll?.rowId, "r9", "unspecified fields are kept");
+  });
+});
+
+/**
+ * The composer's unsent draft lives here, not in the component (§7.4).
+ *
+ * The composer mounts, loads this, and writes back on every change — so the
+ * two halves that have to hold are "a save reaches `localStorage` under this
+ * thread's id" and "a store built from nothing finds it again", which is
+ * exactly the shape of a reload.
+ */
+describe("the persisted composer draft", () => {
+  const DRAFTS_KEY = "orquester:agent-chat-drafts";
+  let backing: Record<string, string> = {};
+
+  const attachment = {
+    type: "file" as const,
+    id: "a1",
+    name: "notes.txt",
+    sizeBytes: 12
+  };
+
+  beforeEach(() => {
+    backing = {};
+    const stub = {
+      getItem: (key: string) => backing[key] ?? null,
+      setItem: (key: string, value: string) => {
+        backing[key] = value;
+      },
+      removeItem: (key: string) => {
+        delete backing[key];
+      },
+      clear: () => {
+        backing = {};
+      },
+      key: (index: number) => Object.keys(backing)[index] ?? null,
+      get length() {
+        return Object.keys(backing).length;
+      }
+    };
+    (globalThis as unknown as { localStorage: unknown }).localStorage = stub;
+  });
+
+  after(() => {
+    delete (globalThis as unknown as { localStorage?: unknown }).localStorage;
+  });
+
+  const persisted = (): Record<string, { text: string; attachments: { id: string }[] }> =>
+    JSON.parse(backing[DRAFTS_KEY] ?? "{}");
+
+  it("writes a saved draft straight through to storage, under its own thread id", async () => {
+    const { api, state } = await store("draft-1");
+    api.getState().actions.saveDraft({
+      text: "half a thought",
+      attachments: [attachment],
+      context: []
+    });
+    assert.equal(state().draft.text, "half a thought");
+    assert.equal(persisted()["draft-1"]?.text, "half a thought");
+    assert.deepEqual(persisted()["draft-1"]?.attachments.map((ref) => ref.id), ["a1"]);
+  });
+
+  it("seeds a fresh store from storage — which is what a reload is", async () => {
+    backing[DRAFTS_KEY] = JSON.stringify({
+      "draft-2": { text: "typed, never sent", attachments: [attachment], context: [] }
+    });
+    const { state } = await store("draft-2");
+    assert.equal(state().draft.text, "typed, never sent");
+    assert.deepEqual(
+      state().draft.attachments.map((ref) => ref.id),
+      ["a1"],
+      "an uploaded attachment comes back as a reference the composer can re-stage"
+    );
+  });
+
+  it("drops the entry when the draft is cleared, so a sent message never returns", async () => {
+    backing[DRAFTS_KEY] = JSON.stringify({
+      "draft-3": { text: "about to be sent", attachments: [], context: [] }
+    });
+    const { api, state } = await store("draft-3");
+    assert.equal(state().draft.text, "about to be sent");
+
+    api.getState().actions.saveDraft({ text: "", attachments: [], context: [] });
+    assert.equal(state().draft.text, "");
+    assert.equal(persisted()["draft-3"], undefined);
+  });
+
+  it("leaves another thread's draft alone", async () => {
+    backing[DRAFTS_KEY] = JSON.stringify({
+      other: { text: "someone else's", attachments: [], context: [] }
+    });
+    const { api } = await store("draft-4");
+    api.getState().actions.saveDraft({ text: "mine", attachments: [], context: [] });
+    assert.equal(persisted().other?.text, "someone else's");
+    assert.equal(persisted()["draft-4"]?.text, "mine");
   });
 });
