@@ -20,6 +20,26 @@ export function capText(text: string, maxChars: number): { text: string; truncat
   return { text, truncated: false };
 }
 
+/**
+ * `text` in at most `max` code points, the last of them a "…" when anything was cut: how the tools shorten a text they
+ * quote in a message — a caller's value (an item, a tool name, an id) or a list's own text. (transcript.ts keeps its
+ * own copy, `capped`.)
+ */
+export function clipText(text: string, max: number): string {
+  return capText(text, max).truncated ? `${capText(text, max - 1).text}…` : text;
+}
+
+/** The most of a caller's value — an id, a tool name, an item — a message quotes back, in code points. */
+export const MAX_ECHO_CHARS = 100;
+
+/**
+ * The most an error's message takes, in code points. A message quotes what the caller sent — an id, a path, a name —
+ * and an error is not a result: ok()'s cap never sees it, so a 2 MiB argument echoed back would make a 2 MiB error.
+ * Every message the tools write on purpose stays under it: an INVALID_ARGUMENT names at most five fields of ≤ 200
+ * characters, and a todo refusal quotes at most 100 of the caller's and lists at most 40 items of ≤ 80.
+ */
+export const MAX_ERROR_MESSAGE_CHARS = 4_000;
+
 /** A value's size as a result, as ok() measures it: its JSON text, in UTF-8 bytes. */
 export const resultBytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), "utf8");
 
@@ -83,7 +103,10 @@ export function ok(value: Record<string, unknown>): { content: [TextContent]; st
   };
 }
 
-/** Map any thrown error to an isError result with a SAFE message (no path/stack leak). */
+/**
+ * Map any thrown error to an isError result with a SAFE message (no path/stack leak), capped at MAX_ERROR_MESSAGE_CHARS
+ * whatever it quotes.
+ */
 export function toSafeToolError(err: unknown): { content: [TextContent]; structuredContent: { code: string; message: string; detail?: unknown }; isError: true } {
   let code = "INTERNAL";
   let message = "Internal error handling the tool call.";
@@ -100,6 +123,7 @@ export function toSafeToolError(err: unknown): { content: [TextContent]; structu
   } else {
     console.error("[mcp] unexpected tool error", err);
   }
+  message = clipText(message, MAX_ERROR_MESSAGE_CHARS);
   const structured: { code: string; message: string; detail?: unknown } = { code, message };
   if (detail !== undefined) structured.detail = detail;
   return { content: [{ type: "text", text: `${code}: ${message}` }], structuredContent: structured, isError: true };

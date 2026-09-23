@@ -6,6 +6,7 @@ import { z } from "zod";
 import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester/config";
 import { createServer } from "../index.ts";
 import { chatSummary } from "./fixtures.ts";
+import { MAX_ERROR_MESSAGE_CHARS } from "./result.ts";
 import { FakeDaemonApi } from "./testing.ts";
 import { allTools, argumentProblems, registerMcp, SERVER_INSTRUCTIONS, SERVER_VERSION, type McpDeps } from "./server.ts";
 
@@ -219,6 +220,29 @@ test("over the wire, a 2 MiB enum value is refused in a short INVALID_ARGUMENT, 
   } finally { await app.close(); }
 });
 
+test("no refusal grows with what the caller sent: a 2 MiB id or project is quoted back inside MAX_ERROR_MESSAGE_CHARS", async () => {
+  const big = "s".repeat(2 * 1024 * 1024);
+  const api = new FakeDaemonApi().on("GET", "/api/sessions", { status: 200, body: [chatSummary()] })
+    .on("GET", "/api/registry", { status: 200, body: { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [] } })
+    .on("GET", "/api/agent-accounts", { status: 200, body: { accounts: [], defaults: {} } }).on("GET", "/api/agent/providers", { status: 503, body: null });
+  const app = mcpApp({ createApi: () => api });
+  try {
+    const cases: [string, Record<string, unknown>, string][] = [
+      ["get_session", { sessionId: big }, "SESSION_NOT_FOUND"],
+      ["wait_for_session", { sessionId: big, timeoutMs: 1_000 }, "SESSION_NOT_FOUND"],
+      ["list_sessions", { project: big }, "PROJECT_NOT_FOUND"]
+    ];
+    for (const [i, [name, args, code]] of cases.entries()) {
+      const r = await postMcp(app, call(30 + i, name, args));
+      assert.equal(r.result.isError, true, name);
+      assert.equal(r.result.structuredContent.code, code, name);
+      const message = r.result.structuredContent.message as string;
+      assert.equal([...message].length, MAX_ERROR_MESSAGE_CHARS, `${name}: ${[...message].length} code points`);
+      assert.ok(message.endsWith("s…"), `${name}: the cut is marked`);
+    }
+  } finally { await app.close(); }
+});
+
 test("a call without an arguments object is a call with none: the defaults apply", async () => {
   const api = new FakeDaemonApi().on("GET", "/api/sessions", { status: 200, body: [chatSummary()] })
     .on("GET", "/api/registry", { status: 200, body: { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [] } })
@@ -238,6 +262,16 @@ test("an unknown tool is a JSON-RPC InvalidParams error (-32602), as the MCP spe
     assert.equal(r.result, undefined);
     assert.equal(r.error.code, -32602);
     assert.match(r.error.message, /Tool read_terminal not found/);
+  } finally { await app.close(); }
+});
+
+test("an unknown tool's name is quoted capped: a 2 MiB name gets a short −32602, not a 2 MiB one", async () => {
+  const app = mcpApp({ createApi: () => new FakeDaemonApi() });
+  try {
+    const r = await postMcp(app, call(19, "t".repeat(2 * 1024 * 1024), {}));
+    assert.equal(r.result, undefined);
+    assert.equal(r.error.code, -32602);
+    assert.match(r.error.message, /^MCP error -32602: Tool t{99}… not found$/, String(r.error.message).slice(0, 200));
   } finally { await app.close(); }
 });
 
