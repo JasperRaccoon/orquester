@@ -223,6 +223,24 @@ export class AgentChatSummaryService {
     const resolution = resolveChatActivity(fields);
     const nowIso = new Date(this.now()).toISOString();
     const attentionChanged = (previous?.activity.attention ?? null) !== resolution.attention;
+    const previousPending = previous?.pending ?? new Map<string, AgentHostPendingRequest>();
+    const pending = this.publishPendingTransitions(threadId, previousPending, pendingRequests);
+    const previousTurn = previous?.fields.latestTurn ?? null;
+    const latestTurn = fields.latestTurn ?? null;
+    // `needsAttentionAt` is the Attention Center's `flaggedAt` and the MCP
+    // `wait_for_session` cursor (MCP spec §9.2): it must move whenever something
+    // NEW calls for the user, not only when the attention VALUE changes. Two
+    // things happen inside one poll with the value unchanged — approval A
+    // answered and approval B raised (`needs-input` throughout), and a turn that
+    // starts and settles (`finished` throughout) — and a stamp that did not
+    // move hid both from a waiter looping on its cursor. A request that stays
+    // open, or a turn that stays settled, keeps its stamp.
+    const restamp =
+      attentionChanged ||
+      [...pending.keys()].some((requestId) => !previousPending.has(requestId)) ||
+      (latestTurn !== null &&
+        turnMoved(previousTurn, latestTurn) &&
+        SETTLED_TURN_STATES.has(latestTurn.state));
     const activity: SessionActivity = {
       state: resolution.state,
       attention: resolution.attention,
@@ -232,15 +250,10 @@ export class AgentChatSummaryService {
       needsAttentionAt:
         resolution.attention === null
           ? null
-          : attentionChanged
+          : restamp
             ? nowIso
             : (previous?.activity.needsAttentionAt ?? nowIso)
     };
-    const pending = this.publishPendingTransitions(
-      threadId,
-      previous?.pending ?? new Map(),
-      pendingRequests
-    );
     this.threads.set(threadId, { fields, activity, pending });
 
     // The tab's own copy of the six fields (the tab strip reads them off the
@@ -248,10 +261,13 @@ export class AgentChatSummaryService {
     this.opts.chat.applyFields(threadId, fields);
     this.opts.chat.setActivity(threadId, activity);
 
+    // The stamp is compared too: a restamp with nothing else moving is exactly
+    // what a waiter on the bus needs to hear.
     const sameActivity =
       previous !== undefined &&
       previous.activity.state === activity.state &&
-      previous.activity.attention === activity.attention;
+      previous.activity.attention === activity.attention &&
+      previous.activity.needsAttentionAt === activity.needsAttentionAt;
     if (!sameActivity) {
       this.opts.broadcaster.publish("sessions", "session.activity", {
         id: threadId,
@@ -259,7 +275,7 @@ export class AgentChatSummaryService {
       } satisfies SessionActivityEvent);
     }
 
-    this.publishTurnTransition(threadId, previous?.fields.latestTurn ?? null, fields.latestTurn ?? null);
+    this.publishTurnTransition(threadId, previousTurn, latestTurn);
 
     // Push only on a NEW attention, never on every tick that keeps it raised —
     // and never on the FIRST observation of a thread.
@@ -275,6 +291,8 @@ export class AgentChatSummaryService {
     if (previous === undefined) {
       return;
     }
+    // Gated on the attention VALUE, never on the stamp: a restamp alone (the
+    // next approval under a still-raised `needs-input`) must not push again.
     if (!attentionChanged || resolution.attention === null) {
       return;
     }
@@ -343,8 +361,7 @@ export class AgentChatSummaryService {
     before: LatestTurnSummary | null,
     after: LatestTurnSummary | null
   ): void {
-    if (!after) return;
-    if (before && before.turnId === after.turnId && before.state === after.state) return;
+    if (after === null || !turnMoved(before, after)) return;
     const payload: AgentChatTurnEventPayload = {
       id: threadId,
       turnId: after.turnId,
@@ -355,6 +372,15 @@ export class AgentChatSummaryService {
       this.opts.onTurnSettled?.();
     }
   }
+}
+
+/**
+ * The latest turn moved between two polls: a new turn id, or the same turn in
+ * a new state. One definition for `agentChat.turn` and the attention restamp,
+ * so the two can never disagree about what counts as a transition.
+ */
+function turnMoved(before: LatestTurnSummary | null, after: LatestTurnSummary): boolean {
+  return before === null || before.turnId !== after.turnId || before.state !== after.state;
 }
 
 /**
