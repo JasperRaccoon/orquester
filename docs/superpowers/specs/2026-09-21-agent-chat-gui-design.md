@@ -1129,6 +1129,8 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   exactly `codex app-server` (`adapters/codex/session.ts`), which takes no `--yolo` anyway.
   Permissions come only from `runtimeMode`, sent on `thread/start` (§4.4); effort only from the
   model selection.*
+  *Built: not on `thread/start` alone — `approvalPolicy`, `approvalsReviewer` and the sandbox ride
+  `thread/start`, `thread/resume` and every `turn/start` (`adapters/codex/session.ts`).*
 - **MCP rides `-c` config overrides, not a params field:**
   `-c mcp_servers.<name>.url=<endpoint>` and
   `-c '<name>.bearer_token_env_var="…"'` appended to argv with the token in env. Not needed for
