@@ -296,6 +296,24 @@ describe("reconcile (§3.3)", () => {
     await next.stop();
   });
 
+  it("an intentional stop rejects idle metadata without cold-folding the history", async () => {
+    const first = createTestHost({ continuationEnabled: () => true });
+    const threadId = await first.createThread();
+    await first.stop();
+
+    let coldReads = 0;
+    const readAll = first.store.readAll.bind(first.store);
+    first.store.readAll = async (id) => {
+      coldReads += 1;
+      return readAll(id);
+    };
+
+    const next = createTestHost({ store: first.store, continuationEnabled: () => true });
+    assert.deepEqual(await next.orchestrator.markThreadsForContinuation(), []);
+    assert.equal(coldReads, 0, `idle thread ${threadId} must not be folded during handover`);
+    await next.stop();
+  });
+
   it("writes the prepared marker and the binding BEFORE the continuation is sent", async () => {
     const { store, threadId, first } = await threadInFlight();
     await first.stop();

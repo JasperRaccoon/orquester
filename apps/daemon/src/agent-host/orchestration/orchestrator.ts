@@ -3416,6 +3416,33 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     const marked: string[] = [];
     for (const threadId of await store.listThreads()) {
       try {
+        // `/stop` is the deploy handover's critical path. Most production
+        // threads are idle and some have 40-100 MB histories, so folding every
+        // log here made an otherwise healthy host take a minute to acknowledge
+        // its stop request. Session transitions always checkpoint `meta.json`;
+        // use that small durable head to reject idle threads before doing a
+        // cold fold. `binding.json` is small too and remains the cursor
+        // authority, so a head written by an older version still works.
+        const persistedHead = await store.loadHead(threadId, { seedRuntime: false });
+        if (persistedHead === null) continue;
+        const persistedSession = persistedHead.session;
+        if (
+          persistedSession.status !== "running" ||
+          persistedSession.activeTurnId === null
+        ) {
+          continue;
+        }
+        if ((await options.continuationEnabled?.(persistedHead.projectPath)) !== true) continue;
+        const persistedBinding = await store.loadBinding(threadId).catch(() => null);
+        if (
+          (bindingResumeCursor(persistedBinding) ?? persistedSession.resumeCursor) === undefined
+        ) {
+          continue;
+        }
+
+        // Re-read through the authoritative fold only for the small set of
+        // candidates, then repeat every predicate in case the turn settled
+        // between the metadata read and this load.
         const runtime = await loadRuntime(threadId);
         const head = headOf(runtime);
         if (!head || runtime.deleted) continue;
