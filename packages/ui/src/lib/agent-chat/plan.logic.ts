@@ -191,6 +191,23 @@ export function normalizePlanMarkdownForExport(planMarkdown: string): string {
 }
 
 /**
+ * What the plan card's Copy and Download hand over: always the WHOLE plan.
+ *
+ * An intact proposal is its own markdown, answered synchronously so a copy
+ * stays inside the click. One the wire cut at 16 KiB (§5.6, the row's
+ * `truncated`) is read back first through `readFull` — the store's
+ * `readFullPlanMarkdown`, the read Implement makes — which rejects rather than
+ * ever answer the cut text, so a failed read hands over nothing instead of a
+ * plan that silently ends in "…".
+ */
+export function wholePlanMarkdown(
+  plan: { id: string; planMarkdown: string; truncated?: true },
+  readFull: (plan: { id: string; planMarkdown: string; truncated?: true }) => Promise<string>
+): string | Promise<string> {
+  return plan.truncated === true ? readFull(plan) : plan.planMarkdown;
+}
+
+/**
  * The prefix plus the trimmed plan — one copy in `@orquester/api/agent-chat`,
  * shared with the MCP's `implement_plan`. *T3: `proposedPlan.ts:75-77`.*
  */

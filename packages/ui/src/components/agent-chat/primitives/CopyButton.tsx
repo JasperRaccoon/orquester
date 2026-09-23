@@ -10,9 +10,11 @@ export interface CopyButtonProps {
   /**
    * The text, or a getter for it. Use the getter form when the value is
    * expensive to build (a whole message's markdown, a diff) — it is only
-   * called on click.
+   * called on click. A getter may answer a promise when the text has to be
+   * read first (a plan the wire cut, read back whole); one that rejects copies
+   * nothing, like a denied clipboard.
    */
-  value: string | (() => string);
+  value: string | (() => string | Promise<string>);
   label?: string;
   size?: ChatIconButtonSize;
   /**
@@ -53,13 +55,17 @@ export function CopyButton({
   );
 
   const copy = React.useCallback(() => {
-    const text = typeof value === "function" ? value() : value;
+    const produced = typeof value === "function" ? value() : value;
     void (async () => {
       try {
+        // A string is written within the click, as it always was; only a
+        // getter that has to read first is awaited.
+        const text = typeof produced === "string" ? produced : await produced;
         await navigator.clipboard.writeText(text);
       } catch {
-        // A denied clipboard permission is not worth a toast: the user can
-        // still select the text. Swallow it and leave the icon unchanged.
+        // A denied clipboard permission, or text that could not be read, is
+        // not worth a toast: the user can still select the text. Swallow it
+        // and leave the icon unchanged.
         return;
       }
       setCopied(true);
