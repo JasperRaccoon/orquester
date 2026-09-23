@@ -7,17 +7,12 @@ import type { DaemonApi } from "../daemon-api.ts";
 import { expectOk, ToolError } from "../errors.ts";
 import { readThread, requireChatSession, sendCommand } from "../reads.ts";
 import { defineTool, MUTATING, READ_ONLY, type ToolContext, type ToolDef } from "../tool.ts";
-import { transcriptEntries } from "../transcript.ts";
+import { transcriptEntries, type TranscriptResult } from "../transcript.ts";
 import { buildViewContext, chatDetail, SETTLED_TURN_STATES, type SessionDetail } from "../views.ts";
 import { turnBaseline, waitForTurn, type TurnBaseline, type TurnOutcome } from "../wait.ts";
 
 const MAX_WAIT_MS = 600_000;
-/**
- * read_transcript's ceiling. `maxChars` is — despite its name — the size budget for the WHOLE result, in UTF-8 bytes of
- * its JSON (transcript.ts): the subagent list gets at most a quarter of it when the transcript needs the rest, and the
- * transcript sheds reasoning, then tool detail, then the oldest turns, and cuts the latest reply last. It stays under the
- * 60 000-byte cap every tool result has (result.ts).
- */
+/** read_transcript's ceiling: the budget covers the whole result in UTF-8 bytes (transcript.ts), 5 000 under ok()'s 60 000-byte cap (result.ts). */
 const MAX_TRANSCRIPT_CHARS = 55_000;
 /**
  * How long a needs-input the snapshot contradicts waits for the summary to move before looking again anyway: just
@@ -25,15 +20,16 @@ const MAX_TRANSCRIPT_CHARS = 55_000;
  * normally ends the wait first.
  */
 const STALE_RECHECK_MS = 2_000;
-const TRUNCATED_HINT = "Shed to fit maxChars: reasoning first, then tool detail, then the oldest turns (coveredTurns says which are left). Raise maxChars (max 55000), include less, or use get_turn_diff for one turn's file changes.";
+const TRUNCATED_HINT = "Shed to fit maxChars: reasoning, then tool detail, then the oldest rows (coveredTurns says which turns are left). Raise maxChars (max 55000), include less, or use get_turn_diff for one turn's file changes.";
 const SUBAGENTS_TRIMMED_HINT = "The subagent list was trimmed too — full roster: get_session.";
 
 /**
- * The hint a shed read_transcript result carries, or none for a whole one. `subagentsTruncated` is optional on purpose: a
- * transcript.ts that cannot trim the roster never sets it. transcript.ts keeps a truncated result TRANSCRIPT_HINT_BYTES
- * (320) under `maxChars` for this field, so `{hint}` serialised stays within that.
+ * The hint a shed read_transcript result carries, or none for a whole one. It keys on `truncated`, which transcript.ts
+ * sets on every result it sheds, a trimmed subagent list alone included; `subagentsTruncated` is present only when the
+ * list was trimmed. A shed result stays TRANSCRIPT_HINT_BYTES under `maxChars` for this field, so the answer, hint
+ * included, keeps within `maxChars`.
  */
-export function transcriptHint(result: { truncated: boolean; subagentsTruncated?: boolean }): string | undefined {
+export function transcriptHint(result: Pick<TranscriptResult, "truncated" | "subagentsTruncated">): string | undefined {
   if (!result.truncated) return undefined;
   return result.subagentsTruncated ? `${TRUNCATED_HINT} ${SUBAGENTS_TRIMMED_HINT}` : TRUNCATED_HINT;
 }
@@ -248,7 +244,7 @@ const readTranscript = defineTool({
     turns: z.number().int().min(1).max(200).default(3).describe("How many of the latest turns to include."),
     agentId: z.string().optional().describe("A subagent id from get_session.subagents to read its own timeline."),
     include: z.array(z.enum(["reasoning", "tools", "activity"])).default(["tools", "activity"]).describe("Extra row kinds; reasoning is opt-in."),
-    maxChars: z.number().int().min(2_000).max(MAX_TRANSCRIPT_CHARS).default(40_000).describe("Size budget for the result, in UTF-8 bytes (max 55000; every tool result is capped at 60000 bytes). The subagent list gets at most a quarter of it when the transcript needs the rest; the transcript sheds reasoning, then tool detail, then the oldest turns, and cuts the latest reply last.")
+    maxChars: z.number().int().min(2_000).max(MAX_TRANSCRIPT_CHARS).default(40_000).describe("Size budget for the result, in UTF-8 bytes (max 55000; every tool result is capped at 60000 bytes). The subagent list gets at most a quarter of it when the transcript needs the rest; the transcript sheds reasoning, then tool detail, then its oldest rows, and cuts the latest reply last.")
   },
   annotations: READ_ONLY,
   async run(args, { api }) {
