@@ -297,7 +297,7 @@ test("a host without the join — an older one's route miss, or its own 404 — 
     (error: unknown) => error instanceof ToolError && error.code === "INTERNAL");
 });
 
-test("a live Claude call streams its result's text: a result given as blocks reads back through the join", async () => {
+test("a live Claude Bash call streams its result's text as a command's output: a result given as blocks reads back through the join", async () => {
   // As the Claude normaliser writes it: the completion keeps the tool_result block, and the result's text went out as a
   // `command_output` delta on the call's own item, which ingestion wrote as a tool.output row.
   const blocks = commandRow({ toolName: "Bash", input: { command: "ls" }, result: { type: "tool_result", tool_use_id: "call-1", content: [{ type: "text", text: "a.ts\nb.ts\n" }] } });
@@ -305,7 +305,28 @@ test("a live Claude call streams its result's text: a result given as blocks rea
   assert.deepEqual([r.kind, r.text, "running" in r], ["command-output", "a.ts\nb.ts\n", false]);
 });
 
-test("only a tool row's call is joined: a message, a task row and a row naming no call never ask the host", async () => {
+test("a file change is never command-output: a Write whose result streamed as file_change_output answers its payload", async () => {
+  // Claude streams every Edit/Write result's text as `file_change_output` (fixture 14a): the host would join it, but it
+  // is no command's output. The payload — the edit's input included — is what the GUI's viewer shows.
+  const write = activity("tool.completed", {
+    itemType: "file_change", toolUseId: "w1", title: "Write", status: "completed",
+    data: { toolName: "Write", input: { file_path: "/w/c.txt", content: "c\n" }, result: { type: "tool_result", tool_use_id: "w1", content: "File created successfully at: /w/c.txt" } }
+  }, { tone: "tool" });
+  const api = streaming(write, joinedOutput({ toolUseId: "w1", output: "File created successfully at: /w/c.txt", complete: true }));
+  const r = await read(api, { itemId: write.id });
+  assert.deepEqual([r.kind, r.text], ["payload", JSON.stringify(write.payload, null, 2)]);
+  assert.match(r.text as string, /"file_path": "\/w\/c\.txt"/);
+  assert.ok(!api.calls.some((c) => c.path.endsWith("/output")), "the join was never read");
+  // A chunk: only a command's (`command_output`) is joined; a file change's is its payload as it is.
+  const editChunk = activity("tool.output", { toolUseId: "w1", streamKind: "file_change_output", delta: "File created successfully at: /w/c.txt" }, { tone: "tool", summary: "Tool output" });
+  const e = await read(streaming(editChunk, joinedOutput({ toolUseId: "w1", output: "File created successfully at: /w/c.txt" })), { itemId: editChunk.id });
+  assert.deepEqual([e.kind, e.text], ["payload", JSON.stringify(editChunk.payload, null, 2)]);
+  const bashChunk = activity("tool.output", { toolUseId: "b1", streamKind: "command_output", delta: "a\n" }, { tone: "tool", summary: "Tool output" });
+  const b = await read(streaming(bashChunk, joinedOutput({ toolUseId: "b1", output: "a\nb\n", complete: false })), { itemId: bashChunk.id });
+  assert.deepEqual([b.kind, b.text, b.running], ["command-output", "a\nb\n", true]);
+});
+
+test("only a command row's call is joined: a message, a task row and a row naming no call never ask the host", async () => {
   const task = activity("task.started", { taskId: "task-1", toolUseId: "toolu_launch", agentKind: "agent", detail: "Explore" }, { summary: "Task started" });
   const warning = activity("runtime.warning", { message: "careful" }, { summary: "careful" });
   for (const item of [message("assistant", "done"), task, warning]) {

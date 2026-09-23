@@ -55,9 +55,11 @@ async function streamedOutput(api: DaemonApi, sessionId: string, itemId: string)
  * 1. a `command_execution` activity whose own data carries output answers it whole (`commandOutputText`: the first place,
  *    in the preview's reading order, that holds output in the unslimmed item) — unless the item is stored slimmed
  *    (`payload.truncated`: an update, persisted already cut, §5.6), whose data holds only the preview;
- * 2. else a tool row (`tool.*`) naming its call (`payload.toolUseId`) answers the call's streamed output, which is in
- *    no item's data at all — a Claude background shell's, a running command's so far — joined by the host, when the
- *    call streamed any;
+ * 2. else a command's row naming its call (`payload.toolUseId`) — a `command_execution` activity, or a `tool.output`
+ *    chunk of `command_output` — answers the call's streamed output, which is in no item's data at all (a Claude
+ *    background shell's, a running command's so far), joined by the host, when the call streamed any. Never a file
+ *    change: Claude streams an Edit's or a Write's result text too (`file_change_output`, "File created successfully
+ *    at: …"), which is no command's output, and its payload — the edit — is what the GUI's viewer shows;
  * 3. else a message's text, a string payload as it is, else the payload as indented JSON, else — no payload to write —
  *    the row's summary.
  */
@@ -68,7 +70,8 @@ async function itemOutput(api: DaemonApi, sessionId: string, item: ThreadItem): 
     const output = commandOutputText(payload.data);
     if (output !== undefined) return { kind: "command-output", text: output };
   }
-  if (item.activityKind.startsWith("tool.") && typeof payload?.toolUseId === "string" && payload.toolUseId !== "") {
+  const command = payload?.itemType === "command_execution" || (item.activityKind === "tool.output" && payload?.streamKind === "command_output");
+  if (command && item.activityKind.startsWith("tool.") && typeof payload?.toolUseId === "string" && payload.toolUseId !== "") {
     const streamed = await streamedOutput(api, sessionId, item.id);
     if (streamed !== null && streamed.output !== "") {
       return { kind: "command-output", text: streamed.output, ...(streamed.complete ? {} : { running: true as const }), ...(streamed.truncated ? { truncated: true as const } : {}) };

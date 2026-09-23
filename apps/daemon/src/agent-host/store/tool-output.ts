@@ -13,6 +13,15 @@
  *
  * Pure over the decoded events: the store runs it after its one `readLog`, the
  * orchestrator over `readAll` for a store without it.
+ *
+ * It reads the RAW log, and a `thread.reverted` does not filter it: a chunk
+ * written in a turn a rewind later removed is still joined. That is the
+ * command's real output — a background shell launched before the rewind point
+ * keeps running through it, and a rewind restores no files and unprints
+ * nothing; the log is the one place that output survives. The join is by call,
+ * not by stream: a file change's `file_change_output` chunks are joined as a
+ * command's `command_output` are, and the reader decides what the text is
+ * (the MCP's `read_tool_output` answers only a command's as its output).
  */
 
 import {

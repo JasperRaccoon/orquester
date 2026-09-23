@@ -868,12 +868,15 @@ it cannot read whole is named in `unavailableTurns` with a hint, and a failed pa
 error. Like the GUI's "Load full output", `read_tool_output` reads the unslimmed item behind a tool
 row's `outputItemId` (`GET …/items/:itemId`) in UTF-8 byte windows; a command answers its whole
 output from the places the row's preview reads (`commandOutputText`, one list with
-`commandDisplayDetail`), unless the item is stored already cut (an update). Output that exists only
-as streamed `tool.output` chunks — a Claude background shell's, a running command's so far — is
-joined by the host (`GET …/items/:itemId/output`, `store/tool-output.ts`) and answered with
-`running`/`truncated`; `read_transcript` offers such a call's latest row as its `outputItemId`, and
-a host from before the route (its route-miss 404) falls back to the item's own text, never an
-error. A result is one JSON object capped at 60 000 bytes (`result.ts`); every tool that can
+`commandDisplayDetail`), unless the item is stored already cut (an update). A command's output
+that exists only as streamed `tool.output` chunks — a Claude background shell's, a running
+command's so far — is joined by the host (`GET …/items/:itemId/output`, `store/tool-output.ts`)
+and answered with `running`/`truncated`; never a file change's (Claude streams its result text as
+`file_change_output`, which is no command's output). `read_transcript` offers such a call's latest
+command row as its `outputItemId` — in a drill-in, when retention evicted the call's rows, an
+entry built from its latest chunk — and a host from before the route (its route-miss 404) falls
+back to the item's own text, never an error. A result is one JSON object capped at 60 000 bytes
+(`result.ts`); every tool that can
 outgrow it bounds itself first and says what it cut (`truncated`, `optionsOmitted`,
 `subagentsTruncated`, `filesTruncated`, …), so `ok()`'s byte cut is only the last resort. An error
 is `<CODE>: <message>`, the message capped at 4 000 code points. `server.ts` replaces the SDK's

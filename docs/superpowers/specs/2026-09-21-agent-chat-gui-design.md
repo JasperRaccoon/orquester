@@ -2866,7 +2866,11 @@ every chunk is capped on the wire, history pages are slimmed. The host joins the
 next to `readItem` and in the same one read of it (`store/tool-output.ts`): the item's newest write
 names the call (`payload.toolUseId`), every `tool.output` row of that call is joined verbatim in log
 order, `complete` says a `tool.completed` exists for it, and past 8 MiB
-(`THREAD_ITEM_OUTPUT_MAX_BYTES`) the join stops on a character boundary with `truncated`. No such
+(`THREAD_ITEM_OUTPUT_MAX_BYTES`) the join stops on a character boundary with `truncated`. It reads
+the raw log: a `thread.reverted` filters nothing, since a chunk written in a turn a rewind removed
+is still what the command printed (a background shell keeps running through a rewind). It is by
+call, not by stream — a file change's `file_change_output` joins too — and the reader decides what
+the text is: the MCP answers only a command's as its output. No such
 item, or one naming no call, is a 404 of its own, `ITEM_NOT_FOUND` — not `THREAD_NOT_FOUND`, which a
 host predating the route answers for it as its generic route miss, so a reader can tell the two
 apart until that host's drain-restart. The daemon proxies it verbatim, as it does `…/items/:itemId`.

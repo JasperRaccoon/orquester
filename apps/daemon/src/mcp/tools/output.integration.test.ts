@@ -1,10 +1,17 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { z } from "zod";
-import { agentChatRoutes } from "@orquester/api/agent-chat";
+import { agentChatRoutes, type ThreadActivityItem } from "@orquester/api/agent-chat";
+import { replayClaudeFixture } from "../../agent-host/adapters/claude/fixtures.ts";
+import { createIngestion } from "../../agent-host/ingestion/index.ts";
+import { FakeClock, FakeTimers, RecordingLiveness, counterIdGen } from "../../agent-host/ingestion/test-harness.ts";
 import { isAgentChatCommandError } from "../../agent-host/orchestration/errors.ts";
 import { createTestHost, type TestHost } from "../../agent-host/orchestration/testing/index.ts";
 import type { AppendableDomainEvent } from "../../agent-host/services.ts";
+import { createThreadStore } from "../../agent-host/store/index.ts";
 import type { DaemonApi, DaemonMethod, DaemonResponse } from "../daemon-api.ts";
 import { chatSummary } from "../fixtures.ts";
 import type { ToolContext, ToolDef } from "../tool.ts";
@@ -78,7 +85,7 @@ function shellRow(host: TestHost, id: string, activityKind: string, payload: Rec
   host.clock.advance(1);
   const at = host.clock.nowIso();
   return sinkEvent(host, `ev-${id}`, "thread.activity-appended", {
-    activity: { kind: "activity", id, tone: "tool", activityKind, summary: "Background shell", payload: { toolUseId: SHELL, ...payload }, turnId: "turn-1", agentId: "task-1", createdAt: at, updatedAt: at }
+    activity: { kind: "activity", id, tone: "tool", activityKind, summary: activityKind === "tool.output" ? "Tool output" : "Background shell", payload: { toolUseId: SHELL, ...payload }, turnId: "turn-1", agentId: "task-1", createdAt: at, updatedAt: at }
   });
 }
 
@@ -147,5 +154,115 @@ describe("a background shell's output through read_transcript and read_tool_outp
     assert.deepEqual([fallback.kind, fallback.text], ["payload", JSON.stringify(completion.payload, null, 2)]);
     assert.ok(api.paths.includes(agentChatRoutes.itemOutput(THREAD, "shell-done")), "the join was asked, and its miss read as none");
     await host.stop();
+  });
+
+  it("a shell that printed past its agent's 200-row window: its start is gone, its latest chunk is the entry and the id", async () => {
+    const host = createTestHost();
+    await host.createThread({ threadId: THREAD });
+    for (const event of [
+      sinkEvent(host, "ask:sent", "thread.message-sent", { messageId: "ask", role: "user", text: "start the dev server", streaming: false, turnId: null }),
+      sinkEvent(host, "ask:start", "thread.turn-start-requested", { turnId: null, messageId: "ask", interactionMode: "default" }),
+      sinkEvent(host, "turn-1:running", "thread.session-set", { session: { status: "running", activeTurnId: "turn-1" } })
+    ]) await host.orchestrator.ingestionSink(THREAD, [event]);
+    await host.orchestrator.ingestionSink(THREAD, [shellRow(host, "shell-start", "tool.started", { itemType: "command_execution", title: "Background shell", status: "inProgress", agentId: "task-1", data: DATA })]);
+    // 300 chunks of the shell's output, and 300 rows of the parent's own work between them.
+    const lines = Array.from({ length: 300 }, (_, i) => `request ${i} served\n`);
+    for (const [i, delta] of lines.entries()) {
+      host.clock.advance(1);
+      const at = host.clock.nowIso();
+      await host.orchestrator.ingestionSink(THREAD, [
+        shellRow(host, `chunk-${i}`, "tool.output", { streamKind: "command_output", delta }),
+        sinkEvent(host, `parent-${i}`, "thread.activity-appended", { activity: { kind: "activity", id: `parent-${i}`, tone: "info", activityKind: "runtime.warning", summary: `parent row ${i}`, payload: { message: `parent row ${i}` }, turnId: "turn-1", createdAt: at, updatedAt: at } })
+      ]);
+    }
+    await host.settle();
+    const snap = await host.orchestrator.readThread(THREAD);
+    assert.ok(snap.kind === "snapshot");
+    assert.equal(snap.thread.items.some((item) => item.id === "shell-start"), false, "retention dropped the shell's start");
+    assert.ok(snap.thread.items.some((item) => item.id === "chunk-299"));
+
+    const api = hostApi(host);
+    const entry = await shellEntry(api);
+    assert.deepEqual(entry, {
+      turn: 1, turnId: "turn-1", kind: "tool", createdAt: (snap.thread.items.find((item) => item.id === "chunk-299") as ThreadActivityItem).createdAt, agentId: "task-1",
+      tool: { type: "command_execution", title: "Tool output", status: "inProgress" }, outputItemId: "chunk-299"
+    });
+    // The whole output, from the log — the chunks the window dropped included.
+    const whole = await outputTool.run(parse(outputTool, { sessionId: THREAD, itemId: entry.outputItemId! }), ctx(api));
+    assert.deepEqual([whole.kind, whole.text, whole.running, "nextOffset" in whole], ["command-output", lines.join(""), true, false]);
+    await host.stop();
+  });
+});
+
+describe("fixture claude/14a through the real ingestion and store: a file change is never a command's output", () => {
+  const FIXTURE_THREAD = "thread-fixture";
+
+  /** read_tool_output's routes, answered as the host answers them, over the real store. */
+  function storeApi(store: ReturnType<typeof createThreadStore>): DaemonApi & { paths: string[] } {
+    const wire = (status: number, body: unknown): DaemonResponse => ({ status, body: JSON.parse(JSON.stringify(body)) as unknown });
+    const paths: string[] = [];
+    return {
+      fsRoot: "/work",
+      workspacesDir: "/work",
+      paths,
+      async request(method: DaemonMethod, path_: string): Promise<DaemonResponse> {
+        paths.push(path_);
+        if (method === "GET" && path_ === "/api/sessions") return wire(200, [chatSummary({ id: FIXTURE_THREAD })]);
+        const match = method === "GET" ? ITEM_ROUTE.exec(path_) : null;
+        if (match && decodeURIComponent(match[1]!) === FIXTURE_THREAD) {
+          const itemId = decodeURIComponent(match[2]!);
+          if (!match[3]) {
+            const item = await store.readItem(FIXTURE_THREAD, itemId);
+            return item ? wire(200, { item }) : wire(404, { error: { code: "THREAD_NOT_FOUND", message: `No item '${itemId}'.` } });
+          }
+          const joined = await store.readToolOutput(FIXTURE_THREAD, itemId);
+          return joined ? wire(200, joined) : wire(404, { error: { code: "ITEM_NOT_FOUND", message: `No tool call behind item '${itemId}'.` } });
+        }
+        return wire(404, { error: { code: "NOT_FOUND", message: `${method} ${path_}` } });
+      },
+      async uploadAttachment() { throw new Error("not a route these tests read"); },
+      subscribe: () => () => {}
+    };
+  }
+
+  it("the Write's completion answers its payload, its input included; the Bash call's answers its output", async (t) => {
+    const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "orq-output-14a-"));
+    t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+    const store = createThreadStore({ rootDir, sweepIntervalMs: 0 });
+    t.after(() => store.close());
+    await store.append({ threadId: FIXTURE_THREAD, events: [{
+      eventId: "created", threadId: FIXTURE_THREAD, type: "thread.created",
+      payload: { projectPath: "/work/p", cwd: "/work/p", title: "14a", adapter: "claude", refId: "claude", accountId: "", home: "system", modelSelection: { model: "sonnet" }, runtimeMode: "auto-accept-edits" },
+      occurredAt: "2026-09-21T00:00:00.000Z", commandId: null, causationEventId: null, metadata: {}
+    } as AppendableDomainEvent] });
+    const clock = new FakeClock();
+    const timers = new FakeTimers(clock);
+    const ingestion = createIngestion({
+      sink: async (threadId, events) => { await store.append({ threadId, events }); },
+      liveness: new RecordingLiveness(),
+      clock,
+      idGen: counterIdGen(),
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer
+    });
+    for (const event of replayClaudeFixture("14a-accept-edits-edit.ndjson").events) await ingestion.ingest(event);
+    await ingestion.drain();
+    await store.drain();
+
+    const rows = (await store.readAll(FIXTURE_THREAD)).events.flatMap((event) => (event.type === "thread.activity-appended" ? [event.payload.activity] : []));
+    const completion = (itemType: string) => rows.find((row) => row.activityKind === "tool.completed" && (row.payload as { itemType?: unknown }).itemType === itemType)!;
+    const write = completion("file_change");
+    const bash = completion("command_execution");
+    // The Write's result text went out as a streamed chunk of its own call — the output the join would give.
+    assert.ok(rows.some((row) => row.activityKind === "tool.output" && (row.payload as { streamKind?: unknown; toolUseId?: unknown }).streamKind === "file_change_output"
+      && (row.payload as { toolUseId?: unknown }).toolUseId === (write.payload as { toolUseId?: unknown }).toolUseId));
+
+    const api = storeApi(store);
+    const r = await outputTool.run(parse(outputTool, { sessionId: FIXTURE_THREAD, itemId: write.id }), ctx(api));
+    assert.deepEqual([r.kind, r.text], ["payload", JSON.stringify(write.payload, null, 2)]);
+    assert.ok((r.text as string).includes("\"input\""), "the whole payload, the Write's input included");
+    assert.ok(!api.paths.some((p_) => p_.endsWith("/output")), "a file change never asks for the join");
+    const b = await outputTool.run(parse(outputTool, { sessionId: FIXTURE_THREAD, itemId: bash.id }), ctx(api));
+    assert.equal(b.kind, "command-output");
   });
 });

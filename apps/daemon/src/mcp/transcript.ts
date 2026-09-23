@@ -9,8 +9,9 @@ export interface TranscriptEntry { turn: number | null; turnId: string | null; k
   /**
    * On a tool row only: where more of the call's output is read, by read_tool_output as `itemId`. The id of the latest
    * of the call's rows whose payload the read cut (`payload.truncated`, §5.6) and the host stores whole — its completion
-   * or a denial, the row the GUI's "Load full output" reads; else, for a call that streamed output (`tool.output` rows,
-   * which only the host can join whole), its latest row. Absent when the snapshot shows neither.
+   * or a denial, the row the GUI's "Load full output" reads; else, for a command that streamed output (`tool.output`
+   * rows of `command_output`, which only the host can join whole), its latest command row, or — for an entry built from
+   * its chunks alone, in a drill-in — its latest chunk. Absent when the snapshot shows neither.
    */
   outputItemId?: string;
   requestId?: string; requestKind?: string; decision?: string;
@@ -68,7 +69,7 @@ export const ROSTER_SHARE = 0.25;
 const TOOL_KINDS = new Set(["tool.started", "tool.updated", "tool.completed", "tool.denied"]);
 // A hook's start and progress are provider bookkeeping, as its successful completion is (below); the GUI keeps only
 // a completion that failed or was cancelled.
-const SKIPPED_ACTIVITY = new Set(["tool.output", "tool.progress", "turn.proposed.delta", "turn.plan.updated", "hook.started", "hook.progress", "context-window.updated", "checkpoint.captured", "background.requested", "task.progress", "task.updated"]);
+const SKIPPED_ACTIVITY = new Set(["tool.progress", "turn.proposed.delta", "turn.plan.updated", "hook.started", "hook.progress", "context-window.updated", "checkpoint.captured", "background.requested", "task.progress", "task.updated"]);
 
 /** A tool's `detail` after the second shed: at most this many characters, the cut marked by the trailing "…". */
 const SHED_DETAIL_CHARS = 200;
@@ -386,20 +387,40 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
     const tools = new Map<string, TranscriptEntry>();
     const requests = new Map<string, TranscriptEntry>();
     const tasks = new Map<string, TranscriptEntry>();
-    // The calls that streamed output (`tool.output` rows), and each call's latest lifecycle row in the range.
+    // A command's streamed output: the calls in the view that streamed some (`tool.output` rows of `command_output` —
+    // never a file change's `file_change_output`), each one's latest chunk in the range, and its latest lifecycle row
+    // there that says it is a command. What the view's lifecycle rows say of a call, in any turn, is kept for an entry
+    // built from a chunk alone (below).
     const streamed = new Set<string>();
-    const latestRow = new Map<string, string>();
+    const latestChunk = new Map<string, ThreadActivityItem>();
+    const latestCommandRow = new Map<string, string>();
+    const callFacts = new Map<string, { title?: string; command?: string; ended?: string }>();
     // An anchor names its agent in `subagent.id`; it carries no owner stamp.
     const base = (item: ThreadItem, kind: TranscriptEntry["kind"]): TranscriptEntry => ({ turn: turnOf(item), turnId: turnIdOf(item), kind, createdAt: item.createdAt, ...(item.agentId && kind !== "subagent" ? { agentId: item.agentId } : {}) });
     for (const item of snap.items) {
       if (!inScope(item)) continue;
-      // A chunk of a call's streamed output is never a row, but it says the call has output only the host can join
-      // whole. Counted wherever it falls in the view, not only in the range: a background shell outlives the turn that
-      // launched it, and its chunks carry whichever turn is live when they arrive.
-      if (item.kind === "activity" && item.activityKind === "tool.output") {
-        const callId = str(asRecord(item.payload)?.toolUseId);
-        if (callId) streamed.add(callId);
-        continue;
+      if (item.kind === "activity" && (item.activityKind === "tool.output" || TOOL_KINDS.has(item.activityKind))) {
+        const p = asRecord(item.payload) ?? {};
+        const callId = str(p.toolUseId);
+        // A chunk of a command's streamed output is never a row, but it says the call has output only the host can join
+        // whole. Counted wherever it falls in the view, not only in the range: a background shell outlives the turn that
+        // launched it, and its chunks carry whichever turn is live when they arrive.
+        if (item.activityKind === "tool.output") {
+          if (callId && p.streamKind === "command_output") {
+            streamed.add(callId);
+            if (inTurns(item)) latestChunk.set(callId, item);
+          }
+          continue;
+        }
+        if (callId) {
+          const facts = callFacts.get(callId) ?? {};
+          if (str(p.title)) facts.title = str(p.title);
+          const command = str(p.command) ?? str(asRecord(p.data)?.command);
+          if (command) facts.command = command;
+          if (item.activityKind === "tool.completed") facts.ended = str(p.status) ?? "completed";
+          if (item.activityKind === "tool.denied") facts.ended = "declined";
+          callFacts.set(callId, facts);
+        }
       }
       if (!inTurns(item)) continue;
       if (item.kind === "message") {
@@ -442,7 +463,7 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
         // denial half is forward-compatible: a denial carries no `data` today and is never cut on the wire, so it
         // names no id until one carries more than the read can show.
         if (p.truncated === true && (a.activityKind === "tool.completed" || a.activityKind === "tool.denied")) e.outputItemId = a.id;
-        if (str(p.toolUseId)) latestRow.set(key, a.id);
+        if (str(p.toolUseId) && p.itemType === "command_execution") latestCommandRow.set(key, a.id);
         continue;
       }
       if (a.activityKind.startsWith("task.")) {
@@ -494,12 +515,29 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
       if (a.activityKind === "runtime.warning" || a.activityKind === "hook.completed") { const e = base(a, "warning"); e.text = rowText(a, p); entries.push(e); continue; }
       if (a.activityKind === "session.identity-changed" || a.activityKind === "model.rerouted") { const e = base(a, "info"); e.text = a.summary; entries.push(e); }
     }
-    // A call whose output was streamed — a background shell's, a running command's so far — has it in no item's data:
-    // the host joins the chunks (`GET …/items/:itemId/output`). Where no cut completion already names the call, its
-    // latest row does: read_tool_output resolves the call from any of its rows.
-    for (const [callId, rowId] of latestRow) {
-      const e = tools.get(callId)!;
-      if (e.outputItemId === undefined && streamed.has(callId)) e.outputItemId = rowId;
+    // A command whose output was streamed — a background shell's, a running command's so far — has it in no item's
+    // data: the host joins the chunks (`GET …/items/:itemId/output`), and read_tool_output resolves the call from any of
+    // its command rows, or from one of its chunks.
+    for (const callId of streamed) {
+      const e = tools.get(callId);
+      if (e) {
+        // Where no cut completion already names the call: its latest command row in the range, else its latest chunk.
+        const rowId = latestCommandRow.get(callId) ?? latestChunk.get(callId)?.id;
+        if (e.outputItemId === undefined && rowId !== undefined) e.outputItemId = rowId;
+        continue;
+      }
+      // No row of the call in the range: an entry of its own, built from its latest chunk there — a long-running
+      // background shell's start is the first row its own chunks evict from its agent's 200-row window. In a drill-in
+      // only: there a chunk carries its agent's own id, while the parent's scope also holds chunks of subagents'
+      // commands (Claude streams a subagent's Bash result with no agent id, fixture claude/07) whose rows are the
+      // subagent's, and which are no parent entry.
+      const chunk = latestChunk.get(callId);
+      if (!opts.agentId || chunk === undefined || !opts.include.has("tools")) continue;
+      const facts = callFacts.get(callId) ?? {};
+      const entry = base(chunk, "tool");
+      entry.tool = { type: "command_execution", title: facts.title ?? chunk.summary, status: facts.ended ?? "inProgress", ...(facts.command ? { command: facts.command } : {}) };
+      entry.outputItemId = chunk.id;
+      entries.push(entry);
     }
     // The roster folds these same rows (a resume reopens, "stopped" is "interrupted", a dead session
     // interrupts) and is what the GUI resolves a spawn row from, so it wins whenever it has the task.

@@ -985,6 +985,67 @@ test("a background shell's row, in its own drill-in, offers outputItemId — its
   assert.deepEqual([done.tool!.status, done.outputItemId], ["completed", completed.id]);
 });
 
+test("only a command's streamed output counts: a file change streaming its result's text offers nothing more", () => {
+  // Claude streams every Edit/Write result as `file_change_output` ("File created successfully at: …", fixture 14a):
+  // that is no command's output, and read_tool_output never answers it as one.
+  const write = (activityKind: string, status: string) => activity(activityKind, { itemType: "file_change", toolUseId: "w1", title: "Write", status }, { turnId: "t1", tone: "tool" });
+  const chunk = activity("tool.output", { toolUseId: "w1", streamKind: "file_change_output", delta: "File created successfully at: /w/c.txt" }, { turnId: "t1", tone: "tool" });
+  assert.equal("outputItemId" in toolEntry([write("tool.started", "inProgress"), chunk]), false);
+  assert.equal("outputItemId" in toolEntry([write("tool.started", "inProgress"), chunk, write("tool.completed", "completed")]), false);
+  // A command's chunk still counts.
+  const bash = activity("tool.started", { itemType: "command_execution", toolUseId: "b1", title: "Bash", status: "inProgress" }, { turnId: "t1", tone: "tool" });
+  const out = activity("tool.output", { toolUseId: "b1", streamKind: "command_output", delta: "ok\n" }, { turnId: "t1", tone: "tool" });
+  assert.equal(toolEntry([bash, out]).outputItemId, bash.id);
+});
+
+test("in a drill-in, a command whose rows retention dropped is an entry built from its latest chunk in the range", () => {
+  // A background shell that printed past its agent's 200-row window: its start aged out, its latest chunks are left.
+  const chunk = (n: number, turnId: string, streamKind = "command_output") =>
+    activity("tool.output", { toolUseId: "bgshell:task-1", streamKind, delta: `line ${n}\n` }, { turnId, agentId: "task-1", tone: "tool", summary: "Tool output", createdAt: stamp(10 + n), updatedAt: stamp(10 + n) });
+  const turns = [turn({ turnId: "t1", requestedAt: stamp(1) }), turn({ turnId: "t2", turnCount: 2, requestedAt: stamp(20) })];
+  const items = [message("user", "build it", { turnId: "t1", id: "u1", createdAt: stamp(1) }), chunk(1, "t1"), chunk(2, "t1"), message("user", "meanwhile…", { turnId: "t2", id: "u2", createdAt: stamp(20) }), chunk(15, "t2")];
+  const read = (over: Partial<Parameters<typeof transcriptEntries>[1]> = {}) =>
+    transcriptEntries(snapshot({ turns, items }), { turns: 5, agentId: "task-1", include: ALL, maxChars: 100_000, ...over });
+  const [entry, ...rest] = read().entries.filter((e) => e.kind === "tool");
+  assert.equal(rest.length, 0, "one entry per call");
+  assert.deepEqual(entry, {
+    turn: 2, turnId: "t2", kind: "tool", createdAt: items[4]!.createdAt, agentId: "task-1",
+    tool: { type: "command_execution", title: "Tool output", status: "inProgress" }, outputItemId: items[4]!.id
+  });
+  // The range decides which chunk: reading turn 1 alone, its latest chunk there.
+  const first = read({ turns: 1, beforeTurn: 2 }).entries.find((e) => e.kind === "tool")!;
+  assert.deepEqual([first.turn, first.outputItemId], [1, items[2]!.id]);
+  // Not without "tools", and never for a file change's chunks.
+  assert.equal(read({ include: new Set(["activity"] as const) }).entries.some((e) => e.kind === "tool"), false);
+  const edits = [chunk(1, "t1", "file_change_output")];
+  assert.equal(transcriptEntries(snapshot({ turns, items: edits }), { turns: 5, agentId: "task-1", include: ALL, maxChars: 100_000 }).entries.length, 0);
+});
+
+test("a chunk-built entry takes the call's title, command and end from its rows in the view, outside the range", () => {
+  const shell = (activityKind: string, payload: Record<string, unknown>, turnId: string, n: number) =>
+    activity(activityKind, { toolUseId: "bgshell:task-1", ...payload }, { turnId, agentId: "task-1", tone: "tool", createdAt: stamp(n), updatedAt: stamp(n) });
+  const turns = [turn({ turnId: "t1", requestedAt: stamp(1) }), turn({ turnId: "t2", turnCount: 2, requestedAt: stamp(10) }), turn({ turnId: "t3", turnCount: 3, requestedAt: stamp(20) })];
+  const started = shell("tool.started", { itemType: "command_execution", title: "Background shell", status: "inProgress", data: { command: "make" } }, "t1", 2);
+  const out = shell("tool.output", { streamKind: "command_output", delta: "building\n" }, "t2", 11);
+  const done = shell("tool.completed", { itemType: "command_execution", title: "Background shell", status: "failed", data: { command: "make", exitCode: 2 } }, "t3", 21);
+  const read = (items: ThreadItem[]) => transcriptEntries(snapshot({ turns, items }), { turns: 1, beforeTurn: 3, agentId: "task-1", include: ALL, maxChars: 100_000 }).entries.find((e) => e.kind === "tool")!;
+  // Turn 2 holds only the chunk; the start (turn 1) and the end (turn 3) are in the view.
+  assert.deepEqual(read([started, out, done]).tool, { type: "command_execution", title: "Background shell", status: "failed", command: "make" });
+  assert.deepEqual(read([started, out]).tool, { type: "command_execution", title: "Background shell", status: "inProgress", command: "make" });
+  assert.equal(read([started, out]).outputItemId, out.id);
+});
+
+test("the parent view builds no entry from a chunk alone: a subagent's command result streams unstamped", () => {
+  // Claude sends a subagent's Bash result as a delta without the agent's id (fixture claude/07): the chunk lands in the
+  // parent's scope while the call's rows are the subagent's. It is never a parent entry.
+  const call = (activityKind: string, status: string) => activity(activityKind, { itemType: "command_execution", toolUseId: "sub-1", title: "Bash", status, agentId: "agent-a" }, { turnId: "t1", agentId: "agent-a", tone: "tool" });
+  const unstamped = activity("tool.output", { toolUseId: "sub-1", streamKind: "command_output", delta: "a.txt\n" }, { turnId: "t1", tone: "tool" });
+  const items = [message("user", "look around", { turnId: "t1", id: "u1" }), call("tool.started", "inProgress"), unstamped, call("tool.completed", "completed")];
+  assert.equal(transcriptEntries(snapshot({ items }), { turns: 5, include: ALL, maxChars: 100_000 }).entries.some((e) => e.kind === "tool"), false);
+  // Nor once the subagent's own rows are gone.
+  assert.equal(transcriptEntries(snapshot({ items: [items[0]!, unstamped] }), { turns: 5, include: ALL, maxChars: 100_000 }).entries.some((e) => e.kind === "tool"), false);
+});
+
 test("hooks: a failed completion is an error row, a cancelled one a warning row; starts, progress and successes are no row", () => {
   const items = [
     message("user", "Format it.", { turnId: "t1" }),

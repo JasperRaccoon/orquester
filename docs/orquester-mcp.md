@@ -706,14 +706,23 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
       GUI offers **Load full output** on; for a command, its whole output. Never the call's start
       (the GUI does not show it) nor an update: a running call's updates are stored already cut,
       so one read back holds only its preview;
-    - else, for a call that **streamed** its output, the call's latest row — its start, its latest
-      update, or a completion nothing cut. Streamed output is in no row's data: it arrives in
-      chunks, which are never rows here and which only the agent host can join whole — a Claude
-      background shell's output (tailed from the file the CLI writes it to: at most 1 MiB, then
-      one notice naming that file), and a command's output while it runs, where the agent streams
-      it (Codex's protocol can; a short command's output arrives whole with its completion). A
-      background shell is listed in `subagents` and its rows are in its own drill-in
-      (`read_transcript` with its `agentId`), as in the GUI.
+    - else, for a **command** that streamed its output, the call's latest row — its start, its
+      latest update, or a completion nothing cut. Streamed output is in no row's data: it arrives
+      in chunks, which are never rows here and which only the agent host can join whole — a
+      Claude background shell's output (tailed from the file the CLI writes it to: at most 1 MiB,
+      then one notice naming that file), and a command's output while it runs, where the agent
+      streams it (Codex's protocol can; a short command's output arrives whole with its
+      completion). A file change streams its result too (Claude's "File created successfully at:
+      …"), but that is no command's output, so it never earns an id this way. A background shell
+      is listed in `subagents` and its rows are in its own drill-in (`read_transcript` with its
+      `agentId`), as in the GUI.
+    - In a drill-in, a command whose rows are all gone from the view — a long-running background
+      shell's own chunks push its start out of its agent's 200-row window — is still an entry,
+      built from its latest chunk in the range: `tool.type` `command_execution`, the title and
+      command its other rows in the view give (else the chunk's own title, "Tool output"),
+      `status` `inProgress` unless its completion is in the view, and `outputItemId` that chunk.
+      The parent view builds no entry from chunks alone: a subagent's command result can stream
+      into the parent's rows with no agent id (Claude's does), and it is the subagent's call.
 
     The snapshot keeps only an allow-list of each call's provider data, so most finished calls
     that carry any have an id. A row without one has nothing more the snapshot knows of.
@@ -735,7 +744,7 @@ TranscriptEntry = { turn: number | null, turnId: string | null, kind, createdAt,
   "tool"         tool: { type, title, status, command?, detail?, changedFiles? }, outputItemId?
                                                   (include "tools"; one entry per tool call, its latest state;
                                                    a command's detail as the GUI's row shows it; outputItemId
-                                                   where the snapshot cut its data or the call streamed its
+                                                   where the snapshot cut its data or a command streamed its
                                                    output: read_tool_output reads it)
   "approval"     requestId, requestKind?, text? /* the request's detail, ≤ 2 000 characters */, decision?
                                                   (include "activity"; open or resolved)
@@ -757,10 +766,10 @@ TranscriptEntry = { turn: number | null, turnId: string | null, kind, createdAt,
 - **`read_tool_output`** — the whole of what `read_transcript` shows cut. Its rows come from the
   thread snapshot, which keeps only part of each tool call's provider data: a command's output
   reaches `tool.detail` as its first line, at most 84 characters. A row whose data was cut, or
-  whose call streamed its output, carries `outputItemId`, and this tool reads that item whole
+  whose command streamed its output, carries `outputItemId`, and this tool reads that item whole
   (`GET /api/sessions/:id/items/:itemId`, the read the GUI's **Load full output** makes) — and,
-  where the item holds no output of its own, the call's streamed output. `kind` says what `text`
-  is:
+  where a command's item holds no output of its own, the call's streamed output. `kind` says what
+  `text` is:
   - `command-output` — a command's output, found in this order:
     1. **The item's own data**, when it carries output: that output whole, as the command printed
        it (nothing trimmed), from the first place — in the order the row's preview reads them —
@@ -772,10 +781,13 @@ TranscriptEntry = { turn: number | null, turnId: string | null, kind, createdAt,
        different place first (Grok's preview is its content blocks' first line, its whole output
        `output_for_prompt`). A running call's update is stored already cut, so its own data is
        never read as its output.
-    2. **The call's streamed output**, when the call streamed any: output that is in no item's
+    2. **The call's streamed output**, when the item is a command's — a `command_execution` row,
+       or a chunk of a command's output — and the call streamed any: output that is in no item's
        data at all — a Claude background shell's, a command's output while it runs — joined by the
        agent host from the chunks it arrived in, in order
-       (`GET /api/sessions/:id/items/:itemId/output`). `running: true` says the call has not
+       (`GET /api/sessions/:id/items/:itemId/output`). A file change is never read this way:
+       Claude streams an Edit's or a Write's result text too, and its payload — the edit itself —
+       is what the GUI shows for it. `running: true` says the call has not
        completed, so `text` is its output so far: read again later for the rest. It only ever
        grows at its end, so an `offset` stays valid from one page to the next while `totalBytes`
        grows. `truncated: true` says the join passed the host's cap, 8 MiB, and `text` is its
@@ -785,8 +797,9 @@ TranscriptEntry = { turn: number | null, turnId: string | null, kind, createdAt,
   - `payload` — anything else, as the GUI's viewer shows it: a string payload as it is, else the
     payload as indented JSON (`JSON.stringify(payload, null, 2)`), else the row's summary. A
     command comes back this way too when neither step finds output: its data keeps it elsewhere
-    and nothing was streamed. (A live Claude call streams its result's text, so even a result
-    given as a list of blocks is read by step 2.)
+    and nothing was streamed. (A live Claude Bash call streams its result's text as a command's
+    output, so even a result given as a list of blocks is read by step 2. A file change always
+    comes back this way.)
 
   Right after a deploy, the agent host may still be the one from before it (it is replaced once no
   turn and no background work is running), and it cannot join streamed output: the item answers
@@ -835,7 +848,7 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "agentId"
       { "turn": 4, "turnId": "1e7c9a3b-…", "kind": "tool", "createdAt": "2026-09-23T11:20:02.910Z",
         "agentId": "b7k2m9x1q",
         "tool": { "type": "command_execution", "title": "Background shell", "status": "inProgress",
-                  "detail": "pnpm --filter @orquester/web dev" },
+                  "command": "pnpm --filter @orquester/web dev" },
         "outputItemId": "c2f81d5e-4a09-4b7e-8d13-5f6a2b9e0c47" } ],
     "turnCount": 4, "olderTurns": 1, "coveredTurns": [ 4, 4 ], "truncated": false, "subagents": [] }
 

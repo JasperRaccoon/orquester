@@ -22,6 +22,7 @@ let seq = 0;
 /** One logged event, as the store decodes it back. */
 function logged(type: "thread.activity-appended", payload: { activity: ThreadActivityItem }): DomainEvent;
 function logged(type: "thread.message-sent", payload: { messageId: string; role: "assistant"; text: string; streaming: boolean; turnId: string | null }): DomainEvent;
+function logged(type: "thread.reverted", payload: { turnCount: number }): DomainEvent;
 function logged(type: string, payload: unknown): DomainEvent {
   seq += 1;
   return { seq, eventId: `ev-${seq}`, threadId: "t1", type, payload, occurredAt: "2026-09-23T10:00:00.000Z", commandId: null, causationEventId: null, metadata: {} } as unknown as DomainEvent;
@@ -78,6 +79,20 @@ test("a call that streamed nothing answers an empty output; an item naming no ca
 test("the item's newest write names the call, as readItem reads it", () => {
   const events = [row("same", "tool.started", "old-call"), chunk("o1", "old-call", "old\n"), chunk("o2", "new-call", "new\n"), row("same", "tool.updated", "new-call")];
   assert.equal(joinToolOutput(events, "same")!.output, "new\n");
+});
+
+test("a rewind does not unprint output: chunks written in the turns a revert removed are still joined", () => {
+  // A background shell launched before the rewind point keeps running through it: what it printed in the removed turns
+  // is its real output, and the raw log keeps it (documented, not filtered).
+  const shell = "bgshell:task-1";
+  const events = [
+    row("start", "tool.started", shell, { itemType: "command_execution" }),
+    chunk("o1", shell, "before\n"),
+    chunk("o2", shell, "in a turn the rewind removed\n"),
+    logged("thread.reverted", { turnCount: 1 }),
+    chunk("o3", shell, "after\n")
+  ];
+  assert.equal(joinToolOutput(events, "start")!.output, "before\nin a turn the rewind removed\nafter\n");
 });
 
 test("the cap cuts the join in-band, on a character boundary, and the completion after the cut is still reported", () => {
