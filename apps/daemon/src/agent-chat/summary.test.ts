@@ -384,6 +384,111 @@ test("a restamp alone never pushes: pushes stay gated on the attention VALUE cha
   );
 });
 
+// A turn restamps only when it settled SINCE the last poll: its `completedAt`
+// is later than that poll. "The latest turn moved onto a settled one" is not
+// enough, because a rewind and a history replay both move it onto turns that
+// settled long ago.
+
+test("a rewind back onto a turn that settled long ago keeps the stamp", () => {
+  // `thread.reverted` truncates the turns, so `latestTurn` goes t3 → t2. A
+  // Codex rewind stays `finished`, and a client that called `revert_session`
+  // itself must not be woken by its own rewind.
+  let clock = 1_000;
+  const h = harness(() => clock);
+  seedTab(h.chat, "c1");
+  h.service.applyFields("c1", settledTurn("t2", "completed", 900));
+  clock = 2_500;
+  h.service.applyFields("c1", settledTurn("t3", "completed", 2_400));
+  assert.equal(h.chat.get("c1")?.activity?.needsAttentionAt, iso(2_500));
+  const seen = activityEvents(h).length;
+  const turnEvents = () => h.published.filter((p) => p.type === "agentChat.turn").length;
+  const turnsSeen = turnEvents();
+
+  clock = 4_000;
+  h.service.applyFields("c1", settledTurn("t2", "completed", 900));
+  assert.equal(h.chat.get("c1")?.activity?.attention, "finished");
+  assert.equal(h.chat.get("c1")?.activity?.needsAttentionAt, iso(2_500), "t2 settled long before the last poll");
+  assert.equal(activityEvents(h).length, seen);
+  assert.equal(turnEvents(), turnsSeen + 1, "agentChat.turn still reports the move");
+});
+
+test("a history replay committing settled rows one poll at a time keeps the stamp", () => {
+  // A create-time resume opens the session at once and replays the provider's
+  // history while the head is still `idle`, i.e. `finished`. `stampHistoryTimes`
+  // dates every replayed row before the thread was created, so each one is
+  // older than any poll of the thread.
+  let clock = 10_000;
+  const h = harness(() => clock);
+  seedTab(h.chat, "c1");
+  const replayed = (turnId: string, at: number) => ({
+    chatSessionStatus: "idle" as const,
+    latestTurn: { turnId, state: "completed" as const, startedAt: iso(at - 1), completedAt: iso(at) }
+  });
+  h.service.applyFields("c1", { chatSessionStatus: "idle", latestTurn: null });
+  assert.equal(h.chat.get("c1")?.activity?.needsAttentionAt, iso(10_000));
+  const seen = activityEvents(h).length;
+
+  clock = 11_500;
+  h.service.applyFields("c1", replayed("h1", 9_997));
+  clock = 13_000;
+  h.service.applyFields("c1", replayed("h2", 9_998));
+  assert.equal(h.chat.get("c1")?.activity?.attention, "finished");
+  assert.equal(h.chat.get("c1")?.activity?.needsAttentionAt, iso(10_000), "a replayed turn is the past");
+  assert.equal(activityEvents(h).length, seen);
+});
+
+test("two turns that fail before the provider names them, inside one poll, restamp", () => {
+  // A turn that fails while still `pending` settles `failed` with a null id, so
+  // two in a row look alike to `turnMoved`. Only the second one's
+  // `completedAt`, written once when it settled, says it is new.
+  let clock = 1_000;
+  const h = harness(() => clock);
+  seedTab(h.chat, "c1");
+  const failedUnnamed = (at: number) => ({
+    chatSessionStatus: "error" as const,
+    latestTurn: { turnId: null, state: "failed" as const, startedAt: null, completedAt: iso(at) }
+  });
+  h.service.applyFields("c1", failedUnnamed(900));
+  assert.equal(h.chat.get("c1")?.activity?.needsAttentionAt, iso(1_000));
+  const seen = activityEvents(h).length;
+
+  clock = 2_500;
+  h.service.applyFields("c1", failedUnnamed(2_400));
+  assert.equal(h.chat.get("c1")?.activity?.needsAttentionAt, iso(2_500));
+  assert.equal(activityEvents(h).length, seen + 1);
+});
+
+test("a turn moving into pending or running never restamps, whatever its completedAt says", () => {
+  // Pins the "settled" half. The error rung outranks running, so the attention
+  // stays `finished` while a new turn is requested and runs. A running turn's
+  // `completedAt` can hold a mid-turn placeholder-checkpoint stamp
+  // (`turn-state.ts`), so a `completedAt` later than the last poll alone does
+  // not mean the turn settled since then.
+  let clock = 1_000;
+  const h = harness(() => clock);
+  seedTab(h.chat, "c1");
+  h.service.applyFields("c1", {
+    chatSessionStatus: "error",
+    latestTurn: { turnId: "t1", state: "failed", startedAt: iso(500), completedAt: iso(900) }
+  });
+  assert.equal(h.chat.get("c1")?.activity?.needsAttentionAt, iso(1_000));
+  const seen = activityEvents(h).length;
+
+  clock = 2_500;
+  h.service.applyFields("c1", {
+    chatSessionStatus: "error",
+    latestTurn: { turnId: null, state: "pending", startedAt: null, completedAt: null }
+  });
+  clock = 4_000;
+  h.service.applyFields("c1", {
+    chatSessionStatus: "error",
+    latestTurn: { turnId: "t2", state: "running", startedAt: iso(3_000), completedAt: iso(3_900) }
+  });
+  assert.equal(h.chat.get("c1")?.activity?.attention, "finished", "the error rung outranks running");
+  assert.equal(h.chat.get("c1")?.activity?.needsAttentionAt, iso(1_000));
+  assert.equal(activityEvents(h).length, seen);
+});
+
 test("end to end: wait_for_session looping on its cursor hears approval B after approval A", async () => {
   // The real summary service publishing onto the bus the MCP's real
   // `waitForAttention` subscribes to, as `InjectDaemonApi` wires it.
