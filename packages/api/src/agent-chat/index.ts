@@ -14,6 +14,7 @@ export * from "./adapter-types.ts";
 export * from "./domain-events.ts";
 export * from "./thread.ts";
 export * from "./compaction.ts";
+export * from "./command-output.ts";
 export * from "./wire.ts";
 export * from "./fold.ts";
 export * from "./fold-snapshot.ts";

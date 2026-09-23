@@ -1,8 +1,10 @@
-import { ACTIVE_SUBAGENT_STATUSES, isPlanImplementationMessage, startedTurns, type RuntimeSubagent, type StartedTurn, type ThreadActivityItem, type ThreadItem, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
+import { ACTIVE_SUBAGENT_STATUSES, commandDisplayDetail, compactionMarkerState, isAgentOwnedActivity, isCompactionActivity, isPlanImplementationMessage, startedTurns, type RuntimeSubagent, type StartedTurn, type ThreadActivityItem, type ThreadItem, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
 import { capText } from "./result.ts";
 
 export type TranscriptInclude = "reasoning" | "tools" | "activity";
 export interface TranscriptEntry { turn: number | null; turnId: string | null; kind: "user" | "assistant" | "reasoning" | "tool" | "approval" | "question" | "subagent" | "plan" | "changes" | "compaction" | "error" | "warning" | "info"; createdAt: string; agentId?: string; text?: string;
+  /** On an assistant row only: the provider marked it narration between tool calls (Codex's commentary), never the turn's answer. */
+  commentary?: true;
   attachments?: { name: string; type: string }[]; tool?: { type: string; title: string; status: string; command?: string; detail?: string; changedFiles?: string[] }; requestId?: string; requestKind?: string; decision?: string;
   questions?: string[]; answered?: boolean; subagent?: { id: string; title: string | null; status: string }; actionable?: boolean; files?: { path: string; additions: number; deletions: number }[]; state?: string; beforeTokens?: number; afterTokens?: number }
 export interface TranscriptOptions {
@@ -52,7 +54,9 @@ const HINT_FIELD_BYTES = 10;
 export const ROSTER_SHARE = 0.25;
 
 const TOOL_KINDS = new Set(["tool.started", "tool.updated", "tool.completed", "tool.denied"]);
-const SKIPPED_ACTIVITY = new Set(["tool.output", "tool.progress", "turn.proposed.delta", "turn.plan.updated", "hook.started", "hook.progress", "hook.completed", "context-window.updated", "checkpoint.captured", "background.requested", "task.progress", "task.updated"]);
+// A hook's start and progress are provider bookkeeping, as its successful completion is (below); the GUI keeps only
+// a completion that failed or was cancelled.
+const SKIPPED_ACTIVITY = new Set(["tool.output", "tool.progress", "turn.proposed.delta", "turn.plan.updated", "hook.started", "hook.progress", "context-window.updated", "checkpoint.captured", "background.requested", "task.progress", "task.updated"]);
 
 /** A tool's `detail` after the second shed: at most this many characters, the cut marked by the trailing "…". */
 const SHED_DETAIL_CHARS = 200;
@@ -226,14 +230,17 @@ function cutRow(entry: TranscriptEntry, need: number): { row: TranscriptEntry; s
   return saved >= need ? { row, saved } : null;
 }
 
-/** The row a shed never drops: the latest turn's final assistant reply, else that turn's newest row. */
+/**
+ * The row a shed never drops: the latest turn's final assistant reply, else that turn's newest row. A commentary row
+ * is narration, never the reply (the GUI never takes it for the turn's answer).
+ */
 function sparedIndex(rows: readonly TranscriptEntry[]): number {
   let latest: number | null = null;
   for (const e of rows) if (e.turn !== null && (latest === null || e.turn > latest)) latest = e.turn;
   let newest = -1;
   for (let i = rows.length - 1; i >= 0; i -= 1) {
     if (rows[i]!.turn !== latest) continue;
-    if (rows[i]!.kind === "assistant") return i;
+    if (rows[i]!.kind === "assistant" && !rows[i]!.commentary) return i;
     if (newest < 0) newest = i;
   }
   return newest;
@@ -375,6 +382,7 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
         if (item.role === "reasoning" && !opts.include.has("reasoning")) continue;
         const e = base(item, item.role === "user" ? "user" : item.role === "assistant" ? "assistant" : "reasoning");
         e.text = item.text;
+        if (item.role === "assistant" && item.messageKind === "commentary") e.commentary = true;
         if (item.attachments?.length) e.attachments = item.attachments.map((a) => ({ name: a.name, type: a.type }));
         entries.push(e);
         continue;
@@ -393,7 +401,11 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
         if (str(p.status)) t.status = str(p.status)!;
         if (a.activityKind === "tool.denied") t.status = "declined";
         if (str(p.command)) t.command = str(p.command);
-        if (str(p.detail)) t.detail = str(p.detail);
+        // A command's detail is what the GUI's row shows (`commandDisplayDetail`): the provider's, or the output its
+        // data carries where that detail is empty, repeats the title or only echoes the command. An activity that
+        // gives none — an echo with no output yet — leaves the detail an earlier one gave, as the GUI's row keeps it.
+        const detail = p.itemType === "command_execution" ? commandDisplayDetail(p) : str(p.detail);
+        if (detail) t.detail = detail;
         if (Array.isArray(p.changedFiles)) t.changedFiles = p.changedFiles.filter((f): f is string => typeof f === "string");
         continue;
       }
@@ -428,16 +440,22 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
       if (a.activityKind === "turn.proposed.completed") {
         const e = base(a, "plan"); e.text = str(p.planMarkdown) ?? ""; e.actionable = a.id === actionablePlan; entries.push(e); continue;
       }
-      if (a.activityKind === "context-compaction") {
-        if (!opts.include.has("activity")) continue;
-        const e = base(a, "compaction"); e.state = str(p.state) ?? "compacting";
+      // A compaction marker in the GUI's reading (`@orquester/api` compaction.ts): a `context-compaction` row or an old
+      // log's `thread.state.changed {state: "compacted"}`, in the state the GUI shows — an unreadable one is settled.
+      // A subagent compacting its own context (an agentId on the row or on its payload) is not the conversation's:
+      // the parent view leaves it out, as the GUI's timeline does.
+      if (isCompactionActivity(a)) {
+        if (!opts.include.has("activity") || (!opts.agentId && isAgentOwnedActivity(a))) continue;
+        const e = base(a, "compaction"); e.state = compactionMarkerState(a);
         if (typeof p.beforeTokens === "number") e.beforeTokens = p.beforeTokens;
         if (typeof p.afterTokens === "number") e.afterTokens = p.afterTokens;
         entries.push(e); continue;
       }
       if (!opts.include.has("activity")) continue;
+      if (a.activityKind === "hook.completed" && p.outcome === "success") continue;
+      // A hook that failed is an error row (its tone), one cancelled — or ending any other way — a warning row.
       if (a.tone === "error") { const e = base(a, "error"); e.text = rowText(a, p); entries.push(e); continue; }
-      if (a.activityKind === "runtime.warning") { const e = base(a, "warning"); e.text = rowText(a, p); entries.push(e); continue; }
+      if (a.activityKind === "runtime.warning" || a.activityKind === "hook.completed") { const e = base(a, "warning"); e.text = rowText(a, p); entries.push(e); continue; }
       if (a.activityKind === "session.identity-changed" || a.activityKind === "model.rerouted") { const e = base(a, "info"); e.text = a.summary; entries.push(e); }
     }
     // The roster folds these same rows (a resume reopens, "stopped" is "interrupted", a dead session

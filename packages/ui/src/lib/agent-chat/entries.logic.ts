@@ -23,6 +23,7 @@
 
 import type { ThreadActivityItem, ThreadItem, ThreadMessageItem } from "@orquester/api/agent-chat";
 import {
+  commandDisplayDetail,
   compactionMarkerState,
   IDENTITY_CHANGED_ACTIVITY_KIND,
   isAgentOwnedActivity,
@@ -164,49 +165,6 @@ export function workLogEntryFromActivity(activity: ThreadActivityItem): WorkLogE
   return derivedWorkLogEntry(activity);
 }
 
-/** Command output can live in provider data while `detail` only echoes the command. */
-function commandOutputPreview(data: Record<string, unknown> | null): string | undefined {
-  const item = asRecord(data?.item);
-  const raw = asRecord(data?.rawOutput);
-  const outputStreams = [asTrimmedString(raw?.stdout), asTrimmedString(raw?.stderr)]
-    .filter((value): value is string => value !== undefined);
-  const content = Array.isArray(data?.content)
-    ? data.content.flatMap((value) => {
-        const block = asRecord(value);
-        const text = asRecord(block?.content);
-        return block?.type === "content" ? [asTrimmedString(text?.text)].filter(Boolean) : [];
-      }).join("\n")
-    : undefined;
-  const candidates = [
-    item?.aggregatedOutput,
-    asRecord(item?.result)?.content,
-    data?.rawOutput,
-    raw?.content,
-    outputStreams.length > 0 ? outputStreams.join("\n") : undefined,
-    raw?.output,
-    raw?.output_for_prompt,
-    content,
-    asRecord(data?.result)?.content,
-    data?.result
-  ];
-  for (const candidate of candidates) {
-    const text = asTrimmedString(candidate);
-    if (text !== undefined) return text;
-  }
-  return undefined;
-}
-
-function repeatsCommandPreview(detail: string | undefined, command: string | undefined): boolean {
-  if (detail === undefined || command === undefined) return false;
-  if (detail === command) return true;
-  const prefix = detail.endsWith("...")
-    ? detail.slice(0, -3)
-    : detail.endsWith("…")
-      ? detail.slice(0, -1)
-      : undefined;
-  return prefix !== undefined && prefix.length > 0 && command.startsWith(prefix);
-}
-
 function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry {
   const cached = derivedByActivity.get(activity);
   if (cached) {
@@ -226,18 +184,11 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
       : asTrimmedString(payload?.detail)
     : asTrimmedString(payload?.detail);
   const command = asTrimmedString(payload?.command) ?? asTrimmedString(data?.command);
-  const isCommand = payload?.itemType === "command_execution";
-  const output = isCommand ? commandOutputPreview(data) : undefined;
-  const commandEcho =
-    isCommand && repeatsCommandPreview(detail, command) &&
-    asTrimmedString(data?.kind)?.toLowerCase() === "execute";
-  const displayDetail =
-    isCommand && output !== undefined &&
-    (detail === undefined || commandEcho || detail === asTrimmedString(payload?.title))
-      ? output
-      : commandEcho
-        ? undefined
-        : detail;
+  // A command row shows the output its provider data carries where `detail`
+  // only echoes the command or repeats the title — one rule in
+  // `@orquester/api` (`command-output.ts`), shared with the MCP's transcript.
+  // It is given the detail kept above: a task row's may have become its label.
+  const displayDetail = commandDisplayDetail(payload, { detail });
 
   const entry: DerivedWorkLogEntry = {
     id: activity.id,
