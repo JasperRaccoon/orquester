@@ -2,11 +2,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createWriteStream } from "node:fs";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
+import { z } from "zod";
 import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester/config";
 import { createServer } from "../index.ts";
 import { chatSummary } from "./fixtures.ts";
 import { FakeDaemonApi } from "./testing.ts";
-import { allTools, registerMcp, SERVER_INSTRUCTIONS, SERVER_VERSION, type McpDeps } from "./server.ts";
+import { allTools, argumentProblems, registerMcp, SERVER_INSTRUCTIONS, SERVER_VERSION, type McpDeps } from "./server.ts";
 
 const EXPECTED_TOOLS = ["list_projects", "list_agents", "list_conversations", "list_sessions", "get_session", "get_turn_diff", "create_session", "update_session", "interrupt_session", "stop_session", "close_session", "revert_session", "compact_session", "send_message", "implement_plan", "read_transcript", "answer_question", "dismiss_question", "resolve_approval", "wait_for_session", "get_usage", "get_cost", "list_files", "read_file", "list_todos", "create_todo", "update_todo", "delete_todo", "toggle_todo_item"];
 
@@ -168,6 +169,53 @@ test("arguments a tool's schema refuses answer the §4.5 envelope: isError, INVA
     const missing = await postMcp(app, call(12, "get_session", {}));
     assert.equal(missing.result.structuredContent.code, "INVALID_ARGUMENT");
     assert.match(missing.result.structuredContent.message, /sessionId: Required/);
+  } finally { await app.close(); }
+});
+
+test("a refusal never echoes a huge value: each named field's text is at most 200 characters, a cut one ending in …", () => {
+  const big = "x".repeat(2 * 1024 * 1024);
+  const refuse = (name: string, args: Record<string, unknown>): string => {
+    const parsed = z.object(allTools().find((t) => t.name === name)!.input).safeParse(args);
+    assert.equal(parsed.success, false, name);
+    return argumentProblems(name, (parsed as z.SafeParseError<unknown>).error);
+  };
+  /** The one issue a single-issue refusal names. */
+  const only = (name: string, message: string): string => {
+    const prefix = `Invalid arguments for ${name}: `;
+    assert.ok(message.startsWith(prefix) && message.endsWith("."), message.slice(0, 300));
+    return message.slice(prefix.length, -1);
+  };
+  const length = (text: string) => [...text].length;
+  // An enum echoes the value it received: the valid values, before it, stay whole.
+  const enumValue = only("resolve_approval", refuse("resolve_approval", { sessionId: "c1", requestId: "r1", decision: big }));
+  assert.match(enumValue, /^decision: Invalid enum value\. Expected 'accept' \| 'acceptForSession' \| 'acceptAlways' \| 'decline' \| 'cancel', received 'x+…$/);
+  assert.equal(length(enumValue), 200);
+  // A strict object echoes the unknown keys.
+  const unknownKey = only("send_message", refuse("send_message", { sessionId: "c1", attachments: [{ path: "a.txt", [big]: 1 }] }));
+  assert.match(unknownKey, /^attachments\.0: Unrecognized key\(s\) in object: 'x+…$/);
+  assert.equal(length(unknownKey), 200);
+  // A record's key is part of the path: it is cut on its own, so the reason still shows.
+  const recordKey = only("answer_question", refuse("answer_question", { sessionId: "c1", answers: { [big]: 5 } }));
+  assert.match(recordKey, /^answers\.x+…: Invalid input$/);
+  assert.ok(length(recordKey) <= 200, `${length(recordKey)} characters`);
+  // Five fields named at most, each capped: the whole line stays short.
+  const many = refuse("read_transcript", { sessionId: "c1", include: Array.from({ length: 7 }, () => big.slice(0, 10_000)) });
+  assert.match(many, /; …\.$/);
+  assert.ok(many.length < 1_100, `${many.length} characters`);
+  assert.equal(many.split("include.").length - 1, 5, "five fields named");
+  // Short texts are untouched.
+  assert.equal(refuse("get_session", {}), "Invalid arguments for get_session: sessionId: Required.");
+});
+
+test("over the wire, a 2 MiB enum value is refused in a short INVALID_ARGUMENT, not a 2 MiB one", async () => {
+  const app = mcpApp({ createApi: () => new FakeDaemonApi() });
+  try {
+    const bad = await postMcp(app, call(18, "read_transcript", { sessionId: "c1", include: ["y".repeat(2 * 1024 * 1024)] }));
+    assert.equal(bad.result.isError, true);
+    assert.equal(bad.result.structuredContent.code, "INVALID_ARGUMENT");
+    const text = bad.result.content[0].text as string;
+    assert.ok(text.length < 400, `${text.length} characters`);
+    assert.match(text, /^INVALID_ARGUMENT: Invalid arguments for read_transcript: include\.0: Invalid enum value\. Expected 'reasoning' \| 'tools' \| 'activity', received 'y+…\.$/);
   } finally { await app.close(); }
 });
 

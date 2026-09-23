@@ -6,7 +6,7 @@ import { CallToolRequestSchema, ErrorCode, McpError } from "@modelcontextprotoco
 import type { DaemonApi } from "./daemon-api.ts";
 import { ToolError } from "./errors.ts";
 import type { FsTools } from "./fs-tools.ts";
-import { ok, toSafeToolError } from "./result.ts";
+import { capText, ok, toSafeToolError } from "./result.ts";
 import type { TodoTools } from "./todo-tools.ts";
 import type { ToolContext, ToolDef } from "./tool.ts";
 import { catalogTools } from "./tools/catalog.ts";
@@ -44,12 +44,28 @@ export function allTools(): ToolDef[] {
 
 /** How many refused fields an INVALID_ARGUMENT names before "…". */
 const MAX_NAMED_ISSUES = 5;
+/**
+ * The most one refused field's text takes, and the most its path takes within it. zod's words can echo the caller's
+ * input — the value an enum received, a strict object's unknown keys, a record's key in the path — and a 2 MiB value
+ * must not make a 2 MiB error. The path is cut on its own, so the reason after it still shows.
+ */
+const MAX_ISSUE_CHARS = 200;
+const MAX_ISSUE_PATH_CHARS = 100;
 
-/** The one line an argument the schema refuses answers with: each bad field and why, as zod words it. */
+/** `text` in at most `max` code points, the last of them a "…" when anything was cut. */
+function clip(text: string, max: number): string {
+  return capText(text, max).truncated ? `${capText(text, max - 1).text}…` : text;
+}
+
+/** The one line an argument the schema refuses answers with: each bad field and why, as zod words it, each capped. */
 export function argumentProblems(toolName: string, error: z.ZodError): string {
-  const named = error.issues.slice(0, MAX_NAMED_ISSUES).map((issue) => `${issue.path.length ? issue.path.join(".") : "arguments"}: ${issue.message}`);
+  const oneLine = (text: string) => text.replace(/\s+/g, " ");
+  const named = error.issues.slice(0, MAX_NAMED_ISSUES).map((issue) => {
+    const path = issue.path.length ? clip(oneLine(issue.path.join(".")), MAX_ISSUE_PATH_CHARS) : "arguments";
+    return clip(oneLine(`${path}: ${issue.message}`), MAX_ISSUE_CHARS);
+  });
   const more = error.issues.length > MAX_NAMED_ISSUES ? "; …" : "";
-  return `Invalid arguments for ${toolName}: ${named.join("; ")}${more}.`.replace(/\s+/g, " ");
+  return `Invalid arguments for ${toolName}: ${named.join("; ")}${more}.`;
 }
 
 /**
@@ -58,7 +74,9 @@ export function argumentProblems(toolName: string, error: z.ZodError): string {
  * SDK answers an argument the schema refuses with its own text, outside spec §4.5's envelope. Ours parses the
  * arguments ONCE with the tool's own schema (defaults applied; no `arguments` at all is `{}`), answers a refusal as
  * INVALID_ARGUMENT naming the fields, and turns anything `run` throws into a coded isError result. An unknown tool is
- * the JSON-RPC InvalidParams error the SDK raises for it.
+ * deliberately the JSON-RPC InvalidParams error (−32602), as the MCP spec has it: SDK 1.29's own handler raises the
+ * same error but catches it into an `isError` tool result. What else that handler checks is skipped on purpose: a
+ * tool's `enabled` flag (no tool is ever disabled), task support and output schemas (no tool declares either).
  */
 export function buildServer(deps: McpDeps, authorization: string | undefined, signal: AbortSignal): McpServer {
   const server = new McpServer({ name: "orquester", version: SERVER_VERSION }, { instructions: SERVER_INSTRUCTIONS });
