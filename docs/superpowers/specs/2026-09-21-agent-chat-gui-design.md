@@ -3196,8 +3196,9 @@ Row kinds and behaviour:
 fetch it, so nothing decodes a 10 MiB image into a bubble on a phone. The sent-message chips, like
 the composer's, carry the file-type icon of §7.4 (`icons/files`). The plan proposal card offers
 **copy and download only**; there is no "save into the workspace" action, which would be a write
-into `fsRoot` from a render path. And there is no "load earlier" header: a thread is sent whole
-(§2), so there is nothing earlier to load
+into `fsRoot` from a render path. An older-history row ("Load older", `LoadOlderRow`) appears
+once the retained window has evicted a visible row, and pages the turns below it from the host's
+thread index (`GET …/history`; design `2026-09-23-thread-index-and-lazy-boot-design.md`)
 (`packages/ui/src/components/agent-chat/timeline/`). Codex's `commentary` phase is a visible
 assistant message between tool calls, in both live and replayed turns. The phase remains metadata
 so commentary cannot become the turn's terminal answer.*

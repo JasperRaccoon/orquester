@@ -123,7 +123,7 @@ flowchart LR
 
 - **Two transports, one server**: an always-on Unix socket (desktop, trusted) and an opt-in, hot-reloadable HTTP transport (remote web, bearer-auth) — flip remote access on/off without touching running sessions.
 - **tmux-backed persistence**: commands live in a dedicated tmux server, so a daemon restart or redeploy reattaches to every running agent. Falls back to direct node-pty where tmux < 3.2 (Windows, stock macOS) — sessions then don't survive restarts.
-- **State is plain JSON** under one appdir (`~/.orquester` by default) — no database.
+- **State is plain JSON** under one appdir (`~/.orquester` by default); the one SQLite file, the agent host's thread index, is a disposable cache rebuilt from the chat logs.
 - **External agents over MCP**: `POST /mcp` (remote transport only) drives chat sessions as an in-process client of the daemon's own REST API — the same routes and gates the GUI uses, no terminal keystrokes. See [`docs/orquester-mcp.md`](docs/orquester-mcp.md).
 
 ### Monorepo layout
