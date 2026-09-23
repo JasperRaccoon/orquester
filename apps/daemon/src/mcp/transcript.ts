@@ -18,6 +18,11 @@ export interface TranscriptResult { entries: TranscriptEntry[]; turnCount: numbe
 
 /** The room a truncated result leaves under `maxChars` for the caller's `hint` field — key, quotes and comma included. */
 export const TRANSCRIPT_HINT_BYTES = 320;
+/**
+ * The subagent list's share of the room once a result is over it: the list takes whatever the transcript does not
+ * need, and never less than this fraction when it needs it.
+ */
+export const ROSTER_SHARE = 0.25;
 
 const TOOL_KINDS = new Set(["tool.started", "tool.updated", "tool.completed", "tool.denied"]);
 const SKIPPED_ACTIVITY = new Set(["tool.output", "tool.progress", "turn.proposed.delta", "turn.plan.updated", "hook.started", "hook.progress", "hook.completed", "context-window.updated", "checkpoint.captured", "background.requested", "task.progress", "task.updated"]);
@@ -61,46 +66,154 @@ function actionablePlanId(items: readonly ThreadItem[]): string | null {
 /** A value's size as the budget counts it: its JSON in UTF-8 bytes, the unit of ok()'s cap (result.ts). */
 const jsonByteSize = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), "utf8");
 
-/** The least k in [0, n] for which the monotone `ok(k)` holds, by bisection; n when none below it does. */
-function least(n: number, ok: (k: number) => boolean): number {
-  let lo = 0;
-  let hi = n;
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1;
-    if (ok(mid)) hi = mid;
-    else lo = mid + 1;
+/** One code point's size inside a JSON string, escaped as JSON.stringify escapes it, in UTF-8 bytes. */
+function codePointBytes(cp: number): number {
+  if (cp === 0x22 || cp === 0x5c) return 2; // \" and \\
+  if (cp < 0x20) return cp === 0x08 || cp === 0x09 || cp === 0x0a || cp === 0x0c || cp === 0x0d ? 2 : 6; // \b \t \n \f \r, else \u00XX
+  if (cp < 0x80) return 1;
+  if (cp < 0x800) return 2;
+  if (cp >= 0xd800 && cp <= 0xdfff) return 6; // a lone surrogate, written \udXXX
+  return cp < 0x10000 ? 3 : 4;
+}
+
+/** A string's size inside a JSON result — escaped, UTF-8, quotes excluded — counted, never serialised. */
+export function jsonTextBytes(text: string): number {
+  let bytes = 0;
+  for (const ch of text) bytes += codePointBytes(ch.codePointAt(0)!);
+  return bytes;
+}
+
+/** The longest head of `text`, whole code points, whose JSON size is at most `budget` bytes. */
+function headWithin(text: string, budget: number): { head: string; bytes: number } {
+  let bytes = 0;
+  let end = 0;
+  for (const ch of text) {
+    const cost = codePointBytes(ch.codePointAt(0)!);
+    if (bytes + cost > budget) break;
+    bytes += cost;
+    end += ch.length;
   }
-  return lo;
+  return { head: text.slice(0, end), bytes };
+}
+
+const ELLIPSIS_BYTES = 3; // "…" (U+2026), which JSON leaves unescaped
+
+/**
+ * `entry` with its free text cut until its JSON is at least `need` bytes smaller: the longest text field first, a
+ * cut field ending in "…". Null when even every field cut down to the mark would not do.
+ */
+function cutRow(entry: TranscriptEntry, need: number): TranscriptEntry | null {
+  const row: TranscriptEntry = { ...entry };
+  const fields: { text: string; set: (text: string) => void }[] = [];
+  if (row.text !== undefined) fields.push({ text: row.text, set: (text) => { row.text = text; } });
+  if (row.tool) {
+    const tool = (row.tool = { ...row.tool });
+    fields.push({ text: tool.title, set: (text) => { tool.title = text; } });
+    if (tool.command !== undefined) fields.push({ text: tool.command, set: (text) => { tool.command = text; } });
+    if (tool.detail !== undefined) fields.push({ text: tool.detail, set: (text) => { tool.detail = text; } });
+  }
+  if (row.subagent?.title) {
+    const subagent = (row.subagent = { ...row.subagent });
+    fields.push({ text: subagent.title!, set: (text) => { subagent.title = text; } });
+  }
+  if (row.questions) {
+    const questions = (row.questions = [...row.questions]);
+    questions.forEach((question, i) => fields.push({ text: question, set: (text) => { questions[i] = text; } }));
+  }
+  const bySize = fields.map((f) => ({ ...f, bytes: jsonTextBytes(f.text) })).sort((a, b) => b.bytes - a.bytes);
+  for (const field of bySize) {
+    if (need <= 0) break;
+    if (field.bytes <= ELLIPSIS_BYTES) continue; // the mark would cost what the cut saves
+    const { head, bytes } = headWithin(field.text, Math.max(0, field.bytes - need - ELLIPSIS_BYTES));
+    field.set(`${head}…`);
+    need -= field.bytes - bytes - ELLIPSIS_BYTES;
+  }
+  return need <= 0 ? row : null;
+}
+
+/** The row a shed never drops: the latest turn's final assistant reply, else that turn's newest row. */
+function sparedIndex(rows: readonly TranscriptEntry[]): number {
+  let latest: number | null = null;
+  for (const e of rows) if (e.turn !== null && (latest === null || e.turn > latest)) latest = e.turn;
+  let newest = -1;
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    if (rows[i]!.turn !== latest) continue;
+    if (rows[i]!.kind === "assistant") return i;
+    if (newest < 0) newest = i;
+  }
+  return newest;
+}
+
+/** The turns the rows present belong to, first and last; null when none belongs to one. */
+function coveredOf(rows: readonly TranscriptEntry[]): [number, number] | null {
+  let first = Infinity;
+  let last = -Infinity;
+  for (const e of rows) if (e.turn !== null) { first = Math.min(first, e.turn); last = Math.max(last, e.turn); }
+  return last >= first ? [first, last] : null;
+}
+
+type RosterRow = NonNullable<TranscriptEntry["subagent"]>;
+const LIVE: ReadonlySet<string> = ACTIVE_SUBAGENT_STATUSES;
+
+/** A row with the bytes it adds to its JSON array — its own JSON plus the comma joining it — measured once. */
+export interface Sized<T> { row: T; bytes: number }
+const sized = <T>(rows: readonly T[]): Sized<T>[] => rows.map((row) => ({ row, bytes: jsonByteSize(row) + 1 }));
+/** A list's JSON inside the result, brackets excluded: every row's bytes but the last comma. */
+const contentBytes = (sum: number, count: number): number => (count > 0 ? sum - 1 : 0);
+
+/**
+ * The subagent list within `allowance` bytes (its JSON, brackets excluded): settled rows go first, then live ones
+ * (pending, running, waiting), each first seen first. Pure, and linear: every row was measured once.
+ */
+export function fitRoster(rows: readonly Sized<RosterRow>[], allowance: number): { rows: RosterRow[]; bytes: number; trimmed: boolean } {
+  let sum = rows.reduce((total, r) => total + r.bytes, 0);
+  let count = rows.length;
+  const gone = new Set<Sized<RosterRow>>();
+  for (const r of [...rows.filter((x) => !LIVE.has(x.row.status)), ...rows.filter((x) => LIVE.has(x.row.status))]) {
+    if (contentBytes(sum, count) <= allowance) break;
+    gone.add(r);
+    sum -= r.bytes;
+    count -= 1;
+  }
+  return { rows: rows.filter((r) => !gone.has(r)).map((r) => r.row), bytes: contentBytes(sum, count), trimmed: gone.size > 0 };
 }
 
 /**
- * The latest turn's own shed, for when it is over the budget on its own (§7.6: `maxChars` is a hard budget): its
- * OLDEST rows go first, sparing the final reply (else the newest row); when that row alone is still over, it keeps
- * the longest head of its text that fits. A spared row that cannot fit even so — no text to cut, or over without
- * it — gives way to the next, so a turn with any row that fits never comes back empty. `size` measures a candidate
- * list the way the budget does.
+ * The entries within `allowance` bytes (their JSON, brackets excluded), in one pass: reasoning rows, then tool
+ * detail, then whole rows, each oldest first — the oldest turn's rows, then the latest turn's own older ones. The
+ * spared row (`sparedIndex`) is never dropped: it is cut last, its longest text field first. Empty only when not
+ * even that row, cut to its minimum, fits. Pure, and linear: every row was measured once.
  */
-function fitBudget(entries: TranscriptEntry[], budget: number, size: (list: TranscriptEntry[]) => number): TranscriptEntry[] {
-  for (let rows = entries; rows.length > 0; ) {
-    const reply = rows.map((e) => e.kind).lastIndexOf("assistant");
-    const spared = reply >= 0 ? reply : rows.length - 1;
-    let total = size(rows);
-    const kept = rows.filter((e, i) => {
-      if (i === spared || total <= budget) return true;
-      total -= jsonByteSize(e) + 1; // a dropped row takes one comma with it: the spared row keeps the list non-empty
-      return false;
-    });
-    if (total <= budget) return kept;
-    // Only the spared row is left. Its text's cost per code point varies (JSON escapes, and the encoding), so the
-    // cut is found by bisection over whole code points, measuring each candidate as the budget does.
-    const row = kept[0]!;
-    const text = row.text ?? "";
-    const cut = (n: number): TranscriptEntry[] => [{ ...row, text: `${capText(text, n).text}…` }];
-    const head = least([...text].length, (n) => size(cut(n)) > budget) - 1;
-    if (head > 0) return cut(head);
-    rows = rows.filter((_, i) => i !== spared);
+export function fitEntries(entries: readonly Sized<TranscriptEntry>[], allowance: number): { entries: TranscriptEntry[]; shed: boolean } {
+  const rows = entries.map((e) => ({ ...e }));
+  let sum = rows.reduce((total, r) => total + r.bytes, 0);
+  let count = rows.length;
+  const over = (): boolean => contentBytes(sum, count) > allowance;
+  if (count === 0 || !over()) return { entries: rows.map((r) => r.row), shed: false };
+  const spared = sparedIndex(rows.map((r) => r.row));
+  const gone = new Set<number>();
+  const drop = (i: number): void => { gone.add(i); sum -= rows[i]!.bytes; count -= 1; };
+  // Reasoning rows, oldest first.
+  for (let i = 0; i < rows.length && over(); i += 1) if (i !== spared && rows[i]!.row.kind === "reasoning") drop(i);
+  // Tool detail, oldest first, down to SHED_DETAIL_CHARS: the size moves by the text's own bytes, never re-measured.
+  for (let i = 0; i < rows.length && over(); i += 1) {
+    const r = rows[i]!;
+    const detail = r.row.tool?.detail;
+    if (gone.has(i) || detail === undefined) continue;
+    const kept = capped(detail, SHED_DETAIL_CHARS);
+    if (kept === detail) continue;
+    const saved = jsonTextBytes(detail) - jsonTextBytes(kept);
+    rows[i] = { row: { ...r.row, tool: { ...r.row.tool!, detail: kept } }, bytes: r.bytes - saved };
+    sum -= saved;
   }
-  return [];
+  // Whole rows, oldest first; then, alone, the spared row is cut.
+  for (let i = 0; i < rows.length && over(); i += 1) if (i !== spared && !gone.has(i)) drop(i);
+  if (over()) {
+    const cut = cutRow(rows[spared]!.row, contentBytes(sum, count) - allowance);
+    if (cut === null) return { entries: [], shed: true };
+    rows[spared]!.row = cut; // its size is not read again
+  }
+  return { entries: rows.filter((_, i) => !gone.has(i)).map((r) => r.row), shed: true };
 }
 
 export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptOptions): TranscriptResult {
@@ -220,46 +333,28 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
     entries.sort((x, y) => (x.createdAt < y.createdAt ? -1 : x.createdAt > y.createdAt ? 1 : 0));
     return entries;
   };
-  // The roster in the order it is shed: settled rows, then live ones (pending, running, waiting), first seen first.
-  const agents = opts.agentId ? [] : snap.roster;
-  const live = (r: RuntimeSubagent): boolean => ACTIVE_SUBAGENT_STATUSES.has(r.status);
-  const shedOrder = [...agents.filter((r) => !live(r)), ...agents.filter(live)];
-  const settledCount = shedOrder.length - agents.filter(live).length;
-  let shed = 0; // how many of shedOrder the result leaves out
-  let entries = build(from);
-  let truncated = false;
-  // The budget bounds the whole result as the caller receives it; `coveredTurns` names turns with rows present.
-  const result = (list: TranscriptEntry[]): TranscriptResult => {
-    const gone = new Set(shedOrder.slice(0, shed));
-    const r: TranscriptResult = { entries: list, turnCount, coveredTurns: turnCount > 0 && list.some((e) => e.turn !== null) ? [from, turnCount] : null, truncated, subagents: agents.filter((a) => !gone.has(a)).map(rosterView) };
-    if (shed > 0) r.subagentsTruncated = true;
+  const entries = build(from);
+  const agents = opts.agentId ? [] : snap.roster.map(rosterView);
+  const result = (list: TranscriptEntry[], subagents: RosterRow[], truncated: boolean, subagentsTruncated: boolean): TranscriptResult => {
+    const r: TranscriptResult = { entries: list, turnCount, coveredTurns: coveredOf(list), truncated, subagents };
+    if (subagentsTruncated) r.subagentsTruncated = true;
     return r;
   };
-  const budget = (): number => Math.max(0, opts.maxChars - (truncated ? TRANSCRIPT_HINT_BYTES : 0));
-  const size = (list: TranscriptEntry[]): number => jsonByteSize(result(list));
-  const over = (): boolean => size(entries) > budget();
-  // Shedding order (§7.6 and its fix-round ruling): (1) reasoning, (2) tool detail, (3) the oldest turns — never
-  // the latest turn's own rows, the floor of the window.
-  if (over()) { truncated = true; entries = entries.filter((e) => e.kind !== "reasoning"); }
-  if (over()) entries.forEach(shedDetail);
-  while (over() && from < turnCount) {
-    from += 1;
-    entries = build(from).filter((e) => e.kind !== "reasoning");
-    entries.forEach(shedDetail);
-  }
-  if (over()) {
-    // (4) Settled subagent rows, as few as lets the latest turn's rows stay whole; (5) with every settled row gone,
-    // the latest turn's oldest rows, then the reply's tail (fitBudget); (6) only when not even a head of a row fits
-    // beside them, the live rows too. The roster is recoverable whole through get_session.
-    const floor = entries;
-    const attempt = (k: number): TranscriptEntry[] | null => {
-      shed = k;
-      if (size(floor) <= budget()) return floor;
-      if (k < settledCount) return null;
-      const fitted = fitBudget(floor, budget(), size);
-      return fitted.length > 0 ? fitted : null;
-    };
-    entries = attempt(least(shedOrder.length, (k) => attempt(k) !== null)) ?? [];
-  }
-  return result(entries);
+  // The frame is the result with both lists empty. A result keeps TRANSCRIPT_HINT_BYTES of maxChars free for the
+  // caller's hint, and fits whole when the entries (E) and the subagent list (R) fit what the frame leaves.
+  const frame = (covered: [number, number] | null, truncated: boolean, subagentsTruncated: boolean): number =>
+    jsonByteSize({ entries: [], turnCount, coveredTurns: covered, truncated, subagents: [], ...(subagentsTruncated ? { subagentsTruncated } : {}) });
+  const budget = opts.maxChars - TRANSCRIPT_HINT_BYTES;
+  const sizedEntries = sized(entries);
+  const sizedAgents = sized(agents);
+  const entryBytes = contentBytes(sizedEntries.reduce((sum, r) => sum + r.bytes, 0), sizedEntries.length);
+  const agentBytes = contentBytes(sizedAgents.reduce((sum, a) => sum + a.bytes, 0), sizedAgents.length);
+  if (frame(coveredOf(entries), false, false) + entryBytes + agentBytes <= budget) return result(entries, agents, false, false);
+  // Over it (§7.6 and its fix-round rulings), in the widest frame: the subagent list takes what the entries do not
+  // need and never less than ROSTER_SHARE of the room when it needs it; the entries get exactly what it leaves.
+  const widest: [number, number] | null = turnCount > 0 ? [turnCount, turnCount] : null;
+  const room = budget - frame(widest, true, true);
+  const listed = fitRoster(sizedAgents, Math.max(Math.floor(room * ROSTER_SHARE), room - entryBytes));
+  const fitted = fitEntries(sizedEntries, budget - frame(widest, true, listed.trimmed) - listed.bytes);
+  return result(fitted.entries, listed.rows, true, listed.trimmed);
 }
