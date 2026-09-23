@@ -148,7 +148,7 @@ function projectItem(
             itemType: "assistant_message",
             detail: text,
             // The phase rides `data`, not `detail`, because on a history row
-            // `detail` is the text. §7.3 demotes `commentary` to an activity.
+            // `detail` is the text. Ingestion keeps the phase on replay.
             data: { phase: item.phase }
           },
           ...base

@@ -241,12 +241,8 @@ export const UserMessageRow = React.memo(function UserMessageRow({
 /**
  * No bubble, no background, full column width: the agent's output is the page.
  *
- * A message the provider marked as **commentary** rather than the turn's answer
- * (Codex's `phase`) is rendered quietly — muted and indented under the activity
- * column. The projection is meant to demote it into the activity group before
- * it ever gets here (§7.3); this is the graceful degradation if one slips
- * through, because a thread of "I'll do X next" narration rendered as full
- * answers is unreadable.
+ * Codex commentary is the narration between tool calls. It remains a visible
+ * message while the turn runs and after the history is reloaded.
  */
 export const AssistantMessageRow = React.memo(function AssistantMessageRow({
   row
@@ -254,21 +250,14 @@ export const AssistantMessageRow = React.memo(function AssistantMessageRow({
   row: Row<"message">;
 }): React.ReactElement {
   const ctx = useTimelineRowContext();
-  const commentary = row.message.messageKind === "commentary";
   const text = row.message.text || (row.message.streaming ? "" : "(empty response)");
   return (
-    <div
-      className={cn(
-        "group/assistant relative min-w-0 px-1 py-0.5",
-        commentary && "ms-7 text-neutral-400"
-      )}
-    >
+    <div className="group/assistant relative min-w-0 px-1 py-0.5">
       <AuthorHeading>Agent</AuthorHeading>
       <ChatMarkdown
         text={text}
         streaming={row.message.streaming}
         onOpenFile={ctx.onOpenFile}
-        {...(commentary ? { className: "text-neutral-500" } : {})}
       />
     </div>
   );
@@ -320,12 +309,9 @@ export const ReasoningRow = React.memo(function ReasoningRow({
   const text = row.message.text;
   const live = row.message.streaming;
   const summary = firstLine(text);
-  // REALITY: the Codex CLI emits a `reasoning` item whose summary AND content
-  // are always empty (W7's capture). A reasoning row must therefore survive
-  // having no text at all — it stays a one-liner, it does not offer a
-  // disclosure, and it never opens an empty card.
-  const body = text.slice(summary.length).trim();
-  const canExpand = body.length > 0;
+  // Codex can emit an empty reasoning item. Keep its one-line status, while
+  // every nonempty trace can open even when it has only one long line.
+  const canExpand = text.trim().length > 0;
   const expanded = canExpand && ctx.isReasoningExpanded(id);
   const label = summary || (live ? "Thinking" : "Thought");
 
@@ -360,8 +346,8 @@ export const ReasoningRow = React.memo(function ReasoningRow({
         </div>
       )}
       {expanded ? (
-        <div className="ms-7 mt-1 whitespace-pre-wrap select-text text-sm leading-relaxed text-neutral-400">
-          {text}
+        <div className="ms-7 mt-1 max-h-96 overflow-auto select-text text-sm leading-relaxed text-neutral-400">
+          <ChatMarkdown text={text} onOpenFile={ctx.onOpenFile} />
         </div>
       ) : null}
     </div>

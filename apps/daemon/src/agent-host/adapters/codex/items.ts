@@ -67,9 +67,8 @@ export function isKnownCodexItemType(type: string): type is CodexItemType {
 /**
  * Classify one item. `phase` handling matters: an `agentMessage` whose phase
  * is `commentary` is the running "I'll do X next" narration, not the answer
- * (fixtures README observation 18), and §7.3 renders it as an activity row —
- * so it is reported as `assistant_message` with `detail: "commentary"` and the
- * timeline decides.
+ * (fixtures README observation 18). Preserve that phase so the timeline can
+ * show the narration as assistant text without treating it as the final answer.
  */
 export function classifyItem(item: CodexThreadItem): ClassifiedItem {
   switch (item.type) {

@@ -767,9 +767,9 @@ runtime.
 arm and the UI still derives `waiting` from an open request — but Codex **does** emit
 `thread/status/changed.activeFlags: ["waitingOnApproval"]`, so an adapter must tolerate the flag
 rather than report it as an unmapped frame
-(`apps/daemon/src/agent-host/adapters/codex/normalise.ts`). (2) The `hook.*` group has **no
-producer**: Claude's filesystem hooks run, but the SDK stream carries no `hook_*` messages at all,
-so nothing in the timeline is fed by that group on any provider. (3) `RuntimeEventRawSource`
+(`apps/daemon/src/agent-host/adapters/codex/normalise.ts`). (2) Codex, Claude and Grok can
+produce `hook.*` events. The timeline omits routine starts, progress and successful completions,
+including those already on disk; failures and cancellations stay visible. (3) `RuntimeEventRawSource`
 gained one member the adapters mint themselves, `HISTORICAL_RAW_SOURCE` (`"history.replay"`),
 which tags every event projected out of a provider's **native history** so nothing downstream
 mistakes a replayed row for live traffic and no historical turn claims token usage
@@ -2993,10 +2993,15 @@ Row kinds and behaviour:
   the bundle (no WASM, see below), code blocks mounted line by line while streaming, cached HTML
   once settled.
 - **Reasoning**: collapsed to one line, labelled "summary" when `reasoning_summary_text`.
+  Every nonempty trace can open, including a single long line; the expanded body uses the same
+  Markdown renderer as assistant text and is height-limited. Inside an expanded activity group,
+  consecutive reasoning blocks have their own disclosure and a short preview, as in T3.
 - **Activity group**: all activities between two assistant texts collapse into one line showing
   the live tool label while running and `summarizeToolGroup()` output when settled ("Read 3
   files, ran 2 commands"). Expanded, each tool shows its command with streamed output, file
-  changes as a unified diff with click-through to an editor tab, hook runs, denials, MCP calls.
+  changes as a unified diff with click-through to an editor tab, failed hook runs, denials, MCP
+  calls. A reasoning block after a tool changes the live label back to "Thinking"; an earlier
+  tool cannot remain the visible current action.
 - **"+N more" toggle** inside a long expanded group, and a **working row** — one element whose
   label is swapped in place (starting → running → tool name) rather than remounted, with a
   self-ticking elapsed timer, so the turn is never represented by an empty timeline.
@@ -3014,9 +3019,9 @@ the composer's, carry the file-type icon of §7.4 (`icons/files`). The plan prop
 **copy and download only**; there is no "save into the workspace" action, which would be a write
 into `fsRoot` from a render path. And there is no "load earlier" header: a thread is sent whole
 (§2), so there is nothing earlier to load
-(`packages/ui/src/components/agent-chat/timeline/`). One kind landed wider: Codex's `commentary`
-phase gets its own activity row rather than being folded into reasoning, because it is the only
-narration that CLI emits between tool calls.*
+(`packages/ui/src/components/agent-chat/timeline/`). Codex's `commentary` phase is a visible
+assistant message between tool calls, in both live and replayed turns. The phase remains metadata
+so commentary cannot become the turn's terminal answer.*
 
 *Built: the compaction marker also carries the provider's own **summary** and reveals it behind a
 "Show summary" / "Hide summary" toggle on the hairline itself, collapsed by default (the CLI's

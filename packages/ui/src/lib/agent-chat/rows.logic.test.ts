@@ -152,7 +152,7 @@ describe("activity-group boundaries", () => {
     assert.ok(kinds(rows).includes("work-live") || kinds(rows).includes("work-toggle"));
   });
 
-  it("demotes an assistant message marked `commentary` into the group", () => {
+  it("shows commentary between tool calls while the turn runs", () => {
     const rows = deriveTimelineRows(
       baseInput(
         entriesFrom([
@@ -175,17 +175,11 @@ describe("activity-group boundaries", () => {
         { isWorking: true, runningTurnId: "t1", activeTurnStartedAt: stamp(1) }
       )
     );
-    const messageRows = rows.filter((row) => row.kind === "message");
-    const texts = messageRows.map((row) => (row.kind === "message" ? row.message.text : ""));
-    assert.ok(!texts.includes("I'll read the file next"), "commentary never gets its own row");
-    assert.ok(texts.includes("Here is the answer"));
-    assert.ok(texts.includes("go"));
-
-    const group = rows.find((row) => row.kind === "activity-group");
-    assert.ok(group && group.kind === "activity-group");
+    const texts = rows.flatMap((row) => row.kind === "message" ? [row.message.text] : []);
+    assert.deepEqual(texts, ["go", "I'll read the file next", "Here is the answer"]);
     assert.ok(
-      group.entries.some((entry) => entry.detail === "I'll read the file next"),
-      "it folds into the surrounding activity group"
+      rows.some((row) => row.kind === "work" || row.kind === "work-live"),
+      "tool activity remains visible between the two assistant messages"
     );
   });
 

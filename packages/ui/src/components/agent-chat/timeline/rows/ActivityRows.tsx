@@ -41,6 +41,7 @@ import {
 import { COMPACTING_LABEL } from "../row-format";
 import { deriveAgentSpawnSummary } from "../../roster/spawn-summary";
 import { TimelineRowTimestamp } from "../timestamp";
+import { ChatMarkdown } from "../markdown/ChatMarkdown";
 import { InlineDiff, looksLikeUnifiedDiff } from "./InlineDiff";
 import { WorkEntryIcon } from "./icons";
 import { ChatIconButton } from "../../primitives/ChatIconButton";
@@ -595,7 +596,22 @@ export const ActivityGroupRow = React.memo(function ActivityGroupRow({
 
   const reasoningCount = joined.filter((entry) => entry.tone === "thinking").length;
   const tools = visible.filter((entry) => entry.tone !== "thinking");
-  const liveWork = [...tools].reverse().find(workEntryIsActiveTurnActivity) ?? tools.at(-1);
+  // A fresh reasoning block supersedes the tool before it. Only tools after
+  // the last thought can describe what the agent is doing right now.
+  let lastReasoningIndex = -1;
+  for (let index = joined.length - 1; index >= 0; index -= 1) {
+    if (joined[index]?.tone === "thinking") {
+      lastReasoningIndex = index;
+      break;
+    }
+  }
+  const trailingTools = omitSupersededLifecycleMarkers(
+    joined.slice(lastReasoningIndex + 1).filter(
+      (entry) => entry.tone !== "thinking" && workEntryIsVisibleInGroup(entry, row.active)
+    ),
+    (entry) => entry
+  );
+  const liveWork = [...trailingTools].reverse().find(workEntryIsActiveTurnActivity) ?? trailingTools.at(-1);
   const thinking = row.active && liveWork === undefined;
   const iconEntry = row.active ? liveWork : tools.at(-1);
   const failed = iconEntry !== undefined && workEntryDisplayIndicatesToolFailure(iconEntry);
@@ -613,6 +629,29 @@ export const ActivityGroupRow = React.memo(function ActivityGroupRow({
       ? summarizeToolGroup(tools)
       : `Thought${reasoningCount > 1 ? ` (×${reasoningCount})` : ""}`;
 
+  const details: React.ReactNode[] = [];
+  if (row.expanded) {
+    for (let index = 0; index < joined.length; index += 1) {
+      const entry = joined[index]!;
+      if (entry.tone !== "thinking") {
+        details.push(<ToolEntryRow key={entry.id} entry={entry} insideExpandedGroup />);
+        continue;
+      }
+      const run = [entry];
+      while (joined[index + 1]?.tone === "thinking") {
+        run.push(joined[++index]!);
+      }
+      details.push(
+        <ReasoningTraceBlock
+          key={entry.id}
+          entries={run}
+          live={row.active && index === joined.length - 1}
+          showHeader={tools.length > 0}
+        />
+      );
+    }
+  }
+
   return (
     <div>
       <button
@@ -629,26 +668,59 @@ export const ActivityGroupRow = React.memo(function ActivityGroupRow({
           failed={failed}
         />
       </button>
-      {row.expanded ? (
-        <div className="ms-7 mt-2 flex flex-col">
-          {joined.map((entry) =>
-            entry.tone === "thinking" ? (
-              <ReasoningTraceBlock key={entry.id} entry={entry} />
-            ) : (
-              <ToolEntryRow key={entry.id} entry={entry} insideExpandedGroup />
-            )
-          )}
-        </div>
-      ) : null}
+      {row.expanded ? <div className="mt-2 flex flex-col">{details}</div> : null}
     </div>
   );
 });
 
-function ReasoningTraceBlock({ entry }: { entry: WorkLogEntry }): React.ReactElement {
-  const text = entry.detail ?? entry.label;
+function ReasoningTraceBlock({
+  entries,
+  live,
+  showHeader
+}: {
+  entries: readonly WorkLogEntry[];
+  live: boolean;
+  showHeader: boolean;
+}): React.ReactElement | null {
+  const ctx = useTimelineRowContext();
+  const first = entries[0];
+  if (!first) return null;
+  const withText = entries.filter((entry) => (entry.detail?.trim().length ?? 0) > 0);
+  if (withText.length === 0 && !live) return null;
+  const expanded = !showHeader || ctx.isReasoningExpanded(first.id);
+  const label = live ? "Thinking" : "Thought";
+  const preview = withText[0]?.detail?.split("\n").map((line) => line.trim()).find(Boolean)
+    ?.replace(/^#{1,6}\s+/, "").slice(0, 160) || label;
+
   return (
-    <div className="px-0.5 py-0.5 text-sm leading-relaxed">
-      <p className="whitespace-pre-wrap select-text text-neutral-400">{text}</p>
+    <div className="flex flex-col">
+      {showHeader ? (
+        <button
+          type="button"
+          aria-expanded={expanded}
+          onClick={() => ctx.setReasoningExpanded(first.id, !expanded)}
+          className="flex min-h-6 w-full cursor-pointer select-none items-center gap-1.5 rounded-md px-0.5 text-left text-sm leading-relaxed transition-colors hover:bg-neutral-800/40 focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500"
+        >
+          <span className="flex h-6 w-6 shrink-0 items-center justify-center text-neutral-500">
+            <WorkEntryIcon name="brain" />
+          </span>
+          <span className="min-w-0 flex-1 truncate text-neutral-400">{expanded ? label : preview}</span>
+          <DisclosureChevron open={expanded} />
+        </button>
+      ) : null}
+      {expanded && withText.length > 0 ? (
+        <div className="ms-7 max-h-96 space-y-3 overflow-auto px-0.5 py-1 select-text">
+          {withText.map((entry) => (
+            <ChatMarkdown
+              key={entry.id}
+              text={entry.detail ?? ""}
+              streaming={live && entry === entries.at(-1)}
+              onOpenFile={ctx.onOpenFile}
+              className="text-neutral-300"
+            />
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }

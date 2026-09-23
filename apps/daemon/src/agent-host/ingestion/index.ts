@@ -1427,9 +1427,15 @@ export function createIngestion(options: IngestionOptions): Ingestion {
           turn.assistantMessageId = messageId;
         }
       }
+      const data = event.payload.data;
+      const phase =
+        typeof data === "object" && data !== null && !Array.isArray(data) &&
+        typeof (data as { phase?: unknown }).phase === "string"
+          ? (data as { phase: string }).phase
+          : event.payload.detail;
       const kindFields =
         role === "assistant"
-          ? { messageKind: assistantPhaseFromDetail(event.payload.detail) ?? "answer" }
+          ? { messageKind: assistantPhaseFromDetail(phase) ?? "answer" }
           : {};
       emit(state, threadId, event, now, "thread.message-sent", {
         messageId,
