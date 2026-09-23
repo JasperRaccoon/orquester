@@ -4037,6 +4037,13 @@ export function createServer(
           }
           try {
             const uploaded = await services.agentChat.uploadAttachment(id, request.query, request.raw);
+            // The host's answer is relayed as is: its `{error}` envelope is what
+            // the chat transport reads, so `refuseUpload`'s `{code, message}`
+            // cannot carry it. A host refusal can still leave the body unread,
+            // and then it closes the socket the same way.
+            if (relayedUploadClosesConnection(uploaded.status, request.raw)) {
+              reply.header("connection", "close");
+            }
             return reply.code(uploaded.status).send(uploaded.value ?? undefined);
           } catch (error) {
             // The cap is the caller's failure, never the host's. The service
@@ -4713,6 +4720,34 @@ function uploadsRootDir(daemonDir: string): string {
 /** Per-session upload dir: <appdir>/daemon/uploads/<sessionId>. */
 function sessionUploadsDir(daemonDir: string, sessionId: string): string {
   return join(uploadsRootDir(daemonDir), sessionId);
+}
+
+/**
+ * Whether relaying the agent host's answer to a chat upload must close the
+ * client's connection (`POST /api/sessions/:id/upload`, the chat branch).
+ *
+ * The host may refuse before it has read the whole body: a missing `name`, or
+ * its 50 MiB cap tripping mid-body. If body bytes are still on the wire then,
+ * a kept-alive connection has Node take the rest off the socket only to throw
+ * it away, or stall while the route's pipe to the host stands still. So a
+ * relayed refusal answers `Connection: close`, as `refuseUpload` does for the
+ * daemon's own (AGENTS.md, "Uploads are raw binary streams").
+ *
+ * The test is `complete`, not `readableEnded`. Node's HTTP parser sets
+ * `complete` the moment the last body byte comes off the socket, which is
+ * exactly when a kept-alive connection has nothing left to drain.
+ * `readableEnded` also waits for the route's own consumer, a pipe into a host
+ * that may have stopped reading. So it stays false for a body that is already
+ * entirely in memory, and closing then would only drop a healthy connection.
+ * `readableEnded` implies `complete`, so the only connections `readableEnded`
+ * would close and `complete` keeps are ones whose body is already entirely
+ * off the wire. A raw request that does not report `complete` at all
+ * (light-my-request's, under `inject`) counts as incomplete, the safe
+ * direction. A success never closes: the host answers 2xx only once it has
+ * read the whole body.
+ */
+export function relayedUploadClosesConnection(status: number, request: { readonly complete?: boolean }): boolean {
+  return status >= 400 && request.complete !== true;
 }
 
 /** Minimal MIME → extension map for naming clipboard images that carry no filename. */

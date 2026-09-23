@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { once } from "node:events";
 import { createWriteStream } from "node:fs";
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
@@ -16,7 +16,7 @@ import {
   createDefaultDaemonConfig
 } from "@orquester/config";
 import { Broadcaster } from "../broadcaster.ts";
-import { createServer as createDaemonApp } from "../index.ts";
+import { createServer as createDaemonApp, relayedUploadClosesConnection } from "../index.ts";
 import { InjectDaemonApi } from "../mcp/daemon-api.ts";
 import type {
   CreateHostThreadRequest,
@@ -47,6 +47,12 @@ interface Fixture {
   refuse: { status: number; body: unknown } | null;
   /** Set to make the fake host refuse `POST /threads/:id/identity`. */
   refuseIdentity: { status: number; body: unknown } | null;
+  /**
+   * Set to make the fake host refuse an attachment upload on sight, before it
+   * reads a byte of the body, as the real host refuses a missing `name` or a
+   * declared length over its 50 MiB cap.
+   */
+  refuseUpload: { status: number; body: unknown } | null;
   appdir: string;
   /** Every path the service asked to confine before granting trust. */
   trustQueries: string[];
@@ -111,6 +117,7 @@ async function makeFixture(
     identities: [],
     refuse: null,
     refuseIdentity: null,
+    refuseUpload: null,
     appdir,
     trustQueries: [],
     launchFor: () => launch,
@@ -126,6 +133,12 @@ async function makeFixture(
     }
   };
   const host = createServer((req: IncomingMessage, res: ServerResponse) => {
+    if (state.refuseUpload && req.method === "POST" && /^\/threads\/[^/]+\/attachments(?:\?|$)/.test(req.url ?? "")) {
+      res
+        .writeHead(state.refuseUpload.status, { "content-type": "application/json" })
+        .end(JSON.stringify(state.refuseUpload.body));
+      return;
+    }
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
     req.on("end", () => {
@@ -910,6 +923,124 @@ test("the upload route answers a cap refusal the host client wrapped 413 too, an
     { status: 413, code: "UPLOAD_TOO_LARGE" },
     { status: 503, code: "HOST_UNAVAILABLE" }
   ]);
+});
+
+// The route relays the host's own answer to a chat upload. The host may refuse
+// before it has read the whole body, and then the rest of it is still on the
+// wire: AGENTS.md ("Uploads are raw binary streams") wants every refusal that
+// leaves the body unread to close the socket, so Node does not drain it.
+
+/** A small chat upload for `thread-1`, well under every cap. */
+const CHAT_UPLOAD = {
+  method: "POST",
+  url: "/api/sessions/thread-1/upload?name=notes.txt",
+  headers: { "content-type": "application/octet-stream" },
+  payload: Buffer.from("bytes")
+} as const;
+
+test("a host that refuses an upload before reading it is relayed as is, and the connection closes", async () => {
+  const f = await makeFixture(CLAUDEX, { env: {} });
+  const refusal = { error: { code: "INVALID_COMMAND", message: "`name` is required." } };
+  f.refuseUpload = { status: 400, body: refusal };
+  const app = chatUploadRoute(f.appdir, f.service);
+  try {
+    const res = await app.inject({ ...CHAT_UPLOAD, headers: { ...CHAT_UPLOAD.headers } });
+    assert.equal(res.statusCode, 400);
+    // The host's own `{error}` envelope, which the chat transport reads. It is
+    // relayed as is, never reshaped into `refuseUpload`'s `{code, message}`.
+    assert.deepEqual(res.json(), refusal);
+    assert.equal(res.headers.connection, "close", "a refusal that may leave the body on the wire closes the socket");
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
+});
+
+test("an upload the host takes is relayed without closing the connection", async () => {
+  const f = await makeFixture(CLAUDEX, { env: {} });
+  const app = chatUploadRoute(f.appdir, f.service);
+  try {
+    const res = await app.inject({ ...CHAT_UPLOAD, headers: { ...CHAT_UPLOAD.headers } });
+    assert.equal(res.statusCode, 200);
+    assert.notEqual(res.headers.connection, "close", "the host read the whole body before answering 2xx");
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
+});
+
+// `inject` cannot leave a body on the wire: light-my-request's request carries
+// no `complete` at all, so the route test above only proves the wiring. The
+// decision itself is pinned here, and then against a real Node request.
+
+test("a relayed answer closes the connection exactly when it refuses with body bytes still on the wire", () => {
+  // Node's parser sets `complete` once the last body byte is off the socket.
+  assert.equal(relayedUploadClosesConnection(400, { complete: false }), true);
+  assert.equal(relayedUploadClosesConnection(413, { complete: false }), true);
+  assert.equal(relayedUploadClosesConnection(503, { complete: false }), true);
+  // Every byte is in: a kept-alive connection has nothing left to drain.
+  assert.equal(relayedUploadClosesConnection(400, { complete: true }), false);
+  // Not a refusal: the host answers 2xx only once it has read the whole body.
+  assert.equal(relayedUploadClosesConnection(200, { complete: false }), false);
+  assert.equal(relayedUploadClosesConnection(399, { complete: false }), false);
+  // A raw request that cannot say (inject's) counts as still on the wire.
+  assert.equal(relayedUploadClosesConnection(400, {}), true);
+});
+
+test("on a real request the decision reads the wire, not the reader: `complete`, never `readableEnded`", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "orq-upload-complete-"));
+  const socketPath = join(dir, "upload.sock");
+  const seen: Array<{ complete: boolean; readableEnded: boolean; closes: boolean }> = [];
+  let headersIn!: () => void;
+  const arrived = new Promise<void>((resolve) => {
+    headersIn = resolve;
+  });
+  const server = createServer((req: IncomingMessage, res: ServerResponse) => {
+    const note = () =>
+      seen.push({
+        complete: req.complete,
+        readableEnded: req.readableEnded,
+        closes: relayedUploadClosesConnection(400, req)
+      });
+    // Headers in, half the body still to come: a refusal now must close.
+    note();
+    headersIn();
+    // Watched without being read, so the rest can arrive while the handler
+    // consumes nothing, as when the route's pipe to the host stands still.
+    const onReadable = () => {
+      if (!req.complete) return;
+      req.off("readable", onReadable);
+      // Every byte is off the wire and none of the rest has been read:
+      // `readableEnded` still says unread, but there is nothing left to drain.
+      note();
+      req.on("end", () => {
+        note();
+        res.writeHead(204).end();
+      });
+      req.resume();
+    };
+    req.on("readable", onReadable);
+  });
+  await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+  try {
+    const client = httpRequest({ socketPath, method: "POST", path: "/", headers: { "content-length": "10" } });
+    const answered = once(client, "response");
+    client.write("12345");
+    await arrived;
+    client.end("67890");
+    const [response] = (await answered) as [IncomingMessage];
+    response.resume();
+    await once(response, "end");
+    assert.deepEqual(seen, [
+      { complete: false, readableEnded: false, closes: true },
+      { complete: true, readableEnded: false, closes: false },
+      { complete: true, readableEnded: true, closes: false }
+    ]);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("an over-cap chat upload answers 413 UPLOAD_TOO_LARGE through the MCP seam too, and logs nothing", async (t) => {
