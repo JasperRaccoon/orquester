@@ -78,8 +78,9 @@ interface ProviderRow { installed: boolean; version: string | null; status: stri
 /**
  * The provider rows of a `GET /api/agent/providers` body, keyed by adapter id. The snapshot type is the contract, but an
  * older host (or a cache it hydrated) can miss or mistype a field: each is checked, one that fails reads as absent or
- * unknown, and a row without an id is skipped — a catalogue read never throws on a degraded row. The one reader of
- * that body: list_agents here, and the view context (views.ts) every session detail is built with.
+ * unknown, and a row without an id is skipped — a catalogue read never throws on a degraded row. Both readers of that
+ * body go through it, so they cannot drift apart: list_agents (`loadAgents`, below) and the view context behind every
+ * session detail (`buildViewContext`, views.ts).
  */
 export function providerRows(body: unknown): Map<string, ProviderRow> {
   const rows = new Map<string, ProviderRow>();
