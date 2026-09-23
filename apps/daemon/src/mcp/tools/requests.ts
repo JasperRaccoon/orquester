@@ -24,6 +24,7 @@ function pick<T extends { requestId: string }>(rows: T[], requestId: string | un
 
 type Q = PendingQuestionView["questions"][number];
 type Answer = string | string[];
+interface Batch { q: Q; files: readonly AttachmentInput[] }
 
 const nameOf = (q: Q): string => q.header || q.question;
 
@@ -51,40 +52,65 @@ const isBlank = (raw: Answer): boolean => (Array.isArray(raw) ? raw : [raw]).eve
 
 /** Encode one non-blank answer exactly as the GUI card does (spec §7.5): an option's value ?? label, several on multiSelect, else the custom text. */
 function encodeAnswer(q: Q, raw: Answer): { value: Answer } | { error: string } {
-  const notAnOption = (text: string, hint = "") => ({ error: `"${text}" is not an option of "${nameOf(q)}". Options: ${q.options.map((o) => o.label).join(", ")}.${hint}` });
+  const notOptions = (texts: readonly string[], hint = "") => ({ error: `${texts.map((t) => `"${t}"`).join(", ")} ${texts.length === 1 ? "is not an option" : "are not options"} of "${nameOf(q)}". Options: ${q.options.map((o) => o.label).join(", ")}.${hint}` });
   if (q.multiSelect) {
     if (Array.isArray(raw) || optionValue(q, raw) !== undefined) {
       const values: string[] = [];
+      const bad: string[] = [];
       for (const item of Array.isArray(raw) ? raw : [raw]) {
         const value = optionValue(q, item);
-        if (value === undefined) return notAnOption(item, q.allowCustomAnswer ? " Pass a string for a custom answer." : "");
-        if (!values.includes(value)) values.push(value);
+        if (value === undefined) bad.push(item);
+        else if (!values.includes(value)) values.push(value);
       }
-      return { value: values };
+      return bad.length ? notOptions(bad, q.allowCustomAnswer ? " Pass a string for a custom answer." : "") : { value: values };
     }
-    return q.allowCustomAnswer ? { value: raw.trim() } : notAnOption(raw);
+    return q.allowCustomAnswer ? { value: raw.trim() } : notOptions([raw]);
   }
   if (Array.isArray(raw) && raw.length !== 1) return { error: `"${nameOf(q)}" takes one answer.` };
   const text = Array.isArray(raw) ? raw[0]! : raw;
   const value = optionValue(q, text);
   if (value !== undefined) return { value };
-  return q.allowCustomAnswer ? { value: text.trim() } : notAnOption(text);
+  return q.allowCustomAnswer ? { value: text.trim() } : notOptions([text]);
 }
 
-/** One question's files, uploaded in order; a failure names the question it belongs to. */
-async function uploadFor(api: DaemonApi, sessionId: string, q: Q, files: readonly AttachmentInput[]): Promise<AttachmentRef[]> {
+/**
+ * Every question's files in ONE upload call, which validates them all before sending any (§8), so a bad file anywhere
+ * leaves nothing uploaded. The refs come back in input order and are sliced back per question.
+ */
+async function uploadAll(api: DaemonApi, sessionId: string, batches: readonly Batch[]): Promise<Record<string, AttachmentRef[]>> {
+  const flat = batches.flatMap((b) => b.files);
+  if (!flat.length) return {};
+  let refs: AttachmentRef[];
   try {
-    return await uploadInlineAttachments(api, sessionId, files);
+    refs = await uploadInlineAttachments(api, sessionId, flat, { max: flat.length }); // the per-question cap is pass 1's
   } catch (error) {
-    if (error instanceof ToolError) throw new ToolError(error.code, `Attachments for "${nameOf(q)}": ${error.message}`, error.detail);
-    throw error;
+    throw error instanceof ToolError ? pointAtQuestion(error, batches) : error;
   }
+  const out: Record<string, AttachmentRef[]> = {};
+  let offset = 0;
+  for (const { q, files } of batches) {
+    out[q.id] = refs.slice(offset, offset + files.length);
+    offset += files.length;
+  }
+  return out;
+}
+
+/** Point a refusal's flat `attachments[i]` back at the question it belongs to and that question's own index. */
+function pointAtQuestion(error: ToolError, batches: readonly Batch[]): ToolError {
+  const match = /^attachments\[(\d+)\]/.exec(error.message);
+  if (!match) return error;
+  let index = Number(match[1]);
+  for (const { q, files } of batches) {
+    if (index < files.length) return new ToolError(error.code, `Attachments for "${nameOf(q)}": attachments[${index}]${error.message.slice(match[0].length)}`, error.detail);
+    index -= files.length;
+  }
+  return error;
 }
 
 const answerQuestion = defineTool({
   name: "answer_question",
   title: "Answer the agent's question",
-  description: "Answer a pending AskUserQuestion-style request, every question at once. Keys are question ids from get_session, or their 1-based indexes (an exact id wins). A string picks an option (label or value) or, where allowCustomAnswer, is a custom answer; an array picks several on a multiSelect question. Attachments per question are optional (not on secret or options-only questions); files alone answer a question. Works for Codex's async questions too.",
+  description: "Answer a pending question request, every question at once. Keys: question ids from get_session, or 1-based indexes (an exact id wins). A string picks an option (label or value) or, where allowCustomAnswer, is a custom answer; an array picks several on a multiSelect question. Attachments per question are optional (not on secret or options-only questions); files alone answer a question.",
   input: {
     sessionId: sessionIdField,
     requestId: requestIdField,
@@ -100,18 +126,22 @@ const answerQuestion = defineTool({
     const errors: string[] = [];
     const unknown = new Set<string>();
     const given = byQuestion(args.answers, req.questions, unknown, errors);
-    const files = byQuestion(args.attachments, req.questions, unknown, errors);
+    const attached = byQuestion(args.attachments, req.questions, unknown, errors);
     if (unknown.size) errors.push(`${[...unknown].map((k) => `"${k}"`).join(", ")} ${unknown.size === 1 ? "is not a question" : "are not questions"} of this request. Questions: ${req.questions.map((q) => `${q.index}: ${q.id}`).join(" | ")}.`);
     const answers: Record<string, Answer> = {};
+    const batches: Batch[] = [];
     const missing: string[] = [];
     for (const q of req.questions) {
       const raw = given.get(q.index);
-      const attached = (files.get(q.index)?.length ?? 0) > 0;
-      // The GUI offers files only beside a custom answer, and never on a secret (`allowsAnswerAttachments`).
-      if (attached && q.isSecret) errors.push(`"${nameOf(q)}" is a secret field and takes no attachments.`);
-      else if (attached && !q.allowCustomAnswer) errors.push(`"${nameOf(q)}" takes only its listed options, so no attachments.`);
+      const files = attached.get(q.index) ?? [];
+      // The GUI offers files only beside a custom answer, and never on a secret (`allowsAnswerAttachments`); refused
+      // files never stand in for the answer.
+      const filesAllowed = q.allowCustomAnswer && !q.isSecret;
+      if (files.length && !filesAllowed) errors.push(q.isSecret ? `"${nameOf(q)}" is a secret field and takes no attachments.` : `"${nameOf(q)}" takes only its listed options, so no attachments.`);
+      else if (files.length > MAX_ATTACHMENTS) errors.push(`"${nameOf(q)}" takes at most ${MAX_ATTACHMENTS} attachments.`);
+      else if (files.length) batches.push({ q, files });
       if (raw === undefined || isBlank(raw)) {
-        if (attached) answers[q.id] = "";
+        if (files.length && filesAllowed) answers[q.id] = "";
         else missing.push(nameOf(q));
         continue;
       }
@@ -121,12 +151,8 @@ const answerQuestion = defineTool({
     }
     if (missing.length) errors.push(`Every question must be answered. Missing: ${missing.join(", ")}.`);
     if (errors.length) throw new ToolError("INVALID_ARGUMENT", errors.join(" "));
-    // Pass 2 uploads each question's files in question order, before the command (§8.3).
-    const attachmentsByQuestionId: Record<string, AttachmentRef[]> = {};
-    for (const q of req.questions) {
-      const list = files.get(q.index);
-      if (list?.length) attachmentsByQuestionId[q.id] = await uploadFor(api, args.sessionId, q, list);
-    }
+    // Pass 2 uploads every file in question order, in one call that validates them all first, before the command (§8.3).
+    const attachmentsByQuestionId = await uploadAll(api, args.sessionId, batches);
     const { seq } = await sendCommand(api, args.sessionId, "answer", { requestId: req.requestId, answers, ...(Object.keys(attachmentsByQuestionId).length ? { attachmentsByQuestionId } : {}) });
     return { seq, session: await chatDetail(api, args.sessionId) };
   }

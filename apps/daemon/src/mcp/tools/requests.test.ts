@@ -35,11 +35,17 @@ async function harness(sessions = [chatSummary(), shellSummary()], snap = snapsh
 }
 
 const tool = (name: string) => requestTools.find((t) => t.name === name)!;
+/** The session detail every request tool returns beside its seq. */
+const detailOf = (r: Record<string, unknown>) => r.session as { id: string; chat: { model: string } };
 const questions = [
   { id: "Which database?", header: "DB", question: "Which database?", options: [{ label: "Postgres", description: "pg" }, { label: "SQLite", description: "lite" }], multiSelect: false, allowCustomAnswer: true },
   { id: "Modules", header: "Modules", question: "Which modules?", options: [{ label: "Auth", description: "" }, { label: "Billing", description: "", value: "bill" }], multiSelect: true, allowCustomAnswer: false },
   { id: "Token", header: "Token", question: "API token?", options: [], multiSelect: false, allowCustomAnswer: true }
 ];
+const twoOpen = () => snapshot({ pending: { approvals: [], userInputs: [{ requestId: "q5", createdAt: stamp(1), dismissible: false, questions: [
+  { id: "Log", header: "Log", question: "Attach the log", options: [], multiSelect: false, allowCustomAnswer: true },
+  { id: "Why", header: "Why", question: "Why did it fail?", options: [], multiSelect: false, allowCustomAnswer: true }
+] }] } });
 const asked = () => snapshot({
   items: [activity("user-input.requested", { requestId: "q1", dismissible: false, questions: [{ ...questions[0] }, { ...questions[1] }, { ...questions[2], isSecret: true }] })],
   pending: { approvals: [], userInputs: [{ requestId: "q1", createdAt: stamp(1), dismissible: false, questions }] }
@@ -50,6 +56,7 @@ test("answer_question encodes single, multi (values over labels), custom text an
   h.api.on("POST", "/api/sessions/c1/answer", { status: 200, body: { seq: 30 } });
   const r = await tool("answer_question").run({ sessionId: "c1", answers: { "1": "Postgres", "Modules": ["Auth", "Billing"], "3": "sk-secret" } }, h.ctx);
   assert.equal(r.seq, 30);
+  assert.equal(detailOf(r).id, "c1"); assert.equal(detailOf(r).chat.model, "claude-fable-5-1[1m]");
   const body = h.api.calls.find((c) => c.path === "/api/sessions/c1/answer")!.body as Record<string, unknown>;
   assert.equal(body.requestId, "q1");
   assert.deepEqual(body.answers, { "Which database?": "Postgres", Modules: ["Auth", "bill"], Token: "sk-secret" });
@@ -91,10 +98,13 @@ test("dismiss_question only for message-mode questions; resolve_approval validat
     userInputs: [{ requestId: "q3", createdAt: stamp(1), dismissible: true, responseMode: "message", questions: [{ id: "x", header: "H", question: "X?", options: [], multiSelect: false, allowCustomAnswer: true }] }] } });
   const h = await harness([chatSummary({ hasPendingUserInput: true, hasPendingApprovals: true })], async_); t.after(h.close);
   h.api.on("POST", "/api/sessions/c1/dismiss", { status: 200, body: { seq: 40 } }).on("POST", "/api/sessions/c1/approval", { status: 200, body: { seq: 41 } });
-  assert.equal((await tool("dismiss_question").run({ sessionId: "c1" }, h.ctx)).seq, 40);
+  const d = await tool("dismiss_question").run({ sessionId: "c1" }, h.ctx);
+  assert.equal(d.seq, 40);
+  assert.equal(detailOf(d).id, "c1"); assert.equal(detailOf(d).chat.model, "claude-fable-5-1[1m]");
   assert.deepEqual((h.api.calls.find((c) => c.path === "/api/sessions/c1/dismiss")!.body as { requestId: string }).requestId, "q3");
   const r = await tool("resolve_approval").run({ sessionId: "c1", decision: "decline" }, h.ctx);
   assert.equal(r.seq, 41);
+  assert.equal(detailOf(r).id, "c1"); assert.equal(detailOf(r).chat.model, "claude-fable-5-1[1m]");
   assert.deepEqual((h.api.calls.find((c) => c.path === "/api/sessions/c1/approval")!.body as { requestId: string; decision: string }), { commandId: (h.api.calls.find((c) => c.path === "/api/sessions/c1/approval")!.body as { commandId: string }).commandId, requestId: "r1", decision: "decline" } as never);
   await assert.rejects(tool("resolve_approval").run({ sessionId: "c1", decision: "acceptAlways" }, h.ctx), (e: { message: string }) => /accept, decline/.test(e.message));
   const blocking = await harness([chatSummary({ hasPendingUserInput: true })], asked()); t.after(blocking.close);
@@ -102,11 +112,7 @@ test("dismiss_question only for message-mode questions; resolve_approval validat
 });
 
 test("answer_question validates every question before uploading any attachment", async (t) => {
-  const two = snapshot({ pending: { approvals: [], userInputs: [{ requestId: "q5", createdAt: stamp(1), dismissible: false, questions: [
-    { id: "Log", header: "Log", question: "Attach the log", options: [], multiSelect: false, allowCustomAnswer: true },
-    { id: "Why", header: "Why", question: "Why did it fail?", options: [], multiSelect: false, allowCustomAnswer: true }
-  ] }] } });
-  const h = await harness([chatSummary({ hasPendingUserInput: true })], two); t.after(h.close);
+  const h = await harness([chatSummary({ hasPendingUserInput: true })], twoOpen()); t.after(h.close);
   await assert.rejects(tool("answer_question").run({ sessionId: "c1", answers: {}, attachments: { Log: [{ name: "app.log", base64: "YQ==" }] } }, h.ctx),
     (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /Missing: Why\./.test(e.message));
   assert.equal(h.api.uploads.length, 0);
@@ -135,8 +141,10 @@ test("answer_question reports every problem at once, treats blank answers as una
   const h = await harness([chatSummary({ hasPendingUserInput: true })], asked()); t.after(h.close);
   h.api.on("POST", "/api/sessions/c1/answer", { status: 200, body: { seq: 34 } });
   const run = (a: Record<string, unknown>) => tool("answer_question").run({ sessionId: "c1", ...a }, h.ctx);
-  await assert.rejects(run({ answers: { "1": "Postgres", Modules: ["Nope"] } }), (e: { message: string }) => /"Nope" is not an option of "Modules"/.test(e.message) && /Missing: Token\./.test(e.message));
+  await assert.rejects(run({ answers: { "1": "Postgres", Modules: ["Nope", "Auth", "Zilch"] } }), (e: { message: string }) => /"Nope", "Zilch" are not options of "Modules"/.test(e.message) && /Missing: Token\./.test(e.message));
   await assert.rejects(run({ answers: { "1": "  ", Modules: [], Token: "x" } }), (e: { message: string }) => /Missing: DB, Modules\./.test(e.message));
+  // Refused files never stand in for the answer: the secret question is still reported missing.
+  await assert.rejects(run({ answers: { "1": "Postgres", Modules: ["Auth"] }, attachments: { Token: [{ name: "a.txt", base64: "YQ==" }] } }), (e: { message: string }) => /"Token" is a secret field/.test(e.message) && /Missing: Token\./.test(e.message));
   // The GUI offers no attachments on an options-only question (`allowsAnswerAttachments`).
   await assert.rejects(run({ answers: { "1": "Postgres", Modules: ["Auth"], Token: "x" }, attachments: { Modules: [{ name: "a.txt", base64: "YQ==" }] } }), (e: { message: string }) => /"Modules" takes only its listed options/.test(e.message));
   assert.equal(h.api.uploads.length, 0);
@@ -168,4 +176,23 @@ test("resolve_approval lists every pending id when several are open, and resolve
   assert.equal((await tool("resolve_approval").run({ sessionId: "c1", requestId: "r2", decision: "acceptForSession" }, h.ctx)).seq, 42);
   const body = h.api.calls.find((c) => c.path === "/api/sessions/c1/approval")!.body as { requestId: string; decision: string };
   assert.equal(body.requestId, "r2"); assert.equal(body.decision, "acceptForSession");
+});
+
+test("answer_question validates every file of every question before uploading any, and slices the refs back per question", async (t) => {
+  const h = await harness([chatSummary({ hasPendingUserInput: true })], twoOpen()); t.after(h.close);
+  h.api.on("POST", "/api/sessions/c1/answer", { status: 200, body: { seq: 36 } });
+  const file = (name: string) => ({ name, base64: Buffer.from(name).toString("base64") });
+  const run = (a: Record<string, unknown>) => tool("answer_question").run({ sessionId: "c1", ...a }, h.ctx);
+  // The bad file is the second question's second file: flat index 2, reported as that question's attachments[1].
+  await assert.rejects(run({ answers: { Why: "disk full" }, attachments: { Log: [file("app.log")], Why: [file("df.txt"), { name: "bad.txt", base64: "not base64!!" }] } }),
+    (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /^Attachments for "Why": attachments\[1\]: base64 is empty or malformed\.$/.test(e.message));
+  await assert.rejects(run({ answers: { Why: "disk full" }, attachments: { Log: Array.from({ length: 9 }, (_, i) => file(`${i}.log`)) } }),
+    (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /"Log" takes at most 8 attachments/.test(e.message));
+  assert.equal(h.api.uploads.length, 0);
+  assert.ok(!h.api.calls.some((c) => c.method === "POST"));
+  await run({ answers: { Why: "disk full" }, attachments: { Why: [file("df.txt"), file("du.txt")], Log: [file("app.log")] } });
+  const body = h.api.calls.find((c) => c.path === "/api/sessions/c1/answer")!.body as { answers: Record<string, unknown>; attachmentsByQuestionId: Record<string, { name: string }[]> };
+  assert.deepEqual(body.answers, { Log: "", Why: "disk full" });
+  assert.deepEqual(Object.fromEntries(Object.entries(body.attachmentsByQuestionId).map(([k, v]) => [k, v.map((a) => a.name)])), { Log: ["app.log"], Why: ["df.txt", "du.txt"] });
+  assert.deepEqual(h.api.uploads.map((u) => u.meta.name), ["app.log", "df.txt", "du.txt"], "uploaded once, in question order");
 });
