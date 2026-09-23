@@ -19,6 +19,23 @@ export function capText(text: string, maxChars: number): { text: string; truncat
   return { text, truncated: false };
 }
 
+/** A string's size inside a JSON result: escaped, UTF-8, without its quotes. */
+export const jsonBytes = (text: string): number => Buffer.byteLength(JSON.stringify(text), "utf8") - 2;
+
+/** The longest prefix of `text` (never splitting a character) whose JSON size fits `budget` bytes. */
+export function fitJsonBytes(text: string, budget: number): { text: string; truncated: boolean } {
+  if (jsonBytes(text) <= budget) return { text, truncated: false };
+  // Every character costs at least one byte, so the answer is at most `budget` characters long.
+  let lo = 0;
+  let hi = Math.max(0, budget);
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (jsonBytes(capText(text, mid).text) <= budget) lo = mid;
+    else hi = mid - 1;
+  }
+  return { text: capText(text, lo).text, truncated: true };
+}
+
 /**
  * A successful tool result: the object as text AND as structuredContent, capped at
  * MAX_RESULT_BYTES. Over budget is a last-resort shed (the tool should have bounded itself):

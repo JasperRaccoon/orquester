@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { FakeDaemonApi } from "./testing.ts";
 import { stamp } from "./fixtures.ts";
-import { EFFORT_OPTION_IDS, findAgent, isProxyAgent, loadAgents, resolveModelSelection, validateAccountId, type AgentView } from "./agents.ts";
+import { EFFORT_OPTION_IDS, findAgent, isProxyAgent, launchesProxyModel, loadAgents, resolveModelSelection, validateAccountId, type AgentView } from "./agents.ts";
 
 const registry = { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [
   { id: "claude", kind: "agent", name: "Claude Code", bin: ["claude"], enabled: true, installState: "idle", version: "2.1.280", chat: { adapter: "claude" } },
@@ -59,6 +59,25 @@ test("a proxy launcher lists the proxy catalogue and only SEEDED accounts of its
   assert.deepEqual(claudex.accounts.map((a) => a.id), ["system", "acc-2"]);
   assert.equal(claudex.defaultAccountId, "acc-2");
   assert.equal(isProxyAgent("claudex"), true); assert.equal(isProxyAgent("claude"), false);
+});
+
+test("claudemix is the Claude main loop through the proxy: the Claude catalogue like claude, and only SEEDED Claude accounts", async () => {
+  const withClaudemix = api()
+    .on("GET", "/api/registry", { status: 200, body: { ...registry, agents: [...registry.agents, { id: "claudemix", kind: "agent", name: "Claude Code × Mixed", bin: ["claude"], enabled: true, installState: "idle", chat: { adapter: "claude" } }] } })
+    .on("GET", "/api/agent-accounts", { status: 200, body: { ...accounts, accounts: [...accounts.accounts, { id: "acc-4", agent: "claude", label: "unseeded@claude", email: null, plan: null, needsReauth: false, createdAt: stamp(0), importedAt: stamp(0) }] } })
+    .on("GET", "/api/cliproxy", { status: 200, body: { ...cliproxy, accounts: [...cliproxy.accounts, { id: "acc-1", provider: "claude", label: "jasperclaude" }] } });
+  const agents = await loadAgents(withClaudemix);
+  const claude = findAgent(agents, "claude");
+  const claudemix = findAgent(agents, "claudemix");
+  assert.deepEqual(claudemix.models, claude.models, "the Claude adapter's catalogue, options included — never claudex's proxy list");
+  assert.deepEqual(claudemix.models.map((m) => m.slug), ["default", "haiku"]);
+  assert.deepEqual(findAgent(await loadAgents(withClaudemix, { includeLegacyModels: true }), "claudemix").models.map((m) => m.slug), ["default", "haiku", "old"], "legacy models follow the same flag");
+  assert.deepEqual(claudemix.accounts.map((a) => a.id), ["system", "acc-1"], "only the seeded Claude accounts");
+  assert.deepEqual(claude.accounts.map((a) => a.id), ["system", "acc-1", "acc-4"]);
+  assert.equal(claudemix.defaultAccountId, "acc-1");
+  assert.ok(findAgent(agents, "claudex").models.some((m) => m.slug === "gpt-5.6-sol" && m.isDefault), "claudex keeps the proxy catalogue");
+  assert.equal(isProxyAgent("claudemix"), true);
+  assert.deepEqual(["claude", "claudex", "claudemix"].map((id) => launchesProxyModel(id)), [false, true, false]);
 });
 
 test("findAgent names the valid ids on a miss", async () => {

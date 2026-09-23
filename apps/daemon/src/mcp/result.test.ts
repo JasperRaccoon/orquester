@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { FsSandboxError } from "@orquester/config/fs";
 import { ToolError } from "./errors.ts";
-import { ok, toSafeToolError, capText, MAX_RESULT_BYTES } from "./result.ts";
+import { ok, toSafeToolError, capText, fitJsonBytes, jsonBytes, MAX_RESULT_BYTES } from "./result.ts";
 
 test("ok returns the object as text and structuredContent", () => {
   const r = ok({ sessions: [] });
@@ -40,4 +40,31 @@ test("capText cuts on a character boundary and flags it", () => {
   // Astral characters count once each: three emoji fit in 3, and 2 never splits a surrogate pair.
   assert.deepEqual(capText("😀😀😀", 3), { text: "😀😀😀", truncated: false });
   assert.deepEqual(capText("😀😀😀", 2), { text: "😀😀", truncated: true });
+});
+
+test("jsonBytes is a string's size inside a JSON result: escaped, UTF-8, without its quotes", () => {
+  assert.equal(jsonBytes(""), 0);
+  assert.equal(jsonBytes("abc"), 3);
+  assert.equal(jsonBytes("é"), 2);
+  assert.equal(jsonBytes("😀"), 4);
+  assert.equal(jsonBytes("\"\\\n"), 6);
+  assert.equal(jsonBytes("\u0001"), 6);
+});
+
+test("fitJsonBytes keeps the longest whole-character prefix whose JSON size fits the budget", () => {
+  assert.deepEqual(fitJsonBytes("hello", 5), { text: "hello", truncated: false });
+  assert.deepEqual(fitJsonBytes("hello", 4), { text: "hell", truncated: true });
+  assert.deepEqual(fitJsonBytes("éé", 3), { text: "é", truncated: true });
+  assert.deepEqual(fitJsonBytes("😀😀", 7), { text: "😀", truncated: true }, "a surrogate pair is never split");
+  assert.deepEqual(fitJsonBytes("abc", 0), { text: "", truncated: true });
+  assert.deepEqual(fitJsonBytes("abc", -1), { text: "", truncated: true });
+  // Every budget: a prefix that fits, and one more character would not.
+  const mixed = "aé\"😀\n\\z".repeat(3);
+  for (let budget = 0; budget <= jsonBytes(mixed) + 1; budget += 1) {
+    const { text, truncated } = fitJsonBytes(mixed, budget);
+    assert.ok(mixed.startsWith(text) && jsonBytes(text) <= budget, `budget ${budget}`);
+    assert.equal(truncated, text !== mixed, `budget ${budget}`);
+    const next = [...mixed.slice(text.length)][0];
+    if (next !== undefined) assert.ok(jsonBytes(text + next) > budget, `budget ${budget}: "${text}" is the longest fitting prefix`);
+  }
 });

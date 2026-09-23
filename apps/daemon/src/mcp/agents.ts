@@ -15,6 +15,15 @@ export function isProxyAgent(refId: string): boolean {
   return proxyAccountFamily(refId) !== null;
 }
 
+/**
+ * The one proxy launcher whose launch names a model the proxy serves: claudex (the "+" menu's model chips). claudemix
+ * is the Claude main loop through the proxy — it offers the Claude catalogue and a launch never names a proxy model
+ * for it (`cliproxy.ts` `validateModel`: "the UI never sends a model for claudemix").
+ */
+export function launchesProxyModel(refId: string): boolean {
+  return refId === "claudex";
+}
+
 /** The capability flags list_agents and get_session both report. No snapshot, or an absent flag, reads false. */
 export function supportsFrom(caps: AdapterCapabilities | undefined): { planMode: boolean; rollback: boolean; compaction: boolean; backgroundTasks: boolean } {
   return { planMode: caps?.showPlanModeToggle ?? false, rollback: caps?.supportsConversationRollback ?? false, compaction: caps?.compaction !== undefined, backgroundTasks: caps?.supportsBackgroundTasks ?? false };
@@ -59,10 +68,11 @@ export async function loadAgents(api: DaemonApi, opts?: { includeLegacyModels?: 
     const familyAccounts = accounts.accounts.filter((a) => a.agent === family).filter((a) => !isProxyAgent(entry.id) || seeded.has(a.id));
     const defaultAccountId = familyAccounts.some((a) => a.id === accounts.defaults[family]) ? (accounts.defaults[family] as string) : "system";
     let models: AgentModelView[];
-    if (isProxyAgent(entry.id)) {
+    if (launchesProxyModel(entry.id)) {
       models = proxyLaunchModels(proxy, catalog).map((m) => ({ slug: m.id, name: m.id, isDefault: m.id === proxy?.defaultModel, options: [], ...(m.providerLabel ? { providerLabel: m.providerLabel } : {}) }));
       if (models.length && !models.some((m) => m.isDefault)) models[0]!.isDefault = true;
     } else {
+      // The adapter's own catalogue — claudemix's too: its model is the Claude main loop's, only its account is the proxy's.
       models = (snapshot?.models ?? []).filter((m) => opts?.includeLegacyModels || !m.isLegacy).map(modelView);
     }
     const caps = snapshot?.capabilities;
