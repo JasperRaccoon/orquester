@@ -711,8 +711,9 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
       chunks, which are never rows here and which only the agent host can join whole — a Claude
       background shell's output (tailed from the file the CLI writes it to: at most 1 MiB, then
       one notice naming that file), and a command's output while it runs, where the agent streams
-      it (Codex does). A background shell is listed in `subagents` and its rows are in its own
-      drill-in (`read_transcript` with its `agentId`), as in the GUI.
+      it (Codex's protocol can; a short command's output arrives whole with its completion). A
+      background shell is listed in `subagents` and its rows are in its own drill-in
+      (`read_transcript` with its `agentId`), as in the GUI.
 
     The snapshot keeps only an allow-list of each call's provider data, so most finished calls
     that carry any have an id. A row without one has nothing more the snapshot knows of.
