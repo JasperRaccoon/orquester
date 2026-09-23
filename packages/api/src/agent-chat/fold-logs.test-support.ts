@@ -799,8 +799,10 @@ export interface LegacyStateFate {
   /** Rows in any other state retention dropped, as it drops any row. */
   readonly droppedOtherStates: number;
   /**
-   * Parent legacy markers the final window holds although a YOUNGER parent row
-   * was dropped: a trim reached past them, and only the exemption kept them.
+   * Parent legacy markers the final window holds although a parent row
+   * positioned after it was dropped: a trim reached past them, and only the
+   * exemption kept them. A row replaced in place keeps its old position, so it
+   * counts from there, not from its latest write.
    */
   readonly keptPastATrim: number;
   /**
@@ -825,16 +827,19 @@ export function legacyStateFate(events: readonly DomainEvent[]): LegacyStateFate
   const isStateRow = (row: ThreadActivityItem): boolean => row.activityKind === "thread.state.changed";
   const isParentRow = (row: ThreadActivityItem): boolean =>
     typeof row.agentId !== "string" || row.agentId.length === 0;
-  // The step each row object arrived at: the fold keeps the event's own object.
+  // The step each row object's POSITION was taken at: the fold keeps the
+  // event's own object, and a row replaced in place keeps its old position, so
+  // its new object takes the step of the one it replaced — retention drops by
+  // position, oldest first, never by the time of a row's latest write.
   const stepOf = new Map<ThreadActivityItem, number>();
   let youngestDroppedParentStep = -1;
   let state = createEmptyThreadState();
   events.forEach((event, step) => {
     if (event.type === "thread.activity-appended") {
       const row = event.payload.activity;
-      stepOf.set(row, step);
       const at = itemPositionOf(state, row.id);
       const existing = at === undefined ? undefined : state.items[at];
+      stepOf.set(row, existing?.kind === "activity" ? (stepOf.get(existing) ?? step) : step);
       if (
         existing?.kind === "activity" &&
         (isStateRow(existing) || isStateRow(row)) &&

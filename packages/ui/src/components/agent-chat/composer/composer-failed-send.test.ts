@@ -107,12 +107,32 @@ describe("a send that did not go out comes back to the thread it was sent from",
   });
 
   it("handed another thread while it was in flight: into its own thread's persisted draft, never the one on screen", () => {
-    const target = restoreFailedSendDraft({ sentFrom: "A", liveThread: "B", restore: FAILED, restoreLive });
+    // The composer on screen shows B, so the bridge knows it as B's: every call it gets is recorded.
+    const toB: string[] = [];
+    const unregister = registerComposerHandle("B", {
+      insertText: () => void toB.push("insertText"),
+      stageAttachment: () => {
+        toB.push("stageAttachment");
+        return true;
+      },
+      focusAtEnd: () => void toB.push("focusAtEnd"),
+      openControl: () => void toB.push("openControl"),
+      restoreFailedSend: () => {
+        toB.push("restoreFailedSend");
+        return true;
+      }
+    });
+    try {
+      const target = restoreFailedSendDraft({ sentFrom: "A", liveThread: "B", restore: FAILED, restoreLive });
 
-    assert.equal(target, "persisted");
-    assert.deepEqual(live, [], "the live draft is B's: nothing goes into it");
-    assert.deepEqual(persisted().A, A_RESTORED);
-    assert.deepEqual(persisted().B, B_BEFORE);
+      assert.equal(target, "persisted");
+      assert.deepEqual(live, [], "the live draft is B's: nothing goes into it");
+      assert.deepEqual(toB, [], "nor into B's composer through the bridge");
+      assert.deepEqual(persisted().A, A_RESTORED);
+      assert.deepEqual(persisted().B, B_BEFORE);
+    } finally {
+      unregister();
+    }
   });
 
   it("unmounted by a project switch: into its own thread's persisted draft, where the next mount loads it", () => {
