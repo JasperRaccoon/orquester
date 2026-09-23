@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { Readable } from "node:stream";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import Fastify, { type FastifyInstance } from "fastify";
 import type { AgentAccount, RegistryEntry } from "@orquester/api";
 import {
@@ -31,7 +31,7 @@ import {
   resolveHomeKind
 } from "./service.ts";
 import { ChatSessionError } from "./chat-sessions.ts";
-import { HostUnavailableError } from "./host-client.ts";
+import { HostUnavailableError, type AgentHostClient } from "./host-client.ts";
 import { UploadTooLargeError } from "../upload-stream.ts";
 
 // §6.1 thread creation: the tab record first, then the host thread, and the
@@ -53,6 +53,18 @@ interface Fixture {
    * declared length over its 50 MiB cap.
    */
   refuseUpload: { status: number; body: unknown } | null;
+  /**
+   * Set to make the fake host refuse an attachment upload only once it has
+   * read every byte of the body, as the real host does when its store refuses
+   * the file it stat'd (an image over the image cap).
+   */
+  refuseUploadAfterBody: { status: number; body: unknown } | null;
+  /**
+   * Called with every attachment upload the fake host receives, the moment it
+   * arrives and before it is answered, so a test can watch the host's end of
+   * the daemon→host request.
+   */
+  onUpload: ((req: IncomingMessage) => void) | null;
   appdir: string;
   /** Every path the service asked to confine before granting trust. */
   trustQueries: string[];
@@ -118,6 +130,8 @@ async function makeFixture(
     refuse: null,
     refuseIdentity: null,
     refuseUpload: null,
+    refuseUploadAfterBody: null,
+    onUpload: null,
     appdir,
     trustQueries: [],
     launchFor: () => launch,
@@ -133,7 +147,9 @@ async function makeFixture(
     }
   };
   const host = createServer((req: IncomingMessage, res: ServerResponse) => {
-    if (state.refuseUpload && req.method === "POST" && /^\/threads\/[^/]+\/attachments(?:\?|$)/.test(req.url ?? "")) {
+    const upload = req.method === "POST" && /^\/threads\/[^/]+\/attachments(?:\?|$)/.test(req.url ?? "");
+    if (upload) state.onUpload?.(req);
+    if (upload && state.refuseUpload) {
       res
         .writeHead(state.refuseUpload.status, { "content-type": "application/json" })
         .end(JSON.stringify(state.refuseUpload.body));
@@ -143,6 +159,12 @@ async function makeFixture(
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
     req.on("end", () => {
       const body = Buffer.concat(chunks).toString("utf8");
+      if (upload && state.refuseUploadAfterBody) {
+        res
+          .writeHead(state.refuseUploadAfterBody.status, { "content-type": "application/json" })
+          .end(JSON.stringify(state.refuseUploadAfterBody.body));
+        return;
+      }
       if (req.url === "/health") {
         res.writeHead(200, { "content-type": "application/json" }).end(
           JSON.stringify({
@@ -1040,6 +1062,97 @@ test("on a real request the decision reads the wire, not the reader: `complete`,
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// The daemon's own request to the host, once a refusal has been relayed. If
+// the host answers ≥ 400 while the body is still arriving, nothing else ever
+// ends that request: `countingLimit` forwards only an error, the route's
+// request is no longer aborted once its reply has gone out, and the host runs
+// with no request timeout. Left open, it holds one daemon↔host socket pair
+// until the host restarts.
+
+/**
+ * Count the `abort()` calls the service makes on the host streams it opens.
+ *
+ * The wire shows a teardown, but it cannot show that none happened: once a
+ * kept-alive exchange has completed, Node has already handed the socket back
+ * to its pool, and an `abort()` then touches neither end of it. So a control
+ * counts, and the teardown test counts first, so that a service that never
+ * aborts fails at once instead of waiting on a connection nothing will close.
+ */
+function countAborts(t: TestContext, service: AgentChatService): () => number {
+  let aborts = 0;
+  const open = service.client.open.bind(service.client);
+  t.mock.method(service.client, "open", async (...args: Parameters<AgentHostClient["open"]>) => {
+    const stream = await open(...args);
+    return {
+      ...stream,
+      abort: () => {
+        aborts += 1;
+        stream.abort();
+      }
+    };
+  });
+  return () => aborts;
+}
+
+test("a host that refuses while the upload is still arriving has the daemon's request to it torn down", async (t) => {
+  const f = await makeFixture(CLAUDEX, { env: {} });
+  t.after(() => f.cleanup());
+  // The real host's answer to an upload with no `name`, before it reads a byte.
+  const refusal = { error: { code: "INVALID_COMMAND", message: "`name` is required." } };
+  f.refuseUpload = { status: 400, body: refusal };
+  const aborts = countAborts(t, f.service);
+  // Watched from the moment the upload reaches the host, so the close cannot
+  // slip by. It is the connection that closes: the host's request object never
+  // does, because once its answer has gone out the server no longer tracks it.
+  // A listener rather than `events.once()`, which would reject on the parse
+  // error the host's socket reports for the cut body on its way out.
+  const closed = new Promise<void>((resolve) => {
+    f.onUpload = (req) => req.socket.once("close", () => resolve());
+  });
+  // The first bytes are sent, and the rest never comes: the client has gone.
+  const source = new Readable({ read() {} });
+  source.push(Buffer.from("the first bytes"));
+  const answer = await f.service.uploadAttachment("thread-1", {}, source);
+  assert.deepEqual(answer, { status: 400, value: refusal }, "the refusal is relayed as is");
+  assert.equal(aborts(), 1, "the daemon's request to the host is aborted");
+  await closed;
+  assert.equal(source.readableFlowing, false, "nothing reads the source any more");
+  assert.equal(source.destroyed, false, "the source is still its owner's to end");
+});
+
+test("an upload the host answers only once every byte is in is never aborted, taken or refused", async (t) => {
+  // The real host's answer when its store refuses the file it stat'd.
+  const refusal = {
+    error: { code: "COMMAND_REJECTED", message: "agent-chat: attachment is 10 bytes, over the 4-byte limit" }
+  };
+  for (const expected of [
+    { status: 200, value: {} },
+    { status: 500, value: refusal }
+  ]) {
+    const f = await makeFixture(CLAUDEX, { env: {} });
+    t.after(() => f.cleanup());
+    if (expected.status >= 400) {
+      f.refuseUploadAfterBody = { status: expected.status, body: expected.value };
+    }
+    const aborts = countAborts(t, f.service);
+    const received = new Promise<string>((resolve) => {
+      f.onUpload = (req) => {
+        const chunks: Buffer[] = [];
+        req.on("data", (chunk: Buffer) => chunks.push(chunk));
+        req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+      };
+    });
+    const answer = await f.service.uploadAttachment(
+      "thread-1",
+      { name: "notes.txt" },
+      Readable.from([Buffer.from("every byte")])
+    );
+    assert.deepEqual(answer, expected, `${expected.status}: the host's answer is relayed`);
+    assert.equal(await received, "every byte", `${expected.status}: the host read the whole body before answering`);
+    assert.equal(aborts(), 0, `${expected.status}: nothing is aborted`);
   }
 });
 

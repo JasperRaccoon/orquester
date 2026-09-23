@@ -830,6 +830,18 @@ export class AgentChatService {
     for await (const chunk of stream.body) {
       chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
     }
+    // The host can refuse while the body is still arriving: an empty `name`,
+    // a 401, a malformed thread id, a staging mkdir/open failure. Nothing else
+    // ever ends this request then. `countingLimit` forwards only an error, the
+    // route's request is no longer aborted once its reply has gone out, and the
+    // host runs with no request timeout, so one daemon↔host socket pair would
+    // stay open until the host restarts. Tear it down, and leave the source to
+    // its owner as ever. A success, or a refusal that came after the whole
+    // body was sent, is left exactly as it was.
+    if (stream.status >= 400 && !counted.readableEnded) {
+      stream.abort();
+      counted.destroy();
+    }
     const raw = Buffer.concat(chunks).toString("utf8");
     let value: unknown = null;
     try {
