@@ -12,6 +12,7 @@ import { findSession, listSessions, readThread, requireChatSession, sendCommand 
 import { fitJsonBytes, MAX_RESULT_BYTES, toSafeToolError } from "../result.ts";
 import { defineTool, DESTRUCTIVE, MUTATING, MUTATING_IDEMPOTENT, READ_ONLY, type ToolContext, type ToolDef } from "../tool.ts";
 import { buildViewContext, chatDetail, sessionView } from "../views.ts";
+import { byAttention } from "./watch.ts";
 
 export const MAX_RUNNING_SESSIONS_PER_PROJECT = 24;
 const runtimeModeSchema = z.enum(RUNTIME_MODES as unknown as [RuntimeMode, ...RuntimeMode[]]);
@@ -65,9 +66,8 @@ const listSessionsTool = defineTool({
     if (args.kind !== "all") sessions = sessions.filter((s) => (args.kind === "chat") === (s.kind === "agent-chat"));
     if (args.attention) {
       sessions = sessions.filter((s) => s.activity && (s.activity.attention !== null || s.activity.state === "waiting"));
-      // The Attention Center's key: "what just called for me" first.
-      const flaggedAt = (s: SessionSummary) => s.activity?.needsAttentionAt ?? s.createdAt;
-      sessions.sort((a, b) => (flaggedAt(a) < flaggedAt(b) ? 1 : flaggedAt(a) > flaggedAt(b) ? -1 : 0));
+      // The Attention Center's order — wait_for_session's own comparator: "what just called for me" first.
+      sessions.sort(byAttention);
     } else {
       sessions.sort((a, b) => a.projectPath.localeCompare(b.projectPath) || a.order - b.order);
     }

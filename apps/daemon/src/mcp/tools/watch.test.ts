@@ -7,7 +7,7 @@ import { z } from "zod";
 import { busEvent, FakeDaemonApi } from "../testing.ts";
 import { chatSummary, stamp } from "../fixtures.ts";
 import type { ToolContext } from "../tool.ts";
-import { watchTools } from "./watch.ts";
+import { byAttention, watchTools } from "./watch.ts";
 
 const tool = watchTools[0]!;
 const registry = { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [{ id: "claude", kind: "agent", name: "Claude Code", bin: ["claude"], enabled: true, installState: "idle", chat: { adapter: "claude" } }] };
@@ -38,6 +38,19 @@ test("wait_for_session orders by the attention instant, newest first, a tie goin
   const r = await tool.run({ after: "2026-09-21T00:00:00.000Z", timeoutMs: 20 }, ctx(api([offset, older, newer])));
   assert.deepEqual(ids(r), ["newer", "older", "offset"]);
   assert.equal(r.cursor, stamp(6));
+});
+
+test("byAttention is the one Attention Center order: the attention instant, newest first, a tie to the newer tab, no stamp counting from the tab's creation", () => {
+  const at = (id: string, needsAttentionAt: string | null, createdAt: string) => chatSummary({ id, createdAt, activity: { state: "waiting", attention: null, lastOutputAt: null, needsAttentionAt } });
+  const sessions = [
+    at("offset", "2026-09-22T01:00:05.000+02:00", stamp(0)), // 2026-09-21T23:00:05Z: the oldest instant, the greatest string
+    at("older", stamp(6), stamp(0)),
+    at("newer", stamp(6), stamp(2)),
+    at("unstamped", null, stamp(8)), // a waiting tab the daemon never stamped: its creation, as the GUI's flaggedAt
+    at("unparseable", "yesterday", stamp(1))
+  ];
+  assert.deepEqual([...sessions].sort(byAttention).map((s) => s.id), ["unstamped", "newer", "older", "unparseable", "offset"]);
+  assert.deepEqual([...sessions].reverse().sort(byAttention).map((s) => s.id), ["unstamped", "newer", "older", "unparseable", "offset"], "whatever the input order");
 });
 
 test("wait_for_session defaults `after` to now, honours session and project filters, and rejects both", async (t) => {

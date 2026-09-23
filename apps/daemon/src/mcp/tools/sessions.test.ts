@@ -58,6 +58,14 @@ test("list_sessions: kind filter, project filter, attention ordering", async (t)
   assert.deepEqual((att.sessions as { id: string; reason: string }[]).map((s) => [s.id, s.reason]), [["c9", "question"], ["c1", "completed"]]);
 });
 
+test("list_sessions attention:true orders as wait_for_session does: by the attention instant, a tie to the newer tab", async (t) => {
+  const flagged = (id: string, needsAttentionAt: string, createdAt: string, order: number) => chatSummary({ id, order, createdAt, activity: { state: "idle", attention: "finished", lastOutputAt: null, needsAttentionAt } });
+  // 2026-09-21T23:00:05Z: the oldest instant of the three, yet the greatest string.
+  const h = await harness([flagged("offset", "2026-09-22T01:00:05.000+02:00", stamp(0), 1), flagged("older", stamp(6), stamp(0), 2), flagged("newer", stamp(6), stamp(2), 3)]); t.after(h.close);
+  const r = await tool("list_sessions").run({ kind: "all", attention: true }, h.ctx);
+  assert.deepEqual((r.sessions as { id: string }[]).map((s) => s.id), ["newer", "older", "offset"]);
+});
+
 test("no session tool reads an empty string as omitted: an empty project, agent, model or cwd is refused, never a default", async (t) => {
   const h = await harness(); t.after(h.close);
   // list_sessions refuses an empty project the way wait_for_session does — never "every project".
