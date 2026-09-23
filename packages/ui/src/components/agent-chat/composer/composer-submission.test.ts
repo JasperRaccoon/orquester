@@ -9,6 +9,7 @@ import {
   composerSubmissionIntentForEnter,
   composerSubmissionValidationMessage,
   decideStagedAttachmentForRef,
+  draftAfterSend,
   hasSendableContent,
   implementationTextResolver,
   isPasteAsTextShortcut,
@@ -24,8 +25,10 @@ import {
   submitIsNoOp,
   swallowsStandalonePlanCommand,
   uploadsBlockSend,
+  type ComposerSendOutcome,
   type StagedAttachmentLike
 } from "./composer-submission.ts";
+import type { StagedAttachment } from "./ComposerAttachments";
 
 const DESKTOP = { isMobileViewport: false, shiftKey: false, modifierKey: false, isRunning: false };
 
@@ -600,4 +603,146 @@ test("so a failed Implement on an intact plan leaves the draft alone too", async
   });
   assert.deepEqual(outcome, { kind: "failed", text: null, notice: "The agent host is restarting." });
   assert.deepEqual(refusing.sent, [prompt]);
+});
+
+// ---------------------------------------------------------------------------
+// What a settled send leaves in the draft: a failed one comes back whole (§7.4)
+// ---------------------------------------------------------------------------
+
+/** A file picked or pasted here: keyed per staging, uploaded, ready to send. */
+function fileChip(id: string, mimeType = "application/pdf", key = `picked:${id}`): StagedAttachment {
+  return {
+    key,
+    name: id,
+    sizeBytes: 12,
+    mimeType,
+    status: "ready",
+    progress: 1,
+    ref: { type: "file", id: `att-${id}`, name: id, mimeType, sizeBytes: 12 }
+  };
+}
+
+function imageChip(id: string, key = `picked:${id}`): StagedAttachment {
+  const name = `${id}.png`;
+  return {
+    key,
+    name,
+    sizeBytes: 12,
+    mimeType: "image/png",
+    status: "ready",
+    progress: 1,
+    ref: { type: "image", id: `att-${id}`, name, mimeType: "image/png", sizeBytes: 12 }
+  };
+}
+
+const failedWith = (text: string | null): ComposerSendOutcome => ({
+  kind: "failed",
+  text,
+  notice: "Could not send the message."
+});
+
+/** What `submit` leaves behind before the send goes out: nothing, tray included. */
+const EMPTIED: { text: string; attachments: StagedAttachment[] } = { text: "", attachments: [] };
+
+test("a failed send comes back with the chips it carried, so a resend carries the files", async () => {
+  const shot = imageChip("shot");
+  const report = fileChip("report");
+  const refusing = recordingSend(new Error("The agent host is restarting."));
+  const outcome = await sendComposerTurn({ text: "why does [Image #1] fail? see the report", send: refusing.send });
+  assert.deepEqual(draftAfterSend({ outcome, sent: [shot, report], draft: EMPTIED }), {
+    text: "why does [Image #1] fail? see the report",
+    attachments: [shot, report]
+  });
+});
+
+test("what was typed or staged while it was in flight stays, behind it, and no chip is doubled", () => {
+  const report = fileChip("report");
+  // A browser pick is keyed by its ref, so delivering it again stages the same key.
+  const pick = fileChip("pick", "text/html", stagedAttachmentKeyForRef({ id: "att-pick" }));
+  const logs = fileChip("logs", "text/plain");
+  assert.deepEqual(
+    draftAfterSend({
+      outcome: failedWith("compare these"),
+      sent: [report, pick],
+      draft: { text: "and the logs", attachments: [{ ...pick }, logs] }
+    }),
+    { text: "compare these\n\nand the logs", attachments: [report, pick, logs] }
+  );
+  // One upload under another key is still one file, as `decideStagedAttachmentForRef` has it.
+  assert.deepEqual(
+    draftAfterSend({
+      outcome: failedWith("compare these"),
+      sent: [report],
+      draft: { text: "", attachments: [{ ...report, key: "picked:report-again" }, logs] }
+    }),
+    { text: "compare these", attachments: [report, logs] }
+  );
+  // A message of files alone comes back as files alone: no blank lines ahead of what was typed since.
+  assert.deepEqual(
+    draftAfterSend({
+      outcome: failedWith(""),
+      sent: [report],
+      draft: { text: "and this", attachments: [] }
+    }),
+    { text: "and this", attachments: [report] }
+  );
+});
+
+test("an image staged meanwhile keeps its own [Image #N] once the sent images are back ahead of it", () => {
+  const before = imageChip("before");
+  const after = imageChip("after");
+  // Staged into the emptied tray, the pasted image was #1 of its own.
+  const pasted = imageChip("pasted");
+  assert.deepEqual(
+    draftAfterSend({
+      outcome: failedWith("compare [Image #1] with [Image #2]"),
+      sent: [before, after],
+      draft: { text: "then crop [Image #1], not [Image #7]", attachments: [pasted] }
+    }),
+    {
+      // A number that names none of the staged images is the user's own, as typed.
+      text: "compare [Image #1] with [Image #2]\n\nthen crop [Image #3], not [Image #7]",
+      attachments: [before, after, pasted]
+    }
+  );
+
+  // An image delivered again meanwhile IS the sent one: its placeholder follows it there.
+  const pick = imageChip("pick", stagedAttachmentKeyForRef({ id: "att-pick" }));
+  assert.deepEqual(
+    draftAfterSend({
+      outcome: failedWith("look at [Image #1] and [Image #2]"),
+      sent: [before, pick],
+      draft: { text: "[Image #1] is the one, then [Image #2]", attachments: [{ ...pick }, pasted] }
+    }),
+    {
+      text: "look at [Image #1] and [Image #2]\n\n[Image #2] is the one, then [Image #3]",
+      attachments: [before, pick, pasted]
+    }
+  );
+  // So does one upload under another key: it is the same image.
+  assert.deepEqual(
+    draftAfterSend({
+      outcome: failedWith("look at [Image #1] and [Image #2]"),
+      sent: [before, pick],
+      draft: { text: "[Image #1] is the one", attachments: [{ ...pick, key: "picked:pick-again" }] }
+    }),
+    { text: "look at [Image #1] and [Image #2]\n\n[Image #2] is the one", attachments: [before, pick] }
+  );
+});
+
+test("a send that went out, a refusal and a failed Implement all leave the draft as it is", () => {
+  const report = fileChip("report");
+  // `submit` already cleared the draft; only what was typed since is in it.
+  const typedSince = { text: "next question", attachments: [] as StagedAttachment[] };
+  assert.equal(draftAfterSend({ outcome: { kind: "sent" }, sent: [report], draft: typedSince }), null);
+  assert.equal(
+    draftAfterSend({
+      outcome: { kind: "refused", notice: "The full plan could not be loaded." },
+      sent: [],
+      draft: typedSince
+    }),
+    null
+  );
+  // Wave D1: Implement's prompt is the composer's, and it never carries a chip.
+  assert.equal(draftAfterSend({ outcome: failedWith(null), sent: [], draft: typedSince }), null);
 });

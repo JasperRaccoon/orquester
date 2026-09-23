@@ -94,7 +94,11 @@ export interface BuildClaudeQueryOptionsInput {
   modelSelection?: ModelSelection;
   /** The catalogue the snapshot published, for per-model option gating. */
   models: readonly ProviderModel[];
-  /** `[cwd, attachmentsDir]` — the dir pasted images live in (§4.1). */
+  /**
+   * The thread's attachments dir, granted beside `cwd` as `[cwd,
+   * attachmentsDir]`: every `Attached file:` path line in the turn text points
+   * into it (§4.1).
+   */
   attachmentsDir: string;
   canUseTool: CanUseTool;
   onUserDialog?: NonNullable<ClaudeQueryOptions["onUserDialog"]>;

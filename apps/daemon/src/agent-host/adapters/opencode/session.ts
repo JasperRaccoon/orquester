@@ -1666,12 +1666,14 @@ export class OpenCodeThreadSession {
         continue;
       }
       const mime = attachment.mimeType?.trim().toLowerCase() ?? "";
-      let absolute: string;
-      try {
-        absolute = await this.deps.ctx.resolveAttachmentPath(this.state.threadId, attachment.id);
-      } catch {
-        continue;
-      }
+      // Never caught. The host resolved and STAT'd every attachment just
+      // before this call, so a miss here is a race, and skipping it would
+      // send the turn without the file. It fails the turn start visibly
+      // instead, as Claude's and Codex's resolves do.
+      const absolute = await this.deps.ctx.resolveAttachmentPath(
+        this.state.threadId,
+        attachment.id
+      );
       parts.push({
         type: "file",
         mime,
