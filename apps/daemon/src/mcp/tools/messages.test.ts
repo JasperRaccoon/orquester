@@ -8,7 +8,7 @@ import { agentChatRoutes, buildPlanImplementationPrompt, type ThreadSnapshotPayl
 import { busEvent, FakeDaemonApi } from "../testing.ts";
 import { activity, chatSummary, head, message, shellSummary, snapshot, stamp, turn } from "../fixtures.ts";
 import type { ToolContext } from "../tool.ts";
-import { MAX_RESULT_BYTES, resultBytes } from "../result.ts";
+import { MAX_RESULT_BYTES, ok, resultBytes } from "../result.ts";
 import { TRANSCRIPT_HINT_BYTES } from "../transcript.ts";
 import { messageTools, transcriptHint } from "./messages.ts";
 
@@ -601,4 +601,28 @@ test("send_message's result keeps within the cap beside a full detail: the pendi
   assert.deepEqual(kept, ids.slice(ids.length - kept.length));
   assert.ok(kept.length > 10 && kept.length < 80, `${kept.length} rows kept`);
   assert.ok(resultBytes(r) + resultBytes(session.subagents[0]) + 1 > MAX_RESULT_BYTES, "no more was shed than needed");
+});
+
+test("send_message: a reply too wide for one result beside a wide plan is cut by bytes, on a code-point boundary, and comes back as `reply` with replyTruncated", async (t) => {
+  const h = await harness(); t.after(h.close);
+  const plan = "漢".repeat(16_384); // 49 152 bytes of UTF-8
+  const reply = "😀".repeat(16_384); // 65 536 bytes
+  const after = snapshot({ turns: [turn(), turn({ turnId: "t2", turnCount: 2, requestedAt: stamp(2), startedAt: stamp(2), completedAt: stamp(3) })],
+    items: [message("user", "plan it", { turnId: "t2" }), message("assistant", reply, { turnId: "t2" }), activity("turn.proposed.completed", { planId: "p1", planMarkdown: plan }, { turnId: "t2" })] });
+  let posted = false;
+  h.api.on("POST", "/api/sessions/c1/turn", () => { posted = true; return { status: 200, body: { seq: 30 } }; });
+  h.api.on("GET", "/api/sessions/c1/thread", () => ({ status: 200, body: { kind: "snapshot", thread: posted ? { ...after, head: { ...after.head, projectPath: h.projectPath, cwd: h.projectPath } } : snapshot() } }));
+  const p = tool("send_message").run({ sessionId: "c1", text: "go", planMode: false, wait: true, timeoutMs: 5_000 }, h.ctx);
+  await tick();
+  h.api.emit(busEvent("session.updated", { ...done(), projectPath: h.projectPath }));
+  const r = await p;
+  assert.equal(r.outcome, "completed"); assert.equal(r.turnId, "t2");
+  assert.ok(resultBytes(r) <= MAX_RESULT_BYTES, `${resultBytes(r)} bytes`);
+  assert.deepEqual(ok(r).structuredContent, r, "never cut by ok()'s last resort");
+  const text = r.reply as string;
+  assert.equal(r.replyTruncated, true);
+  assert.ok(text.length > 0 && text.length < reply.length && reply.startsWith(text) && !/[\uD800-\uDBFF]$/.test(text), "a head of the reply, whole code points");
+  const session = r.session as { lastReply?: unknown; plan?: { markdown: string; truncated: boolean } };
+  assert.equal(session.lastReply, undefined, "returned once, as reply");
+  assert.deepEqual([session.plan?.markdown === plan, session.plan?.truncated], [true, false], "the reply went first, and cutting it made room");
 });

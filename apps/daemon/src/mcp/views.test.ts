@@ -4,7 +4,7 @@ import { buildPlanImplementationPrompt } from "@orquester/api/agent-chat";
 import { FakeDaemonApi } from "./testing.ts";
 import { MAX_RESULT_BYTES, ok, resultBytes } from "./result.ts";
 import { activity, chatSummary, head, message, shellSummary, snapshot, stamp, turn } from "./fixtures.ts";
-import { buildViewContext, chatDetail, lastReply, optionsObject, pendingApprovalViews, pendingQuestionViews, planView, sessionDetail, sessionReason, sessionView, type ViewContext } from "./views.ts";
+import { buildViewContext, chatDetail, lastReply, optionsObject, pendingApprovalViews, pendingQuestionViews, planView, SESSION_DETAIL_BYTES, sessionDetail, sessionReason, sessionView, type SessionDetail, type ViewContext } from "./views.ts";
 
 const ctx: ViewContext = { workspacesDir: "/w", adapterByRefId: new Map([["claude", "claude"], ["codex", "codex"]]), accountLabelById: new Map([["acc-1", "jasperclaude"]]),
   capabilitiesByAdapter: new Map([["claude", { sessionModelSwitch: "in-session", supportsConversationRollback: true, showPlanModeToggle: true, reportsContextWindow: true, compaction: { type: "slash-command", command: "/compact" }, supportsBackgroundTasks: true }]]) };
@@ -256,4 +256,55 @@ test("a session detail keeps within the result cap: 100 long subagents beside a 
   assert.equal(allLive.subagentsTruncated, true);
   const keptLive = allLive.subagents.map((s) => s.id);
   assert.deepEqual(keptLive, ids.slice(ids.length - keptLive.length), "the newest live rows");
+});
+
+// ---- Final fix wave F2, round 2: a plan and a reply too wide for one result are cut by bytes. ----
+
+/** The two texts the byte cut may touch, blanked with their flags, so the rest of a detail can be compared whole. */
+const blankTexts = (d: SessionDetail) => ({ ...d, plan: d.plan && { ...d.plan, markdown: "", truncated: false }, lastReply: d.lastReply && { ...d.lastReply, text: "", truncated: false } });
+/** Whether `cut` is a head of `whole` ending on a code-point boundary: no lone high surrogate at its end. */
+const headOf = (cut: string, whole: string) => whole.startsWith(cut) && !/[\uD800-\uDBFF]$/.test(cut);
+
+test("a plan and a reply of 16 384 wide characters pass the cap on their own: the reply is cut by bytes first, then the plan, on code-point boundaries, each marked truncated; every other field stays whole", () => {
+  const plan = "漢".repeat(16_384); // 49 152 bytes of UTF-8
+  const reply = "😀".repeat(16_384); // 65 536 bytes
+  const request = "確認".repeat(2_048); // 4 096 characters, 12 288 bytes: whole in the approval view
+  const detailOf = (planText: string, replyText: string, pending: boolean) => sessionDetail(chatSummary({ hasPendingApprovals: pending }), snapshot({
+    items: [message("user", "plan it", { turnId: "t1" }), message("assistant", replyText, { turnId: "t1" }), activity("turn.proposed.completed", { planId: "p1", planMarkdown: planText }),
+      activity("context-window.updated", { usedTokens: 50_000, maxTokens: 200_000 }),
+      ...(pending ? [activity("approval.requested", { requestId: "r1", requestKind: "command", detail: request, args: { toolName: "Bash", input: { command: request } } }, { tone: "approval" })] : [])],
+    pending: { approvals: pending ? [{ requestId: "r1", requestKind: "command", createdAt: stamp(5), detail: request }] : [], userInputs: [] }
+  }), ctx);
+  for (const pending of [false, true]) {
+    const d = detailOf(plan, reply, pending);
+    const label = pending ? "with a large request open" : "alone";
+    assert.ok(resultBytes({ session: d }) <= MAX_RESULT_BYTES, `${label}: ${resultBytes({ session: d })} bytes`);
+    assert.deepEqual(ok({ session: d }).structuredContent, { session: d }, `${label}: never cut by ok()'s last resort`);
+    // Every other field whole: exactly the detail of the same session with texts that need no cut.
+    assert.deepEqual(blankTexts(d), blankTexts(detailOf("# short", "short", pending)), `${label}: the rest is whole`);
+    assert.equal(d.lastReply!.truncated, true, `${label}: the reply is marked cut`);
+    assert.ok(headOf(d.lastReply!.text, reply) && d.lastReply!.text.length < reply.length, `${label}: the reply keeps a head, whole code points`);
+    if (!pending) {
+      // The reply goes first, and cutting it made room: the plan is left whole — the cut stops as soon as the detail fits.
+      assert.ok(d.lastReply!.text.length > 0, "a head of the reply is kept");
+      assert.deepEqual(d.plan, { planId: "p1", markdown: plan, truncated: false, actionable: true });
+      // Tight: one more character of the reply (4 bytes) would pass the budget.
+      assert.ok(resultBytes(d) + 4 > SESSION_DETAIL_BYTES, `${resultBytes(d)} bytes`);
+    } else {
+      // The request stays whole, so the reply alone cannot make room: it is cut to nothing, then the plan is cut too.
+      assert.equal(d.lastReply!.text, "");
+      assert.equal(d.plan!.truncated, true, "the plan is marked cut");
+      assert.ok(headOf(d.plan!.markdown, plan) && d.plan!.markdown.length > 0 && d.plan!.markdown.length < plan.length, "the plan keeps a head, whole code points");
+      assert.equal(d.pending.approvals[0]!.detail, request);
+      assert.ok(resultBytes(d) + 3 > SESSION_DETAIL_BYTES, `${resultBytes(d)} bytes`);
+    }
+  }
+  // A text already marked cut (a plan over 16 384 characters, capped by planView) is cut further by bytes, flag kept.
+  const longer = detailOf("😀".repeat(16_385), reply, false);
+  assert.deepEqual([longer.lastReply!.text, longer.lastReply!.truncated, longer.plan!.truncated], ["", true, true]);
+  assert.ok(headOf(longer.plan!.markdown, "😀".repeat(16_384)) && longer.plan!.markdown.length > 0, "a head of the plan");
+  assert.ok(resultBytes(longer) <= SESSION_DETAIL_BYTES && resultBytes(longer) + 4 > SESSION_DETAIL_BYTES, `${resultBytes(longer)} bytes: fits, and tightly`);
+  // Nothing is cut that fits.
+  const small = detailOf("# Plan", "Done.", false);
+  assert.deepEqual([small.plan, small.lastReply?.text, small.lastReply?.truncated], [{ planId: "p1", markdown: "# Plan", truncated: false, actionable: true }, "Done.", false]);
 });

@@ -9,7 +9,7 @@ import { readThread, requireChatSession, sendCommand } from "../reads.ts";
 import { MAX_RESULT_BYTES, resultBytes } from "../result.ts";
 import { defineTool, MUTATING, READ_ONLY, type ToolContext, type ToolDef } from "../tool.ts";
 import { proposedPlan, transcriptEntries, type TranscriptResult } from "../transcript.ts";
-import { buildViewContext, chatDetail, fitSubagents, SETTLED_TURN_STATES, type SessionDetail } from "../views.ts";
+import { buildViewContext, chatDetail, fitDetail, SETTLED_TURN_STATES, type SessionDetail } from "../views.ts";
 import { turnBaseline, waitForTurn, type TurnBaseline, type TurnOutcome } from "../wait.ts";
 
 const MAX_WAIT_MS = 600_000;
@@ -144,23 +144,19 @@ async function awaitTurn(ctx: ToolContext, sessionId: string, baseline: TurnBase
 function sendResult(seq: number, outcome: SendResult["outcome"], session: SessionDetail, over: ReadonlySet<string>): SendResult {
   // The message's turn: one not over when it was posted — a new turn, or the running turn it steered (spec §7.4).
   const ours = (turnId: string | null | undefined): turnId is string => typeof turnId === "string" && turnId !== "" && !over.has(turnId);
-  const head: Omit<SendResult, "session"> = { seq, outcome };
-  const reply = session.lastReply;
   const settled = outcome !== "sent" && outcome !== "needs-input" && outcome !== "timeout";
-  if (settled && reply && ours(reply.turnId)) {
-    head.turnId = reply.turnId;
-    head.reply = reply.text;
-    if (reply.truncated) head.replyTruncated = true;
-  } else if (ours(session.chat.activeTurnId)) {
-    head.turnId = session.chat.activeTurnId;
-  }
-  if (session.pending.approvals.length || session.pending.questions.length) head.pending = session.pending;
-  // `reply` IS the detail's lastReply: returned once, which keeps a long reply inside the result cap.
-  const { lastReply: _returnedAsReply, ...rest } = session;
-  const body = head.reply === undefined ? session : rest;
+  const replying = settled && session.lastReply !== undefined && ours(session.lastReply.turnId);
+  const turnId = replying ? session.lastReply!.turnId : ours(session.chat.activeTurnId) ? session.chat.activeTurnId : undefined;
+  const pending = session.pending.approvals.length || session.pending.questions.length ? session.pending : undefined;
   // The detail was fitted on its own; beside `pending`, returned twice, it can pass the cap. Fit it again in what the
-  // head leaves: `{…head, "session":{}}` less the two bytes of that empty object.
-  return { ...head, session: fitSubagents(body, MAX_RESULT_BYTES - (resultBytes({ ...head, session: {} }) - 2)) };
+  // rest leaves — `{…, "session":{}}` less the two bytes of that empty object — with the reply still in it as
+  // `lastReply`, so a reply too long for the result is cut there, by bytes (`fitDetail`).
+  const fitted = fitDetail(session, MAX_RESULT_BYTES - (resultBytes({ seq, outcome, turnId, pending, session: {} }) - 2));
+  if (!replying || !fitted.lastReply) return { seq, outcome, ...(turnId ? { turnId } : {}), ...(pending ? { pending } : {}), session: fitted };
+  // `reply` IS the detail's lastReply: returned once, which keeps a long reply inside the result cap. It is the
+  // smaller spelling of it (no turnId, completedAt or key of its own), so the result still fits.
+  const { lastReply, ...rest } = fitted;
+  return { seq, outcome, turnId, reply: lastReply.text, ...(lastReply.truncated ? { replyTruncated: true } : {}), ...(pending ? { pending } : {}), session: rest };
 }
 
 const sendMessage = defineTool({

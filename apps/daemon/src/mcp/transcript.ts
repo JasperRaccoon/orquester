@@ -104,6 +104,23 @@ function headWithin(text: string, budget: number): { head: string; bytes: number
   return { head: text.slice(0, end), bytes };
 }
 
+/**
+ * `text` without its shortest tail of whole code points whose JSON size is at least `need` bytes, and that size: one
+ * pass from the end, over the lost tail only. A surrogate pair goes whole; a lone surrogate is one code point too (JSON
+ * writes it \uXXXX). The head is `text` itself when `need` ≤ 0, and "" when the whole text is not enough.
+ */
+export function cutTail(text: string, need: number): { head: string; saved: number } {
+  let end = text.length;
+  let saved = 0;
+  while (end > 0 && saved < need) {
+    const last = text.charCodeAt(end - 1);
+    const pair = end >= 2 && last >= 0xdc00 && last <= 0xdfff && (text.charCodeAt(end - 2) & 0xfc00) === 0xd800;
+    saved += codePointBytes(pair ? text.codePointAt(end - 2)! : last);
+    end -= pair ? 2 : 1;
+  }
+  return { head: text.slice(0, end), saved };
+}
+
 const ELLIPSIS_BYTES = 3; // "…" (U+2026), which JSON leaves unescaped
 
 /** Suffix sums: `sums[i]` is the total of `values[i…]`, so any tail's total is read in O(1). */
