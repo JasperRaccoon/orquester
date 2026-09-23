@@ -3,12 +3,14 @@ import { agentChatRoutes, DEFAULT_RUNTIME_MODE, RUNTIME_MODES, type AdapterCapab
 import { proxyAccountFamily } from "../agent-chat/service.ts";
 import type { DaemonApi } from "./daemon-api.ts";
 import { ToolError } from "./errors.ts";
+import { clipText, MAX_ECHO_CHARS, resultBytes } from "./result.ts";
 
 export const EFFORT_OPTION_IDS: Record<AgentAdapterId, string> = { claude: "effort", codex: "effort", opencode: "variant", grok: "reasoningEffort" };
 export interface AgentModelOptionView { id: string; label: string; type: "select" | "boolean"; description?: string; values?: { id: string; label: string; description?: string; isDefault?: boolean }[] }
 export interface AgentModelView { slug: string; name: string; shortName?: string; isDefault: boolean; isLegacy?: boolean; providerLabel?: string; options: AgentModelOptionView[] }
 export interface AgentAccountView { id: string; label: string; email: string | null; plan: string | null; needsReauth: boolean; isDefault: boolean }
-export interface AgentView { id: string; name: string; adapter: AgentAdapterId; enabled: boolean; installed: boolean; version: string | null; status: string; message?: string; auth: { status: string; label?: string; email?: string };
+/** `disabledReason` is the registry's own (e.g. "proxy down"), present only on a disabled agent the daemon knows the reason for. */
+export interface AgentView { id: string; name: string; adapter: AgentAdapterId; enabled: boolean; disabledReason?: string; installed: boolean; version: string | null; status: string; message?: string; auth: { status: string; label?: string; email?: string };
   models: AgentModelView[]; effortOptionId: string; runtimeModes: readonly RuntimeMode[]; defaultRuntimeMode: RuntimeMode; supports: { planMode: boolean; rollback: boolean; compaction: boolean; backgroundTasks: boolean; contextWindow: boolean }; accounts: AgentAccountView[]; defaultAccountId: string }
 
 export function isProxyAgent(refId: string): boolean {
@@ -135,7 +137,8 @@ export async function loadAgents(api: DaemonApi, opts?: { includeLegacyModels?: 
     }
     const caps = snapshot?.capabilities;
     const view: AgentView = {
-      id: entry.id, name: entry.name, adapter, enabled: entry.enabled, installed: snapshot?.installed ?? false, version: entry.version ?? snapshot?.version ?? null,
+      id: entry.id, name: entry.name, adapter, enabled: entry.enabled, ...(!entry.enabled && nonEmpty(entry.disabledReason) ? { disabledReason: entry.disabledReason } : {}),
+      installed: snapshot?.installed ?? false, version: entry.version ?? snapshot?.version ?? null,
       status: snapshot?.status ?? "unknown", auth: snapshot?.auth ?? { status: "unknown" },
       models, effortOptionId: EFFORT_OPTION_IDS[adapter], runtimeModes: RUNTIME_MODES, defaultRuntimeMode: DEFAULT_RUNTIME_MODE,
       supports: { ...supportsFrom(caps), contextWindow: caps?.reportsContextWindow === true },
@@ -144,6 +147,72 @@ export async function loadAgents(api: DaemonApi, opts?: { includeLegacyModels?: 
     };
     if (snapshot?.message) view.message = snapshot.message;
     return view;
+  });
+}
+
+/** A model as list_agents lists it: whole, or — shed to fit the result — without its options, marked `optionsOmitted`. */
+export type ListedModelView = AgentModelView | (Omit<AgentModelView, "options"> & { optionsOmitted: true });
+/** An agent as list_agents lists it: when models were left out to fit, `modelsTruncated` and the catalogue's `modelCount`. */
+export type ListedAgentView = Omit<AgentView, "models"> & { models: ListedModelView[]; modelsTruncated?: true; modelCount?: number };
+
+const withoutOptions = ({ options: _options, ...model }: AgentModelView): ListedModelView => ({ ...model, optionsOmitted: true });
+
+/**
+ * The agents within `budget` bytes of `{agents}` JSON — list_agents' result, as ok() measures it. Every agent is listed,
+ * its header (everything but `models`) whole. Its default model stays whole too: the one flagged default (OpenCode can
+ * flag two: both), else the first — what a launch that names none gets (`resolveModelSelection`, the GUI's
+ * `resolveLaunchModel`). Over budget,
+ * the rest is shed in two passes, each walking the catalogues largest first (by bytes) and each catalogue from its END,
+ * so the oldest-listed models go last: (a) the options of every other model, which is then marked `optionsOmitted` — a
+ * model with no options has nothing to shed and is never marked; (b) only once no catalogue has any options left to
+ * shed, whole models, the agent then carrying `modelsTruncated` and `modelCount`. Each stops the moment the result
+ * fits. Pure, and linear: every model is measured once in each of its two forms, and the rest is arithmetic —
+ * `JSON.stringify` is compositional, so an agent's bytes are its header's plus its models' plus the commas between.
+ * Never applied by loadAgents: create_session and update_session always read the whole catalogue.
+ */
+export function fitAgentViews(agents: readonly AgentView[], budget: number): ListedAgentView[] {
+  const commas = (count: number): number => Math.max(0, count - 1);
+  const plans = agents.map((agent) => {
+    const flagged = agent.models.some((m) => m.isDefault);
+    const whole = agent.models.map((m) => resultBytes(m));
+    return {
+      agent, whole, bare: agent.models.map((m) => resultBytes(withoutOptions(m))),
+      spared: agent.models.map((m, i) => (flagged ? m.isDefault : i === 0)),
+      /** Each model's form, and its bytes in that form (0 once dropped). */
+      form: agent.models.map((): "whole" | "bare" | "dropped" => "whole"), size: [...whole],
+      header: resultBytes({ ...agent, models: [] }), truncated: false
+    };
+  });
+  const catalogue = (p: (typeof plans)[number]): number => p.size.reduce((sum, n) => sum + n, 0);
+  let total = resultBytes({ agents: [] }) + commas(plans.length) + plans.reduce((sum, p) => sum + p.header + catalogue(p) + commas(p.agent.models.length), 0);
+  if (total <= budget) return [...agents];
+  const largestFirst = (): typeof plans => plans.map((p) => ({ p, bytes: catalogue(p) })).sort((a, b) => b.bytes - a.bytes).map(({ p }) => p);
+  // (a) Options, largest catalogue first, each from its end.
+  for (const p of largestFirst()) {
+    for (let i = p.agent.models.length - 1; i >= 0 && total > budget; i -= 1) {
+      if (p.spared[i] || !p.agent.models[i]!.options.length) continue;
+      total -= p.whole[i]! - p.bare[i]!;
+      p.form[i] = "bare";
+      p.size[i] = p.bare[i]!;
+    }
+  }
+  // (b) Whole models, the same way. The spared model always stays, so a dropped one always takes a comma with it.
+  for (const p of total > budget ? largestFirst() : []) {
+    for (let i = p.agent.models.length - 1; i >= 0 && total > budget; i -= 1) {
+      if (p.spared[i]) continue;
+      if (!p.truncated) {
+        p.truncated = true;
+        total += resultBytes({ ...p.agent, models: [], modelsTruncated: true, modelCount: p.agent.models.length }) - p.header;
+      }
+      total -= p.size[i]! + 1;
+      p.form[i] = "dropped";
+      p.size[i] = 0;
+    }
+  }
+  return plans.map((p) => {
+    if (p.form.every((f) => f === "whole")) return p.agent;
+    const models = p.agent.models.flatMap((m, i): ListedModelView[] => (p.form[i] === "dropped" ? [] : [p.form[i] === "bare" ? withoutOptions(m) : m]));
+    return { ...p.agent, models, ...(p.truncated ? { modelsTruncated: true as const, modelCount: p.agent.models.length } : {}) };
   });
 }
 
@@ -158,6 +227,18 @@ export function findAgent(agents: readonly AgentView[], refId: string): AgentVie
   return agent;
 }
 
+/** The refusal of a model an agent's catalogue does not list, as every tool words it: the caller's slug, capped, and the valid ones. */
+const unknownModel = (agent: AgentView, slug: string): ToolError =>
+  new ToolError("INVALID_ARGUMENT", `Unknown model "${clipText(slug, MAX_ECHO_CHARS)}" for ${agent.id}. Valid models: ${nameList(agent.models.map((m) => m.slug))}.`);
+
+/** The agent's model `slug` — list_agents {agent, model}; refused when unknown, and while the catalogue is still being probed. */
+export function findModel(agent: AgentView, slug: string): AgentModelView {
+  const model = agent.models.find((m) => m.slug === slug);
+  if (model) return model;
+  if (!agent.models.length) throw new ToolError("INVALID_ARGUMENT", `Still loading ${agent.id}'s models — retry in a moment.`);
+  throw unknownModel(agent, slug);
+}
+
 export interface ResolvedSelection { model: string; options: { id: string; value: string | boolean }[] }
 
 export function resolveModelSelection(agent: AgentView, input: { model?: string; options?: Record<string, string | boolean>; current?: ModelSelection }): ResolvedSelection {
@@ -165,10 +246,11 @@ export function resolveModelSelection(agent: AgentView, input: { model?: string;
   const model = input.model || input.current?.model || agent.models.find((m) => m.isDefault)?.slug || agent.models[0]?.slug;
   if (!model) throw new ToolError("INVALID_ARGUMENT", `Still loading ${agent.id}'s models — retry in a moment (list_agents).`);
   const modelView = agent.models.find((m) => m.slug === model);
-  if (agent.models.length && !modelView) {
-    throw new ToolError("INVALID_ARGUMENT", `Unknown model "${model}" for ${agent.id}. Valid models: ${nameList(agent.models.map((m) => m.slug))}.`);
-  }
+  if (agent.models.length && !modelView) throw unknownModel(agent, model);
   const descriptors = modelView?.options ?? [];
+  // A listed model without option descriptors takes none: the GUI offers it no chips (claudex's proxy models, Claude's
+  // haiku). Only a catalogue still being probed passes options through unchecked, for the host to judge.
+  if (modelView && !descriptors.length && Object.keys(input.options ?? {}).length) throw new ToolError("INVALID_ARGUMENT", `${model} takes no options.`);
   const known = new Set(descriptors.map((d) => d.id));
   const merged = new Map<string, string | boolean>();
   for (const o of input.current?.options ?? []) {
@@ -181,7 +263,7 @@ export function resolveModelSelection(agent: AgentView, input: { model?: string;
     const id = rawId === "effort" && !known.has("effort") ? agent.effortOptionId : rawId;
     const d = descriptors.find((x) => x.id === id);
     if (descriptors.length && !d) throw new ToolError("INVALID_ARGUMENT", `Unknown option "${rawId}" for model ${model}. Valid options: ${descriptors.map((x) => x.id).join(", ")}.`);
-    if (!d) { merged.set(id, rawValue); continue; }
+    if (!d) { merged.set(id, rawValue); continue; } // nothing to check against: only a catalogue still being probed
     if (d.type === "boolean") {
       if (typeof rawValue !== "boolean") throw new ToolError("INVALID_ARGUMENT", `Option "${rawId}" takes a boolean.`);
       merged.set(id, rawValue);

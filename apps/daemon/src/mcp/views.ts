@@ -6,9 +6,16 @@ import { projectNamesFor, type ProjectRef } from "./addressing.ts";
 import { providerRows, supportsFrom } from "./agents.ts";
 import type { DaemonApi } from "./daemon-api.ts";
 import { readThread, requireChatSession } from "./reads.ts";
-import { capText } from "./result.ts";
+import { capText, clipText, MAX_RESULT_BYTES, resultBytes } from "./result.ts";
+import { cutTail, fitRoster, proposedPlan, sized, SUBAGENT_TEXT_CHARS } from "./transcript.ts";
 
 export const VIEW_TEXT_CAP = 16_384;
+/**
+ * The most a session detail takes, in UTF-8 bytes of its JSON: ok()'s cap less room for what a tool returns beside it
+ * (`seq`, `applied`, …, well under 1 KB). send_message and implement_plan, which add `pending`, fit the detail again in
+ * what their own fields leave (`fitDetail`, tools/messages.ts).
+ */
+export const SESSION_DETAIL_BYTES = MAX_RESULT_BYTES - 1_000;
 /** completed | failed | interrupted | cancelled — the fold's own set (`thread.ts`), typed for callers holding a plain string. */
 export const SETTLED_TURN_STATES: ReadonlySet<string> = TURN_SETTLED_STATES;
 /** §4.3's default four with the GUI's labels (`banner-model.ts` `DEFAULT_APPROVAL_OPTIONS`), listed approve-first as spec §6.2 does. */
@@ -31,7 +38,7 @@ export interface SubagentView { id: string; kind: string; agentKind: "agent" | "
 export interface PlanView { planId: string; markdown: string; truncated: boolean; actionable: boolean }
 export interface SessionDetail extends SessionView { chat: SessionView["chat"] & { model: string; options: Record<string, string | boolean>; runtimeMode: RuntimeMode; home: AccountHomeKind; accountLabel?: string; activeTurnId: string | null; turnCount: number; lastError?: string; continueAfterRestart: boolean;
     contextWindow?: { usedTokens: number; maxTokens?: number; percentUsed?: number; compactsAutomatically?: boolean }; supports: { planMode: boolean; rollback: boolean; compaction: boolean; backgroundTasks: boolean } };
-  pending: { approvals: PendingApprovalView[]; questions: PendingQuestionView[] }; plan?: PlanView; subagents: SubagentView[]; lastReply?: { turnId: string; text: string; truncated: boolean; completedAt: string | null } }
+  pending: { approvals: PendingApprovalView[]; questions: PendingQuestionView[] }; plan?: PlanView; subagents: SubagentView[]; subagentsTruncated?: true; lastReply?: { turnId: string; text: string; truncated: boolean; completedAt: string | null } }
 export interface ViewContext { workspacesDir: string; adapterByRefId: ReadonlyMap<string, AgentAdapterId>; accountLabelById: ReadonlyMap<string, string>; capabilitiesByAdapter: ReadonlyMap<string, AdapterCapabilities> }
 
 export async function buildViewContext(api: DaemonApi): Promise<ViewContext> {
@@ -143,27 +150,75 @@ export function pendingQuestionViews(snap: ThreadSnapshotPayload): PendingQuesti
   });
 }
 
-export function planView(snap: ThreadSnapshotPayload, s: SessionSummary): PlanView | null {
-  for (let i = snap.items.length - 1; i >= 0; i -= 1) {
-    const item = snap.items[i]!;
-    if (item.kind === "activity" && item.activityKind === "turn.proposed.completed") {
-      const p = (item.payload ?? {}) as { planId?: unknown; planMarkdown?: unknown; truncated?: unknown };
-      const md = capText(typeof p.planMarkdown === "string" ? p.planMarkdown : "", VIEW_TEXT_CAP);
-      // The snapshot is slimmed on the wire (§5.6): a plan over 16 KiB of UTF-8 arrives already cut, `truncated` on its payload.
-      return { planId: typeof p.planId === "string" ? p.planId : item.id, markdown: md.text, truncated: md.truncated || p.truncated === true, actionable: s.hasActionableProposedPlan === true };
-    }
-  }
-  return null;
+/**
+ * The latest proposed plan. `actionable` is judged on the snapshot with the host's rule (`proposedPlan`, transcript.ts),
+ * never on the summary's flag, which trails it by one poll: right after implement_plan that flag still says yes.
+ */
+export function planView(snap: ThreadSnapshotPayload): PlanView | null {
+  const plan = proposedPlan(snap.items);
+  if (!plan) return null;
+  const p = (plan.item.payload ?? {}) as { planId?: unknown; planMarkdown?: unknown; truncated?: unknown };
+  const md = capText(typeof p.planMarkdown === "string" ? p.planMarkdown : "", VIEW_TEXT_CAP);
+  // The snapshot is slimmed on the wire (§5.6): a plan over 16 KiB of UTF-8 arrives already cut, `truncated` on its payload.
+  return { planId: typeof p.planId === "string" ? p.planId : plan.item.id, markdown: md.text, truncated: md.truncated || p.truncated === true, actionable: plan.actionable };
 }
 
+/** A subagent's text as a view shows it: at most SUBAGENT_TEXT_CHARS code points, a cut ending in "…"; a non-string as its JSON. */
+const subagentText = (value: unknown): string => clipText(typeof value === "string" ? value : JSON.stringify(value), SUBAGENT_TEXT_CHARS);
+
 export function subagentView(r: RuntimeSubagent): SubagentView {
-  const v: SubagentView = { id: r.id, kind: r.kind, agentKind: r.agentKind, title: r.title ?? null, status: r.status, startedAt: r.startedAt ?? null, completedAt: r.completedAt ?? null };
+  const v: SubagentView = { id: r.id, kind: r.kind, agentKind: r.agentKind, title: r.title == null ? null : subagentText(r.title), status: r.status, startedAt: r.startedAt ?? null, completedAt: r.completedAt ?? null };
   if (r.model) v.model = r.model;
   if (r.effort) v.effort = r.effort;
-  if (r.progress) v.progress = typeof r.progress === "string" ? r.progress : JSON.stringify(r.progress);
+  if (r.progress) v.progress = subagentText(r.progress);
   if (r.lastToolName) v.lastToolName = r.lastToolName;
-  if (r.error) v.error = typeof r.error === "string" ? r.error : JSON.stringify(r.error);
+  if (r.error) v.error = subagentText(r.error);
   return v;
+}
+
+/**
+ * `text` cut from its end, on a code-point boundary, until its JSON — with its `truncated` flag turning true, which
+ * saves a byte of its own ("false" → "true") — is at least `need` bytes smaller; null when there is nothing to cut.
+ * A text is never marked cut that was not.
+ */
+function cutText(text: string, truncated: boolean, need: number): { text: string; saved: number } | null {
+  const flip = truncated ? 0 : 1;
+  const cut = cutTail(text, Math.max(1, need - flip));
+  return cut.head.length < text.length ? { text: cut.head, saved: cut.saved + flip } : null;
+}
+
+/**
+ * `detail` within `budget` bytes of JSON. First its subagent list: settled rows go first, then live ones, each first
+ * seen first — read_transcript's rule (`fitRoster`, transcript.ts) — and `subagentsTruncated` says so. Then, when the
+ * detail is still over (a plan and a reply of 16 384 wide characters can pass the cap on their own), the last reply's
+ * text and after it the plan's markdown are cut by bytes from their end, on a code-point boundary, each marked
+ * `truncated`. It stops as soon as the detail fits, and every other field stays whole: a detail whose requests alone
+ * pass the budget still does (ok()'s last resort then cuts it). Pure, and linear: each row is measured once, the rest
+ * of the detail at most twice, and a text is walked once, over the tail it loses.
+ */
+export function fitDetail(detail: SessionDetail, budget: number): SessionDetail {
+  const rows = sized(detail.subagents);
+  let fitted = detail;
+  let frame = resultBytes({ ...detail, subagents: [] });
+  let listed = fitRoster(rows, budget - frame);
+  if (listed.trimmed) {
+    frame = resultBytes({ ...detail, subagents: [], subagentsTruncated: true });
+    listed = fitRoster(rows, budget - frame);
+    fitted = { ...detail, subagents: listed.rows, subagentsTruncated: true };
+  }
+  let over = frame + listed.bytes - budget;
+  if (over > 0 && fitted.lastReply) {
+    const cut = cutText(fitted.lastReply.text, fitted.lastReply.truncated, over);
+    if (cut) {
+      fitted = { ...fitted, lastReply: { ...fitted.lastReply, text: cut.text, truncated: true } };
+      over -= cut.saved;
+    }
+  }
+  if (over > 0 && fitted.plan) {
+    const cut = cutText(fitted.plan.markdown, fitted.plan.truncated, over);
+    if (cut) fitted = { ...fitted, plan: { ...fitted.plan, markdown: cut.text, truncated: true } };
+  }
+  return fitted;
 }
 
 export function latestSettledTurn(turns: readonly Turn[]): Turn | null {
@@ -232,9 +287,9 @@ export function sessionDetail(s: SessionSummary, snap: ThreadSnapshotPayload, ct
   const cw = latestContextWindow(snap.items);
   if (cw) chat.contextWindow = cw;
   const detail: SessionDetail = { ...base, chat, pending: { approvals: pendingApprovalViews(snap), questions: pendingQuestionViews(snap) }, subagents: snap.roster.map(subagentView) };
-  const plan = planView(snap, s);
+  const plan = planView(snap);
   if (plan) detail.plan = plan;
   const reply = lastReply(snap);
   if (reply) detail.lastReply = reply;
-  return detail;
+  return fitDetail(detail, SESSION_DETAIL_BYTES);
 }

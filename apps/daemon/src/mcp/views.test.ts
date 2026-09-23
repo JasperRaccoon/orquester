@@ -1,8 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { buildPlanImplementationPrompt } from "@orquester/api/agent-chat";
 import { FakeDaemonApi } from "./testing.ts";
+import { MAX_RESULT_BYTES, ok, resultBytes } from "./result.ts";
 import { activity, chatSummary, head, message, shellSummary, snapshot, stamp, turn } from "./fixtures.ts";
-import { buildViewContext, chatDetail, lastReply, optionsObject, pendingApprovalViews, pendingQuestionViews, planView, sessionDetail, sessionReason, sessionView, type ViewContext } from "./views.ts";
+import { buildViewContext, chatDetail, lastReply, optionsObject, pendingApprovalViews, pendingQuestionViews, planView, SESSION_DETAIL_BYTES, sessionDetail, sessionReason, sessionView, type SessionDetail, type ViewContext } from "./views.ts";
 
 const ctx: ViewContext = { workspacesDir: "/w", adapterByRefId: new Map([["claude", "claude"], ["codex", "codex"]]), accountLabelById: new Map([["acc-1", "jasperclaude"]]),
   capabilitiesByAdapter: new Map([["claude", { sessionModelSwitch: "in-session", supportsConversationRollback: true, showPlanModeToggle: true, reportsContextWindow: true, compaction: { type: "slash-command", command: "/compact" }, supportsBackgroundTasks: true }]]) };
@@ -76,9 +78,9 @@ test("pending views: advertised decisions win over the default four; a message-m
 test("planView caps the markdown, lastReply skips subagent text and unsettled turns, optionsObject flattens", () => {
   const long = "x".repeat(20_000);
   const snap = snapshot({ items: [activity("turn.proposed.completed", { planId: "p", planMarkdown: long })] });
-  const p = planView(snap, chatSummary())!;
-  assert.equal(p.truncated, true); assert.equal(p.markdown.length, 16_384); assert.equal(p.actionable, false);
-  assert.equal(planView(snapshot(), chatSummary()), null);
+  const p = planView(snap)!;
+  assert.equal(p.truncated, true); assert.equal(p.markdown.length, 16_384); assert.equal(p.actionable, true, "the latest plan, not implemented");
+  assert.equal(planView(snapshot()), null);
   const running = snapshot({ turns: [turn({ turnId: "t1", state: "running", completedAt: null })], items: [message("assistant", "partial", { turnId: "t1" })] });
   assert.equal(lastReply(running), null);
   assert.deepEqual(optionsObject([{ id: "effort", value: "high" }, { id: "thinking", value: true }]), { effort: "high", thinking: true });
@@ -153,7 +155,7 @@ test("the context meter skips a row without a usable reading, as the host's snap
 
 test("planView reports a plan the snapshot's wire slimming already cut as truncated", () => {
   const snap = snapshot({ items: [activity("turn.proposed.completed", { planId: "p", planMarkdown: "計画…", truncated: true })] });
-  assert.deepEqual(planView(snap, chatSummary()), { planId: "p", markdown: "計画…", truncated: true, actionable: false });
+  assert.deepEqual(planView(snap), { planId: "p", markdown: "計画…", truncated: true, actionable: true });
 });
 
 test("the context meter's percentUsed is clamped to 100, as the GUI's ring is; the raw token counts are kept", () => {
@@ -177,4 +179,132 @@ test("lastReply is the turn's answer: Codex commentary (the fold's messageKind) 
   // A turn cut before its answer said nothing that answers: its narration is not passed off as a reply.
   const cut = snapshot({ turns: [turn({ state: "interrupted" })], items: [message("assistant", "I'll start with the tests.", { turnId: "t1", messageKind: "commentary" })] });
   assert.equal(lastReply(cut)?.text, "");
+});
+
+// ---- Final fix wave F2 (M3): one rule decides whether a plan is actionable, judged on the snapshot. ----
+
+test("plan.actionable is judged on the snapshot with the host's own rule, never on the summary flag one poll behind", () => {
+  const plan = (id: string) => activity("turn.proposed.completed", { planId: id, planMarkdown: `# ${id}` });
+  const implementing = (id: string) => message("user", buildPlanImplementationPrompt(`# ${id}`), { turnId: "t2" });
+  // Just implemented (implement_plan {wait:false} reads this): the summary still flags the plan it was sent for.
+  const sent = snapshot({ items: [plan("p1"), implementing("p1")] });
+  assert.deepEqual(sessionDetail(chatSummary({ hasActionableProposedPlan: true }), sent, ctx).plan, { planId: "p1", markdown: "# p1", truncated: false, actionable: false });
+  // Just proposed: the summary has not flagged it yet.
+  assert.equal(sessionDetail(chatSummary({ hasActionableProposedPlan: false }), snapshot({ items: [plan("p1")] }), ctx).plan?.actionable, true);
+  // Only the LATEST plan counts: one proposed after an implemented one is actionable again.
+  assert.equal(sessionDetail(chatSummary({ hasActionableProposedPlan: false }), snapshot({ items: [plan("p1"), implementing("p1"), plan("p2")] }), ctx).plan?.actionable, true);
+});
+
+// ---- Final fix wave F2 (A): a session detail keeps within the result cap. ----
+
+/** A roster row as the host folds it; `text` supplies its title, progress and error. */
+function rosterRow(i: number, status: string, text: (label: string) => string): never {
+  return { id: `task-${i}`, kind: "subagent", agentKind: "agent", title: text("Title"), role: null, model: "sonnet", effort: "high", status, activationCount: 1, usage: null, progress: text("Progress"), lastToolName: "Read", result: null, error: text("Error"), outputFile: null, exitCode: null,
+    isBackgrounded: false, parentAgentId: null, agentIndex: null, phaseIndex: null, phaseTitle: null, attempt: 1, workflowName: null, phases: [], runHandles: null, recentActivity: [], firstSeenAt: stamp(i), startedAt: stamp(i), completedAt: status === "running" ? null : stamp(i + 1), updatedAt: stamp(i + 1) } as never;
+}
+
+test("a subagent's title, progress and error are capped at 200 code points in a session view, a cut ending in \"…\"", () => {
+  const long = "é".repeat(150) + "🙂".repeat(100);
+  const d = sessionDetail(chatSummary(), snapshot({ roster: [rosterRow(1, "failed", () => long), rosterRow(2, "completed", (label) => `${label}: short`)] }), ctx);
+  const [cut, whole] = d.subagents;
+  for (const text of [cut!.title!, cut!.progress!, cut!.error!]) {
+    assert.equal([...text].length, 200);
+    assert.equal(text, `${[...long].slice(0, 199).join("")}…`, "cut on a code point, never inside a surrogate pair");
+  }
+  assert.deepEqual([whole!.title, whole!.progress, whole!.error], ["Title: short", "Progress: short", "Error: short"]);
+  assert.equal(d.subagentsTruncated, undefined, "a detail that fits is not flagged");
+});
+
+test("a session detail keeps within the result cap: 100 long subagents beside a 16 KB plan and reply shed settled rows oldest first, then live ones; every other field stays whole", () => {
+  const long = (label: string, i: number) => `${label} of agent ${i}: ${"a long line of narration ".repeat(60)}`;
+  // Every tenth row still running; the rest settled.
+  const roster = Array.from({ length: 100 }, (_, i) => rosterRow(i, i % 10 === 9 ? "running" : "completed", (label) => long(label, i)));
+  const plan = `# Plan\n${"1. a step of the plan\n".repeat(800)}`.slice(0, 16_000);
+  const reply = `Done. ${"the reply goes on ".repeat(1_000)}`.slice(0, 16_000);
+  const snap = snapshot({
+    items: [message("user", "go", { turnId: "t1" }), message("assistant", reply, { turnId: "t1" }), activity("turn.proposed.completed", { planId: "p1", planMarkdown: plan }),
+      activity("approval.requested", { requestId: "r1", requestKind: "command", detail: "rm -rf build", args: { toolName: "Bash", input: { command: "rm -rf build" } } }, { tone: "approval" })],
+    roster, pending: { approvals: [{ requestId: "r1", requestKind: "command", createdAt: stamp(5), detail: "rm -rf build" }], userInputs: [] }
+  });
+  const summary = chatSummary({ hasPendingApprovals: true });
+  const d = sessionDetail(summary, snap, ctx);
+  const size = resultBytes({ session: d });
+  assert.ok(size <= MAX_RESULT_BYTES, `${size} bytes`);
+  assert.deepEqual(ok({ session: d }).structuredContent, { session: d }, "never cut by ok()'s last resort");
+  assert.equal(d.subagentsTruncated, true);
+  // Every other field whole: exactly the detail of the same session without a roster.
+  const alone = sessionDetail(summary, { ...snap, roster: [] }, ctx);
+  assert.deepEqual({ ...d, subagents: [], subagentsTruncated: undefined }, { ...alone, subagentsTruncated: undefined });
+  assert.equal(d.plan?.markdown, plan);
+  assert.equal(d.lastReply?.text, reply);
+  assert.equal(d.pending.approvals[0]?.requestId, "r1");
+  // Settled rows go first, oldest first; the live ones stay while there is room. Kept rows keep the roster's order.
+  const ids = roster.map((r) => (r as { id: string }).id);
+  const live = ids.filter((_, i) => i % 10 === 9);
+  const settled = ids.filter((_, i) => i % 10 !== 9);
+  const kept = d.subagents.map((s) => s.id);
+  assert.deepEqual(kept, ids.filter((id) => kept.includes(id)));
+  assert.ok(live.every((id) => kept.includes(id)), "every live row is kept");
+  const keptSettled = kept.filter((id) => settled.includes(id));
+  assert.ok(keptSettled.length > 0 && keptSettled.length < settled.length, `${keptSettled.length} settled rows kept`);
+  assert.deepEqual(keptSettled, settled.slice(settled.length - keptSettled.length), "the newest settled rows");
+  // Not shed past need: the cap less the room the tools keep beside a detail (≤ 1 KB) and one more row (< 1 KB).
+  assert.ok(size > MAX_RESULT_BYTES - 2_000, `${size} bytes`);
+  // With only live rows over the cap, the oldest live rows go.
+  const allLive = sessionDetail(summary, { ...snap, roster: Array.from({ length: 100 }, (_, i) => rosterRow(i, "running", (label) => long(label, i))) }, ctx);
+  assert.ok(resultBytes({ session: allLive }) <= MAX_RESULT_BYTES, `${resultBytes({ session: allLive })} bytes`);
+  assert.equal(allLive.subagentsTruncated, true);
+  const keptLive = allLive.subagents.map((s) => s.id);
+  assert.deepEqual(keptLive, ids.slice(ids.length - keptLive.length), "the newest live rows");
+});
+
+// ---- Final fix wave F2, round 2: a plan and a reply too wide for one result are cut by bytes. ----
+
+/** The two texts the byte cut may touch, blanked with their flags, so the rest of a detail can be compared whole. */
+const blankTexts = (d: SessionDetail) => ({ ...d, plan: d.plan && { ...d.plan, markdown: "", truncated: false }, lastReply: d.lastReply && { ...d.lastReply, text: "", truncated: false } });
+/** Whether `cut` is a head of `whole` ending on a code-point boundary: no lone high surrogate at its end. */
+const headOf = (cut: string, whole: string) => whole.startsWith(cut) && !/[\uD800-\uDBFF]$/.test(cut);
+
+test("a plan and a reply of 16 384 wide characters pass the cap on their own: the reply is cut by bytes first, then the plan, on code-point boundaries, each marked truncated; every other field stays whole", () => {
+  const plan = "漢".repeat(16_384); // 49 152 bytes of UTF-8
+  const reply = "😀".repeat(16_384); // 65 536 bytes
+  const request = "確認".repeat(2_048); // 4 096 characters, 12 288 bytes: whole in the approval view
+  const detailOf = (planText: string, replyText: string, pending: boolean) => sessionDetail(chatSummary({ hasPendingApprovals: pending }), snapshot({
+    items: [message("user", "plan it", { turnId: "t1" }), message("assistant", replyText, { turnId: "t1" }), activity("turn.proposed.completed", { planId: "p1", planMarkdown: planText }),
+      activity("context-window.updated", { usedTokens: 50_000, maxTokens: 200_000 }),
+      ...(pending ? [activity("approval.requested", { requestId: "r1", requestKind: "command", detail: request, args: { toolName: "Bash", input: { command: request } } }, { tone: "approval" })] : [])],
+    pending: { approvals: pending ? [{ requestId: "r1", requestKind: "command", createdAt: stamp(5), detail: request }] : [], userInputs: [] }
+  }), ctx);
+  for (const pending of [false, true]) {
+    const d = detailOf(plan, reply, pending);
+    const label = pending ? "with a large request open" : "alone";
+    assert.ok(resultBytes({ session: d }) <= MAX_RESULT_BYTES, `${label}: ${resultBytes({ session: d })} bytes`);
+    assert.deepEqual(ok({ session: d }).structuredContent, { session: d }, `${label}: never cut by ok()'s last resort`);
+    // Every other field whole: exactly the detail of the same session with texts that need no cut.
+    assert.deepEqual(blankTexts(d), blankTexts(detailOf("# short", "short", pending)), `${label}: the rest is whole`);
+    assert.equal(d.lastReply!.truncated, true, `${label}: the reply is marked cut`);
+    assert.ok(headOf(d.lastReply!.text, reply) && d.lastReply!.text.length < reply.length, `${label}: the reply keeps a head, whole code points`);
+    if (!pending) {
+      // The reply goes first, and cutting it made room: the plan is left whole — the cut stops as soon as the detail fits.
+      assert.ok(d.lastReply!.text.length > 0, "a head of the reply is kept");
+      assert.deepEqual(d.plan, { planId: "p1", markdown: plan, truncated: false, actionable: true });
+      // Tight: one more character of the reply (4 bytes) would pass the budget.
+      assert.ok(resultBytes(d) + 4 > SESSION_DETAIL_BYTES, `${resultBytes(d)} bytes`);
+    } else {
+      // The request stays whole, so the reply alone cannot make room: it is cut to nothing, then the plan is cut too.
+      assert.equal(d.lastReply!.text, "");
+      assert.equal(d.plan!.truncated, true, "the plan is marked cut");
+      assert.ok(headOf(d.plan!.markdown, plan) && d.plan!.markdown.length > 0 && d.plan!.markdown.length < plan.length, "the plan keeps a head, whole code points");
+      assert.equal(d.pending.approvals[0]!.detail, request);
+      assert.ok(resultBytes(d) + 3 > SESSION_DETAIL_BYTES, `${resultBytes(d)} bytes`);
+    }
+  }
+  // A text already marked cut (a plan over 16 384 characters, capped by planView) is cut further by bytes, flag kept.
+  const longer = detailOf("😀".repeat(16_385), reply, false);
+  assert.deepEqual([longer.lastReply!.text, longer.lastReply!.truncated, longer.plan!.truncated], ["", true, true]);
+  assert.ok(headOf(longer.plan!.markdown, "😀".repeat(16_384)) && longer.plan!.markdown.length > 0, "a head of the plan");
+  assert.ok(resultBytes(longer) <= SESSION_DETAIL_BYTES && resultBytes(longer) + 4 > SESSION_DETAIL_BYTES, `${resultBytes(longer)} bytes: fits, and tightly`);
+  // Nothing is cut that fits.
+  const small = detailOf("# Plan", "Done.", false);
+  assert.deepEqual([small.plan, small.lastReply?.text, small.lastReply?.truncated], [{ planId: "p1", markdown: "# Plan", truncated: false, actionable: true }, "Done.", false]);
 });
