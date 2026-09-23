@@ -36,11 +36,7 @@ import { shortAccountLabel } from "../../lib/account-label";
 import { relativeTime } from "../../lib/relative-time";
 import { launchWithNotice } from "../../lib/launch-notice";
 import { resumeAccountId } from "../../lib/resume-account";
-import {
-  canOpenChat,
-  chatLaunchRefId,
-  isChatResumableConversation
-} from "../../lib/session-kind";
+import { canOpenChat, isResumableByAgent } from "../../lib/session-kind";
 import {
   RUNTIME_MODE_HINTS,
   RUNTIME_MODE_LABELS,
@@ -104,9 +100,7 @@ const ResumeSection: React.FC<{
   // launcher's `resumeArgs`, so the claudex/claudemix proxy-home rows the
   // terminal path had to hide (`isResumableConversation`) are offered here for
   // the first time (§5.3) — under the launcher that owns that home.
-  const mine = cached?.filter(
-    (c) => chatLaunchRefId(c) === agent.id && isChatResumableConversation(c)
-  );
+  const mine = cached?.filter((c) => isResumableByAgent(c, agent.id));
   const shown = mine?.slice(0, MAX_INLINE_CONVERSATIONS) ?? [];
   const hidden = (mine?.length ?? 0) - shown.length;
 

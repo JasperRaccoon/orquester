@@ -14,6 +14,8 @@ import {
   isDefaultThreadTitle,
   isLegacyAgentTerminal,
   isPtySession,
+  isResumableByAgent,
+  isResumableByInstalledAgent,
   launchKindForAgent
 } from "./session-kind.ts";
 
@@ -86,9 +88,10 @@ test("a cliproxy row with no proxyRefId is not resumable: no launcher owns its h
   assert.equal(isChatResumableConversation(row), false);
 });
 
-// The two GUI launch paths ask the same predicate, each behind its own filter.
-// Both are replayed here over one project's rows: a proxied row, the same row
-// with its launcher unknown, and a plain system-home row.
+// The two GUI launch paths ask the same predicate, each through its own
+// exported filter, which is what the components call. Both run here over one
+// project's rows: a proxied row, the same row with its launcher unknown, and a
+// plain system-home row.
 const PROXIED = conversation({ id: "c-proxied", home: "cliproxy", proxyRefId: "claudex" });
 const ORPHANED = conversation({ id: "c-orphaned", home: "cliproxy" });
 const SYSTEM = conversation({ id: "c-system", home: "system" });
@@ -97,18 +100,25 @@ const ROWS = [PROXIED, ORPHANED, SYSTEM];
 test("ProjectOverview offers a proxied row under its launcher, never an orphaned one", () => {
   // `ProjectOverview.tsx` (both of its lists): the launcher entry is installed
   // AND the predicate holds.
-  const installed = new Set(["claude", "claudex"]);
-  const offered = ROWS.filter(
-    (c) => installed.has(chatLaunchRefId(c)) && isChatResumableConversation(c)
-  ).map((c) => c.id);
-  assert.deepEqual(offered, ["c-proxied", "c-system"]);
+  const offered = (agentsById: ReadonlyMap<string, { enabled: boolean }>) =>
+    ROWS.filter((c) => isResumableByInstalledAgent(c, agentsById)).map((c) => c.id);
+  assert.deepEqual(
+    offered(new Map([["claude", { enabled: true }], ["claudex", { enabled: true }]])),
+    ["c-proxied", "c-system"]
+  );
+  // A launcher that is not installed, or not in the registry at all, offers
+  // none of its rows.
+  assert.deepEqual(
+    offered(new Map([["claude", { enabled: true }], ["claudex", { enabled: false }]])),
+    ["c-system"]
+  );
+  assert.deepEqual(offered(new Map([["claudex", { enabled: true }]])), ["c-proxied"]);
 });
 
 test("NewTabMenu lists a proxied row under its launcher, and no agent lists an orphaned one", () => {
   // `NewTabMenu.tsx`: an agent's submenu lists the rows it launches AND the
   // predicate holds. Without the predicate the orphan landed under "claude".
-  const listed = (agentId: string) =>
-    ROWS.filter((c) => chatLaunchRefId(c) === agentId && isChatResumableConversation(c)).map((c) => c.id);
+  const listed = (agentId: string) => ROWS.filter((c) => isResumableByAgent(c, agentId)).map((c) => c.id);
   assert.deepEqual(listed("claudex"), ["c-proxied"]);
   assert.deepEqual(listed("claude"), ["c-system"]);
 });
