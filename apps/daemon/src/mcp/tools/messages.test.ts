@@ -8,7 +8,7 @@ import { agentChatRoutes, buildPlanImplementationPrompt } from "@orquester/api/a
 import { busEvent, FakeDaemonApi } from "../testing.ts";
 import { activity, chatSummary, head, message, shellSummary, snapshot, stamp, turn } from "../fixtures.ts";
 import type { ToolContext } from "../tool.ts";
-import { messageTools } from "./messages.ts";
+import { messageTools, transcriptHint } from "./messages.ts";
 
 // The fake routes every test shares, copied from sessions.test.ts (the two files never import each other's helpers).
 const registry = { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [
@@ -38,6 +38,8 @@ async function harness(sessions = [chatSummary(), shellSummary()], snap = snapsh
 
 /** One macrotask turn. The tools run on in-process fakes, so a single yield parks one wherever it waits; a tool that spins never yields at all. */
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
+/** `n` macrotask turns: long enough for a loop that re-reads once per macrotask to show itself. */
+const ticks = async (n: number) => { for (let i = 0; i < n; i += 1) await tick(); };
 /** A clock that jumps an hour on every read: a wait measured by it is over at its first check, with no real waiting. */
 const racing = () => { let t = Date.parse("2026-09-22T12:00:00.000Z"); return () => (t += 3_600_000); };
 /** Whether `p` has settled, readable after a yield. */
@@ -176,7 +178,7 @@ test("send_message: a needs-input the snapshot does not confirm is the summary's
   await tick();
   // One poll behind: the question just answered is still flagged, while the snapshot has no request open.
   publish(chatSummary({ chatSessionStatus: "running", hasPendingUserInput: true, latestTurn: { turnId: "t2", state: "running", startedAt: stamp(2), completedAt: null } }));
-  await tick();
+  await ticks(10);
   assert.ok(reads() <= 3, `the stale flag is not re-checked in a loop (${reads()} snapshot reads)`);
   assert.equal(settled(), false, "still waiting");
   publish(done());
@@ -325,4 +327,136 @@ test("send_message refusals upload nothing; plan mode needs a known capability; 
     assert.equal(h.api.uploads.length, 0, "nothing was uploaded");
     assert.ok(!h.api.calls.some((c) => c.method === "POST"), "nothing was posted");
   }
+});
+
+// ---- Final wave C1: the timed stale re-check, the summary half of "over", a stamped running turn, a lagging list. ----
+
+test("send_message: with no bus event at all, a needs-input the snapshot contradicts is looked at again after 2 s, never sooner", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const h = await harness(); t.after(h.close);
+  const where = { projectPath: h.projectPath, cwd: h.projectPath };
+  // One poll behind from the start: the list flags a question the snapshot no longer has.
+  let listed = { ...chatSummary({ chatSessionStatus: "running", hasPendingUserInput: true, latestTurn: { turnId: "t2", state: "running", startedAt: stamp(2), completedAt: null } }), ...where };
+  h.api.on("GET", "/api/sessions", () => ({ status: 200, body: [listed] }));
+  let hostSettled = false;
+  const after = snapshot({ turns: [turn(), turn({ turnId: "t2", turnCount: 2, requestedAt: stamp(2), startedAt: stamp(2), completedAt: stamp(3) })], items: [message("assistant", "done.", { turnId: "t2" })] });
+  h.api.on("GET", "/api/sessions/c1/thread", () => ({ status: 200, body: { kind: "snapshot", thread: { ...(hostSettled ? after : snapshot()), head: { ...snapshot().head, ...where } } } }));
+  h.api.on("POST", "/api/sessions/c1/turn", { status: 200, body: { seq: 70 } });
+  let clock = Date.parse("2026-09-22T12:00:00.000Z");
+  const p = tool("send_message").run({ sessionId: "c1", text: "go on", planMode: false, wait: true, timeoutMs: 60_000 }, { ...h.ctx, now: () => clock });
+  const settled = settledFlag(p);
+  await ticks(10);
+  const reads = () => h.api.calls.filter((c) => c.path === "/api/sessions/c1/thread").length;
+  const parked = reads();
+  // t2 settles, but the event that says so is lost: only the timed re-check can notice.
+  listed = { ...done(), ...where };
+  hostSettled = true;
+  clock += 1_999; t.mock.timers.tick(1_999);
+  await ticks(10);
+  assert.equal(settled(), false, "not before 2 s");
+  assert.equal(reads(), parked, "no re-read while parked");
+  clock += 1; t.mock.timers.tick(1);
+  await ticks(10);
+  assert.ok(settled(), "the 2 s re-check read the list again and saw t2 settled");
+  const r = await p;
+  assert.equal(r.outcome, "completed"); assert.equal(r.turnId, "t2"); assert.equal(r.reply, "done.");
+});
+
+test("send_message: a stale park never outlives the timeout — the last one is only what is left of it", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const h = await harness(); t.after(h.close);
+  h.api.on("GET", "/api/sessions", { status: 200, body: [{ ...chatSummary({ chatSessionStatus: "running", hasPendingUserInput: true, latestTurn: { turnId: "t2", state: "running", startedAt: stamp(2), completedAt: null } }), projectPath: h.projectPath, cwd: h.projectPath }] });
+  h.api.on("POST", "/api/sessions/c1/turn", { status: 200, body: { seq: 71 } });
+  let clock = Date.parse("2026-09-22T12:00:00.000Z");
+  const p = tool("send_message").run({ sessionId: "c1", text: "go on", planMode: false, wait: true, timeoutMs: 3_000 }, { ...h.ctx, now: () => clock });
+  const settled = settledFlag(p);
+  await ticks(10);
+  clock += 2_000; t.mock.timers.tick(2_000); // the first re-check: still stale, 1 000 ms left
+  await ticks(10);
+  clock += 999; t.mock.timers.tick(999);
+  await ticks(10);
+  assert.equal(settled(), false, "the second park is the 1 000 ms that are left, not another 2 s");
+  clock += 1; t.mock.timers.tick(1);
+  await ticks(10);
+  assert.ok(settled(), "over at the timeout");
+  assert.equal((await p).outcome, "timeout");
+});
+
+test("send_message: a turn that ended during the upload is over even when only the summary knows it — a failed next turn returns no old reply", async (t) => {
+  const running = chatSummary({ chatSessionStatus: "running", latestTurn: { turnId: "t2", state: "running", startedAt: stamp(2), completedAt: null } });
+  // The snapshot the send is checked on still shows t2 running: only the summary read right before the POST says it ended.
+  const h = await harness([running], snapshot({ head: head({ session: { status: "running", activeTurnId: "t2" } }), turns: [turn(), turn({ turnId: "t2", turnCount: null, state: "running", requestedAt: stamp(2), startedAt: stamp(2), completedAt: null })] })); t.after(h.close);
+  const where = { projectPath: h.projectPath, cwd: h.projectPath };
+  const t2Done = { turnId: "t2", state: "completed", startedAt: stamp(2), completedAt: stamp(3) } as const;
+  h.api.onUpload((_id, meta, bytes) => {
+    h.api.on("GET", "/api/sessions", { status: 200, body: [{ ...chatSummary({ latestTurn: t2Done }), ...where }] });
+    h.api.on("GET", "/api/sessions/c1/thread", { status: 200, body: { kind: "snapshot", thread: { ...snapshot({ turns: [turn(), turn({ turnId: "t2", turnCount: 2, requestedAt: stamp(2), startedAt: stamp(2), completedAt: stamp(3) })], items: [message("assistant", "OLD (t2)", { turnId: "t2" })] }), head: { ...head(), ...where } } } });
+    return { status: 200, value: { type: "image", id: "att-1", name: meta.name, mimeType: meta.type, sizeBytes: bytes.length } };
+  });
+  h.api.on("POST", "/api/sessions/c1/turn", { status: 200, body: { seq: 72 } });
+  const p = tool("send_message").run({ sessionId: "c1", text: "and this", attachments: [{ name: "a.png", base64: Buffer.from("png").toString("base64") }], planMode: false, wait: true, timeoutMs: 5_000 }, h.ctx);
+  await tick();
+  // The next turn's provider fails to start: the session errors with t2 still its latest turn.
+  h.api.emit(busEvent("session.updated", { ...chatSummary({ chatSessionStatus: "error", latestTurn: t2Done }), ...where }));
+  const r = await p;
+  assert.equal(r.outcome, "failed"); assert.equal(r.reply, undefined, "t2's reply answers an earlier message"); assert.equal(r.turnId, undefined);
+});
+
+test("send_message: a running turn stamped with a mid-turn completedAt is not over — a steer into it gets its reply", async (t) => {
+  // turn-state.ts: a running turn's completedAt can hold a mid-turn placeholder-checkpoint stamp; only the state settles a turn.
+  const running = chatSummary({ chatSessionStatus: "running", latestTurn: { turnId: "t2", state: "running", startedAt: stamp(2), completedAt: stamp(3) } });
+  const live = snapshot({ head: head({ session: { status: "running", activeTurnId: "t2" } }), turns: [turn(), turn({ turnId: "t2", turnCount: null, state: "running", requestedAt: stamp(2), startedAt: stamp(2), completedAt: stamp(3) })], items: [message("assistant", "OLD (t1)")] });
+  const h = await harness([running], live); t.after(h.close);
+  const answered = snapshot({ turns: [turn(), turn({ turnId: "t2", turnCount: 2, requestedAt: stamp(2), startedAt: stamp(2), completedAt: stamp(5) })], items: [message("assistant", "OLD (t1)"), message("assistant", "steered answer", { turnId: "t2" })] });
+  let settledHost = false;
+  h.api.on("POST", "/api/sessions/c1/turn", { status: 200, body: { seq: 73 } });
+  h.api.on("GET", "/api/sessions/c1/thread", () => ({ status: 200, body: { kind: "snapshot", thread: { ...(settledHost ? answered : live), head: { ...(settledHost ? answered : live).head, projectPath: h.projectPath, cwd: h.projectPath } } } }));
+  assert.equal((await tool("send_message").run({ sessionId: "c1", text: "also the edge case", planMode: false, wait: false, timeoutMs: 1000 }, h.ctx)).turnId, "t2", "wait:false names the steered turn");
+  const p = tool("send_message").run({ sessionId: "c1", text: "also the edge case", planMode: false, wait: true, timeoutMs: 5_000 }, h.ctx);
+  await tick();
+  settledHost = true;
+  h.api.emit(busEvent("session.updated", { ...chatSummary({ latestTurn: { turnId: "t2", state: "completed", startedAt: stamp(2), completedAt: stamp(5) } }), projectPath: h.projectPath }));
+  const r = await p;
+  assert.equal(r.outcome, "completed"); assert.equal(r.turnId, "t2"); assert.equal(r.reply, "steered answer");
+});
+
+test("send_message: the list catching up on a turn that was already over is not this message's outcome — the wait goes on to its own turn", async (t) => {
+  const h = await harness(); t.after(h.close);
+  const where = { projectPath: h.projectPath, cwd: h.projectPath };
+  // The host has settled t2 (the snapshot says so) while the list, one poll behind, still shows it running.
+  let current = { ...chatSummary({ chatSessionStatus: "running", latestTurn: { turnId: "t2", state: "running", startedAt: stamp(2), completedAt: null } }), ...where };
+  h.api.on("GET", "/api/sessions", () => ({ status: 200, body: [current] }));
+  const publish = (s: ReturnType<typeof chatSummary>) => { current = { ...s, ...where }; h.api.emit(busEvent("session.updated", current)); };
+  const thread = (over: Parameters<typeof snapshot>[0]) => ({ status: 200, body: { kind: "snapshot", thread: { ...snapshot(over), head: { ...head(), ...where } } } });
+  const t2 = turn({ turnId: "t2", turnCount: 2, requestedAt: stamp(2), startedAt: stamp(2), completedAt: stamp(3) });
+  h.api.on("GET", "/api/sessions/c1/thread", thread({ turns: [turn(), t2], items: [message("assistant", "OLD (t2)", { turnId: "t2" })] }));
+  h.api.on("POST", "/api/sessions/c1/turn", { status: 200, body: { seq: 74 } });
+  const p = tool("send_message").run({ sessionId: "c1", text: "next", planMode: false, wait: true, timeoutMs: 5_000 }, h.ctx);
+  const settled = settledFlag(p);
+  await tick();
+  publish(chatSummary({ latestTurn: { turnId: "t2", state: "completed", startedAt: stamp(2), completedAt: stamp(3) } }));
+  await ticks(10);
+  assert.equal(settled(), false, "t2 settling in the list is old news");
+  const t3 = turn({ turnId: "t3", turnCount: 3, requestedAt: stamp(4), startedAt: stamp(4), completedAt: stamp(5) });
+  h.api.on("GET", "/api/sessions/c1/thread", thread({ turns: [turn(), t2, t3], items: [message("assistant", "OLD (t2)", { turnId: "t2" }), message("assistant", "NEW (t3)", { turnId: "t3" })] }));
+  publish(chatSummary({ latestTurn: { turnId: "t3", state: "completed", startedAt: stamp(4), completedAt: stamp(5) } }));
+  const r = await p;
+  assert.equal(r.outcome, "completed"); assert.equal(r.turnId, "t3"); assert.equal(r.reply, "NEW (t3)");
+});
+
+test("read_transcript: maxChars is described as the byte budget it is, and a trimmed subagent list says where the rest is", () => {
+  assert.equal(tool("read_transcript").input.maxChars.description, "Size budget for the result, in UTF-8 bytes (max 55000; every tool result is capped at 60000 bytes). The subagent list gets at most a quarter of it when the transcript needs the rest; the transcript sheds reasoning, then tool detail, then the oldest turns, and cuts the latest reply last.");
+  assert.equal(transcriptHint({ truncated: false }), undefined);
+  const shed = transcriptHint({ truncated: true })!;
+  assert.match(shed, /^Shed to fit maxChars/);
+  assert.doesNotMatch(shed, /subagent list/);
+  assert.equal(transcriptHint({ truncated: true, subagentsTruncated: false }), shed);
+  assert.equal(transcriptHint({ truncated: true, subagentsTruncated: true }), `${shed} The subagent list was trimmed too — full roster: get_session.`);
+});
+
+test("read_transcript's hint, suffix included, fits the room transcript.ts keeps for it", () => {
+  const hint = transcriptHint({ truncated: true, subagentsTruncated: true })!;
+  const bytes = Buffer.byteLength(JSON.stringify({ hint }), "utf8");
+  // 320 = TRANSCRIPT_HINT_BYTES in transcript.ts (wave B1): a truncated result stays that far under maxChars for this field.
+  assert.ok(bytes <= 320, `${bytes} bytes`);
 });
