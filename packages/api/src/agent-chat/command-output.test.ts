@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { commandDisplayDetail } from "./command-output.ts";
+import { commandDisplayDetail, commandOutputText } from "./command-output.ts";
 import { slimActivityPayload } from "./slim.ts";
 
 const command = (fields: Record<string, unknown>) => ({ itemType: "command_execution", ...fields });
@@ -155,4 +155,75 @@ test("the output survives the wire projection every read path applies", () => {
   // Codex's aggregated output reaches the wire as its first meaningful line.
   const codex = slimActivityPayload(command({ title: "Bash", data: { item: { command: "pnpm test", aggregatedOutput: "\n> pnpm test\n2 passed\n" } } }));
   assert.equal(commandDisplayDetail(codex), "> pnpm test");
+});
+
+// commandOutputText: the WHOLE output (the MCP's read_tool_output), read from the same place the preview reads.
+
+test("commandOutputText: Codex's aggregatedOutput whole — every line and its whitespace — where the preview trims it", () => {
+  const data = { item: { command: "pnpm test", aggregatedOutput: "\n> pnpm test\n\n  2 passed\n" } };
+  assert.equal(commandOutputText(data), "\n> pnpm test\n\n  2 passed\n");
+  assert.equal(commandDisplayDetail(command({ data })), "> pnpm test\n\n  2 passed");
+});
+
+test("commandOutputText: rawOutput's stdout then its stderr, each starting a line of its own; a blank stream is no output", () => {
+  assert.equal(commandOutputText({ rawOutput: { stdout: "hi\n", stderr: "  warning: slow\n" } }), "hi\n  warning: slow\n");
+  assert.equal(commandOutputText({ rawOutput: { stdout: "no newline", stderr: "err" } }), "no newline\nerr");
+  assert.equal(commandOutputText({ rawOutput: { stdout: " \n", stderr: "exit 1" } }), "exit 1");
+  assert.equal(commandOutputText({ rawOutput: { stdout: "only stdout\n", stderr: "" } }), "only stdout\n");
+  // The preview of the same data: each stream trimmed, joined by a newline (unchanged).
+  assert.equal(commandDisplayDetail(command({ data: { rawOutput: { stdout: "hi\n", stderr: "  warning: slow\n" } } })), "hi\nwarning: slow");
+});
+
+test("commandOutputText: ACP content blocks' texts, each starting a line of its own — only `content` blocks, blank ones skipped", () => {
+  const data = {
+    kind: "execute",
+    content: [
+      { type: "content", content: { type: "text", text: "hi from ACP\n" } },
+      { type: "diff", path: "a.ts", oldText: "", newText: "x" },
+      { type: "content", content: { type: "text", text: "   " } },
+      { type: "content", content: { type: "text", text: " second block " } },
+      { type: "content", content: { type: "text", text: "third" } }
+    ]
+  };
+  assert.equal(commandOutputText(data), "hi from ACP\n second block \nthird");
+  assert.equal(commandDisplayDetail(command({ detail: "", data })), "hi from ACP\nsecond block\nthird");
+});
+
+test("commandOutputText reads the places in the preview's order: the same place wins, as the provider wrote it", () => {
+  // Each place padded with whitespace: the whole output keeps it, the preview trims it — the SAME place either way.
+  const places: [string, Record<string, unknown>][] = [
+    ["aggregatedOutput", { item: { aggregatedOutput: " aggregatedOutput\n", result: { content: "item result" } } }],
+    ["item result", { item: { result: { content: " item result\n" } }, rawOutput: "raw text" }],
+    ["raw text", { rawOutput: " raw text\n" }],
+    ["raw content", { rawOutput: { content: " raw content\n", stdout: "stdout" } }],
+    ["stdout", { rawOutput: { stdout: " stdout\n", output: "output" } }],
+    ["output", { rawOutput: { output: " output\n", output_for_prompt: "for prompt" } }],
+    ["for prompt", { rawOutput: { output_for_prompt: " for prompt\n" }, content: [{ type: "content", content: { text: "acp" } }] }],
+    ["acp", { content: [{ type: "content", content: { text: " acp\n" } }], result: { content: "result content" } }],
+    ["result content", { result: { content: " result content\n" } }],
+    ["result text", { result: " result text\n" }]
+  ];
+  for (const [expected, data] of places) {
+    assert.equal(commandOutputText(data), ` ${expected}\n`, expected);
+    assert.equal(commandDisplayDetail(command({ data })), expected, expected);
+  }
+  // Grok's real rawOutput (fixture grok/03b): its `output` is a byte array, never text, so output_for_prompt is read.
+  const grok = { kind: "execute", rawOutput: { type: "Bash", output: [104, 105, 10], output_for_prompt: "exit: 0\nhi\n", exit_code: 0 }, content: [{ type: "content", content: { type: "text", text: "hi\n" } }] };
+  assert.equal(commandOutputText(grok), "exit: 0\nhi\n");
+});
+
+test("commandOutputText: no output is undefined — no data, blanks, non-text values", () => {
+  const none: unknown[] = [undefined, null, "text", 7, ["a"], {}, { item: { aggregatedOutput: "  \n" } }, { rawOutput: { output: [104, 105] } },
+    { rawOutput: { stdout: " ", stderr: "\n" } }, { content: [{ type: "diff", path: "a.ts" }] }, { result: { content: [{ type: "text", text: "blocks" }] } }];
+  for (const data of none) assert.equal(commandOutputText(data), undefined, JSON.stringify(data));
+});
+
+test("commandOutputText holds the whole output the wire's one-line preview is cut from", () => {
+  const lines = `${Array.from({ length: 500 }, (_, i) => `line ${i}`).join("\n")}\n`;
+  const data = { item: { command: "seq 0 499", aggregatedOutput: lines } };
+  assert.equal(commandOutputText(data), lines);
+  // What every read path serves instead: the first line, and `truncated` saying the item holds more.
+  const wire = slimActivityPayload(command({ title: "Bash", data })) as { data: unknown; truncated?: unknown };
+  assert.equal(wire.truncated, true);
+  assert.equal(commandOutputText(wire.data), "line 0");
 });

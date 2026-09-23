@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildPlanImplementationPrompt, slimActivityPayload, type ThreadItem, type Turn } from "@orquester/api/agent-chat";
+import { buildPlanImplementationPrompt, commandOutputText, slimActivityPayload, type ThreadItem, type Turn } from "@orquester/api/agent-chat";
 import { activity, message, snapshot, stamp, turn } from "./fixtures.ts";
 import { mergeHistoryPages } from "./history.ts";
 import { cutTail, fitEntries, fitRoster, jsonTextBytes, ROSTER_SHARE, TRANSCRIPT_HINT_BYTES, transcriptEntries, transcriptRange, type TranscriptEntry, type TranscriptResult } from "./transcript.ts";
@@ -880,6 +880,60 @@ test("a Codex command shows its item's aggregatedOutput; a detail that already s
   // Any other tool keeps its provider detail as it came, untrimmed, whatever its data says.
   const patch = activity("tool.completed", { itemType: "file_change", toolUseId: "p", title: "Edit", status: "completed", detail: "3 lines\n", data: { rawOutput: { content: "x" } } }, { turnId: "t1", tone: "tool" });
   assert.equal(toolRow([patch]).detail, "3 lines\n");
+});
+
+/** A call's rows as every read serves them (§5.6 slimming, `truncated` stamped where it cut), folded into its one entry. */
+const toolEntry = (items: ThreadItem[]): TranscriptEntry => {
+  const read = items.map((item) => (item.kind === "activity" ? { ...item, payload: slimActivityPayload(item.payload) } : item));
+  return transcriptEntries(snapshot({ items: read }), { turns: 5, include: ALL, maxChars: 100_000 }).entries.find((e) => e.kind === "tool")!;
+};
+
+test("outputItemId names the call's completion when the read cut it — the row the GUI's \"Load full output\" reads", () => {
+  const lines = `${Array.from({ length: 200 }, (_, i) => `test ${i} passed`).join("\n")}\n`;
+  const row = (activityKind: string, status: string, data?: unknown) => activity(activityKind, {
+    itemType: "command_execution", toolUseId: "call-1", title: "pnpm test", status, ...(data === undefined ? {} : { data })
+  }, { turnId: "t1", tone: "tool" });
+  const started = row("tool.started", "inProgress");
+  const completed = row("tool.completed", "completed", { item: { command: "pnpm test", aggregatedOutput: lines } });
+  // The completion's output was cut to its first line on the way out: its id is where the whole of it is.
+  const whole = toolEntry([started, completed]);
+  assert.equal(whole.outputItemId, completed.id);
+  assert.equal(whole.tool!.detail, "test 0 passed", "the detail is still the wire's preview");
+  // Nothing cut, no field at all.
+  const uncut = toolEntry([started, row("tool.completed", "completed")]);
+  assert.equal("outputItemId" in uncut, false);
+  assert.deepEqual(Object.keys(uncut), ["turn", "turnId", "kind", "createdAt", "tool"]);
+});
+
+test("outputItemId is never an update: ingestion stores it already cut, so its item holds nothing the row does not", () => {
+  const row = (activityKind: string, status: string, data?: unknown) => activity(activityKind, {
+    itemType: "command_execution", toolUseId: "call-1", title: "pnpm test", status, ...(data === undefined ? {} : { data })
+  }, { turnId: "t1", tone: "tool" });
+  const output = `${Array.from({ length: 50 }, (_, i) => `test ${i} passed`).join("\n")}\n`;
+  // A running call's update, as ingestion persists it (§5.6: a `tool.updated` row is written already slimmed): what
+  // `GET …/items/:itemId` would serve for it is the preview again, `truncated` and all.
+  const live = row("tool.updated", "inProgress", { item: { command: "pnpm test", aggregatedOutput: output } });
+  const stored = { ...live, payload: slimActivityPayload(live.payload) };
+  assert.equal((stored.payload as { truncated?: unknown }).truncated, true);
+  assert.equal(commandOutputText((stored.payload as { data: unknown }).data), "test 0 passed", "the stored update holds only the preview");
+  // So a running call offers no id, and a completion the read did not cut leaves none behind an update either.
+  assert.equal("outputItemId" in toolEntry([row("tool.started", "inProgress"), stored]), false);
+  assert.equal("outputItemId" in toolEntry([row("tool.started", "inProgress"), stored, row("tool.completed", "completed")]), false);
+  // Once the completion lands whole, its id is the one.
+  const completed = row("tool.completed", "completed", { item: { command: "pnpm test", aggregatedOutput: output } });
+  assert.equal(toolEntry([row("tool.started", "inProgress"), stored, completed]).outputItemId, completed.id);
+});
+
+test("outputItemId is never a call's start, which the GUI does not show; a denial the read cut is offered", () => {
+  // Grok's first frame, as the normaliser writes it (fixture grok/03b): its data is cut to the allow-list on the wire.
+  const started = activity("tool.started", {
+    itemType: "command_execution", toolUseId: "call-1", title: "run_terminal_command", status: "inProgress", detail: "echo hi",
+    data: { toolUseId: "call-1", command: "echo hi", vendorTool: "run_terminal_command", readOnly: false, rawInput: { command: "echo hi" } }
+  }, { turnId: "t1", tone: "tool" });
+  assert.equal((slimActivityPayload(started.payload) as { truncated?: unknown }).truncated, true, "the start's payload is cut");
+  assert.equal("outputItemId" in toolEntry([started]), false, "a call that has only started offers nothing");
+  const denied = activity("tool.denied", { itemType: "command_execution", toolUseId: "call-1", title: "rm -rf build", data: { reason: "x".repeat(20_000) } }, { turnId: "t1", tone: "tool" });
+  assert.equal(toolEntry([started, denied]).outputItemId, denied.id);
 });
 
 test("hooks: a failed completion is an error row, a cancelled one a warning row; starts, progress and successes are no row", () => {

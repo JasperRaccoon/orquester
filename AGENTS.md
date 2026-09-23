@@ -816,8 +816,8 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
 Start here: `apps/daemon/src/agent-host/README.md` (module map + package ownership).
 
 **Orquester MCP** (`apps/daemon/src/mcp/`). `POST /mcp` lets an external agent drive chat sessions
-the way the chat GUI does: 30 tools (catalogue, sessions, search, messages, requests, waiting,
-usage, files, todos) and no terminal I/O — terminal tabs are only listed and closed. It is mounted
+the way the chat GUI does: 31 tools (catalogue, sessions, search, messages, tool output, requests,
+waiting, usage, files, todos) and no terminal I/O — terminal tabs are only listed and closed. It is mounted
 **only on the HTTP transport** (`mode:"remote"`, behind the global bearer hook; the unauthenticated
 unix socket never serves it) as a stateless Streamable-HTTP endpoint with one `McpServer` per
 request, a 16 MiB body limit and `405` for `GET`/`DELETE`. Every tool but the kept todo/file pair
@@ -857,7 +857,10 @@ the message as a steer). Like the GUI's "Load older", `read_transcript` reads tu
 retained window no longer holds from the host's thread index (`history.ts`: `GET …/history`, at most
 5 pages a call, merged under the window by id with the window's copy winning, in log order); a turn
 it cannot read whole is named in `unavailableTurns` with a hint, and a failed page is never a tool
-error. A result is one JSON object capped at 60 000 bytes (`result.ts`); every
+error. Like the GUI's "Load full output", `read_tool_output` reads the unslimmed item behind a tool
+row's `outputItemId` (`GET …/items/:itemId`) in UTF-8 byte windows; a command answers its whole
+output from the places the row's preview reads (`commandOutputText`, one list with
+`commandDisplayDetail`). A result is one JSON object capped at 60 000 bytes (`result.ts`); every
 tool that can outgrow it bounds itself first and says what it cut (`truncated`, `optionsOmitted`,
 `subagentsTruncated`, `filesTruncated`, …), so `ok()`'s byte cut is only the last resort. An error
 is `<CODE>: <message>`, the message capped at 4 000 code points. `server.ts` replaces the SDK's
