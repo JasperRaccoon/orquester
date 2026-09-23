@@ -1,4 +1,4 @@
-import { proxyLaunchModels, type AgentAccountsResponse, type CliProxyStatus, type RegistryEntry, type RegistryResponse } from "@orquester/api";
+import { proxyLaunchModels, type AgentAccountsResponse, type AgentConversationSummary, type CliProxyStatus, type RegistryEntry, type RegistryResponse } from "@orquester/api";
 import { agentChatRoutes, DEFAULT_RUNTIME_MODE, RUNTIME_MODES, type AdapterCapabilities, type AgentAdapterId, type ModelSelection, type ProviderModel, type RuntimeMode } from "@orquester/api/agent-chat";
 import { proxyAccountFamily } from "../agent-chat/service.ts";
 import type { DaemonApi } from "./daemon-api.ts";
@@ -22,6 +22,17 @@ export function isProxyAgent(refId: string): boolean {
  */
 export function launchesProxyModel(refId: string): boolean {
   return refId === "claudex";
+}
+
+/**
+ * The agent a past conversation resumes with — the GUI's `chatLaunchRefId`: a proxy home's transcript belongs to the
+ * launcher that owns that home (`proxyRefId`), any other row to the CLI that wrote it. `reachable` is false for a proxy
+ * home that names no launcher: no agent can resume it, since plain `claude` reads another HOME. The one predicate
+ * behind list_conversations' `resumable` and create_session's resume refusal.
+ */
+export function conversationLaunch(row: Pick<AgentConversationSummary, "agentRefId" | "home" | "proxyRefId">): { agent: string; reachable: boolean } {
+  if (row.home !== "cliproxy") return { agent: row.agentRefId, reachable: true };
+  return row.proxyRefId ? { agent: row.proxyRefId, reachable: true } : { agent: row.agentRefId, reachable: false };
 }
 
 /**

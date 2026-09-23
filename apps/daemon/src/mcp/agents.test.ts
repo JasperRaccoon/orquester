@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { FakeDaemonApi } from "./testing.ts";
 import { stamp } from "./fixtures.ts";
-import { EFFORT_OPTION_IDS, findAgent, isProxyAgent, launchesProxyModel, loadAgents, resolveModelSelection, validateAccountId, type AgentView } from "./agents.ts";
+import { conversationLaunch, EFFORT_OPTION_IDS, findAgent, isProxyAgent, launchesProxyModel, loadAgents, resolveModelSelection, validateAccountId, type AgentView } from "./agents.ts";
 
 const registry = { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [
   { id: "claude", kind: "agent", name: "Claude Code", bin: ["claude"], enabled: true, installState: "idle", version: "2.1.280", chat: { adapter: "claude" } },
@@ -195,4 +195,12 @@ test("a degraded provider row (an older host's) is normalised field by field, ne
     const broken = api().on("GET", "/api/agent/providers", { status: 200, body });
     assert.deepEqual(findAgent(await loadAgents(broken), "claude").auth, { status: "unknown" }, JSON.stringify(body));
   }
+});
+
+test("conversationLaunch: a proxy home resumes under the launcher that owns it; one that names none is reachable by nothing", () => {
+  assert.deepEqual(conversationLaunch({ agentRefId: "claude", home: "cliproxy", proxyRefId: "claudex" }), { agent: "claudex", reachable: true });
+  assert.deepEqual(conversationLaunch({ agentRefId: "claude", home: "cliproxy" }), { agent: "claude", reachable: false }, "plain claude reads another HOME");
+  assert.deepEqual(conversationLaunch({ agentRefId: "claude", home: "account" }), { agent: "claude", reachable: true });
+  assert.deepEqual(conversationLaunch({ agentRefId: "codex", home: "system", proxyRefId: "claudex" }), { agent: "codex", reachable: true }, "proxyRefId counts only for a proxy home");
+  assert.deepEqual(conversationLaunch({ agentRefId: "grok" }), { agent: "grok", reachable: true }, "no home is the system home");
 });

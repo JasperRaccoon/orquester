@@ -5,7 +5,7 @@ import { SYSTEM_ACCOUNT_ID, type AgentConversationsResponse, type CreateSessionR
 import { agentChatRoutes, RUNTIME_MODES, startedTurns, type AccountHomeKind, type CreateAgentChatSessionFields, type ModelSelection, type RuntimeMode, type ThreadSnapshotPayload, type TurnDiffResponse } from "@orquester/api/agent-chat";
 import { assertInsideFsRoot, FsSandboxError } from "@orquester/config/fs";
 import { resolveProject } from "../addressing.ts";
-import { findAgent, isProxyAgent, launchesProxyModel, loadAgents, resolveModelSelection, validateAccountId, type ResolvedSelection } from "../agents.ts";
+import { conversationLaunch, findAgent, isProxyAgent, launchesProxyModel, loadAgents, resolveModelSelection, validateAccountId, type ResolvedSelection } from "../agents.ts";
 import type { DaemonApi } from "../daemon-api.ts";
 import { ToolError, expectOk } from "../errors.ts";
 import { findSession, listSessions, readThread, requireChatSession, sendCommand } from "../reads.ts";
@@ -155,8 +155,11 @@ const createSession = defineTool({
       const res = expectOk<AgentConversationsResponse>(await api.request("GET", "/api/agents/conversations", { query: { path: project.path } }), "conversations");
       const row = res.conversations.find((c) => c.id === args.resume!.conversationId);
       if (!row) throw new ToolError("INVALID_ARGUMENT", `No conversation "${args.resume.conversationId}" in this project; pick one from list_conversations.`);
-      // A proxy-home transcript belongs to the launcher that owns that home (the GUI's `chatLaunchRefId`).
-      resumeRow = { id: row.id, agent: row.home === "cliproxy" && row.proxyRefId ? row.proxyRefId : row.agentRefId, title: row.title, home: row.home ?? "system", ...(row.accountId ? { accountId: row.accountId } : {}) };
+      // A proxy-home transcript belongs to the launcher that owns that home; with none named, plain `claude` would open an
+      // empty session in its own HOME — list_conversations reports that row resumable:false, and it is refused here.
+      const launch = conversationLaunch(row);
+      if (!launch.reachable) throw new ToolError("INVALID_ARGUMENT", `Conversation "${row.id}" is not resumable: it lives in a proxy home with no launcher. Pick a row with resumable: true from list_conversations.`);
+      resumeRow = { id: row.id, agent: launch.agent, title: row.title, home: row.home ?? "system", ...(row.accountId ? { accountId: row.accountId } : {}) };
     }
     const refId = args.agent ?? resumeRow?.agent;
     if (!refId) throw new ToolError("INVALID_ARGUMENT", "agent is required (see list_agents).");

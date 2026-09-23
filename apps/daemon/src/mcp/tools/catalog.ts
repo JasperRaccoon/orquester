@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { AgentConversationsResponse, ProjectSummary, RecentProjectSummary, RegistryResponse, WorkspaceSummary } from "@orquester/api";
 import { resolveProject } from "../addressing.ts";
-import { findAgent, loadAgents } from "../agents.ts";
+import { conversationLaunch, findAgent, loadAgents } from "../agents.ts";
 import type { DaemonApi } from "../daemon-api.ts";
 import { ToolError, expectOk } from "../errors.ts";
 import { listSessions } from "../reads.ts";
@@ -102,9 +102,8 @@ const listConversations = defineTool({
     const chatAgents = new Set(agents.filter((e) => e.chat?.adapter).map((e) => e.id));
     const res = expectOk<AgentConversationsResponse>(conversations, "conversations");
     const rows = res.conversations.map((c) => {
-      const agent = c.home === "cliproxy" && c.proxyRefId ? c.proxyRefId : c.agentRefId;
-      // A proxy home's transcript is found only by the launcher that owns the home: with none named, nothing resumes it.
-      const resumable = chatAgents.has(agent) && !(c.home === "cliproxy" && !c.proxyRefId);
+      const { agent, reachable } = conversationLaunch(c);
+      const resumable = reachable && chatAgents.has(agent);
       return { id: c.id, agent, title: c.title, ...(c.preview ? { preview: c.preview } : {}), updatedAt: c.updatedAt, home: c.home ?? "system", ...(c.accountId ? { accountId: c.accountId } : {}), resumable };
     });
     // Unknown = neither a registry agent nor one a row of this project names; a known agent without rows is an honest [].
