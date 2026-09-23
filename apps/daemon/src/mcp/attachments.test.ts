@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { appendFileSync, constants, existsSync } from "node:fs";
+import { mkdtemp, mkdir, open, readdir, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeDaemonApi } from "./testing.ts";
@@ -78,4 +80,70 @@ test("an unreadable sandbox file is the caller's error, not an internal one", { 
   const locked = join(s.ws, "acme", "api", "locked.txt"); await writeFile(locked, "x", { mode: 0o000 });
   await assert.rejects(uploadInlineAttachments(s.api, "c1", [{ path: locked }]), (e: { code: string }) => e.code === "INVALID_ARGUMENT");
   assert.equal(s.api.uploads.length, 0);
+});
+
+test("nothing is uploaded when a later attachment fails validation", async (t) => {
+  const s = await sandbox(); t.after(() => rm(s.root, { recursive: true, force: true }));
+  const valid = [{ name: "ok.txt", base64: "YQ==" }, { path: join(s.ws, "acme", "api", "shot.png") }];
+  await assert.rejects(uploadInlineAttachments(s.api, "c1", [...valid, { path: join(s.root, "secret.txt") }]), (e: { code: string }) => e.code === "PATH_NOT_ALLOWED");
+  await assert.rejects(uploadInlineAttachments(s.api, "c1", [...valid, { path: join(s.ws, "acme", "api", "missing.txt") }]), (e: { code: string }) => e.code === "INVALID_ARGUMENT");
+  assert.equal(s.api.uploads.length, 0);
+});
+
+test("a path attachment sends the bytes it was validated at, even if the file grows before its upload", async (t) => {
+  const s = await sandbox(); t.after(() => rm(s.root, { recursive: true, force: true }));
+  const log = join(s.ws, "acme", "api", "app.log"); await writeFile(log, "12345");
+  s.api.onUpload((sessionId, meta, bytes) => {
+    if (meta.name === "shot.png") appendFileSync(log, "678");
+    return { status: 200, value: { type: "file", id: `${sessionId}-${meta.name}`, name: meta.name, sizeBytes: bytes.length } };
+  });
+  await uploadInlineAttachments(s.api, "c1", [{ path: join(s.ws, "acme", "api", "shot.png") }, { path: log }]);
+  assert.deepEqual(s.api.uploads.map((u) => u.bytes.toString("latin1")), ["\x89PNG", "12345"]);
+});
+
+test("an empty sandbox file uploads as an empty attachment", async (t) => {
+  const s = await sandbox(); t.after(() => rm(s.root, { recursive: true, force: true }));
+  const empty = join(s.ws, "acme", "api", "empty.txt"); await writeFile(empty, "");
+  await uploadInlineAttachments(s.api, "c1", [{ path: empty }]);
+  assert.deepEqual(s.api.uploads.map((u) => [u.meta, u.bytes.length]), [[{ name: "empty.txt", type: "text/plain" }, 0]]);
+});
+
+const openFds = async () => (await readdir("/proc/self/fd")).length;
+
+test("every file opened to validate an attachment is closed again, whatever the outcome", { skip: !existsSync("/proc/self/fd") && "needs /proc/self/fd" }, async (t) => {
+  const s = await sandbox(); t.after(() => rm(s.root, { recursive: true, force: true }));
+  const shot = { path: join(s.ws, "acme", "api", "shot.png") };
+  const bigPng = join(s.ws, "acme", "api", "big.png"); await writeFile(bigPng, ""); await truncate(bigPng, 10 * 1024 * 1024 + 1);
+  const baseline = await openFds();
+  await uploadInlineAttachments(s.api, "c1", [shot, shot]);
+  assert.equal(await openFds(), baseline, "after a success");
+  for (const bad of [{ path: join(s.ws, "acme") }, { path: bigPng }, { path: join(s.root, "secret.txt") }]) {
+    await assert.rejects(uploadInlineAttachments(s.api, "c1", [shot, bad]), (e: { code: string }) => e.code === "INVALID_ARGUMENT" || e.code === "PATH_NOT_ALLOWED");
+    assert.equal(await openFds(), baseline, `after refusing ${bad.path}`);
+  }
+  s.api.onUpload(() => ({ status: 409, value: { error: { code: "COMMAND_REJECTED", message: "no" } } }));
+  await assert.rejects(uploadInlineAttachments(s.api, "c1", [shot, shot]), (e: { code: string }) => e.code === "COMMAND_REJECTED");
+  assert.equal(await openFds(), baseline, "after a host refusal");
+  s.api.uploadAttachment = async () => ({ status: 503, value: { code: "HOST_UNAVAILABLE", message: "The agent host is restarting." } });
+  await assert.rejects(uploadInlineAttachments(s.api, "c1", [shot, shot]), (e: { code: string }) => e.code === "HOST_UNAVAILABLE");
+  assert.equal(await openFds(), baseline, "after a refusal that never read the body");
+});
+
+test("a FIFO in the sandbox is refused at once, never waited on", { skip: process.platform === "win32" && "no FIFOs", timeout: 10_000 }, async (t) => {
+  const s = await sandbox();
+  const fifo = join(s.ws, "acme", "api", "pipe.txt");
+  // Were open() ever to block on it again, the test would time out; this then releases the stuck reader so the run still ends.
+  t.after(async () => { await open(fifo, constants.O_WRONLY | constants.O_NONBLOCK).then((w) => w.close(), () => undefined); await rm(s.root, { recursive: true, force: true }); });
+  execFileSync("mkfifo", [fifo]);
+  await assert.rejects(uploadInlineAttachments(s.api, "c1", [{ path: fifo }]), (e: { code: string }) => e.code === "INVALID_ARGUMENT");
+});
+
+test("base64 must be canonical: some data, padding only to a multiple of 4, never 4n+1 data characters", async (t) => {
+  const s = await sandbox(); t.after(() => rm(s.root, { recursive: true, force: true }));
+  for (const base64 of ["   ", "\n", "==", "AAAAA=", "AAAAA", "YQ=", "YWJj=", "YQ==YQ=="]) {
+    await assert.rejects(uploadInlineAttachments(s.api, "c1", [{ name: "x.txt", base64 }]), (e: { code: string }) => e.code === "INVALID_ARGUMENT", JSON.stringify(base64));
+  }
+  assert.equal(s.api.uploads.length, 0);
+  await uploadInlineAttachments(s.api, "c1", [{ name: "a.txt", base64: "YWI=" }, { name: "b.txt", base64: "YWJj\nZA==" }, { name: "c.txt", base64: "YWJjZA" }]);
+  assert.deepEqual(s.api.uploads.map((u) => u.bytes.toString("latin1")), ["ab", "abcd", "abcd"]);
 });
