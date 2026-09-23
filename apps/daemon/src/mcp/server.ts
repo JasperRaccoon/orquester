@@ -95,6 +95,12 @@ const METHOD_NOT_ALLOWED = { jsonrpc: "2.0", error: { code: -32000, message: "Me
  */
 export function registerMcp(app: FastifyInstance, deps: McpDeps): void {
   app.post("/mcp", { bodyLimit: MCP_BODY_LIMIT }, async (request, reply) => {
+    // A client gone before this point has had its 'close' already, and it never fires again: nothing would abort a wait
+    // started for it, and nothing will read the answer. Do no work for it (hijacked, so Fastify sends nothing either).
+    if (reply.raw.destroyed) {
+      reply.hijack();
+      return;
+    }
     const ctrl = new AbortController(); // aborts in-flight waits when the client goes away
     const server = buildServer(deps, request.headers.authorization, ctrl.signal);
     // The transport answers 406 unless Accept lists both application/json and text/event-stream.

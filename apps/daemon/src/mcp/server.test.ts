@@ -76,6 +76,10 @@ async function postMcp(app: FastifyInstance, payload: object, authorization = "B
 }
 
 const call = (id: number, name: string, args: Record<string, unknown>) => ({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+const MCP_HEADERS = { accept: "application/json, text/event-stream", "content-type": "application/json", authorization: "Bearer abc" };
+/** One macrotask turn; `ticks(n)` is n of them. Nothing here sleeps. */
+const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
+const ticks = async (n: number) => { for (let i = 0; i < n; i += 1) await tick(); };
 
 test("tools/list is exactly the 29 spec tools, each with a title, annotations and described params", async () => {
   const app = mcpApp({ createApi: () => new FakeDaemonApi() });
@@ -198,6 +202,51 @@ test("todo and file tools reach the injected TodoTools and FsTools", async () =>
     const read = await postMcp(app, call(6, "read_file", { path: "a.txt" }));
     assert.deepEqual(read.result.structuredContent, { path: "/w/a.txt", text: "hello", size: 5, offset: 0, truncated: false });
     assert.deepEqual(seen, [["list", { workspace: "acme" }], ["read", "a.txt", { offset: 0, maxBytes: 65536 }]]);
+  } finally { await app.close(); }
+});
+
+test("the route takes a 2 MiB tools/call — its own 16 MiB body limit, past Fastify's 1 MiB default", async () => {
+  let seen = 0;
+  const files = { readFileWindow: async (path: string) => { seen = path.length; return { path: "/w/a.txt", text: "", size: 0, offset: 0, truncated: false, consumed: 0 }; } };
+  const app = mcpApp({ createApi: () => new FakeDaemonApi(), files: files as never });
+  try {
+    const big = "p".repeat(2 * 1024 * 1024);
+    const r = await postMcp(app, call(15, "read_file", { path: big }));
+    assert.equal(r.result.isError, undefined, r.result.content?.[0]?.text);
+    assert.equal(seen, big.length, "the whole argument arrived");
+  } finally { await app.close(); }
+});
+
+test("a client that disconnects aborts the request's signal: a wait lets go of the bus at once, not at its timeout", async () => {
+  const api = new FakeDaemonApi().on("GET", "/api/sessions", { status: 200, body: [] });
+  const app = mcpApp({ createApi: () => api });
+  let raw: { destroy(): void } | undefined;
+  app.addHook("onRequest", async (_request, reply) => { raw = reply.raw; });
+  try {
+    const answered = app.inject({ method: "POST", url: "/mcp", headers: MCP_HEADERS, payload: call(16, "wait_for_session", { timeoutMs: 5_000 }) }).then(() => "answered", () => "closed");
+    for (let i = 0; i < 200 && api.listenerCount() === 0; i += 1) await tick();
+    assert.equal(api.listenerCount(), 1, "the wait is on the bus");
+    raw!.destroy(); // the client goes away: the response closes before it finished
+    assert.equal(await answered, "closed");
+    await ticks(10);
+    assert.equal(api.listenerCount(), 0, "the close aborted the wait");
+  } finally { await app.close(); }
+});
+
+test("a client already gone when the route runs gets nothing done for it: its 'close' has fired and will not fire again", async () => {
+  let built = 0;
+  const api = new FakeDaemonApi().on("GET", "/api/sessions", { status: 200, body: [] });
+  const app = mcpApp({ createApi: () => { built += 1; return api; } });
+  app.addHook("preHandler", async (_request, reply) => {
+    reply.raw.destroy();
+    await tick(); // the response's 'close' is emitted here, before the route could listen for it
+  });
+  try {
+    const answered = await app.inject({ method: "POST", url: "/mcp", headers: MCP_HEADERS, payload: call(17, "wait_for_session", { timeoutMs: 1_000 }) }).then(() => "answered", () => "closed");
+    assert.equal(answered, "closed");
+    await ticks(20);
+    assert.equal(built, 0, "no server built, no tool run");
+    assert.equal(api.listenerCount(), 0, "no wait left behind that nothing would ever abort");
   } finally { await app.close(); }
 });
 
