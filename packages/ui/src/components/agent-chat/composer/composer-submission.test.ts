@@ -10,6 +10,7 @@ import {
   composerSubmissionValidationMessage,
   decideStagedAttachmentForRef,
   draftAfterSend,
+  failedSendRestoreTarget,
   hasSendableContent,
   implementationTextResolver,
   isPasteAsTextShortcut,
@@ -26,6 +27,7 @@ import {
   swallowsStandalonePlanCommand,
   uploadsBlockSend,
   type ComposerSendOutcome,
+  type FailedSendRestoreTarget,
   type StagedAttachmentLike
 } from "./composer-submission.ts";
 import type { StagedAttachment } from "./ComposerAttachments";
@@ -745,4 +747,31 @@ test("a send that went out, a refusal and a failed Implement all leave the draft
   );
   // Wave D1: Implement's prompt is the composer's, and it never carries a chip.
   assert.equal(draftAfterSend({ outcome: failedWith(null), sent: [], draft: typedSince }), null);
+});
+
+// ---------------------------------------------------------------------------
+// Where it comes back: the thread it was sent FROM (§7.4)
+// ---------------------------------------------------------------------------
+
+test("a failed send comes back to the thread it was sent from, whichever thread the composer shows by then", () => {
+  const cases: Array<{
+    what: string;
+    liveThread: string | null;
+    shownByComposer: boolean;
+    want: FailedSendRestoreTarget;
+  }> = [
+    // Still mounted and still on A: the handle registered for A is its own.
+    { what: "still on A", liveThread: "A", shownByComposer: true, want: "live" },
+    { what: "still on A, whatever the bridge says", liveThread: "A", shownByComposer: false, want: "live" },
+    // Handed thread B while the send was in flight: the draft on screen is B's.
+    { what: "moved to B", liveThread: "B", shownByComposer: false, want: "persisted" },
+    // A project switch unmounted it.
+    { what: "unmounted", liveThread: null, shownByComposer: false, want: "persisted" },
+    // A's tab came back in another composer, which owns A's one visible draft now.
+    { what: "moved to B, A open again elsewhere", liveThread: "B", shownByComposer: true, want: "composer" },
+    { what: "unmounted, A open again elsewhere", liveThread: null, shownByComposer: true, want: "composer" }
+  ];
+  for (const { what, liveThread, shownByComposer, want } of cases) {
+    assert.equal(failedSendRestoreTarget({ sentFrom: "A", liveThread, shownByComposer }), want, what);
+  }
 });

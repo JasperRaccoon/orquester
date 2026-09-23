@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { after, beforeEach, describe, it, mock } from "node:test";
+import { after, afterEach, beforeEach, describe, it, mock } from "node:test";
 
 import type {
   AgentChatCommandName,
@@ -10,7 +10,10 @@ import type {
 import {
   createThreadStore,
   resetDismissedErrorBanners,
+  resetThreadStores,
+  retainThreadStore,
   REWIND_TIMEOUT_MS,
+  updateThreadDraft,
   type AgentChatThreadState,
   type ThreadStore
 } from "./store";
@@ -772,5 +775,57 @@ describe("the persisted composer draft", () => {
     api.getState().actions.saveDraft({ text: "mine", attachments: [], context: [] });
     assert.equal(persisted().other?.text, "someone else's");
     assert.equal(persisted()["draft-4"]?.text, "mine");
+  });
+
+  /**
+   * `updateThreadDraft` rewrites ONE thread's draft from outside its composer:
+   * a failed send whose composer no longer shows the thread it left from
+   * (§7.4). The draft it reads and the one it writes must be the one the next
+   * composer mount of that thread loads.
+   */
+  describe("rewritten from outside the composer", () => {
+    afterEach(() => {
+      resetThreadStores();
+    });
+
+    it("with no slice open, lands in storage, where the thread's next slice seeds from, and moves no other thread's draft", async () => {
+      backing[DRAFTS_KEY] = JSON.stringify({
+        A: { text: "typed since", attachments: [attachment], context: [] },
+        B: { text: "b's own", attachments: [], context: [] }
+      });
+
+      updateThreadDraft("A", (draft) => ({ ...draft, text: `sent, and failed\n\n${draft.text}` }));
+
+      assert.equal(persisted().A?.text, "sent, and failed\n\ntyped since");
+      assert.deepEqual(persisted().A?.attachments.map((ref) => ref.id), ["a1"], "what it held stays");
+      assert.equal(persisted().B?.text, "b's own");
+      const { state } = await store("A");
+      assert.equal(state().draft.text, "sent, and failed\n\ntyped since");
+    });
+
+    it("with a slice open, goes through that slice, whose draft the next composer mount loads", () => {
+      const deps = { transport: fakeTransport().transport, delay: async () => {} };
+      // A slice keeps its own copy of the draft in memory, seeded from storage.
+      const live = retainThreadStore("A", deps);
+      live.getState().actions.saveDraft({ text: "typed since", attachments: [], context: [] });
+      const other = retainThreadStore("B", deps);
+      other.getState().actions.saveDraft({ text: "b's own", attachments: [], context: [] });
+
+      updateThreadDraft("A", (draft) => ({ ...draft, text: `sent, and failed\n\n${draft.text}` }));
+
+      assert.equal(live.getState().draft.text, "sent, and failed\n\ntyped since");
+      assert.equal(persisted().A?.text, "sent, and failed\n\ntyped since");
+      assert.equal(other.getState().draft.text, "b's own");
+      assert.equal(persisted().B?.text, "b's own");
+    });
+
+    it("writes nothing when the change has nothing to give back", () => {
+      backing[DRAFTS_KEY] = JSON.stringify({
+        A: { text: "typed since", attachments: [], context: [] }
+      });
+      const before = backing[DRAFTS_KEY];
+      updateThreadDraft("A", () => null);
+      assert.equal(backing[DRAFTS_KEY], before);
+    });
   });
 });
