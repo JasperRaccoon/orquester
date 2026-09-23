@@ -58,7 +58,8 @@ const listSessionsTool = defineTool({
   },
   annotations: READ_ONLY,
   async run(args, { api }) {
-    const projectPath = args.project ? (await resolveProject(api, args.project)).path : undefined;
+    // `!== undefined`, as wait_for_session tests it: an empty project is refused by resolveProject, never "every project".
+    const projectPath = args.project !== undefined ? (await resolveProject(api, args.project)).path : undefined;
     const ctx = await buildViewContext(api);
     let sessions = await listSessions(api, projectPath);
     if (args.kind !== "all") sessions = sessions.filter((s) => (args.kind === "chat") === (s.kind === "agent-chat"));
@@ -138,13 +139,15 @@ const createSession = defineTool({
   description: "Open a new chat tab for an agent in a project — the GUI's '+' menu — with model, options (effort…), permission mode and account; or resume a past conversation from list_conversations. Returns the session detail. Send the first message with send_message.",
   input: {
     project: z.string().describe("Absolute project path or \"<workspace>/<project>\"."),
-    agent: z.string().optional().describe("Agent id from list_agents (claude, claudex, claudemix, codex, opencode, grok). Required unless `resume` is given."),
-    model: z.string().optional().describe("Model slug from list_agents; default: the agent's default."),
+    agent: z.string().min(1).optional().describe("Agent id from list_agents (claude, claudex, claudemix, codex, opencode, grok). Required unless `resume` is given."),
+    // min(1): an empty model would read as none, so the default model would launch in its place (agents.ts).
+    model: z.string().min(1).optional().describe("Model slug from list_agents; default: the agent's default."),
     options: optionsSchema.optional(),
     runtimeMode: runtimeModeSchema.default("full-access").describe("Permission mode: approval-required (Supervised), auto-accept-edits, auto, full-access."),
     accountId: z.string().optional().describe("A managed account id from list_agents, or \"system\"; default: the family's default account."),
     title: z.string().min(1).max(300).optional().describe("Tab title; default: the agent's name (or the conversation's)."),
-    cwd: z.string().optional().describe("Working directory: absolute or relative to the project, an existing directory inside the sandbox; default: the project path."),
+    // min(1): an empty cwd resolves to the project itself, the default, which is reading it as omitted.
+    cwd: z.string().min(1).optional().describe("Working directory: absolute or relative to the project, an existing directory inside the sandbox; default: the project path."),
     resume: z.object({ conversationId: z.string().min(1).describe("Conversation id from list_conversations for the same project.") }).optional().describe("Resume this conversation (id from list_conversations for the same project). One stored in a managed account's home resumes under that account.")
   },
   annotations: MUTATING,
@@ -203,7 +206,8 @@ const updateSession = defineTool({
   input: {
     sessionId: sessionIdField,
     title: z.string().min(1).max(300).optional().describe("New tab title."),
-    model: z.string().optional().describe("Model slug from list_agents."),
+    // min(1): an empty model would read as the session's current one, a silent no-op.
+    model: z.string().min(1).optional().describe("Model slug from list_agents."),
     options: optionsSchema.optional(),
     runtimeMode: runtimeModeSchema.optional().describe("Permission mode."),
     accountId: z.string().optional().describe("Managed account id or \"system\"; applied on the next message."),

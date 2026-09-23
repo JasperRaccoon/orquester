@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { z } from "zod";
 import { TodoListManager } from "../../todos.ts";
 import { ToolError } from "../errors.ts";
 import { MAX_RESULT_BYTES, ok, toSafeToolError } from "../result.ts";
@@ -66,6 +67,22 @@ test("exactly one of workspace or project, and the project must resolve inside t
   await assert.rejects(tool("create_todo").run({ project: join(root, "outside"), name: "x" }, ctx), code("PATH_NOT_ALLOWED"));
   await assert.rejects(tool("create_todo").run({ workspace: "missing", name: "x" }, ctx), code("PROJECT_NOT_FOUND"));
   assert.equal(manager.list("workspace", "acme").length + manager.list("workspace", "missing").length, 0, "nothing was created");
+});
+
+test("an empty workspace or project is refused, never read as omitted: the list never lands in the other scope", async (t) => {
+  const { workspacesDir, manager, ctx } = await harness(t);
+  for (const name of ["list_todos", "create_todo"]) {
+    for (const field of ["workspace", "project"]) {
+      const parsed = z.object(tool(name).input).safeParse({ [field]: "", name: "x" });
+      assert.equal(parsed.success, false, `${name}: the schema refuses an empty ${field}`);
+    }
+  }
+  // Past the schema too: one empty field beside a real one is two fields given, not one.
+  await assert.rejects(tool("create_todo").run({ workspace: "acme", project: "", name: "x" }, ctx), code("INVALID_ARGUMENT"));
+  await assert.rejects(tool("create_todo").run({ workspace: "", project: "acme/api", name: "x" }, ctx), code("INVALID_ARGUMENT"));
+  await assert.rejects(tool("list_todos").run({ project: "" }, ctx), code("PROJECT_NOT_FOUND"));
+  await assert.rejects(tool("list_todos").run({ workspace: "" }, ctx), code("PROJECT_NOT_FOUND"));
+  assert.equal(manager.list("workspace", "acme").length + manager.list("project", join(workspacesDir, "acme", "api")).length, 0, "nothing was created");
 });
 
 test("update_todo renames and replaces the body; toggle_todo_item ticks one item; delete_todo removes the list", async (t) => {

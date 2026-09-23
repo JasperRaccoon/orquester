@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { z } from "zod";
 import { FakeDaemonApi } from "../testing.ts";
 import { activity, chatSummary, shellSummary, snapshot, stamp } from "../fixtures.ts";
 import type { ToolContext } from "../tool.ts";
@@ -176,6 +177,24 @@ test("resolve_approval lists every pending id when several are open, and resolve
   assert.equal((await tool("resolve_approval").run({ sessionId: "c1", requestId: "r2", decision: "acceptForSession" }, h.ctx)).seq, 42);
   const body = h.api.calls.find((c) => c.path === "/api/sessions/c1/approval")!.body as { requestId: string; decision: string };
   assert.equal(body.requestId, "r2"); assert.equal(body.decision, "acceptForSession");
+});
+
+test("an empty requestId is refused, never read as omitted: with one request pending it would have acted on that one", async (t) => {
+  const one = snapshot({ pending: { approvals: [{ requestId: "r1", requestKind: "command", createdAt: stamp(1) }],
+    userInputs: [{ requestId: "q3", createdAt: stamp(1), dismissible: true, responseMode: "message", questions: [{ id: "x", header: "H", question: "X?", options: [], multiSelect: false, allowCustomAnswer: true }] }] } });
+  const h = await harness([chatSummary({ hasPendingUserInput: true, hasPendingApprovals: true })], one); t.after(h.close);
+  h.api.on("POST", "/api/sessions/c1/approval", { status: 200, body: { seq: 50 } }).on("POST", "/api/sessions/c1/dismiss", { status: 200, body: { seq: 51 } })
+    .on("POST", "/api/sessions/c1/answer", { status: 200, body: { seq: 52 } });
+  const calls: [string, Record<string, unknown>][] = [
+    ["resolve_approval", { sessionId: "c1", requestId: "", decision: "accept" }],
+    ["dismiss_question", { sessionId: "c1", requestId: "" }],
+    ["answer_question", { sessionId: "c1", requestId: "", answers: { "1": "yes" } }]
+  ];
+  for (const [name, args] of calls) {
+    assert.equal(z.object(tool(name).input).safeParse(args).success, false, `${name}: the schema refuses an empty requestId`);
+    await assert.rejects(tool(name).run(args, h.ctx), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /with requestId ""\. Pending: /.test(e.message), name);
+  }
+  assert.ok(!h.api.calls.some((c) => c.method === "POST"), "nothing was resolved, dismissed or answered");
 });
 
 test("answer_question validates every file of every question before uploading any, and slices the refs back per question", async (t) => {

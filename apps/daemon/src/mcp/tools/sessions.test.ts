@@ -56,6 +56,30 @@ test("list_sessions: kind filter, project filter, attention ordering", async (t)
   assert.deepEqual((att.sessions as { id: string; reason: string }[]).map((s) => [s.id, s.reason]), [["c9", "question"], ["c1", "completed"]]);
 });
 
+test("no session tool reads an empty string as omitted: an empty project, agent, model or cwd is refused, never a default", async (t) => {
+  const h = await harness(); t.after(h.close);
+  // list_sessions refuses an empty project the way wait_for_session does — never "every project".
+  await assert.rejects(tool("list_sessions").run({ project: "", kind: "all", attention: false }, h.ctx),
+    (e: { code: string; message: string }) => e.code === "PROJECT_NOT_FOUND" && /^project is required/.test(e.message));
+  await assert.rejects(tool("list_sessions").run({ project: "  ", kind: "all", attention: false }, h.ctx), (e: { code: string }) => e.code === "PROJECT_NOT_FOUND");
+  assert.ok(!h.api.calls.some((c) => c.path === "/api/sessions"), "nothing was listed");
+  // The schema refuses an empty agent, model or cwd: each would otherwise fall back to the default one.
+  const refuses = (name: string, args: Record<string, unknown>, field: string) => {
+    const parsed = z.object(tool(name).input).safeParse(args);
+    assert.equal(parsed.success, false, `${name}.${field}: ""`);
+    assert.deepEqual((parsed as z.SafeParseError<unknown>).error.issues.map((i) => i.path.join(".")), [field], `${name}.${field}`);
+  };
+  refuses("create_session", { project: "acme/api", agent: "" }, "agent");
+  refuses("create_session", { project: "acme/api", agent: "claude", model: "" }, "model");
+  refuses("create_session", { project: "acme/api", agent: "claude", cwd: "" }, "cwd");
+  refuses("update_session", { sessionId: "c1", model: "" }, "model");
+  // An empty accountId reaches the account check, which names the valid ones.
+  await assert.rejects(tool("create_session").run({ project: "acme/api", agent: "claude", accountId: "", runtimeMode: "full-access" }, h.ctx),
+    (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /^Account "" is not usable with claude\. Valid: system, acc-1\.$/.test(e.message));
+  await assert.rejects(tool("update_session").run({ sessionId: "c1", accountId: "", force: false }, h.ctx), (e: { code: string }) => e.code === "INVALID_ARGUMENT");
+  assert.ok(!h.api.calls.some((c) => c.method !== "GET"), "nothing was created or changed");
+});
+
 test("get_session returns a detail for a chat and a view for a terminal; unknown id errors", async (t) => {
   const h = await harness(); t.after(h.close);
   const chat = await tool("get_session").run({ sessionId: "c1" }, h.ctx);
