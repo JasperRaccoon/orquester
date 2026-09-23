@@ -172,8 +172,13 @@ export function latestSettledTurn(turns: readonly Turn[]): Turn | null {
   return null;
 }
 
+/**
+ * The main agent's answer in a turn: its assistant messages, joined. A message the provider marked as commentary
+ * (Codex's `phase`, carried as `messageKind`) is the running "I'll do X next" narration, not the answer — the GUI
+ * demotes it into the activity group (`isDemotedAssistantMessage`), and it is left out here too.
+ */
 export function assistantTextForTurn(items: readonly ThreadItem[], turnId: string): string {
-  return items.filter((i): i is Extract<ThreadItem, { kind: "message" }> => i.kind === "message" && i.role === "assistant" && i.turnId === turnId && !i.agentId).map((i) => i.text).filter(Boolean).join("\n\n");
+  return items.filter((i): i is Extract<ThreadItem, { kind: "message" }> => i.kind === "message" && i.role === "assistant" && i.turnId === turnId && !i.agentId && i.messageKind !== "commentary").map((i) => i.text).filter(Boolean).join("\n\n");
 }
 
 export function lastReply(snap: ThreadSnapshotPayload): SessionDetail["lastReply"] | null {
@@ -192,7 +197,9 @@ function latestContextWindow(items: readonly ThreadItem[]): SessionDetail["chat"
     // meter does (`isResolvableContextWindowActivity`, agent-host/ingestion/coalesce.ts).
     if (typeof u.usedTokens !== "number" || !Number.isFinite(u.usedTokens) || u.usedTokens < 0) continue;
     const cw: NonNullable<SessionDetail["chat"]["contextWindow"]> = { usedTokens: u.usedTokens };
-    if (typeof u.maxTokens === "number" && u.maxTokens > 0) { cw.maxTokens = u.maxTokens; cw.percentUsed = Math.round((u.usedTokens / u.maxTokens) * 100); }
+    // A reading can run past its window (a compaction lagging the turn); the percentage stops at 100 like the GUI's ring,
+    // and the raw counts stay as reported.
+    if (typeof u.maxTokens === "number" && u.maxTokens > 0) { cw.maxTokens = u.maxTokens; cw.percentUsed = Math.min(100, Math.round((u.usedTokens / u.maxTokens) * 100)); }
     if (typeof u.compactsAutomatically === "boolean") cw.compactsAutomatically = u.compactsAutomatically;
     return cw;
   }
