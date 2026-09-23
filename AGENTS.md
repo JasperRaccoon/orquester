@@ -844,7 +844,11 @@ few places: `project`, `cwd` and attachment paths must realpath inside `fsRoot`;
 family-checked before a create (the daemon silently falls back to the system home); at most 24
 running sessions per project; `update_session` refuses a mid-turn model/permission change without
 `force`. Like the GUI, `send_message` refuses while a request is pending (the host alone would take
-the message as a steer). A result is one JSON object capped at 60 000 bytes (`result.ts`); every
+the message as a steer). Like the GUI's "Load older", `read_transcript` reads turns the snapshot's
+retained window no longer holds from the host's thread index (`history.ts`: `GET …/history`, at most
+5 pages a call, merged under the window by id with the window's copy winning, in log order); a turn
+it cannot read whole is named in `unavailableTurns` with a hint, and a failed page is never a tool
+error. A result is one JSON object capped at 60 000 bytes (`result.ts`); every
 tool that can outgrow it bounds itself first and says what it cut (`truncated`, `optionsOmitted`,
 `subagentsTruncated`, `filesTruncated`, …), so `ok()`'s byte cut is only the last resort. An error
 is `<CODE>: <message>`, the message capped at 4 000 code points. `server.ts` replaces the SDK's

@@ -1,8 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildPlanImplementationPrompt, type ThreadItem } from "@orquester/api/agent-chat";
+import { buildPlanImplementationPrompt, type ThreadItem, type Turn } from "@orquester/api/agent-chat";
 import { activity, message, snapshot, stamp, turn } from "./fixtures.ts";
-import { cutTail, fitEntries, fitRoster, jsonTextBytes, ROSTER_SHARE, TRANSCRIPT_HINT_BYTES, transcriptEntries, type TranscriptEntry, type TranscriptResult } from "./transcript.ts";
+import { mergeHistoryPages } from "./history.ts";
+import { cutTail, fitEntries, fitRoster, jsonTextBytes, ROSTER_SHARE, TRANSCRIPT_HINT_BYTES, transcriptEntries, transcriptRange, type TranscriptEntry, type TranscriptResult } from "./transcript.ts";
 
 const ALL = new Set(["reasoning", "tools", "activity"] as const);
 /** A result's size as `maxChars` counts it: the whole result's JSON, in UTF-8 bytes (what ok() caps). */
@@ -10,8 +11,7 @@ const budgetSize = (r: TranscriptResult): number => Buffer.byteLength(JSON.strin
 /** What a result must fit in: a truncated one leaves the caller room for its hint. */
 const room = (r: TranscriptResult, maxChars: number): number => (r.truncated ? maxChars - TRANSCRIPT_HINT_BYTES : maxChars);
 /** The ruling's room: maxChars less the widest frame (both lists empty, every flag set) and the hint's room. */
-const roomOf = (r: TranscriptResult, maxChars: number): number => maxChars - TRANSCRIPT_HINT_BYTES
-  - Buffer.byteLength(JSON.stringify({ entries: [], turnCount: r.turnCount, coveredTurns: r.turnCount ? [r.turnCount, r.turnCount] : null, truncated: true, subagents: [], subagentsTruncated: true }), "utf8");
+const roomOf = (r: TranscriptResult, maxChars: number): number => maxChars - TRANSCRIPT_HINT_BYTES - frameOf(r, true);
 /** A list's size inside the result: its JSON less the brackets. */
 const contentOf = (rows: readonly unknown[]): number => Buffer.byteLength(JSON.stringify(rows), "utf8") - 2;
 /** The subagent list's cap once a result is over: what the unshed entries (`e` bytes) leave, never less than its share. */
@@ -31,9 +31,14 @@ const nextBack = (all: TranscriptResult["subagents"], kept: TranscriptResult["su
 };
 /** Rows as the fits take them: each with its JSON bytes and a comma, measured once. */
 const sizedOf = <T>(rows: readonly T[]): { row: T; bytes: number }[] => rows.map((row) => ({ row, bytes: Buffer.byteLength(JSON.stringify(row), "utf8") + 1 }));
-/** The frame the entries are fitted in: both lists empty, the widest coveredTurns, truncated, the roster flag as given. */
-const frameOf = (turnCount: number, subagentsTruncated: boolean): number => Buffer.byteLength(JSON.stringify({ entries: [], turnCount,
-  coveredTurns: turnCount ? [turnCount, turnCount] : null, truncated: true, subagents: [], ...(subagentsTruncated ? { subagentsTruncated } : {}) }), "utf8");
+/**
+ * The frame the entries are fitted in: both lists empty, the widest coveredTurns, truncated, the roster flag as given —
+ * and the result's own olderTurns and unavailableTurns.
+ */
+function frameOf(r: TranscriptResult, subagentsTruncated: boolean): number {
+  return Buffer.byteLength(JSON.stringify({ entries: [], turnCount: r.turnCount, olderTurns: r.olderTurns, coveredTurns: r.turnCount ? [r.turnCount, r.turnCount] : null,
+    ...(r.unavailableTurns ? { unavailableTurns: r.unavailableTurns } : {}), truncated: true, subagents: [], ...(subagentsTruncated ? { subagentsTruncated } : {}) }), "utf8");
+}
 /** The biggest row of a list, as it sits in the result: its JSON and a comma. */
 const maxRowOf = (rows: readonly unknown[]): number => Math.max(0, ...rows.map((row) => contentOf([row]) + 1));
 /** An instant just after the last item: where a checkpoint that closes the turn sorts. */
@@ -581,7 +586,7 @@ test("a randomized probe (fixed seed): whole when it fits, else within the reser
       const space = roomOf(r, maxChars);
       // The second pass only re-adds roster rows: the entries are exactly what fitEntries gives at the first pass's allowance.
       const firstPass = fitRoster(sizedOf(whole.subagents), rosterCap(space, contentOf(whole.entries)));
-      const firstAllowance = budget - frameOf(r.turnCount, firstPass.trimmed) - firstPass.bytes;
+      const firstAllowance = budget - frameOf(r, firstPass.trimmed) - firstPass.bytes;
       assert.deepEqual(r.entries, fitEntries(sizedOf(whole.entries), firstAllowance).entries, `${where}: the second pass leaves the fitted entries untouched`);
       if (r.subagents.length > firstPass.rows.length) tally.secondPass += 1;
       // A reply cut to fit: the entries keep at least what the roster's share leaves (no starved reply), and the
@@ -628,4 +633,166 @@ test("cutTail: seeded random texts — exact against JSON.stringify, never split
       assert.ok(jsonSize(text) - jsonSize(text.slice(0, oneLess)) < need, `${label}: no more than needed`);
     }
   }
+});
+
+// ---- Older history (design item 3): beforeTurn, olderTurns, the turnless rows' range, merged pages, unavailable turns. ----
+
+/** `n` started turns, each an opening message and a reply, built in order: the fixture's stamps rise with the log. */
+function turnsOf(n: number): { turns: Turn[]; items: ThreadItem[] } {
+  const turns: Turn[] = [];
+  const items: ThreadItem[] = [];
+  for (let t = 1; t <= n; t += 1) {
+    const ask = message("user", `ask ${t}`, { turnId: `t${t}` });
+    items.push(ask, message("assistant", `reply ${t}`, { turnId: `t${t}` }));
+    turns.push(turn({ turnId: `t${t}`, turnCount: t, requestedAt: ask.createdAt, startedAt: ask.createdAt, completedAt: items.at(-1)!.createdAt }));
+  }
+  return { turns, items };
+}
+
+test("transcriptRange: the turns just before beforeTurn, else the latest; never outside the thread's turns", () => {
+  assert.deepEqual(transcriptRange(10, 3), { start: 8, end: 10 });
+  assert.deepEqual(transcriptRange(10, 3, 11), { start: 8, end: 10 }, "beforeTurn turnCount + 1 is the default");
+  assert.deepEqual(transcriptRange(10, 3, 6), { start: 3, end: 5 });
+  assert.deepEqual(transcriptRange(10, 5, 3), { start: 1, end: 2 }, "never before turn 1");
+  assert.deepEqual(transcriptRange(10, 200), { start: 1, end: 10 });
+  assert.deepEqual(transcriptRange(10, 3, 99), { start: 8, end: 10 }, "clamped, never past the last turn");
+  assert.deepEqual(transcriptRange(0, 3), { start: 1, end: 0 }, "no started turn: an empty range");
+});
+
+test("beforeTurn reads the turns just before it; olderTurns counts the started turns before the range", () => {
+  const snap = snapshot(turnsOf(6));
+  const read = (turns: number, beforeTurn?: number) => transcriptEntries(snap, { turns, ...(beforeTurn === undefined ? {} : { beforeTurn }), include: ALL, maxChars: 100_000 });
+  const r = read(2, 5);
+  assert.deepEqual(r.entries.map((e) => [e.turn, e.text]), [[3, "ask 3"], [3, "reply 3"], [4, "ask 4"], [4, "reply 4"]]);
+  assert.deepEqual([r.turnCount, r.olderTurns, r.coveredTurns], [6, 2, [3, 4]]);
+  assert.deepEqual(Object.keys(r), ["entries", "turnCount", "olderTurns", "coveredTurns", "truncated", "subagents"], "olderTurns always, unavailableTurns only when some were not read");
+  const latest = read(2);
+  assert.deepEqual([latest.olderTurns, latest.coveredTurns], [4, [5, 6]]);
+  assert.deepEqual(read(2, 7), latest, "beforeTurn turnCount + 1 reads the latest turns");
+  assert.deepEqual([read(9, 3).olderTurns, read(9, 3).coveredTurns], [0, [1, 2]], "a range from turn 1 has none older");
+  assert.equal(transcriptEntries(snapshot({ turns: [], items: [] }), { turns: 3, include: ALL, maxChars: 100_000 }).olderTurns, 0);
+});
+
+test("a row with no turn belongs to the range by its time: from the first turn's request (from the very start at turn 1), before the next turn's", () => {
+  const failed = (label: string, over: { createdAt?: string } = {}) => activity("provider.turn.start.failed", { detail: label }, { turnId: null, tone: "error", summary: "Turn failed", ...over });
+  const items: ThreadItem[] = [failed("f0")];
+  const turns: Turn[] = [];
+  for (let t = 1; t <= 3; t += 1) {
+    const ask = message("user", `ask ${t}`, { turnId: `t${t}` });
+    items.push(ask, message("assistant", `reply ${t}`, { turnId: `t${t}` }), failed(`f${t}`));
+    turns.push(turn({ turnId: `t${t}`, turnCount: t, requestedAt: ask.createdAt, startedAt: ask.createdAt, completedAt: ask.createdAt }));
+  }
+  // A failure stamped at the very instant turn 3 was requested lies on turn 3's side of the boundary.
+  items.push(failed("at 3", { createdAt: turns[2]!.requestedAt }));
+  const snap = snapshot({ turns, items });
+  const texts = (beforeTurn?: number) => transcriptEntries(snap, { turns: 1, ...(beforeTurn === undefined ? {} : { beforeTurn }), include: ALL, maxChars: 100_000 }).entries.map((e) => e.text);
+  assert.deepEqual(texts(2), ["Turn failed: f0", "ask 1", "reply 1", "Turn failed: f1"], "turn 1: from the very start, up to turn 2's request");
+  assert.deepEqual(texts(3), ["ask 2", "reply 2", "Turn failed: f2"], "turn 2: from its request, before turn 3's");
+  assert.deepEqual(new Set(texts()), new Set(["ask 3", "reply 3", "Turn failed: f3", "Turn failed: at 3"]), "the latest turn: from its request on, with no end");
+});
+
+test("a merged snapshot's rows sort into log order: a call whose start a page holds and whose end the window holds is one row, at its start, in its latest state", () => {
+  const ask = message("user", "Run the suite.", { turnId: null, id: "ask-2" });
+  const started = activity("tool.started", { itemType: "command_execution", toolUseId: "tu1", title: "pnpm test", command: "pnpm test", status: "inProgress" }, { turnId: "t2", tone: "tool" });
+  const completed = activity("tool.completed", { itemType: "command_execution", toolUseId: "tu1", title: "pnpm test", status: "completed", detail: "ok" }, { turnId: "t2", tone: "tool" });
+  const reply = message("assistant", "Green.", { turnId: "t2" });
+  const turns = [turn({ turnId: "t1", requestedAt: stamp(0) }), turn({ turnId: "t2", turnCount: 2, requestedAt: ask.createdAt, startedAt: ask.createdAt, completedAt: reply.createdAt, userMessageId: ask.id })];
+  const window = snapshot({ turns, items: [completed, reply] });
+  // The page holds the turn's opening: its prompt and the call's first row.
+  const merged = mergeHistoryPages(window, [{ items: [ask, started], checkpoints: [] }]);
+  const r = transcriptEntries(merged, { turns: 1, include: ALL, maxChars: 100_000, windowItems: window.items });
+  assert.deepEqual(r.entries.map((e) => [e.kind, e.turn]), [["user", 2], ["tool", 2], ["assistant", 2]]);
+  const tool = r.entries[1]!;
+  assert.equal(tool.createdAt, started.createdAt, "the call's row sits at its start");
+  assert.deepEqual(tool.tool, { type: "command_execution", title: "pnpm test", status: "completed", command: "pnpm test", detail: "ok" }, "folded from its start, the window's completion last");
+});
+
+test("the actionable plan is judged on the window: a plan only a page holds has aged out, and is not the one implement_plan would send", () => {
+  const plan = activity("turn.proposed.completed", { planId: "p1", planMarkdown: "# Old plan" }, { turnId: "t1" });
+  const later = message("user", "Something else first.", { turnId: "t2" });
+  const turns = [turn({ turnId: "t1", requestedAt: plan.createdAt }), turn({ turnId: "t2", turnCount: 2, requestedAt: later.createdAt, startedAt: later.createdAt, completedAt: later.createdAt })];
+  const planRow = (snap: ReturnType<typeof snapshot>, windowItems?: readonly ThreadItem[]) =>
+    transcriptEntries(snap, { turns: 5, include: ALL, maxChars: 100_000, ...(windowItems ? { windowItems } : {}) }).entries.find((e) => e.kind === "plan");
+  const window = snapshot({ turns, items: [later] });
+  assert.equal(planRow(mergeHistoryPages(window, [{ items: [plan], checkpoints: [] }]), window.items)!.actionable, false);
+  const kept = snapshot({ turns, items: [plan, later] });
+  assert.equal(planRow(kept, kept.items)!.actionable, true, "the same plan in the window is actionable, as the host says");
+  assert.equal(planRow(kept)!.actionable, true, "without windowItems, snap.items is the window");
+});
+
+test("unavailable turns are reported, and their sentence is held back: whole only when the result fits with it, else shed below both hints' room", () => {
+  const hint = "Turn 1 could not be read whole: older turns are unavailable on this host right now. Try again later.";
+  const unavailable = { turns: [1, 1] as [number, number], hint };
+  const snap = snapshot({ items: oneTurn("r".repeat(5_000)) });
+  const opts = { turns: 5, include: ALL, unavailable };
+  const whole = transcriptEntries(snap, { ...opts, maxChars: 1_000_000 });
+  assert.deepEqual([whole.unavailableTurns, whole.truncated], [[1, 1], false]);
+  assert.deepEqual(Object.keys(whole), ["entries", "turnCount", "olderTurns", "coveredTurns", "unavailableTurns", "truncated", "subagents"]);
+  // The hint field inside the result: `,"hint":"…"`.
+  const field = Buffer.byteLength(JSON.stringify({ hint }), "utf8") - 1;
+  const exact = budgetSize(whole) + field;
+  assert.equal(JSON.stringify(transcriptEntries(snap, { ...opts, maxChars: exact })), JSON.stringify(whole), "whole when it fits with its hint");
+  const over = transcriptEntries(snap, { ...opts, maxChars: exact - 1 });
+  assert.equal(over.truncated, true, "one byte less: shed, though the result alone would still fit");
+  assert.ok(budgetSize(over) <= exact - 1 - TRANSCRIPT_HINT_BYTES - jsonTextBytes(hint) - 1, `below maxChars less the shed hint's room, the sentence and a space (${budgetSize(over)})`);
+  assert.deepEqual(over.unavailableTurns, [1, 1]);
+  const plain = transcriptEntries(snap, { turns: 5, include: ALL, maxChars: exact - 1 });
+  assert.equal(plain.truncated, false, "without unavailable turns the same budget holds the result whole");
+});
+
+test("a randomized probe with beforeTurn and unavailable turns (fixed seed): the range, olderTurns, and the answer within maxChars, its hint's room kept", () => {
+  let seed = 0x3c19a7;
+  const rand = (): number => { // mulberry32
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4_294_967_296;
+  };
+  const int = (lo: number, hi: number): number => lo + Math.floor(rand() * (hi - lo + 1));
+  const pick = <T>(xs: readonly T[]): T => xs[int(0, xs.length - 1)]!;
+  const text = (max: number): string => pick(["a", "é", "漢", "😀", '"', "\n", "word "]).repeat(int(1, max));
+  const tally = { whole: 0, shed: 0, unavailable: 0, before: 0 };
+  for (let run = 0; run < 120; run += 1) {
+    const turnCount = int(1, 8);
+    const items: ThreadItem[] = [];
+    const turns: Turn[] = [];
+    for (let t = 1; t <= turnCount; t += 1) {
+      const turnId = `t${t}`;
+      const opening = message("user", text(2_000), { turnId });
+      items.push(opening);
+      for (let k = int(0, 3); k > 0; k -= 1) items.push(activity("tool.completed", { itemType: "command_execution", toolUseId: `${turnId}-${k}`, title: text(40), command: text(100), status: "completed", detail: text(2_000) }, { turnId, tone: "tool" }));
+      if (rand() < 0.3) items.push(activity("provider.turn.start.failed", { detail: text(200) }, { turnId: null, tone: "error", summary: "Turn failed" }));
+      items.push(message("assistant", text(6_000), { turnId }));
+      turns.push(turn({ turnId, turnCount: t, requestedAt: opening.createdAt, startedAt: opening.createdAt, completedAt: items.at(-1)!.createdAt }));
+    }
+    const roster = Array.from({ length: int(0, 40) }, (_, i) => agent(i, text(200), pick(["running", "completed"])));
+    const snap = snapshot({ items, turns, roster });
+    const count = int(1, 4);
+    const beforeTurn = rand() < 0.7 ? int(2, turnCount + 1) : undefined;
+    const { start, end } = transcriptRange(turnCount, count, beforeTurn);
+    const unavailable = rand() < 0.6 ? { turns: [start, int(start, Math.max(start, end))] as [number, number], hint: `Turns ${text(60)} could not be read whole.` } : undefined;
+    const maxChars = int(2_000, 55_000);
+    const opts = { turns: count, ...(beforeTurn === undefined ? {} : { beforeTurn }), include: ALL, ...(unavailable ? { unavailable } : {}) };
+    const r = transcriptEntries(snap, { ...opts, maxChars });
+    const whole = transcriptEntries(snap, { ...opts, maxChars: Number.MAX_SAFE_INTEGER });
+    const where = `run ${run}: ${turnCount} turns, turns ${count}, beforeTurn ${beforeTurn}, maxChars ${maxChars}`;
+    assert.equal(r.olderTurns, start - 1, `${where}: olderTurns`);
+    assert.deepEqual(r.unavailableTurns, unavailable?.turns, `${where}: unavailableTurns`);
+    assert.ok(r.entries.every((e) => e.turn === null || (e.turn >= start && e.turn <= end)), `${where}: every row inside [${start}, ${end}]`);
+    // The room the tool's hint takes: the sentence as a field of its own on a whole result; on a shed one, the sentence,
+    // a space and the shed hint's reserve.
+    const said = unavailable ? jsonTextBytes(unavailable.hint) : 0;
+    const wholeRoom = unavailable ? 10 + said : 0;
+    if (budgetSize(whole) + wholeRoom <= maxChars) {
+      assert.equal(JSON.stringify(r), JSON.stringify(whole), `${where}: fits with its hint, so whole`);
+      tally.whole += 1;
+    } else {
+      assert.ok(r.truncated, `${where}: does not fit with its hint, so shed`);
+      assert.ok(budgetSize(r) <= maxChars - TRANSCRIPT_HINT_BYTES - (unavailable ? said + 1 : 0), `${where}: shed below both hints' room (${budgetSize(r)})`);
+      tally.shed += 1;
+    }
+    if (unavailable) tally.unavailable += 1;
+    if (beforeTurn !== undefined && beforeTurn <= turnCount) tally.before += 1;
+  }
+  assert.ok(Object.values(tally).every((n) => n >= 10), `the probe reaches every branch: ${JSON.stringify(tally)}`);
 });

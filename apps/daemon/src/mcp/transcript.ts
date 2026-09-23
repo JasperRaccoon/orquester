@@ -1,4 +1,4 @@
-import { ACTIVE_SUBAGENT_STATUSES, isPlanImplementationMessage, startedTurns, type RuntimeSubagent, type ThreadActivityItem, type ThreadItem, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
+import { ACTIVE_SUBAGENT_STATUSES, isPlanImplementationMessage, startedTurns, type RuntimeSubagent, type StartedTurn, type ThreadActivityItem, type ThreadItem, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
 import { capText } from "./result.ts";
 
 export type TranscriptInclude = "reasoning" | "tools" | "activity";
@@ -6,19 +6,45 @@ export interface TranscriptEntry { turn: number | null; turnId: string | null; k
   attachments?: { name: string; type: string }[]; tool?: { type: string; title: string; status: string; command?: string; detail?: string; changedFiles?: string[] }; requestId?: string; requestKind?: string; decision?: string;
   questions?: string[]; answered?: boolean; subagent?: { id: string; title: string | null; status: string }; actionable?: boolean; files?: { path: string; additions: number; deletions: number }[]; state?: string; beforeTokens?: number; afterTokens?: number }
 export interface TranscriptOptions {
-  turns: number; agentId?: string; include: ReadonlySet<TranscriptInclude>;
+  /** How many turns the read covers, and `beforeTurn` which ones: the range `transcriptRange` names. */
+  turns: number; beforeTurn?: number; agentId?: string; include: ReadonlySet<TranscriptInclude>;
   /**
    * The size budget for the WHOLE result — entries, turns, subagents and flags — in UTF-8 bytes of its JSON, as ok()
-   * counts (the name predates the unit). A result that fits it comes back whole. One that does not is shed to
-   * TRANSCRIPT_HINT_BYTES under it, which leaves room for the truncation hint the caller adds, so the tool's whole
-   * answer keeps within `maxChars` either way.
+   * counts (the name predates the unit). A result that fits it — with the hint it will carry about `unavailable`
+   * turns, if any — comes back whole. One that does not is shed to TRANSCRIPT_HINT_BYTES under it (and that hint's
+   * bytes more), which leaves room for the hint the caller adds, so the tool's whole answer keeps within `maxChars`
+   * either way.
    */
   maxChars: number;
+  /**
+   * The turns of the range the snapshot could not supply whole (history.ts), and the sentence the caller's hint says
+   * about them: the result reports the turns as `unavailableTurns` and holds back the sentence's bytes.
+   */
+  unavailable?: { turns: [number, number]; hint: string };
+  /**
+   * The thread's retained window, when `snap` also carries the older rows a history page supplied (history.ts). The
+   * actionable plan is judged on it alone, as the host judges it: a plan that aged out of the window is not the one
+   * implement_plan would send. Absent: `snap.items` is the window.
+   */
+  windowItems?: readonly ThreadItem[];
 }
-export interface TranscriptResult { entries: TranscriptEntry[]; turnCount: number; coveredTurns: [number, number] | null; truncated: boolean; subagents: { id: string; title: string | null; status: string }[]; subagentsTruncated?: boolean }
+export interface TranscriptResult {
+  entries: TranscriptEntry[]; turnCount: number;
+  /** The started turns before the range: `beforeTurn` = the range's first turn reads the ones just before it. */
+  olderTurns: number;
+  coveredTurns: [number, number] | null;
+  /** The first and last turn of the range that could not be read whole — only when some could not. */
+  unavailableTurns?: [number, number];
+  truncated: boolean; subagents: { id: string; title: string | null; status: string }[]; subagentsTruncated?: boolean;
+}
 
-/** The room a shed result leaves under `maxChars` for the caller's `hint` field — key, quotes and comma included. */
+/**
+ * The room a shed result leaves under `maxChars` for the caller's `hint` field — key, quotes and comma included. A
+ * result with `unavailable` turns leaves that sentence's bytes and a space more.
+ */
 export const TRANSCRIPT_HINT_BYTES = 320;
+/** What a `hint` field adds to a result besides its text: `,"hint":""`. */
+const HINT_FIELD_BYTES = 10;
 /**
  * The subagent list's share of the room once a result is over it: the list takes whatever the transcript does not
  * need, and never less than this fraction when it needs it.
@@ -287,33 +313,55 @@ export function fitEntries(entries: readonly Sized<TranscriptEntry>[], allowance
   return { entries: rows.filter((_, i) => !gone.has(i)).map((r) => r.row), bytes: contentBytes(sum, count) };
 }
 
+/**
+ * The turns a read covers, by started-turn ordinal: the `turns` turns just before `beforeTurn`, else the latest `turns`
+ * — `end` = `beforeTurn − 1` (default `turnCount`), `start` = max(1, end − turns + 1). The tool refuses a `beforeTurn`
+ * outside 2..turnCount + 1; here one is clamped, so the range never leaves 1..turnCount. It is empty (end < start) when
+ * the thread has no started turn.
+ */
+export function transcriptRange(turnCount: number, turns: number, beforeTurn?: number): { start: number; end: number } {
+  const end = Math.max(0, Math.min(turnCount, (beforeTurn ?? turnCount + 1) - 1));
+  return { start: Math.max(1, end - Math.max(1, Math.floor(turns)) + 1), end };
+}
+
+/**
+ * The turn an item belongs to: its own `turnId`, else — for a turn's opening message, which the host writes with the
+ * idle session's null turnId — the turn that names it back as `userMessageId` (fold.ts), its only link.
+ */
+export function itemTurnId(turns: readonly StartedTurn[]): (item: ThreadItem) => string | null {
+  const opened = new Map<string, string>();
+  for (const t of turns) if (t.userMessageId) opened.set(t.userMessageId, t.turnId);
+  return (item) => item.turnId ?? (item.kind === "message" ? opened.get(item.id) ?? null : null);
+}
+
 export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptOptions): TranscriptResult {
   // 1. Turn numbering: the ordinal among STARTED turns (turns.ts), the same number
   //    revert_session and get_turn_diff speak in; the highest is turnCount.
   const ordered = startedTurns(snap.turns);
   const turnIndex = new Map<string, number>();
   ordered.forEach((t, i) => turnIndex.set(t.turnId, i + 1));
-  // The host writes a turn's opening message with the session's activeTurnId, which is null while the
-  // thread is idle; the turn names that message back as `userMessageId` (fold.ts), its only link.
-  const openedTurn = new Map<string, string>();
-  for (const t of ordered) if (t.userMessageId) openedTurn.set(t.userMessageId, t.turnId);
-  const turnIdOf = (item: ThreadItem): string | null => item.turnId ?? (item.kind === "message" ? openedTurn.get(item.id) ?? null : null);
+  const turnIdOf = itemTurnId(ordered);
   const turnCount = ordered.length;
-  const wanted = Math.max(1, Math.floor(opts.turns));
-  let from = Math.max(1, turnCount - wanted + 1);
+  // 2. The range read, [start, end]; the turns before it are the caller's to page back to.
+  const { start, end } = transcriptRange(turnCount, opts.turns, opts.beforeTurn);
+  const olderTurns = start - 1;
   const roster = new Map(snap.roster.map((r) => [r.id, r]));
-  const latestPlan = proposedPlan(snap.items);
+  const latestPlan = proposedPlan(opts.windowItems ?? snap.items);
   const actionablePlan = latestPlan?.actionable ? latestPlan.item.id : null;
-  const build = (fromTurn: number): TranscriptEntry[] => {
-    const selected = new Set(ordered.slice(fromTurn - 1).map((t) => t.turnId as string));
-    // A row with no turn counts from the window's first turn on, or from the very start when the window
-    // starts at turn 1: a turn the host never started (its message, its failure) has no turn at all.
-    const earliest = fromTurn > 1 ? ordered[fromTurn - 1]!.requestedAt : "";
+  const build = (): TranscriptEntry[] => {
+    const selected = new Set(ordered.slice(start - 1, end).map((t) => t.turnId));
+    // A row with no turn — a turn the host never started: its message, its failure — belongs to the range by its time:
+    // from the range's first turn on (from the very start when that is turn 1), and before the turn after the range.
+    const earliest = start > 1 ? ordered[start - 1]!.requestedAt : "";
+    const beyond = end < turnCount ? ordered[end]!.requestedAt : null;
     // An AGENT's task row anchors it in the parent view even when it carries an agentId (Codex, OpenCode
     // and Grok stamp the task's own id on it); a stamped background shell's row stays out, as in the GUI.
     const isAgentAnchor = (item: ThreadItem): boolean => item.kind === "activity" && item.activityKind.startsWith("task.") && ((item.payload ?? {}) as P).agentKind === "agent";
     const inScope = (item: ThreadItem): boolean => (opts.agentId ? item.agentId === opts.agentId : !item.agentId || isAgentAnchor(item));
-    const inTurns = (item: ThreadItem): boolean => { const id = turnIdOf(item); return id ? selected.has(id) : item.createdAt >= earliest; };
+    const inTurns = (item: ThreadItem): boolean => {
+      const id = turnIdOf(item);
+      return id ? selected.has(id) : item.createdAt >= earliest && (beyond === null || item.createdAt < beyond);
+    };
     const turnOf = (item: ThreadItem): number | null => { const id = turnIdOf(item); return id ? turnIndex.get(id) ?? null : null; };
     const entries: TranscriptEntry[] = [];
     const tools = new Map<string, TranscriptEntry>();
@@ -405,23 +453,27 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
     entries.sort((x, y) => (x.createdAt < y.createdAt ? -1 : x.createdAt > y.createdAt ? 1 : 0));
     return entries;
   };
-  const entries = build(from);
+  const entries = build();
   const agents = opts.agentId ? [] : snap.roster.map(rosterView);
-  const result = (list: TranscriptEntry[], subagents: RosterRow[], truncated: boolean, subagentsTruncated: boolean): TranscriptResult => {
-    const r: TranscriptResult = { entries: list, turnCount, coveredTurns: coveredOf(list), truncated, subagents };
-    if (subagentsTruncated) r.subagentsTruncated = true;
-    return r;
-  };
+  const unavailable = opts.unavailable;
+  // One shape for the result and for its frame, so what is measured is what is returned.
+  const shaped = (list: TranscriptEntry[], subagents: RosterRow[], covered: [number, number] | null, truncated: boolean, subagentsTruncated: boolean): TranscriptResult => ({
+    entries: list, turnCount, olderTurns, coveredTurns: covered, ...(unavailable ? { unavailableTurns: unavailable.turns } : {}), truncated, subagents, ...(subagentsTruncated ? { subagentsTruncated: true } : {})
+  });
+  const result = (list: TranscriptEntry[], subagents: RosterRow[], truncated: boolean, subagentsTruncated: boolean): TranscriptResult => shaped(list, subagents, coveredOf(list), truncated, subagentsTruncated);
   // The frame is the result with both lists empty. A result whose frame, entries (E) and subagent list (R) fit
-  // maxChars comes back whole: nothing shed, no flags, and so no hint. Only a shed one keeps TRANSCRIPT_HINT_BYTES free.
-  const frame = (covered: [number, number] | null, truncated: boolean, subagentsTruncated: boolean): number =>
-    jsonByteSize({ entries: [], turnCount, coveredTurns: covered, truncated, subagents: [], ...(subagentsTruncated ? { subagentsTruncated } : {}) });
-  const budget = opts.maxChars - TRANSCRIPT_HINT_BYTES;
+  // maxChars comes back whole: nothing shed, no flags, and so no hint — but for the sentence about unavailable turns,
+  // whose field it must leave room for. Only a shed one keeps TRANSCRIPT_HINT_BYTES free, plus that sentence and the
+  // space the caller joins the two with.
+  const frame = (covered: [number, number] | null, truncated: boolean, subagentsTruncated: boolean): number => jsonByteSize(shaped([], [], covered, truncated, subagentsTruncated));
+  const said = unavailable ? jsonTextBytes(unavailable.hint) : 0;
+  const budget = opts.maxChars - TRANSCRIPT_HINT_BYTES - (unavailable ? said + 1 : 0);
   const sizedEntries = sized(entries);
   const sizedAgents = sized(agents);
   const entryBytes = contentBytes(sizedEntries.reduce((sum, r) => sum + r.bytes, 0), sizedEntries.length);
   const agentBytes = contentBytes(sizedAgents.reduce((sum, a) => sum + a.bytes, 0), sizedAgents.length);
-  if (frame(coveredOf(entries), false, false) + entryBytes + agentBytes <= opts.maxChars) return result(entries, agents, false, false);
+  const wholeHint = unavailable ? HINT_FIELD_BYTES + said : 0;
+  if (frame(coveredOf(entries), false, false) + entryBytes + agentBytes + wholeHint <= opts.maxChars) return result(entries, agents, false, false);
   // Over it (§7.6 and its fix-round rulings), in the widest frame: the subagent list takes what the entries do not
   // need and never less than ROSTER_SHARE of the room when it needs it; the entries get exactly what it leaves.
   const widest: [number, number] | null = turnCount > 0 ? [turnCount, turnCount] : null;

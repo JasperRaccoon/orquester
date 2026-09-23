@@ -1,14 +1,15 @@
 import { z } from "zod";
 import type { SessionSummary } from "@orquester/api";
-import { agentChatRoutes, buildPlanImplementationPrompt, MAX_TURN_INPUT_CHARS, type AttachmentRef, type ThreadItemResponse, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
+import { agentChatRoutes, buildPlanImplementationPrompt, MAX_TURN_INPUT_CHARS, startedTurns, type AttachmentRef, type ThreadItemResponse, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
 import { supportsFrom } from "../agents.ts";
 import { attachmentInputSchema, MAX_ATTACHMENTS, uploadInlineAttachments } from "../attachments.ts";
 import type { DaemonApi } from "../daemon-api.ts";
 import { expectOk, ToolError } from "../errors.ts";
+import { readOlderHistory, unavailableHint } from "../history.ts";
 import { readThread, requireChatSession, sendCommand } from "../reads.ts";
 import { MAX_RESULT_BYTES, resultBytes } from "../result.ts";
 import { defineTool, MUTATING, READ_ONLY, type ToolContext, type ToolDef } from "../tool.ts";
-import { proposedPlan, transcriptEntries, type TranscriptResult } from "../transcript.ts";
+import { proposedPlan, transcriptEntries, transcriptRange, type TranscriptResult } from "../transcript.ts";
 import { buildViewContext, chatDetail, fitDetail, SETTLED_TURN_STATES, type SessionDetail } from "../views.ts";
 import { turnBaseline, waitForTurn, type TurnBaseline, type TurnOutcome } from "../wait.ts";
 
@@ -26,14 +27,23 @@ const TRUNCATED_HINT = "Shed to fit maxChars: reasoning, then tool detail, then 
 const SUBAGENTS_TRIMMED_HINT = "The subagent list was trimmed too; get_session may list more of it.";
 
 /**
- * The hint a shed read_transcript result carries, or none for a whole one. It keys on `truncated`, which transcript.ts
- * sets on every result it sheds, a trimmed subagent list alone included; `subagentsTruncated` is present only when the
- * list was trimmed. A shed result stays TRANSCRIPT_HINT_BYTES under `maxChars` for this field, so the answer, hint
- * included, keeps within `maxChars`.
+ * The hint a read_transcript result carries, or none for a whole one that read every turn of its range: first
+ * `unavailable`, the sentence about the turns it could not read whole (history.ts `unavailableHint`), then the shed
+ * hint. That one keys on `truncated`, which transcript.ts sets on every result it sheds, a trimmed subagent list alone
+ * included; `subagentsTruncated` is present only when the list was trimmed. A shed result stays TRANSCRIPT_HINT_BYTES
+ * under `maxChars` for this field, and the `unavailable` sentence's bytes more, so the answer, hint included, keeps
+ * within `maxChars`.
  */
-export function transcriptHint(result: Pick<TranscriptResult, "truncated" | "subagentsTruncated">): string | undefined {
-  if (!result.truncated) return undefined;
-  return result.subagentsTruncated ? `${TRUNCATED_HINT} ${SUBAGENTS_TRIMMED_HINT}` : TRUNCATED_HINT;
+export function transcriptHint(result: Pick<TranscriptResult, "truncated" | "subagentsTruncated">, unavailable?: string): string | undefined {
+  const shed = !result.truncated ? undefined : result.subagentsTruncated ? `${TRUNCATED_HINT} ${SUBAGENTS_TRIMMED_HINT}` : TRUNCATED_HINT;
+  return unavailable && shed ? `${unavailable} ${shed}` : unavailable || shed;
+}
+
+/** Why a `beforeTurn` past the last turn is refused, naming the range that is not. */
+function beforeTurnRefusal(turnCount: number): string {
+  if (turnCount === 0) return "This conversation has no started turn yet, so there is no turn to read before: leave beforeTurn out.";
+  const valid = turnCount === 1 ? "2" : `between 2 and ${turnCount + 1}`;
+  return `beforeTurn must be ${valid}: this conversation has ${turnCount} started turn${turnCount === 1 ? "" : "s"}.`;
 }
 
 const sessionIdField = z.string().min(1).describe("The session id from list_sessions.");
@@ -236,10 +246,11 @@ const readTranscript = defineTool({
   // A list cut to fit ends in one element of its own shape counting the rest (transcript.ts `cutRow`): a changedFiles
   // "…N more files" string, a files row {path: "…N more files", additions, deletions} with the rest's line totals, an
   // attachments row {name: "…N more attachments", type: "omitted"}. The description has to say so: it reads as data.
-  description: "What was said and done in a session, newest turns last: messages, tool calls, approvals, questions, plans, file changes, errors. `agentId` drills into one subagent's own timeline. A list cut to fit (a checkpoint's files, a tool's changedFiles, a message's attachments) ends in a marker counting the rest (\"…12 more files\"; a files marker carries their real line totals), not a real entry.",
+  description: "What was said and done in a session, newest turns last: messages, tool calls, approvals, questions, plans, file changes, errors. `beforeTurn` reads older turns; `agentId` drills into a subagent. A list cut to fit (a checkpoint's files, a tool's changedFiles, a message's attachments) ends in a marker counting the rest (\"…12 more files\"; a files marker has their real line totals), not a real entry.",
   input: {
     sessionId: sessionIdField,
-    turns: z.number().int().min(1).max(200).default(3).describe("How many of the latest turns to include."),
+    turns: z.number().int().min(1).max(200).default(3).describe("How many turns to include: the latest ones, or those just before beforeTurn."),
+    beforeTurn: z.number().int().min(2).optional().describe("Read the turns just before this turn number (2 to turnCount + 1) instead of the latest; turns older than the live window are read from the host's history index. To page back, pass the last result's olderTurns + 1. Turns that could not be read whole are named in unavailableTurns."),
     agentId: z.string().min(1).optional().describe("A subagent id from get_session.subagents to read its own timeline."),
     include: z.array(z.enum(["reasoning", "tools", "activity"])).default(["tools", "activity"]).describe("Extra row kinds; reasoning is opt-in."),
     maxChars: z.number().int().min(2_000).max(MAX_TRANSCRIPT_CHARS).default(40_000).describe("Size budget for the result, in UTF-8 bytes (max 55000; every tool result is capped at 60000 bytes). Over it, the transcript sheds reasoning, then tool detail, then its oldest rows, and cuts the latest reply last; the subagent list keeps at least a quarter when it needs it, plus whatever the transcript leaves unused.")
@@ -248,12 +259,22 @@ const readTranscript = defineTool({
   async run(args, { api }) {
     await requireChatSession(api, args.sessionId);
     const snap = await readThread(api, args.sessionId);
+    const turnCount = startedTurns(snap.turns).length;
+    if (args.beforeTurn !== undefined && args.beforeTurn > turnCount + 1) throw new ToolError("INVALID_ARGUMENT", beforeTurnRefusal(turnCount));
+    // Turns older than the window come from the host's thread index; a page it cannot read is reported, never thrown.
+    const older = await readOlderHistory(api, args.sessionId, snap, transcriptRange(turnCount, args.turns, args.beforeTurn));
+    const read = older.snapshot;
     // "" names no subagent: refused like any unknown id, never read as "the main view" (the schema refuses it first).
-    if (args.agentId !== undefined && !snap.roster.some((r) => r.id === args.agentId) && !snap.items.some((i) => i.agentId === args.agentId)) {
-      throw new ToolError("INVALID_ARGUMENT", `No subagent "${args.agentId}". Known: ${snap.roster.map((r) => r.id).join(", ") || "none"}.`);
+    // A subagent of an older turn is known by the rows a page brought back.
+    if (args.agentId !== undefined && !read.roster.some((r) => r.id === args.agentId) && !read.items.some((i) => i.agentId === args.agentId)) {
+      throw new ToolError("INVALID_ARGUMENT", `No subagent "${args.agentId}". Known: ${read.roster.map((r) => r.id).join(", ") || "none"}.`);
     }
-    const result = transcriptEntries(snap, { turns: args.turns, ...(args.agentId !== undefined ? { agentId: args.agentId } : {}), include: new Set(args.include), maxChars: args.maxChars });
-    const hint = transcriptHint(result);
+    const unavailable = older.unavailable ? { turns: older.unavailable.turns, hint: unavailableHint(older.unavailable) } : undefined;
+    const result = transcriptEntries(read, {
+      turns: args.turns, ...(args.beforeTurn !== undefined ? { beforeTurn: args.beforeTurn } : {}), ...(args.agentId !== undefined ? { agentId: args.agentId } : {}),
+      include: new Set(args.include), maxChars: args.maxChars, windowItems: snap.items, ...(unavailable ? { unavailable } : {})
+    });
+    const hint = transcriptHint(result, unavailable?.hint);
     return hint ? { ...result, hint } : { ...result };
   }
 });
