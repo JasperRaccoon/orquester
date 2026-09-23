@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { FsSandboxError } from "@orquester/config/fs";
+import { TodoError } from "../todos.ts";
 import { ToolError } from "./errors.ts";
 import { ok, toSafeToolError, capText, fitJsonBytes, jsonBytes, MAX_RESULT_BYTES } from "./result.ts";
 
@@ -23,14 +24,20 @@ test("ok caps oversized text and says so", () => {
   assert.ok(!m.content[0].text.includes("\uFFFD"));
 });
 
-test("ToolError surfaces code and message; sandbox errors never echo the path; unknown errors are generic", () => {
+test("ToolError surfaces code and message; sandbox errors never echo the path; unknown errors are generic", (t) => {
+  const logged = t.mock.method(console, "error", () => {});
   const a = toSafeToolError(new ToolError("SESSION_NOT_FOUND", "No session abc", { id: "abc" }));
   assert.equal(a.isError, true); assert.equal(a.content[0].text, "SESSION_NOT_FOUND: No session abc");
   assert.deepEqual(a.structuredContent, { code: "SESSION_NOT_FOUND", message: "No session abc", detail: { id: "abc" } });
   const b = toSafeToolError(new FsSandboxError("Path is outside the sandbox: /etc/shadow"));
   assert.ok(!b.content[0].text.includes("/etc/shadow")); assert.equal(b.structuredContent.code, "PATH_NOT_ALLOWED");
-  const c = toSafeToolError(new Error("ENOENT /home/alice/.ssh/id_rsa"));
+  assert.equal(logged.mock.callCount(), 0, "a coded error is not logged");
+  const unknown = new Error("ENOENT /home/alice/.ssh/id_rsa");
+  const c = toSafeToolError(unknown);
   assert.ok(!c.content[0].text.includes("/home/alice")); assert.equal(c.structuredContent.code, "INTERNAL");
+  // The detail stays server-side: logged, never returned.
+  assert.equal(logged.mock.callCount(), 1);
+  assert.equal(logged.mock.calls[0].arguments[1], unknown);
 });
 
 test("capText cuts on a character boundary and flags it", () => {
@@ -67,4 +74,12 @@ test("fitJsonBytes keeps the longest whole-character prefix whose JSON size fits
     const next = [...mixed.slice(text.length)][0];
     if (next !== undefined) assert.ok(jsonBytes(text + next) > budget, `budget ${budget}: "${text}" is the longest fitting prefix`);
   }
+});
+
+test("TodoError maps its status to a code and keeps its (safe) message", () => {
+  const notFound = toSafeToolError(new TodoError(404, "todo not found"));
+  assert.deepEqual(notFound.structuredContent, { code: "NOT_FOUND", message: "todo not found" });
+  assert.equal(notFound.content[0].text, "NOT_FOUND: todo not found");
+  assert.equal(toSafeToolError(new TodoError(400, "bad")).structuredContent.code, "INVALID_ARGUMENT");
+  assert.equal(toSafeToolError(new TodoError(409, "clash")).structuredContent.code, "CONFLICT");
 });
