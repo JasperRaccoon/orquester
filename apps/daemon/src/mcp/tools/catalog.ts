@@ -67,10 +67,10 @@ const listProjects = defineTool({
 const listAgents = defineTool({
   name: "list_agents",
   title: "List launchable agents",
-  description: "Every chat agent (claude, claudex, claudemix, codex, opencode, grok) with its valid models, model options (effort…), permission modes, capabilities and accounts; only enabled ones open (disabledReason says why not). Call it before create_session or update_session. A catalogue too big for one result is cut (optionsOmitted, modelsTruncated): list_agents {agent, model} gives a model's full options.",
+  description: "Every chat agent (claude, claudex, claudemix, codex, opencode, grok): valid models, model options (effort…), permission modes, capabilities, accounts. Only enabled ones open (disabledReason, when known, says why not). Call it before create_session or update_session. A catalogue too big for one result is cut (optionsOmitted, modelsTruncated): list_agents {agent, model} gives a model's full options.",
   input: {
     agent: z.string().min(1).optional().describe("Only this agent id."),
-    model: z.string().min(1).optional().describe("Needs agent: just this model (by slug), with its full options — how to read the options a cut catalogue omits (optionsOmitted)."),
+    model: z.string().min(1).optional().describe("Needs agent: just this model (by slug), with its full options — how to read the options a cut catalogue omits (optionsOmitted). A legacy model (isLegacy) is found too, but serves only an existing session: create_session refuses it, update_session takes it."),
     includeLegacyModels: z.boolean().default(false).describe("Also list models flagged legacy.")
   },
   annotations: READ_ONLY,

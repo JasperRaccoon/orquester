@@ -129,7 +129,13 @@ export async function loadAgents(api: DaemonApi, opts?: { includeLegacyModels?: 
     const defaultAccountId = familyAccounts.some((a) => a.id === accounts.defaults[family]) ? (accounts.defaults[family] as string) : "system";
     let models: AgentModelView[];
     if (launchesProxyModel(entry.id)) {
-      models = proxyLaunchModels(proxy, catalog).map((m) => ({ slug: m.id, name: m.id, isDefault: m.id === proxy?.defaultModel, options: [], ...(m.providerLabel ? { providerLabel: m.providerLabel } : {}) }));
+      // A proxy slug is no Claude model. The composer falls back to the Claude catalogue's default model — the flagged
+      // one, else the first (`resolveSelectedModel`, composer-model.ts) — and offers its option chips, and the host
+      // passes those options on for a model it has no entry for (`resolveEffortLevel`, adapters/claude/models.ts). So
+      // every proxy model takes that model's options; with no Claude catalogue there are none to offer.
+      const fallback = snapshot?.models.find((m) => m.isDefault === true) ?? snapshot?.models[0];
+      const options = fallback ? modelView(fallback).options : [];
+      models = proxyLaunchModels(proxy, catalog).map((m) => ({ slug: m.id, name: m.id, isDefault: m.id === proxy?.defaultModel, options, ...(m.providerLabel ? { providerLabel: m.providerLabel } : {}) }));
       if (models.length && !models.some((m) => m.isDefault)) models[0]!.isDefault = true;
     } else {
       // The adapter's own catalogue — claudemix's too: its model is the Claude main loop's, only its account is the proxy's.
@@ -248,8 +254,9 @@ export function resolveModelSelection(agent: AgentView, input: { model?: string;
   const modelView = agent.models.find((m) => m.slug === model);
   if (agent.models.length && !modelView) throw unknownModel(agent, model);
   const descriptors = modelView?.options ?? [];
-  // A listed model without option descriptors takes none: the GUI offers it no chips (claudex's proxy models, Claude's
-  // haiku). Only a catalogue still being probed passes options through unchecked, for the host to judge.
+  // A listed model without option descriptors takes none: the GUI offers it no chips (Claude's haiku). claudex's proxy
+  // models are not such models: they carry the Claude default model's descriptors (loadAgents), the chips the composer
+  // shows for them. Only a catalogue still being probed passes options through unchecked, for the host to judge.
   if (modelView && !descriptors.length && Object.keys(input.options ?? {}).length) throw new ToolError("INVALID_ARGUMENT", `${model} takes no options.`);
   const known = new Set(descriptors.map((d) => d.id));
   const merged = new Map<string, string | boolean>();

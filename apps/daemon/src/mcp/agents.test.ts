@@ -105,14 +105,12 @@ test("resolveModelSelection: defaults, validation, effort alias, merge with curr
 });
 
 test("a model without option descriptors takes no options, as the GUI shows it no chips: any is refused; an empty catalogue refuses", async () => {
-  const [claude, claudex] = await loadAgents(api());
+  const [claude] = await loadAgents(api());
   const noOptions = (model: string) => (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && e.message === `${model} takes no options.`;
   assert.throws(() => resolveModelSelection(claude, { model: "haiku", options: { effort: "max" } }), noOptions("haiku"));
   assert.throws(() => resolveModelSelection(claude, { model: "haiku", options: { thinking: true } }), noOptions("haiku"), "not even an option the agent's other models take");
   // update_session's options-only change on such a model: the head's model, and still nothing to set.
   assert.throws(() => resolveModelSelection(claude, { options: { effort: "high" }, current: { model: "haiku", options: [] } }), noOptions("haiku"));
-  // claudex's proxy models carry no descriptors either.
-  assert.throws(() => resolveModelSelection(claudex, { model: "gpt-5.6-sol", options: { effort: "high" } }), noOptions("gpt-5.6-sol"));
   // No options at all is fine, and an empty object is none.
   assert.deepEqual(resolveModelSelection(claude, { model: "haiku" }), { model: "haiku", options: [] });
   assert.deepEqual(resolveModelSelection(claude, { model: "haiku", options: {} }), { model: "haiku", options: [] });
@@ -233,4 +231,25 @@ test("nameList: every error that lists valid values lists them one way — up to
   const big: AgentView = { ...claude, models: many.map((slug) => ({ slug, name: slug, isDefault: false, options: [] })) };
   assert.throws(() => resolveModelSelection(big, { model: "nope" }), (e: { message: string }) => e.message === `Unknown model "nope" for claude. Valid models: ${nameList(many.slice())}.`);
   assert.throws(() => findAgent([], "claude"), (e: { message: string }) => e.message === "Unknown agent \"claude\". Valid agents: none.");
+});
+
+test("claudex's proxy models take the options of the Claude catalogue's default model, as the composer offers them: listed, accepted, checked", async () => {
+  const [claude, claudex] = await loadAgents(api());
+  // A proxy slug is no Claude model: the composer falls back to the Claude default model and shows its chips.
+  const claudeDefault = claude.models.find((m) => m.isDefault)!;
+  assert.equal(claudeDefault.slug, "default");
+  assert.ok(claudex.models.length > 1, "several proxy models");
+  for (const m of claudex.models) assert.deepEqual(m.options, claudeDefault.options, `${m.slug} lists the Claude default's options`);
+  assert.deepEqual(resolveModelSelection(claudex, { model: "gpt-5.6-sol", options: { effort: "high" } }), { model: "gpt-5.6-sol", options: [{ id: "effort", value: "high" }] });
+  assert.deepEqual(resolveModelSelection(claudex, { model: "gpt-5.6-sol", options: { effort: "High", thinking: true } }).options, [{ id: "effort", value: "high" }, { id: "thinking", value: true }]);
+  assert.throws(() => resolveModelSelection(claudex, { model: "gpt-5.6-sol", options: { effort: "ultra" } }), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && e.message === "Option \"effort\" must be one of: medium, high.");
+  assert.throws(() => resolveModelSelection(claudex, { model: "gpt-5.6-sol", options: { turbo: true } }), (e: { message: string }) => e.message === "Unknown option \"turbo\" for model gpt-5.6-sol. Valid options: effort, thinking.");
+  // The same options on every proxy model, so a model switch keeps them — as the composer keeps them.
+  const other = claudex.models.find((m) => m.slug !== "gpt-5.6-sol")!.slug;
+  assert.deepEqual(resolveModelSelection(claudex, { model: other, current: { model: "gpt-5.6-sol", options: [{ id: "effort", value: "high" }] } }), { model: other, options: [{ id: "effort", value: "high" }] });
+  // With no flagged default, the composer falls back to the catalogue's first model; with no catalogue, there is nothing to offer.
+  const unflagged = await loadAgents(api().on("GET", "/api/agent/providers", { status: 200, body: { ...providers, providers: [{ ...providers.providers[0], models: providers.providers[0].models.map(({ isDefault: _d, ...m }) => m) }, providers.providers[1]] } }));
+  assert.deepEqual(unflagged[1]!.models[0]!.options, unflagged[0]!.models[0]!.options);
+  const blind = await loadAgents(api().on("GET", "/api/agent/providers", { status: 503, body: null }));
+  assert.ok(blind[1]!.models.every((m) => m.options.length === 0), "no Claude catalogue, no options to offer");
 });

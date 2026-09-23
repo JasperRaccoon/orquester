@@ -454,7 +454,8 @@ test("read_transcript: maxChars is described as the byte budget it is, and a tri
   // The shed goes by row (transcript.ts `fitEntries`), the oldest turn's first: coveredTurns then names the turns left.
   assert.equal(shed, "Shed to fit maxChars: reasoning, then tool detail, then the oldest rows (coveredTurns says which turns are left). Raise maxChars (max 55000), include less, or use get_turn_diff for one turn's file changes.");
   assert.equal(transcriptHint({ truncated: true, subagentsTruncated: false }), shed);
-  assert.equal(transcriptHint({ truncated: true, subagentsTruncated: true }), `${shed} The subagent list was trimmed too — full roster: get_session.`);
+  // get_session sheds subagent rows too when its detail passes the cap: the hint must not promise the whole roster.
+  assert.equal(transcriptHint({ truncated: true, subagentsTruncated: true }), `${shed} The subagent list was trimmed too; get_session may list more of it.`);
 });
 
 test("read_transcript's hint, suffix included, fits the room transcript.ts keeps for it", () => {
@@ -493,7 +494,7 @@ test("read_transcript: every shed result says truncated:true, so it carries the 
   const r = await tool("read_transcript").run({ sessionId: "c1", turns: 3, include: ["tools", "activity"], maxChars: 2_000 }, h.ctx);
   assert.deepEqual((r.entries as { text: string }[]).map((e) => e.text), ["Survey the packages, one subagent each.", "Done: every package is surveyed."], "the transcript is whole");
   assert.deepEqual([r.truncated, r.subagentsTruncated], [true, true], "only the roster was trimmed, and the result still says truncated");
-  assert.match(String(r.hint), /full roster: get_session\.$/);
+  assert.match(String(r.hint), /trimmed too; get_session may list more of it\.$/);
 });
 
 test("read_transcript's description says a list cut to fit ends in a marker counting the rest, and the tool's rows do", async (t) => {
