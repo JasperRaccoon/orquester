@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { FakeDaemonApi } from "./testing.ts";
 import { stamp } from "./fixtures.ts";
-import { conversationLaunch, EFFORT_OPTION_IDS, findAgent, isProxyAgent, launchesProxyModel, loadAgents, resolveModelSelection, validateAccountId, type AgentView } from "./agents.ts";
+import { conversationLaunch, EFFORT_OPTION_IDS, findAgent, isProxyAgent, launchesProxyModel, loadAgents, nameList, resolveModelSelection, validateAccountId, type AgentView } from "./agents.ts";
 
 const registry = { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [
   { id: "claude", kind: "agent", name: "Claude Code", bin: ["claude"], enabled: true, installState: "idle", version: "2.1.280", chat: { adapter: "claude" } },
@@ -203,4 +203,15 @@ test("conversationLaunch: a proxy home resumes under the launcher that owns it; 
   assert.deepEqual(conversationLaunch({ agentRefId: "claude", home: "account" }), { agent: "claude", reachable: true });
   assert.deepEqual(conversationLaunch({ agentRefId: "codex", home: "system", proxyRefId: "claudex" }), { agent: "codex", reachable: true }, "proxyRefId counts only for a proxy home");
   assert.deepEqual(conversationLaunch({ agentRefId: "grok" }), { agent: "grok", reachable: true }, "no home is the system home");
+});
+
+test("nameList: every error that lists valid values lists them one way — up to 40, then an ellipsis; none at all says so", async () => {
+  assert.equal(nameList([]), "none");
+  assert.equal(nameList(["a", "b"]), "a, b");
+  const many = Array.from({ length: 41 }, (_, i) => `m${i}`);
+  assert.equal(nameList(many), `${many.slice(0, 40).join(", ")}, …`);
+  const claude = (await loadAgents(api()))[0];
+  const big: AgentView = { ...claude, models: many.map((slug) => ({ slug, name: slug, isDefault: false, options: [] })) };
+  assert.throws(() => resolveModelSelection(big, { model: "nope" }), (e: { message: string }) => e.message === `Unknown model "nope" for claude. Valid models: ${nameList(many.slice())}.`);
+  assert.throws(() => findAgent([], "claude"), (e: { message: string }) => e.message === "Unknown agent \"claude\". Valid agents: none.");
 });

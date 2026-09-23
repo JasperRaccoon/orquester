@@ -1,16 +1,11 @@
 import { z } from "zod";
 import type { AgentConversationsResponse, ProjectSummary, RecentProjectSummary, RegistryResponse, WorkspaceSummary } from "@orquester/api";
 import { resolveProject } from "../addressing.ts";
-import { conversationLaunch, findAgent, loadAgents } from "../agents.ts";
+import { conversationLaunch, findAgent, loadAgents, nameList } from "../agents.ts";
 import type { DaemonApi } from "../daemon-api.ts";
 import { ToolError, expectOk } from "../errors.ts";
 import { listSessions } from "../reads.ts";
 import { defineTool, READ_ONLY, type ToolDef } from "../tool.ts";
-
-/** Names for an error message: up to 40, then "…" (as resolveModelSelection lists models). */
-function nameList(names: readonly string[]): string {
-  return names.length ? `${names.slice(0, 40).join(", ")}${names.length > 40 ? ", …" : ""}` : "none";
-}
 
 /**
  * One workspace's projects, or the warning that stands in for them: a workspace that cannot be read is left out

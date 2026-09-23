@@ -52,9 +52,11 @@ export class InjectDaemonApi implements DaemonApi {
   }
 
   /**
-   * A thrown upload (the host socket gone, the source stream destroyed) answers as the daemon's own upload route's catch
-   * does: 413 UPLOAD_TOO_LARGE past the cap, else 503 HOST_UNAVAILABLE — its cause logged here and never returned (it
-   * can name a host path), as sendCommand treats a thrown request. A stream left unread is destroyed, never leaked.
+   * A thrown upload answers as the daemon's own upload route's catch does: 413 UPLOAD_TOO_LARGE past the cap, else 503
+   * HOST_UNAVAILABLE — its cause logged here and never returned (it can name a host path), as sendCommand treats a thrown
+   * request. Besides the cap, two things throw: the host socket gone, and a source stream that fails mid-read (a `{path}` attachment's
+   * file hitting EIO, or truncated under it) — `countingLimit` (agent-chat/service.ts) forwards the source's error into
+   * the body the host client is sending, which fails the upload. A stream left unread is destroyed, never leaked.
    */
   async uploadAttachment(sessionId: string, meta: { name: string; type?: string }, bytes: Readable): Promise<{ status: number; value: unknown }> {
     if (!this.opts.agentChat) {

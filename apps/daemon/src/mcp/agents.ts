@@ -145,9 +145,14 @@ export async function loadAgents(api: DaemonApi, opts?: { includeLegacyModels?: 
   });
 }
 
+/** Valid values as every refusal lists them: up to 40, then "…"; "none" when there are none. */
+export function nameList(names: readonly string[]): string {
+  return names.length ? `${names.slice(0, 40).join(", ")}${names.length > 40 ? ", …" : ""}` : "none";
+}
+
 export function findAgent(agents: readonly AgentView[], refId: string): AgentView {
   const agent = agents.find((a) => a.id === refId);
-  if (!agent) throw new ToolError("INVALID_ARGUMENT", `Unknown agent "${refId}". Valid agents: ${agents.map((a) => a.id).join(", ")}.`);
+  if (!agent) throw new ToolError("INVALID_ARGUMENT", `Unknown agent "${refId}". Valid agents: ${nameList(agents.map((a) => a.id))}.`);
   return agent;
 }
 
@@ -159,7 +164,7 @@ export function resolveModelSelection(agent: AgentView, input: { model?: string;
   if (!model) throw new ToolError("INVALID_ARGUMENT", `Still loading ${agent.id}'s models — retry in a moment (list_agents).`);
   const modelView = agent.models.find((m) => m.slug === model);
   if (agent.models.length && !modelView) {
-    throw new ToolError("INVALID_ARGUMENT", `Unknown model "${model}" for ${agent.id}. Valid models: ${agent.models.slice(0, 40).map((m) => m.slug).join(", ")}${agent.models.length > 40 ? ", …" : ""}.`);
+    throw new ToolError("INVALID_ARGUMENT", `Unknown model "${model}" for ${agent.id}. Valid models: ${nameList(agent.models.map((m) => m.slug))}.`);
   }
   const descriptors = modelView?.options ?? [];
   const known = new Set(descriptors.map((d) => d.id));
