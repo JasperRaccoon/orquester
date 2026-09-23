@@ -54,7 +54,8 @@ import type {
   ProviderSessionBindingPatch,
   ThreadFoldState,
   ThreadHead,
-  ThreadItem
+  ThreadItem,
+  ThreadItemOutputResponse
 } from "@orquester/api/agent-chat";
 import {
   FOLD_SNAPSHOT_VERSION,
@@ -103,6 +104,7 @@ import {
 } from "./files.ts";
 import { applyEventToHead } from "./head.ts";
 import { RawFrameLog, pruneRawLogDirectory } from "./raw-log.ts";
+import { joinToolOutput } from "./tool-output.ts";
 
 /** `meta.json` is rewritten after this many appended events (§5.1). */
 export const HEAD_CHECKPOINT_EVENTS = 50;
@@ -289,6 +291,14 @@ export interface AgentThreadStore extends ThreadStore {
    * row a "load full output" click asks for — it must still be servable.
    */
   readItem(threadId: string, itemId: string): Promise<ThreadItem | null>;
+  /**
+   * `GET …/items/:itemId/output`: the streamed output of the tool call the
+   * item belongs to — every `tool.output` chunk of its `payload.toolUseId`,
+   * joined in log order (`tool-output.ts`) — or null when the item names no
+   * call. From the log, for the reason `readItem` reads it: the chunks a
+   * "load full output" asks for are exactly the rows retention drops.
+   */
+  readToolOutput(threadId: string, itemId: string): Promise<ThreadItemOutputResponse | null>;
   /**
    * Run the host-wide sweep now: the raw-log ceiling plus every attachment
    * TTL. Equivalent to `pruneAttachments()` with no arguments; exposed so the
@@ -1519,6 +1529,13 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
         return state.items.find((item) => item.id === itemId) ?? null;
       }
       return null;
+    },
+
+    async readToolOutput(threadId: string, itemId: string): Promise<ThreadItemOutputResponse | null> {
+      assertSafeThreadId(threadId);
+      // One read of the log, as `readItem`: the item's newest write names the
+      // call, and every chunk of it is joined from the same events.
+      return joinToolOutput((await readLog(threadId)).events, itemId);
     }
   };
 

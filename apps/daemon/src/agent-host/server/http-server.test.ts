@@ -347,6 +347,51 @@ describe("agent host server — commands and reads (§6.2, §6.3)", () => {
     await h.stop();
   });
 
+  it("serves a tool call's streamed output joined from the log, and 404s with its own code", async () => {
+    const h = await harness();
+    const threadId = await h.host.createThread();
+    const at = h.host.clock.nowIso();
+    const row = (id: string, activityKind: string, payload: Record<string, unknown>) => ({
+      eventId: `ev-${id}`,
+      threadId,
+      type: "thread.activity-appended" as const,
+      payload: {
+        activity: { kind: "activity" as const, id, tone: "tool" as const, activityKind, summary: activityKind, payload, turnId: null, createdAt: at, updatedAt: at }
+      },
+      occurredAt: at,
+      commandId: null,
+      causationEventId: null,
+      metadata: {}
+    });
+    const shell = "bgshell:task-1";
+    await h.host.orchestrator.ingestionSink(threadId, [
+      row("start", "tool.started", { itemType: "command_execution", toolUseId: shell }),
+      row("o1", "tool.output", { toolUseId: shell, streamKind: "command_output", delta: "one\n" }),
+      row("o2", "tool.output", { toolUseId: shell, streamKind: "command_output", delta: "  two\n" }),
+      row("warn", "runtime.warning", { message: "not a tool call" })
+    ]);
+    await h.host.settle();
+
+    const running = await h.call("GET", agentHostRoutes.itemOutput(threadId, "start"));
+    assert.equal(running.status, 200);
+    assert.deepEqual(running.body, { toolUseId: shell, output: "one\n  two\n", complete: false, truncated: false });
+
+    // Not a tool call, and no such item: ITEM_NOT_FOUND — never the THREAD_NOT_FOUND a route miss answers.
+    for (const itemId of ["warn", "nope"]) {
+      const missing = await h.call("GET", agentHostRoutes.itemOutput(threadId, itemId));
+      assert.equal(missing.status, 404, itemId);
+      assert.equal((missing.body as { error: { code: string } }).error.code, "ITEM_NOT_FOUND", itemId);
+    }
+    const miss = await h.call("GET", `${agentHostRoutes.itemOutput(threadId, "start")}/more`);
+    assert.equal(miss.status, 404);
+    assert.equal((miss.body as { error: { code: string } }).error.code, "THREAD_NOT_FOUND");
+    // A thread the host does not have is the thread's own 404.
+    const gone = await h.call("GET", agentHostRoutes.itemOutput("thread-gone", "start"));
+    assert.equal(gone.status, 404);
+    assert.equal((gone.body as { error: { code: string } }).error.code, "THREAD_NOT_FOUND");
+    await h.stop();
+  });
+
   it("serves the provider snapshots with the host instance id", async () => {
     const h = await harness();
     const result = await h.call("GET", agentHostRoutes.providers);

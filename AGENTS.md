@@ -313,7 +313,7 @@ older host ignores both, and a newer one re-derives from the log whatever it can
 |---|---|
 | Commands (POST, JSON, every body carries a client-minted `commandId`) | `/api/sessions/:id/{turn,interrupt,approval,answer,dismiss,revert,compact,mode,session/stop}` → `{seq}` |
 | Daemon-owned, command-shaped (NOT proxied verbatim) | `POST /api/sessions/:id/account` `{commandId, accountId}` → `{seq}` — §3.4's account switch; see the gotcha below |
-| Reads | `GET /api/sessions/:id/thread` (whole snapshot, with `history` bounds) · `GET …/events?after=<seq>` (long-lived chunked **NDJSON**, `:hb` every 15 s — no new WebSocket) · `GET …/turns/:n/diff` · `GET …/items/:itemId` (unslimmed payload) · `GET …/attachments/:attachmentId` · `GET …/history?before=<cursor>&turns=<n>` (a block of older history from the index; 503 `INDEX_UNAVAILABLE` without one) |
+| Reads | `GET /api/sessions/:id/thread` (whole snapshot, with `history` bounds) · `GET …/events?after=<seq>` (long-lived chunked **NDJSON**, `:hb` every 15 s — no new WebSocket) · `GET …/turns/:n/diff` · `GET …/items/:itemId` (unslimmed payload) · `GET …/items/:itemId/output` (the streamed output of the tool call the item belongs to — its `tool.output` chunks joined from the log, ≤ 8 MiB; 404 `ITEM_NOT_FOUND`) · `GET …/attachments/:attachmentId` · `GET …/history?before=<cursor>&turns=<n>` (a block of older history from the index; 503 `INDEX_UNAVAILABLE` without one) |
 | Host level | `GET /api/agent/providers` · `POST /api/agent/providers/:id/refresh` · `POST /api/agent-host/stop` · `GET /api/agent/search?q=&limit=&projectPath=` (full-text over every open chat; 200 `indexed:false` without an index) |
 
 Everything is built in one place — `agentChatRoutes` in `packages/api/src/agent-chat/wire.ts`; use
@@ -824,15 +824,16 @@ Start here: `apps/daemon/src/agent-host/README.md` (module map + package ownersh
 
 **Orquester MCP** (`apps/daemon/src/mcp/`). `POST /mcp` lets an external agent drive chat sessions
 the way the chat GUI does: 31 tools (catalogue, sessions, search, messages, tool output, requests,
-waiting, usage, files, todos) and no terminal I/O — terminal tabs are only listed and closed. It is mounted
-**only on the HTTP transport** (`mode:"remote"`, behind the global bearer hook; the unauthenticated
-unix socket never serves it) as a stateless Streamable-HTTP endpoint with one `McpServer` per
-request, a 16 MiB body limit and `405` for `GET`/`DELETE`. Every tool but the kept todo/file pair
-is an **in-process client of the daemon's own REST API**: `InjectDaemonApi` (`daemon-api.ts`) runs
-every call through `app.inject()` with the caller's own `Authorization` header, so each route's
-gates (the create route's claudex model gate, seeded-account gate, `chat.adapter` check and
-tab-then-thread order; the proxy routes' `THREAD_NOT_FOUND`/`HOST_UNAVAILABLE` guards) and error
-codes are the GUI's by construction, not by review. Two invariants:
+waiting, usage, files, todos) and no terminal I/O — terminal tabs are only listed and closed. It is
+mounted **only on the HTTP transport** (`mode:"remote"`, behind the global bearer hook; the
+unauthenticated unix socket never serves it) as a stateless Streamable-HTTP endpoint with one
+`McpServer` per request, a 16 MiB body limit and `405` for `GET`/`DELETE`. Every tool but the kept
+todo/file pair is an **in-process client of the daemon's own REST API**: `InjectDaemonApi`
+(`daemon-api.ts`) runs every call through `app.inject()` with the caller's own `Authorization`
+header, so each route's gates (the create route's claudex model gate, seeded-account gate,
+`chat.adapter` check and tab-then-thread order; the proxy routes'
+`THREAD_NOT_FOUND`/`HOST_UNAVAILABLE` guards) and error codes are the GUI's by construction, not by
+review. Two invariants:
 
 - **Tools never touch services directly — only `DaemonApi`.** No `services.sessions`, no host
   client, no store: the seam's only non-route methods are the attachment upload (over
@@ -867,8 +868,16 @@ it cannot read whole is named in `unavailableTurns` with a hint, and a failed pa
 error. Like the GUI's "Load full output", `read_tool_output` reads the unslimmed item behind a tool
 row's `outputItemId` (`GET …/items/:itemId`) in UTF-8 byte windows; a command answers its whole
 output from the places the row's preview reads (`commandOutputText`, one list with
-`commandDisplayDetail`). A result is one JSON object capped at 60 000 bytes (`result.ts`); every
-tool that can outgrow it bounds itself first and says what it cut (`truncated`, `optionsOmitted`,
+`commandDisplayDetail`), unless the item is stored already cut (an update). A command's output
+that exists only as streamed `tool.output` chunks — a Claude background shell's, a running
+command's so far — is joined by the host (`GET …/items/:itemId/output`, `store/tool-output.ts`)
+and answered with `running`/`truncated`; never a file change's (Claude streams its result text as
+`file_change_output`, which is no command's output). `read_transcript` offers such a call's latest
+command row as its `outputItemId` — in a drill-in, when retention evicted the call's rows, an
+entry built from its latest chunk — and a host from before the route (its route-miss 404) falls
+back to the item's own text, never an error. A result is one JSON object capped at 60 000 bytes
+(`result.ts`); every tool that can
+outgrow it bounds itself first and says what it cut (`truncated`, `optionsOmitted`,
 `subagentsTruncated`, `filesTruncated`, …), so `ok()`'s byte cut is only the last resort. An error
 is `<CODE>: <message>`, the message capped at 4 000 code points. `server.ts` replaces the SDK's
 `tools/call` handler (public `server.setRequestHandler`) so a schema refusal answers the same

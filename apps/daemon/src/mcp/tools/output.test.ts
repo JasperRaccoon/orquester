@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { z } from "zod";
-import { agentChatRoutes, slimActivityPayload, type ThreadItem, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
+import { agentChatRoutes, slimActivityPayload, type ThreadItem, type ThreadItemOutputResponse, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
 import { ToolError } from "../errors.ts";
-import { activity, chatSummary, message, shellSummary, snapshot } from "../fixtures.ts";
+import { activity, chatSummary, message, shellSummary, snapshot, stamp, turn } from "../fixtures.ts";
 import { MAX_RESULT_BYTES, ok, resultBytes } from "../result.ts";
 import { FakeDaemonApi } from "../testing.ts";
 import { READ_ONLY, type ToolContext, type ToolDef } from "../tool.ts";
@@ -51,7 +51,7 @@ test("read_tool_output is a read-only tool whose description names where item id
   assert.deepEqual(tool.annotations, READ_ONLY);
   assert.ok(tool.title);
   assert.ok(tool.description.length <= 400, `${tool.description.length} chars`);
-  for (const needle of ["read_transcript", "outputItemId", "nextOffset"]) assert.ok(tool.description.includes(needle), needle);
+  for (const needle of ["read_transcript", "outputItemId", "nextOffset", "running"]) assert.ok(tool.description.includes(needle), needle);
   assert.equal(DEFAULT_OUTPUT_BYTES, 40_000);
   assert.equal(MAX_OUTPUT_BYTES, 55_000);
   const defaults = parse(tool, { sessionId: "c1", itemId: "i1" }) as { offset: number; maxBytes: number };
@@ -97,7 +97,8 @@ test("a message answers its text, and any other item the GUI viewer's text: a st
   assert.deepEqual(await read(holding(mcpCall), { itemId: mcpCall.id }), {
     itemId: mcpCall.id, kind: "payload", text: JSON.stringify(mcpCall.payload, null, 2), offset: 0, totalBytes: Buffer.byteLength(JSON.stringify(mcpCall.payload, null, 2))
   });
-  // A command whose data carries no output in any place the preview reads (Claude's block-array tool_result) is a payload too.
+  // A command whose data carries no output in any place the preview reads (Claude's block-array tool_result), and that
+  // streamed none (this daemon answers the join 404), is a payload too.
   const blocks = commandRow({ toolName: "Bash", input: { command: "ls" }, result: { type: "tool_result", content: [{ type: "text", text: "a.ts" }] } });
   const r = await read(holding(blocks), { itemId: blocks.id });
   assert.deepEqual([r.kind, r.text], ["payload", JSON.stringify(blocks.payload, null, 2)]);
@@ -217,4 +218,136 @@ test("read_transcript's outputItemId is what read_tool_output reads: the command
   assert.equal(row.outputItemId, completed.id);
   const whole = await read(api, { itemId: row.outputItemId! });
   assert.deepEqual([whole.kind, whole.text, "nextOffset" in whole], ["command-output", output, false]);
+});
+
+// --- streamed output: the chunks the host joins (`GET …/items/:itemId/output`) -----------------------------------
+
+/** A daemon whose session c1 holds `item`, and whose host joins the streamed output of its call as `joined` answers. */
+function streaming(item: ThreadItem, joined: { status: number; body: unknown }): FakeDaemonApi {
+  return holding(item).on("GET", agentChatRoutes.itemOutput("c1", item.id), joined);
+}
+const joinedOutput = (over: Partial<ThreadItemOutputResponse> = {}): { status: number; body: ThreadItemOutputResponse } =>
+  ({ status: 200, body: { toolUseId: "bgshell:task-1", output: "make: entering\n  [100%] linked\n", complete: true, truncated: false, ...over } });
+
+/** A background shell's completion as ingestion stores it: whole, and holding no output — the CLI streamed it. */
+const shellDone = () => activity("tool.completed", {
+  itemType: "command_execution", toolUseId: "bgshell:task-1", title: "Background shell", status: "completed", agentId: "task-1",
+  data: { toolName: "Bash", input: { command: "make -j8" }, background: true, exitCode: 0 }
+}, { tone: "tool", agentId: "task-1", summary: "Background shell" });
+
+test("a background shell's output — in no item's data — answers the host's join as command-output", async () => {
+  const row = shellDone();
+  const api = streaming(row, joinedOutput());
+  const r = await read(api, { itemId: row.id });
+  const text = "make: entering\n  [100%] linked\n";
+  assert.deepEqual(r, { itemId: row.id, kind: "command-output", text, offset: 0, totalBytes: Buffer.byteLength(text) });
+  assert.deepEqual(api.calls.map((c) => `${c.method} ${c.path}`), ["GET /api/sessions", `GET ${agentChatRoutes.item("c1", row.id)}`, `GET ${agentChatRoutes.itemOutput("c1", row.id)}`]);
+});
+
+test("a running call answers its output so far with running: true, and says truncated when the host's cap cut it", async () => {
+  const started = activity("tool.started", { itemType: "command_execution", toolUseId: "call-1", title: "pnpm test", status: "inProgress", data: { item: { command: "pnpm test", aggregatedOutput: null } } }, { tone: "tool" });
+  const so_far = await read(streaming(started, joinedOutput({ toolUseId: "call-1", output: "test 0 passed\n", complete: false })), { itemId: started.id });
+  assert.deepEqual(so_far, { itemId: started.id, kind: "command-output", text: "test 0 passed\n", offset: 0, totalBytes: 14, running: true });
+  // Cut by the host's cap, and escape-heavy (ANSI colours): every page still fits the result cap, flags and all.
+  const long = Array.from({ length: 6_000 }, (_, i) => `\u001b[32m✓\u001b[0m "case ${i}" C:\\tmp\\${i}\n`).join("");
+  const api = streaming(started, joinedOutput({ toolUseId: "call-1", output: long, complete: false, truncated: true }));
+  const { text, pages } = await readAll(api, started.id, MAX_OUTPUT_BYTES);
+  assert.equal(text, long);
+  for (const page of pages) {
+    assert.deepEqual([page.kind, page.running, page.truncated], ["command-output", true, true]);
+    assert.ok(resultBytes(page) <= MAX_RESULT_BYTES, `${resultBytes(page)} bytes`);
+  }
+  assert.ok(resultBytes(pages[0]!) > MAX_RESULT_BYTES - 16, "the window fills the room it has, to the last character");
+});
+
+test("the item's own unslimmed output comes first: the host's join is never asked for it", async () => {
+  const output = `${Array.from({ length: 100 }, (_, i) => `ok ${i}`).join("\n")}\n`;
+  const row = activity("tool.completed", { itemType: "command_execution", toolUseId: "call-1", title: "pnpm test", status: "completed", data: { item: { command: "pnpm test", aggregatedOutput: output } } }, { tone: "tool" });
+  const api = streaming(row, joinedOutput({ toolUseId: "call-1", output: "the streamed copy" }));
+  const r = await read(api, { itemId: row.id });
+  assert.deepEqual([r.kind, r.text, "running" in r], ["command-output", output, false]);
+  assert.ok(!api.calls.some((c) => c.path.endsWith("/output")), "the join was never read");
+});
+
+test("a stored-slimmed update is never command-output: its data is the preview — the join answers, else its payload", async () => {
+  const output = `${Array.from({ length: 50 }, (_, i) => `test ${i} passed`).join("\n")}\n`;
+  const live = activity("tool.updated", { itemType: "command_execution", toolUseId: "call-1", title: "pnpm test", status: "inProgress", data: { item: { command: "pnpm test", aggregatedOutput: output } } }, { tone: "tool" });
+  // As ingestion persists it (§5.6) and `GET …/items/:itemId` serves it back: cut, `truncated` and all.
+  const stored = { ...live, payload: slimActivityPayload(live.payload) } as ThreadItem;
+  const joined = await read(streaming(stored, joinedOutput({ toolUseId: "call-1", output, complete: false })), { itemId: stored.id });
+  assert.deepEqual([joined.kind, joined.text, joined.running], ["command-output", output, true]);
+  // Nothing streamed: the payload as it is stored, never its one-line preview labelled as the output.
+  const none = await read(streaming(stored, joinedOutput({ toolUseId: "call-1", output: "", complete: false })), { itemId: stored.id });
+  assert.deepEqual([none.kind, none.text], ["payload", JSON.stringify(stored.kind === "activity" ? stored.payload : null, null, 2)]);
+});
+
+test("a host without the join — an older one's route miss, or its own 404 — falls back to the item's text, never an error", async () => {
+  const row = shellDone();
+  const payloadText = JSON.stringify(row.payload, null, 2);
+  // Until its drain-restart after a deploy, an older host answers the new route as its generic route miss.
+  const older = streaming(row, { status: 404, body: { error: { code: "THREAD_NOT_FOUND", message: `No route for GET /threads/c1/items/${row.id}/output.` } } });
+  const r = await read(older, { itemId: row.id });
+  assert.deepEqual([r.kind, r.text, "running" in r], ["payload", payloadText, false]);
+  const own = await read(streaming(row, { status: 404, body: { error: { code: "ITEM_NOT_FOUND", message: "No tool call behind item." } } }), { itemId: row.id });
+  assert.deepEqual([own.kind, own.text], ["payload", payloadText]);
+  // Any other failure of the join keeps its code; a body that is not a join is INTERNAL.
+  await assert.rejects(read(streaming(row, { status: 503, body: { error: { code: "HOST_UNAVAILABLE", message: "The agent host is restarting." } } }), { itemId: row.id }),
+    (error: unknown) => error instanceof ToolError && error.code === "HOST_UNAVAILABLE");
+  await assert.rejects(read(streaming(row, { status: 200, body: { output: 7 } }), { itemId: row.id }),
+    (error: unknown) => error instanceof ToolError && error.code === "INTERNAL");
+});
+
+test("a live Claude Bash call streams its result's text as a command's output: a result given as blocks reads back through the join", async () => {
+  // As the Claude normaliser writes it: the completion keeps the tool_result block, and the result's text went out as a
+  // `command_output` delta on the call's own item, which ingestion wrote as a tool.output row.
+  const blocks = commandRow({ toolName: "Bash", input: { command: "ls" }, result: { type: "tool_result", tool_use_id: "call-1", content: [{ type: "text", text: "a.ts\nb.ts\n" }] } });
+  const r = await read(streaming(blocks, joinedOutput({ toolUseId: "call-1", output: "a.ts\nb.ts\n" })), { itemId: blocks.id });
+  assert.deepEqual([r.kind, r.text, "running" in r], ["command-output", "a.ts\nb.ts\n", false]);
+});
+
+test("a file change is never command-output: a Write whose result streamed as file_change_output answers its payload", async () => {
+  // Claude streams every Edit/Write result's text as `file_change_output` (fixture 14a): the host would join it, but it
+  // is no command's output. The payload — the edit's input included — is what the GUI's viewer shows.
+  const write = activity("tool.completed", {
+    itemType: "file_change", toolUseId: "w1", title: "Write", status: "completed",
+    data: { toolName: "Write", input: { file_path: "/w/c.txt", content: "c\n" }, result: { type: "tool_result", tool_use_id: "w1", content: "File created successfully at: /w/c.txt" } }
+  }, { tone: "tool" });
+  const api = streaming(write, joinedOutput({ toolUseId: "w1", output: "File created successfully at: /w/c.txt", complete: true }));
+  const r = await read(api, { itemId: write.id });
+  assert.deepEqual([r.kind, r.text], ["payload", JSON.stringify(write.payload, null, 2)]);
+  assert.match(r.text as string, /"file_path": "\/w\/c\.txt"/);
+  assert.ok(!api.calls.some((c) => c.path.endsWith("/output")), "the join was never read");
+  // A chunk: only a command's (`command_output`) is joined; a file change's is its payload as it is.
+  const editChunk = activity("tool.output", { toolUseId: "w1", streamKind: "file_change_output", delta: "File created successfully at: /w/c.txt" }, { tone: "tool", summary: "Tool output" });
+  const e = await read(streaming(editChunk, joinedOutput({ toolUseId: "w1", output: "File created successfully at: /w/c.txt" })), { itemId: editChunk.id });
+  assert.deepEqual([e.kind, e.text], ["payload", JSON.stringify(editChunk.payload, null, 2)]);
+  const bashChunk = activity("tool.output", { toolUseId: "b1", streamKind: "command_output", delta: "a\n" }, { tone: "tool", summary: "Tool output" });
+  const b = await read(streaming(bashChunk, joinedOutput({ toolUseId: "b1", output: "a\nb\n", complete: false })), { itemId: bashChunk.id });
+  assert.deepEqual([b.kind, b.text, b.running], ["command-output", "a\nb\n", true]);
+});
+
+test("only a command row's call is joined: a message, a task row and a row naming no call never ask the host", async () => {
+  const task = activity("task.started", { taskId: "task-1", toolUseId: "toolu_launch", agentKind: "agent", detail: "Explore" }, { summary: "Task started" });
+  const warning = activity("runtime.warning", { message: "careful" }, { summary: "careful" });
+  for (const item of [message("assistant", "done"), task, warning]) {
+    const api = holding(item);
+    await read(api, { itemId: item.id });
+    assert.ok(!api.calls.some((c) => c.path.endsWith("/output")), item.id);
+  }
+});
+
+test("read_transcript's outputItemId on a background shell's drill-in row is what read_tool_output joins", async () => {
+  const shell = (activityKind: string, payload: Record<string, unknown>) =>
+    activity(activityKind, { toolUseId: "bgshell:task-1", ...payload }, { agentId: "task-1", tone: "tool", turnId: "t1" });
+  const started = shell("tool.started", { itemType: "command_execution", title: "Background shell", status: "inProgress", data: { toolName: "Bash", input: { command: "make" }, background: true } });
+  const chunks = [shell("tool.output", { streamKind: "command_output", delta: "building\n" }), shell("tool.output", { streamKind: "command_output", delta: "  still building\n" })];
+  const served: ThreadSnapshotPayload = snapshot({ turns: [turn({ state: "completed", requestedAt: stamp(0) })], items: [message("user", "build it", { id: "u1" }), started, ...chunks].map((item) => (item.kind === "activity" ? { ...item, payload: slimActivityPayload(item.payload) } : item)) });
+  const api = streaming(started, joinedOutput({ output: "building\n  still building\n", complete: false }))
+    .on("GET", agentChatRoutes.thread("c1"), { status: 200, body: { kind: "snapshot", thread: served } });
+  const transcript = messageTools.find((t) => t.name === "read_transcript")!;
+  const read_ = await transcript.run(parse(transcript, { sessionId: "c1", agentId: "task-1" }), ctx(api));
+  const row = (read_.entries as { kind: string; outputItemId?: string }[]).find((e) => e.kind === "tool")!;
+  assert.equal(row.outputItemId, started.id);
+  const whole = await read(api, { itemId: row.outputItemId! });
+  assert.deepEqual([whole.kind, whole.text, whole.running], ["command-output", "building\n  still building\n", true]);
 });

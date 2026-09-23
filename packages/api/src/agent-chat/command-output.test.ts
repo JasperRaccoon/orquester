@@ -157,7 +157,7 @@ test("the output survives the wire projection every read path applies", () => {
   assert.equal(commandDisplayDetail(codex), "> pnpm test");
 });
 
-// commandOutputText: the WHOLE output (the MCP's read_tool_output), read from the same place the preview reads.
+// commandOutputText: the WHOLE output (the MCP's read_tool_output), read from the places the preview reads, in its order.
 
 test("commandOutputText: Codex's aggregatedOutput whole — every line and its whitespace — where the preview trims it", () => {
   const data = { item: { command: "pnpm test", aggregatedOutput: "\n> pnpm test\n\n  2 passed\n" } };
@@ -210,6 +210,10 @@ test("commandOutputText reads the places in the preview's order: the same place 
   // Grok's real rawOutput (fixture grok/03b): its `output` is a byte array, never text, so output_for_prompt is read.
   const grok = { kind: "execute", rawOutput: { type: "Bash", output: [104, 105, 10], output_for_prompt: "exit: 0\nhi\n", exit_code: 0 }, content: [{ type: "content", content: { type: "text", text: "hi\n" } }] };
   assert.equal(commandOutputText(grok), "exit: 0\nhi\n");
+  // The whole output is the UNSLIMMED item's first place. The wire's preview reads the slimmed data, whose rebuild
+  // keeps only the ACP blocks' summary (as rawOutput.content): a different place, so a different text.
+  const wire = slimActivityPayload(command({ detail: "echo hi", data: grok })) as { data: unknown };
+  assert.equal(commandOutputText(wire.data), "hi");
 });
 
 test("commandOutputText: no output is undefined — no data, blanks, non-text values", () => {
