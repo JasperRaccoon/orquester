@@ -4,6 +4,7 @@ import type { TodoScope } from "@orquester/api";
 import { isValidName, type TodoRecord } from "@orquester/config";
 import { TodoError, type TodoListManager } from "../todos.ts";
 import { ToolError } from "./errors.ts";
+import { capText } from "./result.ts";
 
 export type TodoProjection = {
   id: string;
@@ -110,10 +111,27 @@ function availableItems(tasks: TaskLine[]): string {
   return tasks.map((task) => `${task.index}. ${task.item}`).join(", ");
 }
 
+/** The most of a missing list's id its refusal echoes: the id is the caller's text, of any length (ids are UUIDs). */
+const MAX_SHOWN_ID_CHARS = 100;
+
 /**
- * The todo tools' access to the daemon's todo store. A store refusal is a TodoError and is let through untouched:
- * result.ts maps its status to the code it deserves (404 NOT_FOUND, 409 CONFLICT, else INVALID_ARGUMENT) with the
- * store's own (safe) message — a missing list is not a bad argument.
+ * The store's 404 for a list it does not have ("todo not found"), said where the id is known: the id — capped, quoted
+ * and escaped, so the message stays one short line — and where the ids are.
+ */
+function missingList(id: string): TodoError {
+  const shown = capText(id, MAX_SHOWN_ID_CHARS).truncated ? `${capText(id, MAX_SHOWN_ID_CHARS - 1).text}…` : id;
+  return new TodoError(404, `No todo list with id ${JSON.stringify(shown)}; list_todos shows the ids.`);
+}
+
+/** A store refusal, the 404 for this id named; anything else untouched. */
+const namingMissing = (id: string) => (error: unknown): never => {
+  throw error instanceof TodoError && error.status === 404 ? missingList(id) : error;
+};
+
+/**
+ * The todo tools' access to the daemon's todo store. A store refusal is a TodoError and is let through: result.ts maps
+ * its status to the code it deserves (404 NOT_FOUND, 409 CONFLICT, else INVALID_ARGUMENT) with its (safe) message — a
+ * missing list is not a bad argument. The 404 alone is reworded, to name the id it could not find.
  */
 export class TodoTools {
   constructor(private readonly deps: TodoToolsDeps) {}
@@ -129,11 +147,11 @@ export class TodoTools {
   }
 
   async update(id: string, patch: { name?: string; body?: string }): Promise<TodoProjection> {
-    return projectTodo(await this.deps.todos.update(id, patch));
+    return projectTodo(await this.deps.todos.update(id, patch).catch(namingMissing(id)));
   }
 
   async remove(id: string): Promise<{ deleted: true }> {
-    await this.deps.todos.delete(id);
+    await this.deps.todos.delete(id).catch(namingMissing(id));
     return { deleted: true };
   }
 
@@ -144,8 +162,8 @@ export class TodoTools {
   ): Promise<TodoToggleResult> {
     const todo = this.deps.todos.get(id);
     if (!todo) {
-      // The store's own refusal for a list it does not have, as update and delete answer.
-      throw new TodoError(404, "todo not found");
+      // The store's refusal for a list it does not have, as update and delete answer.
+      throw missingList(id);
     }
 
     const lines = splitBodyLines(todo.body);

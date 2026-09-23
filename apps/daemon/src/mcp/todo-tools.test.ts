@@ -131,8 +131,25 @@ test("toggleItem errors are safe and actionable", async () => {
     return true;
   });
 
-  // A list that does not exist is the store's own 404, let through for result.ts to map (NOT_FOUND).
-  await assert.rejects(() => tools.toggleItem("missing", 1), (err) => err instanceof TodoError && err.status === 404);
-  await assert.rejects(() => tools.update("missing", { name: "x" }), (err) => err instanceof TodoError && err.status === 404);
-  await assert.rejects(() => tools.remove("missing"), (err) => err instanceof TodoError && err.status === 404);
+  // A list that does not exist is the store's 404, for result.ts to map (NOT_FOUND) — named: the id and where the ids are.
+  const missing = (err: unknown) => err instanceof TodoError && err.status === 404 && err.message === 'No todo list with id "missing"; list_todos shows the ids.';
+  await assert.rejects(() => tools.toggleItem("missing", 1), missing);
+  await assert.rejects(() => tools.update("missing", { name: "x" }), missing);
+  await assert.rejects(() => tools.remove("missing"), missing);
+});
+
+test("a missing list's id is echoed capped and escaped: one short line whatever the caller sent", async () => {
+  const { tools } = await makeTools();
+  const cases: [string, RegExp][] = [
+    ["x".repeat(500), /^No todo list with id "x{99}…"; list_todos shows the ids\.$/],
+    ["a\nb\"c", /^No todo list with id "a\\nb\\"c"; list_todos shows the ids\.$/]
+  ];
+  for (const [id, expected] of cases) {
+    await assert.rejects(() => tools.remove(id), (err) => err instanceof TodoError && err.status === 404 && expected.test(err.message));
+  }
+  // Any other store refusal passes through untouched.
+  const conflict = new TodoError(409, "todo changed meanwhile");
+  const refusing = new TodoTools({ todos: { update: async () => { throw conflict; }, delete: async () => { throw conflict; } } as never, workspacesDir: "/w" });
+  await assert.rejects(() => refusing.update("t1", { body: "" }), (err) => err === conflict);
+  await assert.rejects(() => refusing.remove("t1"), (err) => err === conflict);
 });

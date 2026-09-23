@@ -85,10 +85,18 @@ async function answer(name: string, args: Record<string, unknown>, ctx: ToolCont
   try { await tool(name).run(args, ctx); return {}; } catch (error) { return toSafeToolError(error).structuredContent; }
 }
 
-test("the five todo tools answer with the code the failure deserves: a missing list is NOT_FOUND, not a bad argument", async (t) => {
+test("the five todo tools answer with the code the failure deserves: a missing list is NOT_FOUND, not a bad argument, and names the id", async (t) => {
   const { ctx } = await harness(t);
   for (const [name, args] of [["update_todo", { id: "nope", name: "x" }], ["delete_todo", { id: "nope" }], ["toggle_todo_item", { id: "nope", item: 1 }]] as const) {
-    assert.deepEqual(await answer(name, args, ctx), { code: "NOT_FOUND", message: "todo not found" }, name);
+    assert.deepEqual(await answer(name, args, ctx), { code: "NOT_FOUND", message: 'No todo list with id "nope"; list_todos shows the ids.' }, name);
+  }
+  // The id is the caller's text, of any length: it is echoed capped, so a junk id never makes a huge error.
+  const junk = "z".repeat(2 * 1024 * 1024);
+  for (const [name, args] of [["update_todo", { id: junk, body: "" }], ["delete_todo", { id: junk }], ["toggle_todo_item", { id: junk, item: 1 }]] as const) {
+    const { code, message } = await answer(name, args, ctx);
+    assert.equal(code, "NOT_FOUND", name);
+    assert.match(message!, /^No todo list with id "z+…"; list_todos shows the ids\.$/, name);
+    assert.ok(message!.length <= 160, `${name}: ${message!.length} characters`);
   }
   assert.equal((await answer("list_todos", { workspace: "missing" }, ctx)).code, "PROJECT_NOT_FOUND");
   assert.equal((await answer("create_todo", { workspace: "missing", name: "x" }, ctx)).code, "PROJECT_NOT_FOUND");
@@ -98,35 +106,73 @@ test("the five todo tools answer with the code the failure deserves: a missing l
   assert.equal((await answer("toggle_todo_item", { id, item: 2 }, ctx)).code, "INVALID_ARGUMENT");
 });
 
-test("list_todos keeps one result: the oldest lists are left out first, and the result says so", async (t) => {
+const resultSize = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8");
+type Listed = { id: string; name: string; body: string; bodyTruncated?: true };
+
+test("list_todos keeps one result: the oldest lists are left out first, and the result says so and how many", async (t) => {
   const { manager, ctx } = await harness(t);
   for (let i = 0; i < 12; i += 1) {
     const { id } = (await tool("create_todo").run({ workspace: "acme", name: `List ${i}` }, ctx)).todo as { id: string };
     await tool("update_todo").run({ id, body: `- [ ] ${"x".repeat(6_000)}` }, ctx);
   }
-  const stored = manager.list("workspace", "acme").map((r) => r.id); // oldest first, as list_todos lists them
+  const stored = manager.list("workspace", "acme"); // oldest first, as list_todos lists them
   const r = await tool("list_todos").run({ workspace: "acme" }, ctx);
-  const kept = (r.todos as { id: string }[]).map((x) => x.id);
+  const todos = r.todos as Listed[];
+  const kept = todos.map((x) => x.id);
   assert.equal(r.truncated, true);
   assert.ok(kept.length > 0 && kept.length < stored.length, `${kept.length} kept`);
-  assert.deepEqual(kept, stored.slice(stored.length - kept.length), "the newest lists, still oldest first");
-  const bytes = Buffer.byteLength(JSON.stringify(r), "utf8");
+  assert.deepEqual(kept, stored.slice(stored.length - kept.length).map((s) => s.id), "the newest lists, still oldest first");
+  assert.equal(r.omittedLists, stored.length - kept.length, "how many lists were left out");
+  // Every list that is listed is listed whole: an agent may edit one and write it back.
+  assert.deepEqual(todos.map((x) => [x.body, "bodyTruncated" in x]), stored.slice(stored.length - kept.length).map((s) => [s.body, false]));
+  const bytes = resultSize(r);
   assert.ok(bytes <= MAX_RESULT_BYTES, `${bytes} bytes`);
   assert.equal(ok(r).structuredContent, r, "bounded by the tool itself: ok() passes it through");
+  // As many as fit: the next-oldest list would not have.
+  const nextOldest = stored[stored.length - kept.length - 1]!;
+  const withOneMore = { todos: [{ ...nextOldest, refKey: undefined }, ...todos], truncated: true, omittedLists: stored.length - kept.length - 1 };
+  assert.ok(resultSize(withOneMore) > MAX_RESULT_BYTES, "one more list would not have fitted");
   // A small set is whole, and says nothing about truncation.
   const small = await tool("list_todos").run({ project: "acme/api" }, ctx);
   assert.deepEqual(small, { todos: [] });
 });
 
-test("list_todos: a newest list too big for a result on its own keeps its name and the head of its body", async (t) => {
+test("list_todos: a newest list too big for a result on its own keeps its name and the head of its body, marked bodyTruncated", async (t) => {
   const { ctx } = await harness(t);
   const { id } = (await tool("create_todo").run({ workspace: "acme", name: "Huge" }, ctx)).todo as { id: string };
   const body = `- [ ] ${"y".repeat(70_000)}`;
   await tool("update_todo").run({ id, body }, ctx);
   const r = await tool("list_todos").run({ workspace: "acme" }, ctx);
-  const [only] = r.todos as { id: string; name: string; body: string }[];
+  const [only] = r.todos as Listed[];
   assert.equal(r.truncated, true);
   assert.equal(only!.id, id); assert.equal(only!.name, "Huge");
   assert.ok(body.startsWith(only!.body) && only!.body.length > 50_000, `kept ${only!.body.length} characters`);
-  assert.ok(Buffer.byteLength(JSON.stringify(r), "utf8") <= MAX_RESULT_BYTES);
+  assert.equal(only!.bodyTruncated, true, "the cut body says so: written back whole, it would delete the tail");
+  assert.equal("omittedLists" in r, false, "no list was left out");
+  assert.ok(resultSize(r) <= MAX_RESULT_BYTES);
+});
+
+test("list_todos: beside older lists, a newest list too big on its own is still the one kept, cut and marked, and the rest are counted out", async (t) => {
+  const { manager, ctx } = await harness(t);
+  for (let i = 0; i < 4; i += 1) {
+    const { id } = (await tool("create_todo").run({ workspace: "acme", name: `List ${i}` }, ctx)).todo as { id: string };
+    await tool("update_todo").run({ id, body: `- [ ] item ${i}` }, ctx);
+  }
+  // The store's own order says which list is the newest (two lists can share a createdAt millisecond).
+  const { id } = manager.list("workspace", "acme").at(-1)!;
+  const body = Array.from({ length: 5_000 }, (_, i) => `- [ ] task ${i}: 項目 "quoted"`).join("\n"); // ~150 KB, escapes and CJK included
+  await tool("update_todo").run({ id, body }, ctx);
+  const r = await tool("list_todos").run({ workspace: "acme" }, ctx);
+  const todos = r.todos as Listed[];
+  assert.deepEqual(todos.map((x) => x.id), [id]);
+  assert.deepEqual([r.truncated, r.omittedLists, todos[0]!.bodyTruncated], [true, 3, true]);
+  assert.ok(body.startsWith(todos[0]!.body), "the head of the body, never a mangled middle");
+  const size = resultSize(r);
+  assert.ok(size <= MAX_RESULT_BYTES && size > MAX_RESULT_BYTES - 16, `${size} bytes: within the cap, and filled to it`);
+});
+
+test("list_todos' description warns that a bodyTruncated list is incomplete", () => {
+  const description = tool("list_todos").description;
+  assert.ok(description.includes("a list marked bodyTruncated is incomplete — never write it back whole"), description);
+  assert.match(description, /omittedLists/);
 });
