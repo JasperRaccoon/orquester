@@ -401,7 +401,8 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
   const fitted = fitEntries(sizedEntries, budget - frame(widest, true, listed.trimmed) - listed.bytes);
   // What the entries leave unused goes back to the roster: one more pass over that room. It can only re-add rows,
   // the last dropped first (live ones, newest first), since the entries never used more than the first pass left.
-  // It also makes the first pass's `room − E` decide nothing: that term only spares this pass when the entries are small.
+  // The first pass's `room − E` term is kept as ruled but has been redundant since this pass: on a shed result it
+  // always trims the roster, so this pass still runs and finds the same rows. It spares nothing.
   if (listed.trimmed) listed = fitRoster(sizedAgents, room - fitted.bytes);
   return result(fitted.entries, listed.rows, true, listed.trimmed);
 }
