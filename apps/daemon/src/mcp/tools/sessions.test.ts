@@ -187,6 +187,15 @@ test("create_session refuses to resume a proxy-home conversation that names no l
   assert.ok(!h.api.calls.some((c) => c.method === "POST"), "nothing was created — plain claude would have opened an empty session");
 });
 
+test("create_session: a disabled agent's refusal carries the registry's disabledReason when there is one", async (t) => {
+  const h = await harness(); t.after(h.close);
+  const down = { ...registry, agents: registry.agents.map((a) => (a.id === "claudex" ? { ...a, enabled: false, disabledReason: "proxy down" } : a)) };
+  h.api.on("GET", "/api/registry", { status: 200, body: down });
+  await assert.rejects(tool("create_session").run({ project: "acme/api", agent: "claudex", runtimeMode: "full-access" }, h.ctx),
+    (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && e.message === "claudex is not available on this host: proxy down.");
+  assert.ok(!h.api.calls.some((c) => c.method === "POST"), "nothing was created");
+});
+
 test("create_session cwd: resolved against the project, and it must be an existing directory inside the sandbox", async (t) => {
   const h = await harness(); t.after(h.close);
   await mkdir(join(h.projectPath, "src"));
@@ -208,7 +217,7 @@ test("create_session refusals: unknown project, disabled agent, bad model, wrong
   const h = await harness(); t.after(h.close);
   const run = (a: Record<string, unknown>) => tool("create_session").run({ runtimeMode: "full-access", ...a }, h.ctx);
   await assert.rejects(run({ project: "acme/nope", agent: "claude" }), (e: { code: string }) => e.code === "PROJECT_NOT_FOUND");
-  await assert.rejects(run({ project: "acme/api", agent: "grok" }), (e: { message: string }) => /not available/.test(e.message));
+  await assert.rejects(run({ project: "acme/api", agent: "grok" }), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && e.message === "grok is not available on this host (not installed or disabled).");
   await assert.rejects(run({ project: "acme/api", agent: "claude", model: "gpt-9" }), (e: { message: string }) => /default, haiku/.test(e.message));
   await assert.rejects(run({ project: "acme/api", agent: "claude", accountId: "acc-2" }), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /acc-1/.test(e.message));
   await assert.rejects(run({ project: "acme/api", agent: "claude", cwd: "/etc" }), (e: { code: string }) => e.code === "PATH_NOT_ALLOWED");
@@ -353,6 +362,32 @@ test("interrupt_session names the running turn, and with none stops the backgrou
   idle.api.on("POST", "/api/sessions/c1/interrupt", { status: 200, body: { seq: 9 } });
   await tool("interrupt_session").run({ sessionId: "c1" }, idle.ctx);
   assert.deepEqual(commandBodies(idle.api, "interrupt"), [{}], "no running turn → stop background work");
+});
+
+test("close_session sends the DELETE for the tab it names, chat or terminal, and refuses an unknown id without sending one", async (t) => {
+  const h = await harness(); t.after(h.close);
+  h.api.on("DELETE", "/api/sessions/c1", { status: 204, body: null }).on("DELETE", "/api/sessions/t1", { status: 204, body: null });
+  assert.deepEqual(await tool("close_session").run({ sessionId: "t1" }, h.ctx), { closed: true, sessionId: "t1" });
+  assert.deepEqual(await tool("close_session").run({ sessionId: "c1" }, h.ctx), { closed: true, sessionId: "c1" });
+  assert.deepEqual(h.api.calls.filter((c) => c.method === "DELETE").map((c) => c.path), ["/api/sessions/t1", "/api/sessions/c1"]);
+  await assert.rejects(tool("close_session").run({ sessionId: "zz" }, h.ctx), (e: { code: string }) => e.code === "SESSION_NOT_FOUND");
+  assert.equal(h.api.calls.filter((c) => c.method === "DELETE").length, 2, "no DELETE for an unknown id");
+  // A DELETE the daemon refuses is its answer, never a { closed: true }.
+  h.api.on("DELETE", "/api/sessions/c1", { status: 409, body: { code: "SESSION_BUSY", message: "The tab is being moved." } });
+  await assert.rejects(tool("close_session").run({ sessionId: "c1" }, h.ctx), (e: { code: string; message: string }) => e.code === "SESSION_BUSY" && e.message === "The tab is being moved.");
+});
+
+test("compact_session posts exactly the compact command, returns its seq with the session, and passes a host refusal through", async (t) => {
+  const h = await harness(); t.after(h.close);
+  h.api.on("POST", "/api/sessions/c1/compact", { status: 200, body: { seq: 12 } });
+  const r = await tool("compact_session").run({ sessionId: "c1" }, h.ctx);
+  assert.equal(r.seq, 12);
+  assert.equal((r.session as { id: string }).id, "c1");
+  assert.deepEqual(h.api.calls.filter((c) => c.method === "POST").map((c) => c.path), ["/api/sessions/c1/compact"]);
+  assert.deepEqual(commandBodies(h.api, "compact"), [{}]);
+  await assert.rejects(tool("compact_session").run({ sessionId: "t1" }, h.ctx), (e: { code: string }) => e.code === "NOT_A_CHAT_SESSION");
+  h.api.on("POST", "/api/sessions/c1/compact", { status: 409, body: { error: { code: "COMPACTION_UNAVAILABLE", message: "A turn is running." } } });
+  await assert.rejects(tool("compact_session").run({ sessionId: "c1" }, h.ctx), (e: { code: string; message: string }) => e.code === "COMPACTION_UNAVAILABLE" && e.message === "A turn is running.");
 });
 
 /** Three settled turns, each opened by its own user message: the thread a rewind starts from. */
@@ -583,7 +618,33 @@ test("get_turn_diff defaults to the latest checkpointed turn, includes the check
   h.api.on("GET", "/api/sessions/c1/turns/2/diff", { status: 200, body: { fromTurnCount: 1, toTurnCount: 2, diff: "+a\n" } });
   const small = await tool("get_turn_diff").run({ sessionId: "c1", turn: 2 }, h.ctx);
   assert.equal(small.diff, "+a\n"); assert.equal(small.truncated, false);
-  await assert.rejects(tool("get_turn_diff").run({ sessionId: "c1", turn: 5 }, h.ctx), (e: { code: string }) => e.code === "THREAD_NOT_FOUND" || e.code === "NOT_FOUND" || e.code === "INVALID_ARGUMENT");
+  assert.equal("filesTruncated" in small, false, "a short file list is whole and says nothing");
+  // A turn with no checkpoint of its own: the host's 404 (agent-host http-server.ts) passes through as it is.
+  h.api.on("GET", "/api/sessions/c1/turns/5/diff", { status: 404, body: { error: { code: "THREAD_NOT_FOUND", message: "No checkpoint for turn 5." } } });
+  await assert.rejects(tool("get_turn_diff").run({ sessionId: "c1", turn: 5 }, h.ctx), (e: { code: string; message: string }) => e.code === "THREAD_NOT_FOUND" && e.message === "No checkpoint for turn 5.");
+});
+
+test("get_turn_diff with no turn named and no checkpoint yet refuses on its own, before asking the host for a diff", async (t) => {
+  const h = await harness([chatSummary()], snapshot({ checkpoints: [] })); t.after(h.close);
+  await assert.rejects(tool("get_turn_diff").run({ sessionId: "c1" }, h.ctx), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && e.message === "This session has no checkpointed turn yet.");
+  assert.ok(!h.api.calls.some((c) => c.path.endsWith("/diff")), "no diff was asked for");
+});
+
+test("get_turn_diff bounds a huge file list too: the head that fits, filesTruncated and omittedFiles, and the diff keeps the rest of the budget", async (t) => {
+  const files = Array.from({ length: 5_000 }, (_, i) => ({ path: `src/generated/module-${i}/index.ts`, additions: i, deletions: 1 }));
+  const snap = snapshot({ head: head({ turnCount: 2 }), checkpoints: [{ turnId: "t2", checkpointTurnCount: 2, checkpointRef: "r", status: "ready", files, assistantMessageId: null, completedAt: stamp(3) }] });
+  const h = await harness([chatSummary()], snap); t.after(h.close);
+  h.api.on("GET", "/api/sessions/c1/turns/2/diff", { status: 200, body: { fromTurnCount: 1, toTurnCount: 2, diff: "d".repeat(90_000) } });
+  const r = await tool("get_turn_diff").run({ sessionId: "c1" }, h.ctx);
+  const listed = r.files as typeof files;
+  assert.ok(listed.length > 100 && listed.length < files.length, `${listed.length} files listed`);
+  assert.deepEqual(listed, files.slice(0, listed.length), "the head of the list, in the checkpoint's order");
+  assert.equal(r.filesTruncated, true);
+  assert.equal(r.omittedFiles, files.length - listed.length);
+  const bytes = Buffer.byteLength(JSON.stringify(r), "utf8");
+  assert.ok(bytes <= MAX_RESULT_BYTES && bytes > MAX_RESULT_BYTES - 8, `${bytes} bytes: within one result, the diff filling the rest`);
+  assert.ok((r.diff as string).length > 25_000, "the file list leaves the diff most of the result");
+  assert.deepEqual(ok(r).structuredContent, r, "ok() passes it through");
 });
 
 test("every session tool parameter is described, nested ones included; revert_session's keepTurns counts from the first turn", () => {
@@ -598,4 +659,10 @@ test("every session tool parameter is described, nested ones included; revert_se
   });
   assert.deepEqual(sessionTools.flatMap((d) => undescribed(d.input, d.name)), []);
   assert.match(tool("revert_session").input.keepTurns.description ?? "", /0 = rewind to before the first turn; N = keep turns 1\.\.N/);
+  // The field a caller reads is chat.sessionStatus; OpenCode history is never listed; the file list is bounded too.
+  assert.match(tool("stop_session").description, /whose chat\.sessionStatus is error/);
+  assert.match(tool("close_session").description, /stays resumable via list_conversations for Claude, Codex and Grok \(and claudex\/claudemix from their proxy homes\); OpenCode history is not listed\./);
+  assert.doesNotMatch(tool("get_turn_diff").description, /every changed file/);
+  assert.match(tool("get_turn_diff").description, /filesTruncated/);
+  for (const d of sessionTools) assert.ok(d.description.length <= 400, `${d.name}: ${d.description.length} characters`);
 });

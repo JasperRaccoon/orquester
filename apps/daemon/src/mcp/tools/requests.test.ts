@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 import { FakeDaemonApi } from "../testing.ts";
-import { activity, chatSummary, shellSummary, snapshot, stamp } from "../fixtures.ts";
+import { activity, chatSummary, head, shellSummary, snapshot, stamp } from "../fixtures.ts";
 import type { ToolContext } from "../tool.ts";
 import { requestTools } from "./requests.ts";
 
@@ -177,6 +177,25 @@ test("resolve_approval lists every pending id when several are open, and resolve
   assert.equal((await tool("resolve_approval").run({ sessionId: "c1", requestId: "r2", decision: "acceptForSession" }, h.ctx)).seq, 42);
   const body = h.api.calls.find((c) => c.path === "/api/sessions/c1/approval")!.body as { requestId: string; decision: string };
   assert.equal(body.requestId, "r2"); assert.equal(body.decision, "acceptForSession");
+});
+
+test("answer_question answers a Codex async question (responseMode \"message\") that outlived its turn: one /answer, the host makes it a message", async (t) => {
+  // Codex's request_user_input in async mode: dismissible, answered by a later user message; the turn that asked is over.
+  const asyncQuestion = { requestId: "q7", turnId: "t1", createdAt: stamp(2), dismissible: true, responseMode: "message" as const, questions: [
+    { id: "deploy_target", header: "Target", question: "Deploy to which environment?", options: [{ label: "staging", description: "safe" }, { label: "production", description: "live" }], multiSelect: false, allowCustomAnswer: true },
+    { id: "notes", header: "Notes", question: "Anything else?", options: [], multiSelect: false, allowCustomAnswer: true }
+  ] };
+  const codex = chatSummary({ refId: "codex", hasPendingUserInput: true, chatSessionStatus: "ready" });
+  const h = await harness([codex], snapshot({ head: head({ refId: "codex", adapter: "codex" }), pending: { approvals: [], userInputs: [asyncQuestion] } })); t.after(h.close);
+  h.api.on("POST", "/api/sessions/c1/answer", { status: 200, body: { seq: 60 } });
+  const r = await tool("answer_question").run({ sessionId: "c1", answers: { "1": "Production", notes: "after 18:00" } }, h.ctx);
+  assert.equal(r.seq, 60);
+  assert.equal(detailOf(r).id, "c1");
+  const posted = h.api.calls.filter((c) => c.method === "POST");
+  assert.deepEqual(posted.map((c) => c.path), ["/api/sessions/c1/answer"], "an answer, never a turn: the host turns it into the message");
+  const { commandId, ...body } = posted[0]!.body as Record<string, unknown>;
+  assert.equal(typeof commandId, "string");
+  assert.deepEqual(body, { requestId: "q7", answers: { deploy_target: "production", notes: "after 18:00" } });
 });
 
 test("an empty requestId is refused, never read as omitted: with one request pending it would have acted on that one", async (t) => {

@@ -1,7 +1,7 @@
 import { stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
-import { SYSTEM_ACCOUNT_ID, type AgentConversationsResponse, type CreateSessionRequest, type SessionSummary } from "@orquester/api";
+import { SYSTEM_ACCOUNT_ID, type AgentConversationsResponse, type CreateSessionRequest, type RegistryResponse, type SessionSummary } from "@orquester/api";
 import { agentChatRoutes, RUNTIME_MODES, startedTurns, type AccountHomeKind, type CreateAgentChatSessionFields, type ModelSelection, type RuntimeMode, type StartedTurn, type ThreadActivityItem, type ThreadItem, type ThreadSnapshotPayload, type TurnDiffResponse } from "@orquester/api/agent-chat";
 import { assertInsideFsRoot, FsSandboxError } from "@orquester/config/fs";
 import { resolveProject } from "../addressing.ts";
@@ -9,7 +9,7 @@ import { conversationLaunch, findAgent, isProxyAgent, launchesProxyModel, loadAg
 import type { DaemonApi } from "../daemon-api.ts";
 import { ToolError, expectOk } from "../errors.ts";
 import { findSession, listSessions, readThread, requireChatSession, sendCommand } from "../reads.ts";
-import { fitJsonBytes, MAX_RESULT_BYTES, toSafeToolError } from "../result.ts";
+import { fitJsonBytes, MAX_RESULT_BYTES, resultBytes, toSafeToolError } from "../result.ts";
 import { defineTool, DESTRUCTIVE, MUTATING, MUTATING_IDEMPOTENT, READ_ONLY, type ToolContext, type ToolDef } from "../tool.ts";
 import { buildViewContext, chatDetail, sessionView } from "../views.ts";
 import { byAttention } from "./watch.ts";
@@ -88,10 +88,30 @@ const getSession = defineTool({
   }
 });
 
+/**
+ * The most get_turn_diff's file list takes of the result, in JSON bytes: a turn that regenerated thousands of files would
+ * otherwise leave the diff nothing, or push the result past the cap.
+ */
+const MAX_DIFF_FILES_BYTES = 20_000;
+
+/** A checkpoint's changed files, the head that fits MAX_DIFF_FILES_BYTES, and how many were left out. */
+function fitFiles(files: readonly { path: string; additions: number; deletions: number }[]): { files: { path: string; additions: number; deletions: number }[]; omitted: number } {
+  const kept: { path: string; additions: number; deletions: number }[] = [];
+  let used = 2; // the brackets
+  for (const f of files) {
+    const row = { path: f.path, additions: f.additions, deletions: f.deletions };
+    const cost = resultBytes(row) + (kept.length ? 1 : 0); // the separating comma
+    if (used + cost > MAX_DIFF_FILES_BYTES) break;
+    used += cost;
+    kept.push(row);
+  }
+  return { files: kept, omitted: files.length - kept.length };
+}
+
 const getTurnDiff = defineTool({
   name: "get_turn_diff",
   title: "Get a turn's diff",
-  description: "The unified diff of the files a turn changed (the GUI's changed-files card). Defaults to the latest turn with a checkpoint. A diff too large for one result is cut at the end (truncated:true); `files` still lists every changed file.",
+  description: "The unified diff of the files a turn changed (the GUI's changed-files card). Defaults to the latest turn with a checkpoint. A diff too large for one result is cut at the end (truncated:true); a file list too long is cut too (filesTruncated:true, omittedFiles counts the rest).",
   input: { sessionId: sessionIdField, turn: z.number().int().min(1).optional().describe("Turn number (1-based); default: the latest checkpointed turn.") },
   annotations: READ_ONLY,
   async run(args, { api }) {
@@ -103,8 +123,8 @@ const getTurnDiff = defineTool({
     const turnCount = args.turn ?? latestCheckpointed;
     if (turnCount < 1) throw new ToolError("INVALID_ARGUMENT", "This session has no checkpointed turn yet.");
     const res = expectOk<TurnDiffResponse>(await api.request("GET", agentChatRoutes.turnDiff(args.sessionId, turnCount), { query: { ignoreWhitespace: "1" } }), "diff");
-    const files = snap.checkpoints.find((c) => c.checkpointTurnCount === turnCount)?.files ?? [];
-    const result = { turn: res.toTurnCount, fromTurn: res.fromTurnCount, files: files.map((f) => ({ path: f.path, additions: f.additions, deletions: f.deletions })), diff: "", truncated: false };
+    const listed = fitFiles(snap.checkpoints.find((c) => c.checkpointTurnCount === turnCount)?.files ?? []);
+    const result = { turn: res.toTurnCount, fromTurn: res.fromTurnCount, files: listed.files, ...(listed.omitted ? { filesTruncated: true, omittedFiles: listed.omitted } : {}), diff: "", truncated: false };
     // The diff gets whatever the rest of the result leaves of the result budget, so the whole
     // result survives `ok()` intact instead of being shed to a bare prefix.
     const diff = fitJsonBytes(res.diff, MAX_RESULT_BYTES - Buffer.byteLength(JSON.stringify(result), "utf8"));
@@ -132,6 +152,15 @@ async function resolveCwd(api: DaemonApi, projectPath: string, input: string): P
 }
 
 interface ResumeRow { id: string; agent: string; title: string; home: AccountHomeKind; accountId?: string }
+
+/** Why the registry disabled an agent (`RegistryEntry.disabledReason` — "proxy down", …), when it says; read only to refuse. */
+async function disabledReason(api: DaemonApi, refId: string): Promise<string | undefined> {
+  const res = await api.request("GET", "/api/registry");
+  if (res.status >= 400) return undefined;
+  const reason = ((res.body as RegistryResponse | null)?.agents ?? []).find((entry) => entry.id === refId)?.disabledReason;
+  const text = typeof reason === "string" ? reason.trim().replace(/\.+$/, "") : "";
+  return text || undefined;
+}
 
 const createSession = defineTool({
   name: "create_session",
@@ -168,7 +197,10 @@ const createSession = defineTool({
     if (!refId) throw new ToolError("INVALID_ARGUMENT", "agent is required (see list_agents).");
     if (resumeRow && args.agent && resumeRow.agent !== args.agent) throw new ToolError("INVALID_ARGUMENT", `Conversation "${resumeRow.id}" belongs to ${resumeRow.agent}, not ${args.agent}.`);
     const agent = findAgent(await loadAgents(api), refId);
-    if (!agent.enabled) throw new ToolError("INVALID_ARGUMENT", `${refId} is not available on this host (not installed or disabled).`);
+    if (!agent.enabled) {
+      const reason = await disabledReason(api, refId);
+      throw new ToolError("INVALID_ARGUMENT", reason ? `${refId} is not available on this host: ${reason}.` : `${refId} is not available on this host (not installed or disabled).`);
+    }
     const selection = resolveModelSelection(agent, { model: args.model, options: args.options });
     let accountId = validateAccountId(agent, args.accountId);
     // The GUI's `resumeAccountId`: a transcript in a managed account's home is visible only from there, so that
@@ -296,7 +328,7 @@ const interruptSession = defineTool({
 const stopSession = defineTool({
   name: "stop_session",
   title: "Stop the agent process",
-  description: "Stop the provider process but keep the tab, its history and resume cursor; the next send_message resumes it. Use it to recover a session whose status is error.",
+  description: "Stop the provider process but keep the tab, its history and resume cursor; the next send_message resumes it. Use it to recover a session whose chat.sessionStatus is error.",
   input: { sessionId: sessionIdField },
   annotations: MUTATING_IDEMPOTENT,
   async run(args, { api }) {
@@ -309,7 +341,7 @@ const stopSession = defineTool({
 const closeSession = defineTool({
   name: "close_session",
   title: "Close a session",
-  description: "Close a tab (chat or terminal). A chat's thread is deleted; the provider's own transcript stays resumable via list_conversations.",
+  description: "Close a tab (chat or terminal). A chat's thread is deleted; the provider's own transcript stays resumable via list_conversations for Claude, Codex and Grok (and claudex/claudemix from their proxy homes); OpenCode history is not listed.",
   input: { sessionId: sessionIdField },
   annotations: DESTRUCTIVE,
   async run(args, { api }) {
