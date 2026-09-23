@@ -5,16 +5,18 @@ import { clipText, fitJsonBytes, MAX_RESULT_BYTES, resultBytes } from "../result
 import type { TodoProjection, TodoSelector } from "../todo-tools.ts";
 import { closedWorld, defineTool, DESTRUCTIVE, MUTATING, MUTATING_IDEMPOTENT, READ_ONLY, type ToolContext, type ToolDef } from "../tool.ts";
 
+// min(1), and `!== undefined` in scope(): an empty field is a field given, never read as omitted — beside the other one
+// it would put the list in the other scope.
 const scopeFields = {
-  workspace: z.string().optional().describe("Workspace name, for that workspace's own lists. Pass this or `project`."),
-  project: z.string().optional().describe("Absolute project path or \"<workspace>/<project>\", for that project's lists. Pass this or `workspace`.")
+  workspace: z.string().min(1).optional().describe("Workspace name, for that workspace's own lists. Pass this or `project`."),
+  project: z.string().min(1).optional().describe("Absolute project path or \"<workspace>/<project>\", for that project's lists. Pass this or `workspace`.")
 };
 const idField = z.string().min(1).describe("The todo list id from list_todos or create_todo.");
 
 /** Spec §7.9: exactly one of `workspace` / `project`, the project resolved like every other tool's. */
 async function scope(ctx: ToolContext, args: { workspace?: string; project?: string }): Promise<TodoSelector> {
-  if (Boolean(args.workspace) === Boolean(args.project)) throw new ToolError("INVALID_ARGUMENT", "Pass exactly one of workspace or project.");
-  if (!args.project) return { workspace: args.workspace! };
+  if ((args.workspace !== undefined) === (args.project !== undefined)) throw new ToolError("INVALID_ARGUMENT", "Pass exactly one of workspace or project.");
+  if (args.project === undefined) return { workspace: args.workspace! };
   const ref = await resolveProject(ctx.api, args.project);
   // resolveProject only returns a `<workspace>/<project>` directory; the guard narrows the types.
   if (!ref.workspace || !ref.name) throw new ToolError("PROJECT_NOT_FOUND", "Todo lists need a project inside a workspace.");

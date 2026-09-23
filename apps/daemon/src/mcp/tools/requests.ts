@@ -8,11 +8,12 @@ import { defineTool, MUTATING, type ToolDef } from "../tool.ts";
 import { chatDetail, pendingApprovalViews, pendingQuestionViews, type PendingQuestionView } from "../views.ts";
 
 const sessionIdField = z.string().min(1).describe("The session id from list_sessions.");
-const requestIdField = z.string().optional().describe("The request id from get_session; may be omitted when exactly one is pending.");
+// min(1): an empty requestId is not an omitted one — read as omitted, it would act on the one request pending.
+const requestIdField = z.string().min(1).optional().describe("The request id from get_session; may be omitted when exactly one is pending.");
 const DECISIONS = ["accept", "acceptForSession", "acceptAlways", "decline", "cancel"] as const satisfies readonly ApprovalDecision[];
 
 function pick<T extends { requestId: string }>(rows: T[], requestId: string | undefined, noun: string): T {
-  if (requestId) {
+  if (requestId !== undefined) {
     const hit = rows.find((r) => r.requestId === requestId);
     if (!hit) throw new ToolError("INVALID_ARGUMENT", `No pending ${noun} with requestId "${requestId}". Pending: ${rows.map((r) => r.requestId).join(", ") || "none"}.`);
     return hit;

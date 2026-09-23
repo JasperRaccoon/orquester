@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { z } from "zod";
 import { TodoListManager } from "../../todos.ts";
 import { ToolError } from "../errors.ts";
 import { MAX_RESULT_BYTES, ok, toSafeToolError } from "../result.ts";
@@ -66,6 +67,22 @@ test("exactly one of workspace or project, and the project must resolve inside t
   await assert.rejects(tool("create_todo").run({ project: join(root, "outside"), name: "x" }, ctx), code("PATH_NOT_ALLOWED"));
   await assert.rejects(tool("create_todo").run({ workspace: "missing", name: "x" }, ctx), code("PROJECT_NOT_FOUND"));
   assert.equal(manager.list("workspace", "acme").length + manager.list("workspace", "missing").length, 0, "nothing was created");
+});
+
+test("an empty workspace or project is refused, never read as omitted: the list never lands in the other scope", async (t) => {
+  const { workspacesDir, manager, ctx } = await harness(t);
+  for (const name of ["list_todos", "create_todo"]) {
+    for (const field of ["workspace", "project"]) {
+      const parsed = z.object(tool(name).input).safeParse({ [field]: "", name: "x" });
+      assert.equal(parsed.success, false, `${name}: the schema refuses an empty ${field}`);
+    }
+  }
+  // Past the schema too: one empty field beside a real one is two fields given, not one.
+  await assert.rejects(tool("create_todo").run({ workspace: "acme", project: "", name: "x" }, ctx), code("INVALID_ARGUMENT"));
+  await assert.rejects(tool("create_todo").run({ workspace: "", project: "acme/api", name: "x" }, ctx), code("INVALID_ARGUMENT"));
+  await assert.rejects(tool("list_todos").run({ project: "" }, ctx), code("PROJECT_NOT_FOUND"));
+  await assert.rejects(tool("list_todos").run({ workspace: "" }, ctx), code("PROJECT_NOT_FOUND"));
+  assert.equal(manager.list("workspace", "acme").length + manager.list("project", join(workspacesDir, "acme", "api")).length, 0, "nothing was created");
 });
 
 test("update_todo renames and replaces the body; toggle_todo_item ticks one item; delete_todo removes the list", async (t) => {
@@ -188,21 +205,38 @@ async function bigList(ctx: ToolContext): Promise<{ id: string; body: string }> 
 test("toggle_todo_item on a 3 000-item list: the toggle is whole, and its result is one result — visibly a success, the body's head marked bodyTruncated", async (t) => {
   const { manager, ctx } = await harness(t);
   const { id, body } = await bigList(ctx);
-  const checked = body.replace("- [ ] task 2999:", "- [x] task 2999:");
-  const r = await tool("toggle_todo_item").run({ id, item: 2_999 }, ctx);
-  assert.deepEqual([r.id, r.item, r.checked, r.bodyTruncated], [id, `task 2999: 項目 "quoted" \\ ${"x".repeat(10)}`, true, true], "the id, the item and its new state, whole");
+  // Item 2 lies inside the head one result can carry, so the returned body can — and must — show the new state.
+  const checked = body.replace("- [ ] task 2:", "- [x] task 2:");
+  const r = await tool("toggle_todo_item").run({ id, item: 2 }, ctx);
+  assert.deepEqual([r.id, r.item, r.checked, r.bodyTruncated], [id, `task 2: 項目 "quoted" \\ ${"x".repeat(10)}`, true, true], "the id, the item and its new state, whole");
   const size = resultSize(r);
   assert.ok(size <= MAX_RESULT_BYTES && size > MAX_RESULT_BYTES - 16, `${size} bytes: within one result, filled to it`);
   assert.equal(ok(r).structuredContent, r, "ok() passes it through: never the truncation note");
-  assert.ok(checked.startsWith(r.body as string), "the head of the new body");
-  assert.equal(manager.get(id)!.body, checked, "the write itself is whole: item 2999 ticked, the other 2 999 as they were");
-  // Flipping it again is visibly a success too, and restores the list exactly.
-  const back = await tool("toggle_todo_item").run({ id, item: 2_999 }, ctx);
+  const head = r.body as string;
+  assert.ok(head.includes("- [x] task 2:"), "the returned head shows the item ticked");
+  assert.ok(checked.startsWith(head), "the head of the new body");
+  assert.ok(!body.startsWith(head), "not the head of the old one");
+  assert.equal(manager.get(id)!.body, checked, "the write itself is whole: item 2 ticked, the other 2 999 as they were");
+  // Flipping it again is visibly a success too: the head shows the item unticked, and the list is restored exactly.
+  const back = await tool("toggle_todo_item").run({ id, item: 2 }, ctx);
   assert.deepEqual([back.checked, back.bodyTruncated, ok(back).structuredContent === back], [false, true, true]);
+  assert.ok(body.startsWith(back.body as string) && !checked.startsWith(back.body as string), "the head of the restored body");
   assert.equal(manager.get(id)!.body, body);
-  // An explicit state that is already set writes nothing and answers the same way.
-  const same = await tool("toggle_todo_item").run({ id, item: 2_999, checked: false }, ctx);
+  // A retry with the state already set writes nothing — the store emits no update and updatedAt stays — and still
+  // answers with the item, its state and the body's head.
+  const updatedAt = manager.get(id)!.updatedAt;
+  let updates = 0;
+  const onUpdated = () => { updates += 1; };
+  manager.lifecycle.on("updated", onUpdated);
+  t.after(() => { manager.lifecycle.off("updated", onUpdated); });
+  const same = await tool("toggle_todo_item").run({ id, item: 2, checked: false }, ctx);
+  assert.equal(updates, 0, "nothing was written");
+  assert.equal(manager.get(id)!.updatedAt, updatedAt, "updatedAt unchanged");
   assert.deepEqual([same.checked, same.bodyTruncated, resultSize(same) <= MAX_RESULT_BYTES], [false, true, true]);
+  assert.ok(body.startsWith(same.body as string), "the head of the unchanged body");
+  // The listener does see a write: the retry's silence above is real.
+  await tool("toggle_todo_item").run({ id, item: 2, checked: true }, ctx);
+  assert.equal(updates, 1);
 });
 
 test("update_todo on a 3 000-item list: a rename keeps the whole body, a rewrite stores it whole, and each result is one result marked bodyTruncated", async (t) => {

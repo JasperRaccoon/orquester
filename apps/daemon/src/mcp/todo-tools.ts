@@ -107,16 +107,25 @@ function taskLines(lines: BodyLine[]): TaskLine[] {
   return tasks;
 }
 
-/** How many of a list's items a refusal names, and the most of each: the list's own text, of any length and count. */
+/**
+ * How many of a list's items a refusal names, and the most of each: the list's own text, of any length and count. 70,
+ * not more: beside a quote escaped at its longest (602 characters), the longest refusal — the ambiguous one, 40 items at
+ * 70 — is 3 701 characters for a 3 000-item list, so MAX_ERROR_MESSAGE_CHARS (result.ts) never cuts its tail, whatever
+ * the input. At 80 it was 4 101.
+ */
 const MAX_LISTED_ITEMS = 40;
-const MAX_LISTED_ITEM_CHARS = 80;
+const MAX_LISTED_ITEM_CHARS = 70;
 
 function availableItems(tasks: TaskLine[]): string {
   const listed = tasks.slice(0, MAX_LISTED_ITEMS).map((task) => `${task.index}. ${clipText(task.item, MAX_LISTED_ITEM_CHARS)}`).join(", ");
   return tasks.length > MAX_LISTED_ITEMS ? `${listed}, … (${tasks.length} items)` : listed;
 }
 
-/** A caller's value — a list id, an item's text — as a refusal quotes it: capped, quoted and escaped onto one line. */
+/**
+ * A caller's value — a list id, an item's text — as a refusal quotes it: capped, quoted and escaped onto one line. The
+ * cap is in code points and comes BEFORE the escaping, so a control character or a lone surrogate costs six characters:
+ * a quote is at most 602.
+ */
 const quoted = (text: string): string => JSON.stringify(clipText(text, MAX_ECHO_CHARS));
 
 /**
@@ -223,7 +232,10 @@ export class TodoTools {
       throw new ToolError("INVALID_ARGUMENT", `Task item text is required. Available items: ${availableItems(tasks)}.`);
     }
 
-    const matches = tasks.filter((task) => task.item.toLowerCase() === needle.toLowerCase());
+    // Lowercased ONCE: the caller's text can be megabytes, and lowercasing it per item blocked the event loop for
+    // seconds on a long list.
+    const wanted = needle.toLowerCase();
+    const matches = tasks.filter((task) => task.item.toLowerCase() === wanted);
     if (matches.length === 0) {
       throw new ToolError("INVALID_ARGUMENT", `No task item matching ${quoted(item)}. Available items: ${availableItems(tasks)}.`);
     }

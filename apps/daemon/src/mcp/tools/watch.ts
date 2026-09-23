@@ -7,6 +7,20 @@ import { defineTool, READ_ONLY, type ToolDef } from "../tool.ts";
 import { buildViewContext, sessionView } from "../views.ts";
 import { waitForAttention, type WatchScope } from "../wait.ts";
 
+const instant = (stamp: string | null | undefined): number => Date.parse(stamp ?? "");
+const createdAt = (s: SessionSummary): number => { const t = instant(s.createdAt); return Number.isNaN(t) ? 0 : t; };
+/** When a session called for attention; one with no parseable stamp counts from its tab's creation, as the GUI's `flaggedAt`. */
+const flaggedAt = (s: SessionSummary): number => { const t = instant(s.activity?.needsAttentionAt); return Number.isNaN(t) ? createdAt(s) : t; };
+
+/**
+ * THE Attention Center order, for every tool that lists flagged sessions (wait_for_session, list_sessions
+ * `attention: true`): newest attention first, by the instant — never by the string, which puts an offset stamp out of
+ * place — and a tie to the newer tab.
+ */
+export function byAttention(a: SessionSummary, b: SessionSummary): number {
+  return flaggedAt(b) - flaggedAt(a) || createdAt(b) - createdAt(a);
+}
+
 const waitForSession = defineTool({
   name: "wait_for_session",
   title: "Wait for a session to need you",
@@ -30,10 +44,8 @@ const waitForSession = defineTool({
     const r = await waitForAttention(api, { ...scope, after, timeoutMs: args.timeoutMs, signal, now });
     if (r.sessions.length === 0) return { sessions: [], cursor: r.cursor, timedOut: r.timedOut };
     const ctx = await buildViewContext(api);
-    // Newest attention first, as the Attention Center lists its flagged rows; a tie goes to the newer tab.
-    // attentionQualifies guarantees every returned session a parseable stamp.
-    const at = (s: SessionSummary) => Date.parse(s.activity!.needsAttentionAt!);
-    const sessions = [...r.sessions].sort((a, b) => at(b) - at(a) || Date.parse(b.createdAt) - Date.parse(a.createdAt)).map((s) => sessionView(s, ctx));
+    // Newest attention first, as the Attention Center lists its flagged rows (attentionQualifies guarantees each a stamp).
+    const sessions = [...r.sessions].sort(byAttention).map((s) => sessionView(s, ctx));
     return { sessions, cursor: r.cursor, timedOut: r.timedOut };
   }
 });
