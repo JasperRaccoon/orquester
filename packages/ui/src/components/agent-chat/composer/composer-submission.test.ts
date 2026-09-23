@@ -4,6 +4,7 @@ import { MAX_TURN_INPUT_CHARS } from "@orquester/api/agent-chat";
 
 import {
   attachmentRejectionReason,
+  buildPlanImplementationPrompt,
   composerPromptLengthValidationMessage,
   composerSubmissionIntentForEnter,
   composerSubmissionValidationMessage,
@@ -17,6 +18,7 @@ import {
   proposedPlanTitle,
   resolveFollowUpDisposition,
   resolvePlanFollowUpSubmission,
+  sendComposerTurn,
   stagedAttachmentKeyForRef,
   submitIsNoOp,
   swallowsStandalonePlanCommand,
@@ -471,4 +473,80 @@ test("R2-3: only a STANDALONE command is swallowed", () => {
     }),
     null
   );
+});
+
+// ---------------------------------------------------------------------------
+// The send step: Implement reads a cut plan back whole (§5.6, §7.3, §7.4)
+// ---------------------------------------------------------------------------
+
+/** A stand-in for the store's `sendTurn`: records what reached the wire. */
+function recordingSend(failure?: Error): { sent: string[]; send: (text: string) => Promise<void> } {
+  const sent: string[] = [];
+  return {
+    sent,
+    send: async (text) => {
+      sent.push(text);
+      if (failure) throw failure;
+    }
+  };
+}
+
+/** What Implement holds for a plan the wire cut at 16 KiB: the prompt ends in "…". */
+const CUT_PROMPT = buildPlanImplementationPrompt("# Ship it\n\nstep 1…");
+
+test("Implement on a plan that cannot be read back sends nothing, and says why", async () => {
+  const wire = recordingSend();
+  const outcome = await sendComposerTurn({
+    text: CUT_PROMPT,
+    resolveText: () =>
+      Promise.reject(new Error("The full plan could not be loaded, so nothing was sent. Try again.")),
+    send: wire.send
+  });
+  assert.deepEqual(outcome, {
+    kind: "refused",
+    notice: "The full plan could not be loaded, so nothing was sent. Try again."
+  });
+  assert.deepEqual(wire.sent, [], "nothing reached the wire");
+  // A reader that rejects with a bare value still gets an honest notice.
+  const bare = await sendComposerTurn({ text: CUT_PROMPT, resolveText: () => Promise.reject("gone"), send: wire.send });
+  assert.deepEqual(bare, { kind: "refused", notice: "The full plan could not be loaded." });
+  assert.deepEqual(wire.sent, []);
+});
+
+test("a read-back prompt over the turn bound is refused before it is sent, and nothing goes back to the draft", async () => {
+  const whole = buildPlanImplementationPrompt(`# Ship it\n\n${"step ".repeat(MAX_TURN_INPUT_CHARS / 5)}`);
+  // The composer measured the CUT prompt, which fits; only the whole one is over.
+  assert.equal(composerPromptLengthValidationMessage(CUT_PROMPT), null);
+  const expected = composerPromptLengthValidationMessage(whole);
+  assert.ok(expected !== null, "the whole prompt is over the bound");
+  const wire = recordingSend();
+  const outcome = await sendComposerTurn({ text: CUT_PROMPT, resolveText: async () => whole, send: wire.send });
+  // `refused` carries no text: only a FAILED send is written back into the
+  // draft, so the whole prompt never lands in the composer.
+  assert.deepEqual(outcome, { kind: "refused", notice: expected });
+  assert.deepEqual(wire.sent, [], "the host never had to refuse it");
+});
+
+test("a plan read back whole is what gets sent, not the cut one", async () => {
+  const whole = buildPlanImplementationPrompt(`# Ship it\n\n${"step\n".repeat(4_000)}done`);
+  assert.ok(whole.length > 16 * 1024, "longer than the wire's cut");
+  const wire = recordingSend();
+  const outcome = await sendComposerTurn({ text: CUT_PROMPT, resolveText: async () => whole, send: wire.send });
+  assert.deepEqual(outcome, { kind: "sent" });
+  assert.deepEqual(wire.sent, [whole]);
+});
+
+test("a plain send goes out as typed, and one the host refuses comes back whole for the draft", async () => {
+  const wire = recordingSend();
+  assert.deepEqual(await sendComposerTurn({ text: "fix the tests", send: wire.send }), { kind: "sent" });
+  assert.deepEqual(wire.sent, ["fix the tests"]);
+
+  const whole = buildPlanImplementationPrompt("# Ship it\n\nevery step");
+  const refusing = recordingSend(new Error("The agent host is restarting."));
+  assert.deepEqual(await sendComposerTurn({ text: CUT_PROMPT, resolveText: async () => whole, send: refusing.send }), {
+    kind: "failed",
+    text: whole,
+    notice: "The agent host is restarting."
+  });
+  assert.deepEqual(refusing.sent, [whole]);
 });

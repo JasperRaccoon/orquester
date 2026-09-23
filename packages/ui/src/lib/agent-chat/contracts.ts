@@ -362,6 +362,12 @@ export type AgentChatTimelineRow =
       createdAt: string;
       planMarkdown: string;
       implementedAt: string | null;
+      /**
+       * The wire cut `planMarkdown` at 16 KiB (§5.6). The card's Copy and
+       * Download then read the whole plan back (`readFullPlanMarkdown`)
+       * rather than hand over text that ends in "…".
+       */
+      truncated?: true;
     }
   /**
    * The live placeholders. `compacting` is set while the thread is in the

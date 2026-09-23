@@ -61,6 +61,14 @@ export interface TimelineRowContextValue {
   onOpenTurnDiff: (turnCount: number) => void;
   onOpenFile: (path: string) => void;
   onLoadFullOutput: (itemId: string) => void;
+  /**
+   * The whole markdown of a plan proposal — the store's `readFullPlanMarkdown`,
+   * the read Implement makes: as is when intact, read back when the wire cut it
+   * (§5.6). The plan card's Copy and Download go through it
+   * (`wholePlanMarkdown`), so neither hands over the cut text. Rejects rather
+   * than ever answer it.
+   */
+  readFullPlanMarkdown: (plan: { id: string; planMarkdown: string; truncated?: true }) => Promise<string>;
   onOpenAgent: (agentId: string) => void;
   onSendQueuedNow: (queuedId: string) => void;
   onReturnQueuedToComposer: (queuedId: string) => void;
@@ -112,6 +120,11 @@ const FALLBACK: TimelineRowContextValue = {
   onOpenTurnDiff: NOOP,
   onOpenFile: NOOP,
   onLoadFullOutput: NOOP,
+  // Outside a timeline there is no thread to read a cut plan back from.
+  readFullPlanMarkdown: (plan) =>
+    plan.truncated === true
+      ? Promise.reject(new Error("The full plan could not be loaded."))
+      : Promise.resolve(plan.planMarkdown),
   onOpenAgent: NOOP,
   onSendQueuedNow: NOOP,
   onReturnQueuedToComposer: NOOP,

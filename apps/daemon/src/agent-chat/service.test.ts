@@ -1,13 +1,23 @@
 import { strict as assert } from "node:assert";
 import { once } from "node:events";
+import { createWriteStream } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { Readable } from "node:stream";
 import { test } from "node:test";
+import Fastify, { type FastifyInstance } from "fastify";
 import type { AgentAccount, RegistryEntry } from "@orquester/api";
-import { agentHostSocketPath, agentHostTokenPath } from "@orquester/config";
+import {
+  agentHostSocketPath,
+  agentHostTokenPath,
+  createDefaultClientConfig,
+  createDefaultDaemonConfig
+} from "@orquester/config";
+import { Broadcaster } from "../broadcaster.ts";
+import { createServer as createDaemonApp } from "../index.ts";
+import { InjectDaemonApi } from "../mcp/daemon-api.ts";
 import type {
   CreateHostThreadRequest,
   SetThreadIdentityRequest
@@ -87,7 +97,7 @@ const OPENCODE: RegistryEntry = {
 async function makeFixture(
   entry: RegistryEntry,
   launch: { env: Record<string, string>; unset?: string[]; accountId?: string } | null,
-  options: { now?: () => number; adopt?: boolean } = {}
+  options: { now?: () => number; adopt?: boolean; uploadLimitBytes?: number } = {}
 ): Promise<Fixture> {
   const appdir = await mkdtemp(join(tmpdir(), "orq-chat-service-"));
   // The REAL paths, so boot adoption probes the fake host rather than deciding
@@ -199,6 +209,7 @@ async function makeFixture(
     sendAttachment: async (reply) => reply,
     nodeBin: "/usr/bin/node",
     ...(options.now ? { now: options.now } : {}),
+    ...(options.uploadLimitBytes !== undefined ? { uploadLimitBytes: options.uploadLimitBytes } : {}),
     sleep: async () => undefined,
     // A test must never start an agent host process.
     spawnDirect: () => {
@@ -789,7 +800,7 @@ test("an upload refused before it was sent leaves a failing body nothing to cras
   }
 });
 
-test("past its cap the counted body still fails with UploadTooLargeError, and the request survives it", async () => {
+test("past its cap the counted body still fails with UploadTooLargeError, and leaves its source to its owner", async () => {
   const source = new Readable({ read() {} });
   const counted = countingLimit(source, 4);
   const failed = once(counted, "error");
@@ -797,7 +808,132 @@ test("past its cap the counted body still fails with UploadTooLargeError, and th
   source.push(Buffer.from("12345"));
   const [error] = await failed;
   assert.ok(error instanceof UploadTooLargeError);
-  // `receiveUpload`'s rule (`upload-stream.ts`): a half-read request that was
-  // destroyed cannot carry the route's refusal back to the client.
+  // `countingLimit` never destroys its source: the request is the route's,
+  // and the route ends it with its own refusal (`refuseUpload`).
   assert.equal(source.destroyed, false);
+});
+
+// The daemon's cap is the one upload failure that is the CALLER's, not the
+// host's. The host client reports it as HOST_UNAVAILABLE like everything else,
+// so `uploadAttachment` hands it on typed, and both of its callers — the
+// daemon's upload route and the MCP seam — answer 413 UPLOAD_TOO_LARGE rather
+// than telling the client to retry a host that is fine. The fixture host
+// answers only once the body is in, as the real one does, so a 5-byte body
+// against a 4-byte cap trips while the host client still waits for headers.
+
+/** A 5-byte octet-stream body for `thread-1`, one byte over the fixtures' cap. */
+const OVER_CAP_UPLOAD = {
+  method: "POST",
+  url: "/api/sessions/thread-1/upload?name=big.bin",
+  headers: { "content-type": "application/octet-stream" },
+  payload: Buffer.from("12345")
+} as const;
+
+/**
+ * The daemon's own upload route over a partial `services`, with the inject-only
+ * harness of `project-create-routes.test.ts`: nothing listens. `thread-1` is
+ * the one chat tab it knows.
+ */
+function chatUploadRoute(appdir: string, agentChat: unknown): FastifyInstance {
+  type Args = Parameters<typeof createDaemonApp>;
+  const workspacesDir = join(appdir, "ws");
+  return createDaemonApp(
+    createDefaultDaemonConfig({ env: {} }),
+    {
+      daemonDir: join(appdir, "daemon"),
+      workspacesDir,
+      workspacesMetaFile: join(appdir, "daemon", "workspaces.json"),
+      fsRoot: workspacesDir
+    } as unknown as Args[1],
+    createDefaultClientConfig(join(appdir, "daemon.sock")),
+    createWriteStream("/dev/null"),
+    {
+      sessions: { get: (id: string) => (id === "thread-1" ? { id, kind: "agent-chat" } : undefined) },
+      agentChat
+    } as unknown as Args[4],
+    { authRequired: false, mode: "local" }
+  );
+}
+
+test("past the daemon's cap an upload rejects with the typed UploadTooLargeError, never as HOST_UNAVAILABLE", async () => {
+  const f = await makeFixture(CLAUDEX, { env: {} }, { uploadLimitBytes: 4 });
+  try {
+    await assert.rejects(
+      f.service.uploadAttachment("thread-1", { name: "big.bin" }, Readable.from([Buffer.from("12345")])),
+      UploadTooLargeError
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("an over-cap chat upload answers 413 UPLOAD_TOO_LARGE through the daemon's upload route, not 503", async () => {
+  const f = await makeFixture(CLAUDEX, { env: {} }, { uploadLimitBytes: 4 });
+  const app = chatUploadRoute(f.appdir, f.service);
+  try {
+    const res = await app.inject({ ...OVER_CAP_UPLOAD, headers: { ...OVER_CAP_UPLOAD.headers } });
+    assert.equal(res.statusCode, 413);
+    assert.deepEqual(res.json(), { code: "UPLOAD_TOO_LARGE", message: new UploadTooLargeError().message });
+    assert.equal(res.headers.connection, "close", "a refusal that leaves the body unread closes the socket");
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
+});
+
+test("the upload route answers a cap refusal the host client wrapped 413 too, and any other host failure 503", async () => {
+  const appdir = await mkdtemp(join(tmpdir(), "orq-chat-upload-route-"));
+  const answers: Array<{ status: number; code: unknown }> = [];
+  try {
+    for (const failure of [
+      new HostUnavailableError(new UploadTooLargeError().message, new UploadTooLargeError()),
+      new HostUnavailableError("connect ENOENT agent-host.sock")
+    ]) {
+      const app = chatUploadRoute(appdir, {
+        // No chat proxy routes: only the upload route is under test.
+        routeDeps: () => undefined,
+        uploadAttachment: async () => {
+          throw failure;
+        }
+      });
+      try {
+        const res = await app.inject({ ...OVER_CAP_UPLOAD, headers: { ...OVER_CAP_UPLOAD.headers } });
+        answers.push({ status: res.statusCode, code: (res.json() as { code?: unknown }).code });
+      } finally {
+        await app.close();
+      }
+    }
+  } finally {
+    await rm(appdir, { recursive: true, force: true });
+  }
+  assert.deepEqual(answers, [
+    { status: 413, code: "UPLOAD_TOO_LARGE" },
+    { status: 503, code: "HOST_UNAVAILABLE" }
+  ]);
+});
+
+test("an over-cap chat upload answers 413 UPLOAD_TOO_LARGE through the MCP seam too, and logs nothing", async (t) => {
+  const logged = t.mock.method(console, "error", () => undefined);
+  const f = await makeFixture(CLAUDEX, { env: {} }, { uploadLimitBytes: 4 });
+  const app = Fastify();
+  try {
+    const seam = new InjectDaemonApi({
+      app,
+      authorization: undefined,
+      agentChat: f.service,
+      broadcaster: new Broadcaster(),
+      fsRoot: f.appdir,
+      workspacesDir: f.appdir
+    });
+    const bytes = Readable.from([Buffer.from("12345")]);
+    assert.deepEqual(await seam.uploadAttachment("thread-1", { name: "big.bin" }, bytes), {
+      status: 413,
+      value: { code: "UPLOAD_TOO_LARGE", message: new UploadTooLargeError().message }
+    });
+    assert.equal(logged.mock.callCount(), 0, "a size refusal is an answer, not a failure to log");
+    assert.equal(bytes.destroyed, true, "the seam still ends the stream it owns");
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
 });

@@ -701,6 +701,44 @@ describe("stable rows", () => {
   });
 });
 
+describe("the plan card row (§7.3)", () => {
+  it("carries the wire's cut (§5.6), so Copy and Download know to read the whole plan back", () => {
+    const rows = deriveTimelineRows(
+      baseInput(
+        entriesFrom([
+          activity(
+            "turn.proposed.completed",
+            { planMarkdown: "# Cut\n\nstep 1…", truncated: true },
+            { id: "p-cut", createdAt: stamp(1) }
+          ),
+          activity("turn.proposed.completed", { planMarkdown: "# Whole" }, { id: "p-whole", createdAt: stamp(2) })
+        ])
+      )
+    );
+    const plans = rows.flatMap((row) => (row.kind === "proposed-plan" ? [row] : []));
+    assert.deepEqual(
+      plans.map((row) => [row.id, row.truncated]),
+      [
+        ["p-cut", true],
+        ["p-whole", undefined]
+      ]
+    );
+    assert.equal("truncated" in plans[1]!, false, "an intact plan's row carries no flag at all");
+  });
+
+  it("makes the cut part of the row's identity check", () => {
+    const plan: AgentChatTimelineRow = {
+      kind: "proposed-plan",
+      id: "p",
+      createdAt: stamp(1),
+      planMarkdown: "# Plan",
+      implementedAt: null
+    };
+    assert.equal(isRowUnchanged(plan, { ...plan }), true);
+    assert.equal(isRowUnchanged(plan, { ...plan, truncated: true }), false);
+  });
+});
+
 describe("formatWorkDuration", () => {
   it("matches T3's shape at every boundary", () => {
     assert.equal(formatWorkDuration(0), "1ms");

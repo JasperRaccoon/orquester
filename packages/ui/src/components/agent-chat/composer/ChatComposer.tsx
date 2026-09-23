@@ -72,6 +72,7 @@ import {
   proposedPlanTitle,
   resolveFollowUpDisposition,
   resolvePlanFollowUpSubmission,
+  sendComposerTurn,
   submitIsNoOp,
   swallowsStandalonePlanCommand,
   uploadsBlockSend
@@ -883,34 +884,37 @@ export function ChatComposer({
     ) => {
       setSending(true);
       try {
-        if (resolveText) {
-          try {
-            text = await resolveText();
-          } catch (error) {
-            // Nothing was sent and the draft stays empty: the plan is still
-            // actionable, so Implement is still there to press again.
-            setNotice(error instanceof Error ? error.message : "The full plan could not be loaded.");
-            return;
-          }
-        }
-        await actions.sendTurn({
+        const outcome = await sendComposerTurn({
           text,
-          ...(refs.length > 0 ? { attachments: refs } : {}),
-          interactionMode: mode,
-          ...(modelSelection ? { modelSelection } : {})
+          ...(resolveText ? { resolveText } : {}),
+          send: (resolved) =>
+            actions.sendTurn({
+              text: resolved,
+              ...(refs.length > 0 ? { attachments: refs } : {}),
+              interactionMode: mode,
+              ...(modelSelection ? { modelSelection } : {})
+            })
         });
-        // The keyboard is worse than a lost second on mobile: dismiss it only
-        // once the send actually succeeded.
-        if (isMobile) textareaRef.current?.blur();
-      } catch (error) {
-        // A failed send goes back to the FRONT of the draft, ahead of anything
-        // typed since, so nothing the user wrote while it was in flight is
-        // reordered behind it.
-        setDraft((state) => ({
-          ...state,
-          text: state.text.trim().length > 0 ? `${text}\n\n${state.text}` : text
-        }));
-        setNotice(error instanceof Error ? error.message : "Could not send the message.");
+        if (outcome.kind === "sent") {
+          // The keyboard is worse than a lost second on mobile: dismiss it only
+          // once the send actually succeeded.
+          if (isMobile) textareaRef.current?.blur();
+          return;
+        }
+        if (outcome.kind === "failed") {
+          // A failed send goes back to the FRONT of the draft, ahead of anything
+          // typed since, so nothing the user wrote while it was in flight is
+          // reordered behind it.
+          const restored = outcome.text;
+          setDraft((state) => ({
+            ...state,
+            text: state.text.trim().length > 0 ? `${restored}\n\n${state.text}` : restored
+          }));
+        }
+        // A refusal sent nothing and leaves the draft alone: a plan that could
+        // not be read back, or read back over the bound, is still actionable,
+        // so Implement is still there to press again.
+        setNotice(outcome.notice);
       } finally {
         setSending(false);
       }
@@ -974,7 +978,8 @@ export function ChatComposer({
       const outgoing = plan?.text ?? text.trim();
       const outgoingMode = plan?.interactionMode ?? interactionMode;
       // §5.6 cut this proposal at 16 KiB on the wire: Implement reads the whole
-      // plan back first, and sends nothing when it cannot.
+      // plan back first, and sends nothing when it cannot or when the whole
+      // prompt is over the bound the cut one passed below (`sendComposerTurn`).
       const cutPlan = plan?.action === "implement" && planFollowUp?.truncated ? planFollowUp : null;
       const wholePlanText = cutPlan
         ? () => actions.readFullPlanMarkdown(cutPlan).then(buildPlanImplementationPrompt)

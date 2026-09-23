@@ -128,6 +128,7 @@ import {
   acceptRawBody,
   declaredLengthExceedsCap,
   discardUpload,
+  isUploadTooLarge,
   receiveUpload,
   refuseUpload,
   uploadTempPath
@@ -4038,8 +4039,12 @@ export function createServer(
             const uploaded = await services.agentChat.uploadAttachment(id, request.query, request.raw);
             return reply.code(uploaded.status).send(uploaded.value ?? undefined);
           } catch (error) {
-            if (error instanceof UploadTooLargeError) {
-              return refuseUpload(reply, 413, "UPLOAD_TOO_LARGE", error.message);
+            // The cap is the caller's failure, never the host's. The service
+            // hands it on typed; the predicate also reads it through the host
+            // client's HOST_UNAVAILABLE wrapper, so a 413 never depends on who
+            // unwrapped it.
+            if (isUploadTooLarge(error)) {
+              return refuseUpload(reply, 413, "UPLOAD_TOO_LARGE", new UploadTooLargeError().message);
             }
             request.log?.warn?.({ err: error }, "agent chat attachment upload failed");
             return refuseUpload(reply, 503, "HOST_UNAVAILABLE", "The agent host is restarting.");

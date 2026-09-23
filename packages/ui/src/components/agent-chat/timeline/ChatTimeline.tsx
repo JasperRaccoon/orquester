@@ -198,6 +198,22 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
     [disclosures, onDisclosureChange]
   );
 
+  /**
+   * A plan proposal's whole markdown, for the plan card's Copy and Download.
+   * Read off the store at call time, as `rememberScroll` below does: a card
+   * holds no session id, and a drill-in reads through the parent's slice, whose
+   * items the plan belongs to.
+   */
+  const readFullPlanMarkdown = React.useCallback(
+    (plan: { id: string; planMarkdown: string; truncated?: true }) => {
+      const store = peekThreadStore(sessionId);
+      return store
+        ? store.getState().actions.readFullPlanMarkdown(plan)
+        : Promise.reject(new Error("The full plan could not be loaded."));
+    },
+    [sessionId]
+  );
+
   const context = React.useMemo<TimelineRowContextValue>(
     () => ({
       workspaceRoot: projectPath,
@@ -230,6 +246,7 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
       onOpenTurnDiff,
       onOpenFile,
       onLoadFullOutput,
+      readFullPlanMarkdown,
       onOpenAgent,
       onSendQueuedNow: effectiveReadOnly ? NOOP_STRING : onSendQueuedNow,
       onReturnQueuedToComposer: effectiveReadOnly ? NOOP_STRING : onReturnQueuedToComposer,
@@ -248,6 +265,7 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
       onOpenAgent,
       onOpenFile,
       onOpenTurnDiff,
+      readFullPlanMarkdown,
       onRevert,
       onBackgroundTool,
       onReturnQueuedToComposer,

@@ -370,6 +370,70 @@ export function resolvePlanFollowUpSubmission(input: {
 }
 
 // ---------------------------------------------------------------------------
+// The send step (§7.3, §7.4)
+// ---------------------------------------------------------------------------
+
+/**
+ * How one send ended, for the composer to render:
+ *  - `sent` — the transport took exactly the text it was handed;
+ *  - `refused` — nothing was sent, and the draft is left as it is;
+ *  - `failed` — the transport rejected; `text` is what goes back to the draft,
+ *    the only outcome that writes it.
+ */
+export type ComposerSendOutcome =
+  | { kind: "sent" }
+  | { kind: "refused"; notice: string }
+  | { kind: "failed"; text: string; notice: string };
+
+/**
+ * The step between "the user pressed send" and the wire.
+ *
+ * Most sends already hold their text. An Implement on a plan the wire cut at
+ * 16 KiB (§5.6) holds only the cut prompt, so `resolveText` reads the whole
+ * plan back and builds the prompt first — and when it cannot, nothing is sent.
+ * The prompt it resolves is also the one that meets the turn input bound
+ * (§4.1) here: the draft was validated on the CUT prompt, and a prompt only
+ * the host refuses would come back as a failed send, writing the whole plan
+ * into the composer. A plain send was validated before its draft was cleared,
+ * and is not measured again.
+ *
+ * `send` is the transport (the store's `sendTurn`), passed in so every branch
+ * is testable without a renderer.
+ */
+export async function sendComposerTurn(input: {
+  text: string;
+  resolveText?: () => Promise<string>;
+  send: (text: string) => Promise<void>;
+}): Promise<ComposerSendOutcome> {
+  let text = input.text;
+  if (input.resolveText) {
+    try {
+      text = await input.resolveText();
+    } catch (error) {
+      return {
+        kind: "refused",
+        notice: error instanceof Error ? error.message : "The full plan could not be loaded."
+      };
+    }
+    const validation = composerSubmissionValidationMessage({
+      prompt: text,
+      submissionTarget: "provider-turn"
+    });
+    if (validation) return { kind: "refused", notice: validation };
+  }
+  try {
+    await input.send(text);
+    return { kind: "sent" };
+  } catch (error) {
+    return {
+      kind: "failed",
+      text,
+      notice: error instanceof Error ? error.message : "Could not send the message."
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // The submit-path guards (V1: R7-3 and R2-3 had no honest test)
 // ---------------------------------------------------------------------------
 

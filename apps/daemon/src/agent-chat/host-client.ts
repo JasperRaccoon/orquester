@@ -33,6 +33,11 @@ export const HOST_RESPONSE_LIMIT_BYTES = 64 * 1024 * 1024;
  * The host is not answering: no socket, connection refused, or the request
  * timed out. Every route maps this to 503 `HOST_UNAVAILABLE` (§6.2) — the one
  * error the client is told to retry with the same `commandId`.
+ *
+ * `cause` is the failure it wraps, kept whole. That includes a request body
+ * that failed, and one such failure is the CALLER's rather than the host's: a
+ * chat upload passing the daemon's cap (`countingLimit`) must still answer
+ * 413, which is why `isUploadTooLarge` (`upload-stream.ts`) looks here too.
  */
 export class HostUnavailableError extends Error {
   readonly code = "HOST_UNAVAILABLE";
