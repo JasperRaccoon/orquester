@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { TodoError, TodoListManager } from "../todos.ts";
 import { TodoTools } from "./todo-tools.ts";
 import { ToolError } from "./errors.ts";
-import { MAX_ERROR_MESSAGE_CHARS } from "./result.ts";
+import { MAX_ERROR_MESSAGE_CHARS, toSafeToolError } from "./result.ts";
 
 async function makeTools() {
   const root = await mkdtemp(join(tmpdir(), "todo-tools-"));
@@ -94,6 +94,33 @@ test("toggleItem by text is exact after trim and case-insensitive", async () => 
   assert.equal(result.body, "- [x]   Write Tests  \n- [ ] write docs");
 });
 
+test("a 2 MiB item against a 3 000-item list is matched in one pass: the item is lowercased once, not once per list item", async () => {
+  const { tools } = await makeTools();
+  const big = await tools.create({ workspace: "w" }, "Big");
+  await tools.update(big.id, { body: Array.from({ length: 3_000 }, (_, i) => `- [ ] Task ${i + 1}`).join("\n") });
+  const item = "Q".repeat(2 * 1024 * 1024);
+  // Counted by hand, not with t.mock: a mock records every call's result, and each would be a 2 MiB string.
+  const original = String.prototype.toLowerCase;
+  let lowercasedChars = 0;
+  let longLowercased = 0;
+  String.prototype.toLowerCase = function (this: string): string {
+    lowercasedChars += this.length;
+    if (this.length >= item.length) longLowercased += 1;
+    return original.call(this);
+  };
+  let err: unknown;
+  try {
+    err = await tools.toggleItem(big.id, item).then(() => undefined, (e: unknown) => e);
+  } finally {
+    String.prototype.toLowerCase = original;
+  }
+  assert.ok(err instanceof ToolError && err.code === "INVALID_ARGUMENT", String(err));
+  assert.match(err.message, /^No task item matching "Q{99}…"\. Available items: 1\. Task 1, 2\. Task 2, .*, … \(3000 items\)\.$/);
+  assert.equal(longLowercased, 1, "the caller's item is lowercased once, before the comparison");
+  // One pass over the input: the item once, and the list's own short texts — 3 000 × 2 MiB before the fix.
+  assert.ok(lowercasedChars < item.length + 100_000, `${lowercasedChars} characters lowercased`);
+});
+
 test("toggleItem explicit same-state set preserves the existing body", async () => {
   const { tools } = await makeTools();
   const todo = await tools.create({ workspace: "w" }, "Tasks");
@@ -173,7 +200,7 @@ test("a refusal quotes the caller's item capped and escaped, and a long list's i
   const twins = await tools.create({ workspace: "w" }, "Twins");
   await tools.update(twins.id, { body: `- [ ] ${long}\n- [ ] ${long}` });
   const ambiguous = await refusal(long, twins.id);
-  assert.match(ambiguous, /^Task item "L{99}…" is ambiguous; use index\. Available items: 1\. L{79}…, 2\. L{79}…\.$/);
+  assert.match(ambiguous, /^Task item "L{99}…" is ambiguous; use index\. Available items: 1\. L{69}…, 2\. L{69}…\.$/);
   // A 3 000-item list: the first 40 items listed, then how many there are.
   const big = await tools.create({ workspace: "w" }, "Big");
   await tools.update(big.id, { body: Array.from({ length: 3_000 }, (_, i) => `- [ ] task ${i + 1}`).join("\n") });
@@ -181,11 +208,34 @@ test("a refusal quotes the caller's item capped and escaped, and a long list's i
   assert.ok(outOfRange.startsWith("No task item at index 5000. Available items: 1. task 1, 2. task 2, "), outOfRange.slice(0, 120));
   assert.ok(outOfRange.endsWith("40. task 40, … (3000 items)."), outOfRange.slice(-60));
   assert.ok(outOfRange.length < 1_000, `${outOfRange.length} characters`);
-  // The longest refusal there can be — the quote at its cap, 40 listed items at theirs — still ends whole under the
-  // error cap (result.ts), so that backstop never cuts its tail.
+});
+
+test("the longest refusal there can be ends whole under the error cap, whatever the input: the quote escaped at its longest, 40 items at their cap", async () => {
+  const { tools } = await makeTools();
+  const refusal = async (id: string, item: string): Promise<string> => {
+    const err = await tools.toggleItem(id, item).then(() => assert.fail("toggleItem resolved"), (e: unknown) => e);
+    assert.ok(err instanceof ToolError && err.code === "INVALID_ARGUMENT", String(err));
+    return err.message;
+  };
+  // quoted() clips to 100 code points and THEN escapes: a control character or a lone surrogate is six characters, so a
+  // quote takes up to 602. The ambiguous template is the longest one; two items share the control-character text.
+  const control = "\u0001".repeat(100);
+  const lines = Array.from({ length: 3_000 }, (_, i) => `- [ ] ${i} ${"w".repeat(300)}`);
+  lines[0] = `- [ ] ${control}`;
+  lines[1] = `- [ ] ${control}`;
   const wide = await tools.create({ workspace: "w" }, "Wide");
-  await tools.update(wide.id, { body: Array.from({ length: 3_000 }, (_, i) => `- [ ] ${i} ${"w".repeat(300)}`).join("\n") });
-  const longest = await refusal("y".repeat(10_000), wide.id);
-  assert.ok(longest.endsWith(", … (3000 items)."), longest.slice(-40));
-  assert.ok([...longest].length <= MAX_ERROR_MESSAGE_CHARS, `${[...longest].length} code points`);
+  await tools.update(wide.id, { body: lines.join("\n") });
+  const ambiguous = await refusal(wide.id, control);
+  assert.ok(ambiguous.startsWith(`Task item "${"\\u0001".repeat(100)}" is ambiguous; use index. Available items: 1. `), ambiguous.slice(0, 80));
+  const lone = await refusal(wide.id, "\ud800".repeat(100));
+  assert.ok(lone.startsWith(`No task item matching "${"\\ud800".repeat(100)}". Available items: 1. `), lone.slice(0, 80));
+  for (const message of [ambiguous, lone]) {
+    assert.ok(message.endsWith(", … (3000 items)."), message.slice(-40));
+    assert.ok([...message].length <= MAX_ERROR_MESSAGE_CHARS, `${[...message].length} code points`);
+    // So the backstop (result.ts) never cuts its tail: toSafeToolError hands it on untouched.
+    assert.equal(toSafeToolError(new ToolError("INVALID_ARGUMENT", message)).structuredContent.message, message);
+  }
+  // The bound result.ts states, exactly: 10 + 602 + 43 for the template and the quote, 40 listed items (index, ". ",
+  // 70) with their 39 separators, ", … (3000 items)" and the final ".".
+  assert.equal([...ambiguous].length, 3_701);
 });

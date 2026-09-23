@@ -35,8 +35,10 @@ export const MAX_ECHO_CHARS = 100;
 /**
  * The most an error's message takes, in code points. A message quotes what the caller sent — an id, a path, a name —
  * and an error is not a result: ok()'s cap never sees it, so a 2 MiB argument echoed back would make a 2 MiB error.
- * Every message the tools write on purpose stays under it: an INVALID_ARGUMENT names at most five fields of ≤ 200
- * characters, and a todo refusal quotes at most 100 of the caller's and lists at most 40 items of ≤ 80.
+ * The messages built to be long stay under it for any input, so it never cuts their tail: an INVALID_ARGUMENT names at
+ * most five fields of ≤ 200 code points (about 1 050 in all); a todo refusal quotes at most 100 code points of the
+ * caller's, JSON-escaped — up to 602 characters, as a control character or a lone surrogate escapes to six — and lists
+ * at most 40 items of ≤ 70, 3 701 in all at worst for a 3 000-item list (todo-tools.test.ts builds that case).
  */
 export const MAX_ERROR_MESSAGE_CHARS = 4_000;
 
