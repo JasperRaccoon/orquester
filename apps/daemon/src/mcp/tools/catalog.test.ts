@@ -295,7 +295,11 @@ test("list_agents sheds whole models only once every catalogue has shed its opti
     assert.deepEqual({ ...agent, models: [] }, { ...source, models: [] }, `${agent.id}: header`);
     assert.deepEqual(agent.models, source.models.map((m) => (m.isDefault || !m.options?.length ? m : withoutOptions(m))), `${agent.id}: models`);
   }
-  assert.ok(agents[4]!.models.every((m) => !m.optionsOmitted && Array.isArray(m.options)), "claudex's proxy models have no options to drop and are never marked");
+  // A model with no options has nothing to shed and is never marked: Claude's haiku.
+  const haiku = agents[0]!.models.find((m) => m.slug === "haiku")!;
+  assert.deepEqual([haiku.options, haiku.optionsOmitted], [[], undefined]);
+  // claudex's proxy models carry the Claude default's options, and shed them like any other model.
+  assert.ok(agents[4]!.models.some((m) => m.optionsOmitted === true), "claudex's non-default models shed their options too");
   const opencode = agents[2]!;
   const source = whole[2]!;
   assert.equal(opencode.modelsTruncated, true);
@@ -353,9 +357,15 @@ test("list_agents' description says how to read a shed model's options, and that
   assert.match(def.description, /modelsTruncated/);
   assert.match(def.description, /disabledReason/);
   assert.doesNotMatch(def.description, /agents you can open/);
+  // The registry sets no reason for an agent whose CLI was not found.
+  assert.match(def.description, /disabledReason, when known/);
   const model = (def.input as Record<string, { description?: string }>).model!;
   assert.match(model.description ?? "", /agent/);
   assert.match(model.description ?? "", /options/);
+  // A legacy model is found by name, but create_session refuses it (it loads no legacy models); update_session takes it.
+  assert.match(model.description ?? "", /legacy/i);
+  assert.match(model.description ?? "", /create_session refuses/);
+  assert.match(model.description ?? "", /update_session/);
 });
 
 test("list_conversations keeps within the result cap: 200 long rows lose the oldest ones, and truncated/omitted say how many", async (t) => {

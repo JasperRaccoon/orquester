@@ -22,7 +22,8 @@ const MAX_TRANSCRIPT_CHARS = 55_000;
  */
 const STALE_RECHECK_MS = 2_000;
 const TRUNCATED_HINT = "Shed to fit maxChars: reasoning, then tool detail, then the oldest rows (coveredTurns says which turns are left). Raise maxChars (max 55000), include less, or use get_turn_diff for one turn's file changes.";
-const SUBAGENTS_TRIMMED_HINT = "The subagent list was trimmed too — full roster: get_session.";
+/** get_session sheds subagent rows too when its detail would pass the cap (views.ts), so this promises no full roster. */
+const SUBAGENTS_TRIMMED_HINT = "The subagent list was trimmed too; get_session may list more of it.";
 
 /**
  * The hint a shed read_transcript result carries, or none for a whole one. It keys on `truncated`, which transcript.ts

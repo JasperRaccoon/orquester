@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildPlanImplementationPrompt, type ThreadItem } from "@orquester/api/agent-chat";
 import { activity, message, snapshot, stamp, turn } from "./fixtures.ts";
-import { fitEntries, fitRoster, jsonTextBytes, ROSTER_SHARE, TRANSCRIPT_HINT_BYTES, transcriptEntries, type TranscriptEntry, type TranscriptResult } from "./transcript.ts";
+import { cutTail, fitEntries, fitRoster, jsonTextBytes, ROSTER_SHARE, TRANSCRIPT_HINT_BYTES, transcriptEntries, type TranscriptEntry, type TranscriptResult } from "./transcript.ts";
 
 const ALL = new Set(["reasoning", "tools", "activity"] as const);
 /** A result's size as `maxChars` counts it: the whole result's JSON, in UTF-8 bytes (what ok() caps). */
@@ -600,4 +600,32 @@ test("a randomized probe (fixed seed): whole when it fits, else within the reser
     }
   }
   assert.ok(Object.values(tally).every((n) => n >= 5), `the probe reaches every branch: ${JSON.stringify(tally)}`);
+});
+
+test("cutTail: seeded random texts — exact against JSON.stringify, never splitting a surrogate pair, never cutting more than needed", () => {
+  /** A text's size inside a JSON result, as JSON.stringify writes it: escaped, UTF-8, quotes excluded. */
+  const jsonSize = (text: string): number => Buffer.byteLength(JSON.stringify(text), "utf8") - 2;
+  // Every kind of character the byte count distinguishes: ASCII, the two-character escapes (quote, backslash, \n, \t),
+  // the \u00XX escapes (other control characters), 2-, 3- and 4-byte characters, U+2028 (never escaped), emoji, and
+  // lone high and low surrogates (written \uXXXX).
+  const pool = ["a", "Z", " ", "\"", "\\", "\n", "\t", "\u0000", "\u0001", "\u001f", "\u007f", "é", "ß", "漢", "…", "\u2028", "\u2029", "😀", "𝄞", "\uD83D", "\uDE00", "\uDBFF", "\uDC00"];
+  let seed = 20_260_923; // fixed: the same texts on every run
+  const next = (n: number): number => { seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648; return seed % n; };
+  const pairAt = (text: string, i: number): boolean => i > 0 && i < text.length && (text.charCodeAt(i - 1) & 0xfc00) === 0xd800 && (text.charCodeAt(i) & 0xfc00) === 0xdc00;
+  for (let run = 0; run < 3_000; run += 1) {
+    const text = Array.from({ length: next(40) }, () => pool[next(pool.length)]!).join("");
+    const need = next(90) - 5; // including needs ≤ 0 and needs past the whole text
+    const { head, saved } = cutTail(text, need);
+    const label = `run ${run}: ${JSON.stringify(text)}, need ${need}`;
+    assert.ok(text.startsWith(head), `${label}: a head`);
+    assert.equal(saved, jsonSize(text) - jsonSize(head), `${label}: saved is exact`);
+    assert.ok(!pairAt(text, head.length), `${label}: no surrogate pair split`);
+    if (need <= 0) assert.equal(head, text, `${label}: nothing to cut`);
+    else if (head !== "") assert.ok(saved >= need, `${label}: enough`);
+    // Minimal: the tail minus its first code point would not have been enough (so an empty head means all was needed).
+    if (head.length < text.length && need > 0) {
+      const oneLess = head.length + [...text.slice(head.length)][0]!.length;
+      assert.ok(jsonSize(text) - jsonSize(text.slice(0, oneLess)) < need, `${label}: no more than needed`);
+    }
+  }
 });
