@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { agentChatRoutes, decodeHistoryCursor, encodeHistoryCursor, type ThreadHistoryBounds, type ThreadHistoryPage, type ThreadItem, type Turn } from "@orquester/api/agent-chat";
+import { agentChatRoutes, decodeHistoryCursor, encodeHistoryCursor, type ThreadActivityItem, type ThreadHistoryBounds, type ThreadHistoryPage, type ThreadItem, type Turn } from "@orquester/api/agent-chat";
 import type { DaemonResponse } from "./daemon-api.ts";
 import { activity, message, snapshot, turn } from "./fixtures.ts";
 import { HISTORY_PAGES_PER_READ, mergeHistoryPages, readOlderHistory, unavailableHint } from "./history.ts";
@@ -44,6 +44,32 @@ function host(answers: DaemonResponse[]): FakeDaemonApi {
   return new FakeDaemonApi().on("GET", HISTORY, () => answers[n++] ?? { status: 404, body: { code: "NOT_FOUND", message: "no more pages" } });
 }
 const historyCalls = (api: FakeDaemonApi) => api.calls.filter((c) => c.path === HISTORY);
+
+/** The bounds of a host whose index has not caught up with the thread yet, and of one with no usable index at all. */
+const BEHIND: ThreadHistoryBounds = { indexed: true, hasOlder: false, beforeCursor: null, oldestRetainedOrdinal: null, totalTurns: 0 };
+const UNINDEXED: ThreadHistoryBounds = { indexed: false, hasOlder: false, beforeCursor: null, oldestRetainedOrdinal: null, totalTurns: 0 };
+
+/** A stamp `ms` after turn `n` of `t` was requested: after its opening message, before its tool call. */
+const inTurn = (t: ReturnType<typeof thread>, n: number, ms: number): string => new Date(Date.parse(t.turns[n - 1]!.requestedAt) + ms).toISOString();
+
+/**
+ * A subagent's rows in turns `from`..`to` as the host SERVES them: each call a tool.started and a tool.completed, the
+ * tool.updated rows between them already projected away — so a full, trimmed window holds far fewer than 200 rows here.
+ */
+function servedCalls(t: ReturnType<typeof thread>, agentId: string, from: number, to: number): ThreadItem[] {
+  const rows: ThreadItem[] = [];
+  for (let n = from; n <= to; n += 1) {
+    for (const kind of ["tool.started", "tool.completed"]) rows.push(activity(kind, { itemType: "command_execution", toolUseId: `${agentId}-${n}`, status: kind === "tool.started" ? "inProgress" : "completed" }, { turnId: `t${n}`, agentId, createdAt: inTurn(t, n, kind === "tool.started" ? 10 : 20) }));
+  }
+  return rows;
+}
+
+/**
+ * An agent's launch (`task.started`) or end (`task.completed`) in turn `n` — an anchor, kept whatever its age: a parent
+ * row naming it in `taskId` (Claude), or one stamped with its own id as well (Codex, OpenCode).
+ */
+const agentTask = (t: ReturnType<typeof thread>, kind: "task.started" | "task.completed", agentId: string, n: number, over: Partial<ThreadActivityItem> = {}): ThreadItem =>
+  activity(kind, { taskId: agentId, agentKind: "agent", ...(kind === "task.started" ? { title: agentId } : { status: "completed" }) }, { turnId: `t${n}`, createdAt: inTurn(t, n, kind === "task.started" ? 5 : 30), ...over });
 
 test("no page is read when the window already holds the range, when the host predates history, or when nothing is older", async () => {
   const t = thread(10);
@@ -237,18 +263,24 @@ test("where the window begins is its oldest activity row that retention would dr
   const api = host([]);
   const [ask2] = t.rowsOf(2, 2);
   const at = (item: ThreadItem, ms: number) => new Date(Date.parse(item.createdAt) + ms).toISOString();
-  // Rows of turn 2 the fold keeps however old: an agent's launch and end, a compaction marker, an open async question,
-  // and a subagent's own row (its own window). The parent's window begins in turn 8.
+  // Rows of turn 2 the fold keeps however old: an agent's launch and end, a compaction marker in either spelling
+  // (`context-compaction`, or the legacy `thread.state.changed {state: "compacted"}` an older log recorded), an open
+  // async question, and a subagent's own row (its own window). The parent's window begins in turn 8.
   const kept = [
     activity("task.started", { taskId: "a1", agentKind: "agent", title: "Explore" }, { turnId: "t2", createdAt: at(ask2!, 1) }),
     activity("context-compaction", { state: "compacted" }, { turnId: "t2", createdAt: at(ask2!, 2) }),
-    activity("user-input.requested", { requestId: "q1", responseMode: "message", questions: [] }, { turnId: "t2", createdAt: at(ask2!, 3) }),
-    activity("tool.completed", { itemType: "command_execution", toolUseId: "sub", status: "completed" }, { turnId: "t2", agentId: "a1", createdAt: at(ask2!, 4) }),
-    activity("task.completed", { taskId: "a1", agentKind: "agent", status: "completed" }, { turnId: "t2", createdAt: at(ask2!, 5) })
+    activity("thread.state.changed", { state: "compacted" }, { turnId: "t2", createdAt: at(ask2!, 3) }),
+    activity("user-input.requested", { requestId: "q1", responseMode: "message", questions: [] }, { turnId: "t2", createdAt: at(ask2!, 4) }),
+    activity("tool.completed", { itemType: "command_execution", toolUseId: "sub", status: "completed" }, { turnId: "t2", agentId: "a1", createdAt: at(ask2!, 5) }),
+    activity("task.completed", { taskId: "a1", agentKind: "agent", status: "completed" }, { turnId: "t2", createdAt: at(ask2!, 6) })
   ];
   const bounds = { indexed: true, hasOlder: false, beforeCursor: null, oldestRetainedOrdinal: null, totalTurns: 0 };
   const window = snapshot({ turns: t.turns, items: [...kept, ...t.rowsOf(8, 10)], history: bounds });
   assert.deepEqual((await readOlderHistory(api, "c1", window, { start: 3, end: 10 })).unavailable, { turns: [3, 8], reason: "unavailable" });
+  // The legacy kind in any other state is no marker: retention drops it, so it says where the window begins.
+  const [ask5] = t.rowsOf(5, 5);
+  const notMarker = activity("thread.state.changed", { state: "compacting" }, { turnId: "t5", createdAt: at(ask5!, 1) });
+  assert.deepEqual((await readOlderHistory(api, "c1", snapshot({ turns: t.turns, items: [...kept, notMarker, ...t.rowsOf(8, 10)], history: bounds }), { start: 3, end: 10 })).unavailable, { turns: [3, 5], reason: "unavailable" });
   // Kept rows alone: the oldest activity row of any kind is all there is to go by.
   const onlyKept = snapshot({ turns: t.turns, items: [...kept, ...t.rowsOf(8, 10).filter((i) => i.kind === "message")], history: bounds });
   assert.deepEqual((await readOlderHistory(api, "c1", onlyKept, { start: 1, end: 10 })).unavailable, { turns: [1, 2], reason: "unavailable" });
@@ -263,20 +295,10 @@ test("where the window begins is its oldest activity row that retention would dr
 test("a drill-in while the index catches up is judged by the subagent's own oldest row left, from the turn it was launched in", async () => {
   const t = thread(10);
   const api = host([]);
-  const bounds = { indexed: true, hasOlder: false, beforeCursor: null, oldestRetainedOrdinal: null, totalTurns: 0 };
-  const at = (n: number, ms: number) => new Date(Date.parse(t.turns[n - 1]!.requestedAt) + ms).toISOString();
-  // A subagent's rows as the host SERVES them: each call a tool.started and a tool.completed, the tool.updated rows
-  // between them already projected away — so a full, trimmed window holds far fewer than 200 rows here.
-  const calls = (agentId: string, from: number, to: number) => {
-    const rows: ThreadItem[] = [];
-    for (let n = from; n <= to; n += 1) {
-      for (const kind of ["tool.started", "tool.completed"]) rows.push(activity(kind, { itemType: "command_execution", toolUseId: `${agentId}-${n}`, status: kind === "tool.started" ? "inProgress" : "completed" }, { turnId: `t${n}`, agentId, createdAt: at(n, kind === "tool.started" ? 10 : 20) }));
-    }
-    return rows;
-  };
-  // Its launch: a parent row naming it in `taskId` (Claude), or stamped with its own id (Codex, OpenCode).
-  const launch = (agentId: string, n: number, stamped = false) =>
-    activity("task.started", { taskId: agentId, agentKind: "agent", title: agentId }, { turnId: `t${n}`, createdAt: at(n, 5), ...(stamped ? { agentId } : {}) });
+  const bounds = BEHIND;
+  // The subagent's rows as the host serves them (`servedCalls`), and its launch (`agentTask`).
+  const calls = (agentId: string, from: number, to: number) => servedCalls(t, agentId, from, to);
+  const launch = (agentId: string, n: number, stamped = false) => agentTask(t, "task.started", agentId, n, stamped ? { agentId } : {});
   const read = async (items: ThreadItem[], range: { start: number; end: number }, agentId?: string) =>
     (await readOlderHistory(api, "c1", snapshot({ turns: t.turns, items, history: bounds }), range, agentId === undefined ? {} : { agentId })).unavailable;
 
@@ -289,30 +311,111 @@ test("a drill-in while the index catches up is judged by the subagent's own olde
   // An anchor stamped with the agent's own id is kept whatever its age: it says nothing about where the rows begin.
   const stamped = [launch("a3", 2, true), ...t.rowsOf(3, 10), ...calls("a3", 7, 10)];
   assert.deepEqual(await read(stamped, { start: 1, end: 10 }, "a3"), { turns: [2, 7], reason: "unavailable" });
-  // An agent with no row left is bounded by the oldest row any agent kept (the cross-agent window dropped the rest).
+  // An agent with no row left that has not ended is bounded by the oldest row any agent kept (the cross-agent window
+  // dropped the rest).
   const gone = [launch("a4", 3), launch("a5", 4), ...t.rowsOf(3, 10), ...calls("a5", 5, 10)];
   assert.deepEqual(await read(gone, { start: 1, end: 10 }, "a4"), { turns: [3, 5], reason: "unavailable" });
   // A background task (a shell) launches with a task.started that is no anchor: it still starts the span, while the
   // window holds it.
-  const shell = [activity("task.started", { taskId: "sh1", agentKind: "background", title: "npm run dev" }, { turnId: "t6", createdAt: at(6, 5) }), ...t.rowsOf(3, 10), ...calls("sh1", 6, 10)];
+  const shell = [activity("task.started", { taskId: "sh1", agentKind: "background", title: "npm run dev" }, { turnId: "t6", createdAt: inTurn(t, 6, 5) }), ...t.rowsOf(3, 10), ...calls("sh1", 6, 10)];
   assert.deepEqual(await read(shell, { start: 1, end: 10 }, "sh1"), { turns: [6, 6], reason: "unavailable" });
   // The host's own ordinal, when it has one, still wins.
   assert.deepEqual((await readOlderHistory(api, "c1", snapshot({ turns: t.turns, items: window, history: { ...bounds, oldestRetainedOrdinal: 8, totalTurns: 5 } }), { start: 4, end: 10 }, { agentId: "a1" })).unavailable, { turns: [4, 8], reason: "unavailable" });
   assert.equal(historyCalls(api).length, 0);
 });
 
-test("the safety net: after a walk that reported nothing, a turn of the range with no row in the merged snapshot is named — the host's empty page with a null cursor included", async () => {
+test("a drill-in on a host without a usable index names the subagent's own span, as while the index catches up: a parent's row is no row of the subagent's", async () => {
   const t = thread(10);
-  // A host that could not plan a block, or read one back whole, answers an empty page with a null cursor: to the walk
-  // alone, that reads as "the thread's first turn reached".
-  const empty = host([page([], null)]);
-  const read = await readOlderHistory(empty, "c1", windowed(t, 8), { start: 2, end: 9 });
-  assert.equal(historyCalls(empty).length, 1);
-  assert.deepEqual(read.unavailable, { turns: [2, 7], reason: "unavailable" });
-  // A page that brought some of the range back: only the turns still without a row.
+  const api = host([]);
+  // The parent's rows reach back to turn 3 (turn 2 holds a1's launch alone); a1, launched in turn 2, kept its rows from
+  // turn 6 on.
+  const window = [agentTask(t, "task.started", "a1", 2), ...t.rowsOf(3, 10), ...servedCalls(t, "a1", 6, 10)];
+  const read = async (range: { start: number; end: number }, agentId?: string) =>
+    (await readOlderHistory(api, "c1", snapshot({ turns: t.turns, items: window, history: UNINDEXED }), range, agentId === undefined ? {} : { agentId })).unavailable;
+  // Every turn from 4 on has the parent's rows. A drill-in read them as a1's presence too, named nothing, and served
+  // a1's turns 4 and 5 empty.
+  assert.equal(await read({ start: 4, end: 10 }), null, "the parent view: every turn has its rows");
+  assert.deepEqual(await read({ start: 4, end: 10 }, "a1"), { turns: [4, 6], reason: "unavailable" }, "a1's own rows begin in turn 6");
+  // From its launch turn: turn 1, where no row is left at all, is none of a1's.
+  assert.deepEqual(await read({ start: 1, end: 10 }), { turns: [1, 1], reason: "unavailable" }, "the parent view: the turn with no row");
+  assert.deepEqual(await read({ start: 1, end: 10 }, "a1"), { turns: [2, 6], reason: "unavailable" });
+  assert.equal(await read({ start: 7, end: 10 }, "a1"), null, "after its oldest row, a1's rows are whole");
+  assert.equal(historyCalls(api).length, 0);
+});
+
+test("an agent with no row left ends its span at its end when its last task row is one — its rows all lie before it — else at the oldest row any agent kept", async () => {
+  const t = thread(10);
+  const api = host([]);
+  // a5 kept its rows from turn 7 on: the oldest row any agent kept. a4, launched in turn 2, kept none.
+  const others = [agentTask(t, "task.started", "a5", 2), ...t.rowsOf(3, 10), ...servedCalls(t, "a5", 7, 10)];
+  const launch = agentTask(t, "task.started", "a4", 2);
+  const end = (n: number, over: Partial<ThreadActivityItem> = {}) => agentTask(t, "task.completed", "a4", n, over);
+  // Whether the index is catching up or missing, a drill-in's span is the same.
+  for (const bounds of [BEHIND, UNINDEXED]) {
+    const read = async (a4: ThreadItem[]) =>
+      (await readOlderHistory(api, "c1", snapshot({ turns: t.turns, items: [...a4, ...others], history: bounds }), { start: 1, end: 10 }, { agentId: "a4" })).unavailable;
+    const named = (from: number, to: number) => ({ turns: [from, to], reason: "unavailable" });
+    const how = `indexed: ${bounds.indexed}`;
+    // Ended in turn 4, or in turn 9: its end bounds it, before the oldest row any agent kept or after it.
+    assert.deepEqual(await read([launch, end(4)]), named(2, 4), how);
+    assert.deepEqual(await read([launch, end(9)]), named(2, 9), how);
+    assert.deepEqual(await read([launch, end(4, { agentId: "a4" })]), named(2, 4), `${how}: an end stamped with its own id (Codex, OpenCode)`);
+    // Relaunched after it ended — a resumed agent keeps its id — its last task row is a launch: it may have worked on
+    // since, so, like an agent that never ended, it is bounded by the oldest row any agent kept.
+    assert.deepEqual(await read([launch, end(4), agentTask(t, "task.started", "a4", 5)]), named(2, 7), how);
+    assert.deepEqual(await read([launch]), named(2, 7), how);
+    // A task launched inside a4 — stamped with a4's id, as Claude stamps the owner, but naming itself in `taskId` — is
+    // that task's row: its end is not a4's.
+    const inside = [agentTask(t, "task.started", "n1", 3, { agentId: "a4" }), agentTask(t, "task.completed", "n1", 4, { agentId: "a4" })];
+    assert.deepEqual(await read([launch, ...inside]), named(2, 7), how);
+  }
+  assert.equal(historyCalls(api).length, 0);
+});
+
+test("an empty page with a null cursor — what a host answers where it could not plan a block or read one back whole — is a failed read in both views, never the thread's first turn reached", async () => {
+  const t = thread(10);
+  const snap = windowed(t, 8);
+  for (const opts of [{}, { agentId: "a1" }]) {
+    const view = opts.agentId === undefined ? "the parent view" : "a drill-in";
+    // The first page: nothing was read, and the window's oldest turn (8) may be partial, as after any failed read.
+    const empty = host([page([], null)]);
+    const first = await readOlderHistory(empty, "c1", snap, { start: 2, end: 9 }, opts);
+    assert.equal(historyCalls(empty).length, 1, view);
+    assert.deepEqual(first.unavailable, { turns: [2, 8], reason: "unavailable" }, view);
+    assert.equal(first.snapshot, snap, `${view}: the window alone`);
+    // A later page: the page read before it is kept, and the turn it ends inside (5) is still partial.
+    const later = await readOlderHistory(host([page(t.rowsOf(5, 7), cursorAt(t, 5, 50)), page([], null)]), "c1", snap, { start: 2, end: 9 }, opts);
+    assert.deepEqual(later.unavailable, { turns: [2, 5], reason: "unavailable" }, view);
+    assert.deepEqual(later.snapshot.items.map((i) => i.id), t.rowsOf(5, 10).map((i) => i.id), `${view}: the rows read are served`);
+    // A page whose every row is dropped as unreadable brought nothing either.
+    const unreadable = host([{ status: 200, body: { threadId: "c1", turns: [], items: [null, { id: "no-kind" }], checkpoints: [], page: { beforeCursor: null }, seq: 1 } }]);
+    assert.deepEqual((await readOlderHistory(unreadable, "c1", snap, { start: 2, end: 9 }, opts)).unavailable, { turns: [2, 8], reason: "unavailable" }, view);
+  }
+});
+
+test("the parent view's net: after a walk, a turn of the range with no row in the merged snapshot is still named — beside a failed read's turns, never past the page limit; a drill-in has none", async () => {
+  const t = thread(10);
+  // A page that ends the walk on a null cursor — the log's start reached — yet holds rows of turns 5 to 7 only.
   const some = await readOlderHistory(host([page(t.rowsOf(5, 7), null)]), "c1", windowed(t, 8), { start: 2, end: 9 });
   assert.deepEqual(some.unavailable, { turns: [2, 4], reason: "unavailable" });
   assert.deepEqual(some.snapshot.items.map((i) => i.id), t.rowsOf(5, 10).map((i) => i.id), "the rows read are served");
+  // It runs after a failed read too, so an empty page, now a failed read, still names every turn the net named when it
+  // was taken for the thread's first turn: here turn 9 as well, above the window's oldest turn, where no page reads.
+  const holed = snapshot({ ...windowed(t, 8), items: [...t.rowsOf(8, 8), ...t.rowsOf(10, 10)] });
+  for (const answer of [page([], null), { status: 503, body: { error: { code: "INDEX_UNAVAILABLE", message: "rebuilding" } } }]) {
+    assert.deepEqual((await readOlderHistory(host([answer]), "c1", holed, { start: 2, end: 10 })).unavailable, { turns: [2, 9], reason: "unavailable" }, JSON.stringify(answer.body));
+    assert.deepEqual((await readOlderHistory(host([answer]), "c1", holed, { start: 2, end: 10 }, { agentId: "a1" })).unavailable, { turns: [2, 8], reason: "unavailable" }, `a drill-in: ${JSON.stringify(answer.body)}`);
+  }
+  // Past the page limit the walk's own sentence stands: it names the call that reads on.
+  const limited = host([7, 6, 5, 4, 3].map((k) => page(t.rowsOf(k, k), cursorAt(t, k, k * 10))));
+  assert.deepEqual((await readOlderHistory(limited, "c1", holed, { start: 1, end: 10 })).unavailable, { turns: [1, 3], reason: "limit" });
+  // A subagent has no row in the turns it did not run in, so there "no row" says nothing: a1, launched in turn 5, is
+  // read whole from its launch on.
+  const a1 = [agentTask(t, "task.started", "a1", 5), ...servedCalls(t, "a1", 5, 7)];
+  const drill = await readOlderHistory(host([page([...t.rowsOf(5, 7), ...a1], null)]), "c1", windowed(t, 8), { start: 2, end: 9 }, { agentId: "a1" });
+  assert.equal(drill.unavailable, null);
+  const served = new Set(drill.snapshot.items.map((i) => i.id));
+  assert.ok(a1.every((row) => served.has(row.id)), "a1's rows are served");
 });
 
 test("the merge: a row a page repeats keeps the window's copy, once, and every row sorts into log order; checkpoints by turn id", () => {

@@ -756,6 +756,38 @@ test("read_transcript drilling into a subagent while the host's index catches up
   assert.equal(historyCalls(h).length, 0, "nothing to page yet");
 });
 
+test("read_transcript drilling into a subagent on a host with no index names that subagent's own span, though every turn has the parent's rows", async (t) => {
+  const th = history(10, 6);
+  const at = (n: number, ms: number) => new Date(Date.parse(th.snap.turns[n - 1]!.requestedAt) + ms).toISOString();
+  // The window holds turns 6 to 10 whole for the parent; a1, launched in turn 6, kept its rows (as served:
+  // tool.started + tool.completed) only from turn 9.
+  const launch = activity("task.started", { taskId: "a1", agentKind: "agent", title: "Explore" }, { turnId: "t6", createdAt: at(6, 2) });
+  const a1 = [9, 10].flatMap((n) => ["tool.started", "tool.completed"].map((kind) => activity(kind, { itemType: "command_execution", toolUseId: `a1-${n}`, status: "completed" }, { turnId: `t${n}`, agentId: "a1", createdAt: at(n, 3) })));
+  const unindexed = snapshot({ ...th.snap, items: [launch, ...th.snap.items, ...a1], history: { indexed: false, hasOlder: false, beforeCursor: null, oldestRetainedOrdinal: null, totalTurns: 0 } });
+  const h = await harness([chatSummary()], unindexed); t.after(h.close);
+  const parent = await tool("read_transcript").run(readArgs({ turns: 5 }), h.ctx);
+  const drill = await tool("read_transcript").run(readArgs({ turns: 5, agentId: "a1" }), h.ctx);
+  assert.equal("unavailableTurns" in parent, false, "every turn of the parent view has its rows");
+  assert.deepEqual([drill.coveredTurns, drill.unavailableTurns], [[9, 10], [6, 9]]);
+  assert.equal(drill.hint, "Turns 6–9 could not be read whole: older turns are unavailable on this host right now. Try again later.");
+  assert.equal(historyCalls(h).length, 0, "no index, nothing to page");
+});
+
+test("read_transcript: an empty history page with no cursor is a failed read — named with a hint in both views, never taken for the thread's first turn", async (t) => {
+  const th = history(10, 8);
+  const at = (n: number) => new Date(Date.parse(th.snap.turns[n - 1]!.requestedAt) + 3).toISOString();
+  // a1's rows, as served: tool.started + tool.completed per call.
+  const a1 = [9, 10].flatMap((n) => ["tool.started", "tool.completed"].map((kind) => activity(kind, { itemType: "command_execution", toolUseId: `a1-${n}`, status: "completed" }, { turnId: `t${n}`, agentId: "a1", createdAt: at(n) })));
+  const h = await harness([chatSummary()], snapshot({ ...th.snap, items: [...th.snap.items, ...a1] })); t.after(h.close);
+  h.api.on("GET", agentChatRoutes.history("c1"), th.page([], null));
+  for (const view of [{}, { agentId: "a1" }]) {
+    const r = await tool("read_transcript").run(readArgs({ turns: 5, ...view }), h.ctx);
+    assert.deepEqual(r.unavailableTurns, [6, 8], JSON.stringify(view));
+    assert.equal(r.hint, "Turns 6–8 could not be read whole: older turns are unavailable on this host right now. Try again later.", JSON.stringify(view));
+  }
+  assert.equal(historyCalls(h).length, 2, "one page a call");
+});
+
 test("read_transcript: with turns named unavailable, the answer — its hint, and the shed hint after it — still fits maxChars", async (t) => {
   const th = history(10, 8);
   const long = snapshot({ ...th.snap, items: [...th.snap.items, message("assistant", "z".repeat(12_000), { turnId: "t10" })] });
