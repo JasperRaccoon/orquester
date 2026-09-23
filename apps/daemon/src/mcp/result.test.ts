@@ -12,16 +12,30 @@ test("ok returns the object as text and structuredContent", () => {
 });
 
 test("ok caps oversized text and says so", () => {
-  const r = ok({ text: "x".repeat(MAX_RESULT_BYTES + 100) });
+  const value = { text: "x".repeat(MAX_RESULT_BYTES + 100) };
+  const over = Buffer.byteLength(JSON.stringify(value), "utf8") - MAX_RESULT_BYTES;
+  const r = ok(value);
   assert.ok(Buffer.byteLength(r.content[0].text, "utf8") <= MAX_RESULT_BYTES);
-  assert.equal((r.structuredContent as { truncated?: boolean }).truncated, true);
   assert.ok(r.content[0].text.startsWith('{"text":"xxx'), "the text keeps the leading part of the result");
-  assert.deepEqual(r.structuredContent, { truncated: true, truncationNote: `Result exceeded ${MAX_RESULT_BYTES} bytes; narrow the request (fewer turns, smaller maxChars).` });
-  assert.ok(Buffer.byteLength(JSON.stringify(r.structuredContent), "utf8") <= MAX_RESULT_BYTES);
-  // A cut through a multibyte character backs off to a whole character: no stray U+FFFD.
+  // The cut is visible where the model reads it: at the end of the text, with how much did not fit.
+  assert.ok(r.content[0].text.endsWith(`xxx… [truncated: ${over} bytes over the 60 000-byte cap]`), r.content[0].text.slice(-80));
+  assert.deepEqual(r.structuredContent, { truncated: true, truncationNote: `The result was ${over} bytes over the 60 000-byte cap and was cut; narrow the request.` });
+  // A cut through a multibyte character backs off to a whole character: no stray U+FFFD, and the note still ends it.
   const m = ok({ t: "é".repeat(MAX_RESULT_BYTES) });
   assert.ok(Buffer.byteLength(m.content[0].text, "utf8") <= MAX_RESULT_BYTES);
-  assert.ok(!m.content[0].text.includes("\uFFFD"));
+  assert.ok(!m.content[0].text.includes(String.fromCharCode(0xfffd)));
+  assert.match(m.content[0].text, /é… \[truncated: \d+ bytes over the 60 000-byte cap\]$/);
+});
+
+test("ok's last-resort note is generic, and the cap is exact: at it the result passes, one byte over it is cut", () => {
+  const { truncationNote } = ok({ rows: Array.from({ length: 4_000 }, (_, i) => ({ i, pad: "p".repeat(20) })) }).structuredContent as { truncationNote: string };
+  assert.doesNotMatch(truncationNote, /maxChars|turns/, "no tool's own parameters: any tool can land here");
+  const exact = { s: "a".repeat(MAX_RESULT_BYTES - 8) };
+  assert.equal(Buffer.byteLength(JSON.stringify(exact), "utf8"), MAX_RESULT_BYTES);
+  assert.deepEqual(ok(exact).structuredContent, exact);
+  const oneOver = ok({ s: "a".repeat(MAX_RESULT_BYTES - 7) });
+  assert.match(oneOver.content[0].text, /^\{"s":"a+… \[truncated: 1 bytes over the 60 000-byte cap\]$/);
+  assert.ok(Buffer.byteLength(oneOver.content[0].text, "utf8") <= MAX_RESULT_BYTES);
 });
 
 test("ToolError surfaces code and message; sandbox errors never echo the path; unknown errors are generic", (t) => {
