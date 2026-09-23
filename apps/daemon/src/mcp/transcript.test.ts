@@ -29,6 +29,11 @@ const nextBack = (all: TranscriptResult["subagents"], kept: TranscriptResult["su
   const live = (s: { status: string }): boolean => ["running", "waiting", "pending"].includes(s.status);
   return [...all.filter((s) => !live(s)), ...all.filter(live)].filter((s) => !ids.has(s.id)).at(-1);
 };
+/** Rows as the fits take them: each with its JSON bytes and a comma, measured once. */
+const sizedOf = <T>(rows: readonly T[]): { row: T; bytes: number }[] => rows.map((row) => ({ row, bytes: Buffer.byteLength(JSON.stringify(row), "utf8") + 1 }));
+/** The frame the entries are fitted in: both lists empty, the widest coveredTurns, truncated, the roster flag as given. */
+const frameOf = (turnCount: number, subagentsTruncated: boolean): number => Buffer.byteLength(JSON.stringify({ entries: [], turnCount,
+  coveredTurns: turnCount ? [turnCount, turnCount] : null, truncated: true, subagents: [], ...(subagentsTruncated ? { subagentsTruncated } : {}) }), "utf8");
 /** The biggest row of a list, as it sits in the result: its JSON and a comma. */
 const maxRowOf = (rows: readonly unknown[]): number => Math.max(0, ...rows.map((row) => contentOf([row]) + 1));
 /** An instant just after the last item: where a checkpoint that closes the turn sorts. */
@@ -516,7 +521,7 @@ test("a randomized probe (fixed seed): whole when it fits, else within the reser
   const text = (max: number): string => pick(["a", "é", "漢", "😀", '"', "\n", "word "]).repeat(int(1, max));
   const statuses = ["running", "waiting", "pending", "idle", "completed", "failed", "interrupted"];
   const isLive = (status: string): boolean => ["running", "waiting", "pending"].includes(status);
-  const tally = { truncated: 0, rosterTrimmed: 0, liveDropped: 0, cut: 0, listCut: 0 };
+  const tally = { truncated: 0, rosterTrimmed: 0, liveDropped: 0, cut: 0, listCut: 0, secondPass: 0 };
   for (let run = 0; run < 120; run += 1) {
     const turnCount = int(1, 5);
     const items: ThreadItem[] = [];
@@ -574,6 +579,11 @@ test("a randomized probe (fixed seed): whole when it fits, else within the reser
     if ((listed?.files?.at(-1)?.path ?? listed?.tool?.changedFiles?.at(-1) ?? "").startsWith("…")) tally.listCut += 1;
     if (r.truncated) {
       const space = roomOf(r, maxChars);
+      // The second pass only re-adds roster rows: the entries are exactly what fitEntries gives at the first pass's allowance.
+      const firstPass = fitRoster(sizedOf(whole.subagents), rosterCap(space, contentOf(whole.entries)));
+      const firstAllowance = budget - frameOf(r.turnCount, firstPass.trimmed) - firstPass.bytes;
+      assert.deepEqual(r.entries, fitEntries(sizedOf(whole.entries), firstAllowance).entries, `${where}: the second pass leaves the fitted entries untouched`);
+      if (r.subagents.length > firstPass.rows.length) tally.secondPass += 1;
       // A reply cut to fit: the entries keep at least what the roster's share leaves (no starved reply), and the
       // result ends within one code point of the budget (no under-fill).
       const cut = r.entries.find((e) => e.createdAt === spared.createdAt)!;
