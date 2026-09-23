@@ -10,6 +10,13 @@
  * as its answer, and demoted — then swallowed as a marker — a reply whose whole
  * text happened to be "commentary" or "final_answer".
  *
+ * A message also keeps the kind of the item that OPENED it, so an item that
+ * never completes must not lend its message to the next one (final fix wave
+ * D4): Codex abandons an `agentMessage` mid-stream when the upstream stream is
+ * cut and silently re-samples, and the re-sample's text — the final answer,
+ * possibly — used to be glued onto the abandoned commentary and filed as
+ * commentary with it.
+ *
  * Everything is asserted on the REAL fold, because that is what the timeline
  * and the MCP's `lastReply` read. Nothing here sleeps: every test waits on
  * `drain()`.
@@ -159,9 +166,58 @@ function seen(
     : { text: message.text, messageKind: message.messageKind };
 }
 
-/** A Codex `agentMessage`, complete, as `thread/turns/list` returns it. */
+/**
+ * What the MCP's `lastReply` / `send_message.reply` return for a turn:
+ * `assistantTextForTurn` (`apps/daemon/src/mcp/views.ts`) joins the turn's own
+ * assistant messages — no subagent's, no commentary — in timeline order.
+ * Mirrored rather than imported: that module pulls in the daemon's
+ * agent-chat service, which the host's tests have no business loading.
+ */
+function answerText(messages: Iterable<ThreadMessageItem>, turnId: string): string {
+  return [...messages]
+    .filter(
+      (message) =>
+        message.role === "assistant" &&
+        message.turnId === turnId &&
+        !message.agentId &&
+        message.messageKind !== "commentary"
+    )
+    .map((message) => message.text)
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+/**
+ * A Codex `agentMessage`: complete, as `thread/turns/list` returns it, or as
+ * the live `item/*` notifications carry it (`text` empty on `item/started`).
+ */
 function agentMessage(id: string, text: string, phase: "commentary" | "final_answer") {
   return { type: "agentMessage", id, text, phase, memoryCitation: null, delivery: null, questions: null };
+}
+
+/** Server notifications through a fresh, REAL Codex normaliser, stamped as the session stamps them. */
+function throughCodexNormaliser(
+  notifications: readonly { method: string; params: unknown }[]
+): RuntimeEvent[] {
+  const normaliser = new CodexNormaliser({ usage: new CodexUsageTracker() });
+  return notifications.flatMap(({ method, params }) =>
+    normaliser.notification(method as never, params).map(stamped)
+  );
+}
+
+/** A `turn/started` / `turn/completed` turn object, shaped as fixture 05 records it. */
+function codexTurn(id: string, status: "inProgress" | "completed") {
+  const settled = status === "completed";
+  return {
+    id,
+    items: [],
+    itemsView: "notLoaded",
+    status,
+    error: null,
+    startedAt: 1789961264,
+    completedAt: settled ? 1789961294 : null,
+    durationMs: settled ? 29575 : null
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -329,18 +385,20 @@ const CODEX_FIXTURES = new URL("../../../test/fixtures/codex/", import.meta.url)
 /**
  * Feed a capture's server notifications through the REAL Codex normaliser, as
  * the transport delivers them, and read what the capture itself says about
- * each `agentMessage` — its phase, and the whole text its `item/completed`
- * carries — as the expectation.
+ * each `agentMessage` — its phase, the whole text its `item/completed`
+ * carries, and the deltas it streamed — as the expectation.
  */
 function replayCodexCapture(name: string): {
   events: RuntimeEvent[];
   phases: Map<string, string | null>;
   completedTexts: Map<string, string>;
+  streamedTexts: Map<string, string>;
 } {
   const normaliser = new CodexNormaliser({ usage: new CodexUsageTracker() });
   const events: RuntimeEvent[] = [];
   const phases = new Map<string, string | null>();
   const completedTexts = new Map<string, string>();
+  const streamedTexts = new Map<string, string>();
   for (const line of readFileSync(new URL(name, CODEX_FIXTURES), "utf8").split("\n")) {
     if (line.trim().length === 0) {
       continue;
@@ -366,11 +424,15 @@ function replayCodexCapture(name: string): {
         }
       }
     }
+    if (frame.method === "item/agentMessage/delta") {
+      const { itemId, delta } = frame.params as { itemId: string; delta: string };
+      streamedTexts.set(itemId, `${streamedTexts.get(itemId) ?? ""}${delta}`);
+    }
     for (const draft of normaliser.notification(frame.method as never, frame.params)) {
       events.push(stamped(draft));
     }
   }
-  return { events, phases, completedTexts };
+  return { events, phases, completedTexts, streamedTexts };
 }
 
 describe("(c) Codex live items carry the phase in detail AND data.phase: unchanged", () => {
@@ -390,14 +452,15 @@ describe("(c) Codex live items carry the phase in detail AND data.phase: unchang
     );
   });
 
-  it("every capture: each assistant bubble is a recorded agentMessage, of its recorded phase", async () => {
+  it("every capture: each assistant bubble is ONE recorded agentMessage, of its phase, with its own text", async () => {
     const names = readdirSync(CODEX_FIXTURES)
       .filter((name) => name.endsWith(".ndjson"))
       .sort();
     const checked = { commentary: 0, answer: 0 };
     for (const name of names) {
-      const { events, phases, completedTexts } = replayCodexCapture(name);
-      for (const bubble of foldMessages(await ingestAll(events)).values()) {
+      const { events, phases, completedTexts, streamedTexts } = replayCodexCapture(name);
+      const bubbles = foldMessages(await ingestAll(events));
+      for (const bubble of bubbles.values()) {
         if (bubble.role !== "assistant") {
           continue;
         }
@@ -406,18 +469,268 @@ describe("(c) Codex live items carry the phase in detail AND data.phase: unchang
         assert.ok(phases.has(itemId), `${name}: ${bubble.id} is not a recorded agentMessage`);
         const expected = phases.get(itemId) === "commentary" ? "commentary" : "answer";
         assert.equal(bubble.messageKind, expected, `${name} ${bubble.id}`);
-        // …and never becomes its text. (05 abandons one agentMessage without an
-        // `item/completed`, and the next one streams into that still-open
-        // segment — the segment rule, not the phase's — so that one bubble has
-        // no single recorded text to compare.)
-        const text = completedTexts.get(itemId);
-        if (text !== undefined) {
-          assert.equal(bubble.text, text, `${name} ${bubble.id}`);
-        }
+        // …and never becomes its text — nor does another item's (D4). A
+        // completed item reads exactly what its `item/completed` recorded; the
+        // one item the corpus abandons (05) reads exactly the deltas it
+        // streamed before its re-sample opened a bubble of its own.
+        assert.equal(
+          bubble.text,
+          completedTexts.get(itemId) ?? streamedTexts.get(itemId),
+          `${name} ${bubble.id}`
+        );
         checked[expected] += 1;
       }
+      // Every agentMessage that said anything has a bubble: none of them
+      // vanished into another's.
+      for (const [itemId, text] of [...streamedTexts, ...completedTexts]) {
+        if (text.trim().length > 0) {
+          assert.ok(bubbles.has(`assistant:${itemId}`), `${name}: ${itemId} has no bubble`);
+        }
+      }
     }
-    // The corpus really exercises both phases.
-    assert.deepEqual(checked, { commentary: 13, answer: 18 });
+    // The corpus really exercises both phases. 14 commentary bubbles where D3
+    // counted 13: 05's abandoned agentMessage (…0bfd06c10b98) and its re-sample
+    // (…2840b954d7ce) are two bubbles now — the re-sample used to be glued onto
+    // the abandoned one and was never counted on its own.
+    assert.deepEqual(checked, { commentary: 14, answer: 18 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (D4) An abandoned assistant message is closed before the next one starts
+// ---------------------------------------------------------------------------
+
+/** An `agentMessage` phase exactly as Codex's live normaliser reports it: in `detail` AND in `data.phase`. */
+function codexLive(phase: "commentary" | "final_answer"): { detail: string; data: unknown } {
+  return { detail: phase, data: { phase, delivery: null, questions: null } };
+}
+
+/** Every `thread.message-sent` of one message, in log order: its deltas and its close. */
+function messageRows(
+  events: readonly AppendableDomainEvent[],
+  messageId: string
+): { index: number; streaming: boolean; text: string }[] {
+  return events.flatMap((event, index) =>
+    event.type === "thread.message-sent" && event.payload.messageId === messageId
+      ? [{ index, streaming: event.payload.streaming, text: event.payload.text }]
+      : []
+  );
+}
+
+describe("(D4) a live assistant item.started closes the abandoned message of its turn and owner", () => {
+  it("(a) abandoned commentary, then the final answer: two messages, and lastReply reads the answer alone", async () => {
+    const at = { threadId: "codex-thread", turnId: "turn-1" };
+    const fragment = "I'll keep the plan self-contained and mark the one repo-derived";
+    const answer = "LICENSE is MIT, held by the project authors.";
+    const events = throughCodexNormaliser([
+      { method: "turn/started", params: { threadId: at.threadId, turn: codexTurn("turn-1", "inProgress") } },
+      { method: "item/started", params: { ...at, startedAtMs: 1, item: agentMessage("msg-a", "", "commentary") } },
+      { method: "item/agentMessage/delta", params: { ...at, itemId: "msg-a", delta: "I'll keep the plan self-contained " } },
+      { method: "item/agentMessage/delta", params: { ...at, itemId: "msg-a", delta: "and mark the one repo-derived" } },
+      // The upstream stream is cut here: `msg-a` never completes, and Codex
+      // silently re-samples — fixture 05's own shape (t 17754–21063), with the
+      // re-sample being the final answer, the case that lost the answer.
+      { method: "item/started", params: { ...at, startedAtMs: 2, item: agentMessage("msg-b", "", "final_answer") } },
+      { method: "item/agentMessage/delta", params: { ...at, itemId: "msg-b", delta: "LICENSE is MIT, " } },
+      { method: "item/agentMessage/delta", params: { ...at, itemId: "msg-b", delta: "held by the project authors." } },
+      { method: "item/completed", params: { ...at, completedAtMs: 3, item: agentMessage("msg-b", answer, "final_answer") } },
+      { method: "turn/completed", params: { threadId: at.threadId, turn: codexTurn("turn-1", "completed") } }
+    ]);
+    // The adapter really abandons `msg-a`: its only completion is the empty
+    // one the normaliser synthesises for an open item when the turn settles.
+    assert.deepEqual(
+      events.flatMap((event) =>
+        event.type === "item.completed" && event.itemId === "msg-a" ? [event.payload] : []
+      ),
+      [{ itemType: "assistant_message", status: "completed" }]
+    );
+
+    const domain = await ingestAll(events);
+    const messages = foldMessages(domain);
+    assert.deepEqual(
+      [...messages.values()].filter((message) => message.role === "assistant").map((message) => message.id),
+      ["assistant:msg-a", "assistant:msg-b"]
+    );
+    assert.deepEqual(seen(messages.get("assistant:msg-a")), { text: fragment, messageKind: "commentary" });
+    assert.deepEqual(seen(messages.get("assistant:msg-b")), { text: answer, messageKind: "answer" });
+    // The abandoned message is closed BEFORE the answer's first row: it ends
+    // with the text it had, exactly as its own completion would have ended it.
+    const closeA = messageRows(domain, "assistant:msg-a").filter((row) => !row.streaming);
+    assert.equal(closeA.length, 1);
+    assert.ok(closeA[0]!.index < messageRows(domain, "assistant:msg-b")[0]!.index);
+    // lastReply's input: the answer, whole, and nothing of the fragment.
+    assert.equal(answerText(messages.values(), "turn-1"), answer);
+  });
+
+  it("(b) fixture 05: the interrupted agentMessage and its re-sample are two bubbles, each its own text", async () => {
+    const abandoned = "msg_0d0d102f2f46ad5c016ab0a4422a1087d287b60bfd06c10b98";
+    const resample = "msg_0d0d102f2f46ad5c016ab0a44574f887d28d6b2840b954d7ce";
+    const { events, completedTexts, streamedTexts } = replayCodexCapture(
+      "05-tool-request-user-input.ndjson"
+    );
+    // What the capture records: the first streams 27 deltas and never
+    // completes; ~3 s later the second starts in the same turn, and completes.
+    assert.equal(completedTexts.has(abandoned), false);
+    assert.equal(completedTexts.has(resample), true);
+
+    const messages = foldMessages(await ingestAll(events));
+    assert.deepEqual(seen(messages.get(`assistant:${abandoned}`)), {
+      text: "The read-only command batch was rejected by the sandbox approval layer, so I’ll keep the plan self-contained and mark the one repo-derived",
+      messageKind: "commentary"
+    });
+    assert.equal(messages.get(`assistant:${abandoned}`)?.text, streamedTexts.get(abandoned));
+    assert.deepEqual(seen(messages.get(`assistant:${resample}`)), {
+      text: completedTexts.get(resample),
+      messageKind: "commentary"
+    });
+  });
+
+  it("(c) a restarted SAME item keeps its one message", async () => {
+    const item = { turnId: "turn-1", itemId: "msg-a" };
+    const domain = await ingestAll([
+      live("item.started", { itemType: "assistant_message", ...codexLive("commentary") }, item),
+      live("content.delta", { streamKind: "assistant_text", delta: "Hello, " }, item),
+      // The same item announced again — the same base key, so nothing was
+      // abandoned.
+      live("item.started", { itemType: "assistant_message", ...codexLive("commentary") }, item),
+      live("content.delta", { streamKind: "assistant_text", delta: "world." }, item),
+      live("item.completed", { itemType: "assistant_message", ...codexLive("commentary") }, item),
+      live("turn.completed", { state: "completed" }, { turnId: "turn-1" })
+    ]);
+    const messages = foldMessages(domain);
+    assert.deepEqual([...messages.keys()], ["assistant:msg-a"]);
+    assert.deepEqual(seen(messages.get("assistant:msg-a")), {
+      text: "Hello, world.",
+      messageKind: "commentary"
+    });
+    // Closed once, by its own completion — never by its own restart.
+    const rows = messageRows(domain, "assistant:msg-a");
+    assert.deepEqual(
+      rows.filter((row) => !row.streaming).map((row) => row.index),
+      [rows.at(-1)!.index]
+    );
+  });
+
+  it("(c) an item.started that names no item proves no abandonment", async () => {
+    const item = { turnId: "turn-1", itemId: "msg-a" };
+    const domain = await ingestAll([
+      live("content.delta", { streamKind: "assistant_text", delta: "Hello, " }, item),
+      // No item id: nothing says this is another item, so nothing is closed.
+      live("item.started", { itemType: "assistant_message", status: "inProgress" }, { turnId: "turn-1" }),
+      live("content.delta", { streamKind: "assistant_text", delta: "world." }, item),
+      live("item.completed", { itemType: "assistant_message", status: "completed" }, item)
+    ]);
+    assert.deepEqual(seen(foldMessages(domain).get("assistant:msg-a")), {
+      text: "Hello, world.",
+      messageKind: "answer"
+    });
+    const rows = messageRows(domain, "assistant:msg-a");
+    assert.deepEqual(
+      rows.filter((row) => !row.streaming).map((row) => row.index),
+      [rows.at(-1)!.index]
+    );
+  });
+
+  it("(c) a subagent's assistant item leaves the parent's open message alone", async () => {
+    const parent = { turnId: "turn-1", itemId: "msg-p" };
+    const agent = { turnId: "turn-1", itemId: "msg-s", agentId: "task-1" };
+    const domain = await ingestAll([
+      live("item.started", { itemType: "assistant_message", status: "inProgress" }, parent),
+      live("content.delta", { streamKind: "assistant_text", delta: "Parent, " }, parent),
+      // A subagent narrates inside the parent's turn: Claude's nested block,
+      // every event stamped with the agent (`nestedMessageEvents`).
+      live("item.started", { itemType: "assistant_message", status: "inProgress", agentId: "task-1" }, agent),
+      live("content.delta", { streamKind: "assistant_text", delta: "Agent says" }, agent),
+      live("item.completed", { itemType: "assistant_message", status: "completed", agentId: "task-1" }, agent),
+      live("content.delta", { streamKind: "assistant_text", delta: "continued." }, parent),
+      live("item.completed", { itemType: "assistant_message", status: "completed" }, parent),
+      live("turn.completed", { state: "completed" }, { turnId: "turn-1" })
+    ]);
+    const messages = foldMessages(domain);
+    assert.deepEqual(seen(messages.get("assistant:msg-p")), {
+      text: "Parent, continued.",
+      messageKind: "answer"
+    });
+    assert.equal(messages.get("assistant:agent:task-1:msg-s")?.text, "Agent says");
+    assert.equal(messages.get("assistant:agent:task-1:msg-s")?.agentId, "task-1");
+    const rows = messageRows(domain, "assistant:msg-p");
+    assert.deepEqual(
+      rows.filter((row) => !row.streaming).map((row) => row.index),
+      [rows.at(-1)!.index],
+      "the parent's message is closed once, by its own completion"
+    );
+  });
+
+  it("(c) …and a parent's new item leaves a subagent's open message alone", async () => {
+    const agent = { turnId: "turn-1", itemId: "msg-s", agentId: "task-1" };
+    const domain = await ingestAll([
+      live("item.started", { itemType: "assistant_message", status: "inProgress", agentId: "task-1" }, agent),
+      live("content.delta", { streamKind: "assistant_text", delta: "Agent " }, agent),
+      live("item.started", { itemType: "assistant_message", status: "inProgress" }, { turnId: "turn-1", itemId: "msg-p" }),
+      live("content.delta", { streamKind: "assistant_text", delta: "Parent." }, { turnId: "turn-1", itemId: "msg-p" }),
+      live("content.delta", { streamKind: "assistant_text", delta: "continues." }, agent),
+      live("item.completed", { itemType: "assistant_message", status: "completed", agentId: "task-1" }, agent),
+      live("turn.completed", { state: "completed" }, { turnId: "turn-1" })
+    ]);
+    const messages = foldMessages(domain);
+    assert.equal(messages.get("assistant:agent:task-1:msg-s")?.text, "Agent continues.");
+    assert.equal(messages.get("assistant:msg-p")?.text, "Parent.");
+    const rows = messageRows(domain, "assistant:agent:task-1:msg-s");
+    assert.deepEqual(
+      rows.filter((row) => !row.streaming).map((row) => row.index),
+      [rows.at(-1)!.index],
+      "the agent's message is closed once, by its own completion"
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (D4) The completion drops a phase-marker `detail`, never `data.text`
+// ---------------------------------------------------------------------------
+
+describe("(D4) a phase-marker detail is dropped from the completion, never data.text", () => {
+  it("data.text stands in for deltas that never arrived, even beside a marker detail", async () => {
+    // Codex does not forward `item.text` today; the day it does, it rides
+    // `data.text` next to the marker, and the marker must not take it along.
+    const messages = foldMessages(
+      await ingestAll([
+        live(
+          "item.completed",
+          {
+            itemType: "assistant_message",
+            detail: "commentary",
+            data: { phase: "commentary", text: "I'll read the config first.", delivery: null, questions: null }
+          },
+          { turnId: "turn-1", itemId: "a1" }
+        )
+      ])
+    );
+    assert.deepEqual(seen(messages.get("assistant:a1")), {
+      text: "I'll read the config first.",
+      messageKind: "commentary"
+    });
+  });
+
+  it("…and never prints a streamed message twice", async () => {
+    const item = { turnId: "turn-1", itemId: "a1" };
+    const messages = foldMessages(
+      await ingestAll([
+        live("item.started", { itemType: "assistant_message", ...codexLive("commentary") }, item),
+        live("content.delta", { streamKind: "assistant_text", delta: "I'll read the config first." }, item),
+        live(
+          "item.completed",
+          {
+            itemType: "assistant_message",
+            detail: "commentary",
+            data: { phase: "commentary", text: "I'll read the config first.", delivery: null, questions: null }
+          },
+          item
+        )
+      ])
+    );
+    assert.deepEqual(seen(messages.get("assistant:a1")), {
+      text: "I'll read the config first.",
+      messageKind: "commentary"
+    });
   });
 });
