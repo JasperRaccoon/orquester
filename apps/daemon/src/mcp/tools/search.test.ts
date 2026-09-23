@@ -121,8 +121,11 @@ test("a blank or over-long query and an unknown project are refused before anyth
   for (const query of ["", "   \n\t", "x".repeat(THREAD_SEARCH_MAX_QUERY_CHARS + 1), "😀".repeat(THREAD_SEARCH_MAX_QUERY_CHARS + 1)]) {
     await assert.rejects(tool.run({ query, limit: 20 }, ctx(api)), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && e.message.length < 200, `${Array.from(query).length} code points`);
   }
-  await assert.rejects(tool.run({ query: "x".repeat(THREAD_SEARCH_MAX_QUERY_CHARS + 1), limit: 20 }, ctx(api)), (e: { message: string }) => /201 characters; the limit is 200/.test(e.message));
-  await assert.rejects(tool.run({ query: "😀".repeat(THREAD_SEARCH_MAX_QUERY_CHARS + 1), limit: 20 }, ctx(api)), (e: { message: string }) => /201 characters; the limit is 200/.test(e.message), "an emoji is one character");
+  await assert.rejects(tool.run({ query: "x".repeat(THREAD_SEARCH_MAX_QUERY_CHARS + 1), limit: 20 }, ctx(api)), (e: { message: string }) => /longer than the 200-character limit/.test(e.message));
+  await assert.rejects(tool.run({ query: "😀".repeat(THREAD_SEARCH_MAX_QUERY_CHARS + 1), limit: 20 }, ctx(api)), (e: { message: string }) => /longer than the 200-character limit/.test(e.message), "an emoji is one character");
+  // A query of megabytes is refused like any other, and a lone surrogate counts as one code point, as the host counts it.
+  await assert.rejects(tool.run({ query: "😀".repeat(512 * 1024), limit: 20 }, ctx(api)), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /longer than the 200-character limit/.test(e.message));
+  await assert.rejects(tool.run({ query: "\uD800".repeat(THREAD_SEARCH_MAX_QUERY_CHARS + 1), limit: 20 }, ctx(api)), (e: { code: string }) => e.code === "INVALID_ARGUMENT");
   await assert.rejects(tool.run({ query: "build", project: "acme/nope", limit: 20 }, ctx(api)), (e: { code: string }) => e.code === "PROJECT_NOT_FOUND");
   // An empty project is refused, never read as "every project" — list_sessions' rule.
   await assert.rejects(tool.run({ query: "build", project: "", limit: 20 }, ctx(api)), (e: { code: string }) => e.code === "PROJECT_NOT_FOUND");
@@ -130,8 +133,9 @@ test("a blank or over-long query and an unknown project are refused before anyth
   // The longest query, and 101 emoji — 202 UTF-16 units, 101 code points — are sent whole, never clipped.
   const longest = "x".repeat(THREAD_SEARCH_MAX_QUERY_CHARS);
   const emoji = "😀".repeat(101);
-  for (const query of [longest, emoji, "😀".repeat(THREAD_SEARCH_MAX_QUERY_CHARS)]) await tool.run({ query: `  ${query}\n`, limit: 20 }, ctx(api));
-  assert.deepEqual(searchCalls(api).map((c) => c.query!.q), [longest, emoji, "😀".repeat(THREAD_SEARCH_MAX_QUERY_CHARS)]);
+  const lone = "\uD800".repeat(THREAD_SEARCH_MAX_QUERY_CHARS);
+  for (const query of [longest, emoji, "😀".repeat(THREAD_SEARCH_MAX_QUERY_CHARS), lone]) await tool.run({ query: `  ${query}\n`, limit: 20 }, ctx(api));
+  assert.deepEqual(searchCalls(api).map((c) => c.query!.q), [longest, emoji, "😀".repeat(THREAD_SEARCH_MAX_QUERY_CHARS), lone]);
 });
 
 test("a result over the byte cap keeps the best hits: titles and snippets capped, the lowest-ranked dropped from the end", async () => {

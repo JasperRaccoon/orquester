@@ -5,7 +5,7 @@ import { resolveProject } from "../addressing.ts";
 import type { DaemonApi } from "../daemon-api.ts";
 import { ToolError, expectOk } from "../errors.ts";
 import { listSessions } from "../reads.ts";
-import { clipText, MAX_RESULT_BYTES, resultBytes } from "../result.ts";
+import { capText, clipText, MAX_RESULT_BYTES, resultBytes } from "../result.ts";
 import { defineTool, READ_ONLY, type ToolDef } from "../tool.ts";
 
 /**
@@ -96,8 +96,9 @@ const searchSessions = defineTool({
     if (!query) throw new ToolError("INVALID_ARGUMENT", "The query is empty: pass the words to search for.");
     // Refused, never clipped: the host would cut a longer query silently and answer for words the caller did not send.
     // Counted in code points, as the host and the daemon clamp it: an emoji is one character, not two.
-    const length = Array.from(query).length;
-    if (length > THREAD_SEARCH_MAX_QUERY_CHARS) throw new ToolError("INVALID_ARGUMENT", `The query is ${length} characters; the limit is ${THREAD_SEARCH_MAX_QUERY_CHARS}.`);
+    // `capText` walks no further than one code point past the limit, so a query of megabytes (the schema sets no maximum,
+    // and a /mcp body may reach 16 MiB) is refused without being walked or copied whole.
+    if (capText(query, THREAD_SEARCH_MAX_QUERY_CHARS).truncated) throw new ToolError("INVALID_ARGUMENT", `The query is longer than the ${THREAD_SEARCH_MAX_QUERY_CHARS}-character limit.`);
     // `!== undefined`, as list_sessions tests it: an empty project is refused by resolveProject, never "every project".
     const projectPath = args.project !== undefined ? (await resolveProject(api, args.project)).path : undefined;
     const res = await api.request("GET", agentChatRoutes.search, { query: { q: query, limit: String(args.limit), ...(projectPath !== undefined ? { projectPath } : {}) } });
