@@ -970,7 +970,7 @@ export function proxyAccountFamily(entryId: string): "claude" | "codex" | null {
 }
 
 /**
- * Pass a body through, counting bytes, and destroy it with
+ * Pass a body through, counting bytes, and fail the counted stream with
  * {@link UploadTooLargeError} past `limit`. The second half of AGENTS.md's
  * "the cap is enforced twice": a chunked request carries no `Content-Length`
  * for the route's declared-length check to refuse.
@@ -979,11 +979,16 @@ export function proxyAccountFamily(entryId: string): "claude" | "codex" | null {
  * stream the MCP sends for a `{path}` attachment hitting EIO, or a file
  * truncated or unlinked under it — would otherwise be an `'error'` with no
  * listener, which ends the daemon. Forwarded, it fails the counted stream,
- * and the host client turns that into a failed upload. Deliberately not
- * `stream.pipeline`: that would also destroy the source when the cap trips,
- * and a destroyed half-read request cannot carry the route's refusal back
- * (`receiveUpload` keeps its request alive for the same reason). Exported for
- * its test.
+ * and the host client turns that into a failed upload.
+ *
+ * `countingLimit` never destroys its source; the route owns the request. So
+ * this is `pipe` plus that one forwarded error, not `stream.pipeline`, which
+ * destroys every stream in its chain on the first failure: past the cap the
+ * source is only unpiped and paused, and its owner ends it — the route with
+ * `refuseUpload`'s 413 and `Connection: close`, the MCP seam by destroying the
+ * file stream it opened. (Not because a destroyed request would lose the 413:
+ * on Node 20 `pipeline` detaches a server request's socket before destroying
+ * it, and the reply still goes out.) Exported for its test.
  */
 export function countingLimit(source: Readable, limit: number): Readable {
   let seen = 0;

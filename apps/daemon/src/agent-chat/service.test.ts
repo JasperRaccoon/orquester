@@ -800,7 +800,7 @@ test("an upload refused before it was sent leaves a failing body nothing to cras
   }
 });
 
-test("past its cap the counted body still fails with UploadTooLargeError, and the request survives it", async () => {
+test("past its cap the counted body still fails with UploadTooLargeError, and leaves its source to its owner", async () => {
   const source = new Readable({ read() {} });
   const counted = countingLimit(source, 4);
   const failed = once(counted, "error");
@@ -808,8 +808,8 @@ test("past its cap the counted body still fails with UploadTooLargeError, and th
   source.push(Buffer.from("12345"));
   const [error] = await failed;
   assert.ok(error instanceof UploadTooLargeError);
-  // `receiveUpload`'s rule (`upload-stream.ts`): a half-read request that was
-  // destroyed cannot carry the route's refusal back to the client.
+  // `countingLimit` never destroys its source: the request is the route's,
+  // and the route ends it with its own refusal (`refuseUpload`).
   assert.equal(source.destroyed, false);
 });
 
