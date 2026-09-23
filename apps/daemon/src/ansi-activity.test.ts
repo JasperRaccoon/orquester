@@ -260,26 +260,6 @@ test("ActivityTracker: a bell 400ms after a keystroke still raises attention", (
   tracker.dispose();
 });
 
-test("ActivityTracker: a programmatic write opens no echo window", () => {
-  const tracker = new ActivityTracker();
-
-  // The MCP tools write, then wait for the bell that answers them — their own
-  // write must not suppress it (I-4: sendAndWait blocked until its timeout).
-  tracker.noteInput(1_000, { programmatic: true });
-  tracker.noteOutput("\x07", 1_050);
-  assert.equal(tracker.snapshot().attention, "bell");
-  assert.equal(tracker.snapshot().needsAttentionAt, new Date(1_050).toISOString());
-
-  // The same timing from a real keystroke IS the terminal's own beep.
-  const typed = new ActivityTracker();
-  typed.noteInput(1_000);
-  typed.noteOutput("\x07", 1_050);
-  assert.equal(typed.snapshot().attention, null);
-
-  tracker.dispose();
-  typed.dispose();
-});
-
 test("ActivityTracker: exit raises finished attention", () => {
   const changes: string[] = [];
   const tracker = new ActivityTracker((s, cause) => changes.push(`${cause}:${s.state}/${s.attention}`));

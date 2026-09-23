@@ -17,13 +17,12 @@ export interface DaemonApi {
   request(method: DaemonMethod, path: string, opts?: { query?: Record<string, string>; body?: unknown }): Promise<DaemonResponse>;
   /** Owns `bytes`: reads it or destroys it. InjectDaemonApi never throws here — a failed upload is an answer (§4.5 codes), as over HTTP. */
   uploadAttachment(sessionId: string, meta: { name: string; type?: string }, bytes: Readable): Promise<{ status: number; value: unknown }>;
-  attachmentPath(sessionId: string, attachmentId: string): Promise<string | null>;
   subscribe(listener: (event: EventMessage) => void): () => void;
   readonly fsRoot: string;
   readonly workspacesDir: string;
 }
 
-type ChatUploads = Pick<AgentChatService, "uploadAttachment" | "attachmentPath">;
+type ChatUploads = Pick<AgentChatService, "uploadAttachment">;
 
 export class InjectDaemonApi implements DaemonApi {
   readonly fsRoot: string;
@@ -73,11 +72,6 @@ export class InjectDaemonApi implements DaemonApi {
       console.error("[mcp] attachment upload failed", error);
       return { status: 503, value: { code: "HOST_UNAVAILABLE", message: "The attachment upload failed." } };
     }
-  }
-
-  async attachmentPath(sessionId: string, attachmentId: string): Promise<string | null> {
-    if (!this.opts.agentChat) return null;
-    return this.opts.agentChat.attachmentPath(sessionId, attachmentId);
   }
 
   subscribe(listener: (event: EventMessage) => void): () => void {
