@@ -216,6 +216,13 @@ async function makeFixture(
       res.writeHead(200, { "content-type": "application/json" }).end("{}");
     });
   });
+  // The real host's timeouts (`agent-host/server/http-server.ts`): none. A
+  // connection closes only when one end tears it down. With Node's defaults
+  // the fake host closed an idle connection itself after 5 s, so a test that
+  // waited on that close passed whether or not the daemon tore anything down.
+  host.keepAliveTimeout = 0;
+  host.headersTimeout = 0;
+  host.requestTimeout = 0;
   await new Promise<void>((resolve) => host.listen(socketPath, resolve));
 
   state.service = new AgentChatService({
@@ -1069,17 +1076,22 @@ test("on a real request the decision reads the wire, not the reader: `complete`,
 // the host answers ≥ 400 while the body is still arriving, nothing else ever
 // ends that request: `countingLimit` forwards only an error, the route's
 // request is no longer aborted once its reply has gone out, and the host runs
-// with no request timeout. Left open, it holds one daemon↔host socket pair
-// until the host restarts.
+// with no keep-alive or request timeout. Left open, it holds one daemon↔host
+// socket pair until the host restarts.
 
 /**
  * Count the `abort()` calls the service makes on the host streams it opens.
  *
- * The wire shows a teardown, but it cannot show that none happened: once a
- * kept-alive exchange has completed, Node has already handed the socket back
- * to its pool, and an `abort()` then touches neither end of it. So a control
- * counts, and the teardown test counts first, so that a service that never
- * aborts fails at once instead of waiting on a connection nothing will close.
+ * The count and the wire answer different questions. The count says the
+ * service asked for a teardown. The wire says the teardown reached the
+ * socket, but only because the fake host, like the real one, never times a
+ * connection out. With a server timeout, the close proves nothing.
+ *
+ * A control can only count. Once a kept-alive exchange has completed, Node has
+ * already handed the socket back to its pool, and an `abort()` then touches
+ * neither end of it. The teardown test counts first, so a service that never
+ * asks fails at once. An `abort()` that is made but never reaches the socket
+ * leaves the close pending, and the test's timeout fails it.
  */
 function countAborts(t: TestContext, service: AgentChatService): () => number {
   let aborts = 0;
@@ -1097,7 +1109,11 @@ function countAborts(t: TestContext, service: AgentChatService): () => number {
   return () => aborts;
 }
 
-test("a host that refuses while the upload is still arriving has the daemon's request to it torn down", async (t) => {
+// The timeout is a deadline for a failure, never a wait. A real teardown
+// closes the host's end of the connection within milliseconds, and nothing
+// else ever closes it. So a teardown that never reaches the socket fails here
+// instead of hanging the suite.
+test("a host that refuses while the upload is still arriving has the daemon's request to it torn down", { timeout: 10_000 }, async (t) => {
   const f = await makeFixture(CLAUDEX, { env: {} });
   t.after(() => f.cleanup());
   // The real host's answer to an upload with no `name`, before it reads a byte.
@@ -1105,10 +1121,11 @@ test("a host that refuses while the upload is still arriving has the daemon's re
   f.refuseUpload = { status: 400, body: refusal };
   const aborts = countAborts(t, f.service);
   // Watched from the moment the upload reaches the host, so the close cannot
-  // slip by. It is the connection that closes: the host's request object never
-  // does, because once its answer has gone out the server no longer tracks it.
-  // A listener rather than `events.once()`, which would reject on the parse
-  // error the host's socket reports for the cut body on its way out.
+  // slip by. Only the daemon can close this connection: the fake host never
+  // times it out. It is the connection that closes: the host's request object
+  // never does, because once its answer has gone out the server no longer
+  // tracks it. A listener rather than `events.once()`, which would reject on
+  // the parse error the host's socket reports for the cut body on its way out.
   const closed = new Promise<void>((resolve) => {
     f.onUpload = (req) => req.socket.once("close", () => resolve());
   });
