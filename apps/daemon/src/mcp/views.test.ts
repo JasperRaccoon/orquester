@@ -127,3 +127,26 @@ test("planView reports a plan the snapshot's wire slimming already cut as trunca
   const snap = snapshot({ items: [activity("turn.proposed.completed", { planId: "p", planMarkdown: "計画…", truncated: true })] });
   assert.deepEqual(planView(snap, chatSummary()), { planId: "p", markdown: "計画…", truncated: true, actionable: false });
 });
+
+test("the context meter's percentUsed is clamped to 100, as the GUI's ring is; the raw token counts are kept", () => {
+  const over = snapshot({ items: [activity("context-window.updated", { usedTokens: 250_000, maxTokens: 200_000 })] });
+  assert.deepEqual(sessionDetail(chatSummary(), over, ctx).chat.contextWindow, { usedTokens: 250_000, maxTokens: 200_000, percentUsed: 100 });
+  const at = snapshot({ items: [activity("context-window.updated", { usedTokens: 200_000, maxTokens: 200_000 })] });
+  assert.equal(sessionDetail(chatSummary(), at, ctx).chat.contextWindow?.percentUsed, 100);
+});
+
+test("lastReply is the turn's answer: Codex commentary (the fold's messageKind) is left out, as the GUI demotes it", () => {
+  const codex = snapshot({ items: [
+    message("user", "fix the parser", { turnId: "t1" }),
+    message("assistant", "I'll look at the failing test first.", { turnId: "t1", messageKind: "commentary" }),
+    message("assistant", "Now running the suite.", { turnId: "t1", messageKind: "commentary" }),
+    message("assistant", "Fixed: the parser skipped empty lines.", { turnId: "t1", messageKind: "answer" })
+  ] });
+  assert.deepEqual(lastReply(codex), { turnId: "t1", text: "Fixed: the parser skipped empty lines.", truncated: false, completedAt: stamp(1) });
+  // Without a phase (Claude, an older Codex) every assistant message of the turn is its answer, as before.
+  const claude = snapshot({ items: [message("assistant", "Looking.", { turnId: "t1" }), message("assistant", "Done.", { turnId: "t1" })] });
+  assert.equal(lastReply(claude)?.text, "Looking.\n\nDone.");
+  // A turn cut before its answer said nothing that answers: its narration is not passed off as a reply.
+  const cut = snapshot({ turns: [turn({ state: "interrupted" })], items: [message("assistant", "I'll start with the tests.", { turnId: "t1", messageKind: "commentary" })] });
+  assert.equal(lastReply(cut)?.text, "");
+});

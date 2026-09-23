@@ -96,7 +96,16 @@ export async function uploadInlineAttachments(api: DaemonApi, sessionId: string,
     for (const [index, input] of inputs.entries()) prepared.push("path" in input ? await preparePath(api, input.path, index) : prepareInline(input, index));
     const refs: AttachmentRef[] = [];
     for (const [index, p] of prepared.entries()) {
-      const res = await api.uploadAttachment(sessionId, { name: p.name, type: p.type }, p.body());
+      let res: Awaited<ReturnType<DaemonApi["uploadAttachment"]>>;
+      try {
+        res = await api.uploadAttachment(sessionId, { name: p.name, type: p.type }, p.body());
+      } catch (error) {
+        // InjectDaemonApi answers instead of throwing, but any seam may reject. A coded refusal keeps its code; anything
+        // else is the host being unreachable, its text (which can name a host path) logged here and never returned.
+        if (error instanceof ToolError) throw atIndex(index, error);
+        console.error("[mcp] attachment upload failed", error);
+        throw atIndex(index, new ToolError("HOST_UNAVAILABLE", "Attachment upload failed."));
+      }
       if (res.status >= 400) throw atIndex(index, daemonError({ status: res.status, body: res.value }, { code: "HOST_UNAVAILABLE", message: "Attachment upload failed." }));
       const ref = res.value as AttachmentRef | null;
       if (!ref || typeof ref !== "object" || typeof (ref as { id?: unknown }).id !== "string") throw atIndex(index, new ToolError("INTERNAL", "the host did not return an attachment reference."));

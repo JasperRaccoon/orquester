@@ -20,6 +20,9 @@ export function capText(text: string, maxChars: number): { text: string; truncat
   return { text, truncated: false };
 }
 
+/** A value's size as a result, as ok() measures it: its JSON text, in UTF-8 bytes. */
+export const resultBytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), "utf8");
+
 /** A string's size inside a JSON result: escaped, UTF-8, without its quotes. */
 export const jsonBytes = (text: string): number => Buffer.byteLength(JSON.stringify(text), "utf8") - 2;
 
@@ -37,23 +40,47 @@ export function fitJsonBytes(text: string, budget: number): { text: string; trun
   return { text: capText(text, lo).text, truncated: true };
 }
 
+/** How many bytes the UTF-8 character a lead byte starts takes (1 for ASCII, or for a byte no character starts with). */
+export function utf8SequenceLength(lead: number): number {
+  return lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1;
+}
+
 /**
- * A successful tool result: the object as text AND as structuredContent, capped at
- * MAX_RESULT_BYTES. Over budget is a last-resort shed (the tool should have bounded itself):
- * the object gains `truncated` + `truncationNote`. When even that is too big, the text keeps the
- * capped JSON's leading bytes (cut on a character boundary, then "...") so the model still
- * sees the start, and structuredContent keeps only those two fields.
+ * How many leading bytes of `bytes` end on a UTF-8 character boundary: all of them, unless the last character is cut
+ * short, in which case it is left out whole. Judged from the bytes present only — a lead byte announces its
+ * character's length — so a reader can cut a window without the byte after it. Bytes that are not UTF-8 are not cut.
+ */
+export function wholeUtf8Length(bytes: Uint8Array): number {
+  const n = bytes.length;
+  // The last character's lead byte is at most 3 continuation bytes (10xxxxxx) back.
+  for (let i = n - 1; i >= 0 && i >= n - 4; i -= 1) {
+    const b = bytes[i]!;
+    if ((b & 0xc0) === 0x80) continue;
+    return i + utf8SequenceLength(b) <= n ? n : i;
+  }
+  return n;
+}
+
+/** The cap as the notes spell it: "60 000". */
+const CAP_LABEL = String(MAX_RESULT_BYTES).replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+
+/**
+ * A successful tool result: the object as text AND as structuredContent, capped at MAX_RESULT_BYTES. Over it is the
+ * last resort — every tool that can grow bounds itself first, so any tool may land here and the note names none of
+ * their parameters. The text keeps the JSON's leading bytes, cut on a character boundary, and ENDS with the note, where
+ * the model reads it; a cut object is no JSON, so structuredContent keeps only `truncated` and the note.
  */
 export function ok(value: Record<string, unknown>): { content: [TextContent]; structuredContent: Record<string, unknown> } {
   const text = JSON.stringify(value);
-  if (Buffer.byteLength(text, "utf8") <= MAX_RESULT_BYTES) return { content: [{ type: "text", text }], structuredContent: value };
-  const truncationNote = `Result exceeded ${MAX_RESULT_BYTES} bytes; narrow the request (fewer turns, smaller maxChars).`;
-  const capped = { ...value, truncated: true, truncationNote };
-  const cappedText = JSON.stringify(capped);
-  if (Buffer.byteLength(cappedText, "utf8") <= MAX_RESULT_BYTES) return { content: [{ type: "text", text: cappedText }], structuredContent: capped };
-  // A cut through a multibyte character decodes to a trailing U+FFFD; drop it so the cut is a whole character.
-  const head = Buffer.from(cappedText, "utf8").subarray(0, MAX_RESULT_BYTES - 3).toString("utf8").replace(/\uFFFD+$/u, "");
-  return { content: [{ type: "text", text: `${head}...` }], structuredContent: { truncated: true, truncationNote } };
+  const size = Buffer.byteLength(text, "utf8");
+  if (size <= MAX_RESULT_BYTES) return { content: [{ type: "text", text }], structuredContent: value };
+  const over = size - MAX_RESULT_BYTES;
+  const marker = `… [truncated: ${over} bytes over the ${CAP_LABEL}-byte cap]`;
+  const head = Buffer.from(text, "utf8").subarray(0, MAX_RESULT_BYTES - Buffer.byteLength(marker, "utf8"));
+  return {
+    content: [{ type: "text", text: `${head.subarray(0, wholeUtf8Length(head)).toString("utf8")}${marker}` }],
+    structuredContent: { truncated: true, truncationNote: `The result was ${over} bytes over the ${CAP_LABEL}-byte cap and was cut; narrow the request.` }
+  };
 }
 
 /** Map any thrown error to an isError result with a SAFE message (no path/stack leak). */

@@ -1,7 +1,10 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { CallToolRequestSchema, ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import type { DaemonApi } from "./daemon-api.ts";
+import { ToolError } from "./errors.ts";
 import type { FsTools } from "./fs-tools.ts";
 import { ok, toSafeToolError } from "./result.ts";
 import type { TodoTools } from "./todo-tools.ts";
@@ -39,28 +42,47 @@ export function allTools(): ToolDef[] {
   return [...catalogTools, ...sessionTools, ...messageTools, ...requestTools, ...watchTools, ...usageTools, ...fileTools, ...todoTools];
 }
 
+/** How many refused fields an INVALID_ARGUMENT names before "…". */
+const MAX_NAMED_ISSUES = 5;
+
+/** The one line an argument the schema refuses answers with: each bad field and why, as zod words it. */
+export function argumentProblems(toolName: string, error: z.ZodError): string {
+  const named = error.issues.slice(0, MAX_NAMED_ISSUES).map((issue) => `${issue.path.length ? issue.path.join(".") : "arguments"}: ${issue.message}`);
+  const more = error.issues.length > MAX_NAMED_ISSUES ? "; …" : "";
+  return `Invalid arguments for ${toolName}: ${named.join("; ")}${more}.`.replace(/\s+/g, " ");
+}
+
 /**
- * A per-request McpServer with every tool bound to the caller's DaemonApi. The SDK parses each call's
- * arguments with the tool's own schema (defaults applied) before the handler runs, so `run` gets them
- * parsed — and answers an argument the schema refuses itself (isError, the SDK's own text). Anything
- * a tool throws becomes a coded isError result (spec §4.5).
+ * A per-request McpServer with every tool bound to the caller's DaemonApi. The registrations are what `tools/list`
+ * serves; `tools/call` is our own handler, installed over the SDK's through its public `server.setRequestHandler`: the
+ * SDK answers an argument the schema refuses with its own text, outside spec §4.5's envelope. Ours parses the
+ * arguments ONCE with the tool's own schema (defaults applied; no `arguments` at all is `{}`), answers a refusal as
+ * INVALID_ARGUMENT naming the fields, and turns anything `run` throws into a coded isError result. An unknown tool is
+ * the JSON-RPC InvalidParams error the SDK raises for it.
  */
 export function buildServer(deps: McpDeps, authorization: string | undefined, signal: AbortSignal): McpServer {
   const server = new McpServer({ name: "orquester", version: SERVER_VERSION }, { instructions: SERVER_INSTRUCTIONS });
   const ctx: ToolContext = { api: deps.createApi(authorization), todos: deps.todos, files: deps.files, signal, now: deps.now ?? (() => Date.now()) };
+  const call = async (tool: ToolDef, args: unknown) => {
+    try {
+      return ok(await tool.run(args as never, ctx));
+    } catch (error) {
+      return toSafeToolError(error);
+    }
+  };
+  const tools = new Map<string, ToolDef>();
   for (const tool of allTools()) {
-    server.registerTool(
-      tool.name,
-      { title: tool.title, description: tool.description, inputSchema: tool.input, annotations: tool.annotations },
-      async (args: Record<string, unknown>) => {
-        try {
-          return ok(await tool.run(args as never, ctx));
-        } catch (error) {
-          return toSafeToolError(error);
-        }
-      }
-    );
+    tools.set(tool.name, tool);
+    // Never invoked — the tools/call handler below replaces the SDK's — but it would answer the same way.
+    server.registerTool(tool.name, { title: tool.title, description: tool.description, inputSchema: tool.input, annotations: tool.annotations }, (args: Record<string, unknown>) => call(tool, args));
   }
+  server.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const tool = tools.get(request.params.name);
+    if (!tool) throw new McpError(ErrorCode.InvalidParams, `Tool ${request.params.name} not found`);
+    const parsed = await z.object(tool.input).safeParseAsync(request.params.arguments ?? {});
+    if (!parsed.success) return toSafeToolError(new ToolError("INVALID_ARGUMENT", argumentProblems(tool.name, parsed.error)));
+    return call(tool, parsed.data);
+  });
   return server;
 }
 
@@ -73,6 +95,12 @@ const METHOD_NOT_ALLOWED = { jsonrpc: "2.0", error: { code: -32000, message: "Me
  */
 export function registerMcp(app: FastifyInstance, deps: McpDeps): void {
   app.post("/mcp", { bodyLimit: MCP_BODY_LIMIT }, async (request, reply) => {
+    // A client gone before this point has had its 'close' already, and it never fires again: nothing would abort a wait
+    // started for it, and nothing will read the answer. Do no work for it (hijacked, so Fastify sends nothing either).
+    if (reply.raw.destroyed) {
+      reply.hijack();
+      return;
+    }
     const ctrl = new AbortController(); // aborts in-flight waits when the client goes away
     const server = buildServer(deps, request.headers.authorization, ctrl.signal);
     // The transport answers 406 unless Accept lists both application/json and text/event-stream.

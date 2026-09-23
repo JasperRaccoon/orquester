@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeDaemonApi } from "./testing.ts";
 import { attachmentInputSchema, guessMime, uploadInlineAttachments } from "./attachments.ts";
+import { ToolError } from "./errors.ts";
 
 async function sandbox() {
   const root = await mkdtemp(join(tmpdir(), "mcp-att-"));
@@ -165,4 +166,29 @@ test("a host refusal while sending names the attachment it refused, keeping the 
   await assert.rejects(uploadInlineAttachments(s.api, "c1", files), (e: { code: string; message: string }) => e.code === "HOST_UNAVAILABLE" && e.message === "attachments[1]: Attachment upload failed.");
   s.api.onUpload((sessionId, meta, bytes) => (meta.name === "c.txt" ? { status: 200, value: { type: "file" } } : accept(sessionId, meta.name, bytes.length)));
   await assert.rejects(uploadInlineAttachments(s.api, "c1", files), (e: { code: string; message: string }) => e.code === "INTERNAL" && e.message === "attachments[2]: the host did not return an attachment reference.");
+});
+
+test("a seam that rejects (any DaemonApi) still names the attachment: HOST_UNAVAILABLE, its cause logged and never echoed", async (t) => {
+  const s = await sandbox(); t.after(() => rm(s.root, { recursive: true, force: true }));
+  const logged = t.mock.method(console, "error", () => {});
+  const sent: string[] = [];
+  s.api.uploadAttachment = async (sessionId, meta, bytes) => {
+    for await (const _ of bytes) { /* drain */ }
+    sent.push(meta.name);
+    if (meta.name === "b.txt") throw new Error("connect ENOENT /var/lib/orquester/daemon/agent-host.sock");
+    return { status: 200, value: { type: "file", id: `${sessionId}-${meta.name}`, name: meta.name, sizeBytes: 1 } };
+  };
+  const files = [{ name: "a.txt", base64: "YQ==" }, { name: "b.txt", base64: "Yg==" }, { name: "c.txt", base64: "Yw==" }];
+  await assert.rejects(uploadInlineAttachments(s.api, "c1", files), (e: { code: string; message: string }) => {
+    assert.equal(e.code, "HOST_UNAVAILABLE");
+    assert.equal(e.message, "attachments[1]: Attachment upload failed.");
+    return true;
+  });
+  assert.deepEqual(sent, ["a.txt", "b.txt"], "a failed send stops the rest");
+  assert.equal(logged.mock.callCount(), 1);
+  assert.match(String(logged.mock.calls[0].arguments[1]), /agent-host\.sock/, "the cause is logged server-side");
+  // A seam that rejects with a coded error keeps its code and message, and gains the index.
+  s.api.uploadAttachment = async () => { throw new ToolError("UPLOAD_TOO_LARGE", "Attachment exceeds the upload limit."); };
+  await assert.rejects(uploadInlineAttachments(s.api, "c1", [files[0]!]), (e: { code: string; message: string }) => e.code === "UPLOAD_TOO_LARGE" && e.message === "attachments[0]: Attachment exceeds the upload limit.");
+  assert.equal(logged.mock.callCount(), 1, "a coded rejection is not logged again");
 });

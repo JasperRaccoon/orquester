@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { TodoListManager } from "../todos.ts";
+import { TodoError, TodoListManager } from "../todos.ts";
 import { TodoTools } from "./todo-tools.ts";
 import { ToolError } from "./errors.ts";
 
@@ -131,5 +131,8 @@ test("toggleItem errors are safe and actionable", async () => {
     return true;
   });
 
-  await assert.rejects(() => tools.toggleItem("missing", 1), ToolError);
+  // A list that does not exist is the store's own 404, let through for result.ts to map (NOT_FOUND).
+  await assert.rejects(() => tools.toggleItem("missing", 1), (err) => err instanceof TodoError && err.status === 404);
+  await assert.rejects(() => tools.update("missing", { name: "x" }), (err) => err instanceof TodoError && err.status === 404);
+  await assert.rejects(() => tools.remove("missing"), (err) => err instanceof TodoError && err.status === 404);
 });

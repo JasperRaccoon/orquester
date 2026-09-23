@@ -1,10 +1,7 @@
 import { z } from "zod";
 import { DEFAULT_READ_BYTES, MAX_FS_ENTRIES, MAX_READ_BYTES, type ListFilesResult } from "../fs-tools.ts";
-import { MAX_RESULT_BYTES } from "../result.ts";
+import { MAX_RESULT_BYTES, resultBytes } from "../result.ts";
 import { defineTool, READ_ONLY, type ToolDef } from "../tool.ts";
-
-/** A result's size as ok() measures it: its JSON text, in UTF-8 bytes. */
-const resultBytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), "utf8");
 
 /**
  * A listing that fits one result (ok() cuts anything over MAX_RESULT_BYTES and loses its fields):
@@ -45,13 +42,15 @@ const readFile = defineTool({
   },
   annotations: READ_ONLY,
   async run(args, ctx) {
-    // FsTools reads whole byte windows, so the window is what shrinks until the result fits: each pass
-    // scales it by the room left for the text, and always by at least one byte.
+    // FsTools reads byte windows, so the window is what shrinks until the result fits: each pass scales it by
+    // the room left for the text, and always by at least one byte.
     let window = args.maxBytes;
     for (;;) {
       const read = await ctx.files.readFileWindow(args.path, { offset: args.offset, maxBytes: window });
-      // A truncated window was read whole, so the next one starts right after it.
-      const result: Record<string, unknown> = read.truncated ? { ...read, nextOffset: read.offset + window } : { ...read };
+      // A window ends on a character boundary, so it can cover fewer bytes than asked: the next one starts right
+      // after the bytes it consumed, never at offset + window. nextOffset says so; `consumed` is not repeated.
+      const { consumed, ...page } = read;
+      const result: Record<string, unknown> = read.truncated ? { ...page, nextOffset: read.offset + consumed } : { ...page };
       const size = resultBytes(result);
       if (size <= MAX_RESULT_BYTES || window === 1) return result;
       const overhead = resultBytes({ ...result, text: "" });

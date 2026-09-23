@@ -11,15 +11,17 @@ type Responder = DaemonResponse | ((call: { query?: Record<string, string>; body
  * - Routes. `on(method, path, responder)` registers a route; a request takes the NEWEST registered route whose method
  *   matches and whose path matches — exactly, or as a prefix when the registered path ends in `*`
  *   (`"/api/sessions/*"`). Exact and prefix routes are not ranked: registration order alone decides, so a later `on`
- *   overrides an earlier one for the paths it covers. The query never takes part in matching; a function responder
- *   receives `{query, body}` and can branch on it.
+ *   overrides an earlier one for the paths it covers. `opts.query` never takes part in matching (a `?` written into
+ *   `path` itself is part of the path and matches literally); a function responder receives `{query, body}` and can
+ *   branch on it.
  * - Answers. A responder is a canned `DaemonResponse` or a function returning one; a function that throws makes
  *   `request` reject (a transport failure). An unmatched request answers `404 {code: "NOT_FOUND"}`; it never throws.
  *   Every request, matched or not, is appended to `calls` (`query`/`body` only when given).
  * - Uploads. `uploadAttachment` reads the whole stream into `uploads`, then answers with the `onUpload` handler, else
- *   a 200 AttachmentRef (`image` for an image/* type); a source stream that errors makes it reject, where
- *   InjectDaemonApi answers 503 HOST_UNAVAILABLE. `attachmentPath` answers from `attachmentPaths`, else a path under a
- *   fake appdir.
+ *   a 200 AttachmentRef (`image` for an image/* type); a source stream that errors makes it reject. InjectDaemonApi
+ *   answers that case 503 HOST_UNAVAILABLE instead: `countingLimit` (agent-chat/service.ts) forwards the source's error
+ *   into the body the host client is sending, the upload fails, and the seam maps the throw. `attachmentPath` answers
+ *   from `attachmentPaths`, else a path under a fake appdir.
  * - Bus. `emit` delivers synchronously, as `Broadcaster.publish` does over the sinks `InjectDaemonApi.subscribe` adds:
  *   it walks the LIVE subscriber set in subscription order (a listener removed mid-delivery is skipped, one added is
  *   reached), each `subscribe` call is its own subscription even for the same function, and a listener that throws is

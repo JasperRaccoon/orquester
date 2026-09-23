@@ -10,11 +10,13 @@ import { allTools, registerMcp, SERVER_INSTRUCTIONS, SERVER_VERSION, type McpDep
 
 const EXPECTED_TOOLS = ["list_projects", "list_agents", "list_conversations", "list_sessions", "get_session", "get_turn_diff", "create_session", "update_session", "interrupt_session", "stop_session", "close_session", "revert_session", "compact_session", "send_message", "implement_plan", "read_transcript", "answer_question", "dismiss_question", "resolve_approval", "wait_for_session", "get_usage", "get_cost", "list_files", "read_file", "list_todos", "create_todo", "update_todo", "delete_todo", "toggle_todo_item"];
 
-// Spec §4.5's annotation rules, spelled out literally so a drifting constant fails here too.
-const READ = { readOnlyHint: true, idempotentHint: true };
+// Spec §4.5's annotation rules, spelled out literally so a drifting constant fails here too. A read, a todo tool and a
+// file tool touch only the daemon's own state (openWorldHint: false); a tool that drives an agent keeps the default.
+const READ = { readOnlyHint: true, idempotentHint: true, openWorldHint: false };
 const WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false };
 const WRITE_IDEMPOTENT = { readOnlyHint: false, destructiveHint: false, idempotentHint: true };
 const DESTROY = { readOnlyHint: false, destructiveHint: true, idempotentHint: true };
+const closed = (a: object) => ({ ...a, openWorldHint: false });
 
 /** Spec §12's tools/list snapshot: required params and annotations per tool — a guard against drift. */
 const CONTRACT: Record<string, { required: string[]; annotations: object }> = {
@@ -43,11 +45,11 @@ const CONTRACT: Record<string, { required: string[]; annotations: object }> = {
   list_files: { required: ["path"], annotations: READ },
   read_file: { required: ["path"], annotations: READ },
   list_todos: { required: [], annotations: READ },
-  create_todo: { required: ["name"], annotations: WRITE },
-  update_todo: { required: ["id"], annotations: WRITE_IDEMPOTENT },
-  delete_todo: { required: ["id"], annotations: DESTROY },
+  create_todo: { required: ["name"], annotations: closed(WRITE) },
+  update_todo: { required: ["id"], annotations: closed(WRITE_IDEMPOTENT) },
+  delete_todo: { required: ["id"], annotations: closed(DESTROY) },
   // Omitting `checked` flips the item, so a repeated call is not a no-op: not idempotent.
-  toggle_todo_item: { required: ["id", "item"], annotations: WRITE }
+  toggle_todo_item: { required: ["id", "item"], annotations: closed(WRITE) }
 };
 
 type ListedTool = { name: string; title?: string; description: string; annotations?: object; inputSchema: { properties?: Record<string, { description?: string }>; required?: string[] } };
@@ -76,6 +78,10 @@ async function postMcp(app: FastifyInstance, payload: object, authorization = "B
 }
 
 const call = (id: number, name: string, args: Record<string, unknown>) => ({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+const MCP_HEADERS = { accept: "application/json, text/event-stream", "content-type": "application/json", authorization: "Bearer abc" };
+/** One macrotask turn; `ticks(n)` is n of them. Nothing here sleeps. */
+const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
+const ticks = async (n: number) => { for (let i = 0; i < n; i += 1) await tick(); };
 
 test("tools/list is exactly the 29 spec tools, each with a title, annotations and described params", async () => {
   const app = mcpApp({ createApi: () => new FakeDaemonApi() });
@@ -134,7 +140,7 @@ test("a tool call returns structuredContent + text; a ToolError becomes isError 
   } finally { await app.close(); }
 });
 
-test("the SDK applies each tool's zod defaults before run(): list_sessions {} answers with kind all, attention off", async () => {
+test("each tool's zod defaults apply before run(): list_sessions {} answers with kind all, attention off", async () => {
   const api = new FakeDaemonApi()
     .on("GET", "/api/sessions", { status: 200, body: [chatSummary({ activity: { state: "idle", attention: null, lastOutputAt: null, needsAttentionAt: null } }), chatSummary({ id: "t9", kind: "shell", refId: "bash", title: "bash", order: 2, activity: { state: "idle", attention: null, lastOutputAt: null, needsAttentionAt: null } })] })
     .on("GET", "/api/registry", { status: 200, body: { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [] } })
@@ -145,6 +151,45 @@ test("the SDK applies each tool's zod defaults before run(): list_sessions {} an
     assert.equal(r.result.isError, undefined, r.result.content?.[0]?.text);
     // Without the defaults `kind` would be undefined, which drops every chat tab (only t9 would come back).
     assert.deepEqual((r.result.structuredContent.sessions as { id: string }[]).map((s) => s.id), ["c1", "t9"]);
+  } finally { await app.close(); }
+});
+
+test("arguments a tool's schema refuses answer the §4.5 envelope: isError, INVALID_ARGUMENT, one line naming the fields", async () => {
+  const app = mcpApp({ createApi: () => new FakeDaemonApi() });
+  try {
+    const bad = await postMcp(app, call(11, "read_transcript", { sessionId: "c1", maxChars: 1, turns: "three" }));
+    assert.equal(bad.result.isError, true);
+    assert.equal(bad.result.structuredContent.code, "INVALID_ARGUMENT");
+    const message = bad.result.structuredContent.message as string;
+    assert.match(message, /^Invalid arguments for read_transcript: /);
+    assert.match(message, /turns: /); assert.match(message, /maxChars: /);
+    assert.doesNotMatch(message, /\n/, "one line");
+    assert.equal(bad.result.content[0].text, `INVALID_ARGUMENT: ${message}`);
+    const missing = await postMcp(app, call(12, "get_session", {}));
+    assert.equal(missing.result.structuredContent.code, "INVALID_ARGUMENT");
+    assert.match(missing.result.structuredContent.message, /sessionId: Required/);
+  } finally { await app.close(); }
+});
+
+test("a call without an arguments object is a call with none: the defaults apply", async () => {
+  const api = new FakeDaemonApi().on("GET", "/api/sessions", { status: 200, body: [chatSummary()] })
+    .on("GET", "/api/registry", { status: 200, body: { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [] } })
+    .on("GET", "/api/agent-accounts", { status: 200, body: { accounts: [], defaults: {} } }).on("GET", "/api/agent/providers", { status: 503, body: null });
+  const app = mcpApp({ createApi: () => api });
+  try {
+    const r = await postMcp(app, { jsonrpc: "2.0", id: 13, method: "tools/call", params: { name: "list_sessions" } });
+    assert.equal(r.result.isError, undefined, r.result.content?.[0]?.text);
+    assert.deepEqual((r.result.structuredContent.sessions as { id: string }[]).map((s) => s.id), ["c1"]);
+  } finally { await app.close(); }
+});
+
+test("an unknown tool is a JSON-RPC InvalidParams error (-32602), as the MCP spec has it, not a tool result", async () => {
+  const app = mcpApp({ createApi: () => new FakeDaemonApi() });
+  try {
+    const r = await postMcp(app, call(14, "read_terminal", {}));
+    assert.equal(r.result, undefined);
+    assert.equal(r.error.code, -32602);
+    assert.match(r.error.message, /Tool read_terminal not found/);
   } finally { await app.close(); }
 });
 
@@ -159,6 +204,51 @@ test("todo and file tools reach the injected TodoTools and FsTools", async () =>
     const read = await postMcp(app, call(6, "read_file", { path: "a.txt" }));
     assert.deepEqual(read.result.structuredContent, { path: "/w/a.txt", text: "hello", size: 5, offset: 0, truncated: false });
     assert.deepEqual(seen, [["list", { workspace: "acme" }], ["read", "a.txt", { offset: 0, maxBytes: 65536 }]]);
+  } finally { await app.close(); }
+});
+
+test("the route takes a 2 MiB tools/call — its own 16 MiB body limit, past Fastify's 1 MiB default", async () => {
+  let seen = 0;
+  const files = { readFileWindow: async (path: string) => { seen = path.length; return { path: "/w/a.txt", text: "", size: 0, offset: 0, truncated: false, consumed: 0 }; } };
+  const app = mcpApp({ createApi: () => new FakeDaemonApi(), files: files as never });
+  try {
+    const big = "p".repeat(2 * 1024 * 1024);
+    const r = await postMcp(app, call(15, "read_file", { path: big }));
+    assert.equal(r.result.isError, undefined, r.result.content?.[0]?.text);
+    assert.equal(seen, big.length, "the whole argument arrived");
+  } finally { await app.close(); }
+});
+
+test("a client that disconnects aborts the request's signal: a wait lets go of the bus at once, not at its timeout", async () => {
+  const api = new FakeDaemonApi().on("GET", "/api/sessions", { status: 200, body: [] });
+  const app = mcpApp({ createApi: () => api });
+  let raw: { destroy(): void } | undefined;
+  app.addHook("onRequest", async (_request, reply) => { raw = reply.raw; });
+  try {
+    const answered = app.inject({ method: "POST", url: "/mcp", headers: MCP_HEADERS, payload: call(16, "wait_for_session", { timeoutMs: 5_000 }) }).then(() => "answered", () => "closed");
+    for (let i = 0; i < 200 && api.listenerCount() === 0; i += 1) await tick();
+    assert.equal(api.listenerCount(), 1, "the wait is on the bus");
+    raw!.destroy(); // the client goes away: the response closes before it finished
+    assert.equal(await answered, "closed");
+    await ticks(10);
+    assert.equal(api.listenerCount(), 0, "the close aborted the wait");
+  } finally { await app.close(); }
+});
+
+test("a client already gone when the route runs gets nothing done for it: its 'close' has fired and will not fire again", async () => {
+  let built = 0;
+  const api = new FakeDaemonApi().on("GET", "/api/sessions", { status: 200, body: [] });
+  const app = mcpApp({ createApi: () => { built += 1; return api; } });
+  app.addHook("preHandler", async (_request, reply) => {
+    reply.raw.destroy();
+    await tick(); // the response's 'close' is emitted here, before the route could listen for it
+  });
+  try {
+    const answered = await app.inject({ method: "POST", url: "/mcp", headers: MCP_HEADERS, payload: call(17, "wait_for_session", { timeoutMs: 1_000 }) }).then(() => "answered", () => "closed");
+    assert.equal(answered, "closed");
+    await ticks(20);
+    assert.equal(built, 0, "no server built, no tool run");
+    assert.equal(api.listenerCount(), 0, "no wait left behind that nothing would ever abort");
   } finally { await app.close(); }
 });
 

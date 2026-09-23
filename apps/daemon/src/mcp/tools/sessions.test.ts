@@ -142,6 +142,17 @@ test("create_session resume: a system-home row never forces System, a cliproxy r
   assert.ok(!h.api.calls.slice(before).some((c) => c.method === "POST"), "nothing was created");
 });
 
+test("create_session refuses to resume a proxy-home conversation that names no launcher (list_conversations says resumable:false)", async (t) => {
+  const h = await harness(); t.after(h.close);
+  h.api.on("POST", "/api/sessions", ({ body }) => ({ status: 200, body: chatSummary({ id: "c1", refId: (body as { refId: string }).refId }) }))
+    .on("GET", "/api/agents/conversations", { status: 200, body: { conversations: [{ id: "conv-orphan", agentRefId: "claude", title: "Proxy, launcher unknown", updatedAt: stamp(2), home: "cliproxy" }] } });
+  for (const agent of [undefined, "claude"]) {
+    await assert.rejects(tool("create_session").run({ project: "acme/api", ...(agent ? { agent } : {}), resume: { conversationId: "conv-orphan" }, runtimeMode: "full-access" }, h.ctx),
+      (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && e.message === "Conversation \"conv-orphan\" is not resumable: it lives in a proxy home with no launcher. Pick a row with resumable: true from list_conversations.", String(agent));
+  }
+  assert.ok(!h.api.calls.some((c) => c.method === "POST"), "nothing was created — plain claude would have opened an empty session");
+});
+
 test("create_session cwd: resolved against the project, and it must be an existing directory inside the sandbox", async (t) => {
   const h = await harness(); t.after(h.close);
   await mkdir(join(h.projectPath, "src"));
@@ -197,6 +208,17 @@ test("create_session: a read that fails after the create names the created sessi
   });
   assert.equal(logged.mock.callCount(), 1);
   assert.equal(h.api.calls.filter((c) => c.method === "POST" && c.path === "/api/sessions").length, 2, "one create per call: the tool never retries it");
+});
+
+test("create_session: a failed read's own detail can never hide which tab was created — sessionId and created:true win a key clash", async (t) => {
+  const h = await harness(); t.after(h.close);
+  h.api.on("POST", "/api/sessions", { status: 200, body: chatSummary() })
+    .on("GET", "/api/sessions/c1/thread", { status: 503, body: { error: { code: "HOST_UNAVAILABLE", message: "The agent host is restarting.", detail: { retryAfterMs: 250, created: false, sessionId: "some-other-tab" } } } });
+  await assert.rejects(tool("create_session").run({ project: "acme/api", agent: "claude", runtimeMode: "full-access" }, h.ctx), (e: { code: string; detail: unknown }) => {
+    assert.equal(e.code, "HOST_UNAVAILABLE");
+    assert.deepEqual(e.detail, { retryAfterMs: 250, sessionId: "c1", created: true });
+    return true;
+  });
 });
 
 test("update_session: one /mode body for model+effort+runtimeMode, rename via PUT, account via /account, no-ops skipped", async (t) => {

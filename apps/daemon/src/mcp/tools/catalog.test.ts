@@ -200,8 +200,8 @@ test("an empty filter is refused like any unknown one, never read as \"no filter
   await assert.rejects(tool("list_projects").run({ workspace: "", includeArchived: false }, ctx(api)), refused, "list_projects");
   await assert.rejects(tool("list_agents").run({ agent: "", includeLegacyModels: false }, ctx(api)), refused, "list_agents");
   await assert.rejects(tool("list_conversations").run({ project: "acme/api", agent: "", limit: 20 }, ctx(api)), refused, "list_conversations");
-  for (const t of catalogTools) {
-    const filter = (t.input as Record<string, { safeParse(v: unknown): { success: boolean } }>)[t.name === "list_projects" ? "workspace" : "agent"]!;
-    assert.equal(filter.safeParse("").success, false, `${t.name}'s schema refuses ""`);
+  for (const def of catalogTools) {
+    const filter = (def.input as Record<string, { safeParse(v: unknown): { success: boolean } }>)[def.name === "list_projects" ? "workspace" : "agent"]!;
+    assert.equal(filter.safeParse("").success, false, `${def.name}'s schema refuses ""`);
   }
 });

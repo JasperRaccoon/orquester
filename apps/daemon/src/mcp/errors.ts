@@ -15,6 +15,9 @@ function codeForStatus(status: number): string {
   return STATUS_CODES[status] ?? (status >= 400 && status < 500 ? "INVALID_ARGUMENT" : "INTERNAL");
 }
 
+/** A string with something to read in it: an empty or blank one names nothing. */
+const readable = (v: unknown): v is string => typeof v === "string" && v.trim() !== "";
+
 /**
  * Fastify's serialisation of an error no route caught: `{statusCode, code?, error: "<status text>", message}`.
  * No daemon route sends that shape on purpose, so its `code` is an errno such as `ENOENT`, not a daemon code.
@@ -29,8 +32,9 @@ function isUncaughtError(body: Record<string, unknown>): boolean {
  * one is a crash or an unreachable service whose text can carry a host path or a stack, so it is
  * never echoed: it becomes INTERNAL (HOST_UNAVAILABLE for 502/503). A 4xx `{error: "…"}` or
  * `{message: "…"}` is the route's own validation text and is kept — from Fastify's own shape the
- * `message` (the reason), never its `error` (the status text). `fallback` replaces the
- * status-derived error when the body names no code; it never echoes the body either.
+ * `message` (the reason), and its `error` (the status text) only when that message is empty; a
+ * blank text is never kept. `fallback` replaces the status-derived error when the body names no
+ * code; it never echoes the body either.
  */
 export function daemonError(res: DaemonResponse, fallback?: { code: string; message: string }): ToolError {
   const body = res.body !== null && typeof res.body === "object" ? (res.body as Record<string, unknown>) : null;
@@ -44,9 +48,9 @@ export function daemonError(res: DaemonResponse, fallback?: { code: string; mess
       return new ToolError(body.code, typeof body.message === "string" ? body.message : body.code, body.detail);
     }
     if (res.status < 500) {
-      if (isUncaughtError(body) && typeof body.message === "string") return new ToolError(codeForStatus(res.status), body.message);
-      if (typeof env === "string") return new ToolError(codeForStatus(res.status), env);
-      if (typeof body.message === "string") return new ToolError(codeForStatus(res.status), body.message);
+      if (isUncaughtError(body) && readable(body.message)) return new ToolError(codeForStatus(res.status), body.message);
+      if (readable(env)) return new ToolError(codeForStatus(res.status), env);
+      if (readable(body.message)) return new ToolError(codeForStatus(res.status), body.message);
     }
   }
   if (fallback) return new ToolError(fallback.code, fallback.message);

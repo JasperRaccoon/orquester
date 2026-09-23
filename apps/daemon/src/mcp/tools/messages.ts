@@ -12,7 +12,12 @@ import { buildViewContext, chatDetail, SETTLED_TURN_STATES, type SessionDetail }
 import { turnBaseline, waitForTurn, type TurnBaseline, type TurnOutcome } from "../wait.ts";
 
 const MAX_WAIT_MS = 600_000;
-/** read_transcript's ceiling: the budget covers the entries, and a whole tool result is capped at 60 000 bytes (result.ts). */
+/**
+ * read_transcript's ceiling. `maxChars` is — despite its name — the size budget for the WHOLE result, in UTF-8 bytes of
+ * its JSON (transcript.ts): the subagent list gets at most a quarter of it when the transcript needs the rest, and the
+ * transcript sheds reasoning, then tool detail, then the oldest turns, and cuts the latest reply last. It stays under the
+ * 60 000-byte cap every tool result has (result.ts).
+ */
 const MAX_TRANSCRIPT_CHARS = 55_000;
 /**
  * How long a needs-input the snapshot contradicts waits for the summary to move before looking again anyway: just
@@ -21,6 +26,17 @@ const MAX_TRANSCRIPT_CHARS = 55_000;
  */
 const STALE_RECHECK_MS = 2_000;
 const TRUNCATED_HINT = "Shed to fit maxChars: reasoning first, then tool detail, then the oldest turns (coveredTurns says which are left). Raise maxChars (max 55000), include less, or use get_turn_diff for one turn's file changes.";
+const SUBAGENTS_TRIMMED_HINT = "The subagent list was trimmed too — full roster: get_session.";
+
+/**
+ * The hint a shed read_transcript result carries, or none for a whole one. `subagentsTruncated` is optional on purpose: a
+ * transcript.ts that cannot trim the roster never sets it. transcript.ts keeps a truncated result TRANSCRIPT_HINT_BYTES
+ * (320) under `maxChars` for this field, so `{hint}` serialised stays within that.
+ */
+export function transcriptHint(result: { truncated: boolean; subagentsTruncated?: boolean }): string | undefined {
+  if (!result.truncated) return undefined;
+  return result.subagentsTruncated ? `${TRUNCATED_HINT} ${SUBAGENTS_TRIMMED_HINT}` : TRUNCATED_HINT;
+}
 
 const sessionIdField = z.string().min(1).describe("The session id from list_sessions.");
 const waitFields = {
@@ -56,7 +72,7 @@ async function dispatchTurn(ctx: ToolContext, sessionId: string, checked: Thread
   const baseline = turnBaseline(summary);
   const over = turnsOverBefore(checked, summary);
   const { seq } = await sendCommand(ctx.api, sessionId, "turn", { input: body.input, ...(body.attachments?.length ? { attachments: body.attachments } : {}), interactionMode: body.interactionMode });
-  const { outcome, session } = wait ? await awaitTurn(ctx, sessionId, baseline, timeoutMs) : { outcome: "sent" as const, session: await chatDetail(ctx.api, sessionId) };
+  const { outcome, session } = wait ? await awaitTurn(ctx, sessionId, baseline, over, timeoutMs) : { outcome: "sent" as const, session: await chatDetail(ctx.api, sessionId) };
   return sendResult(seq, outcome, session, over);
 }
 
@@ -64,11 +80,13 @@ async function dispatchTurn(ctx: ToolContext, sessionId: string, checked: Thread
  * The turns already over when the message is posted: every settled turn of the snapshot the send was checked on, and
  * the summary's latest turn when settled. Their ids and replies answer earlier messages, never this one — even when
  * the baseline counts the session as running only because it is "starting" or its latest turn is a pending row.
+ * Settled is decided by the state alone, as wait.ts and views.ts decide it: a running turn's `completedAt` can hold a
+ * mid-turn placeholder stamp (turn-state.ts), and a steer into that turn is this message's.
  */
 function turnsOverBefore(checked: ThreadSnapshotPayload, summary: SessionSummary): ReadonlySet<string> {
   const over = new Set<string>();
   for (const t of [...checked.turns, summary.latestTurn]) {
-    if (t?.turnId && (SETTLED_TURN_STATES.has(t.state) || t.completedAt)) over.add(t.turnId);
+    if (t?.turnId && SETTLED_TURN_STATES.has(t.state)) over.add(t.turnId);
   }
   return over;
 }
@@ -77,9 +95,11 @@ function turnsOverBefore(checked: ThreadSnapshotPayload, summary: SessionSummary
  * §9.1's wait, then the detail the result is built from. A needs-input the snapshot does not confirm is no outcome:
  * the summary trails the host by up to one poll, so right after answer_question it can still flag the request just
  * settled. The wait then goes on until a real outcome or the timeout — resuming on the session's next bus event (or
- * after STALE_RECHECK_MS), never looping on the stale summary.
+ * after STALE_RECHECK_MS), never looping on the stale summary. For the same lag, a verdict on a turn that was already
+ * `over` when the message was posted is the list catching up, not this message's outcome: the wait rebases on it and
+ * goes on. A session in error is a real failure whatever its latest turn.
  */
-async function awaitTurn(ctx: ToolContext, sessionId: string, baseline: TurnBaseline, timeoutMs: number): Promise<{ outcome: TurnOutcome; session: SessionDetail }> {
+async function awaitTurn(ctx: ToolContext, sessionId: string, baseline: TurnBaseline, over: ReadonlySet<string>, timeoutMs: number): Promise<{ outcome: TurnOutcome; session: SessionDetail }> {
   // Elapsed time as wait.ts counts it: the larger of the caller's clock and the monotonic one.
   const startedAt = ctx.now();
   const startedMono = performance.now();
@@ -99,7 +119,12 @@ async function awaitTurn(ctx: ToolContext, sessionId: string, baseline: TurnBase
     for (;;) {
       if (closed) throw new ToolError("SESSION_NOT_FOUND", `Session "${sessionId}" was closed while waiting.`);
       const seen = events;
-      const { outcome } = await waitForTurn(ctx.api, sessionId, baseline, { timeoutMs: Math.max(0, remaining()), signal: ctx.signal, now: ctx.now });
+      const { outcome, summary } = await waitForTurn(ctx.api, sessionId, baseline, { timeoutMs: Math.max(0, remaining()), signal: ctx.signal, now: ctx.now });
+      const latest = summary?.latestTurn?.turnId;
+      if (outcome !== "needs-input" && outcome !== "timeout" && summary && summary.chatSessionStatus !== "error" && latest && over.has(latest)) {
+        baseline = turnBaseline(summary);
+        continue;
+      }
       const session = await chatDetail(ctx.api, sessionId);
       if (outcome !== "needs-input" || session.pending.approvals.length > 0 || session.pending.questions.length > 0) return { outcome, session };
       const left = remaining();
@@ -223,7 +248,7 @@ const readTranscript = defineTool({
     turns: z.number().int().min(1).max(200).default(3).describe("How many of the latest turns to include."),
     agentId: z.string().optional().describe("A subagent id from get_session.subagents to read its own timeline."),
     include: z.array(z.enum(["reasoning", "tools", "activity"])).default(["tools", "activity"]).describe("Extra row kinds; reasoning is opt-in."),
-    maxChars: z.number().int().min(2_000).max(MAX_TRANSCRIPT_CHARS).default(40_000).describe("Character budget for the entries (max 55000: a whole result is capped at 60000 bytes). Over it, reasoning, then tool detail, then the oldest turns are shed.")
+    maxChars: z.number().int().min(2_000).max(MAX_TRANSCRIPT_CHARS).default(40_000).describe("Size budget for the result, in UTF-8 bytes (max 55000; every tool result is capped at 60000 bytes). The subagent list gets at most a quarter of it when the transcript needs the rest; the transcript sheds reasoning, then tool detail, then the oldest turns, and cuts the latest reply last.")
   },
   annotations: READ_ONLY,
   async run(args, { api }) {
@@ -233,7 +258,8 @@ const readTranscript = defineTool({
       throw new ToolError("INVALID_ARGUMENT", `No subagent "${args.agentId}". Known: ${snap.roster.map((r) => r.id).join(", ") || "none"}.`);
     }
     const result = transcriptEntries(snap, { turns: args.turns, ...(args.agentId ? { agentId: args.agentId } : {}), include: new Set(args.include), maxChars: args.maxChars });
-    return result.truncated ? { ...result, hint: TRUNCATED_HINT } : { ...result };
+    const hint = transcriptHint(result);
+    return hint ? { ...result, hint } : { ...result };
   }
 });
 
