@@ -197,26 +197,53 @@ object**, returned as `structuredContent` and as the same JSON in a single text 
 (`content[0].text`); lists are wrapped (`{"sessions": [...]}`). A tool that changes a session
 returns the session's fresh `SessionDetail` under `session`, and commands also return the host's
 `seq`, so you see the effect without a second call. `tools/list` gives every tool a title,
-annotations (`readOnlyHint` on reads and waits; `destructiveHint` on `close_session`,
-`revert_session` and `delete_todo`) and a description of every parameter.
+annotations and a description of every parameter. The annotations: `readOnlyHint` on every tool
+that only reads or waits — the `list_*`, `get_*` and `read_*` tools and `wait_for_session`;
+`destructiveHint` on `close_session`, `revert_session` and `delete_todo`; `openWorldHint: false` on
+reads, waits, usage and the todo and file tools, which touch only the daemon's own state (a tool
+that drives an agent keeps the default).
 
 **Errors** come back as `isError: true` with the text `<CODE>: <message>` and
 `structuredContent: {code, message, detail?}`; the message names the valid values or the tool that
-fixes the problem. Daemon and agent-host codes pass through unchanged (`THREAD_NOT_FOUND`,
-`COMMAND_REJECTED`, `COMPACTION_UNAVAILABLE`, `HOST_UNAVAILABLE`, `RESUME_UNAVAILABLE`,
-`SESSION_UNAVAILABLE`, `UPLOAD_TOO_LARGE`, `INVALID_COMMAND`, `COMMAND_ID_CONFLICT`, …). The MCP's
-own codes are `INVALID_ARGUMENT`, `PROJECT_NOT_FOUND`, `SESSION_NOT_FOUND`, `NOT_A_CHAT_SESSION`,
-`PENDING_REQUEST`, `SESSION_BUSY`, `PATH_NOT_ALLOWED` and `INTERNAL`; `INTERNAL` never carries a
-path or a stack (the detail is logged on the daemon). A command the agent host refuses with
+fixes the problem. The codes include:
+
+- **Daemon and agent-host codes**, passed through unchanged: `THREAD_NOT_FOUND`,
+  `COMMAND_REJECTED`, `COMPACTION_UNAVAILABLE`, `HOST_UNAVAILABLE`, `RESUME_UNAVAILABLE`,
+  `SESSION_UNAVAILABLE`, `UPLOAD_TOO_LARGE`, `INVALID_COMMAND`, `COMMAND_ID_CONFLICT` and others. A
+  daemon answer that names no code maps by its status: 401 `UNAUTHORIZED`, 403 `FORBIDDEN`, 404
+  `NOT_FOUND`, 409 `COMMAND_REJECTED`, 413 `UPLOAD_TOO_LARGE`, 429 `TOO_MANY_ATTEMPTS`, 502/503
+  `HOST_UNAVAILABLE`, any other 4xx `INVALID_ARGUMENT`, any other 5xx `INTERNAL`.
+- **The MCP's own codes**: `INVALID_ARGUMENT`, `PROJECT_NOT_FOUND`, `SESSION_NOT_FOUND`,
+  `NOT_A_CHAT_SESSION`, `PENDING_REQUEST`, `SESSION_BUSY`, `PATH_NOT_ALLOWED` and `INTERNAL`.
+  `INTERNAL` never carries a path or a stack (the detail is logged on the daemon).
+- **The todo store's codes**: `NOT_FOUND`, a todo list id that does not exist, whose message names
+  it (`No todo list with id "<id>"; list_todos shows the ids.`), and `CONFLICT`, the store's 409.
+
+An argument the tool's schema refuses gets the same envelope: `INVALID_ARGUMENT` with one line,
+`Invalid arguments for <tool>: <field>: <reason>; …`. It names at most five bad fields, each in at
+most 200 characters, so a huge value zod echoes back (an enum's value, an unknown key, a record
+key) is cut with "…". A call with no `arguments` object takes the defaults. An argument name the
+tool does not have is dropped, not refused (only an attachment object refuses a key it does not
+know), so a misspelled optional argument silently takes its default: `tools/list` has the exact
+names. An unknown tool name is not a tool result but a JSON-RPC error, code `-32602`
+(`MCP error -32602: Tool <name> not found`). A refusal quotes a todo list id, a todo item or an
+unknown tool's name at most 100 characters long, and no error message is longer than 4 000
+characters: a longer one is cut, ending in "…". A command the agent host refuses with
 `HOST_UNAVAILABLE` (it is restarting) is retried with the same command id up to 3 times
 (250 ms · 2ⁿ) before the error reaches you.
 
 **Size.** A result is at most 60 000 bytes of UTF-8 JSON (clients such as Claude Code drop larger
-MCP results). The tools that could return more bound themselves and say so with
-`truncated: true`: `read_transcript` (`maxChars`), `get_turn_diff` (the diff), `get_cost` (rows),
-`list_files` (500 entries) and `read_file` (paging). Long texts inside a session view — the plan,
-the last reply — are capped at 16 384 characters. As a last resort, a result still too large
-gains `truncated: true` and a `truncationNote`.
+MCP results). The tools that could return more bound themselves and say so:
+`read_transcript` (to `maxChars`; `truncated`), `get_turn_diff` (the diff is cut at the end;
+`truncated`), `get_cost` (whole days of rows, oldest first; `truncated`, `rowsDropped`),
+`read_file` (the window shrinks; `truncated`, `nextOffset`), `list_files` (at most 500 entries,
+fewer when one result cannot hold them; `truncated`), `list_todos` (the oldest lists, counted by
+`omittedLists`; a newest list too big on its own is cut, marked `bodyTruncated`) and the todo
+writes (a body too big for one result comes back as its head, marked `bodyTruncated`). Long texts
+inside a session view — the plan, the last reply — are capped at 16 384 characters. As a last
+resort, a result still too large is cut: its text keeps the leading bytes (never splitting a
+character) and ends with `… [truncated: N bytes over the 60 000-byte cap]`, and its
+`structuredContent` is only `{truncated: true, truncationNote}`.
 
 ### Views
 
@@ -254,12 +281,12 @@ plus:
 chat: { …SessionView.chat,
         model, options: { [id]: string | boolean }, runtimeMode, home: "system" | "account" | "cliproxy",
         accountLabel?, activeTurnId: string | null, turnCount, lastError?, continueAfterRestart: boolean,
-        contextWindow?: { usedTokens, maxTokens?, percentUsed?, compactsAutomatically? },
+        contextWindow?: { usedTokens, maxTokens?, percentUsed? /* ≤ 100 */, compactsAutomatically? },
         supports: { planMode, rollback, compaction, backgroundTasks } },
 pending: { approvals: PendingApprovalView[], questions: PendingQuestionView[] },
 plan?: { planId, markdown /* ≤ 16 384 characters */, truncated, actionable },
 subagents: SubagentView[],
-lastReply?: { turnId, text /* the main agent's text of the latest settled turn, ≤ 16 384 characters */,
+lastReply?: { turnId, text /* the main agent's answer in the latest settled turn, ≤ 16 384 characters */,
               truncated, completedAt }
 ```
 
@@ -276,6 +303,10 @@ PendingQuestionView = { requestId, createdAt, turnId?, responseMode: "blocking" 
 SubagentView        = { id, kind, agentKind: "agent" | "background", title, status, model?, effort?,
                         progress?, lastToolName?, startedAt, completedAt, error? }
 ```
+
+`lastReply` is the main agent's answer: its assistant messages in that turn, joined, with Codex's
+commentary (its running "I'll do X next" narration, which the GUI demotes) left out.
+`contextWindow.percentUsed` stops at 100, like the GUI's ring; `usedTokens` stays as reported.
 
 A terminal tab's `get_session` is just its `SessionView`: there is no transcript.
 
@@ -310,14 +341,19 @@ retry shortly. `auth.status: "unknown"` is not a sign-in problem; only `"unauthe
 
 - **`list_projects`** — recently used projects first, then the rest alphabetically; `openSessions`
   counts the project's open tabs. Archived workspaces and projects appear only with
-  `includeArchived: true`. An unknown `workspace` is refused (`INVALID_ARGUMENT`, naming the
-  workspaces); a workspace whose projects cannot be read is left out and named in `warnings`
-  rather than failing the whole list.
+  `includeArchived: true`. An unknown or empty `workspace` is refused (`INVALID_ARGUMENT`; an
+  unknown one names the workspaces). `warnings` appears only when there is something to say: a
+  workspace whose projects cannot be read is left out and named there rather than failing the
+  whole list, and naming an archived workspace without `includeArchived` says why the list is
+  empty.
 - **`list_agents`** — only the agents that open as chat tabs. Call it before `create_session` and
-  `update_session`: it has every valid model, option value, permission mode and account.
+  `update_session`: it has every valid model, option value, permission mode and account. An
+  unknown or empty `agent` filter is refused (`INVALID_ARGUMENT`).
 - **`list_conversations`** — the conversations the agent CLIs recorded on disk for this project,
   newest first. `agent` is the agent that resumes the row, and only `resumable: true` rows can be
-  passed to `create_session`'s `resume`. An unknown `agent` filter is refused (`INVALID_ARGUMENT`).
+  passed to `create_session`'s `resume`. An unknown or empty `agent` filter is refused
+  (`INVALID_ARGUMENT`), and a registry that cannot be read answers `INTERNAL` rather than a list
+  in which every row would look unresumable.
 
 ### Sessions
 
@@ -354,8 +390,10 @@ retry shortly. `auth.status: "unknown"` is not a sign-in problem; only `"unauthe
   explicit one (the seeded default, else `system`). With `resume`, the conversation must be one
   `list_conversations` lists for the project: its row decides the agent (`agent` may be omitted,
   and must match if given) and the default title, and a conversation stored under a managed account
-  resumes under that account. `RESUME_UNAVAILABLE` and `SESSION_UNAVAILABLE` pass through with the
-  daemon's message (a conversation already open in another tab arrives as `SESSION_UNAVAILABLE`).
+  resumes under that account. A row with `resumable: false` is refused (`INVALID_ARGUMENT`), for
+  instance a proxy-home conversation that names no launcher. `RESUME_UNAVAILABLE` and
+  `SESSION_UNAVAILABLE` pass through with the daemon's message (a conversation already open in
+  another tab arrives as `SESSION_UNAVAILABLE`).
   If the tab was created but could not be read back, the error's `detail` carries `sessionId` and
   `created: true`: use that id and do not create again. The first message is a separate
   `send_message`.
@@ -392,7 +430,7 @@ retry shortly. `auth.status: "unknown"` is not a sign-in problem; only `"unauthe
 |---|---|---|---|
 | `send_message` | `sessionId`, `text?`, `attachments?` (≤ 8, §9), `planMode? = false`, `wait? = true`, `timeoutMs? = 120000` (1 000–600 000) | `{seq, outcome, turnId?, reply?, replyTruncated?, pending?, session}` | The composer's Send (Enter during a turn steers it) |
 | `implement_plan` | `sessionId`, `wait? = true`, `timeoutMs? = 120000` (1 000–600 000) | Same as `send_message` | The plan card's **Implement** button |
-| `read_transcript` | `sessionId`, `turns? = 3` (≤ 200), `agentId?`, `include? = ["tools", "activity"]` (add `"reasoning"`), `maxChars? = 40000` (2 000–55 000) | `{entries: TranscriptEntry[], turnCount, coveredTurns: [from, to] \| null, truncated, subagents: [{id, title, status}], hint?}` | The chat timeline; a subagent's drill-in |
+| `read_transcript` | `sessionId`, `turns? = 3` (≤ 200), `agentId?`, `include? = ["tools", "activity"]` (add `"reasoning"`), `maxChars? = 40000` (2 000–55 000, UTF-8 bytes) | `{entries: TranscriptEntry[], turnCount, coveredTurns: [from, to] \| null, truncated, subagents: [{id, title, status}], subagentsTruncated?, hint?}` | The chat timeline; a subagent's drill-in |
 
 - **`send_message`** — needs `text` (at most 120 000 characters after trimming) or at least one
   attachment. It is refused with `PENDING_REQUEST` while a question or an approval is open — the
@@ -403,25 +441,46 @@ retry shortly. `auth.status: "unknown"` is not a sign-in problem; only `"unauthe
   validated and uploaded first; a refused one fails the call before anything is sent. While a turn
   is running, the message **steers** it (as Enter does mid-turn in the GUI) and `turnId` is that
   turn's. `wait: false` returns `outcome: "sent"` with the receipt. `wait: true` blocks as §8
-  describes and returns the `outcome`; once the turn has settled, `reply` — the main agent's text
-  from the turn this message started or steered, never an earlier turn's (at most 16 384
-  characters; `replyTruncated: true` when cut, and `read_transcript` has the rest); and `pending`
-  while a question or an approval is open. When `reply` is present, `session.lastReply` is left
-  out: it is the same text.
+  describes and returns the `outcome`; once the turn has settled, `reply` — the main agent's answer
+  (Codex's commentary narration left out) from the turn this message started or steered, never an
+  earlier turn's but for one rare race (§8) — at most 16 384 characters, `replyTruncated: true`
+  when cut, and `read_transcript` has the rest; and `pending` while a question or an approval is
+  open. When `reply` is present, `session.lastReply` is left out: it is the same text.
 - **`implement_plan`** — sends exactly what the GUI's Implement button sends: the line
   `PLEASE IMPLEMENT THIS PLAN:` followed by the latest proposed plan, in default (not plan) mode.
-  A plan too long for the thread snapshot (`plan.truncated: true`) is read back in full first; a
-  cut plan is never sent. Refused with `INVALID_ARGUMENT` when there is no proposed plan or the
-  latest one was already sent for implementation, and with `PENDING_REQUEST` while a request is
-  open. To refine a plan instead (the Refine button), use `send_message {planMode: true, text}`.
+  A plan too long for the thread snapshot (`plan.truncated: true`) is read back in full first, as
+  the Implement button does too; a cut plan is never sent. Refused with `INVALID_ARGUMENT` when
+  there is no proposed plan or the latest one was already sent for implementation, and with
+  `PENDING_REQUEST` while a request is open. To refine a plan instead (the Refine button), use
+  `send_message {planMode: true, text}`.
 - **`read_transcript`** — built from the same thread snapshot the GUI renders. `turns` counts back
-  from the latest turn, and `coveredTurns` says which turns are included. Without `agentId` you get
-  the parent view, the GUI's timeline: the main agent's rows plus one `subagent` row per subagent.
-  With `agentId`, only that subagent's own rows (its drill-in). `maxChars` is a budget for the
-  whole result, measured — despite its name — in UTF-8 bytes of the result's JSON. Over it, rows
-  are shed in a fixed order: reasoning, then tool detail, then the oldest turns, then the newest
-  turn's oldest rows (the final reply is kept, cut if it must be); the result then says
-  `truncated: true` and carries a `hint`.
+  from the latest turn, and `coveredTurns` names the first and last turn of the rows returned
+  (`null` when no row belongs to a turn). Without `agentId` you get the parent view, the GUI's
+  timeline: the main agent's rows plus one `subagent` row per subagent, with the roster in
+  `subagents`. With `agentId`, only that subagent's own rows (its drill-in), and `subagents` is
+  empty. A subagent's title is capped at 200 characters, in `subagents` and on its row.
+
+  `maxChars` is the size budget for the result, in UTF-8 bytes (max 55000; every tool result is
+  capped at 60000 bytes). A result that fits comes back whole. Over it, the transcript sheds
+  reasoning, then tool detail, then its oldest rows, and cuts the latest reply last; the subagent
+  list keeps at least a quarter when it needs it, plus whatever the transcript leaves unused. In
+  detail: each step works oldest first and stops as soon as the result fits; the tool-detail step
+  cuts a detail to 200 characters; the latest turn's final reply (with no reply yet, that turn's
+  newest row) is never dropped, only cut, its biggest text or list first; a shed result keeps
+  320 bytes free for its `hint`, so the answer, hint included, stays within `maxChars`; and the
+  subagent list — at least a quarter of the room left after the hint, when it needs it — drops
+  settled subagents oldest first, then live ones, and says `subagentsTruncated: true`. Every shed
+  result, a trimmed subagent list alone included, says `truncated: true` and carries a `hint`:
+  "Shed to fit maxChars: reasoning, then tool detail, then the oldest rows (coveredTurns says which
+  turns are left). Raise maxChars (max 55000), include less, or use get_turn_diff for one turn's
+  file changes." When `subagentsTruncated` is set, the hint adds " The subagent list was trimmed
+  too — full roster: get_session."
+
+  A list cut to fit — a checkpoint's `files`, a tool's `changedFiles`, a message's `attachments` —
+  ends in one marker element counting the rest, and that element is not a real entry:
+  `"…12 more files"` in `changedFiles`, `{path: "…12 more files", additions, deletions}` in `files`
+  (carrying the omitted files' real line totals), `{name: "…3 more attachments", type: "omitted"}`
+  in `attachments`. Never take a `…N more` element for a real path or file.
 
 ```
 TranscriptEntry = { turn: number | null, turnId: string | null, kind, createdAt, agentId?, …by kind:
@@ -430,7 +489,7 @@ TranscriptEntry = { turn: number | null, turnId: string | null, kind, createdAt,
   "reasoning"    text                                                       (include "reasoning")
   "tool"         tool: { type, title, status, command?, detail?, changedFiles? }
                                                   (include "tools"; one entry per tool call, its latest state)
-  "approval"     requestId, requestKind?, text? /* the request's detail */, decision?
+  "approval"     requestId, requestKind?, text? /* the request's detail, ≤ 2 000 characters */, decision?
                                                   (include "activity"; open or resolved)
   "question"     requestId, questions?: [text], answered                    (include "activity")
   "subagent"     subagent: { id, title, status }                            (parent view only)
@@ -458,15 +517,16 @@ TranscriptEntry = { turn: number | null, turnId: string | null, kind, createdAt,
   (exactly, else ignoring case) selects that option; any other string is sent as the custom answer
   where the question allows one (`allowCustomAnswer`). Attachments (§9) are accepted on questions
   that take a custom answer and are not secret, and files alone answer a question (pass `""` as its
-  answer). Everything is validated before anything is uploaded or sent, and the problems are
+  answer); on a blocking question they reach the agent as `Attached file:` lines, images included
+  (§9). Everything is validated before anything is uploaded or sent, and the problems are
   reported together; all the files of all the questions are validated and uploaded as one batch,
   so a bad file anywhere uploads nothing, and the error names the question and the file
   (`Attachments for "<question>": attachments[i]: …`). A Codex async question
   (`responseMode: "message"`) is answered the same way: the host turns the answer into a user
   message that repeats each question before its answer, which steers or starts a turn.
 - **`dismiss_question`** — closes a question without answering it. Only an async question
-  (`responseMode: "message"`, `dismissible: true`) can be dismissed; a blocking one is refused —
-  answer it, or `interrupt_session`.
+  (`responseMode: "message"`, `dismissible: true`) can be dismissed; a blocking one is refused
+  (`INVALID_ARGUMENT`) — answer it, or `interrupt_session`.
 - **`resolve_approval`** — `decision` must be one of the request's `decisions` (`get_session`
   lists them with their labels and any warning). Two provider quirks, which the GUI shows as
   warnings: on Claude, `acceptAlways` denies (a permanent permission cannot be granted from here);
@@ -480,7 +540,10 @@ TranscriptEntry = { turn: number | null, turnId: string | null, kind, createdAt,
 | `wait_for_session` | `sessionId?` or `project?` (neither: every session), `after?` (ISO time; default: now), `timeoutMs? = 120000` (1 000–600 000) | `{sessions: SessionView[], cursor, timedOut}` | The Attention Center |
 
 Blocks until a watched session needs attention after `after`; §8 has the rules and the cursor
-contract. Passing both `sessionId` and `project` is refused.
+contract. Passing both `sessionId` and `project` is refused, and so is an empty one: an empty
+`sessionId` (`INVALID_ARGUMENT`) or `project` (`PROJECT_NOT_FOUND`) is never read as "every
+session". A wait on one `sessionId` fails with `SESSION_NOT_FOUND` at once when that session
+closes, or when it is already gone.
 
 ### Usage
 
@@ -518,29 +581,47 @@ UsageWindow = { id: "session" | "weekly" | "scoped:<label>", label: "5h" | "Week
 | Tool | Input | Returns | GUI equivalent |
 |---|---|---|---|
 | `list_files` | `path` | `{path, entries: [{name, kind: "dir" \| "file" \| "symlink" \| "other", size}], truncated}` | The file browser |
-| `read_file` | `path`, `offset? = 0`, `maxBytes? = 65536` (≤ 262 144) | `{path, text, size, offset, truncated}` | Opening a file in the editor |
+| `read_file` | `path`, `offset? = 0`, `maxBytes? = 65536` (≤ 262 144) | `{path, text, size, offset, truncated, nextOffset?}` | Opening a file in the editor |
 
 Both work inside the workspaces sandbox: `path` is absolute or relative to the sandbox root, and
-anything outside it is `PATH_NOT_ALLOWED`. `list_files` returns at most 500 entries, sorted by name
-(`truncated: true` beyond). `read_file` pages by byte offset: `truncated: true` means there is
-more — read again with `offset` advanced by `maxBytes`. Binary files are refused.
+anything outside it is `PATH_NOT_ALLOWED`. `list_files` returns at most 500 entries — the first 500
+the directory yields — sorted by name, and fewer when one result cannot hold them; `truncated: true`
+means some were left out. `read_file` pages by byte offset: `truncated: true` means there is more —
+read again with `offset` set to the result's `nextOffset`, never `offset + maxBytes`. A window ends
+on a character boundary and shrinks to fit one result, so it can cover fewer than `maxBytes` bytes —
+or, when `maxBytes` is smaller than the character at `offset`, more: that one whole character (up
+to 4 bytes), so paging always advances. Binary files are refused.
 
 ### Todos
 
 | Tool | Input | Returns | GUI equivalent |
 |---|---|---|---|
-| `list_todos` | `workspace?` or `project?` (exactly one) | `{todos: Todo[]}` | The Todo tab |
+| `list_todos` | `workspace?` or `project?` (exactly one) | `{todos: Todo[], truncated?, omittedLists?}` | The Todo tab |
 | `create_todo` | `workspace?` or `project?` (exactly one), `name` | `{todo: Todo}` | Adding a list |
 | `update_todo` | `id`, `name?`, `body?` | `{todo: Todo}` | Renaming or editing a list |
 | `delete_todo` | `id` | `{deleted: true, id}` | Deleting a list |
-| `toggle_todo_item` | `id`, `item` (its text, or its 1-based index), `checked?` (omit to flip) | `{id, item, checked, body}` | Ticking one checkbox |
+| `toggle_todo_item` | `id`, `item` (its text, or its 1-based index), `checked?` (omit to flip) | `{id, item, checked, body, bodyTruncated?}` | Ticking one checkbox |
 
-`Todo = {id, name, scope: "workspace" | "project", body, createdAt, updatedAt}`. A list belongs to
-a workspace (`workspace`, by name) or to a project (`project`, a path or `"workspace/project"` as
-everywhere else). `body` is GitHub task-list markdown (`- [ ] item`); a new list starts empty, and
-`update_todo` replaces the whole body. To tick one item use `toggle_todo_item`: it is atomic, so it
-cannot clobber an edit made in the meantime; an `item` given as text must match a whole item,
-ignoring case. The human sees every change live in the Todo tab.
+`Todo = {id, name, scope: "workspace" | "project", body, createdAt, updatedAt, bodyTruncated?}`. A
+list belongs to a workspace (`workspace`, by name) or to a project (`project`, a path or
+`"workspace/project"` as everywhere else). `body` is GitHub task-list markdown (`- [ ] item`); a
+new list starts empty, and `update_todo` replaces the whole body. To tick one item use
+`toggle_todo_item`: it is atomic, so it cannot clobber an edit made in the meantime; an `item`
+given as text must match a whole item, ignoring case. It is not idempotent: omitting `checked`
+flips an item, so pass it to make a retry harmless. A list id that does not exist is `NOT_FOUND`:
+`No todo list with id "<id>"; list_todos shows the ids.` The human sees every change live in the
+Todo tab.
+
+When the lists do not all fit one result, `list_todos` leaves the oldest out (`truncated: true`;
+`omittedLists` counts them). A newest list too big for a result on its own comes back with the head
+of its body and `bodyTruncated: true`: a list marked `bodyTruncated` is incomplete. A write's
+result fits one result too: on a list too big for one, `update_todo`'s and `toggle_todo_item`'s
+results carry only the head of the body, marked `bodyTruncated: true`, while the id, the name, and
+a toggle's item and new `checked` stay whole — the write itself is always whole. (Only a name or an
+item of tens of KB, which leaves no room even for an empty body, is cut too, to 200 characters.)
+Never send `update_todo` a body marked `bodyTruncated`: it is only the list's head, and the rest
+would be lost. Tick items with `toggle_todo_item` (it edits the full stored body), rename with
+`name` alone (the body is kept), or put new items in a new list.
 
 ---
 
@@ -556,7 +637,7 @@ and `/* … */` marks parts left out.
 list_agents { "agent": "claude" }
 → { "agents": [ {
       "id": "claude", "name": "Claude Code", "adapter": "claude",
-      "enabled": true, "installed": true, "version": "2.1.3", "status": "ready",
+      "enabled": true, "installed": true, "version": "2.1.278", "status": "ready",
       "auth": { "status": "authenticated" },
       "models": [
         { "slug": "default", "name": "Default (recommended)", "isDefault": true, "options": [ /* … */ ] },
@@ -714,14 +795,19 @@ event:
 | `needs-input` | The agent opened a question or a tool approval; `pending` has it. A Codex async question does not stop the turn, so the turn may still be running — `session` says so. | `answer_question`, `resolve_approval` or `dismiss_question`, then `wait_for_session` |
 | `plan-ready` | The turn ended with a proposed plan (`session.plan`, `actionable: true`). | `implement_plan`, or refine with `send_message {planMode: true}` |
 | `failed` | The session went into `error` (`session.chat.lastError`), or the turn failed. | `read_transcript` for the error; a session in `error` needs `stop_session` before the next message |
-| `completed` | The turn finished; `reply` has the main agent's final text. | — |
+| `completed` | The turn finished; `reply` has the main agent's answer. | — |
 | `interrupted` | The turn was interrupted or cancelled. | — |
 | `timeout` | `timeoutMs` passed first. **The turn keeps running.** | `get_session`, or `wait_for_session` (below) |
 | `sent` | Only with `wait: false`: the message was accepted. | `wait_for_session` |
 
 - Only this message's turn counts: the turn it started, or — for a message sent into a running
   turn, which steers it — that turn settling. `reply` and `turnId` never come from a turn that was
-  already over when the message was posted.
+  already over when the message was posted. One rare race remains: if the agent host restarts
+  while the POST is being retried (the `HOST_UNAVAILABLE` backoff, about 1.75 s in all), a message
+  meant to steer a running turn can come back with that turn's ending — for example
+  `interrupted`, its `turnId` and its partial reply — although the message opened the next turn.
+  To catch it, compare `turnId` with `session.chat.latestTurn`: a different turn there is the one
+  the message opened.
 - If the session is closed while you wait, the call fails with `SESSION_NOT_FOUND`.
 - After a `timeout`, a bare `wait_for_session` only reports attention raised after that call. Pass
   an `after` from before the turn could settle — the running turn's
@@ -798,6 +884,12 @@ The path is the stored copy's, on the daemon host, and the agent opens it with i
 lines go to the provider only: the message as the GUI and `read_transcript` show it keeps your text
 and lists the attachments by name.
 
+An answer to a blocking question is different: it carries every attached file as such a line
+after the answer's text, images included, on every adapter — only a message (a turn) hands images
+to the provider natively. A multi-select answer with files reaches the agent as its selections
+joined with ", ", followed by those lines. A Codex async question (`responseMode: "message"`) is
+answered with a message, so its files travel as a message's do.
+
 ---
 
 ## 10. Safety & things to know
@@ -849,6 +941,9 @@ still not for polling loops.
 | `PENDING_REQUEST` | The agent is waiting on a question or an approval; the message names each request and the tool that answers it. |
 | `SESSION_BUSY` | A turn is running (`update_session` without `force`, `revert_session`, an account switch — wait for it, or `interrupt_session`), the session is in `error` (`stop_session`, then send again), or the project already has 24 running sessions (`close_session` some). |
 | `INVALID_ARGUMENT` naming an agent, model or option | Take the values from `list_agents`. "Still loading … models" means the catalogue is being probed — retry shortly. |
+| `INVALID_ARGUMENT: Invalid arguments for <tool>: …` | An argument failed the tool's schema: a wrong type, a value out of range, a missing required field. The message names each bad field (at most five) and why; `tools/list` describes every parameter. |
+| JSON-RPC error `-32602` (`Tool … not found`) | No tool has that name: a typo, or a client still holding an old tool list (see the stale-guidance row below). |
+| `NOT_FOUND` (`No todo list with id …`) | The list was deleted, or the id is mistyped — `list_todos` shows the ids. |
 | `HOST_UNAVAILABLE` | The agent host is restarting (for example after a deploy). A command has already been retried three times — try again shortly. |
 | `send_message` ends in `timeout` and `read_transcript` shows "Attachment rejected" | The host refused an attachment when starting the turn, so the turn never started. Check the file against §9. |
 | An error whose `detail` has `"created": true` | `create_session` opened the tab but could not read it back: use `detail.sessionId`; don't create it again. |

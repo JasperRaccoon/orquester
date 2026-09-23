@@ -617,7 +617,9 @@ family-checked before a create (the daemon silently falls back to the system hom
 running sessions per project; `update_session` refuses a mid-turn model/permission change without
 `force`. Like the GUI, `send_message` refuses while a request is pending (the host alone would take
 the message as a steer). A result is one JSON object capped at 60 000 bytes (`result.ts`); an error
-is `<CODE>: <message>`. Tool docs: `docs/orquester-mcp.md`; design: the v2 spec,
+is `<CODE>: <message>`. `server.ts` replaces the SDK's `tools/call` handler (public
+`server.setRequestHandler`) so a schema refusal answers the same `<CODE>: <message>` envelope as
+every other error. Tool docs: `docs/orquester-mcp.md`; design: the v2 spec,
 `docs/superpowers/specs/2026-09-22-orquester-mcp-v2-design.md`.
 
 ### Key runtime flows
