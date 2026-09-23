@@ -1611,7 +1611,16 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           lines.push(unavailableAttachmentLine(attachment));
         }
       }
-      const base = typeof folded[questionId] === "string" ? (folded[questionId] as string) : "";
+      // A multi-select answer is an array, and the lines make it text: join the
+      // selections as the message-mode echo does, or the answer is lost. With
+      // no attachments the loop never gets here and the adapter keeps its array.
+      const answer = folded[questionId];
+      const base =
+        typeof answer === "string"
+          ? answer
+          : Array.isArray(answer)
+            ? answer.filter((item): item is string => typeof item === "string").join(", ")
+            : "";
       folded[questionId] = appendAttachmentLines(base, lines.join("\n"));
     }
     try {
