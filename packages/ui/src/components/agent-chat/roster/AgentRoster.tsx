@@ -10,7 +10,7 @@
  *
  * Everything about *which* rows render lives in `roster-rows.ts`, which is
  * pure and tested, because the three rules involved pull against each other:
- * spawn order is stable, rows past five collapse, finished rows fade at turn
+ * active rows lead, rows past five collapse, finished rows fade at turn
  * end — and a live background row is exempt from the last two.
  *
  * *T3: `AgentsPanel.tsx:521-584` — the panel shell and its counts footer.
@@ -31,8 +31,8 @@ import {
 } from "./roster-rows";
 import {
   collapsedRosterLabel,
-  expandedRosterLabel,
   partitionRosterRows,
+  rosterCountLabels,
   rosterKindCounts,
   shellSectionLabel
 } from "./roster-summary";
@@ -143,10 +143,11 @@ export function AgentRoster({
     [agents, panel, expanded, finished]
   );
 
-  // Agents above, shells below — two kinds of row, each in its own spawn
-  // order, so a status change never moves a row between the lists (§7.6).
+  // Agents above, shells below. Active rows lead within each kind, with
+  // spawn order preserved among rows that share a liveness state.
   const { agentRows, shellRows } = partitionRosterRows(selection.rows);
   const counts = rosterKindCounts(agents);
+  const countLabels = rosterCountLabels(counts);
   const shellSection = shellSectionLabel(counts);
 
   const hasWorkflows = panel.workflows.length > 0;
@@ -218,7 +219,7 @@ export function AgentRoster({
             <Terminal size={11} strokeWidth={2} aria-hidden className="text-neutral-600" />
             <span>{shellSection.title}</span>
             {shellSection.detail ? (
-              <span className="ac-tabular font-mono font-normal normal-case text-neutral-500">
+              <span className="ac-tabular font-mono font-normal normal-case text-info-300">
                 · {shellSection.detail}
               </span>
             ) : null}
@@ -245,14 +246,27 @@ export function AgentRoster({
               aria-expanded={!collapsed}
               title={collapsed ? "Show the agents" : "Hide the agents"}
               className={cn(
-                "ac-press -ml-1 inline-flex items-center gap-1 rounded px-1 py-0.5",
+                "ac-press -ml-1 inline-flex min-w-0 items-center gap-1 rounded px-1 py-0.5",
                 "hover:bg-neutral-800/40 hover:text-neutral-300 focus:outline-none",
                 "focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500"
               )}
             >
               {collapsed ? <ChevronUp size={12} aria-hidden /> : <ChevronDown size={12} aria-hidden />}
-              <span className="ac-tabular">
-                {collapsed ? collapsedRosterLabel(counts) : expandedRosterLabel(counts)}
+              <span className="ac-tabular min-w-0 truncate whitespace-nowrap">
+                {countLabels.agents ? (
+                  <>
+                    {countLabels.agents}
+                    {countLabels.working ? <> (<span className="text-info-300">{countLabels.working}</span>)</> : null}
+                  </>
+                ) : null}
+                {countLabels.agents && countLabels.shells ? " · " : null}
+                {countLabels.shells ? (
+                  <>
+                    {countLabels.shells}
+                    {countLabels.running ? <> (<span className="text-info-300">{countLabels.running}</span>)</> : null}
+                  </>
+                ) : null}
+                {!countLabels.agents && !countLabels.shells ? collapsedRosterLabel(counts) : null}
               </span>
             </button>
           ) : null}
@@ -278,7 +292,7 @@ export function AgentRoster({
             </button>
           ) : null}
           <span className="ml-auto flex items-center gap-2">
-            {workingCount > 0 ? (
+            {!onCollapsedChange && workingCount > 0 ? (
               <span className="ac-tabular text-info-300">● {workingCount} working</span>
             ) : null}
             {panel.idleCount > 0 ? (
