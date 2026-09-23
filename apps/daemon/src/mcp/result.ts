@@ -37,6 +37,11 @@ export function fitJsonBytes(text: string, budget: number): { text: string; trun
   return { text: capText(text, lo).text, truncated: true };
 }
 
+/** How many bytes the UTF-8 character a lead byte starts takes (1 for ASCII, or for a byte no character starts with). */
+export function utf8SequenceLength(lead: number): number {
+  return lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1;
+}
+
 /**
  * How many leading bytes of `bytes` end on a UTF-8 character boundary: all of them, unless the last character is cut
  * short, in which case it is left out whole. Judged from the bytes present only — a lead byte announces its
@@ -48,8 +53,7 @@ export function wholeUtf8Length(bytes: Uint8Array): number {
   for (let i = n - 1; i >= 0 && i >= n - 4; i -= 1) {
     const b = bytes[i]!;
     if ((b & 0xc0) === 0x80) continue;
-    const length = b >= 0xf0 ? 4 : b >= 0xe0 ? 3 : b >= 0xc0 ? 2 : 1;
-    return i + length <= n ? n : i;
+    return i + utf8SequenceLength(b) <= n ? n : i;
   }
   return n;
 }

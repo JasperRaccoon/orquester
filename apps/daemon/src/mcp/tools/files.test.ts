@@ -120,3 +120,20 @@ test("read_file refuses a path outside the sandbox with the safe sandbox error",
   await assert.rejects(tool("read_file").run(parse(tool("read_file"), { path: join(root, "secret.txt") }), ctx), (err: unknown) => err instanceof FsSandboxError && !err.message.includes(root));
   await assert.rejects(tool("list_files").run(parse(tool("list_files"), { path: "../" }), ctx), FsSandboxError);
 });
+
+test("read_file never splits a character: nextOffset is where the page's text ends, and the pages concatenate byte-exactly", async (t) => {
+  const { sandbox, ctx } = await harness(t);
+  // 65 536 is not a multiple of 3, so the default window ends inside a character; the result cap shortens it too.
+  const content = "語".repeat(50_000);
+  await writeFile(join(sandbox, "cjk.txt"), content);
+  const first = await tool("read_file").run(parse(tool("read_file"), { path: "cjk.txt" }), ctx);
+  assert.equal(first.truncated, true);
+  assert.equal((first.nextOffset as number) % 3, 0, "the window ended on a character boundary");
+  assert.equal(Buffer.byteLength(first.text as string), first.nextOffset, "nextOffset is offset + the bytes consumed");
+  assert.ok(!(first.text as string).includes(String.fromCharCode(0xfffd)));
+  assert.equal("consumed" in first, false, "nextOffset says it; the result has no second field for it");
+  const all = await readAll(ctx, "cjk.txt");
+  assert.ok(Buffer.from(all.text, "utf8").equals(Buffer.from(content, "utf8")), "byte-exact");
+  const small = await tool("read_file").run(parse(tool("read_file"), { path: "cjk.txt", offset: 3, maxBytes: 10 }), ctx);
+  assert.deepEqual([small.text, small.nextOffset], ["語語語", 12]);
+});

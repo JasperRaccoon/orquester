@@ -45,13 +45,15 @@ const readFile = defineTool({
   },
   annotations: READ_ONLY,
   async run(args, ctx) {
-    // FsTools reads whole byte windows, so the window is what shrinks until the result fits: each pass
-    // scales it by the room left for the text, and always by at least one byte.
+    // FsTools reads byte windows, so the window is what shrinks until the result fits: each pass scales it by
+    // the room left for the text, and always by at least one byte.
     let window = args.maxBytes;
     for (;;) {
       const read = await ctx.files.readFileWindow(args.path, { offset: args.offset, maxBytes: window });
-      // A truncated window was read whole, so the next one starts right after it.
-      const result: Record<string, unknown> = read.truncated ? { ...read, nextOffset: read.offset + window } : { ...read };
+      // A window ends on a character boundary, so it can cover fewer bytes than asked: the next one starts right
+      // after the bytes it consumed, never at offset + window. nextOffset says so; `consumed` is not repeated.
+      const { consumed, ...page } = read;
+      const result: Record<string, unknown> = read.truncated ? { ...page, nextOffset: read.offset + consumed } : { ...page };
       const size = resultBytes(result);
       if (size <= MAX_RESULT_BYTES || window === 1) return result;
       const overhead = resultBytes({ ...result, text: "" });
