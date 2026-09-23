@@ -8,6 +8,7 @@ import { agentChatRoutes, buildPlanImplementationPrompt } from "@orquester/api/a
 import { busEvent, FakeDaemonApi } from "../testing.ts";
 import { activity, chatSummary, head, message, shellSummary, snapshot, stamp, turn } from "../fixtures.ts";
 import type { ToolContext } from "../tool.ts";
+import { TRANSCRIPT_HINT_BYTES } from "../transcript.ts";
 import { messageTools, transcriptHint } from "./messages.ts";
 
 // The fake routes every test shares, copied from sessions.test.ts (the two files never import each other's helpers).
@@ -445,11 +446,11 @@ test("send_message: the list catching up on a turn that was already over is not 
 });
 
 test("read_transcript: maxChars is described as the byte budget it is, and a trimmed subagent list says where the rest is", () => {
-  assert.equal(tool("read_transcript").input.maxChars.description, "Size budget for the result, in UTF-8 bytes (max 55000; every tool result is capped at 60000 bytes). The subagent list gets at most a quarter of it when the transcript needs the rest; the transcript sheds reasoning, then tool detail, then the oldest turns, and cuts the latest reply last.");
+  assert.equal(tool("read_transcript").input.maxChars.description, "Size budget for the result, in UTF-8 bytes (max 55000; every tool result is capped at 60000 bytes). The subagent list gets at most a quarter of it when the transcript needs the rest; the transcript sheds reasoning, then tool detail, then its oldest rows, and cuts the latest reply last.");
   assert.equal(transcriptHint({ truncated: false }), undefined);
   const shed = transcriptHint({ truncated: true })!;
-  assert.match(shed, /^Shed to fit maxChars/);
-  assert.doesNotMatch(shed, /subagent list/);
+  // The shed goes by row (transcript.ts `fitEntries`), the oldest turn's first: coveredTurns then names the turns left.
+  assert.equal(shed, "Shed to fit maxChars: reasoning, then tool detail, then the oldest rows (coveredTurns says which turns are left). Raise maxChars (max 55000), include less, or use get_turn_diff for one turn's file changes.");
   assert.equal(transcriptHint({ truncated: true, subagentsTruncated: false }), shed);
   assert.equal(transcriptHint({ truncated: true, subagentsTruncated: true }), `${shed} The subagent list was trimmed too — full roster: get_session.`);
 });
@@ -457,6 +458,38 @@ test("read_transcript: maxChars is described as the byte budget it is, and a tri
 test("read_transcript's hint, suffix included, fits the room transcript.ts keeps for it", () => {
   const hint = transcriptHint({ truncated: true, subagentsTruncated: true })!;
   const bytes = Buffer.byteLength(JSON.stringify({ hint }), "utf8");
-  // 320 = TRANSCRIPT_HINT_BYTES in transcript.ts (wave B1): a truncated result stays that far under maxChars for this field.
-  assert.ok(bytes <= 320, `${bytes} bytes`);
+  // A shed result stays TRANSCRIPT_HINT_BYTES under maxChars for this field (key, quotes and comma included).
+  assert.ok(bytes <= TRANSCRIPT_HINT_BYTES, `${bytes} bytes, room ${TRANSCRIPT_HINT_BYTES}`);
+});
+
+test("read_transcript: every shed result says truncated:true, so it carries the hint — a trimmed subagent list alone included — and the answer, hint and all, fits maxChars", async (t) => {
+  const agent = (i: number) => ({ id: `task-${i}`, kind: "subagent", agentKind: "agent", title: `Survey package ${i}: list its exports, callers and test coverage`, status: i % 3 ? "completed" : "running", firstSeenAt: stamp(i) }) as never;
+  const roster = Array.from({ length: 40 }, (_, i) => agent(i)); // ~4.5 KB of subagent list
+  const shapes = {
+    "a long roster beside a short turn": snapshot({ items: [message("user", "Survey the packages, one subagent each.", { turnId: "t1" }), message("assistant", "Done: every package is surveyed.", { turnId: "t1" })], roster }),
+    "a long turn, no roster": snapshot({ items: [message("user", "x".repeat(3_000), { turnId: "t1" }), message("assistant", "ok", { turnId: "t1" })] }),
+    "both long": snapshot({ items: [message("user", "y".repeat(6_000), { turnId: "t1" }), message("assistant", "z".repeat(6_000), { turnId: "t1" })], roster })
+  };
+  for (const [shape, snap] of Object.entries(shapes)) {
+    const h = await harness([chatSummary()], snap); t.after(h.close);
+    const read = (maxChars: number) => tool("read_transcript").run({ sessionId: "c1", turns: 3, include: ["tools", "activity"], maxChars }, h.ctx);
+    const whole = await read(55_000);
+    assert.equal(whole.truncated, false, `${shape}: whole at 55 000`);
+    for (const maxChars of [2_000, 3_000, 5_000, 9_000, 20_000]) {
+      const r = await read(maxChars);
+      const where = `${shape} at maxChars ${maxChars}`;
+      const shed = JSON.stringify(r.entries) !== JSON.stringify(whole.entries) || JSON.stringify(r.subagents) !== JSON.stringify(whole.subagents);
+      assert.equal(r.truncated, shed, `${where}: truncated says whether anything was shed`);
+      if (r.subagentsTruncated) assert.equal(r.truncated, true, `${where}: a trimmed subagent list is a shed result`);
+      assert.equal(r.hint, transcriptHint({ truncated: r.truncated as boolean, subagentsTruncated: r.subagentsTruncated as boolean | undefined }), `${where}: the hint follows the flags`);
+      const bytes = Buffer.byteLength(JSON.stringify(r), "utf8");
+      assert.ok(bytes <= maxChars, `${where}: ${bytes} bytes, hint included`);
+    }
+  }
+  // The case the hint could miss: only the subagent list was trimmed, the transcript is whole.
+  const h = await harness([chatSummary()], shapes["a long roster beside a short turn"]); t.after(h.close);
+  const r = await tool("read_transcript").run({ sessionId: "c1", turns: 3, include: ["tools", "activity"], maxChars: 2_000 }, h.ctx);
+  assert.deepEqual((r.entries as { text: string }[]).map((e) => e.text), ["Survey the packages, one subagent each.", "Done: every package is surveyed."], "the transcript is whole");
+  assert.deepEqual([r.truncated, r.subagentsTruncated], [true, true], "only the roster was trimmed, and the result still says truncated");
+  assert.match(String(r.hint), /full roster: get_session\.$/);
 });

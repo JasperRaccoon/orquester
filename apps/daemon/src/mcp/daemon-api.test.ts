@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import type { EventMessage } from "@orquester/api";
+import { HostUnavailableError } from "../agent-chat/host-client.ts";
 import { Broadcaster } from "../broadcaster.ts";
 import { UploadTooLargeError } from "../upload-stream.ts";
 import { uploadInlineAttachments } from "./attachments.ts";
@@ -90,6 +91,22 @@ test("a thrown upload is HOST_UNAVAILABLE, as a thrown daemon call is: the cause
   // At the tool level that is a HOST_UNAVAILABLE naming the file, never an INTERNAL.
   await assert.rejects(uploadInlineAttachments(gone, "s1", [{ name: "a.txt", base64: "YQ==" }]),
     (e: { code: string; message: string }) => e.code === "HOST_UNAVAILABLE" && e.message === "attachments[0]: The attachment upload failed.");
+});
+
+test("a cap refusal wrapped as another error's cause is still 413 UPLOAD_TOO_LARGE, with the refusal's own message", async (t) => {
+  const logged = t.mock.method(console, "error", () => {});
+  const standard = { status: 413, value: { code: "UPLOAD_TOO_LARGE", message: new UploadTooLargeError().message } };
+  // How the host client reports a body that failed (host-client.ts `fail()`), and an ES2022 wrapper: the message is the wrapper's.
+  for (const wrapped of [new HostUnavailableError("socket hang up", new UploadTooLargeError()), new Error("the upload stream failed", { cause: new UploadTooLargeError() })]) {
+    const body = Readable.from([Buffer.from("abc")]);
+    const up = await chatApi({ uploadAttachment: async () => { throw wrapped; }, attachmentPath: async () => null }).uploadAttachment("s1", { name: "big.bin" }, body);
+    assert.deepEqual(up, standard, wrapped.message);
+    assert.equal(body.destroyed, true, `${wrapped.message}: the stream is released`);
+  }
+  assert.equal(logged.mock.callCount(), 0, "a size refusal is an answer, not a failure to log");
+  // Any other cause is still the host's failure.
+  const eio = await chatApi({ uploadAttachment: async () => { throw new HostUnavailableError("EIO", new Error("EIO: i/o error, read")); }, attachmentPath: async () => null }).uploadAttachment("s1", { name: "b.log" }, Readable.from([]));
+  assert.deepEqual(eio, { status: 503, value: { code: "HOST_UNAVAILABLE", message: "The attachment upload failed." } });
 });
 
 test("request appends opts.query to a path that already carries a query string", async () => {
