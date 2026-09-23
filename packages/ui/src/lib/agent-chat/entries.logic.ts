@@ -24,6 +24,7 @@
 import type { ThreadActivityItem, ThreadItem, ThreadMessageItem } from "@orquester/api/agent-chat";
 import {
   IDENTITY_CHANGED_ACTIVITY_KIND,
+  isPlanImplementationMessage,
   PLAN_IMPLEMENTATION_PROMPT_PREFIX
 } from "@orquester/api/agent-chat";
 
@@ -804,7 +805,7 @@ export function splitThreadItems(
       (message) =>
         message.role === "user" &&
         message.createdAt > plan.createdAt &&
-        message.text.startsWith(PLAN_IMPLEMENTATION_PROMPT_PREFIX)
+        isPlanImplementationMessage(message.text)
     );
     return implementing ? { ...plan, implementedAt: implementing.createdAt } : plan;
   });
