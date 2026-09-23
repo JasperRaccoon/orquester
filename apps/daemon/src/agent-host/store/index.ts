@@ -767,7 +767,35 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
       return readLog(threadId);
     },
 
-    async loadHead(threadId: string): Promise<ThreadHead | null> {
+    async loadHead(
+      threadId: string,
+      options?: { seedRuntime?: boolean }
+    ): Promise<ThreadHead | null> {
+      if (options?.seedRuntime === false) {
+        assertSafeThreadId(threadId);
+        const entry = runtime(threadId);
+        try {
+          const raw = await readFileOrNull(threadMetaPath(rootDir, threadId));
+          if (raw === null) return null;
+          let decoded: unknown;
+          try {
+            decoded = JSON.parse(raw);
+          } catch (error) {
+            entry.error = `meta.json is not JSON: ${(error as Error).message}`;
+            return null;
+          }
+          const head = parseAgentThreadHead(decoded);
+          if (head === null) {
+            entry.error = "meta.json does not match the thread head schema";
+            return null;
+          }
+          entry.head = head as ThreadHead;
+          return entry.head;
+        } catch (error) {
+          entry.error = `meta.json is unreadable: ${(error as Error).message}`;
+          return null;
+        }
+      }
       const entry = await ensureLoaded(threadId);
       return entry.head;
     },

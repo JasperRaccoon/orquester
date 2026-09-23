@@ -94,8 +94,12 @@ export interface ThreadStore {
   /** The whole log, for a cold fold. Truncates at a malformed line. */
   readAll(threadId: string): Promise<ThreadTail>;
 
-  /** `meta.json`, or null when the thread does not exist or does not parse. */
-  loadHead(threadId: string): Promise<ThreadHead | null>;
+  /**
+   * `meta.json`, or null when the thread does not exist or does not parse.
+   * `seedRuntime:false` is the metadata-only startup path: it must not inspect
+   * `events.ndjson` merely to decide whether reconciliation is necessary.
+   */
+  loadHead(threadId: string, options?: { seedRuntime?: boolean }): Promise<ThreadHead | null>;
 
   /** Atomic (tmp + rename). Called every 50 events and on turn end (§5.1). */
   saveHead(head: ThreadHead): Promise<void>;

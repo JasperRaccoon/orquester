@@ -398,6 +398,24 @@ test("a meta.json that does not match the schema marks the thread error", async 
   assert.match(store.threadError("t1") ?? "", /schema/);
 });
 
+test("a metadata-only head read never scans a malformed event log", async () => {
+  const rootDir = await tempRoot();
+  const writer = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  await writer.append({ threadId: "t1", events: [created()] });
+  const head = await headOf(writer, "t1");
+  await writer.saveHead(head);
+  await writer.drain();
+  writer.close();
+  await fs.appendFile(eventsPathOf(rootDir, "t1"), "{malformed}\n");
+
+  const reader = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  const loaded = await reader.loadHead("t1", { seedRuntime: false });
+
+  assert.equal(loaded?.id, "t1");
+  assert.equal(reader.threadError("t1"), null, "events.ndjson was not inspected");
+  reader.close();
+});
+
 async function headOf(
   store: ReturnType<typeof createThreadStore>,
   threadId: string

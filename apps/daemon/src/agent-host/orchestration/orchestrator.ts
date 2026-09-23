@@ -3516,7 +3516,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       for (const threadId of threadIds) {
         try {
           if (live.has(threadId)) continue;
-          const persistedHead = await store.loadHead(threadId);
+          const persistedHead = await store.loadHead(threadId, { seedRuntime: false });
           if (persistedHead === null) continue;
           const { session, continueAfterRestart } = persistedHead;
           const prepared = continueAfterRestart?.prepared === true;
