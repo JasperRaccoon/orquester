@@ -509,7 +509,7 @@ OpenCode conversation cannot be resumed, in the GUI either; a registry that cann
 |---|---|---|
 | `list_sessions` | `project?`, `kind? = "all"` (`"chat"`\|`"terminal"`\|`"all"`), `attention? = false` | `{sessions: SessionView[]}`. With `attention:true`: only sessions whose `attention` is set or whose `status` is `waiting`, ordered like the Attention Center (`needsAttentionAt` desc — *Built: `byAttention` (`tools/watch.ts`), shared with `wait_for_session`: by the instant of `needsAttentionAt`, else `createdAt` for an unstamped row, a tie going to the newer tab*); otherwise by project, then `order`. *Built: an empty `project` is refused (`PROJECT_NOT_FOUND`), never read as every project.* |
 | `get_session` | `sessionId` | `{session: SessionDetail}` (`SessionView` + `terminal` for a terminal tab) |
-| `read_transcript` | `sessionId`, `turns? = 3`, `agentId?`, `include? = ["tools","activity"]` (`"reasoning"` opt-in), `maxChars? = 40000` (≤ 55 000 UTF-8 bytes — *Built*, §7.6) | `{entries: TranscriptEntry[], turnCount, coveredTurns: [from, to] \| null, truncated, subagents: [{id, title, status}], subagentsTruncated?, hint?}` — §7.6 |
+| `read_transcript` | `sessionId`, `turns? = 3`, `beforeTurn?` (2 to `turnCount + 1` — *Built*, added after v2 shipped, §7.6), `agentId?`, `include? = ["tools","activity"]` (`"reasoning"` opt-in), `maxChars? = 40000` (≤ 55 000 UTF-8 bytes — *Built*, §7.6) | `{entries: TranscriptEntry[], turnCount, olderTurns, coveredTurns: [from, to] \| null, unavailableTurns?: [from, to], truncated, subagents: [{id, title, status}], subagentsTruncated?, hint?}` — §7.6 (*Built: `olderTurns` and `unavailableTurns` were added with `beforeTurn`*) |
 | `get_turn_diff` | `sessionId`, `turn?` (default: the latest checkpointed turn) | `{turn, fromTurn, files: [{path, additions, deletions}], filesTruncated?, omittedFiles?, diff, truncated}` (`diff` ≤ 80 000 chars — *Built: the file list gets max(20 000 JSON bytes, what the whole diff leaves unused) and keeps its head, `filesTruncated` and `omittedFiles` counting the rest; the diff gets whatever is left of the 60 000-byte result*) |
 | `search_sessions` — *added after v2 shipped (2026-09-23)* | `query` (trimmed, then 1–200 UTF-16 code units, `THREAD_SEARCH_MAX_QUERY_CHARS` — refused, never cut), `project?`, `limit? = 20` (1–50, `THREAD_SEARCH_MAX_RESULTS`) | `{query, hits: [{sessionId, title, projectPath, turn, kind, role?, activityKind?, snippet, at}], truncated, omittedHits?, indexed, hint?}` — the command palette's `?` search. `GET /api/agent/search?q=&limit=&projectPath=` (`project` resolved as `list_sessions`' is), then only the hits whose `threadId` is a chat session open now (`GET /api/sessions`): a terminal tab's id or a closed tab's is not addressable, so it is dropped. `title` and `projectPath` are the session's own, as `list_sessions` shows them; `turn` is the hit's `ordinal` (null for a turnless row); `role` only on a message hit, `activityKind` only on an activity hit; `snippet` keeps the host's `«`/`»` marks. `indexed: false` is an answer — no hits and a `hint` that search is unavailable on this host right now; a non-2xx is an error through `daemonError`. Bounded like every tool: each title and snippet cut to 300 code points (ending in `…`), then the lowest-ranked hits dropped from the end, with `truncated: true` and `omittedHits`; `truncated` is also the host's own "more hits than `limit`". A hit is opened with `read_transcript {sessionId, beforeTurn: turn + 1, turns: 1}`. Annotated as a read (`openWorldHint: false`). |
 
@@ -716,6 +716,29 @@ marker element of the same shape that counts the rest (`{path: "…N more files"
 deletions}` carries the omitted files' real line totals). Whatever the fitted entries leave unused
 goes back to the subagent list in one more pass. Subagent titles are capped at 200 code points.
 `coveredTurns` names only the turns with rows present (null when none).*
+
+*Built (after v2 shipped — the thread index gave the GUI older history, plan
+`2026-09-23-mcp-history-search-parity`, item 3): the snapshot holds only the retained window (the fold's last ~500
+parent activities, 200 per agent, 2 000 messages; turn records are never evicted), so `turns` could silently return
+fewer turns than asked. `beforeTurn` (≥ 2; past `turnCount + 1` refused with `INVALID_ARGUMENT` naming the range) reads
+the `turns` turns just before it: `end = (beforeTurn ?? turnCount + 1) − 1`, `start = max(1, end − turns + 1)`, and
+`olderTurns` = `start − 1` is always returned. A row with no turn belongs to the range by its time: at or after turn
+`start`'s `requestedAt` (from the very start when `start` is 1) and, when `end < turnCount`, before turn `end + 1`'s.
+When `history.indexed` and `hasOlder` are true and `start ≤ oldestRetainedOrdinal` (the window's oldest turn may be
+partial), `history.ts` pages `GET …/history` through `DaemonApi` with `turns = min(end − start + 1, 100)`: the first page
+ends below turn `end + 1` — a cursor minted from its turn record, `{threadId, beforeAnchorAt: requestedAt, beforeTurnId}`
+— when `end + 1 < oldestRetainedOrdinal`, else at the window's boundary (no cursor); each next page follows
+`page.beforeCursor` until turn `start` is whole — the cursor's turn `k ≤ start` without `beforeSeq`, `k < start` with
+it — or the cursor is null, at most `HISTORY_PAGES_PER_READ` = 5 pages a call. Pages merge under the window by item id,
+the window's copy winning (the newer state of the same row), then a stable sort by `createdAt`; checkpoints the same
+way by turn id. The actionable plan is still judged on the window alone, as the host judges it, so a plan that aged out
+is never `actionable`. When turns of the range could not be read whole — a page that failed for any reason (503
+`INDEX_UNAVAILABLE` among them), `indexed:false` with turns of the range that have no row in the window, or the page
+limit — the result carries `unavailableTurns: [from, to]` and its `hint` opens with a sentence saying which and why (the
+limit's names the `beforeTurn`/`turns` that reads them); a failed page is never a tool error, the rows read are
+served. A host without `history` reads as before, plus `olderTurns`. Both new fields are in the byte frame, and the
+sentence's bytes are held back — on a whole result as its own `hint`, on a shed one before the shed hint — so the
+answer still keeps within `maxChars`.*
 
 ### 7.7 Waiting
 

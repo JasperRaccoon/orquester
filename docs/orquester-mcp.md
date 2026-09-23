@@ -561,7 +561,7 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
 |---|---|---|---|
 | `send_message` | `sessionId`, `text?`, `attachments?` (≤ 8, §9), `planMode? = false`, `wait? = true`, `timeoutMs? = 120000` (1 000–600 000) | `{seq, outcome, turnId?, reply?, replyTruncated?, pending?, session}` | The composer's Send (Enter during a turn steers it) |
 | `implement_plan` | `sessionId`, `wait? = true`, `timeoutMs? = 120000` (1 000–600 000) | Same as `send_message` | The plan card's **Implement** button |
-| `read_transcript` | `sessionId`, `turns? = 3` (≤ 200), `agentId?` (non-empty), `include? = ["tools", "activity"]` (add `"reasoning"`), `maxChars? = 40000` (2 000–55 000, UTF-8 bytes) | `{entries: TranscriptEntry[], turnCount, coveredTurns: [from, to] \| null, truncated, subagents: [{id, title, status}], subagentsTruncated?, hint?}` | The chat timeline; a subagent's drill-in |
+| `read_transcript` | `sessionId`, `turns? = 3` (≤ 200), `beforeTurn?` (2 to `turnCount` + 1), `agentId?` (non-empty), `include? = ["tools", "activity"]` (add `"reasoning"`), `maxChars? = 40000` (2 000–55 000, UTF-8 bytes) | `{entries: TranscriptEntry[], turnCount, olderTurns, coveredTurns: [from, to] \| null, unavailableTurns?: [from, to], truncated, subagents: [{id, title, status}], subagentsTruncated?, hint?}` | The chat timeline, "Load older" included; a subagent's drill-in |
 
 - **`send_message`** — needs `text` (at most 120 000 characters after trimming) or at least one
   attachment. It is refused with `PENDING_REQUEST` while a question or an approval is open — the
@@ -597,8 +597,45 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
   (`null` when no row belongs to a turn). Without `agentId` you get the parent view, the GUI's
   timeline: the main agent's rows plus one `subagent` row per subagent, with the roster in
   `subagents`. With `agentId`, only that subagent's own rows (its drill-in), and `subagents` is
-  empty. An empty or unknown `agentId` is refused (`INVALID_ARGUMENT`). A subagent's title is
+  empty. An empty or unknown `agentId` is refused (`INVALID_ARGUMENT`); a subagent that worked only
+  in older turns is known once a page of older history brings its rows back. A subagent's title is
   capped at 200 characters, in `subagents` and on its row.
+
+  **Older turns.** `beforeTurn` reads the `turns` turns just before that turn number instead of the
+  latest ones: the range is turns `start`..`end`, with `end = beforeTurn − 1` (without `beforeTurn`,
+  `turnCount`) and `start = max(1, end − turns + 1)`. `olderTurns` counts the started turns before
+  `start`: the next call with `beforeTurn: olderTurns + 1` reads the ones just before, `turns` at a
+  time, until `olderTurns` is 0.
+  A `beforeTurn` past `turnCount + 1` is refused with `INVALID_ARGUMENT` naming the valid range (the
+  schema refuses one below 2); `turnCount + 1` reads the latest turns, as leaving it out does. A row
+  that belongs to no turn — a message or a failure from a turn the host never started — belongs to
+  the range when it was written at or after turn `start` was requested (from the very start when
+  `start` is 1) and, unless the range ends at the latest turn, before turn `end + 1` was.
+
+  The session's thread snapshot holds only a retained window — about the last 500 activities of
+  the main timeline, 200 per subagent and 2 000 messages — while every turn record stays. A range
+  that reaches the window's oldest turn (which may be partial) is read like the GUI's "Load older":
+  from the host's thread index (`GET /api/sessions/:id/history`), a block of the log at a time, at
+  most 400 activities each, newest first, until the range's first turn is whole — at most **5
+  pages** per call. The pages are merged under the window: a row both hold appears once, with the
+  window's (newer) state, and every row in log order. The latest proposed plan stays the window's —
+  a plan that aged out of it is never `actionable`, as `implement_plan` would not send it.
+
+  When turns of the range could not be read whole, the result names them in
+  `unavailableTurns: [from, to]`, and its `hint` opens with a sentence saying why, before any shed
+  hint:
+
+  - the host has no usable thread index right now (it is being rebuilt, or the native driver did not
+    load), or a history page could not be read: `"Turns 4–6 could not be read whole: older turns are
+    unavailable on this host right now. Try again later."` Without an index, the named turns are the
+    ones of the range with no row left in the window;
+  - the 5-page limit ran out (a subagent fleet's turn runs to thousands of events):
+    `"Turns 1–3 could not be read whole: one call reads at most 5 pages of older history. Read them
+    with beforeTurn: 4, turns: 3."` — the rows of those turns that were read are returned.
+
+  A history page that fails is never a tool error: the rows the window holds, and the pages read
+  before it, are still returned. A host from before the thread index (a snapshot without `history`)
+  is read as before, the window alone, still with `olderTurns`.
 
   `maxChars` is the size budget for the result, in UTF-8 bytes (max 55000; every tool result is
   capped at 60000 bytes). A result that fits comes back whole. Over it, the transcript sheds
@@ -607,7 +644,8 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
   detail: each step works oldest first and stops as soon as the result fits; the tool-detail step
   cuts a detail to 200 characters; the latest turn's final reply (with no reply yet, that turn's
   newest row) is never dropped, only cut, its biggest text or list first; a shed result keeps
-  320 bytes free for its `hint`, so the answer, hint included, stays within `maxChars`; and the
+  320 bytes free for its `hint` (and the bytes of the `unavailableTurns` sentence, which a whole
+  result leaves room for too), so the answer, hint included, stays within `maxChars`; and the
   subagent list — at least a quarter of the room left after the hint, when it needs it — drops
   settled subagents oldest first, then live ones, and says `subagentsTruncated: true`. Every shed
   result, a trimmed subagent list alone included, says `truncated: true` and carries a `hint`:
@@ -837,7 +875,7 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "turns": 
                   "detail": "src/wire.ts(41,7): error TS2322: …" } },
       { "turn": 1, "turnId": "0c5d2e8f-…", "kind": "assistant", "createdAt": "2026-09-23T10:00:31.870Z",
         "text": "The typecheck fails because …" } ],
-    "turnCount": 1, "coveredTurns": [ 1, 1 ], "truncated": false, "subagents": [] }
+    "turnCount": 1, "olderTurns": 0, "coveredTurns": [ 1, 1 ], "truncated": false, "subagents": [] }
 ```
 
 ### (b) Supervise a project

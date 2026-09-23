@@ -4,11 +4,12 @@ import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import { agentChatRoutes, buildPlanImplementationPrompt, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
+import { agentChatRoutes, buildPlanImplementationPrompt, encodeHistoryCursor, type ThreadItem, type ThreadSnapshotPayload, type Turn } from "@orquester/api/agent-chat";
 import { busEvent, FakeDaemonApi } from "../testing.ts";
 import { activity, chatSummary, head, message, shellSummary, snapshot, stamp, turn } from "../fixtures.ts";
 import type { ToolContext } from "../tool.ts";
 import { MAX_RESULT_BYTES, ok, resultBytes } from "../result.ts";
+import { HISTORY_PAGES_PER_READ } from "../history.ts";
 import { TRANSCRIPT_HINT_BYTES } from "../transcript.ts";
 import { messageTools, transcriptHint } from "./messages.ts";
 
@@ -499,7 +500,7 @@ test("read_transcript: every shed result says truncated:true, so it carries the 
 
 test("read_transcript's description says a list cut to fit ends in a marker counting the rest, and the tool's rows do", async (t) => {
   const description = tool("read_transcript").description;
-  assert.equal(description, "What was said and done in a session, newest turns last: messages, tool calls, approvals, questions, plans, file changes, errors. `agentId` drills into one subagent's own timeline. A list cut to fit (a checkpoint's files, a tool's changedFiles, a message's attachments) ends in a marker counting the rest (\"…12 more files\"; a files marker carries their real line totals), not a real entry.");
+  assert.equal(description, "What was said and done in a session, newest turns last: messages, tool calls, approvals, questions, plans, file changes, errors. `beforeTurn` reads older turns; `agentId` drills into a subagent. A list cut to fit (a checkpoint's files, a tool's changedFiles, a message's attachments) ends in a marker counting the rest (\"…12 more files\"; a files marker has their real line totals), not a real entry.");
   assert.ok(description.length <= 400, `${description.length} characters`);
   // A checkpoint of 1 500 files at the smallest budget, the turn's newest row (no reply yet, so it is the row a shed
   // spares and cuts last): its files are a head, then the marker the description names.
@@ -626,4 +627,121 @@ test("send_message: a reply too wide for one result beside a wide plan is cut by
   const session = r.session as { lastReply?: unknown; plan?: { markdown: string; truncated: boolean } };
   assert.equal(session.lastReply, undefined, "returned once, as reply");
   assert.deepEqual([session.plan?.markdown === plan, session.plan?.truncated], [true, false], "the reply went first, and cutting it made room");
+});
+
+// ---- Older history (design item 3): read_transcript pages the host's thread index. ----
+
+/**
+ * A thread of `n` started turns — each an opening message written with the idle session's null turnId and linked back
+ * by `userMessageId`, then a reply — whose retained window holds turns `oldest`..n, with the bounds a current host
+ * stamps; and the rows of any turns, for a page to answer with.
+ */
+function history(n: number, oldest: number) {
+  const turns: Turn[] = [];
+  const rows: ThreadItem[][] = [];
+  for (let t = 1; t <= n; t += 1) {
+    const ask = message("user", `ask ${t}`, { turnId: null, id: `ask-${t}` });
+    const reply = message("assistant", `reply ${t}`, { turnId: `t${t}`, id: `reply-${t}` });
+    turns.push(turn({ turnId: `t${t}`, turnCount: t, requestedAt: ask.createdAt, startedAt: ask.createdAt, completedAt: reply.createdAt, userMessageId: ask.id }));
+    rows.push([ask, reply]);
+  }
+  const rowsOf = (from: number, to: number): ThreadItem[] => rows.slice(from - 1, to).flat();
+  const snap = snapshot({ turns, items: rowsOf(oldest, n), history: { indexed: true, hasOlder: true, beforeCursor: "window", oldestRetainedOrdinal: oldest, totalTurns: n } });
+  /** The cursor a host mints for a page that begins inside turn `k`. */
+  const cursorIn = (k: number): string => encodeHistoryCursor({ threadId: "c1", beforeAnchorAt: turns[k - 1]!.requestedAt, beforeTurnId: `t${k}`, beforeSeq: k * 10 });
+  const page = (items: ThreadItem[], beforeCursor: string | null) => ({ status: 200, body: { threadId: "c1", turns: [], items, checkpoints: [], page: { beforeCursor }, seq: 999 } });
+  return { snap, rowsOf, cursorIn, page };
+}
+const historyCalls = (h: { api: FakeDaemonApi }) => h.api.calls.filter((c) => c.path === agentChatRoutes.history("c1"));
+const readArgs = (over: Record<string, unknown> = {}) => ({ sessionId: "c1", turns: 3, include: ["tools", "activity"], maxChars: 40_000, ...over });
+
+test("read_transcript pages older turns from the host's index: a 3-turn window over a 10-turn thread, turns 5, reads turns 6 to 10", async (t) => {
+  const th = history(10, 8);
+  const h = await harness([chatSummary()], th.snap); t.after(h.close);
+  // The page ends at the window's boundary and begins inside turn 5: turn 6 is whole.
+  h.api.on("GET", agentChatRoutes.history("c1"), ({ query }) => { assert.deepEqual(query, { turns: "5" }); return th.page(th.rowsOf(5, 7), th.cursorIn(5)); });
+  const r = await tool("read_transcript").run(readArgs({ turns: 5 }), h.ctx);
+  assert.deepEqual((r.entries as { turn: number; text: string }[]).map((e) => [e.turn, e.text]), [6, 7, 8, 9, 10].flatMap((n) => [[n, `ask ${n}`], [n, `reply ${n}`]]), "turns 6 and 7 from the page, 8 to 10 from the window; turn 5 left out");
+  assert.deepEqual([r.turnCount, r.olderTurns, r.coveredTurns, r.truncated], [10, 5, [6, 10], false]);
+  assert.equal("unavailableTurns" in r, false); assert.equal(r.hint, undefined);
+  assert.equal(historyCalls(h).length, 1);
+  // A range after the window's oldest turn (8, which may be partial) is the window's alone: nothing is read.
+  const latest = await tool("read_transcript").run(readArgs({ turns: 2 }), h.ctx);
+  assert.deepEqual([latest.olderTurns, latest.coveredTurns], [8, [9, 10]]);
+  assert.equal(historyCalls(h).length, 1, "no page for a range the window holds");
+});
+
+test("read_transcript: beforeTurn past turnCount + 1 is refused naming the range, one below 2 by the schema — before any page is read", async (t) => {
+  const input = z.object(tool("read_transcript").input);
+  for (const beforeTurn of [1, 0, -3, 2.5]) assert.equal(input.safeParse({ sessionId: "c1", beforeTurn }).success, false, `beforeTurn ${beforeTurn}`);
+  assert.equal(input.safeParse({ sessionId: "c1", beforeTurn: 2 }).success, true);
+  const refused = async (n: number, beforeTurn: number, message: string) => {
+    const h = await harness([chatSummary()], history(n, 1).snap); t.after(h.close);
+    await assert.rejects(tool("read_transcript").run(readArgs({ beforeTurn }), h.ctx), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && e.message === message);
+    assert.equal(historyCalls(h).length, 0);
+  };
+  await refused(10, 12, "beforeTurn must be between 2 and 11: this conversation has 10 started turns.");
+  await refused(1, 3, "beforeTurn must be 2: this conversation has 1 started turn.");
+  await refused(0, 2, "This conversation has no started turn yet, so there is no turn to read before: leave beforeTurn out.");
+  // turnCount + 1 is the latest turns, as without it.
+  const h = await harness([chatSummary()], history(10, 1).snap); t.after(h.close);
+  const r = await tool("read_transcript").run(readArgs({ beforeTurn: 11, turns: 2 }), h.ctx);
+  assert.deepEqual([r.olderTurns, r.coveredTurns], [8, [9, 10]]);
+});
+
+test("read_transcript: beforeTurn below the window asks for the page that ends where turn beforeTurn begins; olderTurns says how far back to go", async (t) => {
+  const th = history(10, 8);
+  const h = await harness([chatSummary()], th.snap); t.after(h.close);
+  h.api.on("GET", agentChatRoutes.history("c1"), ({ query }) => {
+    assert.equal(query!.turns, "2");
+    return th.page(th.rowsOf(3, 4), th.cursorIn(2));
+  });
+  const r = await tool("read_transcript").run(readArgs({ beforeTurn: 5, turns: 2 }), h.ctx);
+  assert.deepEqual((r.entries as { text: string }[]).map((e) => e.text), ["ask 3", "reply 3", "ask 4", "reply 4"]);
+  assert.deepEqual([r.olderTurns, r.coveredTurns, r.hint], [2, [3, 4], undefined], "two turns older: beforeTurn 3 reads them");
+});
+
+test("read_transcript: turns it could not read whole are named with a hint, never an error — the index unavailable, or the page limit", async (t) => {
+  const th = history(10, 8);
+  const h = await harness([chatSummary()], th.snap); t.after(h.close);
+  h.api.on("GET", agentChatRoutes.history("c1"), { status: 503, body: { error: { code: "INDEX_UNAVAILABLE", message: "Older history is not available on this host right now." } } });
+  const r = await tool("read_transcript").run(readArgs({ turns: 5 }), h.ctx);
+  assert.deepEqual((r.entries as { turn: number }[]).map((e) => e.turn), [8, 8, 9, 9, 10, 10], "the window's rows are still served");
+  assert.deepEqual([r.olderTurns, r.coveredTurns, r.unavailableTurns, r.truncated], [5, [8, 10], [6, 8], false]);
+  assert.equal(r.hint, "Turns 6–8 could not be read whole: older turns are unavailable on this host right now. Try again later.");
+  // The page limit: every page reaches one turn further back, and five do not reach turn 1.
+  let k = 8;
+  h.api.on("GET", agentChatRoutes.history("c1"), () => { k -= 1; return th.page(th.rowsOf(k, k), th.cursorIn(k)); });
+  const limited = await tool("read_transcript").run(readArgs({ turns: 10 }), h.ctx);
+  assert.equal(historyCalls(h).length, 1 + HISTORY_PAGES_PER_READ);
+  assert.deepEqual([limited.olderTurns, limited.coveredTurns, limited.unavailableTurns], [0, [3, 10], [1, 3]]);
+  assert.equal(limited.hint, `Turns 1–3 could not be read whole: one call reads at most ${HISTORY_PAGES_PER_READ} pages of older history. Read them with beforeTurn: 4, turns: 3.`);
+});
+
+test("read_transcript: with turns named unavailable, the answer — its hint, and the shed hint after it — still fits maxChars", async (t) => {
+  const th = history(10, 8);
+  const long = snapshot({ ...th.snap, items: [...th.snap.items, message("assistant", "z".repeat(12_000), { turnId: "t10" })] });
+  const h = await harness([chatSummary()], long); t.after(h.close);
+  h.api.on("GET", agentChatRoutes.history("c1"), { status: 503, body: { error: { code: "INDEX_UNAVAILABLE", message: "rebuilding" } } });
+  const sentence = "Turns 6–8 could not be read whole: older turns are unavailable on this host right now. Try again later.";
+  for (const maxChars of [2_000, 3_000, 5_000, 9_000, 12_300, 20_000]) {
+    const r = await tool("read_transcript").run(readArgs({ turns: 5, maxChars }), h.ctx);
+    const bytes = Buffer.byteLength(JSON.stringify(r), "utf8");
+    assert.ok(bytes <= maxChars, `maxChars ${maxChars}: ${bytes} bytes, hint included`);
+    assert.deepEqual(r.unavailableTurns, [6, 8], `maxChars ${maxChars}`);
+    assert.equal(r.hint, r.truncated ? `${sentence} ${transcriptHint({ truncated: true, subagentsTruncated: r.subagentsTruncated as boolean | undefined })}` : sentence, `maxChars ${maxChars}: the sentence first`);
+  }
+});
+
+test("read_transcript: a subagent of an older turn is known by the rows a page brought back", async (t) => {
+  const th = history(10, 8);
+  const h = await harness([chatSummary()], th.snap); t.after(h.close);
+  const [, reply6] = th.rowsOf(6, 6);
+  const at = new Date(Date.parse(reply6!.createdAt) + 500).toISOString();
+  const own = message("assistant", "the old agent's own words", { turnId: "t6", agentId: "task-old", createdAt: at, updatedAt: at });
+  h.api.on("GET", agentChatRoutes.history("c1"), th.page([...th.rowsOf(5, 6), own, ...th.rowsOf(7, 7)], th.cursorIn(5)));
+  const r = await tool("read_transcript").run(readArgs({ turns: 5, agentId: "task-old" }), h.ctx);
+  assert.deepEqual((r.entries as { text: string }[]).map((e) => e.text), ["the old agent's own words"]);
+  // Unknown anywhere, it is still refused.
+  await assert.rejects(tool("read_transcript").run(readArgs({ turns: 5, agentId: "task-none" }), h.ctx), (e: { code: string }) => e.code === "INVALID_ARGUMENT");
 });
