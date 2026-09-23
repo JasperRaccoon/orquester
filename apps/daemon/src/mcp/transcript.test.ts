@@ -2,9 +2,16 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildPlanImplementationPrompt, type ThreadItem } from "@orquester/api/agent-chat";
 import { activity, message, snapshot, stamp, turn } from "./fixtures.ts";
-import { transcriptEntries } from "./transcript.ts";
+import { transcriptEntries, type TranscriptResult } from "./transcript.ts";
 
 const ALL = new Set(["reasoning", "tools", "activity"] as const);
+/** A result's size as `maxChars` counts it: the whole result's JSON, in UTF-8 bytes (what ok() caps). */
+const budgetSize = (r: TranscriptResult): number => Buffer.byteLength(JSON.stringify(r), "utf8");
+/** The result with the kept head of its only row's text one code point longer: over budget when the cut is exact. */
+const oneMore = (r: TranscriptResult, whole: string): TranscriptResult => {
+  const head = [...r.entries[0]!.text!.slice(0, -1)]; // drop the "…"
+  return { ...r, entries: [{ ...r.entries[0]!, text: `${[...whole].slice(0, head.length + 1).join("")}…` }] };
+};
 
 function twoTurns() {
   const items = [
@@ -154,14 +161,47 @@ test("maxChars is a hard budget: an oversized newest turn sheds its oldest rows 
   items.push(message("assistant", "all 300 steps done", { turnId: "t1" }));
   const busy = snapshot({ items });
   const r = transcriptEntries(busy, { turns: 5, include: ALL, maxChars: 40_000 });
-  assert.ok(JSON.stringify(r.entries).length <= 40_000); assert.equal(r.truncated, true);
+  assert.ok(budgetSize(r) <= 40_000, "within the budget"); assert.equal(r.truncated, true);
   assert.deepEqual([r.entries.at(-1)!.kind, r.entries.at(-1)!.text], ["assistant", "all 300 steps done"]);
   assert.equal(r.entries.at(-2)!.tool!.title, "Run step 299", "the newest rows are kept");
   assert.ok(!r.entries.some((e) => e.kind === "user"), "the oldest rows go first");
   // A final reply that alone is over the budget keeps its head.
   const report = snapshot({ items: [message("user", "report", { turnId: "t1" }), message("assistant", "z".repeat(10_000), { turnId: "t1" })] });
   const capped = transcriptEntries(report, { turns: 5, include: ALL, maxChars: 2_000 });
-  assert.ok(JSON.stringify(capped.entries).length <= 2_000); assert.equal(capped.truncated, true);
+  assert.ok(budgetSize(capped) <= 2_000, "within the budget"); assert.equal(capped.truncated, true);
   assert.deepEqual(capped.entries.map((e) => e.kind), ["assistant"]);
   assert.match(capped.entries[0]!.text!, /^z{1000,}…$/u);
+});
+
+test("at maxChars 2 000 a final reply whose JSON outgrows its code points survives, cut to fill the budget exactly", () => {
+  // Each line costs more in JSON than in code points (the quotes and the newline escape): a cut counted in code
+  // points under-fills, and at this budget it dropped the reply altogether.
+  const reply = 'say "hi"\n'.repeat(1_000);
+  const r = transcriptEntries(snapshot({ items: [message("user", "report", { turnId: "t1" }), message("assistant", reply, { turnId: "t1" })] }), { turns: 5, include: ALL, maxChars: 2_000 });
+  assert.equal(r.truncated, true);
+  assert.deepEqual(r.entries.map((e) => e.kind), ["assistant"], "the final reply survives");
+  const text = r.entries[0]!.text!;
+  assert.ok(text.endsWith("…") && reply.startsWith(text.slice(0, -1)), "the head of the reply, marked as cut");
+  assert.ok(budgetSize(r) <= 2_000, "within the budget");
+  assert.ok(budgetSize(oneMore(r, reply)) > 2_000, "one code point more would not fit: the cut is exact");
+});
+
+test("maxChars counts UTF-8 bytes: a CJK reply is cut to what fits in bytes, never through a character", () => {
+  const reply = "漢字かな😀".repeat(2_000); // 3 bytes a character, 4 for the emoji (a surrogate pair)
+  const r = transcriptEntries(snapshot({ items: [message("user", "report", { turnId: "t1" }), message("assistant", reply, { turnId: "t1" })] }), { turns: 5, include: ALL, maxChars: 2_000 });
+  assert.deepEqual(r.entries.map((e) => e.kind), ["assistant"]); assert.equal(r.truncated, true);
+  const head = r.entries[0]!.text!.slice(0, -1);
+  assert.ok(reply.startsWith(head) && Buffer.from(head, "utf8").toString("utf8") === head, "a head of whole characters");
+  assert.ok(budgetSize(r) <= 2_000, "within the budget, in bytes");
+  assert.ok(budgetSize(oneMore(r, reply)) > 2_000, "one code point more would not fit: the cut is exact");
+});
+
+test("the budget covers the whole result: a big roster leaves less room for entries, and is never shed itself", () => {
+  const roster = Array.from({ length: 30 }, (_, i) => ({ id: `task-${i}`, kind: "subagent", agentKind: "agent", title: `Worker ${i}: audit the ${"module ".repeat(6)}`, status: "completed" }) as never);
+  const items = [message("user", "u".repeat(1_500), { turnId: "t1" }), message("assistant", "done", { turnId: "t1" })];
+  const r = transcriptEntries(snapshot({ items, roster }), { turns: 5, include: ALL, maxChars: 4_000 });
+  assert.ok(JSON.stringify(transcriptEntries(snapshot({ items, roster }), { turns: 5, include: ALL, maxChars: 100_000 }).entries).length < 4_000, "the entries alone would fit");
+  assert.ok(budgetSize(r) <= 4_000, "within the budget, roster included"); assert.equal(r.truncated, true);
+  assert.deepEqual(r.entries.map((e) => [e.kind, e.text]), [["assistant", "done"]], "the oldest row made room");
+  assert.equal(r.subagents.length, 30);
 });

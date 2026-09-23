@@ -5,7 +5,11 @@ export type TranscriptInclude = "reasoning" | "tools" | "activity";
 export interface TranscriptEntry { turn: number | null; turnId: string | null; kind: "user" | "assistant" | "reasoning" | "tool" | "approval" | "question" | "subagent" | "plan" | "changes" | "compaction" | "error" | "warning" | "info"; createdAt: string; agentId?: string; text?: string;
   attachments?: { name: string; type: string }[]; tool?: { type: string; title: string; status: string; command?: string; detail?: string; changedFiles?: string[] }; requestId?: string; requestKind?: string; decision?: string;
   questions?: string[]; answered?: boolean; subagent?: { id: string; title: string | null; status: string }; actionable?: boolean; files?: { path: string; additions: number; deletions: number }[]; state?: string; beforeTokens?: number; afterTokens?: number }
-export interface TranscriptOptions { turns: number; agentId?: string; include: ReadonlySet<TranscriptInclude>; maxChars: number }
+export interface TranscriptOptions {
+  turns: number; agentId?: string; include: ReadonlySet<TranscriptInclude>;
+  /** The size budget for the WHOLE result — entries, turns, subagents and flags — in UTF-8 bytes of its JSON, as ok() counts (the name predates the unit). */
+  maxChars: number;
+}
 export interface TranscriptResult { entries: TranscriptEntry[]; turnCount: number; coveredTurns: [number, number] | null; truncated: boolean; subagents: { id: string; title: string | null; status: string }[] }
 
 const TOOL_KINDS = new Set(["tool.started", "tool.updated", "tool.completed", "tool.denied"]);
@@ -42,28 +46,38 @@ function actionablePlanId(items: readonly ThreadItem[]): string | null {
   return null;
 }
 
+/** A value's size as the budget counts it: its JSON in UTF-8 bytes, the unit of ok()'s cap (result.ts). */
+const jsonSize = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), "utf8");
+
 /**
  * The last shed, for a newest turn that is over the budget on its own (§7.6: `maxChars` is a hard
  * budget): its OLDEST rows go first, sparing the final reply (else the newest row); when that row alone
- * is still over, it keeps the head of its text.
+ * is still over, it keeps the longest head of its text that fits. `size` measures a candidate list the
+ * way the budget does.
  */
-function fitBudget(entries: TranscriptEntry[], maxChars: number): TranscriptEntry[] {
-  let total = JSON.stringify(entries).length; // "[" + the rows joined by "," + "]"
+function fitBudget(entries: TranscriptEntry[], maxChars: number, size: (list: TranscriptEntry[]) => number): TranscriptEntry[] {
+  let total = size(entries);
   const reply = entries.map((e) => e.kind).lastIndexOf("assistant");
   const spared = reply >= 0 ? reply : entries.length - 1;
   const kept = entries.filter((e, i) => {
     if (i === spared || total <= maxChars) return true;
-    total -= JSON.stringify(e).length + 1;
+    total -= jsonSize(e) + 1; // a dropped row takes one comma with it: the spared row keeps the list non-empty
     return false;
   });
   if (total <= maxChars) return kept;
-  // Only the spared row is left. Cut its text by the overshoot plus one for the "…": a code point is at
-  // least one JSON character, so the cut always lands inside the budget.
+  // Only the spared row is left. Its text's cost per code point varies (JSON escapes, and the encoding), so
+  // the cut is found by bisection over whole code points, measuring each candidate as the budget does.
   const row = kept[0]!;
-  const keep = (row.text ? [...row.text].length : 0) - (total - maxChars) - 1;
-  if (!row.text || keep <= 0) return [];
-  row.text = `${capText(row.text, keep).text}…`;
-  return kept;
+  const text = row.text ?? "";
+  const cut = (n: number): TranscriptEntry[] => [{ ...row, text: `${capText(text, n).text}…` }];
+  let lo = 0;
+  let hi = [...text].length - 1; // the whole text is over, so at least one code point goes
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (size(cut(mid)) <= maxChars) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo > 0 ? cut(lo) : [];
 }
 
 export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptOptions): TranscriptResult {
@@ -183,9 +197,13 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
     entries.sort((x, y) => (x.createdAt < y.createdAt ? -1 : x.createdAt > y.createdAt ? 1 : 0));
     return entries;
   };
-  const size = (list: TranscriptEntry[]): number => JSON.stringify(list).length;
+  const subagents = opts.agentId ? [] : snap.roster.map(rosterView);
   let entries = build(from);
   let truncated = false;
+  // The budget bounds the whole result, as the caller receives it. The roster is never shed (§7.6 names no
+  // such step): a big one leaves the entries less room, and one over the budget on its own leaves none.
+  const result = (list: TranscriptEntry[]): TranscriptResult => ({ entries: list, turnCount, coveredTurns: turnCount ? [from, turnCount] : null, truncated, subagents });
+  const size = (list: TranscriptEntry[]): number => jsonSize(result(list));
   // Shedding order (§7.6): reasoning → tool detail → oldest turns → the newest turn's oldest rows.
   if (size(entries) > opts.maxChars) { truncated = true; entries = entries.filter((e) => e.kind !== "reasoning"); }
   if (size(entries) > opts.maxChars) entries.forEach(shedDetail);
@@ -194,7 +212,6 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
     entries = build(from).filter((e) => e.kind !== "reasoning");
     entries.forEach(shedDetail);
   }
-  if (size(entries) > opts.maxChars) entries = fitBudget(entries, opts.maxChars);
-  const subagents = opts.agentId ? [] : snap.roster.map(rosterView);
-  return { entries, turnCount, coveredTurns: turnCount ? [from, turnCount] : null, truncated, subagents };
+  if (size(entries) > opts.maxChars) entries = fitBudget(entries, opts.maxChars, size);
+  return result(entries);
 }

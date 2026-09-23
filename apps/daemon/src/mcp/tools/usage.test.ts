@@ -2,10 +2,22 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { FakeDaemonApi } from "../testing.ts";
 import type { ToolContext } from "../tool.ts";
-import { MAX_COST_RESULT_CHARS, usageTools } from "./usage.ts";
+import { MAX_COST_RESULT_BYTES, usageTools } from "./usage.ts";
 
 const tool = (name: string) => usageTools.find((t) => t.name === name)!;
 const ctx = (api: FakeDaemonApi): ToolContext => ({ api, todos: {} as never, files: {} as never, signal: new AbortController().signal, now: () => Date.parse("2026-09-22T12:00:00.000Z") });
+/** A result's size as ok() counts it (result.ts): its JSON, in UTF-8 bytes. */
+const bytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), "utf8");
+const dayOf = (k: number) => new Date(Date.UTC(2026, 8, 22 - k)).toISOString().slice(0, 10); // k days before today
+type CostRow = { day: string; costSource: string } & Record<string, unknown>;
+/** The cut result with its next-oldest dropped day added back, rows projected as get_cost projects them. */
+function withNextDay(r: Record<string, unknown>, rows: CostRow[]): Record<string, unknown> {
+  const kept = r.rows as { day: string }[];
+  const days = [...new Set(kept.map((row) => row.day))];
+  assert.deepEqual(days, days.map((_, k) => dayOf(k)), "the kept rows are the newest days, newest first");
+  const back = rows.filter((row) => row.day === dayOf(days.length)).map(({ costSource: _, ...row }) => row);
+  return { ...r, rows: [...kept, ...back], rowsDropped: (r.rowsDropped as number) - back.length };
+}
 
 test("get_usage passes refresh through and joins accounts", async () => {
   const api = new FakeDaemonApi()
@@ -46,19 +58,31 @@ test("get_cost rounds row costs, keeps an unpriced row's null and projects the r
 
 test("get_cost keeps an oversized result in budget by dropping the oldest days' rows, never the totals", async () => {
   const models = ["claude-opus-4-1-20250805", "claude-sonnet-4-5-20250929", "gpt-5-codex", "grok-code-fast-1", "claude-haiku-4-5-20251001"];
-  const dayOf = (k: number) => new Date(Date.UTC(2026, 8, 22 - k)).toISOString().slice(0, 10); // k days before today
   // 400 rows over 90 days: four models every day, a fifth on the newest 40 (so $1.25 a day there, $1 before).
   const rows = Array.from({ length: 400 }, (_, i) => ({ agent: "claude", model: models[Math.floor(i / 90)]!, day: dayOf(i % 90), inputTokens: 123_456, outputTokens: 12_345, cacheReadTokens: 1_234_567, cacheWriteTokens: 123_456, costUsd: 0.25, costSource: "api_equivalent" }));
   const api = new FakeDaemonApi().on("GET", "/api/usage/tokens", { status: 200, body: { asOf: "2026-09-22T11:00:00.000Z", rows } });
   const r = await tool("get_cost").run({ days: 90 }, ctx(api));
-  assert.ok(JSON.stringify(r).length <= MAX_COST_RESULT_CHARS);
+  assert.ok(bytes(r) <= MAX_COST_RESULT_BYTES, "within the budget, in bytes");
   assert.equal(r.truncated, true);
   const kept = r.rows as { day: string }[];
   const dropped = r.rowsDropped as number;
   assert.ok(dropped > 0); assert.equal(kept.length + dropped, 400);
+  assert.ok(kept.length > 0, "rows are kept, not all dropped");
+  assert.ok(bytes(withNextDay(r, rows)) > MAX_COST_RESULT_BYTES, "adding back the next-oldest day would overflow: every day that fits is kept");
   const keptDays = [...new Set(kept.map((row) => row.day))];
   assert.deepEqual(keptDays, Array.from({ length: keptDays.length }, (_, k) => dayOf(k)), "the newest days, newest first");
   assert.equal(kept.length, rows.filter((row) => keptDays.includes(row.day)).length, "whole days: a kept day keeps every row");
   assert.deepEqual(r.byDay, Array.from({ length: 90 }, (_, i) => ({ day: dayOf(89 - i), usd: 89 - i < 40 ? 1.25 : 1 })));
   assert.equal(r.totalUsd, 100); assert.equal(r.days, 90); assert.equal(r.asOf, "2026-09-22T11:00:00.000Z");
+});
+
+test("get_cost's budget counts UTF-8 bytes, as ok() does: non-ASCII model names shed more days, never reach ok()'s cut", async () => {
+  // 400 rows with 3-byte-a-character model names: under 50 000 characters is far over 50 000 bytes.
+  const rows: CostRow[] = Array.from({ length: 400 }, (_, i) => ({ agent: "claude", model: `模型-${"深度求索".repeat(8)}-${i % 5}`, day: dayOf(i % 90), inputTokens: 123_456, outputTokens: 12_345, cacheReadTokens: 1_234_567, cacheWriteTokens: 123_456, costUsd: 0.25, costSource: "api_equivalent" }));
+  const api = new FakeDaemonApi().on("GET", "/api/usage/tokens", { status: 200, body: { asOf: "2026-09-22T11:00:00.000Z", rows } });
+  const r = await tool("get_cost").run({ days: 90 }, ctx(api));
+  assert.ok(bytes(r) <= MAX_COST_RESULT_BYTES, `within get_cost's own budget in bytes (${bytes(r)})`);
+  assert.equal(r.truncated, true); assert.ok((r.rows as unknown[]).length > 0);
+  assert.ok(bytes(withNextDay(r, rows)) > MAX_COST_RESULT_BYTES, "adding back the next-oldest day would overflow");
+  assert.equal(r.totalUsd, 100, "the totals still count every row");
 });

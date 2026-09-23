@@ -24,9 +24,11 @@ const waitForSession = defineTool({
     const after = args.after ?? new Date(now()).toISOString();
     if (Number.isNaN(Date.parse(after))) throw new ToolError("INVALID_ARGUMENT", "`after` must be an ISO-8601 timestamp.");
     let select: (s: SessionSummary) => boolean = () => true;
-    if (args.sessionId !== undefined) { const id = (await findSession(api, args.sessionId)).id; select = (s) => s.id === id; }
+    // One session: its close ends the wait (SESSION_NOT_FOUND). A wider wait just stops watching a closed one.
+    let sessionId: string | undefined;
+    if (args.sessionId !== undefined) { const id = (await findSession(api, args.sessionId)).id; select = (s) => s.id === id; sessionId = id; }
     else if (args.project !== undefined) { const path = (await resolveProject(api, args.project)).path; select = (s) => s.projectPath === path; }
-    const r = await waitForAttention(api, { select, after, timeoutMs: args.timeoutMs, signal, now });
+    const r = await waitForAttention(api, { select, sessionId, after, timeoutMs: args.timeoutMs, signal, now });
     if (r.sessions.length === 0) return { sessions: [], cursor: r.cursor, timedOut: r.timedOut };
     const ctx = await buildViewContext(api);
     // Newest attention first, as the Attention Center lists its flagged rows; a tie goes to the newer tab.

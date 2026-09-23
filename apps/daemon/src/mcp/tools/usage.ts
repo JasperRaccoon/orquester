@@ -4,8 +4,14 @@ import { expectOk } from "../errors.ts";
 import { defineTool, READ_ONLY, type ToolDef } from "../tool.ts";
 import { usageView } from "../usage-view.ts";
 
-/** get_cost's own budget: under ok()'s 60 000-byte cap, so that cap's last-resort cut never fires here. */
-export const MAX_COST_RESULT_CHARS = 50_000;
+/**
+ * get_cost's own budget, counted as ok() counts (UTF-8 bytes of the JSON, result.ts) and 10 000 under its 60 000-byte
+ * cap: an oversized cost table is shed here, whole days oldest first, so it never reaches ok()'s last-resort cut,
+ * which would keep only the head of the text. The head itself (≤ 90 byDay rows, a few KB) is never shed.
+ */
+export const MAX_COST_RESULT_BYTES = 50_000;
+
+const jsonBytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), "utf8");
 
 const round4 = (usd: number): number => Math.round(usd * 10_000) / 10_000;
 
@@ -41,15 +47,19 @@ const getCost = defineTool({
     const totalUsd = round4(byDay.reduce((sum, d) => sum + d.usd, 0));
     const rows = inWindow.map((r) => ({ agent: r.agent, model: r.model, day: r.day, inputTokens: r.inputTokens, outputTokens: r.outputTokens, cacheReadTokens: r.cacheReadTokens, cacheWriteTokens: r.cacheWriteTokens, costUsd: typeof r.costUsd === "number" ? round4(r.costUsd) : null }));
     const head = { asOf: res.asOf, days: args.days, totalUsd, byDay };
-    // Over budget: drop whole days of rows, oldest first, until the rest fits (at most `days` passes).
-    let result: Record<string, unknown> = { ...head, rows };
+    const whole = { ...head, rows };
+    if (jsonBytes(whole) <= MAX_COST_RESULT_BYTES) return whole;
+    // Over budget: drop whole days of rows, oldest first, until the rest fits. Each row is measured once, with the
+    // comma that joins it; only the frame around the rows is re-measured, as rowsDropped's digits move.
+    const rowBytes = rows.map((row) => jsonBytes(row) + 1);
+    let rowsBytes = rowBytes.reduce((sum, n) => sum + n, 0) - 1; // n rows are joined by n - 1 commas
     let kept = rows.length;
-    while (kept > 0 && JSON.stringify(result).length > MAX_COST_RESULT_CHARS) {
+    const frame = () => jsonBytes({ ...head, rows: [], truncated: true, rowsDropped: rows.length - kept });
+    do {
       const oldest = rows[kept - 1]!.day;
-      while (kept > 0 && rows[kept - 1]!.day === oldest) kept -= 1;
-      result = { ...head, rows: rows.slice(0, kept), truncated: true, rowsDropped: rows.length - kept };
-    }
-    return result;
+      while (kept > 0 && rows[kept - 1]!.day === oldest) rowsBytes -= rowBytes[--kept]!;
+    } while (kept > 0 && frame() + rowsBytes > MAX_COST_RESULT_BYTES);
+    return { ...head, rows: rows.slice(0, kept), truncated: true, rowsDropped: rows.length - kept };
   }
 });
 

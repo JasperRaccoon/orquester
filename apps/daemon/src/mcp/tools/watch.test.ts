@@ -46,7 +46,11 @@ test("wait_for_session defaults `after` to now, honours session and project filt
   const fresh = { ...stale, activity: { ...stale.activity!, needsAttentionAt: "2026-09-22T12:00:01.000Z" } };
   // A barrier, not a sleep: the watch subscribes before its first read, so the first read made while a
   // listener is registered is the watch's own. That read still returns the stale list, so only the bus
-  // event can end the wait before its timeout.
+  // event can end the wait before its timeout. The barrier resumes this test BEFORE that read answers, so
+  // the event lands while the watch holds no session yet. A `session.updated` carries the whole summary,
+  // which the watch takes as it comes; a `session.activity` carries only the activity, which counts because
+  // the watch merges activity published during a read into what that read returns (wait.ts) — the next
+  // test emits that one. The list turns fresh for the settle window's re-read, which confirms the hit.
   let watching!: () => void;
   const subscribed = new Promise<void>((resolve) => { watching = resolve; });
   const live: FakeDaemonApi = api([stale]).on("GET", "/api/sessions", () => { if (live.listenerCount() > 0) watching(); return { status: 200, body: [stale] }; });
@@ -67,6 +71,37 @@ test("wait_for_session defaults `after` to now, honours session and project filt
   assert.deepEqual(ids(await tool.run({ project: "acme/api", after: stamp(0), timeoutMs: 20 }, ctx(mixed))), ["h"], "the project's own session is returned");
   await assert.rejects(tool.run({ sessionId: "a", project: "x/y", timeoutMs: 1000 }, ctx(api([stale]))), (e: { code: string }) => e.code === "INVALID_ARGUMENT");
   await assert.rejects(tool.run({ sessionId: "zz", timeoutMs: 1000 }, ctx(api([stale]))), (e: { code: string }) => e.code === "SESSION_NOT_FOUND");
+});
+
+test("wait_for_session: a session.activity published while the watch's first read is in flight ends the wait", async () => {
+  const stale = chatSummary({ id: "a", activity: { state: "idle", attention: "finished", lastOutputAt: null, needsAttentionAt: stamp(5) } });
+  const fresh = { ...stale, activity: { ...stale.activity!, needsAttentionAt: "2026-09-22T12:00:01.000Z" } };
+  // The barrier of the test above: the first read made while a listener is registered is the watch's own.
+  let watching!: () => void;
+  const subscribed = new Promise<void>((resolve) => { watching = resolve; });
+  const live: FakeDaemonApi = api([stale]).on("GET", "/api/sessions", () => { if (live.listenerCount() > 0) watching(); return { status: 200, body: [stale] }; });
+  const p = tool.run({ sessionId: "a", timeoutMs: 1000 }, ctx(live));
+  await subscribed;
+  live.on("GET", "/api/sessions", { status: 200, body: [fresh] });
+  live.emit(busEvent("session.activity", { id: "a", activity: fresh.activity }));
+  const r = await p;
+  assert.deepEqual([ids(r), r.cursor, r.timedOut], [["a"], "2026-09-22T12:00:01.000Z", false]);
+});
+
+test("wait_for_session on one session ends with SESSION_NOT_FOUND when it closes, or is gone by the watch's first read", async () => {
+  const notFound = (e: { code: string }) => e.code === "SESSION_NOT_FOUND";
+  const a = chatSummary({ id: "a" });
+  let watching!: () => void;
+  const subscribed = new Promise<void>((resolve) => { watching = resolve; });
+  const live: FakeDaemonApi = api([a]).on("GET", "/api/sessions", () => { if (live.listenerCount() > 0) watching(); return { status: 200, body: [a] }; });
+  const p = tool.run({ sessionId: "a", timeoutMs: 1000 }, ctx(live));
+  await subscribed;
+  live.emit(busEvent("session.closed", { id: "a" }));
+  await assert.rejects(p, notFound);
+  // Closed after the lookup, before the watch subscribed: only its absence from the watch's read says so.
+  const vanished: FakeDaemonApi = api([a]).on("GET", "/api/sessions", () => ({ status: 200, body: vanished.listenerCount() > 0 ? [] : [a] }));
+  await assert.rejects(tool.run({ sessionId: "a", timeoutMs: 1000 }, ctx(vanished)), notFound);
+  assert.deepEqual([live.listenerCount(), vanished.listenerCount()], [0, 0]);
 });
 
 test("wait_for_session checks `after` before any lookup and never reads an empty id or project as absent", async () => {
