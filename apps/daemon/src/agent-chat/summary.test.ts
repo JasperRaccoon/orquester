@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { SessionSummary } from "@orquester/api";
+import { busEvent, FakeDaemonApi } from "../mcp/testing.ts";
+import { waitForAttention } from "../mcp/wait.ts";
 import { ChatSessionManager } from "./chat-sessions.ts";
 import { AgentHostClient } from "./host-client.ts";
 import { AgentChatSummaryService, sanitizeFields, sanitizePendingRequests } from "./summary.ts";
@@ -226,6 +228,196 @@ test("needsAttentionAt is stamped when attention rises and cleared when it clear
   );
   h.service.applyFields("t1", { chatSessionStatus: "running" });
   assert.equal(h.chat.get("t1")?.activity?.needsAttentionAt, null);
+});
+
+// --- the stamp is the MCP wait's cursor (MCP v2 spec §9.2) --------------------
+//
+// `wait_for_session` reports a session only once its `needsAttentionAt` passes
+// the caller's cursor, so the stamp must move whenever something NEW calls for
+// the user — also when the attention VALUE stays the same.
+
+const iso = (ms: number): string => new Date(ms).toISOString();
+const approval = (requestId: string) => ({ requestId, kind: "approval" as const, title: `Run ${requestId}?` });
+/** A Supervised turn parked on an approval: the ladder's `needs-input`. */
+const awaitingApproval = { chatSessionStatus: "running" as const, hasPendingApprovals: true };
+const activityEvents = (h: Harness) => h.published.filter((p) => p.type === "session.activity");
+const settledTurn = (turnId: string, state: "completed" | "failed", at: number) => ({
+  chatSessionStatus: "ready" as const,
+  latestTurn: { turnId, state, startedAt: iso(at - 400), completedAt: iso(at) }
+});
+
+test("approval A answered and approval B raised inside one poll restamps, and says so on the bus", () => {
+  // A Supervised Claude session raises Edit/Bash approvals back to back. The
+  // attention stays `needs-input` throughout, so a value-change-only stamp kept
+  // A's and the bus carried only `agentChat.pending`: a client looping on A's
+  // cursor never heard about B.
+  let clock = 1_000;
+  const h = harness(() => clock);
+  seedTab(h.chat, "c1");
+  h.service.applyFields("c1", { chatSessionStatus: "running" });
+  clock = 2_000;
+  h.service.applyFields("c1", awaitingApproval, [approval("A")]);
+  assert.equal(h.chat.get("c1")?.activity?.needsAttentionAt, iso(2_000));
+  const seen = activityEvents(h).length;
+
+  clock = 3_500;
+  h.service.applyFields("c1", awaitingApproval, [approval("B")]);
+  const expected = { state: "waiting", attention: "needs-input", lastOutputAt: null, needsAttentionAt: iso(3_500) };
+  assert.deepEqual(h.chat.get("c1")?.activity, expected, "the same attention, re-stamped: B is a new call");
+  assert.deepEqual(
+    activityEvents(h).slice(seen).map((p) => p.payload),
+    [{ id: "c1", activity: expected }],
+    "a stamp that moved alone is still published"
+  );
+});
+
+test("a turn that starts and settles inside one poll restamps; a turn that stays settled does not", () => {
+  // t2 fails fast (a usage limit, say) between two polls: `finished` stays
+  // `finished`, and only the latest turn moving says anything happened.
+  let clock = 1_000;
+  const h = harness(() => clock);
+  seedTab(h.chat, "c1");
+  h.service.applyFields("c1", settledTurn("t1", "completed", 900));
+  assert.equal(h.chat.get("c1")?.activity?.needsAttentionAt, iso(1_000));
+  const seen = activityEvents(h).length;
+
+  clock = 2_500;
+  h.service.applyFields("c1", settledTurn("t2", "failed", 2_400));
+  assert.equal(h.chat.get("c1")?.activity?.attention, "finished", "the attention value never moved");
+  assert.equal(h.chat.get("c1")?.activity?.needsAttentionAt, iso(2_500));
+  assert.equal(activityEvents(h).length, seen + 1, "session.activity carried the new stamp");
+
+  clock = 4_000;
+  h.service.applyFields("c1", settledTurn("t2", "failed", 2_400));
+  assert.equal(
+    h.chat.get("c1")?.activity?.needsAttentionAt,
+    iso(2_500),
+    "a settled turn is reported once — restamping every poll is v1's busy loop"
+  );
+  assert.equal(activityEvents(h).length, seen + 1);
+});
+
+test("the same turn settling under a still-open question restamps too", () => {
+  // A message-mode question may outlive its turn: `needs-input` holds while the
+  // turn goes running → completed, and that settle is news for a waiter.
+  let clock = 1_000;
+  const h = harness(() => clock);
+  seedTab(h.chat, "c1");
+  const question = [{ requestId: "q1", kind: "question" as const, title: "Which branch?" }];
+  h.service.applyFields(
+    "c1",
+    {
+      chatSessionStatus: "running",
+      hasPendingUserInput: true,
+      latestTurn: { turnId: "t1", state: "running", startedAt: iso(500), completedAt: null }
+    },
+    question
+  );
+  assert.equal(h.chat.get("c1")?.activity?.needsAttentionAt, iso(1_000));
+
+  clock = 2_500;
+  h.service.applyFields(
+    "c1",
+    {
+      chatSessionStatus: "ready",
+      hasPendingUserInput: true,
+      latestTurn: { turnId: "t1", state: "completed", startedAt: iso(500), completedAt: iso(2_400) }
+    },
+    question
+  );
+  assert.equal(h.chat.get("c1")?.activity?.attention, "needs-input");
+  assert.equal(h.chat.get("c1")?.activity?.needsAttentionAt, iso(2_500));
+});
+
+test("a request that stays open keeps its stamp; only a request id the last poll lacked restamps", () => {
+  let clock = 1_000;
+  const h = harness(() => clock);
+  seedTab(h.chat, "c1");
+  const stampOf = () => h.chat.get("c1")?.activity?.needsAttentionAt;
+  h.service.applyFields("c1", { chatSessionStatus: "running" });
+  clock = 2_000;
+  h.service.applyFields("c1", awaitingApproval, [approval("A")]);
+  let seen = activityEvents(h).length;
+
+  clock = 3_500;
+  h.service.applyFields("c1", awaitingApproval, [approval("A")]);
+  assert.equal(stampOf(), iso(2_000), "A still open: the same call keeps the same stamp");
+  assert.equal(activityEvents(h).length, seen, "and nothing is re-broadcast");
+
+  clock = 5_000;
+  h.service.applyFields("c1", awaitingApproval, [approval("A"), approval("B")]);
+  assert.equal(stampOf(), iso(5_000), "B opened beside A");
+  seen = activityEvents(h).length;
+
+  clock = 6_500;
+  h.service.applyFields("c1", awaitingApproval, [approval("B")]);
+  assert.equal(stampOf(), iso(5_000), "A closing while B stays open is not a new call");
+  assert.equal(activityEvents(h).length, seen);
+});
+
+test("a restamp alone never pushes: pushes stay gated on the attention VALUE changing", () => {
+  let clock = 1_000;
+  const h = harness(() => clock);
+  seedTab(h.chat, "c1");
+  h.service.applyFields("c1", { chatSessionStatus: "running" });
+  clock = 2_000;
+  h.service.applyFields("c1", awaitingApproval, [approval("A")]);
+  assert.deepEqual(h.pushes, [{ id: "c1", type: "needs-input" }]);
+
+  clock = 3_500;
+  h.service.applyFields("c1", awaitingApproval, [approval("B")]);
+  assert.equal(h.chat.get("c1")?.activity?.needsAttentionAt, iso(3_500), "B restamped");
+
+  clock = 5_000;
+  h.service.applyFields("c1", settledTurn("t1", "completed", 4_900));
+  clock = 6_500;
+  h.service.applyFields("c1", settledTurn("t2", "failed", 6_400));
+  assert.equal(h.chat.get("c1")?.activity?.needsAttentionAt, iso(6_500), "t2 restamped");
+
+  assert.deepEqual(
+    h.pushes,
+    [
+      { id: "c1", type: "needs-input" },
+      { id: "c1", type: "finished" }
+    ],
+    "one push per attention VALUE change; neither restamp pushed"
+  );
+});
+
+test("end to end: wait_for_session looping on its cursor hears approval B after approval A", async () => {
+  // The real summary service publishing onto the bus the MCP's real
+  // `waitForAttention` subscribes to, as `InjectDaemonApi` wires it.
+  let clock = Date.parse("2026-09-22T10:00:00.000Z");
+  const api = new FakeDaemonApi();
+  const chat = new ChatSessionManager({ requestPersist: () => undefined });
+  const service = new AgentChatSummaryService({
+    client: new AgentHostClient({ socketPath: "/dev/null", token: () => null }),
+    chat,
+    broadcaster: { publish: (channel, type, payload) => api.emit(busEvent(type, payload, channel)) },
+    push: { notifyStructural: async () => undefined },
+    now: () => clock
+  });
+  api.on("GET", "/api/sessions", () => ({ status: 200, body: chat.list() }));
+  seedTab(chat, "c1");
+  service.applyFields("c1", { chatSessionStatus: "running" });
+  const signal = new AbortController().signal;
+  const wait = (after: string) =>
+    waitForAttention(api, { sessionId: "c1", after, timeoutMs: 2_000, signal, now: Date.now, settleMs: 0 });
+
+  const first = wait(iso(clock));
+  await new Promise((resolve) => setImmediate(resolve));
+  clock += 1_500;
+  service.applyFields("c1", awaitingApproval, [approval("A")]);
+  const a = await first;
+  assert.deepEqual([a.sessions.map((s) => s.id), a.cursor, a.timedOut], [["c1"], iso(clock), false]);
+
+  // The caller answers A; the agent asks B before the next poll.
+  const second = wait(a.cursor);
+  await new Promise((resolve) => setImmediate(resolve));
+  clock += 1_500;
+  service.applyFields("c1", awaitingApproval, [approval("B")]);
+  const b = await second;
+  assert.deepEqual([b.sessions.map((s) => s.id), b.cursor, b.timedOut], [["c1"], iso(clock), false], "B reached the waiter");
 });
 
 test("a turn transition becomes the coarse agentChat.turn bus event", () => {
