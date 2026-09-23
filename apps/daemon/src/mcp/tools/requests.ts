@@ -4,6 +4,7 @@ import { attachmentInputSchema, MAX_ATTACHMENTS, uploadInlineAttachments, type A
 import type { DaemonApi } from "../daemon-api.ts";
 import { ToolError } from "../errors.ts";
 import { readThread, requireChatSession, sendCommand } from "../reads.ts";
+import { clipText, MAX_ECHO_CHARS } from "../result.ts";
 import { defineTool, MUTATING, type ToolDef } from "../tool.ts";
 import { chatDetail, pendingApprovalViews, pendingQuestionViews, type PendingQuestionView } from "../views.ts";
 
@@ -12,10 +13,23 @@ const sessionIdField = z.string().min(1).describe("The session id from list_sess
 const requestIdField = z.string().min(1).optional().describe("The request id from get_session; may be omitted when exactly one is pending.");
 const DECISIONS = ["accept", "acceptForSession", "acceptAlways", "decline", "cancel"] as const satisfies readonly ApprovalDecision[];
 
+/** How many of the caller's values one refusal quotes; the rest are counted. */
+const MAX_QUOTED_VALUES = 5;
+
+/**
+ * The caller's values as a refusal quotes them: each cut to MAX_ECHO_CHARS, at most MAX_QUOTED_VALUES of them, then how
+ * many more. A caller's text is of any length, and quoted whole it pushed a refusal past the 4 000-character backstop,
+ * which then cut the part that helps — the options, the questions, the pending ids.
+ */
+function quoteValues(values: readonly string[]): string {
+  const quoted = values.slice(0, MAX_QUOTED_VALUES).map((v) => `"${clipText(v, MAX_ECHO_CHARS)}"`).join(", ");
+  return values.length > MAX_QUOTED_VALUES ? `${quoted} and ${values.length - MAX_QUOTED_VALUES} more` : quoted;
+}
+
 function pick<T extends { requestId: string }>(rows: T[], requestId: string | undefined, noun: string): T {
   if (requestId !== undefined) {
     const hit = rows.find((r) => r.requestId === requestId);
-    if (!hit) throw new ToolError("INVALID_ARGUMENT", `No pending ${noun} with requestId "${requestId}". Pending: ${rows.map((r) => r.requestId).join(", ") || "none"}.`);
+    if (!hit) throw new ToolError("INVALID_ARGUMENT", `No pending ${noun} with requestId ${quoteValues([requestId])}. Pending: ${rows.map((r) => r.requestId).join(", ") || "none"}.`);
     return hit;
   }
   if (rows.length === 1) return rows[0]!;
@@ -53,7 +67,7 @@ const isBlank = (raw: Answer): boolean => (Array.isArray(raw) ? raw : [raw]).eve
 
 /** Encode one non-blank answer exactly as the GUI card does (spec §7.5): an option's value ?? label, several on multiSelect, else the custom text. */
 function encodeAnswer(q: Q, raw: Answer): { value: Answer } | { error: string } {
-  const notOptions = (texts: readonly string[], hint = "") => ({ error: `${texts.map((t) => `"${t}"`).join(", ")} ${texts.length === 1 ? "is not an option" : "are not options"} of "${nameOf(q)}". Options: ${q.options.map((o) => o.label).join(", ")}.${hint}` });
+  const notOptions = (texts: readonly string[], hint = "") => ({ error: `${quoteValues(texts)} ${texts.length === 1 ? "is not an option" : "are not options"} of "${nameOf(q)}". Options: ${q.options.map((o) => o.label).join(", ")}.${hint}` });
   if (q.multiSelect) {
     if (Array.isArray(raw) || optionValue(q, raw) !== undefined) {
       const values: string[] = [];
@@ -128,7 +142,7 @@ const answerQuestion = defineTool({
     const unknown = new Set<string>();
     const given = byQuestion(args.answers, req.questions, unknown, errors);
     const attached = byQuestion(args.attachments, req.questions, unknown, errors);
-    if (unknown.size) errors.push(`${[...unknown].map((k) => `"${k}"`).join(", ")} ${unknown.size === 1 ? "is not a question" : "are not questions"} of this request. Questions: ${req.questions.map((q) => `${q.index}: ${q.id}`).join(" | ")}.`);
+    if (unknown.size) errors.push(`${quoteValues([...unknown])} ${unknown.size === 1 ? "is not a question" : "are not questions"} of this request. Questions: ${req.questions.map((q) => `${q.index}: ${q.id}`).join(" | ")}.`);
     const answers: Record<string, Answer> = {};
     const batches: Batch[] = [];
     const missing: string[] = [];

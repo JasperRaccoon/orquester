@@ -209,8 +209,10 @@ test("strict arguments change nothing else: a correct call keeps its defaults, a
   assert.deepEqual(argumentsSchema(sendMessage).parse({ sessionId: "c1", text: "hi" }), { sessionId: "c1", text: "hi", planMode: false, wait: true, timeoutMs: 120_000 });
   const app = mcpApp({ createApi: () => api });
   try {
-    // Defaults still apply: without `attention: false` the idle, unflagged c1 would be filtered out.
-    const listed = await postMcp(app, call(43, "list_sessions", { kind: "chat" }));
+    // Defaults still apply under the strict schema: called with `{}`, `kind` must become "all" — left undefined, the
+    // kind filter would drop every chat tab, c1 included. (`attention` could not show a lost default: the tool tests it
+    // for truthiness, so undefined reads as false.)
+    const listed = await postMcp(app, call(43, "list_sessions", {}));
     assert.equal(listed.result.isError, undefined, listed.result.content?.[0]?.text);
     assert.deepEqual((listed.result.structuredContent.sessions as { id: string }[]).map((s) => s.id), ["c1"]);
     // An attachment is a strict object of its own: an unknown key inside it is refused under its own path, as before.

@@ -121,7 +121,7 @@ test("an error message is capped whatever it echoes: at most MAX_ERROR_MESSAGE_C
     assert.ok(message.endsWith("z…"), `${code}: the cut is marked`);
     assert.equal(e.content[0].text, `${code}: ${message}`, `${code}: the text carries the same capped message`);
   }
-  assert.ok(MAX_ERROR_MESSAGE_CHARS >= 2_000, "room for every message the tools write on purpose (an INVALID_ARGUMENT names five fields of ≤ 200)");
+  assert.ok(MAX_ERROR_MESSAGE_CHARS >= 3_701, "room for the longest message the tools build on purpose: a todo refusal, 3 701 characters at worst for a 3 000-item list (todo-tools.test.ts builds it)");
   // A message within the cap is untouched, detail included.
   const short = toSafeToolError(new ToolError("PENDING_REQUEST", "Answer the agent first.", { approvals: ["r1"] }));
   assert.deepEqual(short.structuredContent, { code: "PENDING_REQUEST", message: "Answer the agent first.", detail: { approvals: ["r1"] } });
