@@ -196,7 +196,7 @@ export interface ChatComposerProps {
   queue: QueuedComposerMessage[];
   activePlan: ActivePlanState | null;
   /** The un-implemented proposal that turns the primary action into a split button. */
-  actionableProposedPlan: { planMarkdown: string } | null;
+  actionableProposedPlan: { id: string; planMarkdown: string; truncated?: true } | null;
   /** The composer goes `inert` for exactly one reason (§7.5). */
   reverting: boolean;
   /**

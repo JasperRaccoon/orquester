@@ -414,6 +414,12 @@ export interface AgentChatActions {
   /** `/turn` against a live turn. Same route; named apart for call-site clarity. */
   steer(input: { text: string; attachments?: AttachmentRef[] }): Promise<void>;
   /**
+   * The whole markdown of a proposal Implement is about to send (§7.3): as is
+   * when intact, read back through `GET …/items/:itemId` when the wire cut it
+   * (`truncated`, §5.6). Rejects rather than ever answer the cut text.
+   */
+  readFullPlanMarkdown(plan: { id: string; planMarkdown: string; truncated?: true }): Promise<string>;
+  /**
    * `/interrupt`. Omits `turnId` whenever the session is not `running`, which
    * is also the only way to stop background work — and it stops all of it.
    */
@@ -522,7 +528,13 @@ export interface AgentChatThreadView {
    * *Added by W15, widened by W11 in the fix wave (R8-B1 / R7-2);
    * `contracts.ts` stays additive-only.*
    */
-  actionableProposedPlan: { id: string; planMarkdown: string; turnId: string | null } | null;
+  actionableProposedPlan: {
+    id: string;
+    planMarkdown: string;
+    turnId: string | null;
+    /** The wire cut `planMarkdown` (§5.6): see `readFullPlanMarkdown`. */
+    truncated?: true;
+  } | null;
   /**
    * True while a `/revert` is in flight — §7.5's one reason the composer goes
    * `inert`, so a turn cannot race history the host is rewriting.
