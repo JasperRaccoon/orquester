@@ -1,8 +1,10 @@
 import { strict as assert } from "node:assert";
+import { once } from "node:events";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
+import { Readable } from "node:stream";
 import { test } from "node:test";
 import type { AgentAccount, RegistryEntry } from "@orquester/api";
 import { agentHostSocketPath, agentHostTokenPath } from "@orquester/config";
@@ -12,12 +14,15 @@ import type {
 } from "../agent-host/host-protocol.ts";
 import {
   AgentChatService,
+  countingLimit,
   isUsableConversationId,
   proxyAccountFamily,
   PROVIDER_REFRESH_DEBOUNCE_MS,
   resolveHomeKind
 } from "./service.ts";
 import { ChatSessionError } from "./chat-sessions.ts";
+import { HostUnavailableError } from "./host-client.ts";
+import { UploadTooLargeError } from "../upload-stream.ts";
 
 // §6.1 thread creation: the tab record first, then the host thread, and the
 // launch environment a chat thread gets must be EXACTLY what a terminal launch
@@ -82,7 +87,7 @@ const OPENCODE: RegistryEntry = {
 async function makeFixture(
   entry: RegistryEntry,
   launch: { env: Record<string, string>; unset?: string[]; accountId?: string } | null,
-  options: { now?: () => number } = {}
+  options: { now?: () => number; adopt?: boolean } = {}
 ): Promise<Fixture> {
   const appdir = await mkdtemp(join(tmpdir(), "orq-chat-service-"));
   // The REAL paths, so boot adoption probes the fake host rather than deciding
@@ -104,6 +109,8 @@ async function makeFixture(
     refreshes: [],
     service: null as unknown as AgentChatService,
     cleanup: async () => {
+      // An upload a test left open would otherwise hold `close` forever.
+      host.closeAllConnections();
       await new Promise<void>((resolve) => host.close(() => resolve()));
       await rm(appdir, { recursive: true, force: true });
     }
@@ -198,6 +205,9 @@ async function makeFixture(
       throw new Error("the fixture must adopt the fake host, never spawn one");
     }
   });
+  // `adopt: false` is a daemon that has not found its host yet: no token, so
+  // every host call is refused before anything is sent.
+  if (options.adopt === false) return state;
   await state.service.supervisor.init();
   assert.equal(state.service.supervisor.isHealthy(), true, "the fake host was adopted");
   return state;
@@ -702,4 +712,92 @@ test("resolveHomeKind and the conversation-id shape check", () => {
   assert.equal(isUsableConversationId("a/../b"), false);
   assert.equal(isUsableConversationId(42), false);
   assert.equal(isUsableConversationId(""), false);
+});
+
+// §6.3 chat attachment uploads. An `'error'` event nobody listens for is thrown
+// on the event loop, and in the daemon that ends the process — so "this is not
+// a crash" is asserted by watching for one, never by hoping.
+
+/**
+ * Run `body` with an `uncaughtException` listener installed. `crashed` settles
+ * on the first one, so a test can race it and fail instead of hanging.
+ */
+async function watchingForCrashes<T>(
+  body: (crashed: Promise<"crashed">) => Promise<T>
+): Promise<{ result: T; uncaught: unknown[] }> {
+  const uncaught: unknown[] = [];
+  let report: () => void = () => undefined;
+  const crashed = new Promise<"crashed">((resolve) => {
+    report = () => resolve("crashed");
+  });
+  const onUncaught = (error: unknown): void => {
+    uncaught.push(error);
+    report();
+  };
+  process.on("uncaughtException", onUncaught);
+  try {
+    return { result: await body(crashed), uncaught };
+  } finally {
+    process.off("uncaughtException", onUncaught);
+  }
+}
+
+/** One full turn of the loop: every tick a `destroy` scheduled has been emitted. */
+const turnOfTheLoop = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
+test("a body that fails mid-upload fails the upload, never the daemon", async () => {
+  const f = await makeFixture(CLAUDEX, { env: {} });
+  try {
+    // What the MCP hands over for a `{path}` attachment is a file stream, and a
+    // file read can fail partway: EIO, a file truncated or unlinked under it.
+    const source = new Readable({ read() {} });
+    source.push(Buffer.from("the first bytes are on their way"));
+    const { result, uncaught } = await watchingForCrashes(async (crashed) => {
+      const upload = f.service.uploadAttachment("thread-1", { name: "notes.txt", type: "text/plain" }, source);
+      source.once("data", () =>
+        source.destroy(Object.assign(new Error("EIO: i/o error, read"), { code: "EIO" }))
+      );
+      return Promise.race([upload.then(() => "resolved", (error: unknown) => error), crashed]);
+    });
+    assert.deepEqual(uncaught, [], "the read error never reaches the event loop");
+    assert.ok(result instanceof HostUnavailableError, `the upload is refused, got ${String(result)}`);
+    assert.match(result.message, /EIO/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("an upload refused before it was sent leaves a failing body nothing to crash on", async () => {
+  // No host adopted yet: the host client refuses without ever reading the body.
+  const f = await makeFixture(CLAUDEX, { env: {} }, { adopt: false });
+  try {
+    const source = new Readable({ read() {} });
+    source.push(Buffer.from("bytes"));
+    const { uncaught } = await watchingForCrashes(async (crashed) => {
+      await assert.rejects(
+        f.service.uploadAttachment("thread-1", { name: "notes.txt" }, source),
+        HostUnavailableError
+      );
+      // The route has answered 503 and the client goes away: the request it
+      // streamed from fails after the fact.
+      source.destroy(new Error("aborted"));
+      await Promise.race([turnOfTheLoop(), crashed]);
+    });
+    assert.deepEqual(uncaught, []);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("past its cap the counted body still fails with UploadTooLargeError, and the request survives it", async () => {
+  const source = new Readable({ read() {} });
+  const counted = countingLimit(source, 4);
+  const failed = once(counted, "error");
+  counted.resume();
+  source.push(Buffer.from("12345"));
+  const [error] = await failed;
+  assert.ok(error instanceof UploadTooLargeError);
+  // `receiveUpload`'s rule (`upload-stream.ts`): a half-read request that was
+  // destroyed cannot carry the route's refusal back to the client.
+  assert.equal(source.destroyed, false);
 });

@@ -802,11 +802,21 @@ export class AgentChatService {
     // refused a declared `Content-Length` above it, and this counts what
     // actually arrives — a chunked upload with no `Content-Length` would
     // otherwise stream unbounded straight through to the host.
-    const stream = await this.client.open("POST", path, {
-      body: countingLimit(body, MAX_UPLOAD_BYTES),
-      headers: { "content-type": "application/octet-stream" },
-      timeoutMs: 0
-    });
+    const counted = countingLimit(body, MAX_UPLOAD_BYTES);
+    const stream = await this.client
+      .open("POST", path, {
+        body: counted,
+        headers: { "content-type": "application/octet-stream" },
+        timeoutMs: 0
+      })
+      .catch((error: unknown) => {
+        // `open` can refuse before it ever listened on the body (no host
+        // token yet). Retire the counted stream, or a body that fails later —
+        // the refused request aborting — is forwarded into a stream nobody
+        // listens to, and that is the crash `countingLimit` exists to prevent.
+        counted.destroy();
+        throw error;
+      });
     const chunks: Buffer[] = [];
     for await (const chunk of stream.body) {
       chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
@@ -955,21 +965,31 @@ export function proxyAccountFamily(entryId: string): "claude" | "codex" | null {
  * {@link UploadTooLargeError} past `limit`. The second half of AGENTS.md's
  * "the cap is enforced twice": a chunked request carries no `Content-Length`
  * for the route's declared-length check to refuse.
+ *
+ * `pipe` carries data, never errors. A body that fails mid-read — the file
+ * stream the MCP sends for a `{path}` attachment hitting EIO, or a file
+ * truncated or unlinked under it — would otherwise be an `'error'` with no
+ * listener, which ends the daemon. Forwarded, it fails the counted stream,
+ * and the host client turns that into a failed upload. Deliberately not
+ * `stream.pipeline`: that would also destroy the source when the cap trips,
+ * and a destroyed half-read request cannot carry the route's refusal back
+ * (`receiveUpload` keeps its request alive for the same reason). Exported for
+ * its test.
  */
-function countingLimit(source: Readable, limit: number): Readable {
+export function countingLimit(source: Readable, limit: number): Readable {
   let seen = 0;
-  return source.pipe(
-    new Transform({
-      transform(chunk: Buffer, _encoding, callback) {
-        seen += chunk.length;
-        if (seen > limit) {
-          callback(new UploadTooLargeError());
-          return;
-        }
-        callback(null, chunk);
+  const counted = new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      seen += chunk.length;
+      if (seen > limit) {
+        callback(new UploadTooLargeError());
+        return;
       }
-    })
-  );
+      callback(null, chunk);
+    }
+  });
+  source.on("error", (error) => counted.destroy(error));
+  return source.pipe(counted);
 }
 
 /** §6.1: an id the adapter cannot use is refused at creation, never degraded. */
