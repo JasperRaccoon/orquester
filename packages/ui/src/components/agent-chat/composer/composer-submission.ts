@@ -377,25 +377,55 @@ export function resolvePlanFollowUpSubmission(input: {
  * How one send ended, for the composer to render:
  *  - `sent` — the transport took exactly the text it was handed;
  *  - `refused` — nothing was sent, and the draft is left as it is;
- *  - `failed` — the transport rejected; `text` is what goes back to the draft,
- *    the only outcome that writes it.
+ *  - `failed` — the transport rejected. `text` is what goes back to the draft,
+ *    the only outcome that writes it: the user's own words from a plain send
+ *    or a Refine, and `null` from an Implement, whose prompt the composer
+ *    generated. The draft is then left as it is and the plan stays actionable.
  */
 export type ComposerSendOutcome =
   | { kind: "sent" }
   | { kind: "refused"; notice: string }
-  | { kind: "failed"; text: string; notice: string };
+  | { kind: "failed"; text: string | null; notice: string };
+
+/**
+ * The `resolveText` of an Implement, and of no other send: the proposal read
+ * through `read` (the store's `readFullPlanMarkdown`: as is when intact, read
+ * back whole when the wire cut it at 16 KiB, §5.6), built into the
+ * implementation prompt at send time.
+ *
+ * Every Implement gets one, not only a cut plan's, because `resolveText` is
+ * how {@link sendComposerTurn} tells a prompt the composer generated from the
+ * user's own words. A Refine sends the user's draft, and a plain send has no
+ * plan at all.
+ */
+export function implementationTextResolver<Proposal>(input: {
+  action: "implement" | "refine" | null;
+  proposal: Proposal | null;
+  read: (proposal: Proposal) => Promise<string>;
+}): (() => Promise<string>) | undefined {
+  const { action, proposal, read } = input;
+  if (action !== "implement" || proposal === null) {
+    return undefined;
+  }
+  return () => read(proposal).then(buildPlanImplementationPrompt);
+}
 
 /**
  * The step between "the user pressed send" and the wire.
  *
- * Most sends already hold their text. An Implement on a plan the wire cut at
- * 16 KiB (§5.6) holds only the cut prompt, so `resolveText` reads the whole
- * plan back and builds the prompt first — and when it cannot, nothing is sent.
- * The prompt it resolves is also the one that meets the turn input bound
- * (§4.1) here: the draft was validated on the CUT prompt, and a prompt only
- * the host refuses would come back as a failed send, writing the whole plan
- * into the composer. A plain send was validated before its draft was cleared,
- * and is not measured again.
+ * A plain send, or a Refine, holds its text: the user's own words. An
+ * Implement resolves its prompt here through `resolveText`
+ * ({@link implementationTextResolver}), which reads the whole plan even when
+ * the wire cut it at 16 KiB (§5.6). When the plan cannot be read, nothing is
+ * sent. The resolved prompt is also the one measured against the turn input
+ * bound (§4.1) here. The draft was validated on the CUT prompt, and a prompt
+ * only the host refuses would come back as a failed send. A plain send was
+ * validated before its draft was cleared, and is not measured again.
+ *
+ * A failed send puts the user's own words back into the draft, never a
+ * resolved prompt. Written into the draft, the prompt would turn the primary
+ * button into a plan-mode "Refine" that carries the implementation prefix.
+ * Left out, the plan stays actionable and Implement is pressed again.
  *
  * `send` is the transport (the store's `sendTurn`), passed in so every branch
  * is testable without a renderer.
@@ -427,7 +457,7 @@ export async function sendComposerTurn(input: {
   } catch (error) {
     return {
       kind: "failed",
-      text,
+      text: input.resolveText ? null : text,
       notice: error instanceof Error ? error.message : "Could not send the message."
     };
   }
