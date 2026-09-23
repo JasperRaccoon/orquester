@@ -37,9 +37,6 @@ type P = Record<string, unknown>;
 const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
 /** `text` cut to at most `max` code points, the last of them a "…" when anything was cut. */
 const capped = (text: string, max: number): string => (capText(text, max).truncated ? `${capText(text, max - 1).text}…` : text);
-const shedDetail = (e: TranscriptEntry): void => {
-  if (e.tool?.detail) e.tool.detail = capped(e.tool.detail, SHED_DETAIL_CHARS);
-};
 const subagentTitle = (title: string | null | undefined): string | null => (title == null ? null : capped(title, SUBAGENT_TITLE_CHARS));
 /**
  * Label plus detail, as the GUI's row shows them; runtime.error and runtime.warning keep their text in
@@ -99,37 +96,81 @@ function headWithin(text: string, budget: number): { head: string; bytes: number
 
 const ELLIPSIS_BYTES = 3; // "…" (U+2026), which JSON leaves unescaped
 
+/** Suffix sums: `sums[i]` is the total of `values[i…]`, so any tail's total is read in O(1). */
+function suffixSums(values: readonly number[]): number[] {
+  const sums = new Array<number>(values.length + 1).fill(0);
+  for (let i = values.length - 1; i >= 0; i -= 1) sums[i] = sums[i + 1]! + values[i]!;
+  return sums;
+}
+const more = (count: number, noun: string): string => `…${count} more ${noun}${count === 1 ? "" : "s"}`;
+
+/** A part of the spared row that can be shortened in place: its bytes in the row's JSON, and a cut by `need` returning what it saved. */
+interface Part { bytes: number; cut: (need: number) => number }
+
 /**
- * `entry` with its free text cut until its JSON is at least `need` bytes smaller: the longest text field first, a
- * cut field ending in "…". Null when even every field cut down to the mark would not do.
+ * `entry` cut until its JSON is at least `need` bytes smaller, its biggest part first. A text field keeps its head and
+ * ends in "…". A list — a checkpoint's files, a tool's changed files, a message's attachments — keeps its head and one
+ * last element of its own shape counting the rest (a checkpoint's also carries the rest's line totals), so the row's
+ * type holds. Null when even every part at its minimum would not do: the row's skeleton does not fit.
  */
-function cutRow(entry: TranscriptEntry, need: number): TranscriptEntry | null {
+function cutRow(entry: TranscriptEntry, need: number): { row: TranscriptEntry; saved: number } | null {
   const row: TranscriptEntry = { ...entry };
-  const fields: { text: string; set: (text: string) => void }[] = [];
-  if (row.text !== undefined) fields.push({ text: row.text, set: (text) => { row.text = text; } });
+  const parts: Part[] = [];
+  const text = (value: string, set: (text: string) => void): void => {
+    const bytes = jsonTextBytes(value);
+    parts.push({ bytes, cut: (want) => {
+      if (bytes <= ELLIPSIS_BYTES) return 0; // the mark would cost what the cut saves
+      const kept = headWithin(value, Math.max(0, bytes - want - ELLIPSIS_BYTES));
+      set(`${kept.head}…`);
+      return bytes - kept.bytes - ELLIPSIS_BYTES;
+    } });
+  };
+  const list = <T>(items: readonly T[], marker: (from: number) => T, set: (kept: T[]) => void): void => {
+    const sizes = items.map((item) => jsonByteSize(item) + 1);
+    const bytes = contentBytes(sizes.reduce((sum, n) => sum + n, 0), items.length);
+    parts.push({ bytes, cut: (want) => {
+      // The longest head that, with the marker for the rest, saves at least `want`; else the marker alone.
+      const markerBytes = (from: number): number => jsonByteSize(marker(from));
+      let keep = 0;
+      let head = 0;
+      while (keep < items.length - 1 && head + sizes[keep]! + markerBytes(keep + 1) <= bytes - want) head += sizes[keep++]!;
+      const saved = bytes - head - markerBytes(keep);
+      if (saved <= 0) return 0;
+      set([...items.slice(0, keep), marker(keep)]);
+      return saved;
+    } });
+  };
+  if (row.text !== undefined) text(row.text, (value) => { row.text = value; });
   if (row.tool) {
     const tool = (row.tool = { ...row.tool });
-    fields.push({ text: tool.title, set: (text) => { tool.title = text; } });
-    if (tool.command !== undefined) fields.push({ text: tool.command, set: (text) => { tool.command = text; } });
-    if (tool.detail !== undefined) fields.push({ text: tool.detail, set: (text) => { tool.detail = text; } });
+    text(tool.title, (value) => { tool.title = value; });
+    if (tool.command !== undefined) text(tool.command, (value) => { tool.command = value; });
+    if (tool.detail !== undefined) text(tool.detail, (value) => { tool.detail = value; });
+    const changed = tool.changedFiles;
+    if (changed?.length) list(changed, (from) => more(changed.length - from, "file"), (kept) => { tool.changedFiles = kept; });
   }
   if (row.subagent?.title) {
     const subagent = (row.subagent = { ...row.subagent });
-    fields.push({ text: subagent.title!, set: (text) => { subagent.title = text; } });
+    text(subagent.title!, (value) => { subagent.title = value; });
   }
   if (row.questions) {
     const questions = (row.questions = [...row.questions]);
-    questions.forEach((question, i) => fields.push({ text: question, set: (text) => { questions[i] = text; } }));
+    questions.forEach((question, i) => text(question, (value) => { questions[i] = value; }));
   }
-  const bySize = fields.map((f) => ({ ...f, bytes: jsonTextBytes(f.text) })).sort((a, b) => b.bytes - a.bytes);
-  for (const field of bySize) {
-    if (need <= 0) break;
-    if (field.bytes <= ELLIPSIS_BYTES) continue; // the mark would cost what the cut saves
-    const { head, bytes } = headWithin(field.text, Math.max(0, field.bytes - need - ELLIPSIS_BYTES));
-    field.set(`${head}…`);
-    need -= field.bytes - bytes - ELLIPSIS_BYTES;
+  const files = row.files;
+  if (files?.length) {
+    const added = suffixSums(files.map((f) => f.additions));
+    const deleted = suffixSums(files.map((f) => f.deletions));
+    list(files, (from) => ({ path: more(files.length - from, "file"), additions: added[from]!, deletions: deleted[from]! }), (kept) => { row.files = kept; });
   }
-  return need <= 0 ? row : null;
+  const attachments = row.attachments;
+  if (attachments?.length) list(attachments, (from) => ({ name: more(attachments.length - from, "attachment"), type: "omitted" }), (kept) => { row.attachments = kept; });
+  let saved = 0;
+  for (const part of parts.sort((a, b) => b.bytes - a.bytes)) {
+    if (saved >= need) break;
+    saved += part.cut(need - saved);
+  }
+  return saved >= need ? { row, saved } : null;
 }
 
 /** The row a shed never drops: the latest turn's final assistant reply, else that turn's newest row. */
@@ -182,15 +223,15 @@ export function fitRoster(rows: readonly Sized<RosterRow>[], allowance: number):
 /**
  * The entries within `allowance` bytes (their JSON, brackets excluded), in one pass: reasoning rows, then tool
  * detail, then whole rows, each oldest first — the oldest turn's rows, then the latest turn's own older ones. The
- * spared row (`sparedIndex`) is never dropped: it is cut last, its longest text field first. Empty only when not
- * even that row, cut to its minimum, fits. Pure, and linear: every row was measured once.
+ * spared row (`sparedIndex`) is never dropped: it is cut last, its biggest part first (`cutRow`). Empty only when not
+ * even that row's skeleton fits. Returns the entries' exact size with them. Pure, and linear: every row was measured once.
  */
-export function fitEntries(entries: readonly Sized<TranscriptEntry>[], allowance: number): { entries: TranscriptEntry[]; shed: boolean } {
+export function fitEntries(entries: readonly Sized<TranscriptEntry>[], allowance: number): { entries: TranscriptEntry[]; bytes: number } {
   const rows = entries.map((e) => ({ ...e }));
   let sum = rows.reduce((total, r) => total + r.bytes, 0);
   let count = rows.length;
   const over = (): boolean => contentBytes(sum, count) > allowance;
-  if (count === 0 || !over()) return { entries: rows.map((r) => r.row), shed: false };
+  if (count === 0 || !over()) return { entries: rows.map((r) => r.row), bytes: contentBytes(sum, count) };
   const spared = sparedIndex(rows.map((r) => r.row));
   const gone = new Set<number>();
   const drop = (i: number): void => { gone.add(i); sum -= rows[i]!.bytes; count -= 1; };
@@ -211,10 +252,11 @@ export function fitEntries(entries: readonly Sized<TranscriptEntry>[], allowance
   for (let i = 0; i < rows.length && over(); i += 1) if (i !== spared && !gone.has(i)) drop(i);
   if (over()) {
     const cut = cutRow(rows[spared]!.row, contentBytes(sum, count) - allowance);
-    if (cut === null) return { entries: [], shed: true };
-    rows[spared]!.row = cut; // its size is not read again
+    if (cut === null) return { entries: [], bytes: 0 };
+    rows[spared] = { row: cut.row, bytes: rows[spared]!.bytes - cut.saved };
+    sum -= cut.saved;
   }
-  return { entries: rows.filter((_, i) => !gone.has(i)).map((r) => r.row), shed: true };
+  return { entries: rows.filter((_, i) => !gone.has(i)).map((r) => r.row), bytes: contentBytes(sum, count) };
 }
 
 export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptOptions): TranscriptResult {
@@ -355,7 +397,11 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
   // need and never less than ROSTER_SHARE of the room when it needs it; the entries get exactly what it leaves.
   const widest: [number, number] | null = turnCount > 0 ? [turnCount, turnCount] : null;
   const room = budget - frame(widest, true, true);
-  const listed = fitRoster(sizedAgents, Math.max(Math.floor(room * ROSTER_SHARE), room - entryBytes));
+  let listed = fitRoster(sizedAgents, Math.max(Math.floor(room * ROSTER_SHARE), room - entryBytes));
   const fitted = fitEntries(sizedEntries, budget - frame(widest, true, listed.trimmed) - listed.bytes);
+  // What the entries leave unused goes back to the roster: one more pass over that room. It can only re-add rows,
+  // the last dropped first (live ones, newest first), since the entries never used more than the first pass left.
+  // It also makes the first pass's `room − E` decide nothing: that term only spares this pass when the entries are small.
+  if (listed.trimmed) listed = fitRoster(sizedAgents, room - fitted.bytes);
   return result(fitted.entries, listed.rows, true, listed.trimmed);
 }
