@@ -181,8 +181,9 @@ const createSession = defineTool({
     // back), so the caller's pick stands and an omitted one stays omitted — the family default, as the GUI's chip
     // pre-selects; forcing System there broke resume whenever the system login was stale.
     if (resumeRow?.home === "account" && resumeRow.accountId) accountId = resumeRow.accountId;
-    // A proxy launcher whose family default is not seeded runs under System: say so explicitly, as the GUI's chip does.
-    if (accountId === undefined && isProxyAgent(refId) && agent.defaultAccountId === SYSTEM_ACCOUNT_ID) accountId = SYSTEM_ACCOUNT_ID;
+    // The daemon falls back to the family default for claude/codex/grok only; a proxy launcher left without an account
+    // runs unpinned. Pin what the "+" menu pre-selects: the seeded family default, else System.
+    if (accountId === undefined && isProxyAgent(refId)) accountId = agent.defaultAccountId;
     const cwd = args.cwd === undefined ? project.path : await resolveCwd(api, project.path, args.cwd);
     const running = (await listSessions(api, project.path)).filter((s) => s.status === "running").length;
     if (running >= MAX_RUNNING_SESSIONS_PER_PROJECT) throw new ToolError("SESSION_BUSY", `${running} sessions are open in this project (limit ${MAX_RUNNING_SESSIONS_PER_PROJECT}); close some first.`);

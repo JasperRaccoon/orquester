@@ -74,8 +74,8 @@ test("create_session validates everything up front and posts the GUI's body (cla
   await tool("create_session").run({ project: h.projectPath, agent: "claudex", runtimeMode: "full-access" }, h.ctx);
   const proxy = h.api.calls.find((c) => c.method === "POST" && c.path === "/api/sessions")!.body as Record<string, unknown>;
   assert.equal(proxy.model, "gpt-5.6-sol"); assert.equal(proxy.title, "Claude Code × GPT");
-  assert.deepEqual(proxy.chat, { modelSelection: { model: "gpt-5.6-sol", options: [] }, runtimeMode: "full-access" });
-  assert.equal(proxy.accountId, undefined, "no accountId → the daemon picks the family default");
+  assert.deepEqual(proxy.chat, { accountId: "acc-2", modelSelection: { model: "gpt-5.6-sol", options: [] }, runtimeMode: "full-access" });
+  assert.equal(proxy.accountId, "acc-2", "no accountId → the seeded family default, pinned as the '+' menu does");
   h.api.on("GET", "/api/agents/conversations", { status: 200, body: { conversations: [{ id: "conv-1", agentRefId: "claude", title: "Earlier", updatedAt: stamp(1), home: "account", accountId: "acc-1" }] } });
   h.api.calls.length = 0;
   await tool("create_session").run({ project: "acme/api", resume: { conversationId: "conv-1" }, runtimeMode: "full-access" }, h.ctx);
@@ -113,6 +113,8 @@ test("create_session resume: a system-home row never forces System, a cliproxy r
   await tool("create_session").run({ project: "acme/api", resume: { conversationId: "conv-proxy" }, runtimeMode: "full-access" }, h.ctx);
   assert.equal(lastCreate(h.api).refId, "claudex"); assert.equal(lastCreate(h.api).model, "gpt-5.6-sol");
   assert.deepEqual(lastCreate(h.api).chat.resume, { home: "cliproxy", conversationId: "conv-proxy" });
+  assert.equal(lastCreate(h.api).accountId, "acc-2", "a proxy launcher resumes under the account its '+' row pins");
+  assert.equal(lastCreate(h.api).chat.accountId, "acc-2");
   const before = h.api.calls.length;
   await assert.rejects(tool("create_session").run({ project: "acme/api", agent: "claudex", resume: { conversationId: "conv-acc" }, runtimeMode: "full-access" }, h.ctx),
     (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /belongs to claude/.test(e.message));
