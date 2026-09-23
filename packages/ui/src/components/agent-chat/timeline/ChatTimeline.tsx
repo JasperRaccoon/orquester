@@ -2,14 +2,14 @@ import React from "react";
 import { TriangleAlert, X } from "lucide-react";
 
 import { cn } from "../../../lib/cn";
-import type { DisclosureState } from "../../../lib/agent-chat/contracts";
+import type { AgentChatActions, DisclosureState } from "../../../lib/agent-chat/contracts";
 import { useAgentChatDrillIn } from "../../../lib/agent-chat/hooks";
 import { isActiveChatTab } from "../../../lib/agent-chat-active-tab";
 import { resolveChatShortcut } from "../../../lib/agent-chat/keybindings.logic";
 import { peekThreadStore } from "../../../lib/agent-chat/store";
 import type { ChatTimelineProps, TimelineScrollPosition } from "../contracts";
 import { ChatIconButton, ScrollToBottomButton } from "../primitives";
-import { TimelineRowContext, type TimelineRowContextValue } from "./context";
+import { readPlanWithoutStore, TimelineRowContext, type TimelineRowContextValue } from "./context";
 import { TimelineRow } from "./TimelineRow";
 
 import { findFirstVisibleIndex, offsetWithinRow, type RowMetric } from "./anchor";
@@ -198,21 +198,8 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
     [disclosures, onDisclosureChange]
   );
 
-  /**
-   * A plan proposal's whole markdown, for the plan card's Copy and Download.
-   * Read off the store at call time, as `rememberScroll` below does: a card
-   * holds no session id, and a drill-in reads through the parent's slice, whose
-   * items the plan belongs to.
-   */
-  const readFullPlanMarkdown = React.useCallback(
-    (plan: { id: string; planMarkdown: string; truncated?: true }) => {
-      const store = peekThreadStore(sessionId);
-      return store
-        ? store.getState().actions.readFullPlanMarkdown(plan)
-        : Promise.reject(new Error("The full plan could not be loaded."));
-    },
-    [sessionId]
-  );
+  /** A plan proposal's whole markdown, for the plan card's Copy and Download. */
+  const readFullPlanMarkdown = React.useMemo(() => threadPlanReader(sessionId), [sessionId]);
 
   const context = React.useMemo<TimelineRowContextValue>(
     () => ({
@@ -699,6 +686,21 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
 /** A read-only surface's rewind: the drill-in dispatches no commands (§7.6). */
 const NOOP_REVERT = (_input: { messageId: string; targetTurnCount: number }): void => {};
 const NOOP_STRING = (): void => {};
+
+/**
+ * The row context's plan reader for one thread: the store's
+ * `readFullPlanMarkdown`. It is looked up at call time, as `rememberScroll`
+ * does, because a card holds no session id, and a drill-in reads through the
+ * parent's slice, whose items the plan belongs to. With no store it answers
+ * as the context's own fallback does: an intact plan as is, and only a cut
+ * one refused.
+ */
+export function threadPlanReader(sessionId: string): AgentChatActions["readFullPlanMarkdown"] {
+  return (plan) => {
+    const store = peekThreadStore(sessionId);
+    return store ? store.getState().actions.readFullPlanMarkdown(plan) : readPlanWithoutStore(plan);
+  };
+}
 
 /**
  * Decides, once per row id, whether that row animates in.
