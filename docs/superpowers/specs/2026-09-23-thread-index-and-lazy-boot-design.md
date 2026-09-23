@@ -88,7 +88,7 @@ File: `agentChatThreadStatePath(appdir, id)` = `threads/<id>/state.json`, atomic
 
 ```ts
 interface FoldSnapshotFile {
-  version: number;          // FOLD_SNAPSHOT_VERSION (1)
+  version: number;          // FOLD_SNAPSHOT_VERSION: 1 at this design; 3 today
   threadId: string;
   seq: number;              // state.seq at write time
   logBytes: number;         // byte length of events.ndjson right after the last folded event

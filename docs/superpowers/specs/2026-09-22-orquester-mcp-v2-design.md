@@ -751,39 +751,42 @@ window alone, as the host judges it, so a plan that aged out is never `actionabl
 read whole, the result carries `unavailableTurns: [from, to]` — a span, first to last — and its `hint` opens with a
 sentence saying which and why: a page that failed for any reason (503 `INDEX_UNAVAILABLE` among them, and an EMPTY page
 with a null cursor while turn `start` is not yet whole — the host's answer where it could not plan a block or read one
-back whole, never "the thread's first turn reached"); `indexed:false` with turns of the range that have no row in the
-window — for a drill-in, the subagent's own span, as below; an index that has not caught up with the thread — `indexed`
-true, `hasOlder` not true and `totalTurns` below the thread's started turns, as every thread is after an index rebuild
-until its catch-up reaches it — which cannot place the window's rows, so the range's turns up to the window's oldest
-(`oldestRetainedOrdinal`, else the turn of the window's oldest activity row that retention could drop — a compaction
-marker of either spelling, `isCompactionActivity`, is one it keeps — or, for a drill-in, of the subagent's own oldest
-row left, anchors aside: an agent's rows are kept in windows of their own, its last 200 and the newest 2 000 across
-agents, which drop the oldest first and can begin turns after the parent's; the snapshot cannot tell a full window by
-counting, because the host serves it with the replaced `tool.updated` rows already projected away. For an agent with
-no row left, of the oldest row any agent kept — or of its end, when its last launch or end (a
-`task.started`/`task.completed` whose `taskId` names it, else, naming no task, stamped with its id) is Claude's: a
-`task.completed` naming it in `taskId` and not stamped with its id, since a Claude subagent that resumes launches again.
-An end stamped with the agent's own id (Codex, OpenCode, Grok) bounds nothing, because of a gap in those adapters:
-they write a child's launch and end once, and a child resumed after its end writes rows under its id with no new
-launch — OpenCode's `task` tool resumes a child session, and Codex's `interacted` after `completed` writes only
+back whole, never "the thread's first turn reached" — except as the first page of the cursor minted from turn `end + 1`
+(final review): the host plans a block from the activities below its end, which its own cursors and the window's
+boundary always have and turn `end + 1` may not — a resumed conversation's replayed first turns can be pure chat — so
+that one empty page is the thread's start reached, and the parent view's net decides); `indexed:false` with turns of the
+range that have no row in the window — for a drill-in, the subagent's own span, as below; an index that has not caught
+up with the thread — `indexed` true, `hasOlder` not true and `totalTurns` below the thread's started turns, as every
+thread is after an index rebuild until its catch-up reaches it — which cannot place the window's rows, so the range's
+turns up to the window's oldest (`oldestRetainedOrdinal`, else the turn of the window's oldest activity row that
+retention could drop — a compaction marker of either spelling, `isCompactionActivity`, is one it keeps — or, for a
+drill-in, of the subagent's own oldest row left, anchors aside: an agent's rows are kept in windows of their own, its
+last 200 and the newest 2 000 across agents, which drop the oldest first and can begin turns after the parent's; the
+snapshot cannot tell a full window by counting, because the host serves it with the replaced `tool.updated` rows already
+projected away. For an agent with no row left, of the oldest row any agent kept — or of its end, when its last launch or
+end (a `task.started`/`task.completed` whose `taskId` names it, else, naming no task, stamped with its id) is Claude's:
+a `task.completed` naming it in `taskId` and not stamped with its id, since a Claude subagent that resumes launches
+again. An end stamped with the agent's own id (Codex, OpenCode, Grok) bounds nothing, because of a gap in those
+adapters: they write a child's launch and end once, and a child resumed after its end writes rows under its id with no
+new launch — OpenCode's `task` tool resumes a child session, and Codex's `interacted` after `completed` writes only
 `task.progress` — so rows can follow that end. A drill-in's span starts at the turn the subagent was launched in, since
-it has no rows before it, and so does a drill-in's failed read) are named; in the parent view, after a walk that did not
-stop at the page limit, any turn of the range still without a row in the merged snapshot, beside a failed read's turns
-(a drill-in has no such net: a subagent has no row in the turns it did not run in); or the page limit, whose sentence
-names the `beforeTurn`/`turns` that reads the turns left, or — when the walk never got out of turn `end` — says that
-turn is larger than one call reads, returns its latest rows, and names the call for the turns before it, so following
-the hints never repeats a call. (Follow-up, plan `2026-09-23-mcp-output-drill-in-and-housekeeping`, items 2–3: a
-drill-in with no index was judged by `missingTurns`, which reads any row, so the parent's rows passed for the
-subagent's and a partial span was served with no flag; the empty page was taken for the thread's first turn, and only
-the net — which a drill-in no longer runs — named its turns; and a Claude subagent that had ended with no row left was
-bounded by the oldest row any agent kept rather than by its end. The first build bounded an agent by any end; the
-review found rows following a stamped end — the adapter gap above, reported to the owner — so only Claude's end
-bounds. A task row's stamp names its OWNER — Claude stamps a task launched inside a subagent with that subagent's id —
-which is why `taskId` decides first.) A failed page is never a tool error,
-the rows read are served. A host without `history`
-reads as before, plus `olderTurns`. Both new fields are in the byte frame — a shed result's measured with the widest
-`olderTurns` (`turnCount`), as its value is not known before the shed — and the sentence's bytes are held back — on a
-whole result as its own `hint`, on a shed one before the shed hint — so the answer still keeps within `maxChars`.*
+it has no rows before it, and so do a drill-in's failed read and — final review — its page-limit span, whose hint then
+names the call that reads from that turn) are named; in the parent view, after a walk that did not stop at the page
+limit, any turn of the range still without a row in the merged snapshot, beside a failed read's turns (a drill-in has no
+such net: a subagent has no row in the turns it did not run in); or the page limit, whose sentence names the
+`beforeTurn`/`turns` that reads the turns left, or — when the walk never got out of turn `end` — says that turn is
+larger than one call reads, returns its latest rows, and names the call for the turns before it, so following the hints
+never repeats a call. (Follow-up, plan `2026-09-23-mcp-output-drill-in-and-housekeeping`, items 2–3: a drill-in with no
+index was judged by `missingTurns`, which reads any row, so the parent's rows passed for the subagent's and a partial
+span was served with no flag; the empty page was taken for the thread's first turn, and only the net — which a drill-in
+no longer runs — named its turns; and a Claude subagent that had ended with no row left was bounded by the oldest row
+any agent kept rather than by its end. The first build bounded an agent by any end; the review found rows following a
+stamped end — the adapter gap above, reported to the owner — so only Claude's end bounds. A task row's stamp names its
+OWNER — Claude stamps a task launched inside a subagent with that subagent's id — which is why `taskId` decides first.)
+A failed page is never a tool error, the rows read are served. A host without `history` reads as before, plus
+`olderTurns`. Both new fields are in the byte frame — a shed result's measured with the widest `olderTurns`
+(`turnCount`), as its value is not known before the shed — and the sentence's bytes are held back — on a whole result as
+its own `hint`, on a shed one before the shed hint — so the answer still keeps within `maxChars`.*
 
 *Built (after v2 shipped — the GUI's timeline changed with the merge of `origin/main`, plan
 `2026-09-23-mcp-history-search-parity`, item 4): the rows show what the timeline now shows. (1) A command's
@@ -843,9 +846,12 @@ in the range: `tool.type` `command_execution`, the title and command its lifecyc
 `outputItemId` that chunk, which `read_tool_output` joins. In a drill-in only: there a chunk carries its agent's own id,
 while the parent's scope also holds chunks of subagents' commands — Claude streams a subagent's Bash result with no
 agent id (fixture `claude/07`) while the call's rows are the subagent's — and building from them would put subagents'
-commands in the parent view, reading `inProgress` once the subagent's rows were evicted. A parent command whose rows
-were all evicted while its chunks survive is theoretical (Claude sends a foreground result as one chunk, just before its
-completion).*
+commands in the parent view, reading `inProgress` once the subagent's rows were evicted. This note first called a parent
+command whose rows were all evicted while its chunks survive theoretical; it is not (final review): a main-agent Codex
+command that streams past ~550 flushes — its chunks are parent rows, and the parent's window trims at 500 + 50 — loses
+its start row while it runs, and the parent view has no entry for it, so no `outputItemId`, until its completion lands.
+Follow-up: stamp streamed deltas with their agent — Claude sends a subagent's Bash output with no agent id today — so
+that the parent view can build entries for its own streaming commands, as a drill-in does.*
 
 ### 7.7 Waiting
 

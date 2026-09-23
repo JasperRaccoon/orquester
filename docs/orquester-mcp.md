@@ -642,25 +642,29 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
     turns are unavailable on this host right now. Try again later."` The host has no usable thread
     index (the native driver did not load, or the index file could not be opened), a history page
     could not be read (an empty page with no cursor counts: it is how the host answers a block it
-    could not plan or read back whole), or the index is being rebuilt (after an update, say) and
-    has not caught up with this conversation yet. Without an index, `unavailableTurns` spans the
-    range's turns with no row left in the window — from the first such turn to the last, so a turn
-    between them may have rows. While the index catches up, it cannot tell where the window begins,
-    so the range's turns up to the window's oldest one — which may be partial — are named until it
-    has. Reading a subagent (`agentId`), without an index as while it catches up, that window is
-    the subagent's own, whatever the conversation's rows say: its rows are kept in windows of their
-    own (its last 200 rows, the newest 2 000 across subagents), which can begin turns after the
-    conversation's, so its turns are named from the one it was launched in up to the turn of its
-    oldest row left. Those turns may in fact be whole: without an index the MCP cannot tell, so on
-    a host without one they are named on every read. A subagent with no row left is bounded by the
-    turn of the oldest row any subagent kept — or, when its last launch or end is a Claude end, by
-    the turn it ended in, since a Claude subagent that resumes launches again. Codex and OpenCode
-    record a subagent's launch and end once, and one they resume after its end works on with no
-    new launch, so there an end bounds nothing. After a history page failed, a subagent's turns
-    are likewise named from the one it was launched in. Without `agentId`, any turn of the range
-    still without a single row after the history pages were read is named the same way, unless the
-    page limit ran out; a subagent's view has no such check, since a subagent has no rows in the
-    turns it did not work in;
+    could not plan or read back whole — except as the first page below a range that ends before the
+    window's oldest turn: the host pages by activities — tool calls and the like — and a
+    conversation's first turns may have none (a resumed conversation's replayed chat, say), so there
+    it means nothing older is left to read, and only a turn with no row at all is named), or the
+    index is being rebuilt (after an update, say) and has not caught up with this conversation yet.
+    Without an index, `unavailableTurns` spans the range's turns with no row left in the window —
+    from the first such turn to the last, so a turn between them may have rows. While the index
+    catches up, it cannot tell where the window begins, so the range's turns up to the window's
+    oldest one — which may be partial — are named until it has. Reading a subagent (`agentId`),
+    without an index as while it catches up, that window is the subagent's own, whatever the
+    conversation's rows say: its rows are kept in windows of their own (its last 200 rows, the
+    newest 2 000 across subagents), which can begin turns after the conversation's, so its turns are
+    named from the one it was launched in up to the turn of its oldest row left. Those turns may in
+    fact be whole: without an index the MCP cannot tell, so on a host without one they are named on
+    every read. A subagent with no row left is bounded by the turn of the oldest row any subagent
+    kept — or, when its last launch or end is a Claude end, by the turn it ended in, since a Claude
+    subagent that resumes launches again. Codex and OpenCode record a subagent's launch and end
+    once, and one they resume after its end works on with no new launch, so there an end bounds
+    nothing. After a history page failed, or the page limit below ran out, a subagent's turns are
+    likewise named from the one it was launched in. Without `agentId`, any turn of the range still
+    without a single row after the history pages were read is named the same way, unless the page
+    limit ran out; a subagent's view has no such check, since a subagent has no rows in the turns it
+    did not work in;
   - the 5-page limit ran out (a subagent fleet's turn runs to thousands of events):
     `"Turns 1–3 could not be read whole: one call reads at most 5 pages of older history. Read them
     with beforeTurn: 4, turns: 3."` — the rows of those turns that were read are returned. When the
@@ -725,13 +729,13 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
       …"), but that is no command's output, so it never earns an id this way. A background shell
       is listed in `subagents` and its rows are in its own drill-in (`read_transcript` with its
       `agentId`), as in the GUI.
-    - In a drill-in, a command whose rows are all gone from the view — a long-running background
-      shell's own chunks push its start out of its agent's 200-row window — is still an entry,
-      built from its latest chunk in the range: `tool.type` `command_execution`, the title and
-      command its other rows in the view give (else the chunk's own title, "Tool output"),
-      `status` `inProgress` unless its completion is in the view, and `outputItemId` that chunk.
-      The parent view builds no entry from chunks alone: a subagent's command result can stream
-      into the parent's rows with no agent id (Claude's does), and it is the subagent's call.
+    - In a drill-in, a command with no row of the call in the range (e.g. retention evicted its
+      start: a long-running background shell's own chunks push it out of its agent's 200-row window)
+      is still an entry, built from its latest chunk in the range: `tool.type` `command_execution`
+      and `outputItemId` that chunk. Title, command and status come from its rows elsewhere in the
+      view — else the title is the chunk's own, "Tool output", and the status `inProgress`. The
+      parent view builds no entry from chunks alone: a subagent's command result can stream into the
+      parent's rows with no agent id (Claude's does), and it is the subagent's call.
 
     The snapshot keeps only an allow-list of each call's provider data, so most finished calls
     that carry any have an id. A row without one has nothing more the snapshot knows of.

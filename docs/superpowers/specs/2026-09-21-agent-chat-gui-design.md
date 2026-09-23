@@ -2271,7 +2271,8 @@ index share: a `context-compaction` row in any phase, or the `thread.state.chang
 an older thread the rewind gate lost its marker exactly as §5.5 describes; any other
 `thread.state.changed` is still an ordinary row, and an agent's own marker an ordinary row of its
 agent's window. `FOLD_SNAPSHOT_VERSION` went to 3, so a `state.json` folded under the old rule is
-discarded and its log re-folded once, on the thread's next load.*
+discarded and its log re-folded once: on the thread's next load, or, for a thread orphaned at boot,
+in the §3.3 reconcile before the gate opens (`agent-host/main.ts`).*
 
 A thread directory that fails to parse marks that thread `error` with the parse message; it
 never affects other threads or host startup. A malformed line inside `events.ndjson` truncates the
@@ -2867,14 +2868,15 @@ next to `readItem` and in the same one read of it (`store/tool-output.ts`): the 
 names the call (`payload.toolUseId`), every `tool.output` row of that call is joined verbatim in log
 order, `complete` says a `tool.completed` exists for it, and past 8 MiB
 (`THREAD_ITEM_OUTPUT_MAX_BYTES`) the join stops on a character boundary with `truncated`. It reads
-the raw log: a `thread.reverted` filters nothing, since a chunk written in a turn a rewind removed
-is still what the command printed (a background shell keeps running through a rewind). It is by
-call, not by stream — a file change's `file_change_output` joins too — and the reader decides what
-the text is: the MCP answers only a command's as its output. No such
-item, or one naming no call, is a 404 of its own, `ITEM_NOT_FOUND` — not `THREAD_NOT_FOUND`, which a
-host predating the route answers for it as its generic route miss, so a reader can tell the two
-apart until that host's drain-restart. The daemon proxies it verbatim, as it does `…/items/:itemId`.
-Its reader today is the MCP's `read_tool_output`; the timeline keeps joining the chunks it holds.*
+the raw log: a `thread.reverted` filters nothing — chunks written before a rewind are what the
+command printed, and a rewind unprints nothing (a Claude rewind restarts the session, closing an
+open shell first, so no shell prints on through one). It is by call, not by stream — a file change's
+`file_change_output` joins too — and the reader decides what the text is: the MCP answers only a
+command's as its output. No such item, or one naming no call, is a 404 of its own, `ITEM_NOT_FOUND`
+— not `THREAD_NOT_FOUND`, which a host predating the route answers for it as its generic route miss,
+so a reader can tell the two apart until that host's drain-restart. The daemon proxies it verbatim,
+as it does `…/items/:itemId`. Its reader today is the MCP's `read_tool_output`; the timeline keeps
+joining the chunks it holds.*
 
 **Snapshot-or-replay is the server's decision, not the client's.** The client only ever sends its
 last sequence; the host chooses. It replays events after `after` only when the range, measured
@@ -3428,22 +3430,24 @@ places the caret without moving focus unless the textarea already had it; a surf
 the draft and its persisted copy before the send leaves; a failure puts its text and chips back
 ahead of anything typed or staged since (`draftAfterSend`, `composer-submission.ts`), and a
 refusal or a failed Implement gives nothing back. Where it goes is decided when the send settles,
-not when it left — by then a project switch may have unmounted the composer, or the composer may
-show another thread (`failedSendRestoreTarget`, routed by `restoreFailedSendDraft` in
-`composer-failed-send.ts`): into the sending composer's live draft while it is still mounted and
-still shows that thread; into the live draft of the composer that shows the thread now, when its
-tab came back after the switch, through the composer bridge (`restoreFailedSend`) — a mounted
-composer owns its thread's one visible draft and reads the persisted copy only when it loads the
-thread, so a write behind its back would be neither shown nor kept; otherwise into that thread's
-persisted draft, the same `draftAfterSend` over the draft loaded as a mount loads it
-(`persistedDraftAfterSend`, `composer-draft.ts`), written through that thread's own open slice's
-`saveDraft` or, with none open, into the storage its next slice seeds from (`updateThreadDraft`,
-`lib/agent-chat/store.ts`). The notice goes only where the draft goes. Two layout-effect timings
-keep it exact: the composer stops naming a thread in the same cleanup that flushes that thread's
-pending draft write, and registers its bridge handle in the commit that loads the thread's draft —
-so a settle never reads a persisted draft missing its last keystrokes, and never misses a composer
-that has just mounted for the thread. The live write is a `flushSync`, so no thread swap can land
-between the check and the write.*
+not when it left — by then a project switch may have unmounted the composer
+(`failedSendRestoreTarget`, routed by `restoreFailedSendDraft` in `composer-failed-send.ts`; a
+composer that now shows another thread is a defensive branch, since each chat tab owns its composer
+— `MainView` mounts one per tab, keyed by the tab id, which is the session id, and a tab switch only
+hides it): into the sending composer's live draft while it is still mounted and still shows that
+thread; into the live draft of the composer that shows the thread now, when its tab came back after
+the switch, through the composer bridge (`restoreFailedSend`) — a mounted composer owns its thread's
+one visible draft and reads the persisted copy only when it loads the thread, so a write behind its
+back would be neither shown nor kept; otherwise into that thread's persisted draft, the same
+`draftAfterSend` over the draft loaded as a mount loads it (`persistedDraftAfterSend`,
+`composer-draft.ts`), written through that thread's own open slice's `saveDraft` or, with none open,
+into the storage its next slice seeds from (`updateThreadDraft`, `lib/agent-chat/store.ts`). The
+notice goes only where the draft goes. Two layout-effect timings keep it exact: the composer stops
+naming a thread in the same cleanup that flushes that thread's pending draft write, and registers
+its bridge handle in the commit that loads the thread's draft — so a settle never reads a persisted
+draft missing its last keystrokes, and never misses a composer that has just mounted for the thread.
+The live write is a `flushSync`, so the restore is committed and its write scheduled before any
+later swap or unmount renders.*
 
 **The queued-message model.** This is the client's own queue of messages it has not dispatched
 yet, and it is a different thing from the host-side queue that holds already-posted `/turn`s behind
