@@ -662,6 +662,33 @@ test("§4.1: a file part only for what the model API reads; the rest is the host
   harness.dispose();
 });
 
+test("§4.1: an attachment that no longer resolves fails the turn start, and nothing goes out without it", async () => {
+  const pdf = { type: "file" as const, id: "pdf-1", name: "report.pdf", mimeType: "application/pdf", sizeBytes: 10 };
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  // The host resolved and STAT'd the file just before the send; this is the
+  // race where it is gone by the time the adapter asks for its path.
+  harness.ctx.resolveAttachmentPath = async () => {
+    throw new Error("agent-chat: attachment not found (removed or expired)");
+  };
+  await assert.rejects(
+    session.sendTurn({ threadId: "thread-1", input: "read this", attachments: [pdf], interactionMode: "default" }),
+    /attachment not found/
+  );
+  assert.equal(harness.fake.find("POST", "/prompt_async"), undefined, "the turn never went out without its file");
+  assert.equal(firstOfType(harness.events, "turn.started"), undefined, "and no turn was opened for it");
+
+  // Nothing was left half-open: once the file resolves, the same turn goes out whole.
+  harness.ctx.resolveAttachmentPath = async (_threadId, attachmentId) => `/attachments/${attachmentId}`;
+  await session.sendTurn({ threadId: "thread-1", input: "read this", attachments: [pdf], interactionMode: "default" });
+  assert.deepEqual((harness.fake.find("POST", "/prompt_async")?.body as { parts: unknown[] }).parts, [
+    { type: "text", text: "read this" },
+    { type: "file", mime: "application/pdf", filename: "report.pdf", url: "file:///attachments/pdf-1" }
+  ]);
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
 test("a turn completes on idle, with accumulated usage and cost", async () => {
   const harness = makeHarness();
   const session = await startSession(harness);
