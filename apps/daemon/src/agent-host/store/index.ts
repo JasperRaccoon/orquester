@@ -488,11 +488,19 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
     if (contents === null) {
       return { events: [], seq: 0, truncated: false };
     }
-    const { lines, torn } = splitCompleteLines(contents);
     const events: DomainEvent[] = [];
+    const torn = contents.length > 0 && !contents.endsWith("\n");
     let truncated = torn;
     let seq = 0;
-    for (const line of lines) {
+    const completeEnd = torn ? contents.lastIndexOf("\n") + 1 : contents.length;
+    let offset = 0;
+    let sliceStartedAt = Date.now();
+    while (offset < completeEnd) {
+      const newline = contents.indexOf("\n", offset);
+      if (newline < 0 || newline >= completeEnd) break;
+      const line = contents.slice(offset, newline);
+      offset = newline + 1;
+      if (line.length === 0) continue;
       const event = decodeLine(line);
       if (event === null) {
         truncated = true;
@@ -505,6 +513,15 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
       }
       seq = event.seq;
       events.push(event);
+      // A historical thread can be hundreds of MB. Parsing its log on the
+      // host's only JS thread used to freeze health, /providers and /stop long
+      // enough for the supervisor to kill the otherwise-healthy process.
+      // Bound each synchronous slice; one large thread may load slowly, but it
+      // cannot take down every agent tab while it does.
+      if (Date.now() - sliceStartedAt >= 8) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        sliceStartedAt = Date.now();
+      }
     }
     return { events, seq, truncated };
   }

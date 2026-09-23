@@ -599,7 +599,18 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
 
   const buildRuntime = async (threadId: string): Promise<ThreadRuntime> => {
     const tail = await store.readAll(threadId);
-    const state = fold.foldAll(tail.events);
+    let state = fold.createEmpty();
+    let sliceStartedAt = Date.now();
+    for (const event of tail.events) {
+      state = fold.apply(state, event);
+      // Keep the socket responsive while rebuilding a large historical tab.
+      // The fold is deterministic across yields because every event is still
+      // applied in order through the shared reducer.
+      if (Date.now() - sliceStartedAt >= 8) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        sliceStartedAt = Date.now();
+      }
+    }
     const persistedHead = await store.loadHead(threadId).catch(() => null);
     const binding = await store.loadBinding(threadId).catch(() => null);
     const launch = await launchConfigs.load(threadId).catch(() => null);
