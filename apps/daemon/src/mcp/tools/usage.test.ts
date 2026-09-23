@@ -66,7 +66,7 @@ test("get_cost keeps an oversized result in budget by dropping the oldest days' 
   assert.equal(r.truncated, true);
   const kept = r.rows as { day: string }[];
   const dropped = r.rowsDropped as number;
-  assert.ok(dropped > 0); assert.equal(kept.length + dropped, 400);
+  assert.ok(dropped > 0, "rows were dropped"); assert.equal(kept.length + dropped, 400);
   assert.ok(kept.length > 0, "rows are kept, not all dropped");
   assert.ok(bytes(withNextDay(r, rows)) > MAX_COST_RESULT_BYTES, "adding back the next-oldest day would overflow: every day that fits is kept");
   const keptDays = [...new Set(kept.map((row) => row.day))];
@@ -82,7 +82,7 @@ test("get_cost's budget counts UTF-8 bytes, as ok() does: non-ASCII model names 
   const api = new FakeDaemonApi().on("GET", "/api/usage/tokens", { status: 200, body: { asOf: "2026-09-22T11:00:00.000Z", rows } });
   const r = await tool("get_cost").run({ days: 90 }, ctx(api));
   assert.ok(bytes(r) <= MAX_COST_RESULT_BYTES, `within get_cost's own budget in bytes (${bytes(r)})`);
-  assert.equal(r.truncated, true); assert.ok((r.rows as unknown[]).length > 0);
+  assert.equal(r.truncated, true); assert.ok((r.rows as unknown[]).length > 0, "rows are kept, not all dropped");
   assert.ok(bytes(withNextDay(r, rows)) > MAX_COST_RESULT_BYTES, "adding back the next-oldest day would overflow");
   assert.equal(r.totalUsd, 100, "the totals still count every row");
 });

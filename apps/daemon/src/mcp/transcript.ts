@@ -1,4 +1,4 @@
-import { isPlanImplementationMessage, startedTurns, type RuntimeSubagent, type ThreadActivityItem, type ThreadItem, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
+import { ACTIVE_SUBAGENT_STATUSES, isPlanImplementationMessage, startedTurns, type RuntimeSubagent, type ThreadActivityItem, type ThreadItem, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
 import { capText } from "./result.ts";
 
 export type TranscriptInclude = "reasoning" | "tools" | "activity";
@@ -7,22 +7,34 @@ export interface TranscriptEntry { turn: number | null; turnId: string | null; k
   questions?: string[]; answered?: boolean; subagent?: { id: string; title: string | null; status: string }; actionable?: boolean; files?: { path: string; additions: number; deletions: number }[]; state?: string; beforeTokens?: number; afterTokens?: number }
 export interface TranscriptOptions {
   turns: number; agentId?: string; include: ReadonlySet<TranscriptInclude>;
-  /** The size budget for the WHOLE result — entries, turns, subagents and flags — in UTF-8 bytes of its JSON, as ok() counts (the name predates the unit). */
+  /**
+   * The size budget for the WHOLE result — entries, turns, subagents and flags — in UTF-8 bytes of its JSON, as ok()
+   * counts (the name predates the unit). A truncated result stays TRANSCRIPT_HINT_BYTES under it, which leaves room for
+   * the truncation hint the caller adds, so the tool's whole answer keeps within `maxChars` too.
+   */
   maxChars: number;
 }
-export interface TranscriptResult { entries: TranscriptEntry[]; turnCount: number; coveredTurns: [number, number] | null; truncated: boolean; subagents: { id: string; title: string | null; status: string }[] }
+export interface TranscriptResult { entries: TranscriptEntry[]; turnCount: number; coveredTurns: [number, number] | null; truncated: boolean; subagents: { id: string; title: string | null; status: string }[]; subagentsTruncated?: boolean }
+
+/** The room a truncated result leaves under `maxChars` for the caller's `hint` field — key, quotes and comma included. */
+export const TRANSCRIPT_HINT_BYTES = 320;
 
 const TOOL_KINDS = new Set(["tool.started", "tool.updated", "tool.completed", "tool.denied"]);
 const SKIPPED_ACTIVITY = new Set(["tool.output", "tool.progress", "turn.proposed.delta", "turn.plan.updated", "hook.started", "hook.progress", "hook.completed", "context-window.updated", "checkpoint.captured", "background.requested", "task.progress", "task.updated"]);
 
 /** A tool's `detail` after the second shed: at most this many characters, the cut marked by the trailing "…". */
 const SHED_DETAIL_CHARS = 200;
+/** A subagent's title, in the roster and on its anchor: at most this many code points, a cut marked the same way. */
+const SUBAGENT_TITLE_CHARS = 200;
 
 type P = Record<string, unknown>;
 const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
+/** `text` cut to at most `max` code points, the last of them a "…" when anything was cut. */
+const capped = (text: string, max: number): string => (capText(text, max).truncated ? `${capText(text, max - 1).text}…` : text);
 const shedDetail = (e: TranscriptEntry): void => {
-  if (e.tool?.detail && capText(e.tool.detail, SHED_DETAIL_CHARS).truncated) e.tool.detail = `${capText(e.tool.detail, SHED_DETAIL_CHARS - 1).text}…`;
+  if (e.tool?.detail) e.tool.detail = capped(e.tool.detail, SHED_DETAIL_CHARS);
 };
+const subagentTitle = (title: string | null | undefined): string | null => (title == null ? null : capped(title, SUBAGENT_TITLE_CHARS));
 /**
  * Label plus detail, as the GUI's row shows them; runtime.error and runtime.warning keep their text in
  * `message`. A warning is labelled with its own message cut short, so then the message alone says it.
@@ -34,7 +46,7 @@ const rowText = (a: ThreadActivityItem, p: P): string => {
   if (!message) return a.summary;
   return message.startsWith(a.summary.replace(/(?:\.\.\.|…)$/u, "")) ? message : `${a.summary}: ${message}`;
 };
-const rosterView = (r: RuntimeSubagent): NonNullable<TranscriptEntry["subagent"]> => ({ id: r.id, title: r.title ?? null, status: r.status });
+const rosterView = (r: RuntimeSubagent): NonNullable<TranscriptEntry["subagent"]> => ({ id: r.id, title: subagentTitle(r.title), status: r.status });
 
 /** The host's `hasActionableProposedPlan` rule: the LATEST proposed plan, until a later user message implements it. */
 function actionablePlanId(items: readonly ThreadItem[]): string | null {
@@ -47,37 +59,48 @@ function actionablePlanId(items: readonly ThreadItem[]): string | null {
 }
 
 /** A value's size as the budget counts it: its JSON in UTF-8 bytes, the unit of ok()'s cap (result.ts). */
-const jsonSize = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), "utf8");
+const jsonByteSize = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), "utf8");
+
+/** The least k in [0, n] for which the monotone `ok(k)` holds, by bisection; n when none below it does. */
+function least(n: number, ok: (k: number) => boolean): number {
+  let lo = 0;
+  let hi = n;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (ok(mid)) hi = mid;
+    else lo = mid + 1;
+  }
+  return lo;
+}
 
 /**
- * The last shed, for a newest turn that is over the budget on its own (§7.6: `maxChars` is a hard
- * budget): its OLDEST rows go first, sparing the final reply (else the newest row); when that row alone
- * is still over, it keeps the longest head of its text that fits. `size` measures a candidate list the
- * way the budget does.
+ * The latest turn's own shed, for when it is over the budget on its own (§7.6: `maxChars` is a hard budget): its
+ * OLDEST rows go first, sparing the final reply (else the newest row); when that row alone is still over, it keeps
+ * the longest head of its text that fits. A spared row that cannot fit even so — no text to cut, or over without
+ * it — gives way to the next, so a turn with any row that fits never comes back empty. `size` measures a candidate
+ * list the way the budget does.
  */
-function fitBudget(entries: TranscriptEntry[], maxChars: number, size: (list: TranscriptEntry[]) => number): TranscriptEntry[] {
-  let total = size(entries);
-  const reply = entries.map((e) => e.kind).lastIndexOf("assistant");
-  const spared = reply >= 0 ? reply : entries.length - 1;
-  const kept = entries.filter((e, i) => {
-    if (i === spared || total <= maxChars) return true;
-    total -= jsonSize(e) + 1; // a dropped row takes one comma with it: the spared row keeps the list non-empty
-    return false;
-  });
-  if (total <= maxChars) return kept;
-  // Only the spared row is left. Its text's cost per code point varies (JSON escapes, and the encoding), so
-  // the cut is found by bisection over whole code points, measuring each candidate as the budget does.
-  const row = kept[0]!;
-  const text = row.text ?? "";
-  const cut = (n: number): TranscriptEntry[] => [{ ...row, text: `${capText(text, n).text}…` }];
-  let lo = 0;
-  let hi = [...text].length - 1; // the whole text is over, so at least one code point goes
-  while (lo < hi) {
-    const mid = Math.ceil((lo + hi) / 2);
-    if (size(cut(mid)) <= maxChars) lo = mid;
-    else hi = mid - 1;
+function fitBudget(entries: TranscriptEntry[], budget: number, size: (list: TranscriptEntry[]) => number): TranscriptEntry[] {
+  for (let rows = entries; rows.length > 0; ) {
+    const reply = rows.map((e) => e.kind).lastIndexOf("assistant");
+    const spared = reply >= 0 ? reply : rows.length - 1;
+    let total = size(rows);
+    const kept = rows.filter((e, i) => {
+      if (i === spared || total <= budget) return true;
+      total -= jsonByteSize(e) + 1; // a dropped row takes one comma with it: the spared row keeps the list non-empty
+      return false;
+    });
+    if (total <= budget) return kept;
+    // Only the spared row is left. Its text's cost per code point varies (JSON escapes, and the encoding), so the
+    // cut is found by bisection over whole code points, measuring each candidate as the budget does.
+    const row = kept[0]!;
+    const text = row.text ?? "";
+    const cut = (n: number): TranscriptEntry[] => [{ ...row, text: `${capText(text, n).text}…` }];
+    const head = least([...text].length, (n) => size(cut(n)) > budget) - 1;
+    if (head > 0) return cut(head);
+    rows = rows.filter((_, i) => i !== spared);
   }
-  return lo > 0 ? cut(lo) : [];
+  return [];
 }
 
 export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptOptions): TranscriptResult {
@@ -145,8 +168,8 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
         if (opts.agentId) continue; // anchors live in the parent view only
         const key = str(p.taskId) ?? a.id;
         let e = tasks.get(key);
-        if (!e) { e = base(a, "subagent"); e.subagent = { id: key, title: str(p.title) ?? str(p.description) ?? null, status: str(p.status) ?? "running" }; tasks.set(key, e); entries.push(e); }
-        if (str(p.title)) e.subagent!.title = str(p.title)!;
+        if (!e) { e = base(a, "subagent"); e.subagent = { id: key, title: subagentTitle(str(p.title) ?? str(p.description)), status: str(p.status) ?? "running" }; tasks.set(key, e); entries.push(e); }
+        if (str(p.title)) e.subagent!.title = subagentTitle(str(p.title));
         if (a.activityKind === "task.completed") { const status = str(p.status) ?? "completed"; e.subagent!.status = status === "stopped" ? "interrupted" : status; }
         continue;
       }
@@ -197,21 +220,46 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
     entries.sort((x, y) => (x.createdAt < y.createdAt ? -1 : x.createdAt > y.createdAt ? 1 : 0));
     return entries;
   };
-  const subagents = opts.agentId ? [] : snap.roster.map(rosterView);
+  // The roster in the order it is shed: settled rows, then live ones (pending, running, waiting), first seen first.
+  const agents = opts.agentId ? [] : snap.roster;
+  const live = (r: RuntimeSubagent): boolean => ACTIVE_SUBAGENT_STATUSES.has(r.status);
+  const shedOrder = [...agents.filter((r) => !live(r)), ...agents.filter(live)];
+  const settledCount = shedOrder.length - agents.filter(live).length;
+  let shed = 0; // how many of shedOrder the result leaves out
   let entries = build(from);
   let truncated = false;
-  // The budget bounds the whole result, as the caller receives it. The roster is never shed (§7.6 names no
-  // such step): a big one leaves the entries less room, and one over the budget on its own leaves none.
-  const result = (list: TranscriptEntry[]): TranscriptResult => ({ entries: list, turnCount, coveredTurns: turnCount ? [from, turnCount] : null, truncated, subagents });
-  const size = (list: TranscriptEntry[]): number => jsonSize(result(list));
-  // Shedding order (§7.6): reasoning → tool detail → oldest turns → the newest turn's oldest rows.
-  if (size(entries) > opts.maxChars) { truncated = true; entries = entries.filter((e) => e.kind !== "reasoning"); }
-  if (size(entries) > opts.maxChars) entries.forEach(shedDetail);
-  while (size(entries) > opts.maxChars && from < turnCount) {
+  // The budget bounds the whole result as the caller receives it; `coveredTurns` names turns with rows present.
+  const result = (list: TranscriptEntry[]): TranscriptResult => {
+    const gone = new Set(shedOrder.slice(0, shed));
+    const r: TranscriptResult = { entries: list, turnCount, coveredTurns: turnCount > 0 && list.some((e) => e.turn !== null) ? [from, turnCount] : null, truncated, subagents: agents.filter((a) => !gone.has(a)).map(rosterView) };
+    if (shed > 0) r.subagentsTruncated = true;
+    return r;
+  };
+  const budget = (): number => Math.max(0, opts.maxChars - (truncated ? TRANSCRIPT_HINT_BYTES : 0));
+  const size = (list: TranscriptEntry[]): number => jsonByteSize(result(list));
+  const over = (): boolean => size(entries) > budget();
+  // Shedding order (§7.6 and its fix-round ruling): (1) reasoning, (2) tool detail, (3) the oldest turns — never
+  // the latest turn's own rows, the floor of the window.
+  if (over()) { truncated = true; entries = entries.filter((e) => e.kind !== "reasoning"); }
+  if (over()) entries.forEach(shedDetail);
+  while (over() && from < turnCount) {
     from += 1;
     entries = build(from).filter((e) => e.kind !== "reasoning");
     entries.forEach(shedDetail);
   }
-  if (size(entries) > opts.maxChars) entries = fitBudget(entries, opts.maxChars, size);
+  if (over()) {
+    // (4) Settled subagent rows, as few as lets the latest turn's rows stay whole; (5) with every settled row gone,
+    // the latest turn's oldest rows, then the reply's tail (fitBudget); (6) only when not even a head of a row fits
+    // beside them, the live rows too. The roster is recoverable whole through get_session.
+    const floor = entries;
+    const attempt = (k: number): TranscriptEntry[] | null => {
+      shed = k;
+      if (size(floor) <= budget()) return floor;
+      if (k < settledCount) return null;
+      const fitted = fitBudget(floor, budget(), size);
+      return fitted.length > 0 ? fitted : null;
+    };
+    entries = attempt(least(shedOrder.length, (k) => attempt(k) !== null)) ?? [];
+  }
   return result(entries);
 }

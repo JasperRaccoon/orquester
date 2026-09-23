@@ -2,11 +2,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildPlanImplementationPrompt, type ThreadItem } from "@orquester/api/agent-chat";
 import { activity, message, snapshot, stamp, turn } from "./fixtures.ts";
-import { transcriptEntries, type TranscriptResult } from "./transcript.ts";
+import { TRANSCRIPT_HINT_BYTES, transcriptEntries, type TranscriptResult } from "./transcript.ts";
 
 const ALL = new Set(["reasoning", "tools", "activity"] as const);
 /** A result's size as `maxChars` counts it: the whole result's JSON, in UTF-8 bytes (what ok() caps). */
 const budgetSize = (r: TranscriptResult): number => Buffer.byteLength(JSON.stringify(r), "utf8");
+/** What a result must fit in: a truncated one leaves the caller room for its hint. */
+const room = (r: TranscriptResult, maxChars: number): number => (r.truncated ? maxChars - TRANSCRIPT_HINT_BYTES : maxChars);
 /** The result with the kept head of its only row's text one code point longer: over budget when the cut is exact. */
 const oneMore = (r: TranscriptResult, whole: string): TranscriptResult => {
   const head = [...r.entries[0]!.text!.slice(0, -1)]; // drop the "…"
@@ -73,13 +75,13 @@ test("drill-in view shows only that agent's rows; reasoning and tools are opt-in
 
 test("turns selects the last N turns; shedding drops reasoning, then tool detail, then the oldest turn", () => {
   const last = transcriptEntries(twoTurns(), { turns: 1, include: ALL, maxChars: 100_000 });
-  assert.deepEqual(last.coveredTurns, [2, 2]); assert.ok(last.entries.every((e) => e.turn === 2));
+  assert.deepEqual(last.coveredTurns, [2, 2]); assert.ok(last.entries.every((e) => e.turn === 2), "only the last turn");
   const big = snapshot({ turns: [turn(), turn({ turnId: "t2", turnCount: 2, requestedAt: stamp(10), startedAt: stamp(10), completedAt: stamp(20) })],
     items: [message("user", "a".repeat(3000), { turnId: "t1" }), message("reasoning", "r".repeat(3000), { turnId: "t1" }), message("assistant", "b".repeat(3000), { turnId: "t1" }),
       activity("tool.completed", { itemType: "command_execution", toolUseId: "x", title: "t", status: "completed", detail: "d".repeat(3000) }, { turnId: "t2", tone: "tool" }), message("assistant", "c".repeat(3000), { turnId: "t2" })] });
   const shed1 = transcriptEntries(big, { turns: 5, include: ALL, maxChars: 12_000 });
-  assert.equal(shed1.truncated, true); assert.ok(!shed1.entries.some((e) => e.kind === "reasoning"));
-  assert.ok(shed1.entries.find((e) => e.kind === "tool")!.tool!.detail!.length <= 200);
+  assert.equal(shed1.truncated, true); assert.ok(!shed1.entries.some((e) => e.kind === "reasoning"), "reasoning shed first");
+  assert.ok(shed1.entries.find((e) => e.kind === "tool")!.tool!.detail!.length <= 200, "tool detail shed second");
   const shed2 = transcriptEntries(big, { turns: 5, include: ALL, maxChars: 4_000 });
   assert.deepEqual(shed2.coveredTurns, [2, 2]); assert.equal(shed2.truncated, true);
 });
@@ -161,14 +163,14 @@ test("maxChars is a hard budget: an oversized newest turn sheds its oldest rows 
   items.push(message("assistant", "all 300 steps done", { turnId: "t1" }));
   const busy = snapshot({ items });
   const r = transcriptEntries(busy, { turns: 5, include: ALL, maxChars: 40_000 });
-  assert.ok(budgetSize(r) <= 40_000, "within the budget"); assert.equal(r.truncated, true);
+  assert.ok(budgetSize(r) <= room(r, 40_000), "within the budget"); assert.equal(r.truncated, true);
   assert.deepEqual([r.entries.at(-1)!.kind, r.entries.at(-1)!.text], ["assistant", "all 300 steps done"]);
   assert.equal(r.entries.at(-2)!.tool!.title, "Run step 299", "the newest rows are kept");
   assert.ok(!r.entries.some((e) => e.kind === "user"), "the oldest rows go first");
   // A final reply that alone is over the budget keeps its head.
   const report = snapshot({ items: [message("user", "report", { turnId: "t1" }), message("assistant", "z".repeat(10_000), { turnId: "t1" })] });
   const capped = transcriptEntries(report, { turns: 5, include: ALL, maxChars: 2_000 });
-  assert.ok(budgetSize(capped) <= 2_000, "within the budget"); assert.equal(capped.truncated, true);
+  assert.ok(budgetSize(capped) <= room(capped, 2_000), "within the budget"); assert.equal(capped.truncated, true);
   assert.deepEqual(capped.entries.map((e) => e.kind), ["assistant"]);
   assert.match(capped.entries[0]!.text!, /^z{1000,}…$/u);
 });
@@ -182,8 +184,8 @@ test("at maxChars 2 000 a final reply whose JSON outgrows its code points surviv
   assert.deepEqual(r.entries.map((e) => e.kind), ["assistant"], "the final reply survives");
   const text = r.entries[0]!.text!;
   assert.ok(text.endsWith("…") && reply.startsWith(text.slice(0, -1)), "the head of the reply, marked as cut");
-  assert.ok(budgetSize(r) <= 2_000, "within the budget");
-  assert.ok(budgetSize(oneMore(r, reply)) > 2_000, "one code point more would not fit: the cut is exact");
+  assert.ok(budgetSize(r) <= room(r, 2_000), "within the budget");
+  assert.ok(budgetSize(oneMore(r, reply)) > room(r, 2_000), "one code point more would not fit: the cut is exact");
 });
 
 test("maxChars counts UTF-8 bytes: a CJK reply is cut to what fits in bytes, never through a character", () => {
@@ -192,16 +194,125 @@ test("maxChars counts UTF-8 bytes: a CJK reply is cut to what fits in bytes, nev
   assert.deepEqual(r.entries.map((e) => e.kind), ["assistant"]); assert.equal(r.truncated, true);
   const head = r.entries[0]!.text!.slice(0, -1);
   assert.ok(reply.startsWith(head) && Buffer.from(head, "utf8").toString("utf8") === head, "a head of whole characters");
-  assert.ok(budgetSize(r) <= 2_000, "within the budget, in bytes");
-  assert.ok(budgetSize(oneMore(r, reply)) > 2_000, "one code point more would not fit: the cut is exact");
+  assert.ok(budgetSize(r) <= room(r, 2_000), "within the budget, in bytes");
+  assert.ok(budgetSize(oneMore(r, reply)) > room(r, 2_000), "one code point more would not fit: the cut is exact");
 });
 
-test("the budget covers the whole result: a big roster leaves less room for entries, and is never shed itself", () => {
-  const roster = Array.from({ length: 30 }, (_, i) => ({ id: `task-${i}`, kind: "subagent", agentKind: "agent", title: `Worker ${i}: audit the ${"module ".repeat(6)}`, status: "completed" }) as never);
-  const items = [message("user", "u".repeat(1_500), { turnId: "t1" }), message("assistant", "done", { turnId: "t1" })];
-  const r = transcriptEntries(snapshot({ items, roster }), { turns: 5, include: ALL, maxChars: 4_000 });
-  assert.ok(JSON.stringify(transcriptEntries(snapshot({ items, roster }), { turns: 5, include: ALL, maxChars: 100_000 }).entries).length < 4_000, "the entries alone would fit");
-  assert.ok(budgetSize(r) <= 4_000, "within the budget, roster included"); assert.equal(r.truncated, true);
-  assert.deepEqual(r.entries.map((e) => [e.kind, e.text]), [["assistant", "done"]], "the oldest row made room");
-  assert.equal(r.subagents.length, 30);
+/** A roster row as the host folds it, with the fields the transcript reads; the roster lists rows first seen first. */
+const agent = (i: number, title: string, status = "completed") => ({ id: `task-${i}`, kind: "subagent", agentKind: "agent", title, status, firstSeenAt: stamp(i) }) as never;
+const oneTurn = (reply = "Done: every package is surveyed.") => [message("user", "Survey the packages, one subagent each.", { turnId: "t1" }), message("assistant", reply, { turnId: "t1" })];
+
+test("a roster over the budget is trimmed, oldest settled rows first, before any row of the latest turn", () => {
+  // The reviewer's case: 30 subagents (3.4 KB), one short turn, maxChars 2 000 — the entries used to come back empty.
+  const roster = Array.from({ length: 30 }, (_, i) => agent(i, `Survey package ${i}: list its exports, callers and test coverage`));
+  const snap = snapshot({ items: oneTurn(), roster });
+  const whole = transcriptEntries(snap, { turns: 5, include: ALL, maxChars: 100_000 });
+  assert.ok(Buffer.byteLength(JSON.stringify(whole.subagents)) > 3_000, "the roster alone is over the budget");
+  const r = transcriptEntries(snap, { turns: 5, include: ALL, maxChars: 2_000 });
+  assert.ok(budgetSize(r) <= 2_000 - TRANSCRIPT_HINT_BYTES, `within the budget, the hint's room kept (${budgetSize(r)})`);
+  assert.deepEqual(r.entries, whole.entries, "both rows of the only turn, untouched");
+  assert.deepEqual([r.coveredTurns, r.truncated, r.subagentsTruncated], [[1, 1], true, true]);
+  const kept = r.subagents.map((s) => s.id);
+  assert.ok(kept.length > 0 && kept.length < 30, `some rows kept (${kept.length})`);
+  assert.deepEqual(kept, whole.subagents.slice(30 - kept.length).map((s) => s.id), "the oldest rows went first");
+  assert.equal(whole.subagentsTruncated, undefined, "an untrimmed roster carries no flag");
+});
+
+test("100 long-titled subagents at 55 000: titles capped at 200 code points, every live row kept, the oldest settled ones dropped", () => {
+  const long = "調査して報告する".repeat(125); // 1 000 code points, 3 bytes each
+  const live = (i: number): boolean => i % 10 === 3;
+  const roster = Array.from({ length: 100 }, (_, i) => agent(i, `${i}: ${long}`, live(i) ? "running" : "completed"));
+  const r = transcriptEntries(snapshot({ items: oneTurn(), roster }), { turns: 5, include: ALL, maxChars: 55_000 });
+  assert.ok(budgetSize(r) <= 55_000 - TRANSCRIPT_HINT_BYTES, `within the budget (${budgetSize(r)})`);
+  assert.deepEqual(r.entries.map((e) => e.kind), ["user", "assistant"], "the turn's rows are all there");
+  assert.ok(r.subagents.every((s) => [...s.title!].length === 200 && s.title!.endsWith("…")), "every title cut to 200 code points, the cut marked");
+  assert.equal(r.subagentsTruncated, true);
+  const kept = r.subagents.map((s) => Number(s.id.slice(5)));
+  const all = Array.from({ length: 100 }, (_, i) => i);
+  assert.deepEqual(kept.filter(live), all.filter(live), "every running agent kept");
+  const settled = all.filter((i) => !live(i));
+  assert.deepEqual(kept.filter((i) => !live(i)), settled.slice(settled.length - kept.filter((i) => !live(i)).length), "the newest settled rows kept");
+  assert.ok(kept.length < 100, "some settled rows dropped");
+});
+
+test("live subagents outlast the reply's tail, and go last — oldest first — only when not even a head of the reply fits", () => {
+  const reply = "The survey is done. ".repeat(500);
+  const title = (i: number): string => `Agent ${i} ${"still auditing the dependency graph ".repeat(6)}`;
+  const few = transcriptEntries(snapshot({ items: oneTurn(reply), roster: [agent(0, title(0)), agent(1, title(1), "running"), agent(2, title(2), "waiting"), agent(3, title(3), "pending")] }), { turns: 5, include: ALL, maxChars: 2_000 });
+  assert.ok(budgetSize(few) <= 2_000 - TRANSCRIPT_HINT_BYTES, `within the budget (${budgetSize(few)})`);
+  assert.deepEqual(few.subagents.map((s) => s.id), ["task-1", "task-2", "task-3"], "the settled row went, the live ones stayed");
+  assert.deepEqual(few.entries.map((e) => e.kind), ["assistant"]); assert.match(few.entries[0]!.text!, /^The survey is done\. .+…$/su, "the reply cut around them");
+  const many = transcriptEntries(snapshot({ items: oneTurn(reply), roster: Array.from({ length: 12 }, (_, i) => agent(i, title(i), "running")) }), { turns: 5, include: ALL, maxChars: 2_000 });
+  assert.ok(budgetSize(many) <= 2_000 - TRANSCRIPT_HINT_BYTES, `within the budget (${budgetSize(many)})`);
+  assert.deepEqual(many.entries.map((e) => e.kind), ["assistant"], "a head of the reply survives");
+  const kept = many.subagents.map((s) => s.id);
+  assert.ok(kept.length > 0 && kept.length < 12, `some live rows kept (${kept.length})`);
+  assert.deepEqual(kept, Array.from({ length: 12 }, (_, i) => `task-${i}`).slice(12 - kept.length), "the oldest live rows went first");
+  assert.equal(many.subagentsTruncated, true);
+});
+
+test("coveredTurns names only turns with rows present: null when the window shows none", () => {
+  // A drill-in on an agent that worked only in the first turn, reading the last one.
+  const items = [message("user", "one", { turnId: "t1" }), message("assistant", "sub", { turnId: "t1", agentId: "task-1" }), message("user", "two", { turnId: "t2" })];
+  const snap = snapshot({ items, turns: [turn(), turn({ turnId: "t2", turnCount: 2, requestedAt: items[2]!.createdAt, startedAt: items[2]!.createdAt, completedAt: items[2]!.createdAt })] });
+  const r = transcriptEntries(snap, { turns: 1, agentId: "task-1", include: ALL, maxChars: 100_000 });
+  assert.deepEqual([r.entries, r.coveredTurns, r.turnCount], [[], null, 2]);
+});
+
+test("when the newest row cannot fit even alone, an older row of the latest turn is kept rather than none", () => {
+  // No reply yet, and the newest row is a tool call whose command alone is over the budget: nothing in it to cut.
+  const items = [message("user", "Write the fixture file.", { turnId: "t1" }),
+    activity("tool.started", { itemType: "command_execution", toolUseId: "big", title: "Write fixture", command: `cat > fixture.json <<'EOF'\n${'{"k": 1},\n'.repeat(400)}EOF`, status: "inProgress" }, { turnId: "t1", tone: "tool" })];
+  const r = transcriptEntries(snapshot({ items }), { turns: 5, include: ALL, maxChars: 2_000 });
+  assert.deepEqual(r.entries.map((e) => [e.kind, e.text]), [["user", "Write the fixture file."]]);
+  assert.ok(budgetSize(r) <= 2_000 - TRANSCRIPT_HINT_BYTES, `within the budget (${budgetSize(r)})`); assert.deepEqual(r.coveredTurns, [1, 1]);
+});
+
+test("a randomized probe (fixed seed): every result fits, keeps the latest turn, sheds in order and says what it covers", () => {
+  let seed = 0x5eedb1;
+  const rand = (): number => { // mulberry32
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4_294_967_296;
+  };
+  const int = (lo: number, hi: number): number => lo + Math.floor(rand() * (hi - lo + 1));
+  const pick = <T>(xs: readonly T[]): T => xs[int(0, xs.length - 1)]!;
+  // No "…" in the alphabet: a text ending in one was cut.
+  const text = (max: number): string => pick(["a", "é", "漢", "😀", '"', "\n", "word "]).repeat(int(1, max));
+  const statuses = ["running", "waiting", "pending", "idle", "completed", "failed", "interrupted"];
+  const isLive = (status: string): boolean => ["running", "waiting", "pending"].includes(status);
+  for (let run = 0; run < 120; run += 1) {
+    const turnCount = int(1, 5);
+    const items: ThreadItem[] = [];
+    const turns = [];
+    for (let t = 1; t <= turnCount; t += 1) {
+      const turnId = `t${t}`;
+      const opening = message("user", text(3_000), { turnId });
+      items.push(opening);
+      if (rand() < 0.5) items.push(message("reasoning", text(4_000), { turnId }));
+      for (let k = int(0, 6); k > 0; k -= 1) items.push(activity("tool.completed", { itemType: "command_execution", toolUseId: `${turnId}-${k}`, title: text(60), command: text(200), status: "completed", detail: text(3_000) }, { turnId, tone: "tool" }));
+      if (rand() < 0.8) items.push(message("assistant", text(20_000), { turnId }));
+      turns.push(turn({ turnId, turnCount: t, requestedAt: opening.createdAt, startedAt: opening.createdAt, completedAt: items.at(-1)!.createdAt }));
+    }
+    const roster = Array.from({ length: int(0, 100) }, (_, i) => agent(i, text(400), pick(statuses))) as unknown as { id: string; status: string }[];
+    const maxChars = int(2_000, 55_000);
+    const window = int(1, 5);
+    const snap = snapshot({ items, turns, roster: roster as never });
+    const r = transcriptEntries(snap, { turns: window, include: ALL, maxChars });
+    const where = `run ${run}: ${turnCount} turns, ${roster.length} agents, maxChars ${maxChars}`;
+    assert.ok(budgetSize(r) <= room(r, maxChars), `${where}: ${budgetSize(r)} bytes`);
+    if (!r.truncated) assert.deepEqual(r, transcriptEntries(snap, { turns: window, include: ALL, maxChars: Number.MAX_SAFE_INTEGER }), `${where}: nothing shed when it fits`);
+    assert.ok(r.entries.some((e) => e.turn === turnCount), `${where}: the latest turn keeps a row`);
+    assert.ok(r.coveredTurns !== null && r.coveredTurns[1] === turnCount && r.entries.every((e) => e.turn === null || e.turn >= r.coveredTurns![0]), `${where}: coveredTurns ${JSON.stringify(r.coveredTurns)}`);
+    assert.equal(r.subagentsTruncated === true, r.subagents.length < roster.length, `${where}: subagentsTruncated`);
+    assert.ok(r.subagents.every((s) => [...(s.title ?? "")].length <= 200), `${where}: titles capped`);
+    // Shed order in the roster: settled rows oldest first, live ones only after every settled row, oldest first.
+    const kept = new Set(r.subagents.map((s) => s.id));
+    const keptOf = (live: boolean) => roster.filter((a) => isLive(a.status) === live).map((a) => kept.has(a.id));
+    for (const flags of [keptOf(false), keptOf(true)]) assert.ok(flags.every((k, i) => !k || flags.slice(i).every(Boolean)), `${where}: rows dropped oldest first`);
+    if (keptOf(true).includes(false)) assert.ok(!keptOf(false).includes(true), `${where}: a live row went before a settled one`);
+    // The roster's settled rows go before any row of the latest turn is cut.
+    if (keptOf(false).includes(true)) assert.ok(r.entries.every((e) => !e.text?.endsWith("…")), `${where}: a text was cut while settled subagent rows remained`);
+  }
 });

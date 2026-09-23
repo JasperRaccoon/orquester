@@ -5,7 +5,7 @@ import { ToolError } from "../errors.ts";
 import { findSession } from "../reads.ts";
 import { defineTool, READ_ONLY, type ToolDef } from "../tool.ts";
 import { buildViewContext, sessionView } from "../views.ts";
-import { waitForAttention } from "../wait.ts";
+import { waitForAttention, type WatchScope } from "../wait.ts";
 
 const waitForSession = defineTool({
   name: "wait_for_session",
@@ -23,12 +23,11 @@ const waitForSession = defineTool({
     // Before any await, so a bare call waits for what happens after the call itself.
     const after = args.after ?? new Date(now()).toISOString();
     if (Number.isNaN(Date.parse(after))) throw new ToolError("INVALID_ARGUMENT", "`after` must be an ISO-8601 timestamp.");
-    let select: (s: SessionSummary) => boolean = () => true;
     // One session: its close ends the wait (SESSION_NOT_FOUND). A wider wait just stops watching a closed one.
-    let sessionId: string | undefined;
-    if (args.sessionId !== undefined) { const id = (await findSession(api, args.sessionId)).id; select = (s) => s.id === id; sessionId = id; }
-    else if (args.project !== undefined) { const path = (await resolveProject(api, args.project)).path; select = (s) => s.projectPath === path; }
-    const r = await waitForAttention(api, { select, sessionId, after, timeoutMs: args.timeoutMs, signal, now });
+    let scope: WatchScope = { select: () => true };
+    if (args.sessionId !== undefined) scope = { sessionId: (await findSession(api, args.sessionId)).id };
+    else if (args.project !== undefined) { const path = (await resolveProject(api, args.project)).path; scope = { select: (s) => s.projectPath === path }; }
+    const r = await waitForAttention(api, { ...scope, after, timeoutMs: args.timeoutMs, signal, now });
     if (r.sessions.length === 0) return { sessions: [], cursor: r.cursor, timedOut: r.timedOut };
     const ctx = await buildViewContext(api);
     // Newest attention first, as the Attention Center lists its flagged rows; a tie goes to the newer tab.

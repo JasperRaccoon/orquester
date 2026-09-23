@@ -26,7 +26,7 @@ test("watchSessions merges session.activity into the summary and drops closed se
   api.emit(busEvent("session.activity", { id: "c1", activity: { state: "waiting", attention: "needs-input", lastOutputAt: null, needsAttentionAt: stamp(9) } }));
   api.emit(busEvent("session.closed", { id: "c1" }));
   assert.equal(await p, "closed");
-  assert.ok(seen.includes("waiting/false"));
+  assert.ok(seen.includes("waiting/false"), "the activity was merged before the close");
 });
 
 test("watchSessions times out with null and honours abort", async () => {
@@ -248,7 +248,7 @@ test("a single-session wait ends with SESSION_NOT_FOUND when its session closes,
   // Closed between the caller's lookup and the wait's first read: no close event ever reaches the wait.
   const gone = new FakeDaemonApi().on("GET", "/api/sessions", { status: 200, body: [shellSummary()] });
   await assert.rejects(waitForTurn(gone, "c1", turnBaseline(chatSummary()), { timeoutMs: 5_000, signal, now }), notFound);
-  const one = (api: FakeDaemonApi) => waitForAttention(api, { select: (s) => s.id === "c1", sessionId: "c1", after: stamp(5), timeoutMs: 5_000, signal, now, settleMs: 0 });
+  const one = (api: FakeDaemonApi) => waitForAttention(api, { sessionId: "c1", after: stamp(5), timeoutMs: 5_000, signal, now, settleMs: 0 });
   await assert.rejects(one(gone), notFound);
   const closing = new FakeDaemonApi().on("GET", "/api/sessions", { status: 200, body: [chatSummary(), chatSummary({ id: "c2" })] });
   const p = one(closing);
@@ -266,4 +266,15 @@ test("a project-wide or unfiltered attention wait just stops watching a closed s
   api.emit(busEvent("session.activity", { id: "c2", activity: { state: "idle", attention: "finished", lastOutputAt: null, needsAttentionAt: stamp(9) } }));
   const r = await p;
   assert.deepEqual([r.sessions.map((s) => s.id), r.cursor], [["c2"], stamp(9)]);
+});
+
+test("a single-session attention wait is scoped by its sessionId alone, so no selection can disagree with it", async () => {
+  const flagged = (id: string, n: number) => chatSummary({ id, activity: { state: "idle", attention: "finished", lastOutputAt: null, needsAttentionAt: stamp(n) } });
+  const api = new FakeDaemonApi().on("GET", "/api/sessions", { status: 200, body: [flagged("c1", 7), flagged("c2", 9)] });
+  const signal = new AbortController().signal;
+  const r = await waitForAttention(api, { sessionId: "c1", after: stamp(5), timeoutMs: 5_000, signal, now, settleMs: 0 });
+  assert.deepEqual([r.sessions.map((s) => s.id), r.cursor], [["c1"], stamp(7)], "c2 qualifies too, and is not watched");
+  // @ts-expect-error one session or a selection, never both
+  const both = () => waitForAttention(api, { sessionId: "c1", select: () => true, after: stamp(5), timeoutMs: 5_000, signal, now });
+  assert.equal(typeof both, "function", "never called: the type is what refuses it");
 });

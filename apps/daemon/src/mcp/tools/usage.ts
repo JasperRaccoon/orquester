@@ -11,7 +11,7 @@ import { usageView } from "../usage-view.ts";
  */
 export const MAX_COST_RESULT_BYTES = 50_000;
 
-const jsonBytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), "utf8");
+const jsonByteSize = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), "utf8");
 
 const round4 = (usd: number): number => Math.round(usd * 10_000) / 10_000;
 
@@ -48,13 +48,13 @@ const getCost = defineTool({
     const rows = inWindow.map((r) => ({ agent: r.agent, model: r.model, day: r.day, inputTokens: r.inputTokens, outputTokens: r.outputTokens, cacheReadTokens: r.cacheReadTokens, cacheWriteTokens: r.cacheWriteTokens, costUsd: typeof r.costUsd === "number" ? round4(r.costUsd) : null }));
     const head = { asOf: res.asOf, days: args.days, totalUsd, byDay };
     const whole = { ...head, rows };
-    if (jsonBytes(whole) <= MAX_COST_RESULT_BYTES) return whole;
+    if (jsonByteSize(whole) <= MAX_COST_RESULT_BYTES) return whole;
     // Over budget: drop whole days of rows, oldest first, until the rest fits. Each row is measured once, with the
     // comma that joins it; only the frame around the rows is re-measured, as rowsDropped's digits move.
-    const rowBytes = rows.map((row) => jsonBytes(row) + 1);
+    const rowBytes = rows.map((row) => jsonByteSize(row) + 1);
     let rowsBytes = rowBytes.reduce((sum, n) => sum + n, 0) - 1; // n rows are joined by n - 1 commas
     let kept = rows.length;
-    const frame = () => jsonBytes({ ...head, rows: [], truncated: true, rowsDropped: rows.length - kept });
+    const frame = () => jsonByteSize({ ...head, rows: [], truncated: true, rowsDropped: rows.length - kept });
     do {
       const oldest = rows[kept - 1]!.day;
       while (kept > 0 && rows[kept - 1]!.day === oldest) rowsBytes -= rowBytes[--kept]!;

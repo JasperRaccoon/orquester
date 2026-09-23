@@ -6,14 +6,13 @@ import { ToolError } from "./errors.ts";
 import { listSessions } from "./reads.ts";
 
 export interface WatchState { sessions: ReadonlyMap<string, SessionSummary>; closed: ReadonlySet<string> }
-export interface WatchOptions<T> {
-  api: DaemonApi; select: (s: SessionSummary) => boolean; evaluate: (state: WatchState) => T | null; timeoutMs: number; signal: AbortSignal; now: () => number; settleMs?: number; rereadMs?: number;
-  /**
-   * Set for a single-session wait (`select` admitting just this id): the session closing, or already missing
-   * from the first read, rejects the watch with SESSION_NOT_FOUND at once rather than running it to the timeout.
-   */
-  sessionId?: string;
-}
+/**
+ * What a watch holds: ONE session — whose close, or absence from the first read, rejects the watch with
+ * SESSION_NOT_FOUND at once rather than running it to the timeout — or every session `select` admits. Never both,
+ * so the two cannot disagree.
+ */
+export type WatchScope = { sessionId: string; select?: never } | { select: (s: SessionSummary) => boolean; sessionId?: never };
+export type WatchOptions<T> = WatchScope & { api: DaemonApi; evaluate: (state: WatchState) => T | null; timeoutMs: number; signal: AbortSignal; now: () => number; settleMs?: number; rereadMs?: number };
 
 const DEFAULT_SETTLE_MS = 300;
 const DEFAULT_REREAD_MS = 10_000;
@@ -41,6 +40,8 @@ function attentionStamp(activity: SessionActivity | undefined): number {
 export async function watchSessions<T>(opts: WatchOptions<T>): Promise<T | null> {
   const settleMs = opts.settleMs ?? DEFAULT_SETTLE_MS;
   const rereadMs = opts.rereadMs ?? DEFAULT_REREAD_MS;
+  const only = opts.sessionId;
+  const select = only === undefined ? opts.select : (s: SessionSummary) => s.id === only;
   let sessions = new Map<string, SessionSummary>();
   const closed = new Set<string>();
   // Activity published while a list read is in flight, which that read may predate; null between reads.
@@ -50,7 +51,7 @@ export async function watchSessions<T>(opts: WatchOptions<T>): Promise<T | null>
   let latched: { hit: T } | { error: unknown } | null = null;
   // A single-session watch ends on that session's close, whatever the caller's evaluate would make of it.
   const evaluate = (state: WatchState): T | null => {
-    if (opts.sessionId !== undefined && state.closed.has(opts.sessionId)) throw new ToolError("SESSION_NOT_FOUND", `Session "${opts.sessionId}" was closed while waiting.`);
+    if (only !== undefined && state.closed.has(only)) throw new ToolError("SESSION_NOT_FOUND", `Session "${only}" was closed while waiting.`);
     return opts.evaluate(state);
   };
   const check = (): { hit: T } | { error: unknown } | null => {
@@ -76,7 +77,7 @@ export async function watchSessions<T>(opts: WatchOptions<T>): Promise<T | null>
       const s = event.payload as SessionSummary;
       // A closed tab stays closed: the daemon can publish its exit after the close.
       if (closed.has(s.id)) return;
-      if (opts.select(s)) sessions.set(s.id, keepActivity(s));
+      if (select(s)) sessions.set(s.id, keepActivity(s));
       else if (!sessions.delete(s.id)) return;
     } else if (event.type === "session.activity") {
       if (!payload.id) return;
@@ -108,7 +109,7 @@ export async function watchSessions<T>(opts: WatchOptions<T>): Promise<T | null>
     }
     const next = new Map<string, SessionSummary>();
     for (const s of list) {
-      if (!opts.select(s) || closed.has(s.id)) continue;
+      if (!select(s) || closed.has(s.id)) continue;
       const listed = keepActivity(s);
       const bus = during.get(s.id);
       next.set(s.id, bus && attentionStamp(bus) >= attentionStamp(listed.activity) ? { ...listed, activity: bus } : listed);
@@ -131,7 +132,7 @@ export async function watchSessions<T>(opts: WatchOptions<T>): Promise<T | null>
   try {
     const first = await reload();
     // Missing from the first read, it closed before the watch could hear it: the same end as a close heard.
-    if (opts.sessionId !== undefined && !first.some((s) => s.id === opts.sessionId)) closed.add(opts.sessionId);
+    if (only !== undefined && !first.some((s) => s.id === only)) closed.add(only);
     for (;;) {
       if (opts.signal.aborted) return null;
       const found = check();
@@ -193,7 +194,7 @@ function turnOutcome(s: SessionSummary, baseline: TurnBaseline): TurnOutcome | n
 export async function waitForTurn(api: DaemonApi, sessionId: string, baseline: TurnBaseline, opts: { timeoutMs: number; signal: AbortSignal; now: () => number }): Promise<{ outcome: TurnOutcome; summary: SessionSummary | null }> {
   let last: SessionSummary | null = null;
   const hit = await watchSessions<{ outcome: TurnOutcome; summary: SessionSummary }>({
-    api, sessionId, select: (s) => s.id === sessionId, timeoutMs: opts.timeoutMs, signal: opts.signal, now: opts.now, settleMs: 0,
+    api, sessionId, timeoutMs: opts.timeoutMs, signal: opts.signal, now: opts.now, settleMs: 0,
     evaluate: (state) => {
       const s = state.sessions.get(sessionId);
       if (!s) return null;
@@ -212,12 +213,13 @@ export function attentionQualifies(s: SessionSummary, after: string): boolean {
 }
 
 /**
- * §9.2's wait. With `sessionId` (and a `select` admitting just it) the session closing, or being gone by the first
- * read, rejects with SESSION_NOT_FOUND; a project-wide or unfiltered wait just stops watching a closed session.
+ * §9.2's wait. Scoped by `sessionId`, the session closing, or being gone by the first read, rejects with
+ * SESSION_NOT_FOUND; a `select` scope — a project, or every session — just stops watching a closed session.
  */
-export async function waitForAttention(api: DaemonApi, opts: { select: (s: SessionSummary) => boolean; sessionId?: string; after: string; timeoutMs: number; signal: AbortSignal; now: () => number; settleMs?: number }): Promise<{ sessions: SessionSummary[]; cursor: string; timedOut: boolean }> {
+export async function waitForAttention(api: DaemonApi, opts: WatchScope & { after: string; timeoutMs: number; signal: AbortSignal; now: () => number; settleMs?: number }): Promise<{ sessions: SessionSummary[]; cursor: string; timedOut: boolean }> {
+  const scope: WatchScope = opts.sessionId === undefined ? { select: opts.select } : { sessionId: opts.sessionId };
   const hit = await watchSessions<SessionSummary[]>({
-    api, select: opts.select, sessionId: opts.sessionId, timeoutMs: opts.timeoutMs, signal: opts.signal, now: opts.now, settleMs: opts.settleMs,
+    ...scope, api, timeoutMs: opts.timeoutMs, signal: opts.signal, now: opts.now, settleMs: opts.settleMs,
     evaluate: (state) => { const q = [...state.sessions.values()].filter((s) => attentionQualifies(s, opts.after)); return q.length ? q : null; }
   });
   if (!hit) return { sessions: [], cursor: opts.after, timedOut: true };
