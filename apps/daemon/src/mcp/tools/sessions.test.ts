@@ -21,7 +21,9 @@ const registry = { shells: [], ides: [], fileExplorers: [], browsers: [], agents
 ] };
 const providers = { hostInstanceId: "h", providers: [{ id: "claude", refIds: ["claude", "claudex", "claudemix"], installed: true, version: "2", status: "ready", auth: { status: "authenticated" }, checkedAt: stamp(0), slashCommands: [], skills: [],
   capabilities: { sessionModelSwitch: "in-session", supportsConversationRollback: true, showPlanModeToggle: true, reportsContextWindow: true, compaction: { type: "slash-command", command: "/compact" } },
-  models: [{ slug: "default", name: "Default", isDefault: true, capabilities: { optionDescriptors: [{ id: "effort", label: "Effort", type: "select", options: [{ id: "medium", label: "Medium", isDefault: true }, { id: "high", label: "High" }] }] } }, { slug: "haiku", name: "Haiku", capabilities: null }] }] };
+  models: [{ slug: "default", name: "Default", isDefault: true, capabilities: { optionDescriptors: [{ id: "effort", label: "Effort", type: "select", options: [{ id: "medium", label: "Medium", isDefault: true }, { id: "high", label: "High" }] }] } }, { slug: "haiku", name: "Haiku", capabilities: null },
+    // Not the default, and it takes options: an options-only change on it must keep it. (haiku takes none.)
+    { slug: "opus", name: "Opus", capabilities: { optionDescriptors: [{ id: "effort", label: "Effort", type: "select", options: [{ id: "low", label: "Low" }, { id: "medium", label: "Medium", isDefault: true }, { id: "high", label: "High" }] }, { id: "thinking", label: "Thinking", type: "boolean" }] } }] }] };
 const accounts = { accounts: [{ id: "acc-1", agent: "claude", label: "jasperclaude", email: null, plan: null, needsReauth: false, createdAt: stamp(0), importedAt: stamp(0) }, { id: "acc-2", agent: "codex", label: "e@x.io", email: "e@x.io", plan: null, needsReauth: false, createdAt: stamp(0), importedAt: stamp(0) }], defaults: { claude: "acc-1", codex: "acc-2", grok: null } };
 // acc-2 (codex) and acc-1 (claude) are seeded, so both proxy launchers have a seeded family default: claudex acc-2, claudemix acc-1.
 const cliproxy = { state: "healthy", reasons: [], detail: null, version: null, defaultModel: "gpt-5.6-sol", backgroundModel: "", modelOverrides: {}, providers: [], routerProviders: [], accounts: [{ id: "acc-2", provider: "codex", label: "e@x.io" }, { id: "acc-1", provider: "claude", label: "jasperclaude" }], activeSessionCount: 0, testedClaudeCliVersion: null, xai: { state: "none", email: null, expiredAt: null, lastQuotaError: null, lastLinkError: null, link: null } };
@@ -311,8 +313,8 @@ test("update_session during a turn: a call whose every field already holds its v
 });
 
 test("update_session: an options-only change keeps the head's model and merges onto the head's options", async (t) => {
-  // "haiku" is not the catalogue default: without the head's selection the model would silently become "default".
-  const h = await harness([chatSummary()], snapshot({ head: head({ modelSelection: { model: "haiku", options: [{ id: "effort", value: "low" }, { id: "thinking", value: true }] } }) })); t.after(h.close);
+  // "opus" is not the catalogue default: without the head's selection the model would silently become "default".
+  const h = await harness([chatSummary()], snapshot({ head: head({ modelSelection: { model: "opus", options: [{ id: "effort", value: "low" }, { id: "thinking", value: true }] } }) })); t.after(h.close);
   h.api.on("POST", "/api/sessions/c1/mode", { status: 200, body: { seq: 6 } });
   const r = await tool("update_session").run({ sessionId: "c1", options: { effort: "high" }, force: false }, h.ctx);
   assert.deepEqual(r.applied, ["options"]);
@@ -320,11 +322,11 @@ test("update_session: an options-only change keeps the head's model and merges o
   assert.equal(modes.length, 1);
   const { commandId, ...mode } = modes[0].body as Record<string, unknown>;
   assert.equal(typeof commandId, "string");
-  assert.deepEqual(mode, { modelSelection: { model: "haiku", options: [{ id: "effort", value: "high" }, { id: "thinking", value: true }] } });
+  assert.deepEqual(mode, { modelSelection: { model: "opus", options: [{ id: "effort", value: "high" }, { id: "thinking", value: true }] } });
 });
 
 test("update_session on a claudemix thread: the Claude catalogue applies, and an options-only change keeps the head's Claude model", async (t) => {
-  const h = await harness([chatSummary({ refId: "claudemix", accountId: "acc-1" })], snapshot({ head: head({ refId: "claudemix", accountId: "acc-1", modelSelection: { model: "haiku", options: [{ id: "thinking", value: true }] } }) })); t.after(h.close);
+  const h = await harness([chatSummary({ refId: "claudemix", accountId: "acc-1" })], snapshot({ head: head({ refId: "claudemix", accountId: "acc-1", modelSelection: { model: "opus", options: [{ id: "thinking", value: true }] } }) })); t.after(h.close);
   h.api.on("POST", "/api/sessions/c1/mode", { status: 200, body: { seq: 5 } });
   await assert.rejects(tool("update_session").run({ sessionId: "c1", model: "gpt-5.6-sol", force: false }, h.ctx), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /default, haiku/.test(e.message));
   const r = await tool("update_session").run({ sessionId: "c1", options: { effort: "high" }, force: false }, h.ctx);
@@ -333,7 +335,7 @@ test("update_session on a claudemix thread: the Claude catalogue applies, and an
   assert.equal(modes.length, 1, "one /mode, and none for the refused proxy model");
   const { commandId, ...mode } = modes[0].body as Record<string, unknown>;
   assert.equal(typeof commandId, "string");
-  assert.deepEqual(mode, { modelSelection: { model: "haiku", options: [{ id: "thinking", value: true }, { id: "effort", value: "high" }] } });
+  assert.deepEqual(mode, { modelSelection: { model: "opus", options: [{ id: "thinking", value: true }, { id: "effort", value: "high" }] } });
 });
 
 test("update_session: a rename needs no catalogue entry; a write that fails mid-way reports only what landed", async (t) => {
