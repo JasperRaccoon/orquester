@@ -75,6 +75,15 @@ export const agentChatRoutes = {
   item: (sessionId: string, itemId: string): string =>
     `${sessionBase(sessionId)}/items/${encodeURIComponent(itemId)}`,
   /**
+   * The streamed output of the tool call an item belongs to — every
+   * `tool.output` chunk of the call, joined by the host
+   * ({@link ThreadItemOutputResponse}). A 404 of its own is
+   * `ITEM_NOT_FOUND`; a host that predates the route answers the miss as its
+   * generic 404 `THREAD_NOT_FOUND` ("No route for GET …").
+   */
+  itemOutput: (sessionId: string, itemId: string): string =>
+    `${sessionBase(sessionId)}/items/${encodeURIComponent(itemId)}/output`,
+  /**
    * §6.3 attachment read-back. NOT `/api/fs/download`: that route is confined
    * to `fsRoot`, and a thread's attachments live under the appdir's
    * `daemon/agent/threads/<id>/attachments`. Carries the same `?token=`
@@ -425,7 +434,15 @@ export type AgentChatErrorCode =
    * is never an error for "no index" — it answers 200 with `indexed:false`
    * and no hits — and nothing about the live thread is affected.
    */
-  | "INDEX_UNAVAILABLE";
+  | "INDEX_UNAVAILABLE"
+  /**
+   * 404 — only `GET …/items/:itemId/output` answers it: the thread has no such
+   * item, or the item names no tool call. A code of its own because a host
+   * that predates the route answers the miss as its generic 404
+   * `THREAD_NOT_FOUND` ("No route for GET …") — the code `GET …/items/:itemId`
+   * gives a missing item — and a reader must tell the two apart.
+   */
+  | "ITEM_NOT_FOUND";
 
 export const AGENT_CHAT_ERROR_CODES = [
   "INVALID_COMMAND",
@@ -434,7 +451,8 @@ export const AGENT_CHAT_ERROR_CODES = [
   "COMMAND_REJECTED",
   "COMPACTION_UNAVAILABLE",
   "HOST_UNAVAILABLE",
-  "INDEX_UNAVAILABLE"
+  "INDEX_UNAVAILABLE",
+  "ITEM_NOT_FOUND"
 ] as const satisfies readonly AgentChatErrorCode[];
 
 /** A failed command answers this, and it is not a transport error to swallow. */
@@ -540,6 +558,44 @@ export interface TurnDiffResponse {
 /** `GET /api/sessions/:id/items/:itemId` — the full, unslimmed payload (§5.6). */
 export interface ThreadItemResponse {
   item: ThreadItem;
+}
+
+/**
+ * The most bytes of streamed output {@link ThreadItemOutputResponse} carries
+ * (UTF-8). Past it the join stops, on a character boundary, and says so with
+ * `truncated`: the answer stays a bounded read however long a command ran.
+ */
+export const THREAD_ITEM_OUTPUT_MAX_BYTES = 8 * 1024 * 1024;
+
+/**
+ * `GET /api/sessions/:id/items/:itemId/output` — the streamed output of the
+ * tool call the item belongs to.
+ *
+ * Some output exists only as `tool.output` chunks (`payload.delta`, the §5.6
+ * command-output buffer): a Claude background shell's, tailed from the file
+ * the CLI writes, and a running command's so far. No single item holds it —
+ * the GUI joins the chunks onto the call's row — and the snapshot cannot give
+ * it back whole (per-agent windows evict chunks, every string is capped on the
+ * wire, history pages are slimmed), so the host joins them from the log.
+ *
+ * 404 `ITEM_NOT_FOUND` when the thread has no such item, or the item names no
+ * tool call (no `payload.toolUseId`).
+ */
+export interface ThreadItemOutputResponse {
+  /** The call: the item's `payload.toolUseId`. */
+  toolUseId: string;
+  /**
+   * Every `tool.output` chunk of the call, joined verbatim in log order — ""
+   * when it streamed nothing.
+   */
+  output: string;
+  /** A `tool.completed` row exists for the call: its output will not grow. */
+  complete: boolean;
+  /**
+   * The join passed {@link THREAD_ITEM_OUTPUT_MAX_BYTES}: `output` is its head,
+   * cut on a character boundary.
+   */
+  truncated: boolean;
 }
 
 /** `GET /api/agent/providers` (§6.3). */

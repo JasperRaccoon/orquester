@@ -905,7 +905,7 @@ test("outputItemId names the call's completion when the read cut it — the row 
   assert.deepEqual(Object.keys(uncut), ["turn", "turnId", "kind", "createdAt", "tool"]);
 });
 
-test("outputItemId is never an update: ingestion stores it already cut, so its item holds nothing the row does not", () => {
+test("without streamed output, outputItemId is never an update: ingestion stores it already cut, so its item holds nothing the row does not", () => {
   const row = (activityKind: string, status: string, data?: unknown) => activity(activityKind, {
     itemType: "command_execution", toolUseId: "call-1", title: "pnpm test", status, ...(data === undefined ? {} : { data })
   }, { turnId: "t1", tone: "tool" });
@@ -924,7 +924,7 @@ test("outputItemId is never an update: ingestion stores it already cut, so its i
   assert.equal(toolEntry([row("tool.started", "inProgress"), stored, completed]).outputItemId, completed.id);
 });
 
-test("outputItemId is never a call's start, which the GUI does not show; a denial the read cut is offered", () => {
+test("without streamed output, outputItemId is never a call's start, which the GUI does not show; a denial the read cut is offered", () => {
   // Grok's first frame, as the normaliser writes it (fixture grok/03b): its data is cut to the allow-list on the wire.
   const started = activity("tool.started", {
     itemType: "command_execution", toolUseId: "call-1", title: "run_terminal_command", status: "inProgress", detail: "echo hi",
@@ -934,6 +934,55 @@ test("outputItemId is never a call's start, which the GUI does not show; a denia
   assert.equal("outputItemId" in toolEntry([started]), false, "a call that has only started offers nothing");
   const denied = activity("tool.denied", { itemType: "command_execution", toolUseId: "call-1", title: "rm -rf build", data: { reason: "x".repeat(20_000) } }, { turnId: "t1", tone: "tool" });
   assert.equal(toolEntry([started, denied]).outputItemId, denied.id);
+});
+
+test("a call that streamed output offers its latest row as outputItemId, where no completion was cut", () => {
+  const row = (activityKind: string, status: string, data?: unknown) => activity(activityKind, {
+    itemType: "command_execution", toolUseId: "call-1", title: "pnpm test", status, ...(data === undefined ? {} : { data })
+  }, { turnId: "t1", tone: "tool" });
+  const chunk = (delta: string) => activity("tool.output", { toolUseId: "call-1", streamKind: "command_output", delta }, { turnId: "t1", tone: "tool" });
+  const started = row("tool.started", "inProgress", { item: { type: "commandExecution", command: "pnpm test", aggregatedOutput: null } });
+  // A running call's output so far exists only as chunks: its latest row — the start, then the latest update — is offered.
+  assert.equal(toolEntry([started, chunk("test 0 passed\n")]).outputItemId, started.id);
+  const update = row("tool.updated", "inProgress", { item: { command: "pnpm test", aggregatedOutput: "test 0 passed\n" } });
+  assert.equal(toolEntry([started, chunk("test 0 passed\n"), update, chunk("test 1 passed\n")]).outputItemId, update.id);
+  // A completion the read did not cut is the latest row too.
+  const done = row("tool.completed", "completed");
+  assert.equal(toolEntry([started, chunk("test 0 passed\n"), done]).outputItemId, done.id);
+  // One the read cut is offered by the first rule, streamed or not; a call that streamed nothing offers nothing new.
+  const cut = row("tool.completed", "completed", { item: { command: "pnpm test", aggregatedOutput: "a\nb\n" } });
+  assert.equal(toolEntry([started, chunk("a\n"), cut]).outputItemId, cut.id);
+  assert.equal("outputItemId" in toolEntry([started, update]), false);
+  // Another call's chunks are not this call's output.
+  const other = activity("tool.output", { toolUseId: "call-2", streamKind: "command_output", delta: "x" }, { turnId: "t1", tone: "tool" });
+  assert.equal("outputItemId" in toolEntry([started, other]), false);
+  // The chunk rows themselves never become entries.
+  const read = transcriptEntries(snapshot({ items: [started, chunk("a\n"), chunk("b\n")] }), { turns: 5, include: ALL, maxChars: 100_000 });
+  assert.deepEqual(read.entries.map((e) => e.kind), ["tool"]);
+});
+
+test("a background shell's row, in its own drill-in, offers outputItemId — its chunks count wherever its turn range ends", () => {
+  // The shell's rows as the Claude normaliser writes them: its own item, stamped with the task as the agent. It outlives
+  // the turn that launched it, so its chunks carry whichever turn is live when they arrive.
+  const shell = (activityKind: string, payload: Record<string, unknown>, turnId: string, createdAt: string) =>
+    activity(activityKind, { toolUseId: "bgshell:task-1", ...payload }, { turnId, agentId: "task-1", tone: "tool", createdAt, updatedAt: createdAt });
+  const data = { toolName: "Bash", input: { command: "make" }, background: true };
+  const started = shell("tool.started", { itemType: "command_execution", title: "Background shell", status: "inProgress", data }, "t1", stamp(2));
+  const early = shell("tool.output", { streamKind: "command_output", delta: "building\n" }, "t2", stamp(5));
+  const turns = [turn({ turnId: "t1", requestedAt: stamp(1) }), turn({ turnId: "t2", turnCount: 2, requestedAt: stamp(4) })];
+  const running = snapshot({ turns, items: [message("user", "build it", { turnId: "t1", id: "u1", createdAt: stamp(1) }), started, message("user", "meanwhile…", { turnId: "t2", id: "u2", createdAt: stamp(4) }), early] });
+  // Turn 1 alone holds the shell's start; its only chunk arrived in turn 2 — the call still has streamed output.
+  const drill = transcriptEntries(running, { turns: 1, beforeTurn: 2, agentId: "task-1", include: ALL, maxChars: 100_000 });
+  const entry = drill.entries.find((e) => e.kind === "tool")!;
+  assert.deepEqual([entry.tool!.status, entry.outputItemId], ["inProgress", started.id]);
+  // The parent view leaves the shell's rows out, as the GUI's timeline does.
+  assert.equal(transcriptEntries(running, { turns: 5, include: ALL, maxChars: 100_000 }).entries.some((e) => e.kind === "tool"), false);
+  // Settled: the completion — cut on the wire, though its data holds no output — is the id.
+  const completed = shell("tool.completed", { itemType: "command_execution", title: "Background shell", status: "completed", data: { ...data, exitCode: 0 } }, "t2", stamp(6));
+  const settled = { ...running, items: [...running.items, completed].map((item) => (item.kind === "activity" ? { ...item, payload: slimActivityPayload(item.payload) } : item)) };
+  assert.equal((settled.items.at(-1) as { payload: { truncated?: unknown } }).payload.truncated, true);
+  const done = transcriptEntries(settled, { turns: 5, agentId: "task-1", include: ALL, maxChars: 100_000 }).entries.find((e) => e.kind === "tool")!;
+  assert.deepEqual([done.tool!.status, done.outputItemId], ["completed", completed.id]);
 });
 
 test("hooks: a failed completion is an error row, a cancelled one a warning row; starts, progress and successes are no row", () => {

@@ -31,6 +31,7 @@ import {
   type AgentProvidersResponse,
   type RefreshProviderResponse,
   type ThreadHistoryPage,
+  type ThreadItemOutputResponse,
   type ThreadItemResponse,
   type ThreadSearchResponse,
   type TurnDiffResponse
@@ -609,6 +610,27 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
         return;
       }
       const body: ThreadItemResponse = { item };
+      sendJson(response, 200, body);
+      return;
+    }
+
+    // The streamed output of the tool call the item belongs to, joined from
+    // the log. Its 404 is `ITEM_NOT_FOUND`, never `THREAD_NOT_FOUND`: that is
+    // what a host predating this route answers for it (the route miss below),
+    // and a reader must tell "no such item" from "no such route".
+    const itemOutputMatch = /^\/items\/([^/]+)\/output$/.exec(rest);
+    if (itemOutputMatch && method === "GET") {
+      const itemId = decodeURIComponent(itemOutputMatch[1]!);
+      const body: ThreadItemOutputResponse | null = await orchestrator.readToolOutput(threadId, itemId);
+      if (!body) {
+        sendJson(response, 404, {
+          error: {
+            code: "ITEM_NOT_FOUND",
+            message: `No tool call behind item '${itemId}': no such item, or it is not a tool call.`
+          }
+        });
+        return;
+      }
       sendJson(response, 200, body);
       return;
     }

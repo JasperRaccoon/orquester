@@ -23,7 +23,7 @@
  * rows (`apps/daemon/src/mcp/transcript.ts`) — so a change here changes what
  * both show. {@link commandOutputText} reads the WHOLE output out of the
  * unslimmed item (the MCP's `read_tool_output`, `apps/daemon/src/mcp/tools/
- * output.ts`), from the one list of places the preview reads.
+ * output.ts`), from the one list of places the preview reads, in its order.
  *
  * *T3: `packages/client-runtime/src/work-log/presentation.ts` reads the same
  * output locations (audit:
@@ -53,8 +53,12 @@ const asTrimmedString = (value: unknown): string | undefined => {
  * then a `result` that is the text itself.
  *
  * The ONE list: the row's preview and the whole output both read the first
- * place that holds a non-blank piece ({@link outputPieces}), so the whole
- * output is always the text the preview was cut from.
+ * place that holds a non-blank piece ({@link outputPieces}), in this order. The
+ * whole output is that first place in the UNSLIMMED item; the preview reads the
+ * slimmed payload, whose allow-list rebuild may leave a different place first
+ * (Grok's: the unslimmed item's `rawOutput.output_for_prompt`, where the wire
+ * keeps only the ACP blocks' summary, as `rawOutput.content`) — so the whole
+ * output is usually, not always, the text the preview was cut from.
  */
 function outputPlaces(data: Record<string, unknown> | null): readonly (readonly unknown[])[] {
   const item = asRecord(data?.item);
@@ -101,15 +105,17 @@ function commandOutputPreview(data: Record<string, unknown> | null): string | un
 }
 
 /**
- * The WHOLE output a command's provider data carries — the text the row's
- * preview is cut from, from the same place, as the provider wrote it: nothing
- * trimmed, inside or at the ends. A place of several pieces (`stdout` then
- * `stderr`; ACP content blocks) starts each piece on a line of its own: a
- * newline goes between two pieces only where the first does not already end
- * with one. `undefined` when the data carries no output.
+ * The WHOLE output a command's provider data carries — the first place, in the
+ * preview's reading order, that holds output ({@link outputPlaces}), as the
+ * provider wrote it: nothing trimmed, inside or at the ends. A place of several
+ * pieces (`stdout` then `stderr`; ACP content blocks) starts each piece on a
+ * line of its own: a newline goes between two pieces only where the first does
+ * not already end with one. `undefined` when the data carries no output.
  *
  * Read it from the UNSLIMMED item (`GET …/items/:itemId`, §5.6): on the wire
- * the output is already cut to its preview.
+ * the output is already cut to its preview. Output the provider only streamed
+ * is in no item's data at all (a Claude background shell's; a running
+ * command's so far): `GET …/items/:itemId/output` joins its chunks instead.
  */
 export function commandOutputText(data: unknown): string | undefined {
   return outputPieces(data)?.reduce((text, piece) => `${text}${text.endsWith("\n") ? "" : "\n"}${piece}`);

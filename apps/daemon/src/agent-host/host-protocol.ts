@@ -116,6 +116,14 @@ export const agentHostRoutes = {
     `${thread(threadId)}/turns/${turnCount}/diff`,
   item: (threadId: string, itemId: string): string =>
     `${thread(threadId)}/items/${encodeURIComponent(itemId)}`,
+  /**
+   * `GET` → `ThreadItemOutputResponse`: the streamed output of the tool call
+   * the item belongs to, joined from the log; 404 `ITEM_NOT_FOUND` when the
+   * item names no call. A host that predates the route answers its generic
+   * route-miss 404 `THREAD_NOT_FOUND` until its drain-restart.
+   */
+  itemOutput: (threadId: string, itemId: string): string =>
+    `${thread(threadId)}/items/${encodeURIComponent(itemId)}/output`,
 
   providers: "/providers",
   providerRefresh: (adapterId: string): string =>

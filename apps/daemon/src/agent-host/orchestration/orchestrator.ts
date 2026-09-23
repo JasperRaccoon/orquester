@@ -63,6 +63,7 @@ import {
   type ThreadHistoryPage,
   type ThreadHistoryTurn,
   type ThreadItem,
+  type ThreadItemOutputResponse,
   type ThreadReadResponse,
   type ThreadSearchResponse,
   type ThreadSessionState,
@@ -115,6 +116,7 @@ import {
 import type { IndexedItemPosition, IndexedTurn, ThreadIndex } from "../index/index.ts";
 import { slimActivityEvent } from "../ingestion/coalesce.ts";
 import { bindingResumeCursor } from "../store/binding.ts";
+import { joinToolOutput } from "../store/tool-output.ts";
 import { projectSnapshotActivities } from "../ingestion/index.ts";
 import { AGENT_HOST_DEADLINES, withDeadline } from "../support/deadline.ts";
 import { attachedFileLine } from "../adapters/attachment-lines.ts";
@@ -187,12 +189,6 @@ export interface ResolvedLaunch {
   home: AccountHome;
 }
 
-/**
- * The store plus the two optional members W2's implementation adds beyond the
- * `ThreadStore` seam: the parse message for a thread that could not be read,
- * and the backwards log scan that serves a `GET …/items/:id` for a row the
- * fold's retention window already dropped.
- */
 /** The snapshot registry, plus the change flag `agent.providers.changed` needs. */
 export type HostProviderSnapshotRegistry = ProviderSnapshotRegistry & {
   /** §7.7: an `auth.status {error}` from a turn must reach the snapshot. */
@@ -205,9 +201,19 @@ export type HostProviderSnapshotRegistry = ProviderSnapshotRegistry & {
   ): Promise<{ snapshot: ProviderSnapshot; changed: boolean }>;
 };
 
+/**
+ * The store plus the three optional members W2's implementation adds beyond the
+ * `ThreadStore` seam: the parse message for a thread that could not be read,
+ * the backwards log scan that serves a `GET …/items/:id` for a row the fold's
+ * retention window already dropped, and the join of a tool call's streamed
+ * output that serves `GET …/items/:id/output`. Without the last two the
+ * orchestrator reads `readAll` itself.
+ */
 export type HostThreadStore = ThreadStore & {
   threadError?(threadId: string): string | null;
   readItem?(threadId: string, itemId: string): Promise<ThreadItem | null>;
+  /** One `readLog` joining a call's `tool.output` chunks (`store/tool-output.ts`). */
+  readToolOutput?(threadId: string, itemId: string): Promise<ThreadItemOutputResponse | null>;
 };
 
 export interface OrchestratorOptions {
@@ -472,6 +478,11 @@ export interface Orchestrator {
   /** Full-text search over every indexed thread; `indexed: false` without an index. */
   searchThreads(query: { q: string; limit: number; projectPath?: string }): ThreadSearchResponse;
   readItem(threadId: string, itemId: string): Promise<ThreadItem | null>;
+  /**
+   * `GET …/items/:itemId/output`: the streamed output of the tool call the item
+   * belongs to, joined from the log; null when the item names no call.
+   */
+  readToolOutput(threadId: string, itemId: string): Promise<ThreadItemOutputResponse | null>;
   readTurnDiff(
     threadId: string,
     turnCount: number,
@@ -3540,6 +3551,21 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       return null;
     });
 
+  const readToolOutput = async (
+    threadId: string,
+    itemId: string
+  ): Promise<ThreadItemOutputResponse | null> =>
+    whenReady(async () => {
+      const runtime = await loadRuntime(threadId);
+      requireHead(runtime);
+      // The LOG, as for `readItem`: a call's streamed chunks are the rows the
+      // per-agent windows evict first, and the wire caps each one (§5.6).
+      if (store.readToolOutput) {
+        return store.readToolOutput(threadId, itemId);
+      }
+      return joinToolOutput((await store.readAll(threadId)).events, itemId);
+    });
+
   const readTurnDiff = async (
     threadId: string,
     turnCount: number,
@@ -4382,6 +4408,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     readHistory,
     searchThreads,
     readItem,
+    readToolOutput,
     readTurnDiff,
     summary,
     subscribe,

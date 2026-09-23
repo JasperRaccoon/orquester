@@ -24,7 +24,11 @@ const STATUS_BY_CODE: Readonly<Record<AgentChatErrorCode, number>> = {
   // answers it (`GET /search` answers 200 `indexed:false` instead), and
   // nothing about the live thread is affected. Not a recorded rejection — it
   // is a read, and it clears itself.
-  INDEX_UNAVAILABLE: 503
+  INDEX_UNAVAILABLE: 503,
+  // `GET …/items/:itemId/output` alone: no such item, or it names no tool
+  // call. Its own code, so a route miss on an older host (a generic 404
+  // `THREAD_NOT_FOUND`) can be told apart. A read, never recorded.
+  ITEM_NOT_FOUND: 404
 };
 
 /**

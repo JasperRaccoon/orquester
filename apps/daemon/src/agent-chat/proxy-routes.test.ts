@@ -228,6 +228,7 @@ test("a down host is 503 HOST_UNAVAILABLE on commands, reads and the stream", as
     ["GET", agentChatRoutes.thread("t1")],
     ["GET", agentChatRoutes.events("t1")],
     ["GET", agentChatRoutes.item("t1", "i1")],
+    ["GET", agentChatRoutes.itemOutput("t1", "i1")],
     ["GET", agentChatRoutes.turnDiff("t1", 2)],
     ["GET", agentChatRoutes.history("t1")],
     ["GET", agentChatRoutes.providers],
@@ -265,6 +266,42 @@ test("a non-JSON body from the host is a 502, never leaked raw", async () => {
   });
   assert.equal(response.statusCode, 502);
   assert.equal(response.json().error.code, "HOST_UNAVAILABLE");
+  await h.close();
+});
+
+test("a tool call's streamed output is proxied verbatim — the host's own 404 and an older host's route miss alike", async () => {
+  const h = await makeHarness({ t1: tab("t1") });
+  const joined = { toolUseId: "bgshell:task-1", output: "one\n  two\n", complete: false, truncated: false };
+  h.host.handler = (req, res) => {
+    if (req.url?.includes("/items/gone/")) {
+      res.writeHead(404, { "content-type": "application/json" }).end(JSON.stringify({ error: { code: "ITEM_NOT_FOUND", message: "No tool call behind item 'gone'." } }));
+    } else if (req.url?.includes("/items/old/")) {
+      // A host that predates the route: its generic route miss, which the daemon does not interpret.
+      res.writeHead(404, { "content-type": "application/json" }).end(JSON.stringify({ error: { code: "THREAD_NOT_FOUND", message: `No route for GET ${req.url}.` } }));
+    } else {
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(joined));
+    }
+  };
+  const served = await h.app.inject({ method: "GET", url: agentChatRoutes.itemOutput("t1", "bgshell:task-1") });
+  assert.equal(served.statusCode, 200);
+  assert.deepEqual(served.json(), joined);
+  // The id stays one encoded segment on the host's route too.
+  assert.equal(h.host.requests[0].url, "/threads/t1/items/bgshell%3Atask-1/output");
+  assert.equal(h.host.requests[0].method, "GET");
+  assert.equal(h.host.requests[0].auth, "Bearer tok");
+
+  const gone = await h.app.inject({ method: "GET", url: agentChatRoutes.itemOutput("t1", "gone") });
+  assert.equal(gone.statusCode, 404);
+  assert.deepEqual(gone.json(), { error: { code: "ITEM_NOT_FOUND", message: "No tool call behind item 'gone'." } });
+  const old = await h.app.inject({ method: "GET", url: agentChatRoutes.itemOutput("t1", "old") });
+  assert.equal(old.statusCode, 404);
+  assert.deepEqual(old.json(), { error: { code: "THREAD_NOT_FOUND", message: "No route for GET /threads/t1/items/old/output." } });
+
+  // An unknown tab never reaches the host.
+  const ghost = await h.app.inject({ method: "GET", url: agentChatRoutes.itemOutput("ghost", "i1") });
+  assert.equal(ghost.statusCode, 404);
+  assert.equal(ghost.json().error.code, "THREAD_NOT_FOUND");
+  assert.equal(h.host.requests.length, 3);
   await h.close();
 });
 
@@ -461,7 +498,8 @@ test("a daemon-side refusal answers the §6.2 status of its code, INDEX_UNAVAILA
     COMMAND_REJECTED: 409,
     COMPACTION_UNAVAILABLE: 409,
     HOST_UNAVAILABLE: 503,
-    INDEX_UNAVAILABLE: 503
+    INDEX_UNAVAILABLE: 503,
+    ITEM_NOT_FOUND: 404
   };
   for (const code of AGENT_CHAT_ERROR_CODES) {
     const response = await h.app.inject({

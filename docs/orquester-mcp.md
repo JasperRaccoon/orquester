@@ -700,14 +700,22 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
     call that has only started, or that finished printing nothing, has no `detail`; and a later
     echo never clears the output an earlier update gave. `tool.command` is the command the call
     runs, from its payload or its data. Other tools keep the provider's detail as it came.
-  - A tool row whose data the snapshot cut carries `outputItemId`: the id of the call's
-    completion (or denial) when its payload was cut on its way to you — the row the GUI offers
-    **Load full output** on. `read_tool_output` reads that item whole: for a command, its whole
-    output. Never the call's start (the GUI does not show it) nor an update: a running call's
-    updates are stored already cut, so there is nothing more to read until the call completes —
-    read the transcript again then. The snapshot keeps only an allow-list of each call's provider
-    data, so most finished calls that carry any have one; a row without it has nothing more to
-    read.
+  - A tool row carries `outputItemId` where more of the call's output can be read, and
+    `read_tool_output` reads it (§6, Tool output):
+    - the call's completion (or denial) when its payload was cut on its way to you — the row the
+      GUI offers **Load full output** on; for a command, its whole output. Never the call's start
+      (the GUI does not show it) nor an update: a running call's updates are stored already cut,
+      so one read back holds only its preview;
+    - else, for a call that **streamed** its output, the call's latest row — its start, its latest
+      update, or a completion nothing cut. Streamed output is in no row's data: it arrives in
+      chunks, which are never rows here and which only the agent host can join whole — a Claude
+      background shell's output (tailed from the file the CLI writes it to: at most 1 MiB, then
+      one notice naming that file), and a command's output while it runs, where the agent streams
+      it (Codex does). A background shell is listed in `subagents` and its rows are in its own
+      drill-in (`read_transcript` with its `agentId`), as in the GUI.
+
+    The snapshot keeps only an allow-list of each call's provider data, so most finished calls
+    that carry any have an id. A row without one has nothing more the snapshot knows of.
   - A hook that failed is an `error` row ("Hook failed") and one cancelled a `warning` row ("Hook
     cancelled"); a hook's start, its progress and a successful run are not rows.
   - An `assistant` row with `commentary: true` is narration between tool calls (Codex's
@@ -726,7 +734,8 @@ TranscriptEntry = { turn: number | null, turnId: string | null, kind, createdAt,
   "tool"         tool: { type, title, status, command?, detail?, changedFiles? }, outputItemId?
                                                   (include "tools"; one entry per tool call, its latest state;
                                                    a command's detail as the GUI's row shows it; outputItemId
-                                                   where the snapshot cut its data: read_tool_output reads it)
+                                                   where the snapshot cut its data or the call streamed its
+                                                   output: read_tool_output reads it)
   "approval"     requestId, requestKind?, text? /* the request's detail, ≤ 2 000 characters */, decision?
                                                   (include "activity"; open or resolved)
   "question"     requestId, questions?: [text], answered                    (include "activity")
@@ -742,23 +751,46 @@ TranscriptEntry = { turn: number | null, turnId: string | null, kind, createdAt,
 
 | Tool | Input | Returns | GUI equivalent |
 |---|---|---|---|
-| `read_tool_output` | `sessionId`, `itemId` (a tool row's `outputItemId`), `offset? = 0` (UTF-8 bytes), `maxBytes? = 40000` (1–55 000) | `{itemId, kind: "command-output" \| "message" \| "payload", text, offset, totalBytes, nextOffset?}` | A tool row's **Load full output** |
+| `read_tool_output` | `sessionId`, `itemId` (a tool row's `outputItemId`), `offset? = 0` (UTF-8 bytes), `maxBytes? = 40000` (1–55 000) | `{itemId, kind: "command-output" \| "message" \| "payload", text, offset, totalBytes, nextOffset?, running?, truncated?}` | A tool row's **Load full output** |
 
 - **`read_tool_output`** — the whole of what `read_transcript` shows cut. Its rows come from the
   thread snapshot, which keeps only part of each tool call's provider data: a command's output
-  reaches `tool.detail` as its first line, at most 84 characters. A row whose data was cut carries
-  `outputItemId`, and this tool reads that item whole (`GET /api/sessions/:id/items/:itemId`, the
-  read the GUI's **Load full output** makes). `kind` says what `text` is:
-  - `command-output` — a command whose data carries output: that output whole, as the command
-    printed it (nothing trimmed), from the place the row's preview was cut from — Codex's
-    aggregated output, the item's result, `rawOutput` (its text, `content`, `stdout` then `stderr`,
-    `output`, `output_for_prompt`), ACP content blocks, a `result`. Where the output comes in
-    pieces (`stdout` and `stderr`; several content blocks), each piece starts a line of its own.
+  reaches `tool.detail` as its first line, at most 84 characters. A row whose data was cut, or
+  whose call streamed its output, carries `outputItemId`, and this tool reads that item whole
+  (`GET /api/sessions/:id/items/:itemId`, the read the GUI's **Load full output** makes) — and,
+  where the item holds no output of its own, the call's streamed output. `kind` says what `text`
+  is:
+  - `command-output` — a command's output, found in this order:
+    1. **The item's own data**, when it carries output: that output whole, as the command printed
+       it (nothing trimmed), from the first place — in the order the row's preview reads them —
+       that holds output in the item as the host stores it: Codex's aggregated output, the item's
+       result, `rawOutput` (its text, `content`, `stdout` then `stderr`, `output`,
+       `output_for_prompt`), ACP content blocks, a `result`. Where the output comes in pieces
+       (`stdout` and `stderr`; several content blocks), each piece starts a line of its own. That
+       is usually, not always, the text the preview was cut from: the snapshot's cut can leave a
+       different place first (Grok's preview is its content blocks' first line, its whole output
+       `output_for_prompt`). A running call's update is stored already cut, so its own data is
+       never read as its output.
+    2. **The call's streamed output**, when the call streamed any: output that is in no item's
+       data at all — a Claude background shell's, a command's output while it runs — joined by the
+       agent host from the chunks it arrived in, in order
+       (`GET /api/sessions/:id/items/:itemId/output`). `running: true` says the call has not
+       completed, so `text` is its output so far: read again later for the rest. It only ever
+       grows at its end, so an `offset` stays valid from one page to the next while `totalBytes`
+       grows. `truncated: true` says the join passed the host's cap, 8 MiB, and `text` is its
+       head. (A background shell's output is already capped when it is read from the CLI's file:
+       1 MiB, then one notice naming the file.)
   - `message` — a message's text.
   - `payload` — anything else, as the GUI's viewer shows it: a string payload as it is, else the
     payload as indented JSON (`JSON.stringify(payload, null, 2)`), else the row's summary. A
-    command whose data keeps its output elsewhere (a Claude tool result given as a list of blocks,
-    for one) comes back this way too.
+    command comes back this way too when neither step finds output: its data keeps it elsewhere
+    and nothing was streamed. (A live Claude call streams its result's text, so even a result
+    given as a list of blocks is read by step 2.)
+
+  Right after a deploy, the agent host may still be the one from before it (it is replaced once no
+  turn and no background work is running), and it cannot join streamed output: the item answers
+  as above without step 2 — usually its payload — and never an error. Read again once the host has
+  been replaced.
 
   It pages by byte offset, as `read_file` does. `totalBytes` is the text's size in UTF-8 bytes, and
   `nextOffset` is present while more remains: read again with `offset` set to it, never
@@ -770,8 +802,9 @@ TranscriptEntry = { turn: number | null, turnId: string | null, kind, createdAt,
   result's `offset` says where the text begins. An `offset` at `totalBytes` reads nothing; one past
   it is refused with `INVALID_ARGUMENT` naming `totalBytes`. An item the host does not have is
   `NOT_FOUND`: `No item "<id>" in this session: it is gone, or it never existed. Item ids come from
-  read_transcript — a tool row's outputItemId.` Every call reads the item afresh (the host reads it
-  back from the thread's log), so page with large windows rather than many small ones.
+  read_transcript — a tool row's outputItemId.` Every call reads the item afresh, and a streamed
+  output's chunks too (the host reads both back from the thread's log), so page with large windows
+  rather than many small ones.
 
 ```jsonc
 // The transcript shows a test run's first line — and where the whole of it is.
@@ -794,6 +827,22 @@ read_tool_output { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "itemId"
                    "offset": 39998 }
 → { "itemId": "5b9c0d7e-2f41-4a8b-9c3d-6e1f2a4b8c90", "kind": "command-output", "text": "…",
     "offset": 39998, "totalBytes": 91342, "nextOffset": 79991 }
+
+// A background shell is listed in subagents; its command row is in its own drill-in.
+read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "agentId": "b7k2m9x1q" }
+→ { "entries": [
+      { "turn": 4, "turnId": "1e7c9a3b-…", "kind": "tool", "createdAt": "2026-09-23T11:20:02.910Z",
+        "agentId": "b7k2m9x1q",
+        "tool": { "type": "command_execution", "title": "Background shell", "status": "inProgress",
+                  "detail": "pnpm --filter @orquester/web dev" },
+        "outputItemId": "c2f81d5e-4a09-4b7e-8d13-5f6a2b9e0c47" } ],
+    "turnCount": 4, "olderTurns": 1, "coveredTurns": [ 4, 4 ], "truncated": false, "subagents": [] }
+
+// Its output so far, joined by the host from the chunks the shell streamed.
+read_tool_output { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "itemId": "c2f81d5e-4a09-4b7e-8d13-5f6a2b9e0c47" }
+→ { "itemId": "c2f81d5e-4a09-4b7e-8d13-5f6a2b9e0c47", "kind": "command-output",
+    "text": "\n> @orquester/web@0.0.0 dev\n> vite\n\n  VITE v6.3.5  ready in 412 ms\n…", "offset": 0,
+    "totalBytes": 1893, "running": true }
 ```
 
 ### Requests
@@ -1259,6 +1308,7 @@ still not for polling loops.
 | JSON-RPC error `-32602` (`Tool … not found`) | No tool has that name: a typo, or a client still holding an old tool list (see the stale-guidance row below). |
 | `NOT_FOUND` (`No todo list with id …`) | The list was deleted, or the id is mistyped — `list_todos` shows the ids. |
 | `NOT_FOUND` (`No item … in this session`) | `read_tool_output` was given an id the session's host does not have: take a tool row's `outputItemId` from `read_transcript` for the same `sessionId`. |
+| `read_tool_output` answers `kind: "payload"` for a background shell or a running command | The agent host is still the one from before a deploy, which cannot join streamed output: it is replaced once no turn and no background work is running. Read again then. |
 | `HOST_UNAVAILABLE` | The agent host is restarting (for example after a deploy). A command has already been retried three times — try again shortly. |
 | `search_sessions` answers `indexed: false` | The agent host has no usable thread index right now: its SQLite driver did not load or the index file could not be opened (the host's log says which), or the host is stopping or being replaced (a deploy). Try again later; `read_transcript` still reads each session. |
 | `send_message` ends in `timeout` and `read_transcript` shows "Attachment rejected" | The host refused an attachment when starting the turn, so the turn never started. Check the file against §9. |

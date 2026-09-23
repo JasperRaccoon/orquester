@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { agentChatRoutes, commandOutputText, type ThreadItem, type ThreadItemResponse } from "@orquester/api/agent-chat";
+import { agentChatRoutes, commandOutputText, type ThreadItem, type ThreadItemOutputResponse, type ThreadItemResponse } from "@orquester/api/agent-chat";
+import type { DaemonApi } from "../daemon-api.ts";
 import { daemonError, ToolError } from "../errors.ts";
 import { requireChatSession } from "../reads.ts";
 import { clipText, MAX_ECHO_CHARS, MAX_RESULT_BYTES, resultBytes, utf8SequenceLength } from "../result.ts";
@@ -13,6 +14,13 @@ export const MAX_OUTPUT_BYTES = 55_000;
 /** What the text is: a command's output, a message's text, or the item's payload. */
 type ToolOutputKind = "command-output" | "message" | "payload";
 
+/**
+ * The text an item answers, and — for a call's streamed output — the two things the host's join says about it: the
+ * call has not completed (`running`: the text is its output so far), and the join passed the host's cap
+ * (`truncated`: the text is its head, `THREAD_ITEM_OUTPUT_MAX_BYTES`).
+ */
+interface ItemOutput { kind: ToolOutputKind; text: string; running?: true; truncated?: true }
+
 const asRecord = (value: unknown): Record<string, unknown> | undefined =>
   typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
 
@@ -23,18 +31,48 @@ function isThreadItem(value: unknown): value is ThreadItem {
 }
 
 /**
- * An item's whole text, as the GUI's "Load full output" viewer reads it (`fullOutputText`, AgentChatView.tsx) — except a
- * command's output, which an agent reads as text rather than as escaped JSON: a `command_execution` activity whose data
- * carries output answers that output whole (`commandOutputText`, from the places the row's preview reads). Any other
- * item: a message's text, a string payload as it is, else the payload as indented JSON, else — no payload to write —
- * the row's summary.
+ * The streamed output of the call `itemId` belongs to, as the host joins it from the log
+ * (`GET /api/sessions/:id/items/:itemId/output`), or null when there is none to read. A 404 is never an error: it is the
+ * host's own `ITEM_NOT_FOUND`, or — until its drain-restart after a deploy — a host that predates the route answering
+ * its generic route miss (`THREAD_NOT_FOUND` "No route for GET …"), and the item's own text answers instead. Any other
+ * failure keeps its code (`daemonError`).
  */
-function itemOutput(item: ThreadItem): { kind: ToolOutputKind; text: string } {
+async function streamedOutput(api: DaemonApi, sessionId: string, itemId: string): Promise<ThreadItemOutputResponse | null> {
+  const res = await api.request("GET", agentChatRoutes.itemOutput(sessionId, itemId));
+  if (res.status === 404) return null;
+  if (res.status >= 400) throw daemonError(res);
+  const body = asRecord(res.body);
+  if (typeof body?.output !== "string" || typeof body.complete !== "boolean" || typeof body.truncated !== "boolean") {
+    throw new ToolError("INTERNAL", "Expected a tool call's streamed output.");
+  }
+  return body as unknown as ThreadItemOutputResponse;
+}
+
+/**
+ * An item's whole text, as the GUI's "Load full output" viewer reads it (`fullOutputText`, AgentChatView.tsx) — except a
+ * command's output, which an agent reads as text rather than as escaped JSON. In this order:
+ *
+ * 1. a `command_execution` activity whose own data carries output answers it whole (`commandOutputText`: the first place,
+ *    in the preview's reading order, that holds output in the unslimmed item) — unless the item is stored slimmed
+ *    (`payload.truncated`: an update, persisted already cut, §5.6), whose data holds only the preview;
+ * 2. else a tool row (`tool.*`) naming its call (`payload.toolUseId`) answers the call's streamed output, which is in
+ *    no item's data at all — a Claude background shell's, a running command's so far — joined by the host, when the
+ *    call streamed any;
+ * 3. else a message's text, a string payload as it is, else the payload as indented JSON, else — no payload to write —
+ *    the row's summary.
+ */
+async function itemOutput(api: DaemonApi, sessionId: string, item: ThreadItem): Promise<ItemOutput> {
   if (item.kind === "message") return { kind: "message", text: item.text };
   const payload = asRecord(item.payload);
-  if (payload?.itemType === "command_execution") {
+  if (payload?.itemType === "command_execution" && payload.truncated !== true) {
     const output = commandOutputText(payload.data);
     if (output !== undefined) return { kind: "command-output", text: output };
+  }
+  if (item.activityKind.startsWith("tool.") && typeof payload?.toolUseId === "string" && payload.toolUseId !== "") {
+    const streamed = await streamedOutput(api, sessionId, item.id);
+    if (streamed !== null && streamed.output !== "") {
+      return { kind: "command-output", text: streamed.output, ...(streamed.complete ? {} : { running: true as const }), ...(streamed.truncated ? { truncated: true as const } : {}) };
+    }
   }
   if (typeof item.payload === "string") return { kind: "payload", text: item.payload };
   let json: string | undefined;
@@ -84,7 +122,7 @@ function windowEnd(bytes: Uint8Array, start: number, maxBytes: number, room: num
 const readToolOutput = defineTool({
   name: "read_tool_output",
   title: "Read a tool's full output",
-  description: "The whole output of a tool call, as the GUI's \"Load full output\" reads it: pass a tool row's outputItemId from read_transcript as itemId. kind says what text is: command-output (a command's output, whole), message (a message's text) or payload (the item's payload as JSON). Read in UTF-8 byte windows: while nextOffset is present, call again with offset = nextOffset.",
+  description: "The whole output of a tool call, as the GUI's \"Load full output\" reads it: pass a tool row's outputItemId from read_transcript as itemId. kind says what text is: command-output (a command's output — so far, if running is true), message (a message's text) or payload (the item's payload as JSON). Read in UTF-8 byte windows: while nextOffset is present, call again with offset = nextOffset.",
   input: {
     sessionId: z.string().min(1).describe("The session id from list_sessions."),
     itemId: z.string().min(1).describe("The item to read: a tool row's outputItemId from read_transcript."),
@@ -102,7 +140,7 @@ const readToolOutput = defineTool({
     if (res.status >= 400) throw daemonError(res);
     const item = (res.body as Partial<ThreadItemResponse> | null)?.item;
     if (!isThreadItem(item)) throw new ToolError("INTERNAL", "Expected a thread item.");
-    const { kind, text } = itemOutput(item);
+    const { kind, text, ...flags } = await itemOutput(api, args.sessionId, item);
     // The text's UTF-8, which every offset counts in (a lone surrogate, which UTF-8 cannot hold, reads as U+FFFD).
     const bytes = Buffer.from(text, "utf8");
     const totalBytes = bytes.length;
@@ -111,9 +149,9 @@ const readToolOutput = defineTool({
     }
     const start = characterStart(bytes, args.offset);
     // The text's room: the cap less the answer around it, with nextOffset at its widest (it never passes totalBytes).
-    const frame = resultBytes({ itemId: args.itemId, kind, text: "", offset: start, totalBytes, nextOffset: totalBytes });
+    const frame = resultBytes({ itemId: args.itemId, kind, text: "", offset: start, totalBytes, nextOffset: totalBytes, ...flags });
     const end = windowEnd(bytes, start, args.maxBytes, MAX_RESULT_BYTES - frame);
-    return { itemId: args.itemId, kind, text: bytes.toString("utf8", start, end), offset: start, totalBytes, ...(end < totalBytes ? { nextOffset: end } : {}) };
+    return { itemId: args.itemId, kind, text: bytes.toString("utf8", start, end), offset: start, totalBytes, ...(end < totalBytes ? { nextOffset: end } : {}), ...flags };
   }
 });
 

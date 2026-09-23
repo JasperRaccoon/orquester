@@ -2854,6 +2854,24 @@ older host that has no `/search` route yet during a rollout
 
 *T3: `apps/server/src/orchestration/threadDetailCursor.ts:3-19` + `:33-36` — the content-derived `(anchor, turnId)` cursor, and "a malformed or foreign-thread cursor degrades to a first-page request"; `apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:1673-1685` + `:3650-3690` — the keyset walk back by user turns under a raw-turn ceiling, and the `hasMore` probe; `packages/client-runtime/src/state/threads.ts:43-50` — 10 user turns on first paint, 20 per older page; differs: a page here is a block of the log by activity count with an optional in-turn `s` bound, because a single fleet turn outgrows the window, and the first paint is still the whole retained window rather than a turn window*
 
+
+*Built (plan `2026-09-23-mcp-output-drill-in-and-housekeeping`, item 7): one more read,
+**`GET /api/sessions/:id/items/:itemId/output`** → `ThreadItemOutputResponse
+{toolUseId, output, complete, truncated}` — the streamed output of the tool call the item belongs to.
+Some output is in no item's data at all: a Claude background shell's, tailed from the CLI's file
+into `content.delta {command_output}` (≤ 1 MiB, then one notice), and a running command's output so
+far exist only as §5.6's `tool.output` chunks, which the timeline joins onto the call's row
+(`joinLifecycleDetails`) but a snapshot cannot hand back whole — the per-agent windows evict them,
+every chunk is capped on the wire, history pages are slimmed. The host joins them from the log,
+next to `readItem` and in the same one read of it (`store/tool-output.ts`): the item's newest write
+names the call (`payload.toolUseId`), every `tool.output` row of that call is joined verbatim in log
+order, `complete` says a `tool.completed` exists for it, and past 8 MiB
+(`THREAD_ITEM_OUTPUT_MAX_BYTES`) the join stops on a character boundary with `truncated`. No such
+item, or one naming no call, is a 404 of its own, `ITEM_NOT_FOUND` — not `THREAD_NOT_FOUND`, which a
+host predating the route answers for it as its generic route miss, so a reader can tell the two
+apart until that host's drain-restart. The daemon proxies it verbatim, as it does `…/items/:itemId`.
+Its reader today is the MCP's `read_tool_output`; the timeline keeps joining the chunks it holds.*
+
 **Snapshot-or-replay is the server's decision, not the client's.** The client only ever sends its
 last sequence; the host chooses. It replays events after `after` only when the range, measured
 *over this thread's rows alone*, is ≤ 1 000 events **and** ≤ 8 MiB of payload; past either it sends
