@@ -42,8 +42,8 @@ const isRecord = (value: unknown): value is Record<string, unknown> => typeof va
  * once the walk is done, unless it stopped at the page limit (`missingTurns`, its net). A host that predates `history`
  * is read as it always was: the window alone. `agentId` names the subagent a drill-in reads: its rows keep windows of
  * their own, so where no index can read them the drill-in names its own span (`windowSpan`), whatever the parent's
- * rows say; and it has no net, because a subagent has no row in the turns it did not run in, so "no row" says nothing
- * there.
+ * rows say; a failed read's turns start, as that span does, at the turn it was launched in (`sinceLaunch`); and it has
+ * no net, because a subagent has no row in the turns it did not run in, so "no row" says nothing there.
  */
 export async function readOlderHistory(api: DaemonApi, sessionId: string, snap: ThreadSnapshotPayload, range: { start: number; end: number }, opts: { agentId?: string } = {}): Promise<OlderHistory> {
   const { start, end } = range;
@@ -86,9 +86,11 @@ export async function readOlderHistory(api: DaemonApi, sessionId: string, snap: 
   }
   const merged = mergeHistoryPages(snap, pages);
   const unread: HistoryUnavailable | null = wholeFrom > start ? { turns: [start, Math.min(end, wholeFrom - 1)], reason: failed ? "unavailable" : "limit" } : null;
-  // Past the page limit the walk's sentence stands alone: it names the call that reads on. A drill-in has no net: a
-  // subagent has no row in the turns it did not run in, so there "no row" says nothing.
-  if (unread?.reason === "limit" || opts.agentId !== undefined) return { snapshot: merged, unavailable: unread };
+  // Past the page limit the walk's sentence stands alone: it names the call that reads on.
+  if (unread?.reason === "limit") return { snapshot: merged, unavailable: unread };
+  // A drill-in's failed read starts where its span without an index does, at the subagent's launch turn. And it has no
+  // net: a subagent has no row in the turns it did not run in, so there "no row" says nothing.
+  if (opts.agentId !== undefined) return { snapshot: merged, unavailable: unread && sinceLaunch(unread, merged, ordered, opts.agentId) };
   // The parent view's net, whether the walk read the range whole or failed: a turn of it still without a row was not
   // read either, and joins a failed read's span.
   const missing = missingTurns(merged, ordered, range);
@@ -112,15 +114,24 @@ function behindIndex(snap: ThreadSnapshotPayload, ordered: readonly StartedTurn[
  * window's oldest turn — `oldestRetainedOrdinal`, else, from the snapshot alone, the turn of the window's oldest
  * activity row (`windowOldestTurn`) or, for a drill-in, where the subagent's own rows begin to be whole
  * (`agentWindowOldestTurn`), either of which may be partial — and every turn of the range before it; a drill-in's from
- * the turn the subagent was launched in (`agentLaunchTurn`), since it has no row before it. Null when the range lies
- * after that turn, or nothing in the window says where it begins.
+ * the turn the subagent was launched in (`sinceLaunch`), since it has no row before it. Null when the range lies after
+ * that turn, or nothing in the window says where it begins.
  */
 function windowSpan(snap: ThreadSnapshotPayload, ordered: readonly StartedTurn[], bounds: ThreadHistoryBounds, { start, end }: { start: number; end: number }, agentId: string | undefined): HistoryUnavailable | null {
   const oldest = typeof bounds.oldestRetainedOrdinal === "number" ? bounds.oldestRetainedOrdinal
     : agentId !== undefined ? agentWindowOldestTurn(snap, ordered, agentId) : windowOldestTurn(snap, ordered);
-  // A subagent has no rows before the turn it was launched in: those turns are not partial, only empty.
-  const from = agentId !== undefined ? Math.max(start, agentLaunchTurn(snap, ordered, agentId) ?? 1) : start;
-  return oldest !== null && from <= Math.min(end, oldest) ? { turns: [from, Math.min(end, oldest)], reason: "unavailable" } : null;
+  if (oldest === null || start > Math.min(end, oldest)) return null;
+  const span: HistoryUnavailable = { turns: [start, Math.min(end, oldest)], reason: "unavailable" };
+  return agentId !== undefined ? sinceLaunch(span, snap, ordered, agentId) : span;
+}
+
+/**
+ * `span` from the turn the subagent `agentId` was launched in (`agentLaunchTurn`): it has no rows before that turn, so
+ * those turns are not partial for its drill-in, only empty. Null when no turn of the span is left.
+ */
+function sinceLaunch(span: HistoryUnavailable, snap: ThreadSnapshotPayload, ordered: readonly StartedTurn[], agentId: string): HistoryUnavailable | null {
+  const from = Math.max(span.turns[0], agentLaunchTurn(snap, ordered, agentId) ?? 1);
+  return from <= span.turns[1] ? { turns: [from, span.turns[1]], reason: span.reason } : null;
 }
 
 /**
@@ -160,10 +171,14 @@ function windowOldestTurn(snap: ThreadSnapshotPayload, ordered: readonly Started
  * already dropped every `tool.updated` that a later `tool.completed` of the same call replaces
  * (`projectSnapshotActivities`), about a third of an agent's rows, so a full window never reads as full. An anchor —
  * the agent's launch or end (`agentKind: "agent"`), which Codex and OpenCode stamp with the agent's own id — is kept
- * whatever its age and says nothing. An agent with no row left lost every row it had. When its last task row
- * (`isTaskRowOf`) is its end, they all lay between its launch and that end, whose turn bounds them. Otherwise — it has
- * not ended, or was relaunched since (a resumed agent keeps its id) and may have worked on — they are bounded by the
- * oldest row any agent kept: the cross-agent window dropped everything older. Null when neither is there.
+ * whatever its age and says nothing. An agent with no row left lost every row it had, and they are bounded by the
+ * oldest row any agent kept: the cross-agent window dropped everything older. One end bounds them instead: Claude's,
+ * a parent row naming the agent in `taskId` and not stamped with its id, when it is the agent's last task row
+ * (`isTaskRowOf`) — a Claude subagent that resumes launches again with a new `task.started`, so a run after that end
+ * would show as a later launch. An end stamped with the agent's own id (Codex, OpenCode, Grok) bounds nothing, because
+ * of a gap in those adapters: they write a child's launch and end once, and a child resumed after its end keeps
+ * writing rows under its id with no new launch (OpenCode's `task` tool resumes a child session; Codex's `interacted`
+ * after `completed` writes only `task.progress`), so rows can follow that end. Null when nothing is there to go by.
  */
 function agentWindowOldestTurn(snap: ThreadSnapshotPayload, ordered: readonly StartedTurn[], agentId: string): number | null {
   let own: ThreadActivityItem | undefined;
@@ -176,7 +191,8 @@ function agentWindowOldestTurn(snap: ThreadSnapshotPayload, ordered: readonly St
     if (own === undefined && item.agentId === agentId) own = item;
     if (floor === undefined || item.createdAt < floor.createdAt) floor = item;
   }
-  const row = own ?? (lastTask?.activityKind === "task.completed" ? lastTask : floor);
+  const claudeEnd = lastTask?.activityKind === "task.completed" && lastTask.agentId !== agentId ? lastTask : undefined;
+  const row = own ?? claudeEnd ?? floor;
   return row ? turnOfRow(row, ordered) : null;
 }
 

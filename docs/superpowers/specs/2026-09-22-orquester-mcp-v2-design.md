@@ -757,20 +757,26 @@ marker of either spelling, `isCompactionActivity`, is one it keeps — or, for a
 row left, anchors aside: an agent's rows are kept in windows of their own, its last 200 and the newest 2 000 across
 agents, which drop the oldest first and can begin turns after the parent's; the snapshot cannot tell a full window by
 counting, because the host serves it with the replaced `tool.updated` rows already projected away. For an agent with
-no row left, the turn of its last `task.completed` when its last launch or end — a `task.started`/`task.completed`
-whose `taskId` names it, else, naming no task, stamped with its id — is one, since its rows all lay before it; else,
-still running or relaunched, of the oldest row any agent kept. A drill-in's span starts at the turn the subagent was
-launched in, since it has no rows before it) are named; in the parent view, after a walk that did not stop at the page
-limit, any turn of the range still without a row in the merged snapshot, beside a failed read's turns (a drill-in has
-no such net: a subagent has no row in the turns it did not run in); or the page limit, whose sentence names the
-`beforeTurn`/`turns` that reads the turns left, or — when the walk never got out of turn `end` — says that turn is
-larger than one call reads, returns its latest rows, and names the call for the turns before it, so following the hints
-never repeats a call. (Follow-up, plan `2026-09-23-mcp-output-drill-in-and-housekeeping`, items 2–3: a drill-in with no
-index was judged by `missingTurns`, which reads any row, so the parent's rows passed for the subagent's and a partial
-span was served with no flag; the empty page was taken for the thread's first turn, and only the net — which a drill-in
-no longer runs — named its turns; and an agent that had ended with no row left was bounded by the oldest row any agent
-kept, though none of its rows lie after its end. A task row's stamp names its OWNER — Claude stamps a task launched
-inside a subagent with that subagent's id — which is why `taskId` decides first.) A failed page is never a tool error,
+no row left, of the oldest row any agent kept — or of its end, when its last launch or end (a
+`task.started`/`task.completed` whose `taskId` names it, else, naming no task, stamped with its id) is Claude's: a
+`task.completed` naming it in `taskId` and not stamped with its id, since a Claude subagent that resumes launches again.
+An end stamped with the agent's own id (Codex, OpenCode, Grok) bounds nothing, because of a gap in those adapters:
+they write a child's launch and end once, and a child resumed after its end writes rows under its id with no new
+launch — OpenCode's `task` tool resumes a child session, and Codex's `interacted` after `completed` writes only
+`task.progress` — so rows can follow that end. A drill-in's span starts at the turn the subagent was launched in, since
+it has no rows before it, and so does a drill-in's failed read) are named; in the parent view, after a walk that did not
+stop at the page limit, any turn of the range still without a row in the merged snapshot, beside a failed read's turns
+(a drill-in has no such net: a subagent has no row in the turns it did not run in); or the page limit, whose sentence
+names the `beforeTurn`/`turns` that reads the turns left, or — when the walk never got out of turn `end` — says that
+turn is larger than one call reads, returns its latest rows, and names the call for the turns before it, so following
+the hints never repeats a call. (Follow-up, plan `2026-09-23-mcp-output-drill-in-and-housekeeping`, items 2–3: a
+drill-in with no index was judged by `missingTurns`, which reads any row, so the parent's rows passed for the
+subagent's and a partial span was served with no flag; the empty page was taken for the thread's first turn, and only
+the net — which a drill-in no longer runs — named its turns; and a Claude subagent that had ended with no row left was
+bounded by the oldest row any agent kept rather than by its end. The first build bounded an agent by any end; the
+review found rows following a stamped end — the adapter gap above, reported to the owner — so only Claude's end
+bounds. A task row's stamp names its OWNER — Claude stamps a task launched inside a subagent with that subagent's id —
+which is why `taskId` decides first.) A failed page is never a tool error,
 the rows read are served. A host without `history`
 reads as before, plus `olderTurns`. Both new fields are in the byte frame — a shed result's measured with the widest
 `olderTurns` (`turnCount`), as its value is not known before the shed — and the sentence's bytes are held back — on a
