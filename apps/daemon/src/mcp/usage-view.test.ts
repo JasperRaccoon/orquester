@@ -38,3 +38,8 @@ test("usageView renders the widget row for row: accounts, system, scoped windows
   assert.equal(v.agents[1].name, "Grok Build"); assert.deepEqual(v.agents[1].accounts, []);
   assert.deepEqual(v.agents[1].windows, [{ id: "weekly", label: "Week", percentUsed: 0, resetsAt: "2026-09-26T13:35:00.000Z", resetsIn: "4d 1h 35m" }]);
 });
+
+test("ageMinutes floors, as the widget's \"Xm ago\" does", () => {
+  const v = usageView({ agents: [{ id: "codex", available: true, stale: false, session: null, weekly: null, asOf: "2026-09-22T11:36:20.000Z" }] }, [], now);
+  assert.equal(v.agents[0].ageMinutes, 23);
+});

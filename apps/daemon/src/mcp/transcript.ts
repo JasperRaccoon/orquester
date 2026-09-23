@@ -19,10 +19,16 @@ const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v 
 const shedDetail = (e: TranscriptEntry): void => {
   if (e.tool?.detail && capText(e.tool.detail, SHED_DETAIL_CHARS).truncated) e.tool.detail = `${capText(e.tool.detail, SHED_DETAIL_CHARS - 1).text}…`;
 };
-/** Label plus detail, as the GUI's row shows them; runtime.error and runtime.warning keep their text in `message`. */
+/**
+ * Label plus detail, as the GUI's row shows them; runtime.error and runtime.warning keep their text in
+ * `message`. A warning is labelled with its own message cut short, so then the message alone says it.
+ */
 const rowText = (a: ThreadActivityItem, p: P): string => {
-  const detail = str(p.detail) ?? (str(p.message) !== a.summary ? str(p.message) : undefined);
-  return detail ? `${a.summary}: ${detail}` : a.summary;
+  const detail = str(p.detail);
+  if (detail) return `${a.summary}: ${detail}`;
+  const message = str(p.message);
+  if (!message) return a.summary;
+  return message.startsWith(a.summary.replace(/(?:\.\.\.|…)$/u, "")) ? message : `${a.summary}: ${message}`;
 };
 const rosterView = (r: RuntimeSubagent): NonNullable<TranscriptEntry["subagent"]> => ({ id: r.id, title: r.title ?? null, status: r.status });
 
@@ -36,12 +42,41 @@ function actionablePlanId(items: readonly ThreadItem[]): string | null {
   return null;
 }
 
+/**
+ * The last shed, for a newest turn that is over the budget on its own (§7.6: `maxChars` is a hard
+ * budget): its OLDEST rows go first, sparing the final reply (else the newest row); when that row alone
+ * is still over, it keeps the head of its text.
+ */
+function fitBudget(entries: TranscriptEntry[], maxChars: number): TranscriptEntry[] {
+  let total = JSON.stringify(entries).length; // "[" + the rows joined by "," + "]"
+  const reply = entries.map((e) => e.kind).lastIndexOf("assistant");
+  const spared = reply >= 0 ? reply : entries.length - 1;
+  const kept = entries.filter((e, i) => {
+    if (i === spared || total <= maxChars) return true;
+    total -= JSON.stringify(e).length + 1;
+    return false;
+  });
+  if (total <= maxChars) return kept;
+  // Only the spared row is left. Cut its text by the overshoot plus one for the "…": a code point is at
+  // least one JSON character, so the cut always lands inside the budget.
+  const row = kept[0]!;
+  const keep = (row.text ? [...row.text].length : 0) - (total - maxChars) - 1;
+  if (!row.text || keep <= 0) return [];
+  row.text = `${capText(row.text, keep).text}…`;
+  return kept;
+}
+
 export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptOptions): TranscriptResult {
   // 1. Turn numbering: the ordinal among STARTED turns (turns.ts), the same number
   //    revert_session and get_turn_diff speak in; the highest is turnCount.
   const ordered = startedTurns(snap.turns);
   const turnIndex = new Map<string, number>();
   ordered.forEach((t, i) => turnIndex.set(t.turnId, i + 1));
+  // The host writes a turn's opening message with the session's activeTurnId, which is null while the
+  // thread is idle; the turn names that message back as `userMessageId` (fold.ts), its only link.
+  const openedTurn = new Map<string, string>();
+  for (const t of ordered) if (t.userMessageId) openedTurn.set(t.userMessageId, t.turnId);
+  const turnIdOf = (item: ThreadItem): string | null => item.turnId ?? (item.kind === "message" ? openedTurn.get(item.id) ?? null : null);
   const turnCount = ordered.length;
   const wanted = Math.max(1, Math.floor(opts.turns));
   let from = Math.max(1, turnCount - wanted + 1);
@@ -49,19 +84,21 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
   const actionablePlan = actionablePlanId(snap.items);
   const build = (fromTurn: number): TranscriptEntry[] => {
     const selected = new Set(ordered.slice(fromTurn - 1).map((t) => t.turnId as string));
-    const earliest = ordered[fromTurn - 1]?.requestedAt ?? "";
-    // A task row anchors its agent in the parent view even when it carries an agentId: Codex, OpenCode
-    // and Grok stamp the task's own id on it.
-    const isAnchor = (item: ThreadItem): boolean => item.kind === "activity" && item.activityKind.startsWith("task.");
-    const inScope = (item: ThreadItem): boolean => (opts.agentId ? item.agentId === opts.agentId : !item.agentId || isAnchor(item));
-    const inTurns = (item: ThreadItem): boolean => (item.turnId ? selected.has(item.turnId) : item.createdAt >= earliest);
-    const turnOf = (item: ThreadItem): number | null => (item.turnId ? turnIndex.get(item.turnId) ?? null : null);
+    // A row with no turn counts from the window's first turn on, or from the very start when the window
+    // starts at turn 1: a turn the host never started (its message, its failure) has no turn at all.
+    const earliest = fromTurn > 1 ? ordered[fromTurn - 1]!.requestedAt : "";
+    // An AGENT's task row anchors it in the parent view even when it carries an agentId (Codex, OpenCode
+    // and Grok stamp the task's own id on it); a stamped background shell's row stays out, as in the GUI.
+    const isAgentAnchor = (item: ThreadItem): boolean => item.kind === "activity" && item.activityKind.startsWith("task.") && ((item.payload ?? {}) as P).agentKind === "agent";
+    const inScope = (item: ThreadItem): boolean => (opts.agentId ? item.agentId === opts.agentId : !item.agentId || isAgentAnchor(item));
+    const inTurns = (item: ThreadItem): boolean => { const id = turnIdOf(item); return id ? selected.has(id) : item.createdAt >= earliest; };
+    const turnOf = (item: ThreadItem): number | null => { const id = turnIdOf(item); return id ? turnIndex.get(id) ?? null : null; };
     const entries: TranscriptEntry[] = [];
     const tools = new Map<string, TranscriptEntry>();
     const requests = new Map<string, TranscriptEntry>();
     const tasks = new Map<string, TranscriptEntry>();
     // An anchor names its agent in `subagent.id`; it carries no owner stamp.
-    const base = (item: ThreadItem, kind: TranscriptEntry["kind"]): TranscriptEntry => ({ turn: turnOf(item), turnId: item.turnId, kind, createdAt: item.createdAt, ...(item.agentId && kind !== "subagent" ? { agentId: item.agentId } : {}) });
+    const base = (item: ThreadItem, kind: TranscriptEntry["kind"]): TranscriptEntry => ({ turn: turnOf(item), turnId: turnIdOf(item), kind, createdAt: item.createdAt, ...(item.agentId && kind !== "subagent" ? { agentId: item.agentId } : {}) });
     for (const item of snap.items) {
       if (!inScope(item) || !inTurns(item)) continue;
       if (item.kind === "message") {
@@ -147,9 +184,9 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
     return entries;
   };
   const size = (list: TranscriptEntry[]): number => JSON.stringify(list).length;
-  let entries = turnCount ? build(from) : [];
+  let entries = build(from);
   let truncated = false;
-  // Shedding order (§7.6): reasoning → tool detail → oldest turns.
+  // Shedding order (§7.6): reasoning → tool detail → oldest turns → the newest turn's oldest rows.
   if (size(entries) > opts.maxChars) { truncated = true; entries = entries.filter((e) => e.kind !== "reasoning"); }
   if (size(entries) > opts.maxChars) entries.forEach(shedDetail);
   while (size(entries) > opts.maxChars && from < turnCount) {
@@ -157,6 +194,7 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
     entries = build(from).filter((e) => e.kind !== "reasoning");
     entries.forEach(shedDetail);
   }
+  if (size(entries) > opts.maxChars) entries = fitBudget(entries, opts.maxChars);
   const subagents = opts.agentId ? [] : snap.roster.map(rosterView);
   return { entries, turnCount, coveredTurns: turnCount ? [from, turnCount] : null, truncated, subagents };
 }

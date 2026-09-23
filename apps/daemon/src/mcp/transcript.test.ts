@@ -77,7 +77,7 @@ test("turns selects the last N turns; shedding drops reasoning, then tool detail
   assert.deepEqual(shed2.coveredTurns, [2, 2]); assert.equal(shed2.truncated, true);
 });
 
-test("an anchor stamped with its own agentId (Codex, OpenCode, Grok) stays in the parent view; the roster decides its title and status", () => {
+test("an agent's anchor stamped with its own agentId stays in the parent view, a stamped background shell's does not; the roster decides title and status", () => {
   const snap = snapshot({
     items: [
       message("user", "fan out", { turnId: "t1" }),
@@ -85,10 +85,13 @@ test("an anchor stamped with its own agentId (Codex, OpenCode, Grok) stays in th
       message("assistant", "sub text", { turnId: "t1", agentId: "agent-7" }),
       activity("task.completed", { taskId: "agent-7", status: "stopped", agentKind: "agent", agentId: "agent-7" }, { turnId: "t1", agentId: "agent-7" }),
       activity("task.started", { taskId: "shell-1", title: "npm test", agentKind: "background" }, { turnId: "t1" }),
-      activity("task.completed", { taskId: "shell-1", status: "stopped" }, { turnId: "t1" })
+      activity("task.completed", { taskId: "shell-1", status: "stopped" }, { turnId: "t1" }),
+      // Grok stamps its background shells with their own id too; the GUI keeps no parent row for them.
+      activity("task.started", { taskId: "grok-sh", title: "sleep 5", agentKind: "background", agentId: "grok-sh" }, { turnId: "t1", agentId: "grok-sh" })
     ],
     // agent-7 was resumed after it stopped and runs again; shell-1 has aged out of the roster.
-    roster: [{ id: "agent-7", kind: "subagent", agentKind: "agent", title: "worker", status: "running" } as never]
+    roster: [{ id: "agent-7", kind: "subagent", agentKind: "agent", title: "worker", status: "running" } as never,
+      { id: "grok-sh", kind: "subagent", agentKind: "background", title: "sleep 5", status: "running" } as never]
   });
   const r = transcriptEntries(snap, { turns: 5, include: new Set(), maxChars: 100_000 });
   assert.deepEqual(r.entries.map((e) => e.kind), ["user", "subagent", "subagent"]);
@@ -97,7 +100,7 @@ test("an anchor stamped with its own agentId (Codex, OpenCode, Grok) stays in th
     { id: "agent-7", title: "worker", status: "running" },
     { id: "shell-1", title: "npm test", status: "interrupted" }
   ]);
-  assert.deepEqual(r.subagents, [{ id: "agent-7", title: "worker", status: "running" }]);
+  assert.deepEqual(r.subagents, [{ id: "agent-7", title: "worker", status: "running" }, { id: "grok-sh", title: "sleep 5", status: "running" }]);
   const sub = transcriptEntries(snap, { turns: 5, agentId: "agent-7", include: new Set(), maxChars: 100_000 });
   assert.deepEqual(sub.entries.map((e) => [e.kind, e.agentId]), [["assistant", "agent-7"]]);
 });
@@ -112,10 +115,53 @@ test("a plan is actionable while it is the latest one and no later message imple
 });
 
 test("an error or warning without a detail reads the payload's message, where runtime.error keeps its text", () => {
+  // Ingestion labels a warning with its own message cut to 120 characters (truncateDetail).
+  const long = `The provider's history for this conversation could not be read: ${"the transcript file was rotated away. ".repeat(3)}`;
   const snap = snapshot({ items: [
     activity("runtime.error", { message: "Provider process exited (code 1)", class: "provider_error" }, { turnId: "t1", tone: "error", summary: "Runtime error" }),
-    activity("runtime.warning", { message: "History not available" }, { turnId: "t1", summary: "History not available" })
+    activity("runtime.warning", { message: "History not available" }, { turnId: "t1", summary: "History not available" }),
+    activity("runtime.warning", { message: long }, { turnId: "t1", summary: `${long.slice(0, 117)}...` })
   ] });
   const r = transcriptEntries(snap, { turns: 5, include: new Set(["activity"]), maxChars: 100_000 });
-  assert.deepEqual(r.entries.map((e) => [e.kind, e.text]), [["error", "Runtime error: Provider process exited (code 1)"], ["warning", "History not available"]]);
+  assert.deepEqual(r.entries.map((e) => [e.kind, e.text]), [["error", "Runtime error: Provider process exited (code 1)"], ["warning", "History not available"], ["warning", long]]);
+});
+
+test("a turn's opening message, written with the idle session's null turnId, is numbered through Turn.userMessageId", () => {
+  const items = [message("user", "first", { turnId: null, id: "user:1" }), message("assistant", "one", { turnId: "t1" }),
+    message("user", "second", { turnId: null, id: "user:2" }), message("assistant", "two", { turnId: "t2" })];
+  const snap = snapshot({ items, turns: [turn({ turnId: "t1", requestedAt: items[0]!.createdAt, userMessageId: "user:1" }),
+    turn({ turnId: "t2", turnCount: 2, requestedAt: items[2]!.createdAt, startedAt: items[2]!.createdAt, completedAt: items[3]!.createdAt, userMessageId: "user:2" })] });
+  const all = transcriptEntries(snap, { turns: 5, include: new Set(), maxChars: 100_000 });
+  assert.deepEqual(all.entries.map((e) => [e.text, e.turn, e.turnId]), [["first", 1, "t1"], ["one", 1, "t1"], ["second", 2, "t2"], ["two", 2, "t2"]]);
+  const last = transcriptEntries(snap, { turns: 1, include: new Set(), maxChars: 100_000 });
+  assert.deepEqual(last.entries.map((e) => [e.text, e.turn, e.turnId]), [["second", 2, "t2"], ["two", 2, "t2"]]);
+});
+
+test("a turn the host never started stays visible: alone, and before the first turn that did start", () => {
+  const failed = (summary: string) => activity("provider.turn.start.failed", { detail: "Attachment rejected" }, { turnId: null, tone: "error", summary });
+  const never = transcriptEntries(snapshot({ turns: [], items: [message("user", "hi", { turnId: null }), failed("Turn failed")] }), { turns: 5, include: ALL, maxChars: 100_000 });
+  assert.deepEqual(never.entries.map((e) => [e.kind, e.turn]), [["user", null], ["error", null]]);
+  assert.equal(never.turnCount, 0); assert.equal(never.coveredTurns, null);
+  const items = [message("user", "hi", { turnId: null }), failed("Turn failed"), message("user", "again", { turnId: null }), message("assistant", "ok", { turnId: "t1" })];
+  const retried = snapshot({ items, turns: [turn({ turnId: "t1", requestedAt: items[2]!.createdAt, startedAt: items[2]!.createdAt, userMessageId: items[2]!.id })] });
+  assert.deepEqual(transcriptEntries(retried, { turns: 5, include: ALL, maxChars: 100_000 }).entries.map((e) => [e.kind, e.turn]), [["user", null], ["error", null], ["user", 1], ["assistant", 1]]);
+});
+
+test("maxChars is a hard budget: an oversized newest turn sheds its oldest rows and keeps its final reply", () => {
+  // Built in order: the fixture stamps are a module-wide counter.
+  const items: ThreadItem[] = [message("user", "do it all", { turnId: "t1" })];
+  for (let i = 0; i < 300; i += 1) items.push(activity("tool.completed", { itemType: "command_execution", toolUseId: `tu${i}`, title: `Run step ${i}`, status: "completed", command: `pnpm run step-${i} ${"--flag ".repeat(40)}`, detail: "ok" }, { turnId: "t1", tone: "tool" }));
+  items.push(message("assistant", "all 300 steps done", { turnId: "t1" }));
+  const busy = snapshot({ items });
+  const r = transcriptEntries(busy, { turns: 5, include: ALL, maxChars: 40_000 });
+  assert.ok(JSON.stringify(r.entries).length <= 40_000); assert.equal(r.truncated, true);
+  assert.deepEqual([r.entries.at(-1)!.kind, r.entries.at(-1)!.text], ["assistant", "all 300 steps done"]);
+  assert.equal(r.entries.at(-2)!.tool!.title, "Run step 299", "the newest rows are kept");
+  assert.ok(!r.entries.some((e) => e.kind === "user"), "the oldest rows go first");
+  // A final reply that alone is over the budget keeps its head.
+  const report = snapshot({ items: [message("user", "report", { turnId: "t1" }), message("assistant", "z".repeat(10_000), { turnId: "t1" })] });
+  const capped = transcriptEntries(report, { turns: 5, include: ALL, maxChars: 2_000 });
+  assert.ok(JSON.stringify(capped.entries).length <= 2_000); assert.equal(capped.truncated, true);
+  assert.deepEqual(capped.entries.map((e) => e.kind), ["assistant"]);
+  assert.match(capped.entries[0]!.text!, /^z{1000,}…$/u);
 });

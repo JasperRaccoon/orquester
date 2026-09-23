@@ -23,7 +23,7 @@ export function formatResetsIn(resetsAt: string | undefined, now: number): strin
 function ageMinutes(asOf: string | undefined, now: number): number | undefined {
   if (!asOf) return undefined;
   const t = Date.parse(asOf);
-  return Number.isNaN(t) ? undefined : Math.max(0, Math.round((now - t) / 60_000));
+  return Number.isNaN(t) ? undefined : Math.max(0, Math.floor((now - t) / 60_000));
 }
 
 function windowView(id: string, label: string, w: UsageWindow | null | undefined, now: number): UsageWindowView | null {
