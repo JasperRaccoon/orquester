@@ -1,13 +1,14 @@
 import { z } from "zod";
 import type { SessionSummary } from "@orquester/api";
 import { agentChatRoutes, buildPlanImplementationPrompt, isPlanImplementationMessage, MAX_TURN_INPUT_CHARS, type AttachmentRef, type ThreadActivityItem, type ThreadItemResponse, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
+import { supportsFrom } from "../agents.ts";
 import { attachmentInputSchema, MAX_ATTACHMENTS, uploadInlineAttachments } from "../attachments.ts";
 import type { DaemonApi } from "../daemon-api.ts";
 import { expectOk, ToolError } from "../errors.ts";
 import { readThread, requireChatSession, sendCommand } from "../reads.ts";
 import { defineTool, MUTATING, READ_ONLY, type ToolContext, type ToolDef } from "../tool.ts";
 import { transcriptEntries } from "../transcript.ts";
-import { buildViewContext, chatDetail, type SessionDetail } from "../views.ts";
+import { buildViewContext, chatDetail, SETTLED_TURN_STATES, type SessionDetail } from "../views.ts";
 import { turnBaseline, waitForTurn, type TurnBaseline, type TurnOutcome } from "../wait.ts";
 
 const MAX_WAIT_MS = 600_000;
@@ -29,7 +30,7 @@ const waitFields = {
 
 /** The send preconditions the GUI applies (spec §7.4), and the snapshot they were checked on. */
 async function readyToSend(api: DaemonApi, summary: SessionSummary): Promise<ThreadSnapshotPayload> {
-  if (summary.chatSessionStatus === "error") throw new ToolError("SESSION_BUSY", "This session's agent is in an error state. Call stop_session (or revert_session) first, then send again.");
+  if (summary.chatSessionStatus === "error") throw new ToolError("SESSION_BUSY", "This session's agent is in an error state. Call stop_session first, then send again.");
   const snap = await readThread(api, summary.id);
   const { approvals, userInputs } = snap.pending;
   if (approvals.length || userInputs.length) {
@@ -45,12 +46,31 @@ async function readyToSend(api: DaemonApi, summary: SessionSummary): Promise<Thr
 type TurnBody = { input: string; attachments?: AttachmentRef[]; interactionMode: "default" | "plan" };
 type SendResult = { seq: number; outcome: TurnOutcome | "sent"; turnId?: string; reply?: string; replyTruncated?: boolean; pending?: SessionDetail["pending"]; session: SessionDetail };
 
-/** Post the turn (§7.4) and, with `wait`, block per §9.1; the result is read from the fresh snapshot. */
-async function dispatchTurn(ctx: ToolContext, summary: SessionSummary, body: TurnBody, wait: boolean, timeoutMs: number): Promise<SendResult> {
+/**
+ * Post the turn (§7.4) and, with `wait`, block per §9.1; the result is read from the fresh snapshot. `checked` is the
+ * snapshot the send was checked on. The baseline is the summary read right before the POST: the checks, the catalogue
+ * read and the uploads take time, and a turn that ended meanwhile must not read as this message's outcome.
+ */
+async function dispatchTurn(ctx: ToolContext, sessionId: string, checked: ThreadSnapshotPayload, body: TurnBody, wait: boolean, timeoutMs: number): Promise<SendResult> {
+  const summary = await requireChatSession(ctx.api, sessionId);
   const baseline = turnBaseline(summary);
-  const { seq } = await sendCommand(ctx.api, summary.id, "turn", { input: body.input, ...(body.attachments?.length ? { attachments: body.attachments } : {}), interactionMode: body.interactionMode });
-  const { outcome, session } = wait ? await awaitTurn(ctx, summary.id, baseline, timeoutMs) : { outcome: "sent" as const, session: await chatDetail(ctx.api, summary.id) };
-  return sendResult(seq, outcome, session, baseline);
+  const over = turnsOverBefore(checked, summary);
+  const { seq } = await sendCommand(ctx.api, sessionId, "turn", { input: body.input, ...(body.attachments?.length ? { attachments: body.attachments } : {}), interactionMode: body.interactionMode });
+  const { outcome, session } = wait ? await awaitTurn(ctx, sessionId, baseline, timeoutMs) : { outcome: "sent" as const, session: await chatDetail(ctx.api, sessionId) };
+  return sendResult(seq, outcome, session, over);
+}
+
+/**
+ * The turns already over when the message is posted: every settled turn of the snapshot the send was checked on, and
+ * the summary's latest turn when settled. Their ids and replies answer earlier messages, never this one — even when
+ * the baseline counts the session as running only because it is "starting" or its latest turn is a pending row.
+ */
+function turnsOverBefore(checked: ThreadSnapshotPayload, summary: SessionSummary): ReadonlySet<string> {
+  const over = new Set<string>();
+  for (const t of [...checked.turns, summary.latestTurn]) {
+    if (t?.turnId && (SETTLED_TURN_STATES.has(t.state) || t.completedAt)) over.add(t.turnId);
+  }
+  return over;
 }
 
 /**
@@ -99,9 +119,9 @@ async function awaitTurn(ctx: ToolContext, sessionId: string, baseline: TurnBase
   }
 }
 
-function sendResult(seq: number, outcome: SendResult["outcome"], session: SessionDetail, baseline: TurnBaseline): SendResult {
-  // The message's turn: not the one the send started from — or, for a steer, that very turn (spec §7.4).
-  const ours = (turnId: string | null | undefined): turnId is string => typeof turnId === "string" && turnId !== "" && (turnId !== baseline.turnId || baseline.running);
+function sendResult(seq: number, outcome: SendResult["outcome"], session: SessionDetail, over: ReadonlySet<string>): SendResult {
+  // The message's turn: one not over when it was posted — a new turn, or the running turn it steered (spec §7.4).
+  const ours = (turnId: string | null | undefined): turnId is string => typeof turnId === "string" && turnId !== "" && !over.has(turnId);
   const head: Omit<SendResult, "session"> = { seq, outcome };
   const reply = session.lastReply;
   const settled = outcome !== "sent" && outcome !== "needs-input" && outcome !== "timeout";
@@ -136,15 +156,20 @@ const sendMessage = defineTool({
     const text = (args.text ?? "").trim();
     if (!text && !args.attachments?.length) throw new ToolError("INVALID_ARGUMENT", "A message needs text or at least one attachment.");
     if (text.length > MAX_TURN_INPUT_CHARS) throw new ToolError("INVALID_ARGUMENT", `The message is ${text.length} characters; the limit is ${MAX_TURN_INPUT_CHARS}.`);
-    await readyToSend(ctx.api, summary);
+    const checked = await readyToSend(ctx.api, summary);
     if (args.planMode) {
       const view = await buildViewContext(ctx.api);
       const adapter = view.adapterByRefId.get(summary.refId);
       const caps = adapter ? view.capabilitiesByAdapter.get(adapter) : undefined;
-      if (caps && !caps.showPlanModeToggle) throw new ToolError("INVALID_ARGUMENT", `${summary.refId} has no plan mode toggle${adapter === "opencode" ? ' — use update_session {options:{agent:"plan"}}' : ""}.`);
+      // The gate get_session reports as supports.planMode: capabilities that could not be read are no plan mode.
+      if (!supportsFrom(caps).planMode) {
+        throw new ToolError("INVALID_ARGUMENT", caps
+          ? `${summary.refId} has no plan mode toggle${adapter === "opencode" ? ' — use update_session {options:{agent:"plan"}}' : ""}.`
+          : `Plan mode can't be confirmed for ${summary.refId} right now: its capabilities could not be read. Retry shortly, or send without planMode.`);
+      }
     }
     const attachments = args.attachments?.length ? await uploadInlineAttachments(ctx.api, args.sessionId, args.attachments) : [];
-    return dispatchTurn(ctx, summary, { input: text, attachments, interactionMode: args.planMode ? "plan" : "default" }, args.wait, args.timeoutMs);
+    return dispatchTurn(ctx, args.sessionId, checked, { input: text, attachments, interactionMode: args.planMode ? "plan" : "default" }, args.wait, args.timeoutMs);
   }
 });
 
@@ -185,7 +210,7 @@ const implementPlan = defineTool({
     const summary = await requireChatSession(ctx.api, args.sessionId);
     const snap = await readyToSend(ctx.api, summary);
     const plan = await actionablePlanMarkdown(ctx.api, args.sessionId, snap);
-    return dispatchTurn(ctx, summary, { input: buildPlanImplementationPrompt(plan), interactionMode: "default" }, args.wait, args.timeoutMs);
+    return dispatchTurn(ctx, args.sessionId, snap, { input: buildPlanImplementationPrompt(plan), interactionMode: "default" }, args.wait, args.timeoutMs);
   }
 });
 

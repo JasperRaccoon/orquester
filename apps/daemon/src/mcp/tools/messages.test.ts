@@ -36,6 +36,17 @@ async function harness(sessions = [chatSummary(), shellSummary()], snap = snapsh
   return { api, ctx, projectPath, root, close: () => rm(root, { recursive: true, force: true }) };
 }
 
+/** One macrotask turn. The tools run on in-process fakes, so a single yield parks one wherever it waits; a tool that spins never yields at all. */
+const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
+/** A clock that jumps an hour on every read: a wait measured by it is over at its first check, with no real waiting. */
+const racing = () => { let t = Date.parse("2026-09-22T12:00:00.000Z"); return () => (t += 3_600_000); };
+/** Whether `p` has settled, readable after a yield. */
+function settledFlag(p: Promise<unknown>): () => boolean {
+  let settled = false;
+  p.then(() => { settled = true; }, () => { settled = true; });
+  return () => settled;
+}
+
 const tool = (name: string) => messageTools.find((t) => t.name === name)!;
 const done = (over = {}) => chatSummary({ latestTurn: { turnId: "t2", state: "completed", startedAt: stamp(2), completedAt: stamp(3) }, ...over });
 
@@ -46,7 +57,7 @@ test("send_message posts the turn body, waits for the new turn and returns its r
   h.api.on("POST", "/api/sessions/c1/turn", ({ body }) => { posted = true; assert.deepEqual(body, { commandId: (body as { commandId: string }).commandId, input: "hi", interactionMode: "default" }); return { status: 200, body: { seq: 21 } }; });
   h.api.on("GET", "/api/sessions/c1/thread", () => ({ status: 200, body: { kind: "snapshot", thread: posted ? { ...after, head: { ...after.head, projectPath: h.projectPath, cwd: h.projectPath } } : snapshot() } }));
   const p = tool("send_message").run({ sessionId: "c1", text: " hi ", planMode: false, wait: true, timeoutMs: 5_000 }, h.ctx);
-  await new Promise((r) => setTimeout(r, 5));
+  await tick();
   h.api.emit(busEvent("session.updated", { ...done(), projectPath: h.projectPath }));
   const r = await p;
   assert.equal(r.seq, 21); assert.equal(r.outcome, "completed"); assert.equal(r.turnId, "t2"); assert.equal(r.reply, "hello!"); assert.equal(r.pending, undefined);
@@ -84,13 +95,13 @@ test("send_message reports needs-input with the pending requests, and timeout", 
   h.api.on("POST", "/api/sessions/c1/turn", () => { posted = true; return { status: 200, body: { seq: 4 } }; });
   h.api.on("GET", "/api/sessions/c1/thread", () => ({ status: 200, body: { kind: "snapshot", thread: { ...(posted ? asked : snapshot()), head: { ...snapshot().head, projectPath: h.projectPath, cwd: h.projectPath } } } }));
   const p = tool("send_message").run({ sessionId: "c1", text: "go", planMode: false, wait: true, timeoutMs: 5_000 }, h.ctx);
-  await new Promise((r) => setTimeout(r, 5));
+  await tick();
   h.api.emit(busEvent("session.updated", { ...chatSummary({ chatSessionStatus: "running", hasPendingApprovals: true }), projectPath: h.projectPath }));
   const r = await p;
   assert.equal(r.outcome, "needs-input"); assert.equal((r.pending as { approvals: { requestId: string }[] }).approvals[0].requestId, "r1"); assert.equal(r.reply, undefined);
   const slow = await harness(); t.after(slow.close);
   slow.api.on("POST", "/api/sessions/c1/turn", { status: 200, body: { seq: 5 } });
-  const to = await tool("send_message").run({ sessionId: "c1", text: "go", planMode: false, wait: true, timeoutMs: 20 }, slow.ctx);
+  const to = await tool("send_message").run({ sessionId: "c1", text: "go", planMode: false, wait: true, timeoutMs: 20 }, { ...slow.ctx, now: racing() });
   assert.equal(to.outcome, "timeout");
 });
 
@@ -161,38 +172,47 @@ test("send_message: a needs-input the snapshot does not confirm is the summary's
   h.api.on("GET", "/api/sessions/c1/thread", () => ({ status: 200, body: { kind: "snapshot", thread: { ...(posted ? after : snapshot()), head: { ...snapshot().head, ...where } } } }));
   const reads = () => h.api.calls.filter((c) => c.path === "/api/sessions/c1/thread").length;
   const p = tool("send_message").run({ sessionId: "c1", text: "go on", planMode: false, wait: true, timeoutMs: 5_000 }, h.ctx);
-  await new Promise((r) => setTimeout(r, 5));
+  const settled = settledFlag(p);
+  await tick();
   // One poll behind: the question just answered is still flagged, while the snapshot has no request open.
   publish(chatSummary({ chatSessionStatus: "running", hasPendingUserInput: true, latestTurn: { turnId: "t2", state: "running", startedAt: stamp(2), completedAt: null } }));
-  await new Promise((r) => setTimeout(r, 30));
+  await tick();
   assert.ok(reads() <= 3, `the stale flag is not re-checked in a loop (${reads()} snapshot reads)`);
+  assert.equal(settled(), false, "still waiting");
   publish(done());
+  await tick();
+  assert.ok(settled(), "the bus event ends the stale wait at once, long before the 2 s re-check");
   const r = await p;
   assert.equal(r.outcome, "completed"); assert.equal(r.turnId, "t2"); assert.equal(r.reply, "done."); assert.equal(r.pending, undefined);
   assert.equal((r.session as { lastReply?: unknown }).lastReply, undefined, "the reply is returned once, as `reply`");
 });
 
 test("send_message: a wait on a flag the snapshot never confirms still ends — at the timeout, on a close, on an abort", async (t) => {
-  const stale = async (timeoutMs: number, signal?: AbortSignal) => {
+  const stale = async (timeoutMs: number, over: Partial<ToolContext> = {}) => {
     const h = await harness(); t.after(h.close);
     // One poll behind from the start (right after answer_question): the list still flags a question the snapshot no longer has.
     h.api.on("GET", "/api/sessions", { status: 200, body: [{ ...chatSummary({ chatSessionStatus: "running", hasPendingUserInput: true, latestTurn: { turnId: "t2", state: "running", startedAt: stamp(2), completedAt: null } }), projectPath: h.projectPath, cwd: h.projectPath }] });
     h.api.on("POST", "/api/sessions/c1/turn", { status: 200, body: { seq: 40 } });
-    return { api: h.api, run: tool("send_message").run({ sessionId: "c1", text: "go on", planMode: false, wait: true, timeoutMs }, signal ? { ...h.ctx, signal } : h.ctx) };
+    const run = tool("send_message").run({ sessionId: "c1", text: "go on", planMode: false, wait: true, timeoutMs }, { ...h.ctx, ...over });
+    return { api: h.api, run, settled: settledFlag(run) };
   };
-  const late = await stale(60);
+  const late = await stale(60_000, { now: racing() });
   assert.equal((await late.run).outcome, "timeout", "an unconfirmed flag is not an outcome");
   const gone = await stale(5_000);
-  await new Promise((r) => setTimeout(r, 10));
+  await tick();
+  assert.equal(gone.settled(), false, "parked on the stale flag");
   gone.api.emit(busEvent("session.closed", { id: "c1" }));
+  await tick();
+  assert.ok(gone.settled(), "the close ends the wait at once");
   await assert.rejects(gone.run, (e: { code: string }) => e.code === "SESSION_NOT_FOUND");
   const ac = new AbortController();
-  const dropped = await stale(5_000, ac.signal);
-  await new Promise((r) => setTimeout(r, 10));
-  const abortedAt = performance.now();
+  const dropped = await stale(5_000, { signal: ac.signal });
+  await tick();
+  assert.equal(dropped.settled(), false, "parked on the stale flag");
   ac.abort();
+  await tick();
+  assert.ok(dropped.settled(), "the abort ends the wait at once");
   assert.equal((await dropped.run).outcome, "timeout");
-  assert.ok(performance.now() - abortedAt < 1_000, "the abort ends the wait at once");
   assert.deepEqual([late, gone, dropped].map((s) => s.api.listenerCount()), [0, 0, 0], "every bus listener is removed");
 });
 
@@ -226,4 +246,83 @@ test("read_transcript: maxChars is at most 55 000 (results are capped at 60 000 
   assert.equal(cut.truncated, true); assert.match(String(cut.hint), /maxChars/);
   const whole = await tool("read_transcript").run({ sessionId: "c1", turns: 3, include: ["tools", "activity"], maxChars: 40_000 }, h.ctx);
   assert.equal(whole.truncated, false); assert.equal(whole.hint, undefined);
+});
+
+// ---- Fix round 1: the baseline is read right before the POST; a reply is this message's only if its turn was not over then. ----
+
+test("send_message: the baseline is read right before the POST, so a turn that ended during the upload is not this message's", async (t) => {
+  const running = chatSummary({ chatSessionStatus: "running", latestTurn: { turnId: "t2", state: "running", startedAt: stamp(2), completedAt: null } });
+  const h = await harness([running], snapshot({ head: head({ session: { status: "running", activeTurnId: "t2" } }), turns: [turn(), turn({ turnId: "t2", turnCount: null, state: "running", requestedAt: stamp(2), startedAt: stamp(2), completedAt: null })] })); t.after(h.close);
+  const where = { projectPath: h.projectPath, cwd: h.projectPath };
+  const t2 = turn({ turnId: "t2", turnCount: 2, requestedAt: stamp(2), startedAt: stamp(2), completedAt: stamp(3) });
+  const t3 = turn({ turnId: "t3", turnCount: 3, requestedAt: stamp(4), startedAt: stamp(4), completedAt: stamp(5) });
+  const thread = (over: Parameters<typeof snapshot>[0]) => ({ status: 200, body: { kind: "snapshot", thread: { ...snapshot(over), head: { ...head(), ...where } } } });
+  // t2 ends while the attachment uploads, and the summary catches up before the POST.
+  h.api.onUpload((_id, meta, bytes) => {
+    h.api.on("GET", "/api/sessions", { status: 200, body: [{ ...chatSummary({ latestTurn: { turnId: "t2", state: "completed", startedAt: stamp(2), completedAt: stamp(3) } }), ...where }] });
+    h.api.on("GET", "/api/sessions/c1/thread", thread({ turns: [turn(), t2], items: [message("assistant", "OLD (t2)", { turnId: "t2" })] }));
+    return { status: 200, value: { type: "image", id: "att-1", name: meta.name, mimeType: meta.type, sizeBytes: bytes.length } };
+  });
+  h.api.on("POST", "/api/sessions/c1/turn", { status: 200, body: { seq: 60 } });
+  const p = tool("send_message").run({ sessionId: "c1", text: "and this", attachments: [{ name: "a.png", base64: Buffer.from("png").toString("base64") }], planMode: false, wait: true, timeoutMs: 5_000 }, h.ctx);
+  const settled = settledFlag(p);
+  await tick();
+  assert.equal(settled(), false, "t2 ending is not this message's outcome");
+  h.api.on("GET", "/api/sessions/c1/thread", thread({ turns: [turn(), t2, t3], items: [message("assistant", "OLD (t2)", { turnId: "t2" }), message("assistant", "NEW (t3)", { turnId: "t3" })] }));
+  h.api.emit(busEvent("session.updated", { ...chatSummary({ latestTurn: { turnId: "t3", state: "completed", startedAt: stamp(4), completedAt: stamp(5) } }), ...where }));
+  const r = await p;
+  assert.equal(r.outcome, "completed"); assert.equal(r.turnId, "t3"); assert.equal(r.reply, "NEW (t3)");
+});
+
+test("send_message never returns an earlier turn's id or reply: a provider that fails to (re)start", async (t) => {
+  const old = snapshot({ items: [message("user", "earlier"), message("assistant", "OLD REPLY (turn t1)")] });
+  // "starting" — a stopped session restarting its provider — with t1 long finished (the reviewer's reproduction).
+  const h = await harness([chatSummary({ chatSessionStatus: "starting" })], old); t.after(h.close);
+  h.api.on("POST", "/api/sessions/c1/turn", { status: 200, body: { seq: 61 } });
+  const p = tool("send_message").run({ sessionId: "c1", text: "hi", planMode: false, wait: true, timeoutMs: 5_000 }, h.ctx);
+  await tick();
+  h.api.emit(busEvent("session.updated", { ...chatSummary({ chatSessionStatus: "error" }), projectPath: h.projectPath }));
+  const r = await p;
+  assert.equal(r.outcome, "failed"); assert.equal(r.turnId, undefined); assert.equal(r.reply, undefined);
+  // A send with wait:false just before: its turn is still a pending row with no id, so the summary never names t1.
+  const queued = chatSummary({ chatSessionStatus: "running", latestTurn: { turnId: null, state: "pending", startedAt: null, completedAt: null } });
+  const q = await harness([queued], snapshot({ items: old.items, turns: [turn(), turn({ turnId: null, state: "pending", turnCount: null, requestedAt: stamp(2), startedAt: null, completedAt: null })] })); t.after(q.close);
+  q.api.on("POST", "/api/sessions/c1/turn", { status: 200, body: { seq: 62 } });
+  const qp = tool("send_message").run({ sessionId: "c1", text: "and hi", planMode: false, wait: true, timeoutMs: 5_000 }, q.ctx);
+  await tick();
+  q.api.emit(busEvent("session.updated", { ...chatSummary({ chatSessionStatus: "error", latestTurn: { turnId: null, state: "failed", startedAt: null, completedAt: stamp(3) } }), projectPath: q.projectPath }));
+  const qr = await qp;
+  assert.equal(qr.outcome, "failed"); assert.equal(qr.turnId, undefined); assert.equal(qr.reply, undefined);
+});
+
+test("send_message with wait into a running turn: the steered turn's reply and id are this message's", async (t) => {
+  const running = chatSummary({ chatSessionStatus: "running", latestTurn: { turnId: "t2", state: "running", startedAt: stamp(2), completedAt: null } });
+  const live = snapshot({ head: head({ session: { status: "running", activeTurnId: "t2" } }), turns: [turn(), turn({ turnId: "t2", turnCount: null, state: "running", requestedAt: stamp(2), startedAt: stamp(2), completedAt: null })], items: [message("assistant", "OLD (t1)")] });
+  const h = await harness([running], live); t.after(h.close);
+  const answered = snapshot({ turns: [turn(), turn({ turnId: "t2", turnCount: 2, requestedAt: stamp(2), startedAt: stamp(2), completedAt: stamp(3) })], items: [message("assistant", "OLD (t1)"), message("assistant", "steered answer", { turnId: "t2" })] });
+  let posted = false;
+  h.api.on("POST", "/api/sessions/c1/turn", () => { posted = true; return { status: 200, body: { seq: 63 } }; });
+  h.api.on("GET", "/api/sessions/c1/thread", () => ({ status: 200, body: { kind: "snapshot", thread: { ...(posted ? answered : live), head: { ...(posted ? answered : live).head, projectPath: h.projectPath, cwd: h.projectPath } } } }));
+  const p = tool("send_message").run({ sessionId: "c1", text: "also cover the edge case", planMode: false, wait: true, timeoutMs: 5_000 }, h.ctx);
+  await tick();
+  h.api.emit(busEvent("session.updated", { ...done(), projectPath: h.projectPath }));
+  const r = await p;
+  assert.equal(r.outcome, "completed"); assert.equal(r.turnId, "t2"); assert.equal(r.reply, "steered answer");
+});
+
+test("send_message refusals upload nothing; plan mode needs a known capability; an errored session points at stop_session only", async (t) => {
+  const png = [{ name: "a.png", base64: Buffer.from("png").toString("base64") }];
+  const run = (ctx: ToolContext, a: Record<string, unknown> = {}) => tool("send_message").run({ sessionId: "c1", text: "hi", attachments: png, planMode: false, wait: false, timeoutMs: 1000, ...a }, ctx);
+  const pending = await harness([chatSummary({ hasPendingApprovals: true })], snapshot({ pending: { approvals: [{ requestId: "r1", requestKind: "command", createdAt: stamp(5) }], userInputs: [] } })); t.after(pending.close);
+  await assert.rejects(run(pending.ctx), (e: { code: string }) => e.code === "PENDING_REQUEST");
+  const err = await harness([chatSummary({ chatSessionStatus: "error" })]); t.after(err.close);
+  await assert.rejects(run(err.ctx), (e: { code: string; message: string }) => e.code === "SESSION_BUSY" && /stop_session/.test(e.message) && !/revert_session/.test(e.message));
+  // The provider list could not be read: get_session reports supports.planMode false, and the gate agrees.
+  const blind = await harness(); t.after(blind.close);
+  blind.api.on("GET", "/api/agent/providers", { status: 503, body: { error: { code: "HOST_UNAVAILABLE", message: "The agent host is restarting." } } });
+  await assert.rejects(run(blind.ctx, { planMode: true }), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /plan mode/i.test(e.message));
+  for (const h of [pending, err, blind]) {
+    assert.equal(h.api.uploads.length, 0, "nothing was uploaded");
+    assert.ok(!h.api.calls.some((c) => c.method === "POST"), "nothing was posted");
+  }
 });
