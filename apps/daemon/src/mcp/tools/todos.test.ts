@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TodoListManager } from "../../todos.ts";
 import { ToolError } from "../errors.ts";
+import { toSafeToolError } from "../result.ts";
 import { FakeDaemonApi } from "../testing.ts";
 import { TodoTools } from "../todo-tools.ts";
 import { DESTRUCTIVE, MUTATING, MUTATING_IDEMPOTENT, READ_ONLY, type ToolContext } from "../tool.ts";
@@ -77,7 +78,22 @@ test("update_todo renames and replaces the body; toggle_todo_item ticks one item
   assert.deepEqual(await tool("toggle_todo_item").run({ id, item: "build", checked: true }, ctx), { id, item: "build", checked: true, body: "- [x] build\n- [x] ship" });
   assert.deepEqual(await tool("delete_todo").run({ id }, ctx), { deleted: true, id });
   assert.equal(manager.get(id), undefined);
-  await assert.rejects(tool("delete_todo").run({ id }, ctx), code("INVALID_ARGUMENT"));
-  await assert.rejects(tool("update_todo").run({ id, name: "again" }, ctx), code("INVALID_ARGUMENT"));
-  await assert.rejects(tool("toggle_todo_item").run({ id, item: 1 }, ctx), code("INVALID_ARGUMENT"));
+});
+
+/** A tool call as buildServer answers it: the result, or the coded error a throw maps to. */
+async function answer(name: string, args: Record<string, unknown>, ctx: ToolContext): Promise<{ code?: string; message?: string }> {
+  try { await tool(name).run(args, ctx); return {}; } catch (error) { return toSafeToolError(error).structuredContent; }
+}
+
+test("the five todo tools answer with the code the failure deserves: a missing list is NOT_FOUND, not a bad argument", async (t) => {
+  const { ctx } = await harness(t);
+  for (const [name, args] of [["update_todo", { id: "nope", name: "x" }], ["delete_todo", { id: "nope" }], ["toggle_todo_item", { id: "nope", item: 1 }]] as const) {
+    assert.deepEqual(await answer(name, args, ctx), { code: "NOT_FOUND", message: "todo not found" }, name);
+  }
+  assert.equal((await answer("list_todos", { workspace: "missing" }, ctx)).code, "PROJECT_NOT_FOUND");
+  assert.equal((await answer("create_todo", { workspace: "missing", name: "x" }, ctx)).code, "PROJECT_NOT_FOUND");
+  // A list that exists but holds no such item is still the caller's argument.
+  const { id } = (await tool("create_todo").run({ workspace: "acme", name: "L" }, ctx)).todo as { id: string };
+  await tool("update_todo").run({ id, body: "- [ ] one" }, ctx);
+  assert.equal((await answer("toggle_todo_item", { id, item: 2 }, ctx)).code, "INVALID_ARGUMENT");
 });

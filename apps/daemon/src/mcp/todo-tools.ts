@@ -110,20 +110,11 @@ function availableItems(tasks: TaskLine[]): string {
   return tasks.map((task) => `${task.index}. ${task.item}`).join(", ");
 }
 
-function todoNotFound(id: string): ToolError {
-  return new ToolError("INVALID_ARGUMENT", `No todo with id ${id}.`);
-}
-
-function rethrowTodoError(id: string, error: unknown): never {
-  if (error instanceof TodoError && error.status === 404) {
-    throw todoNotFound(id);
-  }
-  if (error instanceof TodoError) {
-    throw new ToolError("INVALID_ARGUMENT", error.message);
-  }
-  throw error;
-}
-
+/**
+ * The todo tools' access to the daemon's todo store. A store refusal is a TodoError and is let through untouched:
+ * result.ts maps its status to the code it deserves (404 NOT_FOUND, 409 CONFLICT, else INVALID_ARGUMENT) with the
+ * store's own (safe) message — a missing list is not a bad argument.
+ */
 export class TodoTools {
   constructor(private readonly deps: TodoToolsDeps) {}
 
@@ -138,20 +129,12 @@ export class TodoTools {
   }
 
   async update(id: string, patch: { name?: string; body?: string }): Promise<TodoProjection> {
-    try {
-      return projectTodo(await this.deps.todos.update(id, patch));
-    } catch (error) {
-      rethrowTodoError(id, error);
-    }
+    return projectTodo(await this.deps.todos.update(id, patch));
   }
 
   async remove(id: string): Promise<{ deleted: true }> {
-    try {
-      await this.deps.todos.delete(id);
-      return { deleted: true };
-    } catch (error) {
-      rethrowTodoError(id, error);
-    }
+    await this.deps.todos.delete(id);
+    return { deleted: true };
   }
 
   async toggleItem(
@@ -161,7 +144,8 @@ export class TodoTools {
   ): Promise<TodoToggleResult> {
     const todo = this.deps.todos.get(id);
     if (!todo) {
-      throw todoNotFound(id);
+      // The store's own refusal for a list it does not have, as update and delete answer.
+      throw new TodoError(404, "todo not found");
     }
 
     const lines = splitBodyLines(todo.body);
