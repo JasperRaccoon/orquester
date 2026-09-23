@@ -660,21 +660,42 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
   (carrying the omitted files' real line totals), `{name: "…3 more attachments", type: "omitted"}`
   in `attachments`. Never take a `…N more` element for a real path or file.
 
+  **What the rows show** is what the GUI's timeline shows:
+
+  - A command's `tool.detail` is what the GUI's row shows under the call: the provider's own
+    detail, or, when that detail is empty, only repeats the command (as Grok's does) or repeats the
+    row's title, the output the call's data carries — Codex's aggregated output, Grok's `rawOutput`,
+    ACP content blocks. That output is the one-line preview the wire carries (its first non-blank
+    line, at most 84 characters), not the whole of it. A call that has only echoed its command so
+    far has no `detail`, and a later echo never clears the output an earlier update gave. Other
+    tools keep the provider's detail as it came.
+  - A hook that failed is an `error` row ("Hook failed") and one cancelled a `warning` row ("Hook
+    cancelled"); a hook's start, its progress and a successful run are not rows.
+  - An `assistant` row with `commentary: true` is narration between tool calls (Codex's
+    commentary), never the turn's answer: `lastReply` and `send_message`'s `reply` leave it out,
+    and it is not the "final reply" a shed always keeps.
+  - A `compaction` row's `state` is `compacting` (still running), `compacted` or
+    `compaction-failed`. An old log's marker — one with no state, or the older
+    `thread.state.changed` spelling — reads `compacted`, as the GUI shows it. A subagent compacting
+    its own context is not a row of the parent view.
+
 ```
 TranscriptEntry = { turn: number | null, turnId: string | null, kind, createdAt, agentId?, …by kind:
   "user"         text, attachments?: [{ name, type }]
-  "assistant"    text
+  "assistant"    text, commentary?: true              /* narration between tool calls, never the answer */
   "reasoning"    text                                                       (include "reasoning")
   "tool"         tool: { type, title, status, command?, detail?, changedFiles? }
-                                                  (include "tools"; one entry per tool call, its latest state)
+                                                  (include "tools"; one entry per tool call, its latest state;
+                                                   a command's detail as the GUI's row shows it)
   "approval"     requestId, requestKind?, text? /* the request's detail, ≤ 2 000 characters */, decision?
                                                   (include "activity"; open or resolved)
   "question"     requestId, questions?: [text], answered                    (include "activity")
   "subagent"     subagent: { id, title, status }                            (parent view only)
   "plan"         text /* the plan's markdown */, actionable
   "changes"      files: [{ path, additions, deletions }]    (one per turn, from its checkpoint; parent view only)
-  "compaction"   state, beforeTokens?, afterTokens?                         (include "activity")
-  "error" | "warning" | "info"   text                                       (include "activity") }
+  "compaction"   state /* compacting | compacted | compaction-failed */, beforeTokens?, afterTokens?
+                                                  (include "activity"; never a subagent's own in the parent view)
+  "error" | "warning" | "info"   text             (include "activity"; a failed hook is an error, a cancelled one a warning) }
 ```
 
 ### Requests

@@ -684,6 +684,7 @@ from events. Each entry:
 { turn: number | null, turnId, kind, createdAt, agentId?,
   kind = "user"      → text, attachments?: [{name, type}]
        | "assistant" → text                       (messageKind commentary/answer both included)
+                       /* Built: commentary?: true on a commentary message */
        | "reasoning" → text                       (only with include "reasoning")
        | "tool"      → tool: { type /* itemType */, title, status, command?, detail?, changedFiles? }   // one entry per toolUseId, latest state
        | "approval"  → requestId, kind, detail?, decision?           (open or resolved)
@@ -695,6 +696,7 @@ from events. Each entry:
        | "changes"   → files: [{path, additions, deletions}]           (checkpoint per turn)
        | "compaction"→ state, beforeTokens?, afterTokens?
        | "error" | "warning" | "info" → text }
+                       /* Built: a failed hook is an "error" row, a cancelled one a "warning" row */
 ```
 
 The parent view is the GUI's quiet timeline: items without `agentId`, plus each subagent's anchor.
@@ -739,6 +741,26 @@ limit's names the `beforeTurn`/`turns` that reads them); a failed page is never 
 served. A host without `history` reads as before, plus `olderTurns`. Both new fields are in the byte frame, and the
 sentence's bytes are held back — on a whole result as its own `hint`, on a shed one before the shed hint — so the
 answer still keeps within `maxChars`.*
+
+*Built (after v2 shipped — the GUI's timeline changed with the merge of `origin/main`, plan
+`2026-09-23-mcp-history-search-parity`, item 4): the rows show what the timeline now shows. (1) A command's
+`tool.detail` is decided by `commandDisplayDetail` (`packages/api/src/agent-chat/command-output.ts`), moved out of the
+UI's `entries.logic.ts`, which calls it too: the provider's `detail`, or the output the call's data carries — Codex's
+`item.aggregatedOutput`, the item's `result.content`, `rawOutput` (its text, `content`, `stdout`+`stderr`, `output`,
+`output_for_prompt`), ACP `content` blocks, a `result` — when that detail is empty, repeats the title, or repeats the
+command on a call whose data says it executes (`kind: "execute"`, whole or cut short with "..."/"…"); nothing when it
+only echoes the command. The output is the wire's one-line preview (§5.6 slimming). It is applied to each of the
+call's activities, and one that gives nothing never clears an earlier detail; other tools keep `detail` as it came.
+(2) A `hook.completed` whose `outcome` is not `success` is a row, as the GUI keeps it: `error` when its tone is, else
+`warning`, with the text the other rows use ("Hook failed", "Hook cancelled"); a hook's start, progress and success are
+not rows. (3) An assistant row whose message is Codex commentary (`messageKind: "commentary"`) carries
+`commentary: true`, and the row a shed spares as the latest turn's final reply is never one. (4) `compaction` rows
+follow the rule in `packages/api/src/agent-chat/compaction.ts`: a row for every `isCompactionActivity` — a
+`context-compaction` row or the legacy `thread.state.changed {state: "compacted"}` — with `state` =
+`compactionMarkerState`, so a row with no readable state is `compacted`; the first build read it as `compacting`,
+showed no legacy marker, and scoped the parent view by the row's `agentId` alone. The parent view now leaves out a
+subagent's own compaction named on the row or on its payload (`isAgentOwnedActivity`); a drill-in keeps the rows
+stamped with its agent's id, as before.*
 
 ### 7.7 Waiting
 

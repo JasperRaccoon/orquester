@@ -16,11 +16,11 @@ const roomOf = (r: TranscriptResult, maxChars: number): number => maxChars - TRA
 const contentOf = (rows: readonly unknown[]): number => Buffer.byteLength(JSON.stringify(rows), "utf8") - 2;
 /** The subagent list's cap once a result is over: what the unshed entries (`e` bytes) leave, never less than its share. */
 const rosterCap = (room: number, e: number): number => Math.max(Math.floor(room * ROSTER_SHARE), room - e);
-/** The row a shed never drops: the latest turn's final reply, else that turn's newest row. */
+/** The row a shed never drops: the latest turn's final reply (never a commentary row), else that turn's newest row. */
 const sparedOf = (entries: readonly TranscriptEntry[]): TranscriptEntry | undefined => {
   const turns = entries.flatMap((e) => (e.turn === null ? [] : [e.turn]));
   const own = entries.filter((e) => e.turn === (turns.length ? Math.max(...turns) : null));
-  return [...own].reverse().find((e) => e.kind === "assistant") ?? own.at(-1);
+  return [...own].reverse().find((e) => e.kind === "assistant" && !e.commentary) ?? own.at(-1);
 };
 const hasRow = (r: TranscriptResult, row: TranscriptEntry): boolean => r.entries.some((e) => e.createdAt === row.createdAt && e.kind === row.kind);
 /** The roster row a second pass would bring back next: the last one dropped (live rows drop last, the newest last). */
@@ -87,7 +87,8 @@ test("parent view: every kind, tools folded per toolUseId, subagent rows as anch
   assert.equal(r.turnCount, 2); assert.deepEqual(r.coveredTurns, [1, 2]); assert.equal(r.truncated, false);
   assert.deepEqual(r.entries.map((e) => e.kind), ["user", "reasoning", "assistant", "user", "tool", "subagent", "approval", "question", "plan", "compaction", "warning", "error", "changes", "assistant"]);
   const tool = r.entries.find((e) => e.kind === "tool")!;
-  assert.deepEqual(tool.tool, { type: "command_execution", title: "Run pnpm check", status: "completed", command: "pnpm check", detail: "ok\n", changedFiles: ["src/a.ts"] });
+  // A command's detail is the one the GUI's row shows: trimmed.
+  assert.deepEqual(tool.tool, { type: "command_execution", title: "Run pnpm check", status: "completed", command: "pnpm check", detail: "ok", changedFiles: ["src/a.ts"] });
   assert.equal(tool.createdAt, r.entries[4].createdAt);
   assert.deepEqual(r.entries.find((e) => e.kind === "subagent")!.subagent, { id: "task-1", title: "Explore", status: "completed" });
   const approval = r.entries.find((e) => e.kind === "approval")!;
@@ -795,4 +796,115 @@ test("a randomized probe with beforeTurn and unavailable turns (fixed seed): the
     if (beforeTurn !== undefined && beforeTurn <= turnCount) tally.before += 1;
   }
   assert.ok(Object.values(tally).every((n) => n >= 10), `the probe reaches every branch: ${JSON.stringify(tally)}`);
+});
+
+// ---- Transcript details (design item 4): command output, failed hooks, commentary, the compaction rule. ----
+
+/** The one tool row of a transcript read with every include. */
+const toolRow = (items: ThreadItem[]): NonNullable<TranscriptEntry["tool"]> =>
+  transcriptEntries(snapshot({ items }), { turns: 5, include: ALL, maxChars: 100_000 }).entries.find((e) => e.kind === "tool")!.tool!;
+
+test("a Grok-shaped command whose detail repeats the command shows its output, and an echo with no output never clears it", () => {
+  // Grok's ACP call: `detail` repeats the command, the output rides `rawOutput` (on the wire, the slimmed `{content}`).
+  const call = (activityKind: string, status: string, rawOutput?: unknown) => activity(activityKind, {
+    itemType: "command_execution", toolUseId: "call-1", title: "Execute `echo hi`", status, detail: "echo hi",
+    data: { kind: "execute", command: "echo hi", ...(rawOutput === undefined ? {} : { rawOutput }) }
+  }, { turnId: "t1", tone: "tool" });
+  // The start only echoes the command: no detail yet (the title already says what runs).
+  assert.equal(toolRow([call("tool.started", "inProgress")]).detail, undefined);
+  assert.deepEqual(toolRow([call("tool.started", "inProgress"), call("tool.completed", "completed", { content: "hi" })]),
+    { type: "command_execution", title: "Execute `echo hi`", status: "completed", detail: "hi" });
+  assert.equal(toolRow([call("tool.started", "inProgress"), call("tool.completed", "completed", { stdout: "hi\n", stderr: "note\n" })]).detail, "hi\nnote");
+  // An update that carried the output, then an echo that carries none: the output stays.
+  assert.equal(toolRow([call("tool.updated", "inProgress", { content: "partial" }), call("tool.completed", "completed")]).detail, "partial");
+});
+
+test("a Codex command shows its item's aggregatedOutput; a detail that already says more stands", () => {
+  const items = [
+    activity("tool.started", { itemType: "command_execution", toolUseId: "call-1", title: "Bash", status: "inProgress" }, { turnId: "t1", tone: "tool" }),
+    activity("tool.completed", { itemType: "command_execution", toolUseId: "call-1", title: "Bash", status: "completed", data: { item: { command: "ls -1", aggregatedOutput: "a\nb\n" } } }, { turnId: "t1", tone: "tool" })
+  ];
+  assert.equal(toolRow(items).detail, "a\nb");
+  // OpenCode's detail is already the fuller output: its data's one-line result does not replace it.
+  const openCode = activity("tool.completed", { itemType: "command_execution", toolUseId: "oc", title: "bash", status: "completed", detail: "first line\nsecond line", data: { command: "cat f", result: "first line" } }, { turnId: "t1", tone: "tool" });
+  assert.equal(toolRow([openCode]).detail, "first line\nsecond line");
+  // Any other tool keeps its provider detail as it came, untrimmed, whatever its data says.
+  const patch = activity("tool.completed", { itemType: "file_change", toolUseId: "p", title: "Edit", status: "completed", detail: "3 lines\n", data: { rawOutput: { content: "x" } } }, { turnId: "t1", tone: "tool" });
+  assert.equal(toolRow([patch]).detail, "3 lines\n");
+});
+
+test("hooks: a failed completion is an error row, a cancelled one a warning row; starts, progress and successes are no row", () => {
+  const items = [
+    message("user", "Format it.", { turnId: "t1" }),
+    activity("hook.started", { hookId: "h1", hookName: "fmt", hookEvent: "PostToolUse" }, { turnId: "t1", summary: "Hook fmt started" }),
+    activity("hook.progress", { hookId: "h1", stdout: "formatting…" }, { turnId: "t1", summary: "Hook progress" }),
+    activity("hook.completed", { hookId: "h1", outcome: "success" }, { turnId: "t1", summary: "Hook completed" }),
+    activity("hook.completed", { hookId: "h2", outcome: "error", stderr: "prettier: not found", exitCode: 127 }, { turnId: "t1", tone: "error", summary: "Hook failed" }),
+    activity("hook.completed", { hookId: "h3", outcome: "cancelled" }, { turnId: "t1", summary: "Hook cancelled" }),
+    message("assistant", "Formatted, but one hook failed.", { turnId: "t1" })
+  ];
+  const r = transcriptEntries(snapshot({ items }), { turns: 5, include: ALL, maxChars: 100_000 });
+  assert.deepEqual(r.entries.map((e) => [e.kind, e.text]), [
+    ["user", "Format it."], ["error", "Hook failed"], ["warning", "Hook cancelled"], ["assistant", "Formatted, but one hook failed."]
+  ]);
+  const lean = transcriptEntries(snapshot({ items }), { turns: 5, include: new Set(["tools"]), maxChars: 100_000 });
+  assert.deepEqual(lean.entries.map((e) => e.kind), ["user", "assistant"], "hook rows are activity rows: include \"activity\"");
+});
+
+test("a commentary message is an assistant row marked commentary: true; the turn's answer carries no such field", () => {
+  const items = [
+    message("user", "Fix the parser.", { turnId: "t1" }),
+    message("assistant", "I'll look at the failing test first.", { turnId: "t1", messageKind: "commentary" }),
+    activity("tool.completed", { itemType: "command_execution", toolUseId: "t", title: "pnpm test", status: "completed", detail: "1 failed" }, { turnId: "t1", tone: "tool" }),
+    message("assistant", "Fixed: the parser skipped empty lines.", { turnId: "t1", messageKind: "answer" }),
+    message("assistant", "Anything else?", { turnId: "t1" })
+  ];
+  const r = transcriptEntries(snapshot({ items }), { turns: 5, include: ALL, maxChars: 100_000 });
+  const assistant = r.entries.filter((e) => e.kind === "assistant");
+  assert.deepEqual(assistant.map((e) => [e.text, e.commentary]), [
+    ["I'll look at the failing test first.", true], ["Fixed: the parser skipped empty lines.", undefined], ["Anything else?", undefined]
+  ]);
+  assert.ok(!("commentary" in assistant[1]!) && !("commentary" in assistant[2]!), "no commentary field on an answer");
+});
+
+test("a commentary row is never the spared reply: a running turn's shed keeps its newest row instead", () => {
+  // The turn is still at work: narration, then a call with a long command, and no answer yet.
+  const items = [
+    message("user", "Run the migration and report.", { turnId: "t1" }),
+    message("assistant", `I'll run the migration now. ${"Checking the schema first. ".repeat(60)}`, { turnId: "t1", messageKind: "commentary" }),
+    activity("tool.started", { itemType: "command_execution", toolUseId: "m", title: "Migrate", status: "inProgress", command: `pnpm migrate ${"--table t ".repeat(150)}` }, { turnId: "t1", tone: "tool" })
+  ];
+  const r = transcriptEntries(snapshot({ items }), { turns: 5, include: ALL, maxChars: 2_000 });
+  assert.ok(budgetSize(r) <= 2_000 - TRANSCRIPT_HINT_BYTES, `within the budget (${budgetSize(r)})`);
+  assert.deepEqual(r.entries.map((e) => e.kind), ["tool"], "the newest row stays, cut to fit; the narration goes");
+  // With an answer, the answer is the spared row as before.
+  const answered = transcriptEntries(snapshot({ items: [...items, message("assistant", "Migrated 12 tables.", { turnId: "t1", messageKind: "answer" })] }), { turns: 5, include: ALL, maxChars: 2_000 });
+  assert.ok(answered.entries.some((e) => e.kind === "assistant" && e.text === "Migrated 12 tables."), "the answer stays");
+});
+
+test("compaction rows follow the shared rule: no state is settled, the legacy marker counts, a subagent's own stays out of the parent view", () => {
+  const items = [
+    message("user", "Keep going.", { turnId: "t1" }),
+    // An old log's settled marker had no state at all.
+    activity("context-compaction", { beforeTokens: 9_000, afterTokens: 900 }, { turnId: "t1", summary: "Context compacted" }),
+    // An older log's spelling: thread.state.changed. Only "compacted" is a marker.
+    activity("thread.state.changed", { state: "compacted", beforeTokens: 8_000, afterTokens: 800 }, { turnId: "t1", summary: "Context compacted" }),
+    activity("thread.state.changed", { state: "running" }, { turnId: "t1", summary: "Running" }),
+    activity("context-compaction", { state: "compacting" }, { turnId: "t1", summary: "Compacting context" }),
+    activity("context-compaction", { state: "compaction-failed", error: "too large" }, { turnId: "t1", tone: "error", summary: "Context compaction failed" }),
+    // A subagent compacting its own context: named on the payload only, or on the row.
+    activity("context-compaction", { state: "compacted", agentId: "sub-1" }, { turnId: "t1", summary: "Context compacted" }),
+    activity("context-compaction", { state: "compacted" }, { turnId: "t1", agentId: "sub-1", summary: "Context compacted" })
+  ];
+  const snap = snapshot({ items, roster: [{ id: "sub-1", kind: "subagent", agentKind: "agent", title: "Explore", status: "running" } as never] });
+  const r = transcriptEntries(snap, { turns: 5, include: ALL, maxChars: 100_000 });
+  assert.deepEqual(r.entries.filter((e) => e.kind === "compaction").map((e) => [e.state, e.beforeTokens, e.afterTokens]), [
+    ["compacted", 9_000, 900], ["compacted", 8_000, 800], ["compacting", undefined, undefined], ["compaction-failed", undefined, undefined]
+  ]);
+  assert.deepEqual(r.entries.map((e) => e.kind), ["user", "compaction", "compaction", "compaction", "compaction"], "no other row: the running state is not a marker");
+  // The drill-in keeps its own agent's rows as before: those stamped with its id on the row, as the GUI's drill-in reads them.
+  const sub = transcriptEntries(snap, { turns: 5, agentId: "sub-1", include: ALL, maxChars: 100_000 });
+  assert.deepEqual(sub.entries.map((e) => [e.kind, e.state, e.agentId]), [["compaction", "compacted", "sub-1"]]);
+  const lean = transcriptEntries(snap, { turns: 5, include: new Set(["tools"]), maxChars: 100_000 });
+  assert.ok(!lean.entries.some((e) => e.kind === "compaction"), "compaction rows are activity rows: include \"activity\"");
 });
