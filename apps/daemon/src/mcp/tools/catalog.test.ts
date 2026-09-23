@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeDaemonApi } from "../testing.ts";
 import { chatSummary, shellSummary, stamp } from "../fixtures.ts";
+import { loadAgents } from "../agents.ts";
+import { MAX_RESULT_BYTES, ok, resultBytes } from "../result.ts";
 import type { ToolContext } from "../tool.ts";
 import { catalogTools } from "./catalog.ts";
 
@@ -204,4 +206,186 @@ test("an empty filter is refused like any unknown one, never read as \"no filter
     const filter = (def.input as Record<string, { safeParse(v: unknown): { success: boolean } }>)[def.name === "list_projects" ? "workspace" : "agent"]!;
     assert.equal(filter.safeParse("").success, false, `${def.name}'s schema refuses ""`);
   }
+});
+
+// ---- Final fix wave F2: list_agents and list_conversations bound themselves under ok()'s 60 000-byte cap. ----
+
+type ListedModel = { slug: string; isDefault: boolean; isLegacy?: boolean; options?: unknown[]; optionsOmitted?: true };
+type ListedAgent = { id: string; models: ListedModel[]; modelsTruncated?: true; modelCount?: number; [key: string]: unknown };
+
+const chatAgent = (id: string, name: string, adapter: string) => ({ id, kind: "agent", name, bin: [adapter === "claude" ? "claude" : id], enabled: true, installState: "idle", chat: { adapter } });
+const allChatAgents = [chatAgent("claude", "Claude Code", "claude"), chatAgent("codex", "Codex", "codex"), chatAgent("opencode", "OpenCode", "opencode"), chatAgent("grok", "Grok Build", "grok"), chatAgent("claudex", "Claude Code × GPT/Kimi/Grok", "claude"), chatAgent("claudemix", "Claude Code × Mixed", "claude")];
+const select = (id: string, label: string, values: string[], description?: string) => ({ id, label, type: "select", ...(description ? { description } : {}), options: values.map((v, i) => ({ id: v, label: v[0]!.toUpperCase() + v.slice(1), ...(i === 1 ? { isDefault: true } : {}) })) });
+
+/** `n` OpenCode models, their option descriptors in 22 distinct sets (as on a real host: 389 models, a few dozen sets); `defaultAt` is flagged default, or none. */
+function openCodeCatalogue(n: number, defaultAt: number | null) {
+  const sets = Array.from({ length: 22 }, (_, s) => [
+    select("variant", "Reasoning", ["low", "medium", "high", "xhigh", "max"].slice(0, 2 + (s % 4)), `Reasoning depth, profile ${s + 1}.`),
+    select("agent", "Agent", ["plan", "build"]),
+    ...(s >= 11 ? [{ id: "fast", label: "Fast mode", type: "boolean", description: `Trade depth for speed (tier ${s - 10}).` }] : [])
+  ]);
+  return Array.from({ length: n }, (_, i) => ({ slug: `openrouter/vendor-${i % 40}/model-${i}`, name: `Vendor ${i % 40} Model ${i}`, ...(i === defaultAt ? { isDefault: true } : {}), capabilities: { optionDescriptors: sets[i % 22] } }));
+}
+
+/** Every chat agent of a real registry over a catalogue whose OpenCode models are `openCodeModels`. */
+function catalogueApi(openCodeModels: unknown[]): FakeDaemonApi {
+  const claudeOptions = [select("effort", "Effort", ["low", "medium", "high", "max"], "How much reasoning the model spends on a turn."), { id: "thinking", label: "Thinking", type: "boolean", description: "Show the model's summarised reasoning." }];
+  const claudeModels = [{ slug: "default", name: "Default (recommended)", isDefault: true, capabilities: { optionDescriptors: claudeOptions } }, { slug: "opus", name: "Opus", capabilities: { optionDescriptors: claudeOptions } }, { slug: "sonnet", name: "Sonnet", capabilities: { optionDescriptors: claudeOptions } }, { slug: "haiku", name: "Haiku", capabilities: { optionDescriptors: [] } }];
+  const codexModels = ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.5"].map((slug, i) => ({ slug, name: slug.toUpperCase(), ...(i === 0 ? { isDefault: true } : {}), ...(i === 4 ? { isLegacy: true } : {}), capabilities: { optionDescriptors: [select("effort", "Effort", ["low", "medium", "high", "xhigh"]), select("serviceTier", "Service tier", ["flex", "default", "priority"])] } }));
+  const grokModels = ["grok-4.6", "grok-4.5"].map((slug, i) => ({ slug, name: `Grok ${slug.slice(5)}`, ...(i === 0 ? { isDefault: true } : {}), capabilities: { optionDescriptors: [select("reasoningEffort", "Reasoning", ["low", "high"])] } }));
+  const row = (id: string, models: unknown[]) => ({ id, refIds: [id], installed: true, version: "1.0.0", status: "ready", auth: { status: "authenticated" }, checkedAt: stamp(0), slashCommands: [], skills: [], capabilities: { sessionModelSwitch: "in-session", showPlanModeToggle: true, reportsContextWindow: true, compaction: { type: "native" } }, models });
+  const cliproxy = { state: "healthy", reasons: [], detail: null, version: null, defaultModel: "gpt-5.6-sol", backgroundModel: "", modelOverrides: {}, providers: [], routerProviders: [], accounts: [], activeSessionCount: 0, testedClaudeCliVersion: null, xai: { state: "none", email: null, expiredAt: null, lastQuotaError: null, lastLinkError: null, link: null } };
+  return new FakeDaemonApi()
+    .on("GET", "/api/registry", { status: 200, body: { shells: [], ides: [], fileExplorers: [], browsers: [], agents: allChatAgents } })
+    .on("GET", "/api/agent/providers", { status: 200, body: { hostInstanceId: "h", providers: [row("claude", claudeModels), row("codex", codexModels), row("opencode", openCodeModels), row("grok", grokModels)] } })
+    .on("GET", "/api/agent-accounts", { status: 200, body: { accounts: [], defaults: { claude: null, codex: null, grok: null } } })
+    .on("GET", "/api/cliproxy", { status: 200, body: cliproxy })
+    .on("GET", "/api/cliproxy/models", { status: 200, body: { models: [], asOf: null } });
+}
+
+/** A model as the shed list shows it: its fields but its options, and the mark. */
+const withoutOptions = ({ options: _options, ...model }: ListedModel): ListedModel => ({ ...model, optionsOmitted: true });
+const agentsOf = (r: Record<string, unknown>) => r.agents as ListedAgent[];
+const listAgents = (api: FakeDaemonApi, args: Record<string, unknown> = {}) => tool("list_agents").run({ includeLegacyModels: false, ...args }, ctx(api));
+
+test("list_agents keeps within the result cap: 400 OpenCode models in 22 option sets shed only the options of non-default models, largest catalogue first, from its end", async () => {
+  const models = openCodeCatalogue(400, 137);
+  assert.equal(new Set(models.map((m) => JSON.stringify(m.capabilities.optionDescriptors))).size, 22);
+  const api = catalogueApi(models);
+  const whole = (await loadAgents(api)) as unknown as ListedAgent[]; // what create_session and update_session still read
+  assert.ok(resultBytes({ agents: whole }) > 200_000, "the unbounded catalogue is far past the cap");
+  const r = await listAgents(api);
+  const agents = agentsOf(r);
+  assert.deepEqual(agents.map((a) => a.id), ["claude", "codex", "opencode", "grok", "claudex", "claudemix"], "every agent is listed");
+  assert.ok(resultBytes(r) <= MAX_RESULT_BYTES, `${resultBytes(r)} bytes`);
+  assert.deepEqual(ok(r).structuredContent, r, "never cut by ok()'s last resort");
+  // OpenCode's options alone make the room: every other agent comes back exactly as loadAgents built it.
+  for (const [i, agent] of agents.entries()) if (agent.id !== "opencode") assert.deepEqual(agent, whole[i], agent.id);
+  const opencode = agents[2]!;
+  const source = whole[2]!;
+  assert.deepEqual({ ...opencode, models: [] }, { ...source, models: [] }, "the header is whole, with no truncation flags: no model was left out");
+  assert.deepEqual(opencode.models.map((m) => m.slug), source.models.map((m) => m.slug), "all 400 models are listed");
+  const shed = opencode.models.map((m) => m.optionsOmitted === true);
+  const first = shed.indexOf(true);
+  assert.ok(first > 0 && first < 137, `options are dropped from the end of the list first, so the first ${first} keep theirs`);
+  assert.deepEqual(shed, source.models.map((_, j) => j >= first && j !== 137), "a tail loses its options; the default keeps them");
+  for (const [j, m] of opencode.models.entries()) assert.deepEqual(m, shed[j] ? withoutOptions(source.models[j]!) : source.models[j], `model ${j}`);
+  assert.equal(opencode.models[137]!.isDefault, true);
+  assert.ok(opencode.models[137]!.options!.length > 0, "the default keeps its options");
+  // Tight: giving the last model stripped its options back would pass the cap. Measured exactly, not estimated.
+  assert.ok(resultBytes(r) - resultBytes(opencode.models[first]) + resultBytes(source.models[first]) > MAX_RESULT_BYTES, "no more was shed than needed");
+  // The one model the caller names comes back whole: its full options, even for a model the list shed.
+  const named = await listAgents(api, { agent: "opencode", model: "openrouter/vendor-39/model-399" });
+  assert.deepEqual(named, { agents: [{ ...source, models: [source.models[399]] }] });
+  assert.ok((source.models[399]!.options ?? []).length > 0, "a model with options to show");
+});
+
+test("list_agents sheds whole models only once every catalogue has shed its options: the largest keeps its oldest-listed models and its default, and says modelsTruncated of modelCount", async () => {
+  const api = catalogueApi(openCodeCatalogue(1_500, 900));
+  const whole = (await loadAgents(api)) as unknown as ListedAgent[];
+  const r = await listAgents(api);
+  const agents = agentsOf(r);
+  assert.deepEqual(agents.map((a) => a.id), ["claude", "codex", "opencode", "grok", "claudex", "claudemix"]);
+  assert.ok(resultBytes(r) <= MAX_RESULT_BYTES, `${resultBytes(r)} bytes`);
+  assert.deepEqual(ok(r).structuredContent, r);
+  for (const [i, agent] of agents.entries()) {
+    const source = whole[i]!;
+    if (agent.id === "opencode") continue;
+    // Every other agent keeps every model, and its header whole; each non-default model with options is shown without them.
+    assert.deepEqual({ ...agent, models: [] }, { ...source, models: [] }, `${agent.id}: header`);
+    assert.deepEqual(agent.models, source.models.map((m) => (m.isDefault || !m.options?.length ? m : withoutOptions(m))), `${agent.id}: models`);
+  }
+  assert.ok(agents[4]!.models.every((m) => !m.optionsOmitted && Array.isArray(m.options)), "claudex's proxy models have no options to drop and are never marked");
+  const opencode = agents[2]!;
+  const source = whole[2]!;
+  assert.equal(opencode.modelsTruncated, true);
+  assert.equal(opencode.modelCount, 1_500);
+  assert.deepEqual({ ...opencode, models: [], modelsTruncated: undefined, modelCount: undefined }, { ...source, models: [], modelsTruncated: undefined, modelCount: undefined }, "the rest of the header is whole");
+  const kept = opencode.models.length - 1; // the oldest-listed models, then the default
+  assert.ok(kept > 100 && kept < 900, `${kept} models kept`);
+  assert.deepEqual(opencode.models.map((m) => m.slug), [...source.models.slice(0, kept), source.models[900]!].map((m) => m.slug), "dropped from the end of the list, the default spared");
+  assert.deepEqual(opencode.models[kept], source.models[900], "the default keeps its options");
+  assert.ok(opencode.models.slice(0, kept).every((m) => m.optionsOmitted === true && !("options" in m)), "every kept non-default model is shown without its options");
+  // Tight: the next model in list order would not fit.
+  assert.ok(resultBytes(r) + resultBytes(withoutOptions(source.models[kept]!)) + 1 > MAX_RESULT_BYTES, "no more was shed than needed");
+  // One agent alone is bounded the same way, and has more room.
+  const one = await listAgents(api, { agent: "opencode" });
+  const alone = agentsOf(one)[0]!;
+  assert.ok(resultBytes(one) <= MAX_RESULT_BYTES, `${resultBytes(one)} bytes`);
+  assert.equal(alone.modelsTruncated, true);
+  assert.equal(alone.modelCount, 1_500);
+  assert.ok(alone.models.length > opencode.models.length, `${alone.models.length} models alone`);
+});
+
+test("list_agents: an agent with no flagged default spares its first model, the one a launch that names none gets", async () => {
+  const api = catalogueApi(openCodeCatalogue(1_500, null));
+  const whole = (await loadAgents(api)) as unknown as ListedAgent[];
+  const opencode = agentsOf(await listAgents(api))[2]!;
+  assert.deepEqual(opencode.models[0], whole[2]!.models[0], "whole, with its options");
+  assert.ok(opencode.models.slice(1).every((m) => m.optionsOmitted === true), "every other model is shown without its options");
+  assert.equal(opencode.modelsTruncated, true);
+});
+
+test("list_agents {agent, model}: one model with its full options; a model needs an agent, an unknown one is refused naming valid slugs", async () => {
+  const api = catalogueApi(openCodeCatalogue(400, 137));
+  const whole = (await loadAgents(api, { includeLegacyModels: true })) as unknown as ListedAgent[];
+  const codex = whole[1]!;
+  assert.deepEqual(await listAgents(api, { agent: "codex", model: "gpt-6-sol" }), { agents: [{ ...codex, models: [codex.models[1]] }] });
+  // A model named outright is found even when legacy: the flag only trims a listing.
+  assert.deepEqual(agentsOf(await listAgents(api, { agent: "codex", model: "gpt-5.5" }))[0]!.models, [codex.models[4]]);
+  assert.equal(codex.models[4]!.isLegacy, true);
+  await assert.rejects(listAgents(api, { model: "gpt-6-sol" }), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /model.*agent/i.test(e.message));
+  await assert.rejects(listAgents(api, { agent: "opencode", model: "nope" }),
+    (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && e.message.startsWith("Unknown model \"nope\" for opencode. Valid models: openrouter/vendor-0/model-0, openrouter/vendor-1/model-1, ") && e.message.endsWith(", ….") && e.message.length < 4_000);
+  await assert.rejects(listAgents(api, { agent: "nope", model: "x" }), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /Unknown agent "nope"/.test(e.message));
+  // Still probing: nothing to look up yet, and the refusal says so.
+  const probing = catalogueApi([]);
+  await assert.rejects(listAgents(probing, { agent: "opencode", model: "x" }), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /Still loading opencode's models/.test(e.message));
+  const def = tool("list_agents");
+  assert.equal((def.input as Record<string, { safeParse(v: unknown): { success: boolean } }>).model!.safeParse("").success, false, "an empty model is refused like an empty agent");
+});
+
+test("list_agents' description says how to read a shed model's options, and that only enabled agents open", () => {
+  const def = tool("list_agents");
+  assert.ok(def.description.length <= 400, `${def.description.length} characters`);
+  assert.match(def.description, /list_agents \{agent, model\}/);
+  assert.match(def.description, /optionsOmitted/);
+  assert.match(def.description, /modelsTruncated/);
+  assert.match(def.description, /disabledReason/);
+  assert.doesNotMatch(def.description, /agents you can open/);
+  const model = (def.input as Record<string, { description?: string }>).model!;
+  assert.match(model.description ?? "", /agent/);
+  assert.match(model.description ?? "", /options/);
+});
+
+test("list_conversations keeps within the result cap: 200 long rows lose the oldest ones, and truncated/omitted say how many", async (t) => {
+  const api = await projectApi(t);
+  const long = (i: number) => `会話 ${i} ${"長いタイトルの説明".repeat(9)}`.slice(0, 80);
+  const conversations = Array.from({ length: 200 }, (_, i) => ({ id: `0f6d2c5e-8a1b-4c3d-9e7f-${String(i).padStart(12, "0")}`, agentRefId: "claude", title: long(i), preview: long(i + 1_000), updatedAt: stamp(1_000 - i), home: "account", accountId: "acc-1" }));
+  api.on("GET", "/api/registry", { status: 200, body: chatRegistry }).on("GET", "/api/agents/conversations", { status: 200, body: { conversations } });
+  const projected = (c: (typeof conversations)[number]) => ({ id: c.id, agent: "claude", title: c.title, preview: c.preview, updatedAt: c.updatedAt, home: "account", accountId: "acc-1", resumable: true });
+  assert.ok(resultBytes({ conversations: conversations.map(projected) }) > 100_000, "the unbounded list is far past the cap");
+  const r = await tool("list_conversations").run({ project: "acme/api", limit: 200 }, ctx(api));
+  const rows = r.conversations as ReturnType<typeof projected>[];
+  assert.ok(resultBytes(r) <= MAX_RESULT_BYTES, `${resultBytes(r)} bytes`);
+  assert.deepEqual(ok(r).structuredContent, r);
+  assert.ok(rows.length > 50 && rows.length < 200, `${rows.length} rows`);
+  assert.deepEqual(r, { conversations: conversations.slice(0, rows.length).map(projected), truncated: true, omitted: 200 - rows.length }, "the newest rows, in order");
+  // Tight: the next-oldest row would not have fitted.
+  assert.ok(resultBytes({ conversations: [...rows, projected(conversations[rows.length]!)], truncated: true, omitted: 200 - rows.length - 1 }) > MAX_RESULT_BYTES, "no more was left out than needed");
+  // A list that fits is returned as before, unflagged.
+  assert.deepEqual(await tool("list_conversations").run({ project: "acme/api", limit: 20 }, ctx(api)), { conversations: conversations.slice(0, 20).map(projected) });
+});
+
+test("list_conversations: a row is resumable only through an ENABLED chat agent, as the GUI's resume lists require (create_session refuses a disabled one)", async (t) => {
+  const api = await projectApi(t);
+  api.on("GET", "/api/registry", { status: 200, body: { ...chatRegistry, agents: chatRegistry.agents.map((a) => (a.id === "claudex" ? { ...a, enabled: false, disabledReason: "proxy down" } : a)) } })
+    .on("GET", "/api/agents/conversations", { status: 200, body: { conversations: [
+      { id: "s1", agentRefId: "claude", title: "Through the proxy", updatedAt: stamp(3), home: "cliproxy", proxyRefId: "claudex" },
+      { id: "s2", agentRefId: "claude", title: "Mine", updatedAt: stamp(2), home: "system" }
+    ] } });
+  const r = await tool("list_conversations").run({ project: "acme/api", limit: 20 }, ctx(api));
+  assert.deepEqual((r.conversations as { id: string; agent: string; resumable: boolean }[]).map((c) => [c.id, c.agent, c.resumable]), [["s1", "claudex", false], ["s2", "claude", true]]);
+  // The filter still names the disabled agent's rows: it lists them, it just cannot resume them.
+  assert.deepEqual((await tool("list_conversations").run({ project: "acme/api", agent: "claudex", limit: 20 }, ctx(api))).conversations, [{ id: "s1", agent: "claudex", title: "Through the proxy", updatedAt: stamp(3), home: "cliproxy", resumable: false }]);
 });

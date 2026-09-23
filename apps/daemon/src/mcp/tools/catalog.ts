@@ -1,10 +1,11 @@
 import { z } from "zod";
 import type { AgentConversationsResponse, ProjectSummary, RecentProjectSummary, RegistryResponse, WorkspaceSummary } from "@orquester/api";
 import { resolveProject } from "../addressing.ts";
-import { conversationLaunch, findAgent, loadAgents, nameList } from "../agents.ts";
+import { conversationLaunch, findAgent, findModel, fitAgentViews, loadAgents, nameList } from "../agents.ts";
 import type { DaemonApi } from "../daemon-api.ts";
 import { ToolError, expectOk } from "../errors.ts";
 import { listSessions } from "../reads.ts";
+import { MAX_RESULT_BYTES, resultBytes } from "../result.ts";
 import { defineTool, READ_ONLY, type ToolDef } from "../tool.ts";
 
 /**
@@ -66,26 +67,48 @@ const listProjects = defineTool({
 const listAgents = defineTool({
   name: "list_agents",
   title: "List launchable agents",
-  description: "The chat agents you can open (claude, claudex, claudemix, codex, opencode, grok) with their valid models, model options (effort…), permission modes, capabilities and accounts. Call this before create_session or update_session.",
+  description: "Every chat agent (claude, claudex, claudemix, codex, opencode, grok) with its valid models, model options (effort…), permission modes, capabilities and accounts; only enabled ones open (disabledReason says why not). Call it before create_session or update_session. A catalogue too big for one result is cut (optionsOmitted, modelsTruncated): list_agents {agent, model} gives a model's full options.",
   input: {
     agent: z.string().min(1).optional().describe("Only this agent id."),
+    model: z.string().min(1).optional().describe("Needs agent: just this model (by slug), with its full options — how to read the options a cut catalogue omits (optionsOmitted)."),
     includeLegacyModels: z.boolean().default(false).describe("Also list models flagged legacy.")
   },
   annotations: READ_ONLY,
   async run(args, { api }) {
-    const agents = await loadAgents(api, { includeLegacyModels: args.includeLegacyModels });
-    return { agents: args.agent !== undefined ? [findAgent(agents, args.agent)] : agents };
+    if (args.model !== undefined && args.agent === undefined) throw new ToolError("INVALID_ARGUMENT", "model needs agent: a model is looked up in one agent's catalogue — list_agents {agent, model}.");
+    // A model named outright is found even when legacy: the flag only trims a listing.
+    const agents = await loadAgents(api, { includeLegacyModels: args.includeLegacyModels || args.model !== undefined });
+    if (args.agent === undefined) return { agents: fitAgentViews(agents, MAX_RESULT_BYTES) };
+    const agent = findAgent(agents, args.agent);
+    if (args.model === undefined) return { agents: fitAgentViews([agent], MAX_RESULT_BYTES) };
+    return { agents: [{ ...agent, models: [findModel(agent, args.model)] }] };
   }
 });
+
+/**
+ * Conversation rows (newest first) that fit one result: the oldest are left out — ok() would otherwise cut the JSON
+ * and lose them all — `truncated` and `omitted` saying so. Linear: each row is measured once, with the comma before
+ * it (every row but the first); only the small frame is re-measured, as `omitted`'s digits move.
+ */
+function fitConversations<T>(rows: readonly T[]): { conversations: T[]; truncated?: true; omitted?: number } {
+  const sizes = rows.map((row, i) => resultBytes(row) + (i > 0 ? 1 : 0));
+  if (resultBytes({ conversations: [] }) + sizes.reduce((sum, n) => sum + n, 0) <= MAX_RESULT_BYTES) return { conversations: [...rows] };
+  const frame = (omitted: number): number => resultBytes({ conversations: [], truncated: true, omitted });
+  let used = 0;
+  let kept = 0;
+  // The rows kept are the newest ones, a prefix: the first row that does not fit ends it.
+  while (kept < rows.length && frame(rows.length - kept - 1) + used + sizes[kept]! <= MAX_RESULT_BYTES) used += sizes[kept++]!;
+  return { conversations: rows.slice(0, kept), truncated: true, omitted: rows.length - kept };
+}
 
 const listConversations = defineTool({
   name: "list_conversations",
   title: "List past conversations",
-  description: "Provider conversations recorded for a project, newest first. A row with `resumable: true` can be resumed: pass its `id` as create_session.resume.conversationId (`agent` is the agent it resumes with).",
+  description: "Provider conversations recorded for a project, newest first. A row with `resumable: true` can be resumed: pass its `id` as create_session.resume.conversationId (`agent` is the agent it resumes with). Rows past the result size cap are left out, oldest first (truncated, omitted).",
   input: {
     project: z.string().describe("Absolute project path or \"<workspace>/<project>\"."),
     agent: z.string().min(1).optional().describe("Only rows whose `agent` is this agent id (an unknown one is refused)."),
-    limit: z.number().int().min(1).max(200).default(20).describe("Maximum rows.")
+    limit: z.number().int().min(1).max(200).default(20).describe("Maximum rows; fewer when they would pass the result size cap.")
   },
   annotations: READ_ONLY,
   async run(args, { api }) {
@@ -94,11 +117,12 @@ const listConversations = defineTool({
     // As list_agents: without the registry no row's resumability is known, and `false` on every row would be a lie.
     if (registry.status >= 400) throw new ToolError("INTERNAL", "Could not read the agent registry.");
     const agents = (registry.body as RegistryResponse).agents ?? [];
-    const chatAgents = new Set(agents.filter((e) => e.chat?.adapter).map((e) => e.id));
+    // The GUI's `isResumableByInstalledAgent`: a chat agent, and an enabled one — create_session refuses any other.
+    const launchable = new Set(agents.filter((e) => e.chat?.adapter && e.enabled).map((e) => e.id));
     const res = expectOk<AgentConversationsResponse>(conversations, "conversations");
     const rows = res.conversations.map((c) => {
       const { agent, reachable } = conversationLaunch(c);
-      const resumable = reachable && chatAgents.has(agent);
+      const resumable = reachable && launchable.has(agent);
       return { id: c.id, agent, title: c.title, ...(c.preview ? { preview: c.preview } : {}), updatedAt: c.updatedAt, home: c.home ?? "system", ...(c.accountId ? { accountId: c.accountId } : {}), resumable };
     });
     // Unknown = neither a registry agent nor one a row of this project names; a known agent without rows is an honest [].
@@ -106,7 +130,7 @@ const listConversations = defineTool({
       throw new ToolError("INVALID_ARGUMENT", `Unknown agent "${args.agent}". Valid agents: ${nameList(agents.map((e) => e.id))}.`);
     }
     const filtered = args.agent !== undefined ? rows.filter((r) => r.agent === args.agent) : rows;
-    return { conversations: filtered.slice(0, args.limit) };
+    return fitConversations(filtered.slice(0, args.limit));
   }
 });
 

@@ -1,14 +1,15 @@
 import { z } from "zod";
 import type { SessionSummary } from "@orquester/api";
-import { agentChatRoutes, buildPlanImplementationPrompt, isPlanImplementationMessage, MAX_TURN_INPUT_CHARS, type AttachmentRef, type ThreadActivityItem, type ThreadItemResponse, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
+import { agentChatRoutes, buildPlanImplementationPrompt, MAX_TURN_INPUT_CHARS, type AttachmentRef, type ThreadItemResponse, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
 import { supportsFrom } from "../agents.ts";
 import { attachmentInputSchema, MAX_ATTACHMENTS, uploadInlineAttachments } from "../attachments.ts";
 import type { DaemonApi } from "../daemon-api.ts";
 import { expectOk, ToolError } from "../errors.ts";
 import { readThread, requireChatSession, sendCommand } from "../reads.ts";
+import { MAX_RESULT_BYTES, resultBytes } from "../result.ts";
 import { defineTool, MUTATING, READ_ONLY, type ToolContext, type ToolDef } from "../tool.ts";
-import { transcriptEntries, type TranscriptResult } from "../transcript.ts";
-import { buildViewContext, chatDetail, SETTLED_TURN_STATES, type SessionDetail } from "../views.ts";
+import { proposedPlan, transcriptEntries, type TranscriptResult } from "../transcript.ts";
+import { buildViewContext, chatDetail, fitSubagents, SETTLED_TURN_STATES, type SessionDetail } from "../views.ts";
 import { turnBaseline, waitForTurn, type TurnBaseline, type TurnOutcome } from "../wait.ts";
 
 const MAX_WAIT_MS = 600_000;
@@ -154,10 +155,12 @@ function sendResult(seq: number, outcome: SendResult["outcome"], session: Sessio
     head.turnId = session.chat.activeTurnId;
   }
   if (session.pending.approvals.length || session.pending.questions.length) head.pending = session.pending;
-  if (head.reply === undefined) return { ...head, session };
   // `reply` IS the detail's lastReply: returned once, which keeps a long reply inside the result cap.
   const { lastReply: _returnedAsReply, ...rest } = session;
-  return { ...head, session: rest };
+  const body = head.reply === undefined ? session : rest;
+  // The detail was fitted on its own; beside `pending`, returned twice, it can pass the cap. Fit it again in what the
+  // head leaves: `{…head, "session":{}}` less the two bytes of that empty object.
+  return { ...head, session: fitSubagents(body, MAX_RESULT_BYTES - (resultBytes({ ...head, session: {} }) - 2)) };
 }
 
 const sendMessage = defineTool({
@@ -196,21 +199,16 @@ const sendMessage = defineTool({
 
 /**
  * The plan the GUI's Implement button sends: the LATEST proposed plan, unless a later user message already
- * implemented it. That is the host's own `hasActionableProposedPlan` rule, judged on the snapshot just read rather
- * than on the summary flag, which trails the host by up to one poll: a second call in that window would send the
- * plan twice. A plan over the 16 KiB wire cap arrives slimmed (`payload.truncated`) and is read back whole — the
- * agent must never implement a cut plan.
+ * implemented it. That is the host's own `hasActionableProposedPlan` rule, judged on the snapshot just read
+ * (`proposedPlan`, the one rule get_session and read_transcript use too) rather than on the summary flag, which
+ * trails the host by up to one poll: a second call in that window would send the plan twice. A plan over the 16 KiB
+ * wire cap arrives slimmed (`payload.truncated`) and is read back whole — the agent must never implement a cut plan.
  */
 async function actionablePlanMarkdown(api: DaemonApi, sessionId: string, snap: ThreadSnapshotPayload): Promise<string> {
-  let plan: ThreadActivityItem | undefined;
-  for (let i = snap.items.length - 1; i >= 0 && !plan; i -= 1) {
-    const item = snap.items[i]!;
-    if (item.kind === "message" && item.role === "user" && isPlanImplementationMessage(item.text)) {
-      throw new ToolError("INVALID_ARGUMENT", "The latest proposed plan was already sent for implementation; follow up with send_message.");
-    }
-    if (item.kind === "activity" && item.activityKind === "turn.proposed.completed") plan = item;
-  }
-  if (!plan) throw new ToolError("INVALID_ARGUMENT", "This session has no proposed plan to implement (get_session.plan); ask for one with send_message {planMode:true}.");
+  const latest = proposedPlan(snap.items);
+  if (!latest) throw new ToolError("INVALID_ARGUMENT", "This session has no proposed plan to implement (get_session.plan); ask for one with send_message {planMode:true}.");
+  if (!latest.actionable) throw new ToolError("INVALID_ARGUMENT", "The latest proposed plan was already sent for implementation; follow up with send_message.");
+  const plan = latest.item;
   let payload = (plan.payload ?? {}) as { planMarkdown?: unknown; truncated?: unknown };
   if (payload.truncated === true) {
     const { item } = expectOk<ThreadItemResponse>(await api.request("GET", agentChatRoutes.item(sessionId, plan.id)), "plan");
@@ -245,7 +243,7 @@ const readTranscript = defineTool({
   input: {
     sessionId: sessionIdField,
     turns: z.number().int().min(1).max(200).default(3).describe("How many of the latest turns to include."),
-    agentId: z.string().optional().describe("A subagent id from get_session.subagents to read its own timeline."),
+    agentId: z.string().min(1).optional().describe("A subagent id from get_session.subagents to read its own timeline."),
     include: z.array(z.enum(["reasoning", "tools", "activity"])).default(["tools", "activity"]).describe("Extra row kinds; reasoning is opt-in."),
     maxChars: z.number().int().min(2_000).max(MAX_TRANSCRIPT_CHARS).default(40_000).describe("Size budget for the result, in UTF-8 bytes (max 55000; every tool result is capped at 60000 bytes). Over it, the transcript sheds reasoning, then tool detail, then its oldest rows, and cuts the latest reply last; the subagent list keeps at least a quarter when it needs it, plus whatever the transcript leaves unused.")
   },
@@ -253,10 +251,11 @@ const readTranscript = defineTool({
   async run(args, { api }) {
     await requireChatSession(api, args.sessionId);
     const snap = await readThread(api, args.sessionId);
-    if (args.agentId && !snap.roster.some((r) => r.id === args.agentId) && !snap.items.some((i) => i.agentId === args.agentId)) {
+    // "" names no subagent: refused like any unknown id, never read as "the main view" (the schema refuses it first).
+    if (args.agentId !== undefined && !snap.roster.some((r) => r.id === args.agentId) && !snap.items.some((i) => i.agentId === args.agentId)) {
       throw new ToolError("INVALID_ARGUMENT", `No subagent "${args.agentId}". Known: ${snap.roster.map((r) => r.id).join(", ") || "none"}.`);
     }
-    const result = transcriptEntries(snap, { turns: args.turns, ...(args.agentId ? { agentId: args.agentId } : {}), include: new Set(args.include), maxChars: args.maxChars });
+    const result = transcriptEntries(snap, { turns: args.turns, ...(args.agentId !== undefined ? { agentId: args.agentId } : {}), include: new Set(args.include), maxChars: args.maxChars });
     const hint = transcriptHint(result);
     return hint ? { ...result, hint } : { ...result };
   }

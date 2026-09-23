@@ -30,14 +30,17 @@ const SKIPPED_ACTIVITY = new Set(["tool.output", "tool.progress", "turn.proposed
 
 /** A tool's `detail` after the second shed: at most this many characters, the cut marked by the trailing "…". */
 const SHED_DETAIL_CHARS = 200;
-/** A subagent's title, in the roster and on its anchor: at most this many code points, a cut marked the same way. */
-const SUBAGENT_TITLE_CHARS = 200;
+/**
+ * A subagent's text wherever the tools show it — its title here, in the roster and on its anchor; its title, progress
+ * and error in a session detail (views.ts): at most this many code points, a cut marked the same way.
+ */
+export const SUBAGENT_TEXT_CHARS = 200;
 
 type P = Record<string, unknown>;
 const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
 /** `text` cut to at most `max` code points, the last of them a "…" when anything was cut. */
 const capped = (text: string, max: number): string => (capText(text, max).truncated ? `${capText(text, max - 1).text}…` : text);
-const subagentTitle = (title: string | null | undefined): string | null => (title == null ? null : capped(title, SUBAGENT_TITLE_CHARS));
+const subagentTitle = (title: string | null | undefined): string | null => (title == null ? null : capped(title, SUBAGENT_TEXT_CHARS));
 /**
  * Label plus detail, as the GUI's row shows them; runtime.error and runtime.warning keep their text in
  * `message`. A warning is labelled with its own message cut short, so then the message alone says it.
@@ -51,12 +54,19 @@ const rowText = (a: ThreadActivityItem, p: P): string => {
 };
 const rosterView = (r: RuntimeSubagent): NonNullable<TranscriptEntry["subagent"]> => ({ id: r.id, title: subagentTitle(r.title), status: r.status });
 
-/** The host's `hasActionableProposedPlan` rule: the LATEST proposed plan, until a later user message implements it. */
-function actionablePlanId(items: readonly ThreadItem[]): string | null {
+/**
+ * The thread's latest proposed plan, and whether it is actionable: the host's own `hasActionableProposedPlan` rule
+ * (orchestrator.ts) — the LATEST plan, until a later user message implements it — judged on the snapshot just read.
+ * The ONE place the tools decide it: get_session's `plan.actionable` (views.ts), the transcript's plan rows (below)
+ * and implement_plan's check (tools/messages.ts). The summary's flag says the same one host poll late: right after
+ * implement_plan it still flags the plan just sent, and right after a plan lands it does not flag it yet.
+ */
+export function proposedPlan(items: readonly ThreadItem[]): { item: ThreadActivityItem; actionable: boolean } | null {
+  let implemented = false;
   for (let i = items.length - 1; i >= 0; i -= 1) {
     const item = items[i]!;
-    if (item.kind === "message" && item.role === "user" && isPlanImplementationMessage(item.text)) return null;
-    if (item.kind === "activity" && item.activityKind === "turn.proposed.completed") return item.id;
+    if (item.kind === "message" && item.role === "user" && isPlanImplementationMessage(item.text)) implemented = true;
+    else if (item.kind === "activity" && item.activityKind === "turn.proposed.completed") return { item, actionable: !implemented };
   }
   return null;
 }
@@ -199,18 +209,19 @@ const LIVE: ReadonlySet<string> = ACTIVE_SUBAGENT_STATUSES;
 
 /** A row with the bytes it adds to its JSON array — its own JSON plus the comma joining it — measured once. */
 export interface Sized<T> { row: T; bytes: number }
-const sized = <T>(rows: readonly T[]): Sized<T>[] => rows.map((row) => ({ row, bytes: jsonByteSize(row) + 1 }));
+export const sized = <T>(rows: readonly T[]): Sized<T>[] => rows.map((row) => ({ row, bytes: jsonByteSize(row) + 1 }));
 /** A list's JSON inside the result, brackets excluded: every row's bytes but the last comma. */
 const contentBytes = (sum: number, count: number): number => (count > 0 ? sum - 1 : 0);
 
 /**
- * The subagent list within `allowance` bytes (its JSON, brackets excluded): settled rows go first, then live ones
- * (pending, running, waiting), each first seen first. Pure, and linear: every row was measured once.
+ * A subagent list within `allowance` bytes (its JSON, brackets excluded): settled rows go first, then live ones
+ * (pending, running, waiting), each first seen first. The one rule for both lists that shed subagents — the
+ * transcript's roster here and a session detail's `subagents` (views.ts). Pure, and linear: every row was measured once.
  */
-export function fitRoster(rows: readonly Sized<RosterRow>[], allowance: number): { rows: RosterRow[]; bytes: number; trimmed: boolean } {
+export function fitRoster<T extends { status: string }>(rows: readonly Sized<T>[], allowance: number): { rows: T[]; bytes: number; trimmed: boolean } {
   let sum = rows.reduce((total, r) => total + r.bytes, 0);
   let count = rows.length;
-  const gone = new Set<Sized<RosterRow>>();
+  const gone = new Set<Sized<T>>();
   for (const r of [...rows.filter((x) => !LIVE.has(x.row.status)), ...rows.filter((x) => LIVE.has(x.row.status))]) {
     if (contentBytes(sum, count) <= allowance) break;
     gone.add(r);
@@ -274,7 +285,8 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
   const wanted = Math.max(1, Math.floor(opts.turns));
   let from = Math.max(1, turnCount - wanted + 1);
   const roster = new Map(snap.roster.map((r) => [r.id, r]));
-  const actionablePlan = actionablePlanId(snap.items);
+  const latestPlan = proposedPlan(snap.items);
+  const actionablePlan = latestPlan?.actionable ? latestPlan.item.id : null;
   const build = (fromTurn: number): TranscriptEntry[] => {
     const selected = new Set(ordered.slice(fromTurn - 1).map((t) => t.turnId as string));
     // A row with no turn counts from the window's first turn on, or from the very start when the window

@@ -4,10 +4,11 @@ import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import { agentChatRoutes, buildPlanImplementationPrompt } from "@orquester/api/agent-chat";
+import { agentChatRoutes, buildPlanImplementationPrompt, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
 import { busEvent, FakeDaemonApi } from "../testing.ts";
 import { activity, chatSummary, head, message, shellSummary, snapshot, stamp, turn } from "../fixtures.ts";
 import type { ToolContext } from "../tool.ts";
+import { MAX_RESULT_BYTES, resultBytes } from "../result.ts";
 import { TRANSCRIPT_HINT_BYTES } from "../transcript.ts";
 import { messageTools, transcriptHint } from "./messages.ts";
 
@@ -528,4 +529,76 @@ test("send_message planMode on a degraded 200 providers body: the capability cou
     await assert.rejects(run(h.ctx), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && e.message === refused, JSON.stringify(body));
     assert.ok(!h.api.calls.some((c) => c.method === "POST"), "nothing was posted");
   }
+});
+
+// ---- Final fix wave F2 ----
+
+/** The thread route answering `before` until the turn is posted (answered `seq`), then `after` — with the harness's project path. */
+function threadAfterPost(h: Awaited<ReturnType<typeof harness>>, before: ThreadSnapshotPayload, after: ThreadSnapshotPayload, seq: number): void {
+  let posted = false;
+  const at = (snap: ThreadSnapshotPayload) => ({ status: 200, body: { kind: "snapshot", thread: { ...snap, head: { ...snap.head, projectPath: h.projectPath, cwd: h.projectPath } } } });
+  h.api.on("POST", "/api/sessions/c1/turn", () => { posted = true; return { status: 200, body: { seq } }; });
+  h.api.on("GET", "/api/sessions/c1/thread", () => at(posted ? after : before));
+}
+
+test("implement_plan {wait:false}: the plan it just sent reads as no longer actionable — in the detail as in the transcript — though the summary still flags it", async (t) => {
+  const plan = activity("turn.proposed.completed", { planId: "p1", planMarkdown: "# Plan" });
+  const before = snapshot({ items: [plan] });
+  const after = snapshot({ items: [plan, message("user", buildPlanImplementationPrompt("# Plan"), { turnId: "t2" })] });
+  // The summary is served unchanged throughout: one host poll behind, it still flags the plan.
+  const h = await harness([chatSummary({ hasActionableProposedPlan: true })], before); t.after(h.close);
+  threadAfterPost(h, before, after, 9);
+  const r = await tool("implement_plan").run({ sessionId: "c1", wait: false, timeoutMs: 1000 }, h.ctx);
+  assert.equal(r.outcome, "sent");
+  assert.equal((r.session as { plan?: { planId: string; actionable: boolean } }).plan?.actionable, false);
+  const transcript = await tool("read_transcript").run({ sessionId: "c1", turns: 3, include: ["tools", "activity"], maxChars: 40_000 }, h.ctx);
+  assert.deepEqual((transcript.entries as { kind: string; actionable?: boolean }[]).filter((e) => e.kind === "plan").map((e) => e.actionable), [false]);
+  // And the check itself agrees: a second call is refused, the plan is not sent twice.
+  await assert.rejects(tool("implement_plan").run({ sessionId: "c1", wait: false, timeoutMs: 1000 }, h.ctx), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /already/.test(e.message));
+  assert.equal(h.api.calls.filter((c) => c.method === "POST").length, 1);
+});
+
+test("read_transcript refuses an empty agentId rather than answering the main view", async (t) => {
+  const input = tool("read_transcript").input as Record<string, { safeParse(v: unknown): { success: boolean } }>;
+  assert.equal(input.agentId!.safeParse("").success, false, "the schema refuses it");
+  const h = await harness([chatSummary()], snapshot({ items: [message("user", "hi"), message("assistant", "yo")] })); t.after(h.close);
+  // run() on its own refuses it too: "" names no subagent.
+  await assert.rejects(tool("read_transcript").run({ sessionId: "c1", turns: 3, agentId: "", include: [], maxChars: 40_000 }, h.ctx),
+    (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && e.message.startsWith("No subagent \"\"."));
+});
+
+/** A roster row as the host folds it; `text` supplies its title, progress and error (copied from views.test.ts). */
+function rosterRow(i: number, status: string, text: (label: string) => string): never {
+  return { id: `task-${i}`, kind: "subagent", agentKind: "agent", title: text("Title"), role: null, model: "sonnet", effort: "high", status, activationCount: 1, usage: null, progress: text("Progress"), lastToolName: "Read", result: null, error: text("Error"), outputFile: null, exitCode: null,
+    isBackgrounded: false, parentAgentId: null, agentIndex: null, phaseIndex: null, phaseTitle: null, attempt: 1, workflowName: null, phases: [], runHandles: null, recentActivity: [], firstSeenAt: stamp(i), startedAt: stamp(i), completedAt: status === "running" ? null : stamp(i + 1), updatedAt: stamp(i + 1) } as never;
+}
+
+test("send_message's result keeps within the cap beside a full detail: the pending request it returns twice is paid for by the subagent list", async (t) => {
+  const long = (label: string, i: number) => `${label} of agent ${i}: ${"a long line of narration ".repeat(60)}`;
+  const roster = Array.from({ length: 100 }, (_, i) => rosterRow(i, "completed", (label) => long(label, i)));
+  const reply = `Done. ${"the reply goes on ".repeat(1_000)}`.slice(0, 16_000);
+  const command = `rm -rf ${"build/".repeat(600)}`; // 3 607 characters: whole, under the view's 4 096 cap
+  const before = snapshot({ items: [message("user", "go", { turnId: "t1" }), message("assistant", reply, { turnId: "t1" })], roster });
+  // Right after the post, the agent asks to run a long command.
+  const after = snapshot({ ...before,
+    items: [...before.items, activity("approval.requested", { requestId: "r1", requestKind: "command", detail: command, args: { toolName: "Bash", input: { command } } }, { tone: "approval" })],
+    pending: { approvals: [{ requestId: "r1", requestKind: "command", createdAt: stamp(5), detail: command }], userInputs: [] } });
+  const h = await harness([chatSummary()], before); t.after(h.close);
+  threadAfterPost(h, before, after, 11);
+  const r = await tool("send_message").run({ sessionId: "c1", text: "go on", planMode: false, wait: false, timeoutMs: 1000 }, h.ctx);
+  type Detail = { pending: unknown; subagents: { id: string }[]; subagentsTruncated?: true; lastReply?: { text: string } };
+  const session = r.session as Detail;
+  assert.equal(r.outcome, "sent");
+  assert.ok(resultBytes(r) <= MAX_RESULT_BYTES, `${resultBytes(r)} bytes`);
+  assert.deepEqual(r.pending, session.pending, "the request, whole, in both places");
+  assert.equal((session.pending as { approvals: { detail: string }[] }).approvals[0]?.detail, command);
+  assert.equal(session.lastReply?.text, reply, "the reply stays whole");
+  assert.equal(session.subagentsTruncated, true);
+  // Settled rows go oldest first; and no more than needed: the newest one dropped would not have fitted. Every kept
+  // row has the same size as it (ids of two digits, texts capped to the same 200 code points).
+  const ids = roster.map((row) => (row as { id: string }).id);
+  const kept = session.subagents.map((s) => s.id);
+  assert.deepEqual(kept, ids.slice(ids.length - kept.length));
+  assert.ok(kept.length > 10 && kept.length < 80, `${kept.length} rows kept`);
+  assert.ok(resultBytes(r) + resultBytes(session.subagents[0]) + 1 > MAX_RESULT_BYTES, "no more was shed than needed");
 });

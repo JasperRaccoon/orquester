@@ -104,11 +104,30 @@ test("resolveModelSelection: defaults, validation, effort alias, merge with curr
   assert.equal(EFFORT_OPTION_IDS.opencode, "variant");
 });
 
-test("a model without descriptors passes options through; an empty catalogue refuses", async () => {
-  const claude = (await loadAgents(api()))[0];
-  assert.deepEqual(resolveModelSelection(claude, { model: "haiku", options: { effort: "max" } }).options, [{ id: "effort", value: "max" }]);
+test("a model without option descriptors takes no options, as the GUI shows it no chips: any is refused; an empty catalogue refuses", async () => {
+  const [claude, claudex] = await loadAgents(api());
+  const noOptions = (model: string) => (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && e.message === `${model} takes no options.`;
+  assert.throws(() => resolveModelSelection(claude, { model: "haiku", options: { effort: "max" } }), noOptions("haiku"));
+  assert.throws(() => resolveModelSelection(claude, { model: "haiku", options: { thinking: true } }), noOptions("haiku"), "not even an option the agent's other models take");
+  // update_session's options-only change on such a model: the head's model, and still nothing to set.
+  assert.throws(() => resolveModelSelection(claude, { options: { effort: "high" }, current: { model: "haiku", options: [] } }), noOptions("haiku"));
+  // claudex's proxy models carry no descriptors either.
+  assert.throws(() => resolveModelSelection(claudex, { model: "gpt-5.6-sol", options: { effort: "high" } }), noOptions("gpt-5.6-sol"));
+  // No options at all is fine, and an empty object is none.
+  assert.deepEqual(resolveModelSelection(claude, { model: "haiku" }), { model: "haiku", options: [] });
+  assert.deepEqual(resolveModelSelection(claude, { model: "haiku", options: {} }), { model: "haiku", options: [] });
   const empty: AgentView = { ...claude, models: [] };
   assert.throws(() => resolveModelSelection(empty, {}), (e: { message: string }) => /Still loading/.test(e.message));
+});
+
+test("a disabled agent says why: the registry's disabledReason rides its view, and nothing is made up when there is none", async () => {
+  const down = api().on("GET", "/api/registry", { status: 200, body: { ...registry, agents: registry.agents.map((a) => (a.id === "claudex" ? { ...a, enabled: false, disabledReason: "proxy down" } : a)) } });
+  const agents = await loadAgents(down);
+  const claudex = findAgent(agents, "claudex");
+  assert.equal(claudex.enabled, false);
+  assert.equal(claudex.disabledReason, "proxy down");
+  assert.ok(!("disabledReason" in findAgent(agents, "claude")), "an enabled agent has none");
+  assert.ok(!("disabledReason" in findAgent(agents, "grok")), "grok is disabled without a runtime reason (its CLI was not found)");
 });
 
 test("validateAccountId accepts system and family accounts, refuses the rest with the valid list", async () => {
