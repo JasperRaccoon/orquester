@@ -701,7 +701,7 @@ test("revert_session refuses up front a target before the last settled compactio
   assert.deepEqual(commandBodies(h.api, "revert"), [{ targetTurnCount: 1 }, { targetTurnCount: 0 }, { targetTurnCount: 0 }, { targetTurnCount: 0 }]);
 });
 
-test("revert_session places a turn with no user message by its first row, and one with no row left before the marker", async (t) => {
+test("revert_session places a turn with no user message by its first row, and one with no row left by its own start", async (t) => {
   const h = await harness([chatSummary()], threeTurns()); t.after(h.close);
   const rows = threeTurnRows();
   const marker = activity("context-compaction", { state: "compacted" }, { turnId: "t1" });
@@ -710,11 +710,18 @@ test("revert_session places a turn with no user message by its first row, and on
   const placed = noPrompt(threeTurns({ items: [...rows.slice(0, 2), marker, ...rows.slice(3)] }));
   revertHost(h, placed, () => rewound(placed, 1));
   await tool("revert_session").run({ sessionId: "c1", keepTurns: 1 }, h.ctx);
-  // Turn 2 has no row left at all: it cannot be placed after the marker, so a cut there is refused.
-  const unplaced = noPrompt(threeTurns({ items: [...rows.slice(0, 2), marker, ...rows.slice(4)] }));
+  // Turn 2 has no row left at all — retention evicted its rows, never the marker nor the turn record (started at
+  // stamp 20) — so its start places it: after a marker stamped before it, a cut there is allowed…
+  const early = { ...marker, createdAt: stamp(15), updatedAt: stamp(15) };
+  const aged = threeTurns({ items: [...rows.slice(0, 2), early, ...rows.slice(4)] });
+  revertHost(h, aged, () => rewound(aged, 1));
+  await tool("revert_session").run({ sessionId: "c1", keepTurns: 1 }, h.ctx);
+  // …and before one stamped after it, a cut there is refused.
+  const late = { ...marker, createdAt: stamp(25), updatedAt: stamp(25) };
+  const unplaced = threeTurns({ items: [...rows.slice(0, 2), late, ...rows.slice(4)] });
   revertHost(h, unplaced, () => assert.fail("nothing is posted"));
   await assert.rejects(tool("revert_session").run({ sessionId: "c1", keepTurns: 1 }, h.ctx), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /between 2 and 2/.test(e.message));
-  assert.deepEqual(commandBodies(h.api, "revert"), [{ targetTurnCount: 1 }]);
+  assert.deepEqual(commandBodies(h.api, "revert"), [{ targetTurnCount: 1 }, { targetTurnCount: 1 }]);
 });
 
 test("revert_session refuses while a request is open (PENDING_REQUEST, like send_message), a turn is active (SESSION_BUSY), rollback is missing or the count is out of range", async (t) => {

@@ -403,21 +403,28 @@ function turnOpening(items: readonly ThreadItem[], turn: StartedTurn): number {
 
 /**
  * The fewest turns a rewind may keep. The provider holds nothing from before the thread's LAST settled compaction, so
- * the GUI withholds "rewind to here" on every message before it (rows.logic.ts `buildRevertTurnCountByUserMessageId`),
- * and the adapter would refuse the rollback. Turns are in start order, so the first one that begins after the marker is
- * the earliest a rewind may cut at; one with no row left to place it counts as before the marker (a marker is never
- * evicted, a turn's rows can be). 0 when nothing was compacted; the started-turn count when no turn began after it.
+ * the GUI withholds "rewind to here" on every message before it (rows.logic.ts `buildRevertTurnCountByUserMessageId`,
+ * and a history page's `rewindable`), and the adapter would refuse the rollback. Turns are in start order, so the first
+ * one that begins after the marker is the earliest a rewind may cut at. 0 when nothing was compacted; the started-turn
+ * count when no turn began after it.
  *
  * "Before" and "after" are positions in `snap.items`, the fold's append order, where the GUI sorts its timeline by
  * `createdAt` (entries.logic.ts). For a real log the two agree: the fold appends each row when its event lands in the
  * host's append-only log, and the host stamps the row then; a row updated later keeps both its place and its stamp.
+ * A turn with no row left in the window is placed by its own start instead: retention evicts rows but never a turn
+ * record and never the marker, so on a long thread an early marker outlives the rows of every turn between it and the
+ * window — turns the host rewinds to, and the GUI offers from its history pages.
  */
 function fewestKeptTurns(snap: ThreadSnapshotPayload): number {
   let marker = -1;
   for (let i = snap.items.length - 1; i >= 0 && marker === -1; i -= 1) if (isSettledCompaction(snap.items[i]!)) marker = i;
   if (marker === -1) return 0;
+  const markedAt = snap.items[marker]!.createdAt;
   const started = startedTurns(snap.turns);
-  const first = started.findIndex((turn) => turnOpening(snap.items, turn) > marker);
+  const first = started.findIndex((turn) => {
+    const opening = turnOpening(snap.items, turn);
+    return opening !== -1 ? opening > marker : (turn.startedAt ?? turn.requestedAt) > markedAt;
+  });
   return first === -1 ? started.length : first;
 }
 
