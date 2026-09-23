@@ -335,8 +335,11 @@ timeline. An unmapped provider message is a `satisfies never` typecheck error an
 `runtime.warning` at runtime — never a silent drop, and never the end of a turn.
 
 **Tests and fixtures.** `pnpm test` (root) → `pnpm -r --if-present test` → `node --import tsx
---test $(find src -name '*.test.ts')` per package. Replay tests live **under `src/`** (the daemon's
-test glob only walks `src`) and read recorded real-CLI captures from
+--test $(find src -name '*.test.ts')` per package. The daemon and UI scripts also preload
+`./test/quiet-mock-timers.mjs`, which drops node:test's "The MockTimers API is an experimental
+feature" `ExperimentalWarning` — only that one, every other warning still prints — so a run's output
+stays pristine (`node --test` hands `--import` on to each file's child process). Replay tests live
+**under `src/`** (the daemon's test glob only walks `src`) and read recorded real-CLI captures from
 `apps/daemon/test/fixtures/{claude,codex,opencode,grok}/`, each with a `capturedWith` provenance
 block and a `README.md` of protocol observations that is required reading before touching its
 adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
