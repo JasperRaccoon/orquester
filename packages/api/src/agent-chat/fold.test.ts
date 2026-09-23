@@ -308,6 +308,63 @@ test("the first assistant message of a turn becomes its anchor", () => {
   assert.equal(state.turns[0]?.assistantMessageId, "assistant:1");
 });
 
+test("a turn records the prompt that opened it, through adoption, settlement and capture", () => {
+  reset();
+  let state = fold([
+    created(),
+    ev("thread.message-sent", {
+      messageId: "user:1",
+      role: "user",
+      text: "hi",
+      streaming: false,
+      turnId: null
+    }),
+    ev("thread.turn-start-requested", { turnId: null, messageId: "user:1", interactionMode: "default" })
+  ]);
+  assert.deepEqual(
+    state.turns.map((turn) => [turn.turnId, turn.state, turn.userMessageId]),
+    [[null, "pending", "user:1"]]
+  );
+
+  // `adoptActiveTurn`: the pending row takes the provider's id and keeps its prompt.
+  state = applyDomainEvent(state, ev("thread.session-set", { session: session("running", "T-1") }));
+  assert.deepEqual(
+    state.turns.map((turn) => [turn.turnId, turn.state, turn.userMessageId]),
+    [["T-1", "running", "user:1"]]
+  );
+
+  state = applyDomainEvent(state, ev("thread.session-set", { session: session("ready", null) }));
+  state = applyDomainEvent(state, diff(1, "T-1"));
+  assert.deepEqual(
+    state.turns.map((turn) => [turn.turnId, turn.state, turn.turnCount, turn.userMessageId]),
+    [["T-1", "completed", 1, "user:1"]]
+  );
+});
+
+test("a turn with no nameable prompt records none", () => {
+  reset();
+  const state = fold([
+    created(),
+    // A replayed history turn whose prompt the projection could not name.
+    ev("thread.turn-start-requested", {
+      turnId: "H-1",
+      messageId: "",
+      interactionMode: "default",
+      settled: { state: "completed", completedAt: "2026-01-01T00:00:00.000Z" }
+    }),
+    // A turn the host never saw a command for (a compaction, a continuation):
+    // the fold synthesises its row from `session-set` alone.
+    ev("thread.session-set", { session: session("running", "T-continuation") })
+  ]);
+  assert.deepEqual(
+    state.turns.map((turn) => [turn.turnId, "userMessageId" in turn]),
+    [
+      ["H-1", false],
+      ["T-continuation", false]
+    ]
+  );
+});
+
 // --- checkpoints -----------------------------------------------------------
 
 function diff(
@@ -588,6 +645,34 @@ test("activities are retained at the window, keeping an unresolved async questio
   assert.equal(state.pending.userInputs.length, 1);
 });
 
+test("a compaction marker never ages out of the window", () => {
+  reset();
+  // A busy thread writes 500 tool rows in minutes; the marker is where the
+  // provider's memory begins, and "rewind to here" withholds everything before
+  // it (§5.5) — evicted, every pre-compaction message was offered for a rewind
+  // the adapter could only refuse.
+  const events: DomainEvent[] = [created()];
+  events.push(
+    ev("thread.activity-appended", {
+      activity: activity(
+        "context-compaction",
+        { state: "compacted", beforeTokens: 100, afterTokens: 10 },
+        { id: "marker", turnId: "T-1" }
+      )
+    })
+  );
+  for (let i = 0; i < ACTIVITY_RETENTION_LIMIT + 50; i += 1) {
+    events.push(
+      ev("thread.activity-appended", {
+        activity: activity("tool.started", { toolUseId: `t${i}` }, { id: `noise-${i}` })
+      })
+    );
+  }
+  const state = fold(events);
+  assert.equal(state.activities.length, ACTIVITY_RETENTION_LIMIT + 1);
+  assert.equal(state.activities[0]?.id, "marker", "the marker is kept, ahead of the window");
+});
+
 test("messages are retained at their own window, independently of activities", () => {
   reset();
   const events: DomainEvent[] = [created()];
@@ -610,41 +695,74 @@ test("messages are retained at their own window, independently of activities", (
 
 // --- revert (§5.5) ---------------------------------------------------------
 
-function threadWithThreeTurns(): DomainEvent[] {
-  const events: DomainEvent[] = [created()];
-  for (let n = 1; n <= 3; n += 1) {
+interface LiveTurnOptions {
+  /** The count this turn's checkpoint is captured at; `null` captures none. Default: `n`. */
+  checkpoint?: number | null;
+  /** Whether `turn-start-requested` names the prompt. Default: true. */
+  linkPrompt?: boolean;
+  /** A second user message sent while the turn runs (§4.1 steering). */
+  steer?: boolean;
+}
+
+/**
+ * One live turn as the host writes it: the prompt is persisted with
+ * `turnId: null` (the provider has not minted an id yet), the turn row adopts
+ * the provider's id from `session-set`, and a checkpoint lands after the
+ * settle.
+ */
+function liveTurn(n: number, options: LiveTurnOptions = {}): DomainEvent[] {
+  const turnId = `T-${n}`;
+  const checkpoint = options.checkpoint === undefined ? n : options.checkpoint;
+  const events: DomainEvent[] = [
+    ev("thread.message-sent", {
+      messageId: `user:${n}`,
+      role: "user",
+      text: `ask ${n}`,
+      streaming: false,
+      turnId: null
+    }),
+    ev("thread.turn-start-requested", {
+      turnId: null,
+      messageId: options.linkPrompt === false ? "" : `user:${n}`,
+      interactionMode: "default"
+    }),
+    ev("thread.session-set", { session: session("running", turnId) }),
+    ev("thread.message-sent", {
+      messageId: `assistant:${n}`,
+      role: "assistant",
+      text: `answer ${n}`,
+      streaming: false,
+      turnId
+    })
+  ];
+  if (options.steer === true) {
+    // Sent while the turn runs: it rides the ACTIVE turn's id and opens no
+    // turn of its own, so no `turn-start-requested` names it.
     events.push(
       ev("thread.message-sent", {
-        messageId: `user:${n}`,
+        messageId: `steer:${n}`,
         role: "user",
-        text: `ask ${n}`,
+        text: `and also ${n}`,
         streaming: false,
-        turnId: null
-      }),
-      ev("thread.turn-start-requested", {
-        turnId: null,
-        messageId: `user:${n}`,
-        interactionMode: "default"
-      }),
-      ev("thread.session-set", { session: session("running", `T-${n}`) }),
-      ev("thread.message-sent", {
-        messageId: `assistant:${n}`,
-        role: "assistant",
-        text: `answer ${n}`,
-        streaming: false,
-        turnId: `T-${n}`
-      }),
-      ev("thread.activity-appended", {
-        activity: activity("tool.completed", { toolUseId: `tu-${n}` }, {
-          id: `act-${n}`,
-          turnId: `T-${n}`
-        })
-      }),
-      ev("thread.session-set", { session: session("ready", null) }),
+        turnId
+      })
+    );
+  }
+  events.push(
+    ev("thread.activity-appended", {
+      activity: activity("tool.completed", { toolUseId: `tu-${n}` }, {
+        id: `act-${n}`,
+        turnId
+      })
+    }),
+    ev("thread.session-set", { session: session("ready", null) })
+  );
+  if (checkpoint !== null) {
+    events.push(
       ev("thread.turn-diff-completed", {
-        turnCount: n,
-        turnId: `T-${n}`,
-        ref: `refs/orquester/checkpoints/x/turn/${n}`,
+        turnCount: checkpoint,
+        turnId,
+        ref: `refs/orquester/checkpoints/x/turn/${checkpoint}`,
         status: "ready",
         files: [],
         assistantMessageId: `assistant:${n}`,
@@ -653,6 +771,38 @@ function threadWithThreeTurns(): DomainEvent[] {
     );
   }
   return events;
+}
+
+function threadWithTurns(
+  count: number,
+  {
+    checkpoint,
+    ...turnOptions
+  }: Omit<LiveTurnOptions, "checkpoint"> & {
+    /** The checkpoint count of turn `n`, or `null` for a turn with no capture. */
+    checkpoint?: (n: number) => number | null;
+  } = {}
+): DomainEvent[] {
+  const events: DomainEvent[] = [created()];
+  for (let n = 1; n <= count; n += 1) {
+    events.push(
+      ...liveTurn(n, {
+        ...turnOptions,
+        ...(checkpoint !== undefined ? { checkpoint: checkpoint(n) } : {})
+      })
+    );
+  }
+  return events;
+}
+
+function threadWithThreeTurns(): DomainEvent[] {
+  return threadWithTurns(3);
+}
+
+function userMessageIds(state: ThreadFoldState): string[] {
+  return messages(state)
+    .filter((message) => message.role === "user")
+    .map((message) => message.id);
 }
 
 test("a revert truncates by retained turn id and recomputes the latest turn", () => {
@@ -688,8 +838,10 @@ test("turn-less rows survive a revert", () => {
     activities(state).some((entry) => entry.id === "no-turn"),
     "an activity with turnId null is never truncated"
   );
-  // The user messages carry turnId null by construction, so all three survive
-  // the turn-id pass — the fallback is what bounds the assistant side.
+  // The prompts carry turnId null by construction; each follows the turn that
+  // names it as its `userMessageId`, and the assistant messages follow their
+  // turn id — so only turn 1's survive on either side.
+  assert.deepEqual(userMessageIds(state), ["user:1"]);
   assert.deepEqual(
     messages(state)
       .filter((message) => message.role === "assistant")
@@ -701,22 +853,25 @@ test("turn-less rows survive a revert", () => {
 test("the fallback pass is bounded at `target` per role", () => {
   reset();
   // Three turns whose USER prompts were all persisted before the provider
-  // minted a turn id (the normal case): the turn-id pass sees none of them, so
-  // the fallback is what brings the surviving turns' prompts back — and only
-  // as many as the revert target.
-  const state = fold([...threadWithThreeTurns(), ev("thread.reverted", { turnCount: 2 })]);
-  assert.deepEqual(
-    messages(state)
-      .filter((message) => message.role === "user")
-      .map((message) => message.id),
-    ["user:1", "user:2"]
-  );
+  // minted a turn id, and which NO turn row names: the first pass sees none of
+  // them, so the fallback is what brings the surviving turns' prompts back —
+  // and only as many as the revert target. (Set-up changed with the turn-order
+  // rewind: a turn now claims its prompt through `userMessageId`, which would
+  // restore these without the fallback, so the prompts here are unlinked — a
+  // replayed history turn whose prompt came back `""` looks exactly like this.
+  // The expectation is unchanged.)
+  const state = fold([
+    ...threadWithTurns(3, { linkPrompt: false }),
+    ev("thread.reverted", { turnCount: 2 })
+  ]);
+  assert.deepEqual(userMessageIds(state), ["user:1", "user:2"]);
 });
 
 test("a message whose turn was truncated is never restored by the fallback", () => {
   reset();
-  // Every message carries a turn id, but NO checkpoint does, so nothing is in
-  // the retained set and the fallback has nothing it is allowed to restore.
+  // Every message carries a turn id, but NO checkpoint does (and no turn row
+  // exists, so this is the legacy checkpoint path), so nothing is in the
+  // retained set and the fallback has nothing it is allowed to restore.
   const events: DomainEvent[] = [created()];
   for (let n = 1; n <= 3; n += 1) {
     events.push(
@@ -754,6 +909,202 @@ test("a revert re-derives pending and roster from the surviving activities", () 
   assert.deepEqual(state.roster, [], "a roster row owned by a truncated turn is gone");
 });
 
+// A revert's `turnCount` is the number of STARTED turns kept (`turns.ts`),
+// never a checkpoint count: the checkpoint list is empty, sparse or densely
+// renumbered exactly where a rewind matters.
+
+test("a revert on a thread with no checkpoints keeps exactly the first `target` turns", () => {
+  reset();
+  // A non-git project captures nothing (§5.4).
+  const state = fold([
+    ...threadWithTurns(4, { checkpoint: () => null }),
+    ev("thread.reverted", { turnCount: 2 })
+  ]);
+  assert.deepEqual(state.checkpoints, []);
+  assert.deepEqual(messages(state).map((message) => message.id), [
+    "user:1",
+    "assistant:1",
+    "user:2",
+    "assistant:2"
+  ]);
+  assert.deepEqual(activities(state).map((entry) => entry.id), ["act-1", "act-2"]);
+  assert.deepEqual(state.turns.map((turn) => turn.turnId), ["T-1", "T-2"]);
+  assert.equal(state.head?.turnCount, 2);
+  assert.equal(deriveLatestTurn(state.turns)?.turnId, "T-2");
+});
+
+test("densely numbered checkpoints go with their turns, not with their counts", () => {
+  reset();
+  // An older host numbered the checkpoint list densely: counts 1 and 2 belong
+  // to the 3rd and 4th turns. Keeping two turns keeps turns 1–2 and drops
+  // 3–4 together with both of their checkpoints.
+  const state = fold([
+    ...threadWithTurns(4, { checkpoint: (n) => (n >= 3 ? n - 2 : null) }),
+    ev("thread.reverted", { turnCount: 2 })
+  ]);
+  assert.deepEqual(state.checkpoints, []);
+  assert.deepEqual(messages(state).map((message) => message.id), [
+    "user:1",
+    "assistant:1",
+    "user:2",
+    "assistant:2"
+  ]);
+  assert.deepEqual(activities(state).map((entry) => entry.id), ["act-1", "act-2"]);
+  assert.deepEqual(state.turns.map((turn) => turn.turnId), ["T-1", "T-2"]);
+  assert.equal(state.head?.turnCount, 2);
+});
+
+test("a sparse checkpoint list never reorders the retained turns", () => {
+  reset();
+  // Only turn 2 was captured. Its checkpoint survives with its turn, but it is
+  // not the latest turn: turn 3 is, and the rows stay in start order with
+  // their own fields — a revert must not move turn 2's row to the end, or
+  // every later ordinal is off by one.
+  const state = fold([
+    ...threadWithTurns(4, { checkpoint: (n) => (n === 2 ? 1 : null) }),
+    ev("thread.reverted", { turnCount: 3 })
+  ]);
+  assert.deepEqual(
+    state.turns.map((turn) => [turn.turnId, turn.userMessageId, turn.state]),
+    [
+      ["T-1", "user:1", "completed"],
+      ["T-2", "user:2", "completed"],
+      ["T-3", "user:3", "completed"]
+    ]
+  );
+  assert.deepEqual(state.checkpoints.map((entry) => entry.turnId), ["T-2"]);
+  assert.equal(deriveLatestTurn(state.turns)?.turnId, "T-3");
+  assert.deepEqual(userMessageIds(state), ["user:1", "user:2", "user:3"]);
+});
+
+test("a revert to zero turns keeps only the thread's turn-less rows", () => {
+  reset();
+  const state = fold([
+    ...threadWithThreeTurns(),
+    ev("thread.activity-appended", {
+      activity: activity("runtime.warning", { message: "ambient" }, { id: "no-turn" })
+    }),
+    ev("thread.reverted", { turnCount: 0 })
+  ]);
+  assert.deepEqual(messages(state), []);
+  assert.deepEqual(activities(state).map((entry) => entry.id), ["no-turn"]);
+  assert.deepEqual(state.turns, []);
+  assert.deepEqual(state.checkpoints, []);
+  assert.equal(state.head?.turnCount, 0);
+});
+
+test("a steer follows the turn it was steered into", () => {
+  reset();
+  const events = [
+    created(),
+    ...liveTurn(1),
+    ...liveTurn(2, { steer: true }),
+    ...liveTurn(3)
+  ];
+  const kept = fold([...events, ev("thread.reverted", { turnCount: 2 })]);
+  assert.deepEqual(userMessageIds(kept), ["user:1", "user:2", "steer:2"]);
+
+  const dropped = fold([...events, ev("thread.reverted", { turnCount: 1 })]);
+  assert.deepEqual(userMessageIds(dropped), ["user:1"]);
+});
+
+test("a retained turn whose prompt no turn row names still keeps it (a /compact turn)", () => {
+  reset();
+  // `/compact` is persisted with no `turn-start-requested`; the compaction
+  // reaches the fold only as the session's turn id, so the fold synthesises
+  // that turn's row with no prompt to name. The bounded fallback restores it.
+  const state = fold([
+    created(),
+    ...liveTurn(1),
+    ev("thread.message-sent", {
+      messageId: "user:compact",
+      role: "user",
+      text: "/compact",
+      streaming: false,
+      turnId: null
+    }),
+    ev("thread.session-set", { session: session("running", "T-compact") }),
+    ev("thread.session-set", { session: session("ready", null) }),
+    ...liveTurn(3),
+    ev("thread.reverted", { turnCount: 2 })
+  ]);
+  assert.deepEqual(state.turns.map((turn) => turn.turnId), ["T-1", "T-compact"]);
+  assert.deepEqual(userMessageIds(state), ["user:1", "user:compact"]);
+  assert.deepEqual(state.checkpoints.map((entry) => entry.turnId), ["T-1"]);
+});
+
+test("a prompt a dropped turn claims is never resurrected by the fallback", () => {
+  reset();
+  // A replayed history turn whose prompt could not be named (`""`) and which
+  // has no user message at all, then one live turn. Keeping the history turn
+  // leaves the fallback one user message short — and the only turn-less
+  // prompt left belongs to the turn the revert drops.
+  const state = fold([
+    created(),
+    ev("thread.message-sent", {
+      messageId: "history:assistant",
+      role: "assistant",
+      text: "an old answer",
+      streaming: false,
+      turnId: "H-1"
+    }),
+    ev("thread.turn-start-requested", {
+      turnId: "H-1",
+      messageId: "",
+      interactionMode: "default",
+      settled: {
+        state: "completed",
+        completedAt: "2026-01-01T00:00:00.000Z",
+        assistantMessageId: "history:assistant"
+      }
+    }),
+    ...liveTurn(2, { checkpoint: null }),
+    ev("thread.reverted", { turnCount: 1 })
+  ]);
+  assert.deepEqual(messages(state).map((message) => message.id), ["history:assistant"]);
+  assert.deepEqual(state.turns.map((turn) => turn.turnId), ["H-1"]);
+});
+
+test("the legacy fallback: with no started turn, a revert still truncates by checkpoint count", () => {
+  reset();
+  // A log written before turns were recorded: checkpoints, but an empty
+  // `turns[]`. The checkpoints at or below the target name the retained turns.
+  const events: DomainEvent[] = [created()];
+  for (let n = 1; n <= 3; n += 1) {
+    events.push(
+      ev("thread.message-sent", {
+        messageId: `user:${n}`,
+        role: "user",
+        text: `ask ${n}`,
+        streaming: false,
+        turnId: null
+      }),
+      ev("thread.message-sent", {
+        messageId: `assistant:${n}`,
+        role: "assistant",
+        text: `answer ${n}`,
+        streaming: false,
+        turnId: `T-${n}`
+      }),
+      diff(n, `T-${n}`)
+    );
+  }
+  const before = fold(events);
+  assert.deepEqual(before.turns, [], "no turn was ever recorded");
+
+  const state = fold([...events, ev("thread.reverted", { turnCount: 2 })]);
+  assert.deepEqual(state.checkpoints.map((entry) => entry.checkpointTurnCount), [1, 2]);
+  assert.deepEqual(messages(state).map((message) => message.id), [
+    "user:1",
+    "assistant:1",
+    "user:2",
+    "assistant:2"
+  ]);
+  // The latest turn is synthesised from the last surviving checkpoint.
+  assert.deepEqual(state.turns.map((turn) => [turn.turnId, turn.state]), [["T-2", "completed"]]);
+  assert.equal(state.head?.turnCount, 2);
+});
+
 // --- snapshot --------------------------------------------------------------
 
 test("toThreadSnapshot projects the §6.3 read shape", () => {
@@ -765,6 +1116,20 @@ test("toThreadSnapshot projects the §6.3 read shape", () => {
   assert.equal(snapshot.items, state.items);
   assert.equal(snapshot.checkpoints.length, 3);
   assert.deepEqual(snapshot.pending, { approvals: [], userInputs: [] });
+});
+
+test("toThreadSnapshot carries each turn's prompt through, before and after a revert", () => {
+  reset();
+  const events = threadWithThreeTurns();
+  assert.deepEqual(
+    toThreadSnapshot(fold(events)).turns.map((turn) => turn.userMessageId),
+    ["user:1", "user:2", "user:3"]
+  );
+  const reverted = fold([...events, ev("thread.reverted", { turnCount: 2 })]);
+  assert.deepEqual(
+    toThreadSnapshot(reverted).turns.map((turn) => turn.userMessageId),
+    ["user:1", "user:2"]
+  );
 });
 
 test("foldThread equals a left reduce of applyDomainEvent", () => {

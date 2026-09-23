@@ -320,6 +320,17 @@ export interface Turn {
   startedAt: string | null;
   completedAt: string | null;
   assistantMessageId: string | null;
+  /**
+   * The user message that opened this turn — `thread.turn-start-requested`'s
+   * `messageId`, when the host had one. Absent on a turn the host never saw a
+   * command for (a compaction, a continuation after a restart, a
+   * provider-initiated turn) and on a replayed turn whose prompt could not be
+   * identified. "Rewind to here" (§5.5) maps a user message to its turn
+   * through this and the turn's ORDER — never through the checkpoint list,
+   * which a non-git project, a failed capture or a resumed history leaves
+   * sparse (`turns.ts`).
+   */
+  userMessageId?: string;
   interactionMode?: import("./adapter-types.ts").InteractionMode;
   model?: string;
   tokenUsage?: TurnTokenUsage;

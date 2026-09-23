@@ -962,3 +962,186 @@ test("S1 #9: a failure detail collapses the host's home path to ~", async (t) =>
     `raw host path leaked into a timeline row: ${result.detail ?? ""}`
   );
 });
+
+// ---------------------------------------------------------------------------
+// Turn-ordered numbering (§5.5): the host names the count, the refs follow it
+// ---------------------------------------------------------------------------
+
+test("§5.5: a named turn count numbers the baseline and the turn end — a sparse 26 → 27 pair", async (t) => {
+  const repo = await seededRepo();
+  t.after(() => repo.cleanup());
+  const service = serviceFor(repo);
+
+  // A thread resumed with 26 history turns: nothing was ever captured for
+  // them, so the first live turn (ordinal 27) is the first checkpoint pair.
+  const baseline = await service.captureBaseline({
+    threadId: THREAD,
+    cwd: repo.dir,
+    turnId: "turn-27",
+    turnCount: 26
+  });
+  assert.ok(baseline);
+  assert.deepEqual(baseline, {
+    turnCount: 26,
+    ref: checkpointRefForThreadTurn(THREAD, 26),
+    status: "ready"
+  });
+  const baselineCommit = (await repo.gitReadOnly("rev-parse", baseline.ref)).trim();
+
+  await repo.write("tracked.txt", "one\ntwo\n");
+  await repo.write("created.txt", "new\n");
+
+  // The idempotent backstop from `turn.started` names the same count and
+  // must not recapture the tree the agent is already changing.
+  const again = await service.captureBaseline({
+    threadId: THREAD,
+    cwd: repo.dir,
+    turnId: "turn-27",
+    turnCount: 26
+  });
+  assert.deepEqual(again, baseline);
+  assert.equal((await repo.gitReadOnly("rev-parse", baseline.ref)).trim(), baselineCommit);
+
+  const summary = await service.captureTurnEnd({
+    threadId: THREAD,
+    cwd: repo.dir,
+    turnId: "turn-27",
+    assistantMessageId: null,
+    turnCount: 27
+  });
+  assert.ok(summary);
+  assert.equal(summary.turnCount, 27);
+  assert.equal(summary.ref, checkpointRefForThreadTurn(THREAD, 27));
+  assert.equal(summary.detail, undefined, "the numstat across the sparse pair worked");
+  assert.deepEqual(summary.files.map((file) => file.path).sort(), ["created.txt", "tracked.txt"]);
+  assert.deepEqual(
+    await refNames(repo, checkpointRefNamespace(THREAD)),
+    [checkpointRefForThreadTurn(THREAD, 26), checkpointRefForThreadTurn(THREAD, 27)].sort()
+  );
+
+  // The diff route still answers for the sparse pair…
+  const diff = await service.readTurnDiff({
+    threadId: THREAD,
+    cwd: repo.dir,
+    fromTurnCount: 26,
+    toTurnCount: 27
+  });
+  assert.match(diff, /^\+\+\+ b\/created\.txt$/m);
+  assert.match(diff, /^\+two$/m);
+
+  // …and the next turn's baseline is turn 27's completion, already there.
+  const next = await service.captureBaseline({
+    threadId: THREAD,
+    cwd: repo.dir,
+    turnId: "turn-28",
+    turnCount: 27
+  });
+  assert.deepEqual(next, {
+    turnCount: 27,
+    ref: checkpointRefForThreadTurn(THREAD, 27),
+    status: "ready"
+  });
+});
+
+test("§5.5: a named turn count wins over a placeholder's count and over the derived counter", async (t) => {
+  const repo = await seededRepo();
+  t.after(() => repo.cleanup());
+  const service = serviceFor(repo);
+
+  // Derived, the next completion would be turn/1 — and the placeholder says 5.
+  await service.captureBaseline({ threadId: THREAD, cwd: repo.dir });
+  const placeholder: Checkpoint = {
+    turnId: "turn-3",
+    checkpointTurnCount: 5,
+    checkpointRef: "provider-diff:evt-1",
+    status: "missing",
+    files: [],
+    assistantMessageId: "msg-placeholder",
+    completedAt: new Date(0).toISOString()
+  };
+
+  const summary = await service.captureTurnEnd({
+    threadId: THREAD,
+    cwd: repo.dir,
+    turnId: "turn-3",
+    assistantMessageId: null,
+    checkpoints: [placeholder],
+    turnCount: 3
+  });
+
+  assert.ok(summary);
+  assert.equal(summary.turnCount, 3, "the turn's own ordinal, not 5 and not 1");
+  assert.equal(summary.assistantMessageId, "msg-placeholder");
+  assert.deepEqual(
+    await refNames(repo, checkpointRefNamespace(THREAD)),
+    [checkpointRefForThreadTurn(THREAD, 0), checkpointRefForThreadTurn(THREAD, 3)].sort()
+  );
+});
+
+test("§5.5: a turn count no ref can carry is ignored, never thrown into the turn", async (t) => {
+  const repo = await seededRepo();
+  t.after(() => repo.cleanup());
+  const service = serviceFor(repo);
+
+  const baseline = await service.captureBaseline({
+    threadId: THREAD,
+    cwd: repo.dir,
+    turnCount: -1
+  });
+  assert.equal(baseline?.turnCount, 0, "derived, as if no count had been named");
+
+  const summary = await service.captureTurnEnd({
+    threadId: THREAD,
+    cwd: repo.dir,
+    turnId: "turn-1",
+    assistantMessageId: null,
+    // A completion is never turn/0 — that is the first baseline.
+    turnCount: 0
+  });
+  assert.equal(summary?.turnCount, 1);
+
+  const fractional = await service.captureTurnEnd({
+    threadId: THREAD,
+    cwd: repo.dir,
+    turnId: "turn-2",
+    assistantMessageId: null,
+    turnCount: 1.5
+  });
+  assert.equal(fractional?.turnCount, 2);
+});
+
+test("§5.5: pruneAbove also deletes the dropped turns' own counts, however low", async (t) => {
+  const repo = await seededRepo();
+  t.after(() => repo.cleanup());
+  const service = serviceFor(repo);
+
+  // A thread checkpointed before the counts followed the turns: its 27th and
+  // 28th turns own the DENSE refs turn/1 and turn/2, and a later turn owns
+  // turn/29. Rewinding to 27 turns drops the 28th and the 29th.
+  const head = (await repo.gitReadOnly("rev-parse", "HEAD")).trim();
+  await repo.gitStdin(
+    [0, 1, 2, 29]
+      .map((turnCount) => `create ${checkpointRefForThreadTurn(THREAD, turnCount)}\0${head}\0`)
+      .join(""),
+    "update-ref",
+    "-z",
+    "--stdin"
+  );
+  await service.captureBaseline({ threadId: "other-thread", cwd: repo.dir });
+
+  await service.pruneAbove({
+    threadId: THREAD,
+    cwd: repo.dir,
+    targetTurnCount: 27,
+    droppedTurnCounts: [2, 29]
+  });
+
+  assert.deepEqual(
+    await refNames(repo, checkpointRefNamespace(THREAD)),
+    [checkpointRefForThreadTurn(THREAD, 0), checkpointRefForThreadTurn(THREAD, 1)].sort(),
+    "turn/2 went with its turn although it is below the target; the retained turn/1 stayed"
+  );
+  assert.deepEqual(await refNames(repo, checkpointRefNamespace("other-thread")), [
+    checkpointRefForThreadTurn("other-thread", 0)
+  ]);
+});

@@ -94,6 +94,8 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
     bottomInset,
     canRevert,
     onRevert,
+    revertBusy = false,
+    startedTurnCount = 0,
     onOpenTurnDiff,
     onOpenFile,
     onLoadFullOutput,
@@ -201,6 +203,8 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
       workspaceRoot: projectPath,
       readOnly: effectiveReadOnly,
       canRevert,
+      revertBusy,
+      startedTurnCount,
       disclosures,
       roster: roster ?? [],
       skills: skills ?? [],
@@ -222,7 +226,7 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
           toolOutputOffsets: { ...disclosures.toolOutputOffsets, [id]: offset }
         });
       },
-      onRevert: effectiveReadOnly ? NOOP_NUMBER : onRevert,
+      onRevert: effectiveReadOnly ? NOOP_REVERT : onRevert,
       onOpenTurnDiff,
       onOpenFile,
       onLoadFullOutput,
@@ -250,8 +254,10 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
       onSendQueuedNow,
       patchList,
       projectPath,
+      revertBusy,
       roster,
-      skills
+      skills,
+      startedTurnCount
     ]
   );
 
@@ -672,7 +678,8 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
   );
 }
 
-const NOOP_NUMBER = (): void => {};
+/** A read-only surface's rewind: the drill-in dispatches no commands (§7.6). */
+const NOOP_REVERT = (_input: { messageId: string; targetTurnCount: number }): void => {};
 const NOOP_STRING = (): void => {};
 
 /**

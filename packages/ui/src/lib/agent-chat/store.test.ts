@@ -1,15 +1,18 @@
 import assert from "node:assert/strict";
-import { after, beforeEach, describe, it } from "node:test";
+import { after, beforeEach, describe, it, mock } from "node:test";
 
 import type {
   AgentChatCommandName,
-  AgentChatStreamFrame
+  AgentChatStreamFrame,
+  Turn
 } from "@orquester/api/agent-chat";
 
 import {
   createThreadStore,
   resetDismissedErrorBanners,
-  type AgentChatThreadState
+  REWIND_TIMEOUT_MS,
+  type AgentChatThreadState,
+  type ThreadStore
 } from "./store";
 import { AgentChatCommandError, type AgentChatTransport } from "./transport";
 import { activity, ev, head, message, resetBuilders, snapshot, stamp } from "./test-helpers";
@@ -25,12 +28,15 @@ function fakeTransport(): {
   posted: Posted[];
   push(frame: AgentChatStreamFrame): void;
   fail(error: unknown, times?: number): void;
+  /** Runs inside `command`, after the post is recorded and before it answers. */
+  beforeAnswer(run: (() => void) | null): void;
   streamCount(): number;
 } {
   const posted: Posted[] = [];
   let onFrame: ((frame: AgentChatStreamFrame) => void) | null = null;
   let streams = 0;
   let failures: { error: unknown; times: number } | null = null;
+  let beforeAnswer: (() => void) | null = null;
 
   const transport: AgentChatTransport = {
     stream(_sessionId, _options, handlers) {
@@ -44,6 +50,7 @@ function fakeTransport(): {
         throw failures.error;
       }
       posted.push({ name, body: body as unknown as Record<string, unknown> });
+      beforeAnswer?.();
       return { seq: posted.length };
     },
     // §3.4's account switch: a daemon-owned route, recorded under its own name
@@ -86,11 +93,17 @@ function fakeTransport(): {
     fail: (error, times = 1) => {
       failures = { error, times };
     },
+    beforeAnswer: (run) => {
+      beforeAnswer = run;
+    },
     streamCount: () => streams
   };
 }
 
 const flush = (): Promise<void> => new Promise((resolve) => queueMicrotask(resolve));
+
+/** Let every queued microtask run — a command's whole await chain settles. */
+const settle = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
 async function store(sessionId = "s1"): Promise<{
   api: ReturnType<typeof createThreadStore>;
@@ -294,6 +307,227 @@ describe("commands", () => {
     const { api, fake } = await store();
     await api.getState().actions.interrupt();
     assert.equal("turnId" in (fake.posted[0]?.body ?? {}), false);
+  });
+});
+
+/**
+ * "Rewind to here" end to end (§5.5, §7.5): the host answers `/revert` with a
+ * `{seq}` long before it has rewritten anything, so the store waits for the
+ * thread itself to say how it went — the message truncated away, or a new
+ * `checkpoint.revert.failed` row — and only then hands the message back.
+ */
+describe("rewindTo", () => {
+  const attachment = { type: "file" as const, id: "/att/notes", name: "notes.txt", sizeBytes: 12 };
+  const chip = { kind: "file", label: "src/a.ts", ref: "/w/p/src/a.ts" };
+  const REWOUND_TEXT = "second — try it the other way";
+
+  const turn = (turnId: string, userMessageId: string): Turn => ({
+    turnId,
+    state: "completed",
+    turnCount: null,
+    requestedAt: stamp(0),
+    startedAt: stamp(0),
+    completedAt: stamp(0),
+    assistantMessageId: null,
+    userMessageId
+  });
+
+  /** Two turns; the second prompt carries an attachment and a context chip. */
+  const conversation = () => {
+    const kept = [
+      message("user", "first", { id: "u1", createdAt: stamp(1) }),
+      message("assistant", "one", { id: "a1", turnId: "t1", createdAt: stamp(2) })
+    ];
+    const rewound = [
+      message("user", REWOUND_TEXT, {
+        id: "u2",
+        createdAt: stamp(3),
+        attachments: [attachment],
+        context: [chip]
+      }),
+      message("assistant", "two", { id: "a2", turnId: "t2", createdAt: stamp(4) })
+    ];
+    return { kept, rewound };
+  };
+
+  /** A store holding the two-turn thread, plus the snapshot the host sends once it has rewound. */
+  async function rewindable(extraItems: ReturnType<typeof activity>[] = []) {
+    const opened = await store();
+    const { kept, rewound } = conversation();
+    opened.fake.push({
+      kind: "snapshot",
+      thread: snapshot({
+        items: [...kept, ...rewound, ...extraItems],
+        turns: [turn("t1", "u1"), turn("t2", "u2")],
+        seq: 5
+      })
+    });
+    const truncated: AgentChatStreamFrame = {
+      kind: "snapshot",
+      thread: snapshot({ items: [...kept, ...extraItems], turns: [turn("t1", "u1")], seq: 7 })
+    };
+    return { ...opened, truncated };
+  }
+
+  it("posts `revert`, stays inert until the truncation lands, then hands the message back", async () => {
+    const { api, fake, state, truncated } = await rewindable();
+
+    const rewinding = api.getState().actions.rewindTo({ messageId: "u2", targetTurnCount: 1 });
+    assert.equal(state().reverting, true, "inert from the first moment");
+    await settle();
+    assert.deepEqual(
+      fake.posted.map((posted) => [posted.name, posted.body.targetTurnCount, posted.body.commandId]),
+      [["revert", 1, "id1"]]
+    );
+    assert.equal(
+      state().reverting,
+      true,
+      "the command answering proves nothing — the host has not rewound yet"
+    );
+    assert.equal(state().draft.text, "", "nothing comes back before the thread says so");
+
+    fake.push(truncated);
+    await rewinding;
+    assert.equal(state().reverting, false);
+    assert.equal(state().draft.text, REWOUND_TEXT, "back in the composer for editing");
+    assert.deepEqual(state().draft.attachments, [attachment], "its attachment chip too");
+    assert.deepEqual(state().draft.context, [chip]);
+  });
+
+  it("settles at once when the truncation was folded before the command answered", async () => {
+    const { api, fake, state, truncated } = await rewindable();
+    // The stream can beat the HTTP response: the waiter reads the thread
+    // before it subscribes, or it would wait for a frame that already came.
+    fake.beforeAnswer(() => fake.push(truncated));
+
+    await api.getState().actions.rewindTo({ messageId: "u2", targetTurnCount: 1 });
+    assert.equal(state().reverting, false);
+    assert.equal(state().draft.text, REWOUND_TEXT);
+  });
+
+  it("rejects with the reason of a NEW rewind failure, and clears `reverting`", async () => {
+    const earlier = activity(
+      "checkpoint.revert.failed",
+      { detail: "an older rewind's failure", turnCount: 0 },
+      { tone: "error", summary: "Rewind failed", createdAt: stamp(5) }
+    );
+    const { api, fake, state } = await rewindable([earlier]);
+
+    const rewinding = api.getState().actions.rewindTo({ messageId: "u2", targetTurnCount: 1 });
+    const rejected = assert.rejects(rewinding, {
+      message: "Cannot rewind past a compaction; start a new thread."
+    });
+    await settle();
+    assert.equal(state().reverting, true, "a failure already on the thread is not this rewind's answer");
+
+    fake.push({
+      kind: "event",
+      seq: 6,
+      event: ev(
+        "thread.activity-appended",
+        {
+          activity: activity(
+            "checkpoint.revert.failed",
+            { detail: "Cannot rewind past a compaction; start a new thread.", turnCount: 1 },
+            { tone: "error", summary: "Rewind failed", createdAt: stamp(6) }
+          )
+        },
+        { seq: 6 }
+      )
+    });
+    await rejected;
+    assert.equal(state().reverting, false, "a refusal must not leave the composer inert");
+    assert.equal(state().draft.text, "", "the message never left the thread, so nothing comes back");
+  });
+
+  it("falls back to the failure row's summary when it carries no detail", async () => {
+    const { api, fake } = await rewindable();
+    const rejected = assert.rejects(
+      api.getState().actions.rewindTo({ messageId: "u2", targetTurnCount: 1 }),
+      { message: "Rewind failed" }
+    );
+    await settle();
+    fake.push({
+      kind: "event",
+      seq: 6,
+      event: ev(
+        "thread.activity-appended",
+        {
+          activity: activity("checkpoint.revert.failed", {}, {
+            tone: "error",
+            summary: "Rewind failed",
+            createdAt: stamp(6)
+          })
+        },
+        { seq: 6 }
+      )
+    });
+    await rejected;
+  });
+
+  it("rejects a message it cannot find — or one that is not the user's — without posting", async () => {
+    const { api, fake, state } = await rewindable();
+    await assert.rejects(api.getState().actions.rewindTo({ messageId: "nope", targetTurnCount: 0 }), {
+      message: "The message to rewind to is no longer available."
+    });
+    await assert.rejects(api.getState().actions.rewindTo({ messageId: "a1", targetTurnCount: 0 }), {
+      message: "The message to rewind to is no longer available."
+    });
+    assert.equal(fake.posted.length, 0);
+    assert.equal(state().reverting, false);
+  });
+
+  it("refuses a second rewind while one is in flight — one `/revert`, one message back", async () => {
+    const { api, fake, state, truncated } = await rewindable();
+    const first = api.getState().actions.rewindTo({ messageId: "u2", targetTurnCount: 1 });
+    await assert.rejects(api.getState().actions.rewindTo({ messageId: "u2", targetTurnCount: 1 }), {
+      message: "A rewind is already in progress."
+    });
+    await settle();
+    fake.push(truncated);
+    await first;
+    assert.equal(fake.posted.length, 1);
+    assert.equal(state().draft.text, REWOUND_TEXT, "handed back once, not twice");
+  });
+
+  it("gives the composer back after REWIND_TIMEOUT_MS, saying the thread will still update", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      const { api, fake, state } = await rewindable();
+      const rejected = assert.rejects(
+        api.getState().actions.rewindTo({ messageId: "u2", targetTurnCount: 1 }),
+        { message: "The rewind is taking too long; the thread will update when the host finishes." }
+      );
+      await settle();
+      assert.equal(fake.posted.length, 1);
+
+      mock.timers.tick(REWIND_TIMEOUT_MS - 1);
+      await settle();
+      assert.equal(state().reverting, true, "still waiting a millisecond before the deadline");
+
+      mock.timers.tick(1);
+      await rejected;
+      assert.equal(state().reverting, false);
+      assert.equal(state().draft.text, "", "no answer is not a rewind");
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  it("settles when its store is destroyed mid-wait, handing the message back to the persisted draft", async () => {
+    const { api, state } = await rewindable();
+    const rewinding = api.getState().actions.rewindTo({ messageId: "u2", targetTurnCount: 1 });
+    await settle();
+
+    // No frame can reach a destroyed generation; the wait ends with it rather
+    // than at its timeout. The user asked for this message back, and losing
+    // it would be unrecoverable if the host goes on to rewind.
+    (api as ThreadStore & { destroy?: (options?: { retain?: boolean }) => void }).destroy?.({
+      retain: false
+    });
+    await rewinding;
+    assert.equal(state().reverting, false);
+    assert.equal(state().draft.text, REWOUND_TEXT);
   });
 });
 

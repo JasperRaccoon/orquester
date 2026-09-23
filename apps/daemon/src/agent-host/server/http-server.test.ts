@@ -213,6 +213,11 @@ describe("agent host server — readiness (§3.1, §8)", () => {
     const body = (await h.call("GET", agentHostRoutes.health)).body as AgentHostHealthResponse;
     assert.deepEqual(body.liveThreadIds, [threadId]);
     assert.deepEqual(body.activeTurnThreadIds, [threadId]);
+    assert.deepEqual(
+      body.backgroundWorkThreadIds,
+      [],
+      "the drain-restart also waits on live background work (§3.1)"
+    );
     await h.stop();
   });
 });

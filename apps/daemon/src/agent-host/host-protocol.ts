@@ -140,6 +140,16 @@ export interface AgentHostHealthResponse {
   liveThreadIds: string[];
   /** Threads with an active turn — the drain-restart of §3.1 waits on this. */
   activeTurnThreadIds: string[];
+  /**
+   * Threads with live BACKGROUND work — a subagent fleet or a background shell
+   * that keeps running inside the provider process after the turn that
+   * launched it settled (the §3.1 liveness registry). The drain-restart waits
+   * on these exactly as on `activeTurnThreadIds`: a restart kills the provider
+   * children, and the CLI then reports every one of them as "didn't finish
+   * before the previous session ended" on the next message. Optional: an
+   * older host omits it and the daemon drains on active turns alone.
+   */
+  backgroundWorkThreadIds?: string[];
   pid: number;
   startedAt: string;
   /**

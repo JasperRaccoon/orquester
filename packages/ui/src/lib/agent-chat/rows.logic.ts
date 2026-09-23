@@ -21,7 +21,13 @@
  * No React import.
  */
 
-import type { Checkpoint, LatestTurnSummary, ThreadMessageItem } from "@orquester/api/agent-chat";
+import {
+  startedTurns,
+  type Checkpoint,
+  type LatestTurnSummary,
+  type ThreadMessageItem,
+  type Turn
+} from "@orquester/api/agent-chat";
 
 import type {
   AgentChatTimelineRow,
@@ -178,6 +184,32 @@ export function isCompactCommandMessage(message: ThreadMessageItem): boolean {
     (message.attachments?.length ?? 0) === 0 &&
     message.text.trim().toLowerCase() === "/compact"
   );
+}
+
+/**
+ * A `user` row the provider's own transcript wrote and nobody typed: the
+ * Claude CLI records a slash command as `<command-name>…`, its output as
+ * `<local-command-stdout>…`, a subagent's completion as `<task-notification>…`,
+ * and a few notices as `<system-reminder>…` / `<local-command-caveat>…`. A
+ * resumed history projects them as user messages (they are user-role turn
+ * starts in the transcript), so they render as bubbles — but "rewind to here"
+ * would return one of them to the composer as the user's own prompt, which
+ * is never what a rewind means. Withheld, like the verbatim `/compact`.
+ */
+const PROVIDER_INTERNAL_USER_PREFIXES = [
+  "<command-name>",
+  "<local-command-stdout>",
+  "<local-command-caveat>",
+  "<task-notification>",
+  "<system-reminder>"
+] as const;
+
+export function isProviderInternalUserMessage(message: ThreadMessageItem): boolean {
+  if (message.role !== "user") {
+    return false;
+  }
+  const text = message.text.trimStart();
+  return PROVIDER_INTERNAL_USER_PREFIXES.some((prefix) => text.startsWith(prefix));
 }
 
 /**
@@ -457,37 +489,82 @@ function deriveTurnFolds(input: {
 }
 
 // ---------------------------------------------------------------------------
-// Checkpoints → the changed-files card and "rewind to here"
+// "Rewind to here" — by turn order (§5.5); checkpoints only feed the
+// changed-files card below
 // ---------------------------------------------------------------------------
 
+/** A settled compaction: the provider no longer holds what came before it. */
+function isCompactedMarkerEntry(entry: TimelineEntry): boolean {
+  return (
+    entry.kind === "work" &&
+    isCompactionEntry(entry) &&
+    entry.entry.compaction?.state === "compacted"
+  );
+}
+
+/**
+ * Which user messages offer "rewind to here", and the `targetTurnCount` each
+ * one rewinds to.
+ *
+ * A message is numbered by the turn it OPENED — `Turn.userMessageId` — and
+ * that turn's position among the started turns (`startedTurns`, the one
+ * numbering the host's `/revert` speaks too). Rewinding to it keeps the turns
+ * before it, so its `revertTurnCount` is that turn's 0-based index. It used to
+ * be read off the checkpoint list, which is sparse exactly where a rewind
+ * matters — a non-git project captures nothing, a resumed history has no
+ * checkpoint at all, and a turn's `assistantMessageId` is often null — so on
+ * real threads no row ever carried one.
+ *
+ * Withheld, rather than offered and refused:
+ * - a message that opened no turn — a steer rides the running turn and has
+ *   none of its own, and a pending turn's prompt has no ordinal until the
+ *   provider starts it;
+ * - the verbatim `/compact` (§4.6.5(b)), which renders as the marker, never as
+ *   a bubble, and a `user` row the provider's transcript wrote itself
+ *   (`isProviderInternalUserMessage`) — a command echo, a subagent's
+ *   notification — which a rewind would hand back as the user's own prompt;
+ * - every message before the thread's LAST settled compaction: the provider
+ *   no longer holds those messages, so the adapter would refuse the rollback
+ *   (§4.5, §5.5). A compaction still running, or one that failed, dropped
+ *   nothing and withholds nothing.
+ */
 function buildRevertTurnCountByUserMessageId(input: {
   supportsConversationRollback: boolean;
   entries: readonly TimelineEntry[];
-  checkpointByAssistantMessageId: ReadonlyMap<string, Checkpoint>;
+  turns: readonly Turn[];
 }): Map<string, number> {
   const byUserMessageId = new Map<string, number>();
-  if (!input.supportsConversationRollback) {
+  if (!input.supportsConversationRollback || input.turns.length === 0) {
     return byUserMessageId;
   }
-  for (let index = 0; index < input.entries.length; index += 1) {
+  const keptTurnsByPrompt = new Map<string, number>();
+  startedTurns(input.turns).forEach((turn, index) => {
+    // First turn wins: were one message ever to open two turns, rewinding to
+    // it must drop both, which only the earlier ordinal does.
+    if (turn.userMessageId !== undefined && !keptTurnsByPrompt.has(turn.userMessageId)) {
+      keptTurnsByPrompt.set(turn.userMessageId, index);
+    }
+  });
+  if (keptTurnsByPrompt.size === 0) {
+    return byUserMessageId;
+  }
+  // Newest first, so "a compaction lies after it" is the point the walk stops.
+  for (let index = input.entries.length - 1; index >= 0; index -= 1) {
     const entry = input.entries[index]!;
-    if (entry.kind !== "message" || entry.message.role !== "user") {
+    if (isCompactedMarkerEntry(entry)) {
+      break;
+    }
+    if (
+      entry.kind !== "message" ||
+      entry.message.role !== "user" ||
+      isCompactCommandMessage(entry.message) ||
+      isProviderInternalUserMessage(entry.message)
+    ) {
       continue;
     }
-    for (let next = index + 1; next < input.entries.length; next += 1) {
-      const nextEntry = input.entries[next]!;
-      if (nextEntry.kind !== "message") {
-        continue;
-      }
-      if (nextEntry.message.role === "user") {
-        break;
-      }
-      const checkpoint = input.checkpointByAssistantMessageId.get(nextEntry.message.id);
-      if (!checkpoint) {
-        continue;
-      }
-      byUserMessageId.set(entry.message.id, Math.max(0, checkpoint.checkpointTurnCount - 1));
-      break;
+    const keptTurns = keptTurnsByPrompt.get(entry.message.id);
+    if (keptTurns !== undefined) {
+      byUserMessageId.set(entry.message.id, keptTurns);
     }
   }
   return byUserMessageId;
@@ -514,7 +591,14 @@ export interface TimelineRowsInput {
    */
   isCompacting?: boolean;
   activeTurnStartedAt: string | null;
+  /** Feeds the changed-files card only; "rewind to here" is by turn order. */
   checkpoints?: readonly Checkpoint[];
+  /**
+   * The fold's turns, in start order. "Rewind to here" numbers a user message
+   * by the turn it opened (`Turn.userMessageId`) and that turn's position
+   * among the STARTED turns (§5.5). Absent — the drill-in — means no rewind.
+   */
+  turns?: readonly Turn[];
   supportsConversationRollback: boolean;
   /** Task ids of subagents still working; the live activity row reads them. */
   liveAgentTaskIds?: ReadonlySet<string>;
@@ -538,7 +622,7 @@ export function deriveTimelineRows(input: TimelineRowsInput): AgentChatTimelineR
   const revertTurnCountByUserMessageId = buildRevertTurnCountByUserMessageId({
     supportsConversationRollback: input.supportsConversationRollback,
     entries,
-    checkpointByAssistantMessageId
+    turns: input.turns ?? []
   });
 
   const rows: AgentChatTimelineRow[] = [];
@@ -1144,6 +1228,9 @@ function shallowEqualInput(left: TimelineRowsInput, right: TimelineRowsInput): b
     left.runningTurnId === right.runningTurnId &&
     left.supportsConversationRollback === right.supportsConversationRollback &&
     left.checkpoints === right.checkpoints &&
+    // A pending turn starting stamps its prompt's `revertTurnCount` without
+    // touching a single timeline entry.
+    left.turns === right.turns &&
     left.liveAgentTaskIds === right.liveAgentTaskIds &&
     left.queuedMessages === right.queuedMessages &&
     left.expandedTurnIds === right.expandedTurnIds &&

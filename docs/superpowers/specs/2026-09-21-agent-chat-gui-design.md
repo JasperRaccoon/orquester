@@ -105,6 +105,16 @@ any tool it was running on each deploy. The host preserves the current property.
 4. Socket answers but rejects the token: foreign process. Log an error, never kill or adopt.
 5. Nothing answers: spawn, poll readiness, then adopt.
 
+*Built: case 3's "no thread has an active turn" is "no thread has an active turn **or live
+background work**". `GET /health` carries `backgroundWorkThreadIds` (this section's liveness
+registry) next to `activeTurnThreadIds`, and the daemon unions it with its own §6.4 summary-poll
+view so the host a deploy replaces, which may predate the field, is held too (that view is
+"unknown" until the poll's first round, which also holds such a host at boot). A subagent fleet or
+a background shell outlives its turn inside the provider process, and restarting under it killed
+the fleet with no notice — the CLI reported each agent as "didn't finish before the previous
+session ended" on the next message (2026-09-23). Background work ending reopens the window exactly
+as a settled turn does; a manual `POST /api/agent-host/stop` still restarts at once.*
+
 A 15 s unref'd health interval with bounded backoff supervises it afterwards, as for cliproxy.
 
 **Readiness is a gate, not a race.** The host accepts no command until its own startup has
@@ -2292,6 +2302,39 @@ Triggered from a user message's "rewind to here" affordance with `targetTurnCoun
 
 *T3: `apps/server/src/orchestration/Layers/CheckpointReactor.ts:771-915` — `handleRevertRequested` in exactly this order: turn-count check, `assertConversationRollbackSupported`, rollback, stale-ref delete, `thread.revert.complete`; `:118-148` — every failure becomes a `checkpoint.revert.failed` activity. Differs: T3 reverts through one `thread.checkpoint-revert-requested` event carrying `restoreFiles?`, with `thread.conversation.revert` as a **separate client command** so an older server rejects a history-only rewind rather than silently restoring files (`packages/contracts/src/orchestration.ts:1368-1380`, `:1916-1921`); this design has only the conversation-only path, so the flag and the isolated-worktree guard (`apps/server/src/orchestration/Layers/CheckpointReactor.ts:826-835`) do not exist*
 
+*Built: **turn counts are turn ORDINALS, never checkpoint counts.** Step 1 counts
+`startedTurns(turns)` — the fold's turn rows that got a provider turn id, in order
+(`packages/api/src/agent-chat/turns.ts`) — and `targetTurnCount` means "keep the first N of
+them". The checkpoint list is not the counter: it is sparse exactly where a rewind matters (nothing
+on a non-git project, a skipped capture, no checkpoint at all for the history of a thread resumed
+from the provider's transcript — the owner's 28-turn thread had two, numbered 1 and 2), and while it
+was the counter the affordance never appeared on a real thread. Checkpoints are numbered by the same
+ordinal (§5.4's refs are `turn/<ordinal>`; sparse refs are expected, and `readTurnDiff` already
+falls back to HEAD for a missing baseline). Step 3 hands the adapter the cut **by turn id** as well
+as by count (`RollbackTarget {firstRemovedTurnId, droppedTurnIds, retainedTurnIds}`,
+`apps/daemon/src/agent-host/adapter.ts`): Claude resolves ids through its transcript uuids (the
+cursor's `turnBoundaries`, our turn id paired with the native uuid and remapped on every fork),
+Codex sends `thread/revert {beforeTurnId}`, OpenCode looks the turn up in its message list; an id an
+adapter cannot place is a refusal, never a guess, and the count is only the fallback for a caller
+that predates the id. The affordance maps a user message to its turn through `Turn.userMessageId`
+(the `messageId` of its `thread.turn-start-requested`; absent on a turn the fold synthesises from
+session status, such as a `/compact`), and is withheld for a message that sits before the thread's
+last compaction marker (the provider no longer holds what the rewind would restore, §4.5) and for
+the `/compact` message itself. The truncation keeps the first `target` started turns' rows —
+messages by `turnId` or by `userMessageId`, activities by `turnId` — and the checkpoint-count rule
+survives only as the fallback for a log with no turn rows. After the host has truncated the thread
+the client returns the rewound message, text and attachment chips, to the composer for editing (T3's
+"Edit from here"; the CLI's own rewind does the same), holding `reverting` — §7.5's one `inert`
+reason — for the whole wait. Two consequences for the compaction gate: the marker is exempt from
+§5.1's 500-row activity window (a busy thread evicted it within minutes, after which every
+pre-compaction message was offered for a rewind the adapter could only refuse), and Claude decides
+"compacted in between" by the anchor's position relative to the transcript's last
+`isCompactSummary` row, falling back to `preserved_messages.all_uuids` only for an anchor before it
+— that list names the pre-compaction rows the CLI kept, never the rows written afterwards, so read as
+the set of reachable anchors it refused every rewind after a live `/compact` (fixtures README
+observation 21). A `user` row the provider's transcript wrote itself (a slash-command echo, a
+subagent's notification) is withheld too: a rewind would hand it back as the user's own prompt.*
+
 Truncation is by **retained turn id**, not by timestamp: keep checkpoints with
 `checkpointTurnCount <= target`, take their turn ids as the retained set, then keep every message,
 activity and roster row whose `turnId` is in that set. Rows with `turnId: null` survive — a message
@@ -2940,6 +2983,11 @@ a boolean nothing paints would be strictly worse.*
 Row kinds and behaviour:
 
 - **User message**: text, attachment thumbnails, "rewind to here".
+  *Built: the affordance is T3's hover-revealed icon under the message ("Rewind to here"), disabled
+  while a turn or a revert is in flight, and it confirms in a small anchored panel that names how
+  many later turns leave the chat and that files stay as they are; the same panel closes the
+  composer's Esc-Esc picker (§7.4). Once the host has truncated the thread the message comes back
+  to the composer — its text and its attachment chips — so it can be edited and resent.*
 - **Assistant text**: react-markdown + remark-gfm with an incremental parser that caches the
   prefix up to the last closed fence; code highlighted by the CodeMirror/Lezer parsers already in
   the bundle (no WASM, see below), code blocks mounted line by line while streaming, cached HTML
@@ -3095,6 +3143,18 @@ also returns every queued message to the composer rather than discarding it. Sen
 steers; the ghost bubble shows what was sent. Browser-pick payloads and session uploads targeting a
 chat tab are written into the draft as text plus attachment, never typed into a pane.
 *T3: `apps/web/src/composer-logic.ts:27-44` — `composerSubmissionIntentForEnter` and the `sendShortcut` setting (`packages/contracts/src/settings.ts:441-443`); `apps/web/src/components/ChatView.tsx:3971-3993` — `onInterrupt` drains the queue back into the composer before interrupting; `apps/web/src/components/chat/ChatComposer.tsx:5925-5955` and `apps/web/src/composerDraftStore.ts:3739-3777` — terminal selections and element-picker annotations inserted into the draft at the caret, never into a pane*
+
+*Built: **Escape twice, while idle, opens the rewind picker** — the CLI's own "jump to a previous
+message". It lists the thread's rewindable user messages newest first (`deriveRewindTargets`,
+`packages/ui/src/lib/agent-chat/rewind.logic.ts` — a projection of the rows the timeline stamped
+with `revertTurnCount`, so the picker and the per-row button can never disagree), each naming how
+many turns it drops, and confirms in the same panel as the per-row button. The picker is also a
+composer control next to the attach button (`data-composer-shortcut="rewind"`, deliberately no
+chord), hidden when nothing can be rewound and disabled while a turn, a request or a revert is in
+flight. The first Escape shows "Press Esc again to rewind to an earlier message" for a moment; the
+second, inside the 600 ms window of `createEscapeSequence`, opens the control. An idle Escape
+outside the composer goes through the shell's resolver (`escape-action.ts`), which returns
+`"rewind"` for the same double press and opens the control through the composer bridge.*
 
 Prompt-length validation measures the **larger of the literal draft and its wire-expanded form**, so
 a short reference that expands on the wire cannot smuggle the thread past §4.1's input bound;
@@ -3504,11 +3564,15 @@ silently half-applied.
 *Built: the handover is **drain-then-replace**, not trial-then-commit. T3 starts the replacement,
 waits for its `prepared` and keeps the old version if it never comes; here both hosts would have to
 bind the same `agent-host.sock`, so a trial is not expressible. The restart is therefore deferred
-until no thread has an active turn, the old host is asked to `/stop` (which writes every
-continuation marker), and the supervisor then **waits for the socket to stop answering** before
-spawning the replacement — killing the tmux session milliseconds after `/stop` answers strands a
-teardown that needs seconds, and OpenCode's server is spawned `detached: true`, so it would survive
-the kill holding its port while the new host started a second one for the same project. A
+until no thread has an active turn or live background work, the old host is asked to `/stop`
+(which writes every continuation marker), and the supervisor then **waits for the old host's
+process to exit** — its tmux service session ending, plus the socket — bounded at 30 s, before
+spawning the replacement. The socket closing is the teardown's FIRST step, not its last: killing
+the tmux session the moment it went quiet cut the teardown short, so no `session.exited` and one
+"Task stopped" row out of five were written and the threads read "running" for dead work
+(2026-09-23); OpenCode's server is also spawned `detached: true`, so it would survive the kill
+holding its port while the new host started a second one for the same project. An intentional
+`/stop` ends the process explicitly once the teardown completes. A
 replacement that never reaches readiness latches `error` and is retried with backoff rather than
 being silently half-applied (`apps/daemon/src/agent-chat/supervisor.ts`).*
 

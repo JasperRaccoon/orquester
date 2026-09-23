@@ -28,7 +28,12 @@ import type {
   ThreadSnapshot
 } from "@orquester/api/agent-chat";
 
-import type { AdapterContext, SendTurnInput, SendTurnResult } from "../../adapter.ts";
+import type {
+  AdapterContext,
+  RollbackTarget,
+  SendTurnInput,
+  SendTurnResult
+} from "../../adapter.ts";
 import { AGENT_HOST_DEADLINES, withDeadline } from "../../support/deadline.ts";
 import { appendAttachmentPathLines, type AttachmentPathLine } from "../attachment-lines.ts";
 import { OpenCodeHttpError, isOpenCodeNotFound, type OpenCodeClient } from "./http.ts";
@@ -229,6 +234,15 @@ export class OpenCodeThreadSession {
   private closing: Promise<void> | undefined;
   private lastModelSlug: string;
   private readonly contextLimits: ReadonlyMap<string, number>;
+  /**
+   * A message id the fold may still name → the id that message carries in
+   * the session this thread points at now. A rollback fork re-mints every
+   * message id (fixtures README observation 17) while the fold keeps the ids
+   * it saw, so a later rewind to a turn an earlier one kept must be
+   * translated. Filled by `rememberFork`; in memory only, so after a host
+   * restart such a rewind refuses rather than guesses.
+   */
+  private forkedMessageIds = new Map<string, string>();
 
   private constructor(input: {
     deps: OpenCodeThreadSessionDeps;
@@ -1377,10 +1391,14 @@ export class OpenCodeThreadSession {
 
       // A sendTurn while a turn is active is a STEER: OpenCode queues the
       // prompt into the running session, so the active turn id is reused
-      // (§4.1 "Steering").
+      // (§4.1 "Steering"). A new turn is NAMED by the OpenCode id of the prompt
+      // that opens it — OpenCode keeps a client-minted `messageID` verbatim
+      // (fixtures README observations 8 and 15) — so the id the fold keeps is
+      // the provider's own and a rewind finds the turn again in
+      // `GET /session/:id/message`, across a host restart too (§5.5).
       const steeringTurnId = this.state.activeTurnId;
-      const turnId = steeringTurnId ?? `opencode-turn-${this.deps.ctx.ids.uuid()}`;
       const messageId = mintOpenCodeMessageId();
+      const turnId = steeringTurnId ?? messageId;
       const agent =
         selectedOption(selection, "agent") ??
         (input.interactionMode === "plan" ? "plan" : undefined);
@@ -1890,11 +1908,10 @@ export class OpenCodeThreadSession {
   }
 
   async readThread(): Promise<ThreadSnapshot> {
-    const messages = await this.client.get<OpenCodeMessageWithParts[]>(
-      openCodeRoutes.messages(this.state.openCodeSessionId),
-      { timeoutMs: AGENT_HOST_DEADLINES.sessionOpenMs }
+    return toThreadSnapshot(
+      this.state.threadId,
+      await this.listMessages(this.state.openCodeSessionId)
     );
-    return toThreadSnapshot(this.state.threadId, Array.isArray(messages) ? messages : []);
   }
 
   /**
@@ -1903,23 +1920,42 @@ export class OpenCodeThreadSession {
    * revert (§5.5). The fork is verified to have kept exactly the expected
    * message count and errors otherwise, then the ruleset is re-applied and a
    * new cursor minted.
+   *
+   * With `target` the cut starts at the turn the host NAMED and `numTurns` is
+   * not consulted. Every turn id the fold holds for this adapter is an
+   * OpenCode message id — a replayed turn's is its assistant message or a
+   * trailing unanswered prompt (`toThreadSnapshot`), a live turn's is the
+   * prompt that opened it (`sendTurn`) — so it is looked up in the message
+   * list itself, followed through this session's earlier rollback forks. A
+   * count cannot stand in for it: the snapshot has a turn per ASSISTANT
+   * message and a turn that ran tools writes several. An id that is not
+   * there is a refusal, never a guess. Without `target` (a caller that
+   * predates it) the cut is `turns[turns.length - numTurns]`. Either way the
+   * fork lands on the user message that opens the boundary turn.
    */
-  async rollbackThread(numTurns: number): Promise<ThreadSnapshot> {
+  async rollbackThread(numTurns: number, target?: RollbackTarget): Promise<ThreadSnapshot> {
     return await this.promptLock.run(async () => {
-      const snapshot = await this.readThread();
-      const targetIndex = Math.max(0, snapshot.turns.length - numTurns);
-      const target = snapshot.turns[targetIndex];
-      if (target === undefined) {
-        return snapshot;
+      let boundaryId: string;
+      if (target !== undefined) {
+        boundaryId =
+          this.forkedMessageIds.get(target.firstRemovedTurnId) ?? target.firstRemovedTurnId;
+      } else {
+        const snapshot = await this.readThread();
+        const targetIndex = Math.max(0, snapshot.turns.length - numTurns);
+        const turn = snapshot.turns[targetIndex];
+        if (turn === undefined) {
+          return snapshot;
+        }
+        boundaryId = turn.id;
       }
-      const entries = await this.client.get<OpenCodeMessageWithParts[]>(
-        openCodeRoutes.messages(this.state.openCodeSessionId),
-        { timeoutMs: AGENT_HOST_DEADLINES.sessionOpenMs }
-      );
-      const list = Array.isArray(entries) ? entries : [];
-      const targetMessageIndex = list.findIndex((entry) => entry.info?.id === target.id);
+      const list = await this.listMessages(this.state.openCodeSessionId);
+      const targetMessageIndex = list.findIndex((entry) => entry.info?.id === boundaryId);
       if (targetMessageIndex < 0) {
-        throw new Error("The OpenCode rewind boundary is no longer available.");
+        throw new Error(
+          target !== undefined
+            ? "opencode: the turn to rewind to is no longer in this session"
+            : "The OpenCode rewind boundary is no longer available."
+        );
       }
       const head = list.slice(0, targetMessageIndex + 1);
       let firstRemoved = list[targetMessageIndex];
@@ -1948,11 +1984,7 @@ export class OpenCodeThreadSession {
       if (fork === undefined || typeof fork.id !== "string") {
         throw new Error("OpenCode session fork returned no session payload.");
       }
-      const forkMessages = await this.client.get<OpenCodeMessageWithParts[]>(
-        openCodeRoutes.messages(fork.id),
-        { timeoutMs: AGENT_HOST_DEADLINES.sessionOpenMs }
-      );
-      const forked = Array.isArray(forkMessages) ? forkMessages : [];
+      const forked = await this.listMessages(fork.id);
       if (forked.length !== expectedCount) {
         throw new Error("OpenCode did not preserve the requested rewind boundary.");
       }
@@ -1963,6 +1995,7 @@ export class OpenCodeThreadSession {
         } satisfies UpdateSessionBody
       });
 
+      this.rememberFork(list, forked);
       await this.settlePendingRequests().catch(() => undefined);
       repointSession(this.state, fork.id);
       this.updateRecord({ status: "ready" }, { activeTurnId: true });
@@ -1981,6 +2014,52 @@ export class OpenCodeThreadSession {
           }))
       };
     });
+  }
+
+  private async listMessages(sessionId: string): Promise<OpenCodeMessageWithParts[]> {
+    const messages = await this.client.get<OpenCodeMessageWithParts[]>(
+      openCodeRoutes.messages(sessionId),
+      { timeoutMs: AGENT_HOST_DEADLINES.sessionOpenMs }
+    );
+    return Array.isArray(messages) ? messages : [];
+  }
+
+  /**
+   * Carry `forkedMessageIds` across a rollback fork. The fork holds `source`'s
+   * messages before the boundary, in order, under fresh ids (fixtures README
+   * observation 17), so the mapping is positional — and taken only when every
+   * position's role agrees, or nothing carries over and a rewind to a turn
+   * this one kept refuses. A message the fork cut drops out, and so does the
+   * pre-fork spelling of one the map already names by its original id.
+   */
+  private rememberFork(
+    source: readonly OpenCodeMessageWithParts[],
+    fork: readonly OpenCodeMessageWithParts[]
+  ): void {
+    const moved = new Map<string, string>();
+    const aligned = fork.every((entry, index) => {
+      const from = source[index]?.info;
+      return (
+        typeof entry?.info?.id === "string" &&
+        typeof from?.id === "string" &&
+        entry.info.role === from.role
+      );
+    });
+    if (aligned) {
+      fork.forEach((entry, index) => moved.set(source[index]!.info.id, entry.info.id));
+    }
+    const carried = new Map<string, string>();
+    for (const [named, current] of this.forkedMessageIds) {
+      const next = moved.get(current);
+      if (next !== undefined) {
+        carried.set(named, next);
+        moved.delete(current);
+      }
+    }
+    for (const [from, to] of moved) {
+      carried.set(from, to);
+    }
+    this.forkedMessageIds = carried;
   }
 }
 
@@ -2019,8 +2098,11 @@ function makeCancellation(turnId: string | undefined): OpenCodeCancellation {
  * `GET /session/:id/message` → the §4.1 snapshot.
  *
  * A **turn is keyed on the assistant message**, because that is the unit
- * `rollbackThread` counts: `numTurns` means exchanges, and keying on every
- * message would make `rollback(2)` remove one exchange instead of two.
+ * `rollbackThread`'s count path counts: `numTurns` means exchanges, and keying
+ * on every message would make `rollback(2)` remove one exchange instead of
+ * two. (An exchange that ran tools still spans several assistant messages,
+ * which is why a rewind by turn ID never counts.) A replayed turn's id — this
+ * key — is what the fold keeps, so it is also what a rewind names.
  *
  * Each turn's `items` additionally carry the **user message that prompted it**
  * — `parentID` links them, and OpenCode can answer one prompt with several

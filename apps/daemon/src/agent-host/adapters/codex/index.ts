@@ -29,6 +29,7 @@ import type {
   AdapterContext,
   AdapterFactory,
   AgentAdapter,
+  RollbackTarget,
   SendTurnInput,
   SendTurnResult,
   StartSessionInput
@@ -348,8 +349,12 @@ export const createCodexAdapter: AdapterFactory = async (
       return requireSession(threadId).readThread();
     },
 
-    rollbackThread(threadId: string, numTurns: number): Promise<ThreadSnapshot> {
-      return requireSession(threadId).rollbackThread(numTurns);
+    rollbackThread(
+      threadId: string,
+      numTurns: number,
+      target?: RollbackTarget
+    ): Promise<ThreadSnapshot> {
+      return requireSession(threadId).rollbackThread(numTurns, target);
     },
 
     /**

@@ -428,6 +428,15 @@ export interface AgentChatActions {
   dismissQuestion(input: { requestId: string }): Promise<void>;
   /** `/revert`. Conversation only — files are never restored (§5.5). */
   revert(input: { targetTurnCount: number }): Promise<void>;
+  /**
+   * "Rewind to here" / the Esc-Esc picker, end to end: `/revert` to
+   * `targetTurnCount`, wait for the host to truncate the thread (or to land a
+   * `checkpoint.revert.failed` row), then return the rewound message — its
+   * text and its attachment chips — to the composer for editing, exactly as
+   * the CLI's own rewind and T3's "Edit from here" do. `reverting` stays set
+   * for the whole of it (§7.5). Rejects with the failure's reason.
+   */
+  rewindTo(input: { messageId: string; targetTurnCount: number }): Promise<void>;
   compact(): Promise<void>;
   /**
    * `/background` — the user's Ctrl+B: move one running tool call (or every

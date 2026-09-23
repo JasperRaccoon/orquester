@@ -29,6 +29,8 @@ import {
   isHistoricalRuntimeEvent,
   SETTLED_TURN_STATES,
   slimActivityPayload,
+  startedTurns,
+  turnOrdinal,
   type AgentAdapterId,
   type AgentChatCommandName,
   type AgentChatSessionSummaryFields,
@@ -303,13 +305,20 @@ interface ThreadRuntime {
    */
   historyPending: boolean;
   /**
-   * Target of the most recent `thread.reverted`, or null.
+   * Target of the most recent `thread.reverted`, until the next turn starts;
+   * otherwise null.
    *
    * A capture that lands after a revert belongs to a turn the revert
    * truncated, and appending it raises `head.turnCount` past the target —
    * visibly undoing the rewind and leaving a checkpoint row with no turn. It
    * cannot be derived from the fold: after the revert the head's count and the
    * highest surviving checkpoint are equal again.
+   *
+   * The guard compares COUNTS, so it must end where the next genuine turn
+   * begins: that turn is numbered `target + 1` (§5.5, turns count by order)
+   * and would otherwise be dropped — and with it every turn after it, for the
+   * life of the thread. A `turn.started` clears it (`consume`), and a host
+   * restart re-derives it the same way (`revertGuardFromLog`).
    */
   revertedTo: number | null;
   /**
@@ -402,9 +411,14 @@ export interface Orchestrator {
     input?: { cwd?: string }
   ): Promise<{ provider: ProviderSnapshot; changed: boolean }>;
 
-  /** `GET /health` — the drain-restart of §3.1 waits on `activeTurnThreadIds`. */
+  /**
+   * `GET /health` — the drain-restart of §3.1 waits on `activeTurnThreadIds`
+   * AND `backgroundWorkThreadIds`: a subagent fleet or a background shell that
+   * outlives its turn is work a host restart would kill.
+   */
   liveThreadIds(): string[];
   activeTurnThreadIds(): string[];
+  backgroundWorkThreadIds(): string[];
 
   /** §3.3 step 1, for an intentional stop. Returns the threads it marked. */
   markThreadsForContinuation(): Promise<string[]>;
@@ -611,11 +625,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       historyPending:
         (state.items ?? []).length === 0 &&
         (bindingResumeCursor(binding) ?? state.head?.session.resumeCursor) !== undefined,
-      revertedTo: tail.events.reduce<number | null>(
-        (target, event) =>
-          event.type === "thread.reverted" ? event.payload.turnCount : target,
-        null
-      ),
+      revertedTo: revertGuardFromLog(tail.events),
       titleManual: tail.events.some(
         (event) =>
           event.type === "thread.meta-updated" &&
@@ -1296,7 +1306,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     // the same reason). Waiting on `turn.started` would fold everything the
     // agent writes in the meantime — and anything a provider writes on session
     // start — into the baseline, and the turn's numstat would under-report it.
-    await captureBaseline(runtime);
+    await captureBaseline(runtime, { turnCount: dispatchBaselineTurnCount(runtime) });
     try {
       await ensureSession(runtime, { pendingTurnStart: true });
     } catch (error) {
@@ -1617,12 +1627,26 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     }
   };
 
+  /**
+   * The highest checkpoint count the fold holds. NOT the thread's turn count:
+   * turns count by ORDER (§5.5, `startedTurns`), and the checkpoint list is
+   * sparse wherever git was absent, a capture failed or history was resumed.
+   * Only the diff route's range check and the placeholder's no-ordinal
+   * fallback still read it.
+   */
   const maxCheckpointTurnCount = (runtime: ThreadRuntime): number =>
     (runtime.state.checkpoints ?? []).reduce(
       (max, checkpoint) => Math.max(max, checkpoint.checkpointTurnCount),
       0
     );
 
+  /**
+   * §5.5, cut by turn ORDER. `targetTurnCount` is the number of started turns
+   * kept; the rest are named to the adapter by id (`RollbackTarget`), and
+   * their checkpoints are pruned by their own counts as well as by `> target`
+   * — a thread checkpointed before the counts followed the turns can hold a
+   * dropped turn's ref far below the target.
+   */
   const revertEffect = async (runtime: ThreadRuntime, targetTurnCount: number): Promise<void> => {
     const head = headOf(runtime);
     if (!head) return;
@@ -1630,12 +1654,33 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       // §5.5 step 2, before anything on disk, in the ref store or in the
       // provider is touched.
       checkpoints.assertRollbackSupported(head.adapter);
-      const current = maxCheckpointTurnCount(runtime);
-      const numTurns = current - targetTurnCount;
-      if (numTurns > 0) {
-        await adapterFor(head.adapter).rollbackThread(runtime.id, numTurns);
+      const started = startedTurns(runtime.state.turns ?? []);
+      const dropped = started.slice(targetTurnCount);
+      const retained = started.slice(0, targetTurnCount);
+      const droppedTurnIds = dropped.map((turn) => turn.turnId);
+      if (dropped.length > 0) {
+        await adapterFor(head.adapter).rollbackThread(runtime.id, dropped.length, {
+          firstRemovedTurnId: dropped[0]!.turnId,
+          droppedTurnIds,
+          retainedTurnIds: retained.map((turn) => turn.turnId)
+        });
       }
-      await checkpoints.pruneAbove({ threadId: runtime.id, cwd: head.cwd, targetTurnCount });
+      const droppedIds = new Set(droppedTurnIds);
+      const droppedTurnCounts = [
+        ...new Set(
+          (runtime.state.checkpoints ?? [])
+            .filter(
+              (checkpoint) => checkpoint.turnId !== null && droppedIds.has(checkpoint.turnId)
+            )
+            .map((checkpoint) => checkpoint.checkpointTurnCount)
+        )
+      ];
+      await checkpoints.pruneAbove({
+        threadId: runtime.id,
+        cwd: head.cwd,
+        targetTurnCount,
+        droppedTurnCounts
+      });
       await append(runtime, [
         buildEvent(runtime.id, "thread.reverted", { turnCount: targetTurnCount })
       ]);
@@ -2085,10 +2130,13 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
 
       case "revert": {
         const targetTurnCount = parseTargetTurnCount(body.targetTurnCount);
-        const current = maxCheckpointTurnCount(runtime);
+        // Turns count by ORDER (§5.5) — never by the checkpoint list, which a
+        // non-git project, a failed capture or a resumed history leaves sparse.
+        const current = startedTurns(runtime.state.turns ?? []).length;
         if (targetTurnCount > current) {
           throw commandRejected(
-            `Checkpoint turn count ${targetTurnCount} exceeds the current turn count ${current}.`
+            `Cannot rewind to turn ${targetTurnCount}: this thread has ` +
+              `${current} turn${current === 1 ? "" : "s"}.`
           );
         }
         if (turnIsActive(runtime)) {
@@ -2985,7 +3033,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       // A real checkpoint already covers this turn; §5.4 reuses its own count.
       return null;
     }
-    return { turnCount: maxCheckpointTurnCount(runtime) + 1 };
+    // The running turn's own ordinal (§5.5) — the count its completion
+    // checkpoint will take. The checkpoint-derived rule survives only for a
+    // turn the fold cannot place.
+    return {
+      turnCount: turnOrdinalOf(runtime, input.turnId) ?? maxCheckpointTurnCount(runtime) + 1
+    };
   };
 
   const launchConfig = (threadId: string): ThreadLaunchConfig | null =>
@@ -3064,23 +3117,49 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     });
   };
 
+  /** A turn's 1-based position among the thread's started turns (§5.5), or null. */
+  const turnOrdinalOf = (runtime: ThreadRuntime, turnId: string | null): number | null =>
+    turnId === null ? null : turnOrdinal(runtime.state.turns ?? [], turnId);
+
+  /**
+   * The dispatch-time baseline's count (§5.4, §5.5): the ordinal of the turn
+   * about to start, minus one — i.e. how many turns have started so far.
+   *
+   * A steer is the exception. It joins the RUNNING turn rather than starting
+   * one, so its baseline is that turn's own, already captured; counting the
+   * running turn in would name its COMPLETION ref and capture it mid-turn.
+   */
+  const dispatchBaselineTurnCount = (runtime: ThreadRuntime): number => {
+    const running = turnOrdinalOf(runtime, currentSession(runtime).activeTurnId);
+    return running !== null ? running - 1 : startedTurns(runtime.state.turns ?? []).length;
+  };
+
   /**
    * Awaitable on purpose (§5.4, R5 #6): the baseline must be "the tree as it
    * was before the turn", so the `/turn` dispatch path waits for it. The
    * `turn.started` call site stays fire-and-forget — by then it is only the
-   * idempotent backstop, and `checkpoints.captureBaseline` answers `null`
+   * idempotent backstop, and `checkpoints.captureBaseline` answers `ready`
    * without touching the tree once the ref exists.
+   *
+   * `turnCount` is the baseline's own count — the ordinal of the turn it
+   * precedes, minus one (§5.5); omitted, the service derives it from the
+   * checkpoints as it always did.
    */
-  const captureBaseline = (runtime: ThreadRuntime, turnId?: string | null): Promise<void> => {
+  const captureBaseline = (
+    runtime: ThreadRuntime,
+    input: { turnId?: string | null; turnCount?: number | null } = {}
+  ): Promise<void> => {
     const head = headOf(runtime);
     if (!head) return Promise.resolve();
+    const { turnId, turnCount } = input;
     return runtime.captures
       .run(async () => {
         const result = await checkpoints.captureBaseline({
           threadId: runtime.id,
           cwd: head.cwd,
           checkpoints: runtime.state.checkpoints ?? [],
-          ...(turnId === undefined ? {} : { turnId })
+          ...(turnId === undefined ? {} : { turnId }),
+          ...(typeof turnCount === "number" ? { turnCount } : {})
         });
         // A non-git project skips silently — and stops the ingestion
         // placeholder of §5.4 being written for it at all.
@@ -3098,7 +3177,17 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       });
   };
 
-  const captureTurnEnd = (runtime: ThreadRuntime, turnId: string | null): void => {
+  /**
+   * `turnCount` is the completing turn's ordinal (§5.5), read when the turn
+   * ended — not when the capture queue gets to it, by which time a revert may
+   * have truncated the row. Omitted, the service falls back to a placeholder's
+   * count and then to its own derivation.
+   */
+  const captureTurnEnd = (
+    runtime: ThreadRuntime,
+    turnId: string | null,
+    turnCount: number | null
+  ): void => {
     const head = headOf(runtime);
     if (!head) return;
     void runtime.captures
@@ -3110,13 +3199,16 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           turnId,
           assistantMessageId: turn?.assistantMessageId ?? null,
           checkpoints: runtime.state.checkpoints ?? [],
-          activeTurnId: currentSession(runtime).activeTurnId
+          activeTurnId: currentSession(runtime).activeTurnId,
+          ...(turnCount !== null ? { turnCount } : {})
         });
         if (!summary) return;
         // A capture that lands after a revert belongs to a turn the revert
         // truncated; appending it raises `head.turnCount` past the target and
         // visibly undoes the rewind (the checkpoint list keeps a row with no
-        // matching turn).
+        // matching turn). The guard is lifted by the next `turn.started`, so a
+        // genuinely new turn — numbered `target + 1` — is never mistaken for
+        // one of these.
         const revertedTo = runtime.revertedTo;
         if (revertedTo !== null && summary.turnCount > revertedTo) {
           logger.info("agent-host: dropping a checkpoint for a reverted turn", {
@@ -3173,20 +3265,32 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           await ingestion.ingest(event);
           if (runtime) {
             // After ingestion, so the fold already holds the turn row the
-            // capture reads its `assistantMessageId` from.
+            // capture reads its `assistantMessageId` from — and the row
+            // carries the provider's id, which is what places the turn in the
+            // thread's ORDER (§5.5): its ordinal is the checkpoint's count.
+            const turnId = event.turnId ?? null;
             if (event.type === "turn.started") {
+              // A new turn after a rewind legitimately advances the count past
+              // the target, so the late-capture guard ends here (§5.5).
+              if (!isHistoricalRuntimeEvent(event)) {
+                runtime.revertedTo = null;
+              }
               // Backstop for turns the host did not dispatch itself (a
               // continuation, an adapter-initiated turn). The turn id is
               // recorded with it, so a stale abort for another turn cannot
               // mint a checkpoint later (§5.4).
-              void captureBaseline(runtime, event.turnId ?? null);
+              const ordinal = turnOrdinalOf(runtime, turnId);
+              void captureBaseline(runtime, {
+                turnId,
+                turnCount: ordinal === null ? null : ordinal - 1
+              });
             } else if (event.type === "turn.completed" || event.type === "turn.aborted") {
               persistCursorAtTurnEnd(runtime);
-              captureTurnEnd(runtime, event.turnId ?? null);
+              captureTurnEnd(runtime, turnId, turnOrdinalOf(runtime, turnId));
               // A replayed turn is the past: its questions were settled when it
               // happened, and there is no live provider to strand.
               if (!isHistoricalRuntimeEvent(event)) {
-                await settleStrandedQuestions(runtime, event.turnId ?? null);
+                await settleStrandedQuestions(runtime, turnId);
               }
             }
           }
@@ -3613,6 +3717,14 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       [...runtimes.values()]
         .filter((runtime) => currentSession(runtime).activeTurnId !== null)
         .map((runtime) => runtime.id),
+    // Both buckets count: an agent fleet ("working") is hours of real work,
+    // and a watch loop ("monitoring") loses its output the same way. The
+    // registry's own TTL bounds a silent watch loop, so a dev server left
+    // running cannot defer a deploy for longer than that window.
+    backgroundWorkThreadIds: () =>
+      [...runtimes.values()]
+        .filter((runtime) => liveness.liveness(runtime.id) !== null)
+        .map((runtime) => runtime.id),
     markThreadsForContinuation,
     clearContinuationMarkers,
     reconcile,
@@ -3644,6 +3756,31 @@ export interface HostThreadSummary extends AgentChatSessionSummaryFields {
  * from the UI package, so the literal is pinned here and in a test.
  */
 export const PLAN_IMPLEMENTATION_PROMPT_PREFIX = "PLEASE IMPLEMENT THIS PLAN:\n";
+
+/**
+ * `ThreadRuntime.revertedTo` as the log leaves it: the target of the last
+ * `thread.reverted`, unless a turn started after it — the rule the live path
+ * applies on `turn.started`, read off the `thread.session-set` that names a
+ * running turn. Without the second half a host restart would re-arm a guard
+ * the running host had already lifted, and drop the next capture of a turn
+ * that is not a truncated one at all.
+ */
+function revertGuardFromLog(events: readonly DomainEvent[]): number | null {
+  let target: number | null = null;
+  for (const event of events) {
+    if (event.type === "thread.reverted") {
+      target = event.payload.turnCount;
+    } else if (
+      target !== null &&
+      event.type === "thread.session-set" &&
+      event.payload.session.status === "running" &&
+      event.payload.session.activeTurnId !== null
+    ) {
+      target = null;
+    }
+  }
+  return target;
+}
 
 /**
  * §6.4 / §7.3: `hasActionableProposedPlan` is `implementedAt === null` for the

@@ -146,6 +146,19 @@ export interface SendTurnResult {
  * `uploadFeedback` (Codex-only, `feedback/upload`) is deliberately **not** part
  * of this interface — provider feedback upload is a non-goal (§2).
  */
+/**
+ * The cut a rewind makes, by turn id (§5.5). `firstRemovedTurnId` is the
+ * first turn that goes; `droppedTurnIds` are every turn from it onwards and
+ * `retainedTurnIds` every started turn before it, both in start order. Ids
+ * are the fold's — the provider's own turn ids (§5.1) — so an adapter can
+ * look them up in its own turn list.
+ */
+export interface RollbackTarget {
+  firstRemovedTurnId: string;
+  droppedTurnIds: readonly string[];
+  retainedTurnIds: readonly string[];
+}
+
 export interface AgentAdapter {
   readonly id: AgentAdapterId;
   readonly capabilities: AdapterCapabilities;
@@ -203,7 +216,23 @@ export interface AgentAdapter {
    * host says so in the timeline rather than rendering an empty thread.
    */
   projectHistory?(snapshot: ThreadSnapshot): RuntimeEvent[];
-  rollbackThread(threadId: string, numTurns: number): Promise<ThreadSnapshot>;
+  /**
+   * §5.5 step 3: drop the last `numTurns` turns of the provider's conversation.
+   *
+   * `target` names the same cut by turn ID — the fold's ids, which for every
+   * adapter are the provider's own (§5.1). An adapter that can resolve ids
+   * MUST prefer them: `numTurns` is counted over the host's fold, and a
+   * provider whose own turn list is longer (a resumed transcript with more
+   * history than the cursor recorded) or shorter (a compaction that wrote
+   * extra rows) would land a count-based cut on the wrong turn without
+   * refusing. An id it cannot resolve is a refusal, never a guess. `target`
+   * is absent only from a caller that predates it.
+   */
+  rollbackThread(
+    threadId: string,
+    numTurns: number,
+    target?: RollbackTarget
+  ): Promise<ThreadSnapshot>;
 
   listSessions(): ProviderSession[];
   hasSession(threadId: string): boolean;

@@ -1330,6 +1330,92 @@ describe("codex session — rollback", () => {
     await r.stop();
   });
 
+  it("reverts before the turn the host NAMED, even where its count points elsewhere", async () => {
+    // Compaction runs as a whole extra turn (fixtures README observation 8):
+    // the provider's list holds a turn the host's fold did not count, so the
+    // 2nd-newest turn is not the one the user rewound to.
+    const r = rig({
+      historyTurnIds: ["turn-3", "turn-compact", "turn-2", "turn-1"],
+      turns: [{ kind: "text", text: "a" }]
+    });
+    await r.session.start();
+    const snapshot = await r.session.rollbackThread(2, {
+      firstRemovedTurnId: "turn-2",
+      droppedTurnIds: ["turn-2", "turn-3"],
+      retainedTurnIds: ["turn-1"]
+    });
+
+    const reverts = sentFrames(r.received(), "thread/revert");
+    assert.equal(reverts.length, 1);
+    assert.equal(
+      reverts[0]!.beforeTurnId,
+      "turn-2",
+      "the id wins; a count of 2 would have reverted before turn-compact"
+    );
+    // Re-hydrated through thread/turns/list AFTER the revert, as on the count path.
+    const methods = r.received().map((frame) => frame.method);
+    assert.ok(methods.lastIndexOf("thread/turns/list") > methods.indexOf("thread/revert"));
+    assert.equal(snapshot.threadId, "thread-1");
+    await r.stop();
+  });
+
+  it("refuses a turn the thread no longer holds, and reverts nothing", async () => {
+    const r = rig({ historyTurnIds: ["turn-2", "turn-1"], turns: [{ kind: "text", text: "a" }] });
+    await r.session.start();
+    await assert.rejects(
+      () =>
+        r.session.rollbackThread(1, {
+          firstRemovedTurnId: "turn-gone",
+          droppedTurnIds: ["turn-gone"],
+          retainedTurnIds: ["turn-1", "turn-2"]
+        }),
+      /codex: the turn to rewind to is no longer in this thread/
+    );
+    assert.equal(
+      sentFrames(r.received(), "thread/revert").length,
+      0,
+      "an unresolvable id is a refusal, never a count-based guess"
+    );
+    await r.stop();
+  });
+
+  it("pages back only as far as the named turn, and reads ids without items", async () => {
+    const r = rig({
+      historyTurnIds: ["t7", "t6", "t5", "t4", "t3", "t2", "t1"],
+      turnsPageSize: 2,
+      turns: [{ kind: "text", text: "a" }]
+    });
+    await r.session.start();
+    await r.session.rollbackThread(1, {
+      firstRemovedTurnId: "t3",
+      droppedTurnIds: ["t3", "t4", "t5", "t6", "t7"],
+      retainedTurnIds: ["t1", "t2"]
+    });
+
+    const frames = r.received();
+    const revertAt = frames.findIndex((frame) => frame.method === "thread/revert");
+    assert.ok(revertAt >= 0, "the revert was sent");
+    assert.equal(
+      (frames[revertAt]!.params as { beforeTurnId: string }).beforeTurnId,
+      "t3",
+      "found on the third page, well past a count-sized first page"
+    );
+    const lookup = frames
+      .slice(0, revertAt)
+      .filter((frame) => frame.method === "thread/turns/list")
+      .map((frame) => frame.params as Record<string, unknown>);
+    assert.deepEqual(
+      lookup.map((params) => params.cursor ?? null),
+      [null, "2", "4"],
+      "each page resumes from the cursor the last one handed back, and the fourth is never read"
+    );
+    assert.ok(
+      lookup.every((params) => !("itemsView" in params)),
+      "the lookup takes the server's default summary view"
+    );
+    await r.stop();
+  });
+
   it("readThread hydrates history out of band", async () => {
     const r = rig({ historyTurnIds: ["t2", "t1"], turns: [{ kind: "text", text: "a" }] });
     await r.session.start();

@@ -23,7 +23,13 @@ import type {
   ThreadSnapshot
 } from "@orquester/api/agent-chat";
 
-import type { AgentAdapter, SendTurnInput, SendTurnResult, StartSessionInput } from "../../adapter.ts";
+import type {
+  AgentAdapter,
+  RollbackTarget,
+  SendTurnInput,
+  SendTurnResult,
+  StartSessionInput
+} from "../../adapter.ts";
 
 export interface ScriptedCall {
   kind:
@@ -250,8 +256,18 @@ export function createScriptedAdapter(options: ScriptedAdapterOptions = {}): Scr
         }
       : {}),
 
-    async rollbackThread(threadId: string, numTurns: number): Promise<ThreadSnapshot> {
-      calls.push({ kind: "rollbackThread", threadId, detail: numTurns });
+    async rollbackThread(
+      threadId: string,
+      numTurns: number,
+      target?: RollbackTarget
+    ): Promise<ThreadSnapshot> {
+      // `target` is the cut by turn id (§5.5) — recorded whole, because naming
+      // the right turns is the whole point of it.
+      calls.push({
+        kind: "rollbackThread",
+        threadId,
+        detail: { numTurns, ...(target !== undefined ? { target } : {}) }
+      });
       return { threadId, turns: [] };
     },
 

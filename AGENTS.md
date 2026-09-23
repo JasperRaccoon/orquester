@@ -384,7 +384,28 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   triggered by a protocol-version bump **or by a moved code stamp**: the host reports the commit it
   started from in `/health` (`support/code-stamp.ts` reads `.git/HEAD` without the git binary) and
   the daemon compares it with its own at boot, so a code-only deploy replaces the host as soon as
-  no turn is active. An unreadable stamp on either side never restarts anything.
+  it is **drained**. An unreadable stamp on either side never restarts anything.
+- **"Drained" means no active turn AND no live background work, and the old host must EXIT before
+  its session is killed.** Two things that were bugs (owner incident 2026-09-23: a code-only deploy
+  under five working subagents). (1) The drain waited on `activeTurnThreadIds` alone, so the
+  restart fired the moment the parent's turn settled — a subagent fleet or a background shell
+  outlives its turn inside the provider process, the restart killed every one of them, and the CLI
+  reported each as "didn't finish before the previous session ended" on the next message with no
+  notice in between. `/health` now also carries `backgroundWorkThreadIds` (the host's liveness
+  registry, `working` and `monitoring` both — the registry's TTL bounds a silent watch loop, so a
+  dev server cannot defer a deploy for longer than that window); the supervisor unions it with the
+  daemon's own summary-poll view (`AgentChatSummaryService.threadsWithBackgroundLiveness`, so the
+  host a deploy replaces — which predates the field — is held too; that view is `null` = unknown
+  until the first poll round, because boot adoption runs BEFORE the poll starts and an empty view
+  would read as "nothing running"), and `onBackgroundWorkEnded` reopens the window exactly as a
+  settled turn does. (2) The supervisor read a quiet socket as "the
+  host is gone", but `server.close()` is the FIRST step of the host's teardown and
+  `adapter.stopAll()` runs after it: the tmux session was killed ~400 ms after `/stop`, so no
+  `session.exited` and one "Task stopped" row out of five were ever written, and the threads kept
+  reading "running" for work that was already dead. `awaitHostExit` now waits for the PROCESS —
+  the service session ending (`isAlive()` on a direct child) and the socket — bounded at 30 s, and
+  an intentional `/stop` ends the process explicitly (`onStopped` → `process.exit`). A manual
+  `POST /api/agent-host/stop` still restarts at once, by design.
 - **A fresh host must not answer `GET /providers` with `[]` for five minutes.** Three layers, all
   in `agent-host/orchestration/provider-snapshots.ts`, ported from T3 (`makeManagedServerProvider`
   + `ProviderRegistry`). **(1) A pending seed, synchronously at construction** — before the cache
@@ -473,6 +494,12 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   (1) Claude resumes a subagent under the SAME task id with a NEW launching `tool_use_id`, so the
   roster fold (`packages/api/src/agent-chat/roster.ts`) reopens a terminal row on a changed
   `toolUseId` and only then — an unchanged one is a late delivery and must not reopen anything.
+  The launching call is read off `task.started` rows ONLY: progress rows have stable ids
+  (`task-progress:…`, `task-usage:…`) and are replaced **in place**, so in list order the
+  relaunched run's progress row — already naming the new call — sits before the killed run's
+  `stopped` row, and reading the call off it kept every relaunched agent `interrupted` for as long
+  as it worked (2026-09-23). Anything that folds activities by position must remember that order
+  is first-emission order, not time.
   (2) `task_progress.description` is the agent's live activity, never its name: the normaliser
   fills a task's description from progress only when it has none. (3) Retention has two windows
   (`fold.ts`): the parent's last 500 rows, from which an agent's `task.started`/`task.completed`
@@ -552,6 +579,35 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   The route is daemon-owned rather than a §6.2 command precisely because the body is **not**
   forwarded verbatim — only the daemon can apply the family gate, the seeded-account gate and the
   launch-env recompose. `binding.json` gains no new writer.
+- **Rewind counts turns by ORDER, never by checkpoints.** `targetTurnCount` on `/revert` and on
+  `thread.reverted` means "keep the first N started turns" — `startedTurns(turns)` in
+  `packages/api/src/agent-chat/turns.ts`, the fold's turn rows with a provider turn id, in order —
+  on the host (the command's bound, the checkpoint numbering, the `RollbackTarget` handed to the
+  adapter), in the fold (`reduceReverted` keeps those turns' rows; the checkpoint-count rule survives
+  only for a log with no turn rows) and in the client (`revertTurnCount` = the index of the turn
+  whose `userMessageId` is the message). The checkpoint list is sparse exactly where a rewind
+  matters — a non-git project captures nothing, a failed capture skips a turn, a resumed thread has
+  no checkpoint for its history — which is why "rewind to here" never appeared on a real thread.
+  Three rules follow. (1) **An adapter resolves the cut BY ID** (`firstRemovedTurnId`) and refuses
+  an id it cannot place: Claude keeps `turnBoundaries` (our turn id ↔ transcript uuid, remapped on
+  every fork) in its cursor, Codex sends `thread/revert {beforeTurnId}`, OpenCode looks the turn up
+  in its messages; the count is only the fallback for a caller that predates the id. (2) Checkpoint
+  refs are `turn/<ordinal>`, sparse by design, and `runtime.revertedTo` is cleared by the next
+  `turn.started` — it used to stay set forever, so the first turn after a rewind never captured
+  again. (3) The client withholds the affordance before the last compaction marker and on a
+  `/compact` message and on a `user` row the provider's transcript wrote itself
+  (`<command-name>`, `<task-notification>`, … — `isProviderInternalUserMessage`), and `rewindTo`
+  keeps `reverting` (the composer's one `inert` reason) until the truncation is folded, then returns
+  the message's text and attachment chips to the composer; the host keeps an unreferenced
+  attachment for 24 h, which is what lets those chips stay valid. Esc-Esc while idle opens the same
+  picker the composer's rewind control does. Two more things that were bugs: the compaction marker
+  is exempt from the 500-row activity window (a busy thread evicted it in minutes, and the gate then
+  offered every pre-compaction message), and Claude's "compacted in between" check is decided by the
+  anchor's POSITION relative to the transcript's last `isCompactSummary` row — `preserved_messages.
+  all_uuids` names the pre-compaction rows the CLI kept, never the rows written afterwards, so
+  reading it as the set of reachable anchors refused every rewind after a live `/compact`. OpenCode's
+  live turn ids are now the prompt's message id (its own `opencode-turn-<uuid>` was unresolvable),
+  with an in-memory map across its own forks.
 - **A `/compact` is a visible phase, not "Working".** The first `system/status {status:
   "compacting"}` latches `thread.state.changed {state:"compacting"}` (the CLI sends six of them);
   the next non-compacting status ends the phase. `compact_result: "failed"` emits

@@ -39,6 +39,7 @@ import type {
   QueuedComposerMessage,
   RememberedTimelinePosition
 } from "../../lib/agent-chat/contracts";
+import type { RewindTarget } from "../../lib/agent-chat/rewind.logic";
 
 /**
  * §7.1: **one** `AgentChatView` instance serves every chat tab in a project.
@@ -67,7 +68,28 @@ export interface ChatTimelineProps {
   bottomInset: number;
   /** Offered only where the adapter declares `supportsConversationRollback`. */
   canRevert: boolean;
-  onRevert: (targetTurnCount: number) => void;
+  /**
+   * "Rewind to here" on a user message (§5.5), confirmed in the row's own
+   * popover: the conversation goes back to just before `messageId`, keeping
+   * `targetTurnCount` turns, and the message returns to the composer. Files
+   * are never touched. The view dispatches `actions.rewindTo(input)`.
+   */
+  onRevert: (input: { messageId: string; targetTurnCount: number }) => void;
+  /**
+   * A turn is running or a revert is in flight: the rewind button is shown
+   * but disabled ("Available when the agent is idle"). Absent means idle.
+   *
+   * *Added with the rewind surfaces; additive to the foundation's contract.*
+   */
+  revertBusy?: boolean | undefined;
+  /**
+   * How many turns the thread has started (`startedTurns(turns).length`), so
+   * a row can say how many turns its rewind removes. Absent means 0, which
+   * makes every rewind read as removing one turn — the floor.
+   *
+   * *Added with the rewind surfaces; additive to the foundation's contract.*
+   */
+  startedTurnCount?: number | undefined;
   /** Open a turn's unified diff (`GET …/turns/:n/diff`). */
   onOpenTurnDiff: (turnCount: number) => void;
   /** Click-through from a file-change row to an editor tab. */
@@ -177,6 +199,18 @@ export interface ChatComposerProps {
   actionableProposedPlan: { planMarkdown: string } | null;
   /** The composer goes `inert` for exactly one reason (§7.5). */
   reverting: boolean;
+  /**
+   * The messages the rewind picker lists, newest first (`deriveRewindTargets`
+   * over the rows the timeline renders, so the picker and the per-row button
+   * can never disagree). Empty hides the picker's button altogether.
+   */
+  rewindTargets: readonly RewindTarget[];
+  /**
+   * A confirmed pick from the rewind picker — the double Escape's
+   * destination (§5.5). Conversation only; the view dispatches
+   * `actions.rewindTo`, which returns the message to this composer.
+   */
+  onRewind: (target: RewindTarget) => void;
   actions: AgentChatActions;
   /** Republished so the timeline can use it as its bottom content inset. */
   onHeightChange: (height: number) => void;

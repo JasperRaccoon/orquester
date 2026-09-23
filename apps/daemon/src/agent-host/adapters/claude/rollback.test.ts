@@ -3,21 +3,31 @@
  *
  * The rule under test is "refuse rather than guess": a fork rewrites every
  * uuid, so the retained turns are matched from the truncated end on deep-equal
- * body AND role, and anything that does not line up is a hard error.
+ * body AND role, and anything that does not line up is a hard error. A rewind
+ * that names its cut by turn id resolves that id to exactly one turn start, or
+ * refuses.
  */
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { resumeCursorFor } from "../../orchestration/resume.ts";
-import { buildClaudeResumeCursor, isResumeId, readClaudeResumeCursor } from "./cursor.ts";
+import {
+  buildClaudeResumeCursor,
+  claudeTurnBoundariesFromCursor,
+  isResumeId,
+  readClaudeResumeCursor
+} from "./cursor.ts";
 import {
   ROLLBACK_BOUNDARY_UNAVAILABLE,
+  ROLLBACK_COMPACTED,
   ROLLBACK_HISTORY_UNAVAILABLE,
   conversationIndexForUuid,
   isAnchorReachableAfterCompaction,
   isClaudeHumanTurnStart,
+  mergeClaudeTurnBoundaries,
   planClaudeRollback,
+  planClaudeRollbackById,
   remapClaudeForkTurnBoundaries,
   type ClaudeHistoryMessage
 } from "./rollback.ts";
@@ -27,6 +37,15 @@ const user = (uuid: string, text: string): ClaudeHistoryMessage => ({
   uuid,
   parent_tool_use_id: null,
   message: { role: "user", content: [{ type: "text", text }] }
+});
+
+/** The CLI's own compaction summary row: user-shaped, flagged on the row. */
+const summary = (uuid: string, text: string): ClaudeHistoryMessage => ({
+  type: "user",
+  uuid,
+  parent_tool_use_id: null,
+  isCompactSummary: true,
+  message: { role: "user", content: text }
 });
 
 const toolResult = (uuid: string, id: string): ClaudeHistoryMessage => ({
@@ -182,6 +201,272 @@ describe("claude rollback — fork remapping", () => {
       true
     );
   });
+
+  it("with the transcript at hand, the last compaction summary's position decides", () => {
+    // [h1 a1] compacted → summary s, then [h2 a2] written afterwards. The live
+    // boundary preserved only `a1`; the rows after the summary are not in that
+    // list and never could be — reading the list as the whole reachable set
+    // refused every rewind after a live /compact.
+    const transcript = [
+      user("h1", "first"),
+      assistant("a1", "ok"),
+      summary("s", "This session is being continued…"),
+      user("h2", "second"),
+      assistant("a2", "ok")
+    ];
+    const preservedUuids = ["a1"];
+    // At or after the summary: reachable whatever the list says.
+    assert.equal(
+      isAnchorReachableAfterCompaction({ anchorUuid: "a2", preservedUuids, messages: transcript }),
+      true
+    );
+    assert.equal(
+      isAnchorReachableAfterCompaction({ anchorUuid: "s", preservedUuids, messages: transcript }),
+      true
+    );
+    // Before it: only a preserved row.
+    assert.equal(
+      isAnchorReachableAfterCompaction({ anchorUuid: "a1", preservedUuids, messages: transcript }),
+      true
+    );
+    assert.equal(
+      isAnchorReachableAfterCompaction({ anchorUuid: "h1", preservedUuids, messages: transcript }),
+      false
+    );
+    // Before it with no list at all (resumed after the compaction): refused,
+    // not guessed.
+    assert.equal(
+      isAnchorReachableAfterCompaction({
+        anchorUuid: "a1",
+        preservedUuids: undefined,
+        messages: transcript
+      }),
+      false
+    );
+    // A transcript with no flagged summary falls back to the list alone.
+    assert.equal(
+      isAnchorReachableAfterCompaction({
+        anchorUuid: "a2",
+        preservedUuids,
+        messages: transcript.filter((message) => message.uuid !== "s")
+      }),
+      false
+    );
+  });
+});
+
+describe("claude rollback — by turn id", () => {
+  // A transcript as `getSessionMessages` returns it. Resumed from the CLI, so
+  // none of its turns is a boundary this adapter recorded.
+  const transcript = [
+    user("h1", "first"),
+    assistant("a1", "ok"),
+    user("h2", "second"),
+    assistant("a2", "ok"),
+    user("h3", "third"),
+    assistant("a3", "ok")
+  ];
+  const turnIds = (boundaries: ReadonlyArray<{ turnId: string }>): string[] =>
+    boundaries.map((boundary) => boundary.turnId);
+
+  it("resolves a history turn no cursor recorded by identity — its id IS its uuid", () => {
+    const plan = planClaudeRollbackById({
+      messages: transcript,
+      boundaries: [],
+      firstRemovedTurnId: "h2"
+    });
+    assert.equal(plan.firstRemoved, 2);
+    assert.equal(plan.rollbackAt, "a1");
+    assert.deepEqual(plan.retained, [{ turnId: "h1", uuid: "h1", index: 0 }]);
+    assert.deepEqual(turnIds(plan.dropped), ["h2", "h3"]);
+  });
+
+  it("resolves a turn whose uuid a fork rewrote through its recorded pair", () => {
+    // After one rewind the session IS the fork, and the fork rewrote every
+    // uuid: only the pairs still say which turn `f2` starts.
+    const forked = [
+      user("f1", "first"),
+      assistant("fa1", "ok"),
+      user("f2", "second"),
+      assistant("fa2", "ok")
+    ];
+    const boundaries = [
+      { turnId: "turn-a", uuid: "f1" },
+      { turnId: "turn-b", uuid: "f2" }
+    ];
+    const plan = planClaudeRollbackById({
+      messages: forked,
+      boundaries,
+      firstRemovedTurnId: "turn-b"
+    });
+    assert.equal(plan.firstRemoved, 2);
+    assert.equal(plan.rollbackAt, "fa1");
+    assert.deepEqual(plan.retained, [{ turnId: "turn-a", uuid: "f1", index: 0 }]);
+    assert.deepEqual(turnIds(plan.dropped), ["turn-b"]);
+
+    // The pair owns its uuid, so the fork uuid is not also an identity turn.
+    assert.deepEqual(turnIds(plan.boundaries), ["turn-a", "turn-b"]);
+    assert.throws(
+      () => planClaudeRollbackById({ messages: forked, boundaries, firstRemovedTurnId: "f2" }),
+      { message: ROLLBACK_BOUNDARY_UNAVAILABLE }
+    );
+  });
+
+  it("refuses an id the history cannot place, rather than guessing", () => {
+    assert.throws(
+      () =>
+        planClaudeRollbackById({
+          messages: transcript,
+          boundaries: [{ turnId: "turn-a", uuid: "h1" }],
+          firstRemovedTurnId: "turn-unknown"
+        }),
+      { message: ROLLBACK_BOUNDARY_UNAVAILABLE }
+    );
+  });
+
+  it("refuses a cut whose anchor a later compaction dropped", () => {
+    // `preserved_messages.all_uuids` names only the tail, so `a1` — the entry
+    // a rewind to before `h2` would fork at — is gone.
+    const preservedUuids = ["a2", "h3", "a3"];
+    assert.throws(
+      () =>
+        planClaudeRollbackById({
+          messages: transcript,
+          boundaries: [],
+          firstRemovedTurnId: "h2",
+          preservedUuids
+        }),
+      { message: ROLLBACK_COMPACTED }
+    );
+    // An anchor the compaction preserved is still reachable.
+    const plan = planClaudeRollbackById({
+      messages: transcript,
+      boundaries: [],
+      firstRemovedTurnId: "h3",
+      preservedUuids
+    });
+    assert.equal(plan.rollbackAt, "a2");
+  });
+
+  it("a turn written after a live compaction rewinds although the list never named it", () => {
+    // The owner's case: /compact, then two more turns, then "rewind to the
+    // last one". `preserved_messages.all_uuids` lists pre-compaction rows only.
+    const compacted = [
+      user("h1", "first"),
+      assistant("a1", "ok"),
+      summary("s", "This session is being continued…"),
+      user("h2", "second"),
+      assistant("a2", "ok"),
+      user("h3", "third"),
+      assistant("a3", "ok")
+    ];
+    const plan = planClaudeRollbackById({
+      messages: compacted,
+      boundaries: [
+        { turnId: "turn-2", uuid: "h2" },
+        { turnId: "turn-3", uuid: "h3" }
+      ],
+      firstRemovedTurnId: "turn-3",
+      preservedUuids: ["a1"]
+    });
+    assert.equal(plan.rollbackAt, "a2");
+    // The first turn after the compaction anchors ON the summary — still fine.
+    const toFirst = planClaudeRollbackById({
+      messages: compacted,
+      boundaries: [{ turnId: "turn-2", uuid: "h2" }],
+      firstRemovedTurnId: "turn-2",
+      preservedUuids: ["a1"]
+    });
+    assert.equal(toFirst.rollbackAt, "s");
+    // A turn before the compaction whose anchor the list does not preserve is
+    // gone: h1's anchor is a0, and only a1 survived.
+    const twoBefore = [user("h0", "zeroth"), assistant("a0", "ok"), ...compacted];
+    assert.throws(
+      () =>
+        planClaudeRollbackById({
+          messages: twoBefore,
+          boundaries: [],
+          firstRemovedTurnId: "h1",
+          preservedUuids: ["a1"]
+        }),
+      { message: ROLLBACK_COMPACTED }
+    );
+  });
+
+  it("drops a pair whose uuid the transcript no longer holds, so its id is refused", () => {
+    const boundaries = [
+      { turnId: "turn-gone", uuid: "vanished" },
+      { turnId: "turn-1", uuid: "h1" },
+      { turnId: "turn-unplaced", uuid: null }
+    ];
+    assert.deepEqual(mergeClaudeTurnBoundaries(transcript, boundaries), [
+      { turnId: "turn-1", uuid: "h1", index: 0 },
+      { turnId: "h2", uuid: "h2", index: 2 },
+      { turnId: "h3", uuid: "h3", index: 4 }
+    ]);
+    for (const firstRemovedTurnId of ["turn-gone", "turn-unplaced"]) {
+      assert.throws(
+        () => planClaudeRollbackById({ messages: transcript, boundaries, firstRemovedTurnId }),
+        { message: ROLLBACK_BOUNDARY_UNAVAILABLE },
+        firstRemovedTurnId
+      );
+    }
+  });
+
+  it("orders recorded and identity boundaries by transcript index, not by record order", () => {
+    // A synthetic turn — background output between prompts — is anchored on
+    // the assistant message that opened it.
+    const withBackground = [
+      user("h1", "first"),
+      assistant("a1", "ok"),
+      assistant("bg", "background output"),
+      user("live-2", "second"),
+      assistant("a2", "ok")
+    ];
+    const boundaries = [
+      { turnId: "live-2", uuid: "live-2" },
+      { turnId: "synthetic", uuid: "bg" }
+    ];
+    assert.deepEqual(mergeClaudeTurnBoundaries(withBackground, boundaries), [
+      { turnId: "h1", uuid: "h1", index: 0 },
+      { turnId: "synthetic", uuid: "bg", index: 2 },
+      { turnId: "live-2", uuid: "live-2", index: 3 }
+    ]);
+    const plan = planClaudeRollbackById({
+      messages: withBackground,
+      boundaries,
+      firstRemovedTurnId: "synthetic"
+    });
+    assert.equal(plan.rollbackAt, "a1");
+    assert.deepEqual(turnIds(plan.retained), ["h1"]);
+    assert.deepEqual(turnIds(plan.dropped), ["synthetic", "live-2"]);
+  });
+
+  it("removing every turn yields no anchor: a fresh session, never a fork", () => {
+    const plan = planClaudeRollbackById({
+      messages: transcript,
+      boundaries: [],
+      firstRemovedTurnId: "h1"
+    });
+    assert.equal(plan.rollbackAt, undefined);
+    assert.deepEqual(plan.retained, []);
+    assert.deepEqual(turnIds(plan.dropped), ["h1", "h2", "h3"]);
+
+    // A system notice ahead of the first prompt is not conversation.
+    const withNotice = [system("s0"), ...transcript];
+    assert.equal(
+      planClaudeRollbackById({ messages: withNotice, boundaries: [], firstRemovedTurnId: "h1" })
+        .rollbackAt,
+      undefined
+    );
+  });
+
+  it("refuses an empty history", () => {
+    assert.throws(
+      () => planClaudeRollbackById({ messages: [], boundaries: [], firstRemovedTurnId: "h1" }),
+      { message: ROLLBACK_HISTORY_UNAVAILABLE }
+    );
+  });
 });
 
 describe("claude resume cursor — a bad cursor means no resume, never an error", () => {
@@ -264,5 +549,88 @@ describe("claude resume cursor — a bad cursor means no resume, never an error"
     });
     assert.equal(cursor?.resumeSessionAt, "a8a2167c-1111-2222-3333-444444444444");
     assert.deepEqual(cursor?.turnStartMessageIds, ["t1", null, null, null]);
+  });
+
+  it("round-trips turnBoundaries next to the legacy list", () => {
+    const turnBoundaries = [
+      { turnId: "turn-1", uuid: "fork-1" },
+      { turnId: "turn-2", uuid: "turn-2" }
+    ];
+    const cursor = buildClaudeResumeCursor({
+      threadId: "thread-1",
+      sessionId,
+      turnStartMessageIds: ["fork-1", "turn-2"],
+      turnBoundaries
+    });
+    // Through JSON, as `binding.json` stores it.
+    const read = readClaudeResumeCursor(JSON.parse(JSON.stringify(cursor)));
+    assert.deepEqual(read, {
+      threadId: "thread-1",
+      resume: sessionId,
+      turnCount: 2,
+      turnStartMessageIds: ["fork-1", "turn-2"],
+      turnBoundaries
+    });
+    assert.deepEqual(claudeTurnBoundariesFromCursor(read), turnBoundaries);
+  });
+
+  it("a legacy cursor without turnBoundaries still reads, and pairs each uuid with itself", () => {
+    const legacy = readClaudeResumeCursor({
+      threadId: "thread-1",
+      resume: sessionId,
+      turnCount: 3,
+      turnStartMessageIds: ["t1", null, "t3"]
+    });
+    assert.deepEqual(legacy, {
+      threadId: "thread-1",
+      resume: sessionId,
+      turnCount: 3,
+      turnStartMessageIds: ["t1", null, "t3"]
+    });
+    // For a turn this adapter started the uuid IS the turn id; an unknown
+    // boundary pairs with nothing, while the legacy list keeps its place.
+    assert.deepEqual(claudeTurnBoundariesFromCursor(legacy), [
+      { turnId: "t1", uuid: "t1" },
+      { turnId: "t3", uuid: "t3" }
+    ]);
+    assert.deepEqual(claudeTurnBoundariesFromCursor(readClaudeResumeCursor({ resume: sessionId })), []);
+    assert.deepEqual(claudeTurnBoundariesFromCursor(undefined), []);
+  });
+
+  it("validates turnBoundaries field-wise, and never fails the cursor over them", () => {
+    const cursor = readClaudeResumeCursor({
+      resume: sessionId,
+      turnStartMessageIds: ["t1"],
+      turnBoundaries: [
+        { turnId: "t1", uuid: "u1" },
+        { turnId: "", uuid: "u2" },
+        { uuid: "u3" },
+        { turnId: "t4", uuid: 7 },
+        { turnId: "t5", uuid: "" },
+        { turnId: "t6", uuid: null },
+        { turnId: "t7" },
+        "t8",
+        null,
+        ["t9", "u9"]
+      ]
+    });
+    // No turn id names no turn and is dropped; an unusable uuid is a known
+    // turn whose start is unknown.
+    assert.deepEqual(cursor?.turnBoundaries, [
+      { turnId: "t1", uuid: "u1" },
+      { turnId: "t4", uuid: null },
+      { turnId: "t5", uuid: null },
+      { turnId: "t6", uuid: null },
+      { turnId: "t7", uuid: null }
+    ]);
+
+    // A field that is not an array is absent: the legacy list decides.
+    const notAnArray = readClaudeResumeCursor({
+      resume: sessionId,
+      turnStartMessageIds: ["t1"],
+      turnBoundaries: { t1: "u1" }
+    });
+    assert.equal(notAnArray?.turnBoundaries, undefined);
+    assert.deepEqual(claudeTurnBoundariesFromCursor(notAnArray), [{ turnId: "t1", uuid: "t1" }]);
   });
 });

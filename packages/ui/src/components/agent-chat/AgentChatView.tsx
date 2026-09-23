@@ -4,6 +4,7 @@ import { flushSync } from "react-dom";
 import {
   DEFAULT_RUNTIME_MODE,
   SETTLED_TURN_STATES,
+  startedTurns,
   TERMINAL_SUBAGENT_STATUSES
 } from "@orquester/api/agent-chat";
 import type { ThreadItem } from "@orquester/api/agent-chat";
@@ -37,14 +38,22 @@ import {
 import {
   focusComposer,
   insertComposerText,
+  openComposerControl,
   stageComposerAttachment
 } from "./composer/composer-bridge";
+import { rewindPickerEnabled } from "./composer/RewindControl";
+import {
+  createEscapeSequence,
+  deriveRewindTargets,
+  type EscapeSequence,
+  type RewindTarget
+} from "../../lib/agent-chat/rewind.logic";
 import { cn } from "../../lib/cn";
 import { isDefaultThreadTitle } from "../../lib/session-kind";
 import { isActiveChatTab, releaseActiveChatTab } from "../../lib/agent-chat-active-tab";
 import { anotherLayerOwnsTheKeyboard } from "../attention/GlobalShortcutListener";
 import { deriveThreadTitleSeed } from "../../lib/agent-chat/title.logic";
-import { resolveChatEscape } from "./escape-action";
+import { chatEscapeSequenceStep, resolveChatEscape } from "./escape-action";
 import { proposedPlanTitle, shouldShowPlanFollowUpPrompt } from "../../lib/agent-chat/plan.logic";
 import { useAppStore } from "../../store/app";
 import { AgentDrillIn } from "./roster/AgentDrillIn";
@@ -69,6 +78,7 @@ import type { AgentChatViewProps, AgentRosterMainRow } from "./contracts";
 /** Stable empty arrays, so a neutralised render never churns child props. */
 const NO_APPROVALS: never[] = [];
 const NO_REQUEST_IDS: readonly string[] = [];
+const NO_REWIND_TARGETS: readonly RewindTarget[] = [];
 
 /** Every row callback is a no-op while the paint hold is in effect (§7.1). */
 const noop = (): void => {};
@@ -387,6 +397,45 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
 
   const turnActive = slice.turnStatus !== null && !SETTLED_TURN_STATES.has(slice.turnStatus);
 
+  // --- "Rewind to here" and the Esc-Esc picker (§5.5) ----------------------
+  // Two surfaces, one list: the per-row button reads `revertTurnCount` off
+  // the rows the timeline renders, and the composer's picker gets the SAME
+  // rows projected into targets, so the two can never disagree about what is
+  // rewindable. A rewind is conversation only — files are never touched — and
+  // `rewindTo` hands the message back to the composer for editing.
+  const canRevert = !paintOnly && provider?.capabilities?.supportsConversationRollback !== false;
+  const startedTurnCount = React.useMemo(() => startedTurns(slice.turns).length, [slice.turns]);
+  const rewindTargets = React.useMemo(
+    () =>
+      paintOnly || !canRevert ? NO_REWIND_TARGETS : deriveRewindTargets(displayed.rows, slice.turns),
+    [canRevert, displayed.rows, paintOnly, slice.turns]
+  );
+  // The row button waits while a turn runs (the host refuses a rewind mid-
+  // turn) or a revert is already rewriting the history it points at (§7.5).
+  const revertBusy = !paintOnly && (turnActive || reverting);
+  // The picker's own gate, shared with its button and the composer's Esc Esc,
+  // so the shell's double press never "opens" a picker that is disabled.
+  const rewindAvailable =
+    !paintOnly &&
+    rewindPickerEnabled({
+      targetCount: rewindTargets.length,
+      isTurnActive: turnActive,
+      reverting,
+      hasPendingRequest: pending.totalCount > 0
+    });
+  const rewindTo = React.useCallback(
+    (input: { messageId: string; targetTurnCount: number }) =>
+      dispatch(() =>
+        actions.rewindTo({ messageId: input.messageId, targetTurnCount: input.targetTurnCount })
+      ),
+    [actions]
+  );
+  const rewindToTarget = React.useCallback(
+    (target: RewindTarget) =>
+      rewindTo({ messageId: target.messageId, targetTurnCount: target.targetTurnCount }),
+    [rewindTo]
+  );
+
   // --- the plan-ready decision (§7.3, §7.5) --------------------------------
   // The "Plan ready" banner deliberately carries no buttons: the decision is
   // the composer's primary action, which becomes Implement on an empty draft
@@ -434,25 +483,50 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   //
   // Every rule lives in `resolveChatEscape`, which is pure and tested; this
   // keeps only the three lines that touch the event.
-  const escapeState = React.useRef({ drillInAgentId, turnActive });
-  escapeState.current = { drillInAgentId, turnActive };
+  //
+  // **The idle Escape is the CLI's double press** (§5.5): with nothing to
+  // leave and nothing to stop, two Escapes in a row outside the composer open
+  // the composer's rewind picker — the textarea counts its own Escapes the
+  // same way, on its own sequence, so one press can never advance both. What
+  // counts as a press (only an idle Escape; anything else starts over) is
+  // `chatEscapeSequenceStep`, pure and tested beside the rest.
+  const escapeState = React.useRef({ drillInAgentId, turnActive, rewindAvailable });
+  escapeState.current = { drillInAgentId, turnActive, rewindAvailable };
+  const escapeSequenceRef = React.useRef<EscapeSequence | null>(null);
+  if (escapeSequenceRef.current === null) escapeSequenceRef.current = createEscapeSequence();
   React.useEffect(() => {
     if (!active) {
       return;
     }
+    const sequence = escapeSequenceRef.current;
+    // A tab coming back into view starts a fresh count.
+    sequence?.reset();
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as Element | null;
       const state = escapeState.current;
-      const action = resolveChatEscape({
+      const inside = (selector: string): boolean =>
+        typeof target?.closest === "function" && target.closest(selector) !== null;
+      const gate = {
         key: event.key,
         defaultPrevented: event.defaultPrevented,
         isActiveTab: isActiveChatTab(sessionId),
         blockingLayerOpen: anotherLayerOwnsTheKeyboard(),
-        insideComposer:
-          typeof target?.closest === "function" &&
-          target.closest(`[data-agent-chat-composer-shell="${CSS.escape(sessionId)}"]`) !== null,
+        insideComposer: inside(`[data-agent-chat-composer-shell="${CSS.escape(sessionId)}"]`),
         drillInOpen: state.drillInAgentId !== null,
         turnActive: state.turnActive
+      };
+      const step = chatEscapeSequenceStep({
+        ...gate,
+        repeat: event.repeat,
+        insideFloatingLayer: inside("[data-chat-composer-floating-layer]")
+      });
+      if (step === "reset") {
+        sequence?.reset();
+      }
+      const action = resolveChatEscape({
+        ...gate,
+        secondPress: step === "press" && sequence?.press(Date.now()) === true,
+        rewindAvailable: state.rewindAvailable
       });
       if (action === "ignore") {
         return;
@@ -461,6 +535,12 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
       event.stopPropagation();
       if (action === "close-drill-in") {
         setDrillInAgentId(null);
+        return;
+      }
+      if (action === "rewind") {
+        // The same door the keybinding handler uses: the composer un-collapses,
+        // focuses, and clicks the control carrying the `rewind` token.
+        openComposerControl(sessionId, "rewind");
         return;
       }
       void actions.interrupt().catch(() => {
@@ -640,14 +720,12 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               disclosures={slice.disclosures}
               onDisclosureChange={paintOnly ? noop : actions.setDisclosure}
               bottomInset={bottomInset}
-              canRevert={
-                !paintOnly && provider?.capabilities?.supportsConversationRollback !== false
-              }
-              onRevert={
-                paintOnly
-                  ? noop
-                  : (targetTurnCount) => dispatch(() => actions.revert({ targetTurnCount }))
-              }
+              canRevert={canRevert}
+              // "Rewind to here", confirmed in the row's own popover: the whole
+              // §5.5 flow, ending with the message back in the composer.
+              onRevert={paintOnly ? noop : rewindTo}
+              revertBusy={revertBusy}
+              startedTurnCount={startedTurnCount}
               onOpenTurnDiff={paintOnly ? noop : openTurnDiff}
               onOpenFile={paintOnly ? noop : openFile}
               onLoadFullOutput={paintOnly ? noop : loadFullOutput}
@@ -777,6 +855,9 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 actionableProposedPlan={planFollowUp}
                 onDraftAttachmentCountChange={setComposerAttachments}
                 reverting={reverting}
+                // The Esc-Esc picker: the same targets the rows offer.
+                rewindTargets={rewindTargets}
+                onRewind={paintOnly ? noop : rewindToTarget}
                 active={active}
                 actions={composerActions}
                 onHeightChange={setComposerHeight}

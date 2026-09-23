@@ -52,6 +52,7 @@ import type {
   AdapterContext,
   AdapterFactory,
   AgentAdapter,
+  RollbackTarget,
   SendTurnInput,
   SendTurnResult,
   StartSessionInput
@@ -701,14 +702,20 @@ class OpenCodeAdapterImpl implements AgentAdapter {
   /**
    * §4.1 two-phase rollback: `assertRollbackSupported` runs before anything is
    * touched. OpenCode **can** roll back (by forking, never by
-   * `session.revert`), so the only refusal here is a missing session.
+   * `session.revert`), so the only refusal here is a missing session; with
+   * `target` the session itself cuts at the named turn, and refuses an id it
+   * cannot find (§5.5, `RollbackTarget`).
    */
-  async rollbackThread(threadId: string, numTurns: number): Promise<ThreadSnapshot> {
+  async rollbackThread(
+    threadId: string,
+    numTurns: number,
+    target?: RollbackTarget
+  ): Promise<ThreadSnapshot> {
     const session = this.require(threadId);
     if (!Number.isInteger(numTurns) || numTurns <= 0) {
       throw new Error("OpenCode rollback needs a positive number of turns.");
     }
-    return await session.rollbackThread(numTurns);
+    return await session.rollbackThread(numTurns, target);
   }
 
   async stopSession(threadId: string): Promise<void> {

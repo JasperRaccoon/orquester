@@ -252,10 +252,16 @@ export interface CheckpointService {
   /**
    * On `turn.started` — and on the `/turn` dispatch, before the provider is
    * asked, so the baseline really is the tree as it was before the turn:
-   * capture the baseline at `turn/<turnCount>` if absent, where `turnCount` is
-   * the highest checkpoint turn count the thread already has — derived from
-   * the checkpoints, never stored independently, so a lost `meta.json` cannot
-   * desynchronise it.
+   * capture the baseline at `turn/<turnCount>` if absent.
+   *
+   * Checkpoints are numbered by turn ORDER (§5.5, `@orquester/api`'s
+   * `turns.ts`): the turn with ordinal N has its baseline at `turn/<N - 1>`
+   * and its completion checkpoint at `turn/<N>`, so the numbers stay pinned to
+   * the turns they describe even where a non-git stretch, a failed capture or
+   * a resumed history left no checkpoint — sparse ref numbers are expected.
+   * The host names the count through `turnCount`; without it the count is
+   * derived as it always was, as the highest checkpoint turn count the thread
+   * already has.
    *
    * **`null` means this project has no checkpoints at all** (it is not a git
    * work tree). A baseline that was already published answers
@@ -277,15 +283,24 @@ export interface CheckpointService {
      * refused at turn end rather than minting a checkpoint nobody expects.
      */
     turnId?: string | null;
+    /**
+     * The baseline's own turn count: the ordinal of the turn about to start,
+     * minus one. Overrides the derived counter; the ref it names answers
+     * `ready` untouched when it already exists and is captured otherwise.
+     */
+    turnCount?: number;
   }): Promise<CaptureResult | null>;
 
   /**
-   * On `turn.completed` / `turn.aborted`: capture `turn/<turnCount + 1>` and
-   * diff it against the baseline. Only the session's active turn may produce a
-   * completion checkpoint; a turn that already has a non-placeholder
-   * checkpoint is skipped, and a placeholder left by `turn.diff.updated` is
-   * **reused at its own turn count** rather than incremented past. A missing
-   * baseline keeps the post ref and records an empty file list.
+   * On `turn.completed` / `turn.aborted`: capture the turn's completion
+   * checkpoint and diff it against the baseline one below it. The count is the
+   * completing turn's ordinal when the host names it (`turnCount`), else the
+   * count of a placeholder left by `turn.diff.updated` — **reused at its own
+   * turn count** rather than incremented past — else the highest existing
+   * count plus one. Only the session's active turn may produce a completion
+   * checkpoint, and a turn that already has a non-placeholder checkpoint is
+   * skipped. A missing baseline keeps the post ref and records an empty file
+   * list.
    */
   captureTurnEnd(input: {
     threadId: string;
@@ -301,6 +316,8 @@ export interface CheckpointService {
      * otherwise the service uses what `captureBaseline` told it.
      */
     startedTurnId?: string | null;
+    /** The completing turn's ordinal (§5.5) — preferred over every derivation. */
+    turnCount?: number;
   }): Promise<TurnDiffSummary | null>;
 
   /**
@@ -317,8 +334,19 @@ export interface CheckpointService {
     ignoreWhitespace?: boolean;
   }): Promise<string>;
 
-  /** §5.5 step 4: delete every checkpoint ref above the target turn count. */
-  pruneAbove(input: { threadId: string; cwd: string; targetTurnCount: number }): Promise<void>;
+  /**
+   * §5.5 step 4: delete every checkpoint ref above the target turn count, and
+   * every ref whose count is in `droppedTurnCounts` — the checkpoint counts of
+   * the turns the rewind drops. A thread written before checkpoints were
+   * numbered by turn order carries DENSE counts (a resumed thread's 28th turn
+   * can own `turn/2`), which a bare `> target` test would leave behind.
+   */
+  pruneAbove(input: {
+    threadId: string;
+    cwd: string;
+    targetTurnCount: number;
+    droppedTurnCounts?: readonly number[];
+  }): Promise<void>;
 
   /** §6.1 cascade: delete every ref under the thread's prefix. */
   deleteThreadRefs(input: { threadId: string; cwd: string }): Promise<void>;

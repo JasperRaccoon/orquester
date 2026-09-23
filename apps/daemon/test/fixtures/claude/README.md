@@ -776,6 +776,59 @@ Four things the adapter depends on:
 - A **failed** compaction produces none of this: no boundary, no summary, only the
   `status {compact_result:"failed"}` frame (observation 6).
 
+### 21. A rewind names its cut by turn id, and `turnBoundaries` is what resolves it
+
+Not a capture — what observations 8, 17 and 20 imply for rollback, recorded where the next
+adapter author will look. The resume cursor carries **`turnBoundaries`**: `{turnId, uuid}`
+pairs, one per turn in start order, beside the legacy positional `turnStartMessageIds` (still
+written, because an older host reads nothing else). `turnId` is **ours** — the fold's turn id,
+the one the host names in `RollbackTarget.firstRemovedTurnId` — and `uuid` is the native
+transcript uuid that turn starts at.
+
+- For a turn `sendTurn` opened the two are **equal**: the `SDKUserMessage` is stamped
+  `uuid: turnId` and the CLI keeps it (observation 8). A synthetic turn — assistant output
+  between prompts — pairs its minted id with the assistant message that opened it.
+- A fork **rewrites every uuid** (`11-resume-and-fork.ndjson`, phase 3b: *"the fork REWRITES
+  every uuid"*), so after one rewind a kept turn starts at a uuid the host never saw. Every
+  rewind therefore re-pairs each kept turn id with its fork uuid
+  (`remapClaudeForkTurnBoundaries`); without the pair, a turn that survived one rewind could not
+  be named by the next.
+- At rewind time the transcript is read out-of-band (`getSessionMessages`) and the recorded pairs
+  are merged, in transcript order, with an **identity pair for every human turn start no pair
+  maps**: a turn of a resumed transcript that no cursor recorded is projected under its own uuid
+  (`groupClaudeHistoryTurns`), so its id IS its uuid. A pair whose uuid the transcript no longer
+  holds is stale and is dropped.
+
+**Why the id wins over the host's `numTurns`.** The host counts over its fold; this adapter's
+boundaries are a different list, and a count-based cut lands on the wrong turn **without
+refusing**:
+
+- A **resumed** thread (the §6.1 picker, or any cursor older than its history) has history turns
+  in the host's fold that `turnStartMessageIds` never recorded — resume replays nothing onto the
+  stream (observation 8). A rewind that reaches back into that history counts more turns than the
+  cursor ever recorded, and the count path reads that as "roll back everything": a fresh session
+  that forgets the history turns the user meant to keep.
+- A **compaction** writes rows into the transcript that read as turn starts — the summary is a
+  plain-string `user` row (observations 7 and 20) — while a live thread's fold turned that same
+  summary into the compaction marker, not a turn.
+
+The id resolves to exactly one turn start in the transcript, or the rewind refuses with the §4.5
+"turn boundary is unavailable" text before any fork exists; a count that disagrees with it is
+logged at debug and otherwise ignored.
+
+**"Compacted in between" is decided by position, not by the preserved list alone.** Observation
+17's `preserved_messages.all_uuids` names the pre-compaction rows the CLI kept in context; the
+rows it writes *after* the boundary are never in that list and never could be. Read as "the set of
+reachable anchors" it refused every rewind after a live `/compact` — the owner's own thread, where
+`/compact` was followed by two more turns, could not rewind to either. The transcript is read at
+rewind time anyway, and the CLI writes its summary as a `user` row flagged `isCompactSummary` (a
+real transcript here: boundary row 9800 `system/compact_boundary`, summary row 9801), so the rule is:
+an anchor at or after the **last** summary row is reachable; one before it is reachable only when
+the list preserves it, and refused when this process never saw the boundary frame (a session
+resumed after the compaction) rather than guessed. On a transcript whose summary is not flagged the
+list alone decides, as before. Note that the boundary row *in the transcript* carried no
+`compact_metadata` blocks at all in the 2.1.280 capture above — the metadata rides the live frame.
+
 ## Re-capturing
 
 Nothing here is generated; re-capturing means driving the real CLI again. Keep the format above,

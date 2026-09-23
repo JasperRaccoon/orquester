@@ -46,6 +46,7 @@ export type ComposerControlCommand =
   | "account"
   | "plan"
   | "attach"
+  | "rewind"
   | "send"
   | "stop";
 
@@ -61,6 +62,15 @@ export type ComposerControlCommand =
  * rarely, and every chord spent is one the terminal surfaces cannot have), so
  * the token exists only so the control is addressable, never bound.
  * `compact` is still reached through the context meter, not a control.
+ *
+ * `rewind` is the same case from the other side. The composer's rewind picker
+ * (§5.5, the CLI's "jump to a previous message") carries the token so the
+ * double Escape can reach it through `openControl("rewind")` — but a double
+ * press is a SEQUENCE, not a chord, so no arm of the table below produces it.
+ * The two Escape handlers that own the sequence (the composer's textarea and
+ * the shell's `resolveChatEscape`) open the control themselves; the table
+ * keeps resolving Escape to `interrupt`, and `chatShortcutLabel` stays `null`
+ * because there is no chord to print.
  */
 export const COMPOSER_CONTROL_COMMANDS: readonly ComposerControlCommand[] = [
   "model",
@@ -69,6 +79,7 @@ export const COMPOSER_CONTROL_COMMANDS: readonly ComposerControlCommand[] = [
   "account",
   "plan",
   "attach",
+  "rewind",
   "send",
   "stop"
 ];

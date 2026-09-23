@@ -455,7 +455,7 @@ export async function createClaudeAdapterWith(
       return projectClaudeHistory(snapshot, { clock: context.clock, ids: context.ids });
     },
 
-    async rollbackThread(threadId, numTurns) {
+    async rollbackThread(threadId, numTurns, target) {
       if (!Number.isInteger(numTurns) || numTurns < 1) {
         throw new Error("numTurns must be an integer >= 1.");
       }
@@ -465,8 +465,9 @@ export async function createClaudeAdapterWith(
         throw new Error(`No Claude session has been started for thread ${threadId}.`);
       }
       // Phase 1: everything that can refuse runs BEFORE anything is torn down
-      // or written (§5.5 step 2). A misaligned fork is a hard error here.
-      const plan = await session.planRollback(numTurns);
+      // or written (§5.5 step 2). A misaligned fork is a hard error here. With
+      // a `target` the cut is its turn id, never the count (`planRollbackById`).
+      const plan = await session.planRollback(numTurns, target);
 
       await session.stop("Rewinding the conversation.");
       const restarted = await startSession({
