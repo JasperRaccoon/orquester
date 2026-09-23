@@ -47,7 +47,7 @@ interface Harness {
   stop(): Promise<void>;
 }
 
-async function harness(options: { openGate?: boolean } = {}): Promise<Harness> {
+async function harness(options: { openGate?: boolean; afterStopResponse?: () => void } = {}): Promise<Harness> {
   const dir = await mkdtemp(join(tmpdir(), "agent-host-test-"));
   const socketPath = join(dir, "agent-host.sock");
   const host = createTestHost({ openGate: options.openGate ?? true });
@@ -61,7 +61,8 @@ async function harness(options: { openGate?: boolean } = {}): Promise<Harness> {
     tmpDir: join(dir, "tmp"),
     startedAt: "1970-01-01T00:00:00.000Z",
     pid: 4242,
-    onStop: async () => ({ ok: true, markedThreadIds: [] })
+    onStop: async () => ({ ok: true, markedThreadIds: [] }),
+    ...(options.afterStopResponse ? { afterStopResponse: options.afterStopResponse } : {})
   });
   await server.listen();
 
@@ -515,7 +516,12 @@ describe("agent host server — the event stream (§6.3)", () => {
   });
 
   it("the intentional stop writes the continuation markers first (§3.3)", async () => {
-    const h = await harness();
+    let teardownStarted = false;
+    const h = await harness({
+      afterStopResponse: () => {
+        teardownStarted = true;
+      }
+    });
     const threadId = await h.host.createThread();
     await h.call("POST", agentHostRoutes.turn(threadId), { commandId: "stop-1", input: "go" });
     await h.host.settle();
@@ -529,6 +535,7 @@ describe("agent host server — the event stream (§6.3)", () => {
     const stopped = await h.call("POST", agentHostRoutes.stop);
     assert.equal(stopped.status, 200);
     assert.equal((stopped.body as { ok: boolean }).ok, true);
+    assert.equal(teardownStarted, true, "teardown starts only after the response flushes");
     await h.stop();
   });
 

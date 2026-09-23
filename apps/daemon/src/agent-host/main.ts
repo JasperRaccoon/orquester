@@ -514,6 +514,7 @@ export async function startAgentHost(
 
   // ---- server ------------------------------------------------------------
   let stopping = false;
+  let intentionalStopMarkers: string[] = [];
   const server = createAgentHostServer({
     orchestrator: host,
     store,
@@ -533,22 +534,26 @@ export async function startAgentHost(
     isAllowedCwd,
     onStop: async (): Promise<AgentHostStopResponse> => {
       // The intentional stop of §3.3: write every continuation marker for a
-      // running thread with a usable cursor, then drain and stop.
+      // running thread with a usable cursor before acknowledging the request.
+      // Teardown starts from `afterStopResponse` below; scheduling it here as
+      // a microtask raced the route's own `sendJson()` and produced the socket
+      // hang-up that forced the 2026-09-23 deploy handover.
       const markedThreadIds = await host.markThreadsForContinuation();
-      queueMicrotask(() => {
-        void stop().then(
-          () => {
-            options.onStopped?.();
-          },
-          async (error: unknown) => {
-            logger.error("agent-host: intentional stop failed", error);
-            // A cancelled restart must not inject a phantom continuation on the
-            // next boot.
-            await host.clearContinuationMarkers(markedThreadIds).catch(() => undefined);
-          }
-        );
-      });
+      intentionalStopMarkers = markedThreadIds;
       return { ok: true, markedThreadIds };
+    },
+    afterStopResponse: () => {
+      void stop().then(
+        () => {
+          options.onStopped?.();
+        },
+        async (error: unknown) => {
+          logger.error("agent-host: intentional stop failed", error);
+          // A cancelled restart must not inject a phantom continuation on the
+          // next boot.
+          await host.clearContinuationMarkers(intentionalStopMarkers).catch(() => undefined);
+        }
+      );
     },
     addProviderWatcher: () => snapshots.addWatcher()
   });

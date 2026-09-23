@@ -358,6 +358,36 @@ test("a host that never reaches readiness leaves the supervisor stopped, not hea
   await h.cleanup();
 });
 
+test("a replacement that becomes ready after its deadline is adopted without another restart", async () => {
+  const h = await makeHarness([], {
+    seedToken: "tok",
+    tmux: true,
+    codeStamp: "b".repeat(40)
+  });
+  let replacementReady = false;
+  h.hostExitsAfterPolls = 0;
+  h.probeHook = () => {
+    if (h.spawns.length === 0) {
+      return healthy({ codeStamp: "a".repeat(40) });
+    }
+    return replacementReady
+      ? healthy({ instance: "host-2", codeStamp: "b".repeat(40) })
+      : { ok: false, reachable: true, rejected: false };
+  };
+
+  await h.supervisor.init();
+  assert.equal(h.supervisor.status().state, "error", "the initial readiness deadline elapsed");
+  assert.equal(h.spawns.length, 1);
+
+  replacementReady = true;
+  await h.supervisor.checkHealth();
+
+  assert.equal(h.supervisor.status().state, "healthy");
+  assert.equal(h.supervisor.status().hostInstanceId, "host-2");
+  assert.equal(h.spawns.length, 1, "the now-ready replacement is adopted, not killed and respawned");
+  await h.cleanup();
+});
+
 test("health supervision respawns a dead host and latches error after the cap", async () => {
   const h = await makeHarness([healthy()], { seedToken: "tok", tmux: true });
   await h.supervisor.init();

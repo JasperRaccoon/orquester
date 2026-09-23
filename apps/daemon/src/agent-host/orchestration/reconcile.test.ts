@@ -209,11 +209,19 @@ describe("reconcile (§3.3)", () => {
     const threadId = await first.createThread();
     await first.stop();
 
+    const readAll = first.store.readAll.bind(first.store);
+    let coldFolds = 0;
+    first.store.readAll = async (id) => {
+      coldFolds += 1;
+      return readAll(id);
+    };
+
     const next = createTestHost({ store: first.store, continuationEnabled: () => true });
     await next.orchestrator.reconcile();
     await next.settle();
     assert.equal(next.adapter.calls.length, 0);
     assert.equal(sessionEvents(first.store, threadId).length, 0);
+    assert.equal(coldFolds, 0, "startup must not fold an idle thread's complete history");
     await next.stop();
   });
 

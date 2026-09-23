@@ -94,8 +94,10 @@ export interface AgentHostServerOptions {
   pid?: number;
   /** See `AgentHostHealthResponse.codeStamp`. */
   codeStamp?: string | null;
-  /** Called by `POST /stop`: writes the §3.3 markers, then drains and stops. */
+  /** Called by `POST /stop`: writes the §3.3 markers before the response. */
   onStop(): Promise<AgentHostStopResponse>;
+  /** Starts teardown only after the 200 response has been flushed. */
+  afterStopResponse?(): void;
   /** A watcher handle the provider registry's demand gate counts (§3.2). */
   addProviderWatcher?(): () => void;
 }
@@ -373,6 +375,7 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
 
     if (path === agentHostRoutes.stop && method === "POST") {
       const body = await options.onStop();
+      response.once("finish", () => options.afterStopResponse?.());
       sendJson(response, 200, body);
       return;
     }

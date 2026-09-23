@@ -3494,8 +3494,17 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   };
 
   const reconcile = async (): Promise<void> => {
-    // Never blocks or fails host startup: every thread is handled and settled
-    // individually, and a failure of the whole pass is logged (§3.3).
+    // The head is the startup index. A deploy waits for the old host to drain,
+    // so almost every persisted thread is idle and needs no reconciliation at
+    // all. Loading a runtime for each one used to call `readAll()` and fold its
+    // complete NDJSON history before the readiness gate opened; a handful of
+    // long-lived 40-100 MB threads turned an ordinary deploy into a multi-
+    // minute outage. Inspect the small atomic head first and cold-fold only a
+    // thread that can actually be orphaned.
+    //
+    // Never blocks or fails startup on one bad thread: every candidate is
+    // handled and settled individually, and a failure of the whole pass is
+    // logged (§3.3).
     try {
       const live = new Set<string>();
       for (const adapter of options.adapters.values()) {
@@ -3506,6 +3515,17 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       const threadIds = await store.listThreads();
       for (const threadId of threadIds) {
         try {
+          if (live.has(threadId)) continue;
+          const persistedHead = await store.loadHead(threadId);
+          if (persistedHead === null) continue;
+          const { session, continueAfterRestart } = persistedHead;
+          const prepared = continueAfterRestart?.prepared === true;
+          const canBeOrphaned =
+            session.status === "starting" ||
+            session.status === "running" ||
+            session.activeTurnId !== null ||
+            (session.status === "ready" && prepared);
+          if (!canBeOrphaned) continue;
           await reconcileThread(threadId, live);
         } catch (error) {
           logger.warn(`agent-host: reconcile failed for ${threadId}`, error);
