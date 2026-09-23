@@ -12,7 +12,7 @@ import { READ_ONLY, type ToolContext, type ToolDef } from "../tool.ts";
 import { fileTools } from "./files.ts";
 
 const tool = (name: string) => fileTools.find((t) => t.name === name)!;
-/** What the SDK hands `run()`: the arguments parsed by the tool's own schema, defaults applied. */
+/** The arguments as `run()` receives them: parsed by the tool's own schema, defaults applied (server.ts's tools/call handler). */
 const parse = (t: ToolDef, args: Record<string, unknown>) => z.object(t.input).parse(args) as never;
 const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8");
 
@@ -136,4 +136,20 @@ test("read_file never splits a character: nextOffset is where the page's text en
   assert.ok(Buffer.from(all.text, "utf8").equals(Buffer.from(content, "utf8")), "byte-exact");
   const small = await tool("read_file").run(parse(tool("read_file"), { path: "cjk.txt", offset: 3, maxBytes: 10 }), ctx);
   assert.deepEqual([small.text, small.nextOffset], ["語語語", 12]);
+});
+
+test("read_file: a maxBytes narrower than the character at offset takes that character whole, and the description says so", async (t) => {
+  const { sandbox, ctx } = await harness(t);
+  await writeFile(join(sandbox, "e.txt"), "😀語é!"); // 4 + 3 + 2 + 1 bytes
+  const read = async (offset: number, maxBytes: number) => {
+    const r = await tool("read_file").run(parse(tool("read_file"), { path: "e.txt", offset, maxBytes }), ctx);
+    return [r.text, r.nextOffset];
+  };
+  assert.deepEqual(await read(0, 1), ["😀", 4], "4 bytes at maxBytes 1");
+  assert.deepEqual(await read(4, 2), ["語", 7], "3 bytes at maxBytes 2");
+  assert.deepEqual(await read(7, 1), ["é", 9], "2 bytes at maxBytes 1");
+  assert.deepEqual(await read(9, 1), ["!", undefined], "the last byte, and no more to read");
+  const description = tool("read_file").description;
+  assert.ok(description.includes(`at most \`maxBytes\` (default ${DEFAULT_READ_BYTES}), or one whole character when maxBytes is smaller than it.`), description);
+  assert.match(tool("read_file").input.maxBytes.description ?? "", /or one whole character when maxBytes is smaller than it/);
 });

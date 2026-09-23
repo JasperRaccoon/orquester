@@ -34,11 +34,13 @@ const listFiles = defineTool({
 const readFile = defineTool({
   name: "read_file",
   title: "Read a file",
-  description: `Read a text file inside the workspaces sandbox (absolute path, or relative to the sandbox root) as a byte window: from \`offset\`, at most \`maxBytes\` (default ${DEFAULT_READ_BYTES}). A window too large for one result comes back shorter. truncated:true means more follows: call again with offset = nextOffset. Binary files are refused.`,
+  // A window never splits a character (fs-tools.ts): one narrower than the character at `offset` takes that character
+  // whole — up to 4 bytes, past a maxBytes under 4 — so paging always advances. Both descriptions say so.
+  description: `Read a text file inside the workspaces sandbox (absolute path, or relative to the sandbox root) as a byte window: from \`offset\`, at most \`maxBytes\` (default ${DEFAULT_READ_BYTES}), or one whole character when maxBytes is smaller than it. A window too large for one result comes back shorter. truncated:true means more follows: call again with offset = nextOffset. Binary files are refused.`,
   input: {
     path: z.string().min(1).describe("File path: absolute, or relative to the sandbox root."),
     offset: z.number().int().min(0).default(0).describe("Byte offset to start at: 0, or the previous result's nextOffset."),
-    maxBytes: z.number().int().min(1).max(MAX_READ_BYTES).default(DEFAULT_READ_BYTES).describe(`Most bytes to read (max ${MAX_READ_BYTES}); fewer come back when one result cannot hold them.`)
+    maxBytes: z.number().int().min(1).max(MAX_READ_BYTES).default(DEFAULT_READ_BYTES).describe(`Most bytes to read (max ${MAX_READ_BYTES}), or one whole character when maxBytes is smaller than it; fewer come back when one result cannot hold them.`)
   },
   annotations: READ_ONLY,
   async run(args, ctx) {
