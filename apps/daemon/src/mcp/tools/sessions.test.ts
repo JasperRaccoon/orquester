@@ -199,6 +199,17 @@ test("create_session: a read that fails after the create names the created sessi
   assert.equal(h.api.calls.filter((c) => c.method === "POST" && c.path === "/api/sessions").length, 2, "one create per call: the tool never retries it");
 });
 
+test("create_session: a failed read's own detail can never hide which tab was created — sessionId and created:true win a key clash", async (t) => {
+  const h = await harness(); t.after(h.close);
+  h.api.on("POST", "/api/sessions", { status: 200, body: chatSummary() })
+    .on("GET", "/api/sessions/c1/thread", { status: 503, body: { error: { code: "HOST_UNAVAILABLE", message: "The agent host is restarting.", detail: { retryAfterMs: 250, created: false, sessionId: "some-other-tab" } } } });
+  await assert.rejects(tool("create_session").run({ project: "acme/api", agent: "claude", runtimeMode: "full-access" }, h.ctx), (e: { code: string; detail: unknown }) => {
+    assert.equal(e.code, "HOST_UNAVAILABLE");
+    assert.deepEqual(e.detail, { retryAfterMs: 250, sessionId: "c1", created: true });
+    return true;
+  });
+});
+
 test("update_session: one /mode body for model+effort+runtimeMode, rename via PUT, account via /account, no-ops skipped", async (t) => {
   const h = await harness(); t.after(h.close);
   h.api.on("PUT", "/api/sessions/c1", { status: 200, body: chatSummary({ title: "New" }) }).on("POST", "/api/sessions/c1/mode", { status: 200, body: { seq: 11 } }).on("POST", "/api/sessions/c1/account", { status: 200, body: { seq: 12 } });
