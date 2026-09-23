@@ -2,7 +2,7 @@ import { stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
 import { SYSTEM_ACCOUNT_ID, type AgentConversationsResponse, type CreateSessionRequest, type SessionSummary } from "@orquester/api";
-import { agentChatRoutes, RUNTIME_MODES, startedTurns, type AccountHomeKind, type CreateAgentChatSessionFields, type ModelSelection, type RuntimeMode, type ThreadSnapshotPayload, type TurnDiffResponse } from "@orquester/api/agent-chat";
+import { agentChatRoutes, RUNTIME_MODES, startedTurns, type AccountHomeKind, type CreateAgentChatSessionFields, type ModelSelection, type RuntimeMode, type StartedTurn, type ThreadActivityItem, type ThreadItem, type ThreadSnapshotPayload, type TurnDiffResponse } from "@orquester/api/agent-chat";
 import { assertInsideFsRoot, FsSandboxError } from "@orquester/config/fs";
 import { resolveProject } from "../addressing.ts";
 import { conversationLaunch, findAgent, isProxyAgent, launchesProxyModel, loadAgents, resolveModelSelection, validateAccountId, type ResolvedSelection } from "../agents.ts";
@@ -10,7 +10,7 @@ import type { DaemonApi } from "../daemon-api.ts";
 import { ToolError, expectOk } from "../errors.ts";
 import { findSession, listSessions, readThread, requireChatSession, sendCommand } from "../reads.ts";
 import { fitJsonBytes, MAX_RESULT_BYTES, toSafeToolError } from "../result.ts";
-import { defineTool, DESTRUCTIVE, MUTATING, MUTATING_IDEMPOTENT, READ_ONLY, type ToolDef } from "../tool.ts";
+import { defineTool, DESTRUCTIVE, MUTATING, MUTATING_IDEMPOTENT, READ_ONLY, type ToolContext, type ToolDef } from "../tool.ts";
 import { buildViewContext, chatDetail, sessionView } from "../views.ts";
 
 export const MAX_RUNNING_SESSIONS_PER_PROJECT = 24;
@@ -318,22 +318,155 @@ const closeSession = defineTool({
   }
 });
 
+/** How long revert_session waits for the host to finish the rewind it accepted. */
+export const REWIND_WAIT_MS = 10_000;
+/**
+ * How long that wait goes without reading the thread again when no bus event about the session wakes it first: a
+ * rewind's failure row moves nothing on the session's summary, so no event may ever announce it.
+ */
+export const REWIND_RECHECK_MS = 1_000;
+/** What §5.5 step 6 appends, as an `error` activity, for any rewind that failed (orchestrator.ts `revertEffect`). */
+const REVERT_FAILED_ACTIVITY_KIND = "checkpoint.revert.failed";
+
+const isRecord = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
+
+function isRevertFailure(item: ThreadItem): item is ThreadActivityItem {
+  return item.kind === "activity" && item.activityKind === REVERT_FAILED_ACTIVITY_KIND;
+}
+
+/**
+ * A settled compaction marker of the conversation itself: the GUI's `isCompactionActivity` whose `compactionMarkerState`
+ * is `compacted` (packages/ui entries.logic.ts) — a `context-compaction` row unless it says it is still running or
+ * failed (an unreadable state is settled: old logs recorded only those), or the legacy `thread.state.changed
+ * {state: "compacted"}`. A subagent's own row is not the parent timeline's, which is the one the GUI reads.
+ */
+function isSettledCompaction(item: ThreadItem): boolean {
+  if (item.kind !== "activity" || item.agentId) return false;
+  const state = isRecord(item.payload) ? item.payload.state : undefined;
+  if (item.activityKind === "context-compaction") return state !== "compacting" && state !== "compaction-failed";
+  return item.activityKind === "thread.state.changed" && state === "compacted";
+}
+
+/** Where a turn begins among the thread's rows: its user message, else its first row; -1 when none is left. */
+function turnOpening(items: readonly ThreadItem[], turn: StartedTurn): number {
+  const byMessage = turn.userMessageId === undefined ? -1 : items.findIndex((item) => item.id === turn.userMessageId);
+  return byMessage !== -1 ? byMessage : items.findIndex((item) => item.turnId === turn.turnId);
+}
+
+/**
+ * The fewest turns a rewind may keep. The provider holds nothing from before the thread's LAST settled compaction, so
+ * the GUI withholds "rewind to here" on every message before it (rows.logic.ts `buildRevertTurnCountByUserMessageId`),
+ * and the adapter would refuse the rollback. Turns are in start order, so the first one that begins after the marker is
+ * the earliest a rewind may cut at; one with no row left to place it counts as before the marker (a marker is never
+ * evicted, a turn's rows can be). 0 when nothing was compacted; the started-turn count when no turn began after it.
+ */
+function fewestKeptTurns(snap: ThreadSnapshotPayload): number {
+  let marker = -1;
+  for (let i = snap.items.length - 1; i >= 0 && marker === -1; i -= 1) if (isSettledCompaction(snap.items[i]!)) marker = i;
+  if (marker === -1) return 0;
+  const started = startedTurns(snap.turns);
+  const first = started.findIndex((turn) => turnOpening(snap.items, turn) > marker);
+  return first === -1 ? started.length : first;
+}
+
+/** send_message's refusal (messages.ts `readyToSend`), worded for a rewind: the agent is waiting on the caller. */
+function pendingRefusal(snap: ThreadSnapshotPayload): ToolError | null {
+  const { approvals, userInputs } = snap.pending;
+  if (!approvals.length && !userInputs.length) return null;
+  const open = [
+    ...approvals.map((a) => `approval ${a.requestId} (resolve_approval)`),
+    ...userInputs.map((q) => `question ${q.requestId} (answer_question${q.dismissible ? " or dismiss_question" : ""})`)
+  ];
+  return new ToolError("PENDING_REQUEST", `Resolve the agent's open request before rewinding: it is waiting on ${open.join(" and ")}. get_session shows the details.`, { approvals: approvals.map((a) => a.requestId), questions: userInputs.map((q) => q.requestId) });
+}
+
+/** A rewind's failure row as the tool's answer: its summary and the host's reason (`payload.detail`), as the GUI shows them. */
+function rewindFailed(row: ThreadActivityItem, seq: number): ToolError {
+  const reason = isRecord(row.payload) && typeof row.payload.detail === "string" ? row.payload.detail.trim() : "";
+  const summary = row.summary.trim() || "Rewind failed";
+  return new ToolError("COMMAND_REJECTED", reason ? `${summary}: ${reason}` : `${summary}.`, { seq, activityId: row.id, ...(reason ? { reason } : {}) });
+}
+
+/**
+ * The host answers `/revert` with `{seq}` long before the rollback runs: that is an effect (orchestrator.ts
+ * `revertEffect`), and an adapter's refusal leaves only a `checkpoint.revert.failed` row. So, as the GUI does
+ * (`waitForRewind`), the outcome is read off the thread: the rewind landed once at most `keepTurns` turns are started,
+ * or the first dropped one is gone (a turn sent right after the rewind cannot hide it); it failed on a failure row that
+ * was not there before the POST. The thread is read again on every bus event about the session, else every
+ * REWIND_RECHECK_MS — never a fixed sleep — until REWIND_WAIT_MS; a closed request ends the wait at once. The bus
+ * listener, the timer and the abort listener are always removed.
+ */
+async function awaitRewind(ctx: ToolContext, sessionId: string, target: { keepTurns: number; firstDroppedTurnId: string; seq: number }, knownFailures: ReadonlySet<string>): Promise<void> {
+  // Elapsed time as wait.ts counts it: the larger of the caller's clock and the monotonic one.
+  const startedAt = ctx.now();
+  const startedMono = performance.now();
+  const remaining = () => REWIND_WAIT_MS - Math.max(ctx.now() - startedAt, performance.now() - startedMono);
+  const inProgress = () => new ToolError("SESSION_BUSY", "The rewind is still in progress — check get_session.", { seq: target.seq });
+  let events = 0;
+  let closed = false;
+  let wake: (() => void) | null = null;
+  const off = ctx.api.subscribe((event) => {
+    if (event.channel !== "sessions" || (event.payload as { id?: unknown } | null)?.id !== sessionId) return;
+    events += 1;
+    if (event.type === "session.closed") closed = true;
+    const w = wake;
+    wake = null;
+    w?.();
+  });
+  try {
+    for (;;) {
+      if (closed) throw new ToolError("SESSION_NOT_FOUND", `Session "${sessionId}" was closed while rewinding.`);
+      if (ctx.signal.aborted) throw inProgress();
+      const seen = events;
+      const snap = await readThread(ctx.api, sessionId);
+      const started = startedTurns(snap.turns);
+      if (started.length <= target.keepTurns || !started.some((turn) => turn.turnId === target.firstDroppedTurnId)) return;
+      const failure = snap.items.find((item): item is ThreadActivityItem => isRevertFailure(item) && !knownFailures.has(item.id));
+      if (failure) throw rewindFailed(failure, target.seq);
+      const left = remaining();
+      if (left <= 0 || ctx.signal.aborted) throw inProgress();
+      // Nothing about the session moved during that read: wait until something does, or look again shortly.
+      if (events === seen) {
+        await new Promise<void>((resolve) => {
+          const resume = () => { clearTimeout(timer); ctx.signal.removeEventListener("abort", resume); wake = null; resolve(); };
+          const timer = setTimeout(resume, Math.min(left, REWIND_RECHECK_MS));
+          ctx.signal.addEventListener("abort", resume, { once: true });
+          wake = resume;
+        });
+      }
+    }
+  } finally {
+    off();
+  }
+}
+
 const revertSession = defineTool({
   name: "revert_session",
   title: "Rewind the conversation",
-  description: "Rewind the conversation to keep only the first `keepTurns` turns (the GUI's 'Rewind to here'). Conversation only — files are not restored. Needs an idle session and an agent that supports rollback (not Grok).",
+  description: "Rewind the conversation to keep only the first `keepTurns` turns (the GUI's 'Rewind to here'). Conversation only — files are not restored. Refused before the last context compaction, while a request is pending or a turn runs, and without rollback (Grok). Waits up to 10 s for the host: the session once rewound, COMMAND_REJECTED with its reason, or SESSION_BUSY if still going.",
   input: { sessionId: sessionIdField, keepTurns: z.number().int().min(0).describe("Number of turns to keep, counted from the first (0 = rewind to before the first turn; N = keep turns 1..N and discard the rest).") },
   annotations: DESTRUCTIVE,
-  async run(args, { api }) {
+  async run(args, ctx) {
+    const { api } = ctx;
     const summary = await requireChatSession(api, args.sessionId);
     const snap = await readThread(api, args.sessionId);
     const agent = findAgent(await loadAgents(api), summary.refId);
     if (!agent.supports.rollback) throw new ToolError("INVALID_ARGUMENT", `${summary.refId} does not support conversation rollback.`);
-    const started = startedTurns(snap.turns).length; // turns are counted by START ORDER (turns.ts), never by checkpoints
-    if (started === 0) throw new ToolError("INVALID_ARGUMENT", "This conversation has no turns to rewind.");
-    if (args.keepTurns >= started) throw new ToolError("INVALID_ARGUMENT", `keepTurns must be between 0 and ${started - 1}: this conversation has ${started} started turn${started === 1 ? "" : "s"}.`);
+    const started = startedTurns(snap.turns); // turns are counted by START ORDER (turns.ts), never by checkpoints
+    if (started.length === 0) throw new ToolError("INVALID_ARGUMENT", "This conversation has no turns to rewind.");
+    if (args.keepTurns >= started.length) throw new ToolError("INVALID_ARGUMENT", `keepTurns must be between 0 and ${started.length - 1}: this conversation has ${started.length} started turn${started.length === 1 ? "" : "s"}.`);
+    const fewest = fewestKeptTurns(snap);
+    if (args.keepTurns < fewest) {
+      const why = "Cannot rewind past the last context compaction — the agent no longer holds what came before it";
+      throw new ToolError("INVALID_ARGUMENT", fewest < started.length ? `${why}. keepTurns must be between ${fewest} and ${started.length - 1}.` : `${why}, and it happened in the latest turn: there is no turn to rewind to.`);
+    }
     if (isTurnActive(summary, snap)) throw new ToolError("SESSION_BUSY", "Stop the current turn before rewinding.");
+    const pending = pendingRefusal(snap);
+    if (pending) throw pending;
+    // Only a failure row that appears after the POST answers this rewind.
+    const knownFailures = new Set(snap.items.filter(isRevertFailure).map((item) => item.id));
     const { seq } = await sendCommand(api, args.sessionId, "revert", { targetTurnCount: args.keepTurns });
+    await awaitRewind(ctx, args.sessionId, { keepTurns: args.keepTurns, firstDroppedTurnId: started[args.keepTurns]!.turnId, seq }, knownFailures);
     return { seq, session: await chatDetail(api, args.sessionId) };
   }
 });

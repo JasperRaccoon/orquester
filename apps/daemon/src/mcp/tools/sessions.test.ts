@@ -4,11 +4,13 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import { FakeDaemonApi } from "../testing.ts";
-import { chatSummary, head, shellSummary, snapshot, stamp, turn } from "../fixtures.ts";
+import type { ThreadActivityItem, ThreadItem, ThreadSnapshotPayload } from "@orquester/api/agent-chat";
+import type { ToolError } from "../errors.ts";
+import { busEvent, FakeDaemonApi } from "../testing.ts";
+import { activity, chatSummary, head, message, shellSummary, snapshot, stamp, turn } from "../fixtures.ts";
 import { MAX_RESULT_BYTES, ok } from "../result.ts";
 import type { ToolContext } from "../tool.ts";
-import { sessionTools } from "./sessions.ts";
+import { REWIND_RECHECK_MS, REWIND_WAIT_MS, sessionTools } from "./sessions.ts";
 
 const tool = (name: string) => sessionTools.find((t) => t.name === name)!;
 const registry = { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [
@@ -328,31 +330,217 @@ test("update_session: a rename needs no catalogue entry; a write that fails mid-
     (e: { code: string; detail: unknown }) => { assert.equal(e.code, "COMMAND_REJECTED"); assert.deepEqual(e.detail, { applied: ["title"] }); return true; });
 });
 
-test("interrupt/stop/close/compact/revert map to their commands with the right gates", async (t) => {
+test("interrupt_session names the running turn, and with none stops the background work; stop_session posts session/stop", async (t) => {
   const running = chatSummary({ chatSessionStatus: "running", latestTurn: { turnId: "t2", state: "running", startedAt: stamp(2), completedAt: null } });
   const three = [turn(), turn({ turnId: "t2", turnCount: 2, requestedAt: stamp(2), startedAt: stamp(2), completedAt: stamp(3) }), turn({ turnId: "t3", turnCount: 3, requestedAt: stamp(4), startedAt: stamp(4), completedAt: null, state: "running" })];
   const h = await harness([running, shellSummary()], snapshot({ head: head({ session: { status: "running", activeTurnId: "t3" }, turnCount: 3 }), turns: three })); t.after(h.close);
-  for (const name of ["interrupt", "session/stop", "compact", "revert"]) h.api.on("POST", `/api/sessions/c1/${name}`, { status: 200, body: { seq: 7 } });
-  h.api.on("DELETE", "/api/sessions/c1", { status: 204, body: null }).on("DELETE", "/api/sessions/t1", { status: 204, body: null });
+  for (const name of ["interrupt", "session/stop"]) h.api.on("POST", `/api/sessions/c1/${name}`, { status: 200, body: { seq: 7 } });
   const i = await tool("interrupt_session").run({ sessionId: "c1" }, h.ctx);
-  assert.equal(i.seq, 7); assert.deepEqual((h.api.calls.find((c) => c.path === "/api/sessions/c1/interrupt")!.body as { turnId: string }).turnId, "t3");
-  await tool("stop_session").run({ sessionId: "c1" }, h.ctx);
-  assert.ok(h.api.calls.some((c) => c.path === "/api/sessions/c1/session/stop"));
-  assert.deepEqual(await tool("close_session").run({ sessionId: "t1" }, h.ctx), { closed: true, sessionId: "t1" });
-  await tool("compact_session").run({ sessionId: "c1" }, h.ctx);
-  await assert.rejects(tool("revert_session").run({ sessionId: "c1", keepTurns: 1 }, h.ctx), (e: { code: string }) => e.code === "SESSION_BUSY");
-  const settled = [turn(), turn({ turnId: "t2", turnCount: 2, requestedAt: stamp(2), startedAt: stamp(2), completedAt: stamp(3) }), turn({ turnId: "t3", turnCount: 3, requestedAt: stamp(4), startedAt: stamp(4), completedAt: stamp(5) })];
-  const idle = await harness([chatSummary()], snapshot({ head: head({ turnCount: 3 }), turns: settled })); t.after(idle.close);
-  idle.api.on("POST", "/api/sessions/c1/revert", { status: 200, body: { seq: 8 } }).on("POST", "/api/sessions/c1/interrupt", { status: 200, body: { seq: 9 } });
-  await tool("revert_session").run({ sessionId: "c1", keepTurns: 1 }, idle.ctx);
-  assert.deepEqual((idle.api.calls.find((c) => c.path === "/api/sessions/c1/revert")!.body as { targetTurnCount: number }).targetTurnCount, 1);
-  await assert.rejects(tool("revert_session").run({ sessionId: "c1", keepTurns: 3 }, idle.ctx), (e: { code: string }) => e.code === "INVALID_ARGUMENT");
+  assert.equal(i.seq, 7);
+  assert.deepEqual(commandBodies(h.api, "interrupt"), [{ turnId: "t3" }]);
+  const stopped = await tool("stop_session").run({ sessionId: "c1" }, h.ctx);
+  assert.equal(stopped.seq, 7);
+  assert.deepEqual(commandBodies(h.api, "session/stop"), [{}]);
+  const idle = await harness([chatSummary()], snapshot({ head: head({ turnCount: 3 }), turns: three.map((x) => ({ ...x, state: "completed" as const, completedAt: stamp(5) })) })); t.after(idle.close);
+  idle.api.on("POST", "/api/sessions/c1/interrupt", { status: 200, body: { seq: 9 } });
   await tool("interrupt_session").run({ sessionId: "c1" }, idle.ctx);
-  assert.equal((idle.api.calls.find((c) => c.path === "/api/sessions/c1/interrupt")!.body as { turnId?: string }).turnId, undefined, "no running turn → stop background work");
+  assert.deepEqual(commandBodies(idle.api, "interrupt"), [{}], "no running turn → stop background work");
+});
+
+/** Three settled turns, each opened by its own user message: the thread a rewind starts from. */
+function threeTurns(over: { items?: ThreadItem[]; pending?: ThreadSnapshotPayload["pending"] } = {}): ThreadSnapshotPayload {
+  const turns = [1, 2, 3].map((n) => turn({ turnId: `t${n}`, turnCount: n, userMessageId: `u${n}`, requestedAt: stamp(n * 10), startedAt: stamp(n * 10), completedAt: stamp(n * 10 + 5) }));
+  const items = over.items ?? threeTurnRows();
+  return snapshot({ head: head({ turnCount: 3 }), turns, items, ...(over.pending ? { pending: over.pending } : {}) });
+}
+/** Each turn's user message and reply, in order: u1 a1 u2 a2 u3 a3. */
+const threeTurnRows = (): ThreadItem[] => [1, 2, 3].flatMap((n) => [message("user", `ask ${n}`, { id: `u${n}`, turnId: `t${n}` }), message("assistant", `answer ${n}`, { id: `a${n}`, turnId: `t${n}` })]);
+
+/** The thread after a rewind that kept `kept` turns, as the fold leaves it: those turns and their rows. */
+function rewound(snap: ThreadSnapshotPayload, kept: number): ThreadSnapshotPayload {
+  const keptIds = new Set(snap.turns.slice(0, kept).map((x) => x.turnId));
+  return { ...snap, head: { ...snap.head, turnCount: kept }, turns: snap.turns.slice(0, kept), items: snap.items.filter((i) => i.turnId === null || keptIds.has(i.turnId)) };
+}
+
+type Harness = Awaited<ReturnType<typeof harness>>;
+/**
+ * The host behind a /revert: the thread reads `before` until the command is posted, then `after(n)` for the n-th read
+ * since (1-based) — the rewind's progress as the tool reads it.
+ */
+function revertHost(h: Harness, before: ThreadSnapshotPayload, after: (read: number) => ThreadSnapshotPayload): { reads: () => number } {
+  let posted = false;
+  let reads = 0;
+  const body = (snap: ThreadSnapshotPayload) => ({ status: 200, body: { kind: "snapshot", thread: { ...snap, head: { ...snap.head, projectPath: h.projectPath, cwd: h.projectPath } } } });
+  h.api.on("POST", "/api/sessions/c1/revert", () => { posted = true; return { status: 200, body: { seq: 8 } }; });
+  h.api.on("GET", "/api/sessions/c1/thread", () => (posted ? body(after((reads += 1))) : body(before)));
+  return { reads: () => reads };
+}
+
+/** The bodies posted to a chat command, without their minted commandId. */
+function commandBodies(api: FakeDaemonApi, name: string): Record<string, unknown>[] {
+  return api.calls.filter((c) => c.method === "POST" && c.path === `/api/sessions/c1/${name}`).map((c) => {
+    const { commandId, ...rest } = c.body as Record<string, unknown>;
+    assert.equal(typeof commandId, "string");
+    return rest;
+  });
+}
+
+/**
+ * `fn` with every setTimeout it arms recorded and fired a macrotask later instead of after its delay, so a wait's timed
+ * re-read runs without the test sleeping; `delays` lists what was armed.
+ */
+async function instantTimers<T>(fn: () => Promise<T>): Promise<{ outcome: PromiseSettledResult<T>; delays: number[] }> {
+  const real = globalThis.setTimeout;
+  const delays: number[] = [];
+  globalThis.setTimeout = ((callback: () => void, ms?: number) => { delays.push(ms ?? 0); return real(callback, 0); }) as unknown as typeof setTimeout;
+  try {
+    const [outcome] = await Promise.allSettled([fn()]);
+    return { outcome: outcome!, delays };
+  } finally {
+    globalThis.setTimeout = real;
+  }
+}
+const resolvedValue = <T>(outcome: PromiseSettledResult<T>): T => { assert.equal(outcome.status, "fulfilled", String((outcome as PromiseRejectedResult).reason)); return (outcome as PromiseFulfilledResult<T>).value; };
+const rejection = (outcome: PromiseSettledResult<unknown>): ToolError => { assert.equal(outcome.status, "rejected"); return (outcome as PromiseRejectedResult).reason as ToolError; };
+
+test("revert_session waits for the rewind: the session comes back once the host has dropped the turns, nothing left listening", async (t) => {
+  const before = threeTurns();
+  const h = await harness([chatSummary()], before); t.after(h.close);
+  revertHost(h, before, () => rewound(before, 1));
+  const { outcome, delays } = await instantTimers(() => tool("revert_session").run({ sessionId: "c1", keepTurns: 1 }, h.ctx));
+  const r = resolvedValue(outcome);
+  assert.equal(r.seq, 8);
+  assert.equal((r.session as { chat: { turnCount: number } }).chat.turnCount, 1, "the detail is read after the rewind");
+  assert.deepEqual(commandBodies(h.api, "revert"), [{ targetTurnCount: 1 }]);
+  assert.deepEqual(delays, [], "the first read after the POST saw it: nothing waited");
+  assert.equal(h.api.listenerCount(), 0);
+});
+
+test("revert_session: a bus event about the session re-reads the thread at once, no timer armed", async (t) => {
+  const before = threeTurns();
+  const h = await harness([chatSummary()], before); t.after(h.close);
+  const host = revertHost(h, before, (read) => {
+    if (read > 1) return rewound(before, 0);
+    h.api.emit(busEvent("session.updated", { id: "c1" })); // the summary moved while the tool was reading
+    return before;
+  });
+  const { outcome, delays } = await instantTimers(() => tool("revert_session").run({ sessionId: "c1", keepTurns: 0 }, h.ctx));
+  assert.equal((resolvedValue(outcome).session as { chat: { turnCount: number } }).chat.turnCount, 0);
+  assert.deepEqual(delays, [], "the event woke the wait: no timed re-read");
+  assert.equal(host.reads(), 3, "two reads to see the rewind, then the detail's own");
+  assert.equal(h.api.listenerCount(), 0);
+});
+
+test("revert_session: a rewind the adapter refuses answers COMMAND_REJECTED with the host's reason; an older failure row is not this one", async (t) => {
+  const old = activity("checkpoint.revert.failed", { detail: "An earlier rewind failed.", turnCount: 2 }, { tone: "error", summary: "Rewind failed", turnId: "t2" });
+  const before = threeTurns({ items: [...threeTurnRows(), old] });
+  const h = await harness([chatSummary()], before); t.after(h.close);
+  const refusal = activity("checkpoint.revert.failed", { detail: "Cannot rewind: turn t2 is not in the transcript.", turnCount: 1 }, { tone: "error", summary: "Rewind failed", turnId: "t3" });
+  revertHost(h, before, (read) => {
+    if (read > 1) return { ...before, items: [...before.items, refusal] };
+    h.api.emit(busEvent("session.updated", { id: "c9" })); // another session's news wakes nothing
+    return before;
+  });
+  const { outcome, delays } = await instantTimers(() => tool("revert_session").run({ sessionId: "c1", keepTurns: 1 }, h.ctx));
+  const e = rejection(outcome);
+  assert.equal(e.code, "COMMAND_REJECTED");
+  assert.equal(e.message, "Rewind failed: Cannot rewind: turn t2 is not in the transcript.");
+  assert.deepEqual(e.detail, { seq: 8, activityId: refusal.id, reason: "Cannot rewind: turn t2 is not in the transcript." });
+  assert.deepEqual(delays, [REWIND_RECHECK_MS], "no event about this session: one timed re-read found the refusal");
+  assert.equal(h.api.listenerCount(), 0);
+});
+
+test("revert_session gives up after its deadline with SESSION_BUSY, and a request that closes ends the wait at once", async (t) => {
+  const before = threeTurns();
+  const h = await harness([chatSummary()], before); t.after(h.close);
+  revertHost(h, before, () => before); // the host never finishes
+  // Every look at the clock is 6 s later: the first re-read is still inside the deadline, the second is past it.
+  let clock = h.ctx.now();
+  const late = await instantTimers(() => tool("revert_session").run({ sessionId: "c1", keepTurns: 1 }, { ...h.ctx, now: () => (clock += 6_000) }));
+  const busy = rejection(late.outcome);
+  assert.equal(busy.code, "SESSION_BUSY");
+  assert.equal(busy.message, "The rewind is still in progress — check get_session.");
+  assert.deepEqual(busy.detail, { seq: 8 });
+  assert.deepEqual(late.delays, [REWIND_RECHECK_MS], "one timed re-read, then the deadline");
+  assert.ok(REWIND_WAIT_MS >= 5_000 && REWIND_WAIT_MS <= 15_000, `${REWIND_WAIT_MS} ms`);
+  assert.equal(h.api.listenerCount(), 0);
+  // The client goes away mid-wait: no timer, no listener left behind.
+  const ctrl = new AbortController();
+  revertHost(h, before, () => { ctrl.abort(); return before; });
+  const gone = await instantTimers(() => tool("revert_session").run({ sessionId: "c1", keepTurns: 1 }, { ...h.ctx, signal: ctrl.signal }));
+  assert.equal(rejection(gone.outcome).code, "SESSION_BUSY");
+  assert.deepEqual(gone.delays, []);
+  assert.equal(h.api.listenerCount(), 0);
+});
+
+test("revert_session refuses up front a target before the last settled compaction — the GUI's rule — and nothing is posted", async (t) => {
+  const rows = threeTurnRows(); // u1 a1 u2 a2 u3 a3
+  const marker = (payload: unknown, over: Partial<ThreadActivityItem> = {}) => activity("context-compaction", payload, { turnId: "t1", ...over });
+  const h = await harness([chatSummary()], threeTurns()); t.after(h.close);
+  const refused = async (items: ThreadItem[], keepTurns: number, message: string | RegExp) => {
+    revertHost(h, threeTurns({ items }), () => assert.fail("nothing is posted"));
+    await assert.rejects(tool("revert_session").run({ sessionId: "c1", keepTurns }, h.ctx), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && (typeof message === "string" ? e.message === message : message.test(e.message)));
+  };
+  const allowed = async (items: ThreadItem[], keepTurns: number) => {
+    const before = threeTurns({ items });
+    revertHost(h, before, () => rewound(before, keepTurns));
+    await tool("revert_session").run({ sessionId: "c1", keepTurns }, h.ctx);
+  };
+  // A settled marker between turns 1 and 2: the agent remembers nothing before turn 2, so turn 1 must be kept.
+  const settled = [...rows.slice(0, 2), marker({ state: "compacted", beforeTokens: 9_000, afterTokens: 900 }), ...rows.slice(2)];
+  await refused(settled, 0, "Cannot rewind past the last context compaction — the agent no longer holds what came before it. keepTurns must be between 1 and 2.");
+  await allowed(settled, 1);
+  // An unreadable state is a settled marker (an old log only recorded those); so is the legacy spelling.
+  await refused([...rows.slice(0, 2), marker({}), ...rows.slice(2)], 0, /between 1 and 2/);
+  await refused([...rows.slice(0, 2), activity("thread.state.changed", { state: "compacted" }, { turnId: "t1" }), ...rows.slice(2)], 0, /between 1 and 2/);
+  // Only the LAST marker counts; one in the latest turn leaves nothing to rewind to.
+  await refused([...rows.slice(0, 2), marker({ state: "compacted" }), ...rows.slice(2, 4), marker({ state: "compacted" }, { turnId: "t2" }), ...rows.slice(4)], 1, /between 2 and 2/);
+  await refused([...rows, marker({ state: "compacted" }, { turnId: "t3" })], 2, "Cannot rewind past the last context compaction — the agent no longer holds what came before it, and it happened in the latest turn: there is no turn to rewind to.");
+  // A compaction still running or failed dropped nothing; a subagent's own marker is not the conversation's.
+  await allowed([...rows.slice(0, 2), marker({ state: "compacting" }), ...rows.slice(2)], 0);
+  await allowed([...rows.slice(0, 2), marker({ state: "compaction-failed", error: "x" }), ...rows.slice(2)], 0);
+  await allowed([...rows.slice(0, 2), marker({ state: "compacted" }, { agentId: "sub-1" }), ...rows.slice(2)], 0);
+  assert.deepEqual(commandBodies(h.api, "revert"), [{ targetTurnCount: 1 }, { targetTurnCount: 0 }, { targetTurnCount: 0 }, { targetTurnCount: 0 }]);
+});
+
+test("revert_session places a turn with no user message by its first row, and one with no row left before the marker", async (t) => {
+  const h = await harness([chatSummary()], threeTurns()); t.after(h.close);
+  const rows = threeTurnRows();
+  const marker = activity("context-compaction", { state: "compacted" }, { turnId: "t1" });
+  // Turn 2 was opened by nothing the host saw (a continuation): its first row, a2, is after the marker.
+  const noPrompt = (snap: ThreadSnapshotPayload): ThreadSnapshotPayload => ({ ...snap, turns: snap.turns.map((x) => (x.turnId === "t2" ? { ...x, userMessageId: undefined } : x)) });
+  const placed = noPrompt(threeTurns({ items: [...rows.slice(0, 2), marker, ...rows.slice(3)] }));
+  revertHost(h, placed, () => rewound(placed, 1));
+  await tool("revert_session").run({ sessionId: "c1", keepTurns: 1 }, h.ctx);
+  // Turn 2 has no row left at all: it cannot be placed after the marker, so a cut there is refused.
+  const unplaced = noPrompt(threeTurns({ items: [...rows.slice(0, 2), marker, ...rows.slice(4)] }));
+  revertHost(h, unplaced, () => assert.fail("nothing is posted"));
+  await assert.rejects(tool("revert_session").run({ sessionId: "c1", keepTurns: 1 }, h.ctx), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /between 2 and 2/.test(e.message));
+  assert.deepEqual(commandBodies(h.api, "revert"), [{ targetTurnCount: 1 }]);
+});
+
+test("revert_session refuses while a request is open (PENDING_REQUEST, like send_message), a turn is active (SESSION_BUSY), rollback is missing or the count is out of range", async (t) => {
+  const question = { requestId: "q3", createdAt: stamp(41), dismissible: true, responseMode: "message" as const, questions: [{ id: "x", header: "H", question: "X?", options: [], multiSelect: false, allowCustomAnswer: true }] };
+  const pending = await harness([chatSummary({ hasPendingApprovals: true, hasPendingUserInput: true })], threeTurns({ pending: { approvals: [{ requestId: "r1", requestKind: "command", createdAt: stamp(40) }], userInputs: [question] } })); t.after(pending.close);
+  await assert.rejects(tool("revert_session").run({ sessionId: "c1", keepTurns: 1 }, pending.ctx), (e: { code: string; message: string; detail: unknown }) => {
+    assert.equal(e.code, "PENDING_REQUEST");
+    assert.equal(e.message, "Resolve the agent's open request before rewinding: it is waiting on approval r1 (resolve_approval) and question q3 (answer_question or dismiss_question). get_session shows the details.");
+    assert.deepEqual(e.detail, { approvals: ["r1"], questions: ["q3"] });
+    return true;
+  });
+  // A message-mode question outlives its turn: open on an idle session, it still refuses.
+  const async_ = await harness([chatSummary({ hasPendingUserInput: true })], threeTurns({ pending: { approvals: [], userInputs: [question] } })); t.after(async_.close);
+  await assert.rejects(tool("revert_session").run({ sessionId: "c1", keepTurns: 0 }, async_.ctx), (e: { code: string }) => e.code === "PENDING_REQUEST");
+  const running = chatSummary({ chatSessionStatus: "running", latestTurn: { turnId: "t3", state: "running", startedAt: stamp(30), completedAt: null } });
+  const busy = await harness([running], threeTurns()); t.after(busy.close);
+  await assert.rejects(tool("revert_session").run({ sessionId: "c1", keepTurns: 1 }, busy.ctx), (e: { code: string; message: string }) => e.code === "SESSION_BUSY" && e.message === "Stop the current turn before rewinding.");
+  const idle = await harness([chatSummary()], threeTurns()); t.after(idle.close);
+  await assert.rejects(tool("revert_session").run({ sessionId: "c1", keepTurns: 3 }, idle.ctx), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && e.message === "keepTurns must be between 0 and 2: this conversation has 3 started turns.");
   const grok = await harness([chatSummary({ refId: "grok" })]); t.after(grok.close);
   await assert.rejects(tool("revert_session").run({ sessionId: "c1", keepTurns: 0 }, grok.ctx), (e: { message: string }) => /rollback/.test(e.message));
   const fresh = await harness([chatSummary({ latestTurn: null })], snapshot({ head: head({ turnCount: 0 }), turns: [] })); t.after(fresh.close);
   await assert.rejects(tool("revert_session").run({ sessionId: "c1", keepTurns: 0 }, fresh.ctx), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /no turns/.test(e.message));
+  for (const h of [pending, async_, busy, idle, grok, fresh]) assert.ok(!h.api.calls.some((c) => c.method === "POST"), "nothing was posted");
 });
 
 test("interrupt_session and the busy gates read the thread head, not only the (lagging) summary", async (t) => {
