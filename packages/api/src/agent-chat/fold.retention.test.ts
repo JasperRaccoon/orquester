@@ -7,9 +7,10 @@
  * here is a reference model written from the rules alone: it follows the
  * window event by event, recounts the droppable rows from scratch after each
  * step, and when its trigger fires applies today's `activitiesToDrop` and
- * message cut — copied below as they stood before batching — to the pre-trim
- * window. The fold must agree with it at every step: same rows, same objects,
- * same dropped rows.
+ * message cut — copied below as they stood before batching, with the one rule
+ * changed since: the compaction-marker exemption reads both spellings
+ * (`FOLD_SNAPSHOT_VERSION` 3) — to the pre-trim window. The fold must agree
+ * with it at every step: same rows, same objects, same dropped rows.
  */
 
 import assert from "node:assert/strict";
@@ -37,8 +38,10 @@ import {
   AGENT_CEILING_WEIGHTS,
   AGENT_WEIGHTS,
   FLEET_WEIGHTS,
+  LEGACY_FLEET_WEIGHTS,
   MESSAGE_WEIGHTS,
-  fleetLog
+  fleetLog,
+  legacyStateFate
 } from "./fold-logs.test-support.ts";
 import type { ThreadActivityItem, ThreadItem } from "./thread.ts";
 import {
@@ -72,9 +75,32 @@ function ownerOf(row: ThreadActivityItem): string | null {
 }
 
 /**
+ * A compaction marker in either spelling — a `context-compaction` row in any
+ * phase, or the `thread.state.changed {state: "compacted"}` an older log wrote
+ * instead — which the parent window keeps whatever its age. Spelled out here
+ * rather than imported from `compaction.ts`, so the reference stays a second
+ * reading of the rule.
+ */
+function isMarker(row: ThreadActivityItem): boolean {
+  if (row.activityKind === "context-compaction") {
+    return true;
+  }
+  const payload = row.payload;
+  return (
+    row.activityKind === "thread.state.changed" &&
+    payload !== null &&
+    typeof payload === "object" &&
+    !Array.isArray(payload) &&
+    (payload as { state?: unknown }).state === "compacted"
+  );
+}
+
+/**
  * `activitiesToDrop` as it stood before batch retention — the cross-agent
  * ceiling still sorting with `localeCompare`, which orders the ISO-8601 stamps
- * these logs carry exactly as the fold's `<` does, ties included.
+ * these logs carry exactly as the fold's `<` does, ties included — with the
+ * parent window's marker exemption as it stands since `FOLD_SNAPSHOT_VERSION`
+ * 3: either spelling ({@link isMarker}).
  */
 function referenceActivitiesToDrop(activities: readonly ThreadActivityItem[]): Set<ThreadActivityItem> {
   if (activities.length <= ACTIVITY_RETENTION_LIMIT) {
@@ -107,7 +133,7 @@ function referenceActivitiesToDrop(activities: readonly ThreadActivityItem[]): S
   const parentStart = parentRows.length - ACTIVITY_RETENTION_LIMIT;
   for (let index = 0; index < parentStart; index += 1) {
     const row = parentRows[index]!;
-    if (retainedByQuestion.has(row) || isAnchor(row) || row.activityKind === "context-compaction") {
+    if (retainedByQuestion.has(row) || isAnchor(row) || isMarker(row)) {
       continue;
     }
     drop.add(row);
@@ -177,7 +203,7 @@ function referenceTrigger(
     const owner = ownerOf(row);
     if (owner === null) {
       // Open questions count here too (design B): only the trim exempts them.
-      if (row.activityKind !== "context-compaction") parent += 1;
+      if (!isMarker(row)) parent += 1;
     } else {
       agents.set(owner, (agents.get(owner) ?? 0) + 1);
       agentTotal += 1;
@@ -678,6 +704,92 @@ test("compaction markers are exempt in the parent window only", () => {
     !state.activities.some((row) => row.id === "agent-marker"),
     "an agent-owned marker is an ordinary row of its agent's window"
   );
+});
+
+test("the legacy compaction marker is kept whatever its age, as context-compaction is; any other thread.state.changed is an ordinary row", () => {
+  reset();
+  const stateRow = (id: string, payload: unknown, agentId?: string): DomainEvent =>
+    ev("thread.activity-appended", {
+      activity: activity("thread.state.changed", payload, {
+        id,
+        ...(agentId !== undefined ? { agentId } : {})
+      })
+    });
+  const events: DomainEvent[] = [
+    created(),
+    // What an older log wrote for a settled compaction — the oldest row of all.
+    stateRow("legacy-marker", { state: "compacted", beforeTokens: 90_000, afterTokens: 9_000 }),
+    // The same kind saying anything else is no marker (`compaction.ts`).
+    stateRow("state-running", { state: "running" }),
+    stateRow("state-compacting", { state: "compacting" }),
+    stateRow("state-none", {}),
+    // A subagent's own legacy marker is an ordinary row of its agent's window.
+    stateRow("agent-legacy-marker", { state: "compacted" }, "ag")
+  ];
+  for (let index = 0; index < AGENT_ACTIVITY_RETENTION_LIMIT; index += 1) {
+    events.push(agentRow("ag", index));
+  }
+  // The marker counts in no class: beside the three other state rows, this
+  // fills the parent with exactly its limit plus slack of droppable rows.
+  const fill = ACTIVITY_RETENTION_LIMIT + ACTIVITY_RETENTION_SLACK - 3;
+  for (let index = 0; index < fill; index += 1) events.push(parentRow(index));
+  const states = statesOf(events);
+  assert.ok(
+    states.every((state) => itemsDroppedByRetention(state).length === 0),
+    "the legacy marker is no droppable row: the parent has not passed its trigger"
+  );
+  const before = states.at(-1)!;
+  assert.equal(before.evicted, undefined);
+
+  // One row more: one trim cuts every class back to its limit.
+  const last = parentRow(fill);
+  const after = applyDomainEvent(before, last);
+  assert.deepEqual(
+    itemsDroppedByRetention(after).map((item) => item.id),
+    [
+      "state-running",
+      "state-compacting",
+      "state-none",
+      "agent-legacy-marker",
+      ...Array.from({ length: ACTIVITY_RETENTION_SLACK - 2 }, (_, index) => `p-${index}`)
+    ],
+    "the other states go with the oldest parent rows, the agent's marker with its agent's window"
+  );
+  assert.equal(after.activities[0]?.id, "legacy-marker", "the parent's legacy marker stays, still the oldest row");
+  assert.equal(
+    after.activities.filter((row) => row.agentId === undefined).length,
+    ACTIVITY_RETENTION_LIMIT + 1,
+    "the parent's last 500 rows, plus its marker"
+  );
+  // Exactly the rules over the pre-trim window.
+  const row = last.payload.activity;
+  const reference = referenceTrim([...before.items, row], [...before.activities, row]);
+  assert.deepEqual(itemsDroppedByRetention(after), reference.dropped);
+  assert.deepEqual(after.items, reference.items);
+
+  // However many trims follow.
+  let state = after;
+  let trims = 0;
+  for (let index = fill + 1; index <= fill + 3 * (ACTIVITY_RETENTION_SLACK + 1); index += 1) {
+    state = applyDomainEvent(state, parentRow(index));
+    if (itemsDroppedByRetention(state).length > 0) trims += 1;
+  }
+  assert.equal(trims, 3);
+  assert.equal(state.activities[0]?.id, "legacy-marker");
+});
+
+test("an older log's thread-state rows trim exactly as the rules say, over a fleet-shaped log", () => {
+  const events = fleetLog({ seed: 6, steps: 7_000, weights: LEGACY_FLEET_WEIGHTS });
+  const run = compareWithReference(events);
+  assert.equal(run.mismatch, null);
+  assert.ok(run.trimSteps >= 8, `trim steps: ${run.trimSteps}`);
+  // What the log really exercised.
+  const fate = legacyStateFate(events);
+  assert.equal(fate.droppedParentMarkers, 0, "retention never drops a parent's legacy marker");
+  assert.ok(fate.keptPastATrim >= 10, `legacy markers a trim reached past: ${fate.keptPastATrim}`);
+  assert.ok(fate.droppedOtherStates >= 10, `other thread-state rows dropped: ${fate.droppedOtherStates}`);
+  assert.ok(fate.droppedAgentMarkers >= 2, `agents' legacy markers dropped: ${fate.droppedAgentMarkers}`);
+  assert.ok(fate.movedInPlace >= 5, `rows moved across the exemption in place: ${fate.movedInPlace}`);
 });
 
 // ---------------------------------------------------------------------------

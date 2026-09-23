@@ -32,7 +32,11 @@
  *
  * The host's index stores rows derived by this rule, so changing it means
  * bumping `INDEX_SCHEMA_VERSION` (`apps/daemon/src/agent-host/index/schema.ts`)
- * with it: an index file written by the old rule is otherwise trusted.
+ * with it: an index file written by the old rule is otherwise trusted. And the
+ * fold's retention keeps every row {@link isCompactionActivity} names out of
+ * the parent window's eviction (`fold.ts`), so changing that part also means
+ * bumping `FOLD_SNAPSHOT_VERSION` (`fold-snapshot.ts`): a `state.json` folded
+ * by the old rule is otherwise trusted too.
  */
 
 import type { ThreadActivityItem, ThreadItem } from "./thread.ts";

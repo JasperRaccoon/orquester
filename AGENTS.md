@@ -789,9 +789,13 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   `compactionMarkerState`) over the parent timeline, whose filter also drops `timelineBypass` rows
   (`rows.logic.ts` `isCompactedMarkerEntry`, `history.logic.ts` `hasSettledCompaction` — a change to
   the rule must be mirrored there). They used to disagree; the index derives rows by it, so changing
-  it bumps `INDEX_SCHEMA_VERSION`. Two more things that were bugs: the compaction marker
-  is exempt from the 500-row activity window (a busy thread evicted it in minutes, and the gate then
-  offered every pre-compaction message), and Claude's "compacted in between" check is decided by the
+  it bumps `INDEX_SCHEMA_VERSION`, and the fold's retention exempts every parent row
+  `isCompactionActivity` names, so changing that part bumps `FOLD_SNAPSHOT_VERSION` too. Two more
+  things that were bugs: the compaction marker — either spelling, by `isCompactionActivity`; the
+  legacy one was evicted like any row until `FOLD_SNAPSHOT_VERSION` 3 — is exempt from the parent's
+  500-row activity window (a busy thread evicted it in minutes, and the gate then offered every
+  pre-compaction message; an agent's own marker stays an ordinary row of its window), and Claude's
+  "compacted in between" check is decided by the
   anchor's POSITION relative to the transcript's last `isCompactSummary` row — `preserved_messages.
   all_uuids` names the pre-compaction rows the CLI kept, never the rows written afterwards, so
   reading it as the set of reachable anchors refused every rewind after a live `/compact`. OpenCode's

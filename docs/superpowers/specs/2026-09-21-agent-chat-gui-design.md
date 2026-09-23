@@ -2263,6 +2263,16 @@ only the fold's state, so a snapshot folded forward still equals the whole-log f
 host's history bounds read it (C, `2026-09-23-thread-index-and-lazy-boot-design.md`). T3 has no
 counterpart: its projector retains per event, in SQL, where the cost is the database's.*
 
+*Built (2026-09-23, the legacy compaction marker): the parent window also keeps every compaction
+marker whatever its age — the §5.5 exemption — by `isCompactionActivity`
+(`packages/api/src/agent-chat/compaction.ts`), the rule the UI's window gates, the MCP and the thread
+index share: a `context-compaction` row in any phase, or the `thread.state.changed {state:
+"compacted"}` an older log wrote instead. The legacy spelling used to be evicted like any row, so on
+an older thread the rewind gate lost its marker exactly as §5.5 describes; any other
+`thread.state.changed` is still an ordinary row, and an agent's own marker an ordinary row of its
+agent's window. `FOLD_SNAPSHOT_VERSION` went to 3, so a `state.json` folded under the old rule is
+discarded and its log re-folded once, on the thread's next load.*
+
 A thread directory that fails to parse marks that thread `error` with the parse message; it
 never affects other threads or host startup. A malformed line inside `events.ndjson` truncates the
 fold at that point rather than discarding the file.
