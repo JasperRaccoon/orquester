@@ -46,6 +46,7 @@ import {
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { ComposerTokenMenu } from "./ComposerTokenMenu";
 import { registerComposerHandle } from "./composer-bridge";
+import { restoreFailedSendDraft } from "./composer-failed-send";
 import {
   blockedProviderCommandMessage,
   buildSkillMenuItems,
@@ -84,7 +85,8 @@ import {
   sendComposerTurn,
   submitIsNoOp,
   swallowsStandalonePlanCommand,
-  uploadsBlockSend
+  uploadsBlockSend,
+  type FailedSendRestore
 } from "./composer-submission";
 import {
   detectComposerTrigger,
@@ -251,6 +253,13 @@ export function ChatComposer({
    */
   const carriedContextRef = React.useRef<ComposerContextRecord[]>([]);
   const persistRef = React.useRef<DraftPersistScheduler | null>(null);
+  /**
+   * The thread whose draft the live draft holds, or `null` once this composer
+   * is unmounted — what a send reads when it settles, to put a failure back
+   * into the thread it was sent from (`runSend`). Written only by the draft
+   * scheduler's layout effect, the same step that flushes that thread's writes.
+   */
+  const liveThreadRef = React.useRef<string | null>(null);
   const insetRef = React.useRef(0);
   const restingRef = React.useRef(true);
   const retryFilesRef = React.useRef(new Map<string, File>());
@@ -325,10 +334,18 @@ export function ChatComposer({
    * so the tail of thread A is written to thread A even though `sessionId`
    * already names B. `pagehide`/`visibilitychange` cover what React never sees
    * at all — a reload or a backgrounded tab runs no cleanup.
+   *
+   * A LAYOUT effect, and the one writer of `liveThreadRef`: the cleanup that
+   * stops this composer holding a thread's draft — a swap, an unmount — is the
+   * one that flushes that thread's pending write, in the same commit as the
+   * swap's draft load. So a send that settles afterwards (`runSend`) finds its
+   * thread either still here or with its persisted draft complete: it never
+   * reads that draft while its last keystrokes are in neither place.
    */
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     const scheduler = createDraftPersistScheduler((draft) => storeDraftActions.saveDraft(draft));
     persistRef.current = scheduler;
+    liveThreadRef.current = sessionId;
     const flush = (): void => scheduler.flush();
     const flushIfHidden = (): void => {
       if (document.visibilityState === "hidden") scheduler.flush();
@@ -340,6 +357,7 @@ export function ChatComposer({
       document.removeEventListener("visibilitychange", flushIfHidden);
       scheduler.flush();
       if (persistRef.current === scheduler) persistRef.current = null;
+      liveThreadRef.current = null;
     };
   }, [sessionId, storeDraftActions]);
 
@@ -632,7 +650,40 @@ export function ChatComposer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, isMobile, active]);
 
-  React.useEffect(
+  /**
+   * Put a send that did not go out back into the LIVE draft (§7.4): its text
+   * and chips ahead of anything typed or staged since (`draftAfterSend`), its
+   * notice with them — when this composer shows `thread`, the one the send
+   * left from. Its own send, or one a composer that no longer shows the thread
+   * hands over through the bridge. `false` when it does not show `thread`, so
+   * the caller goes on to that thread's persisted draft.
+   *
+   * `flushSync`: the check and the write are one step. A promise
+   * continuation's update is not sync-lane, and a thread swap committed before
+   * it rendered would load the next thread's draft over it — the restore
+   * would be on no screen and in no thread's store.
+   */
+  const restoreIntoLiveDraft = React.useCallback(
+    (thread: string, restore: FailedSendRestore<StagedAttachment>): boolean => {
+      if (liveThreadRef.current !== thread) return false;
+      flushSync(() => {
+        setDraft((state) => {
+          const next = draftAfterSend({ outcome: restore.outcome, sent: restore.sent, draft: state });
+          return next === null ? state : { ...state, ...next };
+        });
+        setNotice(restore.outcome.notice);
+      });
+      return true;
+    },
+    []
+  );
+
+  // A LAYOUT effect, as the draft load and the draft scheduler are: the handle
+  // names this composer's thread from the commit that loads that thread's
+  // draft to the one that lets it go, so a failed send that settles in between
+  // finds the composer that shows its thread (§7.4) — never a stale handle,
+  // and never nothing while a composer that has just mounted already shows it.
+  React.useLayoutEffect(
     () =>
       registerComposerHandle(sessionId, {
         // A bridge insert never takes focus by itself, whether or not a user
@@ -643,9 +694,18 @@ export function ChatComposer({
         insertText: (text, mode) => insertText(text, mode, { focus: isTextareaFocused() }),
         stageAttachment,
         focusAtEnd,
-        openControl
+        openControl,
+        restoreFailedSend: (restore) => restoreIntoLiveDraft(sessionId, restore)
       }),
-    [focusAtEnd, insertText, isTextareaFocused, openControl, sessionId, stageAttachment]
+    [
+      focusAtEnd,
+      insertText,
+      isTextareaFocused,
+      openControl,
+      restoreIntoLiveDraft,
+      sessionId,
+      stageAttachment
+    ]
   );
 
   // ---------------------------------------------------------------------
@@ -1016,6 +1076,10 @@ export function ChatComposer({
       attachments: readonly StagedAttachment[],
       resolveText?: () => Promise<string>
     ) => {
+      // The thread this message leaves FROM. A failure goes back into its
+      // draft, whichever thread — if any — this composer shows by the time
+      // the send settles.
+      const sentFrom = sessionId;
       setSending(true);
       try {
         const refs = attachmentRefs(attachments);
@@ -1047,16 +1111,24 @@ export function ChatComposer({
         // would read as a plan-mode Refine carrying the implementation prefix.
         // `submit` revoked the sent chips' preview URLs; a restored image chip
         // resolves its preview again, as a reloaded one does.
-        setDraft((state) => {
-          const next = draftAfterSend({ outcome, sent: withoutPreviews(attachments), draft: state });
-          return next === null ? state : { ...state, ...next };
+        //
+        // And it comes back to the thread it was sent FROM, never to the one
+        // on screen when it settles: this live draft while this composer
+        // still shows that thread, else the live draft of the composer that
+        // shows it now, else that thread's persisted draft, where the next
+        // composer to show it loads it (`restoreFailedSendDraft`). Its notice
+        // goes only where its draft does.
+        restoreFailedSendDraft({
+          sentFrom,
+          liveThread: liveThreadRef.current,
+          restore: { outcome, sent: withoutPreviews(attachments) },
+          restoreLive: (restore) => restoreIntoLiveDraft(sentFrom, restore)
         });
-        setNotice(outcome.notice);
       } finally {
         setSending(false);
       }
     },
-    [actions, isMobile, modelSelection]
+    [actions, isMobile, modelSelection, restoreIntoLiveDraft, sessionId]
   );
 
   const submit = React.useCallback(

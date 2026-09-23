@@ -3392,6 +3392,27 @@ bridge (a delivered ref, the queue drained back by an interrupt, a displaced cus
 places the caret without moving focus unless the textarea already had it; a surface that means
 "edit this in the composer" (a queued row's return action) asks for focus explicitly.*
 
+*Built: **a send that did not go out goes back to the thread it was sent from.** `submit` empties
+the draft and its persisted copy before the send leaves; a failure puts its text and chips back
+ahead of anything typed or staged since (`draftAfterSend`, `composer-submission.ts`), and a
+refusal or a failed Implement gives nothing back. Where it goes is decided when the send settles,
+not when it left — by then a project switch may have unmounted the composer, or the composer may
+show another thread (`failedSendRestoreTarget`, routed by `restoreFailedSendDraft` in
+`composer-failed-send.ts`): into the sending composer's live draft while it is still mounted and
+still shows that thread; into the live draft of the composer that shows the thread now, when its
+tab came back after the switch, through the composer bridge (`restoreFailedSend`) — a mounted
+composer owns its thread's one visible draft and reads the persisted copy only when it loads the
+thread, so a write behind its back would be neither shown nor kept; otherwise into that thread's
+persisted draft, the same `draftAfterSend` over the draft loaded as a mount loads it
+(`persistedDraftAfterSend`, `composer-draft.ts`), written through that thread's own open slice's
+`saveDraft` or, with none open, into the storage its next slice seeds from (`updateThreadDraft`,
+`lib/agent-chat/store.ts`). The notice goes only where the draft goes. Two layout-effect timings
+keep it exact: the composer stops naming a thread in the same cleanup that flushes that thread's
+pending draft write, and registers its bridge handle in the commit that loads the thread's draft —
+so a settle never reads a persisted draft missing its last keystrokes, and never misses a composer
+that has just mounted for the thread. The live write is a `flushSync`, so no thread swap can land
+between the check and the write.*
+
 **The queued-message model.** This is the client's own queue of messages it has not dispatched
 yet, and it is a different thing from the host-side queue that holds already-posted `/turn`s behind
 a running compaction (§3.4). A queued message is a full draft snapshot — text, attachments,

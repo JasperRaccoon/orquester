@@ -540,6 +540,48 @@ export function draftAfterSend<A extends RestorableAttachment>(input: {
   return { text, attachments };
 }
 
+/**
+ * A send that settled without going out, on its way back to a draft: its
+ * outcome — the text to restore, if any, and the notice — and the chips it
+ * carried, in tray order. {@link draftAfterSend} decides what that does to
+ * whichever draft it reaches; {@link failedSendRestoreTarget} decides which
+ * draft that is.
+ */
+export interface FailedSendRestore<A extends RestorableAttachment = RestorableAttachment> {
+  outcome: Exclude<ComposerSendOutcome, { kind: "sent" }>;
+  sent: readonly A[];
+}
+
+/**
+ * Which draft a send that did not go out comes back to (§7.4) — always a
+ * draft of **the thread it was sent FROM**, decided when the send settles: by
+ * then a project switch may have unmounted the composer that sent it, or that
+ * composer may show another thread, whose draft is not this one's.
+ *
+ *  - `live` — the composer that sent it is still mounted and still shows that
+ *    thread: its own live draft, as a restore always went.
+ *  - `composer` — it is not, but another composer shows the thread now (its
+ *    tab came back after the switch): that composer's live draft, through the
+ *    bridge. A mounted composer owns its thread's one visible draft and reads
+ *    the persisted copy only when it loads the thread, so a restore written
+ *    there behind its back would not show, and its next save would drop it.
+ *  - `persisted` — no composer shows the thread: its persisted draft in the
+ *    thread store, which the next composer to show it loads.
+ */
+export type FailedSendRestoreTarget = "live" | "composer" | "persisted";
+
+export function failedSendRestoreTarget(input: {
+  /** The thread the message was sent from. */
+  sentFrom: string;
+  /** The thread whose draft the sending composer's live draft holds now; `null` once it is unmounted. */
+  liveThread: string | null;
+  /** Whether a mounted composer shows `sentFrom` now — a bridge handle is registered for it. */
+  shownByComposer: boolean;
+}): FailedSendRestoreTarget {
+  if (input.liveThread === input.sentFrom) return "live";
+  return input.shownByComposer ? "composer" : "persisted";
+}
+
 // ---------------------------------------------------------------------------
 // The submit-path guards (V1: R7-3 and R2-3 had no honest test)
 // ---------------------------------------------------------------------------
