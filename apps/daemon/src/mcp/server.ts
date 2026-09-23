@@ -64,14 +64,26 @@ export function argumentProblems(toolName: string, error: z.ZodError): string {
 }
 
 /**
+ * A tool's arguments as tools/call parses them: the tool's own schema, STRICT. zod's default strips a key the schema
+ * does not name, so a misspelled optional argument (`planmode` for `planMode`) was dropped and silently took its
+ * default; strict, it is refused, and argumentProblems names it. tools/list already promised as much: the SDK's
+ * converter advertises `additionalProperties: false` on every tool. Only the top level changes — a nested object keeps
+ * its own mode (an attachment is strict already).
+ */
+export function argumentsSchema(tool: ToolDef): z.ZodTypeAny {
+  return z.object(tool.input).strict();
+}
+
+/**
  * A per-request McpServer with every tool bound to the caller's DaemonApi. The registrations are what `tools/list`
  * serves; `tools/call` is our own handler, installed over the SDK's through its public `server.setRequestHandler`: the
  * SDK answers an argument the schema refuses with its own text, outside spec §4.5's envelope. Ours parses the
- * arguments ONCE with the tool's own schema (defaults applied; no `arguments` at all is `{}`), answers a refusal as
- * INVALID_ARGUMENT naming the fields, and turns anything `run` throws into a coded isError result. An unknown tool is
- * deliberately the JSON-RPC InvalidParams error (−32602), as the MCP spec has it: SDK 1.29's own handler raises the
- * same error but catches it into an `isError` tool result. What else that handler checks is skipped on purpose: a
- * tool's `enabled` flag (no tool is ever disabled), task support and output schemas (no tool declares either).
+ * arguments ONCE with `argumentsSchema` (defaults applied; an unknown key refused; no `arguments` at all is `{}`),
+ * answers a refusal as INVALID_ARGUMENT naming the fields, and turns anything `run` throws into a coded isError result.
+ * An unknown tool is deliberately the JSON-RPC InvalidParams error (−32602), as the MCP spec has it: SDK 1.29's own
+ * handler raises the same error but catches it into an `isError` tool result. What else that handler checks is skipped
+ * on purpose: a tool's `enabled` flag (no tool is ever disabled), task support and output schemas (no tool declares
+ * either).
  */
 export function buildServer(deps: McpDeps, authorization: string | undefined, signal: AbortSignal): McpServer {
   const server = new McpServer({ name: "orquester", version: SERVER_VERSION }, { instructions: SERVER_INSTRUCTIONS });
@@ -83,19 +95,19 @@ export function buildServer(deps: McpDeps, authorization: string | undefined, si
       return toSafeToolError(error);
     }
   };
-  const tools = new Map<string, ToolDef>();
+  const tools = new Map<string, { tool: ToolDef; schema: z.ZodTypeAny }>();
   for (const tool of allTools()) {
-    tools.set(tool.name, tool);
+    tools.set(tool.name, { tool, schema: argumentsSchema(tool) });
     // Never invoked — the tools/call handler below replaces the SDK's — but it would answer the same way.
     server.registerTool(tool.name, { title: tool.title, description: tool.description, inputSchema: tool.input, annotations: tool.annotations }, (args: Record<string, unknown>) => call(tool, args));
   }
   server.server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const tool = tools.get(request.params.name);
+    const entry = tools.get(request.params.name);
     // The name is the caller's text, of any length: quoted back capped, as every refusal quotes a caller's value.
-    if (!tool) throw new McpError(ErrorCode.InvalidParams, `Tool ${clipText(request.params.name, MAX_ECHO_CHARS)} not found`);
-    const parsed = await z.object(tool.input).safeParseAsync(request.params.arguments ?? {});
-    if (!parsed.success) return toSafeToolError(new ToolError("INVALID_ARGUMENT", argumentProblems(tool.name, parsed.error)));
-    return call(tool, parsed.data);
+    if (!entry) throw new McpError(ErrorCode.InvalidParams, `Tool ${clipText(request.params.name, MAX_ECHO_CHARS)} not found`);
+    const parsed = await entry.schema.safeParseAsync(request.params.arguments ?? {});
+    if (!parsed.success) return toSafeToolError(new ToolError("INVALID_ARGUMENT", argumentProblems(entry.tool.name, parsed.error)));
+    return call(entry.tool, parsed.data);
   });
   return server;
 }

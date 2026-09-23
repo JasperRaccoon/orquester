@@ -8,7 +8,7 @@ import { createServer } from "../index.ts";
 import { chatSummary } from "./fixtures.ts";
 import { MAX_ERROR_MESSAGE_CHARS } from "./result.ts";
 import { FakeDaemonApi } from "./testing.ts";
-import { allTools, argumentProblems, registerMcp, SERVER_INSTRUCTIONS, SERVER_VERSION, type McpDeps } from "./server.ts";
+import { allTools, argumentProblems, argumentsSchema, registerMcp, SERVER_INSTRUCTIONS, SERVER_VERSION, type McpDeps } from "./server.ts";
 
 const EXPECTED_TOOLS = ["list_projects", "list_agents", "list_conversations", "list_sessions", "get_session", "get_turn_diff", "create_session", "update_session", "interrupt_session", "stop_session", "close_session", "revert_session", "compact_session", "send_message", "implement_plan", "read_transcript", "answer_question", "dismiss_question", "resolve_approval", "wait_for_session", "get_usage", "get_cost", "list_files", "read_file", "list_todos", "create_todo", "update_todo", "delete_todo", "toggle_todo_item"];
 
@@ -54,7 +54,7 @@ const CONTRACT: Record<string, { required: string[]; annotations: object }> = {
   toggle_todo_item: { required: ["id", "item"], annotations: closed(WRITE) }
 };
 
-type ListedTool = { name: string; title?: string; description: string; annotations?: object; inputSchema: { properties?: Record<string, { description?: string }>; required?: string[] } };
+type ListedTool = { name: string; title?: string; description: string; annotations?: object; inputSchema: { properties?: Record<string, { description?: string }>; required?: string[]; additionalProperties?: unknown } };
 
 /**
  * light-my-request's mock request never reports `destroyed` once its body is consumed, so the MCP
@@ -97,6 +97,8 @@ test("tools/list is exactly the 29 spec tools, each with a title, annotations an
       assert.ok(t.description.length <= 600, `${t.name} description is ${t.description.length} chars`);
       assert.doesNotMatch(t.description, /❯|Escape|keystroke/i, `${t.name} carries no TUI guidance`);
       for (const [p, s] of Object.entries(t.inputSchema.properties ?? {})) assert.ok(s.description, `${t.name}.${p} is described`);
+      // What tools/call enforces (argumentsSchema is strict): an argument name the tool does not list is refused.
+      assert.equal(t.inputSchema.additionalProperties, false, `${t.name} advertises no additional properties`);
     }
     assert.equal(allTools().length, EXPECTED_TOOLS.length);
     assert.equal(new Set(allTools().map((t) => t.name)).size, EXPECTED_TOOLS.length, "no tool is registered twice");
@@ -173,10 +175,58 @@ test("arguments a tool's schema refuses answer the §4.5 envelope: isError, INVA
   } finally { await app.close(); }
 });
 
+test("an argument name the tool does not take is refused and named, never dropped: a misspelled optional argument cannot take its default", async () => {
+  const api = new FakeDaemonApi();
+  const app = mcpApp({ createApi: () => api });
+  try {
+    // `planmode` for `planMode`: stripped, the message would have gone out WITHOUT plan mode and the caller never known.
+    const bad = await postMcp(app, call(40, "send_message", { sessionId: "c1", text: "plan the migration", planmode: true }));
+    assert.equal(bad.result.isError, true);
+    assert.equal(bad.result.structuredContent.code, "INVALID_ARGUMENT");
+    assert.equal(bad.result.structuredContent.message, "Invalid arguments for send_message: arguments: Unrecognized key(s) in object: 'planmode'.");
+    assert.equal(bad.result.content[0].text, `INVALID_ARGUMENT: ${bad.result.structuredContent.message}`);
+    assert.deepEqual(api.calls, [], "refused before the tool ran: nothing was read, nothing was sent");
+    // Every unknown key is named, in one issue; the known keys beside them do not save the call.
+    const several = await postMcp(app, call(41, "wait_for_session", { sessionid: "c1", timeout: 5, timeoutMs: 1_000 }));
+    assert.equal(several.result.structuredContent.message, "Invalid arguments for wait_for_session: arguments: Unrecognized key(s) in object: 'sessionid', 'timeout'.");
+    // A 2 MiB key is named capped, as every refused field is.
+    const huge = await postMcp(app, call(42, "get_session", { sessionId: "c1", ["k".repeat(2 * 1024 * 1024)]: 1 }));
+    const text = huge.result.content[0].text as string;
+    assert.ok(text.length < 400, `${text.length} characters`);
+    assert.match(text, /^INVALID_ARGUMENT: Invalid arguments for get_session: arguments: Unrecognized key\(s\) in object: 'k+…\.$/);
+    assert.deepEqual(api.calls, [], "no tool ran for any of them");
+  } finally { await app.close(); }
+});
+
+test("strict arguments change nothing else: a correct call keeps its defaults, and a nested attachment object refuses and accepts as before", async () => {
+  const api = new FakeDaemonApi().on("GET", "/api/sessions", { status: 200, body: [chatSummary({ activity: { state: "idle", attention: null, lastOutputAt: null, needsAttentionAt: null } })] })
+    .on("GET", "/api/registry", { status: 200, body: { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [] } })
+    .on("GET", "/api/agent-accounts", { status: 200, body: { accounts: [], defaults: {} } }).on("GET", "/api/agent/providers", { status: 503, body: null });
+  // The handler's own schema: a call naming only known arguments gets every default.
+  const sendMessage = allTools().find((t) => t.name === "send_message")!;
+  assert.deepEqual(argumentsSchema(sendMessage).parse({ sessionId: "c1", text: "hi" }), { sessionId: "c1", text: "hi", planMode: false, wait: true, timeoutMs: 120_000 });
+  const app = mcpApp({ createApi: () => api });
+  try {
+    // Defaults still apply: without `attention: false` the idle, unflagged c1 would be filtered out.
+    const listed = await postMcp(app, call(43, "list_sessions", { kind: "chat" }));
+    assert.equal(listed.result.isError, undefined, listed.result.content?.[0]?.text);
+    assert.deepEqual((listed.result.structuredContent.sessions as { id: string }[]).map((s) => s.id), ["c1"]);
+    // An attachment is a strict object of its own: an unknown key inside it is refused under its own path, as before.
+    const nested = await postMcp(app, call(44, "send_message", { sessionId: "c1", text: "see file", attachments: [{ path: "a.txt", mime: "text/plain" }] }));
+    assert.equal(nested.result.structuredContent.code, "INVALID_ARGUMENT");
+    assert.equal(nested.result.structuredContent.message, "Invalid arguments for send_message: attachments.0: Unrecognized key(s) in object: 'mime'.");
+    // A well-formed attachment passes the parse and reaches the tool (whose own session read then fails: c9 is unknown).
+    api.calls.length = 0;
+    const accepted = await postMcp(app, call(45, "send_message", { sessionId: "c9", text: "see file", attachments: [{ name: "a.txt", base64: "YQ==", mimeType: "text/plain" }] }));
+    assert.equal(accepted.result.structuredContent.code, "SESSION_NOT_FOUND");
+    assert.deepEqual(api.calls.map((c) => `${c.method} ${c.path}`), ["GET /api/sessions"], "the tool ran");
+  } finally { await app.close(); }
+});
+
 test("a refusal never echoes a huge value: each named field's text is at most 200 characters, a cut one ending in …", () => {
   const big = "x".repeat(2 * 1024 * 1024);
   const refuse = (name: string, args: Record<string, unknown>): string => {
-    const parsed = z.object(allTools().find((t) => t.name === name)!.input).safeParse(args);
+    const parsed = argumentsSchema(allTools().find((t) => t.name === name)!).safeParse(args);
     assert.equal(parsed.success, false, name);
     return argumentProblems(name, (parsed as z.SafeParseError<unknown>).error);
   };
