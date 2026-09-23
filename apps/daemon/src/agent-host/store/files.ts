@@ -9,6 +9,7 @@
  */
 
 import * as fs from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -50,6 +51,18 @@ export async function readFileOrNull(filePath: string): Promise<string | null> {
   }
 }
 
+/** A file's byte length, or 0 when it does not exist. */
+export async function fileSizeOrZero(filePath: string): Promise<number> {
+  try {
+    return (await fs.stat(filePath)).size;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return 0;
+    }
+    throw error;
+  }
+}
+
 export interface SplitLines {
   /** Every complete line, in order, without its newline. */
   lines: string[];
@@ -72,6 +85,123 @@ export function splitCompleteLines(contents: string): SplitLines {
   const body = torn ? contents.slice(0, contents.lastIndexOf("\n") + 1) : contents;
   const lines = body.length === 0 ? [] : body.slice(0, -1).split("\n");
   return { lines: lines.filter((line) => line.length > 0), torn };
+}
+
+/** One complete line of a byte window: `[start, newline)`, relative to the window. */
+export interface LineSpan {
+  start: number;
+  /** Index of the line's newline byte — its exclusive text end. */
+  newline: number;
+}
+
+/**
+ * {@link splitCompleteLines} by BYTE offset, for readers that report where
+ * each line sits. Same rules: empty lines are skipped, and a trailing fragment
+ * with no newline is dropped and reported as torn. Splitting on the `\n` byte
+ * is safe in UTF-8 — it never occurs inside a multi-byte sequence.
+ */
+export function splitCompleteLineSpans(bytes: Buffer): { spans: LineSpan[]; torn: boolean } {
+  const spans: LineSpan[] = [];
+  let start = 0;
+  for (;;) {
+    const newline = bytes.indexOf(0x0a, start);
+    if (newline === -1) {
+      break;
+    }
+    if (newline > start) {
+      spans.push({ start, newline });
+    }
+    start = newline + 1;
+  }
+  return { spans, torn: start < bytes.length };
+}
+
+/**
+ * Read the bytes of `[start, end)` (`end` defaults to, and is clamped at, the
+ * end of the file) and the file's size. Null when the file does not exist.
+ */
+export async function readFileWindow(
+  filePath: string,
+  start: number,
+  end?: number
+): Promise<{ bytes: Buffer; size: number } | null> {
+  let handle;
+  try {
+    handle = await fs.open(filePath, "r");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+  try {
+    const { size } = await handle.stat();
+    const length = Math.max(0, Math.min(end ?? size, size) - start);
+    const bytes = Buffer.allocUnsafe(length);
+    const filled = await readInto(handle, bytes, start);
+    return { bytes: filled === length ? bytes : bytes.subarray(0, filled), size };
+  } finally {
+    await handle.close();
+  }
+}
+
+/** Fill `buffer` from `position`; answers how many bytes were read. */
+async function readInto(handle: FileHandle, buffer: Buffer, position: number): Promise<number> {
+  let filled = 0;
+  // `read` may answer short; only a zero-byte read means the file ended.
+  while (filled < buffer.length) {
+    const { bytesRead } = await handle.read(buffer, filled, buffer.length - filled, position + filled);
+    if (bytesRead === 0) {
+      break;
+    }
+    filled += bytesRead;
+  }
+  return filled;
+}
+
+/**
+ * Cut a torn trailing fragment off an append-only log, in place: a file that
+ * does not end with a newline is truncated to the byte after its last one,
+ * or to empty when it has none. Only a fragment is ever cut — a complete
+ * line ends with its newline, whether or not it decodes, and is left alone.
+ * Answers the file's size afterwards (0 when it does not exist).
+ */
+export async function truncateTornTail(filePath: string, windowBytes = 64 * 1024): Promise<number> {
+  let handle;
+  try {
+    handle = await fs.open(filePath, "r");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return 0;
+    }
+    throw error;
+  }
+  let size: number;
+  let complete = 0;
+  try {
+    size = (await handle.stat()).size;
+    const last = Buffer.alloc(1);
+    if (size === 0 || ((await readInto(handle, last, size - 1)) === 1 && last[0] === 0x0a)) {
+      return size;
+    }
+    // Walk back a window at a time to the last newline; the final byte is
+    // already known not to be one.
+    let end = size - 1;
+    while (end > 0) {
+      const start = Math.max(0, end - windowBytes);
+      const window = Buffer.allocUnsafe(end - start);
+      const newline = window.subarray(0, await readInto(handle, window, start)).lastIndexOf(0x0a);
+      if (newline !== -1) {
+        complete = start + newline + 1;
+        break;
+      }
+      end = start;
+    }
+  } finally {
+    await handle.close();
+  }
+  await fs.truncate(filePath, complete);
+  return complete;
 }
 
 /**

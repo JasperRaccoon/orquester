@@ -1,8 +1,9 @@
 import React from "react";
-import { ArrowUp, Clock, FileText, Image as ImageIcon, Undo2, X } from "lucide-react";
+import { ArrowUp, Clock, Undo2, X } from "lucide-react";
 
 import type { AttachmentRef } from "@orquester/api";
 
+import { FileTypeIcon } from "../../../../icons/files";
 import { cn } from "../../../../lib/cn";
 import type { AgentChatTimelineRow } from "../../../../lib/agent-chat/contracts";
 import { ComposerPopover } from "../../composer/ComposerPopover";
@@ -37,21 +38,17 @@ function formatBytes(bytes: number | undefined): string {
  * Attachment chips.
  *
  * DELIBERATE DIFFERENCE FROM T3: T3 renders image thumbnails from a signed
- * asset URL. No route serves a thread attachment's bytes (§6.3 has no such
- * read and `ChatTimelineProps` no such seam), so an attachment renders as a
- * named chip. Inventing a URL here would produce a broken `<img>` on every
- * message, which is strictly worse than a chip that is honest.
+ * asset URL. §6.3's read-back route exists, but the timeline does not fetch
+ * it (§7.3 Built): nothing decodes a 10 MiB image into a bubble on a phone.
+ * An attachment renders as a named chip with the file-type icon the composer
+ * uses (`icons/files`), so a sent `.xlsx` looks like the chip the user staged.
  */
 function AttachmentChips({ attachments }: { attachments: readonly AttachmentRef[] }): React.ReactElement {
   return (
     <div className="mb-2 flex flex-col gap-1">
       {attachments.map((attachment) => (
         <div key={attachment.id} className="flex min-w-0 items-center gap-1.5 text-xs text-neutral-400">
-          {attachment.type === "image" ? (
-            <ImageIcon size={13} strokeWidth={1.8} aria-hidden className="shrink-0" />
-          ) : (
-            <FileText size={13} strokeWidth={1.8} aria-hidden className="shrink-0" />
-          )}
+          <FileTypeIcon name={attachment.name} mimeType={attachment.mimeType} size={14} className="shrink-0" />
           <span className="min-w-0 flex-1 truncate">{attachment.name}</span>
           <span className="ac-tabular shrink-0 text-neutral-500">
             {formatBytes(attachment.sizeBytes)}
@@ -244,12 +241,8 @@ export const UserMessageRow = React.memo(function UserMessageRow({
 /**
  * No bubble, no background, full column width: the agent's output is the page.
  *
- * A message the provider marked as **commentary** rather than the turn's answer
- * (Codex's `phase`) is rendered quietly — muted and indented under the activity
- * column. The projection is meant to demote it into the activity group before
- * it ever gets here (§7.3); this is the graceful degradation if one slips
- * through, because a thread of "I'll do X next" narration rendered as full
- * answers is unreadable.
+ * Codex commentary is the narration between tool calls. It remains a visible
+ * message while the turn runs and after the history is reloaded.
  */
 export const AssistantMessageRow = React.memo(function AssistantMessageRow({
   row
@@ -257,21 +250,14 @@ export const AssistantMessageRow = React.memo(function AssistantMessageRow({
   row: Row<"message">;
 }): React.ReactElement {
   const ctx = useTimelineRowContext();
-  const commentary = row.message.messageKind === "commentary";
   const text = row.message.text || (row.message.streaming ? "" : "(empty response)");
   return (
-    <div
-      className={cn(
-        "group/assistant relative min-w-0 px-1 py-0.5",
-        commentary && "ms-7 text-neutral-400"
-      )}
-    >
+    <div className="group/assistant relative min-w-0 px-1 py-0.5">
       <AuthorHeading>Agent</AuthorHeading>
       <ChatMarkdown
         text={text}
         streaming={row.message.streaming}
         onOpenFile={ctx.onOpenFile}
-        {...(commentary ? { className: "text-neutral-500" } : {})}
       />
     </div>
   );
@@ -323,12 +309,9 @@ export const ReasoningRow = React.memo(function ReasoningRow({
   const text = row.message.text;
   const live = row.message.streaming;
   const summary = firstLine(text);
-  // REALITY: the Codex CLI emits a `reasoning` item whose summary AND content
-  // are always empty (W7's capture). A reasoning row must therefore survive
-  // having no text at all — it stays a one-liner, it does not offer a
-  // disclosure, and it never opens an empty card.
-  const body = text.slice(summary.length).trim();
-  const canExpand = body.length > 0;
+  // Codex can emit an empty reasoning item. Keep its one-line status, while
+  // every nonempty trace can open even when it has only one long line.
+  const canExpand = text.trim().length > 0;
   const expanded = canExpand && ctx.isReasoningExpanded(id);
   const label = summary || (live ? "Thinking" : "Thought");
 
@@ -363,8 +346,8 @@ export const ReasoningRow = React.memo(function ReasoningRow({
         </div>
       )}
       {expanded ? (
-        <div className="ms-7 mt-1 whitespace-pre-wrap select-text text-sm leading-relaxed text-neutral-400">
-          {text}
+        <div className="ms-7 mt-1 max-h-96 overflow-auto select-text text-sm leading-relaxed text-neutral-400">
+          <ChatMarkdown text={text} onOpenFile={ctx.onOpenFile} />
         </div>
       ) : null}
     </div>

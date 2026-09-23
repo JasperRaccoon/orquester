@@ -35,6 +35,7 @@ import type {
   SendTurnResult
 } from "../../adapter.ts";
 import { AGENT_HOST_DEADLINES, withDeadline } from "../../support/deadline.ts";
+import { appendAttachmentPathLines, type AttachmentPathLine } from "../attachment-lines.ts";
 import { OpenCodeHttpError, isOpenCodeNotFound, type OpenCodeClient } from "./http.ts";
 import {
   NormalizerEmitter,
@@ -104,27 +105,12 @@ const ANCESTRY_TERMINAL_MAX_ATTEMPTS = 5;
  */
 const ANCESTRY_ASKED_MAX_ATTEMPTS = 12;
 /**
- * OpenCode ingests these natively, as a `file` part (see
- * {@link openCodeIngestsAttachment}); anything else rides as the host's
- * `Attached file:` path line in the prompt text (§4.1).
+ * OpenCode ingests the four image mimes, `text/*` and PDF natively (under the
+ * cap below, judged on the size the host STAT'd and stamped on the ref); anything
+ * else rides as a path line in the text (`attachment-lines.ts`).
  */
 const NATIVE_IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const NATIVE_FILE_PART_MAX_BYTES = 20 * 1024 * 1024;
-
-/**
- * §4.1: OpenCode ingests an attachment natively — as a `file` part the model
- * API reads — when it is one of the four image mimes, any `text/*` or a PDF,
- * and at most 20 MiB. Anything else (a zip, a file with no declared type, a
- * larger PDF) reaches the agent as the host's `Attached file:` path line.
- * Judged on the size the host STAT'd, which it stamps on the ref.
- */
-export function openCodeIngestsAttachment(attachment: AttachmentRef): boolean {
-  const mime = attachment.mimeType?.trim().toLowerCase() ?? "";
-  if ((attachment.sizeBytes ?? 0) > NATIVE_FILE_PART_MAX_BYTES) {
-    return false;
-  }
-  return NATIVE_IMAGE_MIMES.has(mime) || mime.startsWith("text/") || mime === "application/pdf";
-}
 
 export interface OpenCodeResumeCursor {
   schemaVersion: typeof OPENCODE_RESUME_VERSION;
@@ -1381,8 +1367,8 @@ export class OpenCodeThreadSession {
       this.state.contextMaxTokens = contextMaxTokens;
     }
 
-    const text = input.input.trim();
-    const fileParts = await this.buildFileParts(input.attachments);
+    const { parts: fileParts, pathLines } = await this.splitAttachments(input.attachments);
+    const text = appendAttachmentPathLines(input.input.trim(), pathLines);
     if (text.length === 0 && fileParts.length === 0) {
       throw new Error("OpenCode turns require text input or at least one attachment.");
     }
@@ -1656,24 +1642,30 @@ export class OpenCodeThreadSession {
     }
   }
 
-  private async buildFileParts(attachments: AttachmentRef[]): Promise<OpenCodePartInput[]> {
+  /**
+   * Split the refs into what OpenCode ingests natively — the four image mimes,
+   * `text/*` and `application/pdf` under the cap, as `file` parts the server
+   * reads off this host's disk — and what rides as a path line in the text
+   * (§4.1, §4.5). A ref whose path cannot be resolved fails the turn, as it
+   * does for Claude, Codex and Grok — a silently vanished file is the bug this
+   * task removes.
+   */
+  private async splitAttachments(
+    attachments: AttachmentRef[]
+  ): Promise<{ parts: OpenCodePartInput[]; pathLines: AttachmentPathLine[] }> {
     const parts: OpenCodePartInput[] = [];
+    const pathLines: AttachmentPathLine[] = [];
     for (const attachment of attachments) {
-      // The host hands this adapter only what `openCodeIngestsAttachment`
-      // accepts; anything the model API would reject is already an
-      // `Attached file:` line in the prompt text (§4.1).
-      if (!openCodeIngestsAttachment(attachment)) {
+      const absolute = await this.deps.ctx.resolveAttachmentPath(this.state.threadId, attachment.id);
+      const mime = attachment.mimeType?.trim().toLowerCase() ?? "";
+      const size = attachment.sizeBytes ?? 0;
+      const native =
+        size <= NATIVE_FILE_PART_MAX_BYTES &&
+        (NATIVE_IMAGE_MIMES.has(mime) || mime.startsWith("text/") || mime === "application/pdf");
+      if (!native) {
+        pathLines.push({ name: attachment.name, path: absolute });
         continue;
       }
-      const mime = attachment.mimeType?.trim().toLowerCase() ?? "";
-      // Never caught. The host resolved and STAT'd every attachment just
-      // before this call, so a miss here is a race, and skipping it would
-      // send the turn without the file. It fails the turn start visibly
-      // instead, as Claude's and Codex's resolves do.
-      const absolute = await this.deps.ctx.resolveAttachmentPath(
-        this.state.threadId,
-        attachment.id
-      );
       parts.push({
         type: "file",
         mime,
@@ -1681,7 +1673,7 @@ export class OpenCodeThreadSession {
         url: pathToFileURL(absolute).href
       });
     }
-    return parts;
+    return { parts, pathLines };
   }
 
   // -- interrupt and stop --------------------------------------------------

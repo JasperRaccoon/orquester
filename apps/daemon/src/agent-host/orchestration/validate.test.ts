@@ -84,6 +84,17 @@ describe("command validation (§4.1 bounds)", () => {
     );
   });
 
+  it("strips a client-supplied path: a command's ref is a reference and nothing else (§6.3)", () => {
+    const [file] = parseAttachments([
+      { type: "file", id: "a", name: "q3.xlsx", sizeBytes: 10, path: "/etc/passwd" }
+    ]);
+    assert.deepEqual(file, { type: "file", id: "a", name: "q3.xlsx", sizeBytes: 10 });
+    const [image] = parseAttachments([
+      { type: "image", id: "b", name: "x.png", mimeType: "image/png", sizeBytes: 10, path: "/x" }
+    ]);
+    assert.deepEqual(image, { type: "image", id: "b", name: "x.png", mimeType: "image/png", sizeBytes: 10 });
+  });
+
   it("targetTurnCount must be a non-negative integer", () => {
     assert.equal(parseTargetTurnCount(0), 0);
     rejects(() => parseTargetTurnCount(-1));
@@ -110,13 +121,6 @@ describe("host-native slash commands (§4.6.5, §4.6.9)", () => {
     assert.equal(isSlashInvocation("/review src"), true);
     assert.equal(isSlashInvocation("not /review"), false);
     assert.equal(providerInputFor("/review src"), "/review src");
-    // §4.1: an attachment's path line goes AFTER the text, never before, so a
-    // typed command still opens the turn and still dispatches.
-    const line = "Attached file: a.pdf (/appdir/daemon/agent/threads/t/attachments/a.pdf)";
-    assert.equal(providerInputFor("/review src", line), `/review src\n\n${line}`);
-    assert.equal(isSlashInvocation(providerInputFor("/review", line)), true);
-    assert.equal(providerInputFor("", line), line, "a file-only turn is its lines alone");
-    assert.equal(providerInputFor("/review src", ""), "/review src");
   });
 });
 

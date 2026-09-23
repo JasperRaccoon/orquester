@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
 
-import type { AgentChatStreamFrame } from "@orquester/api/agent-chat";
+import {
+  ACTIVITY_RETENTION_LIMIT,
+  ACTIVITY_RETENTION_SLACK,
+  itemPositionOf,
+  itemsDroppedByRetention,
+  type AgentChatStreamFrame
+} from "@orquester/api/agent-chat";
 
 import {
   applyFrame,
@@ -9,9 +15,10 @@ import {
   createReducerState,
   foldStateFromSnapshot,
   needsResync,
-  patchSlice
+  patchSlice,
+  type AgentChatReducerState
 } from "./reducer.logic";
-import { activity, ev, head, message, resetBuilders, snapshot } from "./test-helpers";
+import { activity, ev, head, historyPage, message, resetBuilders, snapshot, stamp } from "./test-helpers";
 
 const eventFrame = (event: ReturnType<typeof ev>): AgentChatStreamFrame => ({
   kind: "event",
@@ -117,7 +124,7 @@ describe("applyFrame — snapshots", () => {
     const fold = foldStateFromSnapshot(snapshot({ items: [resolved], seq: 3 }));
     assert.ok(fold.closedRequestIds.has("r1"));
     assert.equal(fold.activities.length, 1);
-    assert.equal(fold.itemIndex.get(resolved.id), 0);
+    assert.equal(itemPositionOf(fold, resolved.id), 0);
   });
 
   it("a snapshot's seq is the floor a resume continues from", () => {
@@ -193,6 +200,59 @@ describe("reconnect mid-stream", () => {
     assert.equal(state.slice.seq, 5);
     const ids = state.slice.entries.map((item) => item.id);
     assert.deepEqual(ids, ["m1", "m2", "m3", "m4", "m5"], "no loss and no duplicate");
+  });
+});
+
+describe("applyFrame — the history bridge", () => {
+  /** A window as full as the fold holds it untrimmed: the next row makes it drop some. */
+  const fullWindow = (): AgentChatReducerState =>
+    applyFrame(createReducerState("s1"), {
+      kind: "snapshot",
+      thread: snapshot({
+        items: Array.from({ length: ACTIVITY_RETENTION_LIMIT + ACTIVITY_RETENTION_SLACK }, (_, index) =>
+          activity("tool.completed", { toolUseId: `c${index}` }, { id: `w${index}`, createdAt: stamp(index) })
+        ),
+        seq: 1_000
+      })
+    });
+
+  /** Append rows until one step trims — however many rows it takes — and hand back what it dropped. */
+  function untilTrim(state: AgentChatReducerState, visit: (next: AgentChatReducerState) => void) {
+    const first = state.fold.seq + 1;
+    for (let seq = first; seq < first + 2 * ACTIVITY_RETENTION_LIMIT; seq += 1) {
+      state = applyFrame(
+        state,
+        eventFrame(
+          ev("thread.activity-appended", {
+            activity: activity("tool.completed", { toolUseId: `n${seq}` }, { id: `n${seq}`, createdAt: stamp(seq) })
+          }, { seq })
+        )
+      );
+      visit(state);
+      const dropped = itemsDroppedByRetention(state.fold);
+      if (dropped.length > 0) {
+        return { state, dropped };
+      }
+    }
+    throw new Error("the fold never trimmed");
+  }
+
+  it("never touches the history while nothing is loaded — the fast path is what it was", () => {
+    const start = fullWindow();
+    const history = start.slice.history;
+    const { state } = untilTrim(start, (next) => assert.equal(next.slice.history, history));
+    assert.equal(state.slice.history, history);
+    assert.deepEqual(state.slice.history.bridge, []);
+  });
+
+  it("puts what a step dropped onto the bridge while a page is loaded", () => {
+    const base = fullWindow();
+    const start = patchSlice(base, { history: { ...base.slice.history, pages: [historyPage()] } });
+    const { state, dropped } = untilTrim(start, () => {});
+    assert.deepEqual(
+      state.slice.history.bridge.map((item) => item.id),
+      dropped.map((item) => item.id)
+    );
   });
 });
 

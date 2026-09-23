@@ -207,7 +207,8 @@ describe("E6: a replayed transcript rebuilds the timeline", () => {
           id: "turn-1",
           items: [
             { type: "userMessage", id: "u1", content: [{ type: "text", text: "hello" }] },
-            { type: "agentMessage", id: "a1", text: "hi there" }
+            { type: "agentMessage", id: "a1", text: "I'll check", phase: "commentary" },
+            { type: "agentMessage", id: "a2", text: "hi there", phase: "final_answer" }
           ]
         }
       ]
@@ -228,7 +229,13 @@ describe("E6: a replayed transcript rebuilds the timeline", () => {
     }
 
     const { sink } = await replay(events);
-    assert.deepEqual(roleText(sink.events()), ["user:hello", "assistant:hi there"]);
+    assert.deepEqual(roleText(sink.events()), ["user:hello", "assistant:I'll check", "assistant:hi there"]);
+    assert.deepEqual(
+      sink.ofType("thread.message-sent")
+        .filter((event) => event.payload.role === "assistant")
+        .map((event) => event.payload.messageKind),
+      ["commentary", "answer"]
+    );
   });
 
   it("opencode: a user text part becomes the user's message", async () => {

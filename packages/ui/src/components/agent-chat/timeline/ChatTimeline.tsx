@@ -11,8 +11,15 @@ import type { ChatTimelineProps, TimelineScrollPosition } from "../contracts";
 import { ChatIconButton, ScrollToBottomButton } from "../primitives";
 import { readPlanWithoutStore, TimelineRowContext, type TimelineRowContextValue } from "./context";
 import { TimelineRow } from "./TimelineRow";
+import { LoadOlderRow } from "./rows/LoadOlderRow";
 
-import { findFirstVisibleIndex, offsetWithinRow, type RowMetric } from "./anchor";
+import {
+  findFirstVisibleIndex,
+  findRowElement,
+  offsetWithinRow,
+  scrollRowTo,
+  type RowMetric
+} from "./anchor";
 import {
   armSettleLatch,
   isSettling,
@@ -31,6 +38,12 @@ import {
  * the pending write is flushed on unmount regardless, so nothing is lost.
  */
 const REMEMBER_SCROLL_DEBOUNCE_MS = 200;
+
+/**
+ * Breathing room left above a revealed row, so the command palette's hit
+ * lands just under the top edge instead of flush against the fade.
+ */
+const REVEAL_TOP_MARGIN_PX = 16;
 
 /**
  * The timeline (spec §7.3).
@@ -114,13 +127,32 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
     skills,
     projectPath,
     scroll,
-    onScrollPositionChange
+    onScrollPositionChange,
+    historyHasOlder = false,
+    historyLoading = false,
+    historyError = null,
+    onLoadOlderHistory,
+    revealRequest = null,
+    onRevealHandled
   } = props;
+  /**
+   * "Load older turns" (design 2026-09-23 §C): only on the thread's own,
+   * writable timeline — the drill-in and a read-only surface page nothing.
+   */
+  const showLoadOlder =
+    historyHasOlder &&
+    onLoadOlderHistory !== undefined &&
+    agentId === undefined &&
+    readOnly !== true;
+  // A window that retention emptied is not an empty thread: with older
+  // history on offer it shows the load row, never the resumable-conversations
+  // panel or "No messages yet.".
   const showEmptyPanel =
     threadReady &&
     rows.length === 0 &&
     agentId === undefined &&
     !readOnly &&
+    !showLoadOlder &&
     emptyThreadPanel !== undefined &&
     emptyThreadPanel !== null;
 
@@ -151,6 +183,30 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
    */
   const ignoreScrollUntilRef = React.useRef(0);
   const firstPaintRef = React.useRef(true);
+  /**
+   * `follow` as of this render, readable from observers created in an earlier
+   * one. A reveal disarms follow before the store has re-rendered us, and a
+   * resize callback still holding the old value would yank the page straight
+   * back to the end.
+   */
+  const followRef = React.useRef(follow);
+  followRef.current = follow;
+  /**
+   * The row at the top of the viewport and how far into it the edge sits
+   * (negative: the row starts below the edge), as of the last scroll
+   * measurement. A history page landing above — or the load row changing —
+   * moves everything under the user; putting this row back is the anchoring.
+   */
+  const readingAnchorRef = React.useRef<{ rowId: string; offset: number } | null>(null);
+  /**
+   * Everything that can change ABOVE the reading position: the first row (a
+   * history page landing, or pages dropped by a snapshot) and the load row's
+   * own state (a spinner, an error line, the row going away at turn 1).
+   */
+  const headKey = `${rows[0]?.id ?? ""}\u0000${
+    showLoadOlder ? `${historyLoading ? "loading" : "idle"}:${historyError ?? ""}` : "none"
+  }`;
+  const headKeyRef = React.useRef(headKey);
 
   // The drill-in dispatches no commands, whether or not the caller says so.
   const effectiveReadOnly = readOnly === true || agentId !== undefined;
@@ -351,9 +407,11 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
    * them is bounded by their count, not by the row count.
    */
   const anchorAtOffset = React.useCallback(
-    (scrollOffset: number): { rowId: string | null; offsetWithinRow: number } => {
+    (
+      scrollOffset: number
+    ): { rowId: string | null; offsetWithinRow: number; signedOffset: number } => {
       const container = contentRef.current;
-      if (!container) return { rowId: null, offsetWithinRow: 0 };
+      if (!container) return { rowId: null, offsetWithinRow: 0, signedOffset: 0 };
       const children = container.children;
       const base = container.offsetTop;
       const metricAt = (index: number): RowMetric => {
@@ -361,17 +419,22 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
         return { top: element.offsetTop - base, height: element.offsetHeight };
       };
       let index = findFirstVisibleIndex(children.length, metricAt, scrollOffset);
-      if (index < 0) return { rowId: null, offsetWithinRow: 0 };
-      // Land on a real row, never on a spacer.
+      if (index < 0) return { rowId: null, offsetWithinRow: 0, signedOffset: 0 };
+      // Land on a real row, never on a spacer or the load-older row.
       while (index < children.length) {
         const element = children[index] as HTMLElement;
         const rowId = element.dataset["timelineRowId"];
         if (rowId !== undefined) {
-          return { rowId, offsetWithinRow: offsetWithinRow(metricAt(index), scrollOffset) };
+          const metric = metricAt(index);
+          return {
+            rowId,
+            offsetWithinRow: offsetWithinRow(metric, scrollOffset),
+            signedOffset: scrollOffset - metric.top
+          };
         }
         index += 1;
       }
-      return { rowId: null, offsetWithinRow: 0 };
+      return { rowId: null, offsetWithinRow: 0, signedOffset: 0 };
     },
     []
   );
@@ -379,6 +442,9 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
   const publishPosition = React.useCallback(
     (scrollOffset: number, atEnd: boolean) => {
       const anchor = anchorAtOffset(scrollOffset);
+      if (anchor.rowId !== null) {
+        readingAnchorRef.current = { rowId: anchor.rowId, offset: anchor.signedOffset };
+      }
       const position: TimelineScrollPosition = {
         rowId: anchor.rowId,
         offsetWithinRow: anchor.offsetWithinRow,
@@ -508,20 +574,13 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
     if (!scroll || scroll.atEnd) {
       node.scrollTop = node.scrollHeight;
     } else if (scroll.rowId !== null) {
-      // `CSS.escape` is not universal (and absent in a non-DOM render): a row
-      // id we cannot safely quote falls back to the pixel offset rather than
-      // throwing inside a layout effect.
-      const escaped =
-        typeof CSS !== "undefined" && typeof CSS.escape === "function"
-          ? CSS.escape(scroll.rowId)
-          : null;
-      const target =
-        escaped === null
-          ? null
-          : node.querySelector<HTMLElement>(`[data-timeline-row-id="${escaped}"]`);
+      // A row id that cannot be found (or quoted) falls back to the pixel offset.
+      const target = findRowElement(node, scroll.rowId);
       if (target) {
-        node.scrollTop =
-          node.scrollTop + (target.getBoundingClientRect().top - node.getBoundingClientRect().top) - scroll.offsetWithinRow;
+        // `offsetWithinRow` is how far the edge sat INTO the row, so the row's
+        // top goes that far above the edge (it used to be subtracted, which
+        // restored the position 2 × offset too high).
+        scrollRowTo(node, target, scroll.offsetWithinRow);
       } else {
         node.scrollTop = scroll.scrollOffset;
       }
@@ -532,6 +591,10 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
       firstPaintRef.current = false;
     });
     hadRowsRef.current = rows.length > 0;
+    // A different list: the previous thread's anchor names none of its rows,
+    // and this commit's head change is the switch itself, not a prepend.
+    readingAnchorRef.current = null;
+    headKeyRef.current = headKey;
     armSettling(listIdentity);
     // Only on a thread switch: a rows change must not re-run the restore.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -559,12 +622,95 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
     const node = contentRef.current;
     if (!node || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(() => {
-      if (!follow) return;
+      if (!followRef.current) return;
       scrollToEnd(animateNow(false));
     });
     observer.observe(node);
     return () => observer.disconnect();
   }, [follow, scrollToEnd, animateNow]);
+
+  // -------------------------------------------------------------------------
+  // Older history: anchoring a prepend, and the reveal
+  // -------------------------------------------------------------------------
+
+  /**
+   * **Scroll anchoring on prepend.** When the head changes, the row the user
+   * was reading goes back to exactly where it sat, so twenty older turns
+   * landing above it never move the page under them. Only while NOT
+   * following: at the end, the re-pin above owns the position. A hidden tab
+   * has no position to keep.
+   */
+  React.useLayoutEffect(() => {
+    if (headKeyRef.current === headKey) return;
+    headKeyRef.current = headKey;
+    if (followRef.current) return;
+    const node = scrollerRef.current;
+    const anchor = readingAnchorRef.current;
+    if (!node || !anchor || node.offsetParent === null) return;
+    const row = findRowElement(node, anchor.rowId);
+    if (!row) return;
+    ignoreScrollUntilRef.current = Date.now() + 80;
+    scrollRowTo(node, row, anchor.offset);
+  }, [headKey]);
+
+  /** The load row's click: anchor on what is on screen NOW, then ask. */
+  const loadOlder = React.useCallback(() => {
+    const node = scrollerRef.current;
+    if (node) {
+      const anchor = anchorAtOffset(node.scrollTop);
+      if (anchor.rowId !== null) {
+        readingAnchorRef.current = { rowId: anchor.rowId, offset: anchor.signedOffset };
+      }
+    }
+    onLoadOlderHistory?.();
+  }, [anchorAtOffset, onLoadOlderHistory]);
+
+  /**
+   * **The reveal** — the command palette's hit. Scroll its row to just under
+   * the top edge, let the follow flag say where that left us (a reveal of the
+   * newest turn may well be at the end), record the position, and hand the
+   * nonce back. Retried on every rows change until the row is rendered, and
+   * on a resize until the tab is visible — the palette opens the tab first,
+   * and a hidden scroller has no geometry to scroll.
+   */
+  const handledRevealRef = React.useRef<number | null>(null);
+  const attemptReveal = React.useCallback(() => {
+    if (revealRequest === null || agentId !== undefined) return;
+    if (handledRevealRef.current === revealRequest.nonce) return;
+    const node = scrollerRef.current;
+    if (!node || node.offsetParent === null) return;
+    const row = findRowElement(node, revealRequest.rowId);
+    if (!row) return;
+    handledRevealRef.current = revealRequest.nonce;
+    ignoreScrollUntilRef.current = Date.now() + 80;
+    scrollRowTo(node, row, -REVEAL_TOP_MARGIN_PX);
+    const metrics = readMetrics();
+    const nextFollow = metrics === null ? false : nextFollowState(metrics);
+    followRef.current = nextFollow;
+    if (nextFollow !== follow) onFollowChange(nextFollow);
+    publishPosition(node.scrollTop, nextFollow);
+    onRevealHandled?.(revealRequest.nonce);
+  }, [
+    agentId,
+    follow,
+    onFollowChange,
+    onRevealHandled,
+    publishPosition,
+    readMetrics,
+    revealRequest
+  ]);
+
+  React.useLayoutEffect(() => {
+    attemptReveal();
+  }, [attemptReveal, rows]);
+
+  React.useEffect(() => {
+    const node = scrollerRef.current;
+    if (revealRequest === null || !node || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => attemptReveal());
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [attemptReveal, revealRequest]);
 
   const reArmFollow = React.useCallback(() => {
     onFollowChange(true);
@@ -652,6 +798,9 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
             className={cn("ac-rows flex flex-col", showEmptyPanel && "h-full")}
           >
             <div className="h-3 shrink-0 sm:h-4" aria-hidden />
+            {showLoadOlder ? (
+              <LoadOlderRow loading={historyLoading} error={historyError} onLoad={loadOlder} />
+            ) : null}
             {rows.map((row) => (
               <TimelineRow key={row.id} row={row} enter={enterFlag(row.id)} />
             ))}
@@ -660,7 +809,7 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
               // (`EmptyThreadPanel`, built by the view). The wrapper fits the
               // visible area so only the panel's own list scrolls.
               emptyThreadPanel
-            ) : rows.length === 0 ? (
+            ) : rows.length === 0 && !showLoadOlder ? (
               <div className="mx-auto w-full max-w-3xl py-12 text-center text-sm italic text-neutral-600">
                 {agentId === undefined
                   ? "No messages yet."
@@ -723,9 +872,19 @@ function useRowEnterFlags(
     state.current = { session: sessionId, flags: new Map(), primed: false };
   }
   const current = state.current;
-  for (const row of rows) {
-    if (!current.flags.has(row.id)) current.flags.set(row.id, current.primed);
+  // A row that arrives ABOVE every row already on screen is older history — a
+  // "Load older turns" page landing — not news: it never rises in. Rows after
+  // the first known one keep the rule above.
+  let firstKnownIndex = -1;
+  for (let index = 0; index < rows.length; index += 1) {
+    if (current.flags.has(rows[index]!.id)) {
+      firstKnownIndex = index;
+      break;
+    }
   }
+  rows.forEach((row, index) => {
+    if (!current.flags.has(row.id)) current.flags.set(row.id, current.primed && index > firstKnownIndex);
+  });
   current.primed = true;
   // Drop ids that have left, so a long-lived tab does not accumulate a flag per
   // row it ever showed.

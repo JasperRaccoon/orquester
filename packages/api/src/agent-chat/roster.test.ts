@@ -523,3 +523,49 @@ test("the cap evicts by rank but returns survivors in first-seen order", () => {
   const sorted = [...firstSeen].sort();
   assert.deepEqual(firstSeen, sorted, "survivors keep their original insertion order");
 });
+
+test("a resume reopens even when the NEW run's in-place progress row precedes the OLD run's terminal row", () => {
+  // Owner incident 2026-09-23: a deploy restarted the host under three running
+  // subagents; the resumed CLI reported each as `stopped` ("didn't finish
+  // before the previous session ended"), the agent relaunched them under the
+  // SAME task ids, and the roster kept every one `interrupted` for the rest of
+  // the thread's life. Progress rows carry STABLE ids (`task-progress:…`,
+  // `task-usage:…`) and are replaced in place, so in list order the relaunched
+  // run's progress row — already naming the NEW launching call — sits BEFORE
+  // the old run's `stopped` row. Reading the launching call off every task row
+  // therefore saw "no change" when the resume's start row arrived.
+  resetActivityIds();
+  const agents = foldSubagentActivities([
+    activity("task.started", agentTask("t1", { title: "Backend", toolUseId: "toolu_old" })),
+    // The in-place row: its position is its FIRST emission's, its content the latest.
+    activity(
+      "task.progress",
+      agentTask("t1", { summary: "Confirming test tables", toolUseId: "toolu_new", usageSnapshot: true }),
+      { id: "task-usage:thread:t1" }
+    ),
+    // The resumed CLI's notice for the run the restart killed: no launching call on it.
+    activity("task.completed", agentTask("t1", { status: "stopped", summary: "didn't finish" })),
+    // The relaunch under the same task id, by a new tool call.
+    activity("task.started", agentTask("t1", { title: "Backend", toolUseId: "toolu_new", isBackgrounded: true }))
+  ]);
+  const agent = byId(agents, "t1");
+  assert.equal(agent.status, "running", "the relaunched run is live, not the killed one");
+  assert.equal(agent.activationCount, 2);
+  assert.equal(agent.completedAt, null);
+  assert.equal(agent.result, null, "the 'didn't finish' notice does not label the new run");
+
+  // The same shape, but the start row names the OLD call: a late delivery, no reopen.
+  resetActivityIds();
+  const late = foldSubagentActivities([
+    activity("task.started", agentTask("t1", { title: "Backend", toolUseId: "toolu_old" })),
+    activity(
+      "task.progress",
+      agentTask("t1", { summary: "Confirming", toolUseId: "toolu_old", usageSnapshot: true }),
+      { id: "task-usage:thread:t1" }
+    ),
+    activity("task.completed", agentTask("t1", { status: "stopped", summary: "didn't finish" })),
+    activity("task.started", agentTask("t1", { title: "Backend", toolUseId: "toolu_old" }))
+  ]);
+  assert.equal(byId(late, "t1").status, "interrupted");
+  assert.equal(byId(late, "t1").activationCount, 1);
+});

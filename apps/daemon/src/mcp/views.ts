@@ -232,7 +232,7 @@ export function latestSettledTurn(turns: readonly Turn[]): Turn | null {
 /**
  * The main agent's answer in a turn: its assistant messages, joined. A message the provider marked as commentary
  * (Codex's `phase`, carried as `messageKind`) is the running "I'll do X next" narration, not the answer — the GUI
- * demotes it into the activity group (`isDemotedAssistantMessage`), and it is left out here too.
+ * shows it as narration and never as the turn's answer (`isCommentaryAssistantMessage`), and it is left out here too.
  */
 export function assistantTextForTurn(items: readonly ThreadItem[], turnId: string): string {
   return items.filter((i): i is Extract<ThreadItem, { kind: "message" }> => i.kind === "message" && i.role === "assistant" && i.turnId === turnId && !i.agentId && i.messageKind !== "commentary").map((i) => i.text).filter(Boolean).join("\n\n");

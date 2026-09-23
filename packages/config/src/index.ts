@@ -200,6 +200,26 @@ export function agentChatThreadAttachmentsDir(baseDir: string, threadId: string)
   return joinPath(agentChatThreadDir(baseDir, threadId), "attachments");
 }
 
+/**
+ * The fold snapshot: the thread's folded state as of one `seq`, rewritten
+ * atomically every N events so a cold load folds only the log's tail. A cache
+ * of the log, never an authority — a missing, corrupt or older-version file is
+ * simply ignored and the log is folded from the top.
+ */
+export function agentChatThreadStatePath(baseDir: string, threadId: string): string {
+  return joinPath(agentChatThreadDir(baseDir, threadId), "state.json");
+}
+
+/**
+ * The host-wide thread index (SQLite): turn boundaries, item positions and
+ * full text, all derived from the per-thread logs. Disposable by
+ * construction — it is deleted and rebuilt on any schema or corruption
+ * problem, so it is outside every deploy rollback boundary.
+ */
+export function agentChatIndexPath(baseDir: string): string {
+  return joinPath(agentChatDir(baseDir), "index.sqlite");
+}
+
 /** The bounded command-receipt ring shared by every thread. */
 export function agentChatReceiptsPath(baseDir: string): string {
   return joinPath(agentChatDir(baseDir), "receipts.json");

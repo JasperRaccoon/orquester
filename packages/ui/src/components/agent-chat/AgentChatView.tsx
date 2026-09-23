@@ -1,4 +1,5 @@
 import React from "react";
+import { flushSync } from "react-dom";
 
 import {
   DEFAULT_RUNTIME_MODE,
@@ -48,6 +49,7 @@ import {
   type RewindTarget
 } from "../../lib/agent-chat/rewind.logic";
 import { cn } from "../../lib/cn";
+import { canLoadOlderHistory } from "../../lib/agent-chat/history.logic";
 import { isDefaultThreadTitle } from "../../lib/session-kind";
 import { isActiveChatTab, releaseActiveChatTab } from "../../lib/agent-chat-active-tab";
 import { anotherLayerOwnsTheKeyboard } from "../attention/GlobalShortcutListener";
@@ -168,7 +170,7 @@ function fullOutputText(item: ThreadItem): string {
  */
 export function AgentChatView({ session, projectPath, active }: AgentChatViewProps): JSX.Element {
   const sessionId = session.id;
-  const { slice, actions, rows, activePlan, actionableProposedPlan, reverting } =
+  const { slice, actions, rows, activePlan, actionableProposedPlan, reverting, reveal } =
     useAgentChatThread(sessionId);
   const pending = useAgentChatPending(sessionId);
   const roster = useAgentChatRoster(sessionId);
@@ -342,6 +344,22 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
     [sessionId]
   );
 
+  // --- a queued message returned to the composer (§7.4) --------------------
+  // Every other insert from outside the composer places the caret and leaves
+  // focus where it is. "Cancel and return to the composer" is the user asking
+  // to edit that message, so here the composer takes focus, at the end of the
+  // returned text. The store's action does the insert (`appendToDraft`: the
+  // text into the draft, the attachments back as chips); this adds only the
+  // explicit `focusComposer`. `flushSync` first: `focusAtEnd` measures the
+  // textarea's value, and the returned text must already be in it.
+  const returnQueuedToComposer = React.useCallback(
+    (queuedId: string) => {
+      flushSync(() => actions.returnQueuedToComposer(queuedId));
+      focusComposer(sessionId);
+    },
+    [actions, sessionId]
+  );
+
   // --- the client-seeded thread title (§7.7) -------------------------------
   // There is no title-generation service and none is introduced: the client
   // seeds the title from the first message and writes it through the ordinary
@@ -417,6 +435,17 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
     (target: RewindTarget) =>
       rewindTo({ messageId: target.messageId, targetTurnCount: target.targetTurnCount }),
     [rewindTo]
+  );
+
+  // --- older history and the palette's reveal (design 2026-09-23) ----------
+  // The "Load older turns" row pages the indexed log in ABOVE the window; the
+  // rows it brings are already in `rows` (the store merges them), so this is
+  // only the door and its state. A failure lands on the row in words — the
+  // action never rejects — and a search hit's reveal scrolls a row into view.
+  const historyHasOlder = !paintOnly && canLoadOlderHistory(slice.history);
+  const loadOlderHistory = React.useCallback(
+    () => dispatch(() => actions.loadOlderHistory()),
+    [actions]
   );
 
   // --- the plan-ready decision (§7.3, §7.5) --------------------------------
@@ -733,16 +762,22 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               onBackgroundTool={
                 paintOnly ? noop : (toolUseId) => dispatch(() => actions.backgroundTool({ toolUseId }))
               }
-              // A straight pass-through: the store's action already puts the
-              // message's text back in the draft and its attachments back as
-              // chips (`appendToDraft`), so wrapping it would insert twice.
-              onReturnQueuedToComposer={paintOnly ? noop : actions.returnQueuedToComposer}
+              // The store's action already puts the message's text back in the
+              // draft and its attachments back as chips (`appendToDraft`), so the
+              // wrapper must not insert anything itself: it only adds the focus.
+              onReturnQueuedToComposer={paintOnly ? noop : returnQueuedToComposer}
               errorBanner={paintOnly ? null : slice.errorBanner}
               onDismissErrorBanner={paintOnly ? noop : actions.dismissErrorBanner}
               roster={roster.agents}
               projectPath={projectPath}
               scroll={paintOnly ? null : scrollPosition}
               onScrollPositionChange={paintOnly ? noop : rememberScrollPosition}
+              historyHasOlder={historyHasOlder}
+              historyLoading={!paintOnly && slice.history.loading}
+              historyError={paintOnly ? null : slice.history.error}
+              onLoadOlderHistory={paintOnly ? noop : loadOlderHistory}
+              revealRequest={paintOnly ? null : reveal}
+              onRevealHandled={actions.acknowledgeReveal}
             />
           )}
 

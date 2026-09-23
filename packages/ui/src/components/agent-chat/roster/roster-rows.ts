@@ -5,24 +5,21 @@
  * Three rules govern this file and they pull against each other, which is why
  * the selection is pure and tested rather than inlined in the component:
  *
- *  1. **Spawn order is stable.** Rows update in place; a status change never
- *     re-sorts the list. *T3: `AgentsPanel.tsx:1-12`.*
+ *  1. **Active rows lead.** Within each liveness state, rows retain spawn
+ *     order. This intentionally differs from T3's stable global order.
  *  2. **Rows past five collapse behind "N more", and finished rows fade and
  *     disappear when the turn ends.** Both are ours — T3 renders every row
- *     forever — so they must not turn into the reshuffle rule 1 forbids:
- *     collapsing only ever *filters* the stable order, it never reorders it.
- *     *T3: `state/subagentRuntime.ts:847-848` — "must never reshuffle rows
- *     that remain visible".*
+ *     forever — so the cap filters the live-first order without a second
+ *     reshuffle. A status change can move a row ahead of finished work.
  *  3. **A live background row is exempt from both.** It outlives the turn that
  *     started it, so it is always rendered, it does not count towards the
- *     five, and hiding or showing the rest never moves it — which falls out of
- *     rule 2: everything is one filtered list in one stable order, never two
- *     partitioned groups.
+ *     five. Agent and shell rows are rendered in separate sections after
+ *     selection, with active rows first within each section.
  *
  * **Which rows survive is W11's `deriveRosterDockView`** (`lib/agent-chat/
  * roster.logic.ts`) — one implementation of the collapse, the fade and the
  * background exemption, shared with the rest of the client. This module adds
- * only what a *dock* needs on top of it: the stable order those rows render in
+ * only what a *dock* needs on top of it: the live-first order those rows render in
  * (the selector returns them partitioned), the intermediate `fading` phase
  * that the exit transition needs, and the presentational status mapping.
  */
@@ -116,6 +113,8 @@ export function rosterDisplayOrder(
   return agents
     .map((agent, index) => ({ agent, index, at: Date.parse(agent.firstSeenAt) }))
     .sort((left, right) => {
+      const liveDifference = Number(isActiveStatus(right.agent.status)) - Number(isActiveStatus(left.agent.status));
+      if (liveDifference !== 0) return liveDifference;
       const leftAt = Number.isNaN(left.at) ? Number.NaN : left.at;
       const rightAt = Number.isNaN(right.at) ? Number.NaN : right.at;
       if (!Number.isNaN(leftAt) && !Number.isNaN(rightAt) && leftAt !== rightAt) {

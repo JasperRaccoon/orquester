@@ -18,16 +18,15 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type {
-  AccountHome,
-  AgentAdapterId,
-  RuntimeEvent,
-  RuntimeMode
+import {
+  MAX_TURN_INPUT_CHARS,
+  type AccountHome,
+  type AgentAdapterId,
+  type RuntimeEvent,
+  type RuntimeMode
 } from "@orquester/api/agent-chat";
-import { MAX_TURN_INPUT_CHARS } from "@orquester/api/agent-chat";
 
 import type { AdapterContext } from "../../adapter.ts";
-import { ATTACHMENT_LINES_MAX_CHARS } from "../../orchestration/attachment-lines.ts";
 import { resumeCursorFor } from "../../orchestration/resume.ts";
 import { createGrokAdapter, GROK_CAPABILITIES, isBlockedGrokCommand } from "./index.ts";
 import { parseGrokResumeCursor } from "./session.ts";
@@ -532,21 +531,13 @@ test("listSessions and the adapter id", async () => {
   await r.dispose();
 });
 
-test("attachments reach the agent as the HOST's path lines, because promptCapabilities.image is false", async () => {
+test("attachments reach the agent as PATHS, because promptCapabilities.image is false", async () => {
   const r = await rig();
-  // Nothing is ingested natively — an image included — so the host flattens
-  // every attachment into an `Attached file:` line (§4.1) and this adapter
-  // adds no block of its own.
-  assert.equal(
-    r.adapter.ingestsAttachment({ type: "image", id: "a1", name: "shot.png", mimeType: "image/png", sizeBytes: 10 }),
-    false
-  );
   await start(r);
-  const line = "Attached file: shot.png (/appdir/daemon/agent/threads/t1/attachments/a1.png)";
   await r.adapter.sendTurn({
     threadId: "t1",
-    input: `look at this\n\n${line}`,
-    attachments: [],
+    input: "look at this",
+    attachments: [{ type: "image", id: "a1", name: "shot.png", mimeType: "image/png", sizeBytes: 10 }],
     interactionMode: "default"
   });
   const completed = (await r.waitFor(
@@ -560,32 +551,59 @@ test("attachments reach the agent as the HOST's path lines, because promptCapabi
     .filter((event) => event.payload.streamKind === "assistant_text")
     .map((event) => event.payload.delta)
     .join("");
-  assert.ok(echoed.includes(line), `the host's line verbatim, got: ${echoed}`);
-  assert.doesNotMatch(echoed, /Attached files:/);
+  assert.match(echoed, /Attached files:/);
+  assert.match(echoed, /shot\.png/);
   await r.dispose();
 });
 
-test("the input guard leaves room for the host's path lines after a full-length message", async () => {
+test("a path the text already names is not repeated in the Attached files block", async () => {
   const r = await rig();
   await start(r);
+  // The rig resolves every attachment to its cwd, so that is the path the
+  // composer would have inserted at the caret on upload (§7.4).
+  const typed = `open ${r.cwd} and tell me`;
+  await r.adapter.sendTurn({
+    threadId: "t1",
+    input: typed,
+    attachments: [{ type: "file", id: "a1", name: "q3.xlsx", sizeBytes: 10 }],
+    interactionMode: "default"
+  });
+  await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
+  const echoed = r.events
+    .filter((event): event is Extract<RuntimeEvent, { type: "content.delta" }> => event.type === "content.delta")
+    .filter((event) => event.payload.streamKind === "assistant_text")
+    .map((event) => event.payload.delta)
+    .join("");
+  assert.doesNotMatch(echoed, /Attached files:/);
+  assert.ok(echoed.includes(typed), `expected the typed text verbatim in ${JSON.stringify(echoed)}`);
+  await r.dispose();
+});
+
+test("the input guard bounds the typed text, never the Attached files block after it", async () => {
+  const r = await rig();
+  await start(r);
+  const attachments = [{ type: "file" as const, id: "a1", name: "q3.xlsx", sizeBytes: 10 }];
   await assert.rejects(
     r.adapter.sendTurn({
       threadId: "t1",
-      input: "x".repeat(MAX_TURN_INPUT_CHARS + ATTACHMENT_LINES_MAX_CHARS + 1),
-      attachments: [],
+      input: "x".repeat(MAX_TURN_INPUT_CHARS + 1),
+      attachments,
       interactionMode: "default"
     }),
     /exceeds/
   );
-  const line = "Attached file: a.pdf (/appdir/daemon/agent/threads/t1/attachments/a.pdf)";
-  const accepted = await r.adapter.sendTurn({
+  // A full-length message still takes its block on top.
+  await r.adapter.sendTurn({
     threadId: "t1",
-    input: `${"x".repeat(MAX_TURN_INPUT_CHARS)}\n\n${line}`,
-    attachments: [],
+    input: "x".repeat(MAX_TURN_INPUT_CHARS),
+    attachments,
     interactionMode: "default"
   });
-  assert.equal(accepted.turnId.length > 0, true);
-  await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
+  const completed = (await r.waitFor(
+    (event) => event.type === "turn.completed",
+    "turn.completed"
+  )) as Extract<RuntimeEvent, { type: "turn.completed" }>;
+  assert.equal(completed.payload.state, "completed");
   await r.dispose();
 });
 

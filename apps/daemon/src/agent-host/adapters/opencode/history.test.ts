@@ -203,6 +203,33 @@ test("fixture 10: an empty fork projects to no events at all", () => {
   assert.deepEqual(project("thread-1", historyFor(FIXTURE_10, EMPTY_FORK)), []);
 });
 
+test("fixture 10: a replayed prompt loses the `Attached files:` block the adapter appended", () => {
+  // The capture's own bodies, carrying the text the adapter SENDS with a
+  // non-native attachment (`attachment-lines.ts`): OpenCode stores a
+  // prompt's text part as it was sent, suffix included.
+  const messages = structuredClone(historyFor(FIXTURE_10, ROOT_SESSION));
+  const setText = (index: number, text: string): void => {
+    const part = messages[index]!.parts.find((candidate) => candidate.type === "text");
+    assert.ok(part !== undefined, `message ${index} of the capture has a text part`);
+    (part as { text: string }).text = text;
+  };
+  setText(0, "hello\n\nAttached files:\n- q3.xlsx: /a/q3.xlsx");
+  // The agent's text was never the adapter's, so a block it wrote stays.
+  setText(1, "done\n\nAttached files:\n- q3.xlsx: /a/q3.xlsx");
+  // An attachment-only prompt: the block is all the user sent, and a replay
+  // has no attachment chips to show instead, so it stays.
+  setText(2, "Attached files:\n- notes.txt: /a/notes.txt");
+
+  assert.deepEqual(
+    itemsOf(project("thread-1", messages)).map((item) => [item.payload.itemType, item.payload.detail]),
+    [
+      ["user_message", "hello"],
+      ["assistant_message", "done\n\nAttached files:\n- q3.xlsx: /a/q3.xlsx"],
+      ["user_message", "Attached files:\n- notes.txt: /a/notes.txt"]
+    ]
+  );
+});
+
 test("fixture 3: a completed tool call replays under its lifecycle type with its callID", () => {
   const fixture = "03-permission-ask-reply-once.ndjson";
   const messages = historyFor(fixture, "ses_f3e621707ffej6ZWX9gnB3hIjM");

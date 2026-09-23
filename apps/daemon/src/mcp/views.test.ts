@@ -165,7 +165,7 @@ test("the context meter's percentUsed is clamped to 100, as the GUI's ring is; t
   assert.equal(sessionDetail(chatSummary(), at, ctx).chat.contextWindow?.percentUsed, 100);
 });
 
-test("lastReply is the turn's answer: Codex commentary (the fold's messageKind) is left out, as the GUI demotes it", () => {
+test("lastReply is the turn's answer: Codex commentary (the fold's messageKind) is left out, as the GUI never takes it for the answer", () => {
   const codex = snapshot({ items: [
     message("user", "fix the parser", { turnId: "t1" }),
     message("assistant", "I'll look at the failing test first.", { turnId: "t1", messageKind: "commentary" }),

@@ -261,9 +261,10 @@ export interface ManagedProviderSnapshotRegistry extends ProviderSnapshotRegistr
    */
   load(): Promise<void>;
   /**
-   * Layer three: kick one forced probe of every provider. **Fire-and-forget** —
-   * it returns immediately and must never be awaited on a startup path, since
-   * a probe's deadline is seconds and readiness must not wait on it.
+   * Layer three: kick one probe for every provider that did not hydrate a
+   * correlated cache entry. **Fire-and-forget** — it returns immediately and
+   * must never be awaited on a startup path, since a probe's deadline is
+   * seconds and readiness must not wait on it.
    * Idempotent; a second call while the first pass runs does nothing.
    */
   startBootRefresh(): void;
@@ -670,6 +671,17 @@ export function createProviderSnapshotRegistry(
     }
   };
 
+  const refreshUnprobedNow = async (): Promise<void> => {
+    for (const adapterId of ADAPTER_IDS) {
+      if (!probes.has(adapterId) || probed.has(adapterId)) continue;
+      try {
+        await serialise(() => refreshOne(adapterId));
+      } catch (error) {
+        options.logger.warn(`provider snapshot refresh failed for ${adapterId}`, error);
+      }
+    }
+  };
+
   // ---- the moved-binary check, on every read -------------------------------
   /** When each adapter's bin was last stat'ed, on the injected clock. */
   const lastBinCheckAt = new Map<AgentAdapterId, number>();
@@ -867,7 +879,7 @@ export function createProviderSnapshotRegistry(
       // nothing but its pending seed until the interval elapses.
       if (!primed && ADAPTER_IDS.some((id) => probes.has(id) && !probed.has(id))) {
         primed = true;
-        void refreshAllNow();
+        void refreshUnprobedNow();
       }
       scheduleNext();
       let released = false;
@@ -937,8 +949,12 @@ export function createProviderSnapshotRegistry(
     },
 
     /**
-     * Layer three: force one probe of every provider, now, off the critical
-     * path.
+     * Layer three: probe every provider that has no correlated cache entry,
+     * now, off the critical path. A valid cache is already the layer-two
+     * snapshot this host should serve. Re-probing it here made every deploy
+     * launch a heavyweight Claude SDK process that could block the event loop
+     * long enough for the supervisor to kill an otherwise-ready host. Manual
+     * and scheduled refreshes still use `refreshAllNow()`.
      *
      * Fire-and-forget by contract — the caller must never await it. The HTTP
      * socket is already bound and the readiness gate is already open when this
@@ -960,7 +976,7 @@ export function createProviderSnapshotRegistry(
         return;
       }
       primed = true;
-      void refreshAllNow();
+      void refreshUnprobedNow();
     },
 
     refreshAllNow,

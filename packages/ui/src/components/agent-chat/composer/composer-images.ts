@@ -42,3 +42,31 @@ export function removeImagePlaceholder(text: string, n: number): string {
     return index > n ? imagePlaceholder(index - 1) : match;
   });
 }
+
+/**
+ * Release the object URLs behind image chips (§7.4 thumbnail + hover preview).
+ * Called when a chip is removed, when the draft is sent, on a thread swap and
+ * on unmount — a URL that outlives its chip pins the whole file in memory.
+ */
+export function revokeImagePreviews(
+  attachments: readonly { previewUrl?: string }[],
+  revoke: (url: string) => void = (url) => URL.revokeObjectURL(url)
+): void {
+  for (const attachment of attachments) {
+    if (attachment.previewUrl) revoke(attachment.previewUrl);
+  }
+}
+
+/**
+ * The chips a failed send hands back to the draft. `submit` revoked their
+ * preview URLs when it emptied the tray, so each one drops its dead URL and an
+ * image chip resolves its preview again lazily, through the read-back route,
+ * exactly as a reloaded chip does.
+ */
+export function withoutPreviews<A extends { previewUrl?: string }>(attachments: readonly A[]): A[] {
+  return attachments.map((attachment) => {
+    if (attachment.previewUrl === undefined) return attachment;
+    const { previewUrl: _revoked, ...chip } = attachment;
+    return chip as A;
+  });
+}

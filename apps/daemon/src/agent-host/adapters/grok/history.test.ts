@@ -233,6 +233,45 @@ test("chunks accumulate and a turn_completed closes the turn under its prompt id
   ]);
 });
 
+test("a replayed prompt loses the `Attached files:` block the adapter appended, from the whole message", () => {
+  // The replay echoes the text the adapter SENT, suffix included
+  // (`attachment-lines.ts`). The chunk boundary sits inside the block's path
+  // on purpose: stripped chunk by chunk, the first chunk alone reads as a
+  // block and ".xlsx" is left behind.
+  const collector = new GrokHistoryCollector();
+  collector.observeAcpUpdate({
+    sessionUpdate: "user_message_chunk",
+    content: { type: "text", text: "hello\n\nAttached files:\n- q3.xlsx: /a/q3" }
+  });
+  collector.observeAcpUpdate({ sessionUpdate: "user_message_chunk", content: { type: "text", text: ".xlsx" } });
+  collector.observeAcpUpdate({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "ok" } });
+  collector.observeXaiUpdate({ sessionUpdate: "turn_completed", prompt_id: "p1" });
+  // An attachment-only prompt: the block is all the user sent, and a replay
+  // has no attachment chips to show instead, so it stays.
+  collector.observeAcpUpdate({
+    sessionUpdate: "user_message_chunk",
+    content: { type: "text", text: "Attached files:\n- notes.txt: /a/notes.txt" }
+  });
+  collector.observeAcpUpdate({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "read it" } });
+  collector.observeXaiUpdate({ sessionUpdate: "turn_completed", prompt_id: "p2" });
+
+  const events = projectGrokHistory(
+    { threadId: "t1", turns: collector.snapshotTurns() },
+    { threadId: "t1", ...stamps() }
+  );
+  const rows = events
+    .filter(
+      (event): event is Extract<RuntimeEvent, { type: "item.completed" }> => event.type === "item.completed"
+    )
+    .map((event) => [event.turnId, event.payload.itemType, event.payload.detail]);
+  assert.deepEqual(rows, [
+    ["p1", "user_message", "hello"],
+    ["p1", "assistant_message", "ok"],
+    ["p2", "user_message", "Attached files:\n- notes.txt: /a/notes.txt"],
+    ["p2", "assistant_message", "read it"]
+  ]);
+});
+
 test("a tool call is kept, and it flushes the text before it", () => {
   const collector = new GrokHistoryCollector();
   collector.observeAcpUpdate({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "writing" } });

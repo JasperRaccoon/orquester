@@ -328,7 +328,8 @@ SubagentView        = { id, kind, agentKind: "agent" | "background", title /* �
 ```
 
 `lastReply` is the main agent's answer: its assistant messages in that turn, joined, with Codex's
-commentary (its running "I'll do X next" narration, which the GUI demotes) left out.
+commentary (its running "I'll do X next" narration, which the GUI shows as narration, never as the
+answer) left out.
 `contextWindow.percentUsed` stops at 100, like the GUI's ring; `usedTokens` stays as reported.
 `plan.actionable` is judged on the thread itself — the latest plan, until a message implements it —
 so it is right at once, while `chat.planReady` and `reason: "plan-ready"`, the tab strip's values,
@@ -861,7 +862,7 @@ implement_plan { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "timeoutMs
 ```
 
 A file in the sandbox goes by path instead — `{ "path": "myws/api/docs/spec.pdf" }` — and, not
-being an image, reaches Claude as an `Attached file:` line (§9).
+being an image, is named to Claude in the `Attached files:` block after the message (§9).
 
 ---
 
@@ -966,22 +967,27 @@ name the file as `attachments[i]` (for an answer, after the question it belongs 
 
 **How the agent receives them.** The host stores each file with the conversation and hands the
 provider natively what it can take — images on Claude (gif, jpeg, png, webp) and Codex; images,
-text files and PDFs up to 20 MiB on OpenCode; nothing on Grok. Every other attachment reaches the
-agent as a line appended to the message:
+text files and PDFs up to 20 MiB on OpenCode; nothing on Grok. Every other attachment is named in a
+block appended after the message:
 
 ```
-Attached file: <name> (<absolute path>)
+Attached files:
+- <name>: <absolute path>
 ```
 
-The path is the stored copy's, on the daemon host, and the agent opens it with its own tools. The
-lines go to the provider only: the message as the GUI and `read_transcript` show it keeps your text
-and lists the attachments by name.
+The path is the stored copy's, on the daemon host, and the agent opens it with its own tools. A
+file whose path the text already names is not listed again. The block goes to the provider only:
+the message as the GUI and `read_transcript` show it keeps your text and lists the attachments by
+name.
 
-An answer to a blocking question is different: it carries every attached file as such a line
-after the answer's text, images included, on every adapter — only a message (a turn) hands images
-to the provider natively. A multi-select answer with files reaches the agent as its selections
-joined with ", ", followed by those lines. A Codex async question (`responseMode: "message"`) is
-answered with a message, so its files travel as a message's do.
+An answer to a blocking question is different: it carries every attached file as an
+`Attached file: <name> (<absolute path>)` line after the answer's text, images included, on every
+adapter — only a message (a turn) hands images to the provider natively. A multi-select answer
+with files keeps its selections, and the lines follow them as one more entry. A Codex async
+question (`responseMode: "message"`) is answered with a message: its text echoes each question and
+its answer, followed by the same `Attached file:` lines, and the files travel as a message's do.
+An answer naming a file the host no longer has is refused (`INVALID_COMMAND`) and the question
+stays open.
 
 ---
 

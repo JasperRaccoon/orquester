@@ -33,6 +33,8 @@ import {
   type ThreadSnapshot
 } from "@orquester/api/agent-chat";
 
+import { stripAttachmentPathLines } from "../attachment-lines.ts";
+
 /**
  * The method stamped on every projected event's `raw`. The SOURCE is
  * `HISTORICAL_RAW_SOURCE`, which is what a consumer keys on to know the event
@@ -138,15 +140,22 @@ function projectTurn(turn: ProviderThreadTurnSnapshot, deps: ProjectHistoryDeps)
   for (const item of items) {
     index += 1;
     switch (item.kind) {
-      case "user_message":
+      case "user_message": {
+        // The replay echoes the text the adapter SENT, with any
+        // `Attached files:` block it appended (`attachment-lines.ts`):
+        // provider input, not the user's own text. Stripped here, from the
+        // whole collected message — a chunk is not a message, and a block
+        // can straddle two.
+        const text = stripAttachmentPathLines(item.text);
         events.push(
           event(
             "item.completed",
-            { itemType: "user_message", status: "completed", detail: item.text },
+            { itemType: "user_message", status: "completed", detail: text },
             `${turn.id}:user:${index}`
           )
         );
         break;
+      }
       case "assistant_message":
         events.push(
           event(

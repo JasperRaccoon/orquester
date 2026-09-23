@@ -18,7 +18,6 @@
 import type { AgentAdapterId, AttachmentRef } from "@orquester/api/agent-chat";
 
 import { GROK_BLOCKED_COMMAND_MESSAGE, isBlockedGrokCommand } from "../adapters/grok/index.ts";
-import { appendAttachmentLines } from "./attachment-lines.ts";
 
 /** The literal a compaction turn is persisted as (§4.6.5(b)). */
 export const COMPACT_COMMAND_TEXT = "/compact";
@@ -49,15 +48,12 @@ export function isSlashInvocation(text: string): boolean {
 }
 
 /**
- * The host's whole send-path text policy: the input unchanged, followed by the
- * `Attached file: <name> (<absolute path>)` lines of every attachment the
- * adapter does not ingest natively (§4.1) — AFTER the text, never before and
- * never wrapping it, so a turn that opens with `/command` still opens with it.
- * It is a function rather than an omission so a future prompt-injecting
- * feature has to delete this comment to break §4.6.9.
+ * The host's whole send-path text policy: return the input unchanged. It is a
+ * function rather than an omission so a future prompt-injecting feature has to
+ * delete this comment to break §4.6.9.
  */
-export function providerInputFor(text: string, attachmentLines = ""): string {
-  return appendAttachmentLines(text, attachmentLines);
+export function providerInputFor(text: string): string {
+  return text;
 }
 
 /**

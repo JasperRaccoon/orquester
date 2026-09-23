@@ -106,3 +106,4 @@ export * from "./title.logic";
 export * from "./timeline-position";
 export * from "./keybindings.logic";
 export * from "./rewind.logic";
+export * from "./history.logic";

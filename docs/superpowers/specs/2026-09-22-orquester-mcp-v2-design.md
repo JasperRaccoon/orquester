@@ -654,8 +654,8 @@ it into a user message that echoes each question before its answer, and steers o
 *Built: every problem is reported in one pass; files count as an answer only where files are
 allowed (`allowCustomAnswer` and not `isSecret`); every question's files are validated and uploaded
 in ONE batch (a bad file anywhere uploads nothing), and a refusal names the question and its file
-index. A `multiSelect` answer that carries files reaches the agent as its selections joined with
-", " followed by the `Attached file:` lines (the host keeps the array when no files ride along).*
+index. A `multiSelect` answer that carries files reaches the agent as its selections, the array
+kept, with the `Attached file:` lines as one more entry.*
 
 **`dismiss_question`** — GUI: the card's Dismiss (offered only for `responseMode:"message"`).
 `POST …/dismiss`; the host's `COMMAND_REJECTED` for a blocking question passes through with its
@@ -820,6 +820,18 @@ natively, the turn effect appends `Attached file: <name> (<absolute path>)` line
 input — the path form the native answer path already folds into an answer. It lives in the
 host (one place, all clients benefit) rather than in the MCP; it needs the host's drain-restart on
 deploy like any host change.
+*Built: the same bug was fixed upstream in parallel (`98300bd`, "attachments name themselves in the
+prompt"), and the merge keeps ONE mechanism. Each adapter appends the shared `Attached files:\n-
+<name>: <path>` block for the refs it does not ingest natively, skipping a path the text already
+names — the GUI composer inserts the path at upload time, so the block is the guarantee for an MCP
+message, whose text never names it (`agent-host/adapters/attachment-lines.ts`). From this design
+the host keeps the turn effect's resolve-and-STAT of every attachment on every sending path (the
+bounds hold against the file on disk, and OpenCode's 20 MiB file-part cap judges the real size),
+and the native answer's `Attached file: <name> (<absolute path>)` lines. The merge also made an
+answer naming a file that no longer resolves a refusal before anything is committed (the card stays
+open), and a multi-select answer with files keeps its selections as the array with the lines as one
+more entry — joined into one string, Grok read the selections as free text. The adapter-level
+`ingestsAttachment` predicate and `orchestration/attachment-lines.ts` were dropped as redundant.*
 
 ---
 

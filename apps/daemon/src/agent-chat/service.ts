@@ -220,12 +220,20 @@ export class AgentChatService {
           }
           const child = spawn(bin, args, { cwd: opts.cwd, detached: false, stdio: "ignore", env });
           child.on("error", (error) => opts.logger?.error?.("agent host spawnDirect failed", error));
-          const handle: DirectHostHandle = { kill: () => child.kill(), pid: child.pid };
+          let alive = true;
+          const handle: DirectHostHandle = {
+            kill: () => child.kill(),
+            pid: child.pid,
+            // The supervisor waits for the PROCESS to exit before it replaces a
+            // stopped host; without tmux this is the only signal it has.
+            isAlive: () => alive
+          };
           // Clear the handle when the child dies, or `protectedPids()` keeps
           // returning a pid the OS may recycle onto an unrelated process — and
           // `POST /api/system/processes/kill` would then refuse a legitimate
           // target for no visible reason.
           child.on("exit", () => {
+            alive = false;
             if (this.directHandle === handle) this.directHandle = null;
           });
           this.directHandle = handle;
@@ -236,6 +244,12 @@ export class AgentChatService {
         // The host's OWN refresh (§4.6.4) reaches the bus through here; the
         // explicit refresh route publishes separately.
         onProvidersRevision: () => this.summary.publishProvidersChanged(),
+        // The daemon's own liveness view for the §3.1 drain: the host a deploy
+        // replaces may predate `backgroundWorkThreadIds` on `/health`. Unknown
+        // (null) until the first poll round — boot adoption runs before the
+        // poll starts, and an empty view would read as "nothing running".
+        backgroundWorkThreadIds: () =>
+          this.summary.hasPolled() ? this.summary.threadsWithBackgroundLiveness() : null,
         logger: opts.logger
       }
     });
@@ -250,8 +264,10 @@ export class AgentChatService {
       // route answers 503 then anyway, and a read would only log noise.
       isHostHealthy: () => this.supervisor.isHealthy(),
       // A settled turn reopens the §3.1 drain window, so a deploy's version
-      // handover happens the moment the host goes quiet.
-      onTurnSettled: () => this.supervisor.handleTurnSettled()
+      // handover happens the moment the host goes quiet — and so does a
+      // subagent fleet or watch loop finishing, which the drain also waits on.
+      onTurnSettled: () => this.supervisor.handleTurnSettled(),
+      onBackgroundWorkEnded: () => this.supervisor.handleTurnSettled()
     });
   }
 

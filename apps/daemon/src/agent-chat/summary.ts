@@ -78,6 +78,12 @@ export interface AgentChatSummaryOptions {
    * next 15 s health tick.
    */
   onTurnSettled?: () => void;
+  /**
+   * A thread's background liveness went from live to none. The same drain
+   * window as `onTurnSettled`: the §3.1 restart also waits on subagent fleets
+   * and watch loops, which have no turn to settle.
+   */
+  onBackgroundWorkEnded?: () => void;
   /** Test seam: replaces the interval so a test never waits on a clock. */
   setInterval?: (fn: () => void, ms: number) => { unref?: () => void };
   clearInterval?: (handle: unknown) => void;
@@ -104,6 +110,8 @@ export class AgentChatSummaryService {
   private readonly threads = new Map<string, ThreadState>();
   private timer: unknown = null;
   private polling = false;
+  /** True once one poll round has completed — before that the view is unknown. */
+  private polledOnce = false;
   private readonly now: () => number;
 
   constructor(private readonly opts: AgentChatSummaryOptions) {
@@ -150,6 +158,20 @@ export class AgentChatSummaryService {
     return this.threads.get(threadId)?.activity;
   }
 
+  /**
+   * Threads whose last summary reported live background work (a subagent
+   * fleet, a watch loop) — the daemon's own view for the §3.1 drain-restart
+   * (`SupervisorAdapters.backgroundWorkThreadIds`), which a host from before
+   * `GET /health` carried the field cannot report itself.
+   */
+  threadsWithBackgroundLiveness(): string[] {
+    const out: string[] = [];
+    for (const [threadId, state] of this.threads) {
+      if (hasBackgroundLiveness(state.fields)) out.push(threadId);
+    }
+    return out;
+  }
+
   /** The coarse `agent.providers.changed` of §6.4; the client re-reads §6.3. */
   publishProvidersChanged(payload: AgentProvidersChangedPayload = {}): void {
     this.opts.broadcaster.publish("registry", "agent.providers.changed", payload);
@@ -163,6 +185,7 @@ export class AgentChatSummaryService {
     if (ids.length === 0) {
       // Nothing open: drop any stale state and do no I/O at all.
       this.threads.clear();
+      this.polledOnce = true;
       return;
     }
     this.polling = true;
@@ -170,7 +193,18 @@ export class AgentChatSummaryService {
       await Promise.all(ids.map((id) => this.refreshThread(id)));
     } finally {
       this.polling = false;
+      this.polledOnce = true;
     }
+  }
+
+  /**
+   * False until the first poll round has completed. The supervisor's boot
+   * adoption runs BEFORE the poll starts, so a stale host it wants to drain
+   * must not be judged on an empty view: `threadsWithBackgroundLiveness` is
+   * "unknown", not "none", until this flips.
+   */
+  hasPolled(): boolean {
+    return this.polledOnce;
   }
 
   /**
@@ -260,6 +294,16 @@ export class AgentChatSummaryService {
             : (previous?.activity.needsAttentionAt ?? nowIso)
     };
     this.threads.set(threadId, { fields, activity, pending, polledAt: nowMs });
+    // Background work ending reopens the §3.1 drain window exactly as a turn
+    // settling does: a deploy's handover otherwise waits for the next 15 s
+    // health tick.
+    if (
+      previous !== undefined &&
+      hasBackgroundLiveness(previous.fields) &&
+      !hasBackgroundLiveness(fields)
+    ) {
+      this.opts.onBackgroundWorkEnded?.();
+    }
 
     // The tab's own copy of the six fields (the tab strip reads them off the
     // summary), published only when one actually moved.
@@ -440,6 +484,11 @@ export function sanitizePendingRequests(value: unknown): AgentHostPendingRequest
     });
   }
   return out;
+}
+
+/** `working` or `monitoring`; an absent field reads as none. */
+function hasBackgroundLiveness(fields: AgentChatSessionSummaryFields): boolean {
+  return fields.backgroundLiveness === "working" || fields.backgroundLiveness === "monitoring";
 }
 
 export function sanitizeFields(value: unknown): AgentChatSessionSummaryFields {

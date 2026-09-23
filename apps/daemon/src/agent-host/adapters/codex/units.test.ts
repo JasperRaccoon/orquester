@@ -100,7 +100,7 @@ describe("item classification — typed on the generated discriminants", () => {
     assert.equal(classified.status, "failed");
   });
 
-  it("a commentary agentMessage is reported with its phase so §7.3 can demote it", () => {
+  it("a commentary agentMessage keeps its phase for live and replayed display", () => {
     const classified = classifyItem({
       type: "agentMessage",
       id: "i",

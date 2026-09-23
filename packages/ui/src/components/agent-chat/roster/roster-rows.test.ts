@@ -66,15 +66,17 @@ function at(seconds: number): string {
 // Ordering
 // ---------------------------------------------------------------------------
 
-test("display order is first-seen order and never moves when a status changes", () => {
+test("display order puts active work first, then preserves spawn order within each state", () => {
   const agents = [
-    agent("c", { firstSeenAt: at(3) }),
-    agent("a", { firstSeenAt: at(1) }),
-    agent("b", { firstSeenAt: at(2) })
+    agent("c", { firstSeenAt: at(3), status: "completed" }),
+    agent("a", { firstSeenAt: at(1), status: "running" }),
+    agent("b", { firstSeenAt: at(2), status: "waiting" }),
+    agent("d", { firstSeenAt: at(4), status: "idle" }),
+    agent("e", { firstSeenAt: at(5), status: "pending" })
   ];
   assert.deepEqual(
     rosterDisplayOrder(agents).map((row) => row.id),
-    ["a", "b", "c"]
+    ["a", "b", "e", "c", "d"]
   );
 
   const settled = agents.map((row) =>
@@ -82,7 +84,7 @@ test("display order is first-seen order and never moves when a status changes", 
   );
   assert.deepEqual(
     rosterDisplayOrder(settled).map((row) => row.id),
-    ["a", "b", "c"]
+    ["b", "e", "a", "c", "d"]
   );
 });
 
@@ -198,7 +200,7 @@ test("finished rows fade, then disappear, while live and idle rows stay", () => 
   const gone = selectRosterRows({ agents, expanded: true, finished: "removed" });
   assert.deepEqual(
     gone.rows.map((row) => row.agent.id),
-    ["idle", "bg"]
+    ["bg", "idle"]
   );
 });
 

@@ -25,8 +25,12 @@ import {
   type AttachmentRef,
   type CommandReceiptResponse,
   type RefreshProviderResponse,
+  type ThreadHistoryPage,
+  type ThreadHistoryQuery,
   type ThreadItemResponse,
   type ThreadReadResponse,
+  type ThreadSearchQuery,
+  type ThreadSearchResponse,
   type TurnDiffResponse
 } from "@orquester/api/agent-chat";
 import type { SessionUploadResponse } from "@orquester/api";
@@ -126,6 +130,22 @@ export interface AgentChatTransport {
     options?: { after?: number; signal?: AbortSignal }
   ): Promise<ThreadReadResponse>;
   readItem(sessionId: string, itemId: string, signal?: AbortSignal): Promise<ThreadItemResponse>;
+  /**
+   * `GET …/history` — a page of turns OLDER than what the client holds,
+   * folded from the log by the host (design 2026-09-23 §C "History page").
+   * No `before` asks for the turns just below the retained window. Answers
+   * 503 `INDEX_UNAVAILABLE` while the host has no usable index.
+   */
+  readHistory(
+    sessionId: string,
+    query: ThreadHistoryQuery,
+    signal?: AbortSignal
+  ): Promise<ThreadHistoryPage>;
+  /**
+   * `GET /api/agent/search` — full-text search over every indexed thread on
+   * the host (design 2026-09-23 §C "Search"). Host-level, not per session.
+   */
+  search(query: ThreadSearchQuery, signal?: AbortSignal): Promise<ThreadSearchResponse>;
   turnDiff(
     sessionId: string,
     turnCount: number,
@@ -144,6 +164,8 @@ export interface AgentChatTransport {
     meta: AgentChatUploadMeta,
     onProgress?: (sent: number, total: number) => void
   ): Promise<AttachmentRef>;
+  /** §6.3 read-back: the attachment's bytes, for a chip's thumbnail/preview. */
+  fetchAttachment(sessionId: string, attachmentId: string, signal?: AbortSignal): Promise<ArrayBuffer>;
 }
 
 // ---------------------------------------------------------------------------
@@ -278,6 +300,20 @@ export function createAgentChatTransport(transporter: Transporter): AgentChatTra
       });
     },
 
+    readHistory(sessionId, query, signal) {
+      return send<ThreadHistoryPage>("GET", agentChatRoutes.history(sessionId), {
+        query: definedQuery({ before: query.before, turns: query.turns }),
+        ...(signal === undefined ? {} : { signal })
+      });
+    },
+
+    search(query, signal) {
+      return send<ThreadSearchResponse>("GET", agentChatRoutes.search, {
+        query: definedQuery({ q: query.q, limit: query.limit, projectPath: query.projectPath }),
+        ...(signal === undefined ? {} : { signal })
+      });
+    },
+
     turnDiff(sessionId, turnCount, options) {
       return send<TurnDiffResponse>("GET", agentChatRoutes.turnDiff(sessionId, turnCount), {
         // §5.4: whitespace is ignored by default; only an explicit `false` turns it off.
@@ -311,8 +347,43 @@ export function createAgentChatTransport(transporter: Transporter): AgentChatTra
         throw commandErrorFrom(response.status, response.data, "Attachment upload failed");
       }
       return attachmentRefFromUpload(response.data, meta);
+    },
+
+    // Rides the bearer-authed binary channel, never a `?token=` URL: the
+    // transports that cannot carry binary have no `requestBytes` at all
+    // (`api-client.ts` `readFileBytes` guards it the same way).
+    async fetchAttachment(sessionId, attachmentId, signal) {
+      if (!transporter.requestBytes) {
+        throw new Error("Attachment preview is not supported on this connection.");
+      }
+      const response = await transporter.requestBytes({
+        method: "GET",
+        path: agentChatRoutes.attachment(sessionId, attachmentId),
+        ...(signal === undefined ? {} : { signal })
+      });
+      if (!response.ok) {
+        throw commandErrorFrom(response.status, undefined, "Attachment fetch failed");
+      }
+      return response.data;
     }
   };
+}
+
+/**
+ * A query object with its `undefined` keys dropped, so an absent option never
+ * travels as an empty parameter the host would have to tell apart from a real
+ * one (`?before=` is not "no cursor").
+ */
+function definedQuery(
+  query: Record<string, string | number | undefined>
+): Record<string, string | number> {
+  const defined: Record<string, string | number> = {};
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== undefined) {
+      defined[key] = value;
+    }
+  }
+  return defined;
 }
 
 /**
@@ -329,6 +400,9 @@ export function createAgentChatTransport(transporter: Transporter): AgentChatTra
  * path is the reference. Reading the terminal shape off a chat answer made
  * every chat upload an attachment without an `id` ("attachments[0].id is
  * required." on send, the chip gone) — 2026-09-22.
+ *
+ * The host's answer now also carries the absolute `path` (§7.4); it rides the
+ * ref verbatim — the host strips it from every command body.
  */
 export function attachmentRefFromUpload(
   response: SessionUploadResponse | AttachmentRef,

@@ -112,7 +112,8 @@ export interface LoadedComposerDraft {
  * but it deliberately does **not** go through the composer's `stageAttachment`:
  * that one also writes an `[Image #N]` placeholder at the caret, and the text
  * being restored alongside already contains the placeholders the user saw.
- * Staging through it would duplicate every one of them.
+ * Staging through it would duplicate every one of them. The same holds for a
+ * file's path: the restored text already carries it.
  *
  * An entry the bounds refuse is dropped rather than reported: there is no
  * composer notice to render into yet at load time, and the file itself is

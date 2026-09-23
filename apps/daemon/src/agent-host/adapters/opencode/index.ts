@@ -41,7 +41,6 @@ import type {
   AdapterCapabilities,
   AgentAdapterId,
   ApprovalDecision,
-  AttachmentRef,
   ProviderSession,
   ProviderSnapshot,
   RuntimeEvent,
@@ -61,7 +60,7 @@ import type {
 import { AGENT_HOST_DEADLINES, withDeadline } from "../../support/deadline.ts";
 import { spawnProviderChild } from "../../support/spawn.ts";
 import { StderrCapture } from "../../support/stderr.ts";
-import { OpenCodeThreadSession, openCodeIngestsAttachment } from "./session.ts";
+import { OpenCodeThreadSession } from "./session.ts";
 import { OpenCodeServerPool, type OpenCodeServerHandle } from "./server.ts";
 import { meetsMinimumOpenCodeVersion, parseSemver } from "./semver.ts";
 import { loadInventoryFromCli } from "./cli-inventory.ts";
@@ -121,11 +120,6 @@ class OpenCodeAdapterImpl implements AgentAdapter {
   /** §3.2 layer one. Synchronous, no I/O — see `adapters/pending.ts`. */
   pendingSnapshot(checkedAt: string): ProviderSnapshot {
     return pendingSnapshot(checkedAt);
-  }
-
-  /** §4.1: what rides a `file` part rather than the host's path line. */
-  ingestsAttachment(attachment: AttachmentRef): boolean {
-    return openCodeIngestsAttachment(attachment);
   }
 
   private readonly ctx: AdapterContext;

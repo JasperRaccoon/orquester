@@ -46,6 +46,18 @@ class FakeTransporter implements Transporter {
   }
 }
 
+/** A transporter that can carry binary — the web's HTTP one; the base fake stands for one that cannot. */
+class FakeBinaryTransporter extends FakeTransporter {
+  readonly byteRequests: TransportRequest[] = [];
+  bytes: ArrayBuffer = new ArrayBuffer(3);
+  byteResponses: Array<TransportResponse<ArrayBuffer>> = [];
+
+  async requestBytes(req: TransportRequest): Promise<TransportResponse<ArrayBuffer>> {
+    this.byteRequests.push(req);
+    return this.byteResponses.shift() ?? { status: 200, ok: true, data: this.bytes };
+  }
+}
+
 /** A timer queue the test drives, so nothing waits on a real clock. */
 function fakeTimers() {
   let nextId = 1;
@@ -264,6 +276,89 @@ describe("commands", () => {
   });
 });
 
+describe("indexed history and search (design 2026-09-23 §C)", () => {
+  it("asks for an older page by cursor and turn count", async () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    const page = {
+      threadId: "s 1",
+      turns: [],
+      items: [],
+      checkpoints: [],
+      page: { beforeCursor: null },
+      seq: 9
+    };
+    transporter.responses.push({ status: 200, ok: true, data: page });
+
+    const answer = await transport.readHistory("s 1", { before: "cur-1", turns: 20 });
+
+    assert.deepEqual(answer, page);
+    assert.equal(transporter.requests[0]?.method, "GET");
+    assert.equal(transporter.requests[0]?.path, "/api/sessions/s%201/history");
+    assert.deepEqual(transporter.requests[0]?.query, { before: "cur-1", turns: 20 });
+  });
+
+  it("omits the cursor for the first page below the window", async () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    transporter.responses.push({ status: 200, ok: true, data: {} });
+
+    await transport.readHistory("s1", { turns: 5 });
+
+    assert.deepEqual(transporter.requests[0]?.query, { turns: 5 });
+  });
+
+  it("searches every thread with the query, the limit and an optional project", async () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    const response = { query: "formatBytes", hits: [], truncated: false, indexed: true };
+    transporter.responses.push({ status: 200, ok: true, data: response });
+    transporter.responses.push({ status: 200, ok: true, data: response });
+
+    assert.deepEqual(await transport.search({ q: "formatBytes", limit: 20 }), response);
+    await transport.search({ q: "x", projectPath: "/w/p" });
+
+    assert.equal(transporter.requests[0]?.method, "GET");
+    assert.equal(transporter.requests[0]?.path, "/api/agent/search");
+    assert.deepEqual(transporter.requests[0]?.query, { q: "formatBytes", limit: 20 });
+    assert.deepEqual(transporter.requests[1]?.query, { q: "x", projectPath: "/w/p" });
+  });
+
+  it("forwards the abort signal on both reads", async () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    const controller = new AbortController();
+
+    await transport.readHistory("s1", {}, controller.signal);
+    await transport.search({ q: "x" }, controller.signal);
+
+    assert.equal(transporter.requests[0]?.signal, controller.signal);
+    assert.equal(transporter.requests[1]?.signal, controller.signal);
+  });
+
+  it("maps INDEX_UNAVAILABLE to a typed, non-retryable error", async () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    const envelope = { error: { code: "INDEX_UNAVAILABLE", message: "index is rebuilding" } };
+    transporter.responses.push({ status: 503, ok: false, data: envelope });
+    transporter.responses.push({ status: 503, ok: false, data: envelope });
+
+    for (const run of [
+      () => transport.readHistory("s1", {}),
+      () => transport.search({ q: "x" })
+    ]) {
+      await assert.rejects(run, (error: unknown) => {
+        assert.ok(error instanceof AgentChatCommandError);
+        assert.equal(error.status, 503);
+        assert.equal(error.code, "INDEX_UNAVAILABLE");
+        assert.equal(error.message, "index is rebuilding");
+        assert.equal(error.retryable, false);
+        return true;
+      });
+    }
+  });
+});
+
 describe("attachments", () => {
   it("carries a chat upload's server-minted AttachmentRef verbatim (the host answers the ref itself)", () => {
     const fromHost = {
@@ -296,6 +391,46 @@ describe("attachments", () => {
     assert.deepEqual(
       attachmentRefFromUpload({ path: "/a/b.bin", name: "b.bin", size: 3 }, { name: "b.bin" }),
       { type: "file", id: "/a/b.bin", name: "b.bin", sizeBytes: 3 }
+    );
+  });
+
+  it("keeps the host's absolute path so the composer can name the file in the prompt (§7.4)", () => {
+    const fromHost = {
+      type: "file" as const,
+      id: "t1-uuid-xlsx",
+      name: "q3.xlsx",
+      sizeBytes: 5,
+      path: "/appdir/daemon/agent/threads/t1/attachments/t1-uuid-xlsx.xlsx"
+    };
+    assert.deepEqual(attachmentRefFromUpload(fromHost, { name: "q3.xlsx" }), fromHost);
+  });
+
+  it("reads an attachment's bytes back over requestBytes, and refuses where the transporter has none (§7.4)", async () => {
+    const plain = new FakeTransporter();
+    await assert.rejects(
+      () => createAgentChatTransport(plain).fetchAttachment("s1", "att-1"),
+      /not supported/
+    );
+    assert.equal(plain.requests.length, 0, "never falls back to the JSON request path");
+
+    const binary = new FakeBinaryTransporter();
+    const bytes = await createAgentChatTransport(binary).fetchAttachment("s1", "att-1");
+    assert.equal(bytes, binary.bytes);
+    assert.equal(binary.byteRequests[0]?.method, "GET");
+    assert.equal(binary.byteRequests[0]?.path, "/api/sessions/s1/attachments/att-1");
+
+    // A non-ok answer carries no JSON envelope, so the mapping is the bare
+    // status under the fallback message — never the empty bytes.
+    binary.byteResponses.push({ ok: false, status: 404, data: new ArrayBuffer(0) });
+    await assert.rejects(
+      () => createAgentChatTransport(binary).fetchAttachment("s1", "att-gone"),
+      (error: unknown) => {
+        assert.ok(error instanceof AgentChatCommandError);
+        assert.equal(error.status, 404);
+        assert.equal(error.code, "UNKNOWN");
+        assert.equal(error.message, "Attachment fetch failed");
+        return true;
+      }
     );
   });
 });

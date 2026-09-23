@@ -105,6 +105,16 @@ any tool it was running on each deploy. The host preserves the current property.
 4. Socket answers but rejects the token: foreign process. Log an error, never kill or adopt.
 5. Nothing answers: spawn, poll readiness, then adopt.
 
+*Built: case 3's "no thread has an active turn" is "no thread has an active turn **or live
+background work**". `GET /health` carries `backgroundWorkThreadIds` (this section's liveness
+registry) next to `activeTurnThreadIds`, and the daemon unions it with its own §6.4 summary-poll
+view so the host a deploy replaces, which may predate the field, is held too (that view is
+"unknown" until the poll's first round, which also holds such a host at boot). A subagent fleet or
+a background shell outlives its turn inside the provider process, and restarting under it killed
+the fleet with no notice — the CLI reported each agent as "didn't finish before the previous
+session ended" on the next message (2026-09-23). Background work ending reopens the window exactly
+as a settled turn does; a manual `POST /api/agent-host/stop` still restarts at once.*
+
 A 15 s unref'd health interval with bounded backoff supervises it afterwards, as for cliproxy.
 
 **Readiness is a gate, not a race.** The host accepts no command until its own startup has
@@ -115,6 +125,17 @@ command answers with it rather than hanging. The daemon's probe in step 1 is ans
 the gate opens, so "the socket answers" and "the host can take work" are the same fact.
 
 *T3: `apps/server/src/serverRuntimeStartup.ts:111-152` — `makeCommandGate`: queue commands until `signalCommandReady`, fail every queued command on startup failure; `apps/server/src/serverRuntimeStartup.ts:964-981` — startup phase order: reactors parked, then `provider-sessions.reconcile`, and `:1064-1066` signals command readiness only after that; `docs/internals/server-updates.md:23-28` — the trial must acquire dependencies, bind HTTP and park every long-running root before it reports prepared*
+
+*Built: the gate still waits on the §3.3 reconcile, but that reconcile no longer folds every
+thread (the note at the end of §3.3), and nothing added since may sit in front of it. The thread
+index (`<appdir>/daemon/agent/index.sqlite`, §5.1) is opened on the loop turn AFTER the gate —
+opening runs SQLite's `quick_check` over every page — and caught up from the logs in the
+background, one thread at a time, never awaited. And the folds on the load, history and sweep
+paths yield to the event loop every 500 events (`applyEventsChunked`,
+`apps/daemon/src/agent-host/orchestration/fold-ops.ts`): a cold fold of a big thread held the loop
+for seconds, long enough for the daemon's 15 s health probe (5 s timeout) to miss twice and
+restart a healthy host. See
+`docs/superpowers/specs/2026-09-23-thread-index-and-lazy-boot-design.md`, invariants 2 and 7.*
 
 **Supervision of provider children.** Each provider child is owned by the session's scope: the
 scope closing is what kills the process, so a thread can never leak a child that nothing is
@@ -356,6 +377,12 @@ open. T3 never has that window, and its three mechanisms are adopted whole
    *T3: `makeManagedServerProvider.ts:280-284` —
    `applySnapshot(initialSettings, {forceRefresh: true})` under
    `Effect.forkScoped`.*
+   *Built (2026-09-23): the boot refresh probes only the providers that hydrated
+   no correlated cache row — that row is already the snapshot to serve, and
+   re-probing it launched a heavyweight Claude SDK process on every deploy,
+   which could block the loop long enough for the supervisor to kill a ready
+   host. Manual and scheduled refreshes still probe everything
+   (`refreshAllNow()`).*
 
 *Client side nothing branches on `status`: `resolveLaunchModel`
 (`packages/ui/src/lib/launch-models.ts`) takes `Pick<ProviderSnapshot,
@@ -468,6 +495,24 @@ other twenty.
 
 Threads without an active turn are not resumed eagerly; the first `sendTurn` re-adopts them
 (lazy recovery, §4.1).
+
+*Built: **boot folds only orphaned threads.** The first implementation folded every thread's
+whole `events.ndjson` before deciding anything — 16 s of folding for 78 MB of logs across eight
+threads on the owner's VPS (9 s for one 48 MB thread), all of it in front of the readiness gate, on
+every host replacement (2026-09-23). Orphaned-or-not is now decided from `meta.json` alone, which is
+this section's own input and which `commit` rewrites on every session transition for exactly this
+reader (`isOrphanedHead`); only an orphan is folded, then handled as above. Every other thread is
+not loaded at all: its id goes into `bootSettlePending`, and §3.4's stale-`pending`-turn settle —
+which this reconcile used to run on every idle thread at boot — runs on the thread's **first
+load**, inside `loadRuntime` before the runtime is published, so the first read, stream snapshot or
+command anyone makes already sees it settled. A thread already in memory, and one whose head
+cannot be read, still take the full path. The boot attachment sweep stopped refolding every log
+too: it reads references off the fold snapshot + tail and skips a thread with no stored attachment
+outright (`apps/daemon/src/agent-host/orchestration/orchestrator.ts` `reconcileThread` /
+`loadRuntime`, `apps/daemon/src/agent-host/store/index.ts` `pruneAttachments`). See
+`docs/superpowers/specs/2026-09-23-thread-index-and-lazy-boot-design.md`, A1.*
+
+*T3: `apps/server/src/serverRuntimeStartup.ts:503-544` — the orphan filter runs over `getCommandReadModel()`, rows of the persisted projections, so T3 never folds a log at boot either; `apps/server/src/orchestration/Layers/ProjectionPipeline.ts:2059-2074` — projectors resume from their `projection_state` cursor rather than replaying; differs: Orquester has no persisted read model, so the head (`meta.json`) is the only thing read for every thread, and the fold is deferred to first use and started from `state.json` (§5.1)*
 
 ### 3.4 Session restart policy
 
@@ -637,29 +682,26 @@ Rules of the interface, enforced by the orchestration layer so no adapter can fo
   ≤ 50 MiB; an unknown third arm is a deliberate forward-compat catch-all so a newer producer
   cannot break an older decoder. Claude gets that dir as an additional allowed directory so
   pasted images need no approval.
-  *Built: **attachment delivery is decided per adapter, and nothing is dropped.** Every adapter
-  declares `ingestsAttachment(ref): boolean` — required, synchronous and pure, judged on the size
-  the host STAT'd — and the turn effect (`sendTurnEffect`) resolves each attachment, holds it to
-  these bounds against the stat'd file, and partitions on it
-  (`apps/daemon/src/agent-host/orchestration/attachment-lines.ts`). What the adapter ingests
-  natively rides `attachments`, carrying the stat'd size: Claude inline base64 for the four image
-  mimes, Codex every image as a `localImage` path item, OpenCode a `file` part for those images,
-  `text/*` and PDF up to 20 MiB, Grok nothing at all (its CLI declares
-  `promptCapabilities.image: false`). Every other attachment — a PDF, a CSV, a large paste the
-  composer turned into `pasted-text.txt` — becomes one `Attached file: <name> (<absolute path>)`
-  line appended to `input` **after** the text and a blank line, never before, so a typed
-  `/command` still opens the turn (§4.6.9); a file-only turn is the lines alone. The name is
-  flattened to one line and capped at 255 code points; the path is the host's copy in the
-  thread's attachments dir, which is what Claude's additional-directory grant now serves. The
-  lines are provider input only — the persisted `thread.message-sent` keeps what the user typed —
-  and Grok's whole-input guard is widened by `ATTACHMENT_LINES_MAX_CHARS` to fit them. A native
-  question answer folds its attachments into the same line shape (`(not available)` for one that
-  no longer resolves). Before this, the Claude, Codex and OpenCode adapters skipped whatever they
-  did not ingest on the assumption that the host had already flattened it into the prompt, and
-  nothing had: a PDF never reached the agent and a file-only turn broke. The stat'd re-check also
-  moved into the turn effect, so it now covers every sending path, including the two a check on
-  the `/turn` decision never saw: a turn queued behind a compaction and a message-mode answer
-  (§6.2).*
+  *Built: **no attachment is dropped, and the bounds hold against the file on disk.** The turn
+  effect (`sendTurnEffect`) resolves every attachment and holds it to these bounds against the size
+  the host STAT'd, which it stamps on the ref, on every sending path — a direct turn, a steer, a
+  turn queued behind a compaction and a message-mode answer, the last two of which a check on the
+  `/turn` decision never saw (§6.2). An attachment that is gone or over its bound is an "Attachment
+  rejected" row, and nothing is sent. Each adapter then hands its provider what it ingests
+  natively — Claude inline base64 for the four image mimes, Codex every image as a `localImage`
+  path item, OpenCode a `file` part for those images, `text/*` and PDF up to 20 MiB (judged on the
+  stat'd size), Grok nothing at all (its CLI declares `promptCapabilities.image: false`) — and names
+  every other file in the `Attached files:` block of §4.5, **after** the text and never before it,
+  so a typed `/command` still opens the turn (§4.6.9). The block is provider input only: the
+  persisted `thread.message-sent` keeps what the user typed. A native question answer folds its
+  attachments into `Attached file: <name> (<absolute path>)` lines after the answer; a
+  multi-select answer keeps its selections as the array and the lines ride as one more entry, so
+  the files cannot replace the selections and an adapter still matches each one to its option. An
+  answer naming a file that no longer resolves is refused before anything is committed, and the
+  card stays open. Before this, the Claude, Codex and
+  OpenCode adapters skipped whatever they did not ingest on the assumption that the host had
+  already flattened it into the prompt, and nothing had: a PDF never reached the agent and a
+  file-only turn broke.*
 - **Composer context is not adapter input.** `@file` references are flattened into `input` and
   persisted beside the user message for re-render only.
 
@@ -780,9 +822,9 @@ runtime.
 arm and the UI still derives `waiting` from an open request — but Codex **does** emit
 `thread/status/changed.activeFlags: ["waitingOnApproval"]`, so an adapter must tolerate the flag
 rather than report it as an unmapped frame
-(`apps/daemon/src/agent-host/adapters/codex/normalise.ts`). (2) The `hook.*` group has **no
-producer**: Claude's filesystem hooks run, but the SDK stream carries no `hook_*` messages at all,
-so nothing in the timeline is fed by that group on any provider. (3) `RuntimeEventRawSource`
+(`apps/daemon/src/agent-host/adapters/codex/normalise.ts`). (2) Codex, Claude and Grok can
+produce `hook.*` events. The timeline omits routine starts, progress and successful completions,
+including those already on disk; failures and cancellations stay visible. (3) `RuntimeEventRawSource`
 gained one member the adapters mint themselves, `HISTORICAL_RAW_SOURCE` (`"history.replay"`),
 which tags every event projected out of a provider's **native history** so nothing downstream
 mistakes a replayed row for live traffic and no historical turn claims token usage
@@ -1005,6 +1047,21 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   slash-command invocation when the last block is text; leading with the text made every
   image-carrying turn drop a hand-typed `/command` back to plain prose.
   *T3: `apps/server/src/provider/Layers/ClaudeAdapter.ts:1660-1676`*
+  *Built: **a non-image attachment reaches Claude as a path line, not as nothing.** T3 injects
+  every attachment's on-disk path into the prompt text before the adapter sees the turn
+  (`t3-1-providers.md:282-292`); that step was never ported, and the adapter's `continue` past a
+  `file` ref dropped it silently behind a comment that assumed it. `appendAttachmentPathLines`
+  (`agent-host/adapters/attachment-lines.ts`) appends `Attached files:\n- <name>: <path>` for the
+  refs the adapter does not ingest natively, skipping a path the text already names (the composer
+  inserts it, §7.4) — judged against the whole prompt under a skill dispatch (`namedIn`), so a
+  path typed after the `$skill` mention counts as named — as a suffix of the final text block, or
+  of the leading text block when a skill dispatch owns the last one, so the command block stays
+  last and untouched. The path is readable without an approval because the attachments dir is an
+  `additionalDirectories` entry (`claude/session.ts`, the grant in `claude/launch.ts`). On resume
+  from native history the replayed user row has the block stripped again
+  (`stripAttachmentPathLines`), so the bubble shows what the user typed. A block that is the whole
+  message is kept as the turn's only evidence — except the block-only leading text block of a skill
+  dispatch, which is dropped when the command block carries the text (`project-history.ts`).*
 - **`canUseTool` is the whole approval surface.** `AskUserQuestion` is intercepted **before** any
   approval logic and becomes `user-input.requested`; the question `id` **must equal the full
   question text**, because the SDK ≥ 2.1.121 looks answers up by text, and the reply is
@@ -1162,6 +1219,10 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   string, **not an enum**. Before each turn, `config/mcpServer/reload` is issued best-effort when
   MCP servers are configured.
   *T3: `apps/server/src/provider/Layers/CodexSessionRuntime.ts:611-666` (`buildTurnStartParams`), `:583-606` (`buildCodexCollaborationMode`), `:2504-2511` (the reload); `apps/server/src/provider/Layers/CodexAdapter.ts:2518-2522` (localImage)*
+  *Built: a `file` ref is **not dropped**: its path line is appended to the text item by the same
+  `appendAttachmentPathLines` Claude uses (§4.5 Claude Built), and an attachment-only turn sends
+  the block as its only text item (`codex/session.ts`). Whether Codex may read outside the
+  workspace is its own sandbox/approval policy — a path in the prompt grants nothing.*
 - **Every server→client request Codex sends, and what we answer.** Five handlers:
   `item/commandExecution/requestApproval` → `{decision}` (with `acceptAlways` downgraded);
   `item/fileChange/requestApproval` → `{decision}` (same downgrade);
@@ -1319,6 +1380,17 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   variant?, parts}`, which **accepts no `system` addendum**, and is bounded by the user-message
   receipt rather than a submit timeout.
   *T3: `apps/server/src/provider/Layers/OpenCodeAdapter.ts:3246-3291` (both routes and the no-addendum comment), `:3291-3305` (the 10 s cap), `:996-1026` (the message id)*
+  *Built: **`parts` carries attachments two ways.** The four image mimes, any `text/*` and
+  `application/pdf` at or under 20 MiB become `{type:"file", mime, filename, url: file://…}` parts
+  the server reads off this host's disk; everything else (an `.xlsx`, an undeclared mime, an
+  oversized file) rides as an `Attached files:` path line appended to the text part by
+  `appendAttachmentPathLines`, so an attachment-only turn with such a file no longer throws "turns
+  require text input". OpenCode's `external_directory` rule may still ask before reading it. A ref
+  whose path cannot be resolved fails the turn before `turn.started`, as it does for the other
+  three adapters — a silently vanished file is the bug this replaced. A native `/command` sent
+  with a non-native file receives the block inside its arguments (`$ARGUMENTS`), because the
+  command match runs on the appended text (`opencode/session.ts`; the `external_directory` rule
+  in `opencode/ruleset.ts`, §4.4).*
 - **Turn completion is three machines, not a flag.** (1) The 10 s submit cap above. (2)
   `scheduleIdleReconciliation`: on an idle for the active turn, poll `GET /session/status` with a
   1 s timeout and one retry — a **missing entry counts as idle**, `busy`/`retry` abandons unless a
@@ -1476,6 +1548,9 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   private `streaming_reasoning` phase. A stall cancels and fails the turn. `stopReason` is five values, not
   four: `end_turn | max_tokens | max_turn_requests | refusal | cancelled`.
   *T3: `apps/server/src/provider/Layers/GrokAdapter.ts:94-101` (the two constants with their rationale), `:443-446, 507-518, 729-818` (the watchdog and its approval pause); `packages/effect-acp/src/_generated/schema.gen.ts:9871`*
+  *Built: every attachment reaches Grok as a path line — `promptCapabilities.image` is `false` on
+  this CLI, so even an image is a path its `read_file` tool can act on — through the shared
+  `appendAttachmentPathLines`, which skips a path the text already names (`grok/session.ts`).*
 - **Plan mode is detected, not declared.** `showPlanModeToggle` is false, yet the adapter still
   emits `turn.proposed.completed` from two sources: `enter_plan_mode`-shaped tool calls, and
   writes to `~/.grok/sessions/<encoded-cwd>/<session-id>/plan.md` promoted into a proposal. The
@@ -1953,6 +2028,36 @@ the guard above is a rule rather than a workaround.
 
 *T3: `apps/server/src/persistence/Migrations/001_OrchestrationEvents.ts:8-43` — the log is one SQLite table with a global `sequence INTEGER PRIMARY KEY AUTOINCREMENT` plus a per-stream `stream_version`; differs: Orquester writes one NDJSON file per thread, so `seq` is per-thread and there is no global ordering to wait on (subscriptions are per-thread anyway); `apps/server/src/persistence/Migrations/002_OrchestrationCommandReceipts.ts:8-22` — `orchestration_command_receipts(command_id PK, aggregate_kind, aggregate_id, accepted_at, result_sequence, status, error)`; differs: a bounded JSON ring, not a table*
 
+*Built: two files joined the layout, both **caches** of `events.ndjson` — never authorities and
+outside every rollback: an older host ignores them, a newer one discards what it cannot trust.*
+
+```
+<appdir>/daemon/agent/
+  threads/<sessionId>/
+    state.json         # the fold snapshot: the folded state as of one `seq` + the log's byte length after it
+  index.sqlite         # the host-wide thread index (+ -wal/-shm), 0600 — see "Two event layers" below
+```
+
+*`state.json` makes a cold load fold only the log's tail: the store reads from the snapshot's
+`logBytes` and the first line there must carry `seq + 1`; a shorter log, another first seq, a
+snapshot ahead of the log, another `FOLD_SNAPSHOT_VERSION` or thread, or a state that does not
+deserialize field-wise discards it and the whole log is folded, as before. It is written atomically
+(0600) off the command path, on the thread's own write queue: on every head-shaped change (a session
+transition above all), after a cold load that folded ≥ 200 events, and inside a long turn only once
+200 events **and** 30 s have passed — never per event, because a subagent-heavy thread's state is
+~22 MiB and ~160 ms of blocked loop to serialize. `serializeFoldState` leaves out `itemIndex` **and**
+`activities`, both rebuilt from `items`, because the fold updates an activity in place by finding the
+same object in `activities`; and `FOLD_SNAPSHOT_VERSION` is bumped whenever the fold's output changes
+for the same log, or an old snapshot would carry the old answer for every event before its `seq`.
+Both caches read the log by byte **position**, so `append` answers every line's `positions` (UTF-8
+bytes, newline included) and the resulting `logBytes` beside the stamped events, from one `stat` at
+first load and arithmetic after it; `readEventsFrom` and `readEventRange` read by position. To keep positions and
+`readAll` agreeing, a torn trailing fragment (a crash mid-write) is cut when a thread is first
+loaded, before anything appends onto it, and a failed append is rolled back — length and `seq` —
+rather than left for the next batch to be glued onto (`apps/daemon/src/agent-host/store/index.ts`,
+`packages/api/src/agent-chat/fold-snapshot.ts`). See
+`docs/superpowers/specs/2026-09-23-thread-index-and-lazy-boot-design.md`, A2.*
+
 **Two event layers, not one.** `events.ndjson` holds *domain* events — past-tense facts about the
 thread — not the adapter runtime union of §4.2. Ingestion is a separate hop: the host translates
 each `RuntimeEvent` into zero or more domain events before anything is persisted, so a provider
@@ -1977,6 +2082,23 @@ is the only writer of both, which is what lets the §7 fold rebuild the head's t
 without a second event type, and what the §6.1 `PUT` rename appends.
 
 *T3: `packages/contracts/src/orchestration.ts:1655-1688` — the 35-member `OrchestrationEventType`; `apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts:469-1012` — `runtimeEventToActivities`, the runtime→domain hop; `packages/contracts/src/orchestration.ts:1208-1214` + `:1808-1822` — `thread.meta.update` and `thread.meta-updated` both carry an optional `modelSelection` beside the title, so T3 has no model-set event either; `apps/server/src/orchestration/decider.ts:1753-1796` — `thread.user-input.dismiss` decides to a plain `thread.activity-appended`; differs: T3 also carries project, archive/settle/snooze/pin, proposed-plan and pull-request events this design does not*
+
+*Built: a third layer sits beside the two, and it is **derived**: the thread index,
+`<appdir>/daemon/agent/index.sqlite` (host-wide, WAL, 0600 — it holds the text of every
+conversation, so it is as sensitive as `raw.ndjson`, §10). It projects the domain events into turn
+rows carrying the byte range of `events.ndjson` each started turn owns (ordinals by ORDER of started
+turns, from the fold's own turn reducer `applyTurnEvent`, so they are `/revert`'s count, §5.5),
+activity positions, message spans, compaction markers and FTS5 text. `commit` feeds it the events
+it just appended, with their byte positions, strictly AFTER the append, so a crash leaves it behind
+the log and never ahead; a per-thread cursor (`threads.last_seq`/`last_byte`) is what the post-gate
+catch-up resumes from, a tail that does not continue that cursor re-indexes the thread from byte 0,
+and a schema-version mismatch, a failed `quick_check` or a file this build's statements do not fit
+deletes the file and rebuilds it from the logs. It serves exactly two reads, `GET …/history` and
+`GET /api/agent/search` (§6.3); the thread snapshot is still the fold. Code:
+`apps/daemon/src/agent-host/index/`. See
+`docs/superpowers/specs/2026-09-23-thread-index-and-lazy-boot-design.md`, C.*
+
+*T3: `apps/server/src/persistence/Migrations/005_Projections.ts:7-112` — persisted `projection_*` tables and `projection_state(projector, last_applied_sequence, updated_at)`, one cursor per projector; `apps/server/src/orchestration/Layers/OrchestrationEngine.ts:273-285` — each event is appended and projected in one transaction; `apps/server/src/orchestration/Layers/ProjectionPipeline.ts:2059-2074` — boot resumes every projector from its cursor, never a full replay; `apps/server/src/orchestration/threadDetailCursor.ts:3-19` — the source of the page-cursor rule: a cursor names content (anchor + turn id), never a projection row id, because the revert projector and a rebuild rewrite row ids; differs: T3's projections live in the same SQLite file as its event log, are written in the log's own transaction and ARE its read model. Here the record stays one NDJSON file per thread, and SQLite holds only a disposable projection written after it — behind the log by design after a crash, deleted and rebuilt on any doubt, and outside the rollback boundary*
 
 Envelope: `{seq, eventId, threadId, type, payload, occurredAt, commandId | null,
 causationEventId | null, metadata}`, where `metadata` carries `{providerTurnId?, providerItemId?,
@@ -2129,6 +2251,17 @@ an artefact of the port rather than a requirement
 50 events **and on every head-shaped change**, not only on turn end — a head the stream can serve
 is worth more than the write it saves
 (`apps/daemon/src/agent-host/orchestration/orchestrator.ts`).*
+
+*Built (2026-09-23, `2026-09-23-fold-performance-design.md`): the retention is **batched**. The limits
+above are what a trim cuts back to; a class is trimmed only once it holds more than its limit plus
+a slack (50 parent rows, 50 per agent, 200 across agents, 200 messages) of rows retention may drop,
+and the trim then applies these rules at the exact limits to every class at once. Per-event
+retention rescanned and sorted the whole window on every event and made the fold cost ~1.8 ms per
+event on a subagent-heavy thread (45–81 s for a 70–80 MB log; 1.3–1.6 s now). The trigger reads
+only the fold's state, so a snapshot folded forward still equals the whole-log fold, and
+`FOLD_SNAPSHOT_VERSION` went to 2. `state.evicted` records that retention has dropped anything; the
+host's history bounds read it (C, `2026-09-23-thread-index-and-lazy-boot-design.md`). T3 has no
+counterpart: its projector retains per event, in SQL, where the cost is the database's.*
 
 A thread directory that fails to parse marks that thread `error` with the parse message; it
 never affects other threads or host startup. A malformed line inside `events.ndjson` truncates the
@@ -2412,6 +2545,13 @@ read an unslimmed shape by accident (`packages/api/src/agent-chat/slim.ts`). The
 is measured in **UTF-8 bytes**, never splitting a surrogate pair, and returns the input by
 identity when it already fits.*
 
+*Built: a history page (§6.3) is a third read through the same choke point. Its items are the fold
+of a block of the log, and they go out through the snapshot's own projection (`slimItemsForRead`:
+the two snapshot-time drops, then slimming), so a page row is exactly as slim as a snapshot row; a
+page row's full payload is still `GET …/items/:itemId`, which reads the log backwards rather than
+the fold and so serves rows long gone from the retained window. See
+`docs/superpowers/specs/2026-09-23-thread-index-and-lazy-boot-design.md`, C "History page".*
+
 
 ## 6. Routes and stream
 
@@ -2562,23 +2702,19 @@ reverse. Here that is one `events` array on one orchestrator decision — `respo
 `user-input.resolved` activity (deterministic id `async-answer:<requestId>`) and the
 `thread.message-sent` reach `append` together or not at all — with the steer as the decision's only
 effect. The reply text **echoes each question before its answer** (`"<question>\n<answer>"`, joined
-by blank lines), and a question's attachments follow as `Attached file: <name>` lines and
-ride the message as real attachment refs. The echo is not decoration: the provider parked no
-request, so the agent receives this as an ordinary user turn and has nothing but the text to tell
-it which question was answered — the previous shape dropped the question whenever there was exactly
-one, which reads as a bare "yes" arriving from nowhere in a resumed transcript. The message id is
-the deterministic `async-answer:<requestId>` too, so a replayed command cannot mint a duplicate.*
+by blank lines), and a question's attachments follow as `Attached file: <name> (<path>)` lines —
+the absolute host path, so the adapters' `Attached files:` block (§4.5) finds each file already
+named and appends nothing; an answer naming a file the host cannot resolve is refused before
+anything is committed, so the card stays open — and ride the message as real attachment refs. The echo is not decoration: the provider parked no request, so
+the agent receives this as an ordinary user turn and has nothing but the text to tell it which
+question was answered — the previous shape dropped the question whenever there was exactly one,
+which reads as a bare "yes" arriving from nowhere in a resumed transcript. The message id is the
+deterministic `async-answer:<requestId>` too, so a replayed command cannot mint a duplicate.*
 
-*Built: **the message-mode echo names a file; it does not locate it.** T3's echo line ends in
-`(<id>)`, and so did this one until §4.1's path lines existed. The id means nothing to an agent,
-and the answer's steer goes through the ordinary turn effect, which appends each file's real
-`Attached file: <name> (<absolute path>)` line after the whole reply (or ingests it natively, per
-the adapter's `ingestsAttachment`) — so a file answering "Which branch?" reaches the agent as
-`Which branch?\nmain\nAttached file: notes.md\n\nAttached file: notes.md (<path>)`: the echo says
-which question the file belongs to, the path line says where it is, and there is no second
-parenthesised reference to read as a second file. The persisted `thread.message-sent` holds the
-echo only, never a path. The same turn effect re-checks the files against their stat'd size, so an
-oversized answer attachment is an "Attachment rejected" row, never a send.*
+*Built: **the answer's steer is an ordinary send.** It goes through the same turn effect as a
+`/turn`, which resolves and STATs every attachment before anything is sent (§6.3): an answer
+attachment that is gone or over its bound is an "Attachment rejected" row, never a send. The
+persisted `thread.message-sent` holds the echo, paths included, exactly as the adapter receives it.*
 
 `/session/stop` stops the provider child and leaves the thread, its log and its resume cursor
 intact; the next `/turn` re-adopts it through lazy recovery (§4.1). Without it a session wedged in
@@ -2671,6 +2807,43 @@ absence from `AGENT_CHAT_COMMAND_NAMES`).*
 
 *T3: `packages/contracts/src/orchestration.ts:2164-2177` — the three thread stream frames (`snapshot` / `event` / `synchronized`), adopted verbatim; `:953-963` — the shell stream's own frames, differs: no shell stream here (§6.4); `:2223-2229` — `getTurnDiff` takes `{threadId, fromTurnCount, toTurnCount, ignoreWhitespace?}`, with the `fromTurnCount ≤ toTurnCount` filter at `:2182-2195`*
 
+*Built: the thread index (§5.1) added one snapshot field and two reads; the first paint is still
+the fold's whole retained window. (1) **Every thread snapshot carries `history`** —
+`{indexed, hasOlder, beforeCursor, oldestRetainedOrdinal, totalTurns}`: where the retained window
+ends and whether the index holds anything older. The boundary is the newest first row of any FULL
+retention class (the parent's 500, an agent's 200, the 2 000 across agents), never simply the
+oldest activity the fold holds: anchors and open questions survive out of age order, and a fleet
+whose agents lost their early rows would read as having nothing older at all. With no class full,
+the oldest indexed activity is the boundary — so a thread whose only evictions are messages
+reports `hasOlder: false`. (2) **`GET /api/sessions/:id/history?before=<cursor>&turns=<n>`** →
+`ThreadHistoryPage {threadId, turns, items, checkpoints, page: {beforeCursor}, seq}`. A page is a
+BLOCK of the log walked back 400 activities through the index — below the 500 rows at which
+retention starts dropping anything, so the block's fold is lossless — and not N turns: one
+subagent-fleet turn runs to thousands of events, more than the window, and a turn-sized page hands
+back exactly what the window already shows. `turns` (default 20, at most 100) is only a soft cap.
+The bytes are read by range, folded from empty and projected like a snapshot (§5.6); both
+boundaries move back to a streamed message's first chunk, so no message is split; a revert's cut —
+the removed turns' lines and the `thread.reverted` itself — is never folded into a page; and
+`turns` lists every indexed turn the block meets, with `rewindable` (no settled compaction after
+its prompt), so one turn can appear on two pages. The cursor is `base64url(JSON {t, a, i, s?})` —
+thread, anchor `requestedAt`, turn id, optional in-turn sequence bound — derived from content, so
+it survives an index rebuild and a revert; a malformed or foreign one is a first-page request. No
+usable index is a 503 `INDEX_UNAVAILABLE`. The daemon forwards the page without noting its `seq` as
+the tab's reconnect cursor: that is the thread's CURRENT sequence while the page holds only old
+turns, and moving the cursor to it would let a reconnect skip live events.
+(3) **`GET /api/agent/search?q=&limit=&projectPath=`** → `{query, hits, truncated, indexed}`: FTS5
+over the message and activity text of every thread on the host, `bm25`-ranked, `«…»` snippets,
+`limit` 20 by default and at most 50, `q` at most 200 code points and quoted as a phrase per
+whitespace token — never handed to the FTS parser raw. It is never a 404 and never an error for
+"no index": the host answers 200 `indexed: false`, and the daemon synthesises the same body for an
+older host that has no `/search` route yet during a rollout
+(`apps/daemon/src/agent-host/orchestration/orchestrator.ts` `historyBoundsOf` / `readHistory` /
+`planHistoryBlock` / `windowBoundary` / `searchThreads`, `apps/daemon/src/agent-host/index/queries.ts`,
+`packages/api/src/agent-chat/history-cursor.ts`, `apps/daemon/src/agent-chat/proxy-routes.ts`). See
+`docs/superpowers/specs/2026-09-23-thread-index-and-lazy-boot-design.md`, C.*
+
+*T3: `apps/server/src/orchestration/threadDetailCursor.ts:3-19` + `:33-36` — the content-derived `(anchor, turnId)` cursor, and "a malformed or foreign-thread cursor degrades to a first-page request"; `apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:1673-1685` + `:3650-3690` — the keyset walk back by user turns under a raw-turn ceiling, and the `hasMore` probe; `packages/client-runtime/src/state/threads.ts:43-50` — 10 user turns on first paint, 20 per older page; differs: a page here is a block of the log by activity count with an optional in-turn `s` bound, because a single fleet turn outgrows the window, and the first paint is still the whole retained window rather than a turn window*
+
 **Snapshot-or-replay is the server's decision, not the client's.** The client only ever sends its
 last sequence; the host chooses. It replays events after `after` only when the range, measured
 *over this thread's rows alone*, is ≤ 1 000 events **and** ≤ 8 MiB of payload; past either it sends
@@ -2723,6 +2896,12 @@ It is `GET /api/sessions/:id/attachments/:attachmentId`: the host resolves the i
 namespace and its traversal guard) and the daemon streams the file, carrying the same `?token=`
 carve-out a native `<a download>` needs (`apps/daemon/src/agent-chat/proxy-routes.ts`,
 `agentChatRoutes.attachment`).*
+
+*Built: the upload reply carries the attachment's **absolute host path** beside the reference —
+`AttachmentRef.path` — so the composer can name the file in the prompt (§7.4). It is a courtesy of
+that one reply: `parseAttachments` rebuilds every ref from `{type, id, name, mimeType, sizeBytes}`,
+so no command body reaches an adapter with it and no event carries it
+(`apps/daemon/src/agent-host/orchestration/validate.ts`, `agent-host/store/index.ts`).*
 
 **Provider snapshots.** Each adapter's snapshot carries, besides §4.1's
 `{installed, version, auth, models[], slashCommands[], skills[], usageLimits, versionAdvisory,
@@ -2993,10 +3172,15 @@ Row kinds and behaviour:
   the bundle (no WASM, see below), code blocks mounted line by line while streaming, cached HTML
   once settled.
 - **Reasoning**: collapsed to one line, labelled "summary" when `reasoning_summary_text`.
+  Every nonempty trace can open, including a single long line; the expanded body uses the same
+  Markdown renderer as assistant text and is height-limited. Inside an expanded activity group,
+  consecutive reasoning blocks have their own disclosure and a short preview, as in T3.
 - **Activity group**: all activities between two assistant texts collapse into one line showing
   the live tool label while running and `summarizeToolGroup()` output when settled ("Read 3
   files, ran 2 commands"). Expanded, each tool shows its command with streamed output, file
-  changes as a unified diff with click-through to an editor tab, hook runs, denials, MCP calls.
+  changes as a unified diff with click-through to an editor tab, failed hook runs, denials, MCP
+  calls. A reasoning block after a tool changes the live label back to "Thinking"; an earlier
+  tool cannot remain the visible current action.
 - **"+N more" toggle** inside a long expanded group, and a **working row** — one element whose
   label is swapped in place (starting → running → tool name) rather than remounted, with a
   self-ticking elapsed timer, so the turn is never represented by an empty timeline.
@@ -3009,13 +3193,14 @@ Row kinds and behaviour:
 
 *Built: three row kinds landed narrower than written. A user message's attachments render as named
 **chips**, not thumbnails — the attachment bytes route of §6.3 exists but the timeline does not
-fetch it, so nothing decodes a 10 MiB image into a bubble on a phone. The plan proposal card offers
+fetch it, so nothing decodes a 10 MiB image into a bubble on a phone. The sent-message chips, like
+the composer's, carry the file-type icon of §7.4 (`icons/files`). The plan proposal card offers
 **copy and download only**; there is no "save into the workspace" action, which would be a write
 into `fsRoot` from a render path. And there is no "load earlier" header: a thread is sent whole
 (§2), so there is nothing earlier to load
-(`packages/ui/src/components/agent-chat/timeline/`). One kind landed wider: Codex's `commentary`
-phase gets its own activity row rather than being folded into reasoning, because it is the only
-narration that CLI emits between tool calls.*
+(`packages/ui/src/components/agent-chat/timeline/`). Codex's `commentary` phase is a visible
+assistant message between tool calls, in both live and replayed turns. The phase remains metadata
+so commentary cannot become the turn's terminal answer.*
 
 *Built: the compaction marker also carries the provider's own **summary** and reveals it behind a
 "Show summary" / "Hide summary" toggle on the hairline itself, collapsed by default (the CLI's
@@ -3188,6 +3373,23 @@ than no control. `/effort <id>` is a narrow client-side bridge that writes the c
 effort option and sends nothing (§4.6.5). A paste that folds into a text attachment reports itself
 **inline in the composer** rather than as a toast, because a toast for something that already
 produced a visible chip is noise (`packages/ui/src/components/agent-chat/composer/`).*
+
+*Built: **attachments name themselves in the text.** An image inserts `[Image #N]` at the caret
+when it is staged — the CLI's own placeholder for a pasted image — numbered by its position among
+the staged images; removing it drops the placeholder and renumbers the later ones
+(`packages/ui/src/components/agent-chat/composer/composer-images.ts`). A non-image file inserts its
+**absolute host path** when its upload completes (the path is not known before), exactly as the
+terminal-era upload typed it into the PTY; removing the chip removes the path, and a returned
+queued message re-stages its chips without re-inserting a path the text already names
+(`composer-files.ts`). The path rides the upload reply as `AttachmentRef.path` (§6.3) and the
+persisted draft keeps it so a reload can still strip it. The chips carry a **file-type icon** — a
+vendored subset of Material Icon Theme (`packages/ui/src/icons/files/`) — an image chip shows a
+thumbnail of the local file and a hover preview, resolved through `GET …/attachments/:attachmentId`
+when the draft was reloaded and the `File` is gone (`ComposerAttachments.tsx`). An insert that is
+not the composer's own typing — a finished upload's path, and every insert through the composer
+bridge (a delivered ref, the queue drained back by an interrupt, a displaced custom answer) —
+places the caret without moving focus unless the textarea already had it; a surface that means
+"edit this in the composer" (a queued row's return action) asks for focus explicitly.*
 
 **The queued-message model.** This is the client's own queue of messages it has not dispatched
 yet, and it is a different thing from the host-side queue that holds already-posted `/turn`s behind
@@ -3546,11 +3748,15 @@ silently half-applied.
 *Built: the handover is **drain-then-replace**, not trial-then-commit. T3 starts the replacement,
 waits for its `prepared` and keeps the old version if it never comes; here both hosts would have to
 bind the same `agent-host.sock`, so a trial is not expressible. The restart is therefore deferred
-until no thread has an active turn, the old host is asked to `/stop` (which writes every
-continuation marker), and the supervisor then **waits for the socket to stop answering** before
-spawning the replacement — killing the tmux session milliseconds after `/stop` answers strands a
-teardown that needs seconds, and OpenCode's server is spawned `detached: true`, so it would survive
-the kill holding its port while the new host started a second one for the same project. A
+until no thread has an active turn or live background work, the old host is asked to `/stop`
+(which writes every continuation marker), and the supervisor then **waits for the old host's
+process to exit** — its tmux service session ending, plus the socket — bounded at 30 s, before
+spawning the replacement. The socket closing is the teardown's FIRST step, not its last: killing
+the tmux session the moment it went quiet cut the teardown short, so no `session.exited` and one
+"Task stopped" row out of five were written and the threads read "running" for dead work
+(2026-09-23); OpenCode's server is also spawned `detached: true`, so it would survive the kill
+holding its port while the new host started a second one for the same project. An intentional
+`/stop` ends the process explicitly once the teardown completes. A
 replacement that never reaches readiness latches `error` and is retried with backoff rather than
 being silently half-applied (`apps/daemon/src/agent-chat/supervisor.ts`).*
 

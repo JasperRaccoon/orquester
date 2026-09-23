@@ -19,7 +19,12 @@ const STATUS_BY_CODE: Readonly<Record<AgentChatErrorCode, number>> = {
   COMMAND_ID_CONFLICT: 409,
   COMMAND_REJECTED: 409,
   COMPACTION_UNAVAILABLE: 409,
-  HOST_UNAVAILABLE: 503
+  HOST_UNAVAILABLE: 503,
+  // The thread index is missing or being rebuilt: only `GET …/history`
+  // answers it (`GET /search` answers 200 `indexed:false` instead), and
+  // nothing about the live thread is affected. Not a recorded rejection — it
+  // is a read, and it clears itself.
+  INDEX_UNAVAILABLE: 503
 };
 
 /**

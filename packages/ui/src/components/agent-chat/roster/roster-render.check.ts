@@ -314,7 +314,11 @@ const mixedFolded = render(
     onOpenAgent: () => {}
   })
 );
-assert.ok(mixedFolded.includes("1 agent · 1 shell running"), "the folded roster names both kinds");
+assert.match(
+  mixedFolded,
+  /1 agent \(<span class="text-info-300">1 working<\/span>\) · 1 shell \(<span class="text-info-300">1 running<\/span>\)/,
+  "the folded roster places cyan active counts beside each kind"
+);
 const mixedOpen = render(
   createElement(AgentRoster, {
     sessionId: "s1",
@@ -330,6 +334,53 @@ assert.ok(
   "agents render above the shells section even when the shell spawned first"
 );
 assert.ok(mixedOpen.includes("● 1 working"), "working counts the agent, not the shell");
+
+const foldedCounts = render(
+  createElement(AgentRoster, {
+    sessionId: "s1",
+    agents: [
+      ...Array.from({ length: 7 }, (_, index) =>
+        agent(`agent-${index}`, { status: index < 2 ? "running" : "completed" })
+      ),
+      ...Array.from({ length: 6 }, (_, index) =>
+        shell({ id: `shell-${index}`, status: index === 0 ? "running" : "completed" })
+      )
+    ],
+    panel: emptyPanel,
+    expanded: false,
+    collapsed: true,
+    onCollapsedChange: () => {},
+    onExpandedChange: () => {},
+    onOpenAgent: () => {}
+  })
+);
+assert.match(
+  foldedCounts,
+  /7 agents \(<span class="text-info-300">2 working<\/span>\) · 6 shells \(<span class="text-info-300">1 running<\/span>\)/
+);
+assert.ok(!foldedCounts.includes("● 2 working"), "the working count appears only beside the agents total");
+
+const orderedRoster = render(
+  createElement(AgentRoster, {
+    sessionId: "s1",
+    agents: [
+      agent("agent-done", { status: "completed" }),
+      shell({ id: "shell-done", status: "completed" }),
+      agent("agent-live"),
+      shell({ id: "shell-live" })
+    ],
+    panel: emptyPanel,
+    expanded: true,
+    onCollapsedChange: () => {},
+    onExpandedChange: () => {},
+    onOpenAgent: () => {}
+  })
+);
+assert.ok(orderedRoster.indexOf('data-agent-id="agent-live"') < orderedRoster.indexOf('data-agent-id="agent-done"'));
+assert.ok(orderedRoster.indexOf('data-agent-id="shell-live"') < orderedRoster.indexOf('data-agent-id="shell-done"'));
+assert.match(orderedRoster, /data-agent-id="agent-done"[^>]*class="[^"]*opacity-70/);
+assert.match(orderedRoster, /data-agent-id="shell-done"[^>]*class="[^"]*opacity-70/);
+assert.doesNotMatch(orderedRoster, /data-agent-id="agent-live"[^>]*class="[^"]*opacity-70/);
 
 const exitedRow = render(
   createElement(AgentRoster, {

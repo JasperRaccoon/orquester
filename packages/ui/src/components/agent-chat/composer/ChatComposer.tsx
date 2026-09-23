@@ -15,17 +15,25 @@ import { MAX_TURN_ATTACHMENTS } from "@orquester/api/agent-chat";
 import { cn } from "../../../lib/cn";
 import { useMediaQuery } from "../../../hooks/use-media-query";
 import { useAppStore } from "../../../store/app";
+import { attachmentPathOf } from "../../../lib/agent-chat/composer.logic";
 import { useAgentChatDraft } from "../../../lib/agent-chat/hooks";
 import { createEscapeSequence, type EscapeSequence } from "../../../lib/agent-chat/rewind.logic";
 import type { ChatComposerProps } from "../contracts";
 import { AccountChip, ModelChip, OptionChip, PlanChip, RuntimeModeChip } from "./ComposerChips";
+import { removeFilePath, textNamesPath } from "./composer-files";
+import {
+  imageOrdinal,
+  imagePlaceholder,
+  removeImagePlaceholder,
+  revokeImagePreviews,
+  withoutPreviews
+} from "./composer-images";
 import {
   REWIND_ESCAPE_HINT,
   REWIND_ESCAPE_HINT_MS,
   RewindControl,
   rewindPickerEnabled
 } from "./RewindControl";
-import { imageOrdinal, imagePlaceholder, removeImagePlaceholder } from "./composer-images";
 import { ComposerAttachments, type StagedAttachment } from "./ComposerAttachments";
 import {
   composerDraftToPersist,
@@ -230,6 +238,9 @@ export function ChatComposer({
   const textareaRef = React.useRef<HTMLTextAreaElement>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const draftRef = React.useRef<DraftState>(EMPTY_DRAFT);
+  const caretRef = React.useRef(0);
+  /** A caret `applyCaret` still owes the textarea; whichever lands last, its microtask or the commit, clears it. */
+  const pendingCaretRef = React.useRef<{ at: number; focus: boolean } | null>(null);
   const storeDraftRef = React.useRef(storeDraft);
   storeDraftRef.current = storeDraft;
   /**
@@ -269,6 +280,7 @@ export function ChatComposer({
   const rewindHintTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
   draftRef.current = draft;
+  caretRef.current = cursor;
 
   // ---------------------------------------------------------------------
   // The draft is the store's (§7.1, §7.4)
@@ -283,11 +295,14 @@ export function ChatComposer({
   // and on every thread swap, and the two effects below write it back. The
   // load deliberately does NOT go through `stageAttachment` — that one also
   // writes an `[Image #N]` placeholder at the caret, and the text being
-  // restored already contains the placeholders the user saw.
+  // restored already contains the placeholders the user saw. The same holds
+  // for a file's path: the restored text already carries it.
   const previousSessionRef = React.useRef<string | null>(null);
   React.useLayoutEffect(() => {
     if (previousSessionRef.current === sessionId) return;
     previousSessionRef.current = sessionId;
+    // The previous thread's previews die with its live draft; the persisted one never held them.
+    revokeImagePreviews(draftRef.current.attachments);
     const loaded = loadComposerDraft(storeDraftRef.current);
     carriedContextRef.current = loaded.context;
     const next: DraftState = { text: loaded.text, attachments: loaded.attachments };
@@ -300,6 +315,7 @@ export function ChatComposer({
     // A half-finished double Escape belongs to the thread it was pressed in.
     escapeSequenceRef.current?.reset();
   }, [sessionId]);
+  React.useEffect(() => () => revokeImagePreviews(draftRef.current.attachments), []);
 
   /**
    * One scheduler per thread, and its cleanup is the flush.
@@ -452,16 +468,61 @@ export function ChatComposer({
     setCursor(end);
   }, []);
 
-  const applyCaret = React.useCallback((at: number) => {
+  /**
+   * Whether the composer already owns focus. An insert that is not the
+   * composer's own input — any bridge insert, user event or not, and a finished
+   * upload's path — places the caret but never takes focus by itself (§7.4).
+   */
+  const isTextareaFocused = React.useCallback(
+    () => typeof document !== "undefined" && document.activeElement === textareaRef.current,
+    []
+  );
+
+  // `focus: false` places the caret without taking focus. An insert that is not
+  // the composer's own input never takes focus by itself — every bridge insert,
+  // whether or not a user event triggered it (a queued row's X, a question
+  // card's option click, an interrupt's drain, a delivered ref), and a finished
+  // upload's path: focusing there pops the soft keyboard on a phone or pulls
+  // focus out of the card, chip popover or modal the user is in. A surface that
+  // wants the composer focused asks explicitly (`focusAtEnd`, the bridge's
+  // `focusComposer`), as the queued row's return does.
+  const applyCaret = React.useCallback((at: number, options?: { focus?: boolean }) => {
+    const focus = options?.focus ?? true;
+    pendingCaretRef.current = { at, focus };
     // After paint: the textarea's own value has to land before the caret does.
     queueMicrotask(() => {
       const element = textareaRef.current;
       if (!element) return;
-      element.focus({ preventScroll: true });
+      if (focus) element.focus({ preventScroll: true });
       element.setSelectionRange(at, at);
+      // The value is already the draft's — the commit landed first, or the
+      // text never moved — so the layout effect below owes nothing, and a
+      // stale target must not fire on the next keystroke's commit. A caller
+      // from a promise continuation must have written `draftRef.current.text`
+      // before calling `applyCaret`, as `insertText` does, or this clears the
+      // target too early.
+      if (element.value === draftRef.current.text) pendingCaretRef.current = null;
     });
     setCursor(at);
   }, []);
+
+  // The commit half of `applyCaret`, covering both orders. A commit that
+  // PRECEDES the microtask — a discrete event's insert (a paste, a menu pick)
+  // or `uploadOne`'s `flushSync` one — has the caret land here, and the
+  // microtask then only confirms it. A default-lane commit that FOLLOWS the
+  // microtask (a returned queued message, `appendToDraft` after an interrupt)
+  // finds that the microtask placed the caret on the OLD value and the
+  // commit's `node.value = …` threw it to the end, so it is placed again here.
+  // Whichever lands last leaves the caret after the insert.
+  React.useLayoutEffect(() => {
+    const pending = pendingCaretRef.current;
+    if (pending === null) return;
+    pendingCaretRef.current = null;
+    const element = textareaRef.current;
+    if (!element) return;
+    if (pending.focus) element.focus({ preventScroll: true });
+    element.setSelectionRange(pending.at, pending.at);
+  }, [draft.text]);
 
   /**
    * Insert text into the draft.
@@ -473,25 +534,33 @@ export function ChatComposer({
    * per queued message in a loop, so a non-batch-safe version silently drops
    * every returned message but the last — the exact data loss §7.4 forbids.
    *
-   * The optimistic `draftRef.current` write is what makes the *next* call in
-   * the same tick see this one's text.
+   * The caret comes from `caretRef` — synced from state on render, advanced
+   * optimistically here — never from the closure: a call that lands late (a
+   * file's path arrives when its upload completes) inserts at the caret the
+   * user has NOW, and two inserts in one tick land in order rather than both
+   * at the pre-batch caret.
+   *
+   * `options.focus` is `applyCaret`'s: an insert that is not the composer's
+   * own input passes `isTextareaFocused()`, so it places the caret without
+   * taking focus unless the textarea already had it.
    */
   const insertText = React.useCallback(
-    (text: string, mode: "cursor" | "append" = "cursor") => {
+    (text: string, mode: "cursor" | "append" = "cursor", options?: { focus?: boolean }) => {
       if (!text) return;
       const current = draftRef.current;
       const at =
-        mode === "append" ? current.text.length : Math.min(cursor, current.text.length);
+        mode === "append" ? current.text.length : Math.min(caretRef.current, current.text.length);
       const gap =
         at > 0 && !/\s$/.test(current.text.slice(0, at)) && !/^\s/.test(text) ? " " : "";
       const applied = replaceTextRange(current.text, at, at, `${gap}${text}`);
       draftRef.current = { ...current, text: applied.text };
+      caretRef.current = applied.cursor;
       setDraft((state) =>
         state.text === applied.text ? state : { ...state, text: applied.text }
       );
-      applyCaret(applied.cursor);
+      applyCaret(applied.cursor, options);
     },
-    [applyCaret, cursor]
+    [applyCaret]
   );
 
   const openControl = React.useCallback((command: ComposerShortcutCommand) => {
@@ -537,11 +606,17 @@ export function ChatComposer({
         : { ...state, attachments: [...state.attachments, entry] }
     );
     // An image gets its `[Image #N]` at the caret, as the CLI does on paste,
-    // so the text can name it.
+    // so the text can name it. A file gets its absolute path — unless the text
+    // already names it, as a returned queued message's text does (§7.4).
     const ordinal = imageOrdinal(draftRef.current.attachments, entry.key);
-    if (ordinal !== null) insertText(imagePlaceholder(ordinal), "cursor");
+    const path = attachmentPathOf(ref);
+    if (ordinal !== null) {
+      insertText(imagePlaceholder(ordinal), "cursor", { focus: isTextareaFocused() });
+    } else if (path !== undefined && !textNamesPath(draftRef.current.text, path)) {
+      insertText(path, "cursor", { focus: isTextareaFocused() });
+    }
     return true;
-  }, [insertText]);
+  }, [insertText, isTextareaFocused]);
 
   /**
    * R8-m12: §7.8 suppresses autofocus **on mobile only** — "a keyboard on every
@@ -560,12 +635,17 @@ export function ChatComposer({
   React.useEffect(
     () =>
       registerComposerHandle(sessionId, {
-        insertText,
+        // A bridge insert never takes focus by itself, whether or not a user
+        // event triggered it (a queued row's X, a card's option click, an
+        // interrupt's drain, a delivered ref): place the caret, keep focus
+        // where it is. A surface that wants the composer focused asks for it
+        // explicitly (`focusAtEnd` / `focusComposer`).
+        insertText: (text, mode) => insertText(text, mode, { focus: isTextareaFocused() }),
         stageAttachment,
         focusAtEnd,
         openControl
       }),
-    [focusAtEnd, insertText, openControl, sessionId, stageAttachment]
+    [focusAtEnd, insertText, isTextareaFocused, openControl, sessionId, stageAttachment]
   );
 
   // ---------------------------------------------------------------------
@@ -752,12 +832,34 @@ export function ChatComposer({
           name: file.name,
           type: file.type
         });
-        setDraft((state) => ({
-          ...state,
-          attachments: state.attachments.map((entry) =>
+        // The chip may be gone — removed while the bytes were still going up.
+        // A late success must neither resurrect it nor write its path.
+        if (!draftRef.current.attachments.some((entry) => entry.key === key)) return;
+        const ready = (entries: StagedAttachment[]): StagedAttachment[] =>
+          entries.map((entry) =>
             entry.key === key ? { ...entry, status: "ready" as const, progress: 1, ref } : entry
-          )
-        }));
+          );
+        draftRef.current = { ...draftRef.current, attachments: ready(draftRef.current.attachments) };
+        // A file's path is known only now, so this is where it reaches the
+        // prompt — at the live caret, as the terminal-era upload typed it into
+        // the PTY (`composer-files.ts`). Images already have `[Image #N]`.
+        const path = attachmentPathOf(ref);
+        const insertPath =
+          !file.type.startsWith("image/") &&
+          path !== undefined &&
+          !textNamesPath(draftRef.current.text, path)
+            ? path
+            : undefined;
+        // The caret is placed; focus is kept only where it already was.
+        const focus = isTextareaFocused();
+        // `flushSync`: a promise continuation's update is not sync-lane, so a
+        // keystroke arriving before it committed would rebase over the insert
+        // and drop the path. The status and the path land in ONE commit, so a
+        // Remove can never see one without the other.
+        flushSync(() => {
+          setDraft((state) => ({ ...state, attachments: ready(state.attachments) }));
+          if (insertPath !== undefined) insertText(insertPath, "cursor", { focus });
+        });
       } catch (error) {
         setDraft((state) => ({
           ...state,
@@ -771,6 +873,20 @@ export function ChatComposer({
               : entry
           )
         }));
+      }
+    },
+    [actions, insertText, isTextareaFocused]
+  );
+
+  /** A reloaded or delivered image chip has no local `File`; its preview comes from §6.3's read-back. */
+  const resolvePreview = React.useCallback(
+    async (attachment: StagedAttachment): Promise<string | null> => {
+      if (!attachment.ref) return null;
+      try {
+        const bytes = await actions.fetchAttachmentBytes(attachment.ref.id);
+        return URL.createObjectURL(new Blob([bytes], { type: attachment.mimeType }));
+      } catch {
+        return null;
       }
     },
     [actions]
@@ -809,7 +925,9 @@ export function ChatComposer({
             sizeBytes: file.size,
             mimeType: file.type,
             status: "uploading",
-            progress: 0
+            progress: 0,
+            // The thumbnail and hover preview, from the bytes already in hand.
+            ...(file.type.startsWith("image/") ? { previewUrl: URL.createObjectURL(file) } : {})
           }
         });
       }
@@ -837,20 +955,28 @@ export function ChatComposer({
 
   const removeAttachment = React.useCallback((key: string) => {
     retryFilesRef.current.delete(key);
-    // Its `[Image #N]` leaves with it and the later ones close the gap.
-    const ordinal = imageOrdinal(draftRef.current.attachments, key);
-    const next = {
-      text:
-        ordinal === null
-          ? draftRef.current.text
-          : removeImagePlaceholder(draftRef.current.text, ordinal),
-      attachments: draftRef.current.attachments.filter((entry) => entry.key !== key)
+    const current = draftRef.current;
+    const entry = current.attachments.find((candidate) => candidate.key === key);
+    if (entry?.previewUrl) URL.revokeObjectURL(entry.previewUrl);
+    // Its `[Image #N]` — or, for a file, its path — leaves with it; the later
+    // images close the gap.
+    const ordinal = imageOrdinal(current.attachments, key);
+    const path = attachmentPathOf(entry?.ref);
+    const strip = (text: string): string =>
+      ordinal !== null
+        ? removeImagePlaceholder(text, ordinal)
+        : path !== undefined
+          ? removeFilePath(text, path)
+          : text;
+    draftRef.current = {
+      ...current,
+      text: strip(current.text),
+      attachments: current.attachments.filter((candidate) => candidate.key !== key)
     };
-    draftRef.current = { ...draftRef.current, ...next };
     setDraft((state) => ({
       ...state,
-      text: ordinal === null ? state.text : removeImagePlaceholder(state.text, ordinal),
-      attachments: state.attachments.filter((entry) => entry.key !== key)
+      text: strip(state.text),
+      attachments: state.attachments.filter((candidate) => candidate.key !== key)
     }));
   }, []);
 
@@ -919,8 +1045,10 @@ export function ChatComposer({
         // again. A failed Implement (`text: null`) leaves the draft alone for
         // the same reason: its prompt is the composer's, and in the draft it
         // would read as a plan-mode Refine carrying the implementation prefix.
+        // `submit` revoked the sent chips' preview URLs; a restored image chip
+        // resolves its preview again, as a reloaded one does.
         setDraft((state) => {
-          const next = draftAfterSend({ outcome, sent: attachments, draft: state });
+          const next = draftAfterSend({ outcome, sent: withoutPreviews(attachments), draft: state });
           return next === null ? state : { ...state, ...next };
         });
         setNotice(outcome.notice);
@@ -1014,6 +1142,7 @@ export function ChatComposer({
         isRunning: isTurnActive && plan === null
       });
 
+      revokeImagePreviews(draft.attachments);
       setDraft(EMPTY_DRAFT);
       // The persisted draft is cleared NOW rather than on the debounce: a
       // reload between the send and the next window would otherwise resurrect
@@ -1365,6 +1494,7 @@ export function ChatComposer({
             onRemove={removeAttachment}
             onRetry={retryAttachment}
             disabled={reverting}
+            resolvePreview={resolvePreview}
           />
 
           <label className="sr-only" htmlFor={`${menuId}-input`}>

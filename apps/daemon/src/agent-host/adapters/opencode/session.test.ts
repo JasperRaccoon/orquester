@@ -18,12 +18,10 @@ import type { AdapterContext } from "../../adapter.ts";
 import { resumeCursorFor } from "../../orchestration/resume.ts";
 import {
   OpenCodeThreadSession,
-  openCodeIngestsAttachment,
   parseOpenCodeModelSlug,
   parseOpenCodeResume,
   toQuestionAnswers
 } from "./session.ts";
-import { createOpenCodeAdapter } from "./index.ts";
 import type { OpenCodeServerHandle } from "./server.ts";
 import { OpenCodeClient } from "./http.ts";
 import { deferred } from "./util.ts";
@@ -607,6 +605,131 @@ test("a turn submits prompt_async with a minted id, the system addendum and the 
   harness.dispose();
 });
 
+test("an xlsx rides as a path line in the text part; a csv is still a native file part (§4.5)", async () => {
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  await session.sendTurn({
+    threadId: "thread-1",
+    input: "compare these",
+    attachments: [
+      {
+        type: "file",
+        id: "att-x",
+        name: "q3.xlsx",
+        mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        sizeBytes: 10
+      },
+      { type: "file", id: "att-c", name: "rows.csv", mimeType: "text/csv", sizeBytes: 10 }
+    ],
+    interactionMode: "default"
+  });
+  const submit = harness.fake.find("POST", "/prompt_async");
+  assert.ok(submit !== undefined);
+  const body = submit.body as {
+    parts: { type: string; text?: string; url?: string; filename?: string }[];
+  };
+  assert.equal(body.parts.length, 2);
+  assert.deepEqual(body.parts[0], {
+    type: "text",
+    text: "compare these\n\nAttached files:\n- q3.xlsx: /attachments/att-x"
+  });
+  assert.equal(body.parts[1]?.type, "file");
+  assert.equal(body.parts[1]?.filename, "rows.csv");
+  assert.equal(body.parts[1]?.url, "file:///attachments/att-c");
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("an attachment-only turn with a non-native file no longer throws: the block is the text", async () => {
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  await session.sendTurn({
+    threadId: "thread-1",
+    input: "",
+    attachments: [{ type: "file", id: "att-x", name: "q3.xlsx", sizeBytes: 10 }],
+    interactionMode: "default"
+  });
+  const submit = harness.fake.find("POST", "/prompt_async");
+  const body = submit?.body as { parts: { type: string; text?: string }[] };
+  assert.deepEqual(body.parts, [
+    { type: "text", text: "Attached files:\n- q3.xlsx: /attachments/att-x" }
+  ]);
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("a text file over the native cap rides as a path line, not a file part (§4.5)", async () => {
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  await session.sendTurn({
+    threadId: "thread-1",
+    input: "read this",
+    attachments: [
+      {
+        type: "file",
+        id: "att-big",
+        name: "huge.log",
+        mimeType: "text/plain",
+        sizeBytes: 20 * 1024 * 1024 + 1
+      }
+    ],
+    interactionMode: "default"
+  });
+  const submit = harness.fake.find("POST", "/prompt_async");
+  assert.ok(submit !== undefined);
+  assert.deepEqual((submit.body as { parts: unknown[] }).parts, [
+    { type: "text", text: "read this\n\nAttached files:\n- huge.log: /attachments/att-big" }
+  ]);
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("a non-native file whose path the text already names adds no block: the text is verbatim", async () => {
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  const input = "compare /attachments/att-x with last quarter";
+  await session.sendTurn({
+    threadId: "thread-1",
+    input,
+    attachments: [
+      {
+        type: "file",
+        id: "att-x",
+        name: "q3.xlsx",
+        mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        sizeBytes: 10
+      }
+    ],
+    interactionMode: "default"
+  });
+  const submit = harness.fake.find("POST", "/prompt_async");
+  assert.ok(submit !== undefined);
+  assert.deepEqual((submit.body as { parts: unknown[] }).parts, [{ type: "text", text: input }]);
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("an attachment whose path cannot be resolved fails the turn instead of vanishing", async () => {
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  harness.ctx.resolveAttachmentPath = async () => {
+    throw new Error("agent-chat: attachment not found (removed or expired)");
+  };
+  await assert.rejects(
+    session.sendTurn({
+      threadId: "thread-1",
+      input: "summarise this",
+      attachments: [{ type: "file", id: "att-gone", name: "q3.xlsx", sizeBytes: 10 }],
+      interactionMode: "default"
+    }),
+    /removed or expired/
+  );
+  assert.equal(harness.fake.find("POST", "/prompt_async"), undefined, "nothing reached the server");
+  assert.equal(firstOfType(harness.events, "turn.started"), undefined, "no turn was opened");
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
 test("plan mode rides the `agent` field, per turn", async () => {
   const harness = makeHarness();
   const session = await startSession(harness);
@@ -618,73 +741,6 @@ test("plan mode rides the `agent` field, per turn", async () => {
   });
   const submit = harness.fake.find("POST", "/prompt_async");
   assert.equal((submit?.body as { agent?: string }).agent, "plan");
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
-});
-
-test("§4.1: a file part only for what the model API reads; the rest is the host's path line", async () => {
-  const MiB = 1024 * 1024;
-  const png = { type: "image" as const, id: "png-1", name: "shot.png", mimeType: "image/png", sizeBytes: 10 };
-  const csv = { type: "file" as const, id: "csv-1", name: "data.csv", mimeType: "text/csv", sizeBytes: 10 };
-  const pdf = { type: "file" as const, id: "pdf-1", name: "report.pdf", mimeType: "application/pdf", sizeBytes: 20 * MiB };
-  const zip = { type: "file" as const, id: "zip-1", name: "bundle.zip", mimeType: "application/zip", sizeBytes: 10 };
-  assert.equal(openCodeIngestsAttachment(png), true);
-  assert.equal(openCodeIngestsAttachment(csv), true);
-  assert.equal(openCodeIngestsAttachment(pdf), true, "20 MiB is still a file part");
-  assert.equal(openCodeIngestsAttachment(zip), false);
-  assert.equal(openCodeIngestsAttachment({ type: "file", id: "x", name: "blob", sizeBytes: 10 }), false);
-  assert.equal(
-    openCodeIngestsAttachment({ ...pdf, sizeBytes: 21 * MiB }),
-    false,
-    "judged on the STAT'd size the host stamps on the ref"
-  );
-
-  const harness = makeHarness();
-  const adapter = await createOpenCodeAdapter(harness.ctx);
-  assert.equal(adapter.ingestsAttachment(pdf), true);
-  assert.equal(adapter.ingestsAttachment(zip), false);
-
-  const session = await startSession(harness);
-  const input = "read these\n\nAttached file: bundle.zip (/attachments/zip-1)";
-  await session.sendTurn({
-    threadId: "thread-1",
-    input,
-    attachments: [pdf],
-    interactionMode: "default"
-  });
-  const submit = harness.fake.find("POST", "/prompt_async");
-  assert.deepEqual((submit?.body as { parts: unknown[] }).parts, [
-    { type: "text", text: input },
-    { type: "file", mime: "application/pdf", filename: "report.pdf", url: "file:///attachments/pdf-1" }
-  ]);
-  await session.stop({ reason: "test", hostInitiated: true });
-  await adapter.stopAll();
-  harness.dispose();
-});
-
-test("§4.1: an attachment that no longer resolves fails the turn start, and nothing goes out without it", async () => {
-  const pdf = { type: "file" as const, id: "pdf-1", name: "report.pdf", mimeType: "application/pdf", sizeBytes: 10 };
-  const harness = makeHarness();
-  const session = await startSession(harness);
-  // The host resolved and STAT'd the file just before the send; this is the
-  // race where it is gone by the time the adapter asks for its path.
-  harness.ctx.resolveAttachmentPath = async () => {
-    throw new Error("agent-chat: attachment not found (removed or expired)");
-  };
-  await assert.rejects(
-    session.sendTurn({ threadId: "thread-1", input: "read this", attachments: [pdf], interactionMode: "default" }),
-    /attachment not found/
-  );
-  assert.equal(harness.fake.find("POST", "/prompt_async"), undefined, "the turn never went out without its file");
-  assert.equal(firstOfType(harness.events, "turn.started"), undefined, "and no turn was opened for it");
-
-  // Nothing was left half-open: once the file resolves, the same turn goes out whole.
-  harness.ctx.resolveAttachmentPath = async (_threadId, attachmentId) => `/attachments/${attachmentId}`;
-  await session.sendTurn({ threadId: "thread-1", input: "read this", attachments: [pdf], interactionMode: "default" });
-  assert.deepEqual((harness.fake.find("POST", "/prompt_async")?.body as { parts: unknown[] }).parts, [
-    { type: "text", text: "read this" },
-    { type: "file", mime: "application/pdf", filename: "report.pdf", url: "file:///attachments/pdf-1" }
-  ]);
   await session.stop({ reason: "test", hostInitiated: true });
   harness.dispose();
 });
@@ -868,6 +924,55 @@ test("a name that is NOT in `command.list` falls through to an ordinary prompt",
   assert.deepEqual((submit.body as { parts: unknown[] }).parts, [
     { type: "text", text: "/definitely-not-a-command hi" }
   ]);
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("a native command with a non-native file carries the path block in its arguments (§4.5)", async () => {
+  const harness = makeHarness();
+  harness.fake.commands = [{ name: "fixture", description: "a fixture command", hints: [] }];
+  const session = await startSession(harness);
+  const sessionId = session.sessionId;
+  const pending = session.sendTurn({
+    threadId: "thread-1",
+    input: "/fixture hello there",
+    attachments: [
+      {
+        type: "file",
+        id: "att-x",
+        name: "q3.xlsx",
+        mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        sizeBytes: 10
+      }
+    ],
+    interactionMode: "default"
+  });
+  await waitFor(harness, "turn.started");
+  assert.equal(
+    harness.fake.find("POST", "/prompt_async"),
+    undefined,
+    "a native command must not go through prompt_async"
+  );
+  harness.fake.push({
+    type: "message.updated",
+    properties: {
+      sessionID: sessionId,
+      info: {
+        id: (harness.fake.find("POST", "/session/" + sessionId + "/command")?.body as {
+          messageID: string;
+        }).messageID,
+        role: "user"
+      }
+    }
+  });
+  await pending;
+  const command = harness.fake.find("POST", "/command");
+  const body = command?.body as { command: string; arguments: string; parts: unknown[] };
+  assert.equal(body.command, "fixture");
+  // The command match runs on the APPENDED text, so the block rides `$ARGUMENTS`
+  // — after the typed arguments, never before them (§4.6.9).
+  assert.equal(body.arguments, "hello there\n\nAttached files:\n- q3.xlsx: /attachments/att-x");
+  assert.deepEqual(body.parts, [], "a non-native file is never a file part");
   await session.stop({ reason: "test", hostInitiated: true });
   harness.dispose();
 });

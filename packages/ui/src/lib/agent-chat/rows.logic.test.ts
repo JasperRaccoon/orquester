@@ -152,7 +152,7 @@ describe("activity-group boundaries", () => {
     assert.ok(kinds(rows).includes("work-live") || kinds(rows).includes("work-toggle"));
   });
 
-  it("demotes an assistant message marked `commentary` into the group", () => {
+  it("shows commentary between tool calls while the turn runs", () => {
     const rows = deriveTimelineRows(
       baseInput(
         entriesFrom([
@@ -175,17 +175,11 @@ describe("activity-group boundaries", () => {
         { isWorking: true, runningTurnId: "t1", activeTurnStartedAt: stamp(1) }
       )
     );
-    const messageRows = rows.filter((row) => row.kind === "message");
-    const texts = messageRows.map((row) => (row.kind === "message" ? row.message.text : ""));
-    assert.ok(!texts.includes("I'll read the file next"), "commentary never gets its own row");
-    assert.ok(texts.includes("Here is the answer"));
-    assert.ok(texts.includes("go"));
-
-    const group = rows.find((row) => row.kind === "activity-group");
-    assert.ok(group && group.kind === "activity-group");
+    const texts = rows.flatMap((row) => row.kind === "message" ? [row.message.text] : []);
+    assert.deepEqual(texts, ["go", "I'll read the file next", "Here is the answer"]);
     assert.ok(
-      group.entries.some((entry) => entry.detail === "I'll read the file next"),
-      "it folds into the surrounding activity group"
+      rows.some((row) => row.kind === "work" || row.kind === "work-live"),
+      "tool activity remains visible between the two assistant messages"
     );
   });
 
@@ -642,6 +636,92 @@ describe("the live rows", () => {
     assert.equal(queued.length, 2);
     assert.equal(queued[0]?.kind === "queued-message" && queued[0].isNext, true);
     assert.equal(queued[1]?.kind === "queued-message" && queued[1].isNext, false);
+  });
+});
+
+describe("a timeline split into the history and the window (design 2026-09-23)", () => {
+  /** Turn tR, still running: its prompt, a word from the agent, a call still in flight. */
+  const running = () =>
+    entriesFrom([
+      message("user", "go", { id: "uR", createdAt: stamp(1) }),
+      message("assistant", "on it", { id: "aR", turnId: "tR", createdAt: stamp(2) }),
+      activity("tool.updated", { toolUseId: "call-1", status: "inProgress" }, {
+        id: "xR",
+        turnId: "tR",
+        summary: "Read src/a.ts",
+        createdAt: stamp(3)
+      })
+    ]);
+  const live = (overrides: Partial<TimelineRowsInput> = {}) =>
+    baseInput(running(), {
+      isWorking: true,
+      runningTurnId: "tR",
+      activeTurnStartedAt: stamp(1),
+      ...overrides
+    });
+
+  it("renders a running turn live in a projection the timeline continues below — the tail is the window's", () => {
+    const whole = deriveTimelineRows(live());
+    const above = deriveTimelineRows(live({ continuesBelow: true }));
+
+    assert.deepEqual(kinds(above), kinds(whole), "the same rows: unfolded, live, header after the prompt");
+    assert.ok(!kinds(above).includes("turn-fold"));
+    const answer = above.find((row) => row.kind === "message" && row.id === "aR");
+    assert.equal(answer?.kind === "message" ? answer.showAssistantMeta : null, false);
+    const call = above.find((row) => row.kind === "work-live");
+    assert.equal(call?.kind === "work-live" ? call.active : null, true, "the call in flight is live");
+  });
+
+  it("leaves the thinking placeholder to the projection that ends the timeline", () => {
+    const quiet = entriesFrom([message("user", "go", { id: "uR", createdAt: stamp(1) })]);
+    const input = baseInput(quiet, { isWorking: true, runningTurnId: "tR", activeTurnStartedAt: stamp(1) });
+    assert.deepEqual(kinds(deriveTimelineRows(input)), ["message", "working", "thinking"]);
+    assert.deepEqual(kinds(deriveTimelineRows({ ...input, continuesBelow: true })), ["message", "working"]);
+  });
+
+  it("puts the running turn's header where the timeline's last prompt is", () => {
+    const below = deriveTimelineRows(live({ continuesBelow: true, activeTurnHeader: "below" }));
+    assert.ok(!kinds(below).includes("working"), "the prompt is further down");
+    assert.ok(!kinds(below).includes("turn-fold"), "the running turn still never folds");
+
+    const window = entriesFrom([
+      activity("tool.completed", { toolUseId: "call-2", status: "failed" }, {
+        id: "xR2",
+        turnId: "tR",
+        tone: "error",
+        createdAt: stamp(4)
+      })
+    ]);
+    const after = deriveTimelineRows(
+      baseInput(window, {
+        isWorking: true,
+        runningTurnId: "tR",
+        activeTurnStartedAt: stamp(1),
+        activeTurnHeader: "above"
+      })
+    );
+    assert.deepEqual(kinds(after), ["work", "thinking"], "no second header: it is above");
+  });
+
+  it("needs no placeholder when a live row above shows the turn working, and reports its own", () => {
+    const window = entriesFrom([
+      activity("tool.completed", { toolUseId: "call-2", status: "failed" }, {
+        id: "xR2",
+        turnId: "tR",
+        tone: "error",
+        createdAt: stamp(4)
+      })
+    ]);
+    const input = baseInput(window, {
+      isWorking: true,
+      runningTurnId: "tR",
+      activeTurnStartedAt: stamp(1),
+      activeTurnHeader: "above" as const
+    });
+    assert.ok(!kinds(deriveTimelineRows({ ...input, liveActivityAbove: true })).includes("thinking"));
+
+    assert.equal(deriveTimelineRowsWithState(live({ continuesBelow: true })).hasActivityRow, true);
+    assert.equal(deriveTimelineRowsWithState(input).hasActivityRow, false);
   });
 });
 

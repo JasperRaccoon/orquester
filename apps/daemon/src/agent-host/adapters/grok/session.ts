@@ -26,6 +26,7 @@ import { AGENT_HOST_DEADLINES } from "../../support/deadline.ts";
 import type { ChildExitReason } from "../../support/spawn.ts";
 import { exitOutcome } from "../../support/spawn.ts";
 import type { ClassifiedStderrLine } from "../../support/stderr.ts";
+import { appendAttachmentPathLines } from "../attachment-lines.ts";
 import { AcpConnection } from "./acp/connection.ts";
 import type { AcpFrameDirection } from "./acp/peer.ts";
 import { classifyAcpError } from "./acp/errors.ts";
@@ -663,6 +664,7 @@ export class GrokSession {
    */
   async sendTurn(input: {
     text: string;
+    attachments?: ReadonlyArray<{ id: string; name: string; path: string; mimeType?: string }>;
     modelSelection?: ModelSelection;
     interactionMode: "default" | "plan";
   }): Promise<{ turnId: string; resumeCursor: GrokResumeCursor }> {
@@ -716,14 +718,14 @@ export class GrokSession {
       }
       await this.applyInteractionMode(input.interactionMode);
 
-      // Attachments reach the agent as PATHS, not bytes, and they are already
-      // in `input.text`: `agentCapabilities.promptCapabilities.image` is
-      // **false** on this CLI, so T3's "Grok ingests images only" path would
-      // be sending a content block the agent has said it cannot take — the
-      // adapter ingests nothing natively and the host appends one
-      // `Attached file: <name> (<absolute path>)` line per file (§4.1), which
-      // the agent's own `read_file` tool can act on.
-      const prompt = [{ type: "text" as const, text: input.text }];
+      // Attachments reach the agent as PATHS, not bytes:
+      // `agentCapabilities.promptCapabilities.image` is **false** on this CLI,
+      // so T3's "Grok ingests images only" path would be sending a content
+      // block the agent has said it cannot take. A path line is something the
+      // agent's own `read_file` tool can act on. The shared helper skips a path
+      // the text already names — the composer inserts it at upload time (§7.4).
+      const text = appendAttachmentPathLines(input.text, input.attachments ?? []);
+      const prompt = [{ type: "text" as const, text }];
       const promise = this.peer().request<PromptResponse>(
         "session/prompt",
         { sessionId: this.acpSessionId, prompt },

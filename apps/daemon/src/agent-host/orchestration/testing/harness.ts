@@ -18,6 +18,7 @@ import type {
   RuntimeEvent
 } from "@orquester/api/agent-chat";
 
+import type { ThreadIndex } from "../../index/index.ts";
 import type { ProviderSnapshotRegistry } from "../../services.ts";
 import { createLivenessRegistry } from "../liveness.ts";
 import { createOrchestrator, type Orchestrator, type OrchestratorOptions } from "../orchestrator.ts";
@@ -54,6 +55,8 @@ export interface TestHostOptions {
   openGate?: boolean;
   /** Reuse a launch-config store, to assert what survives a host restart. */
   launchConfigs?: LaunchConfigStore & { readonly entries: Map<string, ThreadLaunchConfig> };
+  /** The thread index (design 2026-09-23, C) — `createFakeThreadIndex()` or a real one. */
+  index?: ThreadIndex;
 }
 
 export interface TestHost {
@@ -167,6 +170,7 @@ export function createTestHost(options: TestHostOptions = {}): TestHost {
     ...(options.continuationEnabled ? { continuationEnabled: options.continuationEnabled } : {}),
     ...(options.isThreadClosed ? { isThreadClosed: options.isThreadClosed } : {}),
     ...(options.minimumVersions ? { minimumVersions: options.minimumVersions } : {}),
+    ...(options.index ? { index: options.index } : {}),
     launchConfigs,
     clock,
     ids,

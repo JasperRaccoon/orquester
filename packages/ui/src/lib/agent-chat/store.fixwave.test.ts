@@ -66,6 +66,12 @@ function fakeTransport(): {
       itemReads.push(itemId);
       return readItem(itemId);
     },
+    async readHistory() {
+      throw new Error("unused");
+    },
+    async search() {
+      throw new Error("unused");
+    },
     async turnDiff() {
       throw new Error("unused");
     },
@@ -77,6 +83,9 @@ function fakeTransport(): {
     },
     async upload() {
       return { type: "file", id: "/a/b", name: "b", sizeBytes: 1 };
+    },
+    async fetchAttachment() {
+      return new ArrayBuffer(0);
     }
   };
 

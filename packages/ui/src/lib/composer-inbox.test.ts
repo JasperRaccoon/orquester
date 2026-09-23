@@ -67,10 +67,13 @@ test("a delivery becomes draft text plus one attachment path per line", () => {
       text: "Fix this button",
       attachments: [
         { type: "image", id: "/up/a.png", name: "a.png", mimeType: "image/png", sizeBytes: 1 },
-        { type: "file", id: "/up/b.txt", name: "b.txt", sizeBytes: 2 }
+        { type: "file", id: "/up/b.txt", name: "b.txt", sizeBytes: 2 },
+        // The host's reply names the absolute path (§7.4); an id-only ref is
+        // all an older reply carried, and it still contributes its id.
+        { type: "file", id: "t1-uuid-xlsx", name: "x.xlsx", sizeBytes: 3, path: "/appdir/x.xlsx" }
       ]
     }),
-    "Fix this button\n\n/up/a.png\n/up/b.txt"
+    "Fix this button\n\n/up/a.png\n/up/b.txt\n/appdir/x.xlsx"
   );
 });
 

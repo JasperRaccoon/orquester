@@ -15,6 +15,8 @@ export * from "./domain-events.ts";
 export * from "./thread.ts";
 export * from "./wire.ts";
 export * from "./fold.ts";
+export * from "./fold-snapshot.ts";
+export * from "./history-cursor.ts";
 export * from "./pending.ts";
 export * from "./plan.ts";
 export * from "./roster.ts";

@@ -165,12 +165,56 @@ export function workLogEntryFromActivity(activity: ThreadActivityItem): WorkLogE
   return derivedWorkLogEntry(activity);
 }
 
+/** Command output can live in provider data while `detail` only echoes the command. */
+function commandOutputPreview(data: Record<string, unknown> | null): string | undefined {
+  const item = asRecord(data?.item);
+  const raw = asRecord(data?.rawOutput);
+  const outputStreams = [asTrimmedString(raw?.stdout), asTrimmedString(raw?.stderr)]
+    .filter((value): value is string => value !== undefined);
+  const content = Array.isArray(data?.content)
+    ? data.content.flatMap((value) => {
+        const block = asRecord(value);
+        const text = asRecord(block?.content);
+        return block?.type === "content" ? [asTrimmedString(text?.text)].filter(Boolean) : [];
+      }).join("\n")
+    : undefined;
+  const candidates = [
+    item?.aggregatedOutput,
+    asRecord(item?.result)?.content,
+    data?.rawOutput,
+    raw?.content,
+    outputStreams.length > 0 ? outputStreams.join("\n") : undefined,
+    raw?.output,
+    raw?.output_for_prompt,
+    content,
+    asRecord(data?.result)?.content,
+    data?.result
+  ];
+  for (const candidate of candidates) {
+    const text = asTrimmedString(candidate);
+    if (text !== undefined) return text;
+  }
+  return undefined;
+}
+
+function repeatsCommandPreview(detail: string | undefined, command: string | undefined): boolean {
+  if (detail === undefined || command === undefined) return false;
+  if (detail === command) return true;
+  const prefix = detail.endsWith("...")
+    ? detail.slice(0, -3)
+    : detail.endsWith("…")
+      ? detail.slice(0, -1)
+      : undefined;
+  return prefix !== undefined && prefix.length > 0 && command.startsWith(prefix);
+}
+
 function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry {
   const cached = derivedByActivity.get(activity);
   if (cached) {
     return cached;
   }
   const payload = asRecord(activity.payload);
+  const data = asRecord(payload?.data);
   const isTaskActivity = TASK_KINDS.has(activity.activityKind);
 
   const taskSummary = isTaskActivity ? asTrimmedString(payload?.summary) : undefined;
@@ -182,6 +226,19 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
       ? undefined
       : asTrimmedString(payload?.detail)
     : asTrimmedString(payload?.detail);
+  const command = asTrimmedString(payload?.command) ?? asTrimmedString(data?.command);
+  const isCommand = payload?.itemType === "command_execution";
+  const output = isCommand ? commandOutputPreview(data) : undefined;
+  const commandEcho =
+    isCommand && repeatsCommandPreview(detail, command) &&
+    asTrimmedString(data?.kind)?.toLowerCase() === "execute";
+  const displayDetail =
+    isCommand && output !== undefined &&
+    (detail === undefined || commandEcho || detail === asTrimmedString(payload?.title))
+      ? output
+      : commandEcho
+        ? undefined
+        : detail;
 
   const entry: DerivedWorkLogEntry = {
     id: activity.id,
@@ -210,8 +267,8 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
       : undefined;
   if (outputChunk !== undefined) {
     entry.detail = outputChunk;
-  } else if (detail) {
-    entry.detail = detail;
+  } else if (displayDetail) {
+    entry.detail = displayDetail;
   } else if (
     activity.activityKind === "runtime.error" ||
     activity.activityKind === "runtime.warning"
@@ -222,7 +279,6 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
     }
   }
 
-  const command = asTrimmedString(payload?.command);
   if (command) {
     entry.command = command;
   }
@@ -254,7 +310,6 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
     entry.parentToolUseId = activity.parentToolUseId;
   }
   if (activity.activityKind === "mcp_tool_call" || entry.itemType === "mcp_tool_call") {
-    const data = asRecord(payload?.data);
     if (data) {
       entry.toolData = data.item ?? data;
     }
@@ -528,6 +583,17 @@ export function deriveWorkLogEntries(
 
   const derived: DerivedWorkLogEntry[] = [];
   for (const activity of activities) {
+    // Hook notifications are provider bookkeeping. Keep failed or cancelled
+    // completions, including those already present in persisted transcripts.
+    if (activity.activityKind === "hook.started" || activity.activityKind === "hook.progress") {
+      continue;
+    }
+    if (
+      activity.activityKind === "hook.completed" &&
+      asRecord(activity.payload)?.outcome === "success"
+    ) {
+      continue;
+    }
     if (DROPPED_ACTIVITY_KINDS.has(activity.activityKind)) {
       continue;
     }

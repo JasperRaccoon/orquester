@@ -17,13 +17,7 @@ import type { RuntimeEvent } from "@orquester/api/agent-chat";
 
 import { resumeCursorFor } from "../../orchestration/resume.ts";
 import { AsyncEventQueue } from "./event-queue.ts";
-import { createCodexAdapter } from "./index.ts";
-import {
-  CodexSession,
-  codexIngestsAttachment,
-  fileChangeDetail,
-  type CodexSessionOptions
-} from "./session.ts";
+import { CodexSession, fileChangeDetail, type CodexSessionOptions } from "./session.ts";
 import {
   EventCollector,
   createFakeContext,
@@ -204,7 +198,7 @@ describe("codex session — start, turn, stop", () => {
     await r.stop();
   });
 
-  it("attaches an image by PATH, never base64", async () => {
+  it("attaches an image by PATH, never base64, and a file as a path line in the text item", async () => {
     const r = rig({ turns: [{ kind: "text", text: "ok" }] });
     await r.session.start();
     await r.session.sendTurn({
@@ -218,33 +212,43 @@ describe("codex session — start, turn, stop", () => {
     await r.events.waitForType("turn.completed");
     const [turn] = sentFrames(r.received(), "turn/start");
     assert.deepEqual(turn!.input, [
-      { type: "text", text: "look", text_elements: [] },
+      {
+        type: "text",
+        text: "look\n\nAttached files:\n- a.txt: /attachments/thread-1/att-2",
+        text_elements: []
+      },
       { type: "localImage", path: "/attachments/thread-1/att-1" }
     ]);
     await r.stop();
   });
 
-  it("ingests images only; the host's path line for anything else is forwarded verbatim (§4.1)", async () => {
-    const image = { type: "image" as const, id: "att-1", name: "a.png", mimeType: "image/png", sizeBytes: 10 };
-    const pdf = { type: "file" as const, id: "att-2", name: "a.pdf", mimeType: "application/pdf", sizeBytes: 10 };
-    assert.equal(codexIngestsAttachment(image), true);
-    assert.equal(codexIngestsAttachment(pdf), false);
-    assert.equal(codexIngestsAttachment({ type: "unknown", id: "u", name: "x" }), false);
-    const adapter = await createCodexAdapter(createFakeContext().context);
-    assert.equal(adapter.ingestsAttachment(image), true);
-    assert.equal(adapter.ingestsAttachment(pdf), false);
-    await adapter.stopAll();
-
-    const r = rig({ turns: [{ kind: "text", text: "ok" }] });
+  it("an attachment-only turn is the path block alone, and a path already in the text is not repeated", async () => {
+    const r = rig({ turns: [{ kind: "text", text: "ok" }, { kind: "text", text: "ok" }] });
     await r.session.start();
-    const input =
-      "summarise\n\nAttached file: a.pdf (/appdir/daemon/agent/threads/thread-1/attachments/att-2.pdf)";
-    await r.session.sendTurn({ input, attachments: [image], interactionMode: "default" });
+    await r.session.sendTurn({
+      input: "",
+      attachments: [{ type: "file", id: "att-2", name: "a.txt", sizeBytes: 10 }],
+      interactionMode: "default"
+    });
     await r.events.waitForType("turn.completed");
-    const [turn] = sentFrames(r.received(), "turn/start");
-    assert.deepEqual(turn!.input, [
-      { type: "text", text: input, text_elements: [] },
-      { type: "localImage", path: "/attachments/thread-1/att-1" }
+    const [first] = sentFrames(r.received(), "turn/start");
+    assert.deepEqual(first!.input, [
+      { type: "text", text: "Attached files:\n- a.txt: /attachments/thread-1/att-2", text_elements: [] }
+    ]);
+    await r.session.sendTurn({
+      input: "see /attachments/thread-1/att-2",
+      attachments: [{ type: "file", id: "att-2", name: "a.txt", sizeBytes: 10 }],
+      interactionMode: "default"
+    });
+    // `waitForType` answers the first match, already seen or not, so the second
+    // turn's completion is counted rather than awaited by type.
+    await waitUntil(
+      () => r.events.events.filter((event) => event.type === "turn.completed").length === 2,
+      "two turns"
+    );
+    const [, second] = sentFrames(r.received(), "turn/start");
+    assert.deepEqual(second!.input, [
+      { type: "text", text: "see /attachments/thread-1/att-2", text_elements: [] }
     ]);
     await r.stop();
   });
