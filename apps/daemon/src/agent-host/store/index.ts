@@ -232,6 +232,11 @@ export interface AgentThreadStore extends ThreadStore {
    */
   sweepNow(): Promise<void>;
   /**
+   * Cheap boot cleanup: prune pending/partial uploads and rotated raw logs
+   * without reading or folding any conversation history.
+   */
+  sweepStartup(): Promise<void>;
+  /**
    * Stop the background sweep. The timer is `unref`'d, so forgetting this
    * never holds the process open; it exists so a host stop is deterministic.
    */
@@ -674,6 +679,24 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
     }
   }
 
+  function pruneRawLogs(nowMs: number): void {
+    const liveThreadIds = new Set<string>();
+    for (const [id, entry] of threads) {
+      if (entry.raw !== null) {
+        liveThreadIds.add(id);
+      }
+    }
+    try {
+      pruneRawLogDirectory({
+        threadsRoot: threadsDir(rootDir),
+        liveThreadIds,
+        now: () => nowMs
+      });
+    } catch {
+      // Diagnostics never block a turn, and never fail a sweep.
+    }
+  }
+
   // --- the store -----------------------------------------------------------
 
   const store: AgentThreadStore = {
@@ -937,21 +960,7 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
       // only bound above the per-thread rotation, and it cannot live inside a
       // single thread's writer (S1 #5).
       if (input?.threadId === undefined) {
-        const liveThreadIds = new Set<string>();
-        for (const [id, entry] of threads) {
-          if (entry.raw !== null) {
-            liveThreadIds.add(id);
-          }
-        }
-        try {
-          pruneRawLogDirectory({
-            threadsRoot: threadsDir(rootDir),
-            liveThreadIds,
-            now: () => nowMs
-          });
-        } catch {
-          // Diagnostics never block a turn, and never fail a sweep.
-        }
+        pruneRawLogs(nowMs);
       }
 
       const targets =
@@ -1004,6 +1013,17 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
 
     async sweepNow(): Promise<void> {
       await store.pruneAttachments();
+    },
+
+    async sweepStartup(): Promise<void> {
+      const nowMs = clock.now().getTime();
+      await sweepDirectory(pendingDir, nowMs, () => false);
+      pruneRawLogs(nowMs);
+      // Partials need no event-log reference scan. Keep every completed file;
+      // the scheduled deep sweep will fold histories and collect true orphans.
+      for (const threadId of await store.listThreads()) {
+        await sweepDirectory(attachmentsDirFor(threadId), nowMs, () => true);
+      }
     },
 
     close(): void {

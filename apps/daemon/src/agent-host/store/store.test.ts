@@ -929,6 +929,40 @@ test("the host-wide raw-log ceiling runs on the sweep schedule", async () => {
   await assert.rejects(fs.stat(rung), "the sweep must reach raw logs, not just attachments");
 });
 
+test("the startup sweep avoids history folds and leaves completed attachments for the deep sweep", async () => {
+  const rootDir = await tempRoot();
+  const store = createThreadStore({ rootDir, idGen: countingIds() });
+  const src = path.join(rootDir, "src");
+  const orphan = await store.putAttachment({
+    threadId: "t1",
+    name: "orphan.bin",
+    sourcePath: await writeSource(src, "orphan.bin", 8)
+  });
+  await store.append({ threadId: "t1", events: [created()] });
+  await store.drain();
+
+  const partial = path.join(attachmentsDirOf(rootDir, "t1"), "upload.part");
+  await fs.writeFile(partial, "partial");
+  const ancient = (Date.now() - 30 * 24 * 60 * 60 * 1000) / 1000;
+  await fs.utimes(partial, ancient, ancient);
+  const rung = path.join(threadDir(rootDir, "t1"), "raw.ndjson.1");
+  await fs.writeFile(rung, "old\n");
+  await fs.utimes(rung, ancient, ancient);
+
+  await store.sweepStartup();
+
+  await store.resolveAttachment("t1", orphan.id);
+  await assert.rejects(fs.stat(partial), "the cheap pass still removes stale partial uploads");
+  await assert.rejects(fs.stat(rung), "the cheap pass still enforces the raw-log ceiling");
+
+  await store.pruneAttachments({ threadId: "t1", now: hoursFromNow(48) });
+  await assert.rejects(
+    store.resolveAttachment("t1", orphan.id),
+    "the scheduled deep pass still collects completed orphans"
+  );
+  store.close();
+});
+
 // --- S1-5 residual: the sweep needs a production scheduler ------------------
 
 test("the store schedules its own host-wide sweep", async () => {
