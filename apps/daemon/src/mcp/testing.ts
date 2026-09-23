@@ -5,7 +5,27 @@ import type { DaemonApi, DaemonMethod, DaemonResponse } from "./daemon-api.ts";
 type Call = { method: DaemonMethod; path: string; query?: Record<string, string>; body?: unknown };
 type Responder = DaemonResponse | ((call: { query?: Record<string, string>; body?: unknown }) => DaemonResponse);
 
-/** In-memory DaemonApi for tool tests: canned responses by `METHOD path` (a trailing `*` is a prefix match). */
+/**
+ * In-memory DaemonApi for tool tests. The rules a test can rely on:
+ *
+ * - Routes. `on(method, path, responder)` registers a route; a request takes the NEWEST registered route whose method
+ *   matches and whose path matches — exactly, or as a prefix when the registered path ends in `*`
+ *   (`"/api/sessions/*"`). Exact and prefix routes are not ranked: registration order alone decides, so a later `on`
+ *   overrides an earlier one for the paths it covers. The query never takes part in matching; a function responder
+ *   receives `{query, body}` and can branch on it.
+ * - Answers. A responder is a canned `DaemonResponse` or a function returning one; a function that throws makes
+ *   `request` reject (a transport failure). An unmatched request answers `404 {code: "NOT_FOUND"}`; it never throws.
+ *   Every request, matched or not, is appended to `calls` (`query`/`body` only when given).
+ * - Uploads. `uploadAttachment` reads the whole stream into `uploads`, then answers with the `onUpload` handler, else
+ *   a 200 AttachmentRef (`image` for an image/* type); a source stream that errors makes it reject, where
+ *   InjectDaemonApi answers 503 HOST_UNAVAILABLE. `attachmentPath` answers from `attachmentPaths`, else a path under a
+ *   fake appdir.
+ * - Bus. `emit` delivers synchronously, as `Broadcaster.publish` does over the sinks `InjectDaemonApi.subscribe` adds:
+ *   it walks the LIVE subscriber set in subscription order (a listener removed mid-delivery is skipped, one added is
+ *   reached), each `subscribe` call is its own subscription even for the same function, and a listener that throws is
+ *   swallowed and stays subscribed. The one difference: every listener gets the same event object, where production
+ *   parses a copy per subscription — so a listener must not mutate the event.
+ */
 export class FakeDaemonApi implements DaemonApi {
   calls: Call[] = [];
   uploads: { sessionId: string; meta: { name: string; type?: string }; bytes: Buffer }[] = [];
@@ -13,7 +33,8 @@ export class FakeDaemonApi implements DaemonApi {
   fsRoot = "/w";
   workspacesDir = "/w";
   private routes: { method: DaemonMethod; path: string; responder: Responder }[] = [];
-  private listeners = new Set<(event: EventMessage) => void>();
+  /** One entry per `subscribe` call, as the Broadcaster holds one sink per call. */
+  private listeners = new Set<{ listener: (event: EventMessage) => void }>();
   private uploadHandler: ((sessionId: string, meta: { name: string; type?: string }, bytes: Buffer) => { status: number; value: unknown }) | null = null;
 
   on(method: DaemonMethod, path: string, responder: Responder): this {
@@ -24,7 +45,11 @@ export class FakeDaemonApi implements DaemonApi {
     this.uploadHandler = handler;
     return this;
   }
-  emit(event: EventMessage): void { for (const l of [...this.listeners]) l(event); }
+  emit(event: EventMessage): void {
+    for (const entry of this.listeners) {
+      try { entry.listener(event); } catch { /* swallowed, and the listener stays: InjectDaemonApi's sink never throws */ }
+    }
+  }
   listenerCount(): number { return this.listeners.size; }
 
   async request(method: DaemonMethod, path: string, opts?: { query?: Record<string, string>; body?: unknown }): Promise<DaemonResponse> {
@@ -49,8 +74,9 @@ export class FakeDaemonApi implements DaemonApi {
     return this.attachmentPaths.get(attachmentId) ?? `/appdir/daemon/agent/threads/${sessionId}/attachments/${attachmentId}`;
   }
   subscribe(listener: (event: EventMessage) => void): () => void {
-    this.listeners.add(listener);
-    return () => { this.listeners.delete(listener); };
+    const entry = { listener };
+    this.listeners.add(entry);
+    return () => { this.listeners.delete(entry); };
   }
 }
 

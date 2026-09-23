@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { FakeDaemonApi } from "./testing.ts";
+import { ToolError } from "./errors.ts";
 import { listSessions, findSession, requireChatSession, readThread, sendCommand } from "./reads.ts";
 
 const chat = { id: "c1", kind: "agent-chat", refId: "claude", title: "Claude", projectPath: "/w/a/p", cwd: "/w/a/p", cols: 0, rows: 0, status: "running", order: 1, createdAt: "2026-09-22T00:00:00.000Z" };
@@ -76,4 +77,20 @@ test("sendCommand waits only between attempts, never after the last one", async 
   const unavailable = new FakeDaemonApi().on("POST", "/api/sessions/c1/turn", { status: 503, body: { error: { code: "HOST_UNAVAILABLE", message: "restarting" } } });
   await assert.rejects(sendCommand(unavailable, "c1", "turn", { input: "x" }, { retryDelayMs }), (e: { code: string }) => e.code === "HOST_UNAVAILABLE");
   assert.deepEqual(waits, [0, 1, 2]);
+});
+
+test("sendCommand: the minted commandId always wins over one in the caller's body", async () => {
+  const api = new FakeDaemonApi().on("POST", "/api/sessions/c1/turn", { status: 200, body: { seq: 3 } });
+  await sendCommand(api, "c1", "turn", { commandId: "caller-chosen", input: "x" });
+  const body = api.calls[0].body as { commandId: string; input: string };
+  assert.notEqual(body.commandId, "caller-chosen");
+  assert.match(body.commandId, /^[0-9a-f-]{36}$/); assert.equal(body.input, "x");
+});
+
+test("readThread refuses any answer that is not a snapshot as INTERNAL, an empty one included", async () => {
+  const api = new FakeDaemonApi().on("GET", "/api/sessions/c1/thread", { status: 200, body: { kind: "events", seq: 5, events: [] } })
+    .on("GET", "/api/sessions/c2/thread", { status: 200, body: null });
+  for (const id of ["c1", "c2"]) {
+    await assert.rejects(readThread(api, id), (e: unknown) => e instanceof ToolError && e.code === "INTERNAL" && e.message === "Expected a thread snapshot.", id);
+  }
 });

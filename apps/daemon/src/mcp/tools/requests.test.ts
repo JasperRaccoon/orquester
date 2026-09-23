@@ -196,3 +196,17 @@ test("answer_question validates every file of every question before uploading an
   assert.deepEqual(Object.fromEntries(Object.entries(body.attachmentsByQuestionId).map(([k, v]) => [k, v.map((a) => a.name)])), { Log: ["app.log"], Why: ["df.txt", "du.txt"] });
   assert.deepEqual(h.api.uploads.map((u) => u.meta.name), ["app.log", "df.txt", "du.txt"], "uploaded once, in question order");
 });
+
+test("answer_question: a host refusal while uploading names the question and that question's own attachment index", async (t) => {
+  const h = await harness([chatSummary({ hasPendingUserInput: true })], twoOpen()); t.after(h.close);
+  h.api.on("POST", "/api/sessions/c1/answer", { status: 200, body: { seq: 37 } });
+  h.api.onUpload((sessionId, meta, bytes) => (meta.name === "df.txt"
+    ? { status: 400, value: { error: { code: "INVALID_COMMAND", message: "Attachment exceeds the 50 MiB limit." } } }
+    : { status: 200, value: { type: "file", id: `${sessionId}-${meta.name}`, name: meta.name, sizeBytes: bytes.length } }));
+  const file = (name: string) => ({ name, base64: Buffer.from(name).toString("base64") });
+  // df.txt is the SECOND question's FIRST file: flat index 1, reported as that question's attachments[0].
+  await assert.rejects(tool("answer_question").run({ sessionId: "c1", answers: { Why: "disk full" }, attachments: { Log: [file("app.log")], Why: [file("df.txt"), file("du.txt")] } }, h.ctx),
+    (e: { code: string; message: string }) => e.code === "INVALID_COMMAND" && e.message === "Attachments for \"Why\": attachments[0]: Attachment exceeds the 50 MiB limit.");
+  assert.deepEqual(h.api.uploads.map((u) => u.meta.name), ["app.log", "df.txt"]);
+  assert.ok(!h.api.calls.some((c) => c.method === "POST"), "nothing is sent after a refused upload");
+});

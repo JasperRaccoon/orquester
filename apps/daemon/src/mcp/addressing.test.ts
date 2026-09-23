@@ -46,3 +46,16 @@ test("projectNamesFor splits a sandbox path and nulls the rest", () => {
   assert.deepEqual(projectNamesFor("/w/acme/api/sub", "/w"), { workspace: "acme", name: "api", path: "/w/acme/api/sub" });
   assert.deepEqual(projectNamesFor("/elsewhere", "/w"), { workspace: null, name: null, path: "/elsewhere" });
 });
+
+test("a directory that is not a project is refused for what it is: the workspaces root, a workspace, or outside every workspace", async (t) => {
+  const s = await sandbox(); t.after(() => rm(s.root, { recursive: true, force: true }));
+  const refused = (input: string, message: string) => assert.rejects(resolveProject(s.api, input), (e: { code: string; message: string }) => e.code === "PROJECT_NOT_FOUND" && e.message === message, input);
+  const hint = "Pass \"<workspace>/<project>\" (list_projects names them).";
+  await refused(s.api.workspacesDir, `"${s.api.workspacesDir}" is the workspaces root, not a project. ${hint}`);
+  await refused(`${s.api.workspacesDir}/`, `"${s.api.workspacesDir}/" is the workspaces root, not a project. ${hint}`);
+  await refused(join(s.api.workspacesDir, "acme"), `"${join(s.api.workspacesDir, "acme")}" is a workspace, not a project. ${hint}`);
+  // A sandbox wider than the workspaces dir reaches directories that sit in no workspace at all.
+  const wide = { fsRoot: s.root, workspacesDir: s.api.workspacesDir };
+  await assert.rejects(resolveProject(wide, join(s.root, "outside")),
+    (e: { code: string; message: string }) => e.code === "PROJECT_NOT_FOUND" && e.message === `"${join(s.root, "outside")}" is not inside a workspace. ${hint}`);
+});

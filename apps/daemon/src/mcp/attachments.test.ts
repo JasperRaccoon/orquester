@@ -147,3 +147,22 @@ test("base64 must be canonical: some data, padding only to a multiple of 4, neve
   await uploadInlineAttachments(s.api, "c1", [{ name: "a.txt", base64: "YWI=" }, { name: "b.txt", base64: "YWJj\nZA==" }, { name: "c.txt", base64: "YWJjZA" }]);
   assert.deepEqual(s.api.uploads.map((u) => u.bytes.toString("latin1")), ["ab", "abcd", "abcd"]);
 });
+
+test("a host refusal while sending names the attachment it refused, keeping the code and the detail", async (t) => {
+  const s = await sandbox(); t.after(() => rm(s.root, { recursive: true, force: true }));
+  const accept = (sessionId: string, name: string, size: number) => ({ status: 200, value: { type: "file", id: `${sessionId}-${name}`, name, sizeBytes: size } });
+  const files = [{ name: "a.txt", base64: "YQ==" }, { name: "b.txt", base64: "Yg==" }, { name: "c.txt", base64: "Yw==" }];
+  s.api.onUpload((sessionId, meta, bytes) => (meta.name === "b.txt"
+    ? { status: 400, value: { error: { code: "INVALID_COMMAND", message: "Attachment exceeds the 50 MiB limit.", detail: { limitBytes: 52_428_800 } } } }
+    : accept(sessionId, meta.name, bytes.length)));
+  const refused = await uploadInlineAttachments(s.api, "c1", files).then(() => assert.fail("expected a refusal"), (e: { code: string; message: string; detail?: unknown }) => e);
+  assert.equal(refused.code, "INVALID_COMMAND");
+  assert.equal(refused.message, "attachments[1]: Attachment exceeds the 50 MiB limit.");
+  assert.deepEqual(refused.detail, { limitBytes: 52_428_800 });
+  assert.deepEqual(s.api.uploads.map((u) => u.meta.name), ["a.txt", "b.txt"], "a refusal stops the sends");
+  // A refusal naming no code takes the fallback, and an answer without a reference is INTERNAL: both still name the file.
+  s.api.onUpload((sessionId, meta, bytes) => (meta.name === "b.txt" ? { status: 500, value: null } : accept(sessionId, meta.name, bytes.length)));
+  await assert.rejects(uploadInlineAttachments(s.api, "c1", files), (e: { code: string; message: string }) => e.code === "HOST_UNAVAILABLE" && e.message === "attachments[1]: Attachment upload failed.");
+  s.api.onUpload((sessionId, meta, bytes) => (meta.name === "c.txt" ? { status: 200, value: { type: "file" } } : accept(sessionId, meta.name, bytes.length)));
+  await assert.rejects(uploadInlineAttachments(s.api, "c1", files), (e: { code: string; message: string }) => e.code === "INTERNAL" && e.message === "attachments[2]: the host did not return an attachment reference.");
+});

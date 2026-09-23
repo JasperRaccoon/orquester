@@ -77,10 +77,16 @@ function checkSize(name: string, type: string | undefined, size: number, index: 
   if (size > cap) throw new ToolError("INVALID_ARGUMENT", `attachments[${index}] "${name}" is ${size} bytes; ${isImage ? "images" : "files"} are capped at ${cap / (1024 * 1024)} MiB.`);
 }
 
+/** A send-phase refusal, re-worded to name the attachment it refused (code and detail unchanged), as validation does. */
+function atIndex(index: number, error: ToolError): ToolError {
+  return new ToolError(error.code, `attachments[${index}]: ${error.message}`, error.detail);
+}
+
 /**
  * Validate every attachment, then upload them in order; nothing is uploaded unless all validate (spec §8). A path
  * attachment is opened while validating and streamed from that handle when sent (§8.3); every handle is closed on
- * the way out, whether the call succeeds, fails validation or is refused by the host.
+ * the way out, whether the call succeeds, fails validation or is refused by the host. Every refusal starts with
+ * `attachments[<i>]` — a send-phase one too — so a caller batching several lists (answer_question) can point back.
  */
 export async function uploadInlineAttachments(api: DaemonApi, sessionId: string, inputs: readonly AttachmentInput[], opts?: { max?: number }): Promise<AttachmentRef[]> {
   const max = opts?.max ?? MAX_ATTACHMENTS;
@@ -89,11 +95,11 @@ export async function uploadInlineAttachments(api: DaemonApi, sessionId: string,
   try {
     for (const [index, input] of inputs.entries()) prepared.push("path" in input ? await preparePath(api, input.path, index) : prepareInline(input, index));
     const refs: AttachmentRef[] = [];
-    for (const p of prepared) {
+    for (const [index, p] of prepared.entries()) {
       const res = await api.uploadAttachment(sessionId, { name: p.name, type: p.type }, p.body());
-      if (res.status >= 400) throw daemonError({ status: res.status, body: res.value }, { code: "HOST_UNAVAILABLE", message: "Attachment upload failed." });
+      if (res.status >= 400) throw atIndex(index, daemonError({ status: res.status, body: res.value }, { code: "HOST_UNAVAILABLE", message: "Attachment upload failed." }));
       const ref = res.value as AttachmentRef | null;
-      if (!ref || typeof ref !== "object" || typeof (ref as { id?: unknown }).id !== "string") throw new ToolError("INTERNAL", "The host did not return an attachment reference.");
+      if (!ref || typeof ref !== "object" || typeof (ref as { id?: unknown }).id !== "string") throw atIndex(index, new ToolError("INTERNAL", "the host did not return an attachment reference."));
       refs.push(ref);
     }
     return refs;

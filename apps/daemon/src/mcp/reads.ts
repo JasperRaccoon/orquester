@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { SessionSummary } from "@orquester/api";
 import type { AgentChatCommandName, ThreadReadResponse, ThreadSnapshotPayload } from "@orquester/api/agent-chat";
 import { agentChatCommandPath, agentChatRoutes } from "@orquester/api/agent-chat";
-import type { DaemonApi } from "./daemon-api.ts";
+import type { DaemonApi, DaemonResponse } from "./daemon-api.ts";
 import { ToolError, daemonError, expectOk } from "./errors.ts";
 
 export async function listSessions(api: DaemonApi, projectPath?: string): Promise<SessionSummary[]> {
@@ -26,8 +26,8 @@ export async function requireChatSession(api: DaemonApi, sessionId: string): Pro
 
 export async function readThread(api: DaemonApi, sessionId: string): Promise<ThreadSnapshotPayload> {
   const res = await api.request("GET", agentChatRoutes.thread(sessionId));
-  const body = expectOk<ThreadReadResponse>(res, "thread");
-  if (body.kind !== "snapshot") throw new ToolError("INTERNAL", "Expected a thread snapshot.");
+  const body = expectOk<ThreadReadResponse | null>(res, "thread");
+  if (body?.kind !== "snapshot") throw new ToolError("INTERNAL", "Expected a thread snapshot.");
   return body.thread;
 }
 
@@ -41,28 +41,25 @@ const RETRIES = 3;
 /**
  * POST a chat command with a fresh commandId; retry 503 HOST_UNAVAILABLE (and
  * a thrown transport error) with the SAME id up to 3 times — the GUI's rule.
+ * The minted id always wins: a `commandId` in `body` is overwritten.
  */
 export async function sendCommand(api: DaemonApi, sessionId: string, name: AgentChatCommandName | "account", body: Record<string, unknown>, opts?: { retryDelayMs?: (attempt: number) => number }): Promise<{ seq: number }> {
   const path = name === "account" ? agentChatRoutes.account(sessionId) : agentChatCommandPath(sessionId, name);
   const delay = opts?.retryDelayMs ?? defaultRetryDelay;
-  const payload = { commandId: mintCommandId(), ...body };
-  let last: ToolError | null = null;
-  for (let attempt = 0; attempt <= RETRIES; attempt += 1) {
+  const payload = { ...body, commandId: mintCommandId() };
+  // Every attempt returns or throws by the last one, so the loop needs no exit and nothing follows it.
+  for (let attempt = 0; ; attempt += 1) {
     // Wait only between attempts: never before the first, never after the last.
     if (attempt > 0) await new Promise((r) => setTimeout(r, delay(attempt - 1)));
-    let res;
+    let res: DaemonResponse | null = null;
     try {
       res = await api.request("POST", path, { body: payload });
     } catch (error) {
       // The exception text can carry a host path: log it here, never hand it to the caller.
       console.error("[mcp] daemon call failed", error);
-      last = new ToolError("HOST_UNAVAILABLE", "The daemon call failed.");
-      continue;
     }
-    if (res.status < 400) return expectOk<{ seq: number }>(res, name);
-    const err = daemonError(res);
-    if (err.code !== "HOST_UNAVAILABLE") throw err;
-    last = err;
+    if (res && res.status < 400) return expectOk<{ seq: number }>(res, name);
+    const failure = res ? daemonError(res) : new ToolError("HOST_UNAVAILABLE", "The daemon call failed.");
+    if (failure.code !== "HOST_UNAVAILABLE" || attempt === RETRIES) throw failure;
   }
-  throw last ?? new ToolError("HOST_UNAVAILABLE", "The agent host is restarting.");
 }
