@@ -12,6 +12,7 @@ import type {
   AttachmentRef,
   BackgroundLiveness,
   Checkpoint,
+  CompactionMarkerState,
   ComposerContextRecord,
   InteractionMode,
   ModelSelection,
@@ -317,14 +318,11 @@ export interface WorkLogEntry {
 }
 
 /**
- * The three states a `context-compaction` activity comes in (mirrors
- * `RuntimeThreadState`'s compaction arm in `@orquester/api/agent-chat`).
- *
- * `compacting` is a **phase, not an event**: it says the provider is rewriting
- * the conversation right now, so it renders as the live placeholder's label
- * rather than as a divider claiming a compaction that has not happened yet.
+ * The three states a compaction marker comes in. Declared in
+ * `@orquester/api/agent-chat` (`compaction.ts`) with the rule that classifies
+ * a row, which the host's thread index and the MCP share; re-exported here.
  */
-export type CompactionMarkerState = "compacting" | "compacted" | "compaction-failed";
+export type { CompactionMarkerState };
 
 // ---------------------------------------------------------------------------
 // §7.3 — the twelve projected row kinds

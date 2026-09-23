@@ -21,11 +21,13 @@ import {
   created,
   delta,
   done,
+  legacyCompaction,
   liveTurn,
   recordingLogger,
   reverted,
   session,
   stampAt,
+  subagentCompaction,
   TestLog,
   turnStart,
   userMessage,
@@ -185,6 +187,45 @@ describe("thread index: rewindable", () => {
       compaction("failed", null, "compaction-failed")
     ]);
     assert.equal(index.rewindable(log.threadId, index.turnByOrdinal(log.threadId, 1)!), true);
+  });
+
+  it("the legacy marker — thread.state.changed {state: compacted} — withholds the turns before it", async () => {
+    const log = new TestLog();
+    await indexed(log, [
+      created(),
+      ...liveTurn({ n: 1, prompt: "one" }),
+      ...liveTurn({ n: 2, prompt: "two", extra: [legacyCompaction("legacy", "t2")] }),
+      ...liveTurn({ n: 3, prompt: "three" }),
+      // Any other thread state is no marker at all.
+      activity("state", "thread.state.changed", { payload: { state: "running" }, turnId: "t3" })
+    ]);
+    const id = log.threadId;
+    assert.deepEqual(
+      [1, 2, 3].map((n) => index.rewindable(id, index.turnByOrdinal(id, n)!)),
+      [false, false, true]
+    );
+  });
+
+  it("a subagent's own compaction withholds nothing, whether the row or its payload names the agent", async () => {
+    const log = new TestLog();
+    await indexed(log, [
+      created(),
+      ...liveTurn({ n: 1, prompt: "one" }),
+      ...liveTurn({
+        n: 2,
+        prompt: "two",
+        extra: [
+          subagentCompaction("on-row", "t2", { agentId: "sub-1", on: "row" }),
+          subagentCompaction("on-payload", "t2", { agentId: "sub-1", on: "payload" })
+        ]
+      }),
+      ...liveTurn({ n: 3, prompt: "three" })
+    ]);
+    const id = log.threadId;
+    assert.deepEqual(
+      [1, 2, 3].map((n) => index.rewindable(id, index.turnByOrdinal(id, n)!)),
+      [true, true, true]
+    );
   });
 });
 

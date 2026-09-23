@@ -2,7 +2,7 @@ import { stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
 import { SYSTEM_ACCOUNT_ID, type AgentConversationsResponse, type CreateSessionRequest, type RegistryResponse, type SessionSummary } from "@orquester/api";
-import { agentChatRoutes, RUNTIME_MODES, startedTurns, type AccountHomeKind, type CreateAgentChatSessionFields, type ModelSelection, type RuntimeMode, type StartedTurn, type ThreadActivityItem, type ThreadItem, type ThreadSnapshotPayload, type TurnDiffResponse } from "@orquester/api/agent-chat";
+import { agentChatRoutes, isSettledConversationCompaction, RUNTIME_MODES, startedTurns, type AccountHomeKind, type CreateAgentChatSessionFields, type ModelSelection, type RuntimeMode, type StartedTurn, type ThreadActivityItem, type ThreadItem, type ThreadSnapshotPayload, type TurnDiffResponse } from "@orquester/api/agent-chat";
 import { assertInsideFsRoot, FsSandboxError } from "@orquester/config/fs";
 import { resolveProject } from "../addressing.ts";
 import { conversationLaunch, findAgent, isProxyAgent, launchesProxyModel, loadAgents, resolveModelSelection, validateAccountId, type ResolvedSelection } from "../agents.ts";
@@ -382,19 +382,6 @@ function isRevertFailure(item: ThreadItem): item is ThreadActivityItem {
   return item.kind === "activity" && item.activityKind === REVERT_FAILED_ACTIVITY_KIND;
 }
 
-/**
- * A settled compaction marker of the conversation itself: the GUI's `isCompactionActivity` whose `compactionMarkerState`
- * is `compacted` (packages/ui entries.logic.ts) — a `context-compaction` row unless it says it is still running or
- * failed (an unreadable state is settled: old logs recorded only those), or the legacy `thread.state.changed
- * {state: "compacted"}`. A subagent's own row is not the parent timeline's, which is the one the GUI reads.
- */
-function isSettledCompaction(item: ThreadItem): boolean {
-  if (item.kind !== "activity" || item.agentId) return false;
-  const state = isRecord(item.payload) ? item.payload.state : undefined;
-  if (item.activityKind === "context-compaction") return state !== "compacting" && state !== "compaction-failed";
-  return item.activityKind === "thread.state.changed" && state === "compacted";
-}
-
 /** Where a turn begins among the thread's rows: its user message, else its first row; -1 when none is left. */
 function turnOpening(items: readonly ThreadItem[], turn: StartedTurn): number {
   const byMessage = turn.userMessageId === undefined ? -1 : items.findIndex((item) => item.id === turn.userMessageId);
@@ -404,9 +391,12 @@ function turnOpening(items: readonly ThreadItem[], turn: StartedTurn): number {
 /**
  * The fewest turns a rewind may keep. The provider holds nothing from before the thread's LAST settled compaction, so
  * the GUI withholds "rewind to here" on every message before it (rows.logic.ts `buildRevertTurnCountByUserMessageId`,
- * and a history page's `rewindable`), and the adapter would refuse the rollback. Turns are in start order, so the first
- * one that begins after the marker is the earliest a rewind may cut at. 0 when nothing was compacted; the started-turn
- * count when no turn began after it.
+ * and a history page's `rewindable`), and the adapter would refuse the rollback. Which row is that marker is the one
+ * rule all three share, `isSettledConversationCompaction` (@orquester/api `compaction.ts`): a `context-compaction` row
+ * or the legacy `thread.state.changed {state: "compacted"}`, settled (an unreadable state is), and not a subagent's own
+ * (an `agentId` on the row or on its payload). Turns are in start order, so the first one that begins after the marker
+ * is the earliest a rewind may cut at. 0 when nothing was compacted; the started-turn count when no turn began after
+ * it.
  *
  * "Before" and "after" are positions in `snap.items`, the fold's append order, where the GUI sorts its timeline by
  * `createdAt` (entries.logic.ts). For a real log the two agree: the fold appends each row when its event lands in the
@@ -417,7 +407,7 @@ function turnOpening(items: readonly ThreadItem[], turn: StartedTurn): number {
  */
 function fewestKeptTurns(snap: ThreadSnapshotPayload): number {
   let marker = -1;
-  for (let i = snap.items.length - 1; i >= 0 && marker === -1; i -= 1) if (isSettledCompaction(snap.items[i]!)) marker = i;
+  for (let i = snap.items.length - 1; i >= 0 && marker === -1; i -= 1) if (isSettledConversationCompaction(snap.items[i]!)) marker = i;
   if (marker === -1) return 0;
   const markedAt = snap.items[marker]!.createdAt;
   const started = startedTurns(snap.turns);

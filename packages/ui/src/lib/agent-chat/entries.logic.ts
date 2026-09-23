@@ -23,16 +23,15 @@
 
 import type { ThreadActivityItem, ThreadItem, ThreadMessageItem } from "@orquester/api/agent-chat";
 import {
+  compactionMarkerState,
   IDENTITY_CHANGED_ACTIVITY_KIND,
+  isAgentOwnedActivity,
+  isCompactionActivity,
   isPlanImplementationMessage,
   PLAN_IMPLEMENTATION_PROMPT_PREFIX
 } from "@orquester/api/agent-chat";
 
-import type {
-  CompactionMarkerState,
-  WorkLogEntry,
-  WorkLogToolLifecycleStatus
-} from "./contracts";
+import type { WorkLogEntry, WorkLogToolLifecycleStatus } from "./contracts";
 import { normalizeCompactToolLabel } from "./presentation.logic";
 
 // ---------------------------------------------------------------------------
@@ -441,9 +440,9 @@ function isAgentTaskStartedActivity(activity: ThreadActivityItem): boolean {
  */
 export function isAgentInternalActivity(activity: ThreadActivityItem): boolean {
   const payload = asRecord(activity.payload);
-  const ownedByAgent =
-    (typeof activity.agentId === "string" && activity.agentId.trim().length > 0) ||
-    (typeof payload?.agentId === "string" && payload.agentId.trim().length > 0);
+  // The ownership half is `@orquester/api`'s: the conversation's compaction
+  // marker is decided by the same test on the host and in the MCP.
+  const ownedByAgent = isAgentOwnedActivity(activity);
   const bypassed = payload?.timelineBypass === true;
 
   if (TASK_KINDS.has(activity.activityKind)) {
@@ -498,30 +497,12 @@ function isPlanBoundaryToolActivity(activity: ThreadActivityItem): boolean {
   return typeof detail === "string" && detail.startsWith("ExitPlanMode:");
 }
 
-/** The compaction marker's activity kind. */
-export function isCompactionActivity(activity: ThreadActivityItem): boolean {
-  if (activity.activityKind === "context-compaction") {
-    return true;
-  }
-  return (
-    activity.activityKind === "thread.state.changed" &&
-    asRecord(activity.payload)?.state === "compacted"
-  );
-}
-
 /**
- * Which of the three compaction markers this activity is (§7.3).
- *
- * **Anything unreadable is `compacted`.** An old log only ever recorded the
- * settled marker — a `context-compaction` activity with no `state`, or the
- * legacy `thread.state.changed` one — and reading an unknown spelling as an
- * in-flight phase would leave a resumed thread shimmering "Compacting
- * context…" against a provider that finished months ago.
+ * The compaction marker's activity kind, and which of its three states a row
+ * is (§7.3). One rule in `@orquester/api` (`compaction.ts`), shared with the
+ * host's thread index and the MCP; re-exported for this module's importers.
  */
-export function compactionMarkerState(activity: ThreadActivityItem): CompactionMarkerState {
-  const state = asRecord(activity.payload)?.state;
-  return state === "compacting" || state === "compaction-failed" ? state : "compacted";
-}
+export { compactionMarkerState, isCompactionActivity };
 
 /** Before/after token counts, carried on the event and formatted client-side (§7.3). */
 export function compactionTokens(activity: ThreadActivityItem): {

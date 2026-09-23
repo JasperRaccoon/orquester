@@ -487,11 +487,12 @@ and its default model (the flagged one, else the first) are never shed.
   (`0 ≤ keepTurns < turnCount`). Conversation only — files are not restored. Refused with
   `INVALID_ARGUMENT` for an agent without rollback (Grok) and for a target before the last context
   compaction (the agent no longer holds what came before it, and the GUI offers no rewind there;
-  the message names the `keepTurns` range still allowed, if any). Refused with `SESSION_BUSY` while
-  a turn is active and with `PENDING_REQUEST` while a question or an approval is open. The host
-  rewinds after it has accepted the command, so the tool waits up to 10 s for the outcome. It
-  returns `{seq, session}` once the turns are gone. If the rewind fails (the adapter refuses it),
-  it answers `COMMAND_REJECTED` with the host's reason (`Rewind failed: …`,
+  the message names the `keepTurns` range still allowed, if any). Only the conversation's own
+  compactions count: a subagent compacting its own context does not stop a rewind. Refused with
+  `SESSION_BUSY` while a turn is active and with `PENDING_REQUEST` while a question or an approval
+  is open. The host rewinds after it has accepted the command, so the tool waits up to 10 s for the
+  outcome. It returns `{seq, session}` once the turns are gone. If the rewind fails (the adapter
+  refuses it), it answers `COMMAND_REJECTED` with the host's reason (`Rewind failed: …`,
   `detail: {seq, activityId, reason?}`). If the rewind is still running, it answers `SESSION_BUSY`
   (`detail: {seq}`) and says not to call `revert_session` again: the rewind has landed once
   `get_session`'s `chat.turnCount` comes down to `keepTurns`, and a failed one shows in

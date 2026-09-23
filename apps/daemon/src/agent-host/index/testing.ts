@@ -257,6 +257,8 @@ export function activity(
     payload?: Record<string, unknown>;
     turnId?: string | null;
     createdAt?: string;
+    /** The owning subagent, stamped on the row itself. */
+    agentId?: string;
   } = {}
 ): Draft {
   const row: ThreadActivityItem = {
@@ -267,6 +269,7 @@ export function activity(
     summary: input.summary ?? activityKind,
     payload: input.payload ?? {},
     turnId: input.turnId ?? null,
+    ...(input.agentId !== undefined ? { agentId: input.agentId } : {}),
     createdAt: input.createdAt ?? stampAt(0),
     updatedAt: input.createdAt ?? stampAt(0)
   };
@@ -282,6 +285,29 @@ export function compaction(
     summary: state === "compacted" ? "Context compacted" : "Compacting context",
     payload: { state },
     turnId
+  });
+}
+
+/** The settled marker as an older log spelled it: `thread.state.changed {state: "compacted"}`. */
+export function legacyCompaction(id: string, turnId: string | null): Draft {
+  return activity(id, "thread.state.changed", {
+    summary: "Context compacted",
+    payload: { state: "compacted" },
+    turnId
+  });
+}
+
+/** A subagent's own settled compaction, named on the row or on its payload. */
+export function subagentCompaction(
+  id: string,
+  turnId: string | null,
+  owner: { agentId: string; on: "row" | "payload" }
+): Draft {
+  return activity(id, "context-compaction", {
+    summary: "Context compacted",
+    payload: { state: "compacted", ...(owner.on === "payload" ? { agentId: owner.agentId } : {}) },
+    turnId,
+    ...(owner.on === "row" ? { agentId: owner.agentId } : {})
   });
 }
 

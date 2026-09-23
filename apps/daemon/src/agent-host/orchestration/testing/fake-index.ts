@@ -16,7 +16,9 @@
 
 import {
   applyDomainEvent,
+  compactionMarkerState,
   createEmptyThreadState,
+  isConversationCompactionActivity,
   startedTurns,
   type DomainEvent,
   type HistoryCursor,
@@ -43,7 +45,7 @@ interface ThreadRows {
   prompts: Map<string, EventPosition>;
   /** The turn whose range grows with the log; none after a revert. */
   openTurnId: string | null;
-  /** `context-compaction` rows; only a settled one blocks a rewind. */
+  /** The conversation's own compaction markers (the shared rule); only a settled one blocks a rewind. */
   markers: Array<{ seq: number; compacted: boolean }>;
   /** Every activity's latest line, by id. */
   items: Map<string, IndexedItemPosition>;
@@ -127,13 +129,11 @@ export function createFakeThreadIndex(options: { available?: boolean } = {}): Fa
     }
     if (
       event.type === "thread.activity-appended" &&
-      event.payload.activity.activityKind === "context-compaction"
+      isConversationCompactionActivity(event.payload.activity)
     ) {
-      const payload = event.payload.activity.payload as { state?: unknown } | null;
-      const state = payload?.state;
       rows.markers.push({
         seq: event.seq,
-        compacted: state !== "compacting" && state !== "compaction-failed"
+        compacted: compactionMarkerState(event.payload.activity) === "compacted"
       });
     }
     if (event.type === "thread.reverted") {
