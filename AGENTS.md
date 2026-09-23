@@ -604,9 +604,14 @@ codes are the GUI's by construction, not by review. Two invariants:
   `wait_for_session` (`wait.ts`) subscribe to the bus the `/events` clients read and evaluate the
   session summary (`activity` plus the six chat fields) on every event, with a 10 s list re-read
   only as a safety net, a 300 ms settle window for siblings stamped by one host poll, and the
-  request's `close` aborting them. `wait_for_session` compares `activity.needsAttentionAt` with the
-  caller's `after` and hands back a `cursor`: a chat tab's `finished` is sticky, so "return what is
-  already flagged" was a busy loop in v1.
+  request's `close` aborting them; `revert_session` waits (≤ 10 s) for the host's asynchronous
+  rewind the same way, re-reading the thread on each bus event about the session, else after 1 s.
+  `wait_for_session` compares `activity.needsAttentionAt` with the caller's `after` and hands back a
+  `cursor`: a chat tab's `finished` is sticky, so "return what is already flagged" was a busy loop
+  in v1. For the cursor to miss nothing, the daemon moves that stamp whenever something new calls
+  for the user, not only when the attention value changes (`agent-chat/summary.ts`): a request id
+  the previous host poll did not have, or a latest turn whose `completedAt` is later than that poll
+  — never a rewind or a replayed history, which land on turns that settled long ago.
 
 Addressing: sessions only by `sessionId` (titles are not unique, so there is no title matching);
 `project` as the absolute path or `"<workspace>/<project>"`, resolved by `resolveProject()`
@@ -616,10 +621,15 @@ few places: `project`, `cwd` and attachment paths must realpath inside `fsRoot`;
 family-checked before a create (the daemon silently falls back to the system home); at most 24
 running sessions per project; `update_session` refuses a mid-turn model/permission change without
 `force`. Like the GUI, `send_message` refuses while a request is pending (the host alone would take
-the message as a steer). A result is one JSON object capped at 60 000 bytes (`result.ts`); an error
-is `<CODE>: <message>`. `server.ts` replaces the SDK's `tools/call` handler (public
-`server.setRequestHandler`) so a schema refusal answers the same `<CODE>: <message>` envelope as
-every other error. Tool docs: `docs/orquester-mcp.md`; design: the v2 spec,
+the message as a steer). A result is one JSON object capped at 60 000 bytes (`result.ts`); every
+tool that can outgrow it bounds itself first and says what it cut (`truncated`, `optionsOmitted`,
+`subagentsTruncated`, `filesTruncated`, …), so `ok()`'s byte cut is only the last resort. An error
+is `<CODE>: <message>`, the message capped at 4 000 code points. `server.ts` replaces the SDK's
+`tools/call` handler (public `server.setRequestHandler`) so a schema refusal answers the same
+`<CODE>: <message>` envelope as every other error, and it parses the arguments strictly
+(`argumentsSchema`, `.strict()` at the top level): an argument name the tool does not take is
+refused and named, never silently dropped — `tools/list` already advertises
+`additionalProperties: false`. Tool docs: `docs/orquester-mcp.md`; design: the v2 spec,
 `docs/superpowers/specs/2026-09-22-orquester-mcp-v2-design.md`.
 
 ### Key runtime flows
