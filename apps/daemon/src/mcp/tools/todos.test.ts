@@ -176,3 +176,71 @@ test("list_todos' description warns that a bodyTruncated list is incomplete", ()
   assert.ok(description.includes("a list marked bodyTruncated is incomplete — never write it back whole"), description);
   assert.match(description, /omittedLists/);
 });
+
+/** A 3 000-item list, CJK, quotes and backslashes included: about 140 KB of JSON body, over twice one result. */
+async function bigList(ctx: ToolContext): Promise<{ id: string; body: string }> {
+  const { id } = (await tool("create_todo").run({ workspace: "acme", name: "Backlog" }, ctx)).todo as { id: string };
+  const body = Array.from({ length: 3_000 }, (_, i) => `- [ ] task ${i + 1}: 項目 "quoted" \\ ${"x".repeat(10)}`).join("\n");
+  await tool("update_todo").run({ id, body }, ctx);
+  return { id, body };
+}
+
+test("toggle_todo_item on a 3 000-item list: the toggle is whole, and its result is one result — visibly a success, the body's head marked bodyTruncated", async (t) => {
+  const { manager, ctx } = await harness(t);
+  const { id, body } = await bigList(ctx);
+  const checked = body.replace("- [ ] task 2999:", "- [x] task 2999:");
+  const r = await tool("toggle_todo_item").run({ id, item: 2_999 }, ctx);
+  assert.deepEqual([r.id, r.item, r.checked, r.bodyTruncated], [id, `task 2999: 項目 "quoted" \\ ${"x".repeat(10)}`, true, true], "the id, the item and its new state, whole");
+  const size = resultSize(r);
+  assert.ok(size <= MAX_RESULT_BYTES && size > MAX_RESULT_BYTES - 16, `${size} bytes: within one result, filled to it`);
+  assert.equal(ok(r).structuredContent, r, "ok() passes it through: never the truncation note");
+  assert.ok(checked.startsWith(r.body as string), "the head of the new body");
+  assert.equal(manager.get(id)!.body, checked, "the write itself is whole: item 2999 ticked, the other 2 999 as they were");
+  // Flipping it again is visibly a success too, and restores the list exactly.
+  const back = await tool("toggle_todo_item").run({ id, item: 2_999 }, ctx);
+  assert.deepEqual([back.checked, back.bodyTruncated, ok(back).structuredContent === back], [false, true, true]);
+  assert.equal(manager.get(id)!.body, body);
+  // An explicit state that is already set writes nothing and answers the same way.
+  const same = await tool("toggle_todo_item").run({ id, item: 2_999, checked: false }, ctx);
+  assert.deepEqual([same.checked, same.bodyTruncated, resultSize(same) <= MAX_RESULT_BYTES], [false, true, true]);
+});
+
+test("update_todo on a 3 000-item list: a rename keeps the whole body, a rewrite stores it whole, and each result is one result marked bodyTruncated", async (t) => {
+  const { manager, ctx } = await harness(t);
+  const { id, body } = await bigList(ctx);
+  const renamed = await tool("update_todo").run({ id, name: "Renamed" }, ctx);
+  const todo = renamed.todo as Listed;
+  assert.deepEqual([todo.id, todo.name, todo.bodyTruncated], [id, "Renamed", true], "the id and the new name, whole");
+  const size = resultSize(renamed);
+  assert.ok(size <= MAX_RESULT_BYTES && size > MAX_RESULT_BYTES - 16, `${size} bytes: within one result, filled to it`);
+  assert.equal(ok(renamed).structuredContent, renamed, "ok() passes it through: never the truncation note");
+  assert.ok(body.startsWith(todo.body), "the head of the body");
+  assert.equal(manager.get(id)!.body, body, "a rename never touches the body");
+  // Writing the whole body again: stored whole, answered bounded.
+  const rewritten = await tool("update_todo").run({ id, body: `${body}\n- [ ] one more` }, ctx);
+  assert.equal((rewritten.todo as Listed).bodyTruncated, true);
+  assert.ok(resultSize(rewritten) <= MAX_RESULT_BYTES && ok(rewritten).structuredContent === rewritten, "one result");
+  assert.equal(manager.get(id)!.body, `${body}\n- [ ] one more`, "the write itself is whole");
+});
+
+test("a todo write's result is whole when it fits; a name too long for any result is the one thing cut, never the id", async (t) => {
+  const { ctx } = await harness(t);
+  const small = (await tool("create_todo").run({ workspace: "acme", name: "Small" }, ctx)).todo as Listed;
+  assert.equal("bodyTruncated" in small, false, "nothing cut, nothing marked");
+  const name = "N".repeat(70_000);
+  const created = await tool("create_todo").run({ workspace: "acme", name }, ctx);
+  const todo = created.todo as Listed;
+  assert.ok(resultSize(created) <= MAX_RESULT_BYTES && ok(created).structuredContent === created, "one result, visibly a success");
+  assert.match(todo.name, /^N+…$/, "the name, cut and marked");
+  assert.deepEqual([todo.body, "bodyTruncated" in todo], ["", false], "the (empty) body is whole, so it is not marked");
+  const listed = await tool("list_todos").run({ workspace: "acme" }, ctx);
+  assert.ok(resultSize(listed) <= MAX_RESULT_BYTES && ok(listed).structuredContent === listed, "list_todos too");
+  const renamed = await tool("update_todo").run({ id: todo.id, name, body: "- [ ] a" }, ctx);
+  assert.equal((renamed.todo as Listed).id, todo.id);
+  assert.ok(resultSize(renamed) <= MAX_RESULT_BYTES && ok(renamed).structuredContent === renamed, "update_todo too");
+});
+
+test("update_todo's body warns never to send a body marked bodyTruncated and names the safe routes; the writes say their results can be cut", () => {
+  assert.equal(tool("update_todo").input.body.description, "The new markdown body, replacing the old one whole. Never send a body marked bodyTruncated — list_todos, and this tool's and toggle_todo_item's results, mark a body cut to fit: it is only the list's head, and the rest would be lost. Tick items with toggle_todo_item (it edits the full stored body), rename with `name` alone (the body is kept), or put new items in a new list.");
+  for (const name of ["update_todo", "toggle_todo_item"]) assert.match(tool(name).description, /the result's body is only its head \(bodyTruncated:true\)/, name);
+});
