@@ -641,17 +641,26 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
   - older turns are unavailable on this host right now: `"Turns 4–6 could not be read whole: older
     turns are unavailable on this host right now. Try again later."` The host has no usable thread
     index (the native driver did not load, or the index file could not be opened), a history page
-    could not be read, or the index is being rebuilt (after an update, say) and has not caught up
-    with this conversation yet. Without an index, `unavailableTurns` spans the range's turns with
-    no row left in the window — from the first such turn to the last, so a turn between them may
-    have rows. While the index catches up, it cannot tell where the window begins, so the range's
-    turns up to the window's oldest one — which may be partial — are named until it has. Reading a
-    subagent (`agentId`), that window is the subagent's own: its rows are kept in windows of their
+    could not be read (an empty page with no cursor counts: it is how the host answers a block it
+    could not plan or read back whole), or the index is being rebuilt (after an update, say) and
+    has not caught up with this conversation yet. Without an index, `unavailableTurns` spans the
+    range's turns with no row left in the window — from the first such turn to the last, so a turn
+    between them may have rows. While the index catches up, it cannot tell where the window begins,
+    so the range's turns up to the window's oldest one — which may be partial — are named until it
+    has. Reading a subagent (`agentId`), without an index as while it catches up, that window is
+    the subagent's own, whatever the conversation's rows say: its rows are kept in windows of their
     own (its last 200 rows, the newest 2 000 across subagents), which can begin turns after the
     conversation's, so its turns are named from the one it was launched in up to the turn of its
-    oldest row left — or, for one with no row left, of the oldest row any subagent kept. Any turn
-    of the range still without a single row after the history pages were read is named the same
-    way;
+    oldest row left. Those turns may in fact be whole: without an index the MCP cannot tell, so on
+    a host without one they are named on every read. A subagent with no row left is bounded by the
+    turn of the oldest row any subagent kept — or, when its last launch or end is a Claude end, by
+    the turn it ended in, since a Claude subagent that resumes launches again. Codex and OpenCode
+    record a subagent's launch and end once, and one they resume after its end works on with no
+    new launch, so there an end bounds nothing. After a history page failed, a subagent's turns
+    are likewise named from the one it was launched in. Without `agentId`, any turn of the range
+    still without a single row after the history pages were read is named the same way, unless the
+    page limit ran out; a subagent's view has no such check, since a subagent has no rows in the
+    turns it did not work in;
   - the 5-page limit ran out (a subagent fleet's turn runs to thousands of events):
     `"Turns 1–3 could not be read whole: one call reads at most 5 pages of older history. Read them
     with beforeTurn: 4, turns: 3."` — the rows of those turns that were read are returned. When the
