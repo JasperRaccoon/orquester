@@ -93,6 +93,11 @@ interface ThreadState {
    * close, never once per tick (§6.4: nothing higher-rate rides the bus).
    */
   pending: Map<string, AgentHostPendingRequest>;
+  /**
+   * The instant of the last poll folded in (the `now` behind its stamp). A
+   * settled turn whose `completedAt` is later settled since we last looked.
+   */
+  polledAt: number;
 }
 
 export class AgentChatSummaryService {
@@ -221,7 +226,8 @@ export class AgentChatSummaryService {
     }
     const previous = this.threads.get(threadId);
     const resolution = resolveChatActivity(fields);
-    const nowIso = new Date(this.now()).toISOString();
+    const nowMs = this.now();
+    const nowIso = new Date(nowMs).toISOString();
     const attentionChanged = (previous?.activity.attention ?? null) !== resolution.attention;
     const previousPending = previous?.pending ?? new Map<string, AgentHostPendingRequest>();
     const pending = this.publishPendingTransitions(threadId, previousPending, pendingRequests);
@@ -234,13 +240,12 @@ export class AgentChatSummaryService {
     // answered and approval B raised (`needs-input` throughout), and a turn that
     // starts and settles (`finished` throughout) — and a stamp that did not
     // move hid both from a waiter looping on its cursor. A request that stays
-    // open, or a turn that stays settled, keeps its stamp.
+    // open, or a turn that stays settled, keeps its stamp; so does a rewind or
+    // a history replay, which move `latestTurn` onto turns that settled long ago.
     const restamp =
       attentionChanged ||
       [...pending.keys()].some((requestId) => !previousPending.has(requestId)) ||
-      (latestTurn !== null &&
-        turnMoved(previousTurn, latestTurn) &&
-        SETTLED_TURN_STATES.has(latestTurn.state));
+      (previous !== undefined && settledSince(latestTurn, previous.polledAt));
     const activity: SessionActivity = {
       state: resolution.state,
       attention: resolution.attention,
@@ -254,7 +259,7 @@ export class AgentChatSummaryService {
             ? nowIso
             : (previous?.activity.needsAttentionAt ?? nowIso)
     };
-    this.threads.set(threadId, { fields, activity, pending });
+    this.threads.set(threadId, { fields, activity, pending, polledAt: nowMs });
 
     // The tab's own copy of the six fields (the tab strip reads them off the
     // summary), published only when one actually moved.
@@ -376,11 +381,32 @@ export class AgentChatSummaryService {
 
 /**
  * The latest turn moved between two polls: a new turn id, or the same turn in
- * a new state. One definition for `agentChat.turn` and the attention restamp,
- * so the two can never disagree about what counts as a transition.
+ * a new state. What `agentChat.turn` reports — every move, a rewind's included.
  */
 function turnMoved(before: LatestTurnSummary | null, after: LatestTurnSummary): boolean {
   return before === null || before.turnId !== after.turnId || before.state !== after.state;
+}
+
+/**
+ * The latest turn settled after `since`: a settled state, with a `completedAt`
+ * later than that instant. This, not {@link turnMoved}, is what restamps the
+ * attention:
+ * - A rewind or a history replay moves `latestTurn` onto turns that settled long
+ *   ago. A rewind keeps its rows whole, and `stampHistoryTimes` dates every
+ *   replayed row before the thread was created.
+ * - Two turns that fail before the provider names them settle with the same
+ *   null id and state.
+ * A settled turn's `completedAt` is written once and never rewritten
+ * (`applySessionStatusToTurn`), so it is the one field that says "new". The
+ * settled check is load-bearing too: a running turn's `completedAt` may hold a
+ * mid-turn placeholder.
+ */
+function settledSince(turn: LatestTurnSummary | null, since: number): boolean {
+  if (turn === null || turn.completedAt === null || !SETTLED_TURN_STATES.has(turn.state)) {
+    return false;
+  }
+  // An unparseable stamp is NaN, and NaN is later than nothing: no restamp.
+  return Date.parse(turn.completedAt) > since;
 }
 
 /**
