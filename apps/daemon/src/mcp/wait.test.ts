@@ -130,3 +130,67 @@ test("a frozen caller clock never stops a timeout (the tools' test contexts free
   assert.equal((await waitForAttention(api, { select: () => true, after: stamp(5), timeoutMs: 20, signal: backstop, now: frozen, settleMs: 0 })).timedOut, true);
   assert.equal(backstop.aborted, false, "the wait's own timeout ended it, not the backstop");
 });
+
+test("an exited terminal keeps its finished attention through summaries that omit activity (a rename, the settle re-read)", async () => {
+  // The daemon drops `activity` from an exited tab's summary and stamps `finished` on the bus after `session.exited`.
+  const live = shellSummary({ id: "s1", activity: { state: "working", attention: null, lastOutputAt: stamp(1), needsAttentionAt: null } });
+  const exited = { ...live, status: "exited" as const, exitCode: 0, activity: undefined };
+  let reads = 0;
+  const api = new FakeDaemonApi().on("GET", "/api/sessions", () => ({ status: 200, body: [++reads === 1 ? live : exited] }));
+  const p = waitForAttention(api, { select: () => true, after: stamp(2), timeoutMs: 1_000, signal: new AbortController().signal, now, settleMs: 20 });
+  await new Promise((r) => setImmediate(r));
+  api.emit(busEvent("session.exited", exited));
+  api.emit(busEvent("session.activity", { id: "s1", activity: { state: "idle", attention: "finished", lastOutputAt: stamp(1), needsAttentionAt: stamp(5) } }));
+  api.emit(busEvent("session.updated", { ...exited, title: "renamed" }));
+  const r = await p;
+  assert.deepEqual(r.sessions.map((s) => s.id), ["s1"]);
+  assert.equal(r.cursor, stamp(5));
+  assert.equal(reads, 2, "the settle window re-read the list");
+});
+
+test("the safety-net re-read keeps its cadence however busy the bus is", async () => {
+  let reads = 0;
+  const api = new FakeDaemonApi().on("GET", "/api/sessions", () => { reads += 1; return { status: 200, body: [running(), shellSummary()] }; });
+  const p = watchSessions({ api, select: (s) => s.id === "c1", evaluate: () => null, timeoutMs: 300, signal: new AbortController().signal, now, settleMs: 0, rereadMs: 40 });
+  const quiet = { state: "working", attention: null, lastOutputAt: null, needsAttentionAt: null };
+  let beat = 0;
+  // Every 10 ms, alternately: the watched chat (nothing decisive) and an unwatched terminal.
+  const chatter = setInterval(() => api.emit(busEvent("session.activity", { id: beat++ % 2 ? "c1" : "t1", activity: quiet })), 10);
+  try {
+    assert.equal(await p, null);
+  } finally {
+    clearInterval(chatter);
+  }
+  assert.ok(reads >= 3, `re-read on schedule: ${reads} reads in 300 ms at rereadMs 40`);
+});
+
+test("events about unwatched sessions neither evaluate nor wake the watch", async () => {
+  const api = new FakeDaemonApi().on("GET", "/api/sessions", { status: 200, body: [running(), shellSummary()] });
+  let evaluations = 0;
+  const ac = new AbortController();
+  const p = watchSessions({ api, select: (s) => s.id === "c1", evaluate: () => { evaluations += 1; return null; }, timeoutMs: 5_000, signal: ac.signal, now, settleMs: 0 });
+  await new Promise((r) => setImmediate(r));
+  const before = evaluations;
+  api.emit(busEvent("session.activity", { id: "t1", activity: { state: "idle", attention: "bell", lastOutputAt: null, needsAttentionAt: stamp(9) } }));
+  api.emit(busEvent("session.updated", shellSummary({ title: "renamed" })));
+  api.emit(busEvent("session.closed", { id: "t9" }));
+  await new Promise((r) => setImmediate(r));
+  assert.equal(evaluations, before, "nothing the watch holds changed");
+  api.emit(busEvent("session.activity", { id: "c1", activity: { state: "working", attention: null, lastOutputAt: null, needsAttentionAt: null } }));
+  assert.equal(evaluations, before + 1, "a watched session's event is evaluated at once");
+  ac.abort();
+  assert.equal(await p, null);
+});
+
+test("an abort inside the settle window resolves null; attention stamps compare as instants, whatever offset `after` uses", async () => {
+  const api = new FakeDaemonApi().on("GET", "/api/sessions", { status: 200, body: [done()] });
+  const ac = new AbortController();
+  const p = watchSessions({ api, select: () => true, evaluate: (st) => (st.sessions.size ? "hit" : null), timeoutMs: 5_000, signal: ac.signal, now, settleMs: 2_000 });
+  await new Promise((r) => setImmediate(r));
+  ac.abort();
+  assert.equal(await p, null, "not the hit the settle window was holding");
+  assert.equal(attentionQualifies(done(), "2026-09-22T02:00:02+02:00"), true, "00:00:03Z is after 02:00:02+02:00");
+  assert.equal(attentionQualifies(done(), "2026-09-22T02:00:03+02:00"), false, "the same instant does not qualify");
+  const r = await waitForAttention(api, { select: () => true, after: "2026-09-22T02:00:02+02:00", timeoutMs: 50, signal: new AbortController().signal, now, settleMs: 0 });
+  assert.deepEqual([r.sessions.map((s) => s.id), r.cursor], [["c1"], stamp(3)], "the cursor is the daemon's own stamp");
+});
