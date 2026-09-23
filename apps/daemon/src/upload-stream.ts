@@ -33,6 +33,20 @@ export class UploadTooLargeError extends Error {
 }
 
 /**
+ * True for the cap refusal, thrown bare or carried as the `cause` of the error
+ * something wrapped it in. The agent host client reports every failed chat
+ * upload as `HostUnavailableError` and keeps what failed the body as its
+ * `cause` (`agent-chat/host-client.ts`); an upload route must still answer the
+ * cap 413, not tell the client to retry a host that is fine.
+ */
+export function isUploadTooLarge(error: unknown): boolean {
+  return (
+    error instanceof UploadTooLargeError ||
+    (error instanceof Error && error.cause instanceof UploadTooLargeError)
+  );
+}
+
+/**
  * Let an (encapsulated) Fastify scope accept `application/octet-stream` and hand
  * the route the raw request stream untouched — no buffering, no bodyLimit. Kept
  * per scope rather than app-wide so every other route keeps answering 415 to a

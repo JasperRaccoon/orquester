@@ -31,7 +31,7 @@ import {
 } from "../agent-host/host-protocol.ts";
 import { Transform, type Readable } from "node:stream";
 import { MAX_UPLOAD_BYTES } from "@orquester/api";
-import { UploadTooLargeError } from "../upload-stream.ts";
+import { isUploadTooLarge, UploadTooLargeError } from "../upload-stream.ts";
 import { isAgentAdapterId } from "../agent-host/adapters/index.ts";
 import { agentHostExtraRoutes } from "../agent-host/server/extra-routes.ts";
 import { ACCOUNT_HOME_ENV_VAR } from "../agent-host/support/env.ts";
@@ -150,6 +150,11 @@ export interface AgentChatServiceOptions {
   spawnDirect?: (bin: string, args: string[], env: Record<string, string>) => DirectHostHandle;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * Test seam: the cap `uploadAttachment` counts a chat upload against.
+   * Production leaves it unset and gets the shared `MAX_UPLOAD_BYTES`.
+   */
+  uploadLimitBytes?: number;
 }
 
 /**
@@ -802,7 +807,7 @@ export class AgentChatService {
     // refused a declared `Content-Length` above it, and this counts what
     // actually arrives — a chunked upload with no `Content-Length` would
     // otherwise stream unbounded straight through to the host.
-    const counted = countingLimit(body, MAX_UPLOAD_BYTES);
+    const counted = countingLimit(body, this.opts.uploadLimitBytes ?? MAX_UPLOAD_BYTES);
     const stream = await this.client
       .open("POST", path, {
         body: counted,
@@ -815,7 +820,11 @@ export class AgentChatService {
         // the refused request aborting — is forwarded into a stream nobody
         // listens to, and that is the crash `countingLimit` exists to prevent.
         counted.destroy();
-        throw error;
+        // The host client reports every failed request as HOST_UNAVAILABLE and
+        // keeps what failed it as `cause`. The cap is the one failure that is
+        // the caller's, not the host's: hand it on typed, so the upload route
+        // and the MCP seam both answer 413 UPLOAD_TOO_LARGE, not 503.
+        throw isUploadTooLarge(error) ? new UploadTooLargeError() : error;
       });
     const chunks: Buffer[] = [];
     for await (const chunk of stream.body) {
