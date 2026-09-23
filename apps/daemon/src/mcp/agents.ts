@@ -1,5 +1,5 @@
 import { proxyLaunchModels, type AgentAccountsResponse, type CliProxyStatus, type RegistryEntry, type RegistryResponse } from "@orquester/api";
-import { agentChatRoutes, DEFAULT_RUNTIME_MODE, RUNTIME_MODES, type AdapterCapabilities, type AgentAdapterId, type AgentProvidersResponse, type ModelSelection, type ProviderModel, type ProviderSnapshot, type RuntimeMode } from "@orquester/api/agent-chat";
+import { agentChatRoutes, DEFAULT_RUNTIME_MODE, RUNTIME_MODES, type AdapterCapabilities, type AgentAdapterId, type ModelSelection, type ProviderModel, type RuntimeMode } from "@orquester/api/agent-chat";
 import { proxyAccountFamily } from "../agent-chat/service.ts";
 import type { DaemonApi } from "./daemon-api.ts";
 import { ToolError } from "./errors.ts";
@@ -24,22 +24,66 @@ export function launchesProxyModel(refId: string): boolean {
   return refId === "claudex";
 }
 
-/** The capability flags list_agents and get_session both report. No snapshot, or an absent flag, reads false. */
+/**
+ * The capability flags list_agents and get_session both report. No snapshot, or an absent flag, reads false — and so
+ * does a mistyped one (an older host's row): a flag counts only when it is really `true`.
+ */
 export function supportsFrom(caps: AdapterCapabilities | undefined): { planMode: boolean; rollback: boolean; compaction: boolean; backgroundTasks: boolean } {
-  return { planMode: caps?.showPlanModeToggle ?? false, rollback: caps?.supportsConversationRollback ?? false, compaction: caps?.compaction !== undefined, backgroundTasks: caps?.supportsBackgroundTasks ?? false };
+  return { planMode: caps?.showPlanModeToggle === true, rollback: caps?.supportsConversationRollback === true, compaction: isRecord(caps?.compaction), backgroundTasks: caps?.supportsBackgroundTasks === true };
+}
+
+type Raw = Record<string, unknown>;
+const isRecord = (v: unknown): v is Raw => v !== null && typeof v === "object" && !Array.isArray(v);
+const nonEmpty = (v: unknown): v is string => typeof v === "string" && v !== "";
+
+/** One model option as list_agents shows it; null for one nobody could set — no id or label, or a select with no choice (no adapter emits one). */
+function optionView(d: unknown): AgentModelOptionView | null {
+  if (!isRecord(d) || !nonEmpty(d.id) || typeof d.label !== "string" || (d.type !== "select" && d.type !== "boolean")) return null;
+  const o: AgentModelOptionView = { id: d.id, label: d.label, type: d.type };
+  if (nonEmpty(d.description)) o.description = d.description;
+  if (d.type === "boolean") return o;
+  const values = (Array.isArray(d.options) ? d.options : []).filter((c): c is Raw => isRecord(c) && nonEmpty(c.id) && typeof c.label === "string")
+    .map((c) => ({ id: c.id as string, label: c.label as string, ...(nonEmpty(c.description) ? { description: c.description } : {}), ...(c.isDefault === true ? { isDefault: true } : {}) }));
+  if (!values.length) return null;
+  o.values = values;
+  return o;
 }
 
 function modelView(m: ProviderModel): AgentModelView {
   const v: AgentModelView = { slug: m.slug, name: m.name, isDefault: m.isDefault === true, options: [] };
-  if (m.shortName) v.shortName = m.shortName;
-  if (m.isLegacy) v.isLegacy = true;
-  for (const d of m.capabilities?.optionDescriptors ?? []) {
-    const o: AgentModelOptionView = { id: d.id, label: d.label, type: d.type };
-    if (d.description) o.description = d.description;
-    if (d.type === "select") o.values = d.options.map((c) => ({ id: c.id, label: c.label, ...(c.description ? { description: c.description } : {}), ...(c.isDefault ? { isDefault: true } : {}) }));
-    v.options.push(o);
+  if (nonEmpty(m.shortName)) v.shortName = m.shortName;
+  if (m.isLegacy === true) v.isLegacy = true;
+  const descriptors: unknown = isRecord(m.capabilities) ? m.capabilities.optionDescriptors : undefined;
+  for (const d of Array.isArray(descriptors) ? descriptors : []) {
+    const o = optionView(d);
+    if (o) v.options.push(o);
   }
   return v;
+}
+
+/** What loadAgents reads of a provider snapshot. */
+interface ProviderRow { installed: boolean; version: string | null; status: string; message?: string; auth: AgentView["auth"]; models: ProviderModel[]; capabilities?: AdapterCapabilities }
+
+/**
+ * The provider rows of a `GET /api/agent/providers` body, keyed by adapter id. The snapshot type is the contract, but an
+ * older host (or a cache it hydrated) can miss or mistype a field: each is checked, one that fails reads as absent or
+ * unknown, and a row without an id is skipped — a catalogue read never throws on a degraded row.
+ */
+function providerRows(body: unknown): Map<string, ProviderRow> {
+  const rows = new Map<string, ProviderRow>();
+  const list: unknown = isRecord(body) ? body.providers : undefined;
+  for (const p of Array.isArray(list) ? list : []) {
+    if (!isRecord(p) || !nonEmpty(p.id)) continue;
+    const auth = isRecord(p.auth) ? p.auth : {};
+    rows.set(p.id, {
+      installed: p.installed === true, version: nonEmpty(p.version) ? p.version : null, status: nonEmpty(p.status) ? p.status : "unknown",
+      ...(nonEmpty(p.message) ? { message: p.message } : {}),
+      auth: { status: nonEmpty(auth.status) ? auth.status : "unknown", ...(nonEmpty(auth.label) ? { label: auth.label } : {}), ...(nonEmpty(auth.email) ? { email: auth.email } : {}) },
+      models: (Array.isArray(p.models) ? p.models : []).filter((m): m is ProviderModel => isRecord(m) && nonEmpty(m.slug) && typeof m.name === "string"),
+      ...(isRecord(p.capabilities) ? { capabilities: p.capabilities as unknown as AdapterCapabilities } : {})
+    });
+  }
+  return rows;
 }
 
 export async function loadAgents(api: DaemonApi, opts?: { includeLegacyModels?: boolean }): Promise<AgentView[]> {
@@ -47,8 +91,7 @@ export async function loadAgents(api: DaemonApi, opts?: { includeLegacyModels?: 
   if (registryRes.status >= 400) throw new ToolError("INTERNAL", "Could not read the agent registry.");
   const entries = ((registryRes.body as RegistryResponse).agents ?? []).filter((e): e is RegistryEntry & { chat: { adapter: AgentAdapterId } } => Boolean(e.chat?.adapter));
   const providersRes = await api.request("GET", agentChatRoutes.providers);
-  const providers = new Map<string, ProviderSnapshot>();
-  if (providersRes.status < 400) for (const p of (providersRes.body as AgentProvidersResponse).providers ?? []) providers.set(p.id, p);
+  const providers = providersRes.status < 400 ? providerRows(providersRes.body) : new Map<string, ProviderRow>();
   const accountsRes = await api.request("GET", "/api/agent-accounts");
   const accounts = accountsRes.status < 400 ? (accountsRes.body as AgentAccountsResponse) : { accounts: [], defaults: { claude: null, codex: null, grok: null } };
   // Every proxy launcher needs the proxy's seeded accounts; only one that launches a proxy model (claudex) needs its catalogue.
@@ -75,14 +118,14 @@ export async function loadAgents(api: DaemonApi, opts?: { includeLegacyModels?: 
       if (models.length && !models.some((m) => m.isDefault)) models[0]!.isDefault = true;
     } else {
       // The adapter's own catalogue — claudemix's too: its model is the Claude main loop's, only its account is the proxy's.
-      models = (snapshot?.models ?? []).filter((m) => opts?.includeLegacyModels || !m.isLegacy).map(modelView);
+      models = (snapshot?.models ?? []).filter((m) => opts?.includeLegacyModels || m.isLegacy !== true).map(modelView);
     }
     const caps = snapshot?.capabilities;
     const view: AgentView = {
       id: entry.id, name: entry.name, adapter, enabled: entry.enabled, installed: snapshot?.installed ?? false, version: entry.version ?? snapshot?.version ?? null,
-      status: snapshot?.status ?? "unknown", auth: snapshot ? { status: snapshot.auth.status, ...(snapshot.auth.label ? { label: snapshot.auth.label } : {}), ...(snapshot.auth.email ? { email: snapshot.auth.email } : {}) } : { status: "unknown" },
+      status: snapshot?.status ?? "unknown", auth: snapshot?.auth ?? { status: "unknown" },
       models, effortOptionId: EFFORT_OPTION_IDS[adapter], runtimeModes: RUNTIME_MODES, defaultRuntimeMode: DEFAULT_RUNTIME_MODE,
-      supports: { ...supportsFrom(caps), contextWindow: caps?.reportsContextWindow ?? false },
+      supports: { ...supportsFrom(caps), contextWindow: caps?.reportsContextWindow === true },
       accounts: [{ id: "system", label: "System", email: null, plan: null, needsReauth: false, isDefault: defaultAccountId === "system" }, ...familyAccounts.map((a) => ({ id: a.id, label: a.label, email: a.email, plan: a.plan, needsReauth: a.needsReauth, isDefault: a.id === defaultAccountId }))],
       defaultAccountId
     };

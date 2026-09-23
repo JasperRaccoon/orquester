@@ -159,3 +159,40 @@ test("the proxy catalogue is read only when an agent launches a proxy model: cla
   await loadAgents(noProxy);
   assert.ok(!noProxy.calls.some((c) => c.path.startsWith("/api/cliproxy")), "no proxy launcher, no proxy read");
 });
+
+test("a degraded provider row (an older host's) is normalised field by field, never thrown on", async () => {
+  const degraded = api().on("GET", "/api/agent/providers", { status: 200, body: { hostInstanceId: "h0", providers: [
+    null,
+    "junk",
+    // No models, no auth, no capabilities at all.
+    { id: "claude", refIds: ["claude", "claudex"], installed: true, version: "2.0.0", status: "ready" },
+    { id: "grok", refIds: ["grok"], installed: "yes", version: 7, status: 3, auth: { status: 42, label: 9 }, message: { x: 1 },
+      capabilities: { showPlanModeToggle: "yes", supportsConversationRollback: 1, compaction: null, reportsContextWindow: "true", supportsBackgroundTasks: {} }, models: [
+      null,
+      { name: "no slug" },
+      { slug: "grok-4.6", name: "Grok 4.6", isDefault: true, capabilities: { optionDescriptors: [
+        { id: "reasoningEffort", label: "Reasoning", type: "select" }, // a select with no choices: nothing to pick, left out
+        { id: "fast", label: "Fast", type: "boolean" },
+        { id: "tier", label: "Tier", type: "select", options: [{ id: "flex", label: "Flex" }, null, { label: "no id" }] },
+        "junk"
+      ] } },
+      { slug: "grok-mini", name: "Grok mini", capabilities: { optionDescriptors: "not a list" } }
+    ] }
+  ] } });
+  const agents = await loadAgents(degraded);
+  const claude = findAgent(agents, "claude");
+  assert.deepEqual([claude.models, claude.auth, claude.installed, claude.status], [[], { status: "unknown" }, true, "ready"]);
+  assert.deepEqual(claude.supports, { planMode: false, rollback: false, compaction: false, backgroundTasks: false, contextWindow: false });
+  const grok = findAgent(agents, "grok");
+  assert.deepEqual([grok.auth, grok.installed, grok.status, grok.message, grok.version], [{ status: "unknown" }, false, "unknown", undefined, null]);
+  assert.deepEqual(grok.supports, { planMode: false, rollback: false, compaction: false, backgroundTasks: false, contextWindow: false }, "a flag counts only when it is really true");
+  assert.deepEqual(grok.models.map((m) => [m.slug, m.options]), [
+    ["grok-4.6", [{ id: "fast", label: "Fast", type: "boolean" }, { id: "tier", label: "Tier", type: "select", values: [{ id: "flex", label: "Flex" }] }]],
+    ["grok-mini", []]
+  ]);
+  // A providers body that is no list at all reads like a failed read: no snapshot.
+  for (const body of [{ hostInstanceId: "h0", providers: "x" }, null, "not json"]) {
+    const broken = api().on("GET", "/api/agent/providers", { status: 200, body });
+    assert.deepEqual(findAgent(await loadAgents(broken), "claude").auth, { status: "unknown" }, JSON.stringify(body));
+  }
+});
