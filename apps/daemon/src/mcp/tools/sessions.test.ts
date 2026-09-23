@@ -694,11 +694,13 @@ test("revert_session refuses up front a target before the last settled compactio
   // Only the LAST marker counts; one in the latest turn leaves nothing to rewind to.
   await refused([...rows.slice(0, 2), marker({ state: "compacted" }), ...rows.slice(2, 4), marker({ state: "compacted" }, { turnId: "t2" }), ...rows.slice(4)], 1, /between 2 and 2/);
   await refused([...rows, marker({ state: "compacted" }, { turnId: "t3" })], 2, "Cannot rewind past the last context compaction — the agent no longer holds what came before it, and it happened in the latest turn: there is no turn to rewind to.");
-  // A compaction still running or failed dropped nothing; a subagent's own marker is not the conversation's.
+  // A compaction still running or failed dropped nothing; a subagent's own marker is not the conversation's, whether
+  // the row or its payload names the agent (the GUI's quiet-timeline rule reads both).
   await allowed([...rows.slice(0, 2), marker({ state: "compacting" }), ...rows.slice(2)], 0);
   await allowed([...rows.slice(0, 2), marker({ state: "compaction-failed", error: "x" }), ...rows.slice(2)], 0);
   await allowed([...rows.slice(0, 2), marker({ state: "compacted" }, { agentId: "sub-1" }), ...rows.slice(2)], 0);
-  assert.deepEqual(commandBodies(h.api, "revert"), [{ targetTurnCount: 1 }, { targetTurnCount: 0 }, { targetTurnCount: 0 }, { targetTurnCount: 0 }]);
+  await allowed([...rows.slice(0, 2), marker({ state: "compacted", agentId: "sub-1" }), ...rows.slice(2)], 0);
+  assert.deepEqual(commandBodies(h.api, "revert"), [{ targetTurnCount: 1 }, { targetTurnCount: 0 }, { targetTurnCount: 0 }, { targetTurnCount: 0 }, { targetTurnCount: 0 }]);
 });
 
 test("revert_session places a turn with no user message by its first row, and one with no row left by its own start", async (t) => {

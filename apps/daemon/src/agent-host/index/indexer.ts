@@ -34,7 +34,11 @@
  *
  * Messages are indexed when they finish (`streaming: false`), with the fold's
  * own text rule; activities on every write (last write wins, like
- * `readItem`), and a `context-compaction` activity also leaves a marker.
+ * `readItem`), and a compaction marker of the conversation itself also leaves
+ * a `markers` row, its kind the marker's phase — by the rule the UI and the
+ * MCP share (`@orquester/api` `compaction.ts`): a `context-compaction` row or
+ * the legacy `thread.state.changed {state: "compacted"}`, never a subagent's
+ * own.
  *
  * **What survives losing the memory.** A thread's memory is dropped by a host
  * restart, by a driver error (the batch rolled back; the thread reloads from
@@ -65,7 +69,12 @@
  */
 
 import type { DomainEvent, Turn } from "@orquester/api/agent-chat";
-import { applyTurnEvent, startedTurns } from "@orquester/api/agent-chat";
+import {
+  applyTurnEvent,
+  compactionMarkerState,
+  isConversationCompactionActivity,
+  startedTurns
+} from "@orquester/api/agent-chat";
 
 import type { AdapterLogger, Clock } from "../adapter.ts";
 import type { EventPosition } from "../services.ts";
@@ -1079,8 +1088,14 @@ export function createThreadIndexer(input: {
         toStringOrNull(activity.createdAt) ?? event.occurredAt
       );
     }
-    if (kind === "context-compaction") {
-      sql.insertMarker.run(threadId, event.seq, markerKind(activity.payload));
+    // The same object as `activity`, checked above to be one; the shared rule
+    // reads each of its fields defensively. A marker row exactly for the
+    // compaction markers the parent timeline shows — either spelling, never a
+    // subagent's own — so `rewindable` agrees with the window and the MCP.
+    const row = event.payload.activity;
+    if (isConversationCompactionActivity(row)) {
+      const markerKind: IndexedMarkerKind = compactionMarkerState(row);
+      sql.insertMarker.run(threadId, event.seq, markerKind);
     }
   }
 
@@ -1324,12 +1339,6 @@ function activityText(activity: Record<string, unknown>): string {
     }
   }
   return capText(parts.join("\n"));
-}
-
-/** `compactionMarkerState`'s classification, on the persisted payload. */
-function markerKind(payload: unknown): IndexedMarkerKind {
-  const state = asRecord(payload)?.state;
-  return state === "compacting" || state === "compaction-failed" ? state : "compacted";
 }
 
 /**

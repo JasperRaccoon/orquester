@@ -6,7 +6,10 @@
  * stay the only authority (invariant 1). So there is no migration path at
  * all: a file whose `meta.schema_version` is not {@link INDEX_SCHEMA_VERSION},
  * or that fails `PRAGMA quick_check`, is deleted and rebuilt from the logs
- * (`sqlite.ts`). Bump the version for ANY change to the statements below.
+ * (`sqlite.ts`). Bump the version for ANY change to the statements below —
+ * and for any change to which rows `indexer.ts` derives into them: a file
+ * written by the old rule fits every statement, so only the version keeps
+ * its rows from being trusted.
  *
  * Beyond the design's table list, four things are deliberate:
  * - `threads.open_turn_id` names the started turn whose byte range still grows
@@ -36,12 +39,19 @@
  *   "café". Tokens are otherwise `unicode61`'s: letters, numbers, private use.
  */
 
+import type { CompactionMarkerState } from "@orquester/api/agent-chat";
+
 /**
+ * 3: `markers` follows the compaction-marker rule the UI and the MCP share
+ * ({@link IndexedMarkerKind}) — the legacy `thread.state.changed` marker
+ * counts, a subagent's own compaction does not. No statement changed; a
+ * version-2 file's markers were derived by the old rule, so it is rebuilt.
+ *
  * 2: `threads.inflight`. Version 1 never shipped, but a file a dev build left
  * behind must read as "another version" — deleted and rebuilt — rather than
  * as a file whose statements fail to prepare.
  */
-export const INDEX_SCHEMA_VERSION = 2;
+export const INDEX_SCHEMA_VERSION = 3;
 
 /** The `meta` key that carries {@link INDEX_SCHEMA_VERSION}. */
 export const SCHEMA_VERSION_KEY = "schema_version";
@@ -145,8 +155,12 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
 ];
 
 /**
- * `markers.kind` — the compaction marker's phase, classified exactly as the
- * client classifies the activity (`compactionMarkerState`): only a
- * `compacted` marker dropped anything, so only it withholds a rewind.
+ * `markers.kind` — the phase of a compaction marker of the conversation
+ * itself. One row for each activity `isConversationCompactionActivity` accepts
+ * (`@orquester/api` `compaction.ts`, the rule the UI's window gate and the
+ * MCP's `revert_session` use too): a `context-compaction` row or the legacy
+ * `thread.state.changed {state: "compacted"}`, never one a subagent owns. Its
+ * kind is `compactionMarkerState`'s: only a `compacted` marker dropped
+ * anything, so only it withholds a rewind (`queries.ts` `rewindable`).
  */
-export type IndexedMarkerKind = "compacted" | "compacting" | "compaction-failed";
+export type IndexedMarkerKind = CompactionMarkerState;

@@ -780,7 +780,13 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   keeps `reverting` (the composer's one `inert` reason) until the truncation is folded, then returns
   the message's text and attachment chips to the composer; the host keeps an unreferenced
   attachment for 24 h, which is what lets those chips stay valid. Esc-Esc while idle opens the same
-  picker the composer's rewind control does. Two more things that were bugs: the compaction marker
+  picker the composer's rewind control does. Which row is "the last compaction marker" is ONE rule,
+  `isSettledConversationCompaction` (`packages/api/src/agent-chat/compaction.ts`): a
+  `context-compaction` row or the legacy `thread.state.changed {state:"compacted"}`, settled (an
+  unreadable state is), and never a subagent's own (a non-blank `agentId` on the row or on its
+  payload). The window gate, the thread index's `markers` rows behind a history page's `rewindable`
+  and the MCP's `revert_session` all call it — they used to disagree; the index derives rows by it,
+  so changing it bumps `INDEX_SCHEMA_VERSION`. Two more things that were bugs: the compaction marker
   is exempt from the 500-row activity window (a busy thread evicted it in minutes, and the gate then
   offered every pre-compaction message), and Claude's "compacted in between" check is decided by the
   anchor's POSITION relative to the transcript's last `isCompactSummary` row — `preserved_messages.

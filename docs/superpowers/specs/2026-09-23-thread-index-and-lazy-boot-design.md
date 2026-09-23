@@ -180,6 +180,20 @@ memory is an LRU of 16 threads that never evicts one with a pending turn or a me
 Known gap of a disposable cache: text a message streamed before its thread's memory was lost is
 missing from that message's search row; its span is intact.
 
+*Built (schema 3):* `markers` holds one row per compaction marker of the conversation itself, by
+the rule the UI's window gate and the MCP's `revert_session` also call
+(`packages/api/src/agent-chat/compaction.ts`: `isConversationCompactionActivity`, and
+`isSettledConversationCompaction` for the settled one): a `context-compaction` row or the legacy
+`thread.state.changed {state: "compacted"}` an older log recorded, and never one a subagent owns
+(a non-blank `agentId` on the row or on its payload — a subagent compacting its own context leaves
+the parent's untouched). Its `kind` is `compactionMarkerState`'s phase, so `rewindable` (a
+`compacted` row after the turn's prompt) reads the same markers the window's gate stops at. The first
+build indexed every `context-compaction` row, a subagent's own included, and never the legacy
+spelling. No statement changed, but `INDEX_SCHEMA_VERSION` went 2 → 3: a version-2 file fits every
+statement, so the version is the only thing that keeps its rows from being trusted. It is deleted
+and rebuilt from the logs by the ordinary version-mismatch path — the version is bumped for a
+change to what the indexer derives as much as for a statement change.
+
 Maintenance. The orchestrator's `commit` hands every appended event, with the byte position the
 store returns for it, to `index.observe(...)`. The indexer keeps, per thread, a tiny **turn fold**
 (`applyTurnEvent` exported from `fold.ts` — the existing turn reducer, unchanged in behaviour) to

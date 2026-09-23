@@ -163,8 +163,9 @@ export interface ThreadIndex {
     input: { before: HistoryCursor | null; beforeTurn?: IndexedTurn | null; limit: number }
   ): IndexedTurn[];
   /**
-   * True when no SETTLED context compaction lies after the turn's opening
-   * prompt (`firstSeq`): a rewind to it would not cross a compaction.
+   * True when no SETTLED compaction of the conversation itself
+   * (`isSettledConversationCompaction`) lies after the turn's opening prompt
+   * (`firstSeq`): a rewind to it would not cross a compaction.
    */
   rewindable(threadId: string, turn: IndexedTurn): boolean;
 

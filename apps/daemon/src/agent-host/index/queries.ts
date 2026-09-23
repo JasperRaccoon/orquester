@@ -335,7 +335,9 @@ export function createThreadIndexQueries(db: SqliteDatabase): ThreadIndexQueries
      * prompt lies between the cut and now — the provider no longer holds what
      * it would roll back to, and refuses (§5.5). The window's rule, exactly:
      * "no compacted marker after the message"; an in-flight or failed
-     * compaction dropped nothing and withholds nothing.
+     * compaction dropped nothing and withholds nothing. `markers` holds only
+     * the conversation's own markers (`schema.ts` `IndexedMarkerKind`), so a
+     * `compacted` row here is what `isSettledConversationCompaction` accepts.
      */
     rewindable(threadId, turn) {
       return sql.compactedAfter.get(threadId, turn.firstSeq) === undefined;
