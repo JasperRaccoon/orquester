@@ -222,6 +222,14 @@ test("toggle_todo_item on a 3 000-item list: the toggle is whole, and its result
   assert.deepEqual([back.checked, back.bodyTruncated, ok(back).structuredContent === back], [false, true, true]);
   assert.ok(body.startsWith(back.body as string) && !checked.startsWith(back.body as string), "the head of the restored body");
   assert.equal(manager.get(id)!.body, body);
+  // Item 2 999 lies past the returned head: the result cannot show it, so the STORED body is what proves the toggle whole.
+  const far = body.replace("- [ ] task 2999:", "- [x] task 2999:");
+  const past = await tool("toggle_todo_item").run({ id, item: 2_999 }, ctx);
+  assert.deepEqual([past.item, past.checked, past.bodyTruncated], [`task 2999: 項目 "quoted" \\ ${"x".repeat(10)}`, true, true]);
+  assert.ok(!(past.body as string).includes("task 2999:"), "the item lies past the returned head");
+  assert.equal(manager.get(id)!.body, far, "the stored body: item 2 999 ticked, every other item as it was");
+  await tool("toggle_todo_item").run({ id, item: 2_999 }, ctx);
+  assert.equal(manager.get(id)!.body, body, "flipped back, the list is exactly as it started");
   // A retry with the state already set writes nothing — the store emits no update and updatedAt stays — and still
   // answers with the item, its state and the body's head.
   const updatedAt = manager.get(id)!.updatedAt;

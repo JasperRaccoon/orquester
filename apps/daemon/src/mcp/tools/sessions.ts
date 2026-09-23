@@ -9,7 +9,7 @@ import { conversationLaunch, findAgent, isProxyAgent, launchesProxyModel, loadAg
 import type { DaemonApi } from "../daemon-api.ts";
 import { ToolError, expectOk } from "../errors.ts";
 import { findSession, listSessions, readThread, requireChatSession, sendCommand } from "../reads.ts";
-import { fitJsonBytes, MAX_RESULT_BYTES, resultBytes, toSafeToolError } from "../result.ts";
+import { fitJsonBytes, jsonBytes, MAX_RESULT_BYTES, resultBytes, toSafeToolError } from "../result.ts";
 import { defineTool, DESTRUCTIVE, MUTATING, MUTATING_IDEMPOTENT, READ_ONLY, type ToolContext, type ToolDef } from "../tool.ts";
 import { buildViewContext, chatDetail, sessionView } from "../views.ts";
 import { byAttention } from "./watch.ts";
@@ -89,19 +89,20 @@ const getSession = defineTool({
 });
 
 /**
- * The most get_turn_diff's file list takes of the result, in JSON bytes: a turn that regenerated thousands of files would
- * otherwise leave the diff nothing, or push the result past the cap.
+ * The room get_turn_diff's file list always has in the result, in JSON bytes, however big the diff: a turn that
+ * regenerated thousands of files would otherwise leave the diff nothing, or push the result past the cap. A diff that
+ * leaves more unused (a 400-file rename is almost all file list) gives the list that room instead.
  */
-const MAX_DIFF_FILES_BYTES = 20_000;
+const MIN_DIFF_FILES_BYTES = 20_000;
 
-/** A checkpoint's changed files, the head that fits MAX_DIFF_FILES_BYTES, and how many were left out. */
-function fitFiles(files: readonly { path: string; additions: number; deletions: number }[]): { files: { path: string; additions: number; deletions: number }[]; omitted: number } {
+/** A checkpoint's changed files: the head whose JSON fits `budget` bytes, and how many were left out. */
+function fitFiles(files: readonly { path: string; additions: number; deletions: number }[], budget: number): { files: { path: string; additions: number; deletions: number }[]; omitted: number } {
   const kept: { path: string; additions: number; deletions: number }[] = [];
   let used = 2; // the brackets
   for (const f of files) {
     const row = { path: f.path, additions: f.additions, deletions: f.deletions };
     const cost = resultBytes(row) + (kept.length ? 1 : 0); // the separating comma
-    if (used + cost > MAX_DIFF_FILES_BYTES) break;
+    if (used + cost > budget) break;
     used += cost;
     kept.push(row);
   }
@@ -123,7 +124,11 @@ const getTurnDiff = defineTool({
     const turnCount = args.turn ?? latestCheckpointed;
     if (turnCount < 1) throw new ToolError("INVALID_ARGUMENT", "This session has no checkpointed turn yet.");
     const res = expectOk<TurnDiffResponse>(await api.request("GET", agentChatRoutes.turnDiff(args.sessionId, turnCount), { query: { ignoreWhitespace: "1" } }), "diff");
-    const listed = fitFiles(snap.checkpoints.find((c) => c.checkpointTurnCount === turnCount)?.files ?? []);
+    const files = snap.checkpoints.find((c) => c.checkpointTurnCount === turnCount)?.files ?? [];
+    // The list gets its floor, or all the diff leaves unused of the result beside the frame — the frame counted with the
+    // markers a cut list would carry.
+    const frame = resultBytes({ turn: res.toTurnCount, fromTurn: res.fromTurnCount, files: [], filesTruncated: true, omittedFiles: files.length, diff: "", truncated: false });
+    const listed = fitFiles(files, Math.max(MIN_DIFF_FILES_BYTES, MAX_RESULT_BYTES - frame - jsonBytes(res.diff)));
     const result = { turn: res.toTurnCount, fromTurn: res.fromTurnCount, files: listed.files, ...(listed.omitted ? { filesTruncated: true, omittedFiles: listed.omitted } : {}), diff: "", truncated: false };
     // The diff gets whatever the rest of the result leaves of the result budget, so the whole
     // result survives `ok()` intact instead of being shed to a bare prefix.
@@ -153,13 +158,23 @@ async function resolveCwd(api: DaemonApi, projectPath: string, input: string): P
 
 interface ResumeRow { id: string; agent: string; title: string; home: AccountHomeKind; accountId?: string }
 
-/** Why the registry disabled an agent (`RegistryEntry.disabledReason` — "proxy down", …), when it says; read only to refuse. */
+/**
+ * Why the registry disabled an agent (`RegistryEntry.disabledReason` — "proxy down", …), when it says; read only to
+ * refuse. It is a second registry read, so any failure of it — a throw, an error status, a body of another shape — only
+ * leaves the reason out: the refusal stays INVALID_ARGUMENT, never an INTERNAL. When `AgentView` carries the reason
+ * itself (F2), the view `findAgent` returned can answer instead and this read can go.
+ */
 async function disabledReason(api: DaemonApi, refId: string): Promise<string | undefined> {
-  const res = await api.request("GET", "/api/registry");
-  if (res.status >= 400) return undefined;
-  const reason = ((res.body as RegistryResponse | null)?.agents ?? []).find((entry) => entry.id === refId)?.disabledReason;
-  const text = typeof reason === "string" ? reason.trim().replace(/\.+$/, "") : "";
-  return text || undefined;
+  try {
+    const res = await api.request("GET", "/api/registry");
+    const agents = res.status < 400 ? (res.body as Partial<RegistryResponse> | null)?.agents : undefined;
+    const entry: unknown = Array.isArray(agents) ? agents.find((e: unknown) => (e as { id?: unknown } | null)?.id === refId) : undefined;
+    const reason = (entry as { disabledReason?: unknown } | undefined)?.disabledReason;
+    const text = typeof reason === "string" ? reason.trim().replace(/\.+$/, "") : "";
+    return text || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 const createSession = defineTool({
@@ -392,6 +407,10 @@ function turnOpening(items: readonly ThreadItem[], turn: StartedTurn): number {
  * and the adapter would refuse the rollback. Turns are in start order, so the first one that begins after the marker is
  * the earliest a rewind may cut at; one with no row left to place it counts as before the marker (a marker is never
  * evicted, a turn's rows can be). 0 when nothing was compacted; the started-turn count when no turn began after it.
+ *
+ * "Before" and "after" are positions in `snap.items`, the fold's append order, where the GUI sorts its timeline by
+ * `createdAt` (entries.logic.ts). For a real log the two agree: the fold appends each row when its event lands in the
+ * host's append-only log, and the host stamps the row then; a row updated later keeps both its place and its stamp.
  */
 function fewestKeptTurns(snap: ThreadSnapshotPayload): number {
   let marker = -1;
@@ -434,7 +453,9 @@ async function awaitRewind(ctx: ToolContext, sessionId: string, target: { keepTu
   const startedAt = ctx.now();
   const startedMono = performance.now();
   const remaining = () => REWIND_WAIT_MS - Math.max(ctx.now() - startedAt, performance.now() - startedMono);
-  const inProgress = () => new ToolError("SESSION_BUSY", "The rewind is still in progress — check get_session.", { seq: target.seq });
+  // A retry would take a late failure row of THIS rewind for its own (the row names no command), and get_session shows
+  // no failure: so the text says how to tell the outcome instead.
+  const inProgress = () => new ToolError("SESSION_BUSY", `The rewind is still in progress — do not call revert_session again. It has landed once get_session's chat.turnCount comes down to keepTurns (${target.keepTurns}); if it failed, read_transcript shows a "Rewind failed" error.`, { seq: target.seq });
   let events = 0;
   let closed = false;
   let wake: (() => void) | null = null;
@@ -448,7 +469,7 @@ async function awaitRewind(ctx: ToolContext, sessionId: string, target: { keepTu
   });
   try {
     for (;;) {
-      if (closed) throw new ToolError("SESSION_NOT_FOUND", `Session "${sessionId}" was closed while rewinding.`);
+      if (closed) throw new ToolError("SESSION_NOT_FOUND", `Session "${sessionId}" was closed while rewinding.`, { seq: target.seq });
       if (ctx.signal.aborted) throw inProgress();
       const seen = events;
       const snap = await readThread(ctx.api, sessionId);
@@ -499,8 +520,15 @@ const revertSession = defineTool({
     // Only a failure row that appears after the POST answers this rewind.
     const knownFailures = new Set(snap.items.filter(isRevertFailure).map((item) => item.id));
     const { seq } = await sendCommand(api, args.sessionId, "revert", { targetTurnCount: args.keepTurns });
-    await awaitRewind(ctx, args.sessionId, { keepTurns: args.keepTurns, firstDroppedTurnId: started[args.keepTurns]!.turnId, seq }, knownFailures);
-    return { seq, session: await chatDetail(api, args.sessionId) };
+    try {
+      await awaitRewind(ctx, args.sessionId, { keepTurns: args.keepTurns, firstDroppedTurnId: started[args.keepTurns]!.turnId, seq }, knownFailures);
+      return { seq, session: await chatDetail(api, args.sessionId) };
+    } catch (error) {
+      // The host accepted the command: whatever fails after it — a thread read in the wait, the detail read after it —
+      // keeps its code and safe message (a thrown one is logged, never echoed) and gains the command's seq.
+      const failure = toSafeToolError(error).structuredContent;
+      throw new ToolError(failure.code, failure.message, { ...detailFields(failure.detail), seq });
+    }
   }
 });
 

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 import type { ThreadActivityItem, ThreadItem, ThreadSnapshotPayload } from "@orquester/api/agent-chat";
+import type { DaemonResponse } from "../daemon-api.ts";
 import type { ToolError } from "../errors.ts";
 import { busEvent, FakeDaemonApi } from "../testing.ts";
 import { activity, chatSummary, head, message, shellSummary, snapshot, stamp, turn } from "../fixtures.ts";
@@ -195,6 +196,20 @@ test("create_session: a disabled agent's refusal carries the registry's disabled
   h.api.on("GET", "/api/registry", { status: 200, body: down });
   await assert.rejects(tool("create_session").run({ project: "acme/api", agent: "claudex", runtimeMode: "full-access" }, h.ctx),
     (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && e.message === "claudex is not available on this host: proxy down.");
+  assert.ok(!h.api.calls.some((c) => c.method === "POST"), "nothing was created");
+});
+
+test("create_session: a registry read that fails while naming the reason leaves the plain refusal, never an INTERNAL", async (t) => {
+  const h = await harness(); t.after(h.close);
+  const down = { ...registry, agents: registry.agents.map((a) => (a.id === "claudex" ? { ...a, enabled: false, disabledReason: "proxy down" } : a)) };
+  const plain = (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && e.message === "claudex is not available on this host (not installed or disabled).";
+  // The catalogue's own read succeeds; the second one, for the reason, fails three ways.
+  for (const second of [() => { throw new Error("socket hang up"); }, () => ({ status: 500, body: null }), () => ({ status: 200, body: { agents: { claudex: {} } } })]) {
+    let reads = 0;
+    h.api.on("GET", "/api/registry", () => ((reads += 1) === 1 ? { status: 200, body: down } : second()));
+    await assert.rejects(tool("create_session").run({ project: "acme/api", agent: "claudex", runtimeMode: "full-access" }, h.ctx), plain);
+    assert.equal(reads, 2);
+  }
   assert.ok(!h.api.calls.some((c) => c.method === "POST"), "nothing was created");
 });
 
@@ -412,13 +427,61 @@ type Harness = Awaited<ReturnType<typeof harness>>;
  * The host behind a /revert: the thread reads `before` until the command is posted, then `after(n)` for the n-th read
  * since (1-based) — the rewind's progress as the tool reads it.
  */
-function revertHost(h: Harness, before: ThreadSnapshotPayload, after: (read: number) => ThreadSnapshotPayload): { reads: () => number } {
+function revertHost(h: Harness, before: ThreadSnapshotPayload, after: (read: number) => ThreadSnapshotPayload | DaemonResponse): { reads: () => number } {
   let posted = false;
   let reads = 0;
   const body = (snap: ThreadSnapshotPayload) => ({ status: 200, body: { kind: "snapshot", thread: { ...snap, head: { ...snap.head, projectPath: h.projectPath, cwd: h.projectPath } } } });
+  const answer = (read: ThreadSnapshotPayload | DaemonResponse): DaemonResponse => ("status" in read ? read : body(read));
   h.api.on("POST", "/api/sessions/c1/revert", () => { posted = true; return { status: 200, body: { seq: 8 } }; });
-  h.api.on("GET", "/api/sessions/c1/thread", () => (posted ? body(after((reads += 1))) : body(before)));
+  h.api.on("GET", "/api/sessions/c1/thread", () => (posted ? answer(after((reads += 1))) : body(before)));
   return { reads: () => reads };
+}
+
+/**
+ * Holds every setTimeout armed while it is on: recorded, and never fired unless the test fires it — so a wait is really
+ * paused, and only its other wake-ups (a bus event, an abort) can resume it. `restore()` puts the real timers back.
+ */
+function holdTimers(): { held: { ms: number; cleared: boolean; fired: boolean; fire: () => void }[]; restore: () => void; releaseAll: () => void } {
+  const realSet = globalThis.setTimeout;
+  const realClear = globalThis.clearTimeout;
+  const held: { ms: number; cleared: boolean; fired: boolean; fire: () => void }[] = [];
+  globalThis.setTimeout = ((callback: () => void, ms?: number) => {
+    const timer = { ms: ms ?? 0, cleared: false, fired: false, fire: () => { if (timer.cleared || timer.fired) return; timer.fired = true; callback(); } };
+    held.push(timer);
+    return timer;
+  }) as unknown as typeof setTimeout;
+  globalThis.clearTimeout = ((handle?: unknown) => {
+    const timer = held.find((h) => h === handle);
+    if (timer) timer.cleared = true;
+    else realClear(handle as Parameters<typeof clearTimeout>[0]);
+  }) as typeof clearTimeout;
+  return { held, restore: () => { globalThis.setTimeout = realSet; globalThis.clearTimeout = realClear; }, releaseAll: () => { for (const timer of held) timer.fire(); } };
+}
+
+/** Up to `turns` macrotask turns for `done()` to come true; whether it did. Nothing sleeps. */
+async function until(done: () => boolean, turns = 100): Promise<boolean> {
+  for (let i = 0; i < turns && !done(); i += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+  return done();
+}
+
+/**
+ * revert_session run while every timer is held: it is paused on its re-read timer when `paused()` resolves, and
+ * `settled()` says whether it has answered since. The caller releases the timers and awaits `done` at the end.
+ */
+function pausedRevert(h: Harness, keepTurns: number, ctx: ToolContext = h.ctx) {
+  const timers = holdTimers();
+  let outcome: PromiseSettledResult<Record<string, unknown>> | undefined;
+  const done = tool("revert_session").run({ sessionId: "c1", keepTurns }, ctx).then(
+    (value) => { outcome = { status: "fulfilled", value }; },
+    (reason: unknown) => { outcome = { status: "rejected", reason }; }
+  );
+  return {
+    timers,
+    paused: () => until(() => timers.held.length === 1),
+    settled: () => until(() => outcome !== undefined),
+    outcome: () => outcome!,
+    finish: async () => { timers.restore(); timers.releaseAll(); await done; }
+  };
 }
 
 /** The bodies posted to a chat command, without their minted commandId. */
@@ -504,7 +567,7 @@ test("revert_session gives up after its deadline with SESSION_BUSY, and a reques
   const late = await instantTimers(() => tool("revert_session").run({ sessionId: "c1", keepTurns: 1 }, { ...h.ctx, now: () => (clock += 6_000) }));
   const busy = rejection(late.outcome);
   assert.equal(busy.code, "SESSION_BUSY");
-  assert.equal(busy.message, "The rewind is still in progress — check get_session.");
+  assert.equal(busy.message, "The rewind is still in progress — do not call revert_session again. It has landed once get_session's chat.turnCount comes down to keepTurns (1); if it failed, read_transcript shows a \"Rewind failed\" error.");
   assert.deepEqual(busy.detail, { seq: 8 });
   assert.deepEqual(late.delays, [REWIND_RECHECK_MS], "one timed re-read, then the deadline");
   assert.ok(REWIND_WAIT_MS >= 5_000 && REWIND_WAIT_MS <= 15_000, `${REWIND_WAIT_MS} ms`);
@@ -515,6 +578,96 @@ test("revert_session gives up after its deadline with SESSION_BUSY, and a reques
   const gone = await instantTimers(() => tool("revert_session").run({ sessionId: "c1", keepTurns: 1 }, { ...h.ctx, signal: ctrl.signal }));
   assert.equal(rejection(gone.outcome).code, "SESSION_BUSY");
   assert.deepEqual(gone.delays, []);
+  assert.equal(h.api.listenerCount(), 0);
+});
+
+test("revert_session: a bus event wakes a PAUSED wait at once — its timer cleared, never fired", async (t) => {
+  const before = threeTurns();
+  const h = await harness([chatSummary()], before); t.after(h.close);
+  let landed = false;
+  const host = revertHost(h, before, () => (landed ? rewound(before, 1) : before));
+  const run = pausedRevert(h, 1);
+  try {
+    assert.ok(await run.paused(), "the wait paused on its re-read timer");
+    assert.equal(run.timers.held[0]!.ms, REWIND_RECHECK_MS);
+    landed = true;
+    h.api.emit(busEvent("session.updated", { id: "c1" }));
+    assert.ok(await run.settled(), "the event resumed the wait: nothing but the bus could, with the timer held");
+    assert.equal(resolvedValue(run.outcome()).seq, 8);
+    assert.deepEqual([run.timers.held[0]!.cleared, run.timers.held[0]!.fired], [true, false]);
+    assert.equal(host.reads(), 3, "the read that paused, the read the event woke, the detail's own");
+  } finally {
+    await run.finish();
+  }
+  assert.equal(h.api.listenerCount(), 0);
+});
+
+test("revert_session: a request that closes DURING the pause ends the wait at once — SESSION_BUSY, the timer cleared, nothing read again", async (t) => {
+  const before = threeTurns();
+  const h = await harness([chatSummary()], before); t.after(h.close);
+  const host = revertHost(h, before, () => before);
+  const ctrl = new AbortController();
+  const run = pausedRevert(h, 1, { ...h.ctx, signal: ctrl.signal });
+  try {
+    assert.ok(await run.paused(), "the wait paused on its re-read timer");
+    ctrl.abort();
+    assert.ok(await run.settled(), "the abort resumed the wait: nothing else could, with the timer held");
+    const busy = rejection(run.outcome());
+    assert.equal(busy.code, "SESSION_BUSY");
+    assert.deepEqual(busy.detail, { seq: 8 });
+    assert.deepEqual([run.timers.held[0]!.cleared, run.timers.held[0]!.fired], [true, false]);
+    assert.equal(host.reads(), 1, "no read after the abort");
+  } finally {
+    await run.finish();
+  }
+  assert.equal(h.api.listenerCount(), 0);
+});
+
+test("revert_session: the session closing mid-wait answers SESSION_NOT_FOUND, with the seq", async (t) => {
+  const before = threeTurns();
+  const h = await harness([chatSummary()], before); t.after(h.close);
+  const host = revertHost(h, before, () => before);
+  const run = pausedRevert(h, 1);
+  try {
+    assert.ok(await run.paused(), "the wait paused on its re-read timer");
+    h.api.emit(busEvent("session.closed", { id: "c1" }));
+    assert.ok(await run.settled(), "the close ended the wait");
+    const closed = rejection(run.outcome());
+    assert.equal(closed.code, "SESSION_NOT_FOUND");
+    assert.equal(closed.message, "Session \"c1\" was closed while rewinding.");
+    assert.deepEqual(closed.detail, { seq: 8 });
+    assert.equal(host.reads(), 1, "no read after the close");
+  } finally {
+    await run.finish();
+  }
+  assert.equal(h.api.listenerCount(), 0);
+});
+
+test("revert_session: a failure after the POST keeps its code and message and gains the seq — in the wait, and reading the detail after it", async (t) => {
+  const before = threeTurns();
+  const h = await harness([chatSummary()], before); t.after(h.close);
+  const unavailable = { status: 503, body: { error: { code: "HOST_UNAVAILABLE", message: "The agent host is restarting.", detail: { retryAfterMs: 500, seq: 99 } } } };
+  // The wait's own thread read fails.
+  revertHost(h, before, () => unavailable);
+  await assert.rejects(tool("revert_session").run({ sessionId: "c1", keepTurns: 1 }, h.ctx), (e: ToolError) => {
+    assert.equal(e.code, "HOST_UNAVAILABLE");
+    assert.equal(e.message, "The agent host is restarting.");
+    assert.deepEqual(e.detail, { retryAfterMs: 500, seq: 8 }, "merged into the host's detail; the command's seq wins");
+    return true;
+  });
+  // The rewind landed; reading the detail after it fails.
+  revertHost(h, before, (read) => (read === 1 ? rewound(before, 1) : unavailable));
+  await assert.rejects(tool("revert_session").run({ sessionId: "c1", keepTurns: 1 }, h.ctx), (e: ToolError) => e.code === "HOST_UNAVAILABLE" && (e.detail as { seq: number }).seq === 8);
+  // A thrown failure keeps its safe INTERNAL message (logged, never echoed), and the seq still rides it.
+  const logged = t.mock.method(console, "error", () => {});
+  revertHost(h, before, () => { throw new Error("socket hang up /var/lib/orquester/daemon/agent-host.sock"); });
+  await assert.rejects(tool("revert_session").run({ sessionId: "c1", keepTurns: 1 }, h.ctx), (e: ToolError) => {
+    assert.equal(e.code, "INTERNAL");
+    assert.equal(e.message, "Internal error handling the tool call.");
+    assert.deepEqual(e.detail, { seq: 8 });
+    return true;
+  });
+  assert.equal(logged.mock.callCount(), 1);
   assert.equal(h.api.listenerCount(), 0);
 });
 
@@ -624,6 +777,31 @@ test("get_turn_diff defaults to the latest checkpointed turn, includes the check
   // A turn with no checkpoint of its own: the host's 404 (agent-host http-server.ts) passes through as it is.
   h.api.on("GET", "/api/sessions/c1/turns/5/diff", { status: 404, body: { error: { code: "THREAD_NOT_FOUND", message: "No checkpoint for turn 5." } } });
   await assert.rejects(tool("get_turn_diff").run({ sessionId: "c1", turn: 5 }, h.ctx), (e: { code: string; message: string }) => e.code === "THREAD_NOT_FOUND" && e.message === "No checkpoint for turn 5.");
+});
+
+test("get_turn_diff: a small diff leaves its room to the file list — a 400-file rename is listed whole", async (t) => {
+  const renamed = (n: number) => Array.from({ length: n }, (_, i) => ({ path: `packages/some-long-package-name/src/renamed/directory/module-${String(i).padStart(4, "0")}.ts`, additions: 0, deletions: 0 }));
+  const checkpoint = (files: ReturnType<typeof renamed>) => snapshot({ head: head({ turnCount: 2 }), checkpoints: [{ turnId: "t2", checkpointTurnCount: 2, checkpointRef: "r", status: "ready", files, assistantMessageId: null, completedAt: stamp(3) }] });
+  const bytes = (v: unknown) => Buffer.byteLength(JSON.stringify(v), "utf8");
+  const four = renamed(400);
+  assert.ok(bytes(four) > 20_000, `${bytes(four)} bytes: more than the list's floor`);
+  const h = await harness([chatSummary()], checkpoint(four)); t.after(h.close);
+  const small = "r".repeat(1_000);
+  h.api.on("GET", "/api/sessions/c1/turns/2/diff", { status: 200, body: { fromTurnCount: 1, toTurnCount: 2, diff: small } });
+  const r = await tool("get_turn_diff").run({ sessionId: "c1" }, h.ctx);
+  assert.deepEqual(r.files, four, "every file");
+  assert.equal("filesTruncated" in r, false);
+  assert.deepEqual([r.diff, r.truncated], [small, false], "the diff whole too");
+  assert.deepEqual(ok(r).structuredContent, r);
+  // More files than the whole result holds: the list fills what the small diff leaves, the diff still whole.
+  const thousand = renamed(1_000);
+  h.api.on("GET", "/api/sessions/c1/thread", { status: 200, body: { kind: "snapshot", thread: { ...checkpoint(thousand), head: { ...checkpoint(thousand).head, projectPath: h.projectPath, cwd: h.projectPath } } } });
+  const full = await tool("get_turn_diff").run({ sessionId: "c1" }, h.ctx);
+  const listed = full.files as typeof thousand;
+  assert.ok(listed.length > 450 && listed.length < 1_000, `${listed.length} files listed`);
+  assert.deepEqual(listed, thousand.slice(0, listed.length));
+  assert.deepEqual([full.filesTruncated, full.omittedFiles, full.diff, full.truncated], [true, 1_000 - listed.length, small, false]);
+  assert.ok(bytes(full) <= MAX_RESULT_BYTES && bytes(full) > MAX_RESULT_BYTES - 250, `${bytes(full)} bytes: the list filled the room`);
 });
 
 test("get_turn_diff with no turn named and no checkpoint yet refuses on its own, before asking the host for a diff", async (t) => {

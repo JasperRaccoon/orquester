@@ -4,6 +4,8 @@ import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
+import { ToolError } from "../errors.ts";
+import { toSafeToolError } from "../result.ts";
 import { FakeDaemonApi } from "../testing.ts";
 import { activity, chatSummary, head, shellSummary, snapshot, stamp } from "../fixtures.ts";
 import type { ToolContext } from "../tool.ts";
@@ -196,6 +198,29 @@ test("answer_question answers a Codex async question (responseMode \"message\") 
   const { commandId, ...body } = posted[0]!.body as Record<string, unknown>;
   assert.equal(typeof commandId, "string");
   assert.deepEqual(body, { requestId: "q7", answers: { deploy_target: "production", notes: "after 18:00" } });
+});
+
+test("a refusal quotes the caller's text cut short, so the tail that helps — Options, Questions, Pending — always survives the 4 000 cap", async (t) => {
+  const h = await harness([chatSummary({ hasPendingUserInput: true })], asked()); t.after(h.close);
+  const huge = "z".repeat(2 * 1024 * 1024);
+  /** The refusal as the caller reads it: through toSafeToolError, whose 4 000-character backstop cuts the tail. */
+  const refusal = async (args: Record<string, unknown>): Promise<string> => {
+    const error = await tool("answer_question").run({ sessionId: "c1", ...args }, h.ctx).then(() => assert.fail("answered"), (e: unknown) => e);
+    assert.ok(error instanceof ToolError && error.code === "INVALID_ARGUMENT", String(error).slice(0, 200));
+    const { message } = toSafeToolError(error).structuredContent;
+    assert.ok(message.length < 1_000, `${message.length} characters`);
+    return message;
+  };
+  // A huge answer to an options-only question: quoted cut, and the options still named after it.
+  assert.equal(await refusal({ answers: { "1": "Postgres", Modules: huge, Token: "t" } }), `"${"z".repeat(99)}…" is not an option of "Modules". Options: Auth, Billing.`);
+  // Seven huge picks on it: five quoted, then how many more.
+  const picks = await refusal({ answers: { "1": "Postgres", Modules: Array.from({ length: 7 }, (_, i) => `${i}${huge}`), Token: "t" } });
+  assert.equal(picks, `${[0, 1, 2, 3, 4].map((i) => `"${i}${"z".repeat(98)}…"`).join(", ")} and 2 more are not options of "Modules". Options: Auth, Billing.`);
+  // A huge unknown key: quoted cut, and the questions still listed.
+  assert.equal(await refusal({ answers: { "1": "Postgres", Modules: ["Auth"], Token: "t", [huge]: "x" } }), `"${"z".repeat(99)}…" is not a question of this request. Questions: 1: Which database? | 2: Modules | 3: Token.`);
+  // A huge requestId: quoted cut, and the pending ids still named.
+  assert.equal(await refusal({ requestId: huge, answers: {} }), `No pending question with requestId "${"z".repeat(99)}…". Pending: q1.`);
+  assert.ok(!h.api.calls.some((c) => c.method === "POST"), "nothing was answered");
 });
 
 test("an empty requestId is refused, never read as omitted: with one request pending it would have acted on that one", async (t) => {
