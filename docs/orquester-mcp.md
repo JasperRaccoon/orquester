@@ -640,7 +640,11 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
     with this conversation yet. Without an index, `unavailableTurns` spans the range's turns with
     no row left in the window — from the first such turn to the last, so a turn between them may
     have rows. While the index catches up, it cannot tell where the window begins, so the range's
-    turns up to the window's oldest one — which may be partial — are named until it has. Any turn
+    turns up to the window's oldest one — which may be partial — are named until it has. Reading a
+    subagent (`agentId`), that window is the subagent's own: its rows are kept in windows of their
+    own (its last 200 rows, the newest 2 000 across subagents), which can begin turns after the
+    conversation's, so its turns are named from the one it was launched in up to the turn of its
+    oldest row left — or, for one with no row left, of the oldest row any subagent kept. Any turn
     of the range still without a single row after the history pages were read is named the same
     way;
   - the 5-page limit ran out (a subagent fleet's turn runs to thousands of events):

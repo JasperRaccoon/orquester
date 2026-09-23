@@ -260,6 +260,47 @@ test("where the window begins is its oldest activity row that retention would dr
   assert.equal(historyCalls(api).length, 0);
 });
 
+test("a drill-in while the index catches up is judged by the subagent's own oldest row left, from the turn it was launched in", async () => {
+  const t = thread(10);
+  const api = host([]);
+  const bounds = { indexed: true, hasOlder: false, beforeCursor: null, oldestRetainedOrdinal: null, totalTurns: 0 };
+  const at = (n: number, ms: number) => new Date(Date.parse(t.turns[n - 1]!.requestedAt) + ms).toISOString();
+  // A subagent's rows as the host SERVES them: each call a tool.started and a tool.completed, the tool.updated rows
+  // between them already projected away — so a full, trimmed window holds far fewer than 200 rows here.
+  const calls = (agentId: string, from: number, to: number) => {
+    const rows: ThreadItem[] = [];
+    for (let n = from; n <= to; n += 1) {
+      for (const kind of ["tool.started", "tool.completed"]) rows.push(activity(kind, { itemType: "command_execution", toolUseId: `${agentId}-${n}`, status: kind === "tool.started" ? "inProgress" : "completed" }, { turnId: `t${n}`, agentId, createdAt: at(n, kind === "tool.started" ? 10 : 20) }));
+    }
+    return rows;
+  };
+  // Its launch: a parent row naming it in `taskId` (Claude), or stamped with its own id (Codex, OpenCode).
+  const launch = (agentId: string, n: number, stamped = false) =>
+    activity("task.started", { taskId: agentId, agentKind: "agent", title: agentId }, { turnId: `t${n}`, createdAt: at(n, 5), ...(stamped ? { agentId } : {}) });
+  const read = async (items: ThreadItem[], range: { start: number; end: number }, agentId?: string) =>
+    (await readOlderHistory(api, "c1", snapshot({ turns: t.turns, items, history: bounds }), range, agentId === undefined ? {} : { agentId })).unavailable;
+
+  // The parent's window begins in turn 3. a1, launched in turn 2, kept its rows from turn 6 on: its older ones went.
+  const window = [launch("a1", 2), ...t.rowsOf(3, 10), ...calls("a1", 6, 10)];
+  assert.equal(await read(window, { start: 4, end: 10 }), null, "the parent's rows are whole from turn 3");
+  assert.deepEqual(await read(window, { start: 4, end: 10 }, "a1"), { turns: [4, 6], reason: "unavailable" }, "a1's own rows begin in turn 6");
+  assert.deepEqual(await read(window, { start: 1, end: 10 }, "a1"), { turns: [2, 6], reason: "unavailable" }, "from its launch turn: before it, a1 has no rows at all");
+  assert.equal(await read(window, { start: 7, end: 10 }, "a1"), null, "after its oldest row, a1's rows are whole");
+  // An anchor stamped with the agent's own id is kept whatever its age: it says nothing about where the rows begin.
+  const stamped = [launch("a3", 2, true), ...t.rowsOf(3, 10), ...calls("a3", 7, 10)];
+  assert.deepEqual(await read(stamped, { start: 1, end: 10 }, "a3"), { turns: [2, 7], reason: "unavailable" });
+  // An agent with no row left is bounded by the oldest row any agent kept (the cross-agent window dropped the rest).
+  const gone = [launch("a4", 3), launch("a5", 4), ...t.rowsOf(3, 10), ...calls("a5", 5, 10)];
+  assert.deepEqual(await read(gone, { start: 1, end: 10 }, "a4"), { turns: [3, 5], reason: "unavailable" });
+  // A background task (a shell) launches with a task.started that is no anchor: it still starts the span, while the
+  // window holds it.
+  const shell = [activity("task.started", { taskId: "sh1", agentKind: "background", title: "npm run dev" }, { turnId: "t6", createdAt: at(6, 5) }), ...t.rowsOf(3, 10), ...calls("sh1", 6, 10)];
+  assert.deepEqual(await read(shell, { start: 1, end: 10 }, "sh1"), { turns: [6, 6], reason: "unavailable" });
+  // The host's own ordinal, when it has one, still wins.
+  assert.deepEqual((await readOlderHistory(api, "c1", snapshot({ turns: t.turns, items: window, history: { ...bounds, oldestRetainedOrdinal: 8, totalTurns: 5 } }), { start: 4, end: 10 }, { agentId: "a1" })).unavailable, { turns: [4, 8], reason: "unavailable" });
+  assert.equal(historyCalls(api).length, 0);
+});
+
 test("the safety net: after a walk that reported nothing, a turn of the range with no row in the merged snapshot is named — the host's empty page with a null cursor included", async () => {
   const t = thread(10);
   // A host that could not plan a block, or read one back whole, answers an empty page with a null cursor: to the walk

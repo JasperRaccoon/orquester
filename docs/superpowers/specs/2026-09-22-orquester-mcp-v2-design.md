@@ -750,7 +750,12 @@ sentence saying which and why: a page that failed for any reason (503 `INDEX_UNA
 with turns of the range that have no row in the window; an index that has not caught up with the thread — `indexed`
 true, `hasOlder` not true and `totalTurns` below the thread's started turns, as every thread is after an index rebuild
 until its catch-up reaches it — which cannot place the window's rows, so the range's turns up to the window's oldest
-(`oldestRetainedOrdinal`, else the turn of the window's oldest activity row that retention could drop) are named; after
+(`oldestRetainedOrdinal`, else the turn of the window's oldest activity row that retention could drop — or, for a
+drill-in, of the subagent's own oldest row left, anchors aside, else the oldest row any agent kept: an agent's rows are
+kept in windows of their own, its last 200 and the newest 2 000 across agents, which drop the oldest first and can
+begin turns after the parent's; the snapshot cannot tell a full window by counting, because the host serves it with
+the replaced `tool.updated` rows already projected away. A drill-in's span starts at the turn the subagent was
+launched in, since it has no rows before it) are named; after
 a walk that reported nothing, any turn of the range still without a row in the merged snapshot (the host answers an
 empty page with a null cursor where it could not plan or read a block back whole); or the page limit, whose sentence
 names the `beforeTurn`/`turns` that reads the turns left, or — when the walk never got out of turn `end` — says that

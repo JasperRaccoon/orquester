@@ -739,6 +739,23 @@ test("read_transcript while the host's index has not caught up with the thread: 
   assert.equal(large.hint, `Turn 7 is larger than one call reads (${HISTORY_PAGES_PER_READ} pages of older history): its latest rows are returned. Read turns 5–6 with beforeTurn: 7, turns: 2.`);
 });
 
+test("read_transcript drilling into a subagent while the host's index catches up names the turns by that subagent's own rows", async (t) => {
+  const th = history(10, 8);
+  const at = (n: number, ms: number) => new Date(Date.parse(th.snap.turns[n - 1]!.requestedAt) + ms).toISOString();
+  const call = (n: number) => activity("tool.completed", { itemType: "command_execution", toolUseId: `call-${n}`, title: "pnpm test", status: "completed" }, { turnId: `t${n}`, tone: "tool", createdAt: at(n, 1) });
+  // a1, launched in turn 6, kept its rows (as served: tool.started + tool.completed) only from turn 9: the parent's
+  // window begins in turn 8, a1's in turn 9.
+  const launch = activity("task.started", { taskId: "a1", agentKind: "agent", title: "Explore" }, { turnId: "t6", createdAt: at(6, 2) });
+  const a1 = [9, 10].flatMap((n) => ["tool.started", "tool.completed"].map((kind) => activity(kind, { itemType: "command_execution", toolUseId: `a1-${n}`, status: "completed" }, { turnId: `t${n}`, agentId: "a1", createdAt: at(n, 3) })));
+  const fresh = snapshot({ ...th.snap, items: [launch, call(8), ...th.snap.items, call(9), call(10), ...a1], history: { indexed: true, hasOlder: false, beforeCursor: null, oldestRetainedOrdinal: null, totalTurns: 0 } });
+  const h = await harness([chatSummary()], fresh); t.after(h.close);
+  const parent = await tool("read_transcript").run(readArgs({ turns: 5 }), h.ctx);
+  const drill = await tool("read_transcript").run(readArgs({ turns: 5, agentId: "a1" }), h.ctx);
+  assert.deepEqual(parent.unavailableTurns, [6, 8]);
+  assert.deepEqual(drill.unavailableTurns, [6, 9]);
+  assert.equal(historyCalls(h).length, 0, "nothing to page yet");
+});
+
 test("read_transcript: with turns named unavailable, the answer — its hint, and the shed hint after it — still fits maxChars", async (t) => {
   const th = history(10, 8);
   const long = snapshot({ ...th.snap, items: [...th.snap.items, message("assistant", "z".repeat(12_000), { turnId: "t10" })] });

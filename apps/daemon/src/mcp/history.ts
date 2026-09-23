@@ -39,16 +39,17 @@ const isRecord = (value: unknown): value is Record<string, unknown> => typeof va
  * caught up with this thread cannot page yet (`behindIndex`), and — the safety net — any turn of the range still
  * without a row once the walk is done (`missingTurns`), because a host answers an empty page with a null cursor where it
  * could not plan a block or read one back whole, which the walk alone takes for "the thread's first turn reached". A
- * host that predates `history` is read as it always was: the window alone.
+ * host that predates `history` is read as it always was: the window alone. `agentId` names the subagent a drill-in
+ * reads: its rows keep windows of their own, so an index that has not caught up is judged by those.
  */
-export async function readOlderHistory(api: DaemonApi, sessionId: string, snap: ThreadSnapshotPayload, range: { start: number; end: number }): Promise<OlderHistory> {
+export async function readOlderHistory(api: DaemonApi, sessionId: string, snap: ThreadSnapshotPayload, range: { start: number; end: number }, opts: { agentId?: string } = {}): Promise<OlderHistory> {
   const { start, end } = range;
   const bounds = snap.history;
   if (!bounds || end < start) return { snapshot: snap, unavailable: null };
   const ordered = startedTurns(snap.turns);
   if (bounds.indexed === false) return { snapshot: snap, unavailable: missingTurns(snap, ordered, range) };
   if (bounds.indexed !== true) return { snapshot: snap, unavailable: null };
-  if (bounds.hasOlder !== true) return { snapshot: snap, unavailable: behindIndex(snap, ordered, bounds, range) };
+  if (bounds.hasOlder !== true) return { snapshot: snap, unavailable: behindIndex(snap, ordered, bounds, range, opts.agentId) };
   const oldest = bounds.oldestRetainedOrdinal;
   if (typeof oldest !== "number" || start > oldest) return { snapshot: snap, unavailable: null };
   // Turn end + 1, when the range ends before the window's oldest turn: the first page ends where it begins. Up to the
@@ -85,14 +86,19 @@ export async function readOlderHistory(api: DaemonApi, sessionId: string, snap: 
  * The range's turns a host whose index has not caught up with this thread cannot page yet — it knows fewer turns than
  * the thread has, as every thread on the first start after an index rebuild does until its catch-up reaches it. Such
  * an index cannot place the window's rows, so its `hasOlder: false` means "unknown", not "nothing older", and the turns
- * up to the window's oldest one — `oldestRetainedOrdinal`, else the turn of the window's oldest activity row
- * (`windowOldestTurn`), which may be partial — are named. Null when the index knows every turn: then `hasOlder: false`
- * is the host's word that the window holds everything.
+ * up to the window's oldest one — `oldestRetainedOrdinal`, else, from the snapshot alone, the turn of the window's
+ * oldest activity row (`windowOldestTurn`) or, for a drill-in, where the subagent's own rows begin to be whole
+ * (`agentWindowOldestTurn`), either of which may be partial — are named; a drill-in's from the turn the subagent was
+ * launched in (`agentLaunchTurn`), since it has no row before it. Null when the index knows every turn: then
+ * `hasOlder: false` is the host's word that the window holds everything.
  */
-function behindIndex(snap: ThreadSnapshotPayload, ordered: readonly StartedTurn[], bounds: ThreadHistoryBounds, { start, end }: { start: number; end: number }): HistoryUnavailable | null {
+function behindIndex(snap: ThreadSnapshotPayload, ordered: readonly StartedTurn[], bounds: ThreadHistoryBounds, { start, end }: { start: number; end: number }, agentId: string | undefined): HistoryUnavailable | null {
   if (typeof bounds.totalTurns !== "number" || bounds.totalTurns >= ordered.length) return null;
-  const oldest = typeof bounds.oldestRetainedOrdinal === "number" ? bounds.oldestRetainedOrdinal : windowOldestTurn(snap, ordered);
-  return oldest !== null && start <= oldest ? { turns: [start, Math.min(end, oldest)], reason: "unavailable" } : null;
+  const oldest = typeof bounds.oldestRetainedOrdinal === "number" ? bounds.oldestRetainedOrdinal
+    : agentId !== undefined ? agentWindowOldestTurn(snap, ordered, agentId) : windowOldestTurn(snap, ordered);
+  // A subagent has no rows before the turn it was launched in: those turns are not partial, only empty.
+  const from = agentId !== undefined ? Math.max(start, agentLaunchTurn(snap, ordered, agentId) ?? 1) : start;
+  return oldest !== null && from <= Math.min(end, oldest) ? { turns: [from, Math.min(end, oldest)], reason: "unavailable" } : null;
 }
 
 /**
@@ -103,7 +109,7 @@ function behindIndex(snap: ThreadSnapshotPayload, ordered: readonly StartedTurn[
 function keptWhateverItsAge(activity: ThreadActivityItem): boolean {
   const payload = isRecord(activity.payload) ? activity.payload : {};
   if (typeof activity.agentId === "string" && activity.agentId.length > 0) return true;
-  if ((activity.activityKind === "task.started" || activity.activityKind === "task.completed") && payload.agentKind === "agent") return true;
+  if (isAgentAnchor(activity)) return true;
   if (activity.activityKind === "context-compaction") return true;
   return activity.activityKind === "user-input.requested" && payload.responseMode === "message";
 }
@@ -112,17 +118,65 @@ function keptWhateverItsAge(activity: ThreadActivityItem): boolean {
  * The turn of the window's oldest activity row — where the window begins, as far as the snapshot alone can tell. The
  * rows retention keeps whatever their age are passed over (`keptWhateverItsAge`): a thread's first agent launch or an
  * early compaction marker would otherwise name an early turn and hide every partial one after it. Else the oldest
- * activity row of any kind; null when the window holds none. A row with no turn is placed by its time, as the
- * transcript places it: in the last turn requested at or before it, turn 1 when it is older than every turn.
+ * activity row of any kind; null when the window holds none. A row with no turn is placed by its time (`turnOfRow`).
  */
 function windowOldestTurn(snap: ThreadSnapshotPayload, ordered: readonly StartedTurn[]): number | null {
   const activities = snap.items.filter((item): item is ThreadActivityItem => item.kind === "activity");
   const oldest = activities.find((a) => !keptWhateverItsAge(a)) ?? activities[0];
-  if (!oldest) return null;
-  const own = oldest.turnId ? ordered.findIndex((t) => t.turnId === oldest.turnId) : -1;
+  return oldest ? turnOfRow(oldest, ordered) : null;
+}
+
+/**
+ * Where a subagent's own rows begin to be whole, for a drill-in — as far as the snapshot alone can tell, by the rule
+ * the parent's view uses (`windowOldestTurn`): its oldest row left. Retention keeps an agent's rows in windows of their
+ * own (packages/api fold.ts `activitiesToDrop`) — its last AGENT_ACTIVITY_RETENTION_LIMIT rows, then the newest
+ * AGENT_ACTIVITY_TOTAL_LIMIT across every agent by `createdAt` — and both drop the OLDEST rows first, so the rows an
+ * agent keeps are its newest ones, and they can begin turns after the parent's window does. The rows cannot be counted
+ * to tell whether a window is full, as the host's `windowBoundary` counts the fold's: the snapshot the host serves has
+ * already dropped every `tool.updated` that a later `tool.completed` of the same call replaces
+ * (`projectSnapshotActivities`), about a third of an agent's rows, so a full window never reads as full. An anchor —
+ * the agent's launch or end (`agentKind: "agent"`), which Codex and OpenCode stamp with the agent's own id — is kept
+ * whatever its age and says nothing. An agent with no row left is bounded by the oldest row any agent kept: the
+ * cross-agent window dropped everything older. Null when no agent kept a row.
+ */
+function agentWindowOldestTurn(snap: ThreadSnapshotPayload, ordered: readonly StartedTurn[], agentId: string): number | null {
+  let own: ThreadActivityItem | undefined;
+  let floor: ThreadActivityItem | undefined;
+  for (const item of snap.items) {
+    if (item.kind !== "activity" || typeof item.agentId !== "string" || item.agentId.length === 0 || isAgentAnchor(item)) continue;
+    if (own === undefined && item.agentId === agentId) own = item;
+    if (floor === undefined || item.createdAt < floor.createdAt) floor = item;
+  }
+  const row = own ?? floor;
+  return row ? turnOfRow(row, ordered) : null;
+}
+
+/**
+ * The turn a subagent or a background task was launched in: its first `task.started` row's — a parent row naming it in
+ * `taskId`, or one stamped with its own id. An agent's is an anchor, which retention never drops; a background task's
+ * may have aged out, and then the span starts at the range's first turn. A resumed agent launches again under the
+ * same id, so the first row is the earliest launch. Null when the window holds none.
+ */
+function agentLaunchTurn(snap: ThreadSnapshotPayload, ordered: readonly StartedTurn[], agentId: string): number | null {
+  const launch = snap.items.find((item): item is ThreadActivityItem =>
+    item.kind === "activity" && item.activityKind === "task.started" && (item.agentId === agentId || (isRecord(item.payload) && item.payload.taskId === agentId)));
+  return launch ? turnOfRow(launch, ordered) : null;
+}
+
+/** An agent's launch or end row (`agentKind: "agent"`): the fold keeps it whatever its age (`isAgentAnchorRow`). */
+function isAgentAnchor(activity: ThreadActivityItem): boolean {
+  return (activity.activityKind === "task.started" || activity.activityKind === "task.completed") && isRecord(activity.payload) && activity.payload.agentKind === "agent";
+}
+
+/**
+ * The turn a row belongs to: its own, or — for a row with no turn — the last turn requested at or before it, as the
+ * transcript places it; turn 1 when it is older than every turn.
+ */
+function turnOfRow(row: ThreadActivityItem, ordered: readonly StartedTurn[]): number {
+  const own = row.turnId ? ordered.findIndex((t) => t.turnId === row.turnId) : -1;
   if (own !== -1) return own + 1;
   let requested = 0;
-  while (requested < ordered.length && ordered[requested]!.requestedAt <= oldest.createdAt) requested += 1;
+  while (requested < ordered.length && ordered[requested]!.requestedAt <= row.createdAt) requested += 1;
   return Math.max(1, requested);
 }
 

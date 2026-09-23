@@ -263,7 +263,7 @@ const readTranscript = defineTool({
     if (args.beforeTurn !== undefined && args.beforeTurn > turnCount + 1) throw new ToolError("INVALID_ARGUMENT", beforeTurnRefusal(turnCount));
     // Turns older than the window come from the host's thread index; a page it cannot read is reported, never thrown.
     const range = transcriptRange(turnCount, args.turns, args.beforeTurn);
-    const older = await readOlderHistory(api, args.sessionId, snap, range);
+    const older = await readOlderHistory(api, args.sessionId, snap, range, args.agentId !== undefined ? { agentId: args.agentId } : {});
     const read = older.snapshot;
     // "" names no subagent: refused like any unknown id, never read as "the main view" (the schema refuses it first).
     // A subagent of an older turn is known by the rows a page brought back.
