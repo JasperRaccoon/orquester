@@ -368,7 +368,7 @@ describe("agent host server — commands and reads (§6.2, §6.3)", () => {
       req.end(bytes);
     });
     assert.equal(uploaded.status, 200);
-    const ref = uploaded.body as { id: string; name: string };
+    const ref = uploaded.body as { id: string; name: string; path?: string };
     assert.equal(ref.name, "notes.md");
 
     const resolved = await h.call(
@@ -377,6 +377,7 @@ describe("agent host server — commands and reads (§6.2, §6.3)", () => {
     );
     assert.equal(resolved.status, 200);
     assert.equal(typeof (resolved.body as { path: string }).path, "string");
+    assert.equal(ref.path, (resolved.body as { path: string }).path, "the upload reply names the same absolute path the resolve route does");
     assert.equal(
       (await h.call("GET", agentHostExtraRoutes.attachment(threadId, "nope"))).status,
       404

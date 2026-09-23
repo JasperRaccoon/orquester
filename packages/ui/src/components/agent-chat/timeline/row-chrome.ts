@@ -18,6 +18,7 @@ import {
   toolGroupSummaryIconName,
   type WorkEntryIconName
 } from "../../../lib/agent-chat/presentation.logic";
+import { escapeRegExp } from "../../../lib/regexp";
 
 /**
  * Absorbed by W11 into the one resolver (fix-wave R7-6) and re-exported here
@@ -212,11 +213,6 @@ export interface MessageTextRun {
   skill?: string;
 }
 
-/** `.` and `-` are legal in a skill name and both are regex metacharacters. */
-function escapeForRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 /**
  * Splits a message into text and skill-mention runs, for re-chipping (§4.6.7).
  *
@@ -244,7 +240,10 @@ export function splitSkillMentions(text: string, skills: readonly string[]): Mes
 
   const alternation = [...names]
     .sort((a, b) => b.length - a.length)
-    .map((name) => escapeForRegExp(name))
+    // `.` is a regex metacharacter and `-` is legal in a skill name; the helper
+    // escapes the former, and `-` needs no escape outside a character class (it
+    // would be illegal under the `u` flag).
+    .map((name) => escapeRegExp(name))
     .join("|");
   // The same boundary the tokeniser uses: start-of-text or whitespace, then a
   // currency symbol. The trailing guard stops a shorter name matching inside a

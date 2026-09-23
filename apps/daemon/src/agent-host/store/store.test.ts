@@ -603,6 +603,8 @@ test("putAttachment copies the file, names the thread in the id and stats the si
   assert.ok(ref.id.startsWith("t1-"), `id ${ref.id} names its thread`);
 
   const resolved = await store.resolveAttachment("t1", ref.id);
+  // The reply names the absolute path the composer puts in the prompt (§7.4).
+  assert.equal(ref.path, resolved);
   assert.equal(path.dirname(resolved), attachmentsDirOf(rootDir, "t1"));
 
   // Copied, not linked: editing the delivered file must not touch the source.
@@ -615,6 +617,9 @@ test("an attachment id belonging to another thread is refused, not looked up", a
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
   const source = await writeSource(path.join(rootDir, "src"), "a.bin", 8);
   const ref = await store.putAttachment({ threadId: "t1", name: "a.bin", sourcePath: source });
+  // The file arm names its absolute path too (§7.4).
+  assert.equal(ref.type, "file");
+  assert.equal(ref.path, await store.resolveAttachment("t1", ref.id));
 
   await assert.rejects(store.resolveAttachment("t2", ref.id), /does not belong/);
   await assert.rejects(

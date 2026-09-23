@@ -138,7 +138,8 @@ export interface ThreadStore {
    * Claim an uploaded file into the thread's attachment namespace. Copies,
    * never hard-links, because an agent editing the delivered file in place
    * must not mutate the retry source (§6.3). Bounds are validated against the
-   * **stat'd** file, not the declared size.
+   * **stat'd** file, not the declared size. Answers the ref with `path` — the
+   * absolute destination — for the upload reply (§7.4).
    */
   putAttachment(input: AttachmentPutInput): Promise<AttachmentRef>;
 

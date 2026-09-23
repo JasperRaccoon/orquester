@@ -555,6 +555,29 @@ test("attachments reach the agent as PATHS, because promptCapabilities.image is 
   await r.dispose();
 });
 
+test("a path the text already names is not repeated in the Attached files block", async () => {
+  const r = await rig();
+  await start(r);
+  // The rig resolves every attachment to its cwd, so that is the path the
+  // composer would have inserted at the caret on upload (§7.4).
+  const typed = `open ${r.cwd} and tell me`;
+  await r.adapter.sendTurn({
+    threadId: "t1",
+    input: typed,
+    attachments: [{ type: "file", id: "a1", name: "q3.xlsx", sizeBytes: 10 }],
+    interactionMode: "default"
+  });
+  await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
+  const echoed = r.events
+    .filter((event): event is Extract<RuntimeEvent, { type: "content.delta" }> => event.type === "content.delta")
+    .filter((event) => event.payload.streamKind === "assistant_text")
+    .map((event) => event.payload.delta)
+    .join("");
+  assert.doesNotMatch(echoed, /Attached files:/);
+  assert.ok(echoed.includes(typed), `expected the typed text verbatim in ${JSON.stringify(echoed)}`);
+  await r.dispose();
+});
+
 test("readThread returns the turns the adapter actually observed", async () => {
   const r = await rig();
   await start(r);

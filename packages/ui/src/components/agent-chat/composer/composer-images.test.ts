@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { imageOrdinal, imagePlaceholder, removeImagePlaceholder } from "./composer-images.ts";
+import {
+  imageOrdinal,
+  imagePlaceholder,
+  removeImagePlaceholder,
+  revokeImagePreviews
+} from "./composer-images.ts";
 
 describe("image placeholders", () => {
   it("numbers images by position among images only", () => {
@@ -23,5 +28,14 @@ describe("image placeholders", () => {
     );
     assert.equal(removeImagePlaceholder("[Image #1]", 1), "");
     assert.equal(removeImagePlaceholder("no images here", 1), "no images here");
+  });
+
+  it("revokes every preview URL a chip set holds, and only those", () => {
+    const revoked: string[] = [];
+    revokeImagePreviews(
+      [{ previewUrl: "blob:a" }, {}, { previewUrl: "blob:b" }],
+      (url) => revoked.push(url)
+    );
+    assert.deepEqual(revoked, ["blob:a", "blob:b"]);
   });
 });

@@ -84,6 +84,17 @@ describe("command validation (§4.1 bounds)", () => {
     );
   });
 
+  it("strips a client-supplied path: a command's ref is a reference and nothing else (§6.3)", () => {
+    const [file] = parseAttachments([
+      { type: "file", id: "a", name: "q3.xlsx", sizeBytes: 10, path: "/etc/passwd" }
+    ]);
+    assert.deepEqual(file, { type: "file", id: "a", name: "q3.xlsx", sizeBytes: 10 });
+    const [image] = parseAttachments([
+      { type: "image", id: "b", name: "x.png", mimeType: "image/png", sizeBytes: 10, path: "/x" }
+    ]);
+    assert.deepEqual(image, { type: "image", id: "b", name: "x.png", mimeType: "image/png", sizeBytes: 10 });
+  });
+
   it("targetTurnCount must be a non-negative integer", () => {
     assert.equal(parseTargetTurnCount(0), 0);
     rejects(() => parseTargetTurnCount(-1));

@@ -1,4 +1,5 @@
 import React from "react";
+import { flushSync } from "react-dom";
 
 import {
   DEFAULT_RUNTIME_MODE,
@@ -332,6 +333,22 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
     [sessionId]
   );
 
+  // --- a queued message returned to the composer (§7.4) --------------------
+  // Every other insert from outside the composer places the caret and leaves
+  // focus where it is. "Cancel and return to the composer" is the user asking
+  // to edit that message, so here the composer takes focus, at the end of the
+  // returned text. The store's action does the insert (`appendToDraft`: the
+  // text into the draft, the attachments back as chips); this adds only the
+  // explicit `focusComposer`. `flushSync` first: `focusAtEnd` measures the
+  // textarea's value, and the returned text must already be in it.
+  const returnQueuedToComposer = React.useCallback(
+    (queuedId: string) => {
+      flushSync(() => actions.returnQueuedToComposer(queuedId));
+      focusComposer(sessionId);
+    },
+    [actions, sessionId]
+  );
+
   // --- the client-seeded thread title (§7.7) -------------------------------
   // There is no title-generation service and none is introduced: the client
   // seeds the title from the first message and writes it through the ordinary
@@ -655,10 +672,10 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               onBackgroundTool={
                 paintOnly ? noop : (toolUseId) => dispatch(() => actions.backgroundTool({ toolUseId }))
               }
-              // A straight pass-through: the store's action already puts the
-              // message's text back in the draft and its attachments back as
-              // chips (`appendToDraft`), so wrapping it would insert twice.
-              onReturnQueuedToComposer={paintOnly ? noop : actions.returnQueuedToComposer}
+              // The store's action already puts the message's text back in the
+              // draft and its attachments back as chips (`appendToDraft`), so the
+              // wrapper must not insert anything itself: it only adds the focus.
+              onReturnQueuedToComposer={paintOnly ? noop : returnQueuedToComposer}
               errorBanner={paintOnly ? null : slice.errorBanner}
               onDismissErrorBanner={paintOnly ? noop : actions.dismissErrorBanner}
               roster={roster.agents}

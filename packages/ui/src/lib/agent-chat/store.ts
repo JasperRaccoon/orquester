@@ -804,6 +804,10 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         return deps.transport.upload(sessionId, file, meta);
       },
 
+      fetchAttachmentBytes(attachmentId, signal) {
+        return deps.transport.fetchAttachment(sessionId, attachmentId, signal);
+      },
+
       queueMessage(message) {
         update((state) => {
           // The anchor is stamped HERE, not by the composer: the boundary a

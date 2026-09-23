@@ -10,9 +10,7 @@
  * self-referential links to bare fragments (`href="#sec"`).
  */
 
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
+import { escapeRegExp } from "./regexp";
 
 /** Turn `href="<filename>#x"` / `href='./<filename>#x'` (a self-link to the file
  *  being previewed) into a bare fragment `href="#x"` so it scrolls in place. */

@@ -365,7 +365,12 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   is deleted the moment its result arrives.
 - **`HISTORICAL_RAW_SOURCE`** (`"history.replay"`) tags every event projected out of a provider's
   *native* history on resume. A replayed row is the past: it claims no token usage and its turns
-  are already settled. Anything that treats a raw frame as live must check it.
+  are already settled. Anything that treats a raw frame as live must check it. A replayed user row
+  has any trailing `Attached files:` block stripped (`agent-host/adapters/attachment-lines.ts`,
+  `stripAttachmentPathLines`): the block is provider input the host never persists, and the native
+  transcript is the only place it survives — unless the block was the whole message, which is kept
+  as the turn's only evidence. (Claude only: the block-only leading text block of a skill dispatch
+  is dropped when the command block carries the text.)
 - **One `opencode serve` per project, not per thread** — safe only while chat threads register
   nothing thread-scoped into that server and every automatic approval is a **one-shot** grant.
   OpenCode's `always` is directory-wide across every session of that server; an `always` from a
@@ -437,6 +442,21 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   card must not be able to close without the message, or the reverse — and its text echoes each
   question before its answer so the agent, which sees an ordinary user turn, can tell what was
   answered.
+- **A non-image attachment reaches the agent as a PATH, guarded twice.** The upload reply
+  carries `AttachmentRef.path` — the absolute host path; `validate.ts` rebuilds every ref from
+  `{type, id, name, mimeType, sizeBytes}`, so the host's validation strips it from every command
+  body and no adapter and no event ever sees it — and the
+  composer inserts it into the prompt when the upload completes, exactly as the terminal-era
+  upload typed it into the PTY (`composer-files.ts`). Independently, every adapter appends
+  `Attached files:\n- <name>: <path>` for the refs it does not ingest natively
+  (`agent-host/adapters/attachment-lines.ts`), skipping paths the text already names — Claude
+  ingests images only, Codex images by path, OpenCode image/`text/*`/pdf as `file` parts, Grok
+  nothing. Before this, Claude and Codex dropped every non-image file silently behind a comment
+  that assumed a host path line never ported from T3. Claude reads the path without an approval
+  (the thread's attachments dir is an `additionalDirectories` entry); Codex and OpenCode may raise
+  their own approval card for a read outside the project. Chips draw a vendored Material Icon
+  Theme subset (`packages/ui/src/icons/files/`, MIT, pinned in its README — never the
+  Office-branded vscode-icons set, whose decorative use the trademark guidelines forbid).
 - **`raw.ndjson` is as sensitive as the repository it watched** — it records whatever the agent
   read, and Grok's `_x.ai/mcp/servers_updated` carries the host's real MCP credentials. Redaction
   runs before anything is written, and before any stderr excerpt leaves the host.

@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Crosshair, Send, X } from "lucide-react";
 import type { AttachmentRef, BrowserPickPayload } from "@orquester/api";
 import { useAppStore } from "../../store/app";
+import { attachmentPathOf } from "../../lib/agent-chat/composer.logic";
+import { attachmentRefFromUpload } from "../../lib/agent-chat/transport";
 import { deliverToComposerDraft } from "../../lib/composer-inbox";
 import { isAgentLikeSession, isChatSession } from "../../lib/session-kind";
 import { formatDesignFeedback, type PickIntent } from "../../lib/design-feedback";
@@ -9,18 +11,6 @@ import { base64ToBlob } from "../../lib/files";
 import { BatchProgress, type UploadProgress } from "../../lib/upload-progress";
 import { Button, IconButton, UploadProgressBar } from "../ui";
 import { cn } from "../../lib/cn";
-
-/**
- * A screenshot the daemon has written, as a turn attachment. The upload route's
- * returned **path** is the attachment reference (agent chat spec §6.1).
- */
-const imageAttachment = (path: string, name: string, sizeBytes = 0): AttachmentRef => ({
-  type: "image",
-  id: path,
-  name,
-  mimeType: "image/png",
-  sizeBytes
-});
 
 /**
  * Bottom sheet shown after element picks: per-element summary + screenshot
@@ -68,9 +58,16 @@ export const PickComposeSheet: React.FC<{
   // Uploads that already succeeded for this batch, keyed by payload identity —
   // a retry after a partial failure reuses them instead of re-uploading and
   // orphaning duplicate design-pick-*.png files in the agent's upload dir.
-  // Keyed per target session too: a path is only valid for the session it was
-  // uploaded to.
-  const uploadedRef = useRef(new WeakMap<BrowserPickPayload, { targetId: string; path: string }>());
+  // Keyed per target session too: a reference is only valid for the session
+  // it was uploaded to. A chat target answers the host-minted `AttachmentRef`
+  // (now with its host `path`, §7.4); a terminal target answers
+  // `{path, name, size}` — `attachmentRefFromUpload` reads both.
+  const uploadedRef = useRef(
+    new WeakMap<
+      BrowserPickPayload,
+      { targetId: string; ref: AttachmentRef; path: string | undefined }
+    >()
+  );
   const targetIsChat = agents.some((a) => a.id === targetId && isChatSession(a));
 
   const sendToAgent = async () => {
@@ -97,16 +94,17 @@ export const PickComposeSheet: React.FC<{
         const cached = uploadedRef.current.get(payload);
         if (cached && cached.targetId === targetId) {
           screenshotPath = cached.path;
-          attachments.push(imageAttachment(cached.path, name));
+          attachments.push(cached.ref);
         } else if (payload.screenshotBase64) {
           const blob = pending[slot].blob!;
           batch.begin(slot, name);
           const uploaded = await api.uploadSessionFile(targetId, { name, type: "image/png" }, blob, batch.onBytes);
           batch.finish();
           slot++;
-          screenshotPath = uploaded.path;
-          uploadedRef.current.set(payload, { targetId, path: uploaded.path });
-          attachments.push(imageAttachment(uploaded.path, uploaded.name, uploaded.size));
+          const ref = attachmentRefFromUpload(uploaded, { name, type: "image/png" });
+          screenshotPath = attachmentPathOf(ref) ?? uploaded.path;
+          uploadedRef.current.set(payload, { targetId, ref, path: screenshotPath });
+          attachments.push(ref);
         }
         picks.push({ payload, screenshotPath });
       }

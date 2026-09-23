@@ -158,11 +158,20 @@ export type SupportedAttachmentImageMimeType =
  * host against the thread's `attachments/` dir. The third arm is a deliberate
  * forward-compat catch-all so a newer producer cannot break an older decoder.
  *
+ * `path` is the attachment's absolute path on the host, answered by the
+ * **upload** so the composer can name the file in the prompt exactly as the
+ * terminal-era upload typed it into the PTY (§7.4). It is a courtesy of that
+ * one reply and nothing more: the host's command validation rebuilds every ref
+ * from `{type, id, name, mimeType, sizeBytes}` (`validate.ts`), so no command
+ * body reaches an adapter with it and no event ever carries it. An older host
+ * still draining after a deploy answers without it, which is why it is
+ * optional and why a composer must treat its absence as "nothing to insert".
+ *
  * *T3: `orchestration.ts:302-372` (`ChatAttachment`).*
  */
 export type AttachmentRef =
-  | { type: "image"; id: string; name: string; mimeType: string; sizeBytes: number }
-  | { type: "file"; id: string; name: string; mimeType?: string; sizeBytes: number }
+  | { type: "image"; id: string; name: string; mimeType: string; sizeBytes: number; path?: string }
+  | { type: "file"; id: string; name: string; mimeType?: string; sizeBytes: number; path?: string }
   | { type: "unknown"; id: string; name: string; mimeType?: string; sizeBytes?: number };
 
 /**

@@ -1502,8 +1502,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
    * The prose a message-mode answer becomes.
    *
    * **Every question is echoed before its answer**, joined by blank lines, and
-   * each question's attachments follow as `Attached file: <name> (<id>)` lines
-   * — T3 `decider.ts:1642-1660`. The echo is not decoration: the provider
+   * each question's attachments follow as `Attached file: <name> (<path>)`
+   * lines — T3 `decider.ts:1642-1660`. The echo is not decoration: the provider
    * parked no request, so the agent receives this as an ordinary user turn and
    * has nothing but the text to tell it which question was answered. The old
    * shape dropped the question whenever there was exactly one, which reads as
@@ -1513,7 +1513,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   const answerMessageText = (
     questions: readonly { id: string; question: string }[],
     answers: Record<string, unknown>,
-    attachmentsByQuestionId?: Record<string, AttachmentRef[]>
+    attachmentsByQuestionId?: Record<string, AttachmentRef[]>,
+    pathById: Record<string, string> = {}
   ): string => {
     const parts: string[] = [];
     for (const entry of questions) {
@@ -1527,7 +1528,14 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       if (value.trim().length === 0 && attachments.length === 0) continue;
       const lines = [`${entry.question}\n${value.trim()}`.trimEnd()];
       for (const attachment of attachments) {
-        lines.push(`Attached file: ${attachment.name} (${attachment.id})`);
+        // The absolute host path, so the adapters' `Attached files:` block
+        // (§4.5) finds it already named and appends nothing; the id only when
+        // the file cannot be resolved (the send then fails as any missing
+        // attachment does). An image ref gets the same line: Claude, Codex
+        // and OpenCode ingest images natively and ignore it; Grok ingests
+        // nothing and, finding the path already named, appends nothing.
+        const named = pathById[attachment.id] ?? attachment.id;
+        lines.push(`Attached file: ${attachment.name} (${named})`);
       }
       parts.push(lines.join("\n"));
     }
@@ -1718,12 +1726,22 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     };
   };
 
-  const decide = (
+  /**
+   * Async for one branch only: a message-mode `answer` resolves its attachment
+   * paths before its events are built, because the text naming them commits
+   * together with the resolved activity (§6.2). Safe because `command` calls
+   * this inside the thread's command queue — the queue every `commit` and
+   * `append` takes — so nothing can move `runtime.state` across the await.
+   * That guarantee stops at the command queue: the fields the effect queue
+   * writes (`bound`, `compacting`, `queuedTurns`, …) are not covered, so read
+   * them before the await or in `schedule`.
+   */
+  const decide = async (
     runtime: ThreadRuntime,
     name: AgentChatCommandName,
     raw: unknown,
     commandId: string
-  ): Decision => {
+  ): Promise<Decision> => {
     const body = requireBody(raw);
     const head = requireHead(runtime);
     const session = currentSession(runtime);
@@ -1929,7 +1947,21 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         // below reaches `append` together or not at all — with the steer as the
         // decision's ONLY effect.
         if (question?.responseMode === "message") {
-          const text = answerMessageText(question.questions, answers, attachmentsByQuestionId);
+          const pathById: Record<string, string> = {};
+          for (const attachment of Object.values(attachmentsByQuestionId ?? {}).flat()) {
+            try {
+              pathById[attachment.id] = await store.resolveAttachment(runtime.id, attachment.id);
+            } catch {
+              // Unresolvable now: the text keeps the id and the send fails
+              // like any missing attachment would (§6.3).
+            }
+          }
+          const text = answerMessageText(
+            question.questions,
+            answers,
+            attachmentsByQuestionId,
+            pathById
+          );
           if (text.length === 0) {
             throw invalidCommand("An answer needs some text.");
           }
@@ -2278,7 +2310,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
 
         let decision: Decision;
         try {
-          decision = decide(runtime, name, body, commandId);
+          decision = await decide(runtime, name, body, commandId);
         } catch (error) {
           if (isAgentChatCommandError(error) && error.recorded) {
             await store

@@ -18,7 +18,8 @@ export const agentHostExtraRoutes = {
    * optional `type` in the query string — the same shape
    * `POST /api/sessions/:id/upload` already uses (AGENTS.md: uploads are raw
    * binary streams, never base64 JSON). The host claims the file into the
-   * thread's attachment namespace and answers the {@link AttachmentRef}.
+   * thread's attachment namespace and answers the {@link AttachmentRef}
+   * together with its absolute `path` (§7.4).
    */
   putAttachment: (threadId: string): string => `${thread(threadId)}/attachments`,
 

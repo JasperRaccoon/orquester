@@ -306,6 +306,122 @@ describe("claude history projection — shapes", () => {
     assert.ok((item?.payload.data as { text: string }).text.startsWith("This session"));
   });
 
+  it("replays a prompt without the `Attached files:` block the adapter appended to it", () => {
+    // The transcript keeps the text the adapter SENT, suffix included
+    // (`attachment-lines.ts`); the bubble is the user's own text. The agent's
+    // text was never the adapter's, so a block it wrote stays.
+    const events = project({
+      threadId: "t",
+      turns: [
+        {
+          id: "turn-1",
+          items: [
+            {
+              role: "user",
+              content: [{ type: "text", text: "hello\n\nAttached files:\n- q3.xlsx: /a/q3.xlsx" }]
+            },
+            {
+              role: "assistant",
+              content: [{ type: "text", text: "read\n\nAttached files:\n- q3.xlsx: /a/q3.xlsx" }]
+            }
+          ]
+        }
+      ]
+    });
+    const items = allOf(events, "item.completed");
+    const user = items.find((event) => event.payload.itemType === "user_message");
+    assert.equal(user?.payload.detail, "hello");
+    assert.deepEqual(user?.payload.data, { text: "hello" });
+    const assistant = items.find((event) => event.payload.itemType === "assistant_message");
+    assert.equal(
+      (assistant?.payload.data as { text?: string } | undefined)?.text,
+      "read\n\nAttached files:\n- q3.xlsx: /a/q3.xlsx"
+    );
+  });
+
+  it("keeps the block of an attachment-only prompt, the turn's only evidence in a replay", () => {
+    // What `buildUserMessage` sends when the user sent nothing but a file: a
+    // replay carries no attachments, so there are no chips to show instead.
+    const block = "Attached files:\n- q3.xlsx: /a/q3.xlsx";
+    const events = project({
+      threadId: "t",
+      turns: [
+        {
+          id: "turn-1",
+          items: [
+            { role: "user", content: [{ type: "text", text: block }] },
+            { role: "assistant", content: [{ type: "text", text: "ok" }] }
+          ]
+        }
+      ]
+    });
+    const user = allOf(events, "item.completed").find(
+      (event) => event.payload.itemType === "user_message"
+    );
+    assert.deepEqual(user?.payload.data, { text: block });
+  });
+
+  it("shows the command block, not the block-only leading text, of a dispatch with attachments and no prose", () => {
+    // `buildUserMessage` sends the block as a leading text block of its own
+    // and keeps the command block last (§4.5). Per block that leading block
+    // is a whole message and the strip keeps it; per MESSAGE the command
+    // block is the user's text, and ingestion keeps one user message per
+    // turn, so the block was the bubble and `/review` never showed.
+    const events = project({
+      threadId: "t",
+      turns: [
+        {
+          id: "turn-1",
+          items: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: "Attached files:\n- q3.xlsx: /a/q3.xlsx" },
+                { type: "text", text: "/review" }
+              ]
+            },
+            { role: "assistant", content: [{ type: "text", text: "ok" }] }
+          ]
+        }
+      ]
+    });
+    const user = allOf(events, "item.completed").filter(
+      (event) => event.payload.itemType === "user_message"
+    );
+    assert.equal(user.length, 1, "exactly one user row");
+    assert.equal(user[0]!.payload.detail, "/review");
+    assert.deepEqual(user[0]!.payload.data, { text: "/review" });
+  });
+
+  it("keeps a block-only text block that is the message's only text when an image block sits beside it", () => {
+    // An attachment-only prompt with an image: the image is a block of its
+    // own, not text, so the block is still all the user sent (§4.5).
+    const block = "Attached files:\n- q3.xlsx: /a/q3.xlsx";
+    const events = project({
+      threadId: "t",
+      turns: [
+        {
+          id: "turn-1",
+          items: [
+            {
+              role: "user",
+              content: [
+                { type: "image", source: { type: "base64", media_type: "image/png", data: "iVBOR" } },
+                { type: "text", text: block }
+              ]
+            },
+            { role: "assistant", content: [{ type: "text", text: "ok" }] }
+          ]
+        }
+      ]
+    });
+    const user = allOf(events, "item.completed").filter(
+      (event) => event.payload.itemType === "user_message"
+    );
+    assert.equal(user.length, 1);
+    assert.deepEqual(user[0]!.payload.data, { text: block });
+  });
+
   it("projects nothing for a turn with nothing projectable", () => {
     assert.deepEqual(
       project({ threadId: "t", turns: [{ id: "turn-1", items: [{ type: "system" }] }] }),

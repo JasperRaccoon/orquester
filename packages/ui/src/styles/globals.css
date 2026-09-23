@@ -477,3 +477,10 @@ body {
     animation: none;
   }
 }
+
+/* Vendored file-type icons (packages/ui/src/icons/files) are drawn for dark
+   surfaces; on light ones their pastel fills wash out, so one filter deepens
+   them. Data, not component logic: no component branches on the mode. */
+[data-mode="light"] [data-file-icon] {
+  filter: saturate(1.15) brightness(0.82);
+}

@@ -18,7 +18,7 @@ import type { AttachmentRef } from "@orquester/api/agent-chat";
 import type { ComposerShortcutCommand } from "./composer-shortcuts";
 
 export interface ComposerHandle {
-  /** Append or insert text into the draft, focusing the composer. */
+  /** Insert text into the draft at the caret (or append it); focus stays where it is (§7.4). */
   insertText: (text: string, mode?: "cursor" | "append") => void;
   /**
    * Stage an **already-uploaded** attachment as a real chip.

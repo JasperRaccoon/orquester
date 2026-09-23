@@ -1,8 +1,9 @@
 import React from "react";
-import { ArrowUp, Clock, FileText, Image as ImageIcon, Undo2, X } from "lucide-react";
+import { ArrowUp, Clock, Undo2, X } from "lucide-react";
 
 import type { AttachmentRef } from "@orquester/api";
 
+import { FileTypeIcon } from "../../../../icons/files";
 import { cn } from "../../../../lib/cn";
 import type { AgentChatTimelineRow } from "../../../../lib/agent-chat/contracts";
 import { ChatIconButton, CopyButton, DisclosureChevron, ShimmerText } from "../../primitives";
@@ -30,21 +31,17 @@ function formatBytes(bytes: number | undefined): string {
  * Attachment chips.
  *
  * DELIBERATE DIFFERENCE FROM T3: T3 renders image thumbnails from a signed
- * asset URL. No route serves a thread attachment's bytes (§6.3 has no such
- * read and `ChatTimelineProps` no such seam), so an attachment renders as a
- * named chip. Inventing a URL here would produce a broken `<img>` on every
- * message, which is strictly worse than a chip that is honest.
+ * asset URL. §6.3's read-back route exists, but the timeline does not fetch
+ * it (§7.3 Built): nothing decodes a 10 MiB image into a bubble on a phone.
+ * An attachment renders as a named chip with the file-type icon the composer
+ * uses (`icons/files`), so a sent `.xlsx` looks like the chip the user staged.
  */
 function AttachmentChips({ attachments }: { attachments: readonly AttachmentRef[] }): React.ReactElement {
   return (
     <div className="mb-2 flex flex-col gap-1">
       {attachments.map((attachment) => (
         <div key={attachment.id} className="flex min-w-0 items-center gap-1.5 text-xs text-neutral-400">
-          {attachment.type === "image" ? (
-            <ImageIcon size={13} strokeWidth={1.8} aria-hidden className="shrink-0" />
-          ) : (
-            <FileText size={13} strokeWidth={1.8} aria-hidden className="shrink-0" />
-          )}
+          <FileTypeIcon name={attachment.name} mimeType={attachment.mimeType} size={14} className="shrink-0" />
           <span className="min-w-0 flex-1 truncate">{attachment.name}</span>
           <span className="ac-tabular shrink-0 text-neutral-500">
             {formatBytes(attachment.sizeBytes)}

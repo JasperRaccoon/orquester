@@ -893,14 +893,24 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
         mimeType !== undefined &&
         (SUPPORTED_ATTACHMENT_IMAGE_MIME_TYPES as readonly string[]).includes(mimeType)
       ) {
-        return { type: "image", id: attachmentId, name: input.name, mimeType, sizeBytes };
+        return {
+          type: "image",
+          id: attachmentId,
+          name: input.name,
+          mimeType,
+          sizeBytes,
+          path: destination
+        };
       }
       return {
         type: "file",
         id: attachmentId,
         name: input.name,
         ...(mimeType !== undefined ? { mimeType } : {}),
-        sizeBytes
+        sizeBytes,
+        // The absolute path the composer names in the prompt (§7.4). Only the
+        // upload reply carries it; `validate.ts` strips it from commands.
+        path: destination
       };
     },
 

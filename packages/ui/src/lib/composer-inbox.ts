@@ -1,5 +1,7 @@
 import type { AttachmentRef } from "@orquester/api";
 
+import { attachmentPathOf } from "./agent-chat/composer.logic";
+
 /**
  * Deliveries into a chat tab's composer **draft** (spec §7.4, §7.7).
  *
@@ -98,19 +100,17 @@ export function clearComposerInbox(sessionId: string): void {
 /**
  * A delivery as composer text.
  *
- * Attachments are appended as their **daemon-side paths**, one per line, which
- * is what an `AttachmentRef.id` is for an uploaded file (§6.1: "upload's
- * returned path is the attachment reference"). The composer's `@`-path search
- * already understands a path in the draft, and the adapters read the file from
- * disk, so this is the same contract the terminal path had — minus the
- * bracketed-paste escape, which a textarea has no use for.
- *
- * (A richer seam — staging a real attachment chip from outside the composer —
- * would need a `stageAttachment` on W13's composer handle; until then a path is
- * strictly better than dropping the file on the floor.)
+ * Attachments the composer could not stage are appended one per line as their
+ * **absolute host path** when the upload answered one (`AttachmentRef.path`,
+ * §7.4 — the same contract the terminal path had, minus the bracketed-paste
+ * escape a textarea has no use for), else as their id. An older host's reply
+ * carried only the id, which is all the fallback can write then; a current
+ * host's carries the path the adapters read.
  */
 export function composerTextForDelivery(delivery: ComposerDelivery): string {
-  const paths = delivery.attachments.map((a) => a.id).filter((id) => id.length > 0);
+  const paths = delivery.attachments
+    .map((attachment) => attachmentPathOf(attachment) ?? attachment.id)
+    .filter((entry) => entry.length > 0);
   const parts: string[] = [];
   if (delivery.text.length > 0) {
     parts.push(delivery.text);

@@ -239,6 +239,26 @@ export function draftIsEmpty(draft: ComposerDraft): boolean {
   );
 }
 
+/**
+ * The absolute host path an upload answered for a ref (§7.4), or undefined —
+ * the `unknown` arm never has one, an older bundle never wrote one.
+ */
+export function attachmentPathOf(ref: AttachmentRef | undefined): string | undefined {
+  if (ref === undefined || !("path" in ref)) return undefined;
+  return typeof ref.path === "string" && ref.path.length > 0 ? ref.path : undefined;
+}
+
+/**
+ * A persisted ref's `path` must be a non-empty string or absent: a malformed
+ * one from a stale blob must never reach `removeFilePath` (AGENTS.md: raw
+ * `JSON.parse` output never reaches typed code).
+ */
+function normalisePersistedAttachment(ref: AttachmentRef): AttachmentRef {
+  if (!("path" in ref) || attachmentPathOf(ref) !== undefined) return ref;
+  const { path: _dropped, ...rest } = ref;
+  return rest;
+}
+
 const DRAFTS_KEY = "orquester:agent-chat-drafts";
 const MAX_PERSISTED_DRAFTS = 50;
 
@@ -293,7 +313,7 @@ export function parsePersistedDrafts(raw: string | null): Record<string, Compose
     result[sessionId] = {
       text: record.text,
       attachments: Array.isArray(record.attachments)
-        ? record.attachments.filter(isAttachmentRef)
+        ? record.attachments.filter(isAttachmentRef).map(normalisePersistedAttachment)
         : [],
       context: Array.isArray(record.context) ? record.context.filter(isContextRecord) : []
     };
