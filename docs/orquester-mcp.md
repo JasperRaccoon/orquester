@@ -163,7 +163,8 @@ Every tool names things the same way:
 - **An agent** is a registry id — `claude`, `claudex`, `claudemix`, `codex`, `opencode`, `grok` —
   as `list_agents` lists them for this host.
 - **A pending question or approval** is `requestId` (from `get_session`). It may be omitted when
-  exactly one request of that kind is pending.
+  exactly one request of that kind is pending. An empty `requestId` is refused (`INVALID_ARGUMENT`),
+  never read as omitted.
 - **A turn** is a 1-based number counting the session's started turns in order; `turnCount` is the
   highest. `get_turn_diff`, `read_transcript` and `revert_session` all count this way.
 - **A subagent** is `agentId` (from `get_session`'s `subagents`), **a todo list** is `id`, and **a
@@ -178,10 +179,13 @@ Values several tools share:
 - **`model`** — a slug from `list_agents` (`models[].slug`).
 - **`options`** — the model's options as one object, `{"<optionId>": value}`, with the ids and
   values `list_agents` lists under `models[].options` — for example
-  `{"effort": "high", "thinking": true}`. `effort` works for every agent: it is mapped to the
-  adapter's own id (`effort` on Claude and Codex, `variant` on OpenCode, `reasoningEffort` on
-  Grok — `list_agents` reports it as `effortOptionId`), and the real id is accepted too. Effort
-  comes only from here, the model selection.
+  `{"effort": "high", "thinking": true}`. `effort` works for every agent, except on a model that
+  takes no options, such as Claude's `haiku`, where any option is refused (`INVALID_ARGUMENT`,
+  `<model> takes no options.`). It is mapped to the adapter's own id (`effort` on Claude and Codex,
+  `variant` on OpenCode, `reasoningEffort` on Grok — `list_agents` reports it as
+  `effortOptionId`), and the real id is accepted too. Effort comes only from here, the model
+  selection. A model marked `optionsOmitted` does have options — `list_agents {agent, model}` shows
+  them. `claudex`'s models take the options of Claude's default model, as the composer offers them.
 - **`planMode`** — `true` sends one message in plan mode (the composer's plan toggle). It is per
   message, not a session setting.
 - **`accountId`** — `"system"` (the daemon's own login) or a managed account id from
@@ -195,13 +199,18 @@ Values several tools share:
 Inputs marked `?` are optional; `= x` is the default. Every successful result is **one JSON
 object**, returned as `structuredContent` and as the same JSON in a single text block
 (`content[0].text`); lists are wrapped (`{"sessions": [...]}`). A tool that changes a session
-returns the session's fresh `SessionDetail` under `session`, and commands also return the host's
-`seq`, so you see the effect without a second call. `tools/list` gives every tool a title,
-annotations and a description of every parameter. The annotations: `readOnlyHint` on every tool
-that only reads or waits — the `list_*`, `get_*` and `read_*` tools and `wait_for_session`;
-`destructiveHint` on `close_session`, `revert_session` and `delete_todo`; `openWorldHint: false` on
-reads, waits, usage and the todo and file tools, which touch only the daemon's own state (a tool
-that drives an agent keeps the default).
+returns the session's fresh `SessionDetail` under `session`, so you see the effect without a second
+call (`close_session` aside: the tab is gone). The tools that send the agent a command also return
+the host's `seq`; `create_session` and `update_session` do not — `update_session` returns the
+fields it `applied` instead. `tools/list` gives every tool a title, annotations and a description
+of every parameter. The annotations: `readOnlyHint` on every tool that only reads or waits — the
+`list_*`, `get_*` and `read_*` tools and `wait_for_session`; `destructiveHint` on `close_session`,
+`revert_session` and `delete_todo`; `idempotentHint` on every tool but `create_session`,
+`interrupt_session` (a retry after the turn has stopped goes on to stop the background work),
+`compact_session` (a retry compacts again), `send_message`, `implement_plan`, the three request
+tools, `create_todo` and `toggle_todo_item`; `openWorldHint: false` on reads, waits, usage and the
+todo and file tools, which touch only the daemon's own state (a tool that drives an agent keeps the
+default).
 
 **Errors** come back as `isError: true` with the text `<CODE>: <message>` and
 `structuredContent: {code, message, detail?}`; the message names the valid values or the tool that
@@ -223,24 +232,35 @@ An argument the tool's schema refuses gets the same envelope: `INVALID_ARGUMENT`
 `Invalid arguments for <tool>: <field>: <reason>; …`. It names at most five bad fields, each in at
 most 200 characters, so a huge value zod echoes back (an enum's value, an unknown key, a record
 key) is cut with "…". A call with no `arguments` object takes the defaults. An argument name the
-tool does not have is dropped, not refused (only an attachment object refuses a key it does not
-know), so a misspelled optional argument silently takes its default: `tools/list` has the exact
-names. An unknown tool name is not a tool result but a JSON-RPC error, code `-32602`
-(`MCP error -32602: Tool <name> not found`). A refusal quotes a todo list id, a todo item or an
-unknown tool's name at most 100 characters long, and no error message is longer than 4 000
-characters: a longer one is cut, ending in "…". A command the agent host refuses with
-`HOST_UNAVAILABLE` (it is restarting) is retried with the same command id up to 3 times
-(250 ms · 2ⁿ) before the error reaches you.
+tool does not have is refused, never dropped: `INVALID_ARGUMENT` names it
+(`arguments: Unrecognized key(s) in object: 'planmode'`), so a misspelled optional argument cannot
+silently take its default. `tools/list` has the exact names, and every tool's `inputSchema` says
+`additionalProperties: false`. Nested, an attachment object refuses an unknown key too, while
+`create_session`'s `resume` object still drops one (its one field, `conversationId`, is required).
+An unknown tool name is not a tool result but a JSON-RPC error, code `-32602`
+(`MCP error -32602: Tool <name> not found`). A refusal quotes a todo list id, a todo item, a model
+slug or an unknown tool's name cut to 100 characters (a todo quote is JSON-escaped, so a control
+character in it takes six), and a todo refusal lists at most 40 of the list's items, each cut to
+70 characters. No error message is longer than 4 000 characters: a longer one is cut, ending in
+"…". A command the agent host refuses with `HOST_UNAVAILABLE` (it is restarting) is retried with
+the same command id up to 3 times (250 ms · 2ⁿ) before the error reaches you.
 
 **Size.** A result is at most 60 000 bytes of UTF-8 JSON (clients such as Claude Code drop larger
 MCP results). The tools that could return more bound themselves and say so:
-`read_transcript` (to `maxChars`; `truncated`), `get_turn_diff` (the diff is cut at the end;
-`truncated`), `get_cost` (whole days of rows, oldest first; `truncated`, `rowsDropped`),
-`read_file` (the window shrinks; `truncated`, `nextOffset`), `list_files` (at most 500 entries,
-fewer when one result cannot hold them; `truncated`), `list_todos` (the oldest lists, counted by
-`omittedLists`; a newest list too big on its own is cut, marked `bodyTruncated`) and the todo
-writes (a body too big for one result comes back as its head, marked `bodyTruncated`). Long texts
-inside a session view — the plan, the last reply — are capped at 16 384 characters. As a last
+`read_transcript` (to `maxChars`; `truncated`), `list_agents` (the options of non-default models,
+then whole non-default models, largest catalogue first; `optionsOmitted`, `modelsTruncated`,
+`modelCount`), `list_conversations` (the oldest rows; `truncated`, `omitted`), every session detail
+(its subagent rows, settled ones first; `subagentsTruncated`), `get_turn_diff` (the diff is cut at
+the end, `truncated`; a long file list keeps its head, `filesTruncated`, `omittedFiles`),
+`get_cost` (whole days of rows, oldest first; `truncated`, `rowsDropped`), `read_file` (the window
+shrinks; `truncated`, `nextOffset`), `list_files` (at most 500 entries, fewer when one result
+cannot hold them; `truncated`), `list_todos` (the oldest lists, counted by `omittedLists`; a newest
+list too big on its own is cut, marked `bodyTruncated`) and the todo writes (a body too big for one
+result comes back as its head, marked `bodyTruncated`). Long texts inside a session view — the
+plan, the last reply — are capped at 16 384 characters, and a subagent's title, progress and error
+at 200. The plan and the last reply are also cut by bytes when a session result would pass the cap.
+The reply goes first, then the plan, each cut on a character boundary and only as far as needed,
+with its `truncated` flag set (`replyTruncated` for `send_message`'s `reply`). As a last
 resort, a result still too large is cut: its text keeps the leading bytes (never splitting a
 character) and ends with `… [truncated: N bytes over the 60 000-byte cap]`, and its
 `structuredContent` is only `{truncated: true, truncationNote}`.
@@ -284,9 +304,11 @@ chat: { …SessionView.chat,
         contextWindow?: { usedTokens, maxTokens?, percentUsed? /* ≤ 100 */, compactsAutomatically? },
         supports: { planMode, rollback, compaction, backgroundTasks } },
 pending: { approvals: PendingApprovalView[], questions: PendingQuestionView[] },
-plan?: { planId, markdown /* ≤ 16 384 characters */, truncated, actionable },
-subagents: SubagentView[],
-lastReply?: { turnId, text /* the main agent's answer in the latest settled turn, ≤ 16 384 characters */,
+plan?: { planId, markdown /* ≤ 16 384 characters; fewer when cut by bytes to fit the result */,
+         truncated, actionable },
+subagents: SubagentView[], subagentsTruncated?,
+lastReply?: { turnId, text /* the main agent's answer in the latest settled turn, ≤ 16 384 characters;
+                              fewer when cut by bytes to fit the result */,
               truncated, completedAt }
 ```
 
@@ -300,24 +322,34 @@ PendingQuestionView = { requestId, createdAt, turnId?, responseMode: "blocking" 
                         questions: [{ index /* 1-based */, id, header, question,
                                       options: [{ label, description, value? }],
                                       multiSelect, allowCustomAnswer, isSecret?, isOther? }] }
-SubagentView        = { id, kind, agentKind: "agent" | "background", title, status, model?, effort?,
-                        progress?, lastToolName?, startedAt, completedAt, error? }
+SubagentView        = { id, kind, agentKind: "agent" | "background", title /* ≤ 200 characters */, status,
+                        model?, effort?, progress? /* ≤ 200 */, lastToolName?, startedAt, completedAt,
+                        error? /* ≤ 200 */ }
 ```
 
 `lastReply` is the main agent's answer: its assistant messages in that turn, joined, with Codex's
 commentary (its running "I'll do X next" narration, which the GUI demotes) left out.
 `contextWindow.percentUsed` stops at 100, like the GUI's ring; `usedTokens` stays as reported.
+`plan.actionable` is judged on the thread itself — the latest plan, until a message implements it —
+so it is right at once, while `chat.planReady` and `reason: "plan-ready"`, the tab strip's values,
+can trail it by one poll. A subagent's `title`, `progress` and `error` are cut at 200 characters,
+ending in "…". A detail too large for one result drops subagent rows — settled ones first, oldest
+first, then live ones — and says `subagentsTruncated: true`. If it is still too large, the last
+reply's `text` and then the plan's `markdown` are cut by bytes, each marked `truncated`, and every
+other field stays whole.
 
 A terminal tab's `get_session` is just its `SessionView`: there is no transcript.
 
 `AgentView` — `list_agents`:
 
 ```
-{ id: <agent id>, name, adapter, enabled, installed, version, status: "ready" | "degraded" | "error" | "unknown", message?,
+{ id: <agent id>, name, adapter, enabled, disabledReason?, installed, version, status: "ready" | "degraded" | "error" | "unknown", message?,
   auth: { status: "authenticated" | "unauthenticated" | "unknown", label?, email? },
   models: [{ slug, name, shortName?, isDefault, isLegacy?, providerLabel?,
              options: [{ id, label, type: "select" | "boolean", description?,
                          values?: [{ id, label, description?, isDefault? }] }] }],
+             /* shed to fit the result: optionsOmitted: true in place of options */
+  modelsTruncated?, modelCount?,                      // only when models were left out to fit
   effortOptionId,                                     // "effort" | "variant" | "reasoningEffort"
   runtimeModes: ["approval-required", "auto-accept-edits", "auto", "full-access"], defaultRuntimeMode: "full-access",
   supports: { planMode, rollback, compaction, backgroundTasks, contextWindow },
@@ -325,19 +357,27 @@ A terminal tab's `get_session` is just its `SessionView`: there is no transcript
   defaultAccountId }
 ```
 
-`enabled` means the agent's CLI was found on this host (`create_session` needs it). For
-`claudex`, `models` is the model proxy's launch catalogue, as the `+` menu offers it; `claudemix`
-runs the Claude main loop through the proxy, so its `models` are Claude's. For both, `accounts`
-are the accounts seeded into the proxy. `models: []` means the catalogue is still being probed —
-retry shortly. `auth.status: "unknown"` is not a sign-in problem; only `"unauthenticated"` is.
+`enabled` means the agent can be opened on this host (`create_session` needs it): its CLI was
+found, and for `claudex`/`claudemix` the model proxy can serve it. A disabled agent says why in
+`disabledReason` when the daemon knows (e.g. `"proxy down"`) — the registry sets none for an agent
+whose CLI was not found. For `claudex`, `models` is the model proxy's launch catalogue, as the `+`
+menu offers it; each of its models carries the options of the Claude catalogue's default model —
+the chips the composer shows for a proxy model; `claudemix` runs the Claude main loop through the
+proxy, so its `models` are Claude's. For both, `accounts` are the accounts seeded into the proxy.
+`models: []` means the catalogue is still being probed — retry shortly. `auth.status: "unknown"` is
+not a sign-in problem; only `"unauthenticated"` is. The list fits one result. Over it, the
+non-default models of the largest catalogues first lose their `options` (then marked
+`optionsOmitted: true`). Only then do whole models go, from the end of a catalogue's list, the
+largest catalogue first (`modelsTruncated: true`, `modelCount` = all of them). An agent's header
+and its default model (the flagged one, else the first) are never shed.
 
 ### Catalogue
 
 | Tool | Input | Returns | GUI equivalent |
 |---|---|---|---|
 | `list_projects` | `workspace?`, `includeArchived? = false` | `{projects: [{workspace, name, path, isArchived, lastInteractedAt?, openSessions}], warnings?}` | The sidebar's workspaces and projects; the recent-projects list |
-| `list_agents` | `agent?`, `includeLegacyModels? = false` | `{agents: AgentView[]}` | The `+` menu and the composer's model, effort, permission and account chips |
-| `list_conversations` | `project`, `agent?`, `limit? = 20` (≤ 200) | `{conversations: [{id, agent, title, preview?, updatedAt, home, accountId?, resumable}]}` | The project's conversation history (resume picker) |
+| `list_agents` | `agent?`, `model?` (with `agent`), `includeLegacyModels? = false` | `{agents: AgentView[]}` — with `model`, that agent alone, `models` holding just that model | The `+` menu and the composer's model, effort, permission and account chips |
+| `list_conversations` | `project`, `agent?`, `limit? = 20` (≤ 200) | `{conversations: [{id, agent, title, preview?, updatedAt, home, accountId?, resumable}], truncated?, omitted?}` | The project's conversation history (resume picker) |
 
 - **`list_projects`** — recently used projects first, then the rest alphabetically; `openSessions`
   counts the project's open tabs. Archived workspaces and projects appear only with
@@ -346,12 +386,21 @@ retry shortly. `auth.status: "unknown"` is not a sign-in problem; only `"unauthe
   workspace whose projects cannot be read is left out and named there rather than failing the
   whole list, and naming an archived workspace without `includeArchived` says why the list is
   empty.
-- **`list_agents`** — only the agents that open as chat tabs. Call it before `create_session` and
-  `update_session`: it has every valid model, option value, permission mode and account. An
-  unknown or empty `agent` filter is refused (`INVALID_ARGUMENT`).
+- **`list_agents`** — every agent that opens as a chat tab, enabled or not (`enabled`,
+  `disabledReason`). Call it before `create_session` and `update_session`: it has every valid model,
+  option value, permission mode and account. `list_agents {agent, model}` gives one model with its
+  full options — a legacy one too, without `includeLegacyModels`, though a legacy model serves only
+  an existing session: `create_session` refuses it and `update_session` takes it — which is how to
+  read options a shortened list omits. An unknown or empty `agent` or `model` is refused
+  (`INVALID_ARGUMENT`), as is `model` without `agent`; while the catalogue is still being probed,
+  `model` answers "Still loading … models".
 - **`list_conversations`** — the conversations the agent CLIs recorded on disk for this project,
   newest first. `agent` is the agent that resumes the row, and only `resumable: true` rows can be
-  passed to `create_session`'s `resume`. An unknown or empty `agent` filter is refused
+  passed to `create_session`'s `resume`. A row whose agent is disabled is listed with
+  `resumable: false`, as the GUI's resume lists leave it out. OpenCode conversations are never
+  listed (the daemon cannot read OpenCode's history store), so an OpenCode conversation cannot be
+  resumed — in the GUI either. Rows that would pass the result cap are left out, oldest first:
+  `truncated: true`, and `omitted` counts them. An unknown or empty `agent` filter is refused
   (`INVALID_ARGUMENT`), and a registry that cannot be read answers `INTERNAL` rather than a list
   in which every row would look unresumable.
 
@@ -361,7 +410,7 @@ retry shortly. `auth.status: "unknown"` is not a sign-in problem; only `"unauthe
 |---|---|---|---|
 | `list_sessions` | `project?`, `kind? = "all"` (`"chat"` \| `"terminal"` \| `"all"`), `attention? = false` | `{sessions: SessionView[]}` | The tab strip; with `attention: true`, the Attention Center |
 | `get_session` | `sessionId` | `{session: SessionDetail}` (a terminal tab: its `SessionView`) | The open chat tab: composer chips, request and plan cards, subagent roster, context meter |
-| `get_turn_diff` | `sessionId`, `turn?` (default: the latest turn with a checkpoint) | `{turn, fromTurn, files: [{path, additions, deletions}], diff, truncated}` | A turn's changed-files card |
+| `get_turn_diff` | `sessionId`, `turn?` (default: the latest turn with a checkpoint) | `{turn, fromTurn, files: [{path, additions, deletions}], filesTruncated?, omittedFiles?, diff, truncated}` | A turn's changed-files card |
 | `create_session` | `project`, `agent` (required unless `resume`), `model?`, `options?`, `runtimeMode? = "full-access"`, `accountId?`, `title?`, `cwd?`, `resume?: {conversationId}` | `{session: SessionDetail}` | The `+` menu; the resume picker |
 | `update_session` | `sessionId`, `title?`, `model?`, `options?`, `runtimeMode?`, `accountId?`, `force? = false` | `{applied: string[], session: SessionDetail}` | The composer's model, effort/option, permission and account chips; renaming the tab |
 | `interrupt_session` | `sessionId` | `{seq, session}` | Stop / Esc |
@@ -371,32 +420,40 @@ retry shortly. `auth.status: "unknown"` is not a sign-in problem; only `"unauthe
 | `compact_session` | `sessionId` | `{seq, session}` | "Compact context" |
 
 - **`list_sessions`** — ordered by project, then tab order. With `attention: true`, only the
-  sessions whose `attention` is set or whose `status` is `waiting`, newest attention first, as the
-  Attention Center orders them.
+  sessions whose `attention` is set or whose `status` is `waiting`, newest attention first by
+  instant (a tie goes to the newer tab, and a session with no stamp counts from its creation), as
+  the Attention Center orders them and as `wait_for_session` does. An empty `project` is refused
+  (`PROJECT_NOT_FOUND`), never read as every project.
 - **`get_turn_diff`** — the unified diff of what one turn changed; whitespace-only changes are
   ignored, as in the GUI. A turn without a checkpoint (a non-git project, a failed capture) has no
-  diff. A diff too large for one result is cut at the end (`truncated: true`); `files` still lists
-  every changed file.
+  diff. A diff too large for one result is cut at the end (`truncated: true`). The file list gets
+  20 000 bytes of the result, or more when the whole diff leaves more unused; a list longer than
+  that keeps its head (`filesTruncated: true`, with `omittedFiles` counting the rest), and the diff
+  gets the rest of the result.
 - **`create_session`** — every check runs before anything is created, and each refusal names the
-  valid values. The project must resolve; the agent must be a chat agent that is `enabled` here;
-  `model` must be in its catalogue (default: the catalogue's default model — for `claudex` a model
-  the proxy serves, for `claudemix` the Claude catalogue); every `options` id and value must be one
-  the model offers; `accountId` must be `"system"` or an account of the agent's family (for
-  `claudex`/`claudemix`, one seeded into the proxy) — checked here because the daemon would
-  silently fall back to its own login; `cwd` (absolute, or relative to the project; default: the
-  project) must be an existing directory inside the sandbox; and the project must have fewer than
-  **24** running sessions (`SESSION_BUSY` otherwise — the GUI has no such cap). An omitted
-  `accountId` means the family's default account; `claudex` and `claudemix` always launch with an
-  explicit one (the seeded default, else `system`). With `resume`, the conversation must be one
-  `list_conversations` lists for the project: its row decides the agent (`agent` may be omitted,
-  and must match if given) and the default title, and a conversation stored under a managed account
+  valid values. The project must resolve; the agent must be a chat agent that is `enabled` here (a
+  disabled agent's refusal carries the registry's reason, e.g.
+  `claudex is not available on this host: proxy down.`); `model` must be in its catalogue
+  (default: the catalogue's default model — for `claudex` a model the proxy serves, for
+  `claudemix` the Claude catalogue); every `options` id and value must be one the model offers;
+  `accountId` must be `"system"` or an account of the agent's family (for `claudex`/`claudemix`,
+  one seeded into the proxy) — checked here because the daemon would silently fall back to its own
+  login; `cwd` (absolute, or relative to the project; default: the project) must be an existing
+  directory inside the sandbox; and the project must have fewer than **24** running sessions
+  (`SESSION_BUSY` otherwise — the GUI has no such cap). An omitted `accountId` means the family's
+  default account; `claudex` and `claudemix` always launch with an explicit one (the seeded
+  default, else `system`). With `resume`, the conversation must be one `list_conversations` lists
+  for the project (never an OpenCode one: OpenCode history is not listed, so an OpenCode
+  conversation cannot be resumed): its row decides the agent (`agent` may be omitted, and must
+  match if given) and the default title, and a conversation stored under a managed account
   resumes under that account. A row with `resumable: false` is refused (`INVALID_ARGUMENT`), for
   instance a proxy-home conversation that names no launcher. `RESUME_UNAVAILABLE` and
   `SESSION_UNAVAILABLE` pass through with the daemon's message (a conversation already open in
   another tab arrives as `SESSION_UNAVAILABLE`).
   If the tab was created but could not be read back, the error's `detail` carries `sessionId` and
   `created: true`: use that id and do not create again. The first message is a separate
-  `send_message`.
+  `send_message`. An empty `agent`, `model` or `cwd` is refused (`INVALID_ARGUMENT`), never read as
+  the default; so is an empty `model` on `update_session`.
 - **`update_session`** — one call for everything on the composer bar except plan mode, which is
   per message. `options` are merged onto the session's current ones (setting `effort` keeps
   `thinking`), and options the new model does not offer are dropped, as the composer does. Model,
@@ -412,15 +469,34 @@ retry shortly. `auth.status: "unknown"` is not a sign-in problem; only `"unauthe
 - **`interrupt_session`** — interrupts the running turn (its pending requests are cancelled); with
   no turn running, stops every live subagent, background shell and watch loop.
 - **`stop_session`** — stops the provider process but keeps the tab, its history and its resume
-  cursor; the next `send_message` resumes the conversation. A session in `error` refuses messages
-  and every other command except `revert_session`, so this is how you recover it.
+  cursor; the next `send_message` resumes the conversation. A session whose `chat.sessionStatus` is
+  `error` refuses messages and every other command except `revert_session`, so this is how you
+  recover it. The refusal comes in two forms: `send_message` and `implement_plan` answer
+  `SESSION_BUSY` (`… Call stop_session first, then send again.`), while `update_session` (a model,
+  option or permission change), `interrupt_session`, `compact_session`, `answer_question`,
+  `dismiss_question` and `resolve_approval` pass through the host's `COMMAND_REJECTED`
+  (`This thread's session is in an error state. Stop the session or rewind to continue.`). Either
+  way: `stop_session`, then try again.
 - **`close_session`** — closes a chat or a terminal tab. A chat tab's Orquester thread (its event
   log) is deleted; the provider's own transcript survives and stays resumable through
-  `list_conversations`. A terminal tab's command is killed with it.
+  `list_conversations` for Claude, Codex and Grok (and claudex/claudemix from their proxy homes).
+  OpenCode history is not listed, so for OpenCode closing a tab is final. A terminal tab's command
+  is killed with it.
 - **`revert_session`** — keeps the first `keepTurns` started turns and drops the rest
   (`0 ≤ keepTurns < turnCount`). Conversation only — files are not restored. Refused with
-  `INVALID_ARGUMENT` for an agent without rollback (Grok), and with `SESSION_BUSY` while a turn is
-  active.
+  `INVALID_ARGUMENT` for an agent without rollback (Grok) and for a target before the last context
+  compaction (the agent no longer holds what came before it, and the GUI offers no rewind there;
+  the message names the `keepTurns` range still allowed, if any). Refused with `SESSION_BUSY` while
+  a turn is active and with `PENDING_REQUEST` while a question or an approval is open. The host
+  rewinds after it has accepted the command, so the tool waits up to 10 s for the outcome. It
+  returns `{seq, session}` once the turns are gone. If the rewind fails (the adapter refuses it),
+  it answers `COMMAND_REJECTED` with the host's reason (`Rewind failed: …`,
+  `detail: {seq, activityId, reason?}`). If the rewind is still running, it answers `SESSION_BUSY`
+  (`detail: {seq}`) and says not to call `revert_session` again: the rewind has landed once
+  `get_session`'s `chat.turnCount` comes down to `keepTurns`, and a failed one shows in
+  `read_transcript` as a "Rewind failed" error. If the session is closed while the tool waits, it
+  answers `SESSION_NOT_FOUND` (`Session "<id>" was closed while rewinding.`, `detail: {seq}`). Any
+  error after the command was accepted carries its `seq` in `detail`.
 - **`compact_session`** — asks the agent to compact its context window. The host refuses while a
   turn runs (`COMPACTION_UNAVAILABLE`) and on an empty conversation (`COMMAND_REJECTED`).
 
@@ -430,7 +506,7 @@ retry shortly. `auth.status: "unknown"` is not a sign-in problem; only `"unauthe
 |---|---|---|---|
 | `send_message` | `sessionId`, `text?`, `attachments?` (≤ 8, §9), `planMode? = false`, `wait? = true`, `timeoutMs? = 120000` (1 000–600 000) | `{seq, outcome, turnId?, reply?, replyTruncated?, pending?, session}` | The composer's Send (Enter during a turn steers it) |
 | `implement_plan` | `sessionId`, `wait? = true`, `timeoutMs? = 120000` (1 000–600 000) | Same as `send_message` | The plan card's **Implement** button |
-| `read_transcript` | `sessionId`, `turns? = 3` (≤ 200), `agentId?`, `include? = ["tools", "activity"]` (add `"reasoning"`), `maxChars? = 40000` (2 000–55 000, UTF-8 bytes) | `{entries: TranscriptEntry[], turnCount, coveredTurns: [from, to] \| null, truncated, subagents: [{id, title, status}], subagentsTruncated?, hint?}` | The chat timeline; a subagent's drill-in |
+| `read_transcript` | `sessionId`, `turns? = 3` (≤ 200), `agentId?` (non-empty), `include? = ["tools", "activity"]` (add `"reasoning"`), `maxChars? = 40000` (2 000–55 000, UTF-8 bytes) | `{entries: TranscriptEntry[], turnCount, coveredTurns: [from, to] \| null, truncated, subagents: [{id, title, status}], subagentsTruncated?, hint?}` | The chat timeline; a subagent's drill-in |
 
 - **`send_message`** — needs `text` (at most 120 000 characters after trimming) or at least one
   attachment. It is refused with `PENDING_REQUEST` while a question or an approval is open — the
@@ -443,14 +519,22 @@ retry shortly. `auth.status: "unknown"` is not a sign-in problem; only `"unauthe
   turn's. `wait: false` returns `outcome: "sent"` with the receipt. `wait: true` blocks as §8
   describes and returns the `outcome`; once the turn has settled, `reply` — the main agent's answer
   (Codex's commentary narration left out) from the turn this message started or steered, never an
-  earlier turn's but for one rare race (§8) — at most 16 384 characters, `replyTruncated: true`
-  when cut, and `read_transcript` has the rest; and `pending` while a question or an approval is
-  open. When `reply` is present, `session.lastReply` is left out: it is the same text.
+  earlier turn's but for one rare race (§8) — at most 16 384 characters, fewer when the result would
+  pass the cap (cut by bytes, on a character boundary), `replyTruncated: true` when cut, and
+  `read_transcript` has the rest; and `pending` while a question or an approval is open. When
+  `reply` is present, `session.lastReply` is left out: it is the same text.
+
+  Text that starts with `/` is forwarded to the agent as typed, and its CLI decides what the
+  command does; the one exception is Grok's `/always-approve`, refused with `INVALID_COMMAND`
+  (change `runtimeMode` with `update_session` instead). A message that is just `/compact`, with no
+  attachments, is the host's own compaction — what `compact_session` asks for. The MCP cannot list
+  an agent's slash commands or skills.
 - **`implement_plan`** — sends exactly what the GUI's Implement button sends: the line
   `PLEASE IMPLEMENT THIS PLAN:` followed by the latest proposed plan, in default (not plan) mode.
   A plan too long for the thread snapshot (`plan.truncated: true`) is read back in full first, as
   the Implement button does too; a cut plan is never sent. Refused with `INVALID_ARGUMENT` when
-  there is no proposed plan or the latest one was already sent for implementation, and with
+  there is no proposed plan or the latest one was already sent for implementation (judged on the
+  thread, as `get_session`'s `plan.actionable` and `read_transcript`'s plan rows are), and with
   `PENDING_REQUEST` while a request is open. To refine a plan instead (the Refine button), use
   `send_message {planMode: true, text}`.
 - **`read_transcript`** — built from the same thread snapshot the GUI renders. `turns` counts back
@@ -458,7 +542,8 @@ retry shortly. `auth.status: "unknown"` is not a sign-in problem; only `"unauthe
   (`null` when no row belongs to a turn). Without `agentId` you get the parent view, the GUI's
   timeline: the main agent's rows plus one `subagent` row per subagent, with the roster in
   `subagents`. With `agentId`, only that subagent's own rows (its drill-in), and `subagents` is
-  empty. A subagent's title is capped at 200 characters, in `subagents` and on its row.
+  empty. An empty or unknown `agentId` is refused (`INVALID_ARGUMENT`). A subagent's title is
+  capped at 200 characters, in `subagents` and on its row.
 
   `maxChars` is the size budget for the result, in UTF-8 bytes (max 55000; every tool result is
   capped at 60000 bytes). A result that fits comes back whole. Over it, the transcript sheds
@@ -474,7 +559,7 @@ retry shortly. `auth.status: "unknown"` is not a sign-in problem; only `"unauthe
   "Shed to fit maxChars: reasoning, then tool detail, then the oldest rows (coveredTurns says which
   turns are left). Raise maxChars (max 55000), include less, or use get_turn_diff for one turn's
   file changes." When `subagentsTruncated` is set, the hint adds " The subagent list was trimmed
-  too — full roster: get_session."
+  too; get_session may list more of it." (`get_session` may trim its subagent list as well).
 
   A list cut to fit — a checkpoint's `files`, a tool's `changedFiles`, a message's `attachments` —
   ends in one marker element counting the rest, and that element is not a real entry:
@@ -508,7 +593,9 @@ TranscriptEntry = { turn: number | null, turnId: string | null, kind, createdAt,
 | `resolve_approval` | `sessionId`, `requestId?`, `decision` (`"accept"` \| `"acceptForSession"` \| `"acceptAlways"` \| `"decline"` \| `"cancel"`) | `{seq, session}` | The approval card's Approve / Decline and its overflow menu |
 
 - `requestId` may be omitted when exactly one request of that kind is pending; otherwise the error
-  lists the pending ids.
+  lists the pending ids. A refusal quotes each of your values — a `requestId`, an answer that is not
+  an option, a key that names no question — cut to 100 characters, and at most five of them,
+  followed by the count of the rest.
 - **`answer_question`** — answers every question of the request at once (the GUI requires all of
   them before Submit). Keys are the question `id`s `get_session` reports, or their 1-based `index`
   (an exact id wins); on Claude a question's `id` is its full text, so the index is usually
@@ -604,11 +691,12 @@ to 4 bytes), so paging always advances. Binary files are refused.
 
 `Todo = {id, name, scope: "workspace" | "project", body, createdAt, updatedAt, bodyTruncated?}`. A
 list belongs to a workspace (`workspace`, by name) or to a project (`project`, a path or
-`"workspace/project"` as everywhere else). `body` is GitHub task-list markdown (`- [ ] item`); a
-new list starts empty, and `update_todo` replaces the whole body. To tick one item use
-`toggle_todo_item`: it is atomic, so it cannot clobber an edit made in the meantime; an `item`
-given as text must match a whole item, ignoring case. It is not idempotent: omitting `checked`
-flips an item, so pass it to make a retry harmless. A list id that does not exist is `NOT_FOUND`:
+`"workspace/project"` as everywhere else). Exactly one, and neither may be empty (an empty one is
+refused, never read as omitted). `body` is GitHub task-list markdown (`- [ ] item`); a new list
+starts empty, and `update_todo` replaces the whole body. To tick one item use `toggle_todo_item`:
+it is atomic, so it cannot clobber an edit made in the meantime; an `item` given as text must match
+a whole item, ignoring case. It is not idempotent: omitting `checked` flips an item, so pass it to
+make a retry harmless. A list id that does not exist is `NOT_FOUND`:
 `No todo list with id "<id>"; list_todos shows the ids.` The human sees every change live in the
 Todo tab.
 
@@ -822,7 +910,12 @@ event:
 - **What counts:** a session whose `attention` is set and whose `needsAttentionAt` is later than
   `after`. That is the Attention Center's own stamp: a chat tab turns `needs-input` when an
   approval, a question or a plan opens, and `finished` when a turn settles (a new turn clears it;
-  the next settle stamps it again); a terminal tab rings (`bell`) or exits (`finished`).
+  the next settle stamps it again). The stamp also moves when the attention stays the same but
+  something new happens: another approval or question opens (even if the previous one was answered
+  in the same moment), or another turn settles — one that settled since the daemon's previous poll
+  of the agent host (every 1.5 s). A rewind with `revert_session`, or the history a resumed
+  conversation replays, lands on turns that settled earlier and does not move it. A terminal tab
+  rings (`bell`) or exits (`finished`).
 - **When it returns:** at once if a watched session already qualifies; otherwise when the first one
   does, or at `timeoutMs`. After the first hit it waits 300 ms and looks again, so sessions flagged
   by the same host poll come back together.
@@ -913,8 +1006,8 @@ answered with a message, so its files travel as a message's do.
   approvals routed to you (`resolve_approval`) — and remember that a driving model approving tool
   calls is itself acting on untrusted text.
 - **Some calls cannot be undone.** `close_session` deletes the chat thread (the provider's
-  transcript stays resumable); `revert_session` drops turns from the conversation and does not
-  restore files.
+  transcript stays resumable, OpenCode's aside); `revert_session` drops turns from the conversation
+  and does not restore files.
 
 `read_file`/`list_files` widen the read surface: file contents inside the sandbox (including
 `.env`s or tokens developers keep in workspaces) flow to the driving model, exactly like transcript
@@ -936,12 +1029,13 @@ still not for polling loops.
 | `413` | The request body is over 16 MiB — pass large attachments by `path` (§9). |
 | `PATH_NOT_ALLOWED` (`… outside the sandbox`) | A `project`, `cwd`, attachment `path` or file path escaped the sandbox root (the workspaces directory). |
 | `PROJECT_NOT_FOUND` | Use a path from `list_projects` or `"workspace/project"`; a workspace, or a directory inside a project, is not a project. |
-| `SESSION_NOT_FOUND` | No open tab has that id (closed, or a typo) — `list_sessions`. A wait on one session fails with it as soon as that session closes. |
+| `SESSION_NOT_FOUND` | No open tab has that id (closed, or a typo) — `list_sessions`. A wait on one session fails with it as soon as that session closes. So does `revert_session` when the session closes while it waits for the rewind. |
 | `NOT_A_CHAT_SESSION` | The tool needs a chat tab; terminal tabs can only be listed and closed. |
 | `PENDING_REQUEST` | The agent is waiting on a question or an approval; the message names each request and the tool that answers it. |
-| `SESSION_BUSY` | A turn is running (`update_session` without `force`, `revert_session`, an account switch — wait for it, or `interrupt_session`), the session is in `error` (`stop_session`, then send again), or the project already has 24 running sessions (`close_session` some). |
-| `INVALID_ARGUMENT` naming an agent, model or option | Take the values from `list_agents`. "Still loading … models" means the catalogue is being probed — retry shortly. |
-| `INVALID_ARGUMENT: Invalid arguments for <tool>: …` | An argument failed the tool's schema: a wrong type, a value out of range, a missing required field. The message names each bad field (at most five) and why; `tools/list` describes every parameter. |
+| `SESSION_BUSY` | A turn is running (`update_session` without `force`, `revert_session`, an account switch — wait for it, or `interrupt_session`), a rewind still running after 10 s (`revert_session`: do not call it again — it has landed once `get_session`'s `chat.turnCount` comes down to `keepTurns`), the session is in `error` (`stop_session`, then send again), or the project already has 24 running sessions (`close_session` some). |
+| `COMMAND_REJECTED` (`… in an error state …`) | The session's `chat.sessionStatus` is `error`, and the host lets only `stop_session` and `revert_session` through (`send_message` and `implement_plan` say `SESSION_BUSY` instead). `stop_session`, then try again. Other `COMMAND_REJECTED` messages are the host's own refusal, passed through — `Rewind failed: …` from `revert_session`, for one. |
+| `INVALID_ARGUMENT` naming an agent, model or option | Take the values from `list_agents`. "Still loading … models" means the catalogue is being probed — retry shortly. `<model> takes no options` (Claude's `haiku`) — send it without `options`. A model marked `optionsOmitted` has options: `list_agents {agent, model}`. |
+| `INVALID_ARGUMENT: Invalid arguments for <tool>: …` | An argument failed the tool's schema: a wrong type, a value out of range, an empty string, a missing required field, or an argument name the tool does not have (`Unrecognized key(s)`). The message names each bad field (at most five) and why; `tools/list` describes every parameter. |
 | JSON-RPC error `-32602` (`Tool … not found`) | No tool has that name: a typo, or a client still holding an old tool list (see the stale-guidance row below). |
 | `NOT_FOUND` (`No todo list with id …`) | The list was deleted, or the id is mistyped — `list_todos` shows the ids. |
 | `HOST_UNAVAILABLE` | The agent host is restarting (for example after a deploy). A command has already been retried three times — try again shortly. |
