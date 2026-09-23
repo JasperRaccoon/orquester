@@ -9,14 +9,15 @@ export interface TranscriptOptions {
   turns: number; agentId?: string; include: ReadonlySet<TranscriptInclude>;
   /**
    * The size budget for the WHOLE result — entries, turns, subagents and flags — in UTF-8 bytes of its JSON, as ok()
-   * counts (the name predates the unit). A truncated result stays TRANSCRIPT_HINT_BYTES under it, which leaves room for
-   * the truncation hint the caller adds, so the tool's whole answer keeps within `maxChars` too.
+   * counts (the name predates the unit). A result that fits it comes back whole. One that does not is shed to
+   * TRANSCRIPT_HINT_BYTES under it, which leaves room for the truncation hint the caller adds, so the tool's whole
+   * answer keeps within `maxChars` either way.
    */
   maxChars: number;
 }
 export interface TranscriptResult { entries: TranscriptEntry[]; turnCount: number; coveredTurns: [number, number] | null; truncated: boolean; subagents: { id: string; title: string | null; status: string }[]; subagentsTruncated?: boolean }
 
-/** The room a truncated result leaves under `maxChars` for the caller's `hint` field — key, quotes and comma included. */
+/** The room a shed result leaves under `maxChars` for the caller's `hint` field — key, quotes and comma included. */
 export const TRANSCRIPT_HINT_BYTES = 320;
 /**
  * The subagent list's share of the room once a result is over it: the list takes whatever the transcript does not
@@ -340,8 +341,8 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
     if (subagentsTruncated) r.subagentsTruncated = true;
     return r;
   };
-  // The frame is the result with both lists empty. A result keeps TRANSCRIPT_HINT_BYTES of maxChars free for the
-  // caller's hint, and fits whole when the entries (E) and the subagent list (R) fit what the frame leaves.
+  // The frame is the result with both lists empty. A result whose frame, entries (E) and subagent list (R) fit
+  // maxChars comes back whole: nothing shed, no flags, and so no hint. Only a shed one keeps TRANSCRIPT_HINT_BYTES free.
   const frame = (covered: [number, number] | null, truncated: boolean, subagentsTruncated: boolean): number =>
     jsonByteSize({ entries: [], turnCount, coveredTurns: covered, truncated, subagents: [], ...(subagentsTruncated ? { subagentsTruncated } : {}) });
   const budget = opts.maxChars - TRANSCRIPT_HINT_BYTES;
@@ -349,7 +350,7 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
   const sizedAgents = sized(agents);
   const entryBytes = contentBytes(sizedEntries.reduce((sum, r) => sum + r.bytes, 0), sizedEntries.length);
   const agentBytes = contentBytes(sizedAgents.reduce((sum, a) => sum + a.bytes, 0), sizedAgents.length);
-  if (frame(coveredOf(entries), false, false) + entryBytes + agentBytes <= budget) return result(entries, agents, false, false);
+  if (frame(coveredOf(entries), false, false) + entryBytes + agentBytes <= opts.maxChars) return result(entries, agents, false, false);
   // Over it (§7.6 and its fix-round rulings), in the widest frame: the subagent list takes what the entries do not
   // need and never less than ROSTER_SHARE of the room when it needs it; the entries get exactly what it leaves.
   const widest: [number, number] | null = turnCount > 0 ? [turnCount, turnCount] : null;

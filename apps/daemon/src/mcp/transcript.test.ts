@@ -249,6 +249,31 @@ test("100 long-titled subagents at 55 000: titles capped at 200 code points, eve
   assert.ok(kept.length < 100, "some settled rows dropped");
 });
 
+test("a result that fits maxChars comes back whole — byte-identical, no flags — even inside the hint's reserve", () => {
+  // The case that made the ruling: a 39 900-byte transcript at the default 40 000, trimmed for a hint it did not need.
+  const roster = Array.from({ length: 5 }, (_, i) => agent(i, `Survey package ${i}: list its exports`, i % 2 ? "running" : "completed"));
+  const at = (reply: string) => snapshot({ items: oneTurn(reply), roster });
+  const base = budgetSize(transcriptEntries(at(""), { turns: 5, include: ALL, maxChars: 1_000_000 }));
+  const snap = at("x".repeat(39_900 - base));
+  const whole = transcriptEntries(snap, { turns: 5, include: ALL, maxChars: 1_000_000 });
+  assert.equal(budgetSize(whole), 39_900, "a 39 900-byte transcript");
+  const r = transcriptEntries(snap, { turns: 5, include: ALL, maxChars: 40_000 });
+  assert.equal(JSON.stringify(r), JSON.stringify(whole), "byte-identical to the unbudgeted projection");
+  assert.equal(r.truncated, false, "not truncated"); assert.equal("subagentsTruncated" in r, false, "no roster flag");
+});
+
+test("the boundary: a result of exactly maxChars bytes is whole; one byte more is trimmed to maxChars − TRANSCRIPT_HINT_BYTES", () => {
+  const snap = snapshot({ items: oneTurn("y".repeat(5_000)), roster: [agent(0, "Survey package 0"), agent(1, "Survey package 1", "running")] });
+  const whole = transcriptEntries(snap, { turns: 5, include: ALL, maxChars: 1_000_000 });
+  const size = budgetSize(whole);
+  const exact = transcriptEntries(snap, { turns: 5, include: ALL, maxChars: size });
+  assert.equal(JSON.stringify(exact), JSON.stringify(whole), `exactly ${size} bytes at maxChars ${size}: whole`);
+  assert.equal(exact.truncated, false, "not truncated");
+  const over = transcriptEntries(snap, { turns: 5, include: ALL, maxChars: size - 1 });
+  assert.equal(over.truncated, true, `${size} bytes at maxChars ${size - 1}: trimmed`);
+  assert.ok(budgetSize(over) <= size - 1 - TRANSCRIPT_HINT_BYTES, `to ${size - 1 - TRANSCRIPT_HINT_BYTES} bytes at most, before the hint (${budgetSize(over)})`);
+});
+
 test("30 running agents beside one short turn: the user row and the reply come back whole, the roster takes the rest", () => {
   const roster = Array.from({ length: 30 }, (_, i) => agent(i, `Survey package ${i}: list its exports, callers and test coverage`, "running"));
   const snap = snapshot({ items: oneTurn(), roster });
@@ -376,7 +401,7 @@ test("jsonTextBytes counts a string's JSON size exactly as JSON.stringify writes
   for (const s of ["😀𝄞", 'a\u0000b\u001f"\\\n\t\b\f\r', "\ud800x", "x\udc00", "  \u007f", ""]) assert.equal(jsonTextBytes(s), Buffer.byteLength(JSON.stringify(s), "utf8") - 2, JSON.stringify(s));
 });
 
-test("a randomized probe (fixed seed): every result fits, keeps its spared row, gives the roster its share and fills what it cuts", () => {
+test("a randomized probe (fixed seed): whole when it fits, else within the reserve, keeping its spared row, sharing and filling", () => {
   let seed = 0x5eedb1;
   const rand = (): number => { // mulberry32
     seed = (seed + 0x6d2b79f5) | 0;
@@ -412,8 +437,17 @@ test("a randomized probe (fixed seed): every result fits, keeps its spared row, 
     const r = transcriptEntries(snap, { turns: window, include: ALL, maxChars });
     const where = `run ${run}: ${turnCount} turns, ${roster.length} agents, maxChars ${maxChars}`;
     const budget = maxChars - TRANSCRIPT_HINT_BYTES;
-    assert.ok(budgetSize(r) <= budget, `${where}: ${budgetSize(r)} bytes, never over (the hint's room kept)`);
+    // Whole when the untrimmed result fits maxChars; otherwise trimmed to maxChars less the hint's reserve.
+    const wholeSize = budgetSize(whole);
+    if (wholeSize <= maxChars) assert.equal(JSON.stringify(r), JSON.stringify(whole), `${where}: ${wholeSize} bytes fit, so whole`);
+    else assert.ok(r.truncated && budgetSize(r) <= budget, `${where}: ${wholeSize} bytes do not fit, so trimmed to ${budget} (${budgetSize(r)})`);
     if (!r.truncated) assert.deepEqual(r, whole, `${where}: nothing shed when it fits`);
+    // The same shape at budgets straddling its whole size: anywhere in [size, size + reserve] it comes back whole; one
+    // byte under it, it is trimmed below the reserve.
+    const snug = wholeSize + int(0, TRANSCRIPT_HINT_BYTES);
+    assert.equal(JSON.stringify(transcriptEntries(snap, { turns: window, include: ALL, maxChars: snug })), JSON.stringify(whole), `${where}: whole at maxChars ${snug}`);
+    const tight = transcriptEntries(snap, { turns: window, include: ALL, maxChars: wholeSize - 1 });
+    assert.ok(tight.truncated && budgetSize(tight) <= wholeSize - 1 - TRANSCRIPT_HINT_BYTES, `${where}: trimmed at maxChars ${wholeSize - 1}`);
     // The spared row — the latest turn's final reply, else its newest row — always stays (a minimal row always fits here).
     const spared = sparedOf(whole.entries)!;
     assert.ok(hasRow(r, spared), `${where}: the spared row stays`);
