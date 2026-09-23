@@ -2,7 +2,7 @@ import { z } from "zod";
 import { resolveProject } from "../addressing.ts";
 import { ToolError } from "../errors.ts";
 import type { TodoSelector } from "../todo-tools.ts";
-import { defineTool, DESTRUCTIVE, MUTATING, MUTATING_IDEMPOTENT, READ_ONLY, type ToolContext, type ToolDef } from "../tool.ts";
+import { closedWorld, defineTool, DESTRUCTIVE, MUTATING, MUTATING_IDEMPOTENT, READ_ONLY, type ToolContext, type ToolDef } from "../tool.ts";
 
 const scopeFields = {
   workspace: z.string().optional().describe("Workspace name, for that workspace's own lists. Pass this or `project`."),
@@ -36,7 +36,7 @@ const createTodo = defineTool({
   title: "Create a todo list",
   description: "Create a shared todo list in a workspace or a project. Its body starts empty: fill it with update_todo ('- [ ] item' lines).",
   input: { ...scopeFields, name: z.string().min(1).describe("List name.") },
-  annotations: MUTATING,
+  annotations: closedWorld(MUTATING),
   async run(args, ctx) {
     return { todo: await ctx.todos.create(await scope(ctx, args), args.name) };
   }
@@ -47,7 +47,7 @@ const updateTodo = defineTool({
   title: "Update a todo list",
   description: "Rename a todo list and/or replace its whole markdown body ('- [ ] item' / '- [x] item' lines). To tick one item use toggle_todo_item, which cannot clobber an edit made meanwhile.",
   input: { id: idField, name: z.string().min(1).optional().describe("New list name."), body: z.string().optional().describe("The new markdown body, replacing the old one whole.") },
-  annotations: MUTATING_IDEMPOTENT,
+  annotations: closedWorld(MUTATING_IDEMPOTENT),
   async run(args, ctx) {
     return { todo: await ctx.todos.update(args.id, { name: args.name, body: args.body }) };
   }
@@ -58,7 +58,7 @@ const deleteTodo = defineTool({
   title: "Delete a todo list",
   description: "Delete a todo list and its body.",
   input: { id: idField },
-  annotations: DESTRUCTIVE,
+  annotations: closedWorld(DESTRUCTIVE),
   async run(args, ctx) {
     await ctx.todos.remove(args.id);
     return { deleted: true, id: args.id };
@@ -75,7 +75,7 @@ const toggleTodoItem = defineTool({
     checked: z.boolean().optional().describe("The state to set; omit to flip the item.")
   },
   // Omitting `checked` flips the item: a repeated identical call is not a no-op, so this is not idempotent.
-  annotations: MUTATING,
+  annotations: closedWorld(MUTATING),
   async run(args, ctx) {
     return { ...(await ctx.todos.toggleItem(args.id, args.item, args.checked)) };
   }

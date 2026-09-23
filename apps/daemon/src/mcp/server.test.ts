@@ -10,11 +10,13 @@ import { allTools, registerMcp, SERVER_INSTRUCTIONS, SERVER_VERSION, type McpDep
 
 const EXPECTED_TOOLS = ["list_projects", "list_agents", "list_conversations", "list_sessions", "get_session", "get_turn_diff", "create_session", "update_session", "interrupt_session", "stop_session", "close_session", "revert_session", "compact_session", "send_message", "implement_plan", "read_transcript", "answer_question", "dismiss_question", "resolve_approval", "wait_for_session", "get_usage", "get_cost", "list_files", "read_file", "list_todos", "create_todo", "update_todo", "delete_todo", "toggle_todo_item"];
 
-// Spec §4.5's annotation rules, spelled out literally so a drifting constant fails here too.
-const READ = { readOnlyHint: true, idempotentHint: true };
+// Spec §4.5's annotation rules, spelled out literally so a drifting constant fails here too. A read, a todo tool and a
+// file tool touch only the daemon's own state (openWorldHint: false); a tool that drives an agent keeps the default.
+const READ = { readOnlyHint: true, idempotentHint: true, openWorldHint: false };
 const WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false };
 const WRITE_IDEMPOTENT = { readOnlyHint: false, destructiveHint: false, idempotentHint: true };
 const DESTROY = { readOnlyHint: false, destructiveHint: true, idempotentHint: true };
+const closed = (a: object) => ({ ...a, openWorldHint: false });
 
 /** Spec §12's tools/list snapshot: required params and annotations per tool — a guard against drift. */
 const CONTRACT: Record<string, { required: string[]; annotations: object }> = {
@@ -43,11 +45,11 @@ const CONTRACT: Record<string, { required: string[]; annotations: object }> = {
   list_files: { required: ["path"], annotations: READ },
   read_file: { required: ["path"], annotations: READ },
   list_todos: { required: [], annotations: READ },
-  create_todo: { required: ["name"], annotations: WRITE },
-  update_todo: { required: ["id"], annotations: WRITE_IDEMPOTENT },
-  delete_todo: { required: ["id"], annotations: DESTROY },
+  create_todo: { required: ["name"], annotations: closed(WRITE) },
+  update_todo: { required: ["id"], annotations: closed(WRITE_IDEMPOTENT) },
+  delete_todo: { required: ["id"], annotations: closed(DESTROY) },
   // Omitting `checked` flips the item, so a repeated call is not a no-op: not idempotent.
-  toggle_todo_item: { required: ["id", "item"], annotations: WRITE }
+  toggle_todo_item: { required: ["id", "item"], annotations: closed(WRITE) }
 };
 
 type ListedTool = { name: string; title?: string; description: string; annotations?: object; inputSchema: { properties?: Record<string, { description?: string }>; required?: string[] } };

@@ -29,7 +29,8 @@ async function harness(t: { after: (fn: () => Promise<void>) => void }) {
 
 test("the five todo tools, in order, with the spec's annotations (a flip is not idempotent)", () => {
   assert.deepEqual(todoTools.map((t) => t.name), ["list_todos", "create_todo", "update_todo", "delete_todo", "toggle_todo_item"]);
-  assert.deepEqual(todoTools.map((t) => t.annotations), [READ_ONLY, MUTATING, MUTATING_IDEMPOTENT, DESTRUCTIVE, MUTATING]);
+  // The todo store is the daemon's own: no open world behind any of them.
+  assert.deepEqual(todoTools.map((t) => t.annotations), [READ_ONLY, MUTATING, MUTATING_IDEMPOTENT, DESTRUCTIVE, MUTATING].map((a) => ({ ...a, openWorldHint: false })));
   for (const t of todoTools) assert.ok(t.title && t.description.length <= 400, t.name);
 });
 

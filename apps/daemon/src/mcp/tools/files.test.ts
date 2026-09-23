@@ -43,6 +43,7 @@ test("list_files and read_file are read-only tools with short descriptions", () 
   assert.deepEqual(fileTools.map((t) => t.name), ["list_files", "read_file"]);
   for (const t of fileTools) {
     assert.deepEqual(t.annotations, READ_ONLY);
+    assert.equal(t.annotations.openWorldHint, false, `${t.name} reads only the sandbox`);
     assert.ok(t.title && t.description.length <= 400, `${t.name}: ${t.description.length} chars`);
   }
 });

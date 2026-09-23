@@ -27,7 +27,13 @@ export function defineTool<Shape extends z.ZodRawShape>(def: ToolDef<Shape>): To
   return def;
 }
 
-export const READ_ONLY: ToolAnnotations = { readOnlyHint: true, idempotentHint: true };
+/**
+ * `openWorldHint: false` says a tool touches only the daemon's own state. A read qualifies, as do the todo and file
+ * tools; a tool that drives an agent does not — the agent it drives can reach anything — so it keeps the default (true).
+ */
+export const READ_ONLY: ToolAnnotations = { readOnlyHint: true, idempotentHint: true, openWorldHint: false };
 export const MUTATING: ToolAnnotations = { readOnlyHint: false, destructiveHint: false, idempotentHint: false };
 export const MUTATING_IDEMPOTENT: ToolAnnotations = { readOnlyHint: false, destructiveHint: false, idempotentHint: true };
 export const DESTRUCTIVE: ToolAnnotations = { readOnlyHint: false, destructiveHint: true, idempotentHint: true };
+/** A write that stays inside the daemon's own state (the todo store): the same hints, and no open world. */
+export const closedWorld = (annotations: ToolAnnotations): ToolAnnotations => ({ ...annotations, openWorldHint: false });
