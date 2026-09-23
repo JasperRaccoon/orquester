@@ -35,15 +35,19 @@ const isRecord = (value: unknown): value is Record<string, unknown> => typeof va
  * evicted, so the snapshot names it — else at the window's boundary; each next page ends where the one before began
  * (its `beforeCursor`), until turn `start` is whole, the thread's start is reached, or HISTORY_PAGES_PER_READ pages were
  * read. Nothing here throws for a page: a read that fails for any reason ends the walk, and the turns left unread are
- * reported beside the rows that were read. An EMPTY page with a null cursor is such a failed read: it is what a host
- * answers where it could not plan a block or read one back whole, so it never counts as "the thread's first turn
- * reached". Reported the same way: the turns no index can read — a host without a usable one, or one whose index has
- * not caught up with this thread (`behindIndex`) — and, in the parent view, any turn of the range still without a row
- * once the walk is done, unless it stopped at the page limit (`missingTurns`, its net). A host that predates `history`
- * is read as it always was: the window alone. `agentId` names the subagent a drill-in reads: its rows keep windows of
- * their own, so where no index can read them the drill-in names its own span (`windowSpan`), whatever the parent's
- * rows say; a failed read's turns start, as that span does, at the turn it was launched in (`sinceLaunch`); and it has
- * no net, because a subagent has no row in the turns it did not run in, so "no row" says nothing there.
+ * reported beside the rows that were read. An EMPTY page with a null cursor is such a failed read — what a host answers
+ * where it could not plan a block or read one back whole — except as the first page below turn `end + 1`. The host
+ * plans a block from the activities below its end, and its own cursors and the window's boundary each have one below
+ * them; turn `end + 1`'s start, the one cursor minted here, may have none (the replayed first turns of a resumed
+ * conversation can be pure chat), so there an empty page is the thread's start reached. Reported the same way: the
+ * turns no index can read — a host without a usable one, or one whose index has not caught up with this thread
+ * (`behindIndex`) — and, in the parent view, any turn of the range still without a row once the walk is done, unless
+ * it stopped at the page limit (`missingTurns`, its net). A host that predates `history` is read as it always was: the
+ * window alone. `agentId` names the subagent a drill-in reads: its rows keep windows of their own, so where no index
+ * can read them the drill-in names its own span (`windowSpan`), whatever the parent's rows say; the turns a walk left
+ * unread — a failed read's, the page limit's — start, as that span does, at the turn it was launched in
+ * (`sinceLaunch`); and it has no net, because a subagent has no row in the turns it did not run in, so "no row" says
+ * nothing there.
  */
 export async function readOlderHistory(api: DaemonApi, sessionId: string, snap: ThreadSnapshotPayload, range: { start: number; end: number }, opts: { agentId?: string } = {}): Promise<OlderHistory> {
   const { start, end } = range;
@@ -73,11 +77,18 @@ export async function readOlderHistory(api: DaemonApi, sessionId: string, snap: 
   let failed = false;
   while (wholeFrom > start && pages.length < HISTORY_PAGES_PER_READ) {
     const page = await readPage(api, sessionId, before === undefined ? { turns } : { before, turns });
-    // An empty page with no cursor is the host's answer where it could not plan a block or read one back whole: turn
-    // `start` is not whole yet, and nothing was read.
-    if (!page || (page.page.beforeCursor === null && page.items.length === 0)) { failed = true; break; }
-    pages.push(page);
+    if (!page) { failed = true; break; }
     const cursor = page.page.beforeCursor;
+    if (cursor === null && page.items.length === 0) {
+      // Nothing read, and no cursor. Below the window's boundary or a host's cursor an activity always lies, so this is
+      // the host's answer where it could not plan a block or read one back whole: turn `start` is not whole yet. Below
+      // turn end + 1 — the first page of the cursor minted here — there may be no activity at all, and then nothing
+      // older is there to read: the thread's start is reached, and the parent view's net names any turn without a row.
+      if (after !== undefined && pages.length === 0) wholeFrom = 1;
+      else failed = true;
+      break;
+    }
+    pages.push(page);
     if (cursor === null) { wholeFrom = 1; break; } // nothing older: the pages reach the thread's first turn
     const reached = wholeFromCursor(cursor, sessionId, ordered);
     if (reached === null) { failed = true; break; }
@@ -86,11 +97,12 @@ export async function readOlderHistory(api: DaemonApi, sessionId: string, snap: 
   }
   const merged = mergeHistoryPages(snap, pages);
   const unread: HistoryUnavailable | null = wholeFrom > start ? { turns: [start, Math.min(end, wholeFrom - 1)], reason: failed ? "unavailable" : "limit" } : null;
+  // A drill-in's turns left unread start where its span without an index does, at the subagent's launch turn — past the
+  // page limit too, so the call its hint names reads no turn before that launch. And it has no net: a subagent has no
+  // row in the turns it did not run in, so there "no row" says nothing.
+  if (opts.agentId !== undefined) return { snapshot: merged, unavailable: unread && sinceLaunch(unread, merged, ordered, opts.agentId) };
   // Past the page limit the walk's sentence stands alone: it names the call that reads on.
   if (unread?.reason === "limit") return { snapshot: merged, unavailable: unread };
-  // A drill-in's failed read starts where its span without an index does, at the subagent's launch turn. And it has no
-  // net: a subagent has no row in the turns it did not run in, so there "no row" says nothing.
-  if (opts.agentId !== undefined) return { snapshot: merged, unavailable: unread && sinceLaunch(unread, merged, ordered, opts.agentId) };
   // The parent view's net, whether the walk read the range whole or failed: a turn of it still without a row was not
   // read either, and joins a failed read's span.
   const missing = missingTurns(merged, ordered, range);
@@ -173,12 +185,13 @@ function windowOldestTurn(snap: ThreadSnapshotPayload, ordered: readonly Started
  * the agent's launch or end (`agentKind: "agent"`), which Codex and OpenCode stamp with the agent's own id — is kept
  * whatever its age and says nothing. An agent with no row left lost every row it had, and they are bounded by the
  * oldest row any agent kept: the cross-agent window dropped everything older. One end bounds them instead: Claude's,
- * a parent row naming the agent in `taskId` and not stamped with its id, when it is the agent's last task row
- * (`isTaskRowOf`) — a Claude subagent that resumes launches again with a new `task.started`, so a run after that end
- * would show as a later launch. An end stamped with the agent's own id (Codex, OpenCode, Grok) bounds nothing, because
- * of a gap in those adapters: they write a child's launch and end once, and a child resumed after its end keeps
- * writing rows under its id with no new launch (OpenCode's `task` tool resumes a child session; Codex's `interacted`
- * after `completed` writes only `task.progress`), so rows can follow that end. Null when nothing is there to go by.
+ * an end naming the agent in `taskId` that is not stamped with the agent's own id (a nested Claude agent's end is
+ * stamped with its owner's), when it is the agent's last task row (`isTaskRowOf`) — a Claude subagent that resumes
+ * launches again with a new `task.started`, so a run after that end would show as a later launch. An end stamped with
+ * the agent's own id (Codex, OpenCode, Grok) bounds nothing, because of a gap in those adapters: they write a child's
+ * launch and end once, and a child resumed after its end keeps writing rows under its id with no new launch
+ * (OpenCode's `task` tool resumes a child session; Codex's `interacted` after `completed` writes only
+ * `task.progress`), so rows can follow that end. Null when nothing is there to go by.
  */
 function agentWindowOldestTurn(snap: ThreadSnapshotPayload, ordered: readonly StartedTurn[], agentId: string): number | null {
   let own: ThreadActivityItem | undefined;

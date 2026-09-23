@@ -788,6 +788,18 @@ test("read_transcript: an empty history page with no cursor is a failed read —
   assert.equal(historyCalls(h).length, 2, "one page a call");
 });
 
+test("read_transcript: older turns with no activity at all — a resumed conversation's replayed chat — are read whole from the messages the window kept: the empty page below turn end + 1 is the thread's start", async (t) => {
+  const th = history(10, 8);
+  // Message retention kept every turn's chat; the host has no activity below turn 4, so it plans no block there.
+  const h = await harness([chatSummary()], snapshot({ ...th.snap, items: th.rowsOf(1, 10) })); t.after(h.close);
+  h.api.on("GET", agentChatRoutes.history("c1"), th.page([], null));
+  const r = await tool("read_transcript").run(readArgs({ beforeTurn: 4, turns: 3 }), h.ctx);
+  assert.deepEqual((r.entries as { text: string }[]).map((e) => e.text), ["ask 1", "reply 1", "ask 2", "reply 2", "ask 3", "reply 3"]);
+  assert.deepEqual([r.olderTurns, r.coveredTurns, r.hint], [0, [1, 3], undefined]);
+  assert.equal("unavailableTurns" in r, false, "no turn named, and no \"Try again later\" that would never come true");
+  assert.equal(historyCalls(h).length, 1);
+});
+
 test("read_transcript: with turns named unavailable, the answer — its hint, and the shed hint after it — still fits maxChars", async (t) => {
   const th = history(10, 8);
   const long = snapshot({ ...th.snap, items: [...th.snap.items, message("assistant", "z".repeat(12_000), { turnId: "t10" })] });

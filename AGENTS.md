@@ -876,14 +876,13 @@ and answered with `running`/`truncated`; never a file change's (Claude streams i
 command row as its `outputItemId` — in a drill-in, when retention evicted the call's rows, an
 entry built from its latest chunk — and a host from before the route (its route-miss 404) falls
 back to the item's own text, never an error. A result is one JSON object capped at 60 000 bytes
-(`result.ts`); every tool that can
-outgrow it bounds itself first and says what it cut (`truncated`, `optionsOmitted`,
-`subagentsTruncated`, `filesTruncated`, …), so `ok()`'s byte cut is only the last resort. An error
-is `<CODE>: <message>`, the message capped at 4 000 code points. `server.ts` replaces the SDK's
-`tools/call` handler (public `server.setRequestHandler`) so a schema refusal answers the same
-`<CODE>: <message>` envelope as every other error, and it parses the arguments strictly
-(`argumentsSchema`, `.strict()` at the top level): an argument name the tool does not take is
-refused and named, never silently dropped — `tools/list` already advertises
+(`result.ts`); every tool that can outgrow it bounds itself first and says what it cut (`truncated`,
+`optionsOmitted`, `subagentsTruncated`, `filesTruncated`, …), so `ok()`'s byte cut is only the last
+resort. An error is `<CODE>: <message>`, the message capped at 4 000 code points. `server.ts`
+replaces the SDK's `tools/call` handler (public `server.setRequestHandler`) so a schema refusal
+answers the same `<CODE>: <message>` envelope as every other error, and it parses the arguments
+strictly (`argumentsSchema`, `.strict()` at the top level): an argument name the tool does not take
+is refused and named, never silently dropped — `tools/list` already advertises
 `additionalProperties: false`. Tool docs: `docs/orquester-mcp.md`; design: the v2 spec,
 `docs/superpowers/specs/2026-09-22-orquester-mcp-v2-design.md`.
 

@@ -125,7 +125,7 @@ function windowEnd(bytes: Uint8Array, start: number, maxBytes: number, room: num
 const readToolOutput = defineTool({
   name: "read_tool_output",
   title: "Read a tool's full output",
-  description: "The whole output of a tool call, as the GUI's \"Load full output\" reads it: pass a tool row's outputItemId from read_transcript as itemId. kind says what text is: command-output (a command's output — so far, if running is true), message (a message's text) or payload (the item's payload as JSON). Read in UTF-8 byte windows: while nextOffset is present, call again with offset = nextOffset.",
+  description: "A tool call's whole output, as the GUI's \"Load full output\" reads it: pass a tool row's outputItemId from read_transcript as itemId. kind: command-output (a command's output — so far if running is true; truncated:true: only its first 8 MiB were kept), message or payload (the item's payload as JSON). Read in UTF-8 byte windows: while nextOffset is present, call again with offset = nextOffset.",
   input: {
     sessionId: z.string().min(1).describe("The session id from list_sessions."),
     itemId: z.string().min(1).describe("The item to read: a tool row's outputItemId from read_transcript."),

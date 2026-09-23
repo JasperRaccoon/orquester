@@ -343,7 +343,7 @@ test("a drill-in on a host without a usable index names the subagent's own span,
   assert.equal(historyCalls(api).length, 0);
 });
 
-test("an agent with no row left ends its span at its end when its last task row is Claude's end — a parent row naming it — else at the oldest row any agent kept", async () => {
+test("an agent with no row left ends its span at its end when its last task row is Claude's end — an end not stamped with the agent's own id — else at the oldest row any agent kept", async () => {
   const t = thread(10);
   const api = host([]);
   // a5 kept its rows from turn 7 on: the oldest row any agent kept. a4, launched in turn 2, kept none.
@@ -393,7 +393,7 @@ test("a child resumed after its end, as OpenCode resumes one — its launch and 
   assert.equal(historyCalls(api).length, 0);
 });
 
-test("an empty page with a null cursor — what a host answers where it could not plan a block or read one back whole — is a failed read in both views, never the thread's first turn reached", async () => {
+test("an empty page with a null cursor at the window's boundary or at a host's cursor — what a host answers where it could not plan a block or read one back whole — is a failed read in both views, never the thread's first turn reached", async () => {
   const t = thread(10);
   const snap = windowed(t, 8);
   for (const opts of [{}, { agentId: "a1" }]) {
@@ -414,6 +414,36 @@ test("an empty page with a null cursor — what a host answers where it could no
   }
 });
 
+test("the first page below turn end + 1 — the one cursor the walk mints itself — may come back empty: with no activity below it, the thread's start is reached, and the parent view names only the turns with no row at all", async () => {
+  const t = thread(10);
+  // Turns 1 to 3 were replayed from a resumed conversation: pure chat, an opening message and a reply each, which
+  // message retention keeps. The window's activities begin in turn 8: the host has an activity below that boundary,
+  // but none below turn 4, so it plans no block there and answers an empty page with no cursor.
+  const chat = (from: number, to: number) => t.rowsOf(from, to).filter((item) => item.kind === "message");
+  const holding = (items: ThreadItem[]) => snapshot({ ...windowed(t, 8), items: [...items, ...t.rowsOf(8, 10)] });
+  for (const opts of [{}, { agentId: "a1" }]) {
+    const view = opts.agentId === undefined ? "the parent view" : "a drill-in";
+    const api = host([page([], null)]);
+    const snap = holding(chat(1, 3));
+    const read = await readOlderHistory(api, "c1", snap, { start: 1, end: 3 }, opts);
+    const [call] = historyCalls(api);
+    assert.deepEqual(decodeHistoryCursor(call!.query!.before!, "c1"), { threadId: "c1", beforeAnchorAt: t.turns[3]!.requestedAt, beforeTurnId: "t4" }, `${view}: turn 4's start, minted from its turn record`);
+    assert.equal(historyCalls(api).length, 1, view);
+    assert.equal(read.unavailable, null, `${view}: every turn of the range has its rows`);
+    assert.equal(read.snapshot, snap, `${view}: nothing to merge`);
+  }
+  // The parent view's net still names a turn with no row at all: turn 1's chat went too.
+  assert.deepEqual((await readOlderHistory(host([page([], null)]), "c1", holding(chat(2, 3)), { start: 1, end: 3 })).unavailable, { turns: [1, 1], reason: "unavailable" });
+  // The same empty page at the window's boundary — no cursor minted, the range reaches turn 8 — is a failed read: the
+  // host has an activity below that boundary.
+  assert.deepEqual((await readOlderHistory(host([page([], null)]), "c1", holding(chat(1, 3)), { start: 1, end: 9 })).unavailable, { turns: [1, 8], reason: "unavailable" });
+  // And a LATER page of a walk that began at a minted cursor: its cursor was the host's, which has an activity below it.
+  for (const opts of [{}, { agentId: "a1" }]) {
+    const later = await readOlderHistory(host([page(t.rowsOf(4, 5), cursorAt(t, 4, 40)), page([], null)]), "c1", windowed(t, 8), { start: 2, end: 5 }, opts);
+    assert.deepEqual(later.unavailable, { turns: [2, 4], reason: "unavailable" }, JSON.stringify(opts));
+  }
+});
+
 test("a drill-in's failed read starts at the turn the subagent was launched in, as its span without an index does: it has no rows before it", async () => {
   const t = thread(10);
   // a1 was launched in turn 5 and a2 in turn 9; the window holds their rows (as served) from turn 8 and 9 on.
@@ -425,6 +455,27 @@ test("a drill-in's failed read starts at the turn the subagent was launched in, 
     assert.deepEqual(await read("a1"), { turns: [5, 8], reason: "unavailable" }, `a1, from its launch: ${why}`);
     assert.equal(await read("a2"), null, `a2, launched after every turn the read left: ${why}`);
   }
+});
+
+test("a drill-in's page-limit span starts at the turn the subagent was launched in too, and both forms of the limit's hint name the call that reads just those turns", async () => {
+  const t = thread(12);
+  // a1's launch, an anchor the window keeps whatever its age, in turn `n`.
+  const launchedIn = (n: number) => snapshot({ ...windowed(t, 11), items: [agentTask(t, "task.started", "a1", n), ...t.rowsOf(11, 12)] });
+  // Each page reaches one turn further back, inside it: after five, turn 6 is the oldest whole one.
+  const back = () => host([10, 9, 8, 7, 6].map((k) => page(t.rowsOf(k, k), cursorAt(t, k, k * 10))));
+  assert.deepEqual((await readOlderHistory(back(), "c1", launchedIn(4), { start: 2, end: 12 })).unavailable, { turns: [2, 6], reason: "limit" }, "the parent view");
+  const drill = await readOlderHistory(back(), "c1", launchedIn(4), { start: 2, end: 12 }, { agentId: "a1" });
+  assert.deepEqual(drill.unavailable, { turns: [4, 6], reason: "limit" }, "a1 has no rows before turn 4");
+  assert.equal(unavailableHint(drill.unavailable!, 12), `Turns 4–6 could not be read whole: one call reads at most ${HISTORY_PAGES_PER_READ} pages of older history. Read them with beforeTurn: 7, turns: 3.`);
+  assert.equal((await readOlderHistory(back(), "c1", launchedIn(7), { start: 2, end: 12 }, { agentId: "a1" })).unavailable, null, "launched after every turn the walk left");
+  // The limit inside the range's last turn: turn 9 alone outlasts five pages.
+  const inside = () => host([90, 80, 70, 60, 50].map((seq) => page([], cursorAt(t, 9, seq))));
+  const wider = await readOlderHistory(inside(), "c1", launchedIn(8), { start: 6, end: 9 }, { agentId: "a1" });
+  assert.deepEqual(wider.unavailable, { turns: [8, 9], reason: "limit" });
+  assert.equal(unavailableHint(wider.unavailable!, 9), `Turn 9 is larger than one call reads (${HISTORY_PAGES_PER_READ} pages of older history): its latest rows are returned. Read turn 8 with beforeTurn: 9, turns: 1.`);
+  const alone = await readOlderHistory(inside(), "c1", launchedIn(9), { start: 6, end: 9 }, { agentId: "a1" });
+  assert.deepEqual(alone.unavailable, { turns: [9, 9], reason: "limit" });
+  assert.equal(unavailableHint(alone.unavailable!, 9), `Turn 9 is larger than one call reads (${HISTORY_PAGES_PER_READ} pages of older history): its latest rows are returned.`);
 });
 
 test("the parent view's net: after a walk, a turn of the range with no row in the merged snapshot is still named — beside a failed read's turns, never past the page limit; a drill-in has none", async () => {
