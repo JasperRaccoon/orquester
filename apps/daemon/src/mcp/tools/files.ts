@@ -1,10 +1,7 @@
 import { z } from "zod";
 import { DEFAULT_READ_BYTES, MAX_FS_ENTRIES, MAX_READ_BYTES, type ListFilesResult } from "../fs-tools.ts";
-import { MAX_RESULT_BYTES } from "../result.ts";
+import { MAX_RESULT_BYTES, resultBytes } from "../result.ts";
 import { defineTool, READ_ONLY, type ToolDef } from "../tool.ts";
-
-/** A result's size as ok() measures it: its JSON text, in UTF-8 bytes. */
-const resultBytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), "utf8");
 
 /**
  * A listing that fits one result (ok() cuts anything over MAX_RESULT_BYTES and loses its fields):

@@ -20,6 +20,9 @@ export function capText(text: string, maxChars: number): { text: string; truncat
   return { text, truncated: false };
 }
 
+/** A value's size as a result, as ok() measures it: its JSON text, in UTF-8 bytes. */
+export const resultBytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), "utf8");
+
 /** A string's size inside a JSON result: escaped, UTF-8, without its quotes. */
 export const jsonBytes = (text: string): number => Buffer.byteLength(JSON.stringify(text), "utf8") - 2;
 

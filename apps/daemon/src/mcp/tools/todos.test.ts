@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TodoListManager } from "../../todos.ts";
 import { ToolError } from "../errors.ts";
-import { toSafeToolError } from "../result.ts";
+import { MAX_RESULT_BYTES, ok, toSafeToolError } from "../result.ts";
 import { FakeDaemonApi } from "../testing.ts";
 import { TodoTools } from "../todo-tools.ts";
 import { DESTRUCTIVE, MUTATING, MUTATING_IDEMPOTENT, READ_ONLY, type ToolContext } from "../tool.ts";
@@ -96,4 +96,37 @@ test("the five todo tools answer with the code the failure deserves: a missing l
   const { id } = (await tool("create_todo").run({ workspace: "acme", name: "L" }, ctx)).todo as { id: string };
   await tool("update_todo").run({ id, body: "- [ ] one" }, ctx);
   assert.equal((await answer("toggle_todo_item", { id, item: 2 }, ctx)).code, "INVALID_ARGUMENT");
+});
+
+test("list_todos keeps one result: the oldest lists are left out first, and the result says so", async (t) => {
+  const { manager, ctx } = await harness(t);
+  for (let i = 0; i < 12; i += 1) {
+    const { id } = (await tool("create_todo").run({ workspace: "acme", name: `List ${i}` }, ctx)).todo as { id: string };
+    await tool("update_todo").run({ id, body: `- [ ] ${"x".repeat(6_000)}` }, ctx);
+  }
+  const stored = manager.list("workspace", "acme").map((r) => r.id); // oldest first, as list_todos lists them
+  const r = await tool("list_todos").run({ workspace: "acme" }, ctx);
+  const kept = (r.todos as { id: string }[]).map((x) => x.id);
+  assert.equal(r.truncated, true);
+  assert.ok(kept.length > 0 && kept.length < stored.length, `${kept.length} kept`);
+  assert.deepEqual(kept, stored.slice(stored.length - kept.length), "the newest lists, still oldest first");
+  const bytes = Buffer.byteLength(JSON.stringify(r), "utf8");
+  assert.ok(bytes <= MAX_RESULT_BYTES, `${bytes} bytes`);
+  assert.equal(ok(r).structuredContent, r, "bounded by the tool itself: ok() passes it through");
+  // A small set is whole, and says nothing about truncation.
+  const small = await tool("list_todos").run({ project: "acme/api" }, ctx);
+  assert.deepEqual(small, { todos: [] });
+});
+
+test("list_todos: a newest list too big for a result on its own keeps its name and the head of its body", async (t) => {
+  const { ctx } = await harness(t);
+  const { id } = (await tool("create_todo").run({ workspace: "acme", name: "Huge" }, ctx)).todo as { id: string };
+  const body = `- [ ] ${"y".repeat(70_000)}`;
+  await tool("update_todo").run({ id, body }, ctx);
+  const r = await tool("list_todos").run({ workspace: "acme" }, ctx);
+  const [only] = r.todos as { id: string; name: string; body: string }[];
+  assert.equal(r.truncated, true);
+  assert.equal(only!.id, id); assert.equal(only!.name, "Huge");
+  assert.ok(body.startsWith(only!.body) && only!.body.length > 50_000, `kept ${only!.body.length} characters`);
+  assert.ok(Buffer.byteLength(JSON.stringify(r), "utf8") <= MAX_RESULT_BYTES);
 });

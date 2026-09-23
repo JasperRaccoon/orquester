@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { resolveProject } from "../addressing.ts";
 import { ToolError } from "../errors.ts";
-import type { TodoSelector } from "../todo-tools.ts";
+import { fitJsonBytes, MAX_RESULT_BYTES, resultBytes } from "../result.ts";
+import type { TodoProjection, TodoSelector } from "../todo-tools.ts";
 import { closedWorld, defineTool, DESTRUCTIVE, MUTATING, MUTATING_IDEMPOTENT, READ_ONLY, type ToolContext, type ToolDef } from "../tool.ts";
 
 const scopeFields = {
@@ -20,14 +21,38 @@ async function scope(ctx: ToolContext, args: { workspace?: string; project?: str
   return { workspace: ref.workspace, project: ref.name };
 }
 
+/**
+ * Lists that fit one result (ok() would otherwise cut the JSON and lose them all): the newest ones, the oldest dropped
+ * first, still oldest first, `truncated` when any was dropped. A newest list too big on its own keeps the head of its
+ * body.
+ */
+function fitTodos(todos: TodoProjection[]): { todos: TodoProjection[]; truncated?: true } {
+  if (resultBytes({ todos }) <= MAX_RESULT_BYTES) return { todos };
+  const room = MAX_RESULT_BYTES - resultBytes({ todos: [], truncated: true });
+  const kept: TodoProjection[] = [];
+  let used = 0;
+  for (let i = todos.length - 1; i >= 0; i -= 1) {
+    const cost = resultBytes(todos[i]) + (kept.length ? 1 : 0); // the separating comma
+    if (used + cost > room) break;
+    used += cost;
+    kept.unshift(todos[i]!);
+  }
+  if (!kept.length) {
+    const newest = todos[todos.length - 1]!;
+    // What the body's escaped text may take: the room less everything else of the list, its empty quotes included.
+    kept.push({ ...newest, body: fitJsonBytes(newest.body, room - resultBytes({ ...newest, body: "" })).text });
+  }
+  return { todos: kept, truncated: true };
+}
+
 const listTodos = defineTool({
   name: "list_todos",
   title: "List todo lists",
-  description: "The shared todo lists of a workspace or of one project, oldest first, each with its markdown body. The human sees and edits the same lists live in the Todo tab.",
+  description: "The shared todo lists of a workspace or of one project, oldest first, each with its markdown body. When they do not all fit one result the oldest are left out (truncated:true). The human sees and edits the same lists live in the Todo tab.",
   input: scopeFields,
   annotations: READ_ONLY,
   async run(args, ctx) {
-    return { todos: ctx.todos.list(await scope(ctx, args)) };
+    return fitTodos(ctx.todos.list(await scope(ctx, args)));
   }
 });
 
