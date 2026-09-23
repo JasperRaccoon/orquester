@@ -41,6 +41,7 @@ import type {
   ActivePlanState,
   AgentChatActions,
   AgentChatThreadSlice,
+  AgentChatThreadView,
   AgentChatTimelineRow,
   DisclosureState,
   QueuedComposerMessage,
@@ -177,7 +178,7 @@ export interface AgentChatThreadState {
    * timeline projection, which only this module holds. `id`/`turnId` ride along
    * so a consumer can tell one proposal from the next without diffing markdown.
    */
-  actionableProposedPlan: { id: string; planMarkdown: string; turnId: string | null } | null;
+  actionableProposedPlan: AgentChatThreadView["actionableProposedPlan"];
   /**
    * True while a `/revert` is in flight — for `rewindTo`, until the host has
    * answered it on the stream; §7.5's one reason the composer goes inert.
@@ -513,11 +514,17 @@ function project(state: InternalState): InternalState {
   // because `timeline.proposedPlans` never leaves this module.
   const latestPlan = findLatestProposedPlan(timeline.proposedPlans, latestTurn?.turnId ?? null);
   const nextPlan = hasActionableProposedPlan(latestPlan)
-    ? { id: latestPlan!.id, planMarkdown: latestPlan!.planMarkdown, turnId: latestPlan!.turnId }
+    ? {
+        id: latestPlan!.id,
+        planMarkdown: latestPlan!.planMarkdown,
+        turnId: latestPlan!.turnId,
+        ...(latestPlan!.truncated ? { truncated: true as const } : {})
+      }
     : null;
   const keptPlan =
     state.actionableProposedPlan?.id === nextPlan?.id &&
-    state.actionableProposedPlan?.planMarkdown === nextPlan?.planMarkdown
+    state.actionableProposedPlan?.planMarkdown === nextPlan?.planMarkdown &&
+    state.actionableProposedPlan?.truncated === nextPlan?.truncated
       ? state.actionableProposedPlan
       : nextPlan;
 
@@ -861,6 +868,23 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
 
       async steer(input) {
         await actions.sendTurn(input);
+      },
+
+      async readFullPlanMarkdown(plan) {
+        if (plan.truncated !== true) {
+          return plan.planMarkdown;
+        }
+        const response = await deps.transport.readItem(sessionId, plan.id).catch(() => null);
+        const item = response?.item;
+        const payload = item?.kind === "activity" ? item.payload : null;
+        const markdown =
+          typeof payload === "object" && payload !== null
+            ? (payload as { planMarkdown?: unknown }).planMarkdown
+            : undefined;
+        if (typeof markdown !== "string" || markdown.trim().length === 0) {
+          throw new Error("The full plan could not be loaded, so nothing was sent. Try again.");
+        }
+        return markdown;
       },
 
       async interrupt(input) {

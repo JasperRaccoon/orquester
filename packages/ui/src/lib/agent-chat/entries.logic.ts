@@ -24,6 +24,7 @@
 import type { ThreadActivityItem, ThreadItem, ThreadMessageItem } from "@orquester/api/agent-chat";
 import {
   IDENTITY_CHANGED_ACTIVITY_KIND,
+  isPlanImplementationMessage,
   PLAN_IMPLEMENTATION_PROMPT_PREFIX
 } from "@orquester/api/agent-chat";
 
@@ -54,6 +55,11 @@ export interface ProposedPlanEntry {
    * the message log.
    */
   implementedAt: string | null;
+  /**
+   * The wire cut `planMarkdown` at 16 KiB (§5.6); `GET …/items/:id` holds the
+   * whole plan, and Implement must send that one.
+   */
+  truncated?: true;
 }
 
 export type TimelineEntry =
@@ -779,9 +785,9 @@ export function splitThreadItems(
       continue;
     }
     if (item.activityKind === "turn.proposed.completed") {
-      const planMarkdown =
-        asTrimmedString(asRecord(item.payload)?.planMarkdown) ??
-        planBuffers.get(item.turnId ?? item.id);
+      const payload = asRecord(item.payload);
+      const sent = asTrimmedString(payload?.planMarkdown);
+      const planMarkdown = sent ?? planBuffers.get(item.turnId ?? item.id);
       if (planMarkdown) {
         plansById.set(item.id, {
           id: item.id,
@@ -789,7 +795,8 @@ export function splitThreadItems(
           updatedAt: item.updatedAt,
           turnId: item.turnId,
           planMarkdown,
-          implementedAt: null
+          implementedAt: null,
+          ...(sent !== undefined && payload?.truncated === true ? { truncated: true as const } : {})
         });
       }
       continue;
@@ -804,7 +811,7 @@ export function splitThreadItems(
       (message) =>
         message.role === "user" &&
         message.createdAt > plan.createdAt &&
-        message.text.startsWith(PLAN_IMPLEMENTATION_PROMPT_PREFIX)
+        isPlanImplementationMessage(message.text)
     );
     return implementing ? { ...plan, implementedAt: implementing.createdAt } : plan;
   });
@@ -1066,6 +1073,7 @@ function samePlans(left: readonly ProposedPlanEntry[], right: readonly ProposedP
     return (
       plan.id === other.id &&
       plan.planMarkdown === other.planMarkdown &&
+      plan.truncated === other.truncated &&
       plan.implementedAt === other.implementedAt &&
       plan.updatedAt === other.updatedAt
     );

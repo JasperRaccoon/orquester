@@ -266,6 +266,22 @@ export function grokReasoningEffort(selection: ModelSelection | undefined): stri
  * grokSpawnArgs}: every runtime mode names itself there) — the CLI-flag tier,
  * which the CLI documents as overriding config for that process.
  *
+ * Nor is it written "for a later release" the way `[cli] auto_update` is.
+ * Where argv is honoured it wins regardless — the config reference ranks CLI
+ * flags layer 8 of 8, above a `GROK_CONFIG_PATH` overlay (layer 5) and the
+ * user's `config.toml` (layer 3) — and an unsupported value in the overlay
+ * (`acceptEdits`) risks the CLI rejecting the whole overlay, and
+ * `support_permission` with it.
+ *
+ * **UNMEASURED: that argv beats this host's user-level `always-approve`.**
+ * That precedence is the CLI's documentation, not an observation. Fixture
+ * observation 6 saw `--permission-mode default … agent stdio` ask for an
+ * edit, but the captures predate the last change to this host's
+ * `config.toml`, and it found `agent stdio` honours that global flag for some
+ * values only. Whether a Supervised thread here really gets its approval card
+ * stays open until a live Supervised Grok chat is asked to write a file; if
+ * it gets none, neither argv nor this overlay is the lever.
+ *
  * **Why an overlay and not the account home.** The previous revision patched
  * `<accountHome>/config.toml`. On this host that path is a SYMLINK:
  *

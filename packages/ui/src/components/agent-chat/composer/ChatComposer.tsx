@@ -61,6 +61,7 @@ import {
 } from "./composer-shortcuts";
 import {
   attachmentRejectionReason,
+  buildPlanImplementationPrompt,
   composerSubmissionIntentForEnter,
   composerSubmissionValidationMessage,
   decideStagedAttachmentForRef,
@@ -874,9 +875,24 @@ export function ChatComposer({
       : uploadBlock;
 
   const runSend = React.useCallback(
-    async (text: string, mode: InteractionMode, refs: AttachmentRef[]) => {
+    async (
+      text: string,
+      mode: InteractionMode,
+      refs: AttachmentRef[],
+      resolveText?: () => Promise<string>
+    ) => {
       setSending(true);
       try {
+        if (resolveText) {
+          try {
+            text = await resolveText();
+          } catch (error) {
+            // Nothing was sent and the draft stays empty: the plan is still
+            // actionable, so Implement is still there to press again.
+            setNotice(error instanceof Error ? error.message : "The full plan could not be loaded.");
+            return;
+          }
+        }
         await actions.sendTurn({
           text,
           ...(refs.length > 0 ? { attachments: refs } : {}),
@@ -957,6 +973,12 @@ export function ChatComposer({
       }
       const outgoing = plan?.text ?? text.trim();
       const outgoingMode = plan?.interactionMode ?? interactionMode;
+      // §5.6 cut this proposal at 16 KiB on the wire: Implement reads the whole
+      // plan back first, and sends nothing when it cannot.
+      const cutPlan = plan?.action === "implement" && planFollowUp?.truncated ? planFollowUp : null;
+      const wholePlanText = cutPlan
+        ? () => actions.readFullPlanMarkdown(cutPlan).then(buildPlanImplementationPrompt)
+        : undefined;
 
       const validation = composerSubmissionValidationMessage({
         prompt: outgoing,
@@ -1004,7 +1026,7 @@ export function ChatComposer({
         });
         return;
       }
-      void runSend(outgoing, outgoingMode, refs);
+      void runSend(outgoing, outgoingMode, refs, wholePlanText);
     },
     [
       planFollowUp,

@@ -326,8 +326,10 @@ export class CodexSession {
     const child = spawnProviderChild({
       command: this.options.bin,
       // Exactly `app-server`. The registry row's `--yolo` is the terminal
-      // CLI's flag (`app-server` does not take it); the runtime mode rides
-      // `thread/start` (§4.4).
+      // CLI's flag (`app-server` does not take it); the runtime mode rides the
+      // protocol instead — `approvalPolicy`, `approvalsReviewer` and the
+      // sandbox go on `thread/start`, on `thread/resume` and on every
+      // `turn/start` (§4.4).
       args: ["app-server"],
       env: this.options.env,
       cwd: this.options.cwd

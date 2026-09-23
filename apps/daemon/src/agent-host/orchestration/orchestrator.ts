@@ -64,9 +64,13 @@ import type { AccountHome } from "@orquester/api/agent-chat";
 /**
  * The prefix the client puts on the turn it sends when the user clicks
  * Implement: one spelling in `@orquester/api/agent-chat`, shared with the UI
- * and the MCP. Re-exported so existing imports from this module keep working.
+ * and the MCP, and read back only through `isPlanImplementationMessage`.
+ * Re-exported so existing imports from this module keep working.
  */
-import { PLAN_IMPLEMENTATION_PROMPT_PREFIX } from "@orquester/api/agent-chat";
+import {
+  isPlanImplementationMessage,
+  PLAN_IMPLEMENTATION_PROMPT_PREFIX
+} from "@orquester/api/agent-chat";
 export { PLAN_IMPLEMENTATION_PROMPT_PREFIX };
 
 import { stat } from "node:fs/promises";
@@ -1611,7 +1615,16 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           lines.push(unavailableAttachmentLine(attachment));
         }
       }
-      const base = typeof folded[questionId] === "string" ? (folded[questionId] as string) : "";
+      // A multi-select answer is an array, and the lines make it text: join the
+      // selections as the message-mode echo does, or the answer is lost. With
+      // no attachments the loop never gets here and the adapter keeps its array.
+      const answer = folded[questionId];
+      const base =
+        typeof answer === "string"
+          ? answer
+          : Array.isArray(answer)
+            ? answer.filter((item): item is string => typeof item === "string").join(", ")
+            : "";
       folded[questionId] = appendAttachmentLines(base, lines.join("\n"));
     }
     try {
@@ -3787,11 +3800,7 @@ function hasActionableProposedPlan(runtime: ThreadRuntime): boolean {
   }
   for (let index = latestPlanIndex + 1; index < items.length; index += 1) {
     const item = items[index]!;
-    if (
-      item.kind === "message" &&
-      item.role === "user" &&
-      item.text.startsWith(PLAN_IMPLEMENTATION_PROMPT_PREFIX)
-    ) {
+    if (item.kind === "message" && item.role === "user" && isPlanImplementationMessage(item.text)) {
       return false;
     }
   }

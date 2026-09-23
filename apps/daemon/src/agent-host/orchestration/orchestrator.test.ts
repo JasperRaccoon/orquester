@@ -1545,6 +1545,36 @@ describe("orchestrator — answering a question (§6.2)", () => {
     );
     await host.stop();
   });
+
+  it("keeps a multi-select answer's selections when files ride along, and the array when none do", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await openQuestion(host, "q-multi", { dismissible: false });
+    await host.settle();
+    const ref = await host.store.putAttachment({
+      threadId,
+      name: "notes.md",
+      sourcePath: "/tmp/notes.md"
+    });
+
+    await host.orchestrator.command(threadId, "answer", {
+      commandId: cmd(),
+      requestId: "q-multi",
+      answers: { "Which branch?": ["main", "dev"], "Which remote?": ["origin", "upstream"] },
+      attachmentsByQuestionId: { "Which branch?": [ref] }
+    });
+    await host.settle();
+
+    const call = host.adapter.calls.find((entry) => entry.kind === "respondToUserInput");
+    const answers = (call?.detail as { answers: Record<string, unknown> }).answers;
+    // The selections survive, joined as the message-mode echo joins them, with
+    // the file's path line after them — not the path line alone.
+    assert.equal(answers["Which branch?"], "main, dev\n\nAttached file: notes.md (/tmp/notes.md)");
+    // No file on this one: a multi-select answer reaches the adapter as the array.
+    assert.deepEqual(answers["Which remote?"], ["origin", "upstream"]);
+    await host.stop();
+  });
 });
 
 describe("orchestrator — the §6.4 summary fields", () => {
