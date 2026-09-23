@@ -51,12 +51,14 @@ export async function loadAgents(api: DaemonApi, opts?: { includeLegacyModels?: 
   if (providersRes.status < 400) for (const p of (providersRes.body as AgentProvidersResponse).providers ?? []) providers.set(p.id, p);
   const accountsRes = await api.request("GET", "/api/agent-accounts");
   const accounts = accountsRes.status < 400 ? (accountsRes.body as AgentAccountsResponse) : { accounts: [], defaults: { claude: null, codex: null, grok: null } };
-  const needsProxy = entries.some((e) => isProxyAgent(e.id));
+  // Every proxy launcher needs the proxy's seeded accounts; only one that launches a proxy model (claudex) needs its catalogue.
   let proxy: CliProxyStatus | null = null;
   let catalog: string[] = [];
-  if (needsProxy) {
+  if (entries.some((e) => isProxyAgent(e.id))) {
     const statusRes = await api.request("GET", "/api/cliproxy");
     if (statusRes.status < 400) proxy = statusRes.body as CliProxyStatus;
+  }
+  if (entries.some((e) => launchesProxyModel(e.id))) {
     const catalogRes = await api.request("GET", "/api/cliproxy/models");
     if (catalogRes.status < 400) catalog = ((catalogRes.body as { models?: string[] }).models ?? []);
   }

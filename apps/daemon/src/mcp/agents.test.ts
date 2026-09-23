@@ -145,3 +145,17 @@ test("a model switch carries an option only when the new model advertises it and
   assert.deepEqual(resolveModelSelection(agent, { model: "sonnet", current: { model: "opus", options: [{ id: "effort", value: "max" }, { id: "thinking", value: true }] } }), { model: "sonnet", options: [{ id: "thinking", value: true }] });
   assert.deepEqual(resolveModelSelection(agent, { model: "sonnet", current: { model: "opus", options: [{ id: "effort", value: "high" }, { id: "thinking", value: "on" }] } }), { model: "sonnet", options: [{ id: "effort", value: "high" }] });
 });
+
+test("the proxy catalogue is read only when an agent launches a proxy model: claudemix alone needs the seeded accounts, not the catalogue", async () => {
+  const claudemix = { id: "claudemix", kind: "agent", name: "Claude Code × Mixed", bin: ["claude"], enabled: true, installState: "idle", chat: { adapter: "claude" } };
+  const withAgents = (agents: unknown[]) => api().on("GET", "/api/registry", { status: 200, body: { ...registry, agents } });
+  const mixOnly = withAgents([registry.agents[0], claudemix]);
+  await loadAgents(mixOnly);
+  assert.deepEqual(mixOnly.calls.filter((c) => c.path.startsWith("/api/cliproxy")).map((c) => c.path), ["/api/cliproxy"], "the seeded accounts only");
+  const withClaudex = withAgents([registry.agents[0], registry.agents[1], claudemix]);
+  await loadAgents(withClaudex);
+  assert.deepEqual(withClaudex.calls.filter((c) => c.path.startsWith("/api/cliproxy")).map((c) => c.path), ["/api/cliproxy", "/api/cliproxy/models"]);
+  const noProxy = withAgents([registry.agents[0], registry.agents[2]]);
+  await loadAgents(noProxy);
+  assert.ok(!noProxy.calls.some((c) => c.path.startsWith("/api/cliproxy")), "no proxy launcher, no proxy read");
+});
