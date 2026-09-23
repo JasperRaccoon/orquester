@@ -366,7 +366,7 @@ adds a CLI flag. The only `mcpServers` writes are **pass-through** of the user's
 system list into a managed home (`agent-accounts.ts:333`, `cliproxy-files.ts:304` — both
 `mcpServers: sys.mcpServers ?? existing.mcpServers ?? {}`). No `.mcp.json` is ever written.
 The documented wiring is a hand-run `claude mcp add --transport http --scope user orquester
-<URL> --header "Authorization: Bearer <CREDENTIAL>"` (`docs/terminal-control-mcp.md`, §1-§3).
+<URL> --header "Authorization: Bearer <CREDENTIAL>"` (the v1 MCP guide §1-§3; now §2-§4 of `docs/orquester-mcp.md`).
 
 **GUI requirement:** the terminal-drive half needs a decision. Either (a) keep shell tabs as
 PTYs and scope these tools to them, or (b) re-express them against the GUI session model —
