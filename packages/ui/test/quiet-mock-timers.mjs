@@ -1,4 +1,5 @@
 // Preloaded by this package's `test` script (`node --import ./test/quiet-mock-timers.mjs`).
+// Keep in sync with ../../apps/daemon/test/quiet-mock-timers.mjs (paths from the package root).
 //
 // node:test's MockTimers is still experimental on Node 20: the first `mock.timers` in a process
 // prints "ExperimentalWarning: The MockTimers API is an experimental feature and might change at

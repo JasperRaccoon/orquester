@@ -294,18 +294,21 @@ export function ChatComposer({
   // ---------------------------------------------------------------------
   // The draft is the store's (§7.1, §7.4)
   // ---------------------------------------------------------------------
-  // One `AgentChatView` serves every chat tab in a PROJECT, so a tab switch
-  // inside a project keeps this component mounted and only `sessionId`
-  // changes — but focusing a session of another project swaps the whole tab
-  // set and unmounts it, and a reload destroys it outright. A draft held in
-  // component state (as a hand-swapped per-tab map once was) is lost to both.
+  // Each chat tab owns its composer: `MainView` mounts an `AgentChatView` per
+  // tab, keyed by the tab id — the session id — and a tab switch only hides
+  // it, so `sessionId` never changes under a mounted composer, and every
+  // branch that handles a thread swap (the load below, a failed send's
+  // restore) is defensive. But focusing a session of another project swaps
+  // the whole tab set and unmounts it, and a reload destroys it outright. A
+  // draft held in component state (as a hand-swapped per-tab map once was) is
+  // lost to both.
   //
   // So the thread store's persisted draft is the owner: this loads it on mount
-  // and on every thread swap, and the two effects below write it back. The
-  // load deliberately does NOT go through `stageAttachment` — that one also
-  // writes an `[Image #N]` placeholder at the caret, and the text being
-  // restored already contains the placeholders the user saw. The same holds
-  // for a file's path: the restored text already carries it.
+  // (and on a thread swap, should one come), and the two effects below write
+  // it back. The load deliberately does NOT go through `stageAttachment` —
+  // that one also writes an `[Image #N]` placeholder at the caret, and the
+  // text being restored already contains the placeholders the user saw. The
+  // same holds for a file's path: the restored text already carries it.
   const previousSessionRef = React.useRef<string | null>(null);
   React.useLayoutEffect(() => {
     if (previousSessionRef.current === sessionId) return;
@@ -658,10 +661,12 @@ export function ChatComposer({
    * hands over through the bridge. `false` when it does not show `thread`, so
    * the caller goes on to that thread's persisted draft.
    *
-   * `flushSync`: the check and the write are one step. A promise
-   * continuation's update is not sync-lane, and a thread swap committed before
-   * it rendered would load the next thread's draft over it — the restore
-   * would be on no screen and in no thread's store.
+   * `flushSync`: the check and the write are one step, and the restore is
+   * committed and its write scheduled before any later swap or unmount
+   * renders. A promise continuation's update is not sync-lane: an unmount (a
+   * project switch) rendered first would drop it with the component, and a
+   * swap (defensive, above) would load the next thread's draft over it — the
+   * restore would be on no screen and in no thread's store.
    */
   const restoreIntoLiveDraft = React.useCallback(
     (thread: string, restore: FailedSendRestore<StagedAttachment>): boolean => {

@@ -208,9 +208,11 @@ whatever their age, a `thread.state.changed` in any other state is still an ordi
 agent's own marker is still an ordinary row of its agent's window. Nothing else about retention
 changed. A state folded by version 2 may already have evicted the marker (and trimmed at other
 steps), so `FOLD_SNAPSHOT_VERSION` went to 3: a version-2 `state.json` is discarded through the
-existing version-mismatch path and its log re-folded once, lazily, on the thread's next load. The
-reference model in `fold.retention.test.ts` reads both spellings; a log with legacy rows is checked
-against it, and through JSON at every split point in `fold.determinism-legacy.test.ts`.
+existing version-mismatch path and its log re-folded once: lazily, on the thread's next load —
+except a thread orphaned at boot: the host's boot reconcile folds it before the readiness gate opens
+(`agent-host/main.ts`; A1 of the thread-index design), so it re-folds there, on the readiness path.
+The reference model in `fold.retention.test.ts` reads both spellings; a log with legacy rows is
+checked against it, and through JSON at every split point in `fold.determinism-legacy.test.ts`.
 
 ## Ownership (parallel implementation)
 

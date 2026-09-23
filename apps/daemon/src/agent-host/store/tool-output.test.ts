@@ -82,17 +82,18 @@ test("the item's newest write names the call, as readItem reads it", () => {
 });
 
 test("a rewind does not unprint output: chunks written in the turns a revert removed are still joined", () => {
-  // A background shell launched before the rewind point keeps running through it: what it printed in the removed turns
-  // is its real output, and the raw log keeps it (documented, not filtered).
+  // Chunks written before a rewind are what the command printed, and a rewind unprints nothing: the raw log keeps them
+  // (documented, not filtered). A Claude rewind restarts the session, which closes an open shell first (its item
+  // settles `failed`, `closeLiveTasks`), so the shell's end lands before the revert and nothing of it follows.
   const shell = "bgshell:task-1";
   const events = [
     row("start", "tool.started", shell, { itemType: "command_execution" }),
     chunk("o1", shell, "before\n"),
     chunk("o2", shell, "in a turn the rewind removed\n"),
-    logged("thread.reverted", { turnCount: 1 }),
-    chunk("o3", shell, "after\n")
+    row("end", "tool.completed", shell, { itemType: "command_execution", status: "failed" }),
+    logged("thread.reverted", { turnCount: 1 })
   ];
-  assert.equal(joinToolOutput(events, "start")!.output, "before\nin a turn the rewind removed\nafter\n");
+  assert.deepEqual(joinToolOutput(events, "start"), { toolUseId: shell, output: "before\nin a turn the rewind removed\n", complete: true, truncated: false });
 });
 
 test("the cap cuts the join in-band, on a character boundary, and the completion after the cut is still reported", () => {

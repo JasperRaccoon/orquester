@@ -579,11 +579,11 @@ export const THREAD_ITEM_OUTPUT_MAX_BYTES = 8 * 1024 * 1024;
  * wire, history pages are slimmed), so the host joins them from the log.
  *
  * The join reads the raw log: a chunk written in a turn a later rewind
- * (`thread.reverted`) removed is still joined, because it is the command's real
- * output — a background shell launched before the rewind point keeps running
- * through it. It is by call, not by stream: a file change's
- * `file_change_output` chunks join like a command's, and the reader decides
- * what the text is.
+ * (`thread.reverted`) removed is still joined — chunks written before a rewind
+ * are what the command printed, and a rewind unprints nothing (a Claude rewind
+ * restarts the session, closing an open shell first, so none prints on through
+ * one). It is by call, not by stream: a file change's `file_change_output`
+ * chunks join like a command's, and the reader decides what the text is.
  *
  * 404 `ITEM_NOT_FOUND` when the thread has no such item, or the item names no
  * tool call (no `payload.toolUseId`).
