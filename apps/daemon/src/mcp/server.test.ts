@@ -10,7 +10,7 @@ import { MAX_ERROR_MESSAGE_CHARS } from "./result.ts";
 import { FakeDaemonApi } from "./testing.ts";
 import { allTools, argumentProblems, argumentsSchema, registerMcp, SERVER_INSTRUCTIONS, SERVER_VERSION, type McpDeps } from "./server.ts";
 
-const EXPECTED_TOOLS = ["list_projects", "list_agents", "list_conversations", "list_sessions", "get_session", "get_turn_diff", "create_session", "update_session", "interrupt_session", "stop_session", "close_session", "revert_session", "compact_session", "search_sessions", "send_message", "implement_plan", "read_transcript", "answer_question", "dismiss_question", "resolve_approval", "wait_for_session", "get_usage", "get_cost", "list_files", "read_file", "list_todos", "create_todo", "update_todo", "delete_todo", "toggle_todo_item"];
+const EXPECTED_TOOLS = ["list_projects", "list_agents", "list_conversations", "list_sessions", "get_session", "get_turn_diff", "create_session", "update_session", "interrupt_session", "stop_session", "close_session", "revert_session", "compact_session", "search_sessions", "send_message", "implement_plan", "read_transcript", "read_tool_output", "answer_question", "dismiss_question", "resolve_approval", "wait_for_session", "get_usage", "get_cost", "list_files", "read_file", "list_todos", "create_todo", "update_todo", "delete_todo", "toggle_todo_item"];
 
 // Spec §4.5's annotation rules, spelled out literally so a drifting constant fails here too. A read, a todo tool and a
 // file tool touch only the daemon's own state (openWorldHint: false); a tool that drives an agent keeps the default.
@@ -41,6 +41,7 @@ const CONTRACT: Record<string, { required: string[]; annotations: object }> = {
   send_message: { required: ["sessionId"], annotations: WRITE },
   implement_plan: { required: ["sessionId"], annotations: WRITE },
   read_transcript: { required: ["sessionId"], annotations: READ },
+  read_tool_output: { required: ["sessionId", "itemId"], annotations: READ },
   answer_question: { required: ["sessionId", "answers"], annotations: WRITE },
   dismiss_question: { required: ["sessionId"], annotations: WRITE },
   resolve_approval: { required: ["sessionId", "decision"], annotations: WRITE },
@@ -88,13 +89,13 @@ const MCP_HEADERS = { accept: "application/json, text/event-stream", "content-ty
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 const ticks = async (n: number) => { for (let i = 0; i < n; i += 1) await tick(); };
 
-test("tools/list is exactly the 30 spec tools, each with a title, annotations and described params", async () => {
+test("tools/list is exactly the 31 spec tools, each with a title, annotations and described params", async () => {
   const app = mcpApp({ createApi: () => new FakeDaemonApi() });
   try {
     const list = await postMcp(app, { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
     const tools = list.result.tools as ListedTool[];
     assert.deepEqual(tools.map((t) => t.name), EXPECTED_TOOLS);
-    assert.equal(tools.length, 30);
+    assert.equal(tools.length, 31);
     for (const t of tools) {
       assert.ok(t.title, `${t.name} has a title`);
       assert.ok(t.annotations, `${t.name} has annotations`);
@@ -413,7 +414,7 @@ test("POST /mcp answers 406 unless Accept lists both application/json and text/e
 
 test("SERVER_INSTRUCTIONS stays under the ~2KB budget and names the load-bearing rules", () => {
   assert.ok(SERVER_INSTRUCTIONS.length <= 2048, `${SERVER_INSTRUCTIONS.length} chars`);
-  for (const needle of ["list_agents", "wait_for_session", "cursor", "% USED", "sessionId"]) assert.ok(SERVER_INSTRUCTIONS.includes(needle), needle);
+  for (const needle of ["list_agents", "wait_for_session", "cursor", "% USED", "sessionId", "read_tool_output", "outputItemId"]) assert.ok(SERVER_INSTRUCTIONS.includes(needle), needle);
   assert.doesNotMatch(SERVER_INSTRUCTIONS, /❯|Escape|keystroke|read_terminal|send_keys/i);
 });
 

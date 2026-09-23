@@ -21,7 +21,9 @@
  * Both readers call {@link commandDisplayDetail} — the timeline's work-log
  * rows (`packages/ui/src/lib/agent-chat/entries.logic.ts`) and the MCP's tool
  * rows (`apps/daemon/src/mcp/transcript.ts`) — so a change here changes what
- * both show.
+ * both show. {@link commandOutputText} reads the WHOLE output out of the
+ * unslimmed item (the MCP's `read_tool_output`, `apps/daemon/src/mcp/tools/
+ * output.ts`), from the one list of places the preview reads.
  *
  * *T3: `packages/client-runtime/src/work-log/presentation.ts` reads the same
  * output locations (audit:
@@ -42,43 +44,75 @@ const asTrimmedString = (value: unknown): string | undefined => {
 };
 
 /**
- * The output a command's provider data carries: the first of these that is a
- * non-blank string, trimmed — Codex's `item.aggregatedOutput`, the item's
- * `result.content`, a `rawOutput` that is the text itself, then `rawOutput`'s
- * `content` (the shape the wire's slimming leaves), its `stdout` and `stderr`
- * joined, its `output` and its `output_for_prompt` (Grok's), then the text of
- * ACP `content` blocks joined, then `result.content`, then a `result` that is
- * the text itself.
+ * The places a command's provider data carries its output, in the order they
+ * are read, each as the pieces it holds: Codex's `item.aggregatedOutput`, the
+ * item's `result.content`, a `rawOutput` that is the text itself, then
+ * `rawOutput`'s `content` (the shape the wire's slimming leaves), its `stdout`
+ * and `stderr` (two pieces), its `output` and its `output_for_prompt` (Grok's),
+ * then the texts of ACP `content` blocks (a piece each), then `result.content`,
+ * then a `result` that is the text itself.
+ *
+ * The ONE list: the row's preview and the whole output both read the first
+ * place that holds a non-blank piece ({@link outputPieces}), so the whole
+ * output is always the text the preview was cut from.
  */
-function commandOutputPreview(data: Record<string, unknown> | null): string | undefined {
+function outputPlaces(data: Record<string, unknown> | null): readonly (readonly unknown[])[] {
   const item = asRecord(data?.item);
   const raw = asRecord(data?.rawOutput);
-  const outputStreams = [asTrimmedString(raw?.stdout), asTrimmedString(raw?.stderr)]
-    .filter((value): value is string => value !== undefined);
-  const content = Array.isArray(data?.content)
+  const blocks = Array.isArray(data?.content)
     ? data.content.flatMap((value) => {
         const block = asRecord(value);
-        const text = asRecord(block?.content);
-        return block?.type === "content" ? [asTrimmedString(text?.text)].filter(Boolean) : [];
-      }).join("\n")
-    : undefined;
-  const candidates = [
-    item?.aggregatedOutput,
-    asRecord(item?.result)?.content,
-    data?.rawOutput,
-    raw?.content,
-    outputStreams.length > 0 ? outputStreams.join("\n") : undefined,
-    raw?.output,
-    raw?.output_for_prompt,
-    content,
-    asRecord(data?.result)?.content,
-    data?.result
+        return block?.type === "content" ? [asRecord(block.content)?.text] : [];
+      })
+    : [];
+  return [
+    [item?.aggregatedOutput],
+    [asRecord(item?.result)?.content],
+    [data?.rawOutput],
+    [raw?.content],
+    [raw?.stdout, raw?.stderr],
+    [raw?.output],
+    [raw?.output_for_prompt],
+    blocks,
+    [asRecord(data?.result)?.content],
+    [data?.result]
   ];
-  for (const candidate of candidates) {
-    const text = asTrimmedString(candidate);
-    if (text !== undefined) return text;
+}
+
+/**
+ * The output's pieces, as the provider wrote them: the non-blank strings of the
+ * first place that has one. A blank piece — a stream that printed only
+ * whitespace — is no output, and a value that is not a string is never text.
+ */
+function outputPieces(data: unknown): string[] | undefined {
+  for (const place of outputPlaces(asRecord(data))) {
+    const pieces = place.filter((piece): piece is string => asTrimmedString(piece) !== undefined);
+    if (pieces.length > 0) return pieces;
   }
   return undefined;
+}
+
+/**
+ * What the row shows of the output: each piece trimmed, one piece per line.
+ * On the wire each piece is already the slimmer's one-line summary.
+ */
+function commandOutputPreview(data: Record<string, unknown> | null): string | undefined {
+  return outputPieces(data)?.map((piece) => piece.trim()).join("\n");
+}
+
+/**
+ * The WHOLE output a command's provider data carries — the text the row's
+ * preview is cut from, from the same place, as the provider wrote it: nothing
+ * trimmed, inside or at the ends. A place of several pieces (`stdout` then
+ * `stderr`; ACP content blocks) starts each piece on a line of its own: a
+ * newline goes between two pieces only where the first does not already end
+ * with one. `undefined` when the data carries no output.
+ *
+ * Read it from the UNSLIMMED item (`GET …/items/:itemId`, §5.6): on the wire
+ * the output is already cut to its preview.
+ */
+export function commandOutputText(data: unknown): string | undefined {
+  return outputPieces(data)?.reduce((text, piece) => `${text}${text.endsWith("\n") ? "" : "\n"}${piece}`);
 }
 
 /**

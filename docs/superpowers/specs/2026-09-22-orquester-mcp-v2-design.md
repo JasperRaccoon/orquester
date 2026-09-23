@@ -14,14 +14,14 @@ tools scrape screens, emit keystrokes, guess quiescence and teach the driving mo
 each provider's machine protocol, and on a chat tab every one of those tools either returns
 nothing, reports success for a write that never happened, or busy-loops (§3).
 
-v2 replaces that surface with **29 chat-native tools** (*Built: 30 — `search_sessions` was added
-after v2 shipped, §7.2*) that mirror the chat GUI one-to-one: what a user can do from a chat tab —
-open, resume and close sessions; pick model, effort, permission mode, plan mode and account; send
-messages with attachments; answer questions and approvals; read status, transcripts and subagents;
-wait for something to happen; read quota per account — an MCP client can do with the same
-semantics, the same gates and the same error codes, because the tools are a thin **in-process
-client of the daemon's own REST API** (§4.2). No screen text, no keystrokes, no quiescence
-heuristics, no TUI prompt guidance.
+v2 replaces that surface with **29 chat-native tools** (*Built: 31 — `search_sessions` and
+`read_tool_output` were added after v2 shipped, §7.2*) that mirror the chat GUI one-to-one: what a
+user can do from a chat tab — open, resume and close sessions; pick model, effort, permission mode,
+plan mode and account; send messages with attachments; answer questions and approvals; read status,
+transcripts and subagents; wait for something to happen; read quota per account — an MCP client
+can do with the same semantics, the same gates and the same error codes, because the tools are a
+thin **in-process client of the daemon's own REST API** (§4.2). No screen text, no keystrokes, no
+quiescence heuristics, no TUI prompt guidance.
 
 ---
 
@@ -232,7 +232,8 @@ shared copy.
   detail is logged server-side (as today's `toSafeToolError`).
   *Built: the todo store adds `NOT_FOUND` (a list id that does not exist; the message names the id:
   `No todo list with id "<id>"; list_todos shows the ids.`) and `CONFLICT` (its 409),
-  through `result.ts`'s `TodoError` mapping, which `TodoTools` lets through. A daemon answer that
+  through `result.ts`'s `TodoError` mapping, which `TodoTools` lets through; `read_tool_output`
+  answers `NOT_FOUND` too, for an item the host does not have (§7.2). A daemon answer that
   names no code maps by status (`errors.ts`): 401 `UNAUTHORIZED`, 403 `FORBIDDEN`, 404 `NOT_FOUND`,
   409 `COMMAND_REJECTED`, 413 `UPLOAD_TOO_LARGE`, 429 `TOO_MANY_ATTEMPTS`, 502/503
   `HOST_UNAVAILABLE`, any other 4xx `INVALID_ARGUMENT`, any other 5xx `INTERNAL`. The SDK's own
@@ -260,10 +261,10 @@ shared copy.
   plus what was cut; `read_transcript` and `get_turn_diff` take explicit `maxChars` bounds.
   *Built: `get_turn_diff` takes no `maxChars` — its diff is bounded by the result budget itself,
   with `truncated`, and its file list keeps its head (`filesTruncated`, §7.2). `get_cost`,
-  `list_files`, `list_todos`, `read_file`, `list_agents`, `list_conversations`, `search_sessions`
-  and every session detail bound themselves too (§6.2, §6.3, §7.1, §7.2, §7.8, §7.9). A result
-  still over the cap keeps its leading bytes, never cutting a character, and ends with
-  `… [truncated: N bytes over the 60 000-byte cap]`; its `structuredContent` is then only
+  `list_files`, `list_todos`, `read_file`, `list_agents`, `list_conversations`, `search_sessions`,
+  `read_tool_output` and every session detail bound themselves too (§6.2, §6.3, §7.1, §7.2, §7.8,
+  §7.9). A result still over the cap keeps its leading bytes, never cutting a character, and ends
+  with `… [truncated: N bytes over the 60 000-byte cap]`; its `structuredContent` is then only
   `{truncated: true, truncationNote}`.*
 - **Annotations.** `readOnlyHint` on every list/get/read/wait/usage/file tool; `destructiveHint`
   on `close_session`, `revert_session`, `delete_todo`; `idempotentHint` on reads and on
@@ -510,6 +511,7 @@ OpenCode conversation cannot be resumed, in the GUI either; a registry that cann
 | `list_sessions` | `project?`, `kind? = "all"` (`"chat"`\|`"terminal"`\|`"all"`), `attention? = false` | `{sessions: SessionView[]}`. With `attention:true`: only sessions whose `attention` is set or whose `status` is `waiting`, ordered like the Attention Center (`needsAttentionAt` desc — *Built: `byAttention` (`tools/watch.ts`), shared with `wait_for_session`: by the instant of `needsAttentionAt`, else `createdAt` for an unstamped row, a tie going to the newer tab*); otherwise by project, then `order`. *Built: an empty `project` is refused (`PROJECT_NOT_FOUND`), never read as every project.* |
 | `get_session` | `sessionId` | `{session: SessionDetail}` (`SessionView` + `terminal` for a terminal tab) |
 | `read_transcript` | `sessionId`, `turns? = 3`, `beforeTurn?` (2 to `turnCount + 1` — *Built*, added after v2 shipped, §7.6), `agentId?`, `include? = ["tools","activity"]` (`"reasoning"` opt-in), `maxChars? = 40000` (≤ 55 000 UTF-8 bytes — *Built*, §7.6) | `{entries: TranscriptEntry[], turnCount, olderTurns, coveredTurns: [from, to] \| null, unavailableTurns?: [from, to], truncated, subagents: [{id, title, status}], subagentsTruncated?, hint?}` — §7.6 (*Built: `olderTurns` and `unavailableTurns` were added with `beforeTurn`*) |
+| `read_tool_output` — *added after v2 shipped (2026-09-23)* | `sessionId`, `itemId` (a tool row's `outputItemId`, §7.6), `offset? = 0`, `maxBytes? = 40000` (1–55 000) | `{itemId, kind: "command-output" \| "message" \| "payload", text, offset, totalBytes, nextOffset?}` — the timeline's "Load full output" (`ActivityRows.tsx`). `GET /api/sessions/:id/items/:itemId` — the unslimmed item (the GUI spec's §5.6) — after the session is checked to be a chat tab. `kind: "command-output"` for a `command_execution` activity whose data carries output: that output whole, found in the places the row's preview reads — one list in `packages/api/src/agent-chat/command-output.ts`, which `commandDisplayDetail`'s preview and `commandOutputText` both read, so the whole output is always the text the preview was cut from — and untrimmed: `stdout` then `stderr`, and ACP content blocks, each start a line of their own. Any other item answers the GUI viewer's text (`fullOutputText`, `AgentChatView.tsx`): a message's text (`message`); a string payload as it is, else `JSON.stringify(payload, null, 2)`, else the row's summary (`payload`) — for a command too when its data carries no output in those places. `offset`, `nextOffset` and `totalBytes` are UTF-8 byte offsets into that text (a lone surrogate reads as U+FFFD). A window never splits a character: it holds at most `maxBytes` bytes — one whole character (up to 4 bytes) when `maxBytes` is narrower than it, so paging always advances — and shrinks, to the last character that fits, until the result fits the 60 000-byte cap (escaped as JSON, most control characters take 6 bytes); an `offset` inside a character starts at that character, and the result's `offset` says where. `nextOffset` is present only when more remains; an `offset` past `totalBytes` is `INVALID_ARGUMENT` naming it (at `totalBytes` the text is empty). A 404 from the item route — the host's `THREAD_NOT_FOUND` "No item '<id>'." — is `NOT_FOUND`, saying the item is gone or never existed and that item ids come from `read_transcript`'s `outputItemId` (the id quoted cut to 100 code points); any other failure goes through `daemonError`. Every page re-reads the item: the host reads it back from the thread's log. Annotated as a read (`openWorldHint: false`). |
 | `get_turn_diff` | `sessionId`, `turn?` (default: the latest checkpointed turn) | `{turn, fromTurn, files: [{path, additions, deletions}], filesTruncated?, omittedFiles?, diff, truncated}` (`diff` ≤ 80 000 chars — *Built: the file list gets max(20 000 JSON bytes, what the whole diff leaves unused) and keeps its head, `filesTruncated` and `omittedFiles` counting the rest; the diff gets whatever is left of the 60 000-byte result*) |
 | `search_sessions` — *added after v2 shipped (2026-09-23)* | `query` (trimmed, then 1–200 code points, `THREAD_SEARCH_MAX_QUERY_CHARS`, counted as the host and the daemon clamp it — refused, never cut), `project?`, `limit? = 20` (1–50, `THREAD_SEARCH_MAX_RESULTS`) | `{query, hits: [{sessionId, title, projectPath, turn, kind, role?, activityKind?, snippet, at}], truncated, omittedHits?, indexed, hint?}` — the command palette's `?` search. `GET /api/agent/search?q=&limit=&projectPath=` (`project` resolved as `list_sessions`' is), then only the hits whose `threadId` is a chat session open now (`GET /api/sessions`): a terminal tab's id or a closed tab's is not addressable, so it is dropped. `title` and `projectPath` are the session's own, as `list_sessions` shows them; `turn` is the hit's `ordinal` (null for a turnless row); `role` only on a message hit, `activityKind` only on an activity hit; `snippet` keeps the host's `«`/`»` marks. `indexed: false` is an answer — no hits and a `hint` that search is unavailable on this host right now; a non-2xx is an error through `daemonError`. Bounded like every tool: each title and snippet cut to 300 code points (ending in `…`), then the lowest-ranked hits dropped from the end, with `truncated: true` and `omittedHits`; `truncated` is also the host's own "more hits than `limit`". A hit is opened with `read_transcript {sessionId, beforeTurn: turn + 1, turns: 1}`. Annotated as a read (`openWorldHint: false`). |
 
@@ -687,6 +689,7 @@ from events. Each entry:
                        /* Built: commentary?: true on a commentary message */
        | "reasoning" → text                       (only with include "reasoning")
        | "tool"      → tool: { type /* itemType */, title, status, command?, detail?, changedFiles? }   // one entry per toolUseId, latest state
+                       /* Built: outputItemId? — where the whole of what the read cut lives, for read_tool_output */
        | "approval"  → requestId, kind, detail?, decision?           (open or resolved)
                        /* Built: requestKind?, text? (≤ 2 000 chars), decision? */
        | "question"  → requestId, questions: [header…], answered: boolean
@@ -788,6 +791,19 @@ showed no legacy marker, and scoped the parent view by the row's `agentId` alone
 subagent's own compaction named on the row or on its payload (`isAgentOwnedActivity`); a drill-in keeps the rows
 stamped with its agent's id, as before.*
 
+*Built (after v2 shipped — plan `2026-09-23-mcp-output-drill-in-and-housekeeping`, item 1): a tool entry carries
+`outputItemId`, the id of the latest of the call's rows whose payload the read cut — `payload.truncated === true`, the
+slimmer's promise that `GET …/items/:itemId` holds more (the GUI spec's §5.6) — among the rows the host stores whole: its
+`tool.completed` or a `tool.denied`. It is the row whose "Load full output" button the GUI's timeline offers
+(`ActivityRows.tsx`: `entry.truncated` → `onLoadFullOutput(entry.id)`), and `read_tool_output` (§7.2) takes it as
+`itemId`. Never the call's start, which the GUI does not show (`tool.started` is a dropped kind in `entries.logic.ts`),
+and — the one departure from the GUI — never a `tool.updated`: ingestion persists an update already slimmed (the GUI
+spec's §5.6 exception, `maybeSlim`), so its item read serves the same cut payload, `truncated` and all, and
+`read_tool_output` would hand the one-line preview back as the whole output. The GUI still offers its button on a running
+call's latest update, where it shows that same cut payload; the MCP names no id until the completion lands. Absent when
+there is nothing more to read. The slimmer's allow-list rebuilds a tool row's `data`, so most finished calls that carry
+provider data are cut and carry the field; its bytes are part of the row, which the shed measures whole.*
+
 ### 7.7 Waiting
 
 **`wait_for_session`** — GUI: the Attention Center.
@@ -847,12 +863,13 @@ the item; passing it makes a retry harmless), so its `idempotentHint` is `false`
 29 tools: catalogue 3 · sessions 14 (`list_sessions`, `get_session`, `read_transcript`,
 `get_turn_diff`, `create_session`, `update_session`, `interrupt_session`, `stop_session`,
 `close_session`, `revert_session`, `compact_session`, `send_message`, `implement_plan`,
-`wait_for_session`) · requests 3 · usage 2 · files 2 · todos 5. *Built: 30 — search 1
+`wait_for_session`) · requests 3 · usage 2 · files 2 · todos 5. *Built: 31 — search 1
 (`search_sessions`, the command palette's `?` search, added after v2 shipped, §7.2), listed in
-`tools/list` between `compact_session` and `send_message`.* Every composer chip, banner
-button, header action and `+`-menu action in the chat GUI maps to exactly one of them; the only
-GUI-reachable chat action without a tool is Ctrl+B "run this command in the background"
-(`/background`, Claude only) — omitted as YAGNI, trivially addable.
+`tools/list` between `compact_session` and `send_message`; and `read_tool_output` (the timeline's
+"Load full output", added after v2 shipped, §7.2), listed right after `read_transcript`.* Every
+composer chip, banner button, header action and `+`-menu action in the chat GUI maps to exactly one
+of them; the only GUI-reachable chat action without a tool is Ctrl+B "run this command in the
+background" (`/background`, Claude only) — omitted as YAGNI, trivially addable.
 
 ---
 

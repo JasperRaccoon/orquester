@@ -5,7 +5,14 @@ export type TranscriptInclude = "reasoning" | "tools" | "activity";
 export interface TranscriptEntry { turn: number | null; turnId: string | null; kind: "user" | "assistant" | "reasoning" | "tool" | "approval" | "question" | "subagent" | "plan" | "changes" | "compaction" | "error" | "warning" | "info"; createdAt: string; agentId?: string; text?: string;
   /** On an assistant row only: the provider marked it narration between tool calls (Codex's commentary), never the turn's answer. */
   commentary?: true;
-  attachments?: { name: string; type: string }[]; tool?: { type: string; title: string; status: string; command?: string; detail?: string; changedFiles?: string[] }; requestId?: string; requestKind?: string; decision?: string;
+  attachments?: { name: string; type: string }[]; tool?: { type: string; title: string; status: string; command?: string; detail?: string; changedFiles?: string[] };
+  /**
+   * On a tool row only: the id of the latest of the call's rows whose payload the read cut (`payload.truncated`, §5.6)
+   * and the host stores whole — its completion or a denial, the row the GUI's "Load full output" reads.
+   * read_tool_output takes it as `itemId`. Absent when there is nothing more to read.
+   */
+  outputItemId?: string;
+  requestId?: string; requestKind?: string; decision?: string;
   questions?: string[]; answered?: boolean; subagent?: { id: string; title: string | null; status: string }; actionable?: boolean; files?: { path: string; additions: number; deletions: number }[]; state?: string; beforeTokens?: number; afterTokens?: number }
 export interface TranscriptOptions {
   /** How many turns the read covers, and `beforeTurn` which ones: the range `transcriptRange` names. */
@@ -415,6 +422,11 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
         const detail = p.itemType !== "command_execution" ? str(p.detail) : a.activityKind === "tool.started" ? undefined : commandDisplayDetail(p);
         if (detail) t.detail = detail;
         if (Array.isArray(p.changedFiles)) t.changedFiles = p.changedFiles.filter((f): f is string => typeof f === "string");
+        // Where the whole of what the read cut lives (`truncated`, the slimmer's promise, §5.6): the latest cut row of
+        // those the host stores whole — the completion or a denial, the row the GUI's "Load full output" reads. Never
+        // the start, which the GUI does not show, nor an update: ingestion stores a `tool.updated` already cut, so its
+        // item holds nothing its row does not (the GUI's button on a running call reads that same preview back).
+        if (p.truncated === true && (a.activityKind === "tool.completed" || a.activityKind === "tool.denied")) e.outputItemId = a.id;
         continue;
       }
       if (a.activityKind.startsWith("task.")) {
