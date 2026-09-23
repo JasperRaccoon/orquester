@@ -18,6 +18,7 @@ import {
   SUPPORTED_ATTACHMENT_IMAGE_MIME_TYPES
 } from "@orquester/api/agent-chat";
 import type { AttachmentRef } from "@orquester/api/agent-chat";
+import { imageOrdinal, imagePlaceholder } from "./composer-images";
 import { parseStandaloneComposerSlashCommand } from "./composer-trigger";
 import type { FollowUpBehavior } from "../../../lib/agent-chat/queue.logic";
 
@@ -378,9 +379,11 @@ export function resolvePlanFollowUpSubmission(input: {
  *  - `sent` — the transport took exactly the text it was handed;
  *  - `refused` — nothing was sent, and the draft is left as it is;
  *  - `failed` — the transport rejected. `text` is what goes back to the draft,
- *    the only outcome that writes it: the user's own words from a plain send
- *    or a Refine, and `null` from an Implement, whose prompt the composer
- *    generated. The draft is then left as it is and the plan stays actionable.
+ *    with the chips the send carried ({@link draftAfterSend}); it is the only
+ *    outcome that writes the draft. It holds the user's own words from a
+ *    plain send or a Refine, and `null` from an Implement, whose prompt the
+ *    composer generated. The draft is then left as it is and the plan stays
+ *    actionable.
  */
 export type ComposerSendOutcome =
   | { kind: "sent" }
@@ -461,6 +464,80 @@ export async function sendComposerTurn(input: {
       notice: error instanceof Error ? error.message : "Could not send the message."
     };
   }
+}
+
+/**
+ * The minimum a chip has to look like for {@link draftAfterSend}. Structural,
+ * like {@link StagedAttachmentLike}; `mimeType` is what numbers an image.
+ */
+export interface RestorableAttachment {
+  key: string;
+  mimeType: string;
+  ref?: { id: string };
+}
+
+/** An `[Image #N]`, as `imagePlaceholder` writes it. */
+const IMAGE_PLACEHOLDER = /\[Image #(\d+)\]/g;
+
+/**
+ * What a settled send does to the draft: the draft to show next, or `null`
+ * to leave it as it is.
+ *
+ * `submit` empties the draft, tray included, before the send goes out. Only
+ * a FAILED send writes anything back, and then the chips it carried come back
+ * WITH its text: restoring the words alone is how a resend went out without
+ * the files. Everything else leaves the draft alone. A sent message is gone,
+ * a refusal sent nothing, and a failed Implement (`text: null`) carried the
+ * composer's prompt and no chip, since a chip in the tray turns Implement back
+ * into a plain send.
+ *
+ * What was typed or staged while the send was in flight stays, behind what
+ * comes back: its text after the restored text, its chips after the restored
+ * chips. Chips merge by `key`, or by the upload's ref id as
+ * {@link decideStagedAttachmentForRef} has it, so a chip delivered again
+ * meanwhile is not staged twice. An image's `[Image #N]` is its position among
+ * the staged images, so the restored text keeps naming its images, and each
+ * placeholder the meanwhile text wrote for one of its own images follows that
+ * image to where it lands. A number that names none of them is the user's own
+ * text and stays as typed.
+ */
+export function draftAfterSend<A extends RestorableAttachment>(input: {
+  outcome: ComposerSendOutcome;
+  /** The chips the send carried, in tray order. */
+  sent: readonly A[];
+  /** The draft as it is now, holding what was typed or staged meanwhile. */
+  draft: { text: string; attachments: readonly A[] };
+}): { text: string; attachments: A[] } | null {
+  const { outcome, sent, draft } = input;
+  if (outcome.kind !== "failed" || outcome.text === null) return null;
+
+  const sentCopyOf = (entry: A): A | undefined =>
+    sent.find(
+      (candidate) =>
+        candidate.key === entry.key ||
+        (candidate.ref !== undefined && candidate.ref.id === entry.ref?.id)
+    );
+  const attachments = [
+    ...sent,
+    ...draft.attachments.filter((entry) => sentCopyOf(entry) === undefined)
+  ];
+
+  const meanwhileImages = draft.attachments.filter((entry) => entry.mimeType.startsWith("image/"));
+  const meanwhileText = draft.text.replace(IMAGE_PLACEHOLDER, (placeholder, digits: string) => {
+    const image = meanwhileImages[Number(digits) - 1];
+    if (image === undefined) return placeholder;
+    const ordinal = imageOrdinal(attachments, (sentCopyOf(image) ?? image).key);
+    return ordinal === null ? placeholder : imagePlaceholder(ordinal);
+  });
+
+  const restored = outcome.text;
+  const text =
+    meanwhileText.trim().length === 0
+      ? restored
+      : restored.trim().length === 0
+        ? meanwhileText
+        : `${restored}\n\n${meanwhileText}`;
+  return { text, attachments };
 }
 
 // ---------------------------------------------------------------------------

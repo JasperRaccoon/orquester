@@ -64,6 +64,7 @@ import {
   composerSubmissionIntentForEnter,
   composerSubmissionValidationMessage,
   decideStagedAttachmentForRef,
+  draftAfterSend,
   hasSendableContent,
   implementationTextResolver,
   isPasteAsTextShortcut,
@@ -99,6 +100,13 @@ interface DraftState {
 }
 
 const EMPTY_DRAFT: DraftState = { text: "", attachments: [] };
+
+/** What goes on the wire for the staged chips: their uploaded references. */
+function attachmentRefs(attachments: readonly StagedAttachment[]): AttachmentRef[] {
+  return attachments
+    .map((entry) => entry.ref)
+    .filter((ref): ref is AttachmentRef => ref !== undefined);
+}
 
 /** 70px → 200px, T3's prompt bounds. *T3: `ComposerPromptEditorTiptap.tsx:729-736`.* */
 const PROMPT_MIN_PX = 70;
@@ -879,11 +887,12 @@ export function ChatComposer({
     async (
       text: string,
       mode: InteractionMode,
-      refs: AttachmentRef[],
+      attachments: readonly StagedAttachment[],
       resolveText?: () => Promise<string>
     ) => {
       setSending(true);
       try {
+        const refs = attachmentRefs(attachments);
         const outcome = await sendComposerTurn({
           text,
           ...(resolveText ? { resolveText } : {}),
@@ -901,22 +910,19 @@ export function ChatComposer({
           if (isMobile) textareaRef.current?.blur();
           return;
         }
-        if (outcome.kind === "failed" && outcome.text !== null) {
-          // A failed send goes back to the FRONT of the draft, ahead of anything
-          // typed since, so nothing the user wrote while it was in flight is
-          // reordered behind it.
-          const restored = outcome.text;
-          setDraft((state) => ({
-            ...state,
-            text: state.text.trim().length > 0 ? `${restored}\n\n${state.text}` : restored
-          }));
-        }
-        // A refusal sent nothing and leaves the draft alone: a plan that could
-        // not be read back, or read back over the bound, is still actionable,
-        // so Implement is still there to press again. A failed Implement
-        // (`text: null`) leaves the draft alone for the same reason: its prompt
-        // is the composer's, and in the draft it would read as a plan-mode
-        // Refine carrying the implementation prefix.
+        // A failed send comes back whole, its chips with its text, to the
+        // FRONT of the draft: ahead of anything typed or staged since, so
+        // nothing the user wrote while it was in flight is reordered behind it
+        // (`draftAfterSend`). A refusal sent nothing and leaves the draft
+        // alone: a plan that could not be read back, or read back over the
+        // bound, is still actionable, so Implement is still there to press
+        // again. A failed Implement (`text: null`) leaves the draft alone for
+        // the same reason: its prompt is the composer's, and in the draft it
+        // would read as a plan-mode Refine carrying the implementation prefix.
+        setDraft((state) => {
+          const next = draftAfterSend({ outcome, sent: attachments, draft: state });
+          return next === null ? state : { ...state, ...next };
+        });
         setNotice(outcome.notice);
       } finally {
         setSending(false);
@@ -1000,9 +1006,7 @@ export function ChatComposer({
         return;
       }
 
-      const refs = draft.attachments
-        .map((entry) => entry.ref)
-        .filter((ref): ref is AttachmentRef => ref !== undefined);
+      const sentAttachments = draft.attachments;
       const disposition = resolveFollowUpDisposition({
         followUpBehavior: chatPrefs.followUpBehavior,
         intent,
@@ -1026,7 +1030,7 @@ export function ChatComposer({
       if (disposition === "queue") {
         actions.queueMessage({
           text: outgoing,
-          attachments: refs,
+          attachments: attachmentRefs(sentAttachments),
           context: [],
           interactionMode: outgoingMode,
           // The client store owns the tool boundary a queued message anchors
@@ -1037,7 +1041,7 @@ export function ChatComposer({
         });
         return;
       }
-      void runSend(outgoing, outgoingMode, refs, implementationText);
+      void runSend(outgoing, outgoingMode, sentAttachments, implementationText);
     },
     [
       planFollowUp,
