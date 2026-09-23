@@ -20,8 +20,7 @@ type Responder = DaemonResponse | ((call: { query?: Record<string, string>; body
  * - Uploads. `uploadAttachment` reads the whole stream into `uploads`, then answers with the `onUpload` handler, else
  *   a 200 AttachmentRef (`image` for an image/* type); a source stream that errors makes it reject. InjectDaemonApi
  *   answers that case 503 HOST_UNAVAILABLE instead: `countingLimit` (agent-chat/service.ts) forwards the source's error
- *   into the body the host client is sending, the upload fails, and the seam maps the throw. `attachmentPath` answers
- *   from `attachmentPaths`, else a path under a fake appdir.
+ *   into the body the host client is sending, the upload fails, and the seam maps the throw.
  * - Bus. `emit` delivers synchronously, as `Broadcaster.publish` does over the sinks `InjectDaemonApi.subscribe` adds:
  *   it walks the LIVE subscriber set in subscription order (a listener removed mid-delivery is skipped, one added is
  *   reached), each `subscribe` call is its own subscription even for the same function, and a listener that throws is
@@ -31,7 +30,6 @@ type Responder = DaemonResponse | ((call: { query?: Record<string, string>; body
 export class FakeDaemonApi implements DaemonApi {
   calls: Call[] = [];
   uploads: { sessionId: string; meta: { name: string; type?: string }; bytes: Buffer }[] = [];
-  attachmentPaths = new Map<string, string>();
   fsRoot = "/w";
   workspacesDir = "/w";
   private routes: { method: DaemonMethod; path: string; responder: Responder }[] = [];
@@ -71,9 +69,6 @@ export class FakeDaemonApi implements DaemonApi {
     if (this.uploadHandler) return this.uploadHandler(sessionId, meta, buf);
     const image = /^image\//.test(meta.type ?? "");
     return { status: 200, value: { type: image ? "image" : "file", id: `${sessionId}-att-${this.uploads.length}`, name: meta.name, mimeType: meta.type, sizeBytes: buf.length } };
-  }
-  async attachmentPath(sessionId: string, attachmentId: string): Promise<string | null> {
-    return this.attachmentPaths.get(attachmentId) ?? `/appdir/daemon/agent/threads/${sessionId}/attachments/${attachmentId}`;
   }
   subscribe(listener: (event: EventMessage) => void): () => void {
     const entry = { listener };

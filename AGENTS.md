@@ -596,7 +596,7 @@ tab-then-thread order; the proxy routes' `THREAD_NOT_FOUND`/`HOST_UNAVAILABLE` g
 codes are the GUI's by construction, not by review. Two invariants:
 
 - **Tools never touch services directly — only `DaemonApi`.** No `services.sessions`, no host
-  client, no store: the seam's only non-route methods are the attachment upload/path pair (over
+  client, no store: the seam's only non-route methods are the attachment upload (over
   `AgentChatService`) and the bus subscription. A route that proves awkward gets a `DaemonApi`
   method; a tool never imports a service. The one standing exception is the kept todo/file pair,
   which reaches `TodoTools`/`FsTools` (`todo-tools.ts`, `fs-tools.ts`) through its `ToolContext`.

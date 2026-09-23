@@ -18,7 +18,6 @@ import {
   tmuxName,
   tmuxVersionOk
 } from "./tmux";
-import { renderText } from "./terminal-text.ts";
 import { ActivityTracker, type ActivityCause } from "./ansi-activity.ts";
 import { classifyAgentEvent } from "./agent-status.ts";
 
@@ -39,14 +38,6 @@ interface Session {
 }
 
 export class SessionError extends Error {}
-
-/**
- * `programmatic: true` marks a write the daemon made on the user's behalf (the
- * MCP terminal-control tools). It skips the input-echo grace, so a tool that
- * writes and then waits for a bell isn't blinded by its own write. Real client
- * keystrokes must never set it.
- */
-export type SessionInputOptions = { programmatic?: boolean };
 
 /**
  * `CreateSessionRequest.initialCommand` as keystrokes, or undefined for nothing
@@ -77,14 +68,12 @@ export interface ISessionManager {
   get(id: string): SessionSummary | undefined;
   /** Durable (tmux) or hot-ring (local) scrollback for a (re)connecting client. */
   scrollback(id: string): Promise<string>;
-  /** Clean (no-ANSI) rendered text: current screen + last `lines` of scrollback. */
-  captureText(id: string, opts?: { lines?: number }): Promise<string>;
   /** Synchronous hot-ring snapshot (kept for callers that can't await). */
   buffer(id: string): string;
   activity(id: string): SessionActivity | undefined;
   /** Apply a managed-hook event to a session's tracker. False = unknown session. */
   agentEvent(id: string, req: AgentEventRequest): boolean;
-  input(id: string, data: string, options?: SessionInputOptions): void;
+  input(id: string, data: string): void;
   resize(id: string, cols: number, rows: number): void;
   /**
    * `opts.seed` marks a title the CLIENT auto-generated from the thread's
@@ -581,25 +570,6 @@ export class SessionManager implements ISessionManager {
     return session.buffer;
   }
 
-  /**
-   * Clean rendered text for an agent read. A running tmux pane is captured WITH color
-   * (captureAnsi) so renderText can drop faint ghost/placeholder text before stripping
-   * ANSI; an exited pane is destroyed (remain-on-exit off) and a running capture can
-   * transiently return "" — both fall back to the cleaned hot ring, bounded by `lines`.
-   * Mirrors scrollback()'s !session guard so a close() mid-call returns "" not throws.
-   */
-  async captureText(id: string, opts?: { lines?: number }): Promise<string> {
-    const session = this.sessions.get(id);
-    if (!session) {
-      return "";
-    }
-    const captured =
-      session.summary.status === "running"
-        ? await this.tmux.captureAnsi(id, opts?.lines ?? 0)
-        : "";
-    return renderText(captured, session.buffer, opts);
-  }
-
   /** Synchronous hot-ring snapshot (kept for callers that can't await). */
   buffer(id: string): string {
     return this.sessions.get(id)?.buffer ?? "";
@@ -632,9 +602,9 @@ export class SessionManager implements ISessionManager {
       : { ...session.summary };
   }
 
-  input(id: string, data: string, options: SessionInputOptions = {}): void {
+  input(id: string, data: string): void {
     const session = this.sessions.get(id);
-    session?.tracker.noteInput(Date.now(), options);
+    session?.tracker.noteInput(Date.now());
     try {
       session?.pty?.write(data);
     } catch {
@@ -1204,15 +1174,6 @@ export class LocalSessionManager implements ISessionManager {
     return this.buffer(id);
   }
 
-  /** No tmux here — always the ANSI-stripped hot ring (bounded by `lines`). */
-  async captureText(id: string, opts?: { lines?: number }): Promise<string> {
-    const session = this.sessions.get(id);
-    if (!session) {
-      return "";
-    }
-    return renderText("", session.buffer, opts);
-  }
-
   buffer(id: string): string {
     return this.sessions.get(id)?.buffer ?? "";
   }
@@ -1244,9 +1205,9 @@ export class LocalSessionManager implements ISessionManager {
       : { ...session.summary };
   }
 
-  input(id: string, data: string, options: SessionInputOptions = {}): void {
+  input(id: string, data: string): void {
     const session = this.sessions.get(id);
-    session?.tracker.noteInput(Date.now(), options);
+    session?.tracker.noteInput(Date.now());
     try {
       session?.pty?.write(data);
     } catch {
