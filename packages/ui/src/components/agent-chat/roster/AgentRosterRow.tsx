@@ -21,7 +21,7 @@ import { cn } from "../../../lib/cn";
 import { ElapsedTicker, StatusDot } from "../primitives";
 import type { ChatTone } from "../primitives/tone";
 import { agentActivityText, rosterRoleChip, rosterRowMetrics } from "./format";
-import { rosterRowTicks, rosterStatusVisual } from "./roster-rows";
+import { isFinishedRow, rosterRowTicks, rosterStatusVisual } from "./roster-rows";
 
 /** The grid every roster row shares. Changing this changes all of them. */
 const ROW_GRID = cn(
@@ -76,7 +76,7 @@ export function AgentRosterRow({
         "hover:bg-neutral-800/40 focus:outline-none focus-visible:ring-1",
         "focus-visible:ring-inset focus-visible:ring-neutral-500",
         active && "bg-neutral-800",
-        fading && "pointer-events-none opacity-0"
+        fading ? "pointer-events-none opacity-0" : isFinishedRow(agent) && "opacity-70 hover:opacity-100"
       )}
     >
       <span className="col-start-1 row-start-1 flex items-center">
@@ -167,7 +167,7 @@ export function BackgroundShellRow({
         "hover:bg-neutral-800/40 focus:outline-none focus-visible:ring-1",
         "focus-visible:ring-inset focus-visible:ring-neutral-500",
         active && "bg-neutral-800",
-        fading && "pointer-events-none opacity-0"
+        fading ? "pointer-events-none opacity-0" : isFinishedRow(agent) && "opacity-70 hover:opacity-100"
       )}
     >
       <span className="col-start-1 row-start-1 flex items-center">

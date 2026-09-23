@@ -26,6 +26,7 @@ import { AGENT_HOST_DEADLINES } from "../../support/deadline.ts";
 import type { ChildExitReason } from "../../support/spawn.ts";
 import { exitOutcome } from "../../support/spawn.ts";
 import type { ClassifiedStderrLine } from "../../support/stderr.ts";
+import { appendAttachmentPathLines } from "../attachment-lines.ts";
 import { AcpConnection } from "./acp/connection.ts";
 import type { AcpFrameDirection } from "./acp/peer.ts";
 import { classifyAcpError } from "./acp/errors.ts";
@@ -721,14 +722,9 @@ export class GrokSession {
       // `agentCapabilities.promptCapabilities.image` is **false** on this CLI,
       // so T3's "Grok ingests images only" path would be sending a content
       // block the agent has said it cannot take. A path line is something the
-      // agent's own `read_file` tool can act on.
-      const attachmentLines = (input.attachments ?? []).map(
-        (attachment) => `- ${attachment.name}: ${attachment.path}`
-      );
-      const text =
-        attachmentLines.length === 0
-          ? input.text
-          : `${input.text}\n\nAttached files:\n${attachmentLines.join("\n")}`;
+      // agent's own `read_file` tool can act on. The shared helper skips a path
+      // the text already names — the composer inserts it at upload time (§7.4).
+      const text = appendAttachmentPathLines(input.text, input.attachments ?? []);
       const prompt = [{ type: "text" as const, text }];
       const promise = this.peer().request<PromptResponse>(
         "session/prompt",

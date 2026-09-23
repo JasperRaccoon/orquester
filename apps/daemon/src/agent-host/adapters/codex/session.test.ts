@@ -198,7 +198,7 @@ describe("codex session — start, turn, stop", () => {
     await r.stop();
   });
 
-  it("attaches an image by PATH, never base64", async () => {
+  it("attaches an image by PATH, never base64, and a file as a path line in the text item", async () => {
     const r = rig({ turns: [{ kind: "text", text: "ok" }] });
     await r.session.start();
     await r.session.sendTurn({
@@ -212,8 +212,43 @@ describe("codex session — start, turn, stop", () => {
     await r.events.waitForType("turn.completed");
     const [turn] = sentFrames(r.received(), "turn/start");
     assert.deepEqual(turn!.input, [
-      { type: "text", text: "look", text_elements: [] },
+      {
+        type: "text",
+        text: "look\n\nAttached files:\n- a.txt: /attachments/thread-1/att-2",
+        text_elements: []
+      },
       { type: "localImage", path: "/attachments/thread-1/att-1" }
+    ]);
+    await r.stop();
+  });
+
+  it("an attachment-only turn is the path block alone, and a path already in the text is not repeated", async () => {
+    const r = rig({ turns: [{ kind: "text", text: "ok" }, { kind: "text", text: "ok" }] });
+    await r.session.start();
+    await r.session.sendTurn({
+      input: "",
+      attachments: [{ type: "file", id: "att-2", name: "a.txt", sizeBytes: 10 }],
+      interactionMode: "default"
+    });
+    await r.events.waitForType("turn.completed");
+    const [first] = sentFrames(r.received(), "turn/start");
+    assert.deepEqual(first!.input, [
+      { type: "text", text: "Attached files:\n- a.txt: /attachments/thread-1/att-2", text_elements: [] }
+    ]);
+    await r.session.sendTurn({
+      input: "see /attachments/thread-1/att-2",
+      attachments: [{ type: "file", id: "att-2", name: "a.txt", sizeBytes: 10 }],
+      interactionMode: "default"
+    });
+    // `waitForType` answers the first match, already seen or not, so the second
+    // turn's completion is counted rather than awaited by type.
+    await waitUntil(
+      () => r.events.events.filter((event) => event.type === "turn.completed").length === 2,
+      "two turns"
+    );
+    const [, second] = sentFrames(r.received(), "turn/start");
+    assert.deepEqual(second!.input, [
+      { type: "text", text: "see /attachments/thread-1/att-2", text_elements: [] }
     ]);
     await r.stop();
   });

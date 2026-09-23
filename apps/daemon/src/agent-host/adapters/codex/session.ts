@@ -49,6 +49,7 @@ import {
   type ProviderChild
 } from "../../support/spawn.ts";
 import { StderrCapture } from "../../support/stderr.ts";
+import { appendAttachmentPathLines, type AttachmentPathLine } from "../attachment-lines.ts";
 import { notificationThreadId } from "./child-routing.ts";
 import type {
   CodexProtocol,
@@ -438,26 +439,32 @@ export class CodexSession {
       this.modelSelection = input.modelSelection;
     }
 
-    const items: CodexProtocol.v2.UserInput[] = [];
-    if (input.input.length > 0) {
-      // Forwarded verbatim except for the §4.6.8 skill-mention normalisation:
-      // the host does not validate a `/command` against any catalog, does not
-      // rewrite it and does not block it — the CLI decides (§4.6.5 c).
-      items.push({
-        type: "text",
-        text: normaliseSkillMentions(input.input),
-        text_elements: []
-      });
-    }
+    // Images by PATH, never base64 (§4.5). Everything else is a path line the
+    // agent reads itself — appended here, because the host forwards the text
+    // verbatim (§4.6.9) and adds nothing of its own (`attachment-lines.ts`).
+    const imageItems: CodexProtocol.v2.UserInput[] = [];
+    const pathLines: AttachmentPathLine[] = [];
     for (const attachment of input.attachments) {
-      // Images by PATH, never base64 (§4.5). Everything else is already
-      // flattened into the prompt text by the host.
-      if (attachment.type !== "image") {
-        continue;
-      }
       const path = await this.options.context.resolveAttachmentPath(this.threadId, attachment.id);
-      items.push({ type: "localImage", path });
+      if (attachment.type === "image") {
+        imageItems.push({ type: "localImage", path });
+      } else {
+        pathLines.push({ name: attachment.name, path });
+      }
     }
+    // Forwarded verbatim except for the §4.6.8 skill-mention normalisation and
+    // the path-line suffix. The host does not validate a `/command` against any
+    // catalog, does not rewrite it and does not block it — the CLI decides
+    // (§4.6.5 c).
+    const text = appendAttachmentPathLines(
+      input.input.length > 0 ? normaliseSkillMentions(input.input) : "",
+      pathLines
+    );
+    const items: CodexProtocol.v2.UserInput[] = [];
+    if (text.length > 0) {
+      items.push({ type: "text", text, text_elements: [] });
+    }
+    items.push(...imageItems);
 
     const config = runtimeModeToThreadConfig(this.runtimeMode);
     const effort = this.selectedOption("effort");

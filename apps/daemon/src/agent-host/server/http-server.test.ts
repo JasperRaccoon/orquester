@@ -59,7 +59,7 @@ interface Harness {
 }
 
 async function harness(
-  options: { openGate?: boolean; index?: ThreadIndex } = {}
+  options: { openGate?: boolean; index?: ThreadIndex; afterStopResponse?: () => void } = {}
 ): Promise<Harness> {
   const dir = await mkdtemp(join(tmpdir(), "agent-host-test-"));
   const socketPath = join(dir, "agent-host.sock");
@@ -77,7 +77,8 @@ async function harness(
     tmpDir: join(dir, "tmp"),
     startedAt: "1970-01-01T00:00:00.000Z",
     pid: 4242,
-    onStop: async () => ({ ok: true, markedThreadIds: [] })
+    onStop: async () => ({ ok: true, markedThreadIds: [] }),
+    ...(options.afterStopResponse ? { afterStopResponse: options.afterStopResponse } : {})
   });
   await server.listen();
 
@@ -389,7 +390,7 @@ describe("agent host server — commands and reads (§6.2, §6.3)", () => {
       req.end(bytes);
     });
     assert.equal(uploaded.status, 200);
-    const ref = uploaded.body as { id: string; name: string };
+    const ref = uploaded.body as { id: string; name: string; path?: string };
     assert.equal(ref.name, "notes.md");
 
     const resolved = await h.call(
@@ -398,6 +399,7 @@ describe("agent host server — commands and reads (§6.2, §6.3)", () => {
     );
     assert.equal(resolved.status, 200);
     assert.equal(typeof (resolved.body as { path: string }).path, "string");
+    assert.equal(ref.path, (resolved.body as { path: string }).path, "the upload reply names the same absolute path the resolve route does");
     assert.equal(
       (await h.call("GET", agentHostExtraRoutes.attachment(threadId, "nope"))).status,
       404
@@ -530,7 +532,12 @@ describe("agent host server — the event stream (§6.3)", () => {
   });
 
   it("the intentional stop writes the continuation markers first (§3.3)", async () => {
-    const h = await harness();
+    let teardownStarted = false;
+    const h = await harness({
+      afterStopResponse: () => {
+        teardownStarted = true;
+      }
+    });
     const threadId = await h.host.createThread();
     await h.call("POST", agentHostRoutes.turn(threadId), { commandId: "stop-1", input: "go" });
     await h.host.settle();
@@ -544,6 +551,7 @@ describe("agent host server — the event stream (§6.3)", () => {
     const stopped = await h.call("POST", agentHostRoutes.stop);
     assert.equal(stopped.status, 200);
     assert.equal((stopped.body as { ok: boolean }).ok, true);
+    assert.equal(teardownStarted, true, "teardown starts only after the response flushes");
     await h.stop();
   });
 

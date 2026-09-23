@@ -46,6 +46,7 @@ import type { AdapterContext, RollbackTarget } from "../../adapter.ts";
 import { TURN_LIVENESS_WINDOWS, withDeadline } from "../../support/deadline.ts";
 import { StderrCapture } from "../../support/stderr.ts";
 import { FileTail, TAIL_MAX_READ_BYTES, TAIL_MAX_TOTAL_BYTES, resolveTildePath } from "../../support/tail-file.ts";
+import { appendAttachmentPathLines, type AttachmentPathLine } from "../attachment-lines.ts";
 import { createDeferred, type Deferred } from "./async-queue.ts";
 import { classifyRequestType, summarizeToolRequest, trimmedString } from "./classify.ts";
 import {
@@ -1625,7 +1626,8 @@ export class ClaudeSession {
    * dispatch) → base64 image blocks → the final text block **last**. The CLI
    * only reads a streamed user message as a slash-command invocation when the
    * last block is text, so leading with the text drops a hand-typed
-   * `/command` back to plain prose on every image-carrying turn.
+   * `/command` back to plain prose on every image-carrying turn. A non-image
+   * attachment is a path line in the text, never a content block (§4.1, §4.5).
    */
   private async buildUserMessage(input: {
     text: string;
@@ -1634,35 +1636,47 @@ export class ClaudeSession {
   }): Promise<SDKUserMessage> {
     const content: Array<Record<string, unknown>> = [];
     const dispatch = planClaudeSkillDispatch(input.text, dispatchableSkillNames(input.skills));
-    if (dispatch?.leadingText !== undefined) {
-      content.push({ type: "text", text: dispatch.leadingText });
-    }
 
+    // Claude ingests images natively. Everything else reaches the agent as a
+    // path line it can `Read` without an approval — the thread's attachments
+    // dir is an `additionalDirectories` entry (`launch.ts`) — appended by
+    // `appendAttachmentPathLines` (§4.1, §4.5), which skips a path the text
+    // already names because the composer inserts it at upload time (§7.4).
+    const imageBlocks: Array<Record<string, unknown>> = [];
+    const pathLines: AttachmentPathLine[] = [];
     for (const attachment of input.attachments) {
-      // Claude ingests images only; a generic file reaches the agent through
-      // the path line the host puts in the prompt.
+      const path = await this.options.context.resolveAttachmentPath(this.threadId, attachment.id);
       if (attachment.type !== "image") {
+        pathLines.push({ name: attachment.name, path });
         continue;
       }
       if (!IMAGE_MIME_TYPES.has(attachment.mimeType)) {
         throw new Error(`Unsupported Claude image attachment type '${attachment.mimeType}'.`);
       }
-      const path = await this.options.context.resolveAttachmentPath(this.threadId, attachment.id);
       const bytes = await fs.readFile(path);
-      content.push({
+      imageBlocks.push({
         type: "image",
-        source: {
-          type: "base64",
-          media_type: attachment.mimeType,
-          data: bytes.toString("base64")
-        }
+        source: { type: "base64", media_type: attachment.mimeType, data: bytes.toString("base64") }
       });
     }
 
     if (dispatch) {
+      // The command block must stay LAST and untouched (§4.5), so the path
+      // lines ride the leading text block, created when the prose was empty,
+      // while "already named" reads the whole prompt: a path typed after the
+      // `$skill` mention lives in the command block.
+      const leading = appendAttachmentPathLines(dispatch.leadingText ?? "", pathLines, input.text);
+      if (leading.length > 0) {
+        content.push({ type: "text", text: leading });
+      }
+      content.push(...imageBlocks);
       content.push({ type: "text", text: dispatch.commandText });
-    } else if (input.text.length > 0) {
-      content.push({ type: "text", text: input.text });
+    } else {
+      content.push(...imageBlocks);
+      const text = appendAttachmentPathLines(input.text, pathLines);
+      if (text.length > 0) {
+        content.push({ type: "text", text });
+      }
     }
 
     return {

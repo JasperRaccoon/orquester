@@ -377,6 +377,12 @@ open. T3 never has that window, and its three mechanisms are adopted whole
    *T3: `makeManagedServerProvider.ts:280-284` —
    `applySnapshot(initialSettings, {forceRefresh: true})` under
    `Effect.forkScoped`.*
+   *Built (2026-09-23): the boot refresh probes only the providers that hydrated
+   no correlated cache row — that row is already the snapshot to serve, and
+   re-probing it launched a heavyweight Claude SDK process on every deploy,
+   which could block the loop long enough for the supervisor to kill a ready
+   host. Manual and scheduled refreshes still probe everything
+   (`refreshAllNow()`).*
 
 *Client side nothing branches on `status`: `resolveLaunchModel`
 (`packages/ui/src/lib/launch-models.ts`) takes `Pick<ProviderSnapshot,
@@ -796,9 +802,9 @@ runtime.
 arm and the UI still derives `waiting` from an open request — but Codex **does** emit
 `thread/status/changed.activeFlags: ["waitingOnApproval"]`, so an adapter must tolerate the flag
 rather than report it as an unmapped frame
-(`apps/daemon/src/agent-host/adapters/codex/normalise.ts`). (2) The `hook.*` group has **no
-producer**: Claude's filesystem hooks run, but the SDK stream carries no `hook_*` messages at all,
-so nothing in the timeline is fed by that group on any provider. (3) `RuntimeEventRawSource`
+(`apps/daemon/src/agent-host/adapters/codex/normalise.ts`). (2) Codex, Claude and Grok can
+produce `hook.*` events. The timeline omits routine starts, progress and successful completions,
+including those already on disk; failures and cancellations stay visible. (3) `RuntimeEventRawSource`
 gained one member the adapters mint themselves, `HISTORICAL_RAW_SOURCE` (`"history.replay"`),
 which tags every event projected out of a provider's **native history** so nothing downstream
 mistakes a replayed row for live traffic and no historical turn claims token usage
@@ -1012,6 +1018,21 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   slash-command invocation when the last block is text; leading with the text made every
   image-carrying turn drop a hand-typed `/command` back to plain prose.
   *T3: `apps/server/src/provider/Layers/ClaudeAdapter.ts:1660-1676`*
+  *Built: **a non-image attachment reaches Claude as a path line, not as nothing.** T3 injects
+  every attachment's on-disk path into the prompt text before the adapter sees the turn
+  (`t3-1-providers.md:282-292`); that step was never ported, and the adapter's `continue` past a
+  `file` ref dropped it silently behind a comment that assumed it. `appendAttachmentPathLines`
+  (`agent-host/adapters/attachment-lines.ts`) appends `Attached files:\n- <name>: <path>` for the
+  refs the adapter does not ingest natively, skipping a path the text already names (the composer
+  inserts it, §7.4) — judged against the whole prompt under a skill dispatch (`namedIn`), so a
+  path typed after the `$skill` mention counts as named — as a suffix of the final text block, or
+  of the leading text block when a skill dispatch owns the last one, so the command block stays
+  last and untouched. The path is readable without an approval because the attachments dir is an
+  `additionalDirectories` entry (`claude/session.ts`, the grant in `claude/launch.ts`). On resume
+  from native history the replayed user row has the block stripped again
+  (`stripAttachmentPathLines`), so the bubble shows what the user typed. A block that is the whole
+  message is kept as the turn's only evidence — except the block-only leading text block of a skill
+  dispatch, which is dropped when the command block carries the text (`project-history.ts`).*
 - **`canUseTool` is the whole approval surface.** `AskUserQuestion` is intercepted **before** any
   approval logic and becomes `user-input.requested`; the question `id` **must equal the full
   question text**, because the SDK ≥ 2.1.121 looks answers up by text, and the reply is
@@ -1161,6 +1182,10 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   string, **not an enum**. Before each turn, `config/mcpServer/reload` is issued best-effort when
   MCP servers are configured.
   *T3: `apps/server/src/provider/Layers/CodexSessionRuntime.ts:611-666` (`buildTurnStartParams`), `:583-606` (`buildCodexCollaborationMode`), `:2504-2511` (the reload); `apps/server/src/provider/Layers/CodexAdapter.ts:2518-2522` (localImage)*
+  *Built: a `file` ref is **not dropped**: its path line is appended to the text item by the same
+  `appendAttachmentPathLines` Claude uses (§4.5 Claude Built), and an attachment-only turn sends
+  the block as its only text item (`codex/session.ts`). Whether Codex may read outside the
+  workspace is its own sandbox/approval policy — a path in the prompt grants nothing.*
 - **Every server→client request Codex sends, and what we answer.** Five handlers:
   `item/commandExecution/requestApproval` → `{decision}` (with `acceptAlways` downgraded);
   `item/fileChange/requestApproval` → `{decision}` (same downgrade);
@@ -1318,6 +1343,17 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   variant?, parts}`, which **accepts no `system` addendum**, and is bounded by the user-message
   receipt rather than a submit timeout.
   *T3: `apps/server/src/provider/Layers/OpenCodeAdapter.ts:3246-3291` (both routes and the no-addendum comment), `:3291-3305` (the 10 s cap), `:996-1026` (the message id)*
+  *Built: **`parts` carries attachments two ways.** The four image mimes, any `text/*` and
+  `application/pdf` at or under 20 MiB become `{type:"file", mime, filename, url: file://…}` parts
+  the server reads off this host's disk; everything else (an `.xlsx`, an undeclared mime, an
+  oversized file) rides as an `Attached files:` path line appended to the text part by
+  `appendAttachmentPathLines`, so an attachment-only turn with such a file no longer throws "turns
+  require text input". OpenCode's `external_directory` rule may still ask before reading it. A ref
+  whose path cannot be resolved fails the turn before `turn.started`, as it does for the other
+  three adapters — a silently vanished file is the bug this replaced. A native `/command` sent
+  with a non-native file receives the block inside its arguments (`$ARGUMENTS`), because the
+  command match runs on the appended text (`opencode/session.ts`; the `external_directory` rule
+  in `opencode/ruleset.ts`, §4.4).*
 - **Turn completion is three machines, not a flag.** (1) The 10 s submit cap above. (2)
   `scheduleIdleReconciliation`: on an idle for the active turn, poll `GET /session/status` with a
   1 s timeout and one retry — a **missing entry counts as idle**, `busy`/`retry` abandons unless a
@@ -1475,6 +1511,9 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   private `streaming_reasoning` phase. A stall cancels and fails the turn. `stopReason` is five values, not
   four: `end_turn | max_tokens | max_turn_requests | refusal | cancelled`.
   *T3: `apps/server/src/provider/Layers/GrokAdapter.ts:94-101` (the two constants with their rationale), `:443-446, 507-518, 729-818` (the watchdog and its approval pause); `packages/effect-acp/src/_generated/schema.gen.ts:9871`*
+  *Built: every attachment reaches Grok as a path line — `promptCapabilities.image` is `false` on
+  this CLI, so even an image is a path its `read_file` tool can act on — through the shared
+  `appendAttachmentPathLines`, which skips a path the text already names (`grok/session.ts`).*
 - **Plan mode is detected, not declared.** `showPlanModeToggle` is false, yet the adapter still
   emits `turn.proposed.completed` from two sources: `enter_plan_mode`-shaped tool calls, and
   writes to `~/.grok/sessions/<encoded-cwd>/<session-id>/plan.md` promoted into a proposal. The
@@ -2626,12 +2665,14 @@ reverse. Here that is one `events` array on one orchestrator decision — `respo
 `user-input.resolved` activity (deterministic id `async-answer:<requestId>`) and the
 `thread.message-sent` reach `append` together or not at all — with the steer as the decision's only
 effect. The reply text **echoes each question before its answer** (`"<question>\n<answer>"`, joined
-by blank lines), and a question's attachments follow as `Attached file: <name> (<id>)` lines and
-ride the message as real attachment refs. The echo is not decoration: the provider parked no
-request, so the agent receives this as an ordinary user turn and has nothing but the text to tell
-it which question was answered — the previous shape dropped the question whenever there was exactly
-one, which reads as a bare "yes" arriving from nowhere in a resumed transcript. The message id is
-the deterministic `async-answer:<requestId>` too, so a replayed command cannot mint a duplicate.*
+by blank lines), and a question's attachments follow as `Attached file: <name> (<path>)` lines —
+the absolute host path, so the adapters' `Attached files:` block (§4.5) finds each file already
+named and appends nothing; the id stands in only when the file cannot be resolved — and ride the
+message as real attachment refs. The echo is not decoration: the provider parked no request, so
+the agent receives this as an ordinary user turn and has nothing but the text to tell it which
+question was answered — the previous shape dropped the question whenever there was exactly one,
+which reads as a bare "yes" arriving from nowhere in a resumed transcript. The message id is the
+deterministic `async-answer:<requestId>` too, so a replayed command cannot mint a duplicate.*
 
 `/session/stop` stops the provider child and leaves the thread, its log and its resume cursor
 intact; the next `/turn` re-adopts it through lazy recovery (§4.1). Without it a session wedged in
@@ -2813,6 +2854,12 @@ It is `GET /api/sessions/:id/attachments/:attachmentId`: the host resolves the i
 namespace and its traversal guard) and the daemon streams the file, carrying the same `?token=`
 carve-out a native `<a download>` needs (`apps/daemon/src/agent-chat/proxy-routes.ts`,
 `agentChatRoutes.attachment`).*
+
+*Built: the upload reply carries the attachment's **absolute host path** beside the reference —
+`AttachmentRef.path` — so the composer can name the file in the prompt (§7.4). It is a courtesy of
+that one reply: `parseAttachments` rebuilds every ref from `{type, id, name, mimeType, sizeBytes}`,
+so no command body reaches an adapter with it and no event carries it
+(`apps/daemon/src/agent-host/orchestration/validate.ts`, `agent-host/store/index.ts`).*
 
 **Provider snapshots.** Each adapter's snapshot carries, besides §4.1's
 `{installed, version, auth, models[], slashCommands[], skills[], usageLimits, versionAdvisory,
@@ -3083,10 +3130,15 @@ Row kinds and behaviour:
   the bundle (no WASM, see below), code blocks mounted line by line while streaming, cached HTML
   once settled.
 - **Reasoning**: collapsed to one line, labelled "summary" when `reasoning_summary_text`.
+  Every nonempty trace can open, including a single long line; the expanded body uses the same
+  Markdown renderer as assistant text and is height-limited. Inside an expanded activity group,
+  consecutive reasoning blocks have their own disclosure and a short preview, as in T3.
 - **Activity group**: all activities between two assistant texts collapse into one line showing
   the live tool label while running and `summarizeToolGroup()` output when settled ("Read 3
   files, ran 2 commands"). Expanded, each tool shows its command with streamed output, file
-  changes as a unified diff with click-through to an editor tab, hook runs, denials, MCP calls.
+  changes as a unified diff with click-through to an editor tab, failed hook runs, denials, MCP
+  calls. A reasoning block after a tool changes the live label back to "Thinking"; an earlier
+  tool cannot remain the visible current action.
 - **"+N more" toggle** inside a long expanded group, and a **working row** — one element whose
   label is swapped in place (starting → running → tool name) rather than remounted, with a
   self-ticking elapsed timer, so the turn is never represented by an empty timeline.
@@ -3099,13 +3151,14 @@ Row kinds and behaviour:
 
 *Built: three row kinds landed narrower than written. A user message's attachments render as named
 **chips**, not thumbnails — the attachment bytes route of §6.3 exists but the timeline does not
-fetch it, so nothing decodes a 10 MiB image into a bubble on a phone. The plan proposal card offers
+fetch it, so nothing decodes a 10 MiB image into a bubble on a phone. The sent-message chips, like
+the composer's, carry the file-type icon of §7.4 (`icons/files`). The plan proposal card offers
 **copy and download only**; there is no "save into the workspace" action, which would be a write
 into `fsRoot` from a render path. And there is no "load earlier" header: a thread is sent whole
 (§2), so there is nothing earlier to load
-(`packages/ui/src/components/agent-chat/timeline/`). One kind landed wider: Codex's `commentary`
-phase gets its own activity row rather than being folded into reasoning, because it is the only
-narration that CLI emits between tool calls.*
+(`packages/ui/src/components/agent-chat/timeline/`). Codex's `commentary` phase is a visible
+assistant message between tool calls, in both live and replayed turns. The phase remains metadata
+so commentary cannot become the turn's terminal answer.*
 
 *Built: the compaction marker also carries the provider's own **summary** and reveals it behind a
 "Show summary" / "Hide summary" toggle on the hairline itself, collapsed by default (the CLI's
@@ -3278,6 +3331,23 @@ than no control. `/effort <id>` is a narrow client-side bridge that writes the c
 effort option and sends nothing (§4.6.5). A paste that folds into a text attachment reports itself
 **inline in the composer** rather than as a toast, because a toast for something that already
 produced a visible chip is noise (`packages/ui/src/components/agent-chat/composer/`).*
+
+*Built: **attachments name themselves in the text.** An image inserts `[Image #N]` at the caret
+when it is staged — the CLI's own placeholder for a pasted image — numbered by its position among
+the staged images; removing it drops the placeholder and renumbers the later ones
+(`packages/ui/src/components/agent-chat/composer/composer-images.ts`). A non-image file inserts its
+**absolute host path** when its upload completes (the path is not known before), exactly as the
+terminal-era upload typed it into the PTY; removing the chip removes the path, and a returned
+queued message re-stages its chips without re-inserting a path the text already names
+(`composer-files.ts`). The path rides the upload reply as `AttachmentRef.path` (§6.3) and the
+persisted draft keeps it so a reload can still strip it. The chips carry a **file-type icon** — a
+vendored subset of Material Icon Theme (`packages/ui/src/icons/files/`) — an image chip shows a
+thumbnail of the local file and a hover preview, resolved through `GET …/attachments/:attachmentId`
+when the draft was reloaded and the `File` is gone (`ComposerAttachments.tsx`). An insert that is
+not the composer's own typing — a finished upload's path, and every insert through the composer
+bridge (a delivered ref, the queue drained back by an interrupt, a displaced custom answer) —
+places the caret without moving focus unless the textarea already had it; a surface that means
+"edit this in the composer" (a queued row's return action) asks for focus explicitly.*
 
 **The queued-message model.** This is the client's own queue of messages it has not dispatched
 yet, and it is a different thing from the host-side queue that holds already-posted `/turn`s behind

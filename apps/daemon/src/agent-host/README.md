@@ -75,9 +75,12 @@ deleted and rebuilt from the logs. Tests use the real driver in a temp dir.
 1. `snapshots.load()`, then every adapter acquired (one ingestion consumer each).
 2. `host.reconcile()` — §3.3, lazily (A1): every thread's `meta.json` is read, only orphans are
    folded (then continued or settled); the rest wait in `bootSettlePending` for their first load.
-3. `store.sweepNow()` — fired, never awaited (snapshot + tail, threads with stored attachments only).
+3. `store.sweepStartup()` — fired, never awaited: stale partial uploads and the raw-log ceiling,
+   no log read. The deep sweep (`sweepNow`: snapshot + tail, threads with stored attachments only)
+   runs on the store's 6 h schedule.
 4. `host.openGate()` — readiness. Queued commands and the daemon's health probe are released.
-5. `snapshots.startBootRefresh()` — never awaited.
+5. `snapshots.startBootRefresh()` — never awaited; probes only the providers that hydrated no
+   correlated cache row.
 6. `setImmediate(openThreadIndex)` — the index file opens on the NEXT loop turn (its `quick_check`
    reads every page), is plugged into the `deferredThreadIndex()` handle the orchestrator was built
    with, and `catchUpThreadIndex` then walks every thread sequentially — reading only the tail past
@@ -85,7 +88,8 @@ deleted and rebuilt from the logs. Tests use the real driver in a temp dir.
    Until the open, that handle is unavailable: an `observe` is dropped (the catch-up reads the log
    instead) and a `deleteThread` is remembered and replayed.
 
-`stop()`: server close → every adapter's `stopAll()` → orchestrator stop → index `stop()` (after
+`stop()` (an intentional `/stop` starts it only once its reply has flushed — `afterStopResponse`):
+server close → every adapter's `stopAll()` → orchestrator stop → index `stop()` (after
 the orchestrator, whose last commits still feed it: every queued observe is applied, a boot
 catch-up in flight ends at its next check with its cursor left behind the log, then the file
 closes — so indexing never holds a deploy's stop) → store close.

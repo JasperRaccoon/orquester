@@ -168,8 +168,14 @@ export interface ThreadStore {
     extras?: Record<string, unknown>;
   }): Promise<void>;
 
-  /** `meta.json`, or null when the thread does not exist or does not parse. */
-  loadHead(threadId: string): Promise<ThreadHead | null>;
+  /**
+   * `meta.json`, or null when the thread does not exist or does not parse.
+   * `seedRuntime:false` is the metadata-only path the boot reconcile and the
+   * stop handover decide on: it must not inspect `events.ndjson` merely to
+   * decide whether a thread needs any work. A thread the store has already
+   * seeded answers its in-memory head, which is at least as new as the file.
+   */
+  loadHead(threadId: string, options?: { seedRuntime?: boolean }): Promise<ThreadHead | null>;
 
   /** Atomic (tmp + rename). Called every 50 events and on turn end (§5.1). */
   saveHead(head: ThreadHead): Promise<void>;
@@ -212,7 +218,8 @@ export interface ThreadStore {
    * Claim an uploaded file into the thread's attachment namespace. Copies,
    * never hard-links, because an agent editing the delivered file in place
    * must not mutate the retry source (§6.3). Bounds are validated against the
-   * **stat'd** file, not the declared size.
+   * **stat'd** file, not the declared size. Answers the ref with `path` — the
+   * absolute destination — for the upload reply (§7.4).
    */
   putAttachment(input: AttachmentPutInput): Promise<AttachmentRef>;
 

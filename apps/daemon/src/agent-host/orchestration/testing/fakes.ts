@@ -365,7 +365,9 @@ export function createFakeThreadStore(): FakeThreadStore {
         id,
         name: input.name,
         ...(input.mimeType !== undefined ? { mimeType: input.mimeType } : {}),
-        sizeBytes: 0
+        sizeBytes: 0,
+        // Mirrors the real store: the upload reply names the absolute path (§7.4).
+        path: input.sourcePath
       };
     },
 

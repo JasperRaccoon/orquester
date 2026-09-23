@@ -46,6 +46,18 @@ class FakeTransporter implements Transporter {
   }
 }
 
+/** A transporter that can carry binary — the web's HTTP one; the base fake stands for one that cannot. */
+class FakeBinaryTransporter extends FakeTransporter {
+  readonly byteRequests: TransportRequest[] = [];
+  bytes: ArrayBuffer = new ArrayBuffer(3);
+  byteResponses: Array<TransportResponse<ArrayBuffer>> = [];
+
+  async requestBytes(req: TransportRequest): Promise<TransportResponse<ArrayBuffer>> {
+    this.byteRequests.push(req);
+    return this.byteResponses.shift() ?? { status: 200, ok: true, data: this.bytes };
+  }
+}
+
 /** A timer queue the test drives, so nothing waits on a real clock. */
 function fakeTimers() {
   let nextId = 1;
@@ -379,6 +391,46 @@ describe("attachments", () => {
     assert.deepEqual(
       attachmentRefFromUpload({ path: "/a/b.bin", name: "b.bin", size: 3 }, { name: "b.bin" }),
       { type: "file", id: "/a/b.bin", name: "b.bin", sizeBytes: 3 }
+    );
+  });
+
+  it("keeps the host's absolute path so the composer can name the file in the prompt (§7.4)", () => {
+    const fromHost = {
+      type: "file" as const,
+      id: "t1-uuid-xlsx",
+      name: "q3.xlsx",
+      sizeBytes: 5,
+      path: "/appdir/daemon/agent/threads/t1/attachments/t1-uuid-xlsx.xlsx"
+    };
+    assert.deepEqual(attachmentRefFromUpload(fromHost, { name: "q3.xlsx" }), fromHost);
+  });
+
+  it("reads an attachment's bytes back over requestBytes, and refuses where the transporter has none (§7.4)", async () => {
+    const plain = new FakeTransporter();
+    await assert.rejects(
+      () => createAgentChatTransport(plain).fetchAttachment("s1", "att-1"),
+      /not supported/
+    );
+    assert.equal(plain.requests.length, 0, "never falls back to the JSON request path");
+
+    const binary = new FakeBinaryTransporter();
+    const bytes = await createAgentChatTransport(binary).fetchAttachment("s1", "att-1");
+    assert.equal(bytes, binary.bytes);
+    assert.equal(binary.byteRequests[0]?.method, "GET");
+    assert.equal(binary.byteRequests[0]?.path, "/api/sessions/s1/attachments/att-1");
+
+    // A non-ok answer carries no JSON envelope, so the mapping is the bare
+    // status under the fallback message — never the empty bytes.
+    binary.byteResponses.push({ ok: false, status: 404, data: new ArrayBuffer(0) });
+    await assert.rejects(
+      () => createAgentChatTransport(binary).fetchAttachment("s1", "att-gone"),
+      (error: unknown) => {
+        assert.ok(error instanceof AgentChatCommandError);
+        assert.equal(error.status, 404);
+        assert.equal(error.code, "UNKNOWN");
+        assert.equal(error.message, "Attachment fetch failed");
+        return true;
+      }
     );
   });
 });

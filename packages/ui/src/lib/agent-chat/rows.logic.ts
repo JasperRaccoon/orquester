@@ -155,21 +155,13 @@ function lastUserMessageIndex(entries: readonly TimelineEntry[]): number {
   return -1;
 }
 
-/**
- * A message that belongs **inside** the activity group rather than above it:
- * reasoning, and an assistant message the provider marked as commentary.
- *
- * REALITY (Codex): an `agentMessage` carries a `phase` of `final_answer` or
- * `commentary`, and a thread of narration rendered as full-width answers is
- * unreadable — §7.3 demotes commentary into the surrounding group. The
- * projection does it here, once, so no surface has to re-derive it.
- */
-export function isDemotedAssistantMessage(message: ThreadMessageItem): boolean {
+/** Codex commentary is a visible assistant message, but never the final answer. */
+export function isCommentaryAssistantMessage(message: ThreadMessageItem): boolean {
   return message.role === "assistant" && message.messageKind === "commentary";
 }
 
 function isGroupMessage(message: ThreadMessageItem): boolean {
-  return message.role === "reasoning" || isDemotedAssistantMessage(message);
+  return message.role === "reasoning";
 }
 
 /**
@@ -219,8 +211,8 @@ export function isProviderInternalUserMessage(message: ThreadMessageItem): boole
 }
 
 /**
- * A group qualifies only when a message in it is reasoning or demoted
- * commentary; a work row is excluded when it carries `agentSpawn` or
+ * A group qualifies only when a message in it is reasoning;
+ * a work row is excluded when it carries `agentSpawn` or
  * `questionAnswer`, is a compaction, or has `tone === "error"` (§7.3).
  *
  * *T3: `MessagesTimeline.logic.ts:317-327`.*
@@ -282,7 +274,7 @@ function deriveTerminalAssistantMessageIds(entries: readonly TimelineEntry[]): S
     }
     // Commentary is never the turn's answer, so it can never be the terminal
     // message whose metadata row closes the response.
-    if (message.role !== "assistant" || isDemotedAssistantMessage(message)) {
+    if (message.role !== "assistant" || isCommentaryAssistantMessage(message)) {
       continue;
     }
     lastByResponseKey.set(
@@ -1170,33 +1162,18 @@ function reasoningEntry(message: ThreadMessageItem): WorkLogEntry {
   if (cached) {
     return cached;
   }
-  const commentary = isDemotedAssistantMessage(message);
   const entry: WorkLogEntry = {
     id: message.id,
     createdAt: message.createdAt,
     turnId: message.turnId,
-    // A reasoning block collapses to "Thought" plus its text; demoted
-    // commentary keeps its own first line as the label, because it is prose
-    // the user wrote no prompt for and a generic verb would hide it.
-    label: commentary ? firstLine(message.text) || "Note" : "Thought",
+    label: "Thought",
     detail: message.text,
-    tone: commentary ? "info" : "thinking",
-    sourceActivityKind: commentary ? "assistant.commentary" : "reasoning",
+    tone: "thinking",
+    sourceActivityKind: "reasoning",
     ...(message.reasoningKind === "summary" ? { toolTitle: "summary" } : {})
   };
   reasoningEntryCache.set(message, entry);
   return entry;
-}
-
-/** The first non-empty line, trimmed — a demoted message's one-line label. */
-function firstLine(text: string): string {
-  for (const line of text.split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed.length > 0) {
-      return trimmed.length > 120 ? `${trimmed.slice(0, 120)}…` : trimmed;
-    }
-  }
-  return "";
 }
 
 /**

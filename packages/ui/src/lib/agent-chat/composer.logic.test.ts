@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import { MAX_TURN_INPUT_CHARS } from "@orquester/api/agent-chat";
 
 import {
+  attachmentPathOf,
   attachmentRejectionReason,
   composerPromptLengthValidationMessage,
   composerSubmissionIntentForEnter,
@@ -168,6 +169,32 @@ describe("persisted drafts", () => {
     assert.equal(parsed.s1?.attachments.length, 1);
     assert.deepEqual(parsed.s1?.context, []);
     assert.equal(parsed.s2, undefined);
+  });
+
+  it("keeps a string path on a persisted ref and drops a malformed one, so an old blob still loads", () => {
+    const raw = JSON.stringify({
+      s1: {
+        text: "see /a/x.xlsx",
+        attachments: [
+          { type: "file", id: "a", name: "x.xlsx", sizeBytes: 1, path: "/a/x.xlsx" },
+          { type: "file", id: "b", name: "y.csv", sizeBytes: 1, path: 123 },
+          { type: "file", id: "c", name: "z.txt", sizeBytes: 1 },
+          { type: "file", id: "d", name: "n.csv", sizeBytes: 2, path: null },
+          { type: "file", id: "e", name: "e.txt", sizeBytes: 3, mimeType: "text/plain", path: "" }
+        ],
+        context: []
+      }
+    });
+    const drafts = parsePersistedDrafts(raw);
+    const [a, b, c, d, e] = drafts.s1!.attachments;
+    assert.equal(attachmentPathOf(a), "/a/x.xlsx");
+    assert.equal("path" in b!, false);
+    assert.equal(attachmentPathOf(c), undefined);
+    // `null` and `""` are not paths either: the field goes, everything else stays.
+    assert.equal("path" in d!, false);
+    assert.deepEqual(d, { type: "file", id: "d", name: "n.csv", sizeBytes: 2 });
+    assert.equal("path" in e!, false);
+    assert.deepEqual(e, { type: "file", id: "e", name: "e.txt", sizeBytes: 3, mimeType: "text/plain" });
   });
 
   it("knows an empty draft", () => {

@@ -27,6 +27,7 @@ import type {
 import { HISTORICAL_RAW_SOURCE } from "@orquester/api/agent-chat";
 
 import type { Clock, IdGen } from "../../adapter.ts";
+import { isAttachmentPathBlock, stripAttachmentPathLines } from "../attachment-lines.ts";
 import {
   classifyToolItemType,
   cliDenialReason,
@@ -138,6 +139,17 @@ function elide(text: string): string {
 }
 
 /**
+ * Whether a user text block holds any of the user's own text: not blank, and
+ * not exactly the `Attached files:` block (`isAttachmentPathBlock`). Trimmed
+ * first, so a block behind leading whitespace is still the block and not the
+ * user's text.
+ */
+function carriesUserText(text: string): boolean {
+  const t = text.trim();
+  return t.length > 0 && !isAttachmentPathBlock(t);
+}
+
+/**
  * Project one snapshot. One `turn.started` / `turn.completed` pair per turn,
  * and one `item.completed` per message, reasoning block and tool call.
  */
@@ -193,6 +205,20 @@ export function projectClaudeHistory(
       }
       model ??= trimmedString(message.model);
       const blocks = contentBlocks(message.content);
+      // A skill dispatch with attachments and no prose sends the block as a
+      // text block of its OWN, ahead of the command block (`buildUserMessage`,
+      // §4.5). Per block it is a whole message and the strip keeps it; per
+      // message it is provider input beside the user's text, and ingestion
+      // keeps one user message per turn — so the block was the bubble and the
+      // `/command` the user typed never showed. It is dropped exactly when
+      // another text block of the same message carries text; alone, it stays
+      // as the turn's only evidence.
+      const dropBlockOnlyText =
+        message.role === "user" &&
+        blocks.some(
+          (block) =>
+            block.type === "text" && typeof block.text === "string" && carriesUserText(block.text)
+        );
 
       for (const block of blocks) {
         const type = typeof block.type === "string" ? block.type : "";
@@ -294,6 +320,14 @@ export function projectClaudeHistory(
           if (text.trim().length === 0) {
             continue;
           }
+          if (dropBlockOnlyText && isAttachmentPathBlock(text)) {
+            continue;
+          }
+          // A prompt block is the text the adapter SENT, with any
+          // `Attached files:` block it appended (`attachment-lines.ts`):
+          // provider input, not the user's own text. The agent's text was
+          // never the adapter's and stays as it is.
+          const shown = message.role === "user" ? stripAttachmentPathLines(text) : text;
           const itemId = deps.ids.messageId("msg");
           if (message.role === "assistant") {
             // The same shape the live path produces, so a consumer that
@@ -311,8 +345,8 @@ export function projectClaudeHistory(
             payload: {
               itemType: message.role === "user" ? "user_message" : "assistant_message",
               status: "completed",
-              detail: elide(text),
-              data: { text }
+              detail: elide(shown),
+              data: { text: shown }
             },
             raw: raw(block)
           });

@@ -1797,8 +1797,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
    * The prose a message-mode answer becomes.
    *
    * **Every question is echoed before its answer**, joined by blank lines, and
-   * each question's attachments follow as `Attached file: <name> (<id>)` lines
-   * — T3 `decider.ts:1642-1660`. The echo is not decoration: the provider
+   * each question's attachments follow as `Attached file: <name> (<path>)`
+   * lines — T3 `decider.ts:1642-1660`. The echo is not decoration: the provider
    * parked no request, so the agent receives this as an ordinary user turn and
    * has nothing but the text to tell it which question was answered. The old
    * shape dropped the question whenever there was exactly one, which reads as
@@ -1808,7 +1808,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   const answerMessageText = (
     questions: readonly { id: string; question: string }[],
     answers: Record<string, unknown>,
-    attachmentsByQuestionId?: Record<string, AttachmentRef[]>
+    attachmentsByQuestionId?: Record<string, AttachmentRef[]>,
+    pathById: Record<string, string> = {}
   ): string => {
     const parts: string[] = [];
     for (const entry of questions) {
@@ -1822,7 +1823,14 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       if (value.trim().length === 0 && attachments.length === 0) continue;
       const lines = [`${entry.question}\n${value.trim()}`.trimEnd()];
       for (const attachment of attachments) {
-        lines.push(`Attached file: ${attachment.name} (${attachment.id})`);
+        // The absolute host path, so the adapters' `Attached files:` block
+        // (§4.5) finds it already named and appends nothing; the id only when
+        // the file cannot be resolved (the send then fails as any missing
+        // attachment does). An image ref gets the same line: Claude, Codex
+        // and OpenCode ingest images natively and ignore it; Grok ingests
+        // nothing and, finding the path already named, appends nothing.
+        const named = pathById[attachment.id] ?? attachment.id;
+        lines.push(`Attached file: ${attachment.name} (${named})`);
       }
       parts.push(lines.join("\n"));
     }
@@ -2048,12 +2056,22 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     };
   };
 
-  const decide = (
+  /**
+   * Async for one branch only: a message-mode `answer` resolves its attachment
+   * paths before its events are built, because the text naming them commits
+   * together with the resolved activity (§6.2). Safe because `command` calls
+   * this inside the thread's command queue — the queue every `commit` and
+   * `append` takes — so nothing can move `runtime.state` across the await.
+   * That guarantee stops at the command queue: the fields the effect queue
+   * writes (`bound`, `compacting`, `queuedTurns`, …) are not covered, so read
+   * them before the await or in `schedule`.
+   */
+  const decide = async (
     runtime: ThreadRuntime,
     name: AgentChatCommandName,
     raw: unknown,
     commandId: string
-  ): Decision => {
+  ): Promise<Decision> => {
     const body = requireBody(raw);
     const head = requireHead(runtime);
     const session = currentSession(runtime);
@@ -2259,7 +2277,21 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         // below reaches `append` together or not at all — with the steer as the
         // decision's ONLY effect.
         if (question?.responseMode === "message") {
-          const text = answerMessageText(question.questions, answers, attachmentsByQuestionId);
+          const pathById: Record<string, string> = {};
+          for (const attachment of Object.values(attachmentsByQuestionId ?? {}).flat()) {
+            try {
+              pathById[attachment.id] = await store.resolveAttachment(runtime.id, attachment.id);
+            } catch {
+              // Unresolvable now: the text keeps the id and the send fails
+              // like any missing attachment would (§6.3).
+            }
+          }
+          const text = answerMessageText(
+            question.questions,
+            answers,
+            attachmentsByQuestionId,
+            pathById
+          );
           if (text.length === 0) {
             throw invalidCommand("An answer needs some text.");
           }
@@ -2611,7 +2643,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
 
         let decision: Decision;
         try {
-          decision = decide(runtime, name, body, commandId);
+          decision = await decide(runtime, name, body, commandId);
         } catch (error) {
           if (isAgentChatCommandError(error) && error.recorded) {
             await store
@@ -3950,14 +3982,18 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
 
   const markThreadsForContinuation = async (): Promise<string[]> => {
     const marked: string[] = [];
-    // Only a thread that can be running is loaded. The lazy boot (A1) leaves
-    // every idle thread on disk, and loading all of them here would fold every
-    // log on disk inside the stop path — the cost the lazy boot took out of
-    // startup, moved to shutdown, where a deploy's drain-restart waits on it.
-    // So: every thread this host serves, every thread with a live provider
-    // session, and an unloaded thread only when its `meta.json` says a turn is
-    // running (a `/stop` that lands before the reconcile has run) or cannot
-    // be read at all — the same rule the reconcile applies.
+    // `/stop` is the deploy handover's critical path. Most production threads
+    // are idle and some have 40-100 MB histories, so loading all of them here
+    // folded every log on disk before the host could acknowledge its stop —
+    // the cost the lazy boot (A1) took out of startup, moved to shutdown,
+    // where a deploy's drain-restart waits on it. Only a thread that can be
+    // running is loaded: every thread this host serves, every thread with a
+    // live provider session, and an unloaded thread only when its `meta.json`
+    // (read alone, never the log) says a turn is running — and the project
+    // opted in, and a cursor exists, the two predicates repeated after the
+    // load — or when it cannot be read at all, the same rule the reconcile
+    // applies. `binding.json` is small too and stays the cursor authority, so
+    // a head written by an older version still works.
     const candidates = new Set<string>(runtimes.keys());
     const liveSessions = new Set<string>();
     for (const adapter of options.adapters.values()) {
@@ -3971,16 +4007,30 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         candidates.add(threadId);
         continue;
       }
-      const persistedHead = await store.loadHead(threadId).catch(() => null);
-      if (
-        persistedHead === null ||
-        (persistedHead.session.status === "running" && persistedHead.session.activeTurnId !== null)
-      ) {
-        candidates.add(threadId);
+      try {
+        const persistedHead = await store.loadHead(threadId, { seedRuntime: false });
+        if (persistedHead !== null) {
+          const persistedSession = persistedHead.session;
+          if (persistedSession.status !== "running" || persistedSession.activeTurnId === null) {
+            continue;
+          }
+          if ((await options.continuationEnabled?.(persistedHead.projectPath)) !== true) continue;
+          const persistedBinding = await store.loadBinding(threadId).catch(() => null);
+          if (
+            (bindingResumeCursor(persistedBinding) ?? persistedSession.resumeCursor) === undefined
+          ) {
+            continue;
+          }
+        }
+      } catch {
+        // Undecidable from the small files: the fold below decides, and logs.
       }
+      candidates.add(threadId);
     }
     for (const threadId of candidates) {
       try {
+        // The authoritative fold, for the small set of candidates: every
+        // predicate is repeated on it, in case the turn settled since.
         const runtime = await loadRuntime(threadId);
         const head = headOf(runtime);
         if (!head || runtime.deleted) continue;
@@ -4084,8 +4134,17 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   };
 
   const reconcile = async (): Promise<void> => {
-    // Never blocks or fails host startup: every thread is handled and settled
-    // individually, and a failure of the whole pass is logged (§3.3).
+    // The head is the startup index. A deploy waits for the old host to drain,
+    // so almost every persisted thread is idle and needs no reconciliation at
+    // all. Loading a runtime for each one used to call `readAll()` and fold its
+    // complete NDJSON history before the readiness gate opened; a handful of
+    // long-lived 40-100 MB threads turned an ordinary deploy into a multi-
+    // minute outage. `reconcileThread` inspects the small atomic head first
+    // and cold-folds only a thread that can actually be orphaned.
+    //
+    // Never blocks or fails startup on one bad thread: every candidate is
+    // handled and settled individually, and a failure of the whole pass is
+    // logged (§3.3).
     try {
       const live = new Set<string>();
       for (const adapter of options.adapters.values()) {
@@ -4116,8 +4175,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     // on disk; the settle it is owed runs on its first load. A thread already
     // in memory keeps the full path (it costs nothing), and a head that cannot
     // be read decides nothing: that thread is folded, as every thread was.
+    // Metadata only (`seedRuntime: false`): deciding that a thread needs
+    // nothing must not read its `events.ndjson` either.
     if (!runtimes.has(threadId) && !loadingRuntimes.has(threadId)) {
-      const persistedHead = await store.loadHead(threadId).catch(() => null);
+      const persistedHead = await store
+        .loadHead(threadId, { seedRuntime: false })
+        .catch(() => null);
       if (persistedHead !== null && !isOrphanedHead(persistedHead)) {
         bootSettlePending.add(threadId);
         return;

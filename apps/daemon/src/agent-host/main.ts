@@ -530,6 +530,7 @@ export async function startAgentHost(
 
   // ---- server ------------------------------------------------------------
   let stopping = false;
+  let intentionalStopMarkers: string[] = [];
   const server = createAgentHostServer({
     orchestrator: host,
     store,
@@ -549,22 +550,26 @@ export async function startAgentHost(
     isAllowedCwd,
     onStop: async (): Promise<AgentHostStopResponse> => {
       // The intentional stop of §3.3: write every continuation marker for a
-      // running thread with a usable cursor, then drain and stop.
+      // running thread with a usable cursor before acknowledging the request.
+      // Teardown starts from `afterStopResponse` below; scheduling it here as
+      // a microtask raced the route's own `sendJson()` and produced the socket
+      // hang-up that forced the 2026-09-23 deploy handover.
       const markedThreadIds = await host.markThreadsForContinuation();
-      queueMicrotask(() => {
-        void stop().then(
-          () => {
-            options.onStopped?.();
-          },
-          async (error: unknown) => {
-            logger.error("agent-host: intentional stop failed", error);
-            // A cancelled restart must not inject a phantom continuation on the
-            // next boot.
-            await host.clearContinuationMarkers(markedThreadIds).catch(() => undefined);
-          }
-        );
-      });
+      intentionalStopMarkers = markedThreadIds;
       return { ok: true, markedThreadIds };
+    },
+    afterStopResponse: () => {
+      void stop().then(
+        () => {
+          options.onStopped?.();
+        },
+        async (error: unknown) => {
+          logger.error("agent-host: intentional stop failed", error);
+          // A cancelled restart must not inject a phantom continuation on the
+          // next boot.
+          await host.clearContinuationMarkers(intentionalStopMarkers).catch(() => undefined);
+        }
+      );
     },
     addProviderWatcher: () => snapshots.addWatcher()
   });
@@ -686,14 +691,13 @@ export async function startAgentHost(
     }
     // §3.3 runs before the gate opens, and never blocks or fails startup.
     await host.reconcile();
-    // One sweep after adoption, before the gate: the store's own interval is
-    // 6 h, so without this a host that is restarted more often than that never
-    // collects anything at all — and what it has to collect (a `.part` from an
-    // upload whose connection died with the last process, a raw log for a
-    // thread that is gone) is exactly what accumulates WHILE it is down.
-    // After adoption, so a thread the reconcile just adopted still counts as
-    // live and its raw log is not a sweep target.
-    void store.sweepNow().catch((error: unknown) => {
+    // Boot cleanup must never fold conversation histories. Production threads
+    // can hold 40-100 MB event logs; the former deep sweep reread every one
+    // after opening the gate, blocked the event loop, and made health + /stop
+    // time out until the supervisor killed the new host. The cheap pass still
+    // collects partial uploads and rotated raw logs. The store's six-hour
+    // schedule owns the full attachment-reference sweep.
+    void store.sweepStartup().catch((error: unknown) => {
       // Housekeeping that cannot run costs disk, not correctness.
       logger.warn("agent-host: the boot sweep failed", error);
     });

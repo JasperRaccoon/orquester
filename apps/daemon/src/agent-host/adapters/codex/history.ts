@@ -23,6 +23,7 @@ import type {
 } from "@orquester/api/agent-chat";
 import { HISTORICAL_RAW_SOURCE, isToolLifecycleItemType } from "@orquester/api/agent-chat";
 
+import { stripAttachmentPathLines } from "../attachment-lines.ts";
 import type { CodexProtocol } from "./_generated/index.ts";
 import { classifyItem, type CodexThreadItem } from "./items.ts";
 import type { RuntimeEventDraft } from "./normalise.ts";
@@ -147,7 +148,7 @@ function projectItem(
             itemType: "assistant_message",
             detail: text,
             // The phase rides `data`, not `detail`, because on a history row
-            // `detail` is the text. §7.3 demotes `commentary` to an activity.
+            // `detail` is the text. Ingestion keeps the phase on replay.
             data: { phase: item.phase }
           },
           ...base
@@ -184,7 +185,10 @@ function terminalStatus(status: string | undefined): "completed" | "failed" {
 
 /**
  * The text of a user message. `content` is an array of `UserInput` arms; only
- * the text ones carry prose, and an attachment-only message has none.
+ * the text ones carry prose, and an attachment-only message has none. The
+ * rollout keeps the text the adapter SENT, with any `Attached files:` block it
+ * appended (`attachment-lines.ts`) — provider input, not the user's own text,
+ * so it is stripped here.
  */
 function userMessageText(content: readonly CodexProtocol.v2.UserInput[]): string | null {
   const parts: string[] = [];
@@ -193,6 +197,6 @@ function userMessageText(content: readonly CodexProtocol.v2.UserInput[]): string
       parts.push(entry.text);
     }
   }
-  const text = parts.join("\n").trim();
+  const text = stripAttachmentPathLines(parts.join("\n").trim());
   return text.length > 0 ? text : null;
 }

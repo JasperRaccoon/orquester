@@ -121,6 +121,9 @@ function fakeTransport() {
     },
     async upload() {
       return { type: "file", id: "/a/b", name: "b", sizeBytes: 1 };
+    },
+    async fetchAttachment() {
+      return new ArrayBuffer(0);
     }
   };
 

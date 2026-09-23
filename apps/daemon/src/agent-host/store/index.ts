@@ -114,6 +114,15 @@ export const HEAD_CHECKPOINT_EVENTS = 50;
  */
 const FOLD_YIELD_EVENTS = 500;
 
+/**
+ * Decoding a log yields to the event loop after this many milliseconds of
+ * synchronous work. A historical thread can be hundreds of MB, and parsing it
+ * in one go froze health, /providers and /stop long enough for the supervisor
+ * to kill an otherwise healthy host; one large thread may load slowly, but it
+ * cannot take down every agent tab while it does.
+ */
+const DECODE_SLICE_MS = 8;
+
 const yieldToLoop = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
 // The layout, relative to `rootDir`. `@orquester/config`'s `agentChat*Path`
@@ -287,6 +296,11 @@ export interface AgentThreadStore extends ThreadStore {
    * test can drive it without waiting for the interval.
    */
   sweepNow(): Promise<void>;
+  /**
+   * Cheap boot cleanup: prune pending/partial uploads and rotated raw logs
+   * without reading or folding any conversation history.
+   */
+  sweepStartup(): Promise<void>;
   /**
    * Stop the background sweep. The timer is `unref`'d, so forgetting this
    * never holds the process open; it exists so a host stop is deterministic.
@@ -595,11 +609,19 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
     if (contents === null) {
       return { events: [], seq: 0, truncated: false };
     }
-    const { lines, torn } = splitCompleteLines(contents);
     const events: DomainEvent[] = [];
+    const torn = contents.length > 0 && !contents.endsWith("\n");
     let truncated = torn;
     let seq = 0;
-    for (const line of lines) {
+    const completeEnd = torn ? contents.lastIndexOf("\n") + 1 : contents.length;
+    let offset = 0;
+    let sliceStartedAt = Date.now();
+    while (offset < completeEnd) {
+      const newline = contents.indexOf("\n", offset);
+      if (newline < 0 || newline >= completeEnd) break;
+      const line = contents.slice(offset, newline);
+      offset = newline + 1;
+      if (line.length === 0) continue;
       const event = decodeLine(line);
       if (event === null) {
         truncated = true;
@@ -612,6 +634,10 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
       }
       seq = event.seq;
       events.push(event);
+      if (Date.now() - sliceStartedAt >= DECODE_SLICE_MS) {
+        await yieldToLoop();
+        sliceStartedAt = Date.now();
+      }
     }
     return { events, seq, truncated };
   }
@@ -621,16 +647,18 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
    * the log, with each event's absolute position. Stops at the first line
    * that does not decode or whose sequence does not climb — {@link readLog}'s
    * rule — and reports it, like a torn trailing fragment, as `truncated`.
+   * Yields like {@link readLog}: a cold load reads the whole log through here.
    */
-  function decodeWindow(
+  async function decodeWindow(
     bytes: Buffer,
     baseOffset: number
-  ): { events: DomainEvent[]; positions: EventPosition[]; lines: number; truncated: boolean } {
+  ): Promise<{ events: DomainEvent[]; positions: EventPosition[]; lines: number; truncated: boolean }> {
     const { spans, torn } = splitCompleteLineSpans(bytes);
     const events: DomainEvent[] = [];
     const positions: EventPosition[] = [];
     let truncated = torn;
     let previous = 0;
+    let sliceStartedAt = Date.now();
     for (const span of spans) {
       const event = decodeLine(bytes.toString("utf8", span.start, span.newline));
       if (event === null || event.seq <= previous) {
@@ -644,6 +672,10 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
         byteOffset: baseOffset + span.start,
         byteLength: span.newline - span.start + 1
       });
+      if (Date.now() - sliceStartedAt >= DECODE_SLICE_MS) {
+        await yieldToLoop();
+        sliceStartedAt = Date.now();
+      }
     }
     return { events, positions, lines: spans.length, truncated };
   }
@@ -856,6 +888,24 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
     }
   }
 
+  function pruneRawLogs(nowMs: number): void {
+    const liveThreadIds = new Set<string>();
+    for (const [id, entry] of threads) {
+      if (entry.raw !== null) {
+        liveThreadIds.add(id);
+      }
+    }
+    try {
+      pruneRawLogDirectory({
+        threadsRoot: threadsDir(rootDir),
+        liveThreadIds,
+        now: () => nowMs
+      });
+    } catch {
+      // Diagnostics never block a turn, and never fail a sweep.
+    }
+  }
+
   // --- the store -----------------------------------------------------------
 
   const store: AgentThreadStore = {
@@ -1007,7 +1057,7 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
       if ((window?.size ?? 0) < byteOffset) {
         return stale;
       }
-      const decoded = decodeWindow(window?.bytes ?? Buffer.alloc(0), byteOffset);
+      const decoded = await decodeWindow(window?.bytes ?? Buffer.alloc(0), byteOffset);
       // The first complete line decides: it must decode AND carry afterSeq + 1.
       if (decoded.lines > 0 && decoded.events[0]?.seq !== afterSeq + 1) {
         return stale;
@@ -1046,7 +1096,7 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
       if (window === null) {
         return { events: [], truncated: true };
       }
-      const decoded = decodeWindow(window.bytes, fromByte);
+      const decoded = await decodeWindow(window.bytes, fromByte);
       return { events: decoded.events, truncated: decoded.truncated || window.size < toByte };
     },
 
@@ -1134,7 +1184,41 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
       });
     },
 
-    async loadHead(threadId: string): Promise<ThreadHead | null> {
+    async loadHead(
+      threadId: string,
+      options?: { seedRuntime?: boolean }
+    ): Promise<ThreadHead | null> {
+      if (options?.seedRuntime === false) {
+        assertSafeThreadId(threadId);
+        const entry = runtime(threadId);
+        // A seeded entry's head is at least as new as the file (appends advance
+        // it between checkpoints), so re-reading `meta.json` over it would
+        // roll it back.
+        if (loaded.has(threadId)) {
+          return entry.head;
+        }
+        try {
+          const raw = await readFileOrNull(threadMetaPath(rootDir, threadId));
+          if (raw === null) return null;
+          let decoded: unknown;
+          try {
+            decoded = JSON.parse(raw);
+          } catch (error) {
+            entry.error = `meta.json is not JSON: ${(error as Error).message}`;
+            return null;
+          }
+          const head = parseAgentThreadHead(decoded);
+          if (head === null) {
+            entry.error = "meta.json does not match the thread head schema";
+            return null;
+          }
+          entry.head = head as ThreadHead;
+          return entry.head;
+        } catch (error) {
+          entry.error = `meta.json is unreadable: ${(error as Error).message}`;
+          return null;
+        }
+      }
       const entry = await ensureLoaded(threadId);
       return entry.head;
     },
@@ -1283,14 +1367,24 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
         mimeType !== undefined &&
         (SUPPORTED_ATTACHMENT_IMAGE_MIME_TYPES as readonly string[]).includes(mimeType)
       ) {
-        return { type: "image", id: attachmentId, name: input.name, mimeType, sizeBytes };
+        return {
+          type: "image",
+          id: attachmentId,
+          name: input.name,
+          mimeType,
+          sizeBytes,
+          path: destination
+        };
       }
       return {
         type: "file",
         id: attachmentId,
         name: input.name,
         ...(mimeType !== undefined ? { mimeType } : {}),
-        sizeBytes
+        sizeBytes,
+        // The absolute path the composer names in the prompt (§7.4). Only the
+        // upload reply carries it; `validate.ts` strips it from commands.
+        path: destination
       };
     },
 
@@ -1317,21 +1411,7 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
       // only bound above the per-thread rotation, and it cannot live inside a
       // single thread's writer (S1 #5).
       if (input?.threadId === undefined) {
-        const liveThreadIds = new Set<string>();
-        for (const [id, entry] of threads) {
-          if (entry.raw !== null) {
-            liveThreadIds.add(id);
-          }
-        }
-        try {
-          pruneRawLogDirectory({
-            threadsRoot: threadsDir(rootDir),
-            liveThreadIds,
-            now: () => nowMs
-          });
-        } catch {
-          // Diagnostics never block a turn, and never fail a sweep.
-        }
+        pruneRawLogs(nowMs);
       }
 
       const targets =
@@ -1393,6 +1473,17 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
 
     async sweepNow(): Promise<void> {
       await store.pruneAttachments();
+    },
+
+    async sweepStartup(): Promise<void> {
+      const nowMs = clock.now().getTime();
+      await sweepDirectory(pendingDir, nowMs, () => false);
+      pruneRawLogs(nowMs);
+      // Partials need no event-log reference scan. Keep every completed file;
+      // the scheduled deep sweep will fold histories and collect true orphans.
+      for (const threadId of await store.listThreads()) {
+        await sweepDirectory(attachmentsDirFor(threadId), nowMs, () => true);
+      }
     },
 
     close(): void {

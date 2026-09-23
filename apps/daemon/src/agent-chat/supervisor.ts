@@ -319,7 +319,20 @@ export class AgentHostSupervisor {
    */
   checkHealth(): Promise<void> {
     return this.transition(async () => {
-      if (!this.supervising || this.state === "error") return;
+      if (!this.supervising) return;
+      // A replacement can miss the bounded prepared deadline and still finish
+      // booting later. `error` used to be terminal, so the daemon kept
+      // returning HOST_UNAVAILABLE even after that exact replacement answered
+      // healthy; only a daemon restart could make it adoptable again. Keep the
+      // respawn cap (do not hammer a genuinely dead host), but continue the
+      // cheap health probe so a late-ready process can recover in place.
+      if (this.state === "error") {
+        const recovered = await this.safeProbe();
+        if (recovered.ok) {
+          this.adopt(recovered.health);
+        }
+        return;
+      }
       if (this.state === "foreign") {
         // Re-probe: a foreign listener may have gone away, and then the socket
         // is ours to take. Still rejected ⇒ stay foreign, still never kill.

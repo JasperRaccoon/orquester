@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
+import { slimActivityPayload } from "@orquester/api/agent-chat";
 
 import {
   deriveTimelineEntriesFromItems,
@@ -42,6 +43,76 @@ describe("workLogEntryFromActivity", () => {
     assert.equal(entry.detail, "3 lines");
     assert.deepEqual(entry.changedFiles, ["/w/p/a.ts"]);
     assert.equal(entry.taskId, undefined, "taskId belongs to task rows only");
+  });
+
+  it("shows Grok command output instead of repeating its command", () => {
+    const grok = workLogEntryFromActivity(
+      activity("tool.completed", {
+        itemType: "command_execution",
+        title: "echo hi",
+        detail: "echo hi",
+        data: { kind: "execute", command: "echo hi", rawOutput: { content: "hi" } }
+      })
+    );
+    assert.equal(grok.command, "echo hi");
+    assert.equal(grok.detail, "hi");
+
+    const noOutput = workLogEntryFromActivity(
+      activity("tool.updated", {
+        itemType: "command_execution",
+        detail: "echo hi",
+        data: { kind: "execute", command: "echo hi" }
+      })
+    );
+    assert.equal(noOutput.command, "echo hi");
+    assert.equal(noOutput.detail, undefined, "the expanded row must not repeat an echo");
+
+    const longCommand = `echo ${"x".repeat(200)}`;
+    const truncatedEcho = workLogEntryFromActivity(
+      activity("tool.completed", {
+        itemType: "command_execution",
+        detail: `${longCommand.slice(0, 80)}…`,
+        data: { kind: "execute", command: longCommand, rawOutput: { content: "done" } }
+      })
+    );
+    assert.equal(truncatedEcho.detail, "done", "a truncated command echo cannot mask output");
+  });
+
+  it("shows ACP output after the wire projection used by live snapshots", () => {
+    const payload = slimActivityPayload({
+      itemType: "command_execution",
+      title: "echo hi",
+      detail: "echo hi",
+      data: {
+        kind: "execute",
+        command: "echo hi",
+        content: [{ type: "content", content: { type: "text", text: "hi from ACP" } }]
+      }
+    });
+    const entry = workLogEntryFromActivity(activity("tool.completed", payload));
+    assert.equal(entry.detail, "hi from ACP");
+  });
+
+  it("keeps provider output in detail when it is already the fuller answer", () => {
+    const openCode = workLogEntryFromActivity(
+      activity("tool.completed", {
+        itemType: "command_execution",
+        detail: "first line\nsecond line",
+        data: { command: "cat file", result: "first line" }
+      })
+    );
+    assert.equal(openCode.command, "cat file");
+    assert.equal(openCode.detail, "first line\nsecond line");
+
+    const codex = workLogEntryFromActivity(
+      activity("tool.completed", {
+        itemType: "command_execution",
+        detail: "2 passed",
+        data: { command: "pnpm test" }
+      })
+    );
+    assert.equal(codex.command, "pnpm test");
+    assert.equal(codex.detail, "2 passed");
   });
 
   it("reads an approval as informational, never as a red row", () => {
@@ -191,6 +262,21 @@ describe("deriveWorkLogEntries", () => {
     ]);
     assert.equal(entries.length, 1);
     assert.equal(entries[0]?.command, "ls");
+  });
+
+  it("hides routine hooks but keeps failed and cancelled hooks", () => {
+    const entries = deriveWorkLogEntries([
+      activity("hook.started", { hookId: "h1", hookName: "hooks.json" }, { tone: "info" }),
+      activity("hook.progress", { hookId: "h1" }, { tone: "info" }),
+      activity("hook.completed", { hookId: "h1", outcome: "success" }, { tone: "info" }),
+      activity("hook.completed", { hookId: "h2", outcome: "error", stderr: "failed" }, { tone: "error" }),
+      activity("hook.completed", { hookId: "h3", outcome: "cancelled" }, { tone: "info" })
+    ]);
+    assert.deepEqual(entries.map((entry) => entry.sourceActivityKind), [
+      "hook.completed",
+      "hook.completed"
+    ]);
+    assert.equal(entries[0]?.tone, "error");
   });
 
   it("collapses one tool call's in-progress and completed updates into one row", () => {

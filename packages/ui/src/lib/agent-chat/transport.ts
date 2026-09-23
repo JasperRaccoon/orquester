@@ -164,6 +164,8 @@ export interface AgentChatTransport {
     meta: AgentChatUploadMeta,
     onProgress?: (sent: number, total: number) => void
   ): Promise<AttachmentRef>;
+  /** §6.3 read-back: the attachment's bytes, for a chip's thumbnail/preview. */
+  fetchAttachment(sessionId: string, attachmentId: string, signal?: AbortSignal): Promise<ArrayBuffer>;
 }
 
 // ---------------------------------------------------------------------------
@@ -345,6 +347,24 @@ export function createAgentChatTransport(transporter: Transporter): AgentChatTra
         throw commandErrorFrom(response.status, response.data, "Attachment upload failed");
       }
       return attachmentRefFromUpload(response.data, meta);
+    },
+
+    // Rides the bearer-authed binary channel, never a `?token=` URL: the
+    // transports that cannot carry binary have no `requestBytes` at all
+    // (`api-client.ts` `readFileBytes` guards it the same way).
+    async fetchAttachment(sessionId, attachmentId, signal) {
+      if (!transporter.requestBytes) {
+        throw new Error("Attachment preview is not supported on this connection.");
+      }
+      const response = await transporter.requestBytes({
+        method: "GET",
+        path: agentChatRoutes.attachment(sessionId, attachmentId),
+        ...(signal === undefined ? {} : { signal })
+      });
+      if (!response.ok) {
+        throw commandErrorFrom(response.status, undefined, "Attachment fetch failed");
+      }
+      return response.data;
     }
   };
 }
@@ -380,6 +400,9 @@ function definedQuery(
  * path is the reference. Reading the terminal shape off a chat answer made
  * every chat upload an attachment without an `id` ("attachments[0].id is
  * required." on send, the chip gone) — 2026-09-22.
+ *
+ * The host's answer now also carries the absolute `path` (§7.4); it rides the
+ * ref verbatim — the host strips it from every command body.
  */
 export function attachmentRefFromUpload(
   response: SessionUploadResponse | AttachmentRef,

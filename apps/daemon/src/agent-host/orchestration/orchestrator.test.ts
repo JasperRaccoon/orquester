@@ -16,6 +16,7 @@ import {
   type ThreadItem
 } from "@orquester/api/agent-chat";
 
+import { appendAttachmentPathLines } from "../adapters/attachment-lines.ts";
 import type { AppendableDomainEvent } from "../services.ts";
 import { isAgentChatCommandError } from "./errors.ts";
 import { applyEventsChunked, FOLD_CHUNK_SIZE } from "./fold-ops.ts";
@@ -1551,6 +1552,40 @@ describe("orchestrator — answering a question (§6.2)", () => {
       (persisted as Extract<DomainEvent, { type: "thread.user-input-response-requested" }>).payload
         .questionTextById,
       { "Which branch?": "Which branch?" }
+    );
+    await host.stop();
+  });
+
+  it("a message-mode answer names each attachment by PATH, so the adapters' Attached files block has nothing to add", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await openQuestion(host, "q-2", { dismissible: true });
+    await host.settle();
+    const ref = await host.store.putAttachment({
+      threadId,
+      name: "q3.xlsx",
+      sourcePath: "/tmp/q3.xlsx"
+    });
+
+    await host.orchestrator.command(threadId, "answer", {
+      commandId: cmd(),
+      requestId: "q-2",
+      answers: { "Which branch?": "this one" },
+      attachmentsByQuestionId: { "Which branch?": [ref] }
+    });
+    await host.settle();
+
+    const sent = (host.store.logs.get(threadId) ?? []).find(
+      (event) => event.type === "thread.message-sent" && event.payload.messageId === "async-answer:q-2"
+    ) as Extract<DomainEvent, { type: "thread.message-sent" }> | undefined;
+    assert.ok(sent);
+    const path = await host.store.resolveAttachment(threadId, ref.id);
+    assert.equal(sent.payload.text, `Which branch?\nthis one\nAttached file: q3.xlsx (${path})`);
+    // The line already names the path, so the shared block appends nothing.
+    assert.equal(
+      appendAttachmentPathLines(sent.payload.text, [{ name: "q3.xlsx", path }]),
+      sent.payload.text
     );
     await host.stop();
   });

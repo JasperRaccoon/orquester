@@ -404,6 +404,44 @@ test("a meta.json that does not match the schema marks the thread error", async 
   assert.match(store.threadError("t1") ?? "", /schema/);
 });
 
+test("a metadata-only head read never scans a malformed event log", async () => {
+  const rootDir = await tempRoot();
+  const writer = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  await writer.append({ threadId: "t1", events: [created()] });
+  const head = await headOf(writer, "t1");
+  await writer.saveHead(head);
+  await writer.drain();
+  writer.close();
+  await fs.appendFile(eventsPathOf(rootDir, "t1"), "{malformed}\n");
+
+  const reader = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  const loaded = await reader.loadHead("t1", { seedRuntime: false });
+
+  assert.equal(loaded?.id, "t1");
+  assert.equal(reader.threadError("t1"), null, "events.ndjson was not inspected");
+  reader.close();
+});
+
+test("a metadata-only head read never rolls a seeded thread's head back to meta.json", async () => {
+  const rootDir = await tempRoot();
+  const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  await store.append({ threadId: "t1", events: [created()] });
+  await store.saveHead(await headOf(store, "t1"));
+  // Between two checkpoints the seeded head moves on and meta.json does not.
+  await store.append({ threadId: "t1", events: [message("t1", "m1")] });
+  await store.drain();
+  const onDisk = JSON.parse(
+    await fs.readFile(path.join(threadDir(rootDir, "t1"), "meta.json"), "utf8")
+  ) as ThreadHead;
+  assert.equal(onDisk.seq, 1);
+
+  const metaOnly = await store.loadHead("t1", { seedRuntime: false });
+
+  assert.equal(metaOnly?.seq, 2, "the seeded head answers, not the older file");
+  assert.equal((await headOf(store, "t1")).seq, 2, "and the seeded head is left as it was");
+  store.close();
+});
+
 async function headOf(
   store: ReturnType<typeof createThreadStore>,
   threadId: string
@@ -609,6 +647,8 @@ test("putAttachment copies the file, names the thread in the id and stats the si
   assert.ok(ref.id.startsWith("t1-"), `id ${ref.id} names its thread`);
 
   const resolved = await store.resolveAttachment("t1", ref.id);
+  // The reply names the absolute path the composer puts in the prompt (§7.4).
+  assert.equal(ref.path, resolved);
   assert.equal(path.dirname(resolved), attachmentsDirOf(rootDir, "t1"));
 
   // Copied, not linked: editing the delivered file must not touch the source.
@@ -621,6 +661,9 @@ test("an attachment id belonging to another thread is refused, not looked up", a
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
   const source = await writeSource(path.join(rootDir, "src"), "a.bin", 8);
   const ref = await store.putAttachment({ threadId: "t1", name: "a.bin", sourcePath: source });
+  // The file arm names its absolute path too (§7.4).
+  assert.equal(ref.type, "file");
+  assert.equal(ref.path, await store.resolveAttachment("t1", ref.id));
 
   await assert.rejects(store.resolveAttachment("t2", ref.id), /does not belong/);
   await assert.rejects(
@@ -928,6 +971,40 @@ test("the host-wide raw-log ceiling runs on the sweep schedule", async () => {
 
   await store.pruneAttachments({ now: hoursFromNow(0) });
   await assert.rejects(fs.stat(rung), "the sweep must reach raw logs, not just attachments");
+});
+
+test("the startup sweep avoids history folds and leaves completed attachments for the deep sweep", async () => {
+  const rootDir = await tempRoot();
+  const store = createThreadStore({ rootDir, idGen: countingIds() });
+  const src = path.join(rootDir, "src");
+  const orphan = await store.putAttachment({
+    threadId: "t1",
+    name: "orphan.bin",
+    sourcePath: await writeSource(src, "orphan.bin", 8)
+  });
+  await store.append({ threadId: "t1", events: [created()] });
+  await store.drain();
+
+  const partial = path.join(attachmentsDirOf(rootDir, "t1"), "upload.part");
+  await fs.writeFile(partial, "partial");
+  const ancient = (Date.now() - 30 * 24 * 60 * 60 * 1000) / 1000;
+  await fs.utimes(partial, ancient, ancient);
+  const rung = path.join(threadDir(rootDir, "t1"), "raw.ndjson.1");
+  await fs.writeFile(rung, "old\n");
+  await fs.utimes(rung, ancient, ancient);
+
+  await store.sweepStartup();
+
+  await store.resolveAttachment("t1", orphan.id);
+  await assert.rejects(fs.stat(partial), "the cheap pass still removes stale partial uploads");
+  await assert.rejects(fs.stat(rung), "the cheap pass still enforces the raw-log ceiling");
+
+  await store.pruneAttachments({ threadId: "t1", now: hoursFromNow(48) });
+  await assert.rejects(
+    store.resolveAttachment("t1", orphan.id),
+    "the scheduled deep pass still collects completed orphans"
+  );
+  store.close();
 });
 
 // --- S1-5 residual: the sweep needs a production scheduler ------------------

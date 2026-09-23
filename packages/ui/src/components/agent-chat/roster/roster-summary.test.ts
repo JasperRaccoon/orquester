@@ -27,14 +27,14 @@ describe("rosterKindCounts", () => {
 });
 
 describe("collapsedRosterLabel", () => {
-  it("names both kinds and says when the shells still run", () => {
+  it("places active counts beside their kind, always in parentheses", () => {
     assert.equal(
-      collapsedRosterLabel({ agents: 4, shells: 1, liveAgents: 4, liveShells: 1 }),
-      "4 agents · 1 shell running"
+      collapsedRosterLabel({ agents: 7, shells: 6, liveAgents: 2, liveShells: 1 }),
+      "7 agents (2 working) · 6 shells (1 running)"
     );
     assert.equal(
-      collapsedRosterLabel({ agents: 1, shells: 2, liveAgents: 0, liveShells: 1 }),
-      "1 agent · 2 shells (1 running)"
+      collapsedRosterLabel({ agents: 4, shells: 1, liveAgents: 4, liveShells: 1 }),
+      "4 agents (4 working) · 1 shell (1 running)"
     );
     assert.equal(
       collapsedRosterLabel({ agents: 2, shells: 1, liveAgents: 0, liveShells: 0 }),
@@ -42,9 +42,9 @@ describe("collapsedRosterLabel", () => {
     );
   });
 
-  it("omits the kind that is absent and never prints a zero", () => {
-    assert.equal(collapsedRosterLabel({ agents: 3, shells: 0, liveAgents: 1, liveShells: 0 }), "3 agents");
-    assert.equal(collapsedRosterLabel({ agents: 0, shells: 1, liveAgents: 0, liveShells: 1 }), "1 shell running");
+  it("omits absent kinds and zero active counts", () => {
+    assert.equal(collapsedRosterLabel({ agents: 3, shells: 0, liveAgents: 1, liveShells: 0 }), "3 agents (1 working)");
+    assert.equal(collapsedRosterLabel({ agents: 0, shells: 1, liveAgents: 0, liveShells: 1 }), "1 shell (1 running)");
     assert.equal(collapsedRosterLabel({ agents: 0, shells: 0, liveAgents: 0, liveShells: 0 }), "Agents");
   });
 });

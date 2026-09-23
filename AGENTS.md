@@ -375,7 +375,12 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   is deleted the moment its result arrives.
 - **`HISTORICAL_RAW_SOURCE`** (`"history.replay"`) tags every event projected out of a provider's
   *native* history on resume. A replayed row is the past: it claims no token usage and its turns
-  are already settled. Anything that treats a raw frame as live must check it.
+  are already settled. Anything that treats a raw frame as live must check it. A replayed user row
+  has any trailing `Attached files:` block stripped (`agent-host/adapters/attachment-lines.ts`,
+  `stripAttachmentPathLines`): the block is provider input the host never persists, and the native
+  transcript is the only place it survives — unless the block was the whole message, which is kept
+  as the turn's only evidence. (Claude only: the block-only leading text block of a skill dispatch
+  is dropped when the command block carries the text.)
 - **One `opencode serve` per project, not per thread** — safe only while chat threads register
   nothing thread-scoped into that server and every automatic approval is a **one-shot** grant.
   OpenCode's `always` is directory-wide across every session of that server; an `always` from a
@@ -409,24 +414,36 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   `session.exited` and one "Task stopped" row out of five were ever written, and the threads kept
   reading "running" for work that was already dead. `awaitHostExit` now waits for the PROCESS —
   the service session ending (`isAlive()` on a direct child) and the socket — bounded at 30 s, and
-  an intentional `/stop` ends the process explicitly (`onStopped` → `process.exit`). A manual
-  `POST /api/agent-host/stop` still restarts at once, by design.
+  an intentional `/stop` ends the process explicitly (`onStopped` → `process.exit`). That `/stop`
+  answers BEFORE teardown starts (`afterStopResponse`, on the reply's `finish`): a teardown queued
+  as a microtask raced the reply and hung the socket up mid-handover. A replacement that misses
+  its readiness deadline latches `error`, but the health probe keeps running there and adopts it
+  the moment it answers healthy (the respawn cap still holds) — `error` used to be terminal until
+  the daemon restarted. A manual `POST /api/agent-host/stop` still restarts at once, by design.
 - **Boot folds only orphaned threads.** The §3.3 reconcile decides "orphaned" from `meta.json`
   alone (`isOrphanedHead`: `starting`/`running`, an `activeTurnId`, or `ready` with a prepared
   `continueAfterRestart`; `commit` rewrites the head on every session transition for exactly this
-  reader) and folds nothing else before the gate. Every other thread goes into
+  reader), read with `loadHead(id, { seedRuntime: false })`, which never opens `events.ndjson`,
+  and folds nothing else before the gate. Every other thread goes into
   `bootSettlePending`: §3.4's stale-`pending`-turn settle, which the reconcile used to run on every
   idle thread at boot, runs on the thread's **first load**, inside `loadRuntime` before the runtime
   is published, so no read, stream snapshot or command can see the thread unsettled — and never at
   boot. A head that cannot be read is folded, as before. Measured before, on the owner's VPS
   (2026-09-23): 16 s of folding for 78 MB of logs, all of it on the readiness path — an 18 s
   "connecting" window on every host replacement; the reconcile now costs one `meta.json` read per
-  thread plus the orphans' own folds. The boot attachment sweep (`sweepNow`, fired unawaited just
-  before the gate) reads references off the snapshot + tail (`foldForSweep`) and skips a thread
-  with no stored attachment outright, so it no longer refolds every log one tick after the gate.
-  The folds on the load, history, sweep and item-read paths yield to the loop every 500 events
-  (`applyEventsChunked`; the store's `foldForward`): a multi-second fold starved the 15 s health
-  probe (5 s timeout), and two consecutive misses restart a healthy host.
+  thread plus the orphans' own folds. The deploy handover's `/stop` (`markThreadsForContinuation`)
+  applies the same rule: it folds only a thread this host serves, one with a live provider session,
+  or one whose `meta.json` says a turn is running in an opted-in project with a cursor — folding
+  every log there made a healthy host take a minute to acknowledge its stop. The boot sweep is
+  `sweepStartup` (fired unawaited just before the gate): stale partial uploads and the raw-log
+  ceiling, no history read at all. The deep attachment-reference sweep (`sweepNow`) runs on the
+  store's 6 h schedule, reads references off the snapshot + tail (`foldForSweep`) and skips a thread
+  with no stored attachment outright; a host restarted more often than that collects orphaned
+  completed attachments late — disk, never correctness. The folds on the load, history, sweep and
+  item-read paths yield to the loop every 500 events (`applyEventsChunked`; the store's
+  `foldForward`), and decoding a log yields every 8 ms (`DECODE_SLICE_MS`: `readLog`,
+  `decodeWindow`): a multi-second fold or parse starved the 15 s health probe (5 s timeout), and
+  two consecutive misses restart a healthy host.
 - **The fold snapshot and the thread index are caches, never authorities.** `events.ndjson` stays
   the record; any doubt — another version, a seq or byte offset that does not line up, a file that
   does not parse — is resolved by discarding the cache and re-deriving from the log, never the
@@ -571,10 +588,14 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   only when the adapter id agrees in all three places, the protocol version matches and the CLI is
   still at the same path — so a cache written before an `npm install -g` moved the binary is
   discarded rather than rendered. A correlated row overrides the pending seed; a v1 identity-less
-  payload is dropped. **(3) The registry forces a probe of every provider at boot itself**
-  (`startBootRefresh()`), called from `main.ts` after `host.openGate()` and never awaited — a probe
-  must never delay readiness. The 5-minute interval is only a top-up and stays gated on a live
-  watcher; the old first-watcher priming survives as a no-op fallback.
+  payload is dropped. **(3) The registry probes, at boot, every provider that did not hydrate a
+  correlated cache row** (`startBootRefresh()`), called from `main.ts` after `host.openGate()` and
+  never awaited — a probe must never delay readiness. A correlated row is already the snapshot to
+  serve: re-probing it launched a heavyweight Claude SDK process on every deploy, which could block
+  the loop long enough for the supervisor to kill a ready host (2026-09-23). Manual and scheduled
+  refreshes still probe everything (`refreshAllNow()`). The 5-minute interval is only a top-up and
+  stays gated on a live watcher; the old first-watcher priming survives as a fallback over the same
+  unprobed set.
   **A moved or updated CLI binary re-probes on the next read**: the identity also carries a cheap
   `realpath` + `stat` of the resolved bin (`binRealPath`/`binMtimeMs`/`binSizeBytes` — the native
   installer's `~/.local/bin/claude` is a *symlink*, so an update moves its target and never its
@@ -613,6 +634,21 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   card must not be able to close without the message, or the reverse — and its text echoes each
   question before its answer so the agent, which sees an ordinary user turn, can tell what was
   answered.
+- **A non-image attachment reaches the agent as a PATH, guarded twice.** The upload reply
+  carries `AttachmentRef.path` — the absolute host path; `validate.ts` rebuilds every ref from
+  `{type, id, name, mimeType, sizeBytes}`, so the host's validation strips it from every command
+  body and no adapter and no event ever sees it — and the
+  composer inserts it into the prompt when the upload completes, exactly as the terminal-era
+  upload typed it into the PTY (`composer-files.ts`). Independently, every adapter appends
+  `Attached files:\n- <name>: <path>` for the refs it does not ingest natively
+  (`agent-host/adapters/attachment-lines.ts`), skipping paths the text already names — Claude
+  ingests images only, Codex images by path, OpenCode image/`text/*`/pdf as `file` parts, Grok
+  nothing. Before this, Claude and Codex dropped every non-image file silently behind a comment
+  that assumed a host path line never ported from T3. Claude reads the path without an approval
+  (the thread's attachments dir is an `additionalDirectories` entry); Codex and OpenCode may raise
+  their own approval card for a read outside the project. Chips draw a vendored Material Icon
+  Theme subset (`packages/ui/src/icons/files/`, MIT, pinned in its README — never the
+  Office-branded vscode-icons set, whose decorative use the trademark guidelines forbid).
 - **`raw.ndjson` is as sensitive as the repository it watched** — it records whatever the agent
   read, and Grok's `_x.ai/mcp/servers_updated` carries the host's real MCP credentials. Redaction
   runs before anything is written, and before any stderr excerpt leaves the host.

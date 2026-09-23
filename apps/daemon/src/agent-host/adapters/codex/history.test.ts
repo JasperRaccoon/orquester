@@ -303,6 +303,38 @@ describe("codex history projection — item selection", () => {
     assert.equal((user!.payload as { detail?: string }).detail, "look at\nthis");
   });
 
+  it("drops the `Attached files:` block the adapter appended from a replayed prompt", () => {
+    // The rollout keeps the text the adapter SENT, suffix included
+    // (`attachment-lines.ts`); the row is the user's own text.
+    const [user] = project([
+      {
+        type: "userMessage",
+        id: "u1",
+        clientId: null,
+        content: [
+          { type: "text", text: "hello\n\nAttached files:\n- q3.xlsx: /a/q3.xlsx", text_elements: [] },
+          { type: "localImage", path: "/tmp/a.png" }
+        ]
+      }
+    ]).filter((event) => event.type === "item.completed");
+    assert.equal((user!.payload as { detail?: string }).detail, "hello");
+
+    // A prompt that was nothing but the block is an attachment-only message,
+    // and a replay has no attachment chips to show instead: the block stays.
+    const [alone] = project([
+      {
+        type: "userMessage",
+        id: "u2",
+        clientId: null,
+        content: [{ type: "text", text: "Attached files:\n- q3.xlsx: /a/q3.xlsx", text_elements: [] }]
+      }
+    ]).filter((event) => event.type === "item.completed");
+    assert.equal(
+      (alone!.payload as { detail?: string }).detail,
+      "Attached files:\n- q3.xlsx: /a/q3.xlsx"
+    );
+  });
+
   it("tolerates a malformed item instead of throwing on a corrupt rollout", () => {
     assert.deepEqual(itemTypes([null, "nonsense", 42, {}, { type: "userMessage" }]), []);
   });

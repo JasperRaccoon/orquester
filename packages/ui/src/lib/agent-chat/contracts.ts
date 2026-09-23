@@ -538,6 +538,8 @@ export interface AgentChatActions {
   stopSession(): Promise<void>;
   /** The existing `POST /api/sessions/:id/upload`; returns the attachment reference. */
   uploadAttachment(file: File | Blob, meta: { name: string; type?: string }): Promise<AttachmentRef>;
+  /** `GET /api/sessions/:id/attachments/:attachmentId` — bytes for an image chip's preview (§7.4). */
+  fetchAttachmentBytes(attachmentId: string, signal?: AbortSignal): Promise<ArrayBuffer>;
 
   // Client-local queue ops (§7.4). None of these touch the host.
   queueMessage(message: Omit<QueuedComposerMessage, "id" | "queuedAt">): void;

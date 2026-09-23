@@ -1,0 +1,22 @@
+# Agent timeline rendering audit — 2026-09-23
+
+Reference: T3 Code commit `6975efd3dd52c95dd978ff26f591139d8c5c2503`, cloned at `node_modules/t3code-reference` (ignored by Git). The comparison follows provider event → runtime event → persisted item → timeline projection → React row. It covers live streaming and reopening a thread.
+
+| Provider | Native signal | T3 Code | Orquester finding and result |
+|---|---|---|---|
+| Codex | App-server `item/agentMessage/delta` and completed `agentMessage` with `phase: commentary` or `final_answer`; tool and hook events interleave. | Assistant text remains visible between work groups; tools are grouped; routine hooks do not become activity rows. | Commentary was converted to a work label inside a crowded activity group, and native-history replay lost its phase because it read the text as the phase. Commentary now renders as assistant prose in live and replay. Routine successful hooks are hidden from the timeline; failures remain visible. |
+| Claude, Claudex, Claudemix | SDK text/thinking block deltas and tool lifecycle; content indexes restart for each assistant message. | Text, reasoning and tools are separate timeline content. Reasoning inside a group has its own disclosure and Markdown body. | The adapter already keys streamed text blocks by message ID plus index. The shared group previously dumped reasoning as plain text. It now has a short collapsed preview and an expandable, capped Markdown body. |
+| Grok | ACP `agent_message_chunk`, `agent_thought_chunk`, `tool_call/update`; command output can live in `rawOutput` or ACP content blocks while `detail` repeats the command. | The ACP model separates answer, thought and tools; work-log presentation extracts output from provider data and suppresses command echoes. | The adapter already separates answer and thought. The shared work-log projection ignored output in provider data, so expanding a command often repeated the command. It now reads output after the wire projection, including ACP content, and suppresses exact or truncated Grok command echoes. |
+| OpenCode | SSE `message.part.delta` and `message.part.updated`, with text, reasoning and tool parts; message role can arrive after a part. | Holds part state, backfills role, emits only new text, then groups reasoning and work. | The adapter already retains part state and backfills role. The same shared reasoning disclosure and live group-header correction now apply. Existing full command detail is preserved when it is richer than the projected output preview. |
+
+## Shared GUI differences
+
+- T3 Code's active activity-group label considers only work **after the last thought** (`apps/web/src/components/chat/MessagesTimeline.tsx`, `ActivityGroupTimelineRow`). Orquester previously considered an older tool and could keep showing its name after the agent resumed thinking. The label now follows the latest phase.
+- T3 Code gives reasoning inside an expanded group a second disclosure, a short preview and a scroll cap (`ReasoningTraceBlock`). Orquester now follows that pattern; standalone one-line reasoning can also be expanded and uses the same Markdown renderer as assistant prose.
+- T3 Code extracts command output from `item.aggregatedOutput`, `item.result`, `rawOutput`, ACP content and result data (`packages/client-runtime/src/work-log/presentation.ts`). Orquester now reads these output locations in its shared presentation projection; the wire's `slimActivityPayload` already preserves a bounded output preview.
+- T3 Code uses LegendList virtualization and richer first-party tool icons and attachment previews. Orquester uses a plain list with `content-visibility: auto`, generic tool glyphs and attachment chips. These differences affect presentation and performance; the missing assistant text came from the timeline grouping. Virtualization deserves a measured performance case before replacing the list's scroll and disclosure behavior.
+
+## Limits and verification
+
+- Grok's native `session/load` replay is incomplete in the recorded fixture (5 events replayed from a 39-event source). A missing historical provider event cannot be recovered by the React renderer; Orquester's own persisted thread events remain the authoritative history for its tabs.
+- The checks cover phase mapping, hook filtering, grouped reasoning, live labels, command output through `slimActivityPayload`, and type safety. They do not include a live daemon session because this repository forbids starting or restarting the daemon without an explicit request.

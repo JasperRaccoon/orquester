@@ -443,11 +443,14 @@ describe("reconcile (§3.3)", () => {
     const threadId = await first.createThread();
     await first.stop();
 
+    const reads = countLogReads(first.store);
+
     const next = createTestHost({ store: first.store, continuationEnabled: () => true });
     await next.orchestrator.reconcile();
     await next.settle();
     assert.equal(next.adapter.calls.length, 0);
     assert.equal(sessionEvents(first.store, threadId).length, 0);
+    assert.equal(reads.get(threadId) ?? 0, 0, "startup must not fold an idle thread's complete history");
     await next.stop();
   });
 
@@ -519,6 +522,23 @@ describe("reconcile (§3.3)", () => {
     await next.settle();
     assert.equal(next.adapter.calls.filter((call) => call.kind === "sendTurn").length, 0);
     assert.equal(headOf(store, threadId).session.status, "error");
+    await next.stop();
+  });
+
+  it("an intentional stop rejects idle metadata without cold-folding the history", async () => {
+    const first = createTestHost({ continuationEnabled: () => true });
+    const threadId = await first.createThread();
+    await first.stop();
+
+    const reads = countLogReads(first.store);
+
+    const next = createTestHost({ store: first.store, continuationEnabled: () => true });
+    assert.deepEqual(await next.orchestrator.markThreadsForContinuation(), []);
+    assert.equal(
+      reads.get(threadId) ?? 0,
+      0,
+      `idle thread ${threadId} must not be folded during handover`
+    );
     await next.stop();
   });
 

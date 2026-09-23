@@ -45,25 +45,31 @@ function plural(count: number, noun: string): string {
 }
 
 /**
- * The folded roster's one line: `4 agents · 1 shell running`.
- *
- * Shells say whether they still run because that is the one thing a folded
- * roster hides that the user may be waiting on; agents do not, because the
- * footer beside this label already counts the working ones.
+ * The roster's count line: `4 agents (2 working) · 1 shell (1 running)`.
  */
+export function rosterCountLabels(counts: RosterKindCounts): {
+  agents: string | null;
+  working: string | null;
+  shells: string | null;
+  running: string | null;
+} {
+  return {
+    agents: counts.agents > 0 ? plural(counts.agents, "agent") : null,
+    working: counts.liveAgents > 0 ? `${counts.liveAgents} working` : null,
+    shells: counts.shells > 0 ? plural(counts.shells, "shell") : null,
+    running: counts.liveShells > 0 ? `${counts.liveShells} running` : null
+  };
+}
+
 export function collapsedRosterLabel(counts: RosterKindCounts): string {
+  const labels = rosterCountLabels(counts);
   const parts: string[] = [];
-  if (counts.agents > 0) parts.push(plural(counts.agents, "agent"));
-  if (counts.shells > 0) {
-    const shells = plural(counts.shells, "shell");
-    if (counts.liveShells === 0) parts.push(shells);
-    else if (counts.liveShells === counts.shells) parts.push(`${shells} running`);
-    else parts.push(`${shells} (${counts.liveShells} running)`);
-  }
+  if (labels.agents) parts.push(labels.agents + (labels.working ? ` (${labels.working})` : ""));
+  if (labels.shells) parts.push(labels.shells + (labels.running ? ` (${labels.running})` : ""));
   return parts.length > 0 ? parts.join(" · ") : "Agents";
 }
 
-/** The unfolded roster's toggle label: what the list is a list of. */
+/** A kind-only title for callers that need one instead of the count line. */
 export function expandedRosterLabel(counts: RosterKindCounts): string {
   if (counts.agents === 0 && counts.shells > 0) return counts.shells === 1 ? "Shell" : "Shells";
   return "Agents";
@@ -78,10 +84,8 @@ export function shellSectionLabel(counts: RosterKindCounts): { title: string; de
 }
 
 /**
- * Split rendered rows by kind **without reordering either kind**: the agents
- * keep their spawn order above, the shells keep theirs below. The partition is
- * by a property that never changes, so a status change never moves a row
- * between the two lists (§7.6 "never reshuffle rows that stay visible").
+ * Split rendered rows by kind. The selection has already put active rows
+ * first; this keeps that order within the agent and shell sections.
  */
 export function partitionRosterRows<T extends { agent: Pick<RuntimeSubagent, "agentKind"> }>(
   rows: readonly T[]

@@ -71,7 +71,7 @@ const BY_EXT: Record<string, [FileKind, string]> = {
 };
 
 /** Lowercased extension, collapsing `.tar.*` compound names to a known key. */
-function extOf(filename: string): string {
+export function extOf(filename: string): string {
   const lower = filename.toLowerCase();
   if (lower.endsWith(".tar.gz")) return "tgz";
   if (lower.endsWith(".tar.bz2") || lower.endsWith(".tar.xz")) return "tar";
@@ -80,6 +80,9 @@ function extOf(filename: string): string {
 }
 
 export function detectFileKind(filename: string): FileKindInfo {
-  const hit = BY_EXT[extOf(filename)];
+  const key = extOf(filename);
+  // Own keys only: `notes.constructor` must not read `Object.prototype`
+  // (the same hole `file-icon.ts` closes for the icon tables).
+  const hit = Object.prototype.hasOwnProperty.call(BY_EXT, key) ? BY_EXT[key] : undefined;
   return hit ? { kind: hit[0], mime: hit[1] } : { kind: "text", mime: "text/plain" };
 }
