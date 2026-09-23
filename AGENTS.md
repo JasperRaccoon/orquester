@@ -363,6 +363,10 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   CLI's complete per-block `assistant` frames carry the stream's `message_start` id, which is how
   a snapshot finds its streamed block. `inFlightTools` is keyed by index only because a tool block
   is deleted the moment its result arrives.
+- **Registry `args` are the terminal launcher's flags and never reach a chat launch** — permissions
+  come only from `runtimeMode`, `full-access` = `bypassPermissions`; effort only from the model
+  selection. (`buildRefIdIndex` in `agent-host/main.ts` carries a row's adapter and bins, never its
+  `args`; Claude's mapping is `RUNTIME_MODE_TO_PERMISSION_MODE` in `adapters/claude/launch.ts`.)
 - **`HISTORICAL_RAW_SOURCE`** (`"history.replay"`) tags every event projected out of a provider's
   *native* history on resume. A replayed row is the past: it claims no token usage and its turns
   are already settled. Anything that treats a raw frame as live must check it.
@@ -578,6 +582,43 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   `GET …/items/:itemId` for the rest.
 
 Start here: `apps/daemon/src/agent-host/README.md` (module map + package ownership).
+
+**Orquester MCP** (`apps/daemon/src/mcp/`). `POST /mcp` lets an external agent drive chat sessions
+the way the chat GUI does: 29 tools (catalogue, sessions, messages, pending requests, waiting,
+usage, files, todos) and no terminal I/O — terminal tabs are only listed and closed. It is mounted
+**only on the HTTP transport** (`mode:"remote"`, behind the global bearer hook; the unauthenticated
+unix socket never serves it) as a stateless Streamable-HTTP endpoint with one `McpServer` per
+request, a 16 MiB body limit and `405` for `GET`/`DELETE`. Every tool but the kept todo/file pair
+is an **in-process client of the daemon's own REST API**: `InjectDaemonApi` (`daemon-api.ts`) runs
+every call through `app.inject()` with the caller's own `Authorization` header, so each route's
+gates (the create route's claudex model gate, seeded-account gate, `chat.adapter` check and
+tab-then-thread order; the proxy routes' `THREAD_NOT_FOUND`/`HOST_UNAVAILABLE` guards) and error
+codes are the GUI's by construction, not by review. Two invariants:
+
+- **Tools never touch services directly — only `DaemonApi`.** No `services.sessions`, no host
+  client, no store: the seam's only non-route methods are the attachment upload/path pair (over
+  `AgentChatService`) and the bus subscription. A route that proves awkward gets a `DaemonApi`
+  method; a tool never imports a service. The one standing exception is the kept todo/file pair,
+  which reaches `TodoTools`/`FsTools` (`todo-tools.ts`, `fs-tools.ts`) through its `ToolContext`.
+- **Waits ride the `Broadcaster`, never sleeps.** `send_message`/`implement_plan` with `wait` and
+  `wait_for_session` (`wait.ts`) subscribe to the bus the `/events` clients read and evaluate the
+  session summary (`activity` plus the six chat fields) on every event, with a 10 s list re-read
+  only as a safety net, a 300 ms settle window for siblings stamped by one host poll, and the
+  request's `close` aborting them. `wait_for_session` compares `activity.needsAttentionAt` with the
+  caller's `after` and hands back a `cursor`: a chat tab's `finished` is sticky, so "return what is
+  already flagged" was a busy loop in v1.
+
+Addressing: sessions only by `sessionId` (titles are not unique, so there is no title matching);
+`project` as the absolute path or `"<workspace>/<project>"`, resolved by `resolveProject()`
+(`addressing.ts`) to exactly `<workspacesDir>/<ws>/<name>` inside `fsRoot` — the string
+`GET /api/sessions?projectPath=` matches. The tools are deliberately stricter than the GUI in a
+few places: `project`, `cwd` and attachment paths must realpath inside `fsRoot`; `accountId` is
+family-checked before a create (the daemon silently falls back to the system home); at most 24
+running sessions per project; `update_session` refuses a mid-turn model/permission change without
+`force`. Like the GUI, `send_message` refuses while a request is pending (the host alone would take
+the message as a steer). A result is one JSON object capped at 60 000 bytes (`result.ts`); an error
+is `<CODE>: <message>`. Tool docs: `docs/orquester-mcp.md`; design: the v2 spec,
+`docs/superpowers/specs/2026-09-22-orquester-mcp-v2-design.md`.
 
 ### Key runtime flows
 
@@ -1119,4 +1160,5 @@ password secrecy + patching remain the real mitigations. It costs two loosened u
 | Agent chat: wire contracts, runtime/domain events, fold | `packages/api/src/agent-chat/{wire.ts,runtime-events.ts,domain-events.ts,fold.ts,slim.ts,roster.ts}` |
 | Agent chat: client state, transport, timeline, composer, roster | `packages/ui/src/lib/agent-chat/`, `packages/ui/src/components/agent-chat/` |
 | Agent chat: protocol fixtures (read the per-provider `README.md`) | `apps/daemon/test/fixtures/{claude,codex,opencode,grok}/` |
+| Orquester MCP (tools, in-process client, waits) | `apps/daemon/src/mcp/server.ts`, `…/daemon-api.ts`, `…/wait.ts`, `…/tools/` |
 | Deployment | `deploy/` + `docs/superpowers/specs|plans/2026-06-19-remote-*.md` |
