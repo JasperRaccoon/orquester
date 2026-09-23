@@ -68,8 +68,12 @@ export function isKnownCodexItemType(type: string): type is CodexItemType {
  * Classify one item. `phase` handling matters: an `agentMessage` whose phase
  * is `commentary` is the running "I'll do X next" narration, not the answer
  * (fixtures README observation 18), and §7.3 renders it as an activity row —
- * so it is reported as `assistant_message` with `detail: "commentary"` and the
- * timeline decides.
+ * so it is reported as `assistant_message` with the phase in `data.phase`,
+ * which is where ingestion reads it (`assistantPhase`, `ingestion/index.ts`).
+ * `detail` mirrors it (`detail: "commentary"`) and is dropped as a marker only
+ * because it equals `data.phase`. The message text is not forwarded: it is
+ * built from `item/agentMessage/delta`. Were `item.text` ever forwarded, it
+ * would belong in `data.text`, which ingestion always reads as text.
  */
 export function classifyItem(item: CodexThreadItem): ClassifiedItem {
   switch (item.type) {

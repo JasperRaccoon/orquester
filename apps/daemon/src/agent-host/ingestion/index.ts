@@ -1146,6 +1146,36 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       );
     }
 
+    // An assistant `item.started` for ANOTHER item than the open assistant
+    // segment of its turn and owner means that segment's item was abandoned:
+    // Codex drops an `agentMessage` mid-stream when the upstream stream is cut
+    // and silently re-samples (fixtures/codex 05, t 17754–21063). Close it the
+    // way its own `item.completed` would, with the text it has — otherwise the
+    // new item streams into it and inherits its kind, and an answer glued onto
+    // commentary is filed as commentary. Every adapter completes an assistant
+    // item before it starts the next, so this fires only on an abandonment: a
+    // restarted SAME item and another owner's item leave the segment alone.
+    if (
+      event.type === "item.started" &&
+      eventTurnId !== null &&
+      event.payload.itemType === "assistant_message" &&
+      event.itemId !== undefined
+    ) {
+      const owner = ownerOf(event);
+      const open = state.segments.get(segmentKey(eventTurnId, "assistant", owner));
+      if (open?.activeMessageId != null && open.baseKey !== segmentBaseKeyFromEvent(event)) {
+        finalizeSegment(
+          threadId,
+          state,
+          eventTurnId,
+          "assistant",
+          { cause: event, occurredAt: now },
+          owner
+        );
+        state.segments.delete(segmentKey(eventTurnId, "assistant", owner));
+      }
+    }
+
     // --- the provider's assistant-message phase (§7.3 `messageKind`) -------
     if (
       (event.type === "item.started" ||
@@ -1733,12 +1763,13 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     const active = activeSegmentId(state, turnId, "assistant", owner);
     const messageId = active ?? segmentMessageId(segmentBaseKeyFromEvent(event), 0, "assistant");
     // A `detail` that IS Codex's phase marker is metadata, not the message
-    // body, and `data.text` wins where an adapter elides `detail` for the label.
-    const detail = assistantPhase(event.payload).detailIsMarker
-      ? undefined
-      : historicalItemText(event.payload);
+    // body, so it alone is dropped: `data.text` is always text, and it wins
+    // where an adapter elides `detail` for the label.
+    const text = historicalItemText(
+      assistantPhase(event.payload).detailIsMarker ? { data: event.payload.data } : event.payload
+    );
     const streamed = state.projected.has(messageId) || state.messages.has(messageId);
-    if (active === null && !streamed && !hasRenderableText(detail)) {
+    if (active === null && !streamed && !hasRenderableText(text)) {
       // Nothing to complete: no stream ever opened and the completion is empty.
       return;
     }
@@ -1746,9 +1777,9 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     const close = {
       cause: event,
       occurredAt: now,
-      // The completion's detail is a whole-message snapshot: it may only stand
+      // The completion's text is a whole-message snapshot: it may only stand
       // in for deltas that never arrived, or the text prints twice.
-      ...(!streamed && hasRenderableText(detail) ? { fallbackText: detail } : {})
+      ...(!streamed && hasRenderableText(text) ? { fallbackText: text } : {})
     };
     if (active !== null) {
       finalizeSegment(threadId, state, turnId, "assistant", close, owner);

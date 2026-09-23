@@ -471,7 +471,8 @@ describe("ingestion output folded by the real fold (§5.1)", () => {
       })
     );
     // The commentary item closes; only then does the next item open its own
-    // message — a segment stays open until a completion or a pause closes it.
+    // message — a segment stays open until a completion, a pause or another
+    // assistant item's `item.started` (same turn and owner, D4) closes it.
     await ingestion.ingest(
       runtimeEvent(
         "item.completed",
