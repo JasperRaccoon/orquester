@@ -1,6 +1,7 @@
 import React from "react";
 import { Check, Copy } from "lucide-react";
 import { cn } from "../../../lib/cn";
+import { copyProduced } from "../../../lib/copy-produced";
 import { ChatIconButton, type ChatIconButtonSize } from "./ChatIconButton";
 
 /** How long the tick stays after a successful copy. T3 and this codebase agree. */
@@ -11,8 +12,9 @@ export interface CopyButtonProps {
    * The text, or a getter for it. Use the getter form when the value is
    * expensive to build (a whole message's markdown, a diff) — it is only
    * called on click. A getter may answer a promise when the text has to be
-   * read first (a plan the wire cut, read back whole); one that rejects copies
-   * nothing, like a denied clipboard.
+   * read first (a plan the wire cut, read back whole). The clipboard write
+   * still starts within the click (`copyProduced`), and a promise that rejects
+   * copies nothing, like a denied clipboard.
    */
   value: string | (() => string | Promise<string>);
   label?: string;
@@ -58,10 +60,15 @@ export function CopyButton({
     const produced = typeof value === "function" ? value() : value;
     void (async () => {
       try {
-        // A string is written within the click, as it always was; only a
-        // getter that has to read first is awaited.
-        const text = typeof produced === "string" ? produced : await produced;
-        await navigator.clipboard.writeText(text);
+        // The write starts here, synchronously, inside the click. WebKit
+        // refuses one begun after an await, so text still being read goes
+        // through `write()` with a promised ClipboardItem where the engine
+        // has one (`copyProduced`).
+        await copyProduced(
+          produced,
+          navigator.clipboard,
+          typeof ClipboardItem === "function" ? ClipboardItem : undefined
+        );
       } catch {
         // A denied clipboard permission, or text that could not be read, is
         // not worth a toast: the user can still select the text. Swallow it

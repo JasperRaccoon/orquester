@@ -91,8 +91,17 @@ export function launchKindForAgent(agentRefId: string): SessionKind | null {
  * under the same HOME instead of going through the launcher's `resumeArgs`
  * (§5.3). It is only offered where the agent that would run it actually has an
  * adapter.
+ *
+ * A `cliproxy` row that names no `proxyRefId` is never offered. Only the
+ * launcher that owns a proxy home can find a transcript there, and with none
+ * named `chatLaunchRefId` falls back to the plain agent, which would open the
+ * daemon's own HOME and resume nothing. The MCP's `list_conversations` and
+ * `create_session` refuse the same row.
  */
 export function isChatResumableConversation(conversation: AgentConversationSummary): boolean {
+  if (conversation.home === "cliproxy" && !conversation.proxyRefId) {
+    return false;
+  }
   return canOpenChat(chatLaunchRefId(conversation));
 }
 

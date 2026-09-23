@@ -20,7 +20,7 @@
 import type { ThreadActivityItem } from "@orquester/api/agent-chat";
 import { buildPlanImplementationPrompt } from "@orquester/api/agent-chat";
 
-import type { ActivePlanState } from "./contracts";
+import type { ActivePlanState, AgentChatActions } from "./contracts";
 import { PLAN_IMPLEMENTATION_PROMPT_PREFIX, type ProposedPlanEntry } from "./entries.logic";
 
 export { PLAN_IMPLEMENTATION_PROMPT_PREFIX };
@@ -201,8 +201,8 @@ export function normalizePlanMarkdownForExport(planMarkdown: string): string {
  * plan that silently ends in "…".
  */
 export function wholePlanMarkdown(
-  plan: { id: string; planMarkdown: string; truncated?: true },
-  readFull: (plan: { id: string; planMarkdown: string; truncated?: true }) => Promise<string>
+  plan: Parameters<AgentChatActions["readFullPlanMarkdown"]>[0],
+  readFull: AgentChatActions["readFullPlanMarkdown"]
 ): string | Promise<string> {
   return plan.truncated === true ? readFull(plan) : plan.planMarkdown;
 }

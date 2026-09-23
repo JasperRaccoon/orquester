@@ -10,6 +10,7 @@ import {
   composerSubmissionValidationMessage,
   decideStagedAttachmentForRef,
   hasSendableContent,
+  implementationTextResolver,
   isPasteAsTextShortcut,
   nextPastedTextFileName,
   pastedTextDisposition,
@@ -536,17 +537,67 @@ test("a plan read back whole is what gets sent, not the cut one", async () => {
   assert.deepEqual(wire.sent, [whole]);
 });
 
-test("a plain send goes out as typed, and one the host refuses comes back whole for the draft", async () => {
+test("a plain send goes out as typed, and one the host refuses goes back to the draft as typed", async () => {
   const wire = recordingSend();
   assert.deepEqual(await sendComposerTurn({ text: "fix the tests", send: wire.send }), { kind: "sent" });
   assert.deepEqual(wire.sent, ["fix the tests"]);
 
+  // The user's own words: a failed send hands them back whole, for the draft.
+  const refusing = recordingSend(new Error("The agent host is restarting."));
+  assert.deepEqual(await sendComposerTurn({ text: "fix the tests", send: refusing.send }), {
+    kind: "failed",
+    text: "fix the tests",
+    notice: "The agent host is restarting."
+  });
+  assert.deepEqual(refusing.sent, ["fix the tests"]);
+});
+
+test("a failed Implement leaves the draft alone: its prompt is the composer's, not the user's", async () => {
+  // Written into the draft, the prompt would turn the primary button into a
+  // plan-mode "Refine" that carries the implementation prefix. Left out, the
+  // plan is still actionable, and Implement is simply pressed again.
   const whole = buildPlanImplementationPrompt("# Ship it\n\nevery step");
   const refusing = recordingSend(new Error("The agent host is restarting."));
   assert.deepEqual(await sendComposerTurn({ text: CUT_PROMPT, resolveText: async () => whole, send: refusing.send }), {
     kind: "failed",
-    text: whole,
+    text: null,
     notice: "The agent host is restarting."
   });
-  assert.deepEqual(refusing.sent, [whole]);
+  assert.deepEqual(refusing.sent, [whole], "the whole prompt is what the host refused");
+});
+
+test("every Implement reads its plan at send time, intact or cut, and no other send does", async () => {
+  const reads: string[] = [];
+  const read = async (plan: { id: string; planMarkdown: string }) => {
+    reads.push(plan.id);
+    return plan.planMarkdown;
+  };
+  const intact = { id: "p-intact", planMarkdown: "# Ship it\n\nevery step" };
+  const resolveText = implementationTextResolver({ action: "implement", proposal: intact, read });
+  assert.ok(resolveText, "an intact plan's Implement resolves its prompt too, not only a cut one's");
+  assert.deepEqual(reads, [], "nothing is read before the send step runs");
+  assert.equal(await resolveText(), buildPlanImplementationPrompt(intact.planMarkdown));
+  assert.deepEqual(reads, ["p-intact"]);
+
+  // A Refine sends the user's own text, and a plain send has no plan at all.
+  assert.equal(implementationTextResolver({ action: "refine", proposal: intact, read }), undefined);
+  assert.equal(implementationTextResolver({ action: null, proposal: null, read }), undefined);
+  assert.deepEqual(reads, ["p-intact"]);
+});
+
+test("so a failed Implement on an intact plan leaves the draft alone too", async () => {
+  const intact = { id: "p-intact", planMarkdown: "# Ship it\n\nevery step" };
+  const prompt = buildPlanImplementationPrompt(intact.planMarkdown);
+  const refusing = recordingSend(new Error("The agent host is restarting."));
+  const outcome = await sendComposerTurn({
+    text: prompt,
+    resolveText: implementationTextResolver({
+      action: "implement",
+      proposal: intact,
+      read: async (plan) => plan.planMarkdown
+    }),
+    send: refusing.send
+  });
+  assert.deepEqual(outcome, { kind: "failed", text: null, notice: "The agent host is restarting." });
+  assert.deepEqual(refusing.sent, [prompt]);
 });

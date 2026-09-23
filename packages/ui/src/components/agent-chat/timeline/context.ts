@@ -2,7 +2,7 @@ import React from "react";
 
 import type { RuntimeSubagent } from "@orquester/api";
 
-import type { DisclosureState } from "../../../lib/agent-chat/contracts";
+import type { AgentChatActions, DisclosureState } from "../../../lib/agent-chat/contracts";
 
 /**
  * Shared row state, carried on a context rather than threaded through props.
@@ -68,7 +68,7 @@ export interface TimelineRowContextValue {
    * (`wholePlanMarkdown`), so neither hands over the cut text. Rejects rather
    * than ever answer it.
    */
-  readFullPlanMarkdown: (plan: { id: string; planMarkdown: string; truncated?: true }) => Promise<string>;
+  readFullPlanMarkdown: AgentChatActions["readFullPlanMarkdown"];
   onOpenAgent: (agentId: string) => void;
   onSendQueuedNow: (queuedId: string) => void;
   onReturnQueuedToComposer: (queuedId: string) => void;
@@ -90,6 +90,17 @@ export interface TimelineRowContextValue {
 }
 
 const NOOP = (): void => {};
+
+/**
+ * The plan reader where no thread store can be reached: the row context
+ * outside a timeline, and a timeline whose store is gone. It keeps the
+ * reader's contract, so an intact plan is its own markdown, as is. Only a plan
+ * the wire cut rejects, because there is nothing to read it back from.
+ */
+export const readPlanWithoutStore: AgentChatActions["readFullPlanMarkdown"] = (plan) =>
+  plan.truncated === true
+    ? Promise.reject(new Error("The full plan could not be loaded."))
+    : Promise.resolve(plan.planMarkdown);
 
 const FALLBACK: TimelineRowContextValue = {
   workspaceRoot: undefined,
@@ -121,10 +132,7 @@ const FALLBACK: TimelineRowContextValue = {
   onOpenFile: NOOP,
   onLoadFullOutput: NOOP,
   // Outside a timeline there is no thread to read a cut plan back from.
-  readFullPlanMarkdown: (plan) =>
-    plan.truncated === true
-      ? Promise.reject(new Error("The full plan could not be loaded."))
-      : Promise.resolve(plan.planMarkdown),
+  readFullPlanMarkdown: readPlanWithoutStore,
   onOpenAgent: NOOP,
   onSendQueuedNow: NOOP,
   onReturnQueuedToComposer: NOOP,

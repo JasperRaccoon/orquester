@@ -61,11 +61,11 @@ import {
 } from "./composer-shortcuts";
 import {
   attachmentRejectionReason,
-  buildPlanImplementationPrompt,
   composerSubmissionIntentForEnter,
   composerSubmissionValidationMessage,
   decideStagedAttachmentForRef,
   hasSendableContent,
+  implementationTextResolver,
   isPasteAsTextShortcut,
   nextPastedTextFileName,
   pastedTextDisposition,
@@ -901,7 +901,7 @@ export function ChatComposer({
           if (isMobile) textareaRef.current?.blur();
           return;
         }
-        if (outcome.kind === "failed") {
+        if (outcome.kind === "failed" && outcome.text !== null) {
           // A failed send goes back to the FRONT of the draft, ahead of anything
           // typed since, so nothing the user wrote while it was in flight is
           // reordered behind it.
@@ -913,7 +913,10 @@ export function ChatComposer({
         }
         // A refusal sent nothing and leaves the draft alone: a plan that could
         // not be read back, or read back over the bound, is still actionable,
-        // so Implement is still there to press again.
+        // so Implement is still there to press again. A failed Implement
+        // (`text: null`) leaves the draft alone for the same reason: its prompt
+        // is the composer's, and in the draft it would read as a plan-mode
+        // Refine carrying the implementation prefix.
         setNotice(outcome.notice);
       } finally {
         setSending(false);
@@ -977,13 +980,16 @@ export function ChatComposer({
       }
       const outgoing = plan?.text ?? text.trim();
       const outgoingMode = plan?.interactionMode ?? interactionMode;
-      // §5.6 cut this proposal at 16 KiB on the wire: Implement reads the whole
-      // plan back first, and sends nothing when it cannot or when the whole
-      // prompt is over the bound the cut one passed below (`sendComposerTurn`).
-      const cutPlan = plan?.action === "implement" && planFollowUp?.truncated ? planFollowUp : null;
-      const wholePlanText = cutPlan
-        ? () => actions.readFullPlanMarkdown(cutPlan).then(buildPlanImplementationPrompt)
-        : undefined;
+      // Implement resolves its prompt at send time through the store's read:
+      // as is when intact, read back whole when §5.6 cut it at 16 KiB. It sends
+      // nothing when the plan cannot be read, or when the whole prompt is over
+      // the bound the cut one passed below. A failed Implement never writes its
+      // prompt into the draft (`sendComposerTurn`).
+      const implementationText = implementationTextResolver({
+        action: plan?.action ?? null,
+        proposal: planFollowUp,
+        read: (proposal) => actions.readFullPlanMarkdown(proposal)
+      });
 
       const validation = composerSubmissionValidationMessage({
         prompt: outgoing,
@@ -1031,7 +1037,7 @@ export function ChatComposer({
         });
         return;
       }
-      void runSend(outgoing, outgoingMode, refs, wholePlanText);
+      void runSend(outgoing, outgoingMode, refs, implementationText);
     },
     [
       planFollowUp,
