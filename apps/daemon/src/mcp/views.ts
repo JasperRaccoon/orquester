@@ -1,9 +1,9 @@
 import { SYSTEM_ACCOUNT_ID, type AgentAccountsResponse, type RegistryResponse, type SessionSummary } from "@orquester/api";
 import { agentChatRoutes, SETTLED_TURN_STATES as TURN_SETTLED_STATES, startedTurns } from "@orquester/api/agent-chat";
-import type { AccountHomeKind, AdapterCapabilities, AgentAdapterId, AgentProvidersResponse, ApprovalDecision, ApprovalOption, LatestTurnSummary, ProviderOptionSelection, ProviderRequestKind, RuntimeMode, RuntimeSubagent, ThreadActivityItem, ThreadItem, ThreadSessionStatus, ThreadSnapshotPayload, ThreadTokenUsage, Turn, UserInputQuestion } from "@orquester/api/agent-chat";
+import type { AccountHomeKind, AdapterCapabilities, AgentAdapterId, ApprovalDecision, ApprovalOption, LatestTurnSummary, ProviderOptionSelection, ProviderRequestKind, RuntimeMode, RuntimeSubagent, ThreadActivityItem, ThreadItem, ThreadSessionStatus, ThreadSnapshotPayload, ThreadTokenUsage, Turn, UserInputQuestion } from "@orquester/api/agent-chat";
 import { resolveChatActivity, type ChatActivityRung } from "../agent-chat/activity-ladder.ts";
 import { projectNamesFor, type ProjectRef } from "./addressing.ts";
-import { supportsFrom } from "./agents.ts";
+import { providerRows, supportsFrom } from "./agents.ts";
 import type { DaemonApi } from "./daemon-api.ts";
 import { readThread, requireChatSession } from "./reads.ts";
 import { capText } from "./result.ts";
@@ -46,9 +46,11 @@ export async function buildViewContext(api: DaemonApi): Promise<ViewContext> {
   if (accounts.status < 400) {
     for (const account of (accounts.body as AgentAccountsResponse).accounts ?? []) accountLabelById.set(account.id, account.label);
   }
+  // The host's body, read field-wise by list_agents' own reader: an older host's degraded row reads as "no capabilities"
+  // (supportsFrom answers false), never as a throw out of get_session, send_message or create_session.
   const providers = await api.request("GET", agentChatRoutes.providers);
   if (providers.status < 400) {
-    for (const provider of (providers.body as AgentProvidersResponse).providers ?? []) capabilitiesByAdapter.set(provider.id, provider.capabilities);
+    for (const [id, row] of providerRows(providers.body)) if (row.capabilities) capabilitiesByAdapter.set(id, row.capabilities);
   }
   return { workspacesDir: api.workspacesDir, adapterByRefId, accountLabelById, capabilitiesByAdapter };
 }

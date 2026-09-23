@@ -109,6 +109,34 @@ test("buildViewContext reads registry, accounts and providers and tolerates a fa
   assert.equal(c.workspacesDir, "/w");
 });
 
+test("buildViewContext reads a degraded providers body field-wise, as list_agents does: nothing throws, and only a row with an id and a capabilities object counts", async () => {
+  const registryBody = { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [{ id: "claude", kind: "agent", name: "Claude Code", bin: ["claude"], enabled: true, installState: "idle", chat: { adapter: "claude" } }, { id: "codex", kind: "agent", name: "Codex", bin: ["codex"], enabled: true, installState: "idle", chat: { adapter: "codex" } }] };
+  const claudeCaps = { sessionModelSwitch: "in-session", showPlanModeToggle: true, supportsConversationRollback: true };
+  const bodies: [string, unknown, [string, unknown][]][] = [
+    ["a null body", null, []],
+    ["a body that is not JSON", "<html>502 Bad Gateway</html>", []],
+    ["providers null", { providers: null }, []],
+    ["providers a number", { providers: 5 }, []],
+    ["providers a string", { providers: "claude" }, []],
+    ["providers an object", { providers: { claude: { id: "claude", capabilities: claudeCaps } } }, []],
+    ["junk rows beside a good one", { providers: [null, 1, "codex", [], {}, { id: "" }, { id: 7, capabilities: claudeCaps }, { id: "codex", capabilities: null }, { id: "grok", capabilities: "all" }, { id: "claude", capabilities: claudeCaps }] }, [["claude", claudeCaps]]]
+  ];
+  for (const [label, body, expected] of bodies) {
+    const api = new FakeDaemonApi()
+      .on("GET", "/api/sessions", { status: 200, body: [chatSummary()] })
+      .on("GET", "/api/sessions/c1/thread", { status: 200, body: { kind: "snapshot", thread: snapshot() } })
+      .on("GET", "/api/registry", { status: 200, body: registryBody })
+      .on("GET", "/api/agent-accounts", { status: 200, body: { accounts: [], defaults: {} } })
+      .on("GET", "/api/agent/providers", { status: 200, body });
+    const c = await buildViewContext(api);
+    assert.deepEqual([...c.capabilitiesByAdapter], expected, label);
+    assert.deepEqual([...c.adapterByRefId], [["claude", "claude"], ["codex", "codex"]], `${label}: the registry still reads`);
+    // get_session, send_message and create_session build their detail through it: a degraded body reads as "no capabilities".
+    const d = await chatDetail(api, "c1");
+    assert.deepEqual(d.chat.supports, expected.length ? { planMode: true, rollback: true, compaction: false, backgroundTasks: false } : { planMode: false, rollback: false, compaction: false, backgroundTasks: false }, `${label}: supports`);
+  }
+});
+
 test("supports.rollback is offered only on an explicit true: an absent flag and no provider snapshot read false", () => {
   const caps = { sessionModelSwitch: "in-session", showPlanModeToggle: true, reportsContextWindow: true, compaction: { type: "native" } } as const;
   const withCaps = (c: typeof caps & { supportsConversationRollback?: boolean }): ViewContext => ({ ...ctx, capabilitiesByAdapter: new Map([["claude", c]]) });
