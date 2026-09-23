@@ -6,7 +6,7 @@ import { CallToolRequestSchema, ErrorCode, McpError } from "@modelcontextprotoco
 import type { DaemonApi } from "./daemon-api.ts";
 import { ToolError } from "./errors.ts";
 import type { FsTools } from "./fs-tools.ts";
-import { capText, ok, toSafeToolError } from "./result.ts";
+import { clipText, MAX_ECHO_CHARS, ok, toSafeToolError } from "./result.ts";
 import type { TodoTools } from "./todo-tools.ts";
 import type { ToolContext, ToolDef } from "./tool.ts";
 import { catalogTools } from "./tools/catalog.ts";
@@ -52,17 +52,12 @@ const MAX_NAMED_ISSUES = 5;
 const MAX_ISSUE_CHARS = 200;
 const MAX_ISSUE_PATH_CHARS = 100;
 
-/** `text` in at most `max` code points, the last of them a "…" when anything was cut. */
-function clip(text: string, max: number): string {
-  return capText(text, max).truncated ? `${capText(text, max - 1).text}…` : text;
-}
-
 /** The one line an argument the schema refuses answers with: each bad field and why, as zod words it, each capped. */
 export function argumentProblems(toolName: string, error: z.ZodError): string {
   const oneLine = (text: string) => text.replace(/\s+/g, " ");
   const named = error.issues.slice(0, MAX_NAMED_ISSUES).map((issue) => {
-    const path = issue.path.length ? clip(oneLine(issue.path.join(".")), MAX_ISSUE_PATH_CHARS) : "arguments";
-    return clip(oneLine(`${path}: ${issue.message}`), MAX_ISSUE_CHARS);
+    const path = issue.path.length ? clipText(oneLine(issue.path.join(".")), MAX_ISSUE_PATH_CHARS) : "arguments";
+    return clipText(oneLine(`${path}: ${issue.message}`), MAX_ISSUE_CHARS);
   });
   const more = error.issues.length > MAX_NAMED_ISSUES ? "; …" : "";
   return `Invalid arguments for ${toolName}: ${named.join("; ")}${more}.`;
@@ -96,7 +91,8 @@ export function buildServer(deps: McpDeps, authorization: string | undefined, si
   }
   server.server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const tool = tools.get(request.params.name);
-    if (!tool) throw new McpError(ErrorCode.InvalidParams, `Tool ${request.params.name} not found`);
+    // The name is the caller's text, of any length: quoted back capped, as every refusal quotes a caller's value.
+    if (!tool) throw new McpError(ErrorCode.InvalidParams, `Tool ${clipText(request.params.name, MAX_ECHO_CHARS)} not found`);
     const parsed = await z.object(tool.input).safeParseAsync(request.params.arguments ?? {});
     if (!parsed.success) return toSafeToolError(new ToolError("INVALID_ARGUMENT", argumentProblems(tool.name, parsed.error)));
     return call(tool, parsed.data);

@@ -4,7 +4,7 @@ import type { TodoScope } from "@orquester/api";
 import { isValidName, type TodoRecord } from "@orquester/config";
 import { TodoError, type TodoListManager } from "../todos.ts";
 import { ToolError } from "./errors.ts";
-import { capText } from "./result.ts";
+import { clipText, MAX_ECHO_CHARS } from "./result.ts";
 
 export type TodoProjection = {
   id: string;
@@ -107,20 +107,24 @@ function taskLines(lines: BodyLine[]): TaskLine[] {
   return tasks;
 }
 
+/** How many of a list's items a refusal names, and the most of each: the list's own text, of any length and count. */
+const MAX_LISTED_ITEMS = 40;
+const MAX_LISTED_ITEM_CHARS = 80;
+
 function availableItems(tasks: TaskLine[]): string {
-  return tasks.map((task) => `${task.index}. ${task.item}`).join(", ");
+  const listed = tasks.slice(0, MAX_LISTED_ITEMS).map((task) => `${task.index}. ${clipText(task.item, MAX_LISTED_ITEM_CHARS)}`).join(", ");
+  return tasks.length > MAX_LISTED_ITEMS ? `${listed}, … (${tasks.length} items)` : listed;
 }
 
-/** The most of a missing list's id its refusal echoes: the id is the caller's text, of any length (ids are UUIDs). */
-const MAX_SHOWN_ID_CHARS = 100;
+/** A caller's value — a list id, an item's text — as a refusal quotes it: capped, quoted and escaped onto one line. */
+const quoted = (text: string): string => JSON.stringify(clipText(text, MAX_ECHO_CHARS));
 
 /**
- * The store's 404 for a list it does not have ("todo not found"), said where the id is known: the id — capped, quoted
- * and escaped, so the message stays one short line — and where the ids are.
+ * The store's 404 for a list it does not have ("todo not found"), said where the id is known: the id, quoted, and
+ * where the ids are.
  */
 function missingList(id: string): TodoError {
-  const shown = capText(id, MAX_SHOWN_ID_CHARS).truncated ? `${capText(id, MAX_SHOWN_ID_CHARS - 1).text}…` : id;
-  return new TodoError(404, `No todo list with id ${JSON.stringify(shown)}; list_todos shows the ids.`);
+  return new TodoError(404, `No todo list with id ${quoted(id)}; list_todos shows the ids.`);
 }
 
 /** A store refusal, the 404 for this id named; anything else untouched. */
@@ -221,10 +225,10 @@ export class TodoTools {
 
     const matches = tasks.filter((task) => task.item.toLowerCase() === needle.toLowerCase());
     if (matches.length === 0) {
-      throw new ToolError("INVALID_ARGUMENT", `No task item matching "${item}". Available items: ${availableItems(tasks)}.`);
+      throw new ToolError("INVALID_ARGUMENT", `No task item matching ${quoted(item)}. Available items: ${availableItems(tasks)}.`);
     }
     if (matches.length > 1) {
-      throw new ToolError("INVALID_ARGUMENT", `Task item "${item}" is ambiguous; use index. Available items: ${availableItems(tasks)}.`);
+      throw new ToolError("INVALID_ARGUMENT", `Task item ${quoted(item)} is ambiguous; use index. Available items: ${availableItems(tasks)}.`);
     }
     return matches[0];
   }

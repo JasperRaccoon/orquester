@@ -238,13 +238,16 @@ const implementPlan = defineTool({
 const readTranscript = defineTool({
   name: "read_transcript",
   title: "Read the transcript",
-  description: "What was said and done in a session, newest turns last: messages, tool calls, approvals, questions, plans, file changes, errors. `agentId` drills into one subagent's own timeline.",
+  // A list cut to fit ends in one element of its own shape counting the rest (transcript.ts `cutRow`): a changedFiles
+  // "…N more files" string, a files row {path: "…N more files", additions, deletions} with the rest's line totals, an
+  // attachments row {name: "…N more attachments", type: "omitted"}. The description has to say so: it reads as data.
+  description: "What was said and done in a session, newest turns last: messages, tool calls, approvals, questions, plans, file changes, errors. `agentId` drills into one subagent's own timeline. A list cut to fit (a checkpoint's files, a tool's changedFiles, a message's attachments) ends in a marker counting the rest (\"…12 more files\"; a files marker carries their real line totals), not a real entry.",
   input: {
     sessionId: sessionIdField,
     turns: z.number().int().min(1).max(200).default(3).describe("How many of the latest turns to include."),
     agentId: z.string().optional().describe("A subagent id from get_session.subagents to read its own timeline."),
     include: z.array(z.enum(["reasoning", "tools", "activity"])).default(["tools", "activity"]).describe("Extra row kinds; reasoning is opt-in."),
-    maxChars: z.number().int().min(2_000).max(MAX_TRANSCRIPT_CHARS).default(40_000).describe("Size budget for the result, in UTF-8 bytes (max 55000; every tool result is capped at 60000 bytes). The subagent list gets at most a quarter of it when the transcript needs the rest; the transcript sheds reasoning, then tool detail, then its oldest rows, and cuts the latest reply last.")
+    maxChars: z.number().int().min(2_000).max(MAX_TRANSCRIPT_CHARS).default(40_000).describe("Size budget for the result, in UTF-8 bytes (max 55000; every tool result is capped at 60000 bytes). Over it, the transcript sheds reasoning, then tool detail, then its oldest rows, and cuts the latest reply last; the subagent list keeps at least a quarter when it needs it, plus whatever the transcript leaves unused.")
   },
   annotations: READ_ONLY,
   async run(args, { api }) {

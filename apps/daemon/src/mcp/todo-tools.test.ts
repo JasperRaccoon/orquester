@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { TodoError, TodoListManager } from "../todos.ts";
 import { TodoTools } from "./todo-tools.ts";
 import { ToolError } from "./errors.ts";
+import { MAX_ERROR_MESSAGE_CHARS } from "./result.ts";
 
 async function makeTools() {
   const root = await mkdtemp(join(tmpdir(), "todo-tools-"));
@@ -152,4 +153,39 @@ test("a missing list's id is echoed capped and escaped: one short line whatever 
   const refusing = new TodoTools({ todos: { update: async () => { throw conflict; }, delete: async () => { throw conflict; } } as never, workspacesDir: "/w" });
   await assert.rejects(() => refusing.update("t1", { body: "" }), (err) => err === conflict);
   await assert.rejects(() => refusing.remove("t1"), (err) => err === conflict);
+});
+
+test("a refusal quotes the caller's item capped and escaped, and a long list's items bounded, never the whole list", async () => {
+  const { tools } = await makeTools();
+  const todo = await tools.create({ workspace: "w" }, "Tasks");
+  await tools.update(todo.id, { body: "- [ ] Alpha\n- [ ] Beta" });
+  const refusal = async (item: string | number, id = todo.id): Promise<string> => {
+    const err = await tools.toggleItem(id, item).then(() => assert.fail("toggleItem resolved"), (e: unknown) => e);
+    assert.ok(err instanceof ToolError && err.code === "INVALID_ARGUMENT", String(err));
+    return err.message;
+  };
+  // An unknown item: its text quoted, at most 100 code points, escaped onto one line; the items still listed.
+  const junk = await refusal(`${"q".repeat(2 * 1024 * 1024)}"\n`);
+  assert.match(junk, /^No task item matching "q{99}…"\. Available items: 1\. Alpha, 2\. Beta\.$/);
+  assert.equal(await refusal('say "hi"\nnow'), 'No task item matching "say \\"hi\\"\\nnow". Available items: 1. Alpha, 2. Beta.');
+  // An ambiguous item — two items with the same long text: the quote and each listed item are capped.
+  const long = "L".repeat(5_000);
+  const twins = await tools.create({ workspace: "w" }, "Twins");
+  await tools.update(twins.id, { body: `- [ ] ${long}\n- [ ] ${long}` });
+  const ambiguous = await refusal(long, twins.id);
+  assert.match(ambiguous, /^Task item "L{99}…" is ambiguous; use index\. Available items: 1\. L{79}…, 2\. L{79}…\.$/);
+  // A 3 000-item list: the first 40 items listed, then how many there are.
+  const big = await tools.create({ workspace: "w" }, "Big");
+  await tools.update(big.id, { body: Array.from({ length: 3_000 }, (_, i) => `- [ ] task ${i + 1}`).join("\n") });
+  const outOfRange = await refusal(5_000, big.id);
+  assert.ok(outOfRange.startsWith("No task item at index 5000. Available items: 1. task 1, 2. task 2, "), outOfRange.slice(0, 120));
+  assert.ok(outOfRange.endsWith("40. task 40, … (3000 items)."), outOfRange.slice(-60));
+  assert.ok(outOfRange.length < 1_000, `${outOfRange.length} characters`);
+  // The longest refusal there can be — the quote at its cap, 40 listed items at theirs — still ends whole under the
+  // error cap (result.ts), so that backstop never cuts its tail.
+  const wide = await tools.create({ workspace: "w" }, "Wide");
+  await tools.update(wide.id, { body: Array.from({ length: 3_000 }, (_, i) => `- [ ] ${i} ${"w".repeat(300)}`).join("\n") });
+  const longest = await refusal("y".repeat(10_000), wide.id);
+  assert.ok(longest.endsWith(", … (3000 items)."), longest.slice(-40));
+  assert.ok([...longest].length <= MAX_ERROR_MESSAGE_CHARS, `${[...longest].length} code points`);
 });

@@ -446,7 +446,8 @@ test("send_message: the list catching up on a turn that was already over is not 
 });
 
 test("read_transcript: maxChars is described as the byte budget it is, and a trimmed subagent list says where the rest is", () => {
-  assert.equal(tool("read_transcript").input.maxChars.description, "Size budget for the result, in UTF-8 bytes (max 55000; every tool result is capped at 60000 bytes). The subagent list gets at most a quarter of it when the transcript needs the rest; the transcript sheds reasoning, then tool detail, then its oldest rows, and cuts the latest reply last.");
+  // Since the second roster pass (transcript.ts), the list keeps its quarter AND whatever the entries leave unused.
+  assert.equal(tool("read_transcript").input.maxChars.description, "Size budget for the result, in UTF-8 bytes (max 55000; every tool result is capped at 60000 bytes). Over it, the transcript sheds reasoning, then tool detail, then its oldest rows, and cuts the latest reply last; the subagent list keeps at least a quarter when it needs it, plus whatever the transcript leaves unused.");
   assert.equal(transcriptHint({ truncated: false }), undefined);
   const shed = transcriptHint({ truncated: true })!;
   // The shed goes by row (transcript.ts `fitEntries`), the oldest turn's first: coveredTurns then names the turns left.
@@ -492,4 +493,39 @@ test("read_transcript: every shed result says truncated:true, so it carries the 
   assert.deepEqual((r.entries as { text: string }[]).map((e) => e.text), ["Survey the packages, one subagent each.", "Done: every package is surveyed."], "the transcript is whole");
   assert.deepEqual([r.truncated, r.subagentsTruncated], [true, true], "only the roster was trimmed, and the result still says truncated");
   assert.match(String(r.hint), /full roster: get_session\.$/);
+});
+
+test("read_transcript's description says a list cut to fit ends in a marker counting the rest, and the tool's rows do", async (t) => {
+  const description = tool("read_transcript").description;
+  assert.equal(description, "What was said and done in a session, newest turns last: messages, tool calls, approvals, questions, plans, file changes, errors. `agentId` drills into one subagent's own timeline. A list cut to fit (a checkpoint's files, a tool's changedFiles, a message's attachments) ends in a marker counting the rest (\"…12 more files\"; a files marker carries their real line totals), not a real entry.");
+  assert.ok(description.length <= 400, `${description.length} characters`);
+  // A checkpoint of 1 500 files at the smallest budget, the turn's newest row (no reply yet, so it is the row a shed
+  // spares and cuts last): its files are a head, then the marker the description names.
+  const files = Array.from({ length: 1_500 }, (_, i) => ({ path: `src/generated/table_${i}.ts`, additions: (i % 7) + 1, deletions: i % 3 }));
+  const items = [message("user", "Regenerate the schema.", { turnId: "t1" })];
+  const cp = { turnId: "t1", checkpointTurnCount: 1, checkpointRef: "refs/t1", status: "ready", files, assistantMessageId: null, completedAt: stamp(9_999) };
+  const h = await harness([chatSummary()], snapshot({ items, checkpoints: [cp] as never })); t.after(h.close);
+  const r = await tool("read_transcript").run({ sessionId: "c1", turns: 3, include: ["tools", "activity"], maxChars: 2_000 }, h.ctx);
+  const changes = (r.entries as { kind: string; files?: typeof files }[]).find((e) => e.kind === "changes")?.files;
+  assert.ok(changes && changes.length < files.length, "the checkpoint row, its files cut");
+  const rest = files.slice(changes.length - 1);
+  const total = (key: "additions" | "deletions") => rest.reduce((n, f) => n + f[key], 0);
+  assert.deepEqual(changes.at(-1), { path: `…${rest.length} more files`, additions: total("additions"), deletions: total("deletions") }, "the marker: the rest counted, with their real line totals");
+});
+
+test("send_message planMode on a degraded 200 providers body: the capability could not be read, and the refusal says so", async (t) => {
+  const run = (ctx: ToolContext) => tool("send_message").run({ sessionId: "c1", text: "plan it", planMode: true, wait: false, timeoutMs: 1000 }, ctx);
+  const refused = "Plan mode can't be confirmed for claude right now: its capabilities could not be read. Retry shortly, or send without planMode.";
+  const claudeRow = { id: "claude", refIds: ["claude", "claudex"], installed: true, version: "2", status: "ready", auth: { status: "authenticated" }, checkedAt: stamp(0), slashCommands: [], skills: [], models: [] };
+  // An older host's degraded rows: capabilities a string, or null; a null row beside it; a body with no list at all.
+  for (const body of [
+    { hostInstanceId: "h", providers: [{ ...claudeRow, capabilities: "plan" }] },
+    { hostInstanceId: "h", providers: [null, { ...claudeRow, capabilities: null }] },
+    { hostInstanceId: "h", providers: "claude" }
+  ]) {
+    const h = await harness(); t.after(h.close);
+    h.api.on("GET", "/api/agent/providers", { status: 200, body });
+    await assert.rejects(run(h.ctx), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && e.message === refused, JSON.stringify(body));
+    assert.ok(!h.api.calls.some((c) => c.method === "POST"), "nothing was posted");
+  }
 });

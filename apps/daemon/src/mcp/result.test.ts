@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { FsSandboxError } from "@orquester/config/fs";
 import { TodoError } from "../todos.ts";
 import { ToolError } from "./errors.ts";
-import { ok, toSafeToolError, capText, fitJsonBytes, jsonBytes, MAX_RESULT_BYTES } from "./result.ts";
+import { ok, toSafeToolError, capText, clipText, fitJsonBytes, jsonBytes, MAX_ERROR_MESSAGE_CHARS, MAX_RESULT_BYTES } from "./result.ts";
 
 test("ok returns the object as text and structuredContent", () => {
   const r = ok({ sessions: [] });
@@ -96,4 +96,33 @@ test("TodoError maps its status to a code and keeps its (safe) message", () => {
   assert.equal(notFound.content[0].text, "NOT_FOUND: todo not found");
   assert.equal(toSafeToolError(new TodoError(400, "bad")).structuredContent.code, "INVALID_ARGUMENT");
   assert.equal(toSafeToolError(new TodoError(409, "clash")).structuredContent.code, "CONFLICT");
+});
+
+test("clipText: at most `max` code points, a cut text ending in …, never a split character", () => {
+  assert.equal(clipText("hello", 5), "hello", "a text that fits is untouched");
+  assert.equal(clipText("hello", 4), "hel…");
+  assert.equal(clipText("😀😀😀", 3), "😀😀😀");
+  assert.equal(clipText("😀😀😀", 2), "😀…", "an astral character counts once and is never split");
+  assert.equal(clipText("abc", 1), "…");
+  const long = clipText("x".repeat(2 * 1024 * 1024), 100);
+  assert.equal([...long].length, 100, "100 code points");
+  assert.ok(long.endsWith("x…"), long.slice(-5));
+});
+
+test("an error message is capped whatever it echoes: at most MAX_ERROR_MESSAGE_CHARS code points, a cut one ending in …", () => {
+  const junk = "z".repeat(2 * 1024 * 1024);
+  const echoing = [
+    toSafeToolError(new ToolError("SESSION_NOT_FOUND", `No session with id "${junk}". Use list_sessions.`)),
+    toSafeToolError(new TodoError(404, `No todo list "${junk}"`))
+  ];
+  for (const e of echoing) {
+    const { code, message } = e.structuredContent;
+    assert.equal([...message].length, MAX_ERROR_MESSAGE_CHARS, `${code}: ${[...message].length} code points`);
+    assert.ok(message.endsWith("z…"), `${code}: the cut is marked`);
+    assert.equal(e.content[0].text, `${code}: ${message}`, `${code}: the text carries the same capped message`);
+  }
+  assert.ok(MAX_ERROR_MESSAGE_CHARS >= 2_000, "room for every message the tools write on purpose (an INVALID_ARGUMENT names five fields of ≤ 200)");
+  // A message within the cap is untouched, detail included.
+  const short = toSafeToolError(new ToolError("PENDING_REQUEST", "Answer the agent first.", { approvals: ["r1"] }));
+  assert.deepEqual(short.structuredContent, { code: "PENDING_REQUEST", message: "Answer the agent first.", detail: { approvals: ["r1"] } });
 });
