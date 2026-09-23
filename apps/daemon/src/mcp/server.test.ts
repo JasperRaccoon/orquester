@@ -10,7 +10,7 @@ import { MAX_ERROR_MESSAGE_CHARS } from "./result.ts";
 import { FakeDaemonApi } from "./testing.ts";
 import { allTools, argumentProblems, argumentsSchema, registerMcp, SERVER_INSTRUCTIONS, SERVER_VERSION, type McpDeps } from "./server.ts";
 
-const EXPECTED_TOOLS = ["list_projects", "list_agents", "list_conversations", "list_sessions", "get_session", "get_turn_diff", "create_session", "update_session", "interrupt_session", "stop_session", "close_session", "revert_session", "compact_session", "send_message", "implement_plan", "read_transcript", "answer_question", "dismiss_question", "resolve_approval", "wait_for_session", "get_usage", "get_cost", "list_files", "read_file", "list_todos", "create_todo", "update_todo", "delete_todo", "toggle_todo_item"];
+const EXPECTED_TOOLS = ["list_projects", "list_agents", "list_conversations", "list_sessions", "get_session", "get_turn_diff", "create_session", "update_session", "interrupt_session", "stop_session", "close_session", "revert_session", "compact_session", "search_sessions", "send_message", "implement_plan", "read_transcript", "answer_question", "dismiss_question", "resolve_approval", "wait_for_session", "get_usage", "get_cost", "list_files", "read_file", "list_todos", "create_todo", "update_todo", "delete_todo", "toggle_todo_item"];
 
 // Spec §4.5's annotation rules, spelled out literally so a drifting constant fails here too. A read, a todo tool and a
 // file tool touch only the daemon's own state (openWorldHint: false); a tool that drives an agent keeps the default.
@@ -37,6 +37,7 @@ const CONTRACT: Record<string, { required: string[]; annotations: object }> = {
   revert_session: { required: ["sessionId", "keepTurns"], annotations: DESTROY },
   // A retry compacts the context again.
   compact_session: { required: ["sessionId"], annotations: WRITE },
+  search_sessions: { required: ["query"], annotations: READ },
   send_message: { required: ["sessionId"], annotations: WRITE },
   implement_plan: { required: ["sessionId"], annotations: WRITE },
   read_transcript: { required: ["sessionId"], annotations: READ },
@@ -87,12 +88,13 @@ const MCP_HEADERS = { accept: "application/json, text/event-stream", "content-ty
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 const ticks = async (n: number) => { for (let i = 0; i < n; i += 1) await tick(); };
 
-test("tools/list is exactly the 29 spec tools, each with a title, annotations and described params", async () => {
+test("tools/list is exactly the 30 spec tools, each with a title, annotations and described params", async () => {
   const app = mcpApp({ createApi: () => new FakeDaemonApi() });
   try {
     const list = await postMcp(app, { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
     const tools = list.result.tools as ListedTool[];
     assert.deepEqual(tools.map((t) => t.name), EXPECTED_TOOLS);
+    assert.equal(tools.length, 30);
     for (const t of tools) {
       assert.ok(t.title, `${t.name} has a title`);
       assert.ok(t.annotations, `${t.name} has annotations`);

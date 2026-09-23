@@ -13,6 +13,7 @@ import { catalogTools } from "./tools/catalog.ts";
 import { fileTools } from "./tools/files.ts";
 import { messageTools } from "./tools/messages.ts";
 import { requestTools } from "./tools/requests.ts";
+import { searchTools } from "./tools/search.ts";
 import { sessionTools } from "./tools/sessions.ts";
 import { todoTools } from "./tools/todos.ts";
 import { usageTools } from "./tools/usage.ts";
@@ -35,11 +36,11 @@ export const SERVER_VERSION = "2.0.0";
  * ≤ 2 KB: Claude Code truncates server instructions around there (and surfaces them only with tool
  * search on), so every load-bearing rule is also in the description of the tool it governs.
  */
-export const SERVER_INSTRUCTIONS = `Orquester MCP drives Orquester's agent chat sessions (Claude Code, Codex, OpenCode, Grok) exactly like the chat GUI. A session is a tab: a chat with an agent, or a terminal (listed and closable only). Addressing: sessions by sessionId (list_sessions); projects by absolute path or "workspace/project" (list_projects). Call list_agents for the valid models, options (effort…), permission modes and accounts before create_session or update_session. create_session opens a chat tab, or resumes a conversation from list_conversations; send_message talks to it — wait:true (default) returns the reply or the question/approval it stopped on; while a turn runs, a message steers it. get_session shows status (status/attention/reason), pending questions and approvals with their ids and options, the proposed plan, subagents and the context meter; read_transcript shows what was said and done (agentId drills into a subagent). answer_question / resolve_approval / dismiss_question act on pending requests; implement_plan is the GUI's Implement button. update_session changes model, effort/options, permission mode, account or title. wait_for_session blocks until a session needs you — pass its cursor back as \`after\`; never poll in a loop. Attachments are inline ({path} in the sandbox or {name, base64}). get_usage percentages are % USED. Errors carry a code (SESSION_BUSY, PENDING_REQUEST, INVALID_ARGUMENT…) and a message naming the fix.`;
+export const SERVER_INSTRUCTIONS = `Orquester MCP drives Orquester's agent chat sessions (Claude Code, Codex, OpenCode, Grok) exactly like the chat GUI. A session is a tab: a chat with an agent, or a terminal (listed and closable only). Addressing: sessions by sessionId (list_sessions); projects by absolute path or "workspace/project" (list_projects). Call list_agents for the valid models, options (effort…), permission modes and accounts before create_session or update_session. create_session opens a chat tab, or resumes a conversation from list_conversations; send_message talks to it — wait:true (default) returns the reply or the question/approval it stopped on; while a turn runs, a message steers it. get_session shows status (status/attention/reason), pending questions and approvals with their ids and options, the proposed plan, subagents and the context meter; read_transcript shows what was said and done (agentId drills into a subagent); search_sessions finds words across every chat. answer_question / resolve_approval / dismiss_question act on pending requests; implement_plan is the GUI's Implement button. update_session changes model, effort/options, permission mode, account or title. wait_for_session blocks until a session needs you — pass its cursor back as \`after\`; never poll in a loop. Attachments are inline ({path} in the sandbox or {name, base64}). get_usage percentages are % USED. Errors carry a code (SESSION_BUSY, PENDING_REQUEST, INVALID_ARGUMENT…) and a message naming the fix.`;
 
-/** Every tool, in tools/list order (spec §7.10: 29). */
+/** Every tool, in tools/list order (spec §7.10: 30). */
 export function allTools(): ToolDef[] {
-  return [...catalogTools, ...sessionTools, ...messageTools, ...requestTools, ...watchTools, ...usageTools, ...fileTools, ...todoTools];
+  return [...catalogTools, ...sessionTools, ...searchTools, ...messageTools, ...requestTools, ...watchTools, ...usageTools, ...fileTools, ...todoTools];
 }
 
 /** How many refused fields an INVALID_ARGUMENT names before "…". */

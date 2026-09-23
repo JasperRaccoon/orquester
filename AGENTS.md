@@ -807,7 +807,7 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
 Start here: `apps/daemon/src/agent-host/README.md` (module map + package ownership).
 
 **Orquester MCP** (`apps/daemon/src/mcp/`). `POST /mcp` lets an external agent drive chat sessions
-the way the chat GUI does: 29 tools (catalogue, sessions, messages, pending requests, waiting,
+the way the chat GUI does: 30 tools (catalogue, sessions, search, messages, requests, waiting,
 usage, files, todos) and no terminal I/O — terminal tabs are only listed and closed. It is mounted
 **only on the HTTP transport** (`mode:"remote"`, behind the global bearer hook; the unauthenticated
 unix socket never serves it) as a stateless Streamable-HTTP endpoint with one `McpServer` per
