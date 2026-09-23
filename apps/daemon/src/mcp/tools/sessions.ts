@@ -280,7 +280,8 @@ const interruptSession = defineTool({
   title: "Interrupt",
   description: "The GUI's Stop: interrupts the running turn (its pending requests are cancelled); with no turn running, stops every live subagent, background shell and watch loop.",
   input: { sessionId: sessionIdField },
-  annotations: MUTATING_IDEMPOTENT,
+  // Not idempotent: a retry after the turn has stopped goes on to stop the background work.
+  annotations: MUTATING,
   async run(args, { api }) {
     await requireChatSession(api, args.sessionId);
     const snap = await readThread(api, args.sessionId);
@@ -476,7 +477,8 @@ const compactSession = defineTool({
   title: "Compact context",
   description: "Ask the agent to compact its context window (the GUI's 'Compact context'). Refused while a turn runs or on an empty conversation.",
   input: { sessionId: sessionIdField },
-  annotations: MUTATING_IDEMPOTENT,
+  // Not idempotent: a retry compacts again.
+  annotations: MUTATING,
   async run(args, { api }) {
     await requireChatSession(api, args.sessionId);
     const { seq } = await sendCommand(api, args.sessionId, "compact", {});

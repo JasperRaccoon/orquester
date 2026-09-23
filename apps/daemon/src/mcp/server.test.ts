@@ -30,11 +30,13 @@ const CONTRACT: Record<string, { required: string[]; annotations: object }> = {
   get_turn_diff: { required: ["sessionId"], annotations: READ },
   create_session: { required: ["project"], annotations: WRITE },
   update_session: { required: ["sessionId"], annotations: WRITE_IDEMPOTENT },
-  interrupt_session: { required: ["sessionId"], annotations: WRITE_IDEMPOTENT },
+  // A retry is not a no-op: once the turn has stopped, a second interrupt goes on to stop the background work.
+  interrupt_session: { required: ["sessionId"], annotations: WRITE },
   stop_session: { required: ["sessionId"], annotations: WRITE_IDEMPOTENT },
   close_session: { required: ["sessionId"], annotations: DESTROY },
   revert_session: { required: ["sessionId", "keepTurns"], annotations: DESTROY },
-  compact_session: { required: ["sessionId"], annotations: WRITE_IDEMPOTENT },
+  // A retry compacts the context again.
+  compact_session: { required: ["sessionId"], annotations: WRITE },
   send_message: { required: ["sessionId"], annotations: WRITE },
   implement_plan: { required: ["sessionId"], annotations: WRITE },
   read_transcript: { required: ["sessionId"], annotations: READ },
@@ -94,7 +96,7 @@ test("tools/list is exactly the 29 spec tools, each with a title, annotations an
     for (const t of tools) {
       assert.ok(t.title, `${t.name} has a title`);
       assert.ok(t.annotations, `${t.name} has annotations`);
-      assert.ok(t.description.length <= 600, `${t.name} description is ${t.description.length} chars`);
+      assert.ok(t.description.length <= 400, `${t.name} description is ${t.description.length} chars`);
       assert.doesNotMatch(t.description, /❯|Escape|keystroke/i, `${t.name} carries no TUI guidance`);
       for (const [p, s] of Object.entries(t.inputSchema.properties ?? {})) assert.ok(s.description, `${t.name}.${p} is described`);
       // What tools/call enforces (argumentsSchema is strict): an argument name the tool does not list is refused.
