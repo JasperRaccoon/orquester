@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { z } from "zod";
 import { FakeDaemonApi } from "../testing.ts";
 import { chatSummary, head, shellSummary, snapshot, stamp, turn } from "../fixtures.ts";
 import { MAX_RESULT_BYTES, ok } from "../result.ts";
@@ -13,13 +14,15 @@ const tool = (name: string) => sessionTools.find((t) => t.name === name)!;
 const registry = { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [
   { id: "claude", kind: "agent", name: "Claude Code", bin: ["claude"], enabled: true, installState: "idle", chat: { adapter: "claude" } },
   { id: "claudex", kind: "agent", name: "Claude Code × GPT", bin: ["claude"], enabled: true, installState: "idle", chat: { adapter: "claude" } },
+  { id: "claudemix", kind: "agent", name: "Claude Code × Mixed", bin: ["claude"], enabled: true, installState: "idle", chat: { adapter: "claude" } },
   { id: "grok", kind: "agent", name: "Grok Build", bin: ["grok"], enabled: false, installState: "idle", chat: { adapter: "grok" } }
 ] };
-const providers = { hostInstanceId: "h", providers: [{ id: "claude", refIds: ["claude", "claudex"], installed: true, version: "2", status: "ready", auth: { status: "authenticated" }, checkedAt: stamp(0), slashCommands: [], skills: [],
+const providers = { hostInstanceId: "h", providers: [{ id: "claude", refIds: ["claude", "claudex", "claudemix"], installed: true, version: "2", status: "ready", auth: { status: "authenticated" }, checkedAt: stamp(0), slashCommands: [], skills: [],
   capabilities: { sessionModelSwitch: "in-session", supportsConversationRollback: true, showPlanModeToggle: true, reportsContextWindow: true, compaction: { type: "slash-command", command: "/compact" } },
   models: [{ slug: "default", name: "Default", isDefault: true, capabilities: { optionDescriptors: [{ id: "effort", label: "Effort", type: "select", options: [{ id: "medium", label: "Medium", isDefault: true }, { id: "high", label: "High" }] }] } }, { slug: "haiku", name: "Haiku", capabilities: null }] }] };
 const accounts = { accounts: [{ id: "acc-1", agent: "claude", label: "jasperclaude", email: null, plan: null, needsReauth: false, createdAt: stamp(0), importedAt: stamp(0) }, { id: "acc-2", agent: "codex", label: "e@x.io", email: "e@x.io", plan: null, needsReauth: false, createdAt: stamp(0), importedAt: stamp(0) }], defaults: { claude: "acc-1", codex: "acc-2", grok: null } };
-const cliproxy = { state: "healthy", reasons: [], detail: null, version: null, defaultModel: "gpt-5.6-sol", backgroundModel: "", modelOverrides: {}, providers: [], routerProviders: [], accounts: [{ id: "acc-2", provider: "codex", label: "e@x.io" }], activeSessionCount: 0, testedClaudeCliVersion: null, xai: { state: "none", email: null, expiredAt: null, lastQuotaError: null, lastLinkError: null, link: null } };
+// acc-2 (codex) and acc-1 (claude) are seeded, so both proxy launchers have a seeded family default: claudex acc-2, claudemix acc-1.
+const cliproxy = { state: "healthy", reasons: [], detail: null, version: null, defaultModel: "gpt-5.6-sol", backgroundModel: "", modelOverrides: {}, providers: [], routerProviders: [], accounts: [{ id: "acc-2", provider: "codex", label: "e@x.io" }, { id: "acc-1", provider: "claude", label: "jasperclaude" }], activeSessionCount: 0, testedClaudeCliVersion: null, xai: { state: "none", email: null, expiredAt: null, lastQuotaError: null, lastLinkError: null, link: null } };
 
 async function harness(sessions = [chatSummary(), shellSummary()], snap = snapshot()) {
   const root = await mkdtemp(join(tmpdir(), "mcp-sess-"));
@@ -94,6 +97,24 @@ test("create_session: a proxy launcher whose family default is not seeded launch
   assert.equal(lastCreate(h.api).chat.accountId, "system");
 });
 
+test("create_session: claudemix is the Claude main loop through the proxy — a Claude-catalogue selection, no top-level model, the seeded Claude default", async (t) => {
+  const h = await harness(); t.after(h.close);
+  h.api.on("POST", "/api/sessions", ({ body }) => ({ status: 200, body: chatSummary({ id: "c1", refId: (body as { refId: string }).refId }) }));
+  await tool("create_session").run({ project: "acme/api", agent: "claudemix", options: { effort: "high" }, runtimeMode: "full-access" }, h.ctx);
+  // A top-level model becomes ANTHROPIC_MODEL (acc-prefixed once several accounts are seeded); for claudemix the daemon
+  // resolves its own Claude default there instead, exactly as the '+' menu leaves it.
+  assert.ok(!("model" in lastCreate(h.api)), "no top-level model");
+  assert.equal(lastCreate(h.api).accountId, "acc-1", "no accountId → the seeded Claude family default");
+  assert.deepEqual(lastCreate(h.api).chat, { accountId: "acc-1", modelSelection: { model: "default", options: [{ id: "effort", value: "high" }] }, runtimeMode: "full-access" });
+  await tool("create_session").run({ project: "acme/api", agent: "claudemix", model: "haiku", runtimeMode: "full-access" }, h.ctx);
+  assert.ok(!("model" in lastCreate(h.api)));
+  assert.deepEqual(lastCreate(h.api).chat.modelSelection, { model: "haiku", options: [] });
+  const posts = h.api.calls.filter((c) => c.method === "POST").length;
+  await assert.rejects(tool("create_session").run({ project: "acme/api", agent: "claudemix", model: "gpt-5.6-sol", runtimeMode: "full-access" }, h.ctx),
+    (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /default, haiku/.test(e.message));
+  assert.equal(h.api.calls.filter((c) => c.method === "POST").length, posts, "claudex's proxy models are not claudemix's: nothing was created");
+});
+
 test("create_session resume: a system-home row never forces System, a cliproxy row launches under its launcher, a mismatched agent is refused", async (t) => {
   const h = await harness(); t.after(h.close);
   h.api.on("POST", "/api/sessions", ({ body }) => ({ status: 200, body: chatSummary({ id: "c1", refId: (body as { refId: string }).refId }) }))
@@ -154,6 +175,30 @@ test("create_session refusals: unknown project, disabled agent, bad model, wrong
   assert.ok(!h.api.calls.some((c) => c.method === "POST"), "nothing was created");
 });
 
+test("create_session: a read that fails after the create names the created session, so a retry does not open a second one", async (t) => {
+  const h = await harness(); t.after(h.close);
+  h.api.on("POST", "/api/sessions", { status: 200, body: chatSummary() })
+    .on("GET", "/api/sessions/c1/thread", { status: 503, body: { error: { code: "HOST_UNAVAILABLE", message: "The agent host is restarting. Retry the same commandId.", detail: { retryAfterMs: 500 } } } });
+  const create = () => tool("create_session").run({ project: "acme/api", agent: "claude", runtimeMode: "full-access" }, h.ctx);
+  await assert.rejects(create(), (e: { code: string; message: string; detail: unknown }) => {
+    assert.equal(e.code, "HOST_UNAVAILABLE", "the read's own code");
+    assert.equal(e.message, "Session c1 was created but could not be read: The agent host is restarting. Retry the same commandId.");
+    assert.deepEqual(e.detail, { sessionId: "c1", created: true, retryAfterMs: 500 });
+    return true;
+  });
+  // A thrown failure keeps its safe INTERNAL message (logged, never echoed) and still names the created session.
+  const logged = t.mock.method(console, "error", () => {});
+  h.api.on("GET", "/api/sessions/c1/thread", () => { throw new Error("socket hang up /var/lib/orquester/daemon/agent-host.sock"); });
+  await assert.rejects(create(), (e: { code: string; message: string; detail: unknown }) => {
+    assert.equal(e.code, "INTERNAL");
+    assert.equal(e.message, "Session c1 was created but could not be read: Internal error handling the tool call.");
+    assert.deepEqual(e.detail, { sessionId: "c1", created: true });
+    return true;
+  });
+  assert.equal(logged.mock.callCount(), 1);
+  assert.equal(h.api.calls.filter((c) => c.method === "POST" && c.path === "/api/sessions").length, 2, "one create per call: the tool never retries it");
+});
+
 test("update_session: one /mode body for model+effort+runtimeMode, rename via PUT, account via /account, no-ops skipped", async (t) => {
   const h = await harness(); t.after(h.close);
   h.api.on("PUT", "/api/sessions/c1", { status: 200, body: chatSummary({ title: "New" }) }).on("POST", "/api/sessions/c1/mode", { status: 200, body: { seq: 11 } }).on("POST", "/api/sessions/c1/account", { status: 200, body: { seq: 12 } });
@@ -187,6 +232,43 @@ test("update_session skips every field that already holds the requested value", 
   const r = await tool("update_session").run({ sessionId: "c1", title: "Claude Code", model: "default", options: { effort: "high" }, runtimeMode: "full-access", accountId: "system", force: false }, h.ctx);
   assert.deepEqual(r.applied, []);
   assert.ok(!h.api.calls.some((c) => c.method === "PUT" || c.method === "POST"), "nothing was written");
+});
+
+test("update_session during a turn: a call whose every field already holds its value is a no-op, not SESSION_BUSY", async (t) => {
+  const running = chatSummary({ chatSessionStatus: "running", latestTurn: { turnId: "t2", state: "running", startedAt: stamp(2), completedAt: null } });
+  const h = await harness([running], snapshot({ head: head({ session: { status: "running", activeTurnId: "t2" }, modelSelection: { model: "default", options: [{ id: "effort", value: "high" }] } }) })); t.after(h.close);
+  const r = await tool("update_session").run({ sessionId: "c1", title: "Claude Code", model: "default", options: { effort: "high" }, runtimeMode: "full-access", accountId: "system", force: false }, h.ctx);
+  assert.deepEqual(r.applied, []);
+  assert.equal((r.session as { id: string }).id, "c1");
+  assert.ok(!h.api.calls.some((c) => c.method === "PUT" || c.method === "POST"), "nothing was written");
+  // A value that would change still restarts the agent, so it is still refused mid-turn.
+  await assert.rejects(tool("update_session").run({ sessionId: "c1", options: { effort: "medium" }, force: false }, h.ctx), (e: { code: string }) => e.code === "SESSION_BUSY");
+});
+
+test("update_session: an options-only change keeps the head's model and merges onto the head's options", async (t) => {
+  // "haiku" is not the catalogue default: without the head's selection the model would silently become "default".
+  const h = await harness([chatSummary()], snapshot({ head: head({ modelSelection: { model: "haiku", options: [{ id: "effort", value: "low" }, { id: "thinking", value: true }] } }) })); t.after(h.close);
+  h.api.on("POST", "/api/sessions/c1/mode", { status: 200, body: { seq: 6 } });
+  const r = await tool("update_session").run({ sessionId: "c1", options: { effort: "high" }, force: false }, h.ctx);
+  assert.deepEqual(r.applied, ["options"]);
+  const modes = h.api.calls.filter((c) => c.path === "/api/sessions/c1/mode");
+  assert.equal(modes.length, 1);
+  const { commandId, ...mode } = modes[0].body as Record<string, unknown>;
+  assert.equal(typeof commandId, "string");
+  assert.deepEqual(mode, { modelSelection: { model: "haiku", options: [{ id: "effort", value: "high" }, { id: "thinking", value: true }] } });
+});
+
+test("update_session on a claudemix thread: the Claude catalogue applies, and an options-only change keeps the head's Claude model", async (t) => {
+  const h = await harness([chatSummary({ refId: "claudemix", accountId: "acc-1" })], snapshot({ head: head({ refId: "claudemix", accountId: "acc-1", modelSelection: { model: "haiku", options: [{ id: "thinking", value: true }] } }) })); t.after(h.close);
+  h.api.on("POST", "/api/sessions/c1/mode", { status: 200, body: { seq: 5 } });
+  await assert.rejects(tool("update_session").run({ sessionId: "c1", model: "gpt-5.6-sol", force: false }, h.ctx), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /default, haiku/.test(e.message));
+  const r = await tool("update_session").run({ sessionId: "c1", options: { effort: "high" }, force: false }, h.ctx);
+  assert.deepEqual(r.applied, ["options"]);
+  const modes = h.api.calls.filter((c) => c.path === "/api/sessions/c1/mode");
+  assert.equal(modes.length, 1, "one /mode, and none for the refused proxy model");
+  const { commandId, ...mode } = modes[0].body as Record<string, unknown>;
+  assert.equal(typeof commandId, "string");
+  assert.deepEqual(mode, { modelSelection: { model: "haiku", options: [{ id: "thinking", value: true }, { id: "effort", value: "high" }] } });
 });
 
 test("update_session: a rename needs no catalogue entry; a write that fails mid-way reports only what landed", async (t) => {
@@ -260,4 +342,18 @@ test("get_turn_diff defaults to the latest checkpointed turn, includes the check
   const small = await tool("get_turn_diff").run({ sessionId: "c1", turn: 2 }, h.ctx);
   assert.equal(small.diff, "+a\n"); assert.equal(small.truncated, false);
   await assert.rejects(tool("get_turn_diff").run({ sessionId: "c1", turn: 5 }, h.ctx), (e: { code: string }) => e.code === "THREAD_NOT_FOUND" || e.code === "NOT_FOUND" || e.code === "INVALID_ARGUMENT");
+});
+
+test("every session tool parameter is described, nested ones included; revert_session's keepTurns counts from the first turn", () => {
+  const undescribed = (shape: z.ZodRawShape, path: string): string[] => Object.entries(shape).flatMap(([key, field]) => {
+    let type: z.ZodTypeAny = field;
+    let described = type.description !== undefined;
+    while (type instanceof z.ZodOptional || type instanceof z.ZodDefault) {
+      type = type._def.innerType;
+      described ||= type.description !== undefined;
+    }
+    return [...(described ? [] : [`${path}.${key}`]), ...(type instanceof z.ZodObject ? undescribed(type.shape, `${path}.${key}`) : [])];
+  });
+  assert.deepEqual(sessionTools.flatMap((d) => undescribed(d.input, d.name)), []);
+  assert.match(tool("revert_session").input.keepTurns.description ?? "", /0 = rewind to before the first turn; N = keep turns 1\.\.N/);
 });

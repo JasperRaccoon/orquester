@@ -5,11 +5,11 @@ import { SYSTEM_ACCOUNT_ID, type AgentConversationsResponse, type CreateSessionR
 import { agentChatRoutes, RUNTIME_MODES, startedTurns, type AccountHomeKind, type CreateAgentChatSessionFields, type ModelSelection, type RuntimeMode, type ThreadSnapshotPayload, type TurnDiffResponse } from "@orquester/api/agent-chat";
 import { assertInsideFsRoot, FsSandboxError } from "@orquester/config/fs";
 import { resolveProject } from "../addressing.ts";
-import { findAgent, isProxyAgent, loadAgents, resolveModelSelection, validateAccountId, type ResolvedSelection } from "../agents.ts";
+import { findAgent, isProxyAgent, launchesProxyModel, loadAgents, resolveModelSelection, validateAccountId, type ResolvedSelection } from "../agents.ts";
 import type { DaemonApi } from "../daemon-api.ts";
 import { ToolError, expectOk } from "../errors.ts";
 import { findSession, listSessions, readThread, requireChatSession, sendCommand } from "../reads.ts";
-import { capText, MAX_RESULT_BYTES } from "../result.ts";
+import { fitJsonBytes, MAX_RESULT_BYTES, toSafeToolError } from "../result.ts";
 import { defineTool, DESTRUCTIVE, MUTATING, MUTATING_IDEMPOTENT, READ_ONLY, type ToolDef } from "../tool.ts";
 import { buildViewContext, chatDetail, sessionView } from "../views.ts";
 
@@ -41,21 +41,10 @@ function sameSelection(a: ResolvedSelection, b: ModelSelection): boolean {
   return a.model === b.model && norm(a.options) === norm(b.options);
 }
 
-/** A string's size inside a JSON result: escaped, UTF-8, without its quotes. */
-const jsonBytes = (text: string): number => Buffer.byteLength(JSON.stringify(text), "utf8") - 2;
-
-/** The longest prefix of `text` (never splitting a character) whose JSON size fits `budget` bytes. */
-function fitJsonBytes(text: string, budget: number): { text: string; truncated: boolean } {
-  if (jsonBytes(text) <= budget) return { text, truncated: false };
-  // Every character costs at least one byte, so the answer is at most `budget` characters long.
-  let lo = 0;
-  let hi = Math.max(0, budget);
-  while (lo < hi) {
-    const mid = Math.ceil((lo + hi) / 2);
-    if (jsonBytes(capText(text, mid).text) <= budget) lo = mid;
-    else hi = mid - 1;
-  }
-  return { text: capText(text, lo).text, truncated: true };
+/** An error's detail as fields to merge into ours: an object's own fields; anything else rides as `cause`. */
+function detailFields(detail: unknown): Record<string, unknown> {
+  if (detail === undefined) return {};
+  return detail !== null && typeof detail === "object" && !Array.isArray(detail) ? { ...(detail as Record<string, unknown>) } : { cause: detail };
 }
 
 const listSessionsTool = defineTool({
@@ -156,7 +145,7 @@ const createSession = defineTool({
     accountId: z.string().optional().describe("A managed account id from list_agents, or \"system\"; default: the family's default account."),
     title: z.string().min(1).max(300).optional().describe("Tab title; default: the agent's name (or the conversation's)."),
     cwd: z.string().optional().describe("Working directory: absolute or relative to the project, an existing directory inside the sandbox; default: the project path."),
-    resume: z.object({ conversationId: z.string().min(1) }).optional().describe("Resume this conversation (id from list_conversations for the same project). One stored in a managed account's home resumes under that account.")
+    resume: z.object({ conversationId: z.string().min(1).describe("Conversation id from list_conversations for the same project.") }).optional().describe("Resume this conversation (id from list_conversations for the same project). One stored in a managed account's home resumes under that account.")
   },
   annotations: MUTATING,
   async run(args, { api }) {
@@ -189,9 +178,18 @@ const createSession = defineTool({
     if (running >= MAX_RUNNING_SESSIONS_PER_PROJECT) throw new ToolError("SESSION_BUSY", `${running} sessions are open in this project (limit ${MAX_RUNNING_SESSIONS_PER_PROJECT}); close some first.`);
     const chat: CreateAgentChatSessionFields = { ...(accountId ? { accountId } : {}), modelSelection: { model: selection.model, options: selection.options }, runtimeMode: args.runtimeMode };
     if (resumeRow) chat.resume = { home: resumeRow.home, conversationId: resumeRow.id };
-    const body: CreateSessionRequest = { kind: "agent-chat", refId, projectPath: project.path, cwd, title: args.title ?? (resumeRow?.title || agent.name), ...(accountId ? { accountId } : {}), ...(isProxyAgent(refId) ? { model: selection.model } : {}), chat };
+    // A top-level model becomes the launch's ANTHROPIC_MODEL: claudex's proxy model, and only that. claudemix never
+    // names one — the daemon resolves its own Claude default, as the "+" menu leaves it — so its selection rides `chat`.
+    const body: CreateSessionRequest = { kind: "agent-chat", refId, projectPath: project.path, cwd, title: args.title ?? (resumeRow?.title || agent.name), ...(accountId ? { accountId } : {}), ...(launchesProxyModel(refId) ? { model: selection.model } : {}), chat };
     const summary = expectOk<SessionSummary>(await api.request("POST", "/api/sessions", { body }), "create");
-    return { session: await chatDetail(api, summary.id) };
+    try {
+      return { session: await chatDetail(api, summary.id) };
+    } catch (error) {
+      // The tab exists now: a caller told only that the read failed would retry and open a second one. The failure keeps
+      // the code and safe message it would have had (a thrown one is logged, never echoed); the detail names the tab.
+      const failure = toSafeToolError(error).structuredContent;
+      throw new ToolError(failure.code, `Session ${summary.id} was created but could not be read: ${failure.message}`, { ...detailFields(failure.detail), sessionId: summary.id, created: true });
+    }
   }
 });
 
@@ -214,9 +212,6 @@ const updateSession = defineTool({
     const snap = await readThread(api, args.sessionId);
     const current = snap.head.modelSelection;
     const wantsSelection = args.model !== undefined || args.options !== undefined;
-    if ((wantsSelection || args.runtimeMode !== undefined) && isTurnActive(summary, snap) && !args.force) {
-      throw new ToolError("SESSION_BUSY", "A turn is running; changing the model or permission mode restarts the agent and would cut it. Wait, interrupt_session, or pass force:true.");
-    }
     // Decided on the registry id first, then the thread's adapter — the GUI's `chatAccountSwitchSupported`.
     if (args.accountId !== undefined && (summary.refId === "opencode" || snap.head.adapter === "opencode")) {
       throw new ToolError("INVALID_ARGUMENT", "OpenCode runs one server per project under the daemon's own identity; it has no per-session account.");
@@ -226,13 +221,7 @@ const updateSession = defineTool({
     const agent = wantsSelection || args.accountId !== undefined ? findAgent(await loadAgents(api, { includeLegacyModels: true }), summary.refId) : null;
     const selection = agent && wantsSelection ? resolveModelSelection(agent, { model: args.model, options: args.options, current }) : undefined;
     const accountId = agent && args.accountId !== undefined ? validateAccountId(agent, args.accountId) : undefined;
-    // The tab record spells the system identity as an absent id; the wire spells it "system".
-    const switchAccount = accountId !== undefined && accountId !== (summary.accountId || SYSTEM_ACCOUNT_ID);
-    if (switchAccount) {
-      const refusal = switchRefusal(summary, snap);
-      if (refusal) throw new ToolError("SESSION_BUSY", refusal);
-    }
-    // Every check has run. One /mode body carries model, options and permission mode (atomic on the host).
+    // What would actually change. One /mode body carries model, options and permission mode (atomic on the host).
     const mode: { runtimeMode?: RuntimeMode; modelSelection?: ModelSelection } = {};
     const modeFields: string[] = [];
     if (selection && !sameSelection(selection, current)) {
@@ -245,7 +234,18 @@ const updateSession = defineTool({
       mode.runtimeMode = args.runtimeMode;
       modeFields.push("runtimeMode");
     }
-    // Writes in order; `applied` records only what landed, and rides a mid-way failure's detail.
+    // Only a real change restarts the agent, so only a real change is refused mid-turn: a field that already holds its
+    // value is skipped below and cuts nothing.
+    if (modeFields.length && isTurnActive(summary, snap) && !args.force) {
+      throw new ToolError("SESSION_BUSY", "A turn is running; changing the model or permission mode restarts the agent and would cut it. Wait, interrupt_session, or pass force:true.");
+    }
+    // The tab record spells the system identity as an absent id; the wire spells it "system".
+    const switchAccount = accountId !== undefined && accountId !== (summary.accountId || SYSTEM_ACCOUNT_ID);
+    if (switchAccount) {
+      const refusal = switchRefusal(summary, snap);
+      if (refusal) throw new ToolError("SESSION_BUSY", refusal);
+    }
+    // Every check has run. Writes in order; `applied` records only what landed, and rides a mid-way failure's detail.
     const applied: string[] = [];
     try {
       if (args.title !== undefined && args.title !== summary.title) {
@@ -315,7 +315,7 @@ const revertSession = defineTool({
   name: "revert_session",
   title: "Rewind the conversation",
   description: "Rewind the conversation to keep only the first `keepTurns` turns (the GUI's 'Rewind to here'). Conversation only — files are not restored. Needs an idle session and an agent that supports rollback (not Grok).",
-  input: { sessionId: sessionIdField, keepTurns: z.number().int().min(0).describe("How many turns to keep (0 = everything after the start).") },
+  input: { sessionId: sessionIdField, keepTurns: z.number().int().min(0).describe("Number of turns to keep, counted from the first (0 = rewind to before the first turn; N = keep turns 1..N and discard the rest).") },
   annotations: DESTRUCTIVE,
   async run(args, { api }) {
     const summary = await requireChatSession(api, args.sessionId);
