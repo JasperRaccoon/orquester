@@ -391,10 +391,11 @@ function turnOpening(items: readonly ThreadItem[], turn: StartedTurn): number {
 /**
  * The fewest turns a rewind may keep. The provider holds nothing from before the thread's LAST settled compaction, so
  * the GUI withholds "rewind to here" on every message before it (rows.logic.ts `buildRevertTurnCountByUserMessageId`,
- * and a history page's `rewindable`), and the adapter would refuse the rollback. Which row is that marker is the one
- * rule all three share, `isSettledConversationCompaction` (@orquester/api `compaction.ts`): a `context-compaction` row
- * or the legacy `thread.state.changed {state: "compacted"}`, settled (an unreadable state is), and not a subagent's own
- * (an `agentId` on the row or on its payload). Turns are in start order, so the first one that begins after the marker
+ * and a history page's `rewindable`), and the adapter would refuse the rollback. Which row is that marker is the rule
+ * in @orquester/api `compaction.ts`, which this tool and the thread index call as `isSettledConversationCompaction` and
+ * the GUI's window gate composes from the same parts over its parent timeline: a `context-compaction` row or the legacy
+ * `thread.state.changed {state: "compacted"}`, settled (an unreadable state is), and not a subagent's own (a non-blank
+ * `agentId` on the row or on its payload). Turns are in start order, so the first one that begins after the marker
  * is the earliest a rewind may cut at. 0 when nothing was compacted; the started-turn count when no turn began after
  * it.
  *

@@ -525,12 +525,16 @@ and its default model (the flagged one, else the first) are never shed.
   short excerpt with the matched words between `«` and `»`. To read a hit in context, read its
   turn alone: `read_transcript {sessionId, beforeTurn: turn + 1, turns: 1}` (with
   `include: ["reasoning"]` for a reasoning hit). A subagent's own row is in that subagent's
-  timeline (`agentId`), not the parent's. Only a chat tab that is open now is ever named: a hit
-  whose tab has closed since is left out.
+  timeline, not the parent's, and a hit does not say which subagent wrote it: find the subagent in
+  `get_session`'s `subagents`, then read its timeline with `read_transcript {sessionId, agentId,
+  beforeTurn: turn + 1, turns: 1}`. Only a chat tab that is open now is ever named: a hit whose
+  tab has closed since is left out.
   `truncated: true` means there were more matches than came back — more than `limit`, or more
   than one result holds. Each hit's `title` and `snippet` are cut to 300 characters, ending in
   "…", and if the hits still pass the result cap, the lowest-ranked go, from the end:
-  `omittedHits` counts them. Narrow the query, pass `project` or raise `limit`.
+  `omittedHits` counts them. Without `omittedHits`, the host stopped at `limit`: raise `limit`
+  (at most 50) for more. With `omittedHits`, the result cap dropped hits, and a higher `limit`
+  brings none of them back: narrow the query or pass `project`.
   `indexed: false` is an answer, not an error: the host has no usable index right now (it could
   not load or open one, or it is restarting), so there are no hits, and a `hint` says search is
   unavailable; try again later. An index the host is rebuilding (after an update, say) does
@@ -593,19 +597,22 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
   `PENDING_REQUEST` while a request is open. To refine a plan instead (the Refine button), use
   `send_message {planMode: true, text}`.
 - **`read_transcript`** — built from the same thread snapshot the GUI renders. `turns` counts back
-  from the latest turn, and `coveredTurns` names the first and last turn of the rows returned
-  (`null` when no row belongs to a turn). Without `agentId` you get the parent view, the GUI's
-  timeline: the main agent's rows plus one `subagent` row per subagent, with the roster in
-  `subagents`. With `agentId`, only that subagent's own rows (its drill-in), and `subagents` is
-  empty. An empty or unknown `agentId` is refused (`INVALID_ARGUMENT`); a subagent that worked only
-  in older turns is known once a page of older history brings its rows back. A subagent's title is
-  capped at 200 characters, in `subagents` and on its row.
+  from the turn before `beforeTurn` (the latest turn when `beforeTurn` is absent), and
+  `coveredTurns` names the first and last turn of the rows returned (`null` when no row belongs to
+  a turn). Without `agentId` you get the parent view, the GUI's timeline: the main agent's rows
+  plus one `subagent` row per subagent, with the roster in `subagents`. With `agentId`, only that
+  subagent's own rows (its drill-in), and `subagents` is empty. An empty or unknown `agentId` is
+  refused (`INVALID_ARGUMENT`); a subagent that worked only in older turns is known once a page of
+  older history brings its rows back. A subagent's title is capped at 200 characters, in
+  `subagents` and on its row.
 
   **Older turns.** `beforeTurn` reads the `turns` turns just before that turn number instead of the
   latest ones: the range is turns `start`..`end`, with `end = beforeTurn − 1` (without `beforeTurn`,
   `turnCount`) and `start = max(1, end − turns + 1)`. `olderTurns` counts the started turns before
-  `start`: the next call with `beforeTurn: olderTurns + 1` reads the ones just before, `turns` at a
-  time, until `olderTurns` is 0.
+  the first turn the result delivers: `start − 1`, or, when the shed dropped rows to fit `maxChars`
+  (below), one less than `coveredTurns[0]`. So the next call with `beforeTurn: olderTurns + 1`
+  reads the turns just before those, `turns` at a time — a turn whose rows the shed dropped
+  included — until `olderTurns` is 0: paging back never skips a turn.
   A `beforeTurn` past `turnCount + 1` is refused with `INVALID_ARGUMENT` naming the valid range (the
   schema refuses one below 2); `turnCount + 1` reads the latest turns, as leaving it out does. A row
   that belongs to no turn — a message or a failure from a turn the host never started — belongs to
@@ -617,21 +624,33 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
   that reaches the window's oldest turn (which may be partial) is read like the GUI's "Load older":
   from the host's thread index (`GET /api/sessions/:id/history`), a block of the log at a time, at
   most 400 activities each, newest first, until the range's first turn is whole — at most **5
-  pages** per call. The pages are merged under the window: a row both hold appears once, with the
-  window's (newer) state, and every row in log order. The latest proposed plan stays the window's —
-  a plan that aged out of it is never `actionable`, as `implement_plan` would not send it.
+  pages** per call; a range of a few ordinary turns takes one. The pages are merged under the
+  window: a row both hold appears once, with the window's (newer) state, and every row in log
+  order. The latest proposed plan stays the window's — a plan that aged out of it is never
+  `actionable`, as `implement_plan` would not send it.
 
   When turns of the range could not be read whole, the result names them in
   `unavailableTurns: [from, to]`, and its `hint` opens with a sentence saying why, before any shed
   hint:
 
-  - the host has no usable thread index right now (it is being rebuilt, or the native driver did not
-    load), or a history page could not be read: `"Turns 4–6 could not be read whole: older turns are
-    unavailable on this host right now. Try again later."` Without an index, the named turns are the
-    ones of the range with no row left in the window;
+  - older turns are unavailable on this host right now: `"Turns 4–6 could not be read whole: older
+    turns are unavailable on this host right now. Try again later."` The host has no usable thread
+    index (the native driver did not load, or the index file could not be opened), a history page
+    could not be read, or the index is being rebuilt (after an update, say) and has not caught up
+    with this conversation yet. Without an index, `unavailableTurns` spans the range's turns with
+    no row left in the window — from the first such turn to the last, so a turn between them may
+    have rows. While the index catches up, it cannot tell where the window begins, so the range's
+    turns up to the window's oldest one — which may be partial — are named until it has. Any turn
+    of the range still without a single row after the history pages were read is named the same
+    way;
   - the 5-page limit ran out (a subagent fleet's turn runs to thousands of events):
     `"Turns 1–3 could not be read whole: one call reads at most 5 pages of older history. Read them
-    with beforeTurn: 4, turns: 3."` — the rows of those turns that were read are returned.
+    with beforeTurn: 4, turns: 3."` — the rows of those turns that were read are returned. When the
+    limit ran out inside the range's last turn, that turn alone is more than one call reads, and
+    asking again would read the same pages: `"Turn 7 is larger than one call reads (5 pages of older
+    history): its latest rows are returned. Read turns 5–6 with beforeTurn: 7, turns: 2."` (the
+    second sentence only when the range has turns before it). Following the hints never repeats a
+    call.
 
   A history page that fails is never a tool error: the rows the window holds, and the pages read
   before it, are still returned. A host from before the thread index (a snapshot without `history`)
@@ -663,12 +682,15 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
   **What the rows show** is what the GUI's timeline shows:
 
   - A command's `tool.detail` is what the GUI's row shows under the call: the provider's own
-    detail, or, when that detail is empty, only repeats the command (as Grok's does) or repeats the
-    row's title, the output the call's data carries — Codex's aggregated output, Grok's `rawOutput`,
-    ACP content blocks. That output is the one-line preview the wire carries (its first non-blank
-    line, at most 84 characters), not the whole of it. A call that has only echoed its command so
-    far has no `detail`, and a later echo never clears the output an earlier update gave. Other
-    tools keep the provider's detail as it came.
+    detail, or the output the call's data carries — Codex's aggregated output, Grok's `rawOutput`,
+    ACP content blocks — when that detail is empty, repeats the row's title, or, on an executing
+    call (`kind: "execute"` in its data, as Grok's ACP calls say), only repeats the command. That
+    output is the one-line preview the wire carries (its first non-blank line, at most 84
+    characters), not the whole of it. The call's start never gives the detail — the GUI does not
+    show it, and Grok's first frame repeats the command before it says the call executes — so a
+    call that has only started, or that finished printing nothing, has no `detail`; and a later
+    echo never clears the output an earlier update gave. `tool.command` is the command the call
+    runs, from its payload or its data. Other tools keep the provider's detail as it came.
   - A hook that failed is an `error` row ("Hook failed") and one cancelled a `warning` row ("Hook
     cancelled"); a hook's start, its progress and a successful run are not rows.
   - An `assistant` row with `commentary: true` is narration between tool calls (Codex's

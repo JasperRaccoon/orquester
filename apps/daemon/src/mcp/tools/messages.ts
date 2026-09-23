@@ -262,14 +262,15 @@ const readTranscript = defineTool({
     const turnCount = startedTurns(snap.turns).length;
     if (args.beforeTurn !== undefined && args.beforeTurn > turnCount + 1) throw new ToolError("INVALID_ARGUMENT", beforeTurnRefusal(turnCount));
     // Turns older than the window come from the host's thread index; a page it cannot read is reported, never thrown.
-    const older = await readOlderHistory(api, args.sessionId, snap, transcriptRange(turnCount, args.turns, args.beforeTurn));
+    const range = transcriptRange(turnCount, args.turns, args.beforeTurn);
+    const older = await readOlderHistory(api, args.sessionId, snap, range);
     const read = older.snapshot;
     // "" names no subagent: refused like any unknown id, never read as "the main view" (the schema refuses it first).
     // A subagent of an older turn is known by the rows a page brought back.
     if (args.agentId !== undefined && !read.roster.some((r) => r.id === args.agentId) && !read.items.some((i) => i.agentId === args.agentId)) {
       throw new ToolError("INVALID_ARGUMENT", `No subagent "${args.agentId}". Known: ${read.roster.map((r) => r.id).join(", ") || "none"}.`);
     }
-    const unavailable = older.unavailable ? { turns: older.unavailable.turns, hint: unavailableHint(older.unavailable) } : undefined;
+    const unavailable = older.unavailable ? { turns: older.unavailable.turns, hint: unavailableHint(older.unavailable, range.end) } : undefined;
     const result = transcriptEntries(read, {
       turns: args.turns, ...(args.beforeTurn !== undefined ? { beforeTurn: args.beforeTurn } : {}), ...(args.agentId !== undefined ? { agentId: args.agentId } : {}),
       include: new Set(args.include), maxChars: args.maxChars, windowItems: snap.items, ...(unavailable ? { unavailable } : {})

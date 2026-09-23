@@ -1089,9 +1089,9 @@ export function createThreadIndexer(input: {
       );
     }
     // The same object as `activity`, checked above to be one; the shared rule
-    // reads each of its fields defensively. A marker row exactly for the
-    // compaction markers the parent timeline shows — either spelling, never a
-    // subagent's own — so `rewindable` agrees with the window and the MCP.
+    // reads each of its fields defensively. A marker row for the compaction
+    // markers the parent timeline shows — either spelling, never a subagent's
+    // own — so `rewindable` agrees with the window and the MCP.
     const row = event.payload.activity;
     if (isConversationCompactionActivity(row)) {
       const markerKind: IndexedMarkerKind = compactionMarkerState(row);

@@ -5,12 +5,21 @@
  * The provider holds nothing from before the LAST settled compaction of the
  * conversation, so "rewind to here" stops there: a rewind across it is one
  * the adapter can only refuse. Three readers ask where that marker is — the
- * UI's window gate (`rows.logic.ts` `buildRevertTurnCountByUserMessageId`),
- * the MCP's `revert_session` and the host's thread index, whose `markers`
- * rows a history page's `rewindable` reads — and they used to disagree: the
- * MCP missed a subagent named on the payload, and the index missed the legacy
- * spelling and counted a subagent's own compaction. This is the one answer. A
- * row is the conversation's settled compaction marker when
+ * UI's window gate, the MCP's `revert_session` and the host's thread index,
+ * whose `markers` rows a history page's `rewindable` reads — and they used to
+ * disagree: the MCP missed a subagent named on the payload, and the index
+ * missed the legacy spelling and counted a subagent's own compaction. This is
+ * the one answer. The MCP and the index call it
+ * ({@link isSettledConversationCompaction},
+ * {@link isConversationCompactionActivity}); the UI's gates compose the same
+ * parts — {@link isCompactionActivity} and {@link compactionMarkerState} over
+ * the parent timeline, whose quiet-timeline filter has already dropped every
+ * row {@link isAgentOwnedActivity} names (`rows.logic.ts`
+ * `isCompactedMarkerEntry`, where `buildRevertTurnCountByUserMessageId` stops,
+ * and `history.logic.ts` `hasSettledCompaction`). That filter also drops
+ * `timelineBypass` rows, which this rule does not read, and a change to the
+ * rule must be mirrored in those two GUI gates. A row is the conversation's
+ * settled compaction marker when
  *
  * - it is a compaction marker at all ({@link isCompactionActivity}): a
  *   `context-compaction` activity, or the legacy `thread.state.changed

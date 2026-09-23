@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildPlanImplementationPrompt, type ThreadItem, type Turn } from "@orquester/api/agent-chat";
+import { buildPlanImplementationPrompt, slimActivityPayload, type ThreadItem, type Turn } from "@orquester/api/agent-chat";
 import { activity, message, snapshot, stamp, turn } from "./fixtures.ts";
 import { mergeHistoryPages } from "./history.ts";
 import { cutTail, fitEntries, fitRoster, jsonTextBytes, ROSTER_SHARE, TRANSCRIPT_HINT_BYTES, transcriptEntries, transcriptRange, type TranscriptEntry, type TranscriptResult } from "./transcript.ts";
@@ -32,11 +32,11 @@ const nextBack = (all: TranscriptResult["subagents"], kept: TranscriptResult["su
 /** Rows as the fits take them: each with its JSON bytes and a comma, measured once. */
 const sizedOf = <T>(rows: readonly T[]): { row: T; bytes: number }[] => rows.map((row) => ({ row, bytes: Buffer.byteLength(JSON.stringify(row), "utf8") + 1 }));
 /**
- * The frame the entries are fitted in: both lists empty, the widest coveredTurns, truncated, the roster flag as given —
- * and the result's own olderTurns and unavailableTurns.
+ * The frame the entries are fitted in: both lists empty, the widest coveredTurns and olderTurns (neither is known before
+ * the shed), truncated, the roster flag as given — and the result's own unavailableTurns.
  */
 function frameOf(r: TranscriptResult, subagentsTruncated: boolean): number {
-  return Buffer.byteLength(JSON.stringify({ entries: [], turnCount: r.turnCount, olderTurns: r.olderTurns, coveredTurns: r.turnCount ? [r.turnCount, r.turnCount] : null,
+  return Buffer.byteLength(JSON.stringify({ entries: [], turnCount: r.turnCount, olderTurns: r.turnCount, coveredTurns: r.turnCount ? [r.turnCount, r.turnCount] : null,
     ...(r.unavailableTurns ? { unavailableTurns: r.unavailableTurns } : {}), truncated: true, subagents: [], ...(subagentsTruncated ? { subagentsTruncated } : {}) }), "utf8");
 }
 /** The biggest row of a list, as it sits in the result: its JSON and a comma. */
@@ -674,6 +674,36 @@ test("beforeTurn reads the turns just before it; olderTurns counts the started t
   assert.equal(transcriptEntries(snapshot({ turns: [], items: [] }), { turns: 3, include: ALL, maxChars: 100_000 }).olderTurns, 0);
 });
 
+test("a shed that dropped the range's first turns counts olderTurns from the first turn it left: paging back by it never skips a turn", () => {
+  // Thirty turns with long replies: ten of them do not fit 9 000 bytes, and the shed drops the oldest rows first.
+  const turns: Turn[] = [];
+  const items: ThreadItem[] = [];
+  for (let n = 1; n <= 30; n += 1) {
+    const ask = message("user", `ask ${n}`, { turnId: `t${n}` });
+    items.push(ask, message("assistant", `reply ${n} ${"x".repeat(1_000)}`, { turnId: `t${n}` }));
+    turns.push(turn({ turnId: `t${n}`, turnCount: n, requestedAt: ask.createdAt, startedAt: ask.createdAt, completedAt: items.at(-1)!.createdAt }));
+  }
+  const snap = snapshot({ turns, items });
+  const read = (beforeTurn?: number) => transcriptEntries(snap, { turns: 10, ...(beforeTurn === undefined ? {} : { beforeTurn }), include: ALL, maxChars: 9_000 });
+  const latest = read();
+  const [first, last] = latest.coveredTurns!;
+  assert.ok(latest.truncated && first > 21 && last === 30, `the range [21, 30] lost its first turns: ${JSON.stringify(latest.coveredTurns)}`);
+  assert.equal(latest.olderTurns, first - 1, "counted back from the first turn shown, not from 21");
+  // The next read takes in the turns the shed dropped, and so on down to turn 1: every turn is shown once or more.
+  const shown = new Set<number>();
+  let r = latest;
+  for (let calls = 0; calls < 30; calls += 1) {
+    for (let n = r.coveredTurns![0]; n <= r.coveredTurns![1]; n += 1) shown.add(n);
+    if (r.olderTurns === 0) break;
+    const next = read(r.olderTurns + 1);
+    assert.ok(next.coveredTurns![1] === r.olderTurns, `the next read ends at the turn just before the first one shown (${r.olderTurns})`);
+    r = next;
+  }
+  assert.equal(shown.size, 30);
+  // Without a shed that dropped rows, it is start − 1, as before.
+  assert.equal(transcriptEntries(snap, { turns: 10, include: ALL, maxChars: 100_000 }).olderTurns, 20);
+});
+
 test("a row with no turn belongs to the range by its time: from the first turn's request (from the very start at turn 1), before the next turn's", () => {
   const failed = (label: string, over: { createdAt?: string } = {}) => activity("provider.turn.start.failed", { detail: label }, { turnId: null, tone: "error", summary: "Turn failed", ...over });
   const items: ThreadItem[] = [failed("f0")];
@@ -752,7 +782,7 @@ test("a randomized probe with beforeTurn and unavailable turns (fixed seed): the
   const int = (lo: number, hi: number): number => lo + Math.floor(rand() * (hi - lo + 1));
   const pick = <T>(xs: readonly T[]): T => xs[int(0, xs.length - 1)]!;
   const text = (max: number): string => pick(["a", "é", "漢", "😀", '"', "\n", "word "]).repeat(int(1, max));
-  const tally = { whole: 0, shed: 0, unavailable: 0, before: 0 };
+  const tally = { whole: 0, shed: 0, unavailable: 0, before: 0, pagedFromCovered: 0 };
   for (let run = 0; run < 120; run += 1) {
     const turnCount = int(1, 8);
     const items: ThreadItem[] = [];
@@ -777,7 +807,10 @@ test("a randomized probe with beforeTurn and unavailable turns (fixed seed): the
     const r = transcriptEntries(snap, { ...opts, maxChars });
     const whole = transcriptEntries(snap, { ...opts, maxChars: Number.MAX_SAFE_INTEGER });
     const where = `run ${run}: ${turnCount} turns, turns ${count}, beforeTurn ${beforeTurn}, maxChars ${maxChars}`;
-    assert.equal(r.olderTurns, start - 1, `${where}: olderTurns`);
+    // Counted back from the first turn delivered: once the shed dropped rows, from the first turn it left.
+    const dropped = r.entries.length < whole.entries.length;
+    assert.equal(r.olderTurns, dropped && r.coveredTurns ? r.coveredTurns[0] - 1 : start - 1, `${where}: olderTurns`);
+    if (dropped && r.coveredTurns && r.coveredTurns[0] > start) tally.pagedFromCovered += 1;
     assert.deepEqual(r.unavailableTurns, unavailable?.turns, `${where}: unavailableTurns`);
     assert.ok(r.entries.every((e) => e.turn === null || (e.turn >= start && e.turn <= end)), `${where}: every row inside [${start}, ${end}]`);
     // The room the tool's hint takes: the sentence as a field of its own on a whole result; on a shed one, the sentence,
@@ -800,23 +833,38 @@ test("a randomized probe with beforeTurn and unavailable turns (fixed seed): the
 
 // ---- Transcript details (design item 4): command output, failed hooks, commentary, the compaction rule. ----
 
-/** The one tool row of a transcript read with every include. */
-const toolRow = (items: ThreadItem[]): NonNullable<TranscriptEntry["tool"]> =>
-  transcriptEntries(snapshot({ items }), { turns: 5, include: ALL, maxChars: 100_000 }).entries.find((e) => e.kind === "tool")!.tool!;
+/**
+ * The one tool row of a transcript read with every include, its rows slimmed as every read path slims them
+ * (`slimActivityPayload`, the orchestrator's `slimItemsForRead`): the transcript never sees a payload any other way.
+ */
+const toolRow = (items: ThreadItem[]): NonNullable<TranscriptEntry["tool"]> => {
+  const read = items.map((item) => (item.kind === "activity" ? { ...item, payload: slimActivityPayload(item.payload) } : item));
+  return transcriptEntries(snapshot({ items: read }), { turns: 5, include: ALL, maxChars: 100_000 }).entries.find((e) => e.kind === "tool")!.tool!;
+};
 
 test("a Grok-shaped command whose detail repeats the command shows its output, and an echo with no output never clears it", () => {
-  // Grok's ACP call: `detail` repeats the command, the output rides `rawOutput` (on the wire, the slimmed `{content}`).
-  const call = (activityKind: string, status: string, rawOutput?: unknown) => activity(activityKind, {
-    itemType: "command_execution", toolUseId: "call-1", title: "Execute `echo hi`", status, detail: "echo hi",
-    data: { kind: "execute", command: "echo hi", ...(rawOutput === undefined ? {} : { rawOutput }) }
+  // Grok's ACP call, as the normaliser writes it (fixture grok/03b): `detail` repeats the command, which rides only in
+  // `data`. The first `tool_call` frame carries no ACP `kind` yet; the updates say `kind: "execute"` and carry the
+  // output in `rawOutput` and in ACP `content` blocks, which the read's slimming turns into one preview line.
+  const started = activity("tool.started", {
+    itemType: "command_execution", toolUseId: "call-1", title: "run_terminal_command", status: "inProgress", detail: "echo hi",
+    data: { toolUseId: "call-1", command: "echo hi", vendorTool: "run_terminal_command", readOnly: false, rawInput: { command: "echo hi", description: "Print hi to stdout" } }
   }, { turnId: "t1", tone: "tool" });
-  // The start only echoes the command: no detail yet (the title already says what runs).
-  assert.equal(toolRow([call("tool.started", "inProgress")]).detail, undefined);
-  assert.deepEqual(toolRow([call("tool.started", "inProgress"), call("tool.completed", "completed", { content: "hi" })]),
-    { type: "command_execution", title: "Execute `echo hi`", status: "completed", detail: "hi" });
-  assert.equal(toolRow([call("tool.started", "inProgress"), call("tool.completed", "completed", { stdout: "hi\n", stderr: "note\n" })]).detail, "hi\nnote");
+  const call = (activityKind: string, status: string, output?: { rawOutput?: unknown; content?: unknown }) => activity(activityKind, {
+    itemType: "command_execution", toolUseId: "call-1", title: "Execute `echo hi`", status, detail: "echo hi",
+    data: { toolUseId: "call-1", kind: "execute", command: "echo hi", rawInput: { command: "echo hi" }, ...output }
+  }, { turnId: "t1", tone: "tool" });
+  const printed = (text: string) => ({ rawOutput: { type: "Bash", output_for_prompt: text, exit_code: 0 }, content: [{ type: "content", content: { type: "text", text } }] });
+  // The start only echoes the command: no detail (the GUI drops the start; the title and command say what runs).
+  assert.deepEqual(toolRow([started]), { type: "command_execution", title: "run_terminal_command", status: "inProgress", command: "echo hi" });
+  assert.deepEqual(toolRow([started, call("tool.completed", "completed", printed("hi\n"))]),
+    { type: "command_execution", title: "Execute `echo hi`", status: "completed", command: "echo hi", detail: "hi" });
+  // A command that printed nothing: the start's echo is never taken for its output.
+  assert.equal(toolRow([started, call("tool.completed", "completed")]).detail, undefined);
+  // Both streams on disk: the read keeps the first (stdout), as its one-line preview.
+  assert.equal(toolRow([started, call("tool.completed", "completed", { rawOutput: { stdout: "hi\nthere\n", stderr: "note\n" } })]).detail, "hi");
   // An update that carried the output, then an echo that carries none: the output stays.
-  assert.equal(toolRow([call("tool.updated", "inProgress", { content: "partial" }), call("tool.completed", "completed")]).detail, "partial");
+  assert.equal(toolRow([started, call("tool.updated", "inProgress", printed("partial\n")), call("tool.completed", "completed")]).detail, "partial");
 });
 
 test("a Codex command shows its item's aggregatedOutput; a detail that already says more stands", () => {
@@ -824,7 +872,8 @@ test("a Codex command shows its item's aggregatedOutput; a detail that already s
     activity("tool.started", { itemType: "command_execution", toolUseId: "call-1", title: "Bash", status: "inProgress" }, { turnId: "t1", tone: "tool" }),
     activity("tool.completed", { itemType: "command_execution", toolUseId: "call-1", title: "Bash", status: "completed", data: { item: { command: "ls -1", aggregatedOutput: "a\nb\n" } } }, { turnId: "t1", tone: "tool" })
   ];
-  assert.equal(toolRow(items).detail, "a\nb");
+  // The read's preview of it: the first line.
+  assert.equal(toolRow(items).detail, "a");
   // OpenCode's detail is already the fuller output: its data's one-line result does not replace it.
   const openCode = activity("tool.completed", { itemType: "command_execution", toolUseId: "oc", title: "bash", status: "completed", detail: "first line\nsecond line", data: { command: "cat f", result: "first line" } }, { turnId: "t1", tone: "tool" });
   assert.equal(toolRow([openCode]).detail, "first line\nsecond line");
