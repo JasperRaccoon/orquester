@@ -134,7 +134,7 @@ test("a tool call returns structuredContent + text; a ToolError becomes isError 
   } finally { await app.close(); }
 });
 
-test("the SDK applies each tool's zod defaults before run(): list_sessions {} answers with kind all, attention off", async () => {
+test("each tool's zod defaults apply before run(): list_sessions {} answers with kind all, attention off", async () => {
   const api = new FakeDaemonApi()
     .on("GET", "/api/sessions", { status: 200, body: [chatSummary({ activity: { state: "idle", attention: null, lastOutputAt: null, needsAttentionAt: null } }), chatSummary({ id: "t9", kind: "shell", refId: "bash", title: "bash", order: 2, activity: { state: "idle", attention: null, lastOutputAt: null, needsAttentionAt: null } })] })
     .on("GET", "/api/registry", { status: 200, body: { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [] } })
@@ -145,6 +145,45 @@ test("the SDK applies each tool's zod defaults before run(): list_sessions {} an
     assert.equal(r.result.isError, undefined, r.result.content?.[0]?.text);
     // Without the defaults `kind` would be undefined, which drops every chat tab (only t9 would come back).
     assert.deepEqual((r.result.structuredContent.sessions as { id: string }[]).map((s) => s.id), ["c1", "t9"]);
+  } finally { await app.close(); }
+});
+
+test("arguments a tool's schema refuses answer the §4.5 envelope: isError, INVALID_ARGUMENT, one line naming the fields", async () => {
+  const app = mcpApp({ createApi: () => new FakeDaemonApi() });
+  try {
+    const bad = await postMcp(app, call(11, "read_transcript", { sessionId: "c1", maxChars: 1, turns: "three" }));
+    assert.equal(bad.result.isError, true);
+    assert.equal(bad.result.structuredContent.code, "INVALID_ARGUMENT");
+    const message = bad.result.structuredContent.message as string;
+    assert.match(message, /^Invalid arguments for read_transcript: /);
+    assert.match(message, /turns: /); assert.match(message, /maxChars: /);
+    assert.doesNotMatch(message, /\n/, "one line");
+    assert.equal(bad.result.content[0].text, `INVALID_ARGUMENT: ${message}`);
+    const missing = await postMcp(app, call(12, "get_session", {}));
+    assert.equal(missing.result.structuredContent.code, "INVALID_ARGUMENT");
+    assert.match(missing.result.structuredContent.message, /sessionId: Required/);
+  } finally { await app.close(); }
+});
+
+test("a call without an arguments object is a call with none: the defaults apply", async () => {
+  const api = new FakeDaemonApi().on("GET", "/api/sessions", { status: 200, body: [chatSummary()] })
+    .on("GET", "/api/registry", { status: 200, body: { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [] } })
+    .on("GET", "/api/agent-accounts", { status: 200, body: { accounts: [], defaults: {} } }).on("GET", "/api/agent/providers", { status: 503, body: null });
+  const app = mcpApp({ createApi: () => api });
+  try {
+    const r = await postMcp(app, { jsonrpc: "2.0", id: 13, method: "tools/call", params: { name: "list_sessions" } });
+    assert.equal(r.result.isError, undefined, r.result.content?.[0]?.text);
+    assert.deepEqual((r.result.structuredContent.sessions as { id: string }[]).map((s) => s.id), ["c1"]);
+  } finally { await app.close(); }
+});
+
+test("an unknown tool is a JSON-RPC InvalidParams error (-32602), as the MCP spec has it, not a tool result", async () => {
+  const app = mcpApp({ createApi: () => new FakeDaemonApi() });
+  try {
+    const r = await postMcp(app, call(14, "read_terminal", {}));
+    assert.equal(r.result, undefined);
+    assert.equal(r.error.code, -32602);
+    assert.match(r.error.message, /Tool read_terminal not found/);
   } finally { await app.close(); }
 });
 
