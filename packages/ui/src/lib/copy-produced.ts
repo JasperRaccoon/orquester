@@ -54,11 +54,13 @@ export function copyProduced<Item>(
     return clipboard.writeText(produced);
   }
   if (ClipboardItemCtor !== undefined && typeof clipboard.write === "function") {
-    return clipboard.write([
-      new ClipboardItemCtor({
-        "text/plain": produced.then((text) => new Blob([text], { type: "text/plain" }))
-      })
-    ]);
+    const blob = produced.then((text) => new Blob([text], { type: "text/plain" }));
+    // An engine can refuse the write without ever reading the item (Chromium
+    // on an unfocused document). A read that then fails would reject `blob`
+    // with nobody listening. Observed apart, so the promise the item carries
+    // still rejects for an engine that does read it.
+    void blob.catch(() => undefined);
+    return clipboard.write([new ClipboardItemCtor({ "text/plain": blob })]);
   }
   return produced.then((text) => clipboard.writeText(text));
 }

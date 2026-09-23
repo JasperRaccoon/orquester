@@ -40,12 +40,18 @@ function fakeClipboard(options: { write?: boolean } = {}) {
 }
 
 /** A read still in flight: the whole plan being fetched back. */
-function pendingRead(): { promise: Promise<string>; resolve: (text: string) => void } {
+function pendingRead(): {
+  promise: Promise<string>;
+  resolve: (text: string) => void;
+  reject: (error: Error) => void;
+} {
   let resolve!: (text: string) => void;
-  const promise = new Promise<string>((settle) => {
+  let reject!: (error: Error) => void;
+  const promise = new Promise<string>((settle, fail) => {
     resolve = settle;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 test("a string is written with writeText at once, inside the click", async () => {
@@ -96,6 +102,46 @@ test("a read that fails copies nothing down either path, and never the cut text"
     await assert.rejects(copyProduced(failed, clipboard, Ctor), /could not be loaded/);
     assert.deepEqual(log.copied, [], "nothing reached the clipboard");
     assert.deepEqual(log.writeTextCalls, []);
+  }
+});
+
+test("a write refused without reading its item leaves nothing unhandled when the read fails too", async () => {
+  // Chromium refuses write() on an unfocused document at once, and never
+  // reads the item it was handed. Nothing then listens to the Blob promise in
+  // that item, so a read that fails as well would reject it unobserved.
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown): void => {
+    unhandled.push(reason);
+  };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const built: FakeClipboardItem[] = [];
+    class RecordedClipboardItem extends FakeClipboardItem {
+      constructor(data: Record<string, Promise<Blob>>) {
+        super(data);
+        built.push(this);
+      }
+    }
+    const clipboard: CopyClipboard<FakeClipboardItem> = {
+      writeText: async () => undefined,
+      write: () => Promise.reject(new Error("Document is not focused."))
+    };
+    const read = pendingRead();
+    await assert.rejects(copyProduced(read.promise, clipboard, RecordedClipboardItem), /not focused/);
+    read.reject(new Error("The full plan could not be loaded."));
+    await assert.rejects(read.promise, /could not be loaded/);
+    // Node reports an unhandled rejection only once the microtask queue has
+    // drained, so awaiting the promises alone would check too early and pass
+    // even with the bug. One turn of the loop, not a duration: by then any
+    // rejection left unhandled has been reported.
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(unhandled, [], "no rejection was left unhandled");
+    // The promise handed to the item still rejects, for an engine that reads
+    // it. Read only after the check, because reading it marks it handled.
+    assert.equal(built.length, 1);
+    await assert.rejects(built[0]!.data["text/plain"]!, /could not be loaded/);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
   }
 });
 

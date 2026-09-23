@@ -1,5 +1,5 @@
 import { REGISTRY, type RegistryEntryDef } from "@orquester/registry";
-import type { AgentConversationSummary, SessionKind, SessionSummary } from "@orquester/api";
+import type { AgentConversationSummary, RegistryEntry, SessionKind, SessionSummary } from "@orquester/api";
 
 import { DEFAULT_THREAD_TITLE } from "./agent-chat/title.logic";
 
@@ -117,6 +117,35 @@ export function chatLaunchRefId(conversation: AgentConversationSummary): string 
     return conversation.proxyRefId;
   }
   return conversation.agentRefId;
+}
+
+/**
+ * Whether a project's resume lists offer a conversation: the registry entry it
+ * launches under ({@link chatLaunchRefId}) is installed, and chat can resume
+ * it ({@link isChatResumableConversation}). This is the filter behind both of
+ * `ProjectOverview`'s lists: the overview's own and the empty chat tab's.
+ *
+ * `agentsById` is the runtime registry keyed by id. An entry is `enabled` only
+ * when its binary was found.
+ */
+export function isResumableByInstalledAgent(
+  conversation: AgentConversationSummary,
+  agentsById: ReadonlyMap<string, Pick<RegistryEntry, "enabled">>
+): boolean {
+  return (
+    Boolean(agentsById.get(chatLaunchRefId(conversation))?.enabled) &&
+    isChatResumableConversation(conversation)
+  );
+}
+
+/**
+ * Whether one agent's "Resume a conversation" section in the "+" menu lists a
+ * conversation: the row launches under exactly that agent, and chat can resume
+ * it. A proxy-home row belongs to its launcher's section, never to plain
+ * `claude`'s, and an orphaned one to nobody's.
+ */
+export function isResumableByAgent(conversation: AgentConversationSummary, agentId: string): boolean {
+  return chatLaunchRefId(conversation) === agentId && isChatResumableConversation(conversation);
 }
 
 /**
