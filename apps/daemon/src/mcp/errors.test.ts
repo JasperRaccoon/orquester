@@ -55,3 +55,17 @@ test("expectOk returns the body below 400 and throws above", () => {
   assert.throws(() => expectOk({ status: 404, body: { error: { code: "THREAD_NOT_FOUND", message: "no" } } }, "thread"),
     (err: unknown) => err instanceof ToolError && err.code === "THREAD_NOT_FOUND");
 });
+
+test("a code-less 4xx with an empty message falls back to the status text, never to an empty message", () => {
+  const fastify = daemonError({ status: 400, body: { statusCode: 400, error: "Bad Request", message: "" } });
+  assert.equal(fastify.code, "INVALID_ARGUMENT"); assert.equal(fastify.message, "Bad Request");
+  const blank = daemonError({ status: 404, body: { statusCode: 404, error: "Not Found", message: "   " } });
+  assert.equal(blank.code, "NOT_FOUND"); assert.equal(blank.message, "Not Found");
+  // No status text to fall back on either: the status-derived message.
+  for (const body of [{ message: "" }, { error: "" }, { statusCode: 409, error: "", message: "" }]) {
+    const e = daemonError({ status: 409, body });
+    assert.equal(e.code, "COMMAND_REJECTED", JSON.stringify(body)); assert.equal(e.message, "The daemon answered 409.", JSON.stringify(body));
+  }
+  // A non-empty reason is still preferred to the status text.
+  assert.equal(daemonError({ status: 400, body: { statusCode: 400, error: "Bad Request", message: "body/title must be string" } }).message, "body/title must be string");
+});
