@@ -1,4 +1,5 @@
 import { FsSandboxError } from "@orquester/config/fs";
+import { TodoError } from "../todos.ts";
 import { ToolError } from "./errors.ts";
 
 /** Claude Code discards MCP results above ~25k tokens; stay well under (spec §4.5). */
@@ -65,6 +66,10 @@ export function toSafeToolError(err: unknown): { content: [TextContent]; structu
   } else if (err instanceof FsSandboxError) {
     code = "PATH_NOT_ALLOWED";
     message = "Path is not allowed (outside the sandbox).";
+  } else if (err instanceof TodoError) {
+    // The todo store's own messages ("todo not found", "invalid scope") carry no path or stack.
+    code = err.status === 404 ? "NOT_FOUND" : err.status === 409 ? "CONFLICT" : "INVALID_ARGUMENT";
+    message = err.message;
   } else {
     console.error("[mcp] unexpected tool error", err);
   }

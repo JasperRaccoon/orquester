@@ -119,7 +119,10 @@ import { listArchiveEntries } from "./archive";
 import { ParquetRequestError, readParquetWindow } from "./parquet";
 import { resolveZipTool, spawnDirZip } from "./zip";
 import { FsSearchError, listProjectFiles, searchProjectFiles } from "./search";
+import { InjectDaemonApi } from "./mcp/daemon-api.ts";
+import { FsTools } from "./mcp/fs-tools.ts";
 import { registerMcp } from "./mcp/server.ts";
+import { TodoTools } from "./mcp/todo-tools.ts";
 import {
   UploadTooLargeError,
   acceptRawBody,
@@ -4621,10 +4624,24 @@ export function createServer(
     });
   }
 
-  // MCP — HTTP-only. The unix socket is unauthenticated, so the agent control
-  // surface must never be reachable there; register /mcp only on remote.
+  // Orquester MCP — HTTP-only. The unix socket is unauthenticated, so full
+  // session drive must never be reachable there; register /mcp only on remote.
+  // Each request's tools call this app's own routes in-process with the
+  // caller's bearer (spec §4.2), so every gate and error code is the GUI's.
   if (options.mode === "remote") {
-    registerMcp(app, {});
+    registerMcp(app, {
+      createApi: (authorization) =>
+        new InjectDaemonApi({
+          app,
+          authorization,
+          agentChat: services.agentChat ?? null,
+          broadcaster: services.broadcaster,
+          fsRoot: resolved.fsRoot,
+          workspacesDir: resolved.workspacesDir
+        }),
+      todos: new TodoTools({ todos, workspacesDir: resolved.workspacesDir }),
+      files: new FsTools({ fsRoot: resolved.fsRoot })
+    });
   }
 
   // Serve the static web client build for everything outside the API, with an
