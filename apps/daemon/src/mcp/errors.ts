@@ -28,7 +28,8 @@ function isUncaughtError(body: Record<string, unknown>): boolean {
  * chat envelope `{error: {code, message, detail?}}` or a route's flat `{code, message}`. A 5xx without
  * one is a crash or an unreachable service whose text can carry a host path or a stack, so it is
  * never echoed: it becomes INTERNAL (HOST_UNAVAILABLE for 502/503). A 4xx `{error: "…"}` or
- * `{message: "…"}` is the route's own validation text and is kept. `fallback` replaces the
+ * `{message: "…"}` is the route's own validation text and is kept — from Fastify's own shape the
+ * `message` (the reason), never its `error` (the status text). `fallback` replaces the
  * status-derived error when the body names no code; it never echoes the body either.
  */
 export function daemonError(res: DaemonResponse, fallback?: { code: string; message: string }): ToolError {
@@ -43,6 +44,7 @@ export function daemonError(res: DaemonResponse, fallback?: { code: string; mess
       return new ToolError(body.code, typeof body.message === "string" ? body.message : body.code, body.detail);
     }
     if (res.status < 500) {
+      if (isUncaughtError(body) && typeof body.message === "string") return new ToolError(codeForStatus(res.status), body.message);
       if (typeof env === "string") return new ToolError(codeForStatus(res.status), env);
       if (typeof body.message === "string") return new ToolError(codeForStatus(res.status), body.message);
     }

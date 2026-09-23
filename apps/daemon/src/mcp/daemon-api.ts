@@ -3,6 +3,7 @@ import type { Readable } from "node:stream";
 import type { EventMessage } from "@orquester/api";
 import type { Broadcaster } from "../broadcaster.ts";
 import type { AgentChatService } from "../agent-chat/service.ts";
+import { UploadTooLargeError } from "../upload-stream.ts";
 
 export type DaemonMethod = "GET" | "POST" | "PUT" | "DELETE";
 export interface DaemonResponse { status: number; body: unknown }
@@ -14,6 +15,7 @@ export interface DaemonResponse { status: number; body: unknown }
  */
 export interface DaemonApi {
   request(method: DaemonMethod, path: string, opts?: { query?: Record<string, string>; body?: unknown }): Promise<DaemonResponse>;
+  /** Owns `bytes`: reads it or destroys it. InjectDaemonApi never throws here — a failed upload is an answer (§4.5 codes), as over HTTP. */
   uploadAttachment(sessionId: string, meta: { name: string; type?: string }, bytes: Readable): Promise<{ status: number; value: unknown }>;
   attachmentPath(sessionId: string, attachmentId: string): Promise<string | null>;
   subscribe(listener: (event: EventMessage) => void): () => void;
@@ -38,7 +40,7 @@ export class InjectDaemonApi implements DaemonApi {
     if (opts?.body !== undefined) headers["content-type"] = "application/json";
     const res = await this.opts.app.inject({
       method,
-      url: qs ? `${path}?${qs}` : path,
+      url: qs ? `${path}${path.includes("?") ? "&" : "?"}${qs}` : path,
       headers,
       payload: opts?.body === undefined ? undefined : JSON.stringify(opts.body)
     });
@@ -49,9 +51,24 @@ export class InjectDaemonApi implements DaemonApi {
     return { status: res.statusCode, body };
   }
 
+  /**
+   * A thrown upload (the host socket gone, the source stream destroyed) answers as the daemon's own upload route's catch
+   * does: 413 UPLOAD_TOO_LARGE past the cap, else 503 HOST_UNAVAILABLE — its cause logged here and never returned (it
+   * can name a host path), as sendCommand treats a thrown request. A stream left unread is destroyed, never leaked.
+   */
   async uploadAttachment(sessionId: string, meta: { name: string; type?: string }, bytes: Readable): Promise<{ status: number; value: unknown }> {
-    if (!this.opts.agentChat) return { status: 503, value: { code: "HOST_UNAVAILABLE", message: "The agent host is restarting." } };
-    return this.opts.agentChat.uploadAttachment(sessionId, { name: meta.name, type: meta.type }, bytes);
+    if (!this.opts.agentChat) {
+      bytes.destroy();
+      return { status: 503, value: { code: "HOST_UNAVAILABLE", message: "The agent host is restarting." } };
+    }
+    try {
+      return await this.opts.agentChat.uploadAttachment(sessionId, { name: meta.name, type: meta.type }, bytes);
+    } catch (error) {
+      bytes.destroy();
+      if (error instanceof UploadTooLargeError) return { status: 413, value: { code: "UPLOAD_TOO_LARGE", message: error.message } };
+      console.error("[mcp] attachment upload failed", error);
+      return { status: 503, value: { code: "HOST_UNAVAILABLE", message: "The attachment upload failed." } };
+    }
   }
 
   async attachmentPath(sessionId: string, attachmentId: string): Promise<string | null> {

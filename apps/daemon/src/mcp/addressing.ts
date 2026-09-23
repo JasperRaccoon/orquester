@@ -15,6 +15,13 @@ export function projectNamesFor(projectPath: string, workspacesDir: string): Pro
   return { workspace, name, path: projectPath };
 }
 
+/** Why a directory projectNamesFor names nothing in is not a project: it is the root, one workspace, or outside the root. */
+function notAProject(raw: string, rel: string): string {
+  if (!rel) return `"${raw}" is the workspaces root, not a project.`;
+  if (rel.startsWith("..") || isAbsolute(rel)) return `"${raw}" is not inside a workspace.`;
+  return `"${raw}" is a workspace, not a project.`;
+}
+
 async function isDirectory(path: string): Promise<boolean> {
   try { return (await stat(path)).isDirectory(); } catch { return false; }
 }
@@ -45,7 +52,7 @@ export async function resolveProject(api: { fsRoot: string; workspacesDir: strin
   }
   if (!(await isDirectory(path))) throw new ToolError("PROJECT_NOT_FOUND", `No project directory at "${raw}". Use list_projects.`);
   const names = projectNamesFor(path, api.workspacesDir);
-  if (!names.workspace || !names.name) throw new ToolError("PROJECT_NOT_FOUND", `"${raw}" is a workspace, not a project. Use "<workspace>/<project>".`);
+  if (!names.workspace || !names.name) throw new ToolError("PROJECT_NOT_FOUND", `${notAProject(raw, relative(api.workspacesDir, path))} Pass "<workspace>/<project>" (list_projects names them).`);
   // A project is exactly `<workspacesDir>/<ws>/<name>` (spec §5): a deeper directory would hand the
   // daemon a projectPath that no session carries.
   if (path !== join(api.workspacesDir, names.workspace, names.name)) {
